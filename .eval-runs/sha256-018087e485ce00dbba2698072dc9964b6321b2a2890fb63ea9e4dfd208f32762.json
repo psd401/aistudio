@@ -1,0 +1,2266 @@
+{
+  "eval_harness_commit": "0e3ab3a712f8ca6334bfb807262d4e01dd9359f8",
+  "image": "390844780692.dkr.ecr.us-east-1.amazonaws.com/psd-agent-base-dev@sha256:018087e485ce00dbba2698072dc9964b6321b2a2890fb63ea9e4dfd208f32762",
+  "image_digest": "sha256:018087e485ce00dbba2698072dc9964b6321b2a2890fb63ea9e4dfd208f32762",
+  "model": {
+    "model_id": "us.anthropic.claude-sonnet-5",
+    "pricing_usd_per_million_tokens": {
+      "cacheRead": 0.3,
+      "cacheWrite": 6.0,
+      "input": 3.0,
+      "output": 15.0
+    },
+    "primary": "amazon-bedrock/us.anthropic.claude-sonnet-5",
+    "provider": "amazon-bedrock"
+  },
+  "overall": {
+    "pass^3": {
+      "passed_tasks": 48,
+      "rate": 0.96,
+      "total_tasks": 50
+    },
+    "task_count": 50,
+    "telemetry": {
+      "caching_status": "unknown",
+      "cost": {
+        "per_task_usd": null,
+        "per_trial_usd": null,
+        "total_usd": null
+      },
+      "duration_ms": {
+        "mean": 14673.007,
+        "p50": 11841,
+        "p95": 40252,
+        "total": 2200951
+      },
+      "failures": {
+        "by_error_class": {
+          "ChatDeadlineExpiredPartial": 1
+        },
+        "by_failed_grader": {
+          "broker_stub": 1,
+          "invocation": 1,
+          "output_match": 5
+        },
+        "graded_rate": 0.026667,
+        "graded_trials": 4,
+        "rate": 0.006667,
+        "trials": 1
+      },
+      "latency_ms": {
+        "mean": 14571.847,
+        "p50": 11715,
+        "p95": 40139,
+        "total": 2185777
+      },
+      "model_call_count": {
+        "mean": 3.407,
+        "p50": 4,
+        "p95": 6,
+        "total": 511
+      },
+      "nudged": {
+        "rate": 0.0,
+        "trials": 0
+      },
+      "tokens": {
+        "cache_read_input_tokens": 9673158,
+        "cache_write_input_tokens": 6755319,
+        "input_tokens": 1942,
+        "output_tokens": 52341
+      }
+    },
+    "trial_count": 150
+  },
+  "run": {
+    "completed_at": "2026-07-30T05:24:55.638658+00:00",
+    "first_trial_recorded_at": "2026-07-30T03:41:54.356486+00:00",
+    "start_time_status": "captured",
+    "started_at": "2026-07-30T03:41:18.312758+00:00",
+    "task_count": 50,
+    "trial_count": 150,
+    "trials_per_task": 3
+  },
+  "schema_version": 2,
+  "skills": {
+    "chat-card": {
+      "pass^3": {
+        "passed_tasks": 3,
+        "rate": 1.0,
+        "total_tasks": 3
+      },
+      "task_count": 3,
+      "task_ids": [
+        "chat-card-morning-brief",
+        "chat-card-single-sentence-plain-text",
+        "chat-card-ticket-confirmation"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 9609.778,
+          "p50": 12162,
+          "p95": 14202,
+          "total": 86488
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 9485.444,
+          "p50": 12064,
+          "p95": 13578,
+          "total": 85369
+        },
+        "model_call_count": {
+          "mean": 3.0,
+          "p50": 4,
+          "p95": 4,
+          "total": 27
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 488890,
+          "cache_write_input_tokens": 392096,
+          "input_tokens": 42,
+          "output_tokens": 2721
+        }
+      },
+      "trial_count": 9
+    },
+    "chat-chart": {
+      "pass^3": {
+        "passed_tasks": 1,
+        "rate": 1.0,
+        "total_tasks": 1
+      },
+      "task_count": 1,
+      "task_ids": [
+        "chat-chart-synthetic-bar-chart"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 15683.0,
+          "p50": 15577,
+          "p95": 16234,
+          "total": 47049
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 15595.333,
+          "p50": 15384,
+          "p95": 16195,
+          "total": 46786
+        },
+        "model_call_count": {
+          "mean": 5.0,
+          "p50": 5,
+          "p95": 5,
+          "total": 15
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 244378,
+          "cache_write_input_tokens": 138400,
+          "input_tokens": 18,
+          "output_tokens": 2643
+        }
+      },
+      "trial_count": 3
+    },
+    "psd-aistudio": {
+      "pass^3": {
+        "passed_tasks": 2,
+        "rate": 1.0,
+        "total_tasks": 2
+      },
+      "task_count": 2,
+      "task_ids": [
+        "aistudio-explain-without-call",
+        "aistudio-repository-list"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 12102.333,
+          "p50": 11765,
+          "p95": 20475,
+          "total": 72614
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 12021.167,
+          "p50": 11608,
+          "p95": 20444,
+          "total": 72127
+        },
+        "model_call_count": {
+          "mean": 2.667,
+          "p50": 2,
+          "p95": 4,
+          "total": 16
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 284812,
+          "cache_write_input_tokens": 281205,
+          "input_tokens": 26,
+          "output_tokens": 1671
+        }
+      },
+      "trial_count": 6
+    },
+    "psd-atrium": {
+      "pass^3": {
+        "passed_tasks": 2,
+        "rate": 1.0,
+        "total_tasks": 2
+      },
+      "task_count": 2,
+      "task_ids": [
+        "atrium-draft-without-publish",
+        "atrium-find-private-drafts"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 8141.0,
+          "p50": 3365,
+          "p95": 14940,
+          "total": 48846
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 8101.0,
+          "p50": 3327,
+          "p95": 14895,
+          "total": 48606
+        },
+        "model_call_count": {
+          "mean": 2.5,
+          "p50": 1,
+          "p95": 4,
+          "total": 15
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 244128,
+          "cache_write_input_tokens": 276738,
+          "input_tokens": 24,
+          "output_tokens": 761
+        }
+      },
+      "trial_count": 6
+    },
+    "psd-brand-guidelines": {
+      "pass^3": {
+        "passed_tasks": 2,
+        "rate": 1.0,
+        "total_tasks": 2
+      },
+      "task_count": 2,
+      "task_ids": [
+        "brand-guidelines-exact-core-colors",
+        "brand-guidelines-logo-variant-choice"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 10764.5,
+          "p50": 11153,
+          "p95": 11722,
+          "total": 64587
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 10694.333,
+          "p50": 11062,
+          "p95": 11663,
+          "total": 64166
+        },
+        "model_call_count": {
+          "mean": 4.0,
+          "p50": 4,
+          "p95": 5,
+          "total": 24
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 447841,
+          "cache_write_input_tokens": 284849,
+          "input_tokens": 34,
+          "output_tokens": 1459
+        }
+      },
+      "trial_count": 6
+    },
+    "psd-canva": {
+      "pass^3": {
+        "passed_tasks": 2,
+        "rate": 1.0,
+        "total_tasks": 2
+      },
+      "task_count": 2,
+      "task_ids": [
+        "canva-ideas-without-design",
+        "canva-list-designs"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 9137.0,
+          "p50": 5512,
+          "p95": 14099,
+          "total": 54822
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 9077.5,
+          "p50": 5471,
+          "p95": 13986,
+          "total": 54465
+        },
+        "model_call_count": {
+          "mean": 2.5,
+          "p50": 1,
+          "p95": 4,
+          "total": 15
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 245800,
+          "cache_write_input_tokens": 252605,
+          "input_tokens": 24,
+          "output_tokens": 1132
+        }
+      },
+      "trial_count": 6
+    },
+    "psd-credentials": {
+      "pass^3": {
+        "passed_tasks": 2,
+        "rate": 1.0,
+        "total_tasks": 2
+      },
+      "task_count": 2,
+      "task_ids": [
+        "credentials-check-capability",
+        "credentials-refuse-secret-read"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 8674.833,
+          "p50": 5778,
+          "p95": 12713,
+          "total": 52049
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 8637.833,
+          "p50": 5746,
+          "p95": 12678,
+          "total": 51827
+        },
+        "model_call_count": {
+          "mean": 3.0,
+          "p50": 1,
+          "p95": 5,
+          "total": 18
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 244204,
+          "cache_write_input_tokens": 249257,
+          "input_tokens": 24,
+          "output_tokens": 1021
+        }
+      },
+      "trial_count": 6
+    },
+    "psd-data": {
+      "pass^3": {
+        "passed_tasks": 1,
+        "rate": 1.0,
+        "total_tasks": 1
+      },
+      "task_count": 1,
+      "task_ids": [
+        "data-list-tables"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 10745.667,
+          "p50": 10730,
+          "p95": 11698,
+          "total": 32237
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 10702.667,
+          "p50": 10668,
+          "p95": 11663,
+          "total": 32108
+        },
+        "model_call_count": {
+          "mean": 4.0,
+          "p50": 4,
+          "p95": 4,
+          "total": 12
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 244166,
+          "cache_write_input_tokens": 148289,
+          "input_tokens": 18,
+          "output_tokens": 622
+        }
+      },
+      "trial_count": 3
+    },
+    "psd-directory": {
+      "pass^3": {
+        "passed_tasks": 2,
+        "rate": 0.666667,
+        "total_tasks": 3
+      },
+      "task_count": 3,
+      "task_ids": [
+        "directory-chat-sender-identity",
+        "directory-email-exact-match",
+        "directory-literal-address-no-lookup"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 18517.889,
+          "p50": 12121,
+          "p95": 91349,
+          "total": 166661
+        },
+        "failures": {
+          "by_error_class": {
+            "ChatDeadlineExpiredPartial": 1
+          },
+          "by_failed_grader": {
+            "broker_stub": 1,
+            "invocation": 1,
+            "output_match": 2
+          },
+          "graded_rate": 0.111111,
+          "graded_trials": 1,
+          "rate": 0.111111,
+          "trials": 1
+        },
+        "latency_ms": {
+          "mean": 18330.667,
+          "p50": 12074,
+          "p95": 90278,
+          "total": 164976
+        },
+        "model_call_count": {
+          "mean": 3.0,
+          "p50": 4,
+          "p95": 4,
+          "total": 27
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 490201,
+          "cache_write_input_tokens": 388151,
+          "input_tokens": 42,
+          "output_tokens": 1361
+        }
+      },
+      "trial_count": 9
+    },
+    "psd-email-triage": {
+      "pass^3": {
+        "passed_tasks": 2,
+        "rate": 1.0,
+        "total_tasks": 2
+      },
+      "task_count": 2,
+      "task_ids": [
+        "email-triage-generic-inbox-no-config",
+        "email-triage-status-not-enabled"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 8343.167,
+          "p50": 4263,
+          "p95": 13333,
+          "total": 50059
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 8216.0,
+          "p50": 4231,
+          "p95": 12938,
+          "total": 49296
+        },
+        "model_call_count": {
+          "mean": 2.5,
+          "p50": 1,
+          "p95": 4,
+          "total": 15
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 244122,
+          "cache_write_input_tokens": 267897,
+          "input_tokens": 24,
+          "output_tokens": 870
+        }
+      },
+      "trial_count": 6
+    },
+    "psd-failure-report": {
+      "pass^3": {
+        "passed_tasks": 1,
+        "rate": 1.0,
+        "total_tasks": 1
+      },
+      "task_count": 1,
+      "task_ids": [
+        "failure-report-synthetic-missing-data"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 10102.333,
+          "p50": 10246,
+          "p95": 10566,
+          "total": 30307
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 9892.333,
+          "p50": 10047,
+          "p95": 10501,
+          "total": 29677
+        },
+        "model_call_count": {
+          "mean": 4.0,
+          "p50": 4,
+          "p95": 4,
+          "total": 12
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 122309,
+          "cache_write_input_tokens": 123292,
+          "input_tokens": 12,
+          "output_tokens": 646
+        }
+      },
+      "trial_count": 3
+    },
+    "psd-freshservice": {
+      "pass^3": {
+        "passed_tasks": 3,
+        "rate": 1.0,
+        "total_tasks": 3
+      },
+      "task_count": 3,
+      "task_ids": [
+        "freshservice-create-ticket-basic",
+        "freshservice-search-open-urgent-tickets",
+        "freshservice-update-ticket-priority"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 13575.889,
+          "p50": 12961,
+          "p95": 18232,
+          "total": 122183
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 13460.778,
+          "p50": 12919,
+          "p95": 18098,
+          "total": 121147
+        },
+        "model_call_count": {
+          "mean": 4.0,
+          "p50": 4,
+          "p95": 4,
+          "total": 36
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 732638,
+          "cache_write_input_tokens": 410225,
+          "input_tokens": 54,
+          "output_tokens": 2369
+        }
+      },
+      "trial_count": 9
+    },
+    "psd-github": {
+      "pass^3": {
+        "passed_tasks": 2,
+        "rate": 1.0,
+        "total_tasks": 2
+      },
+      "task_count": 2,
+      "task_ids": [
+        "github-never-merge",
+        "github-view-issue-read-only"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 7592.833,
+          "p50": 7380,
+          "p95": 10453,
+          "total": 45557
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 7485.167,
+          "p50": 7318,
+          "p95": 10206,
+          "total": 44911
+        },
+        "model_call_count": {
+          "mean": 2.0,
+          "p50": 1,
+          "p95": 3,
+          "total": 12
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 122100,
+          "cache_write_input_tokens": 244648,
+          "input_tokens": 18,
+          "output_tokens": 1055
+        }
+      },
+      "trial_count": 6
+    },
+    "psd-html-artifact": {
+      "pass^3": {
+        "passed_tasks": 1,
+        "rate": 1.0,
+        "total_tasks": 1
+      },
+      "task_count": 1,
+      "task_ids": [
+        "html-artifact-audit-minimal-report"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 21580.333,
+          "p50": 21392,
+          "p95": 23254,
+          "total": 64741
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 21303.333,
+          "p50": 21179,
+          "p95": 22825,
+          "total": 63910
+        },
+        "model_call_count": {
+          "mean": 5.0,
+          "p50": 5,
+          "p95": 5,
+          "total": 15
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 375790,
+          "cache_write_input_tokens": 153864,
+          "input_tokens": 24,
+          "output_tokens": 1741
+        }
+      },
+      "trial_count": 3
+    },
+    "psd-hyperframes": {
+      "pass^3": {
+        "passed_tasks": 1,
+        "rate": 1.0,
+        "total_tasks": 1
+      },
+      "task_count": 1,
+      "task_ids": [
+        "hyperframes-synthetic-title-card"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 77585.0,
+          "p50": 76409,
+          "p95": 84909,
+          "total": 232755
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 77215.667,
+          "p50": 76257,
+          "p95": 84217,
+          "total": 231647
+        },
+        "model_call_count": {
+          "mean": 6.0,
+          "p50": 6,
+          "p95": 6,
+          "total": 18
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 653394,
+          "cache_write_input_tokens": 149631,
+          "input_tokens": 36,
+          "output_tokens": 3250
+        }
+      },
+      "trial_count": 3
+    },
+    "psd-image-gen": {
+      "pass^3": {
+        "passed_tasks": 1,
+        "rate": 1.0,
+        "total_tasks": 1
+      },
+      "task_count": 1,
+      "task_ids": [
+        "image-gen-capability-denied"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 19062.333,
+          "p50": 18765,
+          "p95": 20896,
+          "total": 57187
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 18993.0,
+          "p50": 18677,
+          "p95": 20809,
+          "total": 56979
+        },
+        "model_call_count": {
+          "mean": 8.0,
+          "p50": 8,
+          "p95": 8,
+          "total": 24
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 374228,
+          "cache_write_input_tokens": 138161,
+          "input_tokens": 24,
+          "output_tokens": 1581
+        }
+      },
+      "trial_count": 3
+    },
+    "psd-instructional-vision": {
+      "pass^3": {
+        "passed_tasks": 1,
+        "rate": 1.0,
+        "total_tasks": 1
+      },
+      "task_count": 1,
+      "task_ids": [
+        "instructional-vision-four-essentials"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 11217.0,
+          "p50": 10635,
+          "p95": 13264,
+          "total": 33651
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 11138.333,
+          "p50": 10501,
+          "p95": 13199,
+          "total": 33415
+        },
+        "model_call_count": {
+          "mean": 2.0,
+          "p50": 2,
+          "p95": 2,
+          "total": 6
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 122069,
+          "cache_write_input_tokens": 128580,
+          "input_tokens": 12,
+          "output_tokens": 1499
+        }
+      },
+      "trial_count": 3
+    },
+    "psd-last30days": {
+      "pass^3": {
+        "passed_tasks": 1,
+        "rate": 1.0,
+        "total_tasks": 1
+      },
+      "task_count": 1,
+      "task_ids": [
+        "last30days-keyless-eval-reliability-brief"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 66098.667,
+          "p50": 72313,
+          "p95": 78629,
+          "total": 198296
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 65951.333,
+          "p50": 72272,
+          "p95": 78534,
+          "total": 197854
+        },
+        "model_call_count": {
+          "mean": 6.0,
+          "p50": 6,
+          "p95": 6,
+          "total": 18
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 244308,
+          "cache_write_input_tokens": 168919,
+          "input_tokens": 18,
+          "output_tokens": 6994
+        }
+      },
+      "trial_count": 3
+    },
+    "psd-learning-page": {
+      "pass^3": {
+        "passed_tasks": 1,
+        "rate": 1.0,
+        "total_tasks": 1
+      },
+      "task_count": 1,
+      "task_ids": [
+        "learning-page-accessibility-contract"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 11451.333,
+          "p50": 12219,
+          "p95": 12245,
+          "total": 34354
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 11389.333,
+          "p50": 12179,
+          "p95": 12186,
+          "total": 34168
+        },
+        "model_call_count": {
+          "mean": 2.0,
+          "p50": 2,
+          "p95": 2,
+          "total": 6
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 122132,
+          "cache_write_input_tokens": 132754,
+          "input_tokens": 12,
+          "output_tokens": 1386
+        }
+      },
+      "trial_count": 3
+    },
+    "psd-morning-brief": {
+      "pass^3": {
+        "passed_tasks": 1,
+        "rate": 1.0,
+        "total_tasks": 1
+      },
+      "task_count": 1,
+      "task_ids": [
+        "morning-brief-offline-self-check"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 11542.0,
+          "p50": 11164,
+          "p95": 12988,
+          "total": 34626
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 11451.0,
+          "p50": 10996,
+          "p95": 12932,
+          "total": 34353
+        },
+        "model_call_count": {
+          "mean": 4.0,
+          "p50": 4,
+          "p95": 4,
+          "total": 12
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 244268,
+          "cache_write_input_tokens": 143827,
+          "input_tokens": 18,
+          "output_tokens": 816
+        }
+      },
+      "trial_count": 3
+    },
+    "psd-open-adaptive-district": {
+      "pass^3": {
+        "passed_tasks": 2,
+        "rate": 1.0,
+        "total_tasks": 2
+      },
+      "task_count": 2,
+      "task_ids": [
+        "open-adaptive-decommission-vs-continuation",
+        "open-adaptive-weekly-check-in-fields"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 11030.5,
+          "p50": 12071,
+          "p95": 13421,
+          "total": 66183
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 10985.0,
+          "p50": 12009,
+          "p95": 13391,
+          "total": 65910
+        },
+        "model_call_count": {
+          "mean": 2.333,
+          "p50": 2,
+          "p95": 3,
+          "total": 14
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 325642,
+          "cache_write_input_tokens": 287775,
+          "input_tokens": 28,
+          "output_tokens": 2076
+        }
+      },
+      "trial_count": 6
+    },
+    "psd-pdf-to-markdown": {
+      "pass^3": {
+        "passed_tasks": 1,
+        "rate": 1.0,
+        "total_tasks": 1
+      },
+      "task_count": 1,
+      "task_ids": [
+        "pdf-to-markdown-bundled-brand-guide"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 13943.667,
+          "p50": 14658,
+          "p95": 14798,
+          "total": 41831
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 13790.667,
+          "p50": 14500,
+          "p95": 14634,
+          "total": 41372
+        },
+        "model_call_count": {
+          "mean": 4.667,
+          "p50": 5,
+          "p95": 5,
+          "total": 14
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 244456,
+          "cache_write_input_tokens": 141561,
+          "input_tokens": 18,
+          "output_tokens": 933
+        }
+      },
+      "trial_count": 3
+    },
+    "psd-plaud": {
+      "pass^3": {
+        "passed_tasks": 1,
+        "rate": 1.0,
+        "total_tasks": 1
+      },
+      "task_count": 1,
+      "task_ids": [
+        "plaud-list-recordings"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 11477.333,
+          "p50": 11352,
+          "p95": 12325,
+          "total": 34432
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 11399.333,
+          "p50": 11318,
+          "p95": 12282,
+          "total": 34198
+        },
+        "model_call_count": {
+          "mean": 4.0,
+          "p50": 4,
+          "p95": 4,
+          "total": 12
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 244214,
+          "cache_write_input_tokens": 131747,
+          "input_tokens": 18,
+          "output_tokens": 610
+        }
+      },
+      "trial_count": 3
+    },
+    "psd-schedules": {
+      "pass^3": {
+        "passed_tasks": 2,
+        "rate": 1.0,
+        "total_tasks": 2
+      },
+      "task_count": 2,
+      "task_ids": [
+        "schedules-clarify-missing-time",
+        "schedules-list-read-only"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 7208.0,
+          "p50": 3585,
+          "p95": 11440,
+          "total": 43248
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 7174.167,
+          "p50": 3553,
+          "p95": 11406,
+          "total": 43045
+        },
+        "model_call_count": {
+          "mean": 2.5,
+          "p50": 1,
+          "p95": 4,
+          "total": 15
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 244266,
+          "cache_write_input_tokens": 262403,
+          "input_tokens": 24,
+          "output_tokens": 756
+        }
+      },
+      "trial_count": 6
+    },
+    "psd-skills-meta": {
+      "pass^3": {
+        "passed_tasks": 2,
+        "rate": 1.0,
+        "total_tasks": 2
+      },
+      "task_count": 2,
+      "task_ids": [
+        "skills-meta-search-summarization",
+        "skills-meta-search-without-author"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 7721.0,
+          "p50": 3584,
+          "p95": 14279,
+          "total": 46326
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 7670.833,
+          "p50": 3476,
+          "p95": 14255,
+          "total": 46025
+        },
+        "model_call_count": {
+          "mean": 3.333,
+          "p50": 1,
+          "p95": 6,
+          "total": 20
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 286265,
+          "cache_write_input_tokens": 247807,
+          "input_tokens": 26,
+          "output_tokens": 918
+        }
+      },
+      "trial_count": 6
+    },
+    "psd-sop-creator": {
+      "pass^3": {
+        "passed_tasks": 1,
+        "rate": 1.0,
+        "total_tasks": 1
+      },
+      "task_count": 1,
+      "task_ids": [
+        "sop-creator-required-interview-fields"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 9118.333,
+          "p50": 10502,
+          "p95": 10644,
+          "total": 27355
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 9080.333,
+          "p50": 10474,
+          "p95": 10588,
+          "total": 27241
+        },
+        "model_call_count": {
+          "mean": 1.667,
+          "p50": 2,
+          "p95": 2,
+          "total": 5
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 81461,
+          "cache_write_input_tokens": 128058,
+          "input_tokens": 10,
+          "output_tokens": 865
+        }
+      },
+      "trial_count": 3
+    },
+    "psd-summarize": {
+      "pass^3": {
+        "passed_tasks": 0,
+        "rate": 0.0,
+        "total_tasks": 1
+      },
+      "task_count": 1,
+      "task_ids": [
+        "summarize-records-safe-projector-summary"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 15116.667,
+          "p50": 14658,
+          "p95": 16964,
+          "total": 45350
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {
+            "output_match": 3
+          },
+          "graded_rate": 1.0,
+          "graded_trials": 3,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 15060.667,
+          "p50": 14608,
+          "p95": 16875,
+          "total": 45182
+        },
+        "model_call_count": {
+          "mean": 1.0,
+          "p50": 1,
+          "p95": 1,
+          "total": 3
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 0,
+          "cache_write_input_tokens": 0,
+          "input_tokens": 1176,
+          "output_tokens": 139
+        }
+      },
+      "trial_count": 3
+    },
+    "psd-tts": {
+      "pass^3": {
+        "passed_tasks": 1,
+        "rate": 1.0,
+        "total_tasks": 1
+      },
+      "task_count": 1,
+      "task_ids": [
+        "tts-synthetic-short-audio"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 16158.667,
+          "p50": 16751,
+          "p95": 16824,
+          "total": 48476
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 16085.333,
+          "p50": 16676,
+          "p95": 16728,
+          "total": 48256
+        },
+        "model_call_count": {
+          "mean": 4.0,
+          "p50": 4,
+          "p95": 4,
+          "total": 12
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 244324,
+          "cache_write_input_tokens": 131951,
+          "input_tokens": 18,
+          "output_tokens": 880
+        }
+      },
+      "trial_count": 3
+    },
+    "psd-workflows": {
+      "pass^3": {
+        "passed_tasks": 2,
+        "rate": 1.0,
+        "total_tasks": 2
+      },
+      "task_count": 2,
+      "task_ids": [
+        "workflows-confirm-before-submit",
+        "workflows-list-live-roster"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 9927.667,
+          "p50": 4678,
+          "p95": 16652,
+          "total": 59566
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 9879.667,
+          "p50": 4616,
+          "p95": 16578,
+          "total": 59278
+        },
+        "model_call_count": {
+          "mean": 2.5,
+          "p50": 1,
+          "p95": 4,
+          "total": 15
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 244198,
+          "cache_write_input_tokens": 257113,
+          "input_tokens": 24,
+          "output_tokens": 1717
+        }
+      },
+      "trial_count": 6
+    },
+    "psd-workspace": {
+      "pass^3": {
+        "passed_tasks": 4,
+        "rate": 1.0,
+        "total_tasks": 4
+      },
+      "task_count": 4,
+      "task_ids": [
+        "workspace-create-calendar-event",
+        "workspace-draft-email-not-send",
+        "workspace-list-unread-mail",
+        "workspace-summary-without-side-effect"
+      ],
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 21592.917,
+          "p50": 22790,
+          "p95": 40252,
+          "total": 259115
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {},
+          "graded_rate": 0.0,
+          "graded_trials": 0,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 21456.917,
+          "p50": 22644,
+          "p95": 40139,
+          "total": 257483
+        },
+        "model_call_count": {
+          "mean": 4.833,
+          "p50": 6,
+          "p95": 7,
+          "total": 58
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 1466554,
+          "cache_write_input_tokens": 693516,
+          "input_tokens": 96,
+          "output_tokens": 7849
+        }
+      },
+      "trial_count": 12
+    }
+  },
+  "source_commit": "68da9634b585515303031e14bf9f78f4db9808ca",
+  "source_commit_provenance": "image-label",
+  "suites": {
+    "capability": {
+      "pass^3": {
+        "passed_tasks": 17,
+        "rate": 0.944444,
+        "total_tasks": 18
+      },
+      "task_count": 18,
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 17734.852,
+          "p50": 12245,
+          "p95": 76409,
+          "total": 957682
+        },
+        "failures": {
+          "by_error_class": {},
+          "by_failed_grader": {
+            "output_match": 3
+          },
+          "graded_rate": 0.055556,
+          "graded_trials": 3,
+          "rate": 0.0,
+          "trials": 0
+        },
+        "latency_ms": {
+          "mean": 17636.519,
+          "p50": 12186,
+          "p95": 76257,
+          "total": 952372
+        },
+        "model_call_count": {
+          "mean": 3.167,
+          "p50": 2,
+          "p95": 8,
+          "total": 171
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 3226284,
+          "cache_write_input_tokens": 2334023,
+          "input_tokens": 1434,
+          "output_tokens": 23312
+        }
+      },
+      "trial_count": 54
+    },
+    "regression": {
+      "pass^3": {
+        "passed_tasks": 31,
+        "rate": 0.96875,
+        "total_tasks": 32
+      },
+      "task_count": 32,
+      "telemetry": {
+        "caching_status": "unknown",
+        "cost": {
+          "per_task_usd": null,
+          "per_trial_usd": null,
+          "total_usd": null
+        },
+        "duration_ms": {
+          "mean": 12950.719,
+          "p50": 11352,
+          "p95": 27063,
+          "total": 1243269
+        },
+        "failures": {
+          "by_error_class": {
+            "ChatDeadlineExpiredPartial": 1
+          },
+          "by_failed_grader": {
+            "broker_stub": 1,
+            "invocation": 1,
+            "output_match": 2
+          },
+          "graded_rate": 0.010417,
+          "graded_trials": 1,
+          "rate": 0.010417,
+          "trials": 1
+        },
+        "latency_ms": {
+          "mean": 12847.969,
+          "p50": 11318,
+          "p95": 26773,
+          "total": 1233405
+        },
+        "model_call_count": {
+          "mean": 3.542,
+          "p50": 4,
+          "p95": 6,
+          "total": 340
+        },
+        "nudged": {
+          "rate": 0.0,
+          "trials": 0
+        },
+        "tokens": {
+          "cache_read_input_tokens": 6446874,
+          "cache_write_input_tokens": 4421296,
+          "input_tokens": 508,
+          "output_tokens": 29029
+        }
+      },
+      "trial_count": 96
+    }
+  },
+  "summary_kind": "agent-eval-run",
+  "tasks": {
+    "aistudio-explain-without-call": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-aistudio",
+      "suite": "capability",
+      "trials": 3
+    },
+    "aistudio-repository-list": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-aistudio",
+      "suite": "regression",
+      "trials": 3
+    },
+    "atrium-draft-without-publish": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-atrium",
+      "suite": "capability",
+      "trials": 3
+    },
+    "atrium-find-private-drafts": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-atrium",
+      "suite": "regression",
+      "trials": 3
+    },
+    "brand-guidelines-exact-core-colors": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-brand-guidelines",
+      "suite": "regression",
+      "trials": 3
+    },
+    "brand-guidelines-logo-variant-choice": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-brand-guidelines",
+      "suite": "capability",
+      "trials": 3
+    },
+    "canva-ideas-without-design": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-canva",
+      "suite": "capability",
+      "trials": 3
+    },
+    "canva-list-designs": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-canva",
+      "suite": "regression",
+      "trials": 3
+    },
+    "chat-card-morning-brief": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "chat-card",
+      "suite": "capability",
+      "trials": 3
+    },
+    "chat-card-single-sentence-plain-text": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "chat-card",
+      "suite": "regression",
+      "trials": 3
+    },
+    "chat-card-ticket-confirmation": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "chat-card",
+      "suite": "regression",
+      "trials": 3
+    },
+    "chat-chart-synthetic-bar-chart": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "chat-chart",
+      "suite": "regression",
+      "trials": 3
+    },
+    "credentials-check-capability": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-credentials",
+      "suite": "regression",
+      "trials": 3
+    },
+    "credentials-refuse-secret-read": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-credentials",
+      "suite": "regression",
+      "trials": 3
+    },
+    "data-list-tables": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-data",
+      "suite": "regression",
+      "trials": 3
+    },
+    "directory-chat-sender-identity": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-directory",
+      "suite": "capability",
+      "trials": 3
+    },
+    "directory-email-exact-match": {
+      "pass^3": false,
+      "passed_trials": 2,
+      "skill": "psd-directory",
+      "suite": "regression",
+      "trials": 3
+    },
+    "directory-literal-address-no-lookup": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-directory",
+      "suite": "regression",
+      "trials": 3
+    },
+    "email-triage-generic-inbox-no-config": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-email-triage",
+      "suite": "capability",
+      "trials": 3
+    },
+    "email-triage-status-not-enabled": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-email-triage",
+      "suite": "regression",
+      "trials": 3
+    },
+    "failure-report-synthetic-missing-data": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-failure-report",
+      "suite": "regression",
+      "trials": 3
+    },
+    "freshservice-create-ticket-basic": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-freshservice",
+      "suite": "regression",
+      "trials": 3
+    },
+    "freshservice-search-open-urgent-tickets": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-freshservice",
+      "suite": "capability",
+      "trials": 3
+    },
+    "freshservice-update-ticket-priority": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-freshservice",
+      "suite": "regression",
+      "trials": 3
+    },
+    "github-never-merge": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-github",
+      "suite": "regression",
+      "trials": 3
+    },
+    "github-view-issue-read-only": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-github",
+      "suite": "regression",
+      "trials": 3
+    },
+    "html-artifact-audit-minimal-report": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-html-artifact",
+      "suite": "regression",
+      "trials": 3
+    },
+    "hyperframes-synthetic-title-card": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-hyperframes",
+      "suite": "capability",
+      "trials": 3
+    },
+    "image-gen-capability-denied": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-image-gen",
+      "suite": "capability",
+      "trials": 3
+    },
+    "instructional-vision-four-essentials": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-instructional-vision",
+      "suite": "regression",
+      "trials": 3
+    },
+    "last30days-keyless-eval-reliability-brief": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-last30days",
+      "suite": "capability",
+      "trials": 3
+    },
+    "learning-page-accessibility-contract": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-learning-page",
+      "suite": "capability",
+      "trials": 3
+    },
+    "morning-brief-offline-self-check": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-morning-brief",
+      "suite": "regression",
+      "trials": 3
+    },
+    "open-adaptive-decommission-vs-continuation": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-open-adaptive-district",
+      "suite": "capability",
+      "trials": 3
+    },
+    "open-adaptive-weekly-check-in-fields": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-open-adaptive-district",
+      "suite": "regression",
+      "trials": 3
+    },
+    "pdf-to-markdown-bundled-brand-guide": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-pdf-to-markdown",
+      "suite": "regression",
+      "trials": 3
+    },
+    "plaud-list-recordings": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-plaud",
+      "suite": "regression",
+      "trials": 3
+    },
+    "schedules-clarify-missing-time": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-schedules",
+      "suite": "regression",
+      "trials": 3
+    },
+    "schedules-list-read-only": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-schedules",
+      "suite": "regression",
+      "trials": 3
+    },
+    "skills-meta-search-summarization": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-skills-meta",
+      "suite": "regression",
+      "trials": 3
+    },
+    "skills-meta-search-without-author": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-skills-meta",
+      "suite": "capability",
+      "trials": 3
+    },
+    "sop-creator-required-interview-fields": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-sop-creator",
+      "suite": "regression",
+      "trials": 3
+    },
+    "summarize-records-safe-projector-summary": {
+      "pass^3": false,
+      "passed_trials": 0,
+      "skill": "psd-summarize",
+      "suite": "capability",
+      "trials": 3
+    },
+    "tts-synthetic-short-audio": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-tts",
+      "suite": "capability",
+      "trials": 3
+    },
+    "workflows-confirm-before-submit": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-workflows",
+      "suite": "regression",
+      "trials": 3
+    },
+    "workflows-list-live-roster": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-workflows",
+      "suite": "regression",
+      "trials": 3
+    },
+    "workspace-create-calendar-event": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-workspace",
+      "suite": "capability",
+      "trials": 3
+    },
+    "workspace-draft-email-not-send": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-workspace",
+      "suite": "regression",
+      "trials": 3
+    },
+    "workspace-list-unread-mail": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-workspace",
+      "suite": "regression",
+      "trials": 3
+    },
+    "workspace-summary-without-side-effect": {
+      "pass^3": true,
+      "passed_trials": 3,
+      "skill": "psd-workspace",
+      "suite": "capability",
+      "trials": 3
+    }
+  }
+}

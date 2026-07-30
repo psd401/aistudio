@@ -184,6 +184,23 @@ class ProxyDeltaPrecedenceTests(unittest.TestCase):
         )
 
 
+class UsageCaptureCompletenessTests(unittest.TestCase):
+    def test_proxy_capture_is_complete_when_proxy_measured_the_turn(self):
+        self.assertTrue(
+            agentcore_wrapper.usage_capture_is_complete(True, False)
+        )
+
+    def test_harness_capture_is_complete_when_transcript_settled(self):
+        self.assertTrue(
+            agentcore_wrapper.usage_capture_is_complete(False, True)
+        )
+
+    def test_failed_capture_is_never_inferred_from_fallback_tokens(self):
+        self.assertFalse(
+            agentcore_wrapper.usage_capture_is_complete(False, False)
+        )
+
+
 class ReadProxyUsageTests(unittest.TestCase):
     def test_usage_events_threaded_from_proxy(self):
         payload = json.dumps({

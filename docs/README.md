@@ -149,6 +149,10 @@ Load testing and performance benchmarking procedures.
 #### [operations/streaming-infrastructure.md](./operations/streaming-infrastructure.md)
 ECS streaming infrastructure operations and monitoring.
 
+#### [operations/agent-eval-first-comparison-decisions-2026-07-29.md](./operations/agent-eval-first-comparison-decisions-2026-07-29.md)
+Digest-bound harness, prompt, and model comparison decisions from the first
+full PSD Agent eval run.
+
 #### [operations/production-migration-checklist.md](./operations/production-migration-checklist.md)
 Comprehensive checklist for deploying to production.
 

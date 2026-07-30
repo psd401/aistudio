@@ -27,6 +27,7 @@ logger = logging.getLogger("harness_adapter")
 # Session/agent ids from the gateway event stream are interpolated into a
 # transcript path, so they must be filename-safe before they touch the FS.
 _SAFE_PATH_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+TERMINAL_USAGE_STOP_REASONS = frozenset({"stop", "end_turn"})
 
 
 def _is_safe_path_component(value: str) -> bool:
@@ -97,9 +98,11 @@ class TurnResult:
     # Bedrock prompt-caching split (issue #1089). Sourced from the OpenClaw
     # session transcript alongside tokens_in/tokens_out — see
     # OpenClawAdapter._read_turn_usage. Zero when the model doesn't cache or
-    # the transcript read failed.
+    # the transcript read failed; usage_capture_complete distinguishes those
+    # cases so downstream cost logic never prices a failed capture.
     cache_read: int = 0
     cache_write: int = 0
+    usage_capture_complete: bool = False
     latency_ms: int = 0
     messages: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
     tool_calls: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
@@ -252,15 +255,24 @@ class OpenClawAdapter(HarnessAdapter):
     # agree within the process. OpenClaw overwrites the config file's token on
     # startup and --token overrides that config value, so the on-disk config
     # token is never the operative secret.
-    # client.id MUST be "openclaw-tui" — verified by reading OpenClaw source:
-    # - "cli" passes auth but scopes are cleared (not an operator UI client)
-    # - "openclaw-control-ui" triggers browser origin check (rejects non-browser)
-    # - "openclaw-tui" passes isOperatorUiClient (scopes preserved) without
-    #   triggering isBrowserOperatorUiClient (no origin check)
-    # See: /app/dist/message-channel-CBqCPFa_.js lines 80-85
+    # The image contract chooses the identity supported by its pinned host.
+    # Production 2026.7.1 retains the proven TUI path; 2026.7.2 harness
+    # candidates select OpenClaw's local CLI identity, whose container-local
+    # shared-auth path preserves operator scopes without classifying this
+    # non-browser adapter as Control UI. candidate.py and the Docker build
+    # accept only these two exact pairs.
+    _gateway_client_pair = (
+        os.environ.get("PSD_OPENCLAW_GATEWAY_CLIENT_ID", "openclaw-tui"),
+        os.environ.get("PSD_OPENCLAW_GATEWAY_CLIENT_MODE", "backend"),
+    )
+    if _gateway_client_pair not in {
+        ("openclaw-tui", "backend"),
+        ("cli", "cli"),
+    }:
+        raise RuntimeError("Unsupported OpenClaw gateway client identity")
     CLIENT_INFO = {
-        "id": "openclaw-tui",
-        "mode": "backend",
+        "id": _gateway_client_pair[0],
+        "mode": _gateway_client_pair[1],
         "version": "dev",
         "platform": "linux",
     }
@@ -359,17 +371,34 @@ class OpenClawAdapter(HarnessAdapter):
             f"OpenClaw gateway did not become ready within {timeout}s"
         )
 
+    @staticmethod
+    def _open_gateway_socket(websocket_module: Any, ws_url: str) -> Any:
+        """Open the adapter's non-browser loopback WebSocket.
+
+        websocket-client adds an Origin header unless told otherwise. Newer
+        OpenClaw releases deliberately treat any Origin-bearing connection as
+        browser-originated and therefore refuse the privileged local-CLI auth
+        path. This adapter is a backend client on the same container loopback,
+        not a browser, so suppress the synthetic header instead of weakening
+        the gateway's browser-origin checks.
+        """
+        return websocket_module.create_connection(
+            ws_url,
+            timeout=120,
+            suppress_origin=True,
+        )
+
     def _sum_transcript_usage(
         self, path: str, since_ms: int,
     ) -> Tuple[Dict[str, int], bool]:
         """Sum assistant-message usage in `path` for records at/after `since_ms`.
 
-        Returns `(totals, complete)`. `complete` is True once the newest
-        in-window assistant record carries a terminal stopReason — OpenClaw
-        writes `stopReason: "toolUse"` on every model call that hands off to a
-        tool and a terminal reason ("stop"/"end_turn") only on the call that
-        ends the turn, so that flag is an exact "no more model calls coming"
-        signal rather than a guess. Never raises.
+        Returns `(totals, complete)`. `complete` is True only when the newest
+        in-window assistant record carries an explicitly allowlisted terminal
+        stopReason. OpenClaw writes `stopReason: "toolUse"` on every model call
+        that hands off to a tool and "stop"/"end_turn" only on the call that
+        ends the turn, so missing or novel values cannot accidentally become a
+        "no more model calls coming" signal. Never raises.
         """
         totals = {"input": 0, "output": 0, "cache_read": 0,
                   "cache_write": 0, "model_calls": 0}
@@ -384,8 +413,11 @@ class OpenClawAdapter(HarnessAdapter):
                         record = json.loads(line)
                     except (json.JSONDecodeError, ValueError):
                         # A torn final line is expected when we read while the
-                        # runtime is mid-append. Skip it; the settle loop will
-                        # re-read once it lands whole.
+                        # runtime is mid-append. Clear completeness in case a
+                        # prior terminal record was followed by a new partial
+                        # model-call record; the settle loop will re-read once
+                        # it lands whole.
+                        complete = False
                         continue
                     if not isinstance(record, dict):
                         continue
@@ -412,7 +444,7 @@ class OpenClawAdapter(HarnessAdapter):
                     # Recomputed per record so the LAST in-window record wins:
                     # an earlier terminal reason followed by more model calls
                     # (nudge/compaction legs) must not latch `complete` True.
-                    complete = stop_reason != "toolUse"
+                    complete = stop_reason in TERMINAL_USAGE_STOP_REASONS
         except OSError as exc:
             logger.warning(
                 "transcript usage read failed: %s", str(exc)[:200],
@@ -441,7 +473,7 @@ class OpenClawAdapter(HarnessAdapter):
         session_uuid: Optional[str],
         agent_id: Optional[str],
         since_ms: int,
-    ) -> Dict[str, int]:
+    ) -> Dict[str, object]:
         """Read this turn's real token usage from the OpenClaw session transcript.
 
         This is the ground-truth capture point after #1159/#1384 moved chat off
@@ -466,10 +498,12 @@ class OpenClawAdapter(HarnessAdapter):
         alternative failure mode — reading a stale file and billing another
         turn's calls twice.
 
-        Returns zeros on any failure; telemetry must never break a chat turn.
+        Returns zeros with capture_complete=False on any failure; telemetry
+        must never break a chat turn.
         """
         empty = {"input": 0, "output": 0, "cache_read": 0,
-                 "cache_write": 0, "model_calls": 0}
+                 "cache_write": 0, "model_calls": 0,
+                 "capture_complete": False}
         if not session_uuid:
             logger.warning(
                 "transcript usage skipped — no sessionId on the event stream",
@@ -526,7 +560,7 @@ class OpenClawAdapter(HarnessAdapter):
         for attempt in range(self.USAGE_SETTLE_ATTEMPTS):
             totals, complete = self._sum_transcript_usage(path, since_ms)
             if complete:
-                return totals
+                return {**totals, "capture_complete": True}
             if attempt < self.USAGE_SETTLE_ATTEMPTS - 1:
                 time.sleep(self.USAGE_SETTLE_INTERVAL_S)
         logger.warning(
@@ -536,7 +570,7 @@ class OpenClawAdapter(HarnessAdapter):
             totals["model_calls"],
             session_uuid,
         )
-        return totals
+        return {**totals, "capture_complete": False}
 
     def process(
         self,
@@ -601,7 +635,7 @@ class OpenClawAdapter(HarnessAdapter):
         last_error = None
         for attempt in range(3):
             try:
-                ws = websocket.create_connection(ws_url, timeout=120)
+                ws = self._open_gateway_socket(websocket, ws_url)
                 break
             except Exception as exc:
                 last_error = exc
@@ -641,9 +675,10 @@ class OpenClawAdapter(HarnessAdapter):
                         # gateway protocol docs so we negotiate v4 against this
                         # gateway yet stay compatible with a v3 gateway on
                         # rollback. The v4 connect envelope + fields below are
-                        # unchanged, and device auth is disabled in the gateway
-                        # config (dangerouslyDisableDeviceAuth=true), so no
-                        # `device` block is required.
+                        # unchanged. The harness-selected loopback identity
+                        # authenticates with the per-container shared token and
+                        # avoids the host's device-auth Control UI path, so no
+                        # device block is required.
                         "minProtocol": 3,
                         "maxProtocol": 4,
                         "client": self.CLIENT_INFO,
@@ -1113,6 +1148,9 @@ class OpenClawAdapter(HarnessAdapter):
                                 tokens_out=tokens_out,
                                 cache_read=cache_read,
                                 cache_write=cache_write,
+                                usage_capture_complete=bool(
+                                    err_usage.get("capture_complete")
+                                ),
                                 latency_ms=int((time.time() - chat_send_at) * 1000),
                                 messages=messages_log,
                                 tool_calls=tool_calls,
@@ -1239,6 +1277,9 @@ class OpenClawAdapter(HarnessAdapter):
                 tokens_out=tokens_out,
                 cache_read=cache_read,
                 cache_write=cache_write,
+                usage_capture_complete=bool(
+                    turn_usage.get("capture_complete")
+                ),
                 latency_ms=latency_ms,
                 messages=log,
                 tool_calls=tool_calls,
@@ -1425,6 +1466,10 @@ class OpenClawAdapter(HarnessAdapter):
                     tokens_out=tokens_out + nudged.tokens_out,
                     cache_read=cache_read + nudged.cache_read,
                     cache_write=cache_write + nudged.cache_write,
+                    usage_capture_complete=(
+                        bool(turn_usage.get("capture_complete"))
+                        and nudged.usage_capture_complete
+                    ),
                     latency_ms=int((time.time() - chat_send_at) * 1000),
                     messages=messages_log + nudged.messages,
                     tool_calls=merged_tools,

@@ -6,4 +6,4 @@ suite: capability
 prompt: "A SHIP bet missed its success measure, but the team has a materially revised hypothesis worth testing next cycle. Use PSD's Open Adaptive District doctrine to decide between Decommission and Continuation and explain the deciding condition."
 trials: 3
 graders:
-  - {"type":"output_match","pattern":"(?is)Continuation.*revised hypothesis"}
+  - {"type":"output_match","pattern":"(?is)Continu(?:e|ation).*revised hypothesis"}

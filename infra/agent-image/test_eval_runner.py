@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -33,6 +34,7 @@ def metadata(session_id: str, **extra: object) -> dict[str, object]:
         "output_tokens": 2,
         "cache_read_input_tokens": 3,
         "cache_write_input_tokens": 4,
+        "usage_capture_complete": True,
         "model_call_count": 1,
         "duration_ms": 120,
         "latency_ms": 100,
@@ -253,6 +255,182 @@ class SuiteLoadingTests(unittest.TestCase):
                 ),
                 f"{task_id} does not prove its executable succeeded",
             )
+
+        failure_report_output = next(
+            grader
+            for grader in tasks_by_id[
+                "failure-report-synthetic-missing-data"
+            ].graders
+            if grader.get("type") == "output_match"
+        )
+        failure_report_pattern = failure_report_output.get("pattern")
+        self.assertIsInstance(failure_report_pattern, str)
+        for valid_confirmation in (
+            "Logged — failure_id 394.",
+            "Failure record filed #396.",
+            "Failure report recorded as ID 407.",
+            "Logged as failure #408.",
+            '{"logged":true,"failure_id":414}',
+            "Failure record `423` created.",
+        ):
+            self.assertIsNotNone(
+                re.search(failure_report_pattern, valid_confirmation),
+                valid_confirmation,
+            )
+        self.assertIsNone(
+            re.search(
+                failure_report_pattern,
+                "The failure report could not be recorded.",
+            )
+        )
+
+        learning_page_patterns = {
+            str(grader.get("pattern"))
+            for grader in tasks_by_id[
+                "learning-page-accessibility-contract"
+            ].graders
+            if grader.get("type") == "output_match"
+        }
+        self.assertEqual(
+            learning_page_patterns,
+            {
+                "(?i)caption",
+                "(?i)transcript",
+                "(?i)quiz",
+                "(?i)summary",
+            },
+        )
+
+        morning_brief_meetings = next(
+            str(grader.get("pattern"))
+            for grader in tasks_by_id["chat-card-morning-brief"].graders
+            if grader.get("type") == "output_match"
+            and "Meetings" in str(grader.get("pattern"))
+        )
+        for valid_meeting_fact in (
+            '"topLabel":"Meetings today","text":"3"',
+            '"topLabel":"Meetings","text":"3 today"',
+            '"topLabel":"Meetings today","text":"3 meetings"',
+        ):
+            self.assertIsNotNone(
+                re.search(morning_brief_meetings, valid_meeting_fact),
+                valid_meeting_fact,
+            )
+        self.assertIsNone(
+            re.search(
+                morning_brief_meetings,
+                '"topLabel":"Meetings","text":"4 today"',
+            )
+        )
+        morning_brief_follow_up = next(
+            str(grader.get("pattern"))
+            for grader in tasks_by_id["chat-card-morning-brief"].graders
+            if grader.get("type") == "output_match"
+            and "Follow" in str(grader.get("pattern"))
+        )
+        for valid_follow_up in (
+            '"topLabel":"Follow-up due","text":"1"',
+            '"topLabel":"Follow‑ups due","text":"1"',
+            '"topLabel":"Follow-up","text":"1 due"',
+        ):
+            self.assertIsNotNone(
+                re.search(morning_brief_follow_up, valid_follow_up),
+                valid_follow_up,
+            )
+        morning_brief_unread = next(
+            str(grader.get("pattern"))
+            for grader in tasks_by_id["chat-card-morning-brief"].graders
+            if grader.get("type") == "output_match"
+            and "Unread" in str(grader.get("pattern"))
+        )
+        for valid_unread in (
+            '"topLabel":"Unread messages","text":"7"',
+            '"topLabel":"Unread","text":"7 messages"',
+        ):
+            self.assertIsNotNone(
+                re.search(morning_brief_unread, valid_unread),
+                valid_unread,
+            )
+
+        last30days_window = next(
+            str(grader.get("pattern"))
+            for grader in tasks_by_id[
+                "last30days-keyless-eval-reliability-brief"
+            ].graders
+            if grader.get("type") == "output_match"
+            and "seven" in str(grader.get("pattern"))
+        )
+        for valid_window in (
+            "last 7 days",
+            "last-7-days",
+            "last\u202f7\u202fdays",
+            "past week",
+            "7-day",
+            "seven-day",
+        ):
+            self.assertIsNotNone(
+                re.search(last30days_window, valid_window),
+                valid_window,
+            )
+        self.assertIsNone(re.search(last30days_window, "past month"))
+
+        instructional_patterns = {
+            str(grader.get("pattern"))
+            for grader in tasks_by_id[
+                "instructional-vision-four-essentials"
+            ].graders
+            if grader.get("type") == "output_match"
+        }
+        self.assertTrue(
+            any(
+                re.search(pattern, "Data‑Driven Decisions", re.IGNORECASE)
+                for pattern in instructional_patterns
+            )
+        )
+        self.assertTrue(
+            any(
+                re.search(pattern, "Tier\u202f1", re.IGNORECASE)
+                for pattern in instructional_patterns
+            )
+        )
+
+        morning_self_check = next(
+            str(grader.get("pattern"))
+            for grader in tasks_by_id[
+                "morning-brief-offline-self-check"
+            ].graders
+            if grader.get("type") == "output_match"
+        )
+        for valid_self_check in (
+            "Offline self-check: PASS",
+            "All checks passed; the offline self‑check completed.",
+        ):
+            self.assertIsNotNone(
+                re.search(morning_self_check, valid_self_check),
+                valid_self_check,
+            )
+
+        open_adaptive_decision = next(
+            str(grader.get("pattern"))
+            for grader in tasks_by_id[
+                "open-adaptive-decommission-vs-continuation"
+            ].graders
+            if grader.get("type") == "output_match"
+        )
+        for valid_decision in (
+            "Continuation is warranted by the revised hypothesis.",
+            "Continue only if the revised hypothesis is testable.",
+        ):
+            self.assertIsNotNone(
+                re.search(open_adaptive_decision, valid_decision),
+                valid_decision,
+            )
+        self.assertIsNone(
+            re.search(
+                open_adaptive_decision,
+                "Decommission because the original hypothesis failed.",
+            )
+        )
 
         chart_probe = next(
             grader

@@ -271,12 +271,15 @@ def _observed_caching_status(
     label: str,
 ) -> str:
     telemetry = _telemetry(summary, label)
-    tokens = _mapping(telemetry.get("tokens"), f"{label}.overall.telemetry.tokens")
-    cache_reads = _integer(
-        tokens.get("cache_read_input_tokens"),
-        f"{label}.overall.telemetry.tokens.cache_read_input_tokens",
+    status = _string(
+        telemetry.get("caching_status"),
+        f"{label}.overall.telemetry.caching_status",
     )
-    return "uncached" if cache_reads == 0 else "cached"
+    if status not in {"cached", "uncached", "unknown"}:
+        raise EvalReportError(
+            f"{label}.overall.telemetry.caching_status is invalid"
+        )
+    return status
 
 
 def _scope_costs(
@@ -476,9 +479,22 @@ def _promotion_clauses(
         ),
     )
 
-    _, baseline_cost = _scope_costs(baseline, "baseline")
-    _, candidate_cost = _scope_costs(candidate, "candidate")
-    if baseline_caching_status != candidate_caching_status:
+    if "unknown" in {
+        baseline_caching_status,
+        candidate_caching_status,
+    }:
+        cost_clause = ClauseResult(
+            key="c",
+            title="Cost per task increases by no more than 20%",
+            passed=None,
+            detail=(
+                "Declined because usage telemetry is incomplete "
+                f"(baseline {baseline_caching_status}, "
+                f"candidate {candidate_caching_status}); no cache or cost "
+                "verdict rendered."
+            ),
+        )
+    elif baseline_caching_status != candidate_caching_status:
         cost_clause = ClauseResult(
             key="c",
             title="Cost per task increases by no more than 20%",
@@ -490,6 +506,8 @@ def _promotion_clauses(
             ),
         )
     else:
+        _, baseline_cost = _scope_costs(baseline, "baseline")
+        _, candidate_cost = _scope_costs(candidate, "candidate")
         cost_change = _percent_change(baseline_cost, candidate_cost)
         if cost_change is None:
             cost_passed = False
@@ -635,13 +653,19 @@ def _metric_rows(comparison: Comparison) -> list[list[str]]:
         candidate_telemetry.get("cost"),
         "candidate.overall.telemetry.cost",
     )
-    baseline_total_exact, baseline_per_task_exact = _scope_costs(
-        comparison.baseline,
-        "baseline",
+    usage_unknown = "unknown" in {
+        comparison.baseline_caching_status,
+        comparison.candidate_caching_status,
+    }
+    baseline_total_exact, baseline_per_task_exact = (
+        (None, None)
+        if comparison.baseline_caching_status == "unknown"
+        else _scope_costs(comparison.baseline, "baseline")
     )
-    candidate_total_exact, candidate_per_task_exact = _scope_costs(
-        comparison.candidate,
-        "candidate",
+    candidate_total_exact, candidate_per_task_exact = (
+        (None, None)
+        if comparison.candidate_caching_status == "unknown"
+        else _scope_costs(comparison.candidate, "candidate")
     )
     for field, title, baseline_exact, candidate_exact in (
         (
@@ -657,16 +681,32 @@ def _metric_rows(comparison: Comparison) -> list[list[str]]:
             candidate_total_exact,
         ),
     ):
-        baseline_value = _decimal(
-            baseline_cost.get(field),
-            f"baseline.overall.telemetry.cost.{field}",
+        baseline_raw = baseline_cost.get(field)
+        candidate_raw = candidate_cost.get(field)
+        baseline_value = (
+            None
+            if baseline_raw is None
+            else _decimal(
+                baseline_raw,
+                f"baseline.overall.telemetry.cost.{field}",
+            )
         )
-        candidate_value = _decimal(
-            candidate_cost.get(field),
-            f"candidate.overall.telemetry.cost.{field}",
+        candidate_value = (
+            None
+            if candidate_raw is None
+            else _decimal(
+                candidate_raw,
+                f"candidate.overall.telemetry.cost.{field}",
+            )
         )
-        change = _percent_change(baseline_exact, candidate_exact)
-        if not caching_matches:
+        change = (
+            None
+            if baseline_exact is None or candidate_exact is None
+            else _percent_change(baseline_exact, candidate_exact)
+        )
+        if usage_unknown:
+            delta = "declined: incomplete usage telemetry"
+        elif not caching_matches:
             delta = "declined: caching mismatch"
         elif change is None:
             delta = "undefined from zero baseline"
@@ -675,8 +715,16 @@ def _metric_rows(comparison: Comparison) -> list[list[str]]:
         rows.append(
             [
                 title,
-                f"${baseline_value:.6f}",
-                f"${candidate_value:.6f}",
+                (
+                    "unknown"
+                    if baseline_value is None
+                    else f"${baseline_value:.6f}"
+                ),
+                (
+                    "unknown"
+                    if candidate_value is None
+                    else f"${candidate_value:.6f}"
+                ),
                 delta,
             ]
         )

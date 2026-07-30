@@ -240,6 +240,14 @@ def _validate_record(
     for field in ("nudged", "failed"):
         if not isinstance(metadata.get(field), bool):
             raise EvalSummaryError(f"{label} metadata.{field} must be a boolean")
+    usage_capture_complete = metadata.get("usage_capture_complete")
+    if (
+        usage_capture_complete is not None
+        and not isinstance(usage_capture_complete, bool)
+    ):
+        raise EvalSummaryError(
+            f"{label} metadata.usage_capture_complete must be a boolean"
+        )
     error_class = metadata.get("error_class")
     if error_class is not None and not isinstance(error_class, str):
         raise EvalSummaryError(f"{label} metadata.error_class must be a string or null")
@@ -282,15 +290,20 @@ def _telemetry_summary(
     nudged_count = 0
     failed_count = 0
     graded_failure_count = 0
+    usage_complete = True
     failure_classes: Counter[str] = Counter()
     failed_graders: Counter[str] = Counter()
     for index, record in enumerate(records, start=1):
         metadata = _mapping(record.get("metadata"), f"trial record {index} metadata")
-        for field in TOKEN_PRICE_KEYS:
-            tokens[field] += _nonnegative_integer(
+        record_tokens = {
+            field: _nonnegative_integer(
                 metadata.get(field),
                 f"trial record {index} metadata.{field}",
             )
+            for field in TOKEN_PRICE_KEYS
+        }
+        for field, value in record_tokens.items():
+            tokens[field] += value
         durations.append(
             _nonnegative_integer(
                 metadata.get("duration_ms"),
@@ -303,11 +316,15 @@ def _telemetry_summary(
                 f"trial record {index} metadata.latency_ms",
             )
         )
-        model_calls.append(
-            _nonnegative_integer(
-                metadata.get("model_call_count"),
-                f"trial record {index} metadata.model_call_count",
-            )
+        record_model_calls = _nonnegative_integer(
+            metadata.get("model_call_count"),
+            f"trial record {index} metadata.model_call_count",
+        )
+        model_calls.append(record_model_calls)
+        usage_complete = (
+            usage_complete
+            and metadata.get("usage_capture_complete") is True
+            and record_tokens["output_tokens"] >= record_model_calls
         )
         if metadata.get("nudged") is True:
             nudged_count += 1
@@ -342,11 +359,19 @@ def _telemetry_summary(
     task_count = len({_nonempty_string(record.get("task_id"), "task_id") for record in records})
     return {
         "tokens": tokens,
-        "cost": {
-            "total_usd": _rounded_usd(cost),
-            "per_trial_usd": _rounded_usd(cost / Decimal(len(records))),
-            "per_task_usd": _rounded_usd(cost / Decimal(task_count)),
-        },
+        "cost": (
+            {
+                "total_usd": _rounded_usd(cost),
+                "per_trial_usd": _rounded_usd(cost / Decimal(len(records))),
+                "per_task_usd": _rounded_usd(cost / Decimal(task_count)),
+            }
+            if usage_complete
+            else {
+                "total_usd": None,
+                "per_trial_usd": None,
+                "per_task_usd": None,
+            }
+        ),
         "duration_ms": _distribution(durations),
         "latency_ms": _distribution(latencies),
         "model_call_count": _distribution(model_calls),
@@ -363,7 +388,13 @@ def _telemetry_summary(
             "by_failed_grader": dict(sorted(failed_graders.items())),
         },
         "caching_status": (
-            "uncached" if tokens["cache_read_input_tokens"] == 0 else "cached"
+            "unknown"
+            if not usage_complete
+            else (
+                "uncached"
+                if tokens["cache_read_input_tokens"] == 0
+                else "cached"
+            )
         ),
     }
 
@@ -676,8 +707,20 @@ def _validate_telemetry(value: object, description: str) -> None:
         {"total_usd", "per_trial_usd", "per_task_usd"},
         f"{description}.cost",
     )
+    caching_status = telemetry.get("caching_status")
+    if caching_status not in {"cached", "uncached", "unknown"}:
+        raise EvalSummaryError(
+            f"{description}.caching_status must be cached, uncached, or unknown"
+        )
     for field in ("total_usd", "per_trial_usd", "per_task_usd"):
-        _finite_decimal(cost.get(field), f"{description}.cost.{field}")
+        value = cost.get(field)
+        if caching_status == "unknown":
+            if value is not None:
+                raise EvalSummaryError(
+                    f"{description}.cost.{field} must be null when usage is unknown"
+                )
+        else:
+            _finite_decimal(value, f"{description}.cost.{field}")
     for field in ("duration_ms", "latency_ms", "model_call_count"):
         _validate_distribution(
             telemetry.get(field),
@@ -721,12 +764,6 @@ def _validate_telemetry(value: object, description: str) -> None:
         failures.get("by_failed_grader"),
         f"{description}.failures.by_failed_grader",
     )
-    if telemetry.get("caching_status") not in {"cached", "uncached"}:
-        raise EvalSummaryError(
-            f"{description}.caching_status must be cached or uncached"
-        )
-
-
 def _validate_derived_rate(
     value: object,
     numerator: int,
@@ -782,9 +819,41 @@ def _validate_scope_telemetry_consistency(
         ),
     }
     cost = _mapping(telemetry.get("cost"), f"{description}.telemetry.cost")
+    model_call_distribution = _mapping(
+        telemetry.get("model_call_count"),
+        f"{description}.telemetry.model_call_count",
+    )
+    model_call_total = _nonnegative_integer(
+        model_call_distribution.get("total"),
+        f"{description}.telemetry.model_call_count.total",
+    )
+    observed_caching_status = telemetry.get("caching_status")
+    known_caching_status = (
+        "uncached"
+        if token_counts["cache_read_input_tokens"] == 0
+        else "cached"
+    )
+    allowed_caching_statuses = (
+        {"unknown"}
+        if token_counts["output_tokens"] < model_call_total
+        else {"unknown", known_caching_status}
+    )
+    if observed_caching_status not in allowed_caching_statuses:
+        raise EvalSummaryError(
+            f"{description}.telemetry.caching_status is inconsistent "
+            "with observed usage"
+        )
     for field, expected in expected_costs.items():
+        value = cost.get(field)
+        if observed_caching_status == "unknown":
+            if value is not None:
+                raise EvalSummaryError(
+                    f"{description}.telemetry.cost.{field} must be null "
+                    "when usage is unknown"
+                )
+            continue
         actual = _finite_decimal(
-            cost.get(field),
+            value,
             f"{description}.telemetry.cost.{field}",
         )
         if actual != expected:
@@ -902,18 +971,6 @@ def _validate_scope_telemetry_consistency(
             "with graded failed trials"
         )
 
-    expected_caching_status = (
-        "uncached"
-        if token_counts["cache_read_input_tokens"] == 0
-        else "cached"
-    )
-    if telemetry.get("caching_status") != expected_caching_status:
-        raise EvalSummaryError(
-            f"{description}.telemetry.caching_status is inconsistent "
-            "with cache-read tokens"
-        )
-
-
 def _validate_partition_telemetry_consistency(
     root: Mapping[str, object],
     partition_field: str,
@@ -939,6 +996,19 @@ def _validate_partition_telemetry_consistency(
         )
         for key, scope in partitions.items()
     }
+
+    overall_caching_status = overall_telemetry.get("caching_status")
+    unknown_partitions = sorted(
+        key
+        for key, telemetry in partition_telemetries.items()
+        if telemetry.get("caching_status") == "unknown"
+    )
+    if unknown_partitions and overall_caching_status != "unknown":
+        raise EvalSummaryError(
+            f"{description}.overall.telemetry.caching_status must be unknown "
+            f"when {partition_field} partitions have incomplete usage: "
+            + ", ".join(unknown_partitions)
+        )
 
     overall_tokens = _mapping(
         overall_telemetry.get("tokens"),

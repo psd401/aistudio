@@ -69,6 +69,7 @@ def trial_record(
             "output_tokens": 200,
             "cache_read_input_tokens": cache_reads,
             "cache_write_input_tokens": 50,
+            "usage_capture_complete": True,
             "model_call_count": trial,
             "duration_ms": trial * 1000,
             "latency_ms": trial * 900,
@@ -187,6 +188,57 @@ class SummaryAggregationTests(unittest.TestCase):
         self.assertEqual(
             summary["skills"]["skill-a"]["telemetry"]["caching_status"],
             "uncached",
+        )
+
+    def test_incomplete_usage_marks_cache_and_cost_unknown(self):
+        records = complete_records(cache_reads=0)
+        for record in records:
+            record["metadata"]["usage_capture_complete"] = False
+
+        summary = summarize.summarize_records(records, pricing())
+        telemetry = summary["overall"]["telemetry"]
+
+        self.assertEqual(telemetry["caching_status"], "unknown")
+        self.assertEqual(
+            telemetry["cost"],
+            {
+                "total_usd": None,
+                "per_trial_usd": None,
+                "per_task_usd": None,
+            },
+        )
+
+    def test_one_incomplete_trial_is_not_masked_by_other_trials(self):
+        records = complete_records()
+        records[0]["metadata"]["usage_capture_complete"] = False
+
+        summary = summarize.summarize_records(records, pricing())
+        telemetry = summary["overall"]["telemetry"]
+
+        self.assertGreater(
+            telemetry["tokens"]["output_tokens"],
+            telemetry["model_call_count"]["total"],
+        )
+        self.assertEqual(telemetry["caching_status"], "unknown")
+        self.assertEqual(
+            telemetry["cost"],
+            {
+                "total_usd": None,
+                "per_trial_usd": None,
+                "per_task_usd": None,
+            },
+        )
+
+    def test_legacy_record_without_capture_flag_is_conservatively_unknown(self):
+        records = complete_records()
+        for record in records:
+            record["metadata"].pop("usage_capture_complete")
+
+        summary = summarize.summarize_records(records, pricing())
+
+        self.assertEqual(
+            summary["overall"]["telemetry"]["caching_status"],
+            "unknown",
         )
 
     def test_summary_contains_no_trial_transcript_fields_or_values(self):
@@ -614,6 +666,27 @@ class CommittedArtifactGuardTests(unittest.TestCase):
                 mutate(value)
 
                 self.assert_rejected(value, pattern)
+
+    def test_unknown_partition_requires_unknown_overall_usage(self):
+        for partition_field, partition_key in (
+            ("suites", "capability"),
+            ("skills", "skill-a"),
+        ):
+            with self.subTest(partition_field=partition_field):
+                value = json.loads(self.safe_summary_bytes())
+                telemetry = value[partition_field][partition_key]["telemetry"]
+                telemetry["caching_status"] = "unknown"
+                telemetry["cost"] = {
+                    "total_usd": None,
+                    "per_trial_usd": None,
+                    "per_task_usd": None,
+                }
+
+                self.assert_rejected(
+                    value,
+                    rf"overall\.telemetry\.caching_status must be unknown "
+                    rf"when {partition_field} partitions have incomplete usage",
+                )
 
     def test_skill_membership_must_match_task_summaries(self):
         value = json.loads(self.safe_summary_bytes())

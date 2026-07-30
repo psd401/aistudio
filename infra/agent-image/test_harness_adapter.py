@@ -97,6 +97,17 @@ class CatalogDiagnosticTests(unittest.TestCase):
 
 
 class GatewayTokenTests(unittest.TestCase):
+    def test_defaults_to_proven_baseline_gateway_identity(self):
+        self.assertEqual(
+            OpenClawAdapter.CLIENT_INFO,
+            {
+                "id": "openclaw-tui",
+                "mode": "backend",
+                "version": "dev",
+                "platform": "linux",
+            },
+        )
+
     def test_token_generated_and_nonempty(self):
         a = harness_adapter.OpenClawAdapter()
         # secrets.token_urlsafe(32) yields ~43 url-safe chars; assert it is a
@@ -147,6 +158,23 @@ class GatewayTokenTests(unittest.TestCase):
         self.assertNotIn("AWS_BEARER_TOKEN_BEDROCK", child_environment)
         self.assertNotIn("BEDROCK_API_KEY_SECRET_ARN", child_environment)
         self.assertNotIn("CANDIDATE_MANTLE_BEARER_TOKEN", child_environment)
+
+    def test_gateway_socket_suppresses_browser_origin_header(self):
+        websocket_module = mock.Mock()
+        expected_socket = object()
+        websocket_module.create_connection.return_value = expected_socket
+
+        socket = OpenClawAdapter._open_gateway_socket(
+            websocket_module,
+            "ws://127.0.0.1:3100",
+        )
+
+        self.assertIs(socket, expected_socket)
+        websocket_module.create_connection.assert_called_once_with(
+            "ws://127.0.0.1:3100",
+            timeout=120,
+            suppress_origin=True,
+        )
 
 
 # Bound staticmethod for readability.
@@ -400,6 +428,7 @@ class TestChatDeadlineRegression(unittest.TestCase):
             "cache_read": 0,
             "cache_write": 0,
             "model_calls": 0,
+            "capture_complete": False,
         }
         with (
             mock.patch.dict(
@@ -554,6 +583,7 @@ class TranscriptUsageTests(unittest.TestCase):
             _assistant(6_000, inp=20, out=2, cr=30, cw=40),
         ])
         usage = self.adapter._read_turn_usage("s1", "main", 5_000)
+        self.assertTrue(usage["capture_complete"])
         self.assertEqual(usage["input"], 30)
         self.assertEqual(usage["output"], 3)
         self.assertEqual(usage["cache_read"], 30)
@@ -581,11 +611,30 @@ class TranscriptUsageTests(unittest.TestCase):
         self.assertTrue(complete)
         self.assertEqual(totals["input"], 30)
 
+    def test_only_allowlisted_terminal_stop_reasons_complete_capture(self):
+        cases = (
+            (None, False),
+            ("", False),
+            ("toolUse", False),
+            ("novel-terminal", False),
+            ("stop", True),
+            ("end_turn", True),
+        )
+        for index, (stop_reason, expected) in enumerate(cases, start=1):
+            with self.subTest(stop_reason=stop_reason):
+                path = self._write(
+                    f"terminal-{index}",
+                    [_assistant(5_000, inp=10, stop=stop_reason)],
+                )
+                _, complete = self.adapter._sum_transcript_usage(str(path), 0)
+                self.assertIs(complete, expected)
+
     def test_missing_transcript_returns_zeros_without_settling(self):
         started = time.monotonic()
         # Non-zero interval so a wrongly-taken settle path would be visible.
         self.adapter.USAGE_SETTLE_INTERVAL_S = 0.05
         usage = self.adapter._read_turn_usage("nope", "main", 0)
+        self.assertFalse(usage["capture_complete"])
         self.assertEqual(usage["model_calls"], 0)
         self.assertLess(time.monotonic() - started, 0.05)
 
@@ -598,6 +647,7 @@ class TranscriptUsageTests(unittest.TestCase):
             encoding="utf-8",
         )
         usage = self.adapter._read_turn_usage("s1", "main", 0)
+        self.assertFalse(usage["capture_complete"])
         self.assertEqual(usage["input"], 11)
         self.assertEqual(usage["model_calls"], 1)
 
@@ -723,6 +773,7 @@ class TurnResultCacheFieldTests(unittest.TestCase):
         result = TurnResult(text="hi")
         self.assertEqual(result.cache_read, 0)
         self.assertEqual(result.cache_write, 0)
+        self.assertFalse(result.usage_capture_complete)
 
 
 class ChatErrorClassificationTests(unittest.TestCase):
