@@ -207,6 +207,27 @@ class SummaryAggregationTests(unittest.TestCase):
             },
         )
 
+    def test_one_incomplete_trial_is_not_masked_by_other_trials(self):
+        records = complete_records()
+        records[0]["metadata"]["output_tokens"] = 0
+
+        summary = summarize.summarize_records(records, pricing())
+        telemetry = summary["overall"]["telemetry"]
+
+        self.assertGreater(
+            telemetry["tokens"]["output_tokens"],
+            telemetry["model_call_count"]["total"],
+        )
+        self.assertEqual(telemetry["caching_status"], "unknown")
+        self.assertEqual(
+            telemetry["cost"],
+            {
+                "total_usd": None,
+                "per_trial_usd": None,
+                "per_task_usd": None,
+            },
+        )
+
     def test_summary_contains_no_trial_transcript_fields_or_values(self):
         summary = summarize.summarize_records(complete_records(), pricing())
         encoded = json.dumps(summary)

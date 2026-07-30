@@ -147,7 +147,9 @@ classes, failed-grader counts, and caching status. When usage is complete, cost
 uses the primary model's `openclaw.json` price block; automation extracts that
 file from the exact immutable image so a repo/image skew cannot silently
 misprice a run. A scope with fewer observed output tokens than model calls has
-incomplete usage: its caching status is `unknown` and its cost fields are null.
+incomplete usage in any individual trial: its caching status is `unknown` and
+its cost fields are null. Completeness is evaluated per trial so usage captured
+by one trial cannot mask a telemetry gap in another.
 Otherwise, zero `cache_read_input_tokens` means `uncached`.
 
 New runner records capture the actual invocation start before any container or

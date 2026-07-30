@@ -282,15 +282,20 @@ def _telemetry_summary(
     nudged_count = 0
     failed_count = 0
     graded_failure_count = 0
+    usage_complete = True
     failure_classes: Counter[str] = Counter()
     failed_graders: Counter[str] = Counter()
     for index, record in enumerate(records, start=1):
         metadata = _mapping(record.get("metadata"), f"trial record {index} metadata")
-        for field in TOKEN_PRICE_KEYS:
-            tokens[field] += _nonnegative_integer(
+        record_tokens = {
+            field: _nonnegative_integer(
                 metadata.get(field),
                 f"trial record {index} metadata.{field}",
             )
+            for field in TOKEN_PRICE_KEYS
+        }
+        for field, value in record_tokens.items():
+            tokens[field] += value
         durations.append(
             _nonnegative_integer(
                 metadata.get("duration_ms"),
@@ -303,11 +308,14 @@ def _telemetry_summary(
                 f"trial record {index} metadata.latency_ms",
             )
         )
-        model_calls.append(
-            _nonnegative_integer(
-                metadata.get("model_call_count"),
-                f"trial record {index} metadata.model_call_count",
-            )
+        record_model_calls = _nonnegative_integer(
+            metadata.get("model_call_count"),
+            f"trial record {index} metadata.model_call_count",
+        )
+        model_calls.append(record_model_calls)
+        usage_complete = (
+            usage_complete
+            and record_tokens["output_tokens"] >= record_model_calls
         )
         if metadata.get("nudged") is True:
             nudged_count += 1
@@ -339,7 +347,6 @@ def _telemetry_summary(
         Decimal(tokens[token_field]) * prices[price_key] / Decimal(1_000_000)
         for token_field, price_key in TOKEN_PRICE_KEYS.items()
     )
-    usage_complete = tokens["output_tokens"] >= sum(model_calls)
     task_count = len({_nonempty_string(record.get("task_id"), "task_id") for record in records})
     return {
         "tokens": tokens,
@@ -811,23 +818,25 @@ def _validate_scope_telemetry_consistency(
         model_call_distribution.get("total"),
         f"{description}.telemetry.model_call_count.total",
     )
-    expected_caching_status = (
-        "unknown"
-        if token_counts["output_tokens"] < model_call_total
-        else (
-            "uncached"
-            if token_counts["cache_read_input_tokens"] == 0
-            else "cached"
-        )
+    observed_caching_status = telemetry.get("caching_status")
+    known_caching_status = (
+        "uncached"
+        if token_counts["cache_read_input_tokens"] == 0
+        else "cached"
     )
-    if telemetry.get("caching_status") != expected_caching_status:
+    allowed_caching_statuses = (
+        {"unknown"}
+        if token_counts["output_tokens"] < model_call_total
+        else {"unknown", known_caching_status}
+    )
+    if observed_caching_status not in allowed_caching_statuses:
         raise EvalSummaryError(
             f"{description}.telemetry.caching_status is inconsistent "
             "with observed usage"
         )
     for field, expected in expected_costs.items():
         value = cost.get(field)
-        if expected_caching_status == "unknown":
+        if observed_caching_status == "unknown":
             if value is not None:
                 raise EvalSummaryError(
                     f"{description}.telemetry.cost.{field} must be null "
