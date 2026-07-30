@@ -1,0 +1,7 @@
+# Focused regression suite for issue #1483's GLM-5 skill-contract failures.
+tasks:
+  - ../../skills/psd-data/evals/list-tables.yaml
+  - ../../skills/psd-directory/evals/literal-address-no-lookup.yaml
+  - ../../skills/psd-failure-report/evals/synthetic-missing-data.yaml
+  - ../../skills/psd-freshservice/evals/update-ticket-priority.yaml
+  - ../../skills/psd-workspace/evals/list-unread-mail.yaml

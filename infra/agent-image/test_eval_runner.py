@@ -659,6 +659,62 @@ class SuiteLoadingTests(unittest.TestCase):
             )
         )
 
+    def test_glm_contract_suite_reuses_unmodified_regression_tasks(self):
+        focused_tasks = runner.load_suite(
+            AGENT_IMAGE_DIR / "eval" / "suites" / "glm-5-contracts.yaml"
+        )
+        regression_tasks = {
+            task.id: task
+            for task in runner.load_suite(
+                AGENT_IMAGE_DIR / "eval" / "suites" / "regression.yaml"
+            )
+        }
+        expected_ids = [
+            "data-list-tables",
+            "directory-literal-address-no-lookup",
+            "failure-report-synthetic-missing-data",
+            "freshservice-update-ticket-priority",
+            "workspace-list-unread-mail",
+        ]
+
+        self.assertEqual([task.id for task in focused_tasks], expected_ids)
+        self.assertEqual({task.trials for task in focused_tasks}, {3})
+        self.assertEqual({task.suite for task in focused_tasks}, {"regression"})
+        for task in focused_tasks:
+            self.assertEqual(task, regression_tasks[task.id])
+
+    def test_glm_regression_skill_prompts_pin_exact_contracts(self):
+        skill_contracts = {
+            "psd-data": (
+                "node /opt/psd-skills/psd-data/run.js tables --detailed",
+                "set `detailed` to false",
+            ),
+            "psd-directory": (
+                "emit it exactly once",
+                "skill or any other tool",
+            ),
+            "psd-failure-report": (
+                "actually\ninvoke `report.js`",
+                'stdout returns `"logged": true`',
+            ),
+            "psd-freshservice": (
+                "Urgent `4`",
+                """--data '{"priority":4}'""",
+            ),
+            "psd-workspace": (
+                "`--params` and `--json` are not interchangeable",
+                "gmail users messages list --params",
+            ),
+        }
+
+        for skill, required_fragments in skill_contracts.items():
+            with self.subTest(skill=skill):
+                document = (
+                    AGENT_IMAGE_DIR / "skills" / skill / "SKILL.md"
+                ).read_text(encoding="utf-8")
+                for fragment in required_fragments:
+                    self.assertIn(fragment, document)
+
     def test_invalid_workspace_fails_closed(self):
         with self.subTest("validation happens after parsing"):
             with self.assertRaises(runner.EvalRunnerError):

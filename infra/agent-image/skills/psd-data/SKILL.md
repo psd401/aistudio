@@ -117,6 +117,17 @@ node /opt/psd-skills/psd-data/run.js tables [--detailed]
 `--detailed` adds the table descriptions to the listing. Use this first
 when the user asks "do we have data on X?".
 
+**Table-availability contract:** when the user asks to list available tables
+or determine whether a named table exists, `--detailed` is required. Invoke
+this exact shape:
+
+```bash
+node /opt/psd-skills/psd-data/run.js tables --detailed
+```
+
+Do not omit `--detailed`, set `detailed` to false, or substitute a generic
+`call` invocation for this request.
+
 ### `schema` — inspect one or more tables' columns
 
 ```bash

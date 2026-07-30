@@ -87,6 +87,18 @@ and ask them to re-attach the file (or share it via Drive as a fallback).
 
 ## Invocation
 
+### `--params` and `--json` are not interchangeable
+
+Use `--params` for path and query parameters defined by the Google method
+(IDs, search queries, page sizes). Use `--json` only for a request body on a
+method that accepts one. Read/list methods such as
+`gmail users messages list` take `--params`; never replace it with `--json`.
+For unread mail, preserve this exact command shape:
+
+```bash
+gmail users messages list --params '{"userId":"me","q":"is:unread","maxResults":20}'
+```
+
 ```bash
 node /opt/psd-skills/psd-workspace/run.js \
   --user <caller-email> \
