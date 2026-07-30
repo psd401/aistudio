@@ -124,6 +124,24 @@ class SuiteLoadingTests(unittest.TestCase):
         self.assertEqual({task.workspace for task in tasks}, {"pure"})
         self.assertEqual({task.trials for task in tasks}, {3})
 
+    def test_repository_name_grader_accepts_typographic_separators(self):
+        [task] = runner.load_suite(
+            AGENT_IMAGE_DIR
+            / "skills"
+            / "psd-aistudio"
+            / "evals"
+            / "repository-list.yaml"
+        )
+        output_grader = next(
+            grader
+            for grader in task.graders
+            if grader["type"] == "output_match"
+        )
+        pattern = str(output_grader["pattern"])
+
+        self.assertRegex("EVAL-1426 Canary Repository", pattern)
+        self.assertRegex("EVAL‑1426 Canary Repository", pattern)
+
     def test_committed_skill_suites_meet_issue_1426_contract(self):
         suite_paths = {
             "regression": AGENT_IMAGE_DIR / "eval" / "suites" / "regression.yaml",

@@ -4,6 +4,7 @@ const MAX_EXPRESSION_LENGTH = 256;
 const MAX_TIMEZONE_LENGTH = 100;
 const SCHEDULE_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const LEGACY_SCHEDULE_ID_RE = /^[0-9a-f]{8}$/i;
 
 export class AgentScheduleInputError extends Error {
   constructor(message: string) {
@@ -34,8 +35,13 @@ function requireBoundedString(
 
 export function validateScheduleId(value: unknown): string {
   const scheduleId = requireBoundedString(value, "scheduleId", 64);
-  if (!SCHEDULE_ID_RE.test(scheduleId)) {
-    throw new AgentScheduleInputError("scheduleId must be a UUID");
+  if (
+    !SCHEDULE_ID_RE.test(scheduleId) &&
+    !LEGACY_SCHEDULE_ID_RE.test(scheduleId)
+  ) {
+    throw new AgentScheduleInputError(
+      "scheduleId must be a UUID or legacy 8-character hexadecimal ID",
+    );
   }
   return scheduleId.toLowerCase();
 }

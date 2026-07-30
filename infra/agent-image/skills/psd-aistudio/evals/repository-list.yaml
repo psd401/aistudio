@@ -9,4 +9,4 @@ fixtures:
   - fixtures/repository-list.json
 graders:
   - {"type":"broker_request","route":"/api/agent/aistudio","method":"POST","body":{"method":{"exact":"tools/call"},"params.name":{"exact":"repositories_list"},"params.arguments.query":{"exact":"EVAL-1426"}}}
-  - {"type":"output_match","pattern":"EVAL-1426 Canary Repository"}
+  - {"type":"output_match","pattern":"EVAL[-\u2010-\u2015]1426\\s+Canary\\s+Repository"}

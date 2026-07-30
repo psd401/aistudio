@@ -23,6 +23,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 
 AGENT_IMAGE_DIR = Path(__file__).resolve().parent
@@ -52,6 +53,62 @@ def _python_allowlist(path: Path, variable: str) -> set[str]:
     raise AssertionError(f"{variable} was not found in {path}")
 
 
+def _python_literal(path: Path, variable: str) -> object:
+    """Read a literal assignment, including nested ``frozenset`` calls."""
+
+    def resolve(node: ast.AST) -> object:
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "frozenset"
+            and len(node.args) == 1
+            and not node.keywords
+        ):
+            return frozenset(resolve(node.args[0]))
+        if isinstance(node, ast.Dict):
+            return {
+                resolve(key): resolve(value)
+                for key, value in zip(node.keys, node.values, strict=True)
+            }
+        if isinstance(node, ast.Tuple):
+            return tuple(resolve(element) for element in node.elts)
+        if isinstance(node, ast.Set):
+            return {resolve(element) for element in node.elts}
+        return ast.literal_eval(node)
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(
+            isinstance(target, ast.Name) and target.id == variable
+            for target in node.targets
+        ):
+            return resolve(node.value)
+    raise AssertionError(f"{variable} was not found in {path}")
+
+
+def _python_assignment_ast(path: Path, variable: str) -> str:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(
+            isinstance(target, ast.Name) and target.id == variable
+            for target in node.targets
+        ):
+            return ast.dump(node.value, include_attributes=False)
+    raise AssertionError(f"{variable} was not found in {path}")
+
+
+def _python_function_ast(path: Path, function: str) -> str:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == function:
+            return ast.dump(node, include_attributes=False)
+    raise AssertionError(f"{function} was not found in {path}")
+
+
 def _javascript_allowlist(path: Path) -> set[str]:
     source = path.read_text(encoding="utf-8")
     match = re.search(
@@ -69,6 +126,7 @@ class RunningStub:
         self,
         *,
         model_upstream_base_url: str = "http://127.0.0.1:9",
+        candidate_mantle_environment: dict[str, str] | None = None,
     ) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory(
             prefix="issue-1424-broker-test-"
@@ -94,14 +152,27 @@ class RunningStub:
             self.control_directory / "request-proof-key"
         )
         self.request_proof_key_path.write_bytes(encoded_proof_key)
-        self.server = broker_stub.create_server(
-            self.control_directory,
-            port=0,
-            workspace_flush_token_path=self.flush_token_path,
-            invocation_context_path=self.invocation_context_path,
-            request_proof_key_path=self.request_proof_key_path,
-            model_upstream_base_url=model_upstream_base_url,
-        )
+        create_arguments = {
+            "port": 0,
+            "workspace_flush_token_path": self.flush_token_path,
+            "invocation_context_path": self.invocation_context_path,
+            "request_proof_key_path": self.request_proof_key_path,
+            "model_upstream_base_url": model_upstream_base_url,
+        }
+        if candidate_mantle_environment is None:
+            self.server = broker_stub.create_server(
+                self.control_directory,
+                **create_arguments,
+            )
+        else:
+            with mock.patch.multiple(
+                broker_stub,
+                **candidate_mantle_environment,
+            ):
+                self.server = broker_stub.create_server(
+                    self.control_directory,
+                    **create_arguments,
+                )
         self.thread = threading.Thread(
             target=self.server.serve_forever,
             daemon=True,
@@ -158,6 +229,8 @@ class RunningStub:
 
     def captures(self) -> list[dict[str, object]]:
         capture = self.control_directory / broker_stub.CAPTURE_FILENAME
+        if not capture.exists():
+            return []
         return [
             json.loads(line)
             for line in capture.read_text(encoding="utf-8").splitlines()
@@ -187,6 +260,28 @@ class BrokerRouteParityTests(unittest.TestCase):
             broker_stub.ALLOWED_AGENT_BROKER_ROUTES,
             javascript_routes,
         )
+
+    def test_stub_matches_the_production_candidate_mantle_contract(self):
+        proxy_path = AGENT_IMAGE_DIR / "mantle_proxy.py"
+        stub_path = AGENT_IMAGE_DIR / "eval" / "broker_stub.py"
+
+        self.assertEqual(
+            broker_stub.CANDIDATE_MANTLE_PREFIX,
+            _python_literal(proxy_path, "CANDIDATE_MANTLE_PREFIX"),
+        )
+        self.assertEqual(
+            broker_stub.CANDIDATE_MANTLE_OPERATIONS,
+            _python_literal(proxy_path, "CANDIDATE_MANTLE_OPERATIONS"),
+        )
+        self.assertEqual(
+            _python_assignment_ast(stub_path, "_STRIPPED_TC_ID"),
+            _python_assignment_ast(proxy_path, "_STRIPPED_TC_ID"),
+        )
+        for function in ("_restore_tool_call_id", "repair_tool_call_ids"):
+            self.assertEqual(
+                _python_function_ast(stub_path, function),
+                _python_function_ast(proxy_path, function),
+            )
 
 
 class BrokerControlStorageTests(unittest.TestCase):
@@ -262,6 +357,349 @@ class BrokerControlStorageTests(unittest.TestCase):
                     Path(directory),
                     b"[]",
                 )
+
+
+class CandidateMantleRelayTests(unittest.TestCase):
+    def _environment(
+        self,
+        *,
+        model_id: str = "openai.gpt-oss-120b",
+    ) -> dict[str, str]:
+        return {
+            "CANDIDATE_MANTLE_API": "openai-completions",
+            "CANDIDATE_MANTLE_BASE_URL": (
+                "https://bedrock-mantle.us-east-1.api.aws/v1"
+            ),
+            "CANDIDATE_MANTLE_BEARER_TOKEN": "root-only-token",
+            "CANDIDATE_MANTLE_MODEL_ID": model_id,
+        }
+
+    def test_configuration_rejects_a_lookalike_mantle_origin(self):
+        environment = {
+            **self._environment(),
+            "CANDIDATE_MANTLE_BASE_URL": (
+                "https://bedrock-mantle.us-east-1.api.aws.attacker.test/v1"
+            ),
+        }
+        with mock.patch.multiple(
+            broker_stub,
+            **environment,
+        ), self.assertRaisesRegex(
+            broker_stub.BrokerStubConfigurationError,
+            "exact AWS endpoint",
+        ):
+            broker_stub._candidate_mantle_configuration()
+
+    def test_openai_tool_shapes_relay_byte_for_byte_with_root_bearer(self):
+        stub = RunningStub(
+            candidate_mantle_environment=self._environment()
+        )
+        received: dict[str, object] = {}
+        response_body = {
+            "id": "chatcmpl-eval",
+            "model": "openai.gpt-oss-120b",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Capability is granted.",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+
+        class Response:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+
+            def read(self, limit: int) -> bytes:
+                self.limit = limit
+                return json.dumps(response_body).encode("utf-8")
+
+            def close(self) -> None:
+                return
+
+        class Opener:
+            def open(
+                self,
+                request: urllib.request.Request,
+                timeout: int,
+            ) -> Response:
+                received["url"] = request.full_url
+                received["body"] = request.data
+                received["headers"] = {
+                    key.lower(): value
+                    for key, value in request.header_items()
+                }
+                received["timeout"] = timeout
+                return Response()
+
+        tool_request = {
+            "model": "openai.gpt-oss-120b",
+            "messages": [
+                {"role": "user", "content": "Check capability"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_123",
+                            "type": "function",
+                            "function": {
+                                "name": "exec",
+                                "arguments": "{\"command\":\"check\"}",
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_123",
+                    "content": "{\"granted\":true}",
+                },
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "exec",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+            "stream": True,
+        }
+        serialized_request = json.dumps(tool_request).encode("utf-8")
+        try:
+            stub.configure([])
+            with mock.patch.object(
+                broker_stub.urllib_request,
+                "build_opener",
+                return_value=Opener(),
+            ):
+                status, response = stub.request(
+                    "/candidate-mantle/chat/completions",
+                    method="POST",
+                    body=tool_request,
+                    headers={"Authorization": "Bearer model-supplied"},
+                )
+        finally:
+            stub.close()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(response, response_body)
+        self.assertEqual(
+            received["url"],
+            (
+                "https://bedrock-mantle.us-east-1.api.aws/v1"
+                "/chat/completions"
+            ),
+        )
+        self.assertEqual(
+            json.loads(received["body"]),
+            json.loads(serialized_request),
+        )
+        self.assertEqual(
+            received["headers"]["authorization"],
+            "Bearer root-only-token",
+        )
+        self.assertEqual(received["timeout"], 300)
+        self.assertEqual(stub.captures(), [])
+
+    def test_candidate_relay_repairs_kimi_tool_call_history_like_production(
+        self,
+    ):
+        model_id = "moonshotai.kimi-k2.5"
+        stub = RunningStub(
+            candidate_mantle_environment=self._environment(
+                model_id=model_id
+            )
+        )
+        received: dict[str, object] = {}
+
+        class Response:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+
+            def read(self, limit: int) -> bytes:
+                self.limit = limit
+                return b'{"choices":[]}'
+
+            def close(self) -> None:
+                return
+
+        class Opener:
+            def open(
+                self,
+                request: urllib.request.Request,
+                timeout: int,
+            ) -> Response:
+                received["body"] = request.data
+                return Response()
+
+        try:
+            stub.configure([])
+            with mock.patch.object(
+                broker_stub.urllib_request,
+                "build_opener",
+                return_value=Opener(),
+            ):
+                status, _ = stub.request(
+                    "/candidate-mantle/chat/completions",
+                    method="POST",
+                    body={
+                        "model": model_id,
+                        "messages": [
+                            {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "functionsexec0",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "exec",
+                                            "arguments": "{}",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "role": "tool",
+                                "tool_call_id": "functionsexec0",
+                                "content": "{}",
+                            },
+                        ],
+                    },
+                )
+        finally:
+            stub.close()
+
+        self.assertEqual(status, 200)
+        forwarded = json.loads(received["body"])
+        self.assertEqual(
+            forwarded["messages"][0]["tool_calls"][0]["id"],
+            "functions.exec:0",
+        )
+        self.assertEqual(
+            forwarded["messages"][1]["tool_call_id"],
+            "functions.exec:0",
+        )
+        self.assertEqual(stub.captures(), [])
+
+    def test_model_discovery_is_available_before_the_first_trial_opens(self):
+        stub = RunningStub(
+            candidate_mantle_environment=self._environment()
+        )
+        received: dict[str, object] = {}
+        response_body = {
+            "object": "list",
+            "data": [{"id": "openai.gpt-oss-120b"}],
+        }
+
+        class Response:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+
+            def read(self, limit: int) -> bytes:
+                self.limit = limit
+                return json.dumps(response_body).encode("utf-8")
+
+            def close(self) -> None:
+                return
+
+        class Opener:
+            def open(
+                self,
+                request: urllib.request.Request,
+                timeout: int,
+            ) -> Response:
+                received["url"] = request.full_url
+                received["headers"] = {
+                    key.lower(): value
+                    for key, value in request.header_items()
+                }
+                return Response()
+
+        try:
+            stub.invocation_context_path.unlink()
+            stub.request_proof_key_path.unlink()
+            with mock.patch.object(
+                broker_stub.urllib_request,
+                "build_opener",
+                return_value=Opener(),
+            ):
+                status, response = stub.request(
+                    "/candidate-mantle/models",
+                )
+        finally:
+            stub.close()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(response, response_body)
+        self.assertEqual(
+            received["url"],
+            "https://bedrock-mantle.us-east-1.api.aws/v1/models",
+        )
+        self.assertEqual(
+            received["headers"]["authorization"],
+            "Bearer root-only-token",
+        )
+        self.assertEqual(
+            stub.server.state.finalization_state,
+            "closed",
+        )
+        self.assertEqual(stub.captures(), [])
+
+    def test_candidate_relay_rejects_the_wrong_model_without_upstream_call(self):
+        stub = RunningStub(
+            candidate_mantle_environment=self._environment()
+        )
+        try:
+            stub.configure([])
+            with mock.patch.object(
+                broker_stub.urllib_request,
+                "build_opener",
+            ) as build_opener:
+                status, response = stub.request(
+                    "/candidate-mantle/chat/completions",
+                    method="POST",
+                    body={"model": "attacker-model", "messages": []},
+                )
+        finally:
+            stub.close()
+
+        self.assertEqual(status, 404)
+        self.assertEqual(
+            response["error"],
+            "EvalUnsupportedCandidateModelOperation",
+        )
+        build_opener.assert_not_called()
+
+    def test_paid_candidate_inference_requires_turn_authority(self):
+        stub = RunningStub(
+            candidate_mantle_environment=self._environment()
+        )
+        try:
+            stub.configure([])
+            stub.invocation_context_path.unlink()
+            status, response = stub.request(
+                "/candidate-mantle/chat/completions",
+                method="POST",
+                body={
+                    "model": "openai.gpt-oss-120b",
+                    "messages": [],
+                },
+            )
+        finally:
+            stub.close()
+
+        self.assertEqual(status, 503)
+        self.assertEqual(
+            response,
+            {"error": "Invocation authority is unavailable"},
+        )
 
 
 class BrokerStubHttpTests(unittest.TestCase):

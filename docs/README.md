@@ -164,6 +164,10 @@ configuration, retrieval validation, and prior-edition retirement.
 #### [operations/production-migration-checklist.md](./operations/production-migration-checklist.md)
 Comprehensive checklist for deploying to production.
 
+#### [operations/agent-schedule-legacy-backfill.md](./operations/agent-schedule-legacy-backfill.md)
+Deployment, stale-DLQ cleanup, explicit invocation, and verification steps for
+the owner-bound agent schedule record and Scheduler-target migration.
+
 #### [operations/unified-content-migration-retirement.md](./operations/unified-content-migration-retirement.md)
 Inventory, backfill, reconciliation, cutover, rollback, and legacy-content retirement runbook.
 

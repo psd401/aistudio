@@ -32,10 +32,12 @@ function harness() {
 
 describe("agent-cron pre-invocation telemetry", () => {
   it.each([
+    "invalid-reference",
     "not-found",
     "owner-mismatch",
     "version-mismatch",
     "disabled",
+    "invalid-record",
   ] as const)("records %s schedule references as skipped", async (reason) => {
     const { telemetry, recordPreflightRun, log } = harness()
 
@@ -61,6 +63,20 @@ describe("agent-cron pre-invocation telemetry", () => {
         errorMessage: `Schedule reference rejected: ${reason}`,
       }),
       log,
+    )
+    expect(log.warn).toHaveBeenCalledWith(
+      "Schedule reference rejected before invocation",
+      {
+        reason,
+        ...([
+          "invalid-reference",
+          "owner-mismatch",
+          "version-mismatch",
+          "invalid-record",
+        ].includes(reason)
+          ? { marker: "SCHEDULE_REFERENCE_REJECTION" }
+          : {}),
+      },
     )
   })
 

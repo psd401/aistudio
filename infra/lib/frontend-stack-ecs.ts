@@ -439,28 +439,36 @@ export class FrontendStackEcs extends cdk.Stack {
   private createScheduleTargetBackfillTrigger(
     backfill: lambda.IFunction,
   ): void {
+    const migrationVersion = 'legacy-schedule-records-and-targets-v4';
+    const invocation = {
+      service: 'Lambda',
+      action: 'invoke',
+      parameters: {
+        FunctionName: backfill.functionName,
+        // A full group can take longer than the custom-resource provider's
+        // synchronous SDK timeout. Let Lambda's configured async retries,
+        // DLQ, and internal IAM-propagation backoff supervise the migration
+        // after acceptance.
+        InvocationType: 'Event',
+        Payload: JSON.stringify({
+          RequestType: 'Create',
+          phase: 'records',
+          migrationVersion,
+        }),
+      },
+      physicalResourceId: customResources.PhysicalResourceId.of(
+        `agent-schedule-target-backfill-${migrationVersion}`,
+      ),
+    };
     const trigger = new customResources.AwsCustomResource(
       this,
       'ScheduleTargetBackfillAfterFrontend',
       {
-        onCreate: {
-          service: 'Lambda',
-          action: 'invoke',
-          parameters: {
-            FunctionName: backfill.functionName,
-            // A full group can take longer than the custom-resource provider's
-            // synchronous SDK timeout. Let Lambda's configured async retries,
-            // DLQ, and alarm supervise the migration after acceptance.
-            InvocationType: 'Event',
-            Payload: JSON.stringify({
-              RequestType: 'Create',
-              migrationVersion: 'scheduled-time-delivery-policy-v3',
-            }),
-          },
-          physicalResourceId: customResources.PhysicalResourceId.of(
-            'agent-schedule-target-backfill-scheduled-time-delivery-policy-v3',
-          ),
-        },
+        onCreate: invocation,
+        // The v3 trigger already exists in deployed stacks. An explicit update
+        // hook guarantees this version is freshly invoked instead of relying
+        // on create-only custom-resource behavior.
+        onUpdate: invocation,
         policy: customResources.AwsCustomResourcePolicy.fromStatements([
           new iam.PolicyStatement({
             actions: ['lambda:InvokeFunction'],

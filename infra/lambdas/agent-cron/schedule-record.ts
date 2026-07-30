@@ -3,6 +3,7 @@ import type { GetCommandInput } from '@aws-sdk/lib-dynamodb';
 const SAFE_EMAIL_RE = /^[\w%+.-]+@[\d.A-Za-z-]+\.[A-Za-z]{2,}$/;
 const SCHEDULE_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const LEGACY_SCHEDULE_ID_RE = /^[0-9a-f]{8}$/i;
 const DM_SPACE_RE = /^spaces\/[\w-]{1,256}$/;
 
 export interface ScheduleReferenceEvent {
@@ -64,7 +65,10 @@ function isValidScheduleReference(
     && SAFE_EMAIL_RE.test(ownerEmail);
   const validScheduleId =
     typeof event.scheduleId === 'string'
-    && SCHEDULE_ID_RE.test(event.scheduleId);
+    && (
+      SCHEDULE_ID_RE.test(event.scheduleId)
+      || LEGACY_SCHEDULE_ID_RE.test(event.scheduleId)
+    );
   const validVersion =
     Number.isInteger(event.version) && Number(event.version) >= 1;
   return validOwner && validScheduleId && validVersion && !!schedulesTable;
