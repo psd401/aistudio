@@ -231,9 +231,10 @@ export class AgentSkillsService {
       "agentSkills.load",
     );
     if (!skill) return null;
-    // The broker owns the approval check, but bundled content lives only in
-    // the agent image. Return a marker so the signed caller can read its local,
-    // read-only copy without treating the image breadcrumb as an S3 prefix.
+    // Backward compatibility for rows created before bundled artifacts were
+    // published to the workspace bucket. The broker owns the approval check;
+    // an old image breadcrumb tells the signed caller to use its local,
+    // read-only copy during a rolling deployment.
     if (skill.s3Key.startsWith("image:")) {
       return { name: skill.name, source: "bundled" as const };
     }
