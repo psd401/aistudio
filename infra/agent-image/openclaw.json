@@ -43,11 +43,13 @@
         "midTurnPrecheck": {
           "enabled": true
         }
-      },
-      "memorySearch": {
-        "provider": "bedrock",
-        "model": "amazon.titan-embed-text-v2:0"
       }
+    }
+  },
+  "memory": {
+    "search": {
+      "provider": "bedrock",
+      "model": "amazon.titan-embed-text-v2:0"
     }
   },
   "tools": {
@@ -109,11 +111,7 @@
       "token": ""
     },
     "controlUi": {
-      "enabled": false,
-      "allowInsecureAuth": true,
-      "dangerouslyDisableDeviceAuth": true,
-      "dangerouslyAllowHostHeaderOriginFallback": true,
-      "allowedOrigins": ["*"]
+      "enabled": false
     }
   }
 }

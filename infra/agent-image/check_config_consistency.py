@@ -2,7 +2,7 @@
 """
 Config self-consistency gate for the agent image (issue #1161).
 
-Five static asserts over openclaw.json + the Dockerfile, run on the host before
+Eight static asserts over openclaw.json + the Dockerfile, run on the host before
 build (no Docker):
 
   1. contextWindow sanity — every declared model's contextWindow must be a
@@ -36,6 +36,23 @@ build (no Docker):
      enabled, and the build must assert its fixed Search MCP endpoint. Without
      an explicit provider, OpenClaw still exposes the tool but every call fails
      at runtime with "disabled or no provider available".
+
+  6. settled-tool recovery — the OpenClaw host must contain the upstream
+     tools-disabled finalization for a settled post-tool turn that produced no
+     visible answer, plus its structured diagnostic. Without this contract a
+     replay-unsafe turn fails with generic OpenClawChatError after its tools
+     have already run (issue #1469).
+
+  7. tier-eval config schema — the recovery-bearing host also moved semantic
+     memory from `agents.defaults.memorySearch` to `memory.search` and retired
+     `gateway.controlUi.allowInsecureAuth`. Catch those legacy keys before an
+     expensive Docker build reaches `openclaw config validate`.
+
+  8. plugin runtime registration — the Docker build must load both host-coupled
+     plugins through OpenClaw and require status=loaded at their exact pins.
+     Published peer ranges are necessary but insufficient: Bedrock plugin
+     2026.7.1 claimed compatibility yet imported a plugin-SDK export removed by
+     the beta.5 host.
 
 Exit 0 when consistent, 1 on any violation.
 """
@@ -135,6 +152,19 @@ _HOST_IMAGE_ARG_RE = re.compile(
 )
 _HOST_FROM_ARG_RE = re.compile(
     r"^FROM\s+\$\{OPENCLAW_BASE_IMAGE\}\s*$", re.MULTILINE,
+)
+_SETTLED_TOOL_RECOVERY_MIN = "2026.7.2-beta.5"
+_SETTLED_TOOL_RECOVERY_BUILD_CONTRACT = (
+    'ARG OPENCLAW_SETTLED_TOOL_RECOVERY_LOG="settled post-tool turn lacked a final answer"',
+    'ARG OPENCLAW_SETTLED_TOOL_RECOVERY_PROMPT="The previous assistant turn completed '
+    'its tool calls but did not produce a user-visible answer."',
+    'grep -RFq -- "${OPENCLAW_SETTLED_TOOL_RECOVERY_LOG}" /app/dist',
+    'grep -RFq -- "${OPENCLAW_SETTLED_TOOL_RECOVERY_PROMPT}" /app/dist',
+)
+_PLUGIN_RUNTIME_BUILD_CONTRACT = (
+    "openclaw plugins inspect amazon-bedrock --runtime --json",
+    "openclaw plugins inspect parallel --runtime --json",
+    'plugin.status!=="loaded"||plugin.version!==expected',
 )
 
 
@@ -581,6 +611,71 @@ def check_host_plugin_compatibility(dockerfile_path: str) -> List[str]:
     return violations
 
 
+def check_settled_tool_recovery(dockerfile_path: str) -> List[str]:
+    """Keep the safe post-tool finalization and its diagnostic in the host.
+
+    OpenClaw 2026.7.1 detected replay-unsafe incomplete turns but could only
+    fail them. Upstream PR #110565 added one tools-disabled finalization from
+    settled results; v2026.7.2-beta.5 is the first immutable release artifact
+    containing it. The Docker build also greps the compiled runtime so a bad
+    tag/digest mapping fails closed rather than trusting this version string.
+    """
+    try:
+        with open(dockerfile_path, "r", encoding="utf-8") as fh:
+            source = fh.read()
+    except OSError as exc:
+        return [f"cannot read Dockerfile {dockerfile_path}: {exc}"]
+
+    tag_match = _HOST_TAG_RE.search(source)
+    if not tag_match:
+        # check_host_plugin_compatibility reports the missing tag/digest pair.
+        return []
+
+    violations: List[str] = []
+    host_tag = tag_match.group(1)
+    if _version_key(host_tag) < _version_key(_SETTLED_TOOL_RECOVERY_MIN):
+        violations.append(
+            f"OpenClaw base image {host_tag} predates settled-tool recovery "
+            f"{_SETTLED_TOOL_RECOVERY_MIN}; replay-unsafe tool turns would "
+            f"regress to generic OpenClawChatError (#1469)"
+        )
+
+    missing = [
+        contract
+        for contract in _SETTLED_TOOL_RECOVERY_BUILD_CONTRACT
+        if contract not in source
+    ]
+    if missing:
+        violations.append(
+            "Dockerfile does not assert the compiled settled-tool recovery "
+            "diagnostic and no-repeat continuation prompt: "
+            + "; ".join(missing)
+        )
+    return violations
+
+
+def check_plugin_runtime_assertions(dockerfile_path: str) -> List[str]:
+    """Require the build to prove host/plugin API compatibility by loading."""
+    try:
+        with open(dockerfile_path, "r", encoding="utf-8") as fh:
+            source = fh.read()
+    except OSError as exc:
+        return [f"cannot read Dockerfile {dockerfile_path}: {exc}"]
+
+    missing = [
+        contract
+        for contract in _PLUGIN_RUNTIME_BUILD_CONTRACT
+        if contract not in source
+    ]
+    if not missing:
+        return []
+    return [
+        "Dockerfile does not require exact-version runtime registration for "
+        "the host-coupled Bedrock and Parallel plugins: "
+        + "; ".join(missing)
+    ]
+
+
 def check_prompt_caching_reachable(
     config: dict, dockerfile_path: str,
 ) -> List[str]:
@@ -678,6 +773,94 @@ def check_context_windows(config: dict) -> List[str]:
     return violations
 
 
+def check_tier_eval_config_schema(config: dict) -> List[str]:
+    """Enforce config migrations required by the recovery-bearing host.
+
+    OpenClaw v2026.7.2-beta.5 rejects the legacy memorySearch location and the
+    retired allowInsecureAuth compatibility toggle. Semantic memory is a
+    production contract for this image, so require its canonical Bedrock
+    provider/model rather than merely checking that the old key disappeared.
+    """
+    violations: List[str] = []
+    agents = config.get("agents")
+    if not isinstance(agents, dict):
+        agents = {}
+    defaults = agents.get("defaults")
+    if not isinstance(defaults, dict):
+        defaults = {}
+    if "memorySearch" in defaults:
+        violations.append(
+            "agents.defaults.memorySearch moved to memory.search in OpenClaw "
+            "v2026.7.2-beta.5"
+        )
+
+    entries = agents.get("entries")
+    if isinstance(entries, dict):
+        for agent_id, entry in entries.items():
+            if isinstance(entry, dict) and "memorySearch" in entry:
+                violations.append(
+                    f"agents.entries.{agent_id}.memorySearch moved to "
+                    f"agents.entries.{agent_id}.memory.search"
+                )
+    legacy_list = agents.get("list")
+    if isinstance(legacy_list, list):
+        for index, entry in enumerate(legacy_list):
+            if isinstance(entry, dict) and "memorySearch" in entry:
+                violations.append(
+                    f"agents.list[{index}].memorySearch moved to "
+                    f"agents.list[{index}].memory.search"
+                )
+    if "memorySearch" in config:
+        violations.append(
+            "top-level memorySearch moved to memory.search in OpenClaw "
+            "v2026.7.2-beta.5"
+        )
+
+    memory = config.get("memory")
+    search = memory.get("search") if isinstance(memory, dict) else None
+    if not isinstance(search, dict):
+        violations.append(
+            "memory.search is missing — semantic memory would lose its "
+            "explicit Bedrock embedding provider"
+        )
+    else:
+        if search.get("provider") != "bedrock":
+            violations.append(
+                "memory.search.provider must be 'bedrock' for key-free "
+                "semantic memory"
+            )
+        if search.get("model") != "amazon.titan-embed-text-v2:0":
+            violations.append(
+                "memory.search.model must be "
+                "'amazon.titan-embed-text-v2:0'"
+            )
+
+    gateway = config.get("gateway")
+    control_ui = (
+        gateway.get("controlUi") if isinstance(gateway, dict) else None
+    )
+    if isinstance(control_ui, dict) and "allowInsecureAuth" in control_ui:
+        violations.append(
+            "gateway.controlUi.allowInsecureAuth is retired in OpenClaw "
+            "v2026.7.2-beta.5; remove it (there is no replacement)"
+        )
+    if isinstance(control_ui, dict) and "dangerouslyDisableDeviceAuth" in control_ui:
+        violations.append(
+            "gateway.controlUi.dangerouslyDisableDeviceAuth is retired in "
+            "OpenClaw v2026.7.2-beta.5"
+        )
+    if (
+        isinstance(control_ui, dict)
+        and control_ui.get("enabled") is False
+        and "dangerouslyAllowHostHeaderOriginFallback" in control_ui
+    ):
+        violations.append(
+            "gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback must "
+            "not be enabled when the Control UI is disabled"
+        )
+    return violations
+
+
 def check_apikey_hydration(config: dict, wrapper_path: str) -> List[str]:
     violations: List[str] = []
     try:
@@ -735,10 +918,13 @@ def run_checks(
     config = _load(config_path)
     violations = (
         check_context_windows(config)
+        + check_tier_eval_config_schema(config)
         + check_apikey_hydration(config, wrapper_path)
         + check_prompt_caching_reachable(config, dockerfile_path)
         + check_host_plugin_compatibility(dockerfile_path)
         + check_web_search_provider(config, dockerfile_path)
+        + check_settled_tool_recovery(dockerfile_path)
+        + check_plugin_runtime_assertions(dockerfile_path)
     )
     if verify_upstream:
         violations += check_upstream_pins(dockerfile_path)
@@ -783,7 +969,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(
         "OK — openclaw.json context windows + apiKey hydration paths + "
         "prompt-caching reachability + host/plugin compatibility + web-search "
-        "provider readiness consistent."
+        "provider readiness + settled-tool recovery + tier-eval schema + "
+        "runtime plugin registration contracts consistent."
     )
     return 0
 

@@ -2598,6 +2598,10 @@ class BuildGateCompatibilityTests(unittest.TestCase):
         self.assertIn('eval/probe.py" last-result', build_script)
         self.assertIn('eval/probe.py" make-payload --', build_script)
         self.assertIn(
+            'docker logs "${CID}" 2>&1 | tail -80',
+            build_script,
+        )
+        self.assertIn(
             '\'{"tag":"%s","boot_ok":false,"boot_elapsed_s":%s,'
             '"canary_ok":false}\\n\'',
             build_script,

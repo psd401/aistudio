@@ -141,6 +141,7 @@ def _format_for_chat(text: str) -> str:
 
 
 CONTEXT_OVERFLOW_ERROR_CLASS = "ContextOverflow"
+INCOMPLETE_TOOL_TURN_ERROR_CLASS = "OpenClawIncompleteToolTurn"
 
 
 def _classify_chat_error(error_message: str) -> str:
@@ -153,6 +154,10 @@ def _classify_chat_error(error_message: str) -> str:
       • Context overflow — the transcript outgrew the model's window. The work
         itself is fine; the SESSION is the problem, and continuing it is
         guaranteed to fail again. Recoverable, but only by starting fresh.
+      • Incomplete post-tool turn — OpenClaw exhausted or declined its own
+        tools-disabled finalization after possible effects. Retrying the
+        original request is unsafe, but the distinct class and structured
+        context make the exact failed pipeline boundary observable.
       • Everything else — a genuine fault. Retrying is not obviously safe.
 
     Downstream (agent-cron promotion, agent_failures, alarms) has to tell these
@@ -168,6 +173,14 @@ def _classify_chat_error(error_message: str) -> str:
     lowered = (error_message or "").lower()
     if "context overflow" in lowered or "prompt too large" in lowered:
         return CONTEXT_OVERFLOW_ERROR_CLASS
+    if (
+        (
+            "couldn't generate a response" in lowered
+            or "could not generate a response" in lowered
+        )
+        and "some tool actions may have already been executed" in lowered
+    ):
+        return INCOMPLETE_TOOL_TURN_ERROR_CLASS
     return "OpenClawChatError"
 
 
@@ -256,16 +269,16 @@ class OpenClawAdapter(HarnessAdapter):
     # startup and --token overrides that config value, so the on-disk config
     # token is never the operative secret.
     # The image contract chooses the identity supported by its pinned host.
-    # Production 2026.7.1 retains the proven TUI path; 2026.7.2 harness
-    # candidates select OpenClaw's local CLI identity, whose container-local
-    # shared-auth path preserves operator scopes without classifying this
-    # non-browser adapter as Control UI. candidate.py and the Docker build
-    # accept only these two exact pairs.
+    # Production 2026.7.2-beta.5 uses OpenClaw's supported local-backend
+    # identity; harness candidates may select another explicitly approved pair
+    # for their pinned host. These loopback identities preserve operator scopes
+    # without classifying this non-browser adapter as Control UI.
     _gateway_client_pair = (
-        os.environ.get("PSD_OPENCLAW_GATEWAY_CLIENT_ID", "openclaw-tui"),
+        os.environ.get("PSD_OPENCLAW_GATEWAY_CLIENT_ID", "gateway-client"),
         os.environ.get("PSD_OPENCLAW_GATEWAY_CLIENT_MODE", "backend"),
     )
     if _gateway_client_pair not in {
+        ("gateway-client", "backend"),
         ("openclaw-tui", "backend"),
         ("cli", "cli"),
     }:
@@ -377,8 +390,8 @@ class OpenClawAdapter(HarnessAdapter):
 
         websocket-client adds an Origin header unless told otherwise. Newer
         OpenClaw releases deliberately treat any Origin-bearing connection as
-        browser-originated and therefore refuse the privileged local-CLI auth
-        path. This adapter is a backend client on the same container loopback,
+        browser-originated and therefore refuse approved local-backend auth
+        paths. This adapter is a backend client on the same container loopback,
         not a browser, so suppress the synthetic header instead of weakening
         the gateway's browser-origin checks.
         """
@@ -675,10 +688,10 @@ class OpenClawAdapter(HarnessAdapter):
                         # gateway protocol docs so we negotiate v4 against this
                         # gateway yet stay compatible with a v3 gateway on
                         # rollback. The v4 connect envelope + fields below are
-                        # unchanged. The harness-selected loopback identity
-                        # authenticates with the per-container shared token and
-                        # avoids the host's device-auth Control UI path, so no
-                        # device block is required.
+                        # unchanged. The harness-selected supported loopback
+                        # identity authenticates with the per-process shared
+                        # token, so no interactive operator-UI device identity
+                        # is involved.
                         "minProtocol": 3,
                         "maxProtocol": 4,
                         "client": self.CLIENT_INFO,
@@ -1095,10 +1108,51 @@ class OpenClawAdapter(HarnessAdapter):
 
                         elif state == "error":
                             err_msg = payload.get("errorMessage", "unknown")
+                            err_class = _classify_chat_error(str(err_msg))
+                            elapsed_s = max(
+                                0, int(time.time() - chat_send_at)
+                            )
+                            run_id = payload.get("runId")
+                            event_sequence = payload.get("seq")
+                            visible_response = (
+                                response_text or agent_assistant_accum
+                            )
+                            failure_context = {
+                                "phase": "chat_event_error",
+                                "last_state": last_state,
+                                "elapsed_s": elapsed_s,
+                                "deadline_s": deadline_s,
+                                "response_chars": len(visible_response),
+                                "tool_call_count": len(tool_calls),
+                                "active_tool_count": len(tool_starts),
+                                "event_counts": event_counts,
+                                "first_events": first_event_types,
+                            }
+                            if isinstance(run_id, str) and run_id:
+                                failure_context["run_id"] = run_id
+                            if isinstance(event_sequence, int):
+                                failure_context["event_sequence"] = (
+                                    event_sequence
+                                )
                             logger.error(
-                                "chat event error: %s | full_payload=%s",
+                                "chat event error: class=%s run_id=%s seq=%s "
+                                "response_chars=%d tool_calls=%d "
+                                "active_tools=%d elapsed_s=%d deadline_s=%d "
+                                "event_counts=%s error=%s",
+                                err_class,
+                                run_id or "unknown",
+                                event_sequence
+                                if isinstance(event_sequence, int)
+                                else "unknown",
+                                len(visible_response),
+                                len(tool_calls),
+                                len(tool_starts),
+                                elapsed_s,
+                                deadline_s,
+                                json.dumps(
+                                    event_counts, separators=(",", ":")
+                                ),
                                 err_msg,
-                                json.dumps(payload)[:800],
                             )
                             # Previously returned silently — no failure signal.
                             # This is where OpenClaw's "reply session
@@ -1107,8 +1161,11 @@ class OpenClawAdapter(HarnessAdapter):
                             # failure visible in agent_failures / the alarm.
                             # Context overflow gets its own class so the caller
                             # can recover it (fresh session) instead of
-                            # treating it as a crash. See _classify_chat_error.
-                            err_class = _classify_chat_error(str(err_msg))
+                            # treating it as a crash. A replay-unsafe incomplete
+                            # tool turn is also distinct, but deliberately stays
+                            # fail-closed downstream: the upgraded OpenClaw host
+                            # already attempted the only safe, tools-disabled
+                            # finalization. See _classify_chat_error.
                             record_failure(
                                 source="harness",
                                 severity="error",
@@ -1116,17 +1173,14 @@ class OpenClawAdapter(HarnessAdapter):
                                 error_message=str(err_msg),
                                 session_id=session_id,
                                 model=observed_model or model_override,
-                                context={
-                                    "phase": "chat_event_error",
-                                    "last_state": last_state,
-                                },
+                                context=failure_context,
                             )
                             # Never post the accumulated scratchpad narration
                             # as if it were the answer — frame it as a failed
                             # partial (issue #1138 F4).
                             err_text = _frame_failed_partial(
-                                _format_for_chat(response_text)
-                                if response_text
+                                _format_for_chat(visible_response)
+                                if visible_response
                                 else ""
                             )
                             # An errored turn can still have burned tokens

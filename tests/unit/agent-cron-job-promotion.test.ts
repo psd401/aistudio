@@ -99,6 +99,7 @@ const baseInput = {
         "ChatDeadlineExpiredPartial",
         "ContextOverflow",
         "OpenClawChatError",
+        "OpenClawIncompleteToolTurn",
         "SomeFutureError",
         "",
         undefined,
@@ -170,6 +171,9 @@ const baseInput = {
       // two-hour retry budget. The container classifies overflow separately
       // (harness_adapter._classify_chat_error) precisely so this can stay no.
       expect(shouldPromoteFromCron("OpenClawChatError")).toBe(false)
+      // OpenClaw already attempted the only safe tools-disabled finalization.
+      // Replaying the original request could duplicate side effects.
+      expect(shouldPromoteFromCron("OpenClawIncompleteToolTurn")).toBe(false)
 
       expect(shouldPromoteFromCron("InvocationContextInvalid")).toBe(false)
       expect(shouldPromoteFromCron(undefined)).toBe(false)
@@ -183,6 +187,7 @@ const baseInput = {
       expect(promotionReason("ChatDeadlineExpiredPartial")).toBe("deadline")
       expect(promotionReason("ContextOverflow")).toBe("context-overflow")
       expect(promotionReason("OpenClawChatError")).toBeNull()
+      expect(promotionReason("OpenClawIncompleteToolTurn")).toBeNull()
       expect(promotionReason(undefined)).toBeNull()
     })
 
