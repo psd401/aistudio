@@ -12,7 +12,7 @@ AgentCore runtime.
 - AI Studio image source:
   `68da9634b585515303031e14bf9f78f4db9808ca`
 - Final evaluator, suite, and grader revision:
-  `fef7087027969418762deff6901d8b29566c6927`
+  `9ed4c27e26f29798c3f9780f37042acad54f0506`
 - 50 tasks per arm: 32 regression and 18 capability
 - 3 trials per task; pass^3 requires all three to pass
 - Same ARM64 host and synthetic owner for every arm
@@ -26,7 +26,7 @@ Every candidate manifest varies exactly one complete axis from
 
 | Arm | Immutable digest | Observed cache | Promotion clauses | Decision |
 | --- | --- | --- | --- | --- |
-| OpenClaw `2026.7.2-beta.5` harness | `sha256:6aaa879b034bed2b44af8d25aa4a681a65c1f896d4632af7c18e2bc14eff5825` | uncached | regression PASS; capability FAIL (17/18 → 17/18); cost DECLINED | **REJECT** |
+| OpenClaw `2026.7.2-beta.5` harness | `sha256:6aaa879b034bed2b44af8d25aa4a681a65c1f896d4632af7c18e2bc14eff5825` | unknown | regression PASS; capability FAIL (17/18 → 17/18); cost DECLINED | **REJECT** |
 | Conservative tool-routing prompt | `sha256:018087e485ce00dbba2698072dc9964b6321b2a2890fb63ea9e4dfd208f32762` | cached | regression FAIL; capability FAIL (17/18 → 17/18); cost PASS (+0.68%) | **REJECT** |
 | Z.AI GLM-5, native Bedrock | `sha256:48bdedab676e00d95d107e2f2dc86f159a1ab3123234f3ccb3d8ff224928711c` | uncached | regression FAIL; capability FAIL (17/18 → 17/18); cost DECLINED | **REJECT** |
 | OpenAI GPT OSS 120B, Mantle | `sha256:89a95ae81fde54daebf8d81f99fb9bed098481a4b6fa25277af3dffd97873333` | cached | regression FAIL; capability FAIL (17/18 → 6/18); cost PASS (-97.35%) | **REJECT** |
@@ -39,13 +39,15 @@ with observed caching `cached`.
 
 The calibration succeeded in its primary purpose: after bench compatibility
 fixes, the beta harness had no regression-suite skill drops. It did not
-improve overall capability, however, and observed cache reads disappeared.
-Because caching differs, the report deliberately declines the cost clause.
-Mean latency increased 1.59 seconds and p95 increased 2.73 seconds.
+improve overall capability, however. Its transcript usage is incomplete: 512
+model calls produced only 121 observed output tokens, compared with 50,787
+baseline output tokens. The summary therefore records cache status and cost as
+unknown, and the report declines both inferences. Mean duration increased 1.59
+seconds and p95 increased 2.73 seconds.
 
 Decision: reject the beta candidate. It demonstrates that the upgraded host
-can preserve skill quality, but does not satisfy the promotion rule and loses
-the baseline's observed caching behavior.
+can preserve skill quality, but does not satisfy the promotion rule and is
+slower. No conclusion is drawn about its caching behavior.
 
 [Harness report](../../.eval-runs/comparison-sha256-478ea37b04b53f8669e16d514dc6e079a5a148010cc39e726c6e3d48ef0bea42-vs-sha256-6aaa879b034bed2b44af8d25aa4a681a65c1f896d4632af7c18e2bc14eff5825.md)
 
@@ -116,6 +118,9 @@ tracked host and output-contract changes:
 - Deterministic graders must accept stable semantic variants such as a
   documented identifier rendered as text or JSON, equivalent decision verbs,
   split label/value facts, Unicode typography, and reordered required terms.
+- Usage aggregation must not interpret missing transcript telemetry as zero:
+  fewer observed output tokens than model calls marks cache status and cost
+  unknown.
 
 The candidate manifest now records version-specific migrations and identity,
 the backend socket suppresses its synthetic browser Origin, and focused tests

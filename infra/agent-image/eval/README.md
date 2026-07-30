@@ -141,13 +141,14 @@ its `legacy-image-tag` provenance records the full revision embedded in the
 image's build tag rather than pretending the inherited OpenClaw revision label
 describes AI Studio.
 
-The summary contains per-task and per-skill `pass^3`, aggregate token cost,
+The summary contains per-task and per-skill `pass^3`, aggregate token usage,
 duration and latency distributions, model-call counts, nudge rate, failure
-classes, failed-grader counts, and caching status. Cost uses the primary model's
-`openclaw.json` price block; automation extracts that file from the exact
-immutable image so a repo/image skew cannot silently misprice a run. Caching is
-derived from observed telemetry: zero `cache_read_input_tokens` across the
-summarized trials means `uncached`.
+classes, failed-grader counts, and caching status. When usage is complete, cost
+uses the primary model's `openclaw.json` price block; automation extracts that
+file from the exact immutable image so a repo/image skew cannot silently
+misprice a run. A scope with fewer observed output tokens than model calls has
+incomplete usage: its caching status is `unknown` and its cost fields are null.
+Otherwise, zero `cache_read_input_tokens` means `uncached`.
 
 New runner records capture the actual invocation start before any container or
 trial work. The first baseline predates that field, so its summary explicitly
@@ -201,12 +202,14 @@ a contradictory `0.00%` report delta. Any exact increase above the 20% limit
 also carries an explicit `over 20% limit` marker, even if its two-decimal
 percentage display rounds to `20.00%`.
 
-Caching status is re-derived from each summary's observed
-`cache_read_input_tokens`, not from candidate configuration or the summary's
-status label. When only one arm observed cache reads, raw costs remain visible
-but their delta and clause (3) are marked `DECLINED`; the result can never be
-`PROMOTE`. A quality-clause failure still produces `REJECT`, while otherwise
-passing quality with an unavailable cost verdict produces `INDETERMINATE`.
+Caching status is schema-validated against observed output-token, model-call,
+and cache-read counts, not candidate configuration. When an arm's usage is
+incomplete, its cache and cost render as `unknown`; when only one complete arm
+observed cache reads, both raw costs remain visible but their delta is not
+compared. In either case clause (3) is marked `DECLINED`, and the result can
+never be `PROMOTE`. A quality-clause failure still produces `REJECT`, while
+otherwise passing quality with an unavailable cost verdict produces
+`INDETERMINATE`.
 
 Render the same evidence as Markdown for a recorded comparison decision:
 

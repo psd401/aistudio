@@ -37,6 +37,14 @@ between a card's label and value. These variants preserved the task contract;
 malformed paths, duplicated exact output, wrong broker payloads, missing tool
 calls, and runtime errors did not.
 
+The beta host also changed the transcript usage shape. The runner observed 512
+model calls but could parse only 121 output tokens. Zero cache-read tokens in
+that incomplete record do not prove that the model was uncached, and pricing
+the partial token count produces a misleading near-zero cost. Summaries now
+mark caching and cost unknown whenever observed output tokens are fewer than
+model calls; comparison reports decline the cost clause instead of inferring a
+cache regression.
+
 After binding the gateway client identity to the pinned harness, suppressing
 the synthetic browser Origin, and widening the graders to the valid output
 contract, the harness candidate had no regression-suite skill drops. The
@@ -72,6 +80,8 @@ the stable behavioral contract.
   Unicode typography when exact ASCII punctuation is not itself the contract.
 - Rerun affected tasks for both baseline and candidate, then regenerate both
   summaries with the same final evaluator commit.
+- Reconcile token usage with model-call counts before interpreting cache or
+  cost. Preserve observed counts, but classify incomplete usage as unknown.
 
 ## Prevention
 
