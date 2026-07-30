@@ -157,6 +157,10 @@ full PSD Agent eval run.
 Reproduction evidence, prompt hardening, repeated trials, and the non-promotion
 decision for the GLM-5 stable-skill contract follow-up.
 
+#### [operations/psd-observances-annual-refresh.md](./operations/psd-observances-annual-refresh.md)
+Annual NSPRA publication replacement, protected-source handling, repository
+configuration, retrieval validation, and prior-edition retirement.
+
 #### [operations/production-migration-checklist.md](./operations/production-migration-checklist.md)
 Comprehensive checklist for deploying to production.
 
@@ -186,6 +190,8 @@ AI integration patterns using Vercel AI SDK v6, provider factory implementation,
 **[Unified repository product integration](./features/unified-repository-product-integration.md)** — Authoritative Repository Manager source/ACL/version UI, Assistant Architect repository-only knowledge, Nexus private ephemeral attachments, promotion, retention, and rollback boundaries.
 
 **[Unified content agents and Projects](./features/unified-content-agents-and-projects.md)** — Repository catalog MCP/REST scopes, per-user OpenClaw PKCE OAuth, live skill repository bindings, and durable Nexus Project membership/repository/chat boundaries.
+
+**[PSD Observances agent skill](./features/psd-observances.md)** — Cited, bounded NSPRA calendar lookups, coverage limits, repository resolution, authorization behavior, and operational ownership.
 
 **[Google Workspace content synchronization](./features/google-workspace-content-sync.md)** — PKCE OAuth and Picker selection across My Drive and user-accessible Shared Drives, durable cursor/version reconciliation, deployment-owned configuration, deletion grace, and operations.
 

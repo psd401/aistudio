@@ -1864,9 +1864,6 @@ export class AgentPlatformStack extends cdk.Stack {
       GUARDRAIL_ARN: props.guardrailArn,
       SKILL_BUILDER_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:${resources.skillBuilderFunctionName}`,
       APP_BASE_URL: props.appBaseUrl ?? '',
-      PSD_DATA_MCP_URL:
-        (this.node.tryGetContext('psdDataMcpUrl') as string | undefined)
-        ?? 'https://l3jpggwgsojgql275k6axcboue0syeuq.lambda-url.us-west-2.on.aws/mcp',
       // Service credentials and their endpoint selectors intentionally stay out
       // of the model-facing runtime environment. Skills reach the fixed,
       // allowlisted web-tier brokers via APP_BASE_URL.
@@ -2623,6 +2620,48 @@ export class AgentPlatformStack extends cdk.Stack {
     });
     cdk.Tags.of(triageWorkerLogGroup).add('Environment', environment);
     cdk.Tags.of(triageWorkerLogGroup).add('ManagedBy', 'cdk');
+
+    const triageMetricNamespace = `PSD/AgentPlatform/${environment}`;
+    const untrustedLabelMetricName = 'TriageUntrustedLabelMappings';
+    new logs.MetricFilter(this, 'TriageUntrustedLabelMappingMetric', {
+      logGroup: triageWorkerLogGroup,
+      metricNamespace: triageMetricNamespace,
+      metricName: untrustedLabelMetricName,
+      filterPattern: logs.FilterPattern.stringValue(
+        '$.evt',
+        '=',
+        'untrusted_label_mapping',
+      ),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+
+    const untrustedLabelMappingAlarm = new cloudwatch.Alarm(
+      this,
+      'TriageUntrustedLabelMappingAlarm',
+      {
+        alarmName:
+          `psd-agent-triage-untrusted-label-mapping-${environment}`,
+        alarmDescription:
+          'Email triage rejected an untrusted label mapping — a user poll is fail-closed',
+        metric: new cloudwatch.Metric({
+          namespace: triageMetricNamespace,
+          metricName: untrustedLabelMetricName,
+          period: cdk.Duration.minutes(5),
+          statistic: 'Sum',
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    if (resources.agentAlarmTopic) {
+      untrustedLabelMappingAlarm.addAlarmAction(
+        new cloudwatchActions.SnsAction(resources.agentAlarmTopic),
+      );
+    }
 
     resources.triageWorkerRole.addToPolicy(new iam.PolicyStatement({
       sid: 'TriageWorkerLogsCorrectArn',

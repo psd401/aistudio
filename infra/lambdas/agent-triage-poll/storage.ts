@@ -17,6 +17,7 @@ import {
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
 
+import type { TrustedTriageLabelMapping } from "./label-mapping";
 import type {
   CorrectionRecord,
   DecisionRecord,
@@ -260,6 +261,41 @@ export async function backfillDmSpaceName(
       Key: { userEmail },
       UpdateExpression: "SET dmSpaceName = :s",
       ExpressionAttributeValues: { ":s": dmSpaceName },
+    }),
+  );
+}
+
+/**
+ * Persist a label mapping rebuilt from the owner's live Gmail labels.
+ * The caller must derive this object through resolveCanonicalTriageLabelMapping;
+ * this helper only mirrors the trusted ensure-labels writer into the worker.
+ */
+export async function stampTrustedTriageLabelMapping(
+  mapping: TrustedTriageLabelMapping,
+): Promise<void> {
+  await ddb().send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: { userEmail: mapping.labelMappingOwnerEmail },
+      UpdateExpression:
+        "SET #labels = :labels, #ids = :ids, #version = :version, " +
+        "#provenance = :provenance, #owner = :owner, #resolved = :resolved",
+      ExpressionAttributeNames: {
+        "#labels": "labels",
+        "#ids": "labelIdsByKey",
+        "#version": "labelMappingVersion",
+        "#provenance": "labelMappingProvenance",
+        "#owner": "labelMappingOwnerEmail",
+        "#resolved": "labelMappingResolvedAt",
+      },
+      ExpressionAttributeValues: {
+        ":labels": mapping.labels,
+        ":ids": mapping.labelIdsByKey,
+        ":version": mapping.labelMappingVersion,
+        ":provenance": mapping.labelMappingProvenance,
+        ":owner": mapping.labelMappingOwnerEmail,
+        ":resolved": mapping.labelMappingResolvedAt,
+      },
     }),
   );
 }

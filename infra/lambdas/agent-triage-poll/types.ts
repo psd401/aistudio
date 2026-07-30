@@ -34,7 +34,7 @@ export interface TriageRow {
   lastHistoryId?: string;
   lastPollAt?: string;
   labels: Partial<Record<LabelKey, string>>;
-  labelIdsByKey: Partial<Record<LabelKey, string>>;
+  labelIdsByKey?: Partial<Record<LabelKey, string>>;
   labelMappingVersion?: number;
   labelMappingProvenance?: string;
   labelMappingOwnerEmail?: string;
