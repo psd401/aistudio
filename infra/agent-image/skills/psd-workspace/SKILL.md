@@ -89,6 +89,10 @@ and ask them to re-attach the file (or share it via Drive as a fallback).
 
 ### `--params` and `--json` are not interchangeable
 
+Reading this section is a precondition for the first Workspace invocation in
+each user turn. Do not make a speculative call from memory and correct it
+afterward: the first request must use the documented flags.
+
 Use `--params` for path and query parameters defined by the Google method
 (IDs, search queries, page sizes). Use `--json` only for a request body on a
 method that accepts one. Read/list methods such as

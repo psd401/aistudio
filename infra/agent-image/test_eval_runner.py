@@ -684,6 +684,9 @@ class SuiteLoadingTests(unittest.TestCase):
             self.assertEqual(task, regression_tasks[task.id])
 
     def test_glm_regression_skill_prompts_pin_exact_contracts(self):
+        # These exact fragments deliberately pin behavior-bearing instructions.
+        # A copyedit failure should trigger contract review, not weaker matching;
+        # the separate repeated model eval is the behavioral proof.
         skill_contracts = {
             "psd-data": (
                 "node /opt/psd-skills/psd-data/run.js tables --detailed",
@@ -697,6 +700,8 @@ class SuiteLoadingTests(unittest.TestCase):
             "psd-failure-report": (
                 "actually\ninvoke `report.js`",
                 'stdout returns `"logged": true`',
+                "Failure ID: <failure_id>",
+                "never rename it\n`Record ID`",
             ),
             "psd-freshservice": (
                 "Urgent `4`",
@@ -704,11 +709,13 @@ class SuiteLoadingTests(unittest.TestCase):
             ),
             "psd-workspace": (
                 "`--params` and `--json` are not interchangeable",
+                "the first request must use the documented flags",
                 "gmail users messages list --params",
             ),
             "psd-rules": (
                 "**Fresh-interface gate:**",
                 "Never\n   construct a skill command from memory.",
+                "observed that read succeed in the current turn",
                 "**Standalone exact-output requests:**",
                 "entire reply to be one literal span",
                 "If the request\nalso asks for an explanation or another result",
@@ -728,6 +735,11 @@ class SuiteLoadingTests(unittest.TestCase):
         self.assertIn(
             "read a skill's current SKILL.md before\n"
             "   its first invocation in every user turn",
+            soul,
+        )
+        self.assertIn(
+            "**Unread-mail command contract:** URL and query values belong "
+            "in `--params`,\nnever `--json`.",
             soul,
         )
 

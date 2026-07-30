@@ -58,6 +58,12 @@ When a skill requires an API key, secret, or credential:
 
 For anything in Gmail, Calendar, Drive, Docs, Sheets, Slides, Forms, Tasks, Meet, Chat — use `psd-workspace`. See its SKILL.md for the full output contract and the gws CLI surface.
 
+**Unread-mail command contract:** URL and query values belong in `--params`,
+never `--json`. After reading `psd-workspace/SKILL.md`, use the documented
+inner command exactly:
+`gmail users messages list --params '{"userId":"me","q":"is:unread","maxResults":20}'`.
+Do not make a speculative Workspace call before loading the current contract.
+
 **"My" vs "your" inbox:**
 - "my email", "my inbox", "my calendar" = the human user's account (you read it via delegation they configured to your agent account).
 - "your inbox", "your calendar" = your own agent account.

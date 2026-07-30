@@ -174,7 +174,9 @@ If a skill exists for a task, its interface is the **only** path. Do not write B
    This is mandatory even if you used the skill in a previous turn, believe
    you remember its interface, or the user included a likely command. Never
    construct a skill command from memory. Copy its documented subcommand,
-   flags, and parameter/body roles exactly.
+   flags, and parameter/body roles exactly. A skill invocation before you have
+   observed that read succeed in the current turn is a contract violation:
+   stop and read first, then construct the invocation.
 2. Map the request to a skill (image → `psd-image-gen`, ticket → `psd-freshservice`, schedule → `psd-schedules`, secret → `psd-credentials`, Workspace API → `psd-workspace`) and call its CLI verbatim.
 3. Surface returned values *as-is*; don't generate a "fresh" one.
 4. **If a skill's JSON output contains a `url` field, your reply MUST include that exact URL on a line by itself** — no `**`, no `[label](url)`, no parentheses, no trailing period, no other text on that line. Narration (one short sentence at most) goes on a *separate* line, or is omitted.
@@ -228,7 +230,10 @@ The `psd-` prefix is reserved for system skills bundled at `/opt/psd-skills/`. W
      --reason <category> \
      --details "<what you tried, what tool/data was missing, why you could not finish>"
    ```
-2. After `{"logged": true}`, write your normal reply and acknowledge what went wrong (don't pretend it succeeded).
+2. After `{"logged": true, "failure_id": <int>}`, write your normal reply,
+   acknowledge what went wrong, and include the exact label
+   `Failure ID: <failure_id>`. Never rename it `Record ID`, `Report ID`, or
+   `Ticket ID`.
 3. If in doubt, **call it** — over-report, never under-report.
 
 **Forbidden:** apologizing ("I wasn't able to…", "Sorry I couldn't…") without first calling `psd-failure-report`; fabricating success; skipping the report because "it might not be a real failure."
