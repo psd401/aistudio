@@ -515,6 +515,41 @@ class CandidateMatrixTests(unittest.TestCase):
                 ):
                     candidate.validate(temporary_manifest)
 
+    def test_rejects_explicit_baseline_gateway_client(self):
+        baseline = json.loads(
+            (self.manifests_dir / "baseline.json").read_text(encoding="utf-8")
+        )
+        source = json.loads(
+            (self.manifests_dir / "glm-5-native.json").read_text(encoding="utf-8")
+        )
+        baseline["axes"]["harness"]["gatewayClient"] = {
+            "id": "openclaw-tui",
+            "mode": "backend",
+        }
+        source["axes"]["harness"] = baseline["axes"]["harness"]
+        with tempfile.TemporaryDirectory(
+            dir=self.manifests_dir.parent, prefix=".candidate-contract-test."
+        ) as directory:
+            directory_path = Path(directory)
+            baseline["axes"]["model"]["providerTemplate"] = (
+                "../providers/native-bedrock-sonnet-5.json"
+            )
+            source["baseline"] = "baseline.json"
+            source["axes"]["model"]["providerTemplate"] = (
+                "../providers/native-bedrock-glm-5.json"
+            )
+            (directory_path / "baseline.json").write_text(
+                json.dumps(baseline), encoding="utf-8"
+            )
+            temporary_manifest = directory_path / "candidate.json"
+            temporary_manifest.write_text(json.dumps(source), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                candidate.CandidateError,
+                "baseline harness cannot declare a gateway client",
+            ):
+                candidate.validate(temporary_manifest)
+
     def test_mantle_templates_use_the_mantle_iam_service_prefix(self):
         providers_dir = self.manifests_dir.parent / "providers"
         for template_path in providers_dir.glob("mantle-*.json"):

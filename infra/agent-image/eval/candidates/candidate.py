@@ -444,6 +444,8 @@ def _compose_config(
     params["cacheRetention"] = cache_retention
     if harness is not None:
         harness_mapping = _mapping(harness, "axes.harness")
+        # Validate again at the mutation boundary so direct callers of this
+        # composition helper cannot bypass the closed migration allowlist.
         _apply_config_migrations(
             config,
             _validate_config_migrations(
@@ -685,11 +687,16 @@ def _validate_baseline_harness_and_prompt(
     harness = _validate_harness(
         axes["harness"], f"{baseline_path}: axes.harness"
     )
-    if _mapping(axes["harness"], f"{baseline_path}: axes.harness").get(
-        "configMigrations"
-    ) is not None:
+    harness_axis = _mapping(
+        axes["harness"], f"{baseline_path}: axes.harness"
+    )
+    if harness_axis.get("configMigrations") is not None:
         raise CandidateError(
             f"{baseline_path}: baseline harness cannot declare config migrations"
+        )
+    if harness_axis.get("gatewayClient") is not None:
+        raise CandidateError(
+            f"{baseline_path}: baseline harness cannot declare a gateway client"
         )
     dockerfile = CANONICAL_DOCKERFILE.read_text(encoding="utf-8")
     if _render_pin_contract(*harness) != dockerfile:
