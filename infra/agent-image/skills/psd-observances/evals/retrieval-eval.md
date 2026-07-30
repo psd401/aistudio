@@ -59,7 +59,9 @@ bun run test:skill:psd-observances
   direct PDF is sufficient.
 
 Extra retrieved facts do not reduce a score: recall, not precision, is the
-enumeration decision metric.
+enumeration decision metric. Fact matching requires every normalized name and
+date token to appear in one returned excerpt; it is intentionally an unordered
+token match rather than a phrase match.
 
 The first dev measurement and its post-investigation recommendation are in
 [`dev-2026-07-30-report.md`](dev-2026-07-30-report.md).

@@ -1,6 +1,7 @@
 'use strict';
 
 const path = require('node:path');
+const { describe, expect, test } = require('bun:test');
 const {
   aggregate,
   citationPages,

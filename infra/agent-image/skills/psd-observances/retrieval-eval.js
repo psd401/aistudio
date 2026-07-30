@@ -13,7 +13,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { main: runSkill } = require('./run');
-const { parseMcpPayload } = require('./common');
+const { parseToolEnvelope } = require('./common');
 
 const DEFAULT_FIXTURE = path.join(
   __dirname,
@@ -313,10 +313,7 @@ function createLiveMcpClient(baseUrl, apiKey) {
   return {
     callTool: async (name, args) => {
       const response = await call('tools/call', { name, arguments: args });
-      if (response.httpStatus < 200 || response.httpStatus >= 300) {
-        fail(`MCP ${name} failed with HTTP ${response.httpStatus}`);
-      }
-      return parseMcpPayload(response.payload, name);
+      return parseToolEnvelope(response, name);
     },
     requestAgentBroker: async (route, body) => {
       if (route !== '/api/agent/aistudio') {
@@ -327,6 +324,8 @@ function createLiveMcpClient(baseUrl, apiKey) {
   };
 }
 
+// Keep this rule aligned with run.js:createRepositoryResolver so the
+// preflight and every skill invocation select the same live repository.
 function selectRepository(payload) {
   const matches = (payload?.repositories ?? [])
     .filter(
