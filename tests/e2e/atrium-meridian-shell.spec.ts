@@ -79,14 +79,25 @@ test.describe("Atrium Meridian shell (authenticated)", () => {
         fullPage: false,
       });
 
-      // --- Leakage guard: Meridian must NOT bleed onto non-Atrium routes -------
+      // --- Scope boundary ------------------------------------------------------
+      // Meridian is now the design system for EVERY authenticated surface, applied
+      // at app/(protected)/layout.tsx, so its presence off /atrium is the intended
+      // state rather than leakage. This guard previously asserted the opposite —
+      // that `.meridian` did not exist on /dashboard — which encoded the old
+      // Atrium-only architecture.
+      //
+      // What still must not leak is Atrium's own CHROME, and the palette must not
+      // reach unauthenticated surfaces. Both are asserted below.
       await page.goto("/dashboard");
       await expect(page).toHaveURL(/\/dashboard/);
-      // Neither the scope class nor the Atrium rail exist off /atrium.
-      await expect(page.locator(".meridian")).toHaveCount(0);
+      await expect(page.locator(".meridian").first()).toBeVisible();
       await expect(
         page.getByRole("navigation", { name: "Atrium" })
       ).toHaveCount(0);
+
+      // Public routes are deliberately still on the global theme.
+      await page.goto("/");
+      await expect(page.locator(".meridian")).toHaveCount(0);
     } finally {
       await context.close();
     }

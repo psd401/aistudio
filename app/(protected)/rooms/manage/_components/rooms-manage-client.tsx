@@ -30,6 +30,36 @@ function roomToDraft(room: ManagedRoom): RoomMutationInput {
   };
 }
 
+/**
+ * Success feedback has to live on the PAGE, not in the editor: the editor is a
+ * modal now and closes on a successful save, so a banner rendered inside it
+ * would unmount before it could be read. Errors keep rendering inside the modal,
+ * which stays open so the form can be corrected — hence `hidden` rather than
+ * moving the banner wholesale.
+ */
+function RoomFeedbackBanner({
+  feedback,
+  hidden,
+}: {
+  feedback: RoomEditorFeedback | null;
+  hidden: boolean;
+}) {
+  if (!feedback || hidden) return null;
+  return (
+    <div
+      data-testid="room-feedback"
+      role="status"
+      className={
+        feedback.kind === "error"
+          ? "rounded-[var(--mer-r-button,0.375rem)] border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm text-destructive"
+          : "rounded-[var(--mer-r-button,0.375rem)] border border-border bg-muted px-4 py-3 text-sm"
+      }
+    >
+      {feedback.message}
+    </div>
+  );
+}
+
 export function RoomsManageClient({
   initialData,
 }: {
@@ -153,6 +183,8 @@ export function RoomsManageClient({
 
   return (
     <div className="space-y-6" data-testid="rooms-manage">
+      <RoomFeedbackBanner feedback={feedback} hidden={isEditorOpen} />
+
       <RoomsList
         rooms={initialData.rooms}
         isAdministrator={initialData.isAdministrator}
