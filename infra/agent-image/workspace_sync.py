@@ -1067,22 +1067,19 @@ def _iter_workspace_files(
         except TimeoutError:
             raise
         except OSError as exc:
-            logger.warning(
-                "workspace push skip unsafe directory %s: %s",
-                relative_directory or ".",
-                exc,
-            )
-            continue
+            raise WorkspacePushIncomplete(
+                "workspace traversal could not open directory "
+                f"{relative_directory or '.'}: {exc}"
+            ) from exc
         try:
             with os.scandir(directory_fd) as entries:
                 for entry in entries:
                     _remaining_timeout(deadline_monotonic, 60)
                     visited += 1
                     if visited > MAX_SYNC_ENTRIES:
-                        logger.warning(
-                            "workspace push entry-count limit reached"
+                        raise WorkspacePushIncomplete(
+                            "workspace traversal entry-count limit reached"
                         )
-                        return
                     relative = (
                         f"{relative_directory}/{entry.name}"
                         if relative_directory
@@ -1095,9 +1092,9 @@ def _iter_workspace_files(
                             if len(Path(relative).parts) <= MAX_SYNC_DEPTH:
                                 stack.append(relative)
                             else:
-                                logger.warning(
-                                    "workspace push skip over-deep directory %s",
-                                    relative,
+                                raise WorkspacePushIncomplete(
+                                    "workspace traversal directory depth limit "
+                                    f"reached at {relative}"
                                 )
                         elif entry.is_file(follow_symlinks=False):
                             yield relative
@@ -1107,11 +1104,10 @@ def _iter_workspace_files(
                                 relative,
                             )
                     except OSError as exc:
-                        logger.warning(
-                            "workspace push skip unsafe entry %s: %s",
-                            relative,
-                            exc,
-                        )
+                        raise WorkspacePushIncomplete(
+                            "workspace traversal could not inspect entry "
+                            f"{relative}: {exc}"
+                        ) from exc
         finally:
             os.close(directory_fd)
 

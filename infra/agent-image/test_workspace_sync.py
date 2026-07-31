@@ -295,13 +295,20 @@ class PullTraversalTests(unittest.TestCase):
         with mock.patch.object(
             workspace_sync, "WORKSPACE_DIR", linked_workspace
         ), mock.patch.object(workspace_sync, "_broker_request", broker):
-            self.assertEqual(workspace_sync.push_workspace("owner"), 0)
+            with self.assertRaisesRegex(
+                workspace_sync.WorkspacePushIncomplete,
+                "could not open directory",
+            ):
+                workspace_sync.push_workspace("owner")
 
         broker.assert_not_called()
 
-    def test_unsafe_entries_consume_the_traversal_budget(self):
+    def test_traversal_limit_fails_before_any_upload(self):
         for index in range(10):
             (self.root / f"unsafe-{index}").symlink_to("/dev/null")
+        marker = self.root / workspace_sync.OPENCLAW_MIGRATION_MARKER
+        marker.parent.mkdir()
+        marker.write_bytes(workspace_sync._OPENCLAW_MIGRATION_MARKER_BYTES)
         broker = mock.Mock()
 
         with mock.patch.object(
@@ -309,7 +316,11 @@ class PullTraversalTests(unittest.TestCase):
         ), mock.patch.object(
             workspace_sync, "MAX_SYNC_ENTRIES", 3
         ), mock.patch.object(workspace_sync, "_broker_request", broker):
-            self.assertEqual(workspace_sync.push_workspace("owner"), 0)
+            with self.assertRaisesRegex(
+                workspace_sync.WorkspacePushIncomplete,
+                "entry-count limit",
+            ):
+                workspace_sync.push_workspace("owner")
 
         broker.assert_not_called()
 
