@@ -66,7 +66,7 @@ export function TagInput({
 
   return (
     <div
-      className={`flex min-h-[40px] w-full flex-wrap gap-1.5 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ${disabled ? "cursor-not-allowed opacity-50" : ""} ${className}`}
+      className={`flex min-h-[40px] w-full flex-wrap gap-1.5 rounded-[var(--mer-r-button,0.375rem)] border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ${disabled ? "cursor-not-allowed opacity-50" : ""} ${className}`}
       onClick={() => inputRef.current?.focus()}
       onKeyDown={(e) => {
         // Only the WRAPPER's own key events activate it. Keydown bubbles, so
