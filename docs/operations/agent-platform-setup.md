@@ -601,6 +601,29 @@ If the final assertion finds another enabled schedule, repeat the second
 16-minute drain window before continuing. At this point there are no new
 Router, scheduled, reconciliation, or promoted-job writers.
 
+Re-run the exact workspace compatibility gate after the last writer drains.
+This is a hard precondition for the v2 checkpoint namespace: any v1 control
+object means an older checkpoint may still be the last committed boundary, so
+the cutover must stop rather than blessing a possibly partial current state.
+
+```bash
+WORKSPACE_BUCKET="$(aws ssm get-parameter \
+  --name "/aistudio/${CUTOVER_ENV}/agent-workspace-bucket-name" \
+  --query 'Parameter.Value' \
+  --output text \
+  --region "$AWS_REGION")"
+test -n "$WORKSPACE_BUCKET"
+test "$WORKSPACE_BUCKET" != "None"
+bun run scripts/agent-workspace/audit-live-workspace-paths.ts \
+  --bucket "$WORKSPACE_BUCKET" \
+  --environment "$CUTOVER_ENV" \
+  --region "$AWS_REGION"
+```
+
+The audit is read-only. It must report empty
+`legacyV1CheckpointObjectHashes`, `unknownCheckpointObjectHashes`, path,
+conflict, and TypeScript/Python parity failure arrays before continuing.
+
 ##### 3. Remove the old runtime before changing the broker
 
 There is no list-all-runtime-sessions API that can prove every sticky microVM

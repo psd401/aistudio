@@ -109,18 +109,15 @@ class PullTraversalTests(unittest.TestCase):
                    if not Path(d).resolve().is_relative_to(self.root)]
         return count, downloaded, escaped
 
-    def test_traversal_key_is_skipped_not_written(self):
+    def test_traversal_key_fails_the_entire_restore_before_writing(self):
         keys = [
             "../../home/node/.ssh/authorized_keys",  # classic zip-slip
             "../evil.txt",                            # single-level escape
             "notes/ok.md",                            # benign control
         ]
-        count, downloaded, escaped = self._run_pull(keys)
-        # Only the benign file downloads; both traversal keys are skipped.
-        self.assertEqual(count, 1)
-        self.assertEqual([k for (k, _) in downloaded], ["notes/ok.md"])
-        self.assertEqual(escaped, [])
-        self.assertTrue((self.root / "notes" / "ok.md").exists())
+        with self.assertRaises(workspace_sync.WorkspaceRestoreIncomplete):
+            self._run_pull(keys)
+        self.assertFalse((self.root / "notes" / "ok.md").exists())
 
     def test_forced_restore_prunes_uncommitted_local_extras_and_restores_seed(self):
         # Dirty turn changed a required parent from a directory to a file.
@@ -229,10 +226,9 @@ class PullTraversalTests(unittest.TestCase):
     def test_no_write_outside_workspace_dir(self):
         # Even if download_file were reached, assert nothing lands outside root.
         keys = ["../../tmp/pwned"]
-        count, downloaded, escaped = self._run_pull(keys)
-        self.assertEqual(count, 0)
-        self.assertEqual(downloaded, [])
-        self.assertEqual(escaped, [])
+        with self.assertRaises(workspace_sync.WorkspaceRestoreIncomplete):
+            self._run_pull(keys)
+        self.assertFalse((self.root.parent / "tmp" / "pwned").exists())
 
     def test_forced_restore_removes_attachment_root_symlink_only(self):
         outside = self.root.parent / "outside-attachments"

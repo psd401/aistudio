@@ -75,6 +75,10 @@ class VersionedS3 {
   }> = []
   sequence = 0
   failNextManifestPutAfterWrite = false
+  beforeCommand?: (
+    name: string,
+    input: Record<string, unknown>,
+  ) => Promise<void>
 
   add(
     key: string,
@@ -149,6 +153,7 @@ class VersionedS3 {
     const name = typed.constructor.name
     const input = typed.input
     this.commands.push({ name, input })
+    await this.beforeCommand?.(name, input)
     const key = String(input.Key ?? "")
 
     if (name === "ListObjectsV2Command") {
@@ -289,6 +294,11 @@ function workspaceGeneration(
 }
 
 function manifestKey(): string {
+  const prefixHash = createHash("sha256").update(PREFIX).digest("hex")
+  return `.workspace-checkpoints/v2/${prefixHash}/manifest.json`
+}
+
+function legacyManifestKey(): string {
   const prefixHash = createHash("sha256").update(PREFIX).digest("hex")
   return `.workspace-checkpoints/v1/${prefixHash}/manifest.json`
 }
@@ -434,6 +444,137 @@ describe("durable workspace checkpoints", () => {
       ),
     ).toHaveLength(0)
     expect(store.current(manifestKey())?.scope).toBe("Scope=checkpoint")
+  })
+
+  it("accepts legacy punctuation and excludes regenerable trees from the checkpoint", async () => {
+    const durable = store.add(`${PREFIX}/memory/Review (draft), [v2].md`, {
+      size: 4,
+      eTag: '"durable"',
+      body: "keep",
+      scope: "Scope=private",
+    })
+    for (let index = 0; index < 5_500; index += 1) {
+      store.add(
+        `${PREFIX}/skills/example/.tts-venv/lib/python3.11/site-packages/pkg-${index}/script (dev).tmpl`,
+        {
+          size: 1,
+          eTag: `"generated-${index}"`,
+          body: "x",
+        },
+      )
+    }
+
+    const result = await ensureWorkspaceCheckpoint(PREFIX)
+
+    expect(result.workspaceGeneration).toBe(
+      workspaceGeneration([
+        {
+          path: "memory/Review (draft), [v2].md",
+          size: 4,
+          eTag: '"durable"',
+        },
+      ]),
+    )
+    expect(manifest().entries).toEqual([
+      expect.objectContaining({
+        path: "memory/Review (draft), [v2].md",
+        versionId: durable.versionId,
+      }),
+    ])
+    expect(
+      store.commands.filter(
+        (command) =>
+          command.name === "HeadObjectCommand" &&
+          String(command.input.Key).startsWith(`${PREFIX}/`),
+      ),
+    ).toHaveLength(1)
+  })
+
+  it("refuses to bless current state while a legacy v1 boundary exists", async () => {
+    const legacyBody = JSON.stringify({
+      version: 1,
+      entries: [{ path: "node_modules/legacy/index.js" }],
+    })
+    store.add(legacyManifestKey(), {
+      size: Buffer.byteLength(legacyBody),
+      eTag: '"legacy-manifest"',
+      body: legacyBody,
+      scope: "Scope=checkpoint",
+    })
+    store.add(`${PREFIX}/memory/durable.md`, {
+      size: 4,
+      eTag: '"durable"',
+      body: "keep",
+      scope: "Scope=private",
+    })
+
+    await expect(ensureWorkspaceCheckpoint(PREFIX)).rejects.toThrow(
+      "Legacy workspace checkpoint must be recovered before v2 bootstrap",
+    )
+
+    expect(store.current(manifestKey())).toBeUndefined()
+    expect(store.current(legacyManifestKey())?.body).toBe(legacyBody)
+  })
+
+  it("waits for every in-flight checkpoint worker before releasing the owner lock", async () => {
+    store.add(`${PREFIX}/memory/a.md`, {
+      size: 1,
+      eTag: '"a"',
+      body: "a",
+    })
+    store.add(`${PREFIX}/memory/b.md`, {
+      size: 1,
+      eTag: '"b"',
+      body: "b",
+    })
+    let finishSlow: (() => void) | undefined
+    const slow = new Promise<void>((resolve) => {
+      finishSlow = resolve
+    })
+    let slowSettled = false
+    let lockReleased = false
+    store.beforeCommand = async (name, input) => {
+      if (name !== "HeadObjectCommand") return
+      const key = String(input.Key)
+      if (key.endsWith("/memory/a.md")) {
+        throw new Error("checkpoint metadata failed")
+      }
+      if (key.endsWith("/memory/b.md")) {
+        await slow
+        slowSettled = true
+      }
+    }
+    withSessionMock.mockImplementation(
+      async (...args: unknown[]) => {
+        const callback = args[0] as (session: {
+          executeQuery: AsyncUnknownMock
+          executeTransaction: AsyncUnknownMock
+        }) => Promise<unknown>
+        return callback({
+          executeQuery: async (...queryArgs: unknown[]) => {
+            if (queryArgs[1] === "tryFenceWorkspaceUploadCompletion") {
+              return [{ acquired: true }]
+            }
+            if (queryArgs[1] === "releaseWorkspaceUploadCompletionFence") {
+              lockReleased = true
+              expect(slowSettled).toBe(true)
+              return [{ released: true }]
+            }
+            return executeQueryMock(...queryArgs)
+          },
+          executeTransaction: (...transactionArgs: unknown[]) =>
+            executeTransactionMock(...transactionArgs),
+        })
+      },
+    )
+
+    const checkpoint = ensureWorkspaceCheckpoint(PREFIX)
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(lockReleased).toBe(false)
+    finishSlow?.()
+
+    await expect(checkpoint).rejects.toThrow("checkpoint metadata failed")
+    expect(lockReleased).toBe(true)
   })
 
   it("recovers a crash-partial batch, preserves history, and idempotently commits the retry", async () => {

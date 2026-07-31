@@ -36,10 +36,16 @@ import {
   releaseResourceAdmission,
 } from "@/lib/resource-admission"
 import { createLogger } from "@/lib/logger"
+import {
+  isCheckpointManagedWorkspacePath,
+  validateWorkspaceRelativePath,
+  workspaceRelativePathRejectionReason,
+} from "@/lib/agent-workspace/path-policy"
+
+export { validateWorkspaceRelativePath } from "@/lib/agent-workspace/path-policy"
 
 const log = createLogger({ module: "workspace-storage-broker" })
 
-const MAX_RELATIVE_PATH_LENGTH = 768
 const MAX_LIST_KEYS = 1_000
 export const MAX_PRIVATE_UPLOAD_BYTES = 256 * 1024 * 1024
 export const MAX_PUBLIC_ARTIFACT_BYTES = 100 * 1024 * 1024
@@ -51,8 +57,9 @@ const UPLOAD_RESERVATION_MS = 5 * 60 * 1000
 const SHA256_BASE64_RE = /^[A-Za-z0-9+/]{43}=$/
 const WORKSPACE_GENERATION_RE = /^[0-9a-f]{64}$/
 const MAX_WORKSPACE_GENERATION_OBJECTS = 250_000
-const WORKSPACE_CHECKPOINT_VERSION = 1 as const
-const WORKSPACE_CHECKPOINT_CONTROL_PREFIX = ".workspace-checkpoints/v1"
+const WORKSPACE_CHECKPOINT_VERSION = 2 as const
+const WORKSPACE_CHECKPOINT_CONTROL_PREFIX = ".workspace-checkpoints/v2"
+const LEGACY_WORKSPACE_CHECKPOINT_CONTROL_PREFIX = ".workspace-checkpoints/v1"
 const MAX_WORKSPACE_CHECKPOINT_BYTES = 64 * 1024 * 1024
 const WORKSPACE_CHECKPOINT_CONCURRENCY = 32
 const CONTENT_TYPE_RE =
@@ -97,7 +104,7 @@ export function workspaceReservationCountsAsRetained(
     status as (typeof RETAINED_UPLOAD_STATUSES)[number],
   )
 }
-const SAFE_PATH_SEGMENT = /^[A-Za-z0-9._@+= -]+$/
+const SAFE_PUBLIC_ARTIFACT_NAME = /^[A-Za-z0-9._@+= -]+$/
 const PUBLIC_EXTENSIONS = new Set([
   ".csv",
   ".html",
@@ -620,30 +627,6 @@ function bucketName(): string {
   return bucket
 }
 
-export function validateWorkspaceRelativePath(relativePath: string): string {
-  if (
-    !relativePath ||
-    relativePath.length > MAX_RELATIVE_PATH_LENGTH ||
-    relativePath.startsWith("/") ||
-    relativePath.endsWith("/")
-  ) {
-    throw new Error("Invalid workspace-relative path")
-  }
-  const segments = relativePath.split("/")
-  if (
-    segments.some(
-      (segment) =>
-        !segment ||
-        segment === "." ||
-        segment === ".." ||
-        !SAFE_PATH_SEGMENT.test(segment)
-    )
-  ) {
-    throw new Error("Invalid workspace-relative path")
-  }
-  return segments.join("/")
-}
-
 function validateTrustedPrefix(prefix: string): string {
   const normalized = prefix.replace(/^\/+|\/+$/g, "")
   if (!normalized || normalized.includes("..") || normalized.includes("\\")) {
@@ -656,17 +639,17 @@ export function ownerWorkspaceKey(
   signedWorkspacePrefix: string,
   relativePath: string
 ): string {
-  return `${validateTrustedPrefix(signedWorkspacePrefix)}/${validateWorkspaceRelativePath(relativePath)}`
+  const key = `${validateTrustedPrefix(signedWorkspacePrefix)}/${validateWorkspaceRelativePath(relativePath)}`
+  if (Buffer.byteLength(key, "utf8") > 1_024) {
+    throw new Error("Invalid workspace object key length")
+  }
+  return key
 }
 
 export type WorkspaceGenerationEntry = {
   path: string
   size: number
   eTag: string
-}
-
-function isRouterOwnedWorkspacePath(path: string): boolean {
-  return path === "attachments" || path.startsWith("attachments/")
 }
 
 /**
@@ -680,7 +663,11 @@ export function workspaceGenerationFromEntries(
 ): string {
   const digest = createHash("sha256")
   const sorted = [...entries]
-    .filter((entry) => !isRouterOwnedWorkspacePath(entry.path))
+    .filter((entry) => isCheckpointManagedWorkspacePath(entry.path))
+    .map((entry) => ({
+      ...entry,
+      path: validateWorkspaceRelativePath(entry.path),
+    }))
     .sort((left, right) =>
       Buffer.compare(
         Buffer.from(left.path, "utf8"),
@@ -717,7 +704,9 @@ export function workspaceGenerationFromEntries(
 
 export function publicArtifactKey(ownerEmail: string, fileName: string): string {
   const safeName = validateWorkspaceRelativePath(fileName)
-  if (safeName.includes("/")) throw new Error("Public artifact name must be a file name")
+  if (safeName.includes("/") || !SAFE_PUBLIC_ARTIFACT_NAME.test(safeName)) {
+    throw new Error("Invalid public artifact name")
+  }
   const extensionIndex = safeName.lastIndexOf(".")
   const extension = extensionIndex === -1 ? "" : safeName.slice(extensionIndex).toLowerCase()
   if (!PUBLIC_EXTENSIONS.has(extension)) {
@@ -772,24 +761,46 @@ export async function listWorkspaceObjects(
 
   const entries = (response.Contents ?? [])
     .filter((entry): entry is typeof entry & { Key: string } =>
-      Boolean(entry.Key?.startsWith(prefix))
+      Boolean(
+        entry.Key?.startsWith(prefix) && entry.Key.length > prefix.length,
+      )
     )
-    .map((entry) => ({
-      path: entry.Key.slice(prefix.length),
-      size: entry.Size ?? 0,
-      // Epoch SECONDS. The restore only ever compares these to each other to
-      // rank recency, so second resolution is ample and avoids shipping a
-      // date-string the client would have to parse.
-      lastModified: entry.LastModified
-        ? Math.floor(entry.LastModified.getTime() / 1000)
-        : 0,
-      // ETag is the collision-resistant object generation token the agent
-      // image uses to prove a warm workspace has not gone stale between lock
-      // acquisition and its final checkpoint. Keep the raw opaque value:
-      // multipart/copy ETags are not necessarily content MD5s.
-      eTag: entry.ETag ?? "",
-    }))
-    .filter((entry) => entry.path.length > 0)
+    .map((entry) => {
+      const path = entry.Key.slice(prefix.length)
+      const rejectionReason = isCheckpointManagedWorkspacePath(path)
+        ? workspaceRelativePathRejectionReason(path)
+        : null
+      if (rejectionReason) {
+        log.warn(
+          "Persisted workspace path is incompatible with the storage contract",
+          {
+            pathHash: createHash("sha256")
+              .update(path)
+              .digest("hex")
+              .slice(0, 16),
+            rejectionReason,
+          },
+        )
+        throw new WorkspaceStorageCompletionError(
+          "Persisted workspace path is incompatible with the storage contract",
+        )
+      }
+      return {
+        path,
+        size: entry.Size ?? 0,
+        // Epoch SECONDS. The restore only ever compares these to each other to
+        // rank recency, so second resolution is ample and avoids shipping a
+        // date-string the client would have to parse.
+        lastModified: entry.LastModified
+          ? Math.floor(entry.LastModified.getTime() / 1000)
+          : 0,
+        // ETag is the collision-resistant object generation token the agent
+        // image uses to prove a warm workspace has not gone stale between lock
+        // acquisition and its final checkpoint. Keep the raw opaque value:
+        // multipart/copy ETags are not necessarily content MD5s.
+        eTag: entry.ETag ?? "",
+      }
+    })
 
   return {
     // `paths` is RETAINED for compatibility. Containers deploy independently of
@@ -882,14 +893,33 @@ async function readWorkspaceGenerationSnapshot(
   }
 }
 
-function checkpointNamespace(signedWorkspacePrefix: string): string {
+function checkpointNamespaceForControlPrefix(
+  signedWorkspacePrefix: string,
+  controlPrefix: string,
+): string {
   const prefix = validateTrustedPrefix(signedWorkspacePrefix)
   const prefixHash = createHash("sha256").update(prefix).digest("hex")
-  return `${WORKSPACE_CHECKPOINT_CONTROL_PREFIX}/${prefixHash}`
+  return `${controlPrefix}/${prefixHash}`
+}
+
+function checkpointNamespace(signedWorkspacePrefix: string): string {
+  return checkpointNamespaceForControlPrefix(
+    signedWorkspacePrefix,
+    WORKSPACE_CHECKPOINT_CONTROL_PREFIX,
+  )
 }
 
 function checkpointManifestKey(signedWorkspacePrefix: string): string {
   return `${checkpointNamespace(signedWorkspacePrefix)}/manifest.json`
+}
+
+function legacyCheckpointManifestKey(
+  signedWorkspacePrefix: string,
+): string {
+  return `${checkpointNamespaceForControlPrefix(
+    signedWorkspacePrefix,
+    LEGACY_WORKSPACE_CHECKPOINT_CONTROL_PREFIX,
+  )}/manifest.json`
 }
 
 function checkpointAnchorKey(
@@ -906,7 +936,7 @@ function mutableWorkspaceEntries(
   snapshot: WorkspaceGenerationSnapshot,
 ): WorkspaceGenerationEntry[] {
   return [...snapshot.entries.values()]
-    .filter((entry) => !isRouterOwnedWorkspacePath(entry.path))
+    .filter((entry) => isCheckpointManagedWorkspacePath(entry.path))
     .sort((left, right) =>
       Buffer.compare(
         Buffer.from(left.path, "utf8"),
@@ -938,6 +968,8 @@ async function mapWithWorkspaceCheckpointConcurrency<T, U>(
   if (values.length === 0) return []
   const results = Array.from({ length: values.length }) as U[]
   let nextIndex = 0
+  let failed = false
+  let firstError: unknown
   const workers = Array.from(
     {
       length: Math.min(
@@ -946,15 +978,24 @@ async function mapWithWorkspaceCheckpointConcurrency<T, U>(
       ),
     },
     async () => {
-      while (true) {
+      while (!failed) {
         const index = nextIndex
         nextIndex += 1
         if (index >= values.length) return
-        results[index] = await operation(values[index]!, index)
+        try {
+          results[index] = await operation(values[index]!, index)
+        } catch (error) {
+          if (!failed) {
+            failed = true
+            firstError = error
+          }
+          return
+        }
       }
     },
   )
   await Promise.all(workers)
+  if (failed) throw firstError
   return results
 }
 
@@ -998,8 +1039,8 @@ function parseWorkspaceCheckpointManifest(
     const entry = rawEntry as Record<string, unknown>
     if (
       typeof entry.path !== "string" ||
-      validateWorkspaceRelativePath(entry.path) !== entry.path ||
-      isRouterOwnedWorkspacePath(entry.path) ||
+      workspaceRelativePathRejectionReason(entry.path) !== null ||
+      !isCheckpointManagedWorkspacePath(entry.path) ||
       seenPaths.has(entry.path) ||
       !Number.isSafeInteger(entry.size) ||
       (entry.size as number) < 0 ||
@@ -1097,6 +1138,25 @@ async function readWorkspaceCheckpointManifest(
     )
   }
   return parseWorkspaceCheckpointManifest(parsed, signedWorkspacePrefix)
+}
+
+async function assertNoLegacyWorkspaceCheckpoint(
+  signedWorkspacePrefix: string,
+): Promise<void> {
+  try {
+    await s3Client().send(
+      new HeadObjectCommand({
+        Bucket: bucketName(),
+        Key: legacyCheckpointManifestKey(signedWorkspacePrefix),
+      }),
+    )
+  } catch (error) {
+    if (isS3ObjectNotFound(error)) return
+    throw error
+  }
+  throw new WorkspaceStorageCompletionError(
+    "Legacy workspace checkpoint must be recovered before v2 bootstrap",
+  )
 }
 
 async function writeWorkspaceCheckpointManifest(
@@ -1396,6 +1456,7 @@ export async function ensureWorkspaceCheckpoint(
         signedWorkspacePrefix,
       )
       if (!manifest) {
+        await assertNoLegacyWorkspaceCheckpoint(signedWorkspacePrefix)
         manifest = await captureWorkspaceCheckpointManifest(
           signedWorkspacePrefix,
           snapshot,
@@ -1599,7 +1660,7 @@ export async function deleteWorkspacePath(
 }> {
   const path = validateWorkspaceRelativePath(relativePath)
   if (
-    isRouterOwnedWorkspacePath(path) ||
+    !isCheckpointManagedWorkspacePath(path) ||
     !WORKSPACE_GENERATION_RE.test(expectedGeneration)
   ) {
     throw new Error("Invalid workspace delete request")
@@ -1953,6 +2014,9 @@ export async function createWorkspaceUploadUrl(
   )
   const checksum = expectedChecksum(checksumSha256)
   const normalizedContentType = expectedContentType(contentType)
+  if (!isCheckpointManagedWorkspacePath(relativePath)) {
+    throw new Error("Invalid workspace upload path")
+  }
   const targetKey = ownerWorkspaceKey(signedWorkspacePrefix, relativePath)
   const params: PrivateUploadParameters = {
     ownerEmail,
@@ -2251,6 +2315,12 @@ async function reconstructCommittedPrivateUpload(
       "Workspace upload target does not match its signed prefix",
     )
   }
+  const relativePath = reservation.targetKey.slice(prefix.length)
+  if (!isCheckpointManagedWorkspacePath(relativePath)) {
+    throw new WorkspaceStorageCompletionError(
+      "Workspace upload target is not mutable user state",
+    )
+  }
   const eTag = await committedUploadMatches(
     reservation.targetKey,
     reservation.objectVersionId,
@@ -2266,7 +2336,6 @@ async function reconstructCommittedPrivateUpload(
   const snapshot = await readWorkspaceGenerationSnapshot(
     signedWorkspacePrefix,
   )
-  const relativePath = reservation.targetKey.slice(prefix.length)
   const listed = snapshot.entries.get(relativePath)
   if (
     !listed ||
@@ -2301,9 +2370,9 @@ async function recoverVerifyingPrivateUpload(
     )
   }
   const relativePath = reservation.targetKey.slice(prefix.length)
-  if (isRouterOwnedWorkspacePath(relativePath)) {
+  if (!isCheckpointManagedWorkspacePath(relativePath)) {
     throw new WorkspaceStorageCompletionError(
-      "Router-owned attachments cannot be recovered by workspace sync",
+      "Workspace upload target is not mutable user state",
     )
   }
   let metadata
@@ -2738,9 +2807,9 @@ async function finishClaimedUpload(
         )
       }
       targetRelativePath = claimed.targetKey.slice(prefix.length)
-      if (isRouterOwnedWorkspacePath(targetRelativePath)) {
+      if (!isCheckpointManagedWorkspacePath(targetRelativePath)) {
         throw new WorkspaceStorageCompletionError(
-          "Router-owned attachments cannot be promoted by workspace sync",
+          "Workspace upload target is not mutable user state",
         )
       }
       generationSnapshot = await readWorkspaceGenerationSnapshot(

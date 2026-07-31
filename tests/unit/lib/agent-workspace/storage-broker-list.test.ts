@@ -144,4 +144,38 @@ describe("listWorkspaceObjects", () => {
     expect(result.continuationToken).toBe("next-page")
     expect(send.mock.calls[0][0].input.ContinuationToken).toBe("prev-page")
   })
+
+  it("returns ordinary punctuation from persisted user history", async () => {
+    send.mockResolvedValue({
+      Contents: [
+        {
+          Key: `${PREFIX}/memory/Review (draft), [v2].md`,
+          Size: 4,
+          LastModified: new Date(),
+          ETag: '"punctuation"',
+        },
+      ],
+    })
+
+    const result = await listWorkspaceObjects(PREFIX)
+
+    expect(result.paths).toEqual(["memory/Review (draft), [v2].md"])
+  })
+
+  it("fails closed before returning an incompatible durable path", async () => {
+    send.mockResolvedValue({
+      Contents: [
+        {
+          Key: `${PREFIX}/memory/bad\\name.md`,
+          Size: 4,
+          LastModified: new Date(),
+          ETag: '"invalid"',
+        },
+      ],
+    })
+
+    await expect(listWorkspaceObjects(PREFIX)).rejects.toThrow(
+      "Persisted workspace path is incompatible with the storage contract",
+    )
+  })
 })
