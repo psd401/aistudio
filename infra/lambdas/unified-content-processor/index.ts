@@ -36,6 +36,7 @@ import {
 import { and, asc, eq, gt, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { executeQuery } from "../../../lib/db/drizzle-client";
 import {
+  repositoryIndexGenerations,
   repositoryItemChunks,
   repositoryArtifacts,
   repositoryItems,
