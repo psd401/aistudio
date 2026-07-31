@@ -119,7 +119,13 @@
  * shadow, centered max-width — NEVER the full-viewport width the base shadcn
  * DialogContent renders because this repo's variant carries no max-width).
  * ========================================================================== */
-.mer-portal[data-slot="dialog-content"] {
+/* `.app-mer-portal` is the app-palette twin (styles/app-meridian.css) and is
+ * listed alongside `.mer-portal` on every rule below rather than duplicated
+ * into that file: these rules are pure structure and read only var(--mer-*),
+ * so whichever token layer the portal carries supplies the colour. Sharing the
+ * selector is what stops Atrium's and the app's modals drifting apart. */
+.mer-portal[data-slot="dialog-content"],
+.app-mer-portal[data-slot="dialog-content"] {
   background: var(--mer-surface);
   border: 1px solid var(--mer-border);
   border-radius: 16px;
@@ -129,18 +135,21 @@
   max-width: min(520px, calc(100vw - 32px));
 }
 /* Keep opt-in wide dialogs (data-wide-mode) at their own size. */
-.mer-portal[data-slot="dialog-content"][data-wide-mode="active"] {
+.mer-portal[data-slot="dialog-content"][data-wide-mode="active"],
+.app-mer-portal[data-slot="dialog-content"][data-wide-mode="active"] {
   max-width: 95vw;
   border-radius: 16px;
 }
 /* Meridian dialog title/description type + close affordance. */
-.mer-portal[data-slot="dialog-content"] [data-slot="dialog-title"] {
+.mer-portal[data-slot="dialog-content"] [data-slot="dialog-title"],
+.app-mer-portal[data-slot="dialog-content"] [data-slot="dialog-title"] {
   font-size: 17px;
   font-weight: 700;
   letter-spacing: -0.01em;
   color: var(--mer-ink);
 }
-.mer-portal[data-slot="dialog-content"] [data-slot="dialog-description"] {
+.mer-portal[data-slot="dialog-content"] [data-slot="dialog-description"],
+.app-mer-portal[data-slot="dialog-content"] [data-slot="dialog-description"] {
   color: var(--mer-ink-muted);
 }
 

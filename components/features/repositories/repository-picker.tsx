@@ -42,6 +42,14 @@ export interface RepositoryPickerProps {
   description?: string
   loadRepositories?: typeof getUserAccessibleRepositoriesAction
   maxSelections?: number
+  /**
+   * Extra classes for the portaled DialogContent. Radix portals to
+   * document.body, so a design-system scope on the page does NOT reach this
+   * dialog — the caller passes its own scope class (e.g.
+   * `appMeridianPortalClassName`). Kept caller-supplied because this picker
+   * renders on both Meridian and non-Meridian surfaces.
+   */
+  contentClassName?: string
 }
 
 function toSummary(
@@ -288,6 +296,7 @@ export function RepositoryPicker({
   description = "Select an accessible durable knowledge repository.",
   loadRepositories = getUserAccessibleRepositoriesAction,
   maxSelections,
+  contentClassName,
 }: RepositoryPickerProps) {
   const { toast } = useToast()
   const [repositories, setRepositories] =
@@ -395,7 +404,10 @@ export function RepositoryPicker({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent
+        className={contentClassName ? `sm:max-w-2xl ${contentClassName}` : "sm:max-w-2xl"}
+        data-mer-size="wide"
+      >
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>

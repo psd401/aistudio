@@ -224,6 +224,19 @@
   box-shadow: 0 0 0 3px rgba(42, 116, 159, 0.12);
 }
 
+/* Portaled dialogs share the structural rules in atrium-meridian.css, but that
+ * sheet shadow is a hardcoded Meridian teal — recast it on the app's brand. */
+.app-mer-portal[data-slot="dialog-content"] {
+  box-shadow: var(--mer-shadow-sheet);
+}
+
+/* The repositories picker carries genuinely wide rows (name + status badges +
+ * provenance line). The shared 520px cap crushes them, so this surface opts
+ * into a wider sheet without reaching for Atrium's 95vw wide-mode. */
+.app-mer-portal[data-slot="dialog-content"][data-mer-size="wide"] {
+  max-width: min(680px, calc(100vw - 32px));
+}
+
 /*
  * Clickable card. Meridian deliberately has no `.mer-card:hover` — its cards are
  * containers, not targets. Dashboard cards ARE targets, so this adds the
