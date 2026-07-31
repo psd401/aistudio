@@ -88,6 +88,7 @@ beforeEach(() => {
   })
 })
 
+// eslint-disable-next-line max-lines-per-function
 describe("POST /api/agent/workspace-storage", () => {
   it("requires a signed owner or scheduled context", async () => {
     verifyContextMock.mockResolvedValue(null)
@@ -197,8 +198,30 @@ describe("POST /api/agent/workspace-storage", () => {
   })
 
   it("binds checkpoint operations to the signed workspace prefix", async () => {
+    const workspaceGeneration = "1".repeat(64)
+    const checkpointSnapshot = {
+      workspaceGeneration,
+      entries: [
+        {
+          path: "memory/MEMORY.md",
+          size: 4,
+          eTag: '"memory"',
+        },
+      ],
+    }
+    ensureWorkspaceCheckpointMock.mockResolvedValueOnce({
+      checkpointReady: true,
+      workspaceGeneration,
+      checkpointSnapshot,
+    })
+
     const ensured = await POST(request({ operation: "ensure-checkpoint" }))
     expect(ensured.status).toBe(200)
+    expect(await ensured.json()).toEqual({
+      checkpointReady: true,
+      workspaceGeneration,
+      checkpointSnapshot,
+    })
     expect(ensureWorkspaceCheckpointMock).toHaveBeenCalledWith(
       "workspaces/owner/",
     )

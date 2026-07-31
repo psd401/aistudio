@@ -471,6 +471,24 @@ describe("durable workspace checkpoints", () => {
         { path: "state/a.sqlite", size: 4, eTag: '"a-old"' },
         { path: "memory/MEMORY.md", size: 4, eTag: '"b-old"' },
       ]),
+      checkpointSnapshot: {
+        workspaceGeneration: workspaceGeneration([
+          { path: "state/a.sqlite", size: 4, eTag: '"a-old"' },
+          { path: "memory/MEMORY.md", size: 4, eTag: '"b-old"' },
+        ]),
+        entries: [
+          {
+            path: "memory/MEMORY.md",
+            size: 4,
+            eTag: '"b-old"',
+          },
+          {
+            path: "state/a.sqlite",
+            size: 4,
+            eTag: '"a-old"',
+          },
+        ],
+      },
     })
     const committed = manifest()
     expect(committed.signedWorkspacePrefix).toBe(PREFIX)
@@ -542,6 +560,29 @@ describe("durable workspace checkpoints", () => {
     ).toHaveLength(1)
   })
 
+  it("omits an inline checkpoint snapshot above the response-size cap", async () => {
+    for (let index = 0; index < 750; index += 1) {
+      const path = [
+        "memory",
+        `${String(index).padStart(4, "0")}-${"a".repeat(230)}`,
+        "b".repeat(240),
+        `${"c".repeat(217)}.md`,
+      ].join("/")
+      store.add(`${PREFIX}/${path}`, {
+        size: 1,
+        eTag: `"large-${index}"`,
+        body: "x",
+        scope: "Scope=private",
+      })
+    }
+
+    const result = await ensureWorkspaceCheckpoint(PREFIX)
+
+    expect(result.checkpointReady).toBe(true)
+    expect(result.workspaceGeneration).toMatch(/^[0-9a-f]{64}$/)
+    expect(result).not.toHaveProperty("checkpointSnapshot")
+  })
+
   it("normalizes legacy exec approvals out of an existing v2 checkpoint without deleting owner state", async () => {
     const durableMemory = store.add(`${PREFIX}/memory/MEMORY.md`, {
       size: 4,
@@ -611,6 +652,21 @@ describe("durable workspace checkpoints", () => {
     expect(result).toEqual({
       checkpointReady: true,
       workspaceGeneration: normalizedGeneration,
+      checkpointSnapshot: {
+        workspaceGeneration: normalizedGeneration,
+        entries: [
+          {
+            path: "memory/MEMORY.md",
+            size: 4,
+            eTag: '"memory"',
+          },
+          {
+            path: "state/openclaw.sqlite",
+            size: 4,
+            eTag: '"sqlite"',
+          },
+        ],
+      },
     })
     expect(manifest()).toMatchObject({
       version: 2,
@@ -881,6 +937,7 @@ describe("durable workspace checkpoints", () => {
     expect(lockReleased).toBe(true)
   })
 
+  // eslint-disable-next-line max-lines-per-function
   it("recovers a crash-partial batch, preserves history, and idempotently commits the retry", async () => {
     const originalA = store.add(`${PREFIX}/state/a.sqlite`, {
       size: 4,
@@ -951,6 +1008,21 @@ describe("durable workspace checkpoints", () => {
     })
 
     const recovered = await ensureWorkspaceCheckpoint(PREFIX)
+    expect(recovered.checkpointSnapshot).toEqual({
+      workspaceGeneration: recovered.workspaceGeneration,
+      entries: [
+        {
+          path: "memory/MEMORY.md",
+          size: 4,
+          eTag: '"b-old"',
+        },
+        {
+          path: "state/a.sqlite",
+          size: 4,
+          eTag: '"anchor-a-old"',
+        },
+      ],
+    })
     expect(store.current(`${PREFIX}/state/a.sqlite`)?.body).toBe("aaaa")
     expect(store.current(`${PREFIX}/memory/MEMORY.md`)?.body).toBe("bbbb")
     expect(store.current(`${PREFIX}/memory/new.md`)).toBeUndefined()

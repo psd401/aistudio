@@ -533,7 +533,9 @@ const SLASH_COMMAND_NAMES: Record<string, string> = {
 };
 
 const ASIDE_RESPONSE_PREFIX = '[aside] ';
-const WORKSPACE_RETRY_VISIBILITY_SECONDS = 60;
+const WORKSPACE_RETRY_FIRST_DELAY_MAX_SECONDS = 5;
+const WORKSPACE_RETRY_MAX_DELAY_SECONDS = 60;
+const CHAT_DELIVERY_RETRY_VISIBILITY_SECONDS = 60;
 const WORKSPACE_DEFER_ATTRIBUTE = 'PsdWorkspaceDeferV1';
 const WORKSPACE_DEFER_MAX_ATTEMPTS = 180;
 const WORKSPACE_DEFER_MAX_AGE_SECONDS = 3 * 60 * 60;
@@ -931,6 +933,11 @@ async function deferWorkspaceTurn(
     });
     return false;
   }
+  const retryAfterSeconds = workspaceRetryDelaySeconds(
+    deferState,
+    error.messageName ??
+      crypto.createHash('sha256').update(record.body).digest('hex')
+  );
   const claimReleased = await dependencies.releaseClaim(
     error.messageName,
     log
@@ -945,7 +952,7 @@ async function deferWorkspaceTurn(
   await dependencies.enqueue({
     QueueUrl: queueUrl,
     MessageBody: record.body,
-    DelaySeconds: WORKSPACE_RETRY_VISIBILITY_SECONDS,
+    DelaySeconds: retryAfterSeconds,
     MessageAttributes: workspaceRetryMessageAttributes(
       record,
       deferState
@@ -954,7 +961,7 @@ async function deferWorkspaceTurn(
   log.info('Requeued Chat turn for durable workspace retry', {
     messageName: error.messageName,
     reason: error.reason,
-    retryAfterSeconds: WORKSPACE_RETRY_VISIBILITY_SECONDS,
+    retryAfterSeconds,
     deferAttempt: deferState.attempt,
     firstDeferredAt: deferState.firstDeferredAt,
     receiveCount: record.attributes?.ApproximateReceiveCount ?? '1',
@@ -966,6 +973,39 @@ type WorkspaceDeferState = {
   firstDeferredAt: number;
   attempt: number;
 };
+
+/**
+ * Assign each logical Chat message a stable delay inside non-overlapping,
+ * exponentially growing bands: 1-5s, 6-10s, 11-20s, 21-40s, 41-60s,
+ * then 60s. Persisted attempt state makes the schedule survive SQS copies;
+ * hashing the logical message identity spreads contending turns without
+ * introducing nondeterministic retry behavior.
+ */
+function workspaceRetryDelaySeconds(
+  state: WorkspaceDeferState,
+  messageIdentity: string
+): number {
+  const ceilingForAttempt = (attempt: number): number =>
+    Math.min(
+      WORKSPACE_RETRY_MAX_DELAY_SECONDS,
+      WORKSPACE_RETRY_FIRST_DELAY_MAX_SECONDS *
+        2 ** Math.min(Math.max(attempt - 1, 0), 4)
+    );
+  const upperBound = ceilingForAttempt(state.attempt);
+  const previousUpperBound =
+    state.attempt === 1 ? 0 : ceilingForAttempt(state.attempt - 1);
+  const lowerBound =
+    previousUpperBound === WORKSPACE_RETRY_MAX_DELAY_SECONDS
+      ? WORKSPACE_RETRY_MAX_DELAY_SECONDS
+      : previousUpperBound + 1;
+  const bandSize = upperBound - lowerBound + 1;
+  const sample = crypto
+    .createHash('sha256')
+    .update(`${messageIdentity}\0${state.firstDeferredAt}\0${state.attempt}`)
+    .digest()
+    .readUInt32BE(0);
+  return lowerBound + (sample % bandSize);
+}
 
 function nextWorkspaceDeferState(
   record: SQSRecord,
@@ -1030,7 +1070,7 @@ function workspaceDeferStateIsEligible(
 ): boolean {
   return (
     state.firstDeferredAt <=
-      nowSeconds + WORKSPACE_RETRY_VISIBILITY_SECONDS &&
+      nowSeconds + WORKSPACE_RETRY_MAX_DELAY_SECONDS &&
     state.attempt < WORKSPACE_DEFER_MAX_ATTEMPTS &&
     nowSeconds - state.firstDeferredAt < WORKSPACE_DEFER_MAX_AGE_SECONDS
   );
@@ -1086,11 +1126,11 @@ async function deferChatDeliveryRetry(
     new ChangeMessageVisibilityCommand({
       QueueUrl: queueUrl,
       ReceiptHandle: record.receiptHandle,
-      VisibilityTimeout: WORKSPACE_RETRY_VISIBILITY_SECONDS,
+      VisibilityTimeout: CHAT_DELIVERY_RETRY_VISIBILITY_SECONDS,
     })
   );
   log.warn('Deferred completed Chat response delivery for retry', {
-    retryAfterSeconds: WORKSPACE_RETRY_VISIBILITY_SECONDS,
+    retryAfterSeconds: CHAT_DELIVERY_RETRY_VISIBILITY_SECONDS,
     receiveCount: record.attributes?.ApproximateReceiveCount ?? '1',
   });
 }
@@ -5335,6 +5375,7 @@ export const agentRouterTestHelpers = {
   buildAgentInvocationContext,
   sendGoogleChatResponseWithDependencies,
   deferWorkspaceTurn,
+  workspaceRetryDelaySeconds,
   workspaceDeferredRecordNeedsRetry,
   WorkspaceTurnDeferredError,
   isDuplicateMessage,
