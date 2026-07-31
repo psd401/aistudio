@@ -11,13 +11,22 @@ export interface InputProps
 
 const Input = React.forwardRef<HTMLInputElement, InputProps>(
   ({ className, type, icon, ...props }, ref) => {
-    return (
-      <div className="relative">
-        {icon && (
-          <div className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">
-            {icon}
-          </div>
-        )}
+    /*
+     * The wrapper exists ONLY to position an icon, so it is rendered only when
+     * there is an icon to position.
+     *
+     * Previously every Input was wrapped in `<div className="relative">` while
+     * `className` was applied to the inner <input>. Layout classes therefore
+     * landed inside a div that did not participate in the parent's layout:
+     * `<Input className="flex-1" />` inside a flex row sized to content instead
+     * of filling, which is why the repository search field rendered ~190px wide
+     * in a 1250px card. Same for `w-full`, `grow`, `col-span-*` and friends at
+     * every other call site.
+     *
+     * When an icon IS present the wrapper is unavoidable, so it takes `w-full`
+     * — icon inputs are full-width everywhere in this codebase.
+     */
+    const input = (
         <input
           type={type}
           className={cn(
@@ -32,6 +41,16 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
           ref={ref}
           {...props}
         />
+    )
+
+    if (!icon) return input
+
+    return (
+      <div className={cn("relative w-full", className)}>
+        <div className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">
+          {icon}
+        </div>
+        {input}
       </div>
     )
   }
