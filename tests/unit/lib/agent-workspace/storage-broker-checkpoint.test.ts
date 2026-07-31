@@ -1075,15 +1075,34 @@ describe("durable workspace checkpoints", () => {
     })
     const base = (await ensureWorkspaceCheckpoint(PREFIX))
       .workspaceGeneration
+    const commandsBeforeDelete = store.commands.length
 
     const deleted = await deleteWorkspacePath(
       PREFIX,
       "memory/remove.md",
       base,
     )
+    const firstDeleteCommands = store.commands.slice(commandsBeforeDelete)
+    expect(
+      firstDeleteCommands.filter(
+        (command) => command.name === "ListObjectsV2Command",
+      ),
+    ).toHaveLength(1)
+    expect(deleted.workspaceGeneration).toBe(
+      workspaceGeneration([
+        { path: "memory/keep.md", size: 4, eTag: '"keep"' },
+      ]),
+    )
     await expect(
       deleteWorkspacePath(PREFIX, "memory/remove.md", base),
     ).resolves.toEqual(deleted)
+    expect(
+      store.commands
+        .slice(commandsBeforeDelete)
+        .filter(
+          (command) => command.name === "ListObjectsV2Command",
+        ),
+    ).toHaveLength(2)
     expect(store.current(`${PREFIX}/memory/remove.md`)).toBeUndefined()
     expect(store.versions(`${PREFIX}/memory/remove.md`)).toEqual(
       expect.arrayContaining([retained]),

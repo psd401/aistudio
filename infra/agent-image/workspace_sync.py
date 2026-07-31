@@ -176,6 +176,12 @@ _TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 # deliberately not auto-retried: a client timeout does not prove the web tier
 # stopped working, and overlapping retries would queue behind the same lock.
 WORKSPACE_CHECKPOINT_BROKER_TIMEOUT_SECONDS = 240
+# Generation-fenced mutations scan the authoritative workspace while holding
+# the broker lock. Large migrated workspaces can legitimately take more than
+# the generic 20-second read timeout. Keep one request alive long enough to
+# settle rather than launching an overlapping retry; the turn-wide deadline
+# remains the hard upper bound.
+WORKSPACE_MUTATION_BROKER_TIMEOUT_SECONDS = 60
 WORKSPACE_FLUSH_TOKEN_PATH = (
     "/run/psd-agent-authority/workspace-flush-token"
 )
@@ -1256,6 +1262,14 @@ def _broker_request(
         else ()
     )
     for attempt in range(len(retry_delays) + 1):
+        # A spent turn-wide budget is terminal. Calculate it outside the
+        # network exception handler so the local deadline is never mistaken
+        # for a transient socket timeout and retried after finalization has
+        # already expired.
+        request_timeout = _remaining_timeout(
+            deadline_monotonic,
+            maximum_timeout_seconds,
+        )
         request = urllib.request.Request(
             "http://127.0.0.1:18791/agent-broker/api/agent/workspace-storage",
             data=body,
@@ -1268,10 +1282,7 @@ def _broker_request(
         try:
             with urllib.request.urlopen(
                 request,
-                timeout=_remaining_timeout(
-                    deadline_monotonic,
-                    maximum_timeout_seconds,
-                ),
+                timeout=request_timeout,
             ) as response:
                 result = json.loads(response.read())
             if not isinstance(result, dict):
@@ -1438,6 +1449,9 @@ def _complete_upload_reservation(
         },
         deadline_monotonic,
         retry_transient=True,
+        maximum_timeout_seconds=(
+            WORKSPACE_MUTATION_BROKER_TIMEOUT_SECONDS
+        ),
     )
     next_generation = completed.get("workspaceGeneration")
     e_tag = completed.get("eTag")
@@ -1468,6 +1482,9 @@ def _delete_workspace_path(
         },
         deadline_monotonic,
         retry_transient=True,
+        maximum_timeout_seconds=(
+            WORKSPACE_MUTATION_BROKER_TIMEOUT_SECONDS
+        ),
     )
     next_generation = result.get("workspaceGeneration")
     if (
@@ -2511,13 +2528,24 @@ def push_workspace(
                 marker_upload = None
             _pending_workspace_generations[prefix] = current_generation
             _pending_workspace_completions.pop(prefix, None)
-        # Re-read immediately before opening an upload reservation. This is a
-        # client-side early abort; the broker repeats the exact comparison
-        # under its cross-instance commit mutex before each target promotion.
-        before_upload = _list_remote_workspace_snapshot(
-            prefix,
-            deadline_monotonic,
-        )
+        # The successful restore/refresh already retained the complete remote
+        # snapshot. `_ensure_workspace_checkpoint` just re-read the
+        # authoritative workspace under the broker lock and proved that its
+        # generation still equals this cache. Re-listing thousands of legacy
+        # objects here adds no information. A resumed partial push does not
+        # have that guarantee, so it deliberately falls back to a fresh list.
+        cached_before_upload = _remote_workspace_snapshots.get(prefix)
+        if (
+            not continuing_pending_push
+            and cached_before_upload is not None
+            and cached_before_upload.generation == current_generation
+        ):
+            before_upload = cached_before_upload
+        else:
+            before_upload = _list_remote_workspace_snapshot(
+                prefix,
+                deadline_monotonic,
+            )
         if before_upload.generation is None:
             raise WorkspaceGenerationUnavailable(
                 "workspace broker metadata is incomplete; refusing final push"
@@ -2598,7 +2626,7 @@ def push_workspace(
         pair: tuple[str, str, int, int, int, str],
         prepared: _PreparedWorkspaceUpload,
         generation: str,
-    ) -> str:
+    ) -> tuple[str, str | None]:
         (
             _path,
             relative,
@@ -2613,7 +2641,7 @@ def push_workspace(
                 modified_ns,
                 changed_ns,
             )
-            return generation
+            return generation, prepared.unchanged_e_tag
         if prepared.reservation_id is None:
             raise RuntimeError(
                 "workspace upload reservation id is unavailable"
@@ -2628,7 +2656,7 @@ def push_workspace(
                     changed_ns=changed_ns,
                 )
             )
-            next_generation, _e_tag = _complete_upload_reservation(
+            next_generation, e_tag = _complete_upload_reservation(
                 prepared.reservation_id,
                 generation,
                 deadline_monotonic,
@@ -2639,7 +2667,7 @@ def push_workspace(
                 modified_ns,
                 changed_ns,
             )
-            return next_generation
+            return next_generation, e_tag
         completed = _broker_request(
             {
                 "operation": "complete-upload",
@@ -2655,7 +2683,8 @@ def push_workspace(
                 modified_ns,
                 changed_ns,
             )
-            return generation
+            e_tag = completed.get("eTag")
+            return generation, e_tag if isinstance(e_tag, str) else None
         if (
             not isinstance(completed.get("key"), str)
             or not isinstance(completed.get("eTag"), str)
@@ -2671,7 +2700,7 @@ def push_workspace(
             modified_ns,
             changed_ns,
         )
-        return next_generation
+        return next_generation, completed["eTag"]
 
     count = 0
     started = time.monotonic()
@@ -2698,12 +2727,24 @@ def push_workspace(
 
     try:
         assert current_generation is not None
+        final_entries = (
+            {
+                relative: (
+                    before_upload.sizes[relative],
+                    before_upload.e_tags[relative],
+                )
+                for relative in before_upload.paths
+            }
+            if require_generation
+            else {}
+        )
         for relative in to_delete:
             current_generation = _delete_workspace_path(
                 relative,
                 current_generation,
                 deadline_monotonic,
             )
+            final_entries.pop(relative, None)
             _uploaded_state.pop((prefix, relative), None)
             if require_generation:
                 _pending_workspace_generations[prefix] = (
@@ -2711,11 +2752,17 @@ def push_workspace(
                 )
             count += 1
         for pair, prepared in staged:
-            current_generation = _complete_one(
+            current_generation, e_tag = _complete_one(
                 pair,
                 prepared,
                 current_generation,
             )
+            if require_generation and e_tag is None:
+                raise WorkspaceGenerationUnavailable(
+                    "workspace upload completion returned no generation metadata"
+                )
+            if e_tag is not None:
+                final_entries[pair[1]] = (pair[2], e_tag)
             if require_generation:
                 _pending_workspace_generations[prefix] = current_generation
             count += 1
@@ -2733,33 +2780,52 @@ def push_workspace(
                     "workspace push incomplete (migration marker stage failed) "
                     f"for prefix {prefix}: {marker_error or 'unknown error'}"
                 )
-            current_generation = _complete_one(
+            current_generation, marker_e_tag = _complete_one(
                 marker_pair,
                 marker_prepared,
                 current_generation,
             )
+            if require_generation and marker_e_tag is None:
+                raise WorkspaceGenerationUnavailable(
+                    "workspace marker completion returned no generation metadata"
+                )
+            if marker_e_tag is not None:
+                final_entries[marker_pair[1]] = (
+                    marker_pair[2],
+                    marker_e_tag,
+                )
             if require_generation:
                 _pending_workspace_generations[prefix] = current_generation
             count += 1
 
         if require_generation:
-            committed = _list_remote_workspace_snapshot(
-                prefix,
-                deadline_monotonic,
-            )
-            if committed.generation is None:
-                raise WorkspaceGenerationUnavailable(
-                    "workspace broker metadata became incomplete after push"
-                )
-            if committed.generation != current_generation:
+            synthesized_generation = _generation_for_entries(final_entries)
+            if synthesized_generation != current_generation:
                 raise WorkspaceGenerationConflict(
-                    "authoritative workspace changed during final push"
+                    "workspace mutation results did not form the broker generation"
                 )
+            # This call performs the authoritative full snapshot read under
+            # the broker lock and refuses the commit unless it exactly equals
+            # current_generation. A separate client-side full listing right
+            # before it was the same check twice and consumed another large
+            # fraction of the turn-final deadline.
             _commit_workspace_checkpoint(
                 prefix,
                 base_checkpoint_generation,
                 current_generation,
                 deadline_monotonic,
+            )
+            committed = _RemoteWorkspaceSnapshot(
+                paths=tuple(sorted(final_entries)),
+                sizes={
+                    relative: metadata[0]
+                    for relative, metadata in final_entries.items()
+                },
+                e_tags={
+                    relative: metadata[1]
+                    for relative, metadata in final_entries.items()
+                },
+                generation=current_generation,
             )
             _remote_workspace_snapshots[prefix] = committed
             _pending_workspace_generations.pop(prefix, None)
