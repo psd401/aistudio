@@ -1921,20 +1921,17 @@ export async function deleteWorkspacePath(
           (entry) => entry.path !== path,
         ),
       )
-      const nextSnapshot = await readWorkspaceGenerationSnapshot(
-        signedWorkspacePrefix,
-      )
-      if (
-        nextSnapshot.entries.has(path) ||
-        nextSnapshot.generation !== expectedNextGeneration
-      ) {
-        throw new WorkspaceStorageSettlementUncertainError(
-          "Workspace path deletion generation could not be confirmed",
-        )
-      }
+      // S3 is strongly consistent, the versionless delete returned both a
+      // delete marker and its VersionId, and this mutation still owns the
+      // per-workspace advisory lock. Re-listing the entire workspace here is
+      // therefore redundant. On large, migrated workspaces that second scan
+      // takes longer than the agent's request timeout and causes an
+      // overlapping idempotent retry. Derive the next generation from the
+      // already-validated pre-delete snapshot, exactly as upload promotion
+      // does below.
       return {
         deleted: true,
-        workspaceGeneration: nextSnapshot.generation,
+        workspaceGeneration: expectedNextGeneration,
       }
     },
   )

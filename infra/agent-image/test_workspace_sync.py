@@ -989,14 +989,6 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
 
     def test_generation_mismatch_aborts_before_any_upload(self):
         (self.root / "state.sqlite").write_bytes(b"local-history")
-        workspace_sync._remote_workspace_snapshots["owner"] = (
-            workspace_sync._RemoteWorkspaceSnapshot(
-                paths=(),
-                sizes={},
-                e_tags={},
-                generation="1" * 64,
-            )
-        )
         workspace_sync._committed_workspace_generations["owner"] = "1" * 64
         changed = workspace_sync._RemoteWorkspaceSnapshot(
             paths=(),
@@ -1034,7 +1026,9 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
         local.write_bytes(b"local-history")
         metadata = local.stat()
         old_generation = "1" * 64
-        advanced_generation = "2" * 64
+        advanced_generation = workspace_sync._generation_for_entries({
+            "state.sqlite": (metadata.st_size, '"new"'),
+        })
         workspace_sync._pending_workspace_generations["owner"] = (
             old_generation
         )
@@ -1101,9 +1095,13 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
         child = self.root / "a" / "b"
         child.parent.mkdir()
         child.write_bytes(b"child")
-        base_generation = "1" * 64
-        deleted_generation = "2" * 64
-        final_generation = "3" * 64
+        base_generation = workspace_sync._generation_for_entries({
+            "a": (4, '"old"'),
+        })
+        deleted_generation = workspace_sync._generation_for_entries({})
+        final_generation = workspace_sync._generation_for_entries({
+            "a/b": (5, '"child"'),
+        })
         workspace_sync._committed_workspace_generations["owner"] = (
             base_generation
         )
@@ -1112,12 +1110,6 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
             sizes={"a": 4},
             e_tags={"a": '"old"'},
             generation=base_generation,
-        )
-        committed = workspace_sync._RemoteWorkspaceSnapshot(
-            paths=("a/b",),
-            sizes={"a/b": 5},
-            e_tags={"a/b": '"child"'},
-            generation=final_generation,
         )
         events = []
         reservation = "36bb0456-1c51-4fb8-97d1-4e87d02765ce"
@@ -1143,7 +1135,7 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
         ), mock.patch.object(
             workspace_sync,
             "_list_remote_workspace_snapshot",
-            side_effect=[before, committed],
+            return_value=before,
         ), mock.patch.object(
             workspace_sync,
             "_upload_spec",
@@ -1182,6 +1174,85 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
         delete.assert_called_once_with("a", base_generation, None)
         self.assertLess(events.index("delete"), events.index("promote"))
         self.assertLess(events.index("promote"), events.index("commit"))
+
+    def test_verified_restore_cache_avoids_duplicate_pre_and_post_lists(self):
+        local = self.root / "state.sqlite"
+        local.write_bytes(b"local-history")
+        size = local.stat().st_size
+        base_generation = workspace_sync._generation_for_entries({
+            "state.sqlite": (3, '"old"'),
+        })
+        final_generation = workspace_sync._generation_for_entries({
+            "state.sqlite": (size, '"new"'),
+        })
+        cached = workspace_sync._RemoteWorkspaceSnapshot(
+            paths=("state.sqlite",),
+            sizes={"state.sqlite": 3},
+            e_tags={"state.sqlite": '"old"'},
+            generation=base_generation,
+        )
+        workspace_sync._remote_workspace_snapshots["owner"] = cached
+        workspace_sync._committed_workspace_generations["owner"] = (
+            base_generation
+        )
+        prepared = (
+            "https://upload.invalid/state",
+            "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
+            {
+                "Content-Length": str(size),
+                "Content-Type": "application/octet-stream",
+                "x-amz-checksum-sha256":
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            },
+        )
+
+        with mock.patch.object(
+            workspace_sync,
+            "WORKSPACE_DIR",
+            self.root,
+        ), mock.patch.object(
+            workspace_sync,
+            "_ensure_workspace_checkpoint",
+            return_value=base_generation,
+        ), mock.patch.object(
+            workspace_sync,
+            "_list_remote_workspace_snapshot",
+        ) as list_snapshot, mock.patch.object(
+            workspace_sync,
+            "_upload_spec",
+            return_value=prepared,
+        ), mock.patch.object(
+            workspace_sync,
+            "_stream_upload",
+        ), mock.patch.object(
+            workspace_sync,
+            "_complete_upload_reservation",
+            return_value=(final_generation, '"new"'),
+        ), mock.patch.object(
+            workspace_sync,
+            "_commit_workspace_checkpoint",
+            return_value=final_generation,
+        ) as commit:
+            self.assertEqual(
+                workspace_sync.push_workspace(
+                    "owner",
+                    expected_generation=base_generation,
+                    require_generation=True,
+                ),
+                1,
+            )
+
+        list_snapshot.assert_not_called()
+        commit.assert_called_once_with(
+            "owner",
+            base_generation,
+            final_generation,
+            None,
+        )
+        self.assertEqual(
+            workspace_sync._remote_workspace_snapshots["owner"].generation,
+            final_generation,
+        )
 
 
 class BoundedTransferTests(unittest.TestCase):
@@ -1435,6 +1506,83 @@ class BoundedTransferTests(unittest.TestCase):
             ):
                 workspace_sync._ensure_workspace_checkpoint("owner")
         self.assertEqual(timed_out.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_generation_mutations_use_extended_deadline_bounded_timeout(self):
+        generation = "a" * 64
+        advanced = "b" * 64
+        completion = _FakeResponse(
+            json.dumps({
+                "key": "owner/state/openclaw.sqlite",
+                "eTag": '"new"',
+                "workspaceGeneration": advanced,
+            }).encode("utf-8")
+        )
+        with mock.patch.object(
+            workspace_sync.urllib.request,
+            "urlopen",
+            return_value=completion,
+        ) as request:
+            self.assertEqual(
+                workspace_sync._complete_upload_reservation(
+                    "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
+                    generation,
+                    None,
+                ),
+                (advanced, '"new"'),
+            )
+        self.assertEqual(
+            request.call_args.kwargs["timeout"],
+            workspace_sync.WORKSPACE_MUTATION_BROKER_TIMEOUT_SECONDS,
+        )
+
+        deletion = _FakeResponse(
+            json.dumps({
+                "deleted": True,
+                "workspaceGeneration": advanced,
+            }).encode("utf-8")
+        )
+        with mock.patch.object(
+            workspace_sync.time,
+            "monotonic",
+            return_value=100.0,
+        ), mock.patch.object(
+            workspace_sync.urllib.request,
+            "urlopen",
+            return_value=deletion,
+        ) as request:
+            self.assertEqual(
+                workspace_sync._delete_workspace_path(
+                    "devices/pending.json",
+                    generation,
+                    107.0,
+                ),
+                advanced,
+            )
+        self.assertEqual(request.call_args.kwargs["timeout"], 7.0)
+
+    def test_spent_deadline_does_not_launch_or_retry_broker_request(self):
+        with mock.patch.object(
+            workspace_sync.time,
+            "monotonic",
+            return_value=100.0,
+        ), mock.patch.object(
+            workspace_sync.urllib.request,
+            "urlopen",
+        ) as request, mock.patch.object(
+            workspace_sync.time,
+            "sleep",
+        ) as sleep:
+            with self.assertRaisesRegex(
+                TimeoutError,
+                "workspace sync deadline exceeded",
+            ):
+                workspace_sync._delete_workspace_path(
+                    "devices/pending.json",
+                    "a" * 64,
+                    100.0,
+                )
+        request.assert_not_called()
         sleep.assert_not_called()
 
     def test_broker_exhaustion_still_fails_closed(self):
