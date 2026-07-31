@@ -60,6 +60,10 @@ class WorkspaceRestoreIncomplete(RuntimeError):
     """
 
 
+class WorkspacePushIncomplete(RuntimeError):
+    """One or more local workspace files were not durably persisted."""
+
+
 WORKSPACE_DIR = Path("/home/node/.openclaw")
 # All of these are runaway-traversal BACKSTOPS, not product limits. #1353 set
 # them below real-world workspace sizes and the sync path treated hitting one
@@ -108,14 +112,12 @@ _OPENCLAW_MIGRATION_MARKER_BYTES = (
 )
 
 
-def _download_workspace_file(
-    source_url: str,
+def _install_workspace_file(
+    source: Path,
     destination: Path,
     workspace_root: Path,
-    content_length: int,
-    required_headers: dict[str, str],
 ) -> None:
-    """Restore one exact bounded object without root writing into model state."""
+    """Atomically install a staged object without root writing into model state."""
     destination.relative_to(workspace_root)
     writer = r"""
 import os
@@ -142,36 +144,8 @@ finally:
     except FileNotFoundError:
         pass
 """
-    request = urllib.request.Request(source_url, headers=required_headers)
-    written = 0
-    temporary_fd, temporary_name = tempfile.mkstemp(
-        prefix="workspace-download-",
-        dir="/tmp",
-    )
-    temporary_path = Path(temporary_name)
     process: subprocess.Popen[bytes] | None = None
     try:
-        with os.fdopen(temporary_fd, "wb") as output:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                response_length = response.headers.get("Content-Length")
-                if response_length is not None and (
-                    not response_length.isdigit()
-                    or int(response_length) != content_length
-                ):
-                    raise RuntimeError("workspace download length mismatch")
-                while True:
-                    chunk = response.read(TRANSFER_CHUNK_BYTES)
-                    if not chunk:
-                        break
-                    written += len(chunk)
-                    if written > content_length:
-                        raise RuntimeError(
-                            "workspace download exceeded declared length"
-                        )
-                    output.write(chunk)
-        if written != content_length:
-            raise RuntimeError("workspace download ended before declared length")
-
         process_options: dict[str, object] = {}
         if os.geteuid() == 0:
             process_options = {
@@ -195,9 +169,9 @@ finally:
             **process_options,
         )
         assert process.stdin is not None
-        with temporary_path.open("rb") as source:
+        with source.open("rb") as staged:
             while True:
-                chunk = source.read(TRANSFER_CHUNK_BYTES)
+                chunk = staged.read(TRANSFER_CHUNK_BYTES)
                 if not chunk:
                     break
                 process.stdin.write(chunk)
@@ -224,6 +198,62 @@ finally:
             if process.stderr is not None and not process.stderr.closed:
                 process.stderr.close()
         raise
+
+
+def _download_workspace_file(
+    source_url: str,
+    destination: Path,
+    workspace_root: Path,
+    content_length: int,
+    required_headers: dict[str, str],
+) -> None:
+    """Restore one exact bounded object without root writing into model state."""
+    request = urllib.request.Request(source_url, headers=required_headers)
+    written = 0
+    temporary_fd, temporary_name = tempfile.mkstemp(
+        prefix="workspace-download-",
+        dir="/tmp",
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(temporary_fd, "wb") as output:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                response_length = response.headers.get("Content-Length")
+                if response_length is not None and (
+                    not response_length.isdigit()
+                    or int(response_length) != content_length
+                ):
+                    raise RuntimeError("workspace download length mismatch")
+                while True:
+                    chunk = response.read(TRANSFER_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > content_length:
+                        raise RuntimeError(
+                            "workspace download exceeded declared length"
+                        )
+                    output.write(chunk)
+        if written != content_length:
+            raise RuntimeError("workspace download ended before declared length")
+        _install_workspace_file(temporary_path, destination, workspace_root)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _materialize_empty_workspace_file(
+    destination: Path,
+    workspace_root: Path,
+) -> None:
+    """Restore a broker-declared empty object without requesting an invalid range."""
+    temporary_fd, temporary_name = tempfile.mkstemp(
+        prefix="workspace-empty-",
+        dir="/tmp",
+    )
+    os.close(temporary_fd)
+    temporary_path = Path(temporary_name)
+    try:
+        _install_workspace_file(temporary_path, destination, workspace_root)
     finally:
         temporary_path.unlink(missing_ok=True)
 
@@ -671,6 +701,7 @@ def pull_workspace(prefix: str) -> int:
     # migration marker sorts after agents/* in S3, so deciding page-by-page can
     # mistakenly trim the very JSONL history a first-time migration needs.
     listed_paths: list[str] = []
+    listed_sizes: dict[str, int] = {}
     skipped = 0
     truncated = False
     continuation = None
@@ -686,6 +717,7 @@ def pull_workspace(prefix: str) -> int:
         paths = page.get("paths", [])
         if not isinstance(paths, list):
             raise RuntimeError("workspace broker returned invalid path list")
+        page_paths: list[str] = []
         for relative in paths:
             if not isinstance(relative, str):
                 continue
@@ -700,15 +732,100 @@ def pull_workspace(prefix: str) -> int:
                 truncated = True
                 break
             listed_paths.append(relative)
+            page_paths.append(relative)
+        entries = page.get("entries")
+        if isinstance(entries, list):
+            valid_page_paths = frozenset(page_paths)
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                entry_path = entry.get("path")
+                entry_size = entry.get("size")
+                if (
+                    isinstance(entry_path, str)
+                    and entry_path in valid_page_paths
+                    and isinstance(entry_size, int)
+                    and not isinstance(entry_size, bool)
+                    and entry_size >= 0
+                ):
+                    listed_sizes[entry_path] = entry_size
         if truncated:
             break
         continuation = page.get("continuationToken")
         if not isinstance(continuation, str) or not continuation:
             break
 
-    migration_complete = OPENCLAW_MIGRATION_MARKER in listed_paths
-    to_download: list[tuple[str, Path]] = []
+    from concurrent.futures import ThreadPoolExecutor
+
+    total_bytes = 0
+    total_lock = threading.Lock()
+
+    def _download_one(item: tuple[str, Path, Optional[int]]) -> Optional[str]:
+        nonlocal total_bytes
+        relative, dest, declared_size = item
+        try:
+            if declared_size == 0:
+                _materialize_empty_workspace_file(dest, workspace_root)
+                return None
+            url, content_length, required_headers = _download_spec(relative)
+            with total_lock:
+                if total_bytes + content_length > MAX_SYNC_TOTAL_BYTES:
+                    # Never raise here: an aborted restore leaves image
+                    # defaults in place and a later push then overwrites the
+                    # user's real files. Skip this one file, keep going, and
+                    # let pull_workspace mark the restore incomplete so the
+                    # caller suppresses the push.
+                    logger.error(
+                        "workspace restore hit the aggregate byte backstop — "
+                        "restore INCOMPLETE, push will be disabled",
+                    )
+                    return f"{relative}: aggregate byte backstop"
+                total_bytes += content_length
+            _download_workspace_file(
+                url,
+                dest,
+                workspace_root,
+                content_length,
+                required_headers,
+            )
+            return None
+        except Exception as exc:  # noqa: BLE001
+            return f"{relative}: {exc}"
+
+    # The marker controls whether hundreds of megabytes of legacy transcripts
+    # may be omitted. Restore and validate its exact bytes before making that
+    # decision: path presence alone is not a trustworthy migration boundary.
+    marker_restored = False
+    migration_complete = False
+    if OPENCLAW_MIGRATION_MARKER in listed_paths:
+        marker_dest = (WORKSPACE_DIR / OPENCLAW_MIGRATION_MARKER).resolve()
+        try:
+            marker_dest.relative_to(workspace_root)
+        except ValueError as exc:
+            raise WorkspaceRestoreIncomplete(
+                f"restore incomplete (unsafe migration marker) for prefix {prefix}"
+            ) from exc
+        marker_error = _download_one((
+            OPENCLAW_MIGRATION_MARKER,
+            marker_dest,
+            listed_sizes.get(OPENCLAW_MIGRATION_MARKER),
+        ))
+        if marker_error is not None:
+            raise WorkspaceRestoreIncomplete(
+                "restore incomplete (migration marker download failed: "
+                f"{marker_error}) for prefix {prefix}"
+            )
+        marker_restored = True
+        migration_complete = openclaw_migration_complete()
+        if not migration_complete:
+            logger.warning(
+                "workspace migration marker is invalid; restoring legacy archive"
+            )
+
+    to_download: list[tuple[str, Path, Optional[int]]] = []
     for relative in listed_paths:
+        if relative == OPENCLAW_MIGRATION_MARKER and marker_restored:
+            continue
         if migration_complete and _is_imported_legacy_state(relative):
             skipped += 1
             continue
@@ -737,43 +854,9 @@ def pull_workspace(prefix: str) -> int:
             logger.warning("workspace pull skip (path escape) %s", relative)
             skipped += 1
             continue
-        to_download.append((relative, dest))
+        to_download.append((relative, dest, listed_sizes.get(relative)))
 
-    from concurrent.futures import ThreadPoolExecutor
-
-    total_bytes = 0
-    total_lock = threading.Lock()
-
-    def _download_one(item: tuple[str, Path]) -> Optional[str]:
-        nonlocal total_bytes
-        relative, dest = item
-        try:
-            url, content_length, required_headers = _download_spec(relative)
-            with total_lock:
-                if total_bytes + content_length > MAX_SYNC_TOTAL_BYTES:
-                    # Never raise here: an aborted restore leaves image
-                    # defaults in place and a later push then overwrites the
-                    # user's real files. Skip this one file, keep going, and
-                    # let pull_workspace mark the restore incomplete so the
-                    # caller suppresses the push.
-                    logger.error(
-                        "workspace restore hit the aggregate byte backstop — "
-                        "restore INCOMPLETE, push will be disabled",
-                    )
-                    return f"{relative}: aggregate byte backstop"
-                total_bytes += content_length
-            _download_workspace_file(
-                url,
-                dest,
-                workspace_root,
-                content_length,
-                required_headers,
-            )
-            return None
-        except Exception as exc:  # noqa: BLE001
-            return f"{relative}: {exc}"
-
-    count = 0
+    count = 1 if marker_restored else 0
     download_errors: list[str] = []
     started = time.monotonic()
     with ThreadPoolExecutor(max_workers=SYNC_WORKERS) as pool:
@@ -1045,6 +1128,8 @@ def push_workspace(
     # shutdown flush, so state can be lost if the microVM is torn down
     # mid-push.
     to_upload: list[tuple[str, str, int, int, str]] = []
+    marker_upload: Optional[tuple[str, str, int, int, str]] = None
+    preparation_errors: list[str] = []
     total_bytes = 0
     for relative in _iter_workspace_files(deadline_monotonic):
         path = WORKSPACE_DIR / relative
@@ -1052,6 +1137,7 @@ def push_workspace(
             source, metadata = _open_regular_no_follow(relative)
         except OSError as exc:
             logger.warning("workspace push skip unsafe file %s: %s", relative, exc)
+            preparation_errors.append(f"{relative}: {exc}")
             continue
         if metadata.st_size < 1:
             source.close()
@@ -1059,22 +1145,29 @@ def push_workspace(
         if metadata.st_size > MAX_SYNC_FILE_BYTES:
             source.close()
             logger.warning("workspace push skip oversized file %s", relative)
+            preparation_errors.append(f"{relative}: oversized file")
             continue
         signature = (metadata.st_size, metadata.st_mtime_ns)
         state_key = (prefix, relative)
         if _uploaded_state.get(state_key) == signature:
             source.close()
             continue
-        if len(to_upload) >= MAX_SYNC_FILES:
+        queued_files = len(to_upload) + int(marker_upload is not None)
+        if queued_files >= MAX_SYNC_FILES:
             source.close()
             logger.warning("workspace push file-count limit reached")
+            preparation_errors.append("file-count limit reached")
             break
         if total_bytes + metadata.st_size > MAX_SYNC_TOTAL_BYTES:
             source.close()
             logger.warning("workspace push aggregate byte limit reached")
+            preparation_errors.append("aggregate byte limit reached")
             break
         total_bytes += metadata.st_size
         digest = hashlib.sha256()
+        marker_bytes = (
+            bytearray() if relative == OPENCLAW_MIGRATION_MARKER else None
+        )
         with source:
             while True:
                 _remaining_timeout(deadline_monotonic, 60)
@@ -1082,15 +1175,24 @@ def push_workspace(
                 if not chunk:
                     break
                 digest.update(chunk)
-        to_upload.append(
-            (
-                str(path),
-                relative,
-                metadata.st_size,
-                metadata.st_mtime_ns,
-                base64.b64encode(digest.digest()).decode("ascii"),
-            )
+                if marker_bytes is not None:
+                    marker_bytes.extend(chunk)
+        upload = (
+            str(path),
+            relative,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            base64.b64encode(digest.digest()).decode("ascii"),
         )
+        if relative == OPENCLAW_MIGRATION_MARKER:
+            if bytes(marker_bytes or b"") != _OPENCLAW_MIGRATION_MARKER_BYTES:
+                logger.warning(
+                    "workspace push ignored invalid migration marker"
+                )
+                continue
+            marker_upload = upload
+        else:
+            to_upload.append(upload)
 
     from concurrent.futures import ThreadPoolExecutor
 
@@ -1133,6 +1235,7 @@ def push_workspace(
             return f"{path}: {exc}"
 
     count = 0
+    upload_errors = list(preparation_errors)
     started = time.monotonic()
     with ThreadPoolExecutor(max_workers=SYNC_WORKERS) as pool:
         for err in pool.map(_upload_one, to_upload):
@@ -1140,6 +1243,26 @@ def push_workspace(
                 count += 1
             else:
                 logger.warning("workspace push skip %s", err)
+                upload_errors.append(err)
+    if upload_errors:
+        raise WorkspacePushIncomplete(
+            f"workspace push incomplete ({len(upload_errors)} file error(s)) "
+            f"for prefix {prefix}"
+        )
+
+    # Commit the migration boundary last. If this upload is interrupted, the
+    # next microVM safely replays the preserved legacy archive. Once the marker
+    # exists remotely, every database/state object from this snapshot has
+    # already completed and been verified by the broker.
+    if marker_upload is not None:
+        marker_error = _upload_one(marker_upload)
+        if marker_error is not None:
+            logger.warning("workspace push skip %s", marker_error)
+            raise WorkspacePushIncomplete(
+                "workspace push incomplete (migration marker commit failed) "
+                f"for prefix {prefix}"
+            )
+        count += 1
     elapsed = time.monotonic() - started
 
     logger.info(

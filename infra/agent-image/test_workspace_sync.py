@@ -57,19 +57,34 @@ class PullTraversalTests(unittest.TestCase):
             os.chmod(Path(td), 0o755)
             os.chown(self.root, node.pw_uid, node.pw_gid)
 
-    def _run_pull(self, keys, prefix="userA"):
+    def _run_pull(self, keys, prefix="userA", entries=None, contents=None):
         downloaded = []
+        response_bodies = {}
 
         def fake_broker(payload):
             self.assertEqual(payload, {"operation": "list"})
-            return {"paths": keys}
+            result = {"paths": keys}
+            if entries is not None:
+                result["entries"] = entries
+            return result
 
         def fake_download_spec(relative):
             downloaded.append((relative, str(self.root / relative)))
+            body = (
+                contents.get(relative, b"x")
+                if contents is not None
+                else (
+                    workspace_sync._OPENCLAW_MIGRATION_MARKER_BYTES
+                    if relative == workspace_sync.OPENCLAW_MIGRATION_MARKER
+                    else b"x"
+                )
+            )
+            url = f"https://download.invalid/{relative}"
+            response_bodies[url] = body
             return (
-                f"https://download.invalid/{relative}",
-                1,
-                {"Range": "bytes=0-0"},
+                url,
+                len(body),
+                {"Range": f"bytes=0-{len(body) - 1}"},
             )
 
         with mock.patch.object(workspace_sync, "WORKSPACE_DIR", self.root), \
@@ -78,7 +93,9 @@ class PullTraversalTests(unittest.TestCase):
                 mock.patch.object(
                     workspace_sync.urllib.request,
                     "urlopen",
-                    side_effect=lambda *_args, **_kwargs: _FakeResponse(b"x"),
+                    side_effect=lambda request, **_kwargs: _FakeResponse(
+                        response_bodies[request.full_url]
+                    ),
                 ):
             count = workspace_sync.pull_workspace(prefix)
         escaped = [d for (_, d) in downloaded
@@ -111,6 +128,22 @@ class PullTraversalTests(unittest.TestCase):
         count, downloaded, escaped = self._run_pull(keys)
         self.assertEqual(count, 1)
         self.assertTrue((self.root / "a" / "b" / "c.md").exists())
+
+    def test_declared_empty_object_replaces_image_default_without_download(self):
+        destination = self.root / "memory" / "cleared.md"
+        destination.parent.mkdir()
+        destination.write_bytes(b"image default")
+        relative = "memory/cleared.md"
+
+        count, downloaded, escaped = self._run_pull(
+            [relative],
+            entries=[{"path": relative, "size": 0, "lastModified": 123}],
+        )
+
+        self.assertEqual(count, 1)
+        self.assertEqual(downloaded, [])
+        self.assertEqual(escaped, [])
+        self.assertEqual(destination.read_bytes(), b"")
 
     def test_first_migration_restores_every_legacy_transcript(self):
         keys = [
@@ -148,6 +181,22 @@ class PullTraversalTests(unittest.TestCase):
                 "memory/MEMORY.md",
             },
         )
+
+    def test_invalid_marker_bytes_restore_legacy_archive(self):
+        keys = [
+            workspace_sync.OPENCLAW_MIGRATION_MARKER,
+            "state/openclaw.sqlite",
+            "agents/main/sessions/s0001.jsonl",
+            "openclaw-workspace-state.json",
+        ]
+
+        count, downloaded, _ = self._run_pull(
+            keys,
+            contents={workspace_sync.OPENCLAW_MIGRATION_MARKER: b"invalid"},
+        )
+
+        self.assertEqual(count, len(keys))
+        self.assertEqual({path for path, _ in downloaded}, set(keys))
 
     def test_restored_file_is_writable_by_model_uid(self):
         count, _, _ = self._run_pull(["memory/new.md"])
@@ -207,7 +256,10 @@ class PullTraversalTests(unittest.TestCase):
         original = protected.stat()
         (self.root / "escape.md").symlink_to(protected)
 
-        count, downloaded, _ = self._run_pull(["escape.md"])
+        count, downloaded, _ = self._run_pull(
+            ["escape.md"],
+            entries=[{"path": "escape.md", "size": 0, "lastModified": 123}],
+        )
 
         self.assertEqual(count, 0)
         self.assertEqual(downloaded, [])
@@ -673,6 +725,62 @@ class SQLitePersistenceTests(unittest.TestCase):
             self.assertFalse(workspace_sync.openclaw_migration_complete())
             workspace_sync.mark_openclaw_migration_complete()
             self.assertTrue(workspace_sync.openclaw_migration_complete())
+
+    def test_marker_upload_commits_after_database_uploads(self):
+        database = self.root / "state" / "openclaw.sqlite"
+        database.parent.mkdir(parents=True)
+        database.write_bytes(b"database")
+        with mock.patch.object(workspace_sync, "WORKSPACE_DIR", self.root):
+            workspace_sync.mark_openclaw_migration_complete()
+
+        prepared = []
+
+        def prepare(relative, *_args):
+            prepared.append(relative)
+            return None
+
+        workspace_sync._uploaded_state.clear()
+        self.addCleanup(workspace_sync._uploaded_state.clear)
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync, "_upload_spec", side_effect=prepare
+        ):
+            self.assertEqual(workspace_sync.push_workspace("owner"), 2)
+
+        self.assertEqual(prepared[-1], workspace_sync.OPENCLAW_MIGRATION_MARKER)
+        self.assertEqual(prepared[:-1], ["state/openclaw.sqlite"])
+
+    def test_marker_upload_is_withheld_when_database_upload_fails(self):
+        database = self.root / "state" / "openclaw.sqlite"
+        database.parent.mkdir(parents=True)
+        database.write_bytes(b"database")
+        with mock.patch.object(workspace_sync, "WORKSPACE_DIR", self.root):
+            workspace_sync.mark_openclaw_migration_complete()
+
+        prepared = []
+
+        def prepare(relative, *_args):
+            prepared.append(relative)
+            if relative == "state/openclaw.sqlite":
+                raise RuntimeError("database upload failed")
+            return None
+
+        workspace_sync._uploaded_state.clear()
+        self.addCleanup(workspace_sync._uploaded_state.clear)
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync, "_upload_spec", side_effect=prepare
+        ):
+            with self.assertRaisesRegex(
+                workspace_sync.WorkspacePushIncomplete,
+                "1 file error",
+            ):
+                workspace_sync.push_workspace("owner")
+
+        self.assertEqual(prepared, ["state/openclaw.sqlite"])
+        self.assertNotIn(workspace_sync.OPENCLAW_MIGRATION_MARKER, prepared)
 
     def test_checkpoint_includes_wal_and_validates_database(self):
         database = self.root / "state" / "openclaw.sqlite"
