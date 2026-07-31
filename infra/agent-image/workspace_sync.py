@@ -311,9 +311,9 @@ _SKIP_SUFFIXES = (
     ".sqlite-wal",
     ".sqlite-shm",
     ".sqlite-journal",
+    ".reindex-lock.sqlite",
 )
 _SKIP_BASENAMES = frozenset({
-    ".reindex-lock.sqlite",
     "plugins.sync.lock",
 })
 

@@ -663,6 +663,7 @@ class SQLitePersistenceTests(unittest.TestCase):
             "state/openclaw.sqlite-shm",
             "agents/main/agent/openclaw-agent.sqlite-journal",
             "agents/main/agent/.reindex-lock.sqlite",
+            "agents/main/agent/openclaw-agent.sqlite.reindex-lock.sqlite",
             "plugins.sync.lock",
         ):
             self.assertTrue(workspace_sync._should_skip_relative(relative))
