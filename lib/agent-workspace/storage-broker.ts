@@ -41,6 +41,13 @@ import {
   validateWorkspaceRelativePath,
   workspaceRelativePathRejectionReason,
 } from "@/lib/agent-workspace/path-policy"
+import {
+  MAX_RETIRED_EXEC_APPROVALS_BYTES,
+  RETIRED_EXEC_APPROVALS_CLAIM_PATH,
+  RETIRED_EXEC_APPROVALS_SOURCE_PATH,
+  validateRetiredExecApprovalsPath,
+  validateRetiredExecApprovalsRead,
+} from "@/lib/agent-workspace/retired-exec-approvals"
 
 export { validateWorkspaceRelativePath } from "@/lib/agent-workspace/path-policy"
 
@@ -62,6 +69,15 @@ const WORKSPACE_CHECKPOINT_CONTROL_PREFIX = ".workspace-checkpoints/v2"
 const LEGACY_WORKSPACE_CHECKPOINT_CONTROL_PREFIX = ".workspace-checkpoints/v1"
 const MAX_WORKSPACE_CHECKPOINT_BYTES = 64 * 1024 * 1024
 const WORKSPACE_CHECKPOINT_CONCURRENCY = 32
+// These paths were checkpoint-managed before they were identified as
+// generated OpenClaw host state. Every current or manifest-bound source is
+// content-validated below before exclusion; a policy or interrupted claim
+// fails closed. Existing v2 manifests remain readable only long enough to
+// retire verified socket-only entries without touching the owner object.
+const RETIRED_WORKSPACE_CHECKPOINT_PATHS = new Set([
+  RETIRED_EXEC_APPROVALS_SOURCE_PATH,
+  RETIRED_EXEC_APPROVALS_CLAIM_PATH,
+])
 const CONTENT_TYPE_RE =
   /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/i
 // S3 expires a public current version after 30 days, then its resulting
@@ -627,6 +643,61 @@ function bucketName(): string {
   return bucket
 }
 
+async function assertRetiredExecApprovalsObjectSafe(params: {
+  signedWorkspacePrefix: string
+  relativePath: string
+  key: string
+  size: number
+  eTag: string
+  versionId?: string
+}): Promise<void> {
+  const pathReason = validateRetiredExecApprovalsPath(params.relativePath)
+  let reason: string | null = pathReason
+  if (!reason) {
+    try {
+      const response = await s3Client().send(
+        new GetObjectCommand({
+          Bucket: bucketName(),
+          Key: params.key,
+          ...(params.versionId ? { VersionId: params.versionId } : {}),
+          IfMatch: params.eTag,
+          Range: `bytes=0-${MAX_RETIRED_EXEC_APPROVALS_BYTES - 1}`,
+        }),
+      )
+      if (!response.Body) {
+        reason = "missing-body"
+      } else {
+        const body = await response.Body.transformToByteArray()
+        reason = validateRetiredExecApprovalsRead(
+          { size: params.size, eTag: params.eTag },
+          {
+            size: response.ContentLength ?? -1,
+            eTag: response.ETag ?? "",
+            body,
+          },
+        )
+      }
+    } catch {
+      reason = "bounded-read-failed"
+    }
+  }
+  if (!reason) return
+  log.warn("Retired workspace host state is not safe to exclude", {
+    ownerHash: createHash("sha256")
+      .update(params.signedWorkspacePrefix)
+      .digest("hex")
+      .slice(0, 16),
+    pathHash: createHash("sha256")
+      .update(params.relativePath)
+      .digest("hex")
+      .slice(0, 16),
+    reason,
+  })
+  throw new WorkspaceStorageCompletionError(
+    "Retired workspace host state requires controlled migration",
+  )
+}
+
 function validateTrustedPrefix(prefix: string): string {
   const normalized = prefix.replace(/^\/+|\/+$/g, "")
   if (!normalized || normalized.includes("..") || normalized.includes("\\")) {
@@ -658,12 +729,13 @@ export type WorkspaceGenerationEntry = {
  * the owner lock, and explicitly pulled by path for each turn, so excluding
  * them avoids a full workspace restore for every new upload.
  */
-export function workspaceGenerationFromEntries(
+function workspaceGenerationFromMatchingEntries(
   entries: readonly WorkspaceGenerationEntry[],
+  include: (entry: WorkspaceGenerationEntry) => boolean,
 ): string {
   const digest = createHash("sha256")
   const sorted = [...entries]
-    .filter((entry) => isCheckpointManagedWorkspacePath(entry.path))
+    .filter(include)
     .map((entry) => ({
       ...entry,
       path: validateWorkspaceRelativePath(entry.path),
@@ -700,6 +772,26 @@ export function workspaceGenerationFromEntries(
     digest.update(eTag)
   }
   return digest.digest("hex")
+}
+
+export function workspaceGenerationFromEntries(
+  entries: readonly WorkspaceGenerationEntry[],
+): string {
+  return workspaceGenerationFromMatchingEntries(
+    entries,
+    (entry) => isCheckpointManagedWorkspacePath(entry.path),
+  )
+}
+
+function legacyWorkspaceCheckpointGeneration(
+  entries: readonly WorkspaceGenerationEntry[],
+): string {
+  return workspaceGenerationFromMatchingEntries(
+    entries,
+    (entry) =>
+      isCheckpointManagedWorkspacePath(entry.path) ||
+      RETIRED_WORKSPACE_CHECKPOINT_PATHS.has(entry.path),
+  )
 }
 
 export function publicArtifactKey(ownerEmail: string, fileName: string): string {
@@ -759,12 +851,56 @@ export async function listWorkspaceObjects(
     )
   }
 
-  const entries = (response.Contents ?? [])
-    .filter((entry): entry is typeof entry & { Key: string } =>
-      Boolean(
-        entry.Key?.startsWith(prefix) && entry.Key.length > prefix.length,
+  const listed = response.Contents ?? []
+  const retired = listed.flatMap((entry) => {
+    const key = entry.Key
+    if (
+      typeof key !== "string" ||
+      !key.startsWith(prefix) ||
+      key.length <= prefix.length
+    ) return []
+    const relativePath = key.slice(prefix.length)
+    return RETIRED_WORKSPACE_CHECKPOINT_PATHS.has(relativePath)
+      ? [{ entry, key, relativePath }]
+      : []
+  })
+  // A claim means Doctor may have moved the source but not committed its
+  // canonical SQLite row. Reject it without reading either object.
+  for (const candidate of retired) {
+    if (candidate.relativePath === RETIRED_EXEC_APPROVALS_CLAIM_PATH) {
+      await assertRetiredExecApprovalsObjectSafe({
+        signedWorkspacePrefix,
+        relativePath: candidate.relativePath,
+        key: candidate.key,
+        size: candidate.entry.Size ?? -1,
+        eTag: candidate.entry.ETag ?? "",
+      })
+    }
+  }
+  await Promise.all(
+    retired.map((candidate) =>
+      assertRetiredExecApprovalsObjectSafe({
+        signedWorkspacePrefix,
+        relativePath: candidate.relativePath,
+        key: candidate.key,
+        size: candidate.entry.Size ?? -1,
+        eTag: candidate.entry.ETag ?? "",
+      }),
+    ),
+  )
+
+  const entries = listed
+    .filter((entry): entry is typeof entry & { Key: string } => {
+      const key = entry.Key
+      if (
+        typeof key !== "string" ||
+        !key.startsWith(prefix) ||
+        key.length <= prefix.length
+      ) return false
+      return !RETIRED_WORKSPACE_CHECKPOINT_PATHS.has(
+        key.slice(prefix.length),
       )
-    )
+    })
     .map((entry) => {
       const path = entry.Key.slice(prefix.length)
       const rejectionReason = isCheckpointManagedWorkspacePath(path)
@@ -842,6 +978,12 @@ type WorkspaceCheckpointManifest = {
   signedWorkspacePrefix: string
   workspaceGeneration: string
   entries: WorkspaceCheckpointEntry[]
+}
+
+type ParsedWorkspaceCheckpointManifest = {
+  manifest: WorkspaceCheckpointManifest
+  normalizedRetiredPaths: boolean
+  retiredEntries: WorkspaceCheckpointEntry[]
 }
 
 async function readWorkspaceGenerationSnapshot(
@@ -1004,7 +1146,7 @@ async function mapWithWorkspaceCheckpointConcurrency<T, U>(
 function parseWorkspaceCheckpointManifest(
   value: unknown,
   signedWorkspacePrefix: string,
-): WorkspaceCheckpointManifest {
+): ParsedWorkspaceCheckpointManifest {
   const expectedPrefix = validateTrustedPrefix(signedWorkspacePrefix)
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new WorkspaceStorageCompletionError(
@@ -1037,10 +1179,13 @@ function parseWorkspaceCheckpointManifest(
       )
     }
     const entry = rawEntry as Record<string, unknown>
+    const pathIsRetired =
+      typeof entry.path === "string" &&
+      RETIRED_WORKSPACE_CHECKPOINT_PATHS.has(entry.path)
     if (
       typeof entry.path !== "string" ||
       workspaceRelativePathRejectionReason(entry.path) !== null ||
-      !isCheckpointManagedWorkspacePath(entry.path) ||
+      (!isCheckpointManagedWorkspacePath(entry.path) && !pathIsRetired) ||
       seenPaths.has(entry.path) ||
       !Number.isSafeInteger(entry.size) ||
       (entry.size as number) < 0 ||
@@ -1075,7 +1220,7 @@ function parseWorkspaceCheckpointManifest(
     })
   }
   if (
-    workspaceGenerationFromEntries(entries) !==
+    legacyWorkspaceCheckpointGeneration(entries) !==
     candidate.workspaceGeneration
   ) {
     throw new WorkspaceStorageCompletionError(
@@ -1083,17 +1228,29 @@ function parseWorkspaceCheckpointManifest(
     )
   }
   assertPrefixFreeWorkspaceEntries(entries)
-  entries.sort((left, right) =>
+  const normalizedEntries = entries
+    .filter(
+      (entry) => !RETIRED_WORKSPACE_CHECKPOINT_PATHS.has(entry.path),
+    )
+  normalizedEntries.sort((left, right) =>
     Buffer.compare(
       Buffer.from(left.path, "utf8"),
       Buffer.from(right.path, "utf8"),
     ),
   )
   return {
-    version: WORKSPACE_CHECKPOINT_VERSION,
-    signedWorkspacePrefix: expectedPrefix,
-    workspaceGeneration: candidate.workspaceGeneration,
-    entries,
+    manifest: {
+      version: WORKSPACE_CHECKPOINT_VERSION,
+      signedWorkspacePrefix: expectedPrefix,
+      workspaceGeneration:
+        workspaceGenerationFromEntries(normalizedEntries),
+      entries: normalizedEntries,
+    },
+    normalizedRetiredPaths:
+      normalizedEntries.length !== entries.length,
+    retiredEntries: entries.filter((entry) =>
+      RETIRED_WORKSPACE_CHECKPOINT_PATHS.has(entry.path),
+    ),
   }
 }
 
@@ -1137,7 +1294,27 @@ async function readWorkspaceCheckpointManifest(
       "Workspace checkpoint manifest is invalid",
     )
   }
-  return parseWorkspaceCheckpointManifest(parsed, signedWorkspacePrefix)
+  const result = parseWorkspaceCheckpointManifest(
+    parsed,
+    signedWorkspacePrefix,
+  )
+  if (result.normalizedRetiredPaths) {
+    for (const entry of result.retiredEntries) {
+      await assertRetiredExecApprovalsObjectSafe({
+        signedWorkspacePrefix,
+        relativePath: entry.path,
+        key: checkpointRecoverySourceKey(signedWorkspacePrefix, entry),
+        size: entry.size,
+        eTag: entry.sourceETag,
+        versionId: entry.versionId,
+      })
+    }
+    // Every caller holds the owner generation lock. This control-only rewrite
+    // changes the manifest's definition of durable state but deliberately
+    // leaves the retired, versioned owner object current and recoverable.
+    await writeWorkspaceCheckpointManifest(result.manifest)
+  }
+  return result.manifest
 }
 
 async function assertNoLegacyWorkspaceCheckpoint(

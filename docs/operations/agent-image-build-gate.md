@@ -1,44 +1,59 @@
 # Agent Image Build-Time Eval Gate (#1161)
 
 `infra/agent-image/build-and-push.sh` refuses to push an agent image that has
-not been proven to boot and answer. This page documents the gate's seven checks,
+not been proven to boot and answer. This page documents the gate's eight checks,
 how to satisfy the runtime half, and how to override it when you must.
 
 The gate exists because the image is an artifact optimised against an
-evaluator, and four separate regressions reached production before it did:
+evaluator, and five separate regressions reached production before it did:
 a dead-boot image (r10), a missing provider (r11), a silently truncated
-`SOUL.md`, and a broker/image path-policy mismatch that made populated
-workspaces unrestorable. Every one of them is caught before push by the checks
-below.
+`SOUL.md`, a broker/image path-policy mismatch that made populated workspaces
+unrestorable, and generated `exec-approvals.json` host state restored as user
+history. Every one of them is caught before push by the checks below.
 
-## The seven checks
+## The eight checks
 
 | # | Check | Kind | Fails on |
 |---|-------|------|----------|
 | 1 | Instruction-budget (`check_bootstrap_budget.py`) | static | a bootstrap file that would be truncated at boot |
 | 2 | Config self-consistency (`check_config_consistency.py`) | static | bad `contextWindow`, `apiKey` hydration, plugin compatibility, web-search readiness, a stale host schema, or a host missing settled-tool finalization in `openclaw.json` / `Dockerfile` |
 | 3 | Cross-language workspace persistence contract | static | the Python sync/runtime tests or TypeScript broker integration tests fail |
-| 4 | Existing dev + prod workspace inventory | AWS read-only | any registered workspace contains durable state the candidate cannot round-trip, or the real TypeScript/Python classifications or generation hashes disagree |
+| 4 | Existing dev + prod workspace inventory | AWS read-only | any registered workspace contains durable state the candidate cannot round-trip, the real TypeScript/Python classifications or generation hashes disagree, or any bucket object would retire a non-generated exec-approval policy / interrupted claim |
 | 5 | Plugin-aware config validation | build | the complete config is invalid after the pinned custom plugins are installed |
-| 6 | Boot probe | runtime | no `BOOT_OK` within `PROBE_BOOT_TIMEOUT` (default 120s) |
-| 7 | Canary turn | runtime | `/invocations` does not answer `OK` |
+| 6 | Restored host-state contract | runtime | the image would restore retired exec-approval JSON, bakes that state into the image, or lacks canonical SQLite state |
+| 7 | Boot probe | runtime | no `BOOT_OK` within `PROBE_BOOT_TIMEOUT` (default 120s) |
+| 8 | Canary turn | runtime | `/invocations` does not answer `OK` |
 
 Static checks run before the build. Plugin-aware validation runs inside the
 image after the official Bedrock and Parallel plugins are installed. The
 runtime checks run against the freshly built image, before `docker push`.
+Check 6 is hermetic: it reads the exact policy staged into the image, verifies
+both the retired source and interrupted-Doctor claim are excluded, verifies
+neither is baked into the image, contaminates the image workspace with both a
+file and directory form, proves the warm-runtime cleanup removes them, and
+requires the canonical OpenClaw SQLite state. The static checkpoint regression
+also loads a real pre-policy v2
+manifest and proves normalization retains every durable entry and both owner
+objects without copying or deleting workspace data.
 The inventory gate reads the authoritative workspace-prefix registries and
-every current S3 key in both dev and prod. It rejects incompatible durable
-state, then sends the same in-memory inventory through the actual Python image
-classifier and generation implementation and compares those results with the
-actual TypeScript broker. Excluded dependency/runtime trees are counted but do
-not block a build merely because they contain a path neither runtime restores.
-The gate emits aggregate counts and stable hashes only, performs no writes, and
-cannot be bypassed by `SKIP_STATIC_GATE=1`. This closes the gap where an empty
-canary passed while a normal filename already present in saved user history
-could not be restored.
+every current S3 key in both dev and prod, including orphaned workspace
+prefixes. It rejects incompatible durable state, then sends the same in-memory
+inventory through the actual Python image classifier and generation
+implementation and compares those results with the actual TypeScript broker.
+For the two retired exec-approval paths it bounded-reads the exact listed ETag,
+never logs the body or token, and permits only the pinned runtime's generated
+socket-only shape (empty defaults and empty agents). Any malformed body,
+policy, allowlist, unknown field, changed object, or interrupted Doctor claim
+fails closed. Excluded dependency/runtime trees are counted but do not block a
+build merely because they contain a path neither runtime restores. The gate
+emits aggregate counts and stable hashes only, performs no writes, and cannot
+be bypassed by `SKIP_STATIC_GATE=1`. This closes the gap where an empty canary
+passed while a normal filename already present in saved user history could not
+be restored.
 It also fails on any legacy v1 or unknown checkpoint-control object. The
-paused cutover runs the same audit again after all old writers drain, closing
-the time gap between image build and frontend deployment.
+paused cutover runs the same audit after all old writers drain and once more
+after deleting the old Runtime, closing both the build-to-deploy gap and the
+old wrapper's final shutdown-write window.
 
 Issue #1469 added a fail-closed host contract to check 2. The pinned OpenClaw
 runtime must contain its one-shot, tools-disabled finalization for a settled
@@ -107,7 +122,7 @@ buckets. If any lookup or audit fails, the build **stops**.
 
 ### Building a one-axis candidate
 
-Candidate manifests use the same command and all seven gates:
+Candidate manifests use the same command and all eight gates:
 
 ```bash
 cd infra/agent-image
@@ -247,7 +262,7 @@ than it must:
 | Flag | Disables | When |
 |------|----------|------|
 | `ALLOW_UNVERIFIED_IMAGE=1` | turns a *skipped* runtime probe from a hard failure into a warning | you cannot reach the broker (no credentials, environment not deployed) and accept an unverified image |
-| `SKIP_PROBE_GATE=1` | checks 6–7 entirely, even when they could run | the probe itself is broken and blocking a release |
+| `SKIP_PROBE_GATE=1` | checks 6–8 entirely, even when they could run | the probe itself is broken and blocking a release |
 | `SKIP_STATIC_GATE=1` | checks 1–3 | true emergency only — these are pure file checks with no external dependency; the dev+prod inventory audit still runs |
 | `REQUIRE_PROBE_GATE=1` | nothing; **outranks** `ALLOW_UNVERIFIED_IMAGE` | CI, so an opt-in inherited from the environment cannot weaken the pipeline |
 

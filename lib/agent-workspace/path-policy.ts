@@ -14,6 +14,7 @@ export type WorkspacePathRejectionReason =
 
 const PRIVATE_PATH_POLICY = workspacePolicy.privatePath
 const CHECKPOINT_EXCLUSIONS = workspacePolicy.checkpointExclusions
+const EXCLUDED_EXACT_PATHS = new Set(CHECKPOINT_EXCLUSIONS.exactPaths)
 const EXCLUDED_BASENAMES = new Set(CHECKPOINT_EXCLUSIONS.basenames)
 const EXCLUDED_SEGMENT_NAMES = new Set(CHECKPOINT_EXCLUSIONS.segmentNames)
 const EXACT_VENV_SEGMENTS = new Set(
@@ -104,6 +105,7 @@ function isRegenerableSegment(segment: string): boolean {
 export function isWorkspaceCheckpointExcluded(relativePath: string): boolean {
   const relative = relativePath.replace(/^\/+/, "")
   if (
+    EXCLUDED_EXACT_PATHS.has(relative) ||
     CHECKPOINT_EXCLUSIONS.relativePrefixes.some(
       (prefix) => relative === prefix || relative.startsWith(prefix),
     )

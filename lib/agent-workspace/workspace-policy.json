@@ -16,6 +16,10 @@
     ]
   },
   "checkpointExclusions": {
+    "exactPaths": [
+      "exec-approvals.json",
+      "exec-approvals.json.doctor-importing"
+    ],
     "relativePrefixes": [
       "openclaw.json",
       "openclaw.json.bak",
