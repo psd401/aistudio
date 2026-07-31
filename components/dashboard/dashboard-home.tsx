@@ -101,7 +101,7 @@ function FeaturedToolCard({ title, description, href, icon, ctaText }: ToolCardP
           content. */}
       <div className="flex flex-col sm:flex-row flex-1">
         <div className="flex flex-col justify-center flex-1 p-5">
-          <span className="mer-icon-chip mb-3">{icon}</span>
+          <span className="mer-icon-chip mer-icon-chip-sm mb-3">{icon}</span>
           <h3 className="mer-card-title text-[17px] mb-1">{title}</h3>
           <p className="mer-card-desc max-w-[46ch]">{description}</p>
           <span className="mer-btn mer-btn-primary mt-4 w-fit">
@@ -118,7 +118,7 @@ function FeaturedToolCard({ title, description, href, icon, ctaText }: ToolCardP
 function StandardToolCard({ title, description, href, icon, ctaText }: ToolCardProps) {
   return (
     <Link href={href} className="mer-card mer-card-link h-full p-4">
-      <span className="mer-icon-chip mb-2.5">{icon}</span>
+      <span className="mer-icon-chip mer-icon-chip-sm mb-2.5">{icon}</span>
       <h3 className="mer-card-title mb-0.5">{title}</h3>
       <p className="mer-card-desc flex-1">{description}</p>
       {ctaText && (

@@ -263,16 +263,18 @@
  * green) with the single brand tint — Meridian's discipline is brand + neutral,
  * with violet reserved for agent presence.
  */
-.mer-icon-chip {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+/*
+ * Size MODIFIER, not a redefinition. `.mer-icon-chip` already exists in
+ * atrium-meridian.css (34px / 9px radius) and Atrium renders it in
+ * LibraryList. An earlier revision of this file redefined the base class at
+ * 30px/7px, which was invisible only because Atrium's layout does not import
+ * this stylesheet — the moment anything loaded both, Atrium's chips would have
+ * silently shrunk. Compose instead: `mer-icon-chip mer-icon-chip-sm`.
+ */
+.mer-icon-chip-sm {
   width: 30px;
   height: 30px;
   border-radius: var(--mer-r-chip);
-  background: var(--mer-brand-tint);
-  color: var(--mer-brand);
-  flex-shrink: 0;
 }
 
 .mer-card-title {
