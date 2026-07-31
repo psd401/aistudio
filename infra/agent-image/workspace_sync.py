@@ -97,6 +97,8 @@ MAX_SYNC_DEPTH = 64
 SYNC_WORKERS = 4
 TRANSFER_CHUNK_BYTES = 64 * 1024
 WORKSPACE_UPLOAD_CONTENT_TYPE = "application/octet-stream"
+_TRANSIENT_READ_RETRY_DELAYS_SECONDS = (0.25, 0.5, 1.0, 2.0)
+_TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 WORKSPACE_FLUSH_TOKEN_PATH = (
     "/run/psd-agent-authority/workspace-flush-token"
 )
@@ -116,6 +118,26 @@ _SQLITE_TRANSIENT_SIDECAR_SUFFIXES = (
     "-shm",
     "-journal",
 )
+_SQLITE_MEMORY_REINDEX_RE = re.compile(
+    r"^.+\.sqlite\.memory-reindex-[0-9A-Fa-f-]+"
+    r"(?:-(?:wal|shm|journal))?$"
+)
+
+
+def _is_transient_read_error(error: BaseException) -> bool:
+    """Return whether an idempotent workspace read is safe to retry."""
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in _TRANSIENT_HTTP_STATUSES
+    return isinstance(
+        error,
+        (
+            urllib.error.URLError,
+            TimeoutError,
+            ConnectionError,
+            http.client.IncompleteRead,
+            http.client.RemoteDisconnected,
+        ),
+    )
 
 
 def _install_workspace_file(
@@ -128,6 +150,7 @@ def _install_workspace_file(
     writer = r"""
 import os
 import pathlib
+import re
 import sys
 import uuid
 root = pathlib.Path(sys.argv[1]).resolve()
@@ -139,9 +162,15 @@ if resolved.name.endswith(".sqlite"):
     sidecar_names = [
         f"{resolved.name}{suffix}" for suffix in sys.argv[3].split(",")
     ]
-    sidecar_names.extend([
+    reindex_database_names = [
         ".reindex-lock.sqlite",
         f"{resolved.name}.reindex-lock.sqlite",
+    ]
+    sidecar_names.extend(reindex_database_names)
+    sidecar_names.extend([
+        f"{reindex_database_name}{suffix}"
+        for reindex_database_name in reindex_database_names
+        for suffix in sys.argv[3].split(",")
     ])
     for sidecar_name in sidecar_names:
         sidecar = resolved.with_name(sidecar_name)
@@ -149,6 +178,17 @@ if resolved.name.endswith(".sqlite"):
             sidecar.unlink()
         except FileNotFoundError:
             pass
+    memory_reindex_prefix = f"{resolved.name}.memory-reindex-"
+    for sibling in resolved.parent.iterdir():
+        if re.fullmatch(
+            rf"{re.escape(memory_reindex_prefix)}[0-9A-Fa-f-]+"
+            r"(?:-(?:wal|shm|journal))?",
+            sibling.name,
+        ):
+            try:
+                sibling.unlink()
+            except FileNotFoundError:
+                pass
 temporary = resolved.with_name(f".{resolved.name}.{uuid.uuid4().hex}.tmp")
 try:
     with temporary.open("xb") as output:
@@ -229,34 +269,72 @@ def _download_workspace_file(
     required_headers: dict[str, str],
 ) -> None:
     """Restore one exact bounded object without root writing into model state."""
-    request = urllib.request.Request(source_url, headers=required_headers)
-    written = 0
     temporary_fd, temporary_name = tempfile.mkstemp(
         prefix="workspace-download-",
         dir="/tmp",
     )
+    os.close(temporary_fd)
     temporary_path = Path(temporary_name)
     try:
-        with os.fdopen(temporary_fd, "wb") as output:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                response_length = response.headers.get("Content-Length")
-                if response_length is not None and (
-                    not response_length.isdigit()
-                    or int(response_length) != content_length
-                ):
-                    raise RuntimeError("workspace download length mismatch")
-                while True:
-                    chunk = response.read(TRANSFER_CHUNK_BYTES)
-                    if not chunk:
-                        break
-                    written += len(chunk)
-                    if written > content_length:
-                        raise RuntimeError(
-                            "workspace download exceeded declared length"
+        for attempt in range(
+            len(_TRANSIENT_READ_RETRY_DELAYS_SECONDS) + 1
+        ):
+            written = 0
+            try:
+                request = urllib.request.Request(
+                    source_url,
+                    headers=required_headers,
+                )
+                with temporary_path.open("wb") as output:
+                    with urllib.request.urlopen(
+                        request,
+                        timeout=60,
+                    ) as response:
+                        response_length = response.headers.get(
+                            "Content-Length"
                         )
-                    output.write(chunk)
-        if written != content_length:
-            raise RuntimeError("workspace download ended before declared length")
+                        if response_length is not None and (
+                            not response_length.isdigit()
+                            or int(response_length) != content_length
+                        ):
+                            raise RuntimeError(
+                                "workspace download length mismatch"
+                            )
+                        while True:
+                            chunk = response.read(TRANSFER_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            written += len(chunk)
+                            if written > content_length:
+                                raise RuntimeError(
+                                    "workspace download exceeded declared length"
+                                )
+                            output.write(chunk)
+                if written != content_length:
+                    raise RuntimeError(
+                        "workspace download ended before declared length"
+                    )
+                break
+            except Exception as exc:  # noqa: BLE001
+                retryable = _is_transient_read_error(exc)
+                if isinstance(exc, urllib.error.HTTPError):
+                    exc.close()
+                if (
+                    not retryable
+                    or attempt >= len(_TRANSIENT_READ_RETRY_DELAYS_SECONDS)
+                ):
+                    raise
+                delay = _TRANSIENT_READ_RETRY_DELAYS_SECONDS[attempt]
+                logger.warning(
+                    "workspace object download retry: path=%s "
+                    "attempt=%d/%d delay_s=%.2f error=%s",
+                    destination.relative_to(workspace_root).as_posix(),
+                    attempt + 1,
+                    len(_TRANSIENT_READ_RETRY_DELAYS_SECONDS) + 1,
+                    delay,
+                    str(exc)[:160],
+                )
+                time.sleep(delay)
         _install_workspace_file(temporary_path, destination, workspace_root)
     finally:
         temporary_path.unlink(missing_ok=True)
@@ -442,7 +520,10 @@ def _should_skip_relative(relative: str) -> bool:
     for prefix in _SKIP_RELATIVE_PREFIXES:
         if rel == prefix or rel.startswith(prefix):
             return True
-    if Path(rel).name in _SKIP_BASENAMES:
+    basename = Path(rel).name
+    if basename in _SKIP_BASENAMES:
+        return True
+    if _SQLITE_MEMORY_REINDEX_RE.fullmatch(basename):
         return True
     if any(_is_regenerable_segment(seg) for seg in rel.split("/")):
         return True
@@ -514,31 +595,77 @@ def _remaining_timeout(
 def _broker_request(
     payload: dict,
     deadline_monotonic: float | None = None,
+    retry_transient: bool = False,
 ) -> dict:
     """Call the trusted storage broker with the opaque signed owner context."""
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     headers.update(_workspace_flush_headers())
-    request = urllib.request.Request(
-        "http://127.0.0.1:18791/agent-broker/api/agent/workspace-storage",
-        data=body,
-        method="POST",
-        headers=headers,
+    retry_delays = (
+        _TRANSIENT_READ_RETRY_DELAYS_SECONDS
+        if retry_transient
+        else ()
     )
-    try:
-        with urllib.request.urlopen(
-            request,
-            timeout=_remaining_timeout(deadline_monotonic, 20),
-        ) as response:
-            result = json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        detail = exc.read(500).decode("utf-8", errors="replace")
-        raise RuntimeError(
-            f"workspace broker HTTP {exc.code}: {detail}"
-        ) from exc
-    if not isinstance(result, dict):
-        raise RuntimeError("workspace broker returned invalid JSON")
-    return result
+    for attempt in range(len(retry_delays) + 1):
+        request = urllib.request.Request(
+            "http://127.0.0.1:18791/agent-broker/api/agent/workspace-storage",
+            data=body,
+            method="POST",
+            headers=headers,
+        )
+        retry_error: RuntimeError | None = None
+        retry_cause: BaseException | None = None
+        status: int | str = "network"
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=_remaining_timeout(deadline_monotonic, 20),
+            ) as response:
+                result = json.loads(response.read())
+            if not isinstance(result, dict):
+                raise RuntimeError("workspace broker returned invalid JSON")
+            return result
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read(500).decode("utf-8", errors="replace")
+            finally:
+                exc.close()
+            error = RuntimeError(
+                f"workspace broker HTTP {exc.code}: {detail}"
+            )
+            if exc.code not in _TRANSIENT_HTTP_STATUSES:
+                raise error from exc
+            retry_error = error
+            retry_cause = exc
+            status = exc.code
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            ConnectionError,
+            http.client.IncompleteRead,
+            http.client.RemoteDisconnected,
+        ) as exc:
+            retry_error = RuntimeError(
+                f"workspace broker network error: {exc}"
+            )
+            retry_cause = exc
+
+        if retry_error is None or retry_cause is None:
+            raise RuntimeError("workspace broker retry state is invalid")
+        if attempt >= len(retry_delays):
+            raise retry_error from retry_cause
+        delay = retry_delays[attempt]
+        logger.warning(
+            "workspace broker read retry: operation=%s status=%s "
+            "attempt=%d/%d delay_s=%.2f",
+            payload.get("operation", "unknown"),
+            status,
+            attempt + 1,
+            len(retry_delays) + 1,
+            delay,
+        )
+        time.sleep(delay)
+    raise RuntimeError("workspace broker retry loop exhausted")
 
 
 def _workspace_flush_headers() -> dict[str, str]:
@@ -557,7 +684,10 @@ def _workspace_flush_headers() -> dict[str, str]:
 
 
 def _download_spec(relative: str) -> tuple[str, int, dict[str, str]]:
-    result = _broker_request({"operation": "download", "path": relative})
+    result = _broker_request(
+        {"operation": "download", "path": relative},
+        retry_transient=True,
+    )
     url = result.get("downloadUrl")
     content_length = result.get("contentLength")
     required_headers = result.get("requiredHeaders")
@@ -734,7 +864,7 @@ def pull_workspace(prefix: str) -> int:
         request_payload = {"operation": "list"}
         if continuation:
             request_payload["continuationToken"] = continuation
-        page = _broker_request(request_payload)
+        page = _broker_request(request_payload, retry_transient=True)
         paths = page.get("paths", [])
         if not isinstance(paths, list):
             raise RuntimeError("workspace broker returned invalid path list")

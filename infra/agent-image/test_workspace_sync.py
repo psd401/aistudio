@@ -12,6 +12,7 @@ network or real filesystem outside the temp dir is touched.
 
 import os
 import io
+import json
 import pathlib
 import pwd
 import shutil
@@ -61,7 +62,7 @@ class PullTraversalTests(unittest.TestCase):
         downloaded = []
         response_bodies = {}
 
-        def fake_broker(payload):
+        def fake_broker(payload, **_kwargs):
             self.assertEqual(payload, {"operation": "list"})
             result = {"paths": keys}
             if entries is not None:
@@ -208,8 +209,36 @@ class PullTraversalTests(unittest.TestCase):
             destination.with_name(f"{destination.name}-shm"),
             destination.with_name(f"{destination.name}-journal"),
             destination.with_name(".reindex-lock.sqlite"),
+            destination.with_name(".reindex-lock.sqlite-wal"),
+            destination.with_name(".reindex-lock.sqlite-shm"),
+            destination.with_name(".reindex-lock.sqlite-journal"),
             destination.with_name(
                 f"{destination.name}.reindex-lock.sqlite"
+            ),
+            destination.with_name(
+                f"{destination.name}.reindex-lock.sqlite-wal"
+            ),
+            destination.with_name(
+                f"{destination.name}.reindex-lock.sqlite-shm"
+            ),
+            destination.with_name(
+                f"{destination.name}.reindex-lock.sqlite-journal"
+            ),
+            destination.with_name(
+                f"{destination.name}.memory-reindex-"
+                "8c8ed445-b794-4d99-89f0-a309631f2977"
+            ),
+            destination.with_name(
+                f"{destination.name}.memory-reindex-"
+                "8c8ed445-b794-4d99-89f0-a309631f2977-wal"
+            ),
+            destination.with_name(
+                f"{destination.name}.memory-reindex-"
+                "8c8ed445-b794-4d99-89f0-a309631f2977-shm"
+            ),
+            destination.with_name(
+                f"{destination.name}.memory-reindex-"
+                "8c8ed445-b794-4d99-89f0-a309631f2977-journal"
             ),
         ]
         transient_paths[0].write_bytes(boot_wal)
@@ -287,7 +316,7 @@ class PullTraversalTests(unittest.TestCase):
                 output.write("node")
 
     def test_failed_object_download_marks_restore_incomplete(self):
-        def fake_broker(payload):
+        def fake_broker(payload, **_kwargs):
             self.assertEqual(payload, {"operation": "list"})
             return {"paths": ["memory/MEMORY.md"]}
 
@@ -454,6 +483,157 @@ class BoundedTransferTests(unittest.TestCase):
                     {"Range": "bytes=0-3"},
                 )
         self.assertEqual(destination.read_bytes(), b"existing")
+
+    def test_workspace_download_retries_before_installing(self):
+        destination = self.root / "restored.bin"
+        transient = workspace_sync.urllib.error.HTTPError(
+            "https://download.invalid/x",
+            503,
+            "Service Unavailable",
+            {},
+            io.BytesIO(b"temporary"),
+        )
+        with mock.patch.object(
+            workspace_sync.urllib.request,
+            "urlopen",
+            side_effect=[
+                transient,
+                _FakeResponse(b"restored", 8),
+            ],
+        ) as download, mock.patch.object(
+            workspace_sync.time,
+            "sleep",
+        ) as sleep:
+            workspace_sync._download_workspace_file(
+                "https://download.invalid/x",
+                destination,
+                self.root,
+                8,
+                {"Range": "bytes=0-7"},
+            )
+
+        self.assertEqual(destination.read_bytes(), b"restored")
+        self.assertEqual(download.call_count, 2)
+        self.assertEqual(
+            sleep.call_args_list.count(mock.call(0.25)),
+            1,
+        )
+
+    def test_pull_retries_exact_transient_broker_502(self):
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        relative = "agents/main/sessions/session.jsonl"
+        broker_url = (
+            "http://127.0.0.1:18791"
+            "/agent-broker/api/agent/workspace-storage"
+        )
+        transient = workspace_sync.urllib.error.HTTPError(
+            broker_url,
+            502,
+            "Bad Gateway",
+            {},
+            io.BytesIO(b"<html><h1>502 Bad Gateway</h1></html>"),
+        )
+        list_response = _FakeResponse(
+            json.dumps({"paths": [relative]}).encode("utf-8")
+        )
+        download_response = _FakeResponse(
+            json.dumps({
+                "downloadUrl": "https://download.invalid/session",
+                "contentLength": 10,
+                "requiredHeaders": {"Range": "bytes=0-9"},
+            }).encode("utf-8")
+        )
+        object_response = _FakeResponse(b"history-ok", 10)
+
+        with mock.patch.object(
+            workspace_sync,
+            "WORKSPACE_DIR",
+            workspace,
+        ), mock.patch.object(
+            workspace_sync.urllib.request,
+            "urlopen",
+            side_effect=[
+                list_response,
+                transient,
+                download_response,
+                object_response,
+            ],
+        ) as request, mock.patch.object(
+            workspace_sync.time,
+            "sleep",
+        ) as sleep:
+            self.assertEqual(workspace_sync.pull_workspace("owner"), 1)
+
+        self.assertEqual((workspace / relative).read_bytes(), b"history-ok")
+        self.assertEqual(request.call_count, 4)
+        self.assertEqual(
+            sleep.call_args_list.count(mock.call(0.25)),
+            1,
+        )
+
+    def test_broker_does_not_retry_non_transient_rejection(self):
+        forbidden = workspace_sync.urllib.error.HTTPError(
+            "http://127.0.0.1:18791/agent-broker",
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(b"forbidden"),
+        )
+        with mock.patch.object(
+            workspace_sync.urllib.request,
+            "urlopen",
+            side_effect=forbidden,
+        ) as request, mock.patch.object(
+            workspace_sync.time,
+            "sleep",
+        ) as sleep:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "workspace broker HTTP 403",
+            ):
+                workspace_sync._broker_request(
+                    {"operation": "download", "path": "memory.md"},
+                    retry_transient=True,
+                )
+
+        self.assertEqual(request.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_broker_exhaustion_still_fails_closed(self):
+        failures = [
+            workspace_sync.urllib.error.HTTPError(
+                "http://127.0.0.1:18791/agent-broker",
+                502,
+                "Bad Gateway",
+                {},
+                io.BytesIO(b"temporary"),
+            )
+            for _ in range(5)
+        ]
+        with mock.patch.object(
+            workspace_sync.urllib.request,
+            "urlopen",
+            side_effect=failures,
+        ) as request, mock.patch.object(
+            workspace_sync.time,
+            "sleep",
+        ) as sleep:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "workspace broker HTTP 502",
+            ):
+                workspace_sync._broker_request(
+                    {"operation": "download", "path": "memory.md"},
+                    retry_transient=True,
+                )
+
+        self.assertEqual(request.call_count, 5)
+        for delay in (0.25, 0.5, 1.0, 2.0):
+            self.assertEqual(
+                sleep.call_args_list.count(mock.call(delay)),
+                1,
+            )
 
     def test_push_never_follows_model_created_symlink(self):
         secret = self.root / "secret"
@@ -788,6 +968,10 @@ class SQLitePersistenceTests(unittest.TestCase):
             "agents/main/agent/openclaw-agent.sqlite-journal",
             "agents/main/agent/.reindex-lock.sqlite",
             "agents/main/agent/openclaw-agent.sqlite.reindex-lock.sqlite",
+            "agents/main/agent/openclaw-agent.sqlite.memory-reindex-"
+            "8c8ed445-b794-4d99-89f0-a309631f2977",
+            "agents/main/agent/openclaw-agent.sqlite.memory-reindex-"
+            "8c8ed445-b794-4d99-89f0-a309631f2977-wal",
             "plugins.sync.lock",
         ):
             self.assertTrue(workspace_sync._should_skip_relative(relative))
