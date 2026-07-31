@@ -26,6 +26,12 @@ describe('atomic generation activation', () => {
     expect(normalizedSql).toContain("SET status = 'superseded'");
     expect(normalizedSql).toContain("SET status = 'active'");
     expect(normalizedSql).toContain(
+      'source_version_count = ( SELECT count(DISTINCT chunk.item_version_id)::integer'
+    );
+    expect(normalizedSql).toContain(
+      'segment_count = ( SELECT count(*)::integer'
+    );
+    expect(normalizedSql).toContain(
       'AND EXISTS ( SELECT 1 FROM repository_item_chunks chunk'
     );
     expect(normalizedSql).toContain(

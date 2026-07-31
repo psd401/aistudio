@@ -15,6 +15,35 @@ import {
 } from "@/lib/repositories/temporary-attachment-client";
 
 const log = createLogger({ moduleName: 'enhanced-attachment-adapters' });
+const LEGACY_UPLOAD_DEADLINE_MS = 15 * 60 * 1_000;
+const LEGACY_STATUS_DEADLINE_MS = 15_000;
+
+class DocumentProcessingFailedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DocumentProcessingFailedError";
+  }
+}
+
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  timeoutMs: number,
+  timeoutMessage: string
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(timeoutMessage, { cause: error });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 export interface AttachmentProcessingCallbacks {
   onProcessingStart?: (attachmentId: string) => void;
@@ -89,6 +118,7 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
     { pattern: 'upload service temporarily unavailable', message: 'Upload service temporarily unavailable.' },
     { pattern: 'processing service temporarily unavailable', message: 'Processing service temporarily unavailable.' },
     { pattern: 'processing timeout', message: 'Processing timed out.' },
+    { pattern: 'processing status check timed out', message: 'Processing status check timed out.' },
     { pattern: 'network error during upload', message: 'Network error during upload.' },
     { pattern: 'failed to check processing status', message: 'Could not check processing status.' },
     // Scanned/image-only PDFs cannot be processed without OCR.
@@ -327,10 +357,10 @@ Please try re-uploading. If the issue persists, contact support.`
 
     let response: Response;
     try {
-      response = await fetch('/api/documents/v2/upload', {
+      response = await fetchWithTimeout('/api/documents/v2/upload', {
         method: 'POST',
         body: formData, // No Content-Type header - browser sets it with boundary
-      });
+      }, LEGACY_UPLOAD_DEADLINE_MS, 'Upload timed out');
     } catch (networkError) {
       log.error('Upload network error', {
         attachmentId: attachment.id,
@@ -422,7 +452,12 @@ Please try re-uploading. If the issue persists, contact support.`
   }
 
   private async fetchJobStatus(jobId: string) {
-    const response = await fetch(`/api/documents/v2/jobs/${jobId}`)
+    const response = await fetchWithTimeout(
+      `/api/documents/v2/jobs/${jobId}`,
+      {},
+      LEGACY_STATUS_DEADLINE_MS,
+      'Processing status check timed out'
+    )
 
     if (!response.ok) {
       if (response.status === 502 || response.status === 503) {
@@ -445,7 +480,9 @@ Please try re-uploading. If the issue persists, contact support.`
         if (job.status === 'completed') {
           return this.formatJobResult(job.result, fileName)
         } else if (job.status === 'failed') {
-          throw new Error(job.error || 'Server processing failed')
+          throw new DocumentProcessingFailedError(
+            job.error || 'Server processing failed'
+          )
         } else if (job.status === 'processing' && job.progress && job.processingStage) {
           log.info('Processing progress', {
             jobId,
@@ -458,6 +495,9 @@ Please try re-uploading. If the issue persists, contact support.`
         pollInterval = Math.min(pollInterval * 1.2, 5000)
         attempts++
       } catch (error) {
+        if (error instanceof DocumentProcessingFailedError) {
+          throw error
+        }
         if (attempts < maxAttempts - 1) {
           log.warn('Polling request failed, retrying', {
             error: error instanceof Error ? error.message : 'Unknown error',

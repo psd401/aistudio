@@ -24,6 +24,23 @@ const mockDeleteRepositoryStorageTree = jest.fn<(...a: unknown[]) => Promise<unk
 const mockBeginRepositoryDeletion = jest.fn<(...a: unknown[]) => Promise<unknown[]>>(() => Promise.resolve([]))
 const mockFinalizeRepositoryDeletion = jest.fn<(...a: unknown[]) => Promise<boolean>>(() => Promise.resolve(true))
 const mockGetUserAccessibleRepositories = jest.fn<(...a: unknown[]) => Promise<unknown[]>>(() => Promise.resolve([]))
+const mockGetRepositoryReadiness = jest.fn(() =>
+  Promise.resolve(
+    new Map([
+      [
+        5,
+        {
+          repositoryId: 5,
+          readiness: "searchable",
+          activeGenerationId: "generation-1",
+          indexedItemCount: 2,
+          segmentCount: 8,
+          lastIndexError: null,
+        },
+      ],
+    ])
+  )
+)
 
 jest.mock('@/lib/auth/server-session', () => ({ getServerSession: mockGetServerSession }))
 jest.mock('@/utils/roles', () => ({
@@ -56,6 +73,9 @@ jest.mock('@/lib/repositories/content-platform/storage-cleanup', () => ({
 jest.mock('@/lib/repositories/content-platform/deletion-service', () => ({
   beginRepositoryDeletion: mockBeginRepositoryDeletion,
   finalizeRepositoryDeletion: mockFinalizeRepositoryDeletion,
+}))
+jest.mock('@/lib/repositories/readiness-service', () => ({
+  getRepositoryReadiness: mockGetRepositoryReadiness,
 }))
 jest.mock('next/cache', () => ({ revalidatePath: jest.fn() }))
 jest.mock('@/lib/logger', () => ({
@@ -106,6 +126,21 @@ function defineRepositoryActionsAuthorizationREVSEC082REVSECSuite1Part1() {
       repositoryObjectCount: 0,
     })
     mockGetUserAccessibleRepositories.mockResolvedValue([])
+    mockGetRepositoryReadiness.mockResolvedValue(
+      new Map([
+        [
+          5,
+          {
+            repositoryId: 5,
+            readiness: "searchable",
+            activeGenerationId: "generation-1",
+            indexedItemCount: 2,
+            segmentCount: 8,
+            lastIndexError: null,
+          },
+        ],
+      ])
+    )
   })
 
   it('getRepository returns not-found when the caller lacks read access (REV-SEC-082)', async () => {
@@ -224,6 +259,7 @@ function defineRepositoryActionsAuthorizationREVSEC082REVSECSuite1Part2() {it('p
     expect(res.isSuccess).toBe(true)
     expect(res.data).not.toBeNull()
     expect(res.data?.id).toBe(5)
+    expect(res.data?.readiness).toBe("searchable")
   })
 
   it('cleans every repository item type and its root prefix before deleting manifests', async () => {

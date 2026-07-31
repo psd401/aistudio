@@ -40,12 +40,20 @@ import {
   REPOSITORY_ACCESS_CHANGED_MESSAGE,
 } from "@/lib/assistant-architect/repository-access-preflight"
 import {
+  ConversationRepositoryBindingError,
+  replaceConversationRepositoryBindings,
+} from "@/lib/nexus/conversation-repository-service"
+import {
   bindNexusRequestAttachmentReferences,
   NexusAttachmentBindingCleanupError,
   NexusAttachmentBindingRejectedError,
   rollbackNewNexusAttachmentConversation,
 } from "@/lib/nexus/request-attachment-binding"
 import { compareAssistantPromptExecutionOrder } from "@/lib/assistant-architect/execution-coordinator"
+import {
+  assertRepositoriesSearchable,
+  RepositoryReadinessError,
+} from "@/lib/repositories/readiness-service"
 
 export const maxDuration = 900
 
@@ -80,20 +88,24 @@ type StartRequestResult =
   | { request: StartRequest; response?: never }
   | { request?: never; response: NextResponse }
 
+type StartAuthorizationResult =
+  | { repositoryIds: number[]; response?: never }
+  | { repositoryIds?: never; response: NextResponse }
+
 type ConversationRollbackState = {
   conversationId: string | null
-  hasBoundReferences: boolean
   firstMessagePersisted: boolean
 }
 
+// eslint-disable-next-line complexity -- Authorization returns precise failures for scope, grants, repository ACLs, and repository readiness.
 async function verifyStartAuthorization(
   assistantId: number,
   auth: ApiAuthContext,
   requestId: string,
   log: RouteLogger
-): Promise<NextResponse | null> {
+): Promise<StartAuthorizationResult> {
   const scopeError = requireAssistantScope(auth, assistantId, requestId)
-  if (scopeError) return scopeError
+  if (scopeError) return { response: scopeError }
 
   const accessError = await verifyAssistantAccess(
     assistantId,
@@ -101,19 +113,21 @@ async function verifyStartAuthorization(
     requestId,
     { requireApproved: auth.authType !== "session" }
   )
-  if (accessError) return accessError
+  if (accessError) return { response: accessError }
 
   const architectResult = await getAssistantArchitectByIdAction(
     assistantId.toString(),
     INTERNAL_ASSISTANT_LOOKUP
   )
   if (!architectResult.isSuccess || !architectResult.data) {
-    return createErrorResponse(
-      requestId,
-      404,
-      "NOT_FOUND",
-      `Assistant not found: ${assistantId}`
-    )
+    return {
+      response: createErrorResponse(
+        requestId,
+        404,
+        "NOT_FOUND",
+        `Assistant not found: ${assistantId}`
+      ),
+    }
   }
   const architect = architectResult.data
   const prompts = (architect.prompts || []).sort(
@@ -121,12 +135,14 @@ async function verifyStartAuthorization(
   )
   const lastPromptModelId = prompts.at(-1)?.modelId
   if (!lastPromptModelId) {
-    return createErrorResponse(
-      requestId,
-      400,
-      "CONFIGURATION_ERROR",
-      "Assistant has no model configured"
-    )
+    return {
+      response: createErrorResponse(
+        requestId,
+        400,
+        "CONFIGURATION_ERROR",
+        "Assistant has no model configured"
+      ),
+    }
   }
   const grantsError = await verifyAssistantResourceGrants({
     auth,
@@ -145,19 +161,30 @@ async function verifyStartAuthorization(
     requestId,
     log,
   })
-  if (grantsError) return grantsError
+  if (grantsError) return { response: grantsError }
 
   const repositoryAccess = await preflightAssistantRepositoryAccess(
     prompts,
     auth.cognitoSub
   )
-  if (repositoryAccess.isAllowed) return null
-  return createErrorResponse(
-    requestId,
-    403,
-    "FORBIDDEN",
-    REPOSITORY_ACCESS_CHANGED_MESSAGE
-  )
+  if (repositoryAccess.isAllowed) {
+    return { repositoryIds: repositoryAccess.repositoryIds }
+  }
+  const inaccessible =
+    repositoryAccess.errorCode === "REPOSITORY_BINDING_INACCESSIBLE" ||
+    repositoryAccess.errorCode === undefined
+  return {
+    response: createErrorResponse(
+      requestId,
+      inaccessible ? 403 : 409,
+      repositoryAccess.errorCode ??
+        "REPOSITORY_BINDING_INACCESSIBLE",
+      inaccessible
+        ? REPOSITORY_ACCESS_CHANGED_MESSAGE
+        : "A repository used by this assistant is not searchable yet.",
+      { repositoryIds: repositoryAccess.repositoryIds }
+    ),
+  }
 }
 
 async function parseStartRequest(
@@ -199,7 +226,6 @@ function shouldRollbackConversation(
 ): state is ConversationRollbackState & { conversationId: string } {
   return Boolean(
     state.conversationId &&
-      state.hasBoundReferences &&
       !state.firstMessagePersisted &&
       !(error instanceof NexusAttachmentBindingRejectedError) &&
       !(error instanceof NexusAttachmentBindingCleanupError)
@@ -237,6 +263,7 @@ async function compensateEmptyConversation(
   }
 }
 
+// eslint-disable-next-line complexity -- Preserve structured errors from each pre-conversation validation and compensation boundary.
 function mapStartConversationError(
   error: unknown,
   state: ConversationRollbackState,
@@ -262,6 +289,24 @@ function mapStartConversationError(
       500,
       "EXECUTION_ERROR",
       "Failed to start conversation"
+    )
+  }
+  if (error instanceof RepositoryReadinessError) {
+    return createErrorResponse(
+      requestId,
+      error.code === "REPOSITORY_BINDING_INACCESSIBLE" ? 403 : 409,
+      error.code,
+      error.message,
+      { repositories: error.repositories }
+    )
+  }
+  if (error instanceof ConversationRepositoryBindingError) {
+    return createErrorResponse(
+      requestId,
+      error.code === "REPOSITORY_BINDING_INACCESSIBLE" ? 403 : 404,
+      error.code,
+      error.message,
+      { repositoryIds: error.repositoryIds }
     )
   }
   if (isAssistantRuntimeRepositoryInputError(error)) {
@@ -311,16 +356,17 @@ function mapStartConversationError(
   )
 }
 
+// eslint-disable-next-line max-params -- The route boundary keeps authenticated identity, request correlation, logging, and preflighted bindings explicit.
 async function startConversation(
   assistantId: number,
   request: StartRequest,
   auth: ApiAuthContext,
   requestId: string,
-  log: RouteLogger
+  log: RouteLogger,
+  staticRepositoryIds: number[]
 ): Promise<NextResponse> {
   const state: ConversationRollbackState = {
     conversationId: null,
-    hasBoundReferences: false,
     firstMessagePersisted: false,
   }
   try {
@@ -328,6 +374,13 @@ async function startConversation(
       request.inputs,
       auth.userId
     )
+    await assertRepositoriesSearchable(preparedInputs.runtimeRepositoryIds)
+    const repositoryIds = [
+      ...new Set([
+        ...staticRepositoryIds,
+        ...preparedInputs.runtimeRepositoryIds,
+      ]),
+    ]
     const assistant = await getAssistantById(assistantId)
     if (!assistant) {
       return createErrorResponse(
@@ -345,16 +398,23 @@ async function startConversation(
         source: "api",
         assistantId,
         assistantName: assistant.name,
+        repositoryIds,
         runtimeRepositoryIds: preparedInputs.runtimeRepositoryIds,
       },
     })
     state.conversationId = conversation.id
-    state.hasBoundReferences = preparedInputs.references.length > 0
     await bindNexusRequestAttachmentReferences({
       ownerId: auth.userId,
       conversationId: conversation.id,
       references: preparedInputs.references,
       conversationCreated: true,
+    })
+    await replaceConversationRepositoryBindings({
+      conversationId: conversation.id,
+      userId: auth.userId,
+      repositoryIds,
+      source: "assistant",
+      sourceId: String(assistantId),
     })
     log.info("Conversation created", {
       conversationId: conversation.id,
@@ -415,15 +475,22 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid assistant ID")
   }
 
-  const authorizationError = await verifyStartAuthorization(
+  const authorization = await verifyStartAuthorization(
     assistantId,
     auth,
     requestId,
     log
   )
-  if (authorizationError) return authorizationError
+  if (authorization.response) return authorization.response
 
   const parsed = await parseStartRequest(request, requestId)
   if (parsed.response) return parsed.response
-  return startConversation(assistantId, parsed.request, auth, requestId, log)
+  return startConversation(
+    assistantId,
+    parsed.request,
+    auth,
+    requestId,
+    log,
+    authorization.repositoryIds
+  )
 })

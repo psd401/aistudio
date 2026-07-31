@@ -15,6 +15,30 @@ export interface BrowserCompletedPart {
   PartNumber: number;
 }
 
+const STORAGE_UPLOAD_DEADLINE_MS = 15 * 60 * 1_000;
+
+async function uploadWithDeadline(
+  url: string,
+  init: RequestInit,
+  label: string
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    STORAGE_UPLOAD_DEADLINE_MS
+  );
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`${label} timed out`, { cause: error });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 /**
  * Upload directly from the browser to canonical object storage. Product
  * surfaces share this helper so large sources never traverse a Next.js body.
@@ -28,7 +52,7 @@ export async function uploadFileToRepositoryStorage(
     if (!upload.uploadUrl) {
       throw new Error("Upload URL was not provided");
     }
-    const response = await fetch(upload.uploadUrl, {
+    const response = await uploadWithDeadline(upload.uploadUrl, {
       method: "PUT",
       headers: {
         "Content-Type": contentType,
@@ -36,7 +60,7 @@ export async function uploadFileToRepositoryStorage(
         "x-amz-tagging": REPOSITORY_UPLOAD_TEMPORARY_TAGGING,
       },
       body: file,
-    });
+    }, "Storage upload");
     if (!response.ok) {
       throw new Error("Failed to upload file to storage");
     }
@@ -61,10 +85,10 @@ export async function uploadFileToRepositoryStorage(
           start,
           Math.min(start + upload.partSize!, file.size)
         );
-        const response = await fetch(part.uploadUrl, {
+        const response = await uploadWithDeadline(part.uploadUrl, {
           method: "PUT",
           body,
-        });
+        }, `Storage upload part ${part.partNumber}`);
         if (!response.ok) {
           throw new Error(`Failed to upload part ${part.partNumber}`);
         }

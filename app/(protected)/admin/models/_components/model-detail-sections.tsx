@@ -159,7 +159,7 @@ export function ConfigurationPanel({
       <h3 className="text-lg font-semibold mb-4">Configuration</h3>
       <div className="space-y-4">
         <div className="space-y-2">
-          <Label htmlFor="maxTokens">Max Tokens</Label>
+          <Label htmlFor="maxTokens">Legacy Max Tokens</Label>
           <Input
             id="maxTokens"
             type="number"
@@ -171,6 +171,48 @@ export function ConfigurationPanel({
               )
             }
           />
+          <p className="text-xs text-muted-foreground">
+            Deprecated compatibility field. Agentic execution does not use it.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="space-y-2">
+            <Label htmlFor="contextWindowTokens">Context Window Tokens</Label>
+            <Input
+              id="contextWindowTokens"
+              type="number"
+              min={1}
+              value={formData.contextWindowTokens ?? ""}
+              onChange={(event) =>
+                updateField(
+                  "contextWindowTokens",
+                  event.target.value
+                    ? Number.parseInt(event.target.value, 10)
+                    : null
+                )
+              }
+              placeholder="200000"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="maxOutputTokens">Maximum Output Tokens</Label>
+            <Input
+              id="maxOutputTokens"
+              type="number"
+              min={1}
+              value={formData.maxOutputTokens ?? ""}
+              onChange={(event) =>
+                updateField(
+                  "maxOutputTokens",
+                  event.target.value
+                    ? Number.parseInt(event.target.value, 10)
+                    : null
+                )
+              }
+              placeholder="8192"
+            />
+          </div>
         </div>
 
         <div className="space-y-2">
@@ -233,6 +275,13 @@ export function AvailabilityPanel({
       description: "Available in Assistant Architect",
       field: "architectEnabled",
       label: "Assistant Architect Enabled",
+    },
+    {
+      checked: formData.agenticReady,
+      description:
+        "Admit this model to cost-bounded agentic execution. Requires explicit limits and complete pricing.",
+      field: "agenticReady",
+      label: "Agentic Ready",
     },
   ] as const
 

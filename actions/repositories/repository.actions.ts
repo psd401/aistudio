@@ -45,6 +45,10 @@ import {
   beginRepositoryDeletion,
   finalizeRepositoryDeletion
 } from "@/lib/repositories/content-platform/deletion-service"
+import {
+  getRepositoryReadiness,
+  type RepositoryReadiness,
+} from "@/lib/repositories/readiness-service"
 
 export interface Repository {
   id: number
@@ -62,6 +66,10 @@ export interface Repository {
   updatedAt: Date
   ownerName?: string
   itemCount?: number
+  readiness: RepositoryReadiness
+  indexedItemCount: number
+  segmentCount: number
+  lastIndexError: string | null
   canManage: boolean
 }
 
@@ -71,6 +79,11 @@ export interface AccessibleRepositorySummary {
   description: string | null
   isPublic: boolean
   itemCount: number
+  readiness: RepositoryReadiness
+  activeGenerationId: string | null
+  indexedItemCount: number
+  segmentCount: number
+  lastIndexError: string | null
   lastUpdated: Date | null
   canManage: boolean
 }
@@ -136,7 +149,29 @@ function mapToRepository(resultRaw: RawRepository): Repository {
     metadata: resultRaw.metadata ?? {},
     createdAt: resultRaw.createdAt ?? new Date(),
     updatedAt: resultRaw.updatedAt ?? new Date(),
+    readiness: "empty",
+    indexedItemCount: 0,
+    segmentCount: 0,
+    lastIndexError: null,
     canManage: false,
+  }
+}
+
+async function mapToRepositoryWithReadiness(
+  resultRaw: RawRepository,
+  canManage: boolean
+): Promise<Repository> {
+  const repository = mapToRepository(resultRaw)
+  const readiness = (await getRepositoryReadiness([resultRaw.id])).get(
+    resultRaw.id
+  )
+  return {
+    ...repository,
+    readiness: readiness?.readiness ?? "failed",
+    indexedItemCount: readiness?.indexedItemCount ?? 0,
+    segmentCount: readiness?.segmentCount ?? 0,
+    lastIndexError: readiness?.lastIndexError ?? null,
+    canManage,
   }
 }
 
@@ -234,6 +269,10 @@ export async function createRepository(
       metadata: resultRaw.metadata ?? {},
       createdAt: resultRaw.createdAt ?? new Date(),
       updatedAt: resultRaw.updatedAt ?? new Date(),
+      readiness: "empty",
+      indexedItemCount: 0,
+      segmentCount: 0,
+      lastIndexError: null,
       canManage: true,
     }
 
@@ -317,7 +356,7 @@ export async function updateRepository(
         throw ErrorFactories.dbRecordNotFound("knowledge_repositories", input.id)
       }
       return createSuccess(
-        { ...mapToRepository(current), canManage: true },
+        await mapToRepositoryWithReadiness(current, true),
         "No changes to apply"
       )
     }
@@ -337,10 +376,7 @@ export async function updateRepository(
     }
 
     // Convert to expected type
-    const result: Repository = {
-      ...mapToRepository(resultRaw),
-      canManage: true,
-    }
+    const result = await mapToRepositoryWithReadiness(resultRaw, true)
 
     log.info("Repository updated successfully", {
       repositoryId: result.id,
@@ -526,8 +562,13 @@ export async function listRepositories(): Promise<ActionState<Repository[]>> {
       ...activeRepositories,
       ...deletionRetries.filter((repository) => !activeIds.has(repository.id))
     ]
+    const readinessByRepository = await getRepositoryReadiness(
+      repositoriesRaw.map((repository) => repository.id)
+    )
 
-    const repositories: Repository[] = repositoriesRaw.map((repo) => ({
+    const repositories: Repository[] = repositoriesRaw.map((repo) => {
+      const readiness = readinessByRepository.get(repo.id)
+      return {
       id: repo.id,
       name: repo.name,
       description: repo.description,
@@ -543,8 +584,13 @@ export async function listRepositories(): Promise<ActionState<Repository[]>> {
       updatedAt: repo.updatedAt ?? new Date(),
       ownerName: repo.ownerName ?? undefined,
       itemCount: Number(repo.itemCount),
+      readiness: readiness?.readiness ?? "failed",
+      indexedItemCount: readiness?.indexedItemCount ?? 0,
+      segmentCount: readiness?.segmentCount ?? 0,
+      lastIndexError: readiness?.lastIndexError ?? null,
       canManage: isAdmin || repo.ownerId === userId,
-    }))
+      }
+    })
 
     log.info("Repositories fetched successfully", {
       repositoryCount: repositories.length
@@ -586,6 +632,7 @@ async function getRepositoryItemCounts(repositoryIds: number[]): Promise<Map<num
   return counts
 }
 
+// eslint-disable-next-line complexity -- Repository authorization and lifecycle/readiness projection intentionally fail closed in one action.
 export async function getRepository(
   id: number
 ): Promise<ActionState<Repository>> {
@@ -627,7 +674,7 @@ export async function getRepository(
     }
 
     const currentUserId = await getUserIdFromSession(session.sub)
-    const [counts, ownerRows, canManage] = await Promise.all([
+    const [counts, ownerRows, canManage, readinessByRepository] = await Promise.all([
       getRepositoryItemCounts([id]),
       executeQuery(
         (db) =>
@@ -643,6 +690,7 @@ export async function getRepository(
         "getRepositoryOwner"
       ),
       canModifyRepository(id, currentUserId),
+      getRepositoryReadiness([id]),
     ])
     const owner = ownerRows[0]
     const ownerDisplayName = owner
@@ -667,6 +715,12 @@ export async function getRepository(
       updatedAt: resultRaw.updatedAt ?? new Date(),
       ownerName: ownerDisplayName,
       itemCount: counts.get(id) ?? 0,
+      readiness: readinessByRepository.get(id)?.readiness ?? "failed",
+      indexedItemCount:
+        readinessByRepository.get(id)?.indexedItemCount ?? 0,
+      segmentCount: readinessByRepository.get(id)?.segmentCount ?? 0,
+      lastIndexError:
+        readinessByRepository.get(id)?.lastIndexError ?? null,
       canManage,
     }
 
@@ -960,12 +1014,44 @@ export async function revokeRepositoryAccess(
   }
 }
 
-export async function getUserAccessibleRepositoriesAction(): Promise<
-  ActionState<AccessibleRepositorySummary[]>
-> {
+async function loadAccessibleRepositorySummaries(
+  cognitoSub: string
+): Promise<AccessibleRepositorySummary[]> {
+  const currentUserId = await getUserIdFromSession(cognitoSub)
+  const [repositoriesRaw, isAdmin] = await Promise.all([
+    getUserAccessibleRepositories(cognitoSub),
+    hasRole("administrator"),
+  ])
+  const readinessByRepository = await getRepositoryReadiness(
+    repositoriesRaw.map((repository) => repository.id)
+  )
+  return repositoriesRaw.map(repo => {
+    const readiness = readinessByRepository.get(repo.id)
+    return {
+      id: repo.id,
+      name: repo.name,
+      description: repo.description,
+      isPublic: repo.isPublic ?? false,
+      itemCount: Number(repo.itemCount),
+      readiness: readiness?.readiness ?? "failed",
+      activeGenerationId:
+        readiness?.activeGenerationId ?? repo.activeIndexGenerationId,
+      indexedItemCount: readiness?.indexedItemCount ?? 0,
+      segmentCount: readiness?.segmentCount ?? 0,
+      lastIndexError: readiness?.lastIndexError ?? null,
+      lastUpdated: repo.lastUpdated,
+      canManage: isAdmin || repo.ownerId === currentUserId,
+    }
+  })
+}
+
+async function getAccessibleRepositorySummariesAction(input: {
+  action: string
+  requireRepositoryManagerCapability: boolean
+}): Promise<ActionState<AccessibleRepositorySummary[]>> {
   const requestId = generateRequestId()
-  const timer = startTimer("getUserAccessibleRepositories")
-  const log = createLogger({ requestId, action: "getUserAccessibleRepositories" })
+  const timer = startTimer(input.action)
+  const log = createLogger({ requestId, action: input.action })
 
   try {
     log.info("Action started: Getting user accessible repositories")
@@ -976,30 +1062,16 @@ export async function getUserAccessibleRepositoriesAction(): Promise<
       return { isSuccess: false, message: "Unauthorized" }
     }
 
-    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
-    if (!hasAccess) {
+    if (
+      input.requireRepositoryManagerCapability &&
+      !(await hasCapabilityAccess("knowledge-repositories"))
+    ) {
       log.warn("Access denied - missing knowledge-repositories tool access")
       return { isSuccess: false, message: "Access denied. You need knowledge repository access." }
     }
 
     log.debug("Fetching accessible repositories via Drizzle", { cognitoSub: session.sub })
-
-    const currentUserId = await getUserIdFromSession(session.sub)
-    const [repositoriesRaw, isAdmin] = await Promise.all([
-      getUserAccessibleRepositories(session.sub),
-      hasRole("administrator"),
-    ])
-
-    // Convert nullable types to match return type
-    const repositories = repositoriesRaw.map(repo => ({
-      id: repo.id,
-      name: repo.name,
-      description: repo.description,
-      isPublic: repo.isPublic ?? false,
-      itemCount: Number(repo.itemCount),
-      lastUpdated: repo.lastUpdated,
-      canManage: isAdmin || repo.ownerId === currentUserId,
-    }))
+    const repositories = await loadAccessibleRepositorySummaries(session.sub)
 
     log.info("Accessible repositories fetched successfully", {
       repositoryCount: repositories.length
@@ -1017,4 +1089,27 @@ export async function getUserAccessibleRepositoriesAction(): Promise<
       operation: "getUserAccessibleRepositories"
     })
   }
+}
+
+export async function getUserAccessibleRepositoriesAction(): Promise<
+  ActionState<AccessibleRepositorySummary[]>
+> {
+  return getAccessibleRepositorySummariesAction({
+    action: "getUserAccessibleRepositories",
+    requireRepositoryManagerCapability: true,
+  })
+}
+
+/**
+ * Nexus is a separate UI capability from Repository Manager. This action lists
+ * only repositories the authenticated user can read through repository ACLs;
+ * it does not grant creation or management access.
+ */
+export async function getNexusAccessibleRepositoriesAction(): Promise<
+  ActionState<AccessibleRepositorySummary[]>
+> {
+  return getAccessibleRepositorySummariesAction({
+    action: "getNexusAccessibleRepositories",
+    requireRepositoryManagerCapability: false,
+  })
 }

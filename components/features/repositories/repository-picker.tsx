@@ -40,6 +40,8 @@ export interface RepositoryPickerProps {
   closeOnSelect?: boolean
   title?: string
   description?: string
+  loadRepositories?: typeof getUserAccessibleRepositoriesAction
+  maxSelections?: number
 }
 
 function toSummary(
@@ -51,6 +53,11 @@ function toSummary(
     description: repository.description,
     isPublic: repository.isPublic,
     itemCount: repository.itemCount ?? 0,
+    readiness: repository.readiness,
+    activeGenerationId: repository.activeIndexGenerationId,
+    indexedItemCount: repository.indexedItemCount,
+    segmentCount: repository.segmentCount,
+    lastIndexError: repository.lastIndexError,
     lastUpdated: repository.updatedAt,
     canManage: repository.canManage,
   }
@@ -148,6 +155,18 @@ function RepositoryResults({
                 <Badge variant="outline">
                   {repository.canManage ? "Managed by you" : "Shared"}
                 </Badge>
+                <Badge
+                  variant={
+                    repository.readiness === "searchable"
+                      ? "default"
+                      : repository.readiness === "degraded"
+                        ? "secondary"
+                        : "outline"
+                  }
+                  className="capitalize"
+                >
+                  {repository.readiness}
+                </Badge>
                 {!repository.isPublic ? (
                   <Lock
                     className="h-3.5 w-3.5 text-muted-foreground"
@@ -157,7 +176,8 @@ function RepositoryResults({
               </div>
               <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
                 {repository.description || "No description"} ·{" "}
-                {repository.itemCount} items
+                {repository.indexedItemCount}/{repository.itemCount} indexed ·{" "}
+                {repository.segmentCount} segments
               </p>
             </div>
             <span
@@ -254,6 +274,7 @@ function RepositoryCreator({
   )
 }
 
+// eslint-disable-next-line max-lines-per-function -- Picker orchestration keeps its load, selection, creation, and dialog state colocated.
 export function RepositoryPicker({
   open,
   onOpenChange,
@@ -265,6 +286,8 @@ export function RepositoryPicker({
   closeOnSelect = true,
   title = "Choose a repository",
   description = "Select an accessible durable knowledge repository.",
+  loadRepositories = getUserAccessibleRepositoriesAction,
+  maxSelections,
 }: RepositoryPickerProps) {
   const { toast } = useToast()
   const [repositories, setRepositories] =
@@ -278,7 +301,7 @@ export function RepositoryPicker({
   const [newDescription, setNewDescription] = useState("")
 
   const load = useCallback(async () => {
-    const result = await getUserAccessibleRepositoriesAction()
+    const result = await loadRepositories()
     if (result.isSuccess && result.data) {
       setRepositories(result.data)
       setError(null)
@@ -286,13 +309,13 @@ export function RepositoryPicker({
       setError(result.message || "Accessible repositories could not be loaded")
     }
     setLoading(false)
-  }, [])
+  }, [loadRepositories])
 
   useEffect(() => {
     if (!open) return
     let cancelled = false
     async function loadInitialRepositories() {
-      const result = await getUserAccessibleRepositoriesAction()
+      const result = await loadRepositories()
       if (cancelled) return
       if (result.isSuccess && result.data) {
         setRepositories(result.data)
@@ -306,7 +329,7 @@ export function RepositoryPicker({
     return () => {
       cancelled = true
     }
-  }, [open])
+  }, [loadRepositories, open])
 
   const visibleRepositories = useMemo(
     () => filterRepositories(repositories, query, manageableOnly),
@@ -320,7 +343,20 @@ export function RepositoryPicker({
       return
     }
 
-    const next = selectedRepositoryIds.includes(repositoryId)
+    const selected = selectedRepositoryIds.includes(repositoryId)
+    if (
+      !selected &&
+      maxSelections !== undefined &&
+      selectedRepositoryIds.length >= maxSelections
+    ) {
+      toast({
+        title: "Repository limit reached",
+        description: `Select at most ${maxSelections} repositories for this conversation.`,
+        variant: "destructive",
+      })
+      return
+    }
+    const next = selected
       ? selectedRepositoryIds.filter((id) => id !== repositoryId)
       : [...selectedRepositoryIds, repositoryId]
     onSelectionChange(next)

@@ -76,6 +76,10 @@ import {
   modelSupportsProviderNativeTool,
 } from "@/lib/ai/model-router/core";
 import { INTERNAL_ASSISTANT_LOOKUP } from "@/lib/assistant-architect/internal-access";
+import {
+  AGENTIC_MODEL_CONFIGURATION_ERROR,
+  isAgenticModelReady,
+} from "@/lib/agents/model-readiness";
 
 // Use inline type for architect with relations
 type ArchitectWithRelations = SelectAssistantArchitect & {
@@ -326,6 +330,23 @@ async function resolveAgenticUpdateFields(
   return { fields };
 }
 
+async function validateAgenticModelAvailability(
+  userId: number
+): Promise<string | null> {
+  const candidates = (await getArchitectEnabledModels()).filter(
+    isAgenticModelReady
+  );
+  if (candidates.length === 0) return AGENTIC_MODEL_CONFIGURATION_ERROR;
+  const accessibleIds = await filterAccessibleResourceIds(
+    userId,
+    "model",
+    candidates.map((model) => model.id)
+  );
+  return candidates.some((model) => accessibleIds.has(String(model.id)))
+    ? null
+    : AGENTIC_MODEL_CONFIGURATION_ERROR;
+}
+
 /** Normalize a nullable numeric limit to a positive integer, or null for no cap. */
 function nullablePositiveInt(value: number | null): number | null {
   if (value === null) return null;
@@ -416,6 +437,17 @@ export async function createAssistantArchitectAction(
         field: 'agentEnabledTools',
         message: agentResult.error
       }])
+    }
+    if (agentResult.fields.mode === "agentic") {
+      const modelError = await validateAgenticModelAvailability(
+        currentUser.data.user.id
+      );
+      if (modelError) {
+        throw ErrorFactories.validationFailed(
+          [{ field: "mode", message: modelError }],
+          { userMessage: modelError }
+        );
+      }
     }
 
     const routingResult = resolveModelRoutingFields({
@@ -935,6 +967,15 @@ export async function updateAssistantArchitectAction(
     );
     if ("error" in agentResult) {
       return { isSuccess: false, message: agentResult.error }
+    }
+    const effectiveMode = agentResult.fields.mode ?? currentTool.mode;
+    if (effectiveMode === "agentic") {
+      const modelError = await validateAgenticModelAvailability(
+        currentUserData.user.id
+      );
+      if (modelError) {
+        return { isSuccess: false, message: modelError }
+      }
     }
     Object.assign(updateData, agentResult.fields);
 

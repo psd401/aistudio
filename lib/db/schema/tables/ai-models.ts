@@ -26,7 +26,11 @@ export const aiModels = pgTable("ai_models", {
   modelId: text("model_id").notNull().unique(),
   description: text("description"),
   capabilities: text("capabilities"),
+  /** @deprecated Ambiguous legacy provider limit. Use the explicit fields below. */
   maxTokens: integer("max_tokens"),
+  contextWindowTokens: integer("context_window_tokens"),
+  maxOutputTokens: integer("max_output_tokens"),
+  agenticReady: boolean("agentic_ready").default(false).notNull(),
   active: boolean("active").default(true).notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at"),

@@ -93,6 +93,16 @@ export async function activateCompletedGeneration(
     activateTarget: sql`
       UPDATE repository_index_generations generation
       SET status = 'active',
+          source_version_count = (
+            SELECT count(DISTINCT chunk.item_version_id)::integer
+            FROM repository_item_chunks chunk
+            WHERE chunk.index_generation_id = generation.id
+          ),
+          segment_count = (
+            SELECT count(*)::integer
+            FROM repository_item_chunks chunk
+            WHERE chunk.index_generation_id = generation.id
+          ),
           published_at = COALESCE(generation.published_at, now())
       WHERE generation.id = ${generationId}::uuid
         AND EXISTS (

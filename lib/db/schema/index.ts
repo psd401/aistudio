@@ -63,6 +63,7 @@ export * from "./tables/agentic-cost-reservations";
 export * from "./tables/resource-admission-leases";
 export * from "./tables/workspace-upload-reservations";
 export * from "./tables/nexus-repository-bindings";
+export * from "./tables/nexus-conversation-repositories";
 export * from "./tables/nexus-projects";
 
 // ============================================

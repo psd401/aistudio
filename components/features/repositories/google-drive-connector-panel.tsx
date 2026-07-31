@@ -6,6 +6,8 @@ import {
   CheckCircle2,
   Cloud,
   Loader2,
+  Pause,
+  Play,
   RefreshCw,
   Unplug,
 } from "lucide-react";
@@ -13,6 +15,16 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/use-toast";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import type { GoogleDriveConnectorView } from "@/lib/repositories/google-drive/connector-service";
 
 interface PickerSession {
@@ -233,11 +245,13 @@ function ConnectorHealth({
   connectors,
   pendingAction,
   onDisconnect,
+  onPauseChange,
   onSync,
 }: {
   connectors: GoogleDriveConnectorView[];
   pendingAction: string | null;
   onDisconnect: (connectorId: string) => void;
+  onPauseChange: (connectorId: string, paused: boolean) => void;
   onSync: (connectorId: string) => void;
 }) {
   if (connectors.length === 0) return null;
@@ -267,7 +281,29 @@ function ConnectorHealth({
                 type="button"
                 variant="outline"
                 size="sm"
-                disabled={pendingAction !== null}
+                disabled={
+                  pendingAction !== null || connector.status === "revoked"
+                }
+                onClick={() =>
+                  onPauseChange(connector.id, connector.status !== "paused")
+                }
+              >
+                {pendingAction === `lifecycle:${connector.id}` ? (
+                  <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                ) : connector.status === "paused" ? (
+                  <Play className="mr-1 h-3 w-3" />
+                ) : (
+                  <Pause className="mr-1 h-3 w-3" />
+                )}
+                {connector.status === "paused" ? "Resume" : "Pause sync"}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={
+                  pendingAction !== null || connector.status === "paused"
+                }
                 onClick={() => onSync(connector.id)}
               >
                 {pendingAction === `sync:${connector.id}` ? (
@@ -324,6 +360,7 @@ function ConnectorPanelContent({
   repositoryId,
   onChooseSources,
   onDisconnect,
+  onPauseChange,
   onSync,
 }: {
   connectors: GoogleDriveConnectorView[];
@@ -333,6 +370,7 @@ function ConnectorPanelContent({
   repositoryId: number;
   onChooseSources: () => void;
   onDisconnect: (connectorId: string) => void;
+  onPauseChange: (connectorId: string, paused: boolean) => void;
   onSync: (connectorId: string) => void;
 }) {
   return (
@@ -383,12 +421,14 @@ function ConnectorPanelContent({
         connectors={connectors}
         pendingAction={pendingAction}
         onDisconnect={onDisconnect}
+        onPauseChange={onPauseChange}
         onSync={onSync}
       />
     </div>
   );
 }
 
+// eslint-disable-next-line max-lines-per-function -- Connector picker, pause/resume, sync, and destructive confirmation share one coordinated UI state machine.
 export function GoogleDriveConnectorPanel({
   repositoryId,
   onSourcesChanged,
@@ -398,6 +438,8 @@ export function GoogleDriveConnectorPanel({
   const [isLoading, setIsLoading] = useState(true);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [disconnectTarget, setDisconnectTarget] =
+    useState<GoogleDriveConnectorView | null>(null);
 
   const loadConnectors = useCallback(async () => {
     setIsLoading(true);
@@ -497,6 +539,45 @@ export function GoogleDriveConnectorPanel({
     }
   }
 
+  async function changeConnectorPause(
+    connectorId: string,
+    paused: boolean,
+  ) {
+    setPendingAction(`lifecycle:${connectorId}`);
+    try {
+      const response = await fetch(
+        `/api/repositories/${repositoryId}/connectors/google/${connectorId}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ operation: paused ? "pause" : "resume" }),
+        },
+      );
+      if (!response.ok) {
+        const result = (await response.json()) as { error?: string };
+        throw new Error(result.error || "Failed to change connector state");
+      }
+      toast({
+        title: paused ? "Google Drive sync paused" : "Google Drive sync resumed",
+        description: paused
+          ? "The last verified searchable snapshot is retained."
+          : "A reconciliation from the durable cursor has been queued.",
+      });
+      await loadConnectors();
+    } catch (lifecycleError) {
+      toast({
+        title: paused ? "Pause failed" : "Resume failed",
+        description:
+          lifecycleError instanceof Error
+            ? lifecycleError.message
+            : "Failed to change connector state",
+        variant: "destructive",
+      });
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
   async function disconnectConnector(connectorId: string) {
     setPendingAction(`disconnect:${connectorId}`);
     try {
@@ -525,6 +606,7 @@ export function GoogleDriveConnectorPanel({
       });
     } finally {
       setPendingAction(null);
+      setDisconnectTarget(null);
     }
   }
 
@@ -532,15 +614,64 @@ export function GoogleDriveConnectorPanel({
   if (isLoading) return <GoogleDriveLoading />;
 
   return (
-    <ConnectorPanelContent
-      connectors={connectors}
-      error={error}
-      pendingAction={pendingAction}
-      personalConnector={personalConnector}
-      repositoryId={repositoryId}
-      onChooseSources={() => void choosePersonalDriveSources()}
-      onDisconnect={connectorId => void disconnectConnector(connectorId)}
-      onSync={connectorId => void syncConnector(connectorId)}
-    />
+    <>
+      <ConnectorPanelContent
+        connectors={connectors}
+        error={error}
+        pendingAction={pendingAction}
+        personalConnector={personalConnector}
+        repositoryId={repositoryId}
+        onChooseSources={() => void choosePersonalDriveSources()}
+        onDisconnect={connectorId =>
+          setDisconnectTarget(
+            connectors.find(connector => connector.id === connectorId) ?? null,
+          )
+        }
+        onPauseChange={(connectorId, paused) =>
+          void changeConnectorPause(connectorId, paused)
+        }
+        onSync={connectorId => void syncConnector(connectorId)}
+      />
+      <AlertDialog
+        open={disconnectTarget !== null}
+        onOpenChange={open => {
+          if (!open && pendingAction === null) setDisconnectTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Disconnect and remove linked Google Drive content?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This revokes the connector credential, fences future sync work,
+              and makes all linked sources unavailable for retrieval. Use Pause
+              sync instead if you want to retain the last verified searchable
+              snapshot and resume later.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={pendingAction !== null}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={pendingAction !== null || disconnectTarget === null}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={event => {
+                event.preventDefault();
+                if (disconnectTarget) {
+                  void disconnectConnector(disconnectTarget.id);
+                }
+              }}
+            >
+              {pendingAction?.startsWith("disconnect:") ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : null}
+              Disconnect and remove content
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }

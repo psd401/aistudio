@@ -1,9 +1,19 @@
 import { NextResponse } from 'next/server';
-import { getAIModels, createAIModel, updateAIModel, deleteAIModel } from '@/lib/db/drizzle';
+import {
+  getAIModels,
+  getAIModelById,
+  createAIModel,
+  updateAIModel,
+  deleteAIModel,
+} from '@/lib/db/drizzle';
 import { requireAdmin } from '@/lib/auth/admin-check';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { normalizeBoolean } from '@/lib/validations/api-schemas';
 import type { AIModelData } from '@/lib/db/drizzle/ai-models';
+import {
+  agenticModelAdmissionIssues,
+  type AgenticModelAdmissionFields,
+} from '@/lib/agents/model-readiness';
 
 // NOTE (#1207): per-model role/group access is set ONLY via the ResourceGrantsEditor
 // (resource_access_grants — see actions/db/resource-grants-actions.ts). The legacy
@@ -80,6 +90,7 @@ function missingCreateField(body: CreateModelBody): string | null {
   return null;
 }
 
+// eslint-disable-next-line complexity -- Centralized request normalization keeps model creation and admission validation consistent.
 function buildCreateModelData(
   body: CreateModelBody,
   capabilities: string | null
@@ -91,6 +102,15 @@ function buildCreateModelData(
     description: body.description,
     capabilities: capabilities || undefined,
     maxTokens: body.maxTokens ? Number.parseInt(String(body.maxTokens)) : undefined,
+    contextWindowTokens:
+      body.contextWindowTokens == null
+        ? undefined
+        : Number.parseInt(String(body.contextWindowTokens), 10),
+    maxOutputTokens:
+      body.maxOutputTokens == null
+        ? undefined
+        : Number.parseInt(String(body.maxOutputTokens), 10),
+    agenticReady: body.agenticReady ?? false,
     active: body.active ?? true,
     nexusEnabled: body.nexusEnabled ?? true,
     architectEnabled: body.architectEnabled ?? true,
@@ -106,6 +126,16 @@ function buildCreateModelData(
     supportsBatching: body.supportsBatching ?? undefined,
     providerMetadata: body.providerMetadata || undefined,
   };
+}
+
+function agenticAdmissionMessage(
+  model: AgenticModelAdmissionFields
+): string | null {
+  if (model.agenticReady !== true) return null;
+  const issues = agenticModelAdmissionIssues(model);
+  return issues.length > 0
+    ? `Model cannot be marked Agentic Ready: ${issues.join(", ")}`
+    : null;
 }
 
 export async function GET() {
@@ -182,6 +212,13 @@ export async function POST(request: Request) {
     // Validate and sanitize capabilities
     const validatedCapabilities = validateCapabilities(body.capabilities, log);
     const modelData = buildCreateModelData(body, validatedCapabilities);
+    const admissionMessage = agenticAdmissionMessage(modelData);
+    if (admissionMessage) {
+      return NextResponse.json(
+        { isSuccess: false, message: admissionMessage },
+        { status: 400, headers: { "X-Request-Id": requestId } }
+      );
+    }
 
     const model = await createAIModel(modelData);
 
@@ -206,6 +243,7 @@ export async function POST(request: Request) {
   }
 }
 
+// eslint-disable-next-line complexity -- The admin update endpoint normalizes a heterogeneous model configuration before one validated write.
 export async function PUT(request: Request) {
   const requestId = generateRequestId();
   const timer = startTimer("api.admin.models.update");
@@ -222,8 +260,15 @@ export async function PUT(request: Request) {
       return authError;
     }
 
-    const body = await request.json();
+    const body = (await request.json()) as Record<string, unknown>;
     const { id, ...updates } = body;
+    const modelId = Number(id);
+    if (!Number.isSafeInteger(modelId) || modelId <= 0) {
+      return NextResponse.json(
+        { isSuccess: false, message: "A valid model id is required" },
+        { status: 400, headers: { "X-Request-Id": requestId } }
+      );
+    }
     
     log.debug("Updating model", { modelId: id, updates });
     
@@ -242,7 +287,19 @@ export async function PUT(request: Request) {
 
     // Convert maxTokens to number if present
     if (updates.maxTokens !== undefined) {
-      updates.maxTokens = updates.maxTokens ? Number.parseInt(updates.maxTokens) : null;
+      updates.maxTokens = updates.maxTokens
+        ? Number.parseInt(String(updates.maxTokens), 10)
+        : null;
+    }
+    if (updates.contextWindowTokens !== undefined) {
+      updates.contextWindowTokens = updates.contextWindowTokens
+        ? Number.parseInt(String(updates.contextWindowTokens), 10)
+        : null;
+    }
+    if (updates.maxOutputTokens !== undefined) {
+      updates.maxOutputTokens = updates.maxOutputTokens
+        ? Number.parseInt(String(updates.maxOutputTokens), 10)
+        : null;
     }
 
     // Handle boolean fields - ensure proper type (frontend may send as string)
@@ -256,6 +313,9 @@ export async function PUT(request: Request) {
     if ('architectEnabled' in updates) {
       updates.architectEnabled = normalizeBoolean(updates.architectEnabled);
     }
+    if ('agenticReady' in updates) {
+      updates.agenticReady = normalizeBoolean(updates.agenticReady);
+    }
 
     // JSONB fields - pass as objects, Drizzle serializes automatically via .$type<T>()
     // No manual JSON.stringify needed - consistent with POST handler
@@ -265,9 +325,27 @@ export async function PUT(request: Request) {
       updates.pricingUpdatedAt = updates.pricingUpdatedAt.toISOString();
     }
 
-    const model = await updateAIModel(id, updates);
+    const existing = await getAIModelById(modelId);
+    if (!existing) {
+      return NextResponse.json(
+        { isSuccess: false, message: "Model not found" },
+        { status: 404, headers: { "X-Request-Id": requestId } }
+      );
+    }
+    const admissionMessage = agenticAdmissionMessage({
+      ...existing,
+      ...updates,
+    });
+    if (admissionMessage) {
+      return NextResponse.json(
+        { isSuccess: false, message: admissionMessage },
+        { status: 400, headers: { "X-Request-Id": requestId } }
+      );
+    }
 
-    log.info("Model updated successfully", { modelId: id });
+    const model = await updateAIModel(modelId, updates);
+
+    log.info("Model updated successfully", { modelId });
     timer({ status: "success" });
     
     return NextResponse.json(

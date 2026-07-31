@@ -252,6 +252,7 @@ export {
   getActiveAIModels,
   getNexusEnabledModels,
   getArchitectEnabledModels,
+  getAgenticReadyArchitectModels,
   getAIModelsByProvider,
   getModelsWithCapabilities,
   // CRUD operations
