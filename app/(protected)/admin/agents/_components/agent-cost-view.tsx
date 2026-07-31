@@ -108,7 +108,7 @@ function ModelCostPanel({ costByModel }: { costByModel: AgentCostByModel | null 
           Model cost (tokens × pricing)
         </h3>
         <Card>
-          <CardContent className="pt-6">
+          <CardContent>
             <EmptyRow text="Model cost data unavailable — the query failed to load (see the error notification). This is NOT a $0 reading; retry the range." />
           </CardContent>
         </Card>
@@ -443,7 +443,7 @@ function CostExplorerPanel({ data }: { data: AgentCostSummary | null }) {
 function SummaryStat({ label, value }: { label: string; value: string }) {
   return (
     <Card>
-      <CardContent className="pt-6">
+      <CardContent>
         <div className="text-xs uppercase tracking-wide text-muted-foreground">
           {label}
         </div>

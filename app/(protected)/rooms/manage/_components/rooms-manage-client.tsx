@@ -11,7 +11,7 @@ import {
 } from "@/actions/db/rooms-actions";
 import type { RoomMutationInput } from "@/lib/rooms/mutations";
 import type { ManagedRoom, RosterStudentOption } from "@/lib/rooms/queries";
-import { RoomEditor, type RoomEditorFeedback } from "./room-editor";
+import { RoomEditorDialog, type RoomEditorFeedback } from "./room-editor";
 import { RoomsList } from "./rooms-list";
 
 const emptyDraft = (): RoomMutationInput => ({
@@ -37,6 +37,11 @@ export function RoomsManageClient({
 }) {
   const router = useRouter();
   const [editingRoomId, setEditingRoomId] = useState<string | null>(null);
+  // The editor used to live permanently in a right-hand column, so "New room"
+  // (which only resets the draft) produced no visible change and read as a dead
+  // button. It is a modal now: the click has an unmistakable result, and the
+  // list gets the full width.
+  const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [draft, setDraft] = useState<RoomMutationInput>(emptyDraft);
   const [studentSearch, setStudentSearch] = useState("");
   const [studentResults, setStudentResults] = useState<RosterStudentOption[]>([]);
@@ -59,6 +64,16 @@ export function RoomsManageClient({
     [initialData.assistants]
   );
 
+  function openCreate() {
+    resetEditor();
+    setIsEditorOpen(true);
+  }
+
+  function closeEditor() {
+    setIsEditorOpen(false);
+    resetEditor();
+  }
+
   function resetEditor() {
     setEditingRoomId(null);
     setDraft(emptyDraft());
@@ -71,6 +86,7 @@ export function RoomsManageClient({
     resetEditor();
     setEditingRoomId(room.id);
     setDraft(roomToDraft(room));
+    setIsEditorOpen(true);
   }
 
   async function searchStudents() {
@@ -113,7 +129,7 @@ export function RoomsManageClient({
       });
       return;
     }
-    resetEditor();
+    closeEditor();
     setFeedback({ kind: "success", message: result.message ?? "Room saved." });
     router.refresh();
   }
@@ -136,21 +152,20 @@ export function RoomsManageClient({
   }
 
   return (
-    <div
-      className="grid gap-6 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]"
-      data-testid="rooms-manage"
-    >
+    <div className="space-y-6" data-testid="rooms-manage">
       <RoomsList
         rooms={initialData.rooms}
         isAdministrator={initialData.isAdministrator}
         sectionById={sectionById}
         assistantById={assistantById}
         deletingRoomId={deletingRoomId}
-        onCreate={resetEditor}
+        onCreate={openCreate}
         onEdit={beginEdit}
         onDelete={deleteRoom}
       />
-      <RoomEditor
+      <RoomEditorDialog
+        open={isEditorOpen}
+        onOpenChange={(open) => (open ? setIsEditorOpen(true) : closeEditor())}
         editingRoomId={editingRoomId}
         draft={draft}
         sections={initialData.sections}
@@ -164,7 +179,7 @@ export function RoomsManageClient({
         onStudentSearchChange={setStudentSearch}
         onStudentSearch={searchStudents}
         onAddStudent={addStudent}
-        onCancel={resetEditor}
+        onCancel={closeEditor}
         onSubmit={saveRoom}
       />
     </div>

@@ -161,12 +161,15 @@ export function IdeaNotesDialog(props: {
         </DialogHeader>
         <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-4">
           {controller.notes.map((note) => (
-            <Card key={note.id}>
-              <CardContent className="pt-6">
+            // No CardHeader here, so CardContent's default `mt-4` would push the
+            // note away from the top of its own card for no reason. Card already
+            // supplies p-6.
+            <Card key={note.id} className="p-4">
+              <CardContent className="mt-0 space-y-1">
                 <p className="text-sm break-words whitespace-pre-wrap">
                   {note.content}
                 </p>
-                <p className="text-xs text-muted-foreground mt-2">
+                <p className="text-xs text-muted-foreground">
                   {new Date(note.createdAt).toLocaleString()} by {note.createdBy}
                 </p>
               </CardContent>

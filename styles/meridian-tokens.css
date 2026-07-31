@@ -50,6 +50,24 @@
  * Humans get green / terracotta / blue. Never repurpose violet as an accent.
  */
 
+/*
+ * Overscroll / rubber-band area.
+ *
+ * The scope class sits on a div INSIDE <body>, so scrolling past the end of the
+ * document reveals the <body> background — which app/globals.css sets to the
+ * global cream. No amount of styling inside the scope can reach it.
+ *
+ * `:has()` lets the document root adopt the canvas only on pages that actually
+ * render Meridian, so unconverted and public pages keep the cream they still
+ * expect. The value is a literal because these elements sit ABOVE the scope
+ * that defines --mer-canvas; it is the one place the token cannot be used.
+ * Keep it in step with --mer-canvas below.
+ */
+html:has(.meridian),
+html:has(.meridian) body {
+  background-color: #f5f7f9; /* = --mer-canvas */
+}
+
 .meridian,
 .meridian-portal {
   /* ---- Surfaces (cool-neutral, chroma 0.003) ---- */

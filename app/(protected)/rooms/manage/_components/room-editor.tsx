@@ -8,13 +8,19 @@ import type {
   TeacherSectionOption,
 } from "@/lib/rooms/queries";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { RoomAssistantPicker } from "./room-assistant-picker";
 import { RoomSectionPicker } from "./room-section-picker";
 import { RoomStudentPicker } from "./room-student-picker";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { meridianPortalClassName } from "@/lib/meridian/fonts";
 
 export interface RoomEditorFeedback {
   kind: "success" | "error";
@@ -43,15 +49,10 @@ export function RoomEditor(props: RoomEditorProps) {
   const updateDraft = (changes: Partial<RoomMutationInput>) =>
     props.onDraftChange({ ...props.draft, ...changes });
 
+  // Rendered inside a Dialog, which supplies the sheet and the title — the old
+  // Card + CardHeader here duplicated both.
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>
-          {props.editingRoomId ? "Edit room" : "Create a room"}
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        <form className="space-y-6" onSubmit={props.onSubmit}>
+    <form className="space-y-6" onSubmit={props.onSubmit}>
           <div className="space-y-2">
             <Label htmlFor="room-name">Room name</Label>
             <Input
@@ -138,9 +139,36 @@ export function RoomEditor(props: RoomEditorProps) {
                   : "Create room"}
             </Button>
           </div>
-        </form>
-      </CardContent>
-    </Card>
+    </form>
+  );
+}
+
+/**
+ * The editor in a modal. Extracted from RoomsManageClient so that component
+ * stays under the max-lines lint budget, and so the sheet/title live next to
+ * the form they wrap.
+ */
+export function RoomEditorDialog(
+  props: RoomEditorProps & {
+    open: boolean;
+    onOpenChange: (open: boolean) => void;
+  }
+) {
+  const { open, onOpenChange, ...editorProps } = props;
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        className={`sm:max-w-2xl max-h-[85vh] overflow-y-auto ${meridianPortalClassName}`}
+        data-mer-size="wide"
+      >
+        <DialogHeader>
+          <DialogTitle>
+            {editorProps.editingRoomId ? "Edit room" : "Create a room"}
+          </DialogTitle>
+        </DialogHeader>
+        <RoomEditor {...editorProps} />
+      </DialogContent>
+    </Dialog>
   );
 }
 

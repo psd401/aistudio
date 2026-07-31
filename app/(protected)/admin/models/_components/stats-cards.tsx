@@ -25,7 +25,7 @@ function StatCard({ label, value, icon, loading, className }: StatCardProps) {
   if (loading) {
     return (
       <Card className={className}>
-        <CardContent className="pt-6">
+        <CardContent>
           <div className="flex items-center justify-between">
             <div className="space-y-2">
               <Skeleton className="h-4 w-24" />
@@ -40,7 +40,7 @@ function StatCard({ label, value, icon, loading, className }: StatCardProps) {
 
   return (
     <Card className={className}>
-      <CardContent className="pt-6">
+      <CardContent>
         <div className="flex items-center justify-between">
           <div>
             <p className="text-sm text-muted-foreground font-medium">{label}</p>

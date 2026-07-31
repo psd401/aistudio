@@ -28,6 +28,7 @@ import { useRouter } from 'next/navigation'
 import { navigateToConversation } from '@/lib/nexus/conversation-navigation'
 import { archiveConversationAction } from '@/actions/nexus/archive-conversation.actions'
 import type { AssistantArchitectConversationMetadata, NexusConversationMetadata } from '@/lib/db/types/jsonb'
+import { meridianPortalClassName } from '@/lib/meridian/fonts'
 
 const log = createLogger({ moduleName: 'nexus-conversation-list' })
 
@@ -344,7 +345,7 @@ const ConversationItemRow = memo(function ConversationItemRow({
               <Trash2Icon className="h-4 w-4" />
             </TooltipIconButton>
           </AlertDialogTrigger>
-          <AlertDialogContent>
+          <AlertDialogContent className={meridianPortalClassName}>
             <AlertDialogHeader>
               <AlertDialogTitle>Delete conversation?</AlertDialogTitle>
               <AlertDialogDescription>

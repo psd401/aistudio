@@ -63,7 +63,7 @@ function RepositoryTable({
 }: RepositoryTableProps) {
   return (
     <Card>
-      <CardContent className="pt-6">
+      <CardContent>
         <div className="rounded-md border">
           <Table>
             <TableHeader>

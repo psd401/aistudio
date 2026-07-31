@@ -103,7 +103,7 @@ export function TriageDetailClient({ userEmail }: Props) {
       <div className="space-y-4">
         <h1 className="text-2xl font-semibold">Email Triage · {userEmail}</h1>
         <Card>
-          <CardContent className="pt-6 text-muted-foreground">
+          <CardContent className="text-muted-foreground">
             No triage row for this user. They have not enabled triage yet, or it
             has been forcefully reset.
           </CardContent>
