@@ -58,6 +58,7 @@ import {
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { MemoryImportDialog } from "./memory-import-dialog"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 const log = createLogger({ component: "MemoryTab" })
 
@@ -133,7 +134,7 @@ function MemoryCategorySelect({
       >
         <SelectValue />
       </SelectTrigger>
-      <SelectContent>
+      <SelectContent className={meridianPortalClassName}>
         {MEMORY_CATEGORIES.map((category) => (
           <SelectItem key={category.value} value={category.value}>
             {category.label}
@@ -175,7 +176,7 @@ function AddMemoryDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className={`max-w-lg ${meridianPortalClassName}`}>
         <DialogHeader>
           <DialogTitle>Add memory</DialogTitle>
           <DialogDescription>
@@ -971,7 +972,7 @@ function MemoryDeleteDialog({
         }
       }}
     >
-      <AlertDialogContent>
+      <AlertDialogContent className={meridianPortalClassName}>
         <AlertDialogHeader>
           <AlertDialogTitle>
             {deletion.deleteTarget?.kind === "bulk"

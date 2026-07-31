@@ -33,6 +33,7 @@ import {
   revokeUserApiKey,
 } from "@/actions/settings/user-settings.actions"
 import type { ApiKeyInfo } from "@/lib/api-keys/key-service"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 const log = createLogger({ component: "ApiKeysTab" })
 
@@ -140,7 +141,7 @@ function RevokeApiKeyDialog({
 }: RevokeApiKeyDialogProps) {
   return (
     <AlertDialog open={target !== null} onOpenChange={onOpenChange}>
-      <AlertDialogContent>
+      <AlertDialogContent className={meridianPortalClassName}>
         <AlertDialogHeader>
           <AlertDialogTitle>Revoke API Key?</AlertDialogTitle>
           <AlertDialogDescription className="space-y-2">

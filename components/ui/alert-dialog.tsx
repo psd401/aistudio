@@ -45,6 +45,11 @@ const AlertDialogContent = React.forwardRef<
     <AlertDialogOverlay />
     <AlertDialogPrimitive.Content
       ref={ref}
+      // Meridian's portal surface rules match on data-slot; DialogContent emits
+      // one and this did not, so alert dialogs inside a Meridian scope kept the
+      // default shadcn sheet (8px radius, shadow-lg) while every other modal
+      // picked up the Meridian one. Additive attribute — inert outside Meridian.
+      data-slot="alert-dialog-content"
       className={cn(
         "fixed z-50 grid w-full max-w-lg scale-100 gap-4 border bg-background p-6 opacity-100 shadow-lg animate-in fade-in-90 slide-in-from-bottom-10 sm:rounded-lg sm:zoom-in-90 sm:slide-in-from-bottom-0",
         className
@@ -88,6 +93,7 @@ const AlertDialogTitle = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof AlertDialogPrimitive.Title>
 >(({ className, ...props }, ref) => (
   <AlertDialogPrimitive.Title
+    data-slot="alert-dialog-title"
     ref={ref}
     className={cn("text-lg font-semibold", className)}
     {...props}
@@ -100,6 +106,7 @@ const AlertDialogDescription = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof AlertDialogPrimitive.Description>
 >(({ className, ...props }, ref) => (
   <AlertDialogPrimitive.Description
+    data-slot="alert-dialog-description"
     ref={ref}
     className={cn("text-sm text-muted-foreground", className)}
     {...props}
