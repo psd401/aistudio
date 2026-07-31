@@ -15,10 +15,10 @@ import io
 import pathlib
 import pwd
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
-import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -112,6 +112,43 @@ class PullTraversalTests(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertTrue((self.root / "a" / "b" / "c.md").exists())
 
+    def test_first_migration_restores_every_legacy_transcript(self):
+        keys = [
+            "agents/main/sessions/s0001.jsonl",
+            "agents/main/sessions/s0002.jsonl",
+            "openclaw-workspace-state.json",
+            "workspace-attestations/setup.attested",
+            "memory/MEMORY.md",
+        ]
+        count, downloaded, _ = self._run_pull(keys)
+        self.assertEqual(count, len(keys))
+        self.assertEqual({path for path, _ in downloaded}, set(keys))
+
+    def test_completed_migration_restores_sqlite_not_legacy_archive(self):
+        keys = [
+            workspace_sync.OPENCLAW_MIGRATION_MARKER,
+            "state/openclaw.sqlite",
+            "state/openclaw.sqlite-wal",
+            "agents/main/agent/openclaw-agent.sqlite",
+            "agents/main/agent/openclaw-agent.sqlite-shm",
+            "agents/main/sessions/s0001.jsonl",
+            "openclaw-workspace-state.json",
+            "workspace-attestations/setup.attested",
+            "memory/MEMORY.md",
+        ]
+        count, downloaded, _ = self._run_pull(keys)
+        restored = {path for path, _ in downloaded}
+        self.assertEqual(count, 4)
+        self.assertEqual(
+            restored,
+            {
+                workspace_sync.OPENCLAW_MIGRATION_MARKER,
+                "state/openclaw.sqlite",
+                "agents/main/agent/openclaw-agent.sqlite",
+                "memory/MEMORY.md",
+            },
+        )
+
     def test_restored_file_is_writable_by_model_uid(self):
         count, _, _ = self._run_pull(["memory/new.md"])
         self.assertEqual(count, 1)
@@ -138,6 +175,30 @@ class PullTraversalTests(unittest.TestCase):
         else:
             with restored.open("a") as output:
                 output.write("node")
+
+    def test_failed_object_download_marks_restore_incomplete(self):
+        def fake_broker(payload):
+            self.assertEqual(payload, {"operation": "list"})
+            return {"paths": ["memory/MEMORY.md"]}
+
+        with mock.patch.object(
+            workspace_sync,
+            "WORKSPACE_DIR",
+            self.root,
+        ), mock.patch.object(
+            workspace_sync,
+            "_broker_request",
+            side_effect=fake_broker,
+        ), mock.patch.object(
+            workspace_sync,
+            "_download_spec",
+            side_effect=RuntimeError("temporary download failure"),
+        ):
+            with self.assertRaisesRegex(
+                workspace_sync.WorkspaceRestoreIncomplete,
+                "1 object download",
+            ):
+                workspace_sync.pull_workspace("userA")
 
     def test_symlink_destination_cannot_change_protected_target(self):
         protected = self.root.parent / "protected-root-file"
@@ -459,81 +520,6 @@ class BoundedTransferTests(unittest.TestCase):
                     )
 
 
-class PeriodicPushLifecycleTests(unittest.TestCase):
-    def tearDown(self):
-        workspace_sync.stop_periodic_push()
-        t = workspace_sync._periodic_thread
-        if t is not None:
-            t.join(2)
-        workspace_sync._periodic_thread = None
-
-    def test_stop_resets_thread_state_and_restart_is_live(self):
-        with mock.patch.object(workspace_sync, "push_workspace", return_value=0):
-            workspace_sync.start_periodic_push("p", interval_s=60)
-            t1 = workspace_sync._periodic_thread
-            self.assertIsNotNone(t1)
-            self.assertTrue(t1.is_alive())
-
-            workspace_sync.stop_periodic_push()
-            # Bug was: thread ref never reset, so restart was blocked.
-            self.assertIsNone(workspace_sync._periodic_thread)
-            t1.join(2)
-            self.assertFalse(t1.is_alive())
-
-            workspace_sync.start_periodic_push("p", interval_s=60)
-            t2 = workspace_sync._periodic_thread
-            self.assertIsNotNone(t2)
-            self.assertTrue(t2.is_alive())
-            self.assertIsNot(t2, t1)  # genuinely a new pusher
-            # Bug was: reused, already-set Event → new pusher exits immediately.
-            self.assertFalse(workspace_sync._periodic_stop.is_set())
-
-    def test_restart_actually_resumes_pushing(self):
-        pushed = threading.Event()
-        calls = []
-
-        def fake_push(prefix):
-            calls.append(prefix)
-            pushed.set()
-            return 0
-
-        with mock.patch.object(workspace_sync, "push_workspace", side_effect=fake_push):
-            workspace_sync.start_periodic_push("p", interval_s=0.02)
-            self.assertTrue(pushed.wait(3), "first pusher never pushed")
-            t1 = workspace_sync._periodic_thread
-
-            workspace_sync.stop_periodic_push()
-            if t1 is not None:
-                t1.join(3)
-            pushed.clear()
-
-            workspace_sync.start_periodic_push("p", interval_s=0.02)
-            self.assertTrue(pushed.wait(3), "restarted pusher never resumed pushing")
-
-    def test_double_start_is_noop_while_alive(self):
-        with mock.patch.object(workspace_sync, "push_workspace", return_value=0):
-            workspace_sync.start_periodic_push("p", interval_s=60)
-            t1 = workspace_sync._periodic_thread
-            workspace_sync.start_periodic_push("p", interval_s=60)
-            self.assertIs(workspace_sync._periodic_thread, t1)  # no second thread
-
-    def test_stop_joins_thread_before_returning(self):
-        # gemini-code-assist review: stop_periodic_push signaled the thread to
-        # stop but never joined it, so a caller could observe _periodic_thread
-        # as None while the old thread was still mid-push_workspace(),
-        # potentially racing a freshly started replacement thread.
-        with mock.patch.object(workspace_sync, "push_workspace", return_value=0):
-            workspace_sync.start_periodic_push("p", interval_s=0.01)
-            t1 = workspace_sync._periodic_thread
-            self.assertTrue(t1.is_alive())
-
-            workspace_sync.stop_periodic_push()
-            # If stop_periodic_push joined (rather than just signaling), the
-            # thread must already be dead the instant it returns — no separate
-            # join() call needed here.
-            self.assertFalse(t1.is_alive(), "thread still alive immediately after stop_periodic_push() returned")
-
-
 class RestoreNeverClobbersTests(unittest.TestCase):
     """The 2026-07-27 data-loss regression.
 
@@ -542,7 +528,7 @@ class RestoreNeverClobbersTests(unittest.TestCase):
 
       restore raised (MAX_SYNC_FILES=1,000 vs a ~5,000-file workspace)
         -> container kept the image's default IDENTITY.md / MEMORY.md
-        -> periodic push uploaded those defaults over the real files in S3
+        -> a later push uploaded those defaults over the real files in S3
         -> the agent lost its name and all memory
 
     A failed READ became a destructive WRITE.
@@ -562,25 +548,26 @@ class RestoreNeverClobbersTests(unittest.TestCase):
             issubclass(workspace_sync.WorkspaceRestoreIncomplete, RuntimeError)
         )
 
-    def test_wrapper_gates_push_on_a_successful_restore(self):
-        # Asserted against the executable source: the push must be guarded by
-        # the hydration flag, not started unconditionally.
-        import re
-        src = open(
+    def test_wrapper_checkpoints_only_after_stop_and_successful_restore(self):
+        # Asserted against the executable source: a push must be guarded by the
+        # hydration flag and follow both gateway shutdown and SQLite checkpoint.
+        with open(
             os.path.join(os.path.dirname(__file__), "agentcore_wrapper.py"),
             encoding="utf-8",
-        ).read()
-        code = re.sub(r"#[^\n]*", "", src)
-        self.assertIn("_workspace_prefix_hydrated", code)
-        guarded = re.search(
-            r"if\s+workspace_prefix\s+and\s+_workspace_prefix_hydrated\s*:\s*\n"
-            r"\s*workspace_sync\.start_periodic_push",
-            code,
+        ) as source:
+            src = source.read()
+        finalizer = src[
+            src.index("async def _finalize_invocation_authority")
+            :src.index("def _serialize_invocations")
+        ]
+        self.assertIn("and _workspace_prefix_hydrated", finalizer)
+        self.assertLess(
+            finalizer.index("adapter.shutdown"),
+            finalizer.index("workspace_sync.prepare_sqlite_snapshot"),
         )
-        self.assertIsNotNone(
-            guarded,
-            "start_periodic_push must be gated on a successful restore — an "
-            "ungated push overwrites the remote workspace with image defaults",
+        self.assertLess(
+            finalizer.index("workspace_sync.prepare_sqlite_snapshot"),
+            finalizer.index("workspace_sync.push_workspace"),
         )
 
 
@@ -661,71 +648,51 @@ class RegenerableArtifactSkipTests(unittest.TestCase):
             )
 
 
-class SessionTranscriptRestoreTests(unittest.TestCase):
-    """Cold-start restore must not pull every archived session transcript.
+class SQLitePersistenceTests(unittest.TestCase):
+    """Migration keeps history and persistence never uploads live sidecars."""
 
-    On 2026-07-27 a dev workspace held 812 transcripts totalling 202 MB — 93%
-    of the bytes the restore pulled — and the pull took 70.8s during which the
-    agent could not answer. Boot was 10s and the model turn 15s: the
-    transcripts WERE the cold-start latency.
-    """
+    def setUp(self):
+        td = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, td, ignore_errors=True)
+        self.root = Path(td).resolve()
+        self.root.mkdir(exist_ok=True)
 
-    def _sessions(self, count, base_mtime=1_700_000_000):
-        return [
-            {
-                "path": f"{workspace_sync.SESSION_DIR_PREFIX}s{i:04d}.jsonl",
-                "size": 250_000,
-                "lastModified": base_mtime + i,
-            }
-            for i in range(count)
-        ]
+    def test_transient_sqlite_files_are_skipped_in_both_directions(self):
+        for relative in (
+            "state/openclaw.sqlite-wal",
+            "state/openclaw.sqlite-shm",
+            "agents/main/agent/openclaw-agent.sqlite-journal",
+            "agents/main/agent/.reindex-lock.sqlite",
+            "plugins.sync.lock",
+        ):
+            self.assertTrue(workspace_sync._should_skip_relative(relative))
 
-    def test_keeps_only_the_most_recent_transcripts(self):
-        keep = workspace_sync._select_session_transcripts(self._sessions(812))
-        self.assertEqual(len(keep), workspace_sync.MAX_RESTORED_SESSIONS)
+    def test_marker_is_atomic_and_exact(self):
+        with mock.patch.object(workspace_sync, "WORKSPACE_DIR", self.root):
+            self.assertFalse(workspace_sync.openclaw_migration_complete())
+            workspace_sync.mark_openclaw_migration_complete()
+            self.assertTrue(workspace_sync.openclaw_migration_complete())
 
-    def test_keeps_the_newest_and_drops_the_oldest(self):
-        # Ranking must be by mtime, not by path order: the CURRENT session's
-        # transcript is the most recently written one, and dropping it would
-        # make the agent resume with no conversation history.
-        keep = workspace_sync._select_session_transcripts(self._sessions(100))
-        self.assertIn(f"{workspace_sync.SESSION_DIR_PREFIX}s0099.jsonl", keep)
-        self.assertNotIn(f"{workspace_sync.SESSION_DIR_PREFIX}s0000.jsonl", keep)
-
-    def test_never_selects_non_session_files(self):
-        # memory/ is the agent's actual continuity and must always restore in
-        # full — it must never be subject to this cap.
-        entries = self._sessions(30) + [
-            {"path": "memory/MEMORY.md", "size": 13_683, "lastModified": 1},
-            {"path": "IDENTITY.md", "size": 770, "lastModified": 1},
-        ]
-        keep = workspace_sync._select_session_transcripts(entries)
-        self.assertNotIn("memory/MEMORY.md", keep)
-        self.assertNotIn("IDENTITY.md", keep)
-        self.assertTrue(
-            all(p.startswith(workspace_sync.SESSION_DIR_PREFIX) for p in keep)
-        )
-
-    def test_keeps_everything_when_the_broker_sends_no_timestamps(self):
-        # Containers deploy independently of the web tier, so a new image can
-        # run against an older broker that returns no mtimes. Ranking would
-        # then be arbitrary and could discard the live session, so the restore
-        # declines to trim: slower, never wrong.
-        no_ts = [dict(e, lastModified=0) for e in self._sessions(50)]
-        self.assertEqual(len(workspace_sync._select_session_transcripts(no_ts)), 50)
-
-        missing = [{"path": e["path"]} for e in self._sessions(50)]
-        self.assertEqual(len(workspace_sync._select_session_transcripts(missing)), 50)
-
-    def test_no_sessions_selects_nothing(self):
+    def test_checkpoint_includes_wal_and_validates_database(self):
+        database = self.root / "state" / "openclaw.sqlite"
+        database.parent.mkdir(parents=True)
+        connection = sqlite3.connect(database)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("CREATE TABLE history (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO history VALUES ('preserved')")
+        connection.commit()
+        with mock.patch.object(workspace_sync, "WORKSPACE_DIR", self.root):
+            self.assertEqual(workspace_sync.prepare_sqlite_snapshot(), 1)
+        connection.close()
+        restored = sqlite3.connect(database)
         self.assertEqual(
-            workspace_sync._select_session_transcripts(
-                [{"path": "memory/a.md", "size": 1, "lastModified": 9}]
-            ),
-            set(),
+            restored.execute("SELECT value FROM history").fetchall(),
+            [("preserved",)],
         )
+        self.assertEqual(restored.execute("PRAGMA integrity_check").fetchone(), ("ok",))
+        restored.close()
 
-    def test_trimming_the_pull_cannot_delete_remote_objects(self):
+    def test_legacy_archive_is_never_deleted_remotely(self):
         # THE SAFETY INVARIANT. Skipping a download is only safe because the
         # push is additive: it walks LOCAL files and uploads them, and nothing
         # in the sync path enumerates S3 to remove keys. If a delete ever

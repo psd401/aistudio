@@ -532,14 +532,19 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
                 _REQUEST_PROOF_KEY_PATH=key_path,
                 _WORKSPACE_FLUSH_TOKEN_PATH=flush_path,
                 _current_workspace_prefix="owner-prefix",
+                _workspace_prefix_hydrated=True,
             ), mock.patch.object(
-                agentcore_wrapper.workspace_sync,
-                "stop_periodic_push",
-            ) as stop, mock.patch.object(
                 agentcore_wrapper.workspace_sync,
                 "push_workspace",
                 return_value=1,
             ) as push, mock.patch.object(
+                agentcore_wrapper.workspace_sync,
+                "prepare_sqlite_snapshot",
+                return_value=2,
+            ) as prepare, mock.patch.object(
+                agentcore_wrapper.adapter,
+                "shutdown",
+            ) as shutdown, mock.patch.object(
                 agentcore_wrapper,
                 "_set_proxy_finalization",
             ) as transition:
@@ -553,7 +558,8 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(StopAsyncIteration):
                     await anext(stream)
 
-            stop.assert_called_once_with()
+            shutdown.assert_called_once_with()
+            prepare.assert_called_once_with()
             self.assertEqual(push.call_args.args, ("owner-prefix",))
             self.assertGreater(
                 push.call_args.kwargs["deadline_monotonic"],
@@ -590,13 +596,18 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
                 _REQUEST_PROOF_KEY_PATH=key_path,
                 _WORKSPACE_FLUSH_TOKEN_PATH=flush_path,
                 _current_workspace_prefix="owner-prefix",
-            ), mock.patch.object(
-                agentcore_wrapper.workspace_sync,
-                "stop_periodic_push",
+                _workspace_prefix_hydrated=True,
             ), mock.patch.object(
                 agentcore_wrapper.workspace_sync,
                 "push_workspace",
                 return_value=1,
+            ), mock.patch.object(
+                agentcore_wrapper.workspace_sync,
+                "prepare_sqlite_snapshot",
+                return_value=2,
+            ), mock.patch.object(
+                agentcore_wrapper.adapter,
+                "shutdown",
             ), mock.patch.object(
                 agentcore_wrapper,
                 "_set_proxy_finalization",
@@ -607,6 +618,94 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
 
             self.assertFalse(os.path.exists(context_path))
             self.assertFalse(os.path.exists(key_path))
+
+
+class TestOpenClawWorkspaceMigration(unittest.TestCase):
+    def test_doctor_mutations_never_replace_deployed_config(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "openclaw.json"
+            config_path.write_bytes(b'{"deployed":"exact"}\n')
+            original_metadata = config_path.stat()
+            migrator_path = Path(directory) / "migrate.mjs"
+            migrator_path.write_text("// test helper\n", encoding="utf-8")
+
+            def mutate_on_doctor(command, **_kwargs):
+                if command[0] == "openclaw":
+                    config_path.write_bytes(b'{"doctor":"mutation"}\n')
+                return mock.Mock(returncode=0)
+
+            with mock.patch.object(
+                agentcore_wrapper.subprocess,
+                "run",
+                side_effect=mutate_on_doctor,
+            ) as run, mock.patch.object(
+                agentcore_wrapper.os,
+                "geteuid",
+                return_value=1000,
+            ):
+                agentcore_wrapper.migrate_openclaw_workspace(
+                    str(config_path),
+                    str(migrator_path),
+                )
+
+            self.assertEqual(config_path.read_bytes(), b'{"deployed":"exact"}\n')
+            rewritten_metadata = config_path.stat()
+            self.assertEqual(rewritten_metadata.st_uid, original_metadata.st_uid)
+            self.assertEqual(rewritten_metadata.st_gid, original_metadata.st_gid)
+            self.assertEqual(
+                rewritten_metadata.st_mode & 0o777,
+                original_metadata.st_mode & 0o777,
+            )
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(
+                run.call_args_list[0].args[0],
+                ["node", str(migrator_path)],
+            )
+            self.assertEqual(
+                run.call_args_list[1].args[0],
+                [
+                    "openclaw",
+                    "doctor",
+                    "--fix",
+                    "--non-interactive",
+                    "--no-workspace-suggestions",
+                ],
+            )
+
+    def test_failed_migration_still_restores_config(self):
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "openclaw.json"
+            config_path.write_bytes(b'{"deployed":"exact"}\n')
+            migrator_path = Path(directory) / "migrate.mjs"
+            migrator_path.write_text("// test helper\n", encoding="utf-8")
+
+            def fail_after_mutation(*_args, **_kwargs):
+                config_path.write_bytes(b'{"partial":"mutation"}\n')
+                raise subprocess.CalledProcessError(1, "node")
+
+            with mock.patch.object(
+                agentcore_wrapper.subprocess,
+                "run",
+                side_effect=fail_after_mutation,
+            ), mock.patch.object(
+                agentcore_wrapper.os,
+                "geteuid",
+                return_value=1000,
+            ):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    agentcore_wrapper.migrate_openclaw_workspace(
+                        str(config_path),
+                        str(migrator_path),
+                    )
+
+            self.assertEqual(config_path.read_bytes(), b'{"deployed":"exact"}\n')
 
 
 class TestWorkspacePrefixBinding(unittest.TestCase):

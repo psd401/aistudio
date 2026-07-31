@@ -33,6 +33,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 # Configure structured logging for CloudWatch
@@ -52,6 +53,7 @@ from check_bootstrap_budget import check_runtime_bootstrap
 # Runtime path OpenClaw reads its credential-free config and bootstrap files from.
 OPENCLAW_CONFIG_PATH = "/home/node/.openclaw/openclaw.json"
 OPENCLAW_WORKSPACE_DIR = "/home/node/.openclaw"
+OPENCLAW_DATABASE_MIGRATOR = "/app/openclaw_agent_db_migrate.mjs"
 
 # Emergency fallback only. Candidate images read their actual primary model
 # from openclaw.json so a GLM/Kimi/Qwen/OpenAI turn is never mislabeled Claude
@@ -275,9 +277,8 @@ def _restart_mantle_proxy() -> None:
 
 
 async def _finalize_invocation_authority() -> None:
-    """Lock the relay, flush once as root, then revoke all turn authority."""
+    """Stop OpenClaw, checkpoint SQLite, flush, then revoke turn authority."""
     loop = asyncio.get_running_loop()
-    periodic_stopped = False
     proxy_finalizing = False
     proxy_needs_recovery = False
     flush_token: str | None = None
@@ -317,17 +318,23 @@ async def _finalize_invocation_authority() -> None:
                     restart_exc,
                 )
                 return
+        gateway_stopped = False
         try:
-            await loop.run_in_executor(None, workspace_sync.stop_periodic_push)
-            periodic_stopped = True
+            await loop.run_in_executor(None, adapter.shutdown)
+            gateway_stopped = True
         except Exception as exc:  # noqa: BLE001
-            logger.warning("turn-final periodic workspace stop failed: %s", exc)
+            logger.warning("turn-final OpenClaw shutdown failed: %s", exc)
         if (
-            periodic_stopped
+            gateway_stopped
             and _current_workspace_prefix
+            and _workspace_prefix_hydrated
             and _invocation_authority_is_installed()
         ):
             try:
+                await loop.run_in_executor(
+                    None,
+                    workspace_sync.prepare_sqlite_snapshot,
+                )
                 deadline = time.monotonic() + FINAL_WORKSPACE_FLUSH_SECONDS
                 push = functools.partial(
                     workspace_sync.push_workspace,
@@ -480,6 +487,100 @@ def _configured_primary_model_id(
     except (OSError, ValueError):
         pass
     return DEFAULT_AGENT_MODEL_ID
+
+
+def _node_process_environment() -> dict[str, str]:
+    """Return the same credential-minimized environment used by the gateway."""
+    excluded = {
+        "AGENT_INVOCATION_SIGNING_SECRET",
+        "AGENT_INVOCATION_SIGNING_SECRET_ID",
+        "PSD_INVOCATION_CONTEXT_FILE",
+        "PSD_INVOCATION_REQUEST_PROOF_KEY_FILE",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "BEDROCK_API_KEY_SECRET_ARN",
+        "CANDIDATE_MANTLE_BEARER_TOKEN",
+    }
+    return {
+        **{key: value for key, value in os.environ.items() if key not in excluded},
+        "HOME": "/home/node",
+        "OPENCLAW_NO_RESPAWN": "1",
+    }
+
+
+def _restore_exact_file(
+    path: str,
+    content: bytes,
+    metadata: os.stat_result,
+) -> None:
+    """Atomically restore image-owned config after a mutating doctor run."""
+    directory = os.path.dirname(path)
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=".openclaw.restore.",
+        dir=directory,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+            os.fchown(output.fileno(), metadata.st_uid, metadata.st_gid)
+            os.fchmod(output.fileno(), metadata.st_mode & 0o777)
+        os.replace(temporary_path, path)
+    except Exception:
+        try:
+            os.unlink(temporary_path)
+        except OSError:
+            pass
+        raise
+
+
+def migrate_openclaw_workspace(
+    config_path: str = OPENCLAW_CONFIG_PATH,
+    migrator_path: str = OPENCLAW_DATABASE_MIGRATOR,
+) -> None:
+    """Run OpenClaw's one-time persisted-state migration while it is stopped.
+
+    The pinned beta rejects both schema-v1 agent databases and legacy
+    workspace/session markers. Its maintenance migrator upgrades the database
+    first; `doctor --fix` then imports every restored JSONL transcript and
+    workspace attestation. Doctor also rewrites unrelated config defaults, so
+    the exact deployed (or candidate) config is restored in a finally block.
+    """
+    config_bytes = Path(config_path).read_bytes()
+    config_metadata = os.stat(config_path)
+    process_options: dict[str, object] = {}
+    if os.geteuid() == 0:
+        process_options = {
+            "user": "node",
+            "group": "node",
+            "extra_groups": [],
+            "umask": 0o077,
+        }
+    try:
+        subprocess.run(
+            ["node", migrator_path],
+            check=True,
+            timeout=300,
+            cwd="/home/node",
+            env=_node_process_environment(),
+            **process_options,
+        )
+        subprocess.run(
+            [
+                "openclaw",
+                "doctor",
+                "--fix",
+                "--non-interactive",
+                "--no-workspace-suggestions",
+            ],
+            check=True,
+            timeout=300,
+            cwd="/home/node",
+            env=_node_process_environment(),
+            **process_options,
+        )
+    finally:
+        _restore_exact_file(config_path, config_bytes, config_metadata)
 
 
 def _configure_candidate_mantle_relay(
@@ -745,15 +846,15 @@ def hydrate_github_auth(user_email: str) -> None:
 
 
 def handle_shutdown(signum, frame):
-    """Graceful shutdown on SIGTERM/SIGINT — push workspace to S3 first."""
+    """Graceful shutdown — stop SQLite writers, checkpoint, then push."""
     logger.info("Received signal %d, shutting down", signum)
-    workspace_sync.stop_periodic_push()
-    if _current_workspace_prefix:
+    adapter.shutdown()
+    if _current_workspace_prefix and _workspace_prefix_hydrated:
         try:
+            workspace_sync.prepare_sqlite_snapshot()
             workspace_sync.push_workspace(_current_workspace_prefix)
         except Exception as exc:  # noqa: BLE001
             logger.warning("shutdown workspace push failed: %s", exc)
-    adapter.shutdown()
     if _mantle_proxy_process and _mantle_proxy_process.poll() is None:
         _mantle_proxy_process.terminate()
         try:
@@ -1078,26 +1179,6 @@ def main():
             yield {"result": "I didn't receive a message. Could you try again?"}
             return
 
-        # A previous turn's periodic workspace push may still be using the
-        # current authority. It must be fully stopped before authority can be
-        # replaced for this serialized turn; otherwise a background request
-        # can be signed as the next owner.
-        try:
-            workspace_sync.stop_periodic_push()
-        except RuntimeError as exc:
-            logger.error(
-                "Invocation rejected: prior owner workspace push is still active: %s",
-                exc,
-            )
-            yield {
-                "result": "The agent is still securing the previous workspace. Please retry.",
-                "metadata": {
-                    "failed": True,
-                    "error_class": "InvocationAuthorityBusy",
-                },
-            }
-            return
-
         # A model-visible email or workspace prefix is never authority. Install
         # the signed context before any skill can run; fail closed when an old
         # or untrusted caller invokes the runtime without one.
@@ -1155,46 +1236,46 @@ def main():
             )
 
         # This microVM is permanently bound to the prefix above, so a pull can
-        # never overlay a previous owner's local files.
+        # never overlay a previous owner's local files. The image starts a
+        # gateway only to prove BOOT_OK; stop it before overlaying persisted
+        # SQLite state or running OpenClaw's one-time migration.
         if workspace_prefix and not _workspace_prefix_hydrated:
             try:
+                await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    adapter.shutdown,
+                )
                 pulled = await asyncio.get_running_loop().run_in_executor(
                     None, workspace_sync.pull_workspace, workspace_prefix
                 )
+                if not workspace_sync.openclaw_migration_complete():
+                    await asyncio.get_running_loop().run_in_executor(
+                        None,
+                        migrate_openclaw_workspace,
+                    )
+                    workspace_sync.mark_openclaw_migration_complete()
                 logger.info(
                     "workspace mounted: prefix=%s files=%d",
                     workspace_prefix, pulled,
                 )
-                _workspace_prefix_hydrated = True
             except Exception as exc:  # noqa: BLE001
                 logger.error(
-                    "workspace mount FAILED (%s) — periodic push DISABLED for "
+                    "workspace mount/migration FAILED (%s) — push DISABLED for "
                     "this microVM to protect the remote workspace",
                     exc,
                 )
-
-        # THE PUSH IS GATED ON A SUCCESSFUL RESTORE. This is a data-loss
-        # guard, not tidiness.
-        #
-        # Previously the push started unconditionally. On 2026-07-27 a restore
-        # failed (the #1353 MAX_SYNC_FILES cap of 1,000 against a ~5,000-file
-        # workspace), the container was left holding the image's DEFAULT
-        # IDENTITY.md/MEMORY.md, and 120s later the periodic push uploaded
-        # those defaults over the user's real files in S3. A failed READ became
-        # a destructive WRITE, and the agent lost its name and memory.
-        #
-        # If we could not faithfully restore, we do not know what the remote
-        # holds — so we must not write to it. The workspace stays readable and
-        # the agent runs with image defaults for this microVM only; nothing
-        # remote is touched. S3 versioning is the last line of defence, not the
-        # first.
-        if workspace_prefix and _workspace_prefix_hydrated:
-            workspace_sync.start_periodic_push(workspace_prefix, interval_s=120)
-        elif workspace_prefix:
-            logger.error(
-                "workspace push suppressed: restore incomplete for prefix=%s",
-                workspace_prefix,
-            )
+                yield {
+                    "result": (
+                        "I couldn't safely restore this agent's workspace. "
+                        "Your saved history was not changed; please retry after "
+                        "the agent service is repaired."
+                    ),
+                    "metadata": {
+                        "failed": True,
+                        "error_class": "WorkspaceMigrationFailed",
+                    },
+                }
+                return
 
         # Per-turn attachment delivery (issue #1138 F1): the router uploaded
         # Chat attachment bytes to S3 AFTER this microVM's one-time workspace
@@ -1216,6 +1297,31 @@ def main():
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("attachment pull failed: %s", exc)
+
+        # Finalization stops the gateway before checkpointing SQLite. Restart
+        # it only after the owner workspace and per-turn attachments are fully
+        # present, then mark the workspace writable for the final flush.
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None,
+                adapter.configure,
+                {"gateway_port": 3100},
+            )
+            if workspace_prefix:
+                _workspace_prefix_hydrated = True
+        except Exception as exc:  # noqa: BLE001
+            logger.error("OpenClaw gateway start FAILED: %s", exc)
+            yield {
+                "result": (
+                    "I restored this agent's workspace but couldn't start its "
+                    "runtime. Your saved history was not changed; please retry."
+                ),
+                "metadata": {
+                    "failed": True,
+                    "error_class": "OpenClawStartupFailed",
+                },
+            }
+            return
 
         # Inject per-turn context: the caller's identity AND the current
         # Pacific local time. The LLM has no real clock — without this header

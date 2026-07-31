@@ -519,6 +519,7 @@ ENV OPENCLAW_SKIP_CRON=1
 #   harness_adapter.py      — OpenClaw WebSocket bridge with empty-turn rescue
 #   agent_failures.py       — RDS Data API failure logger
 #   agentcore_wrapper.py    — AgentCore HTTP entrypoint
+#   openclaw_agent_db_migrate.mjs — pinned-host SQLite schema migrator
 #   workspace_sync.py       — S3 ↔ /home/node/.openclaw sync
 #   mantle_proxy.py         — local proxy to Bedrock Mantle with retry/rescue
 #   chat_format.py          — Markdown→Google Chat formatter + envelope splitter
@@ -527,7 +528,7 @@ ENV OPENCLAW_SKIP_CRON=1
 # Firecracker snapshotter consistently fails overlay mount at 54+
 # layers (2026-05-18 incident). Folding six COPYs into one keeps us
 # safely under that ceiling.
-COPY *.py /app/
+COPY *.py *.mjs /app/
 
 # Container OS clock is UTC. The wrapper reads the user's local time via
 # zoneinfo (requires the tzdata package installed above). TZ env var is set

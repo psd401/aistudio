@@ -8,14 +8,15 @@ preferences, cached artifacts). AgentCore microVMs are ephemeral, so without
 syncing this directory the agent forgets everything between idle-timeouts and
 deploys.
 
-This module gives the wrapper three operations:
+This module gives the wrapper four operations:
   - pull_workspace(prefix): on first invocation per microVM, restore the user's
     /home/node/.openclaw/ from the signed invocation context's workspace prefix
-  - push_workspace(prefix): on shutdown (or periodically), upload the current
-    contents back to S3
-  - start_periodic_push(prefix, interval_s): background thread that pushes on
-    a fixed cadence so a hard kill doesn't lose more than `interval_s` of
-    state
+  - mark_openclaw_migration_complete(): persist the one-time JSONL → SQLite
+    migration boundary without deleting the versioned legacy source objects
+  - prepare_sqlite_snapshot(): checkpoint and validate OpenClaw's databases
+    after the gateway has stopped
+  - push_workspace(prefix): upload that stable state at each turn boundary and
+    on graceful shutdown
 
 We intentionally use a flat per-user prefix (no per-session subdir) so the
 agent's memory is the user's memory, not the conversation's. A space hash is
@@ -35,6 +36,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import stat
@@ -52,9 +54,9 @@ logger = logging.getLogger("workspace_sync")
 class WorkspaceRestoreIncomplete(RuntimeError):
     """Restore did not faithfully reproduce S3.
 
-    The caller MUST NOT start the periodic push after this: the local tree is
-    missing files that still exist remotely, and pushing would delete or
-    overwrite them with image defaults.
+    The caller MUST NOT push after this: the local tree is missing files that
+    still exist remotely, and pushing would overwrite them with stale state or
+    image defaults.
     """
 
 
@@ -62,7 +64,7 @@ WORKSPACE_DIR = Path("/home/node/.openclaw")
 # All of these are runaway-traversal BACKSTOPS, not product limits. #1353 set
 # them below real-world workspace sizes and the sync path treated hitting one
 # as a fatal error, which on 2026-07-27 destroyed a user's agent memory:
-# restore raised -> container kept image defaults -> periodic push wrote those
+# restore raised -> container kept image defaults -> a later push wrote those
 # defaults over the real files in S3.
 #
 # Sizes now sit far above any plausible workspace, and — more importantly —
@@ -76,8 +78,8 @@ MAX_SYNC_TOTAL_BYTES = 64 * 1024 * 1024 * 1024
 #
 # CRITICAL: a restore must NEVER fail because of this number. Restoring FEWER
 # files than exist is a silent-corruption bug — the agent boots with image
-# defaults and the periodic push then writes those defaults over the real
-# files in S3. See pull_workspace() and start_periodic_push().
+# defaults and a later push then writes those defaults over the real files in
+# S3. See pull_workspace().
 MAX_SYNC_FILES = 250_000
 # Count every directory entry, including directories, symlinks, sockets, and
 # other unsafe objects.  A model-controlled tree must not turn the privileged
@@ -94,6 +96,16 @@ WORKSPACE_FLUSH_TOKEN_PATH = (
     "/run/psd-agent-authority/workspace-flush-token"
 )
 _uploaded_state: dict[tuple[str, str], tuple[int, int]] = {}
+
+# OpenClaw 2026.7 is SQLite-first. The marker is part of the owner workspace,
+# so it survives a microVM shutdown and tells future restores that the legacy
+# JSONL/attestation archive has already been imported. The legacy S3 objects
+# remain untouched (and the bucket is versioned); they are simply no longer
+# downloaded on every cold boot.
+OPENCLAW_MIGRATION_MARKER = "state/psd-openclaw-sqlite-migration-v1.json"
+_OPENCLAW_MIGRATION_MARKER_BYTES = (
+    b'{"version":1,"storage":"openclaw-sqlite","legacyArchivePreserved":true}\n'
+)
 
 
 def _download_workspace_file(
@@ -288,8 +300,22 @@ _SKIP_RELATIVE_PREFIXES = (
     "skills/psd-workspace/",
 )
 
-# Filename suffixes that are always runtime cruft (socket files, pid files).
-_SKIP_SUFFIXES = (".sock", ".pid")
+# Filename suffixes that are always runtime cruft. SQLite WAL/SHM files are
+# deliberately excluded in BOTH directions: copying sidecars independently
+# while the gateway is live produced mismatched database generations in S3.
+# The wrapper now stops the gateway and checkpoints the main database before
+# every push.
+_SKIP_SUFFIXES = (
+    ".sock",
+    ".pid",
+    ".sqlite-wal",
+    ".sqlite-shm",
+    ".sqlite-journal",
+)
+_SKIP_BASENAMES = frozenset({
+    ".reindex-lock.sqlite",
+    "plugins.sync.lock",
+})
 
 # Directory names that hold REGENERABLE build artifacts, matched at ANY depth.
 #
@@ -331,53 +357,32 @@ def _is_regenerable_segment(segment: str) -> bool:
     return segment.startswith(".") and segment.endswith("-venv")
 
 
-# Session transcripts: restore only the most recent N.
+# Legacy session transcripts.
 #
-# These are the single biggest cost in a cold start. On 2026-07-27 one dev
-# workspace held 812 of them totalling 202 MB — 93% of the bytes the restore
-# pulled — and the pull took 70.8s, during which the agent could not answer at
-# all. Boot itself was 10s and the model turn 15s; the transcripts WERE the
-# latency.
+# OpenClaw 2026.7 imports these JSONL files into the per-agent SQLite database.
+# The FIRST restore must therefore download every legacy transcript so no
+# history is omitted from the import. After the durable marker above exists,
+# future cold boots restore the SQLite database and leave the legacy archive in
+# versioned S3 instead of re-downloading hundreds of megabytes.
 #
-# Old transcripts are archive, not memory:
-#   • Interactive session keys embed the image digest, so every deploy makes
-#     every previous transcript permanently unresumable.
-#   • Scheduled session keys embed the date, so yesterday's never resumes.
-# The agent's actual continuity lives in memory/, which is 55 files and is
-# always restored in full.
-#
-# SAFE BY CONSTRUCTION: this skips a DOWNLOAD, never an upload or a delete.
-# push_workspace only walks local files and uploads them; nothing in the sync
-# path enumerates S3 to remove objects. Unrestored transcripts stay in S3 and
-# remain readable there. That asymmetry is what makes trimming the pull safe,
-# and it is why the cap is applied HERE rather than by deleting anything.
-SESSION_DIR_PREFIX = "agents/main/sessions/"
-MAX_RESTORED_SESSIONS = 20
-
-
-def _select_session_transcripts(
-    entries: list, keep: int = MAX_RESTORED_SESSIONS
-) -> set:
-    """Return the relative paths of the `keep` most recently modified transcripts.
-
-    `entries` are broker list records: {"path", "size", "lastModified"}. Ranking
-    needs mtime, which the broker only started returning alongside paths — so
-    when it is absent (older web tier during a rollout) the caller keeps ALL
-    transcripts rather than picking an arbitrary subset. Slower, never wrong.
-    """
-    sessions = [e for e in entries if str(e.get("path", "")).startswith(SESSION_DIR_PREFIX)]
-    if not sessions:
-        return set()
-    # A tie at 0 means the broker sent no usable timestamps; ranking would be
-    # arbitrary, so decline to trim.
-    if all(int(e.get("lastModified") or 0) == 0 for e in sessions):
-        return {str(e["path"]) for e in sessions}
-    ranked = sorted(
-        sessions,
-        key=lambda e: (int(e.get("lastModified") or 0), str(e.get("path", ""))),
-        reverse=True,
+def _is_legacy_session_path(relative: str) -> bool:
+    parts = Path(relative.lstrip("/")).parts
+    return (
+        len(parts) >= 3
+        and parts[0] == "agents"
+        and parts[2] == "sessions"
     )
-    return {str(e["path"]) for e in ranked[:keep]}
+
+
+def _is_imported_legacy_state(relative: str) -> bool:
+    """Return True for a source object already represented in SQLite."""
+    rel = relative.lstrip("/")
+    return (
+        _is_legacy_session_path(rel)
+        or rel == "openclaw-workspace-state.json"
+        or rel.startswith("workspace-attestations/")
+        or rel.endswith(".doctor-importing")
+    )
 
 
 def _should_skip_relative(relative: str) -> bool:
@@ -386,6 +391,8 @@ def _should_skip_relative(relative: str) -> bool:
     for prefix in _SKIP_RELATIVE_PREFIXES:
         if rel == prefix or rel.startswith(prefix):
             return True
+    if Path(rel).name in _SKIP_BASENAMES:
+        return True
     if any(_is_regenerable_segment(seg) for seg in rel.split("/")):
         return True
     return any(rel.endswith(suf) for suf in _SKIP_SUFFIXES)
@@ -651,17 +658,19 @@ def pull_workspace(prefix: str) -> int:
     brings a 10k-file pull to ~30–60s while staying well under Python's
     thread/GIL and S3's per-prefix request limits.
 
-    Failures on individual files are logged as warnings and skipped — the
-    pull continues so a single corrupt object doesn't break the whole
-    restore.
+    Failures on individual files are logged while the remaining downloads
+    continue, then the restore raises WorkspaceRestoreIncomplete. This gathers
+    useful diagnostics without ever treating a partial tree as writable.
     """
     if not prefix:
         return 0
 
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Collect paths first, then obtain short-lived download URLs in each worker.
-    to_download: list[tuple[str, Path]] = []
+    # Collect the complete listing before choosing downloads. The durable
+    # migration marker sorts after agents/* in S3, so deciding page-by-page can
+    # mistakenly trim the very JSONL history a first-time migration needs.
+    listed_paths: list[str] = []
     skipped = 0
     truncated = False
     continuation = None
@@ -677,63 +686,12 @@ def pull_workspace(prefix: str) -> int:
         paths = page.get("paths", [])
         if not isinstance(paths, list):
             raise RuntimeError("workspace broker returned invalid path list")
-        # Rank session transcripts by recency WITHIN this page. The broker
-        # paginates, so this keeps up to MAX_RESTORED_SESSIONS per page rather
-        # than globally — deliberately: holding every page in memory to rank
-        # globally would reintroduce the unbounded traversal these caps exist
-        # to prevent, and per-page is already a ~40x reduction. Falls back to
-        # keeping all transcripts when the broker sends no timestamps.
-        page_entries = page.get("entries")
-        keep_sessions = (
-            _select_session_transcripts(page_entries)
-            if isinstance(page_entries, list)
-            else None
-        )
         for relative in paths:
-            if (
-                keep_sessions is not None
-                and isinstance(relative, str)
-                and relative.startswith(SESSION_DIR_PREFIX)
-                and relative not in keep_sessions
-            ):
-                # Archived transcript: still in S3, just not worth 70s of the
-                # user's time on every cold start.
-                skipped += 1
-                continue
             if not isinstance(relative, str):
                 continue
             if not relative:
                 continue
-            if _should_skip_relative(relative):
-                # Gateway-owned config or telemetry. Never let S3 state
-                # override the image-provided version.
-                skipped += 1
-                continue
-            # Path-traversal guard (REV-COR-358): S3 keys are attacker-
-            # influencable — each user's prefix round-trips through
-            # agent-writable state — so a key with ".." segments could
-            # otherwise resolve outside WORKSPACE_DIR and let a restore write
-            # arbitrary files. Reject ".." segments outright, then verify the
-            # resolved destination stays inside the workspace root. Skip-and-
-            # warn (do not abort the whole pull), matching per-file failure
-            # handling.
-            if ".." in Path(relative).parts:
-                logger.warning("workspace pull skip (path escape) %s", relative)
-                skipped += 1
-                continue
-            dest = (WORKSPACE_DIR / relative).resolve()
-            try:
-                dest.relative_to(workspace_root)
-            except ValueError:
-                logger.warning("workspace pull skip (path escape) %s", relative)
-                skipped += 1
-                continue
-            if len(to_download) >= MAX_SYNC_FILES:
-                # Do NOT raise. A raised restore leaves the container holding
-                # image defaults, and the periodic push then overwrites the
-                # user's real files in S3 with those defaults — a failed READ
-                # becoming a destructive WRITE. Flag it instead; the caller
-                # refuses to push when the restore was incomplete.
+            if len(listed_paths) >= MAX_SYNC_FILES:
                 logger.error(
                     "workspace restore hit the file-count backstop (%d) — "
                     "restore is INCOMPLETE and push will be disabled",
@@ -741,12 +699,45 @@ def pull_workspace(prefix: str) -> int:
                 )
                 truncated = True
                 break
-            to_download.append((relative, dest))
+            listed_paths.append(relative)
         if truncated:
             break
         continuation = page.get("continuationToken")
         if not isinstance(continuation, str) or not continuation:
             break
+
+    migration_complete = OPENCLAW_MIGRATION_MARKER in listed_paths
+    to_download: list[tuple[str, Path]] = []
+    for relative in listed_paths:
+        if migration_complete and _is_imported_legacy_state(relative):
+            skipped += 1
+            continue
+        if _should_skip_relative(relative):
+            # Gateway-owned config, telemetry, or SQLite transient state.
+            # Never let S3 override the image config or pair a main database
+            # with a WAL/SHM file from another point in time.
+            skipped += 1
+            continue
+        # Path-traversal guard (REV-COR-358): S3 keys are attacker-
+        # influencable — each user's prefix round-trips through
+        # agent-writable state — so a key with ".." segments could
+        # otherwise resolve outside WORKSPACE_DIR and let a restore write
+        # arbitrary files. Reject ".." segments outright, then verify the
+        # resolved destination stays inside the workspace root. Skip-and-
+        # warn (do not abort the whole pull), matching per-file failure
+        # handling.
+        if ".." in Path(relative).parts:
+            logger.warning("workspace pull skip (path escape) %s", relative)
+            skipped += 1
+            continue
+        dest = (WORKSPACE_DIR / relative).resolve()
+        try:
+            dest.relative_to(workspace_root)
+        except ValueError:
+            logger.warning("workspace pull skip (path escape) %s", relative)
+            skipped += 1
+            continue
+        to_download.append((relative, dest))
 
     from concurrent.futures import ThreadPoolExecutor
 
@@ -761,10 +752,10 @@ def pull_workspace(prefix: str) -> int:
             with total_lock:
                 if total_bytes + content_length > MAX_SYNC_TOTAL_BYTES:
                     # Never raise here: an aborted restore leaves image
-                    # defaults in place and the periodic push then overwrites
-                    # the user's real files. Skip this one file, keep going,
-                    # and let pull_workspace mark the restore incomplete so
-                    # the caller suppresses the push.
+                    # defaults in place and a later push then overwrites the
+                    # user's real files. Skip this one file, keep going, and
+                    # let pull_workspace mark the restore incomplete so the
+                    # caller suppresses the push.
                     logger.error(
                         "workspace restore hit the aggregate byte backstop — "
                         "restore INCOMPLETE, push will be disabled",
@@ -783,6 +774,7 @@ def pull_workspace(prefix: str) -> int:
             return f"{relative}: {exc}"
 
     count = 0
+    download_errors: list[str] = []
     started = time.monotonic()
     with ThreadPoolExecutor(max_workers=SYNC_WORKERS) as pool:
         for err in pool.map(_download_one, to_download):
@@ -790,20 +782,107 @@ def pull_workspace(prefix: str) -> int:
                 count += 1
             else:
                 logger.warning("workspace pull skip %s", err)
+                download_errors.append(err)
     elapsed = time.monotonic() - started
 
-    if truncated:
-        # Everything reachable was still downloaded, but the restore is NOT a
-        # faithful copy of S3. Signal it so the caller disables the push.
+    if truncated or download_errors:
+        # A partial local tree must never become a new remote generation. The
+        # caller suppresses every push and retries on the next invocation.
+        reason = (
+            f"truncated at {MAX_SYNC_FILES} files"
+            if truncated
+            else f"{len(download_errors)} object download(s) failed"
+        )
         raise WorkspaceRestoreIncomplete(
-            f"restore truncated at {MAX_SYNC_FILES} files for prefix {prefix}"
+            f"restore incomplete ({reason}) for prefix {prefix}"
         )
 
     logger.info(
-        "workspace pull: prefix=%s files=%d skipped_config=%d elapsed_s=%.1f",
-        prefix, count, skipped, elapsed,
+        "workspace pull: prefix=%s files=%d skipped=%d migrated=%s elapsed_s=%.1f",
+        prefix, count, skipped, migration_complete, elapsed,
     )
     return count
+
+
+def openclaw_migration_complete() -> bool:
+    """Return whether this hydrated workspace has crossed the SQLite boundary."""
+    marker = WORKSPACE_DIR / OPENCLAW_MIGRATION_MARKER
+    try:
+        return marker.is_file() and marker.read_bytes() == (
+            _OPENCLAW_MIGRATION_MARKER_BYTES
+        )
+    except OSError:
+        return False
+
+
+def mark_openclaw_migration_complete() -> None:
+    """Atomically mark a verified migration without deleting legacy S3 data."""
+    marker = WORKSPACE_DIR / OPENCLAW_MIGRATION_MARKER
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    workspace_metadata = WORKSPACE_DIR.stat()
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{marker.name}.",
+        dir=marker.parent,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(_OPENCLAW_MIGRATION_MARKER_BYTES)
+            output.flush()
+            os.fsync(output.fileno())
+            os.fchown(
+                output.fileno(),
+                workspace_metadata.st_uid,
+                workspace_metadata.st_gid,
+            )
+            os.fchmod(output.fileno(), 0o600)
+        os.replace(temporary_name, marker)
+    except Exception:
+        try:
+            os.unlink(temporary_name)
+        except OSError:
+            pass
+        raise
+
+
+def prepare_sqlite_snapshot() -> int:
+    """Checkpoint and validate every persisted OpenClaw database.
+
+    The gateway MUST be stopped before this runs. A failed checkpoint or
+    integrity check aborts the subsequent push, preserving the last known-good
+    remote database rather than replacing it with a torn generation.
+    """
+    candidates = [WORKSPACE_DIR / "state" / "openclaw.sqlite"]
+    candidates.extend(
+        (WORKSPACE_DIR / "agents").glob("*/agent/openclaw-agent.sqlite")
+    )
+    checked = 0
+    workspace_root = WORKSPACE_DIR.resolve()
+    for database in candidates:
+        if not database.exists():
+            continue
+        resolved = database.resolve()
+        try:
+            resolved.relative_to(workspace_root)
+        except ValueError as exc:
+            raise RuntimeError("SQLite database escaped workspace root") from exc
+        if resolved != database.absolute():
+            raise RuntimeError("SQLite database path contains a symlink")
+        with sqlite3.connect(str(database), timeout=30) as connection:
+            checkpoint = connection.execute(
+                "PRAGMA wal_checkpoint(TRUNCATE)"
+            ).fetchone()
+            if checkpoint is None or int(checkpoint[0]) != 0:
+                raise RuntimeError(
+                    f"SQLite checkpoint remained busy for {database.name}"
+                )
+            integrity = connection.execute("PRAGMA integrity_check").fetchall()
+        if integrity != [("ok",)]:
+            raise RuntimeError(
+                f"SQLite integrity check failed for {database.name}"
+            )
+        checked += 1
+    logger.info("workspace SQLite snapshot prepared: databases=%d", checked)
+    return checked
 
 
 def pull_files(prefix: str, relative_paths: list) -> int:
@@ -1068,60 +1147,3 @@ def push_workspace(
         prefix, count, elapsed,
     )
     return count
-
-
-_periodic_thread: Optional[threading.Thread] = None
-# Stop signal for the current periodic-push thread. A fresh Event is created per
-# start_periodic_push() and captured in that thread's closure, so stopping and
-# restarting the pusher never reuses an already-set Event — which previously left
-# a restarted pusher permanently short-circuited (its wait() returned True on the
-# first tick, so it exited without ever pushing). See REV-COR-358.
-_periodic_stop: Optional[threading.Event] = None
-
-
-def start_periodic_push(prefix: str, interval_s: int = 120) -> None:
-    """Background thread that pushes the workspace every interval_s seconds.
-
-    Restart-safe: each call owns a fresh stop Event captured in its worker
-    closure, so a stopped-then-started pusher is always a live thread rather
-    than a silently-dead one. This is a no-op only while a pusher is already
-    alive.
-    """
-    global _periodic_thread, _periodic_stop
-    if _periodic_thread is not None and _periodic_thread.is_alive():
-        return  # already running
-
-    stop = threading.Event()
-    _periodic_stop = stop
-
-    def _run():
-        while not stop.wait(interval_s):
-            try:
-                push_workspace(prefix)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("periodic push failed: %s", exc)
-
-    _periodic_thread = threading.Thread(
-        target=_run, name="workspace-sync", daemon=True
-    )
-    _periodic_thread.start()
-    logger.info("workspace periodic push started: interval=%ds", interval_s)
-
-
-def stop_periodic_push() -> None:
-    """Signal the periodic push thread to stop, join it, and reset state so a
-    later start_periodic_push() can cleanly restart it. Joining (bounded by a
-    timeout so shutdown can't hang forever) avoids a window where the old
-    thread is still mid-push_workspace() concurrently with a freshly started
-    replacement thread (gemini-code-assist review)."""
-    global _periodic_thread
-    stop = _periodic_stop
-    if stop is not None:
-        stop.set()
-    if _periodic_thread is not None and _periodic_thread.is_alive():
-        _periodic_thread.join(timeout=15)
-        if _periodic_thread.is_alive():
-            raise RuntimeError(
-                "periodic workspace push did not stop before authority change"
-            )
-    _periodic_thread = None

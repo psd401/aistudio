@@ -1697,3 +1697,5 @@ class OpenClawAdapter(HarnessAdapter):
                 self._process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self._process.kill()
+                self._process.wait(timeout=10)
+        self._process = None
