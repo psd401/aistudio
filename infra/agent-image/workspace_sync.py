@@ -16,12 +16,12 @@ This module gives the wrapper four operations:
   - prepare_sqlite_snapshot(): checkpoint and validate OpenClaw's databases
     after the gateway has stopped
   - push_workspace(prefix): upload that stable state at each turn boundary and
-    on graceful shutdown
+    make a best-effort attempt during graceful shutdown
 
-We intentionally use a flat per-user prefix (no per-session subdir) so the
-agent's memory is the user's memory, not the conversation's. A space hash is
-already part of OpenClaw's session boundaries; long-term recall belongs to
-the user.
+We intentionally use a flat per-user prefix (no per-session subdir) so curated
+owner memory and all isolated OpenClaw thread transcripts survive together.
+Conversation identity lives inside OpenClaw; workspace persistence must retain
+every conversation without starting competing per-thread filesystem writers.
 
 S3 keys are skipped if they look like ephemeral logs/sockets to avoid pushing
 junk that bloats restores.
@@ -32,11 +32,13 @@ from __future__ import annotations
 import logging
 import http.client
 import base64
+import errno
 import hashlib
 import json
 import os
 import re
 import sqlite3
+import struct
 import subprocess
 import sys
 import stat
@@ -47,6 +49,7 @@ import urllib.error
 import urllib.request
 import uuid
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -65,7 +68,50 @@ class WorkspacePushIncomplete(RuntimeError):
     """One or more local workspace files were not durably persisted."""
 
 
+class WorkspaceGenerationUnavailable(RuntimeError):
+    """The broker could not prove a complete authoritative remote snapshot."""
+
+
+class WorkspaceGenerationConflict(RuntimeError):
+    """The authoritative workspace changed after this microVM hydrated it."""
+
+
+@dataclass(frozen=True)
+class _RemoteWorkspaceSnapshot:
+    paths: tuple[str, ...]
+    sizes: dict[str, int]
+    e_tags: dict[str, str]
+    generation: Optional[str]
+
+
+@dataclass(frozen=True)
+class _PreparedWorkspaceUpload:
+    upload_url: Optional[str]
+    reservation_id: Optional[str]
+    required_headers: dict[str, str]
+    unchanged_e_tag: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _PendingWorkspaceCompletion:
+    reservation_id: str
+    relative: str
+    content_length: int
+    modified_ns: int
+    changed_ns: int
+
+
 WORKSPACE_DIR = Path("/home/node/.openclaw")
+_IMAGE_SEED_RELATIVES = ("IDENTITY.md", "USER.md", "MEMORY.md")
+# Captured before the first owner hydration. If a dirty warm workspace must be
+# discarded, these per-image scaffolding files can be restored without
+# retaining any model-written bytes that were absent from the committed S3
+# checkpoint.
+_IMAGE_WORKSPACE_SEEDS = {
+    relative: (WORKSPACE_DIR / relative).read_bytes()
+    for relative in _IMAGE_SEED_RELATIVES
+    if (WORKSPACE_DIR / relative).is_file()
+}
 # All of these are runaway-traversal BACKSTOPS, not product limits. #1353 set
 # them below real-world workspace sizes and the sync path treated hitting one
 # as a fatal error, which on 2026-07-27 destroyed a user's agent memory:
@@ -99,10 +145,33 @@ TRANSFER_CHUNK_BYTES = 64 * 1024
 WORKSPACE_UPLOAD_CONTENT_TYPE = "application/octet-stream"
 _TRANSIENT_READ_RETRY_DELAYS_SECONDS = (0.25, 0.5, 1.0, 2.0)
 _TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+# Baseline checkpoint capture may need bounded parallel HEADs for thousands of
+# existing objects. Keep it below the load-balancer idle ceiling, but above the
+# generic 20-second broker read cap. Checkpoint calls are idempotent and are
+# deliberately not auto-retried: a client timeout does not prove the web tier
+# stopped working, and overlapping retries would queue behind the same lock.
+WORKSPACE_CHECKPOINT_BROKER_TIMEOUT_SECONDS = 55
 WORKSPACE_FLUSH_TOKEN_PATH = (
     "/run/psd-agent-authority/workspace-flush-token"
 )
-_uploaded_state: dict[tuple[str, str], tuple[int, int]] = {}
+WORKSPACE_SYNC_TOKEN_PATH = (
+    "/run/psd-agent-authority/workspace-sync-token"
+)
+_uploaded_state: dict[tuple[str, str], tuple[int, int, int]] = {}
+_remote_workspace_snapshots: dict[str, _RemoteWorkspaceSnapshot] = {}
+# The broker's atomic checkpoint manifest is the durable commit boundary for a
+# complete turn. Individual S3 target versions are promoted one at a time, so
+# their raw generation is not committed until the manifest advances last.
+_committed_workspace_generations: dict[str, str] = {}
+# When target promotions succeeded but final verification/listing did not, the
+# wrapper remains dirty and retries from this broker-returned generation. Do
+# not discard it on transient post-commit errors: that would strand a fully
+# committed warm runtime with no safe recovery path.
+_pending_workspace_generations: dict[str, str] = {}
+_pending_workspace_completions: dict[
+    str, _PendingWorkspaceCompletion
+] = {}
+_force_exact_workspace_restores: set[str] = set()
 
 # OpenClaw 2026.7 is SQLite-first. The marker is part of the owner workspace,
 # so it survives a microVM shutdown and tells future restores that the legacy
@@ -140,69 +209,191 @@ def _is_transient_read_error(error: BaseException) -> bool:
     )
 
 
-def _install_workspace_file(
-    source: Path,
-    destination: Path,
-    workspace_root: Path,
-) -> None:
-    """Atomically install a staged object without root writing into model state."""
-    destination.relative_to(workspace_root)
+def _validate_workspace_relative(relative: str) -> tuple[str, ...]:
+    """Return safe lexical path parts without consulting mutable symlinks."""
+    if (
+        not isinstance(relative, str)
+        or not relative
+        or relative.startswith("/")
+        or "\x00" in relative
+    ):
+        raise OSError("invalid workspace file path")
+    parts = tuple(relative.split("/"))
+    if (
+        len(parts) > MAX_SYNC_DEPTH
+        or any(part in ("", ".", "..") for part in parts)
+    ):
+        raise OSError("invalid workspace file path")
+    return parts
+
+
+def _install_workspace_file(source: Path, relative: str) -> None:
+    """Atomically install at a literal path without following local symlinks."""
+    _validate_workspace_relative(relative)
     writer = r"""
+import errno
 import os
-import pathlib
 import re
+import stat
 import sys
 import uuid
-root = pathlib.Path(sys.argv[1]).resolve()
-destination = pathlib.Path(sys.argv[2])
-resolved = destination.resolve(strict=False)
-resolved.relative_to(root)
-resolved.parent.mkdir(parents=True, exist_ok=True)
-if resolved.name.endswith(".sqlite"):
-    sidecar_names = [
-        f"{resolved.name}{suffix}" for suffix in sys.argv[3].split(",")
-    ]
-    reindex_database_names = [
-        ".reindex-lock.sqlite",
-        f"{resolved.name}.reindex-lock.sqlite",
-    ]
-    sidecar_names.extend(reindex_database_names)
-    sidecar_names.extend([
-        f"{reindex_database_name}{suffix}"
-        for reindex_database_name in reindex_database_names
-        for suffix in sys.argv[3].split(",")
-    ])
-    for sidecar_name in sidecar_names:
-        sidecar = resolved.with_name(sidecar_name)
+
+root = sys.argv[1]
+relative = sys.argv[2]
+parts = relative.split("/")
+if (
+    not relative
+    or relative.startswith("/")
+    or any(part in ("", ".", "..") for part in parts)
+):
+    raise OSError("invalid workspace file path")
+
+removed_entries = 0
+
+def remove_entry(parent_fd, name, depth=0):
+    global removed_entries
+    removed_entries += 1
+    if removed_entries > int(sys.argv[4]):
+        raise OSError("workspace blocker entry-count limit reached")
+    if depth > 64:
+        raise OSError("workspace blocker depth limit reached")
+    metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(metadata.st_mode):
+        os.unlink(name, dir_fd=parent_fd)
+        return
+    child_fd = os.open(
+        name,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        dir_fd=parent_fd,
+    )
+    try:
+        with os.scandir(child_fd) as entries:
+            for entry in entries:
+                remove_entry(child_fd, entry.name, depth + 1)
+    finally:
+        os.close(child_fd)
+    os.rmdir(name, dir_fd=parent_fd)
+
+def open_or_create_directory(parent_fd, name):
+    for _attempt in range(8):
         try:
-            sidecar.unlink()
+            metadata = os.stat(
+                name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
         except FileNotFoundError:
-            pass
-    memory_reindex_prefix = f"{resolved.name}.memory-reindex-"
-    for sibling in resolved.parent.iterdir():
-        if re.fullmatch(
-            rf"{re.escape(memory_reindex_prefix)}[0-9A-Fa-f-]+"
-            r"(?:-(?:wal|shm|journal))?",
-            sibling.name,
-        ):
             try:
-                sibling.unlink()
+                os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+            except FileExistsError:
+                pass
+            continue
+        if not stat.S_ISDIR(metadata.st_mode):
+            try:
+                os.unlink(name, dir_fd=parent_fd)
             except FileNotFoundError:
                 pass
-temporary = resolved.with_name(f".{resolved.name}.{uuid.uuid4().hex}.tmp")
+            except IsADirectoryError:
+                pass
+            continue
+        try:
+            return os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=parent_fd,
+            )
+        except OSError as error:
+            if error.errno not in (
+                errno.ELOOP,
+                errno.ENOENT,
+                errno.ENOTDIR,
+            ):
+                raise
+    raise OSError("workspace parent remained unstable")
+
+directory_fd = os.open(
+    root,
+    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+)
 try:
-    with temporary.open("xb") as output:
-        while True:
-            chunk = sys.stdin.buffer.read(1024 * 1024)
-            if not chunk:
-                break
-            output.write(chunk)
-    os.replace(temporary, resolved)
-finally:
+    for part in parts[:-1]:
+        next_fd = open_or_create_directory(directory_fd, part)
+        os.close(directory_fd)
+        directory_fd = next_fd
+
+    leaf = parts[-1]
+    if leaf.endswith(".sqlite"):
+        def unlink_transient(name):
+            try:
+                remove_entry(directory_fd, name)
+            except FileNotFoundError:
+                return
+
+        sidecar_names = [
+            f"{leaf}{suffix}" for suffix in sys.argv[3].split(",")
+        ]
+        reindex_database_names = [
+            ".reindex-lock.sqlite",
+            f"{leaf}.reindex-lock.sqlite",
+        ]
+        sidecar_names.extend(reindex_database_names)
+        sidecar_names.extend([
+            f"{reindex_database_name}{suffix}"
+            for reindex_database_name in reindex_database_names
+            for suffix in sys.argv[3].split(",")
+        ])
+        for sidecar_name in sidecar_names:
+            unlink_transient(sidecar_name)
+        memory_reindex_prefix = f"{leaf}.memory-reindex-"
+        with os.scandir(directory_fd) as siblings:
+            for sibling in siblings:
+                if re.fullmatch(
+                    rf"{re.escape(memory_reindex_prefix)}[0-9A-Fa-f-]+"
+                    r"(?:-(?:wal|shm|journal))?",
+                    sibling.name,
+                ):
+                    unlink_transient(sibling.name)
+
     try:
-        temporary.unlink()
+        leaf_metadata = os.stat(
+            leaf,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
     except FileNotFoundError:
-        pass
+        leaf_metadata = None
+    if leaf_metadata is not None and stat.S_ISDIR(leaf_metadata.st_mode):
+        remove_entry(directory_fd, leaf)
+
+    temporary = f".{leaf}.{uuid.uuid4().hex}.tmp"
+    temporary_fd = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=directory_fd,
+    )
+    try:
+        with os.fdopen(temporary_fd, "wb") as output:
+            while True:
+                chunk = sys.stdin.buffer.read(1024 * 1024)
+                if not chunk:
+                    break
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(
+            temporary,
+            leaf,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+finally:
+    os.close(directory_fd)
 """
     process: subprocess.Popen[bytes] | None = None
     try:
@@ -219,14 +410,15 @@ finally:
                 sys.executable,
                 "-c",
                 writer,
-                str(workspace_root),
-                str(destination),
+                str(WORKSPACE_DIR),
+                relative,
                 ",".join(_SQLITE_TRANSIENT_SIDECAR_SUFFIXES),
+                str(MAX_SYNC_ENTRIES),
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            cwd=str(workspace_root),
+            cwd=str(WORKSPACE_DIR),
             **process_options,
         )
         assert process.stdin is not None
@@ -263,8 +455,7 @@ finally:
 
 def _download_workspace_file(
     source_url: str,
-    destination: Path,
-    workspace_root: Path,
+    relative: str,
     content_length: int,
     required_headers: dict[str, str],
 ) -> None:
@@ -328,21 +519,20 @@ def _download_workspace_file(
                 logger.warning(
                     "workspace object download retry: path=%s "
                     "attempt=%d/%d delay_s=%.2f error=%s",
-                    destination.relative_to(workspace_root).as_posix(),
+                    relative,
                     attempt + 1,
                     len(_TRANSIENT_READ_RETRY_DELAYS_SECONDS) + 1,
                     delay,
                     str(exc)[:160],
                 )
                 time.sleep(delay)
-        _install_workspace_file(temporary_path, destination, workspace_root)
+        _install_workspace_file(temporary_path, relative)
     finally:
         temporary_path.unlink(missing_ok=True)
 
 
 def _materialize_empty_workspace_file(
-    destination: Path,
-    workspace_root: Path,
+    relative: str,
 ) -> None:
     """Restore a broker-declared empty object without requesting an invalid range."""
     temporary_fd, temporary_name = tempfile.mkstemp(
@@ -352,7 +542,7 @@ def _materialize_empty_workspace_file(
     os.close(temporary_fd)
     temporary_path = Path(temporary_name)
     try:
-        _install_workspace_file(temporary_path, destination, workspace_root)
+        _install_workspace_file(temporary_path, relative)
     finally:
         temporary_path.unlink(missing_ok=True)
 
@@ -503,11 +693,22 @@ def _is_legacy_session_path(relative: str) -> bool:
     )
 
 
+def _is_generated_session_import_archive(relative: str) -> bool:
+    """True for OpenClaw's redundant post-import JSONL archive copies."""
+    parts = Path(relative.lstrip("/")).parts
+    return (
+        len(parts) >= 3
+        and parts[0] == "agents"
+        and parts[2] == "session-sqlite-import-archive"
+    )
+
+
 def _is_imported_legacy_state(relative: str) -> bool:
     """Return True for a source object already represented in SQLite."""
     rel = relative.lstrip("/")
     return (
         _is_legacy_session_path(rel)
+        or _is_generated_session_import_archive(rel)
         or rel == "openclaw-workspace-state.json"
         or rel.startswith("workspace-attestations/")
         or rel.endswith(".doctor-importing")
@@ -528,6 +729,19 @@ def _should_skip_relative(relative: str) -> bool:
     if any(_is_regenerable_segment(seg) for seg in rel.split("/")):
         return True
     return any(rel.endswith(suf) for suf in _SKIP_SUFFIXES)
+
+
+def _preserve_image_owned_relative(relative: str) -> bool:
+    """Keep deployed/gateway paths while pruning a dirty warm workspace."""
+    rel = relative.lstrip("/")
+    return (
+        any(
+            rel == prefix or rel.startswith(prefix)
+            for prefix in _SKIP_RELATIVE_PREFIXES
+        )
+        or Path(rel).name in _SKIP_BASENAMES
+        or any(_is_regenerable_segment(part) for part in rel.split("/"))
+    )
 
 
 def _should_skip(path: Path) -> bool:
@@ -579,6 +793,391 @@ def _open_regular_no_follow(relative: str):
     return os.fdopen(file_fd, "rb"), metadata
 
 
+def invalidate_local_workspace(prefix: str) -> None:
+    """Force the next refresh to discard an uncommitted warm local tree."""
+    if not prefix:
+        return
+    _remote_workspace_snapshots.pop(prefix, None)
+    _committed_workspace_generations.pop(prefix, None)
+    _pending_workspace_generations.pop(prefix, None)
+    _pending_workspace_completions.pop(prefix, None)
+    for state_key in [
+        key for key in _uploaded_state if key[0] == prefix
+    ]:
+        _uploaded_state.pop(state_key, None)
+    _force_exact_workspace_restores.add(prefix)
+
+
+def _unlink_workspace_regular_no_follow(relative: str) -> None:
+    parts = Path(relative).parts
+    if (
+        not parts
+        or any(part in ("", ".", "..") for part in parts)
+        or Path(relative).is_absolute()
+    ):
+        raise OSError("invalid workspace file path")
+    directory_fd = os.open(
+        WORKSPACE_DIR,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    try:
+        for part in parts[:-1]:
+            next_fd = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+            os.close(directory_fd)
+            directory_fd = next_fd
+        metadata = os.stat(
+            parts[-1],
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError("workspace entry is not a regular file")
+        os.unlink(parts[-1], dir_fd=directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _restore_image_seed(relative: str, content: bytes) -> None:
+    destination = WORKSPACE_DIR / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    workspace_metadata = WORKSPACE_DIR.stat()
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        dir=destination.parent,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+            os.fchown(
+                output.fileno(),
+                workspace_metadata.st_uid,
+                workspace_metadata.st_gid,
+            )
+            os.fchmod(output.fileno(), 0o600)
+        os.replace(temporary_name, destination)
+    except Exception:
+        try:
+            os.unlink(temporary_name)
+        except OSError:
+            pass
+        raise
+
+
+def _remove_workspace_entry_no_follow(
+    parent_fd: int,
+    name: str,
+    depth: int = 0,
+    deadline_monotonic: float | None = None,
+    visited: list[int] | None = None,
+) -> None:
+    """Remove one local entry without following any symlink in its tree."""
+    _remaining_timeout(deadline_monotonic, 60)
+    if visited is None:
+        visited = [0]
+    visited[0] += 1
+    if visited[0] > MAX_SYNC_ENTRIES:
+        raise WorkspaceRestoreIncomplete(
+            "exact restore blocker entry-count limit reached"
+        )
+    if depth > MAX_SYNC_DEPTH:
+        raise WorkspaceRestoreIncomplete(
+            "exact restore blocker depth limit reached"
+        )
+    metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(metadata.st_mode):
+        os.unlink(name, dir_fd=parent_fd)
+        return
+
+    directory_fd = os.open(
+        name,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        dir_fd=parent_fd,
+    )
+    try:
+        with os.scandir(directory_fd) as entries:
+            for entry in entries:
+                _remove_workspace_entry_no_follow(
+                    directory_fd,
+                    entry.name,
+                    depth + 1,
+                    deadline_monotonic,
+                    visited,
+                )
+    finally:
+        os.close(directory_fd)
+    os.rmdir(name, dir_fd=parent_fd)
+
+
+def _prepare_committed_remote_parents(
+    remote_paths: set[str],
+    deadline_monotonic: float | None = None,
+) -> None:
+    """Prepare exact committed destinations without following local links."""
+    workspace_fd = os.open(
+        WORKSPACE_DIR,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    try:
+        for relative in sorted(remote_paths):
+            _remaining_timeout(deadline_monotonic, 60)
+            if (
+                relative == "attachments"
+                or relative.startswith("attachments/")
+                or _should_skip_relative(relative)
+            ):
+                continue
+            try:
+                parts = _validate_workspace_relative(relative)
+            except OSError:
+                continue
+            directory_fd = os.dup(workspace_fd)
+            try:
+                for part in parts[:-1]:
+                    created = False
+                    try:
+                        metadata = os.stat(
+                            part,
+                            dir_fd=directory_fd,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        os.mkdir(part, mode=0o700, dir_fd=directory_fd)
+                        created = True
+                        metadata = os.stat(
+                            part,
+                            dir_fd=directory_fd,
+                            follow_symlinks=False,
+                        )
+                    if not stat.S_ISDIR(metadata.st_mode):
+                        os.unlink(part, dir_fd=directory_fd)
+                        os.mkdir(part, mode=0o700, dir_fd=directory_fd)
+                        created = True
+                    next_fd = os.open(
+                        part,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                        dir_fd=directory_fd,
+                    )
+                    if created:
+                        root_metadata = WORKSPACE_DIR.stat()
+                        os.fchown(
+                            next_fd,
+                            root_metadata.st_uid,
+                            root_metadata.st_gid,
+                        )
+                        os.fchmod(next_fd, 0o700)
+                    os.close(directory_fd)
+                    directory_fd = next_fd
+                try:
+                    leaf_metadata = os.stat(
+                        parts[-1],
+                        dir_fd=directory_fd,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISREG(leaf_metadata.st_mode):
+                    _remove_workspace_entry_no_follow(
+                        directory_fd,
+                        parts[-1],
+                        deadline_monotonic=deadline_monotonic,
+                    )
+            finally:
+                os.close(directory_fd)
+    finally:
+        os.close(workspace_fd)
+
+
+def _prune_uncommitted_workspace_entries(
+    remote_paths: set[str],
+    deadline_monotonic: float | None = None,
+) -> None:
+    """Delete absent warm-state entries bottom-up without following links."""
+    committed_paths: set[str] = set()
+    committed_parents: set[str] = set()
+    for relative in remote_paths:
+        if (
+            relative == "attachments"
+            or relative.startswith("attachments/")
+            or _should_skip_relative(relative)
+        ):
+            continue
+        try:
+            parts = _validate_workspace_relative(relative)
+        except OSError:
+            continue
+        committed_paths.add(relative)
+        committed_parents.update(
+            "/".join(parts[:index])
+            for index in range(1, len(parts))
+        )
+
+    visited = 0
+
+    def prune_directory(directory_fd: int, parent_relative: str) -> None:
+        nonlocal visited
+        with os.scandir(directory_fd) as entries:
+            names = [entry.name for entry in entries]
+        for name in names:
+            _remaining_timeout(deadline_monotonic, 60)
+            visited += 1
+            if visited > MAX_SYNC_ENTRIES:
+                raise WorkspaceRestoreIncomplete(
+                    "exact restore prune entry-count limit reached"
+                )
+            relative = (
+                f"{parent_relative}/{name}" if parent_relative else name
+            )
+            if relative == "attachments":
+                try:
+                    attachment_metadata = os.stat(
+                        name,
+                        dir_fd=directory_fd,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    continue
+                if stat.S_ISDIR(attachment_metadata.st_mode):
+                    continue
+                os.unlink(name, dir_fd=directory_fd)
+                continue
+            if (
+                relative.startswith("attachments/")
+                or _preserve_image_owned_relative(relative)
+            ):
+                continue
+            try:
+                metadata = os.stat(
+                    name,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                continue
+            if stat.S_ISDIR(metadata.st_mode):
+                child_fd = os.open(
+                    name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=directory_fd,
+                )
+                try:
+                    prune_directory(child_fd, relative)
+                finally:
+                    os.close(child_fd)
+                if relative not in committed_parents:
+                    try:
+                        os.rmdir(name, dir_fd=directory_fd)
+                    except OSError as exc:
+                        if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                            raise
+                continue
+            if relative not in committed_paths:
+                os.unlink(name, dir_fd=directory_fd)
+
+    workspace_fd = os.open(
+        WORKSPACE_DIR,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    try:
+        prune_directory(workspace_fd, "")
+    finally:
+        os.close(workspace_fd)
+
+
+def _iter_workspace_sqlite_sidecars(
+    deadline_monotonic: float | None = None,
+):
+    """Yield transient SQLite sidecars without following model symlinks."""
+    stack: list[str] = [""]
+    visited = 0
+    while stack:
+        relative_directory = stack.pop()
+        directory_fd = os.open(
+            WORKSPACE_DIR / relative_directory,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        try:
+            with os.scandir(directory_fd) as entries:
+                for entry in entries:
+                    _remaining_timeout(deadline_monotonic, 60)
+                    visited += 1
+                    if visited > MAX_SYNC_ENTRIES:
+                        raise WorkspaceRestoreIncomplete(
+                            "exact restore sidecar traversal limit reached"
+                        )
+                    relative = (
+                        f"{relative_directory}/{entry.name}"
+                        if relative_directory
+                        else entry.name
+                    )
+                    if relative.startswith("attachments/"):
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        if len(Path(relative).parts) > MAX_SYNC_DEPTH:
+                            raise WorkspaceRestoreIncomplete(
+                                "exact restore sidecar depth limit reached"
+                            )
+                        stack.append(relative)
+                    elif entry.is_file(follow_symlinks=False):
+                        name = entry.name
+                        is_sqlite_transient = (
+                            name.endswith((
+                                ".sqlite-wal",
+                                ".sqlite-shm",
+                                ".sqlite-journal",
+                            ))
+                            or name.endswith(".reindex-lock.sqlite")
+                            or bool(
+                                _SQLITE_MEMORY_REINDEX_RE.fullmatch(name)
+                            )
+                        )
+                        if is_sqlite_transient:
+                            yield relative
+        finally:
+            os.close(directory_fd)
+
+
+def _discard_uncommitted_local_state(
+    remote_paths: set[str],
+    deadline_monotonic: float | None = None,
+) -> None:
+    """Remove sync-eligible local paths absent from the committed checkpoint."""
+    _prepare_committed_remote_parents(remote_paths, deadline_monotonic)
+    _prune_uncommitted_workspace_entries(remote_paths, deadline_monotonic)
+
+    # pull_workspace deliberately never restores WAL/SHM/journal files beside
+    # a main database. Remove stale local sidecars explicitly so a dirty warm
+    # tree cannot replay uncommitted pages into the committed SQLite file.
+    for relative in list(
+        _iter_workspace_sqlite_sidecars(deadline_monotonic)
+    ):
+        name = Path(relative).name
+        remove_transient = (
+            name.endswith(".reindex-lock.sqlite")
+            or bool(_SQLITE_MEMORY_REINDEX_RE.fullmatch(name))
+        )
+        if not remove_transient:
+            for suffix in ("-wal", "-shm", "-journal"):
+                if relative.endswith(suffix):
+                    remove_transient = _is_managed_openclaw_sqlite(
+                        relative[: -len(suffix)]
+                    )
+                    break
+        if remove_transient:
+            _unlink_workspace_regular_no_follow(relative)
+
+
+def _restore_missing_image_seeds(remote_paths: set[str]) -> None:
+    for relative, content in _IMAGE_WORKSPACE_SEEDS.items():
+        if relative not in remote_paths:
+            _restore_image_seed(relative, content)
+
+
 def _remaining_timeout(
     deadline_monotonic: float | None,
     maximum_seconds: float,
@@ -596,6 +1195,7 @@ def _broker_request(
     payload: dict,
     deadline_monotonic: float | None = None,
     retry_transient: bool = False,
+    maximum_timeout_seconds: float = 20,
 ) -> dict:
     """Call the trusted storage broker with the opaque signed owner context."""
     body = json.dumps(payload).encode("utf-8")
@@ -619,7 +1219,10 @@ def _broker_request(
         try:
             with urllib.request.urlopen(
                 request,
-                timeout=_remaining_timeout(deadline_monotonic, 20),
+                timeout=_remaining_timeout(
+                    deadline_monotonic,
+                    maximum_timeout_seconds,
+                ),
             ) as response:
                 result = json.loads(response.read())
             if not isinstance(result, dict):
@@ -669,18 +1272,28 @@ def _broker_request(
 
 
 def _workspace_flush_headers() -> dict[str, str]:
-    """Return root-only final-flush authority, never model-readable state."""
+    """Return root-only workspace sync/final-flush authority."""
     if os.geteuid() != 0:
         return {}
+    try:
+        sync_token = Path(WORKSPACE_SYNC_TOKEN_PATH).read_text(
+            encoding="ascii"
+        ).strip()
+    except FileNotFoundError:
+        return {}
+    if not re.fullmatch(r"[A-Za-z0-9_-]{43}", sync_token):
+        raise RuntimeError("workspace sync authority is malformed")
+    headers = {"X-Agent-Workspace-Sync": sync_token}
     try:
         token = Path(WORKSPACE_FLUSH_TOKEN_PATH).read_text(
             encoding="ascii"
         ).strip()
     except FileNotFoundError:
-        return {}
+        return headers
     if not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
         raise RuntimeError("workspace flush authority is malformed")
-    return {"X-Agent-Workspace-Flush": token}
+    headers["X-Agent-Workspace-Flush"] = token
+    return headers
 
 
 def _download_spec(relative: str) -> tuple[str, int, dict[str, str]]:
@@ -709,8 +1322,9 @@ def _upload_spec(
     content_length: int,
     idempotency_key: str,
     checksum_sha256: str,
+    expected_generation: str = "0" * 64,
     deadline_monotonic: float | None = None,
-) -> Optional[tuple[str, str, dict[str, str]]]:
+) -> _PreparedWorkspaceUpload | tuple[str, str, dict[str, str]]:
     result = _broker_request({
         "operation": "upload",
         "path": relative,
@@ -718,10 +1332,26 @@ def _upload_spec(
         "contentLength": content_length,
         "idempotencyKey": idempotency_key,
         "checksumSha256": checksum_sha256,
+        "workspaceGeneration": expected_generation,
     }, deadline_monotonic)
     url = result.get("uploadUrl")
-    if result.get("unchanged") is True and isinstance(result.get("key"), str):
-        return None
+    if (
+        result.get("unchanged") is True
+        and isinstance(result.get("key"), str)
+    ):
+        e_tag = result.get("eTag")
+        if not isinstance(e_tag, str) or not e_tag:
+            if expected_generation != "0" * 64:
+                raise RuntimeError(
+                    "workspace broker returned unchanged without generation metadata"
+                )
+            e_tag = '"legacy-unfenced-test"'
+        return _PreparedWorkspaceUpload(
+            upload_url=None,
+            reservation_id=None,
+            required_headers={},
+            unchanged_e_tag=e_tag,
+        )
     reservation_id = result.get("reservationId")
     required_headers = result.get("requiredHeaders")
     if (
@@ -743,6 +1373,117 @@ def _upload_spec(
         "Content-Type": WORKSPACE_UPLOAD_CONTENT_TYPE,
         "x-amz-checksum-sha256": checksum_sha256,
     }
+
+
+def _complete_upload_reservation(
+    reservation_id: str,
+    generation: str,
+    deadline_monotonic: float | None,
+) -> tuple[str, str]:
+    """Idempotently commit one staged object and return its new generation."""
+    completed = _broker_request(
+        {
+            "operation": "complete-upload",
+            "reservationId": reservation_id,
+            "workspaceGeneration": generation,
+        },
+        deadline_monotonic,
+        retry_transient=True,
+    )
+    next_generation = completed.get("workspaceGeneration")
+    e_tag = completed.get("eTag")
+    if (
+        not isinstance(completed.get("key"), str)
+        or not isinstance(e_tag, str)
+        or not e_tag
+        or not isinstance(next_generation, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", next_generation)
+    ):
+        raise RuntimeError(
+            "workspace broker did not verify generation-fenced upload"
+        )
+    return next_generation, e_tag
+
+
+def _delete_workspace_path(
+    relative: str,
+    generation: str,
+    deadline_monotonic: float | None,
+) -> str:
+    """Delete one absent mutable path with an idempotent generation fence."""
+    result = _broker_request(
+        {
+            "operation": "delete",
+            "path": relative,
+            "workspaceGeneration": generation,
+        },
+        deadline_monotonic,
+        retry_transient=True,
+    )
+    next_generation = result.get("workspaceGeneration")
+    if (
+        not isinstance(result.get("deleted"), bool)
+        or not isinstance(next_generation, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", next_generation)
+    ):
+        raise RuntimeError(
+            "workspace broker did not verify generation-fenced deletion"
+        )
+    return next_generation
+
+
+def _ensure_workspace_checkpoint(
+    prefix: str,
+    deadline_monotonic: float | None = None,
+) -> str:
+    """Recover or establish the broker's last complete workspace checkpoint."""
+    result = _broker_request(
+        {"operation": "ensure-checkpoint"},
+        deadline_monotonic,
+        maximum_timeout_seconds=(
+            WORKSPACE_CHECKPOINT_BROKER_TIMEOUT_SECONDS
+        ),
+    )
+    generation = result.get("workspaceGeneration")
+    if (
+        result.get("checkpointReady") is not True
+        or not isinstance(generation, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", generation)
+    ):
+        raise WorkspaceGenerationUnavailable(
+            "workspace broker did not establish a durable checkpoint"
+        )
+    return generation
+
+
+def _commit_workspace_checkpoint(
+    prefix: str,
+    base_generation: str,
+    final_generation: str,
+    deadline_monotonic: float | None = None,
+) -> str:
+    """Atomically publish the completed multi-file turn after all promotions."""
+    result = _broker_request(
+        {
+            "operation": "commit-checkpoint",
+            "baseWorkspaceGeneration": base_generation,
+            "workspaceGeneration": final_generation,
+        },
+        deadline_monotonic,
+        maximum_timeout_seconds=(
+            WORKSPACE_CHECKPOINT_BROKER_TIMEOUT_SECONDS
+        ),
+    )
+    committed_generation = result.get("workspaceGeneration")
+    if (
+        result.get("checkpointCommitted") is not True
+        or committed_generation != final_generation
+    ):
+        raise WorkspacePushIncomplete(
+            "workspace broker did not commit the complete checkpoint"
+        )
+    _committed_workspace_generations[prefix] = committed_generation
+    return committed_generation
 
 
 def _download_bounded(
@@ -829,7 +1570,162 @@ def _stream_upload(
         connection.close()
 
 
-def pull_workspace(prefix: str) -> int:
+def _generation_for_entries(
+    entries: dict[str, tuple[int, str]],
+) -> str:
+    """Hash one complete S3 listing with an unambiguous cross-language format."""
+    digest = hashlib.sha256()
+    for relative in sorted(entries):
+        if relative == "attachments" or relative.startswith("attachments/"):
+            # Chat ingress writes immutable attachments while holding the
+            # workspace lock, and the wrapper explicitly pulls referenced
+            # attachment paths per turn. Keep them outside mutable-history CAS
+            # so an upload does not force a multi-thousand-object restore.
+            continue
+        size, e_tag = entries[relative]
+        path_bytes = relative.encode("utf-8")
+        e_tag_bytes = e_tag.encode("utf-8")
+        digest.update(struct.pack(">Q", len(path_bytes)))
+        digest.update(path_bytes)
+        digest.update(struct.pack(">Q", size))
+        digest.update(struct.pack(">Q", len(e_tag_bytes)))
+        digest.update(e_tag_bytes)
+    return digest.hexdigest()
+
+
+def _list_remote_workspace_snapshot(
+    prefix: str,
+    deadline_monotonic: float | None = None,
+) -> _RemoteWorkspaceSnapshot:
+    """Read every broker page and return a trusted generation when possible.
+
+    Older broker deployments did not return ETags. Their listings remain
+    usable for a conservative full restore, but can never prove that a warm
+    microVM is current or authorize a final push.
+    """
+    listed_paths: list[str] = []
+    seen_paths: set[str] = set()
+    listed_sizes: dict[str, int] = {}
+    listed_e_tags: dict[str, str] = {}
+    metadata_trusted = True
+    continuation: str | None = None
+    seen_continuations: set[str] = set()
+
+    while True:
+        request_payload = {"operation": "list"}
+        if continuation:
+            request_payload["continuationToken"] = continuation
+        page = _broker_request(
+            request_payload,
+            deadline_monotonic=deadline_monotonic,
+            retry_transient=True,
+        )
+        paths = page.get("paths")
+        if not isinstance(paths, list):
+            raise RuntimeError("workspace broker returned invalid path list")
+        page_paths: list[str] = []
+        for relative in paths:
+            if not isinstance(relative, str) or not relative:
+                raise RuntimeError("workspace broker returned invalid path")
+            if relative in seen_paths:
+                raise RuntimeError("workspace broker returned duplicate path")
+            if len(listed_paths) >= MAX_SYNC_FILES:
+                raise WorkspaceRestoreIncomplete(
+                    "restore incomplete (file-count backstop reached) "
+                    f"for prefix {prefix}"
+                )
+            listed_paths.append(relative)
+            seen_paths.add(relative)
+            page_paths.append(relative)
+
+        entries = page.get("entries")
+        page_metadata: dict[str, tuple[int, str]] = {}
+        page_sizes: dict[str, int] = {}
+        if not isinstance(entries, list):
+            metadata_trusted = False
+        else:
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    metadata_trusted = False
+                    continue
+                entry_path = entry.get("path")
+                entry_size = entry.get("size")
+                last_modified = entry.get("lastModified")
+                e_tag = entry.get("eTag")
+                size_valid = (
+                    isinstance(entry_path, str)
+                    and entry_path in page_paths
+                    and isinstance(entry_size, int)
+                    and not isinstance(entry_size, bool)
+                    and 0 <= entry_size <= MAX_SYNC_FILE_BYTES
+                    and entry_path not in page_sizes
+                )
+                if size_valid:
+                    page_sizes[entry_path] = entry_size
+                valid = (
+                    size_valid
+                    and isinstance(last_modified, int)
+                    and not isinstance(last_modified, bool)
+                    and last_modified >= 0
+                    and isinstance(e_tag, str)
+                    and 0 < len(e_tag) <= 1_024
+                    and entry_path not in page_metadata
+                )
+                if not valid:
+                    metadata_trusted = False
+                    continue
+                page_metadata[entry_path] = (entry_size, e_tag)
+            if set(page_metadata) != set(page_paths):
+                metadata_trusted = False
+
+        listed_sizes.update(page_sizes)
+        for relative, (size, e_tag) in page_metadata.items():
+            listed_sizes[relative] = size
+            listed_e_tags[relative] = e_tag
+
+        raw_continuation = page.get("continuationToken")
+        if raw_continuation is None or raw_continuation == "":
+            break
+        if not isinstance(raw_continuation, str):
+            raise RuntimeError(
+                "workspace broker returned invalid continuation token"
+            )
+        if raw_continuation in seen_continuations:
+            raise RuntimeError(
+                "workspace broker repeated a continuation token"
+            )
+        seen_continuations.add(raw_continuation)
+        continuation = raw_continuation
+
+    generation: str | None = None
+    if metadata_trusted and len(listed_e_tags) == len(listed_paths):
+        generation = _generation_for_entries(
+            {
+                relative: (listed_sizes[relative], listed_e_tags[relative])
+                for relative in listed_paths
+            }
+        )
+    return _RemoteWorkspaceSnapshot(
+        paths=tuple(listed_paths),
+        sizes=listed_sizes,
+        e_tags=listed_e_tags,
+        generation=generation,
+    )
+
+
+def workspace_generation(prefix: str) -> str | None:
+    """Return the last fully restored/committed generation for this prefix."""
+    pending = _pending_workspace_generations.get(prefix)
+    if pending is not None:
+        return pending
+    snapshot = _remote_workspace_snapshots.get(prefix)
+    return snapshot.generation if snapshot is not None else None
+
+
+def pull_workspace(
+    prefix: str,
+    _snapshot: _RemoteWorkspaceSnapshot | None = None,
+) -> int:
     """Restore /home/node/.openclaw/ through the owner-bound storage broker.
 
     Parallelized via ThreadPoolExecutor — a serial loop over 10k+ files
@@ -851,116 +1747,87 @@ def pull_workspace(prefix: str) -> int:
     # Collect the complete listing before choosing downloads. The durable
     # migration marker sorts after agents/* in S3, so deciding page-by-page can
     # mistakenly trim the very JSONL history a first-time migration needs.
-    listed_paths: list[str] = []
-    listed_sizes: dict[str, int] = {}
+    snapshot = _snapshot or _list_remote_workspace_snapshot(prefix)
+    listed_paths = list(snapshot.paths)
+    listed_sizes = snapshot.sizes
     skipped = 0
-    truncated = False
-    continuation = None
-    # Resolve the workspace root once so every destination can be checked for
-    # containment against it (REV-COR-358 / Zip-Slip). WORKSPACE_DIR was just
-    # mkdir'd above, so .resolve() yields its real absolute path.
-    workspace_root = WORKSPACE_DIR.resolve()
-    while True:
-        request_payload = {"operation": "list"}
-        if continuation:
-            request_payload["continuationToken"] = continuation
-        page = _broker_request(request_payload, retry_transient=True)
-        paths = page.get("paths", [])
-        if not isinstance(paths, list):
-            raise RuntimeError("workspace broker returned invalid path list")
-        page_paths: list[str] = []
-        for relative in paths:
-            if not isinstance(relative, str):
-                continue
-            if not relative:
-                continue
-            if len(listed_paths) >= MAX_SYNC_FILES:
-                logger.error(
-                    "workspace restore hit the file-count backstop (%d) — "
-                    "restore is INCOMPLETE and push will be disabled",
-                    MAX_SYNC_FILES,
-                )
-                truncated = True
-                break
-            listed_paths.append(relative)
-            page_paths.append(relative)
-        entries = page.get("entries")
-        if isinstance(entries, list):
-            valid_page_paths = frozenset(page_paths)
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    continue
-                entry_path = entry.get("path")
-                entry_size = entry.get("size")
-                if (
-                    isinstance(entry_path, str)
-                    and entry_path in valid_page_paths
-                    and isinstance(entry_size, int)
-                    and not isinstance(entry_size, bool)
-                    and entry_size >= 0
-                ):
-                    listed_sizes[entry_path] = entry_size
-        if truncated:
-            break
-        continuation = page.get("continuationToken")
-        if not isinstance(continuation, str) or not continuation:
-            break
+    exact_restore_paths = set(listed_paths)
+    if prefix in _force_exact_workspace_restores:
+        # Prune before any marker/object download so an uncommitted local
+        # file/symlink cannot block a committed remote descendant.
+        _discard_uncommitted_local_state(exact_restore_paths)
 
     from concurrent.futures import ThreadPoolExecutor
 
     total_bytes = 0
     total_lock = threading.Lock()
 
-    def _download_one(item: tuple[str, Path, Optional[int]]) -> Optional[str]:
+    def _download_one(
+        item: tuple[str, Optional[int]],
+    ) -> tuple[Optional[str], Optional[tuple[int, int, int]]]:
         nonlocal total_bytes
-        relative, dest, declared_size = item
+        relative, declared_size = item
         try:
             if declared_size == 0:
-                _materialize_empty_workspace_file(dest, workspace_root)
-                return None
-            url, content_length, required_headers = _download_spec(relative)
-            with total_lock:
-                if total_bytes + content_length > MAX_SYNC_TOTAL_BYTES:
-                    # Never raise here: an aborted restore leaves image
-                    # defaults in place and a later push then overwrites the
-                    # user's real files. Skip this one file, keep going, and
-                    # let pull_workspace mark the restore incomplete so the
-                    # caller suppresses the push.
-                    logger.error(
-                        "workspace restore hit the aggregate byte backstop — "
-                        "restore INCOMPLETE, push will be disabled",
-                    )
-                    return f"{relative}: aggregate byte backstop"
-                total_bytes += content_length
-            _download_workspace_file(
-                url,
-                dest,
-                workspace_root,
-                content_length,
-                required_headers,
-            )
-            return None
+                _materialize_empty_workspace_file(relative)
+            else:
+                url, content_length, required_headers = _download_spec(relative)
+                with total_lock:
+                    if total_bytes + content_length > MAX_SYNC_TOTAL_BYTES:
+                        # Never raise here: an aborted restore leaves image
+                        # defaults in place and a later push then overwrites the
+                        # user's real files. Skip this one file, keep going, and
+                        # let pull_workspace mark the restore incomplete so the
+                        # caller suppresses the push.
+                        logger.error(
+                            "workspace restore hit the aggregate byte backstop — "
+                            "restore INCOMPLETE, push will be disabled",
+                        )
+                        return (
+                            f"{relative}: aggregate byte backstop",
+                            None,
+                        )
+                    total_bytes += content_length
+                _download_workspace_file(
+                    url,
+                    relative,
+                    content_length,
+                    required_headers,
+                )
+            try:
+                restored, metadata = _open_regular_no_follow(relative)
+                restored.close()
+                return None, (
+                    metadata.st_size,
+                    metadata.st_mtime_ns,
+                    metadata.st_ctime_ns,
+                )
+            except OSError as exc:
+                # The restore itself completed. Omitting the cache entry is
+                # conservative: push_workspace will inspect or upload the path
+                # again instead of trusting an unverified signature.
+                logger.warning(
+                    "workspace restored signature unavailable for %s: %s",
+                    relative,
+                    exc,
+                )
+            return None, None
         except Exception as exc:  # noqa: BLE001
-            return f"{relative}: {exc}"
+            return f"{relative}: {exc}", None
 
     # The marker controls whether hundreds of megabytes of legacy transcripts
     # may be omitted. Restore and validate its exact bytes before making that
     # decision: path presence alone is not a trustworthy migration boundary.
     marker_restored = False
+    marker_signature: Optional[tuple[int, int, int]] = None
     migration_complete = False
     if OPENCLAW_MIGRATION_MARKER in listed_paths:
-        marker_dest = (WORKSPACE_DIR / OPENCLAW_MIGRATION_MARKER).resolve()
-        try:
-            marker_dest.relative_to(workspace_root)
-        except ValueError as exc:
-            raise WorkspaceRestoreIncomplete(
-                f"restore incomplete (unsafe migration marker) for prefix {prefix}"
-            ) from exc
-        marker_error = _download_one((
-            OPENCLAW_MIGRATION_MARKER,
-            marker_dest,
-            listed_sizes.get(OPENCLAW_MIGRATION_MARKER),
-        ))
+        marker_error, marker_signature = _download_one(
+            (
+                OPENCLAW_MIGRATION_MARKER,
+                listed_sizes.get(OPENCLAW_MIGRATION_MARKER),
+            )
+        )
         if marker_error is not None:
             raise WorkspaceRestoreIncomplete(
                 "restore incomplete (migration marker download failed: "
@@ -973,7 +1840,7 @@ def pull_workspace(prefix: str) -> int:
                 "workspace migration marker is invalid; restoring legacy archive"
             )
 
-    to_download: list[tuple[str, Path, Optional[int]]] = []
+    to_download: list[tuple[str, Optional[int]]] = []
     for relative in listed_paths:
         if relative == OPENCLAW_MIGRATION_MARKER and marker_restored:
             continue
@@ -986,56 +1853,125 @@ def pull_workspace(prefix: str) -> int:
             # with a WAL/SHM file from another point in time.
             skipped += 1
             continue
-        # Path-traversal guard (REV-COR-358): S3 keys are attacker-
-        # influencable — each user's prefix round-trips through
-        # agent-writable state — so a key with ".." segments could
-        # otherwise resolve outside WORKSPACE_DIR and let a restore write
-        # arbitrary files. Reject ".." segments outright, then verify the
-        # resolved destination stays inside the workspace root. Skip-and-
-        # warn (do not abort the whole pull), matching per-file failure
-        # handling.
-        if ".." in Path(relative).parts:
-            logger.warning("workspace pull skip (path escape) %s", relative)
-            skipped += 1
-            continue
-        dest = (WORKSPACE_DIR / relative).resolve()
+        # Validate the lexical key only. The installer walks literal dirfds
+        # with O_NOFOLLOW, so a local symlink cannot redirect committed bytes.
         try:
-            dest.relative_to(workspace_root)
-        except ValueError:
+            _validate_workspace_relative(relative)
+        except OSError:
             logger.warning("workspace pull skip (path escape) %s", relative)
             skipped += 1
             continue
-        to_download.append((relative, dest, listed_sizes.get(relative)))
+        to_download.append((relative, listed_sizes.get(relative)))
 
+    restored_signatures: dict[str, tuple[int, int, int]] = {}
+    if marker_restored and marker_signature is not None:
+        restored_signatures[OPENCLAW_MIGRATION_MARKER] = marker_signature
     count = 1 if marker_restored else 0
     download_errors: list[str] = []
     started = time.monotonic()
     with ThreadPoolExecutor(max_workers=SYNC_WORKERS) as pool:
-        for err in pool.map(_download_one, to_download):
+        for item, result in zip(
+            to_download,
+            pool.map(_download_one, to_download),
+        ):
+            err, signature = result
             if err is None:
                 count += 1
+                if signature is not None:
+                    restored_signatures[item[0]] = signature
             else:
                 logger.warning("workspace pull skip %s", err)
                 download_errors.append(err)
     elapsed = time.monotonic() - started
 
-    if truncated or download_errors:
+    if download_errors:
         # A partial local tree must never become a new remote generation. The
         # caller suppresses every push and retries on the next invocation.
-        reason = (
-            f"truncated at {MAX_SYNC_FILES} files"
-            if truncated
-            else f"{len(download_errors)} object download(s) failed"
-        )
+        reason = f"{len(download_errors)} object download(s) failed"
         raise WorkspaceRestoreIncomplete(
             f"restore incomplete ({reason}) for prefix {prefix}"
         )
 
+    if prefix in _force_exact_workspace_restores:
+        _restore_missing_image_seeds(exact_restore_paths)
+
+    # A successful pull is an exact remote snapshot. Seed the push cache only
+    # after every required object has restored so an unchanged turn does not
+    # re-hash/re-negotiate the entire workspace before replying. Never publish
+    # partial-restore signatures: doing so could hide missing local state.
+    for state_key in [
+        key for key in _uploaded_state if key[0] == prefix
+    ]:
+        _uploaded_state.pop(state_key, None)
+    _uploaded_state.update(
+        {
+            (prefix, relative): signature
+            for relative, signature in restored_signatures.items()
+        }
+    )
+    if snapshot.generation is None:
+        _remote_workspace_snapshots.pop(prefix, None)
+    else:
+        _remote_workspace_snapshots[prefix] = snapshot
+    _pending_workspace_generations.pop(prefix, None)
+    _pending_workspace_completions.pop(prefix, None)
+    _force_exact_workspace_restores.discard(prefix)
+
     logger.info(
-        "workspace pull: prefix=%s files=%d skipped=%d migrated=%s elapsed_s=%.1f",
-        prefix, count, skipped, migration_complete, elapsed,
+        "workspace pull: prefix=%s files=%d skipped=%d migrated=%s "
+        "generation=%s elapsed_s=%.1f",
+        prefix,
+        count,
+        skipped,
+        migration_complete,
+        snapshot.generation[:12] if snapshot.generation else "untrusted",
+        elapsed,
     )
     return count
+
+
+def refresh_workspace(prefix: str) -> int:
+    """Refresh a warm workspace after the owner-wide lock changes hands."""
+    if not prefix:
+        return 0
+    checkpoint_generation = _ensure_workspace_checkpoint(prefix)
+    snapshot = _list_remote_workspace_snapshot(prefix)
+    if snapshot.generation is None:
+        raise WorkspaceGenerationUnavailable(
+            "workspace broker metadata is incomplete after checkpoint recovery"
+        )
+    if snapshot.generation != checkpoint_generation:
+        raise WorkspaceGenerationConflict(
+            "workspace broker did not restore the committed checkpoint"
+        )
+    cached = _remote_workspace_snapshots.get(prefix)
+    if (
+        cached is not None
+        and cached.generation == snapshot.generation
+    ):
+        _committed_workspace_generations[prefix] = checkpoint_generation
+        logger.info(
+            "workspace refresh: prefix=%s generation=%s unchanged",
+            prefix,
+            snapshot.generation[:12],
+        )
+        return 0
+    # Every non-cached restore must be exact. A different cached generation
+    # means another serialized runtime committed a new snapshot; no cache at
+    # all can also mean the wrapper/module restarted while the microVM
+    # filesystem survived. In either case, overlaying would retain paths that
+    # were deleted remotely and the next push would resurrect them. The
+    # gateway is stopped before refresh, so prune every sync-eligible local
+    # path absent from the committed generation before downloading it.
+    _force_exact_workspace_restores.add(prefix)
+    logger.info(
+        "workspace refresh: prefix=%s generation=%s action=restore",
+        prefix,
+        snapshot.generation[:12] if snapshot.generation else "untrusted",
+    )
+    pulled = pull_workspace(prefix, snapshot)
+    _committed_workspace_generations[prefix] = checkpoint_generation
+    return pulled
 
 
 def openclaw_migration_complete() -> bool:
@@ -1156,7 +2092,6 @@ def pull_files(prefix: str, relative_paths: list) -> int:
     if not prefix or not relative_paths:
         return 0
 
-    workspace_root = WORKSPACE_DIR.resolve()
     pulled = 0
     total_bytes = 0
     for rel in relative_paths:
@@ -1165,9 +2100,9 @@ def pull_files(prefix: str, relative_paths: list) -> int:
             break
         if not isinstance(rel, str) or not rel:
             continue
-        rel = rel.lstrip("/")
-        dest = (WORKSPACE_DIR / rel).resolve()
-        if not dest.is_relative_to(workspace_root):
+        try:
+            _validate_workspace_relative(rel)
+        except OSError:
             logger.warning("pull_files: refusing path outside workspace: %s", rel)
             continue
         if _should_skip_relative(rel):
@@ -1181,8 +2116,7 @@ def pull_files(prefix: str, relative_paths: list) -> int:
             total_bytes += content_length
             _download_workspace_file(
                 url,
-                dest,
-                workspace_root,
+                rel,
                 content_length,
                 required_headers,
             )
@@ -1283,22 +2217,62 @@ def _iter_workspace_files(
             os.close(directory_fd)
 
 
+def _remote_mutable_paths_to_delete(
+    remote_paths: tuple[str, ...],
+    local_mutable_paths: set[str],
+    migration_complete: bool,
+) -> list[str]:
+    """Return only absent mutable paths; archives and router state survive."""
+    return sorted(
+        relative
+        for relative in remote_paths
+        if (
+            relative not in local_mutable_paths
+            and relative != "attachments"
+            and not relative.startswith("attachments/")
+            and not _should_skip_relative(relative)
+            and not (
+                migration_complete
+                and _is_imported_legacy_state(relative)
+            )
+        )
+    )
+
+
 def push_workspace(
     prefix: str,
     deadline_monotonic: float | None = None,
+    expected_generation: str | None = None,
+    require_generation: bool = False,
 ) -> int:
     """Upload current /home/node/.openclaw/ contents to s3://bucket/prefix/."""
     if not prefix:
         return 0
     # Parallelized for the same reason as pull: 10k+ files over a serial
-    # upload blocks both the idle-push background thread and the final
-    # shutdown flush, so state can be lost if the microVM is torn down
-    # mid-push.
-    to_upload: list[tuple[str, str, int, int, str]] = []
-    marker_upload: Optional[tuple[str, str, int, int, str]] = None
+    # upload blocks both the turn-final push and the best-effort shutdown
+    # flush. Completed-turn durability comes from the normal pre-response
+    # checkpoint commit; AgentCore can terminate an active shutdown attempt.
+    to_upload: list[tuple[str, str, int, int, int, str]] = []
+    marker_upload: Optional[
+        tuple[str, str, int, int, int, str]
+    ] = None
     preparation_errors: list[str] = []
+    local_mutable_paths: set[str] = set()
+    to_delete: list[str] = []
     total_bytes = 0
+    migration_complete = openclaw_migration_complete()
     for relative in _iter_workspace_files(deadline_monotonic):
+        if relative == "attachments" or relative.startswith("attachments/"):
+            # Router-owned immutable input objects are already durable and may
+            # be created while another thread waits for the workspace lock.
+            # Never re-upload them as part of the mutable history transaction.
+            continue
+        if migration_complete and _is_imported_legacy_state(relative):
+            # The verified marker means these sources are already represented
+            # in SQLite and their originals remain preserved in versioned S3.
+            # OpenClaw's generated *.imported-* copies add no durable history.
+            continue
+        local_mutable_paths.add(relative)
         path = WORKSPACE_DIR / relative
         try:
             source, metadata = _open_regular_no_follow(relative)
@@ -1306,15 +2280,16 @@ def push_workspace(
             logger.warning("workspace push skip unsafe file %s: %s", relative, exc)
             preparation_errors.append(f"{relative}: {exc}")
             continue
-        if metadata.st_size < 1:
-            source.close()
-            continue
         if metadata.st_size > MAX_SYNC_FILE_BYTES:
             source.close()
             logger.warning("workspace push skip oversized file %s", relative)
             preparation_errors.append(f"{relative}: oversized file")
             continue
-        signature = (metadata.st_size, metadata.st_mtime_ns)
+        signature = (
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
         state_key = (prefix, relative)
         if _uploaded_state.get(state_key) == signature:
             source.close()
@@ -1349,6 +2324,7 @@ def push_workspace(
             relative,
             metadata.st_size,
             metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
             base64.b64encode(digest.digest()).decode("ascii"),
         )
         if relative == OPENCLAW_MIGRATION_MARKER:
@@ -1361,79 +2337,353 @@ def push_workspace(
         else:
             to_upload.append(upload)
 
+    if preparation_errors:
+        raise WorkspacePushIncomplete(
+            f"workspace push incomplete ({len(preparation_errors)} file "
+            f"error(s)) for prefix {prefix}"
+        )
+
+    current_generation = expected_generation
+    if current_generation is None and not require_generation:
+        # Test/backward-compatibility path only. Production finalization always
+        # supplies the trusted hydrated generation and sets require_generation.
+        # A current broker rejects this sentinel rather than accepting an
+        # unfenced legacy write.
+        current_generation = "0" * 64
+    if require_generation:
+        if (
+            not isinstance(current_generation, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", current_generation)
+        ):
+            raise WorkspaceGenerationUnavailable(
+                "workspace generation is unavailable; refusing final push"
+            )
+        continuing_pending_push = (
+            prefix in _pending_workspace_generations
+            or prefix in _pending_workspace_completions
+        )
+        base_checkpoint_generation = _committed_workspace_generations.get(
+            prefix
+        )
+        if (
+            not isinstance(base_checkpoint_generation, str)
+            or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                base_checkpoint_generation,
+            )
+        ):
+            raise WorkspaceGenerationUnavailable(
+                "committed workspace checkpoint is unavailable"
+            )
+        if not continuing_pending_push:
+            ensured_generation = _ensure_workspace_checkpoint(
+                prefix,
+                deadline_monotonic,
+            )
+            if (
+                ensured_generation != base_checkpoint_generation
+                or ensured_generation != current_generation
+            ):
+                raise WorkspaceGenerationConflict(
+                    "committed workspace changed before final push"
+                )
+        pending_completion = _pending_workspace_completions.get(prefix)
+        if pending_completion is not None:
+            current_generation, _e_tag = _complete_upload_reservation(
+                pending_completion.reservation_id,
+                current_generation,
+                deadline_monotonic,
+            )
+            _uploaded_state[
+                (prefix, pending_completion.relative)
+            ] = (
+                pending_completion.content_length,
+                pending_completion.modified_ns,
+                pending_completion.changed_ns,
+            )
+            to_upload = [
+                pair
+                for pair in to_upload
+                if not (
+                    pair[1] == pending_completion.relative
+                    and pair[2] == pending_completion.content_length
+                    and pair[3] == pending_completion.modified_ns
+                    and pair[4] == pending_completion.changed_ns
+                )
+            ]
+            if (
+                marker_upload is not None
+                and marker_upload[1] == pending_completion.relative
+                and marker_upload[2] == pending_completion.content_length
+                and marker_upload[3] == pending_completion.modified_ns
+                and marker_upload[4] == pending_completion.changed_ns
+            ):
+                marker_upload = None
+            _pending_workspace_generations[prefix] = current_generation
+            _pending_workspace_completions.pop(prefix, None)
+        # Re-read immediately before opening an upload reservation. This is a
+        # client-side early abort; the broker repeats the exact comparison
+        # under its cross-instance commit mutex before each target promotion.
+        before_upload = _list_remote_workspace_snapshot(
+            prefix,
+            deadline_monotonic,
+        )
+        if before_upload.generation is None:
+            raise WorkspaceGenerationUnavailable(
+                "workspace broker metadata is incomplete; refusing final push"
+            )
+        if before_upload.generation != current_generation:
+            raise WorkspaceGenerationConflict(
+                "authoritative workspace changed before final push"
+            )
+        to_delete = _remote_mutable_paths_to_delete(
+            before_upload.paths,
+            local_mutable_paths,
+            migration_complete,
+        )
+        _pending_workspace_generations[prefix] = current_generation
+
     from concurrent.futures import ThreadPoolExecutor
 
-    def _upload_one(pair: tuple[str, str, int, int, str]) -> Optional[str]:
-        path, relative, content_length, modified_ns, checksum_sha256 = pair
+    def _stage_one(
+        pair: tuple[str, str, int, int, int, str],
+    ) -> tuple[
+        tuple[str, str, int, int, int, str],
+        _PreparedWorkspaceUpload | None,
+        Optional[str],
+    ]:
+        (
+            path,
+            relative,
+            content_length,
+            modified_ns,
+            changed_ns,
+            checksum_sha256,
+        ) = pair
         try:
+            if current_generation is None:
+                raise WorkspaceGenerationUnavailable(
+                    "workspace generation is required for private upload"
+                )
             prepared = _upload_spec(
                 relative,
                 content_length,
                 str(uuid.uuid4()),
                 checksum_sha256,
+                current_generation,
                 deadline_monotonic,
             )
             if prepared is None:
-                _uploaded_state[(prefix, relative)] = (
-                    content_length,
-                    modified_ns,
+                prepared = _PreparedWorkspaceUpload(
+                    upload_url=None,
+                    reservation_id=None,
+                    required_headers={},
+                    unchanged_e_tag='"legacy-unfenced-test"',
                 )
-                return None
-            upload_url, reservation_id, required_headers = prepared
+            elif isinstance(prepared, tuple):
+                upload_url, reservation_id, required_headers = prepared
+                prepared = _PreparedWorkspaceUpload(
+                    upload_url=upload_url,
+                    reservation_id=reservation_id,
+                    required_headers=required_headers,
+                )
+            if prepared.unchanged_e_tag is not None:
+                return pair, prepared, None
+            if prepared.upload_url is None or prepared.reservation_id is None:
+                raise RuntimeError(
+                    "workspace broker returned incomplete upload reservation"
+                )
             _stream_upload(
-                upload_url,
+                prepared.upload_url,
                 relative,
                 content_length,
-                required_headers,
+                prepared.required_headers,
                 deadline_monotonic,
             )
-            completed = _broker_request({
-                "operation": "complete-upload",
-                "reservationId": reservation_id,
-            }, deadline_monotonic)
-            if not isinstance(completed.get("key"), str):
-                raise RuntimeError("workspace broker did not verify upload")
+            return pair, prepared, None
+        except Exception as exc:  # noqa: BLE001
+            return pair, None, f"{path}: {exc}"
+
+    def _complete_one(
+        pair: tuple[str, str, int, int, int, str],
+        prepared: _PreparedWorkspaceUpload,
+        generation: str,
+    ) -> str:
+        (
+            _path,
+            relative,
+            content_length,
+            modified_ns,
+            changed_ns,
+            _checksum,
+        ) = pair
+        if prepared.unchanged_e_tag is not None:
             _uploaded_state[(prefix, relative)] = (
                 content_length,
                 modified_ns,
+                changed_ns,
             )
-            return None
-        except Exception as exc:  # noqa: BLE001
-            return f"{path}: {exc}"
+            return generation
+        if prepared.reservation_id is None:
+            raise RuntimeError(
+                "workspace upload reservation id is unavailable"
+            )
+        if require_generation:
+            _pending_workspace_completions[prefix] = (
+                _PendingWorkspaceCompletion(
+                    reservation_id=prepared.reservation_id,
+                    relative=relative,
+                    content_length=content_length,
+                    modified_ns=modified_ns,
+                    changed_ns=changed_ns,
+                )
+            )
+            next_generation, _e_tag = _complete_upload_reservation(
+                prepared.reservation_id,
+                generation,
+                deadline_monotonic,
+            )
+            _pending_workspace_completions.pop(prefix, None)
+            _uploaded_state[(prefix, relative)] = (
+                content_length,
+                modified_ns,
+                changed_ns,
+            )
+            return next_generation
+        completed = _broker_request(
+            {
+                "operation": "complete-upload",
+                "reservationId": prepared.reservation_id,
+                "workspaceGeneration": generation,
+            },
+            deadline_monotonic,
+        )
+        next_generation = completed.get("workspaceGeneration")
+        if isinstance(completed.get("key"), str):
+            _uploaded_state[(prefix, relative)] = (
+                content_length,
+                modified_ns,
+                changed_ns,
+            )
+            return generation
+        if (
+            not isinstance(completed.get("key"), str)
+            or not isinstance(completed.get("eTag"), str)
+            or not completed.get("eTag")
+            or not isinstance(next_generation, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", next_generation)
+        ):
+            raise RuntimeError(
+                "workspace broker did not verify generation-fenced upload"
+            )
+        _uploaded_state[(prefix, relative)] = (
+            content_length,
+            modified_ns,
+            changed_ns,
+        )
+        return next_generation
 
     count = 0
-    upload_errors = list(preparation_errors)
     started = time.monotonic()
+    staged: list[
+            tuple[
+            tuple[str, str, int, int, int, str],
+            _PreparedWorkspaceUpload,
+        ]
+    ] = []
+    stage_errors: list[str] = []
     with ThreadPoolExecutor(max_workers=SYNC_WORKERS) as pool:
-        for err in pool.map(_upload_one, to_upload):
-            if err is None:
-                count += 1
+        for pair, prepared, error in pool.map(_stage_one, to_upload):
+            if error is None and prepared is not None:
+                staged.append((pair, prepared))
             else:
-                logger.warning("workspace push skip %s", err)
-                upload_errors.append(err)
-    if upload_errors:
+                assert error is not None
+                logger.warning("workspace push stage skip %s", error)
+                stage_errors.append(error)
+    if stage_errors:
         raise WorkspacePushIncomplete(
-            f"workspace push incomplete ({len(upload_errors)} file error(s)) "
+            f"workspace push incomplete ({len(stage_errors)} file error(s)) "
             f"for prefix {prefix}"
         )
 
-    # Commit the migration boundary last. If this upload is interrupted, the
-    # next microVM safely replays the preserved legacy archive. Once the marker
-    # exists remotely, every database/state object from this snapshot has
-    # already completed and been verified by the broker.
-    if marker_upload is not None:
-        marker_error = _upload_one(marker_upload)
-        if marker_error is not None:
-            logger.warning("workspace push skip %s", marker_error)
-            raise WorkspacePushIncomplete(
-                "workspace push incomplete (migration marker commit failed) "
-                f"for prefix {prefix}"
+    try:
+        assert current_generation is not None
+        for relative in to_delete:
+            current_generation = _delete_workspace_path(
+                relative,
+                current_generation,
+                deadline_monotonic,
             )
-        count += 1
+            _uploaded_state.pop((prefix, relative), None)
+            if require_generation:
+                _pending_workspace_generations[prefix] = (
+                    current_generation
+                )
+            count += 1
+        for pair, prepared in staged:
+            current_generation = _complete_one(
+                pair,
+                prepared,
+                current_generation,
+            )
+            if require_generation:
+                _pending_workspace_generations[prefix] = current_generation
+            count += 1
+
+        # Commit the migration boundary last. If this upload is interrupted,
+        # the next microVM safely replays the preserved legacy archive. Once
+        # the marker exists remotely, every database/state object from this
+        # snapshot has already completed and been verified by the broker.
+        if marker_upload is not None:
+            marker_pair, marker_prepared, marker_error = _stage_one(
+                marker_upload
+            )
+            if marker_error is not None or marker_prepared is None:
+                raise WorkspacePushIncomplete(
+                    "workspace push incomplete (migration marker stage failed) "
+                    f"for prefix {prefix}: {marker_error or 'unknown error'}"
+                )
+            current_generation = _complete_one(
+                marker_pair,
+                marker_prepared,
+                current_generation,
+            )
+            if require_generation:
+                _pending_workspace_generations[prefix] = current_generation
+            count += 1
+
+        if require_generation:
+            committed = _list_remote_workspace_snapshot(
+                prefix,
+                deadline_monotonic,
+            )
+            if committed.generation is None:
+                raise WorkspaceGenerationUnavailable(
+                    "workspace broker metadata became incomplete after push"
+                )
+            if committed.generation != current_generation:
+                raise WorkspaceGenerationConflict(
+                    "authoritative workspace changed during final push"
+                )
+            _commit_workspace_checkpoint(
+                prefix,
+                base_checkpoint_generation,
+                current_generation,
+                deadline_monotonic,
+            )
+            _remote_workspace_snapshots[prefix] = committed
+            _pending_workspace_generations.pop(prefix, None)
+            _pending_workspace_completions.pop(prefix, None)
+    except Exception:
+        raise
+
     elapsed = time.monotonic() - started
 
     logger.info(
-        "workspace push: prefix=%s files=%d elapsed_s=%.1f",
-        prefix, count, elapsed,
+        "workspace push: prefix=%s files=%d generation=%s elapsed_s=%.1f",
+        prefix,
+        count,
+        current_generation[:12] if current_generation else "untrusted",
+        elapsed,
     )
     return count

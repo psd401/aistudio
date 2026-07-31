@@ -158,6 +158,7 @@
     "165-agent-scheduled-run-fire-idempotency.sql",
     "166-atrium-collection-management.sql",
     "167-deep-research-interaction-binding.sql",
-    "168-repository-item-cancelled-status.sql"
+    "168-repository-item-cancelled-status.sql",
+    "169-workspace-upload-zero-byte-files.sql"
   ]
 }

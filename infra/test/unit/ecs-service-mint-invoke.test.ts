@@ -373,15 +373,15 @@ function defineECSTaskRoleMintLambdaInvokeOnlyGrantSuite1Part3() {it('scopes per
         's3:GetObjectVersion',
         's3:PutObject',
         's3:PutObjectTagging',
+        's3:DeleteObject',
         's3:DeleteObjectVersion',
       ]),
     });
     const actions = Array.isArray(brokerObjects!.Action)
       ? brokerObjects!.Action
       : [brokerObjects!.Action];
-    expect(actions).toHaveLength(5);
+    expect(actions).toHaveLength(6);
     expect(actions).not.toEqual(expect.arrayContaining([
-      's3:DeleteObject',
       's3:ListBucketVersions',
     ]));
     expect(JSON.stringify(brokerObjects!.Resource)).toContain(

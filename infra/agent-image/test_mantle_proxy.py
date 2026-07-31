@@ -581,29 +581,48 @@ class TestAgentBrokerRoute(unittest.TestCase):
         )
 
     def test_final_flush_accepts_only_token_bound_private_workspace_writes(self):
-        token = "a" * 43
-        self.assertTrue(
-            _workspace_flush_request_allowed(
-                "/api/agent/workspace-storage",
-                {"operation": "upload"},
-                token,
-                token,
+        flush_token = "a" * 43
+        sync_token = "b" * 43
+        for operation in (
+            "list",
+            "download",
+            "upload",
+            "delete",
+            "complete-upload",
+            "ensure-checkpoint",
+            "commit-checkpoint",
+        ):
+            payload = {"operation": operation}
+            if operation == "complete-upload":
+                payload["workspaceGeneration"] = "0" * 64
+            self.assertTrue(
+                _workspace_flush_request_allowed(
+                    "/api/agent/workspace-storage",
+                    payload,
+                    flush_token,
+                    flush_token,
+                    sync_token,
+                    sync_token,
+                )
             )
-        )
         self.assertFalse(
             _workspace_flush_request_allowed(
                 "/api/agent/workspace-storage",
                 {"operation": "publish"},
-                token,
-                token,
+                flush_token,
+                flush_token,
+                sync_token,
+                sync_token,
             )
         )
         self.assertFalse(
             _workspace_flush_request_allowed(
                 "/api/agent/credentials",
                 {"operation": "upload"},
-                token,
-                token,
+                flush_token,
+                flush_token,
+                sync_token,
+                sync_token,
             )
         )
         self.assertFalse(
@@ -611,7 +630,69 @@ class TestAgentBrokerRoute(unittest.TestCase):
                 "/api/agent/workspace-storage",
                 {"operation": "upload"},
                 None,
-                token,
+                flush_token,
+                sync_token,
+                sync_token,
+            )
+        )
+
+    def test_private_storage_requires_sync_token_during_open_turn(self):
+        sync_token = "b" * 43
+        for operation in (
+            "list",
+            "download",
+            "upload",
+            "delete",
+            "ensure-checkpoint",
+        ):
+            self.assertFalse(
+                _workspace_flush_request_allowed(
+                    "/api/agent/workspace-storage",
+                    {"operation": operation},
+                    None,
+                    None,
+                    None,
+                    sync_token,
+                )
+            )
+            self.assertTrue(
+                _workspace_flush_request_allowed(
+                    "/api/agent/workspace-storage",
+                    {"operation": operation},
+                    None,
+                    None,
+                    sync_token,
+                    sync_token,
+                )
+            )
+        self.assertFalse(
+            _workspace_flush_request_allowed(
+                "/api/agent/workspace-storage",
+                {
+                    "operation": "commit-checkpoint",
+                    "workspaceGeneration": "0" * 64,
+                },
+                None,
+                None,
+                None,
+                sync_token,
+            )
+        )
+        for operation in ("publish", "download-public"):
+            self.assertTrue(
+                _workspace_flush_request_allowed(
+                    "/api/agent/workspace-storage",
+                    {"operation": operation},
+                    None,
+                    None,
+                )
+            )
+        self.assertTrue(
+            _workspace_flush_request_allowed(
+                "/api/agent/workspace-storage",
+                {"operation": "complete-upload"},
+                None,
+                None,
             )
         )
 
@@ -622,6 +703,20 @@ class TestFinalizationGate(unittest.IsolatedAsyncioTestCase):
             mantle_proxy.finalization_gate_middleware.__middleware_version__,
             1,
         )
+
+    async def test_replacement_proxy_starts_closed_during_root_flush(self):
+        gate = mantle_proxy._FinalizationGate(initially_finalizing=True)
+
+        self.assertFalse(await gate.enter())
+        self.assertTrue(await gate.enter(final_flush=True))
+        await gate.leave()
+
+        # The wrapper retries `begin` after starting the replacement. The
+        # transition remains valid and cannot briefly reopen model traffic.
+        await gate.begin()
+        self.assertFalse(await gate.enter())
+        self.assertTrue(await gate.enter(final_flush=True))
+        await gate.leave()
 
     async def test_begin_blocks_new_calls_and_drains_in_flight_call(self):
         gate = mantle_proxy._FinalizationGate()

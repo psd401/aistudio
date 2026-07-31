@@ -56,6 +56,12 @@ import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import { HttpRequest } from '@smithy/protocol-http';
 import { ECSClient, RunTaskCommand } from '@aws-sdk/client-ecs';
 import { S3Client } from '@aws-sdk/client-s3';
+import {
+  ChangeMessageVisibilityCommand,
+  type MessageAttributeValue,
+  SendMessageCommand,
+  SQSClient,
+} from '@aws-sdk/client-sqs';
 import { Upload } from '@aws-sdk/lib-storage';
 import { Context as LambdaContext, SQSBatchResponse, SQSEvent, SQSRecord } from 'aws-lambda';
 import * as crypto from 'node:crypto';
@@ -74,6 +80,8 @@ import {
 import {
   buildJobPayload,
   jobChatDeliveryContext,
+  JOB_DEADLINE_S,
+  JOB_INVOCATION_CONTEXT_TTL_S,
   promotionReason,
   type PromotionReason,
 } from './job-promotion';
@@ -137,6 +145,7 @@ const secretsClient = new SecretsManagerClient({});
 const ssmClient = new SSMClient({});
 const s3Client = new S3Client({});
 const ecsClient = new ECSClient({});
+const sqsClient = new SQSClient({});
 
 // SigV4 signer — promoted to module scope to avoid re-creating the credential
 // provider chain on every invocation. In a Lambda context credentials are stable
@@ -507,7 +516,7 @@ const CROSS_USER_SLASH_COMMAND_IDS = new Set(['1', '2']);
  * Persistent owner-DM sidecar session command (issue #1405).
  *
  * Manual deploy-time registration in Google Cloud Console:
- *   /btw -> commandId "3" -> "Ask a concurrent question while your agent works"
+ *   /btw -> commandId "3" -> "Use a separate side-conversation transcript"
  */
 const BTW_SLASH_COMMAND_ID = '3';
 
@@ -524,10 +533,38 @@ const SLASH_COMMAND_NAMES: Record<string, string> = {
 };
 
 const ASIDE_RESPONSE_PREFIX = '[aside] ';
-const AUTO_ASIDE_RESPONSE_PREFIX =
-  '[aside] _Your main task is still running._ ';
-const OWNER_BUSY_RESPONSE =
-  "I'm currently busy processing another request. Please try again in a moment.";
+const WORKSPACE_RETRY_VISIBILITY_SECONDS = 60;
+const WORKSPACE_DEFER_ATTRIBUTE = 'PsdWorkspaceDeferV1';
+const WORKSPACE_DEFER_MAX_ATTEMPTS = 180;
+const WORKSPACE_DEFER_MAX_AGE_SECONDS = 3 * 60 * 60;
+const CHAT_DELIVERY_ENVELOPE_KIND = 'agent-chat-delivery-v1';
+const MAX_CHAT_DELIVERY_ENVELOPE_BYTES = 32 * 1024;
+
+class WorkspaceTurnDeferredError extends Error {
+  readonly messageName: string | undefined;
+  readonly reason: 'workspace-contended' | 'background-job-active';
+
+  constructor(
+    messageName: string | undefined,
+    reason: WorkspaceTurnDeferredError['reason']
+  ) {
+    super(
+      reason === 'background-job-active'
+        ? 'Owner workspace is held by a background job'
+        : 'Owner workspace is held by another turn'
+    );
+    this.name = 'WorkspaceTurnDeferredError';
+    this.messageName = messageName;
+    this.reason = reason;
+  }
+}
+
+class ChatDeliveryRetryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ChatDeliveryRetryError';
+  }
+}
 
 function isSlashCommandAvailable(
   commandId: string | undefined,
@@ -585,60 +622,84 @@ const RUNTIME_ID_TTL_MS = 10 * 60 * 1000; // 10 minutes
 // for consistency and ~100-300ms lower latency per query.
 let pgClient: postgres.Sql | null = null;
 
-// Sentinel token for pass-through lock scenarios (lock table missing or DDB
-// error). Used instead of a real UUID so `releaseSessionLock` can short-circuit
-// without attempting a conditional DynamoDB delete that would fail by coincidence.
+// Sentinel token for the intentional local-development pass-through scenario
+// where no lock table is configured. A configured table must fail closed:
+// running without the owner workspace mutex can corrupt durable history.
 const LOCK_PASS_THROUGH = '__lock-pass-through__';
+// Covers the complete interactive lifecycle, not merely Lambda's caller
+// lifetime: AgentCore can still be stopping OpenClaw and flushing SQLite after
+// a transport disconnect. Five-minute renewals normally keep this farther
+// ahead; 30 minutes is the fail-safe when one renewal is missed.
+const SESSION_LOCK_TTL_SECONDS = 30 * 60;
+const SESSION_LOCK_RENEW_INTERVAL_MS = 5 * 60 * 1000;
+
+interface SessionLockAcquireDependencies {
+  tableName: string | undefined;
+  send: (command: PutCommand) => Promise<unknown>;
+}
 
 /**
  * Try to acquire the per-session lock. Returns the unique lock token on
- * success, `null` if another holder already has it, or `LOCK_PASS_THROUGH`
- * when locking is disabled or DynamoDB is unavailable (fail-open).
+ * success, `null` if another holder already has it or a configured DynamoDB
+ * table cannot prove ownership, or `LOCK_PASS_THROUGH` when locking is
+ * intentionally disabled for local development.
  *
  * Each acquisition writes a random `lockToken` into the DynamoDB row. The
  * token is required by `releaseSessionLock` so that a stale holder (whose
  * lock expired and was re-acquired by a different invocation) cannot
- * accidentally delete a newer holder's lock.
+ * accidentally delete a newer holder's lock. A caller-supplied stable token
+ * may re-enter and extend its own row; promoted-job delivery retries use this
+ * together with ECS clientToken idempotency.
  *
- * Serialization is best-effort for turns longer than 14 min: the DynamoDB
- * TTL backstop expires at that point and a new holder can re-acquire the
- * lock while the first turn is still in-flight. The conditional-delete
- * token mechanism prevents the first holder from releasing the second
- * holder's lock, but the serialization guarantee itself is broken in
- * that 14–15 min window. This is acceptable given the tail probability.
+ * The 30-minute lease covers cold restore, the 14-minute harness budget, and
+ * the wrapper's bounded final workspace flush. Interactive turns and async
+ * jobs renew it while they run. The conditional-delete token prevents a stale
+ * holder from releasing a newer holder's lock after expiry + re-acquisition.
  */
 async function tryAcquireSessionLock(
   sessionId: string,
   log: ReturnType<typeof createLogger>,
-  kind: 'turn' | 'job' = 'turn'
+  kind: 'turn' | 'job' = 'turn',
+  override?: SessionLockAcquireDependencies,
+  requestedLockToken?: string
 ): Promise<string | null> {
-  const tableName = process.env.SESSION_LOCKS_TABLE;
+  const tableName = override?.tableName ?? process.env.SESSION_LOCKS_TABLE;
   if (!tableName) return LOCK_PASS_THROUGH; // Lock disabled (e.g. local) — pass through.
 
-  const lockToken = crypto.randomUUID();
-  const expiresAt = Math.floor(Date.now() / 1000) + 14 * 60;
+  const lockToken = requestedLockToken ?? crypto.randomUUID();
+  const expiresAt =
+    Math.floor(Date.now() / 1000) + SESSION_LOCK_TTL_SECONDS;
   try {
-    await dynamoClient.send(
-      new PutCommand({
-        TableName: tableName,
-        // `kind: 'job'` marks a lock held by the async job-runner (#1138) —
-        // the router replies "still working on your earlier task" instantly
-        // instead of making the user wait out the 13-min lock poll. The
-        // runner renews expiresAt every ~5 min (renewSessionLock), leaving
-        // enough lease margin for a full missed renewal.
-        Item: { sessionId, expiresAt, lockToken, kind, claimedAt: new Date().toISOString() },
-        ConditionExpression: 'attribute_not_exists(sessionId) OR expiresAt < :now',
-        ExpressionAttributeValues: { ':now': Math.floor(Date.now() / 1000) },
-      })
-    );
+    const command = new PutCommand({
+      TableName: tableName,
+      // `kind: 'job'` marks a lock held by the async job-runner (#1138) —
+      // the router replies "still working on your earlier task" instantly.
+      // The runner renews expiresAt every ~5 min, leaving enough lease margin
+      // for a full missed renewal.
+      Item: {
+        sessionId,
+        expiresAt,
+        lockToken,
+        kind,
+        claimedAt: new Date().toISOString(),
+      },
+      ConditionExpression:
+        'attribute_not_exists(sessionId) OR expiresAt < :now ' +
+        'OR lockToken = :tok',
+      ExpressionAttributeValues: {
+        ':now': Math.floor(Date.now() / 1000),
+        ':tok': lockToken,
+      },
+    });
+    await (override?.send(command) ?? dynamoClient.send(command));
     return lockToken;
   } catch (error) {
     const errName = (error as { name?: string } | null)?.name;
     if (errName === 'ConditionalCheckFailedException') return null;
-    log.warn('Session lock acquire failed; proceeding without lock', {
+    log.error('Session lock acquire failed; refusing unlocked workspace turn', {
       error: error instanceof Error ? error.message : String(error),
     });
-    return LOCK_PASS_THROUGH; // Conservative — let the message through if DDB is broken.
+    return null;
   }
 }
 
@@ -681,15 +742,14 @@ async function releaseSessionLock(
 }
 
 /**
- * Renew a held session lock by extending expiresAt another 14 minutes,
- * conditioned on still owning it (lockToken match). The async job-runner
- * (#1138) calls this every ~5 min for up to the 2h job ceiling so the
- * `kind='job'` marker stays live while the job runs. Returns false when the
- * lock was lost (expired + re-acquired by someone else), and in confirmation
- * mode when a transient error prevents proving the startup extension. The
- * runner refuses to start external work without that proof; later losses
- * remain advisory because work may already have side effects and OpenClaw
- * serializes the session itself.
+ * Renew a held session lock by extending expiresAt another 30 minutes,
+ * conditioned on still owning it (lockToken match). Interactive turns and the
+ * async job-runner call this every ~5 min. Returns false when the lock was lost
+ * (expired + re-acquired by someone else), and in confirmation mode when a
+ * transient error prevents proving the startup extension. The runner refuses
+ * to start external work without that proof; later losses remain advisory
+ * because work may already have side effects and OpenClaw serializes the
+ * session itself.
  */
 async function renewSessionLock(
   sessionId: string,
@@ -707,7 +767,8 @@ async function renewSessionLock(
         UpdateExpression: 'SET expiresAt = :exp',
         ConditionExpression: 'lockToken = :tok',
         ExpressionAttributeValues: {
-          ':exp': Math.floor(Date.now() / 1000) + 14 * 60,
+          ':exp':
+            Math.floor(Date.now() / 1000) + SESSION_LOCK_TTL_SECONDS,
           ':tok': lockToken,
         },
       })
@@ -762,45 +823,6 @@ async function isJobLockActive(
 }
 
 /**
- * Acquire-or-wait. Polls the lock with exponential backoff (1s -> 2s -> 4s,
- * capped at 8s) up to maxWaitMs. Returns the lock token on success, or `null`
- * if the wait times out. Caller MUST check the return value and only release
- * when non-null. Bounded to leave headroom under the 15-min Lambda timeout —
- * agent turns regularly take 1–4 min, so 13 min is the upper bound.
- */
-async function waitForSessionLock(
-  sessionId: string,
-  log: ReturnType<typeof createLogger>,
-  maxWaitMs = 13 * 60 * 1000,
-): Promise<string | null> {
-  const start = Date.now();
-  let attempt = 0;
-  let backoffMs = 1000;
-  while (Date.now() - start < maxWaitMs) {
-    const token = await tryAcquireSessionLock(sessionId, log);
-    if (typeof token === "string") {
-      if (attempt > 0) {
-        log.info('Session lock acquired after wait', {
-          waitedMs: Date.now() - start,
-          attempts: attempt + 1,
-        });
-      }
-      return token;
-    }
-    attempt += 1;
-    await new Promise((r) => setTimeout(r, backoffMs));
-    // Exponential backoff capped at 8s — reduces DDB read volume by ~75%
-    // for long waits (1s -> 2s -> 4s -> 8s -> 8s…) with negligible impact
-    // on response latency since agent turns take minutes.
-    backoffMs = Math.min(backoffMs * 2, 8000);
-  }
-  log.warn('Session lock wait timed out — returning busy message', {
-    waitedMs: Date.now() - start,
-  });
-  return null;
-}
-
-/**
  * Returns true if this message name has already been processed (or is being
  * processed concurrently) by claiming its row via a conditional PutItem. The
  * row carries a 1-hour TTL so the table self-prunes.
@@ -811,26 +833,33 @@ async function waitForSessionLock(
  */
 async function isDuplicateMessage(
   messageName: string,
-  log: ReturnType<typeof createLogger>
+  log: ReturnType<typeof createLogger>,
+  override?: {
+    tableName: string | undefined;
+    send: (command: PutCommand) => Promise<unknown>;
+  }
 ): Promise<boolean> {
-  const tableName = process.env.MESSAGE_DEDUP_TABLE;
+  const tableName =
+    override?.tableName ?? process.env.MESSAGE_DEDUP_TABLE;
   if (!tableName) {
     return false; // Dedup not configured (e.g., local tests) — pass through
   }
 
   const expiresAt = Math.floor(Date.now() / 1000) + 3600; // 1 hour TTL
+  const now = Math.floor(Date.now() / 1000);
   try {
-    await dynamoClient.send(
-      new PutCommand({
+    const command = new PutCommand({
         TableName: tableName,
         Item: {
           messageName,
           expiresAt,
           claimedAt: new Date().toISOString(),
         },
-        ConditionExpression: 'attribute_not_exists(messageName)',
-      })
-    );
+        ConditionExpression:
+          'attribute_not_exists(messageName) OR expiresAt < :now',
+        ExpressionAttributeValues: { ':now': now },
+      });
+    await (override?.send(command) ?? dynamoClient.send(command));
     return false; // Successfully claimed → first time we've seen this msg
   } catch (error) {
     const errName = (error as { name?: string } | null)?.name;
@@ -842,6 +871,228 @@ async function isDuplicateMessage(
     });
     return false;
   }
+}
+
+async function releaseMessageClaimForRetry(
+  messageName: string | undefined,
+  log: ReturnType<typeof createLogger>
+): Promise<boolean> {
+  const tableName = process.env.MESSAGE_DEDUP_TABLE;
+  if (!tableName || !messageName) return true;
+  try {
+    await dynamoClient.send(
+      new DeleteCommand({
+        TableName: tableName,
+        Key: { messageName },
+      })
+    );
+    return true;
+  } catch (error) {
+    log.error('Failed to release message claim for deferred workspace turn', {
+      messageName,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+}
+
+async function deferWorkspaceTurn(
+  record: SQSRecord,
+  error: WorkspaceTurnDeferredError,
+  log: ReturnType<typeof createLogger>,
+  dependencies: {
+    releaseClaim: typeof releaseMessageClaimForRetry;
+    enqueue: (
+      input: ConstructorParameters<typeof SendMessageCommand>[0]
+    ) => Promise<unknown>;
+    nowSeconds: () => number;
+  } = {
+    releaseClaim: releaseMessageClaimForRetry,
+    enqueue: input => sqsClient.send(new SendMessageCommand(input)),
+    nowSeconds: () => Math.floor(Date.now() / 1000),
+  }
+): Promise<boolean> {
+  const queueUrl = process.env.ROUTER_QUEUE_URL;
+  if (!queueUrl) {
+    log.error(
+      'ROUTER_QUEUE_URL is missing; deferred turn will use default visibility'
+    );
+    return false;
+  }
+  const nowSeconds = dependencies.nowSeconds();
+  const deferState = nextWorkspaceDeferState(record, nowSeconds);
+  if (!deferState) {
+    log.error('Workspace deferral budget exhausted; record will follow DLQ redrive', {
+      messageName: error.messageName,
+      reason: error.reason,
+      maxAttempts: WORKSPACE_DEFER_MAX_ATTEMPTS,
+      maxAgeSeconds: WORKSPACE_DEFER_MAX_AGE_SECONDS,
+      receiveCount: record.attributes?.ApproximateReceiveCount ?? '1',
+    });
+    return false;
+  }
+  const claimReleased = await dependencies.releaseClaim(
+    error.messageName,
+    log
+  );
+  if (!claimReleased) {
+    // Leave the source queue's normal 90-minute visibility in place. The
+    // one-hour dedup claim will expire before that retry, so the turn remains
+    // recoverable even while DynamoDB is unhealthy.
+    return false;
+  }
+
+  await dependencies.enqueue({
+    QueueUrl: queueUrl,
+    MessageBody: record.body,
+    DelaySeconds: WORKSPACE_RETRY_VISIBILITY_SECONDS,
+    MessageAttributes: workspaceRetryMessageAttributes(
+      record,
+      deferState
+    ),
+  });
+  log.info('Requeued Chat turn for durable workspace retry', {
+    messageName: error.messageName,
+    reason: error.reason,
+    retryAfterSeconds: WORKSPACE_RETRY_VISIBILITY_SECONDS,
+    deferAttempt: deferState.attempt,
+    firstDeferredAt: deferState.firstDeferredAt,
+    receiveCount: record.attributes?.ApproximateReceiveCount ?? '1',
+  });
+  return true;
+}
+
+type WorkspaceDeferState = {
+  firstDeferredAt: number;
+  attempt: number;
+};
+
+function nextWorkspaceDeferState(
+  record: SQSRecord,
+  nowSeconds: number
+): WorkspaceDeferState | null {
+  const attribute = record.messageAttributes?.[WORKSPACE_DEFER_ATTRIBUTE];
+  if (!attribute) {
+    if (Object.keys(record.messageAttributes ?? {}).length >= 10) {
+      return null;
+    }
+    return { firstDeferredAt: nowSeconds, attempt: 1 };
+  }
+  const state = parseWorkspaceDeferState(attribute);
+  if (
+    !state ||
+    !workspaceDeferStateIsEligible(state, nowSeconds)
+  ) {
+    return null;
+  }
+  return {
+    firstDeferredAt: state.firstDeferredAt,
+    attempt: state.attempt + 1,
+  };
+}
+
+function parseWorkspaceDeferState(
+  attribute: SQSRecord['messageAttributes'][string]
+): WorkspaceDeferState | null {
+  if (
+    attribute.dataType !== 'String' ||
+    typeof attribute.stringValue !== 'string'
+  ) {
+    return null;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(attribute.stringValue);
+  } catch {
+    return null;
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const state = value as Record<string, unknown>;
+  if (
+    Object.keys(state).length !== 2 ||
+    typeof state.firstDeferredAt !== 'number' ||
+    !Number.isSafeInteger(state.firstDeferredAt) ||
+    state.firstDeferredAt < 0 ||
+    typeof state.attempt !== 'number' ||
+    !Number.isSafeInteger(state.attempt) ||
+    state.attempt < 1
+  ) {
+    return null;
+  }
+  return state as WorkspaceDeferState;
+}
+
+function workspaceDeferStateIsEligible(
+  state: WorkspaceDeferState,
+  nowSeconds: number
+): boolean {
+  return (
+    state.firstDeferredAt <=
+      nowSeconds + WORKSPACE_RETRY_VISIBILITY_SECONDS &&
+    state.attempt < WORKSPACE_DEFER_MAX_ATTEMPTS &&
+    nowSeconds - state.firstDeferredAt < WORKSPACE_DEFER_MAX_AGE_SECONDS
+  );
+}
+
+function workspaceRetryMessageAttributes(
+  record: SQSRecord,
+  state: WorkspaceDeferState
+): Record<string, MessageAttributeValue> {
+  const attributes = Object.fromEntries(
+    Object.entries(record.messageAttributes ?? {}).map(([name, value]) => [
+      name,
+      {
+        DataType: value.dataType,
+        ...(value.stringValue !== undefined
+          ? { StringValue: value.stringValue }
+          : {}),
+        ...(value.binaryValue !== undefined
+          ? { BinaryValue: Buffer.from(value.binaryValue, 'base64') }
+          : {}),
+        ...(value.stringListValues !== undefined
+          ? { StringListValues: value.stringListValues }
+          : {}),
+        ...(value.binaryListValues !== undefined
+          ? {
+              BinaryListValues: value.binaryListValues.map(item =>
+                Buffer.from(item, 'base64')
+              ),
+            }
+          : {}),
+      },
+    ])
+  );
+  attributes[WORKSPACE_DEFER_ATTRIBUTE] = {
+    DataType: 'String',
+    StringValue: JSON.stringify(state),
+  };
+  return attributes;
+}
+
+async function deferChatDeliveryRetry(
+  record: SQSRecord,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const queueUrl = process.env.ROUTER_QUEUE_URL;
+  if (!queueUrl) {
+    log.error(
+      'ROUTER_QUEUE_URL is missing; Chat delivery retry will use default visibility'
+    );
+    return;
+  }
+  await sqsClient.send(
+    new ChangeMessageVisibilityCommand({
+      QueueUrl: queueUrl,
+      ReceiptHandle: record.receiptHandle,
+      VisibilityTimeout: WORKSPACE_RETRY_VISIBILITY_SECONDS,
+    })
+  );
+  log.warn('Deferred completed Chat response delivery for retry', {
+    retryAfterSeconds: WORKSPACE_RETRY_VISIBILITY_SECONDS,
+    receiveCount: record.attributes?.ApproximateReceiveCount ?? '1',
+  });
 }
 
 async function getDbClient(): Promise<postgres.Sql> {
@@ -1609,6 +1860,13 @@ async function consumeAgentCoreStream(
 interface AgentInvocationContext {
   displayName?: string;
   workspacePrefix?: string;
+  /**
+   * OpenClaw transcript identity. This is deliberately distinct from the
+   * AgentCore runtime session id: one owner-wide runtime serializes durable
+   * workspace writes, while each Google Chat space/thread gets independent
+   * conversational memory.
+   */
+  conversationSessionId?: string;
   invokedBy?: { email: string; displayName: string };
   audience?: 'shared-space';
   threadContext?: string;
@@ -1642,6 +1900,14 @@ interface AgentCoreResult {
   failed?: boolean;
   errorClass?: string;
   errorSource?: 'harness' | 'router';
+  /**
+   * True when deleting the lock is safe. Once a runtime call starts, only
+   * terminal metadata explicitly proving OpenClaw shutdown, SQLite checkpoint,
+   * and the final workspace push can set it. A local rejection before any
+   * runtime call is also safe. Transport failure, missing terminal events,
+   * legacy results, and false proof remain conservative.
+   */
+  workspaceFinalizationConfirmed: boolean;
 }
 
 interface FailureRecordParams {
@@ -1661,7 +1927,8 @@ interface FailureRecordParams {
 
 function failedAgentCoreResult(
   response: string,
-  errorClass: string
+  errorClass: string,
+  workspaceFinalizationConfirmed = false
 ): AgentCoreResult {
   return {
     response,
@@ -1679,7 +1946,98 @@ function failedAgentCoreResult(
     failed: true,
     errorClass,
     errorSource: 'router',
+    workspaceFinalizationConfirmed,
   };
+}
+
+interface SessionLockRenewalScheduler {
+  start(callback: () => void, intervalMs: number): unknown;
+  stop(timer: unknown): void;
+}
+
+interface SessionLockLeaseDependencies {
+  renewSessionLock: typeof renewSessionLock;
+  releaseSessionLock: typeof releaseSessionLock;
+  scheduler: SessionLockRenewalScheduler;
+}
+
+const sessionLockLeaseDependencies: SessionLockLeaseDependencies = {
+  renewSessionLock,
+  releaseSessionLock,
+  scheduler: {
+    start: (callback, intervalMs) => setInterval(callback, intervalMs),
+    stop: timer =>
+      clearInterval(timer as ReturnType<typeof setInterval>),
+  },
+};
+
+/**
+ * Keep the owner-wide workspace mutex alive for the entire AgentCore turn.
+ *
+ * A confirmed terminal result proves the wrapper already stopped OpenClaw,
+ * checkpointed SQLite, and finished its final push, so the row can be deleted.
+ * On a disconnect, thrown invocation, or missing terminal result, retain the
+ * most recently renewed lease. The remote microVM may still be finalizing
+ * after this Lambda has stopped receiving bytes.
+ */
+async function invokeWithSessionLockLease(
+  sessionId: string,
+  lockToken: string,
+  log: ReturnType<typeof createLogger>,
+  invocation: () => Promise<AgentCoreResult>,
+  dependencies: SessionLockLeaseDependencies =
+    sessionLockLeaseDependencies
+): Promise<AgentCoreResult> {
+  let renewalInFlight: Promise<void> | undefined;
+  const renewOnce = () => {
+    if (renewalInFlight) return;
+    renewalInFlight = (async () => {
+      try {
+        const renewed = await dependencies.renewSessionLock(
+          sessionId,
+          lockToken,
+          log
+        );
+        if (!renewed) {
+          log.warn('Workspace lock renewal could not confirm ownership', {
+            sessionId,
+          });
+        }
+      } catch (error) {
+        log.warn('Workspace lock renewal threw unexpectedly', {
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        renewalInFlight = undefined;
+      }
+    })();
+  };
+  const timer = dependencies.scheduler.start(
+    renewOnce,
+    SESSION_LOCK_RENEW_INTERVAL_MS
+  );
+  let result: AgentCoreResult | undefined;
+  try {
+    result = await invocation();
+    return result;
+  } finally {
+    dependencies.scheduler.stop(timer);
+    const pendingRenewal = renewalInFlight;
+    if (pendingRenewal) await pendingRenewal;
+    if (result?.workspaceFinalizationConfirmed) {
+      await dependencies.releaseSessionLock(
+        sessionId,
+        lockToken,
+        log
+      );
+    } else {
+      log.warn(
+        'Retaining workspace lock after unconfirmed AgentCore completion',
+        { sessionId }
+      );
+    }
+  }
 }
 
 function cachedAgentCoreRuntimeId(): string {
@@ -1721,13 +2079,22 @@ async function resolveAgentCoreRuntimeId(
 function invocationTtlOptions(
   deadlineS: number | undefined
 ): { ttlSeconds?: number } {
-  return deadlineS === undefined ? {} : { ttlSeconds: deadlineS };
+  if (deadlineS === undefined) return {};
+  return {
+    ttlSeconds:
+      deadlineS === JOB_DEADLINE_S
+        ? JOB_INVOCATION_CONTEXT_TTL_S
+        : deadlineS,
+  };
 }
 
 function addOptionalAgentContext(
   payload: Record<string, unknown>,
   context: AgentInvocationContext
 ): void {
+  if (context.conversationSessionId) {
+    payload.conversation_session_id = context.conversationSessionId;
+  }
   if (context.invokedBy) {
     payload.invoked_by_email = context.invokedBy.email;
     payload.invoked_by_display_name = context.invokedBy.displayName;
@@ -1887,6 +2254,8 @@ function parseAgentCoreResult(
   const metadata =
     (responseBody.metadata as Record<string, unknown> | undefined) ?? {};
   const failed = metadata.failed === true;
+  const workspaceFinalizationConfirmed =
+    metadata.workspace_finalization_confirmed === true;
   return {
     response: (responseBody.result as string) || 'No response from agent.',
     inputTokens: (metadata.input_tokens as number) || 0,
@@ -1906,6 +2275,7 @@ function parseAgentCoreResult(
         ? metadata.error_class
         : undefined,
     errorSource: failed ? 'harness' : undefined,
+    workspaceFinalizationConfirmed,
   };
 }
 
@@ -1920,7 +2290,8 @@ async function invokeAgentCore(
   if (!runtimeId) {
     return failedAgentCoreResult(
       'Your agent is not yet deployed. An administrator needs to push the agent image and deploy the AgentCore Runtime.',
-      'AgentNotDeployed'
+      'AgentNotDeployed',
+      true
     );
   }
 
@@ -2012,7 +2383,9 @@ async function getChatClient(): Promise<NonNullable<typeof cachedChatClient>> {
 async function fetchChatUploads(
   attachments: AgentAttachment[],
   workspacePrefix: string,
-  log: ReturnType<typeof createLogger>
+  log: ReturnType<typeof createLogger>,
+  messageName = '',
+  messageCreatedAt = ''
 ): Promise<void> {
   const uploads = attachments.filter(
     (a) => a.source === 'chat-upload' && a.attachmentResourceName
@@ -2046,7 +2419,23 @@ async function fetchChatUploads(
         { resourceName: att.attachmentResourceName as string, alt: 'media' },
         { responseType: 'stream' }
       );
-      const workspacePath = buildWorkspacePath(att.name, index, new Date());
+      const parsedCreateTime = new Date(messageCreatedAt);
+      const stableCreateTime = Number.isNaN(parsedCreateTime.getTime())
+        ? new Date(0)
+        : parsedCreateTime;
+      const messageIdentity = crypto
+        .createHash('sha256')
+        .update(
+          `${messageName}\0${att.attachmentResourceName ?? ''}\0${index}`
+        )
+        .digest('hex')
+        .slice(0, 16);
+      const workspacePath = buildWorkspacePath(
+        att.name,
+        index,
+        stableCreateTime,
+        messageIdentity
+      );
       const upload = new Upload({
         client: s3Client,
         params: {
@@ -2084,15 +2473,21 @@ async function fetchChatUploads(
  * the SAME AgentCore session with a 2-hour deadline and posts the final
  * answer when done.
  *
- * Returns true when the job launched (caller returns; nothing more to send).
- * Returns false on ANY failure — missing config, no runtime id, lock
- * contention, RunTask error — and the caller falls through to today's
- * behavior (post the failure frame). Promotion must never make things
- * worse than the status quo.
+ * Returns true when the job launched or RunTask acceptance is uncertain, so
+ * the caller never starts overlapping fallback work. Returns false only when
+ * configuration, lock contention, payload validation, or an explicit service
+ * rejection proves no task was accepted.
  */
 interface JobPromotionInput {
+  /** Immutable source-message identity used for ECS idempotency. */
+  promotionId: string;
   reason: PromotionReason;
+  /** Build-rotated AgentCore runtime affinity identity. */
   sessionId: string;
+  /** Deployment-stable owner workspace mutex. */
+  workspaceLockId: string;
+  /** OpenClaw transcript identity for the originating Chat space/thread. */
+  conversationSessionId?: string;
   userEmail: string;
   googleIdentity: string;
   displayName: string;
@@ -2132,34 +2527,46 @@ function getJobPromotionConfig(): JobPromotionConfig | null {
     : config;
 }
 
+function promotedJobRunTaskCommand(
+  config: JobPromotionConfig,
+  payload: string,
+  clientToken: string
+): RunTaskCommand {
+  return new RunTaskCommand({
+    clientToken,
+    cluster: config.clusterArn,
+    taskDefinition: config.taskDefArn,
+    launchType: 'FARGATE',
+    count: 1,
+    startedBy: 'agent-router-promotion',
+    networkConfiguration: {
+      awsvpcConfiguration: {
+        subnets: config.subnets,
+        securityGroups: [config.securityGroup],
+        assignPublicIp: 'DISABLED',
+      },
+    },
+    overrides: {
+      containerOverrides: [
+        {
+          name: config.containerName,
+          environment: [{ name: 'JOB_PAYLOAD', value: payload }],
+        },
+      ],
+    },
+  });
+}
+
 async function runPromotedJob(
   config: JobPromotionConfig,
-  payload: string
-): Promise<string | undefined> {
+  payload: string,
+  clientToken: string
+): Promise<string> {
   const result = await ecsClient.send(
-    new RunTaskCommand({
-      cluster: config.clusterArn,
-      taskDefinition: config.taskDefArn,
-      launchType: 'FARGATE',
-      count: 1,
-      startedBy: 'agent-router-promotion',
-      networkConfiguration: {
-        awsvpcConfiguration: {
-          subnets: config.subnets,
-          securityGroups: [config.securityGroup],
-          assignPublicIp: 'DISABLED',
-        },
-      },
-      overrides: {
-        containerOverrides: [
-          {
-            name: config.containerName,
-            environment: [{ name: 'JOB_PAYLOAD', value: payload }],
-          },
-        ],
-      },
-    })
+    promotedJobRunTaskCommand(config, payload, clientToken)
   );
+  const taskArn = result.tasks?.[0]?.taskArn;
+  if (taskArn) return taskArn;
   if (result.failures?.length) {
     const failureSummary = result.failures
       .map(failure =>
@@ -2168,40 +2575,215 @@ async function runPromotedJob(
         }`
       )
       .join('; ');
-    throw new Error(`RunTask failures: ${failureSummary}`);
+    throw new DefiniteRunTaskFailure(
+      `RunTask failures: ${failureSummary}`
+    );
   }
-  return result.tasks?.[0]?.taskArn;
+  throw new AmbiguousRunTaskFailure(
+    'RunTask returned without a task ARN or explicit failure'
+  );
 }
 
-async function promoteToJob(
+class DefiniteRunTaskFailure extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DefiniteRunTaskFailure';
+  }
+}
+
+class AmbiguousRunTaskFailure extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AmbiguousRunTaskFailure';
+  }
+}
+
+type RunTaskFailureCertainty = 'definite' | 'ambiguous';
+
+const DEFINITE_RUN_TASK_ERROR_NAMES = new Set([
+  'AccessDeniedException',
+  'ClientException',
+  'ClusterNotFoundException',
+  'InvalidParameterException',
+  'PlatformTaskDefinitionIncompatibilityException',
+  'PlatformUnknownException',
+  'SerializationException',
+  'UnsupportedFeatureException',
+  'ValidationException',
+]);
+const DEFINITE_RUN_TASK_HTTP_STATUSES = new Set([401, 403, 404, 429]);
+const RUN_TASK_THROTTLE_ERROR_NAMES = new Set([
+  'ThrottlingException',
+  'TooManyRequestsException',
+]);
+const RUN_TASK_THROTTLE_HTTP_STATUSES = new Set([400, 429]);
+const RUN_TASK_AMBIGUOUS_ATTEMPTS = 2;
+
+function runTaskFailureCertainty(error: unknown): RunTaskFailureCertainty {
+  if (error instanceof DefiniteRunTaskFailure) return 'definite';
+  if (error instanceof AmbiguousRunTaskFailure) return 'ambiguous';
+  const details = error as {
+    name?: unknown;
+    $metadata?: { httpStatusCode?: unknown };
+  } | null;
+  const name = typeof details?.name === 'string' ? details.name : '';
+  if (DEFINITE_RUN_TASK_ERROR_NAMES.has(name)) return 'definite';
+  const rawStatus = details?.$metadata?.httpStatusCode;
+  const status = typeof rawStatus === 'number' ? rawStatus : undefined;
+  const explicitThrottle =
+    RUN_TASK_THROTTLE_ERROR_NAMES.has(name) &&
+    status !== undefined &&
+    RUN_TASK_THROTTLE_HTTP_STATUSES.has(status);
+  if (
+    explicitThrottle ||
+    (status !== undefined &&
+      DEFINITE_RUN_TASK_HTTP_STATUSES.has(status))
+  ) {
+    // These are explicit client/auth/throttling rejections. In particular,
+    // a 429 means ECS declined the request; no task was accepted.
+    return 'definite';
+  }
+  // Timeouts, disconnects, conflicts, 5xx responses, and unknown SDK errors
+  // cannot prove whether ECS accepted the task before the caller lost contact.
+  return 'ambiguous';
+}
+
+function jobPromotionIdentity(
+  input: Pick<
+    JobPromotionInput,
+    'promotionId' | 'reason' | 'workspaceLockId'
+  >
+): { clientToken: string; lockToken: string } {
+  const digest = crypto
+    .createHash('sha256')
+    .update(
+      `${input.workspaceLockId}\0${input.promotionId}\0${input.reason}`
+    )
+    .digest('hex');
+  return {
+    // ECS RunTask accepts at most 64 visible ASCII characters.
+    clientToken: `agent-job-${digest.slice(0, 54)}`,
+    // JOB_PAYLOAD is part of RunTask's idempotency comparison, so its DDB
+    // token must be stable across delivery retries too.
+    lockToken: `job-${digest}`,
+  };
+}
+
+interface JobPromotionDependencies {
+  getConfig(): JobPromotionConfig | null;
+  getRuntimeId(): string;
+  acquireLock(
+    workspaceLockId: string,
+    requestedLockToken: string,
+    log: ReturnType<typeof createLogger>
+  ): Promise<string | null>;
+  releaseLock(
+    workspaceLockId: string,
+    lockToken: string,
+    log: ReturnType<typeof createLogger>
+  ): Promise<void>;
+  runJob(
+    config: JobPromotionConfig,
+    payload: string,
+    clientToken: string
+  ): Promise<string>;
+  sendResponse: typeof sendGoogleChatResponse;
+}
+
+const jobPromotionDependencies: JobPromotionDependencies = {
+  getConfig: getJobPromotionConfig,
+  getRuntimeId: () =>
+    process.env.AGENTCORE_RUNTIME_ID || cachedRuntimeId || '',
+  acquireLock: (workspaceLockId, requestedLockToken, log) =>
+    tryAcquireSessionLock(
+      workspaceLockId,
+      log,
+      'job',
+      undefined,
+      requestedLockToken
+    ),
+  releaseLock: releaseSessionLock,
+  runJob: runPromotedJob,
+  sendResponse: sendGoogleChatResponse,
+};
+
+function promotionAcknowledgement(
   input: JobPromotionInput,
-  log: ReturnType<typeof createLogger>
+  launchAmbiguous: boolean
+): string {
+  const prefix =
+    input.acknowledgementPrefix ?? input.responsePrefix ?? '';
+  return launchAmbiguous
+    ? prefix +
+        '⏳ The background handoff is still being confirmed. I protected this ' +
+        'workspace from overlapping work and will post here if the job started.'
+    : prefix +
+        '⏳ This is taking longer than one pass allows — I\'ve moved it to a ' +
+        'background job and will post the result here when it\'s done.';
+}
+
+async function sendPromotionAcknowledgement(
+  input: JobPromotionInput,
+  launchAmbiguous: boolean,
+  log: ReturnType<typeof createLogger>,
+  dependencies: JobPromotionDependencies
+): Promise<void> {
+  try {
+    await dependencies.sendResponse(
+      input.spaceName,
+      input.threadName,
+      promotionAcknowledgement(input, launchAmbiguous),
+      log,
+      jobChatDeliveryContext(input, true)
+    );
+  } catch (error) {
+    // Once RunTask is accepted or uncertain, Chat delivery must not roll back
+    // the workspace lock or trigger an overlapping fallback turn.
+    log.error('Background promotion acknowledgement delivery failed', {
+      launchAmbiguous,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function promoteToJobWithDependencies(
+  input: JobPromotionInput,
+  log: ReturnType<typeof createLogger>,
+  dependencies: JobPromotionDependencies
 ): Promise<boolean> {
-  const config = getJobPromotionConfig();
+  const config = dependencies.getConfig();
   if (!config) {
     log.warn('Job promotion not configured — falling back to failure frame');
     return false;
   }
 
-  const runtimeId = process.env.AGENTCORE_RUNTIME_ID || cachedRuntimeId || '';
+  const runtimeId = dependencies.getRuntimeId();
   if (!runtimeId) {
     log.warn('Job promotion aborted — no resolved AgentCore runtime id');
     return false;
   }
 
+  const identity = jobPromotionIdentity(input);
   // Pre-acquire the job lock so there is no unlocked gap between promotion
   // and the runner's first renewal (~60s task cold start). If someone else
   // grabbed the session in the meantime, skip promotion.
-  const jobLockToken = await tryAcquireSessionLock(input.sessionId, log, 'job');
+  const jobLockToken = await dependencies.acquireLock(
+    input.workspaceLockId,
+    identity.lockToken,
+    log
+  );
   if (jobLockToken === null) {
     log.warn('Job promotion aborted — session lock contended');
     return false;
   }
 
+  let payload: string;
   try {
-    const payload = buildJobPayload({
+    payload = buildJobPayload({
       reason: input.reason,
       sessionId: input.sessionId,
+      workspaceLockId: input.workspaceLockId,
+      conversationSessionId: input.conversationSessionId,
       lockToken: jobLockToken,
       runtimeId,
       userEmail: input.userEmail,
@@ -2214,38 +2796,96 @@ async function promoteToJob(
       originalPrompt: input.originalPrompt,
       responsePrefix: input.responsePrefix,
     });
-
-    const taskArn = await runPromotedJob(config, payload);
-
-    await sendGoogleChatResponse(
-      input.spaceName,
-      input.threadName,
-      (input.acknowledgementPrefix ?? input.responsePrefix ?? '') +
-        '⏳ This is taking longer than one pass allows — I\'ve moved it to a ' +
-        'background job and will post the result here when it\'s done.',
-      log,
-      jobChatDeliveryContext(input)
-    );
-
-    log.info('Turn promoted to background job', {
-      // Stable marker for the BackgroundPromotion metric filter (#1161). This
-      // is a "platform compensating for model behavior" counter — its trend is
-      // an input to Loop-2 instruction tuning, so it's a metric without an alarm.
-      marker: 'BACKGROUND_PROMOTION',
-      reason: input.reason,
-      sessionId: input.sessionId,
-      taskArn: taskArn ?? 'unknown',
-    });
-    return true;
   } catch (error) {
-    // Roll back the job lock so the fallback path (and the user's next
-    // message) isn't blocked behind a job that never started.
-    await releaseSessionLock(input.sessionId, jobLockToken, log);
-    log.error('Job promotion failed — falling back to failure frame', {
+    // Payload/configuration failures happen before RunTask and are therefore
+    // safe to roll back.
+    await dependencies.releaseLock(
+      input.workspaceLockId,
+      jobLockToken,
+      log
+    );
+    log.error('Job promotion rejected before RunTask', {
       error: error instanceof Error ? error.message : String(error),
     });
     return false;
   }
+
+  let taskArn: string | undefined;
+  let launchError: unknown;
+  let sawAmbiguousOutcome = false;
+  for (
+    let attempt = 1;
+    attempt <= RUN_TASK_AMBIGUOUS_ATTEMPTS;
+    attempt += 1
+  ) {
+    try {
+      taskArn = await dependencies.runJob(
+        config,
+        payload,
+        identity.clientToken
+      );
+      launchError = undefined;
+      break;
+    } catch (error) {
+      launchError = error;
+      const certainty = runTaskFailureCertainty(error);
+      if (certainty === 'definite' && !sawAmbiguousOutcome) {
+        await dependencies.releaseLock(
+          input.workspaceLockId,
+          jobLockToken,
+          log
+        );
+        log.error('Job promotion rejected by RunTask', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return false;
+      }
+      sawAmbiguousOutcome = true;
+      if (attempt < RUN_TASK_AMBIGUOUS_ATTEMPTS) {
+        log.warn('RunTask completion uncertain; retrying idempotently', {
+          attempt,
+          clientToken: identity.clientToken,
+        });
+      }
+    }
+  }
+
+  if (!taskArn) {
+    log.error('RunTask remained uncertain; retaining workspace lock', {
+      error:
+        launchError instanceof Error
+          ? launchError.message
+          : String(launchError),
+      clientToken: identity.clientToken,
+      attempts: RUN_TASK_AMBIGUOUS_ATTEMPTS,
+    });
+    await sendPromotionAcknowledgement(input, true, log, dependencies);
+    return true;
+  }
+
+  await sendPromotionAcknowledgement(input, false, log, dependencies);
+  log.info('Turn promoted to background job', {
+    // Stable marker for the BackgroundPromotion metric filter (#1161). This
+    // is a "platform compensating for model behavior" counter — its trend is
+    // an input to Loop-2 instruction tuning, so it's a metric without an alarm.
+    marker: 'BACKGROUND_PROMOTION',
+    reason: input.reason,
+    sessionId: input.sessionId,
+    taskArn,
+    clientToken: identity.clientToken,
+  });
+  return true;
+}
+
+async function promoteToJob(
+  input: JobPromotionInput,
+  log: ReturnType<typeof createLogger>
+): Promise<boolean> {
+  return promoteToJobWithDependencies(
+    input,
+    log,
+    jobPromotionDependencies
+  );
 }
 
 async function sendGoogleChatResponse(
@@ -2255,30 +2895,60 @@ async function sendGoogleChatResponse(
   log: ReturnType<typeof createLogger>,
   deliveryContext: ChatResponseDeliveryContext = {}
 ): Promise<ChatResponseDeliveryOutcome> {
-  const chatClient = await getChatClient();
-  const chatAuth = await getChatAuth();
-  return sendGoogleChatResponseWithDependencies(
-    {
-      spaceName,
-      threadName,
-      text,
-      deliveryContext,
-    },
-    log,
-    {
-      createMessage: async request => {
-        await chatClient.spaces.messages.create(request);
-      },
-      resolveDmSpace: googleIdentity =>
-        resolveDmSpace(chatAuth, googleIdentity),
-      recordFailure,
+  const retryableContext =
+    deliveryContext.durableDelivery === true
+      ? {
+          ...deliveryContext,
+          deliveryRequestId:
+            deliveryContext.deliveryRequestId ?? crypto.randomUUID(),
+        }
+      : deliveryContext;
+  const input = {
+    spaceName,
+    threadName,
+    text,
+    deliveryContext: retryableContext,
+  };
+  try {
+    const chatClient = await getChatClient();
+    const outcome = await sendGoogleChatResponseWithDependencies(
+      input,
+      log,
+      {
+        createMessage: async request => {
+          await chatClient.spaces.messages.create(request);
+        },
+        recordFailure,
+      }
+    );
+    if (
+      outcome !== 'failed' ||
+      retryableContext.durableDelivery !== true
+    ) {
+      return outcome;
     }
-  );
+    await enqueueDeferredChatDelivery(input, log);
+    return 'deferred';
+  } catch (error) {
+    if (retryableContext.durableDelivery !== true) throw error;
+    try {
+      await enqueueDeferredChatDelivery(input, log);
+      return 'deferred';
+    } catch (enqueueError) {
+      log.error('Failed to enqueue completed Chat response for retry', {
+        error: sanitizeDiagnostic(errorMessage(enqueueError)),
+      });
+      throw error;
+    }
+  }
 }
 
 interface ChatResponseDeliveryContext {
   isSharedSpace?: boolean;
-  senderGoogleIdentity?: string;
+  /** Queue this exact response for idempotent retry instead of rerunning AgentCore. */
+  durableDelivery?: boolean;
+  /** Stable Google Chat request id carried across delivery retries. */
+  deliveryRequestId?: string;
   userId?: string;
   sessionId?: string;
 }
@@ -2290,33 +2960,251 @@ interface ChatResponseInput {
   deliveryContext: ChatResponseDeliveryContext;
 }
 
+interface DeferredChatDeliveryEnvelope {
+  kind: typeof CHAT_DELIVERY_ENVELOPE_KIND;
+  spaceName: string;
+  threadName?: string;
+  text: string;
+  deliveryContext: ChatResponseDeliveryContext;
+}
+
+function isBoundedString(
+  value: unknown,
+  minLength: number,
+  maxLength: number
+): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length >= minLength &&
+    value.length <= maxLength
+  );
+}
+
+function strictObject(value: unknown): Record<string, unknown> | null {
+  return value &&
+    typeof value === 'object' &&
+    !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function hasOnlyKeys(
+  value: Record<string, unknown>,
+  allowed: ReadonlySet<string>
+): boolean {
+  return Object.keys(value).every(key => allowed.has(key));
+}
+
+function validOptionalBoolean(value: unknown): boolean {
+  return value === undefined || typeof value === 'boolean';
+}
+
+function validOptionalBoundedString(
+  value: unknown,
+  maximumLength: number
+): boolean {
+  return (
+    value === undefined ||
+    isBoundedString(value, 1, maximumLength)
+  );
+}
+
+const DEFERRED_CHAT_CONTEXT_KEYS = new Set([
+  'isSharedSpace',
+  // Accepted only so retry envelopes queued by the preceding deployment can
+  // be delivered after rollout. These legacy routing hints are discarded:
+  // delivery is always bound to the envelope's exact space + thread.
+  'allowDmFallback',
+  'durableDelivery',
+  'deliveryRequestId',
+  'senderGoogleIdentity',
+  'userId',
+  'sessionId',
+]);
+
+function parseDeferredChatDeliveryContext(
+  value: unknown
+): ChatResponseDeliveryContext | null {
+  const rawContext = strictObject(value);
+  if (!rawContext) return null;
+  if (!hasOnlyKeys(rawContext, DEFERRED_CHAT_CONTEXT_KEYS)) return null;
+  if (rawContext.durableDelivery !== false) return null;
+  if (!isBoundedString(rawContext.deliveryRequestId, 36, 36)) return null;
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      .test(rawContext.deliveryRequestId)
+  ) {
+    return null;
+  }
+  if (!validOptionalBoolean(rawContext.isSharedSpace)) return null;
+  if (!validOptionalBoolean(rawContext.allowDmFallback)) return null;
+  if (!validOptionalBoundedString(rawContext.senderGoogleIdentity, 512)) {
+    return null;
+  }
+  if (!validOptionalBoundedString(rawContext.userId, 512)) return null;
+  if (!validOptionalBoundedString(rawContext.sessionId, 256)) return null;
+  return {
+    isSharedSpace: rawContext.isSharedSpace === true,
+    durableDelivery: false,
+    deliveryRequestId: rawContext.deliveryRequestId,
+    ...(typeof rawContext.userId === 'string'
+      ? { userId: rawContext.userId }
+      : {}),
+    ...(typeof rawContext.sessionId === 'string'
+      ? { sessionId: rawContext.sessionId }
+      : {}),
+  };
+}
+
+const DEFERRED_CHAT_ENVELOPE_KEYS = new Set([
+  'kind',
+  'spaceName',
+  'threadName',
+  'text',
+  'deliveryContext',
+]);
+
+function parseDeferredChatDelivery(
+  body: string
+): DeferredChatDeliveryEnvelope | null {
+  if (
+    Buffer.byteLength(body, 'utf8') >
+    MAX_CHAT_DELIVERY_ENVELOPE_BYTES
+  ) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  const envelope = strictObject(parsed);
+  if (!envelope) return null;
+  if (!hasOnlyKeys(envelope, DEFERRED_CHAT_ENVELOPE_KEYS)) return null;
+  if (envelope.kind !== CHAT_DELIVERY_ENVELOPE_KIND) return null;
+  if (!isBoundedString(envelope.spaceName, 1, 512)) return null;
+  if (!validOptionalBoundedString(envelope.threadName, 1024)) return null;
+  if (!isBoundedString(envelope.text, 1, 16 * 1024)) return null;
+  const deliveryContext = parseDeferredChatDeliveryContext(
+    envelope.deliveryContext
+  );
+  if (!deliveryContext) return null;
+  return {
+    kind: CHAT_DELIVERY_ENVELOPE_KIND,
+    spaceName: envelope.spaceName,
+    ...(typeof envelope.threadName === 'string'
+      ? { threadName: envelope.threadName }
+      : {}),
+    text: envelope.text,
+    deliveryContext,
+  };
+}
+
+/**
+ * Distinguish a malformed durable-delivery envelope from an ordinary Chat
+ * event after strict parsing fails. Reserved envelopes must remain failed SQS
+ * records so they can retry and ultimately reach the DLQ instead of being
+ * acknowledged as TYPE_UNSPECIFIED Chat events.
+ */
+function hasDeferredChatDeliveryKind(body: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return false;
+  }
+  return strictObject(parsed)?.kind === CHAT_DELIVERY_ENVELOPE_KIND;
+}
+
+function parseDeferredChatDeliveryRecord(
+  body: string
+): DeferredChatDeliveryEnvelope | null {
+  const delivery = parseDeferredChatDelivery(body);
+  if (delivery) return delivery;
+  if (hasDeferredChatDeliveryKind(body)) {
+    throw new ChatDeliveryRetryError(
+      'Malformed durable Chat delivery envelope'
+    );
+  }
+  return null;
+}
+
+async function enqueueDeferredChatDelivery(
+  input: ChatResponseInput,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const queueUrl = process.env.ROUTER_QUEUE_URL;
+  if (!queueUrl) {
+    throw new Error('ROUTER_QUEUE_URL is not configured');
+  }
+  const requestId = input.deliveryContext.deliveryRequestId;
+  if (!requestId) {
+    throw new Error('Durable Chat delivery requires a request id');
+  }
+  const envelope: DeferredChatDeliveryEnvelope = {
+    kind: CHAT_DELIVERY_ENVELOPE_KIND,
+    spaceName: input.spaceName,
+    ...(input.threadName ? { threadName: input.threadName } : {}),
+    text: input.text,
+    deliveryContext: {
+      ...input.deliveryContext,
+      durableDelivery: false,
+      deliveryRequestId: requestId,
+    },
+  };
+  const messageBody = JSON.stringify(envelope);
+  if (
+    Buffer.byteLength(messageBody, 'utf8') >
+    MAX_CHAT_DELIVERY_ENVELOPE_BYTES
+  ) {
+    throw new Error('Durable Chat delivery envelope is too large');
+  }
+  const request = {
+    QueueUrl: queueUrl,
+    MessageBody: messageBody,
+    DelaySeconds: 15,
+  };
+  let lastError: unknown;
+  for (const delayMs of [0, 250, 750]) {
+    if (delayMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+    try {
+      await sqsClient.send(new SendMessageCommand(request));
+      lastError = undefined;
+      break;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (lastError) throw lastError;
+  log.warn('Queued completed Chat response for durable delivery retry', {
+    spaceName: input.spaceName,
+    hasThread: Boolean(input.threadName),
+    deliveryRequestId: requestId,
+  });
+}
+
 type ChatResponseDeliveryOutcome =
   | 'delivered'
-  | 'dm-fallback-delivered'
+  | 'deferred'
   | 'failed';
 
 interface ChatMessageCreateRequest {
   parent: string;
   requestBody: Record<string, unknown>;
-  messageReplyOption?: 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD';
+  requestId?: string;
+  messageReplyOption?: 'REPLY_MESSAGE_OR_FAIL';
 }
 
 interface ChatResponseDependencies {
   createMessage(request: ChatMessageCreateRequest): Promise<void>;
-  resolveDmSpace(googleIdentity: string): Promise<string | null>;
   recordFailure(
     params: FailureRecordParams,
     log: ReturnType<typeof createLogger>
   ): Promise<void>;
 }
-
-const CHAT_MESSAGE_MAX_LENGTH = 4096;
-const CHAT_SPACE_DM_FALLBACK_NOTE =
-  "⚠️ I couldn't post this reply in the shared space because your Workspace " +
-  "administrator currently restricts this Chat app there. I'm sending it " +
-  'to you privately instead.';
-const CHAT_MESSAGE_TRUNCATION_SUFFIX =
-  '\n\n_(Response truncated — ask me to continue)_';
 
 function errorStatusCode(error: unknown): number | undefined {
   if (typeof error !== 'object' || error === null) return undefined;
@@ -2347,214 +3235,6 @@ function isChatPostPermissionDenied(error: unknown): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function dmFallbackMessageBody(
-  messageBody: Record<string, unknown>
-): Record<string, unknown> {
-  const fallbackBody = { ...messageBody };
-  delete fallbackBody.thread;
-  const responseText =
-    typeof fallbackBody.text === 'string' ? fallbackBody.text : '';
-  const separator = responseText ? '\n\n' : '';
-  const policySuffix = separator + CHAT_SPACE_DM_FALLBACK_NOTE;
-  const availableUntruncatedLength = Math.max(
-    CHAT_MESSAGE_MAX_LENGTH - policySuffix.length,
-    0
-  );
-  if (responseText.length <= availableUntruncatedLength) {
-    fallbackBody.text = responseText + policySuffix;
-    return fallbackBody;
-  }
-
-  const availableTruncatedLength = Math.max(
-    CHAT_MESSAGE_MAX_LENGTH -
-      policySuffix.length -
-      CHAT_MESSAGE_TRUNCATION_SUFFIX.length,
-    0
-  );
-  fallbackBody.text =
-    responseText.slice(0, availableTruncatedLength) +
-    CHAT_MESSAGE_TRUNCATION_SUFFIX +
-    policySuffix;
-  return fallbackBody;
-}
-
-async function resolveDmSpace(
-  chatAuth: GoogleChatAuth,
-  googleIdentity: string
-): Promise<string | null> {
-  try {
-    const response = await chatAuth.request<{ name?: string }>({
-      url: 'https://chat.googleapis.com/v1/spaces:findDirectMessage',
-      method: 'GET',
-      params: {
-        name: googleIdentity,
-      },
-    });
-    return response.data.name ?? null;
-  } catch (error) {
-    if (errorStatusCode(error) === 404) return null;
-    throw error;
-  }
-}
-
-async function recordDmFallbackFailure(
-  error: unknown,
-  deliveryContext: ChatResponseDeliveryContext,
-  context: Record<string, unknown>,
-  log: ReturnType<typeof createLogger>,
-  dependencies: ChatResponseDependencies
-): Promise<void> {
-  await dependencies.recordFailure(
-    {
-      source: 'router',
-      severity: 'error',
-      userId: deliveryContext.userId,
-      sessionId: deliveryContext.sessionId,
-      errorClass: 'ChatDmFallbackFailed',
-      errorMessage: sanitizeDiagnostic(errorMessage(error)),
-      context,
-    },
-    log
-  );
-}
-
-async function recordChatPostPermissionOutcome(
-  input: {
-    error: unknown;
-    deliveryContext: ChatResponseDeliveryContext;
-    context: Record<string, unknown>;
-    recovered: boolean;
-    log: ReturnType<typeof createLogger>;
-  },
-  dependencies: ChatResponseDependencies
-): Promise<void> {
-  const { error, deliveryContext, context, recovered, log } = input;
-  await dependencies.recordFailure(
-    {
-      source: 'router',
-      severity: recovered ? 'warn' : 'error',
-      ...(recovered ? { alert: false } : {}),
-      userId: deliveryContext.userId,
-      sessionId: deliveryContext.sessionId,
-      errorClass: 'ChatPostPermissionDenied',
-      errorMessage: sanitizeDiagnostic(errorMessage(error)),
-      context,
-    },
-    log
-  );
-}
-
-async function handleChatPostPermissionDenied(
-  input: {
-    error: unknown;
-    spaceName: string;
-    threadName?: string;
-    messageBody: Record<string, unknown>;
-    senderGoogleIdentity: string;
-    deliveryContext: ChatResponseDeliveryContext;
-    log: ReturnType<typeof createLogger>;
-  },
-  dependencies: ChatResponseDependencies
-): Promise<Exclude<ChatResponseDeliveryOutcome, 'delivered'>> {
-  const {
-    error,
-    spaceName,
-    threadName,
-    messageBody,
-    senderGoogleIdentity,
-    deliveryContext,
-    log,
-  } = input;
-  const failureContext = {
-    phase: 'google_chat_response',
-    spaceName,
-    ...(threadName ? { threadName } : {}),
-    dmFallbackAttempted: true,
-  };
-
-  try {
-    const dmSpaceName =
-      await dependencies.resolveDmSpace(senderGoogleIdentity);
-    if (!dmSpaceName) {
-      log.error('Shared-space Chat reply failed and sender DM was not found', {
-        space: spaceName,
-        errorClass: 'ChatPostPermissionDenied',
-      });
-      const outcomeContext = {
-        ...failureContext,
-        dmFallbackOutcome: 'dm-space-not-found',
-      };
-      await recordChatPostPermissionOutcome(
-        {
-          error,
-          deliveryContext,
-          context: outcomeContext,
-          recovered: false,
-          log,
-        },
-        dependencies
-      );
-      await recordDmFallbackFailure(
-        new Error('No existing Google Chat DM space found for sender'),
-        deliveryContext,
-        outcomeContext,
-        log,
-        dependencies
-      );
-      return 'failed';
-    }
-
-    await dependencies.createMessage({
-      parent: dmSpaceName,
-      requestBody: dmFallbackMessageBody(messageBody),
-    });
-    await recordChatPostPermissionOutcome(
-      {
-        error,
-        deliveryContext,
-        context: { ...failureContext, dmFallbackOutcome: 'delivered' },
-        recovered: true,
-        log,
-      },
-      dependencies
-    );
-    log.warn('Shared-space Chat reply delivered by DM fallback', {
-      space: spaceName,
-      dmSpace: dmSpaceName,
-      errorClass: 'ChatPostPermissionDenied',
-    });
-    return 'dm-fallback-delivered';
-  } catch (fallbackError) {
-    log.error('Shared-space Chat reply and DM fallback both failed', {
-      space: spaceName,
-      error: sanitizeDiagnostic(errorMessage(fallbackError)),
-      errorClass: 'ChatDmFallbackFailed',
-    });
-    const outcomeContext = {
-      ...failureContext,
-      dmFallbackOutcome: 'failed',
-    };
-    await recordChatPostPermissionOutcome(
-      {
-        error,
-        deliveryContext,
-        context: outcomeContext,
-        recovered: false,
-        log,
-      },
-      dependencies
-    );
-    await recordDmFallbackFailure(
-      fallbackError,
-      deliveryContext,
-      outcomeContext,
-      log,
-      dependencies
-    );
-    return 'failed';
-  }
 }
 
 function prepareGoogleChatMessage(
@@ -2598,6 +3278,54 @@ function prepareGoogleChatMessage(
   };
 }
 
+async function recordInPlaceChatDeliveryFailure(
+  input: ChatResponseInput,
+  error: unknown,
+  log: ReturnType<typeof createLogger>,
+  dependencies: ChatResponseDependencies
+): Promise<void> {
+  const permissionDenied = isChatPostPermissionDenied(error);
+  const completedResponse =
+    typeof input.deliveryContext.deliveryRequestId === 'string';
+  const errorClass = permissionDenied
+    ? 'ChatPostPermissionDenied'
+    : completedResponse
+      ? 'ChatResponseDeliveryFailed'
+      : 'ChatLifecycleNoticeDeliveryFailed';
+  const phase = completedResponse
+    ? 'google_chat_response'
+    : 'google_chat_lifecycle_notice';
+  log[completedResponse ? 'error' : 'warn'](
+    'Google Chat delivery failed in its originating space/thread',
+    {
+    space: input.spaceName,
+    ...(input.threadName ? { thread: input.threadName } : {}),
+    errorClass,
+    retryInPlace: completedResponse,
+    channelRebound: false,
+    }
+  );
+  await dependencies.recordFailure(
+    {
+      source: 'router',
+      severity: completedResponse ? 'error' : 'warn',
+      ...(completedResponse ? {} : { alert: false }),
+      userId: input.deliveryContext.userId,
+      sessionId: input.deliveryContext.sessionId,
+      errorClass,
+      errorMessage: sanitizeDiagnostic(errorMessage(error)),
+      context: {
+        phase,
+        spaceName: input.spaceName,
+        ...(input.threadName ? { threadName: input.threadName } : {}),
+        retryInPlace: completedResponse,
+        channelRebound: false,
+      },
+    },
+    log
+  );
+}
+
 async function sendGoogleChatResponseWithDependencies(
   input: ChatResponseInput,
   log: ReturnType<typeof createLogger>,
@@ -2612,43 +3340,25 @@ async function sendGoogleChatResponseWithDependencies(
   const createRequest: ChatMessageCreateRequest = {
     parent: spaceName,
     requestBody: messageBody,
+    ...(deliveryContext.deliveryRequestId
+      ? { requestId: deliveryContext.deliveryRequestId }
+      : {}),
     ...(threadName
       ? {
-          messageReplyOption:
-            'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD',
+          messageReplyOption: 'REPLY_MESSAGE_OR_FAIL',
         }
       : {}),
   };
   try {
     await dependencies.createMessage(createRequest);
   } catch (error) {
-    const senderGoogleIdentity =
-      deliveryContext.senderGoogleIdentity;
-    if (
-      deliveryContext.isSharedSpace !== true ||
-      !senderGoogleIdentity ||
-      !isChatPostPermissionDenied(error)
-    ) {
-      throw error;
-    }
-
-    // The AgentCore turn has already completed. A failed room+DM delivery is
-    // returned as an explicit outcome and recorded by the fallback handler
-    // instead of throwing back to SQS, because retrying the event would rerun
-    // a potentially side-effecting turn. Promoted jobs convert this outcome
-    // to exit code 3; interactive turns page through AGENT_FAILURE_RECORD.
-    return handleChatPostPermissionDenied(
-      {
-        error,
-        spaceName,
-        threadName,
-        messageBody,
-        senderGoogleIdentity,
-        deliveryContext,
-        log,
-      },
+    await recordInPlaceChatDeliveryFailure(
+      input,
+      error,
+      log,
       dependencies
     );
+    return 'failed';
   }
 
   log.info('Response sent to Google Chat', {
@@ -3314,6 +4024,35 @@ export async function handler(
     results.map(async (result, idx) => {
       if (result.status === 'rejected') {
         const messageId = event.Records[idx].messageId;
+        if (result.reason instanceof ChatDeliveryRetryError) {
+          batchItemFailures.push({ itemIdentifier: messageId });
+          try {
+            await deferChatDeliveryRetry(event.Records[idx], log);
+          } catch (error) {
+            log.error(
+              'Failed to shorten visibility for Chat delivery retry',
+              {
+                messageId,
+                error: error instanceof Error
+                  ? error.message
+                  : String(error),
+              }
+            );
+          }
+          return;
+        }
+        if (result.reason instanceof WorkspaceTurnDeferredError) {
+          if (
+            await workspaceDeferredRecordNeedsRetry(
+              event.Records[idx],
+              result.reason,
+              log
+            )
+          ) {
+            batchItemFailures.push({ itemIdentifier: messageId });
+          }
+          return;
+        }
         batchItemFailures.push({ itemIdentifier: messageId });
         const classified = classifyError(result.reason);
         log.error('Record processing failed', {
@@ -3336,6 +4075,28 @@ export async function handler(
   );
 
   return { batchItemFailures };
+}
+
+async function workspaceDeferredRecordNeedsRetry(
+  record: SQSRecord,
+  error: WorkspaceTurnDeferredError,
+  log: ReturnType<typeof createLogger>,
+  defer: typeof deferWorkspaceTurn = deferWorkspaceTurn
+): Promise<boolean> {
+  try {
+    // A confirmed SendMessage transfers ownership to a fresh delayed record,
+    // so this source record must be acknowledged. Every uncertain transfer
+    // leaves the source failed and lets SQS redrive it normally.
+    return !(await defer(record, error, log));
+  } catch (enqueueError) {
+    log.error('Failed to requeue deferred workspace turn', {
+      messageId: record.messageId,
+      error: enqueueError instanceof Error
+        ? enqueueError.message
+        : String(enqueueError),
+    });
+    return true;
+  }
 }
 
 async function parseChatEventRecord(
@@ -3424,7 +4185,8 @@ function convertCardClickToMessage(
 
 async function handleNonMessageEvent(
   chatEvent: GoogleChatEvent,
-  log: ReturnType<typeof createLogger>
+  log: ReturnType<typeof createLogger>,
+  sendResponse: typeof sendGoogleChatResponse = sendGoogleChatResponse
 ): Promise<boolean> {
   if (chatEvent.type === 'MESSAGE') return false;
 
@@ -3435,17 +4197,13 @@ async function handleNonMessageEvent(
   const addedByDomain = addedByEmail?.split('@')[1]?.toLowerCase();
   if (addedByDomain && ALLOWED_DOMAINS.includes(addedByDomain)) {
     const isSharedSpace = isSharedChatSpaceType(chatEvent.space.type);
-    const senderGoogleIdentity = chatEvent.message?.sender?.name;
-    await sendGoogleChatResponse(
+    await sendResponse(
       chatEvent.space.name,
       undefined,
       "Hello! I'm your PSD AI Agent. Send me a message to get started.",
       log,
       {
         isSharedSpace,
-        ...(isSharedSpace && senderGoogleIdentity
-          ? { senderGoogleIdentity }
-          : {}),
         userId: addedByEmail,
       }
     );
@@ -3620,13 +4378,12 @@ function createHumanMessage(incoming: IncomingMessage): HumanMessage {
 
 function humanChatDeliveryContext(
   human: HumanMessage,
-  sessionId?: string
+  sessionId?: string,
+  durableDelivery = false
 ): ChatResponseDeliveryContext {
   return {
     isSharedSpace: human.isSharedSpace,
-    ...(human.isSharedSpace
-      ? { senderGoogleIdentity: human.senderName }
-      : {}),
+    durableDelivery,
     userId: human.senderEmail,
     ...(sessionId ? { sessionId } : {}),
   };
@@ -3635,11 +4392,13 @@ function humanChatDeliveryContext(
 function buildAgentInvocationContext(
   human: HumanMessage,
   owner: Pick<AgentUser, 'displayName' | 'workspacePrefix'>,
-  invokedBy?: { email: string; displayName: string }
+  invokedBy?: { email: string; displayName: string },
+  conversationSessionId?: string
 ): AgentInvocationContext {
   return {
     displayName: invokedBy ? owner.displayName : human.senderDisplayName,
     workspacePrefix: owner.workspacePrefix,
+    ...(conversationSessionId ? { conversationSessionId } : {}),
     ...(invokedBy ? { invokedBy, threadContext: '' } : {}),
     ...(human.isSharedSpace
       ? { audience: 'shared-space' }
@@ -3789,21 +4548,90 @@ function emptyCrossUserQuestionHelp(
         `Example: @agent:${invocation.targetUsername} what's the budget status?`;
 }
 
+function scopedAgentSessionId(
+  user: Pick<AgentUser, 'workspacePrefix'>,
+  kind: 'runtime' | 'chat' | 'chat-aside',
+  scope: string
+): string {
+  const scopeHash = crypto
+    .createHash('sha256')
+    .update(`${user.workspacePrefix}\0${scope}`)
+    .digest('hex');
+  // AgentCore runtime session ids are capped at 100 characters. Use the
+  // compact "rt" discriminator for runtime affinity; the prior
+  // "agent-runtime" prefix produced a 103-character id after the build hash
+  // was appended and was rejected before the request reached the container.
+  const base = `agent-${kind === 'runtime' ? 'rt' : kind}-${scopeHash}`;
+  // Runtime affinity must rotate on every deployed image/config revision so
+  // AgentCore cannot sticky-route to an obsolete microVM. Conversation keys
+  // intentionally do not: their SQLite-backed transcripts must survive that
+  // runtime rotation and VM shutdown.
+  if (kind !== 'runtime') return base;
+  const buildTag = process.env.AGENT_BUILD_TAG || 'unset';
+  const buildHash = crypto
+    .createHash('sha256')
+    .update(buildTag)
+    .digest('hex')
+    .slice(0, 24);
+  return `${base}-${buildHash}`;
+}
+
+/**
+ * One sticky AgentCore runtime and one DynamoDB lock per owner workspace.
+ *
+ * Do not add Chat space/thread identity here. Multiple warm microVMs for the
+ * same S3 workspace retain stale local SQLite state and can overwrite each
+ * other's later checkpoints even when their individual turns do not overlap.
+ */
+function ownerSessionId(
+  _human: HumanMessage,
+  user: Pick<AgentUser, 'workspacePrefix'>
+): string {
+  return scopedAgentSessionId(
+    user,
+    'runtime',
+    `workspace:${user.workspacePrefix}`
+  );
+}
+
+/**
+ * Logical OpenClaw conversation identity for a Google Chat thread.
+ *
+ * The owner prefix isolates agents, the space isolates DMs/rooms, and the
+ * Google thread name isolates parallel conversations within either surface.
+ * A stable sentinel preserves continuity for legacy events without a thread.
+ */
+function ownerConversationSessionId(
+  human: HumanMessage,
+  user: Pick<AgentUser, 'workspacePrefix'>
+): string {
+  return scopedAgentSessionId(
+    user,
+    'chat',
+    `space:${human.spaceName}\nthread:${human.threadName ?? '__unthreaded__'}`
+  );
+}
+
+/**
+ * Deployment-stable mutex for every process that can mutate an owner's
+ * durable workspace. Cron intentionally duplicates this exact derivation
+ * because its independently bundled Lambda cannot import router code.
+ */
+function ownerWorkspaceLockId(
+  user: Pick<AgentUser, 'workspacePrefix'>
+): string {
+  const workspaceHash = crypto
+    .createHash('sha256')
+    .update(`owner-workspace-lock\0${user.workspacePrefix}`)
+    .digest('hex');
+  return `agent-workspace-${workspaceHash}`;
+}
+
 function crossUserSessionId(
   human: HumanMessage,
   targetUser: AgentUser
 ): string {
-  const spaceHash = crypto
-    .createHash('sha256')
-    .update(human.spaceName)
-    .digest('hex');
-  const invokerHash = crypto
-    .createHash('sha256')
-    .update(human.senderEmail)
-    .digest('hex')
-    .slice(0, 8);
-  const buildTag = process.env.AGENT_BUILD_TAG || 'unset';
-  return `xuser-${targetUser.workspacePrefix}-${spaceHash}-${invokerHash}-${buildTag}`;
+  return ownerConversationSessionId(human, targetUser);
 }
 
 async function invokeCrossUserAgent(
@@ -3812,35 +4640,46 @@ async function invokeCrossUserAgent(
   targetUser: AgentUser,
   log: ReturnType<typeof createLogger>
 ): Promise<{ result: AgentCoreResult; sessionId: string } | null> {
-  const sessionId = crossUserSessionId(human, targetUser);
-  await fetchChatUploads(human.attachments, targetUser.workspacePrefix, log);
-  const lockToken = await waitForSessionLock(sessionId, log);
+  const sessionId = ownerSessionId(human, targetUser);
+  const conversationSessionId = crossUserSessionId(human, targetUser);
+  const workspaceLockId = ownerWorkspaceLockId(targetUser);
+  const lockToken = await tryAcquireSessionLock(workspaceLockId, log);
   if (!lockToken) {
-    const ownerLabel = targetUser.displayName || targetUser.email;
-    await sendGoogleChatResponse(
-      human.spaceName,
-      human.threadName,
-      `[${ownerLabel}'s Agent] I'm currently busy processing another request. Please try again in a moment.`,
-      log,
-      humanChatDeliveryContext(human, sessionId)
+    throw new WorkspaceTurnDeferredError(
+      human.message.name,
+      'workspace-contended'
     );
-    return null;
   }
-  const result = await invokeAgentCore(
-    invocation.strippedMessage,
-    targetUser.email,
-    sessionId,
+  const result = await invokeWithSessionLockLease(
+    workspaceLockId,
+    lockToken,
     log,
-    buildAgentInvocationContext(
-      human,
-      targetUser,
-      {
-        email: human.senderEmail,
-        displayName: human.senderDisplayName,
-      }
-    )
-  ).finally(() => releaseSessionLock(sessionId, lockToken, log));
-  return { result, sessionId };
+    async () => {
+      await fetchChatUploads(
+        human.attachments,
+        targetUser.workspacePrefix,
+        log,
+        human.message.name,
+        human.message.createTime
+      );
+      return invokeAgentCore(
+        invocation.strippedMessage,
+        targetUser.email,
+        sessionId,
+        log,
+        buildAgentInvocationContext(
+          human,
+          targetUser,
+          {
+            email: human.senderEmail,
+            displayName: human.senderDisplayName,
+          },
+          conversationSessionId
+        )
+      );
+    }
+  );
+  return { result, sessionId: conversationSessionId };
 }
 
 function buildCrossUserResponse(
@@ -3965,7 +4804,7 @@ async function runCrossUserTurn(
     human.threadName,
     buildCrossUserResponse(invocation, targetUser, turn.result, log),
     log,
-    humanChatDeliveryContext(human, turn.sessionId)
+    humanChatDeliveryContext(human, turn.sessionId, true)
   );
   await recordCrossUserResult(
     {
@@ -4068,39 +4907,34 @@ async function handleCrossUserInvocation(
   return { handled: true, messageText: human.messageText };
 }
 
-function ownerSessionId(human: HumanMessage, user: AgentUser): string {
-  const spaceHash = crypto
-    .createHash('sha256')
-    .update(human.spaceName)
-    .digest('hex');
-  const buildTag = process.env.AGENT_BUILD_TAG || 'unset';
-  return `${user.workspacePrefix}-${spaceHash}-${buildTag}`;
-}
-
 function asideSessionId(human: HumanMessage, user: AgentUser): string {
-  const spaceHash = crypto
-    .createHash('sha256')
-    .update(human.spaceName)
-    .digest('hex');
-  const buildTag = process.env.AGENT_BUILD_TAG || 'unset';
-  return `${user.workspacePrefix}-${spaceHash}-aside-${buildTag}`;
+  return scopedAgentSessionId(
+    user,
+    'chat-aside',
+    `space:${human.spaceName}\nthread:${human.threadName ?? '__unthreaded__'}`
+  );
 }
 
 interface OwnerAgentTurn {
   result: AgentCoreResult;
+  /** Build-rotated AgentCore runtime affinity identity. */
   sessionId: string;
+  /** Deployment-stable mutex shared with cron and promoted jobs. */
+  workspaceLockId: string;
+  /** OpenClaw transcript identity scoped to the originating Chat thread. */
+  conversationSessionId: string;
   prompt: string;
   responsePrefix: string;
   isAside: boolean;
-  autoRouted: boolean;
 }
 
 interface OwnerInvocationDependencies {
   fetchChatUploads: typeof fetchChatUploads;
   isJobLockActive: typeof isJobLockActive;
   tryAcquireSessionLock: typeof tryAcquireSessionLock;
-  waitForSessionLock: typeof waitForSessionLock;
+  renewSessionLock: typeof renewSessionLock;
   releaseSessionLock: typeof releaseSessionLock;
+  renewalScheduler: SessionLockRenewalScheduler;
   invokeAgentCore: typeof invokeAgentCore;
   sendGoogleChatResponse: typeof sendGoogleChatResponse;
 }
@@ -4109,8 +4943,9 @@ const ownerInvocationDependencies: OwnerInvocationDependencies = {
   fetchChatUploads,
   isJobLockActive,
   tryAcquireSessionLock,
-  waitForSessionLock,
+  renewSessionLock,
   releaseSessionLock,
+  renewalScheduler: sessionLockLeaseDependencies.scheduler,
   invokeAgentCore,
   sendGoogleChatResponse,
 };
@@ -4123,6 +4958,8 @@ async function invokeOwnerAgentWithDependencies(
   dependencies: OwnerInvocationDependencies
 ): Promise<OwnerAgentTurn | null> {
   const mainSessionId = ownerSessionId(human, user);
+  const mainConversationSessionId = ownerConversationSessionId(human, user);
+  const workspaceLockId = ownerWorkspaceLockId(user);
   const ownerDm = human.chatEvent.space.type === 'DM' && !human.isSharedSpace;
   const asideInvocation = ownerDm
     ? parseAsideInvocation(human.message)
@@ -4139,85 +4976,80 @@ async function invokeOwnerAgentWithDependencies(
     return null;
   }
 
-  // Preserve the existing owner-turn contract: uploaded files are persisted
-  // even when a busy main job means a shared-space turn cannot run yet.
-  await dependencies.fetchChatUploads(
-    human.attachments,
-    user.workspacePrefix,
-    log
-  );
-
-  let sessionId = mainSessionId;
+  const sessionId = mainSessionId;
+  let conversationSessionId = mainConversationSessionId;
   let prompt = messageText;
   let responsePrefix = '';
   let isAside = false;
-  let autoRouted = false;
 
   if (asideInvocation) {
-    sessionId = asideSessionId(human, user);
+    conversationSessionId = asideSessionId(human, user);
     prompt = asideInvocation.messageText;
     responsePrefix = ASIDE_RESPONSE_PREFIX;
     isAside = true;
     log.info('Explicit aside invocation detected', {
       source: asideInvocation.source,
-      sessionId,
+      sessionId: conversationSessionId,
+      workspaceSessionId: sessionId,
     });
-  } else {
-    const mainJobActive = await dependencies.isJobLockActive(
-      mainSessionId,
-      log
-    );
-    if (mainJobActive && ownerDm) {
-      sessionId = asideSessionId(human, user);
-      responsePrefix = AUTO_ASIDE_RESPONSE_PREFIX;
-      isAside = true;
-      autoRouted = true;
-      log.info('Main job active; auto-routing owner DM to aside session', {
-        mainSessionId,
-        asideSessionId: sessionId,
-      });
-    } else if (mainJobActive) {
-      await dependencies.sendGoogleChatResponse(
-        human.spaceName,
-        human.threadName,
-        "I'm still working on your earlier task in the background — I'll post " +
-          "the result here when it's done.",
-        log,
-        humanChatDeliveryContext(human, mainSessionId)
-      );
-      return null;
-    }
   }
 
-  const lockToken = isAside
-    ? await dependencies.tryAcquireSessionLock(sessionId, log)
-    : await dependencies.waitForSessionLock(sessionId, log);
-  if (!lockToken) {
-    await dependencies.sendGoogleChatResponse(
-      human.spaceName,
-      human.threadName,
-      OWNER_BUSY_RESPONSE,
-      log,
-      humanChatDeliveryContext(human, sessionId)
+  if (await dependencies.isJobLockActive(workspaceLockId, log)) {
+    throw new WorkspaceTurnDeferredError(
+      human.message.name,
+      'background-job-active'
     );
-    return null;
   }
-  const result = await dependencies.invokeAgentCore(
-    prompt,
-    human.senderEmail,
-    sessionId,
+
+  const lockToken = await dependencies.tryAcquireSessionLock(
+    workspaceLockId,
+    log
+  );
+  if (!lockToken) {
+    throw new WorkspaceTurnDeferredError(
+      human.message.name,
+      'workspace-contended'
+    );
+  }
+  const result = await invokeWithSessionLockLease(
+    workspaceLockId,
+    lockToken,
     log,
-    buildAgentInvocationContext(human, user)
-  ).finally(() =>
-    dependencies.releaseSessionLock(sessionId, lockToken, log)
+    async () => {
+      await dependencies.fetchChatUploads(
+        human.attachments,
+        user.workspacePrefix,
+        log,
+        human.message.name,
+        human.message.createTime
+      );
+      return dependencies.invokeAgentCore(
+        prompt,
+        human.senderEmail,
+        sessionId,
+        log,
+        buildAgentInvocationContext(
+          human,
+          user,
+          undefined,
+          conversationSessionId
+        )
+      );
+    },
+    {
+      renewSessionLock: dependencies.renewSessionLock,
+      releaseSessionLock: dependencies.releaseSessionLock,
+      scheduler: dependencies.renewalScheduler,
+    }
   );
   return {
     result,
     sessionId,
+    workspaceLockId,
+    conversationSessionId,
     prompt,
     responsePrefix,
     isAside,
-    autoRouted,
   };
 }
 
@@ -4250,8 +5082,11 @@ function buildOwnerJobPromotionInput(
   reason: PromotionReason
 ): JobPromotionInput {
   return {
+    promotionId: human.message.name,
     reason,
     sessionId: turn.sessionId,
+    workspaceLockId: turn.workspaceLockId,
+    conversationSessionId: turn.conversationSessionId,
     userEmail: human.senderEmail,
     googleIdentity: human.senderName,
     displayName: human.senderDisplayName,
@@ -4292,7 +5127,7 @@ async function promoteOwnerTurn(
   await logTelemetry(
     {
       userId: human.senderEmail,
-      sessionId: turn.sessionId,
+      sessionId: turn.conversationSessionId,
       ...agentResultTelemetry(turn.result),
       latencyMs,
       guardrailBlocked: prepared.guardrailResult.wouldHaveBlocked,
@@ -4342,7 +5177,7 @@ async function recordOwnerResult(
   await logTelemetry(
     {
       userId: human.senderEmail,
-      sessionId: turn.sessionId,
+      sessionId: turn.conversationSessionId,
       ...agentResultTelemetry(turn.result),
       latencyMs,
       guardrailBlocked: prepared.guardrailResult.wouldHaveBlocked,
@@ -4355,7 +5190,7 @@ async function recordOwnerResult(
     turn.result,
     {
       userId: human.senderEmail,
-      sessionId: turn.sessionId,
+      sessionId: turn.conversationSessionId,
       latencyMs,
     },
     log
@@ -4408,9 +5243,35 @@ async function handleOwnerTurn(
     human.threadName,
     buildOwnerResponse(human, turn.result, turn.responsePrefix),
     log,
-    humanChatDeliveryContext(human, turn.sessionId)
+    humanChatDeliveryContext(
+      human,
+      turn.conversationSessionId,
+      true
+    )
   );
   await recordOwnerResult(human, prepared, turn, startTime, log);
+}
+
+async function processDeferredChatDelivery(
+  delivery: DeferredChatDeliveryEnvelope,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  try {
+    const outcome = await sendGoogleChatResponse(
+      delivery.spaceName,
+      delivery.threadName,
+      delivery.text,
+      log,
+      delivery.deliveryContext
+    );
+    if (outcome === 'failed') {
+      throw new Error('Google Chat delivery returned a failed outcome');
+    }
+  } catch (error) {
+    throw new ChatDeliveryRetryError(
+      sanitizeDiagnostic(errorMessage(error))
+    );
+  }
 }
 
 async function processRecord(
@@ -4418,6 +5279,11 @@ async function processRecord(
   log: ReturnType<typeof createLogger>
 ): Promise<void> {
   const startTime = Date.now();
+  const deferredDelivery = parseDeferredChatDeliveryRecord(record.body);
+  if (deferredDelivery) {
+    await processDeferredChatDelivery(deferredDelivery, log);
+    return;
+  }
   const parsedEvent = await parseChatEventRecord(record, log);
   const chatEvent = convertCardClickToMessage(parsedEvent, log);
   if (await handleNonMessageEvent(chatEvent, log)) return;
@@ -4448,17 +5314,32 @@ export const agentRouterTestHelpers = {
   cardClickMessageText,
   parseAgentCoreResult,
   totalAgentTokens,
+  tryAcquireSessionLock,
+  invokeWithSessionLockLease,
+  jobPromotionIdentity,
+  promotedJobRunTaskCommand,
+  runTaskFailureCertainty,
+  promoteToJobWithDependencies,
   parseAsideInvocation,
   ownerSessionId,
+  ownerConversationSessionId,
+  ownerWorkspaceLockId,
   asideSessionId,
   invokeOwnerAgentWithDependencies,
   buildOwnerResponse,
   buildOwnerJobPromotionInput,
+  handleNonMessageEvent,
   extractIncomingMessage,
   addOptionalAgentContext,
+  invocationTtlOptions,
   buildAgentInvocationContext,
   sendGoogleChatResponseWithDependencies,
-  resolveDmSpace,
+  deferWorkspaceTurn,
+  workspaceDeferredRecordNeedsRetry,
+  WorkspaceTurnDeferredError,
+  isDuplicateMessage,
+  parseDeferredChatDelivery,
+  parseDeferredChatDeliveryRecord,
   btwSlashCommandId: BTW_SLASH_COMMAND_ID,
 };
 
@@ -4475,6 +5356,7 @@ export {
   logTelemetry,
   writeScheduledRun,
   recordFailure,
+  tryAcquireSessionLock,
   renewSessionLock,
   releaseSessionLock,
 };

@@ -106,12 +106,22 @@ export type ScheduleLockContentionResolution =
       fireClaim?: Extract<ScheduleFireClaim, { claimed: true }>;
     };
 
+function sameScheduleFireKey(
+  ownerFireKey: string,
+  identity: ScheduleFireIdentity,
+): boolean {
+  const timeSuffix = `#${identity.scheduledTime}`;
+  if (!identity.key.endsWith(timeSuffix)) return false;
+  const schedulePrefix = identity.key.slice(0, -timeSuffix.length);
+  return ownerFireKey.startsWith(`${schedulePrefix}#`);
+}
+
 /**
- * Distinct fires share a daily AgentCore session. If its prior background turn
- * is still active, queueing every high-frequency fire would deliver stale
- * prompts in a burst after the lock clears. Coalesce only when the lock names
- * a different fire. Legacy or uncorrelated locks may represent the same fire
- * and must remain retryable.
+ * Every schedule for one owner now shares the owner-wide workspace lock.
+ * Coalesce only a later fire of the SAME schedule so a high-frequency schedule
+ * does not burst stale prompts after its predecessor. A different schedule is
+ * independent work and must retry until the workspace becomes available.
+ * Legacy, interactive, or otherwise uncorrelated locks also remain retryable.
  */
 export function resolveScheduleLockContention(
   failure: JobLockFailure,
@@ -136,14 +146,30 @@ export function resolveScheduleLockContention(
       },
     };
   }
-  if (fireClaim) {
+  if (
+    fireClaim
+    && typeof failure.ownerFireKey === 'string'
+    && sameScheduleFireKey(failure.ownerFireKey, fireClaim.identity)
+  ) {
     return {
       action: 'coalesce',
       fireClaim,
       failure: {
         ...failure,
         errorMessage:
-          'Scheduled fire was coalesced because its daily session is still active',
+          'Scheduled fire was coalesced because the same schedule is still active',
+      },
+    };
+  }
+  if (fireClaim) {
+    return {
+      action: 'retry',
+      fireClaim,
+      failure: {
+        ...failure,
+        severity: 'error',
+        errorMessage:
+          'Owner workspace is active for another schedule; retrying this fire',
       },
     };
   }

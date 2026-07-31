@@ -2,7 +2,7 @@ import * as crypto from 'node:crypto';
 
 const INVOCATION_CONTEXT_AUDIENCE = 'psd-agent-internal';
 const INVOCATION_CONTEXT_VERSION = 1;
-const DEFAULT_TTL_SECONDS = 15 * 60;
+export const SCHEDULED_INVOCATION_CONTEXT_TTL_S = 15 * 60;
 
 export function createScheduledInvocationContextToken(
   secret: string,
@@ -17,14 +17,15 @@ export function createScheduledInvocationContextToken(
     throw new Error('Agent invocation signing secret must contain at least 32 bytes');
   }
   const nowSeconds = options.nowSeconds ?? Math.floor(Date.now() / 1000);
-  const ttlSeconds = options.ttlSeconds ?? DEFAULT_TTL_SECONDS;
+  const ttlSeconds =
+    options.ttlSeconds ?? SCHEDULED_INVOCATION_CONTEXT_TTL_S;
   if (
     !Number.isInteger(ttlSeconds)
     || ttlSeconds < 30
-    || ttlSeconds > DEFAULT_TTL_SECONDS
+    || ttlSeconds > SCHEDULED_INVOCATION_CONTEXT_TTL_S
   ) {
     throw new Error(
-      `Agent invocation context TTL must be between 30 and ${DEFAULT_TTL_SECONDS} seconds`,
+      `Agent invocation context TTL must be between 30 and ${SCHEDULED_INVOCATION_CONTEXT_TTL_S} seconds`,
     );
   }
 

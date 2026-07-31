@@ -520,6 +520,7 @@ ENV OPENCLAW_SKIP_CRON=1
 #   agent_failures.py       — RDS Data API failure logger
 #   agentcore_wrapper.py    — AgentCore HTTP entrypoint
 #   openclaw_agent_db_migrate.mjs — pinned-host SQLite schema migrator
+#   openclaw_runtime_patch.mjs — fail-closed backports for the pinned host
 #   workspace_sync.py       — S3 ↔ /home/node/.openclaw sync
 #   mantle_proxy.py         — local proxy to Bedrock Mantle with retry/rescue
 #   chat_format.py          — Markdown→Google Chat formatter + envelope splitter
@@ -539,7 +540,9 @@ ENV TZ=America/Los_Angeles
 # OpenClaw is explicitly dropped to node by harness_adapter.py. The wrapper
 # and local relay remain root so model-launched processes cannot read request
 # signing authority under /run/psd-agent-authority.
-RUN chown -R node:node /home/node/.openclaw && \
+RUN node /app/openclaw_runtime_patch.mjs /app/dist && \
+    rm /app/openclaw_runtime_patch.mjs && \
+    chown -R node:node /home/node/.openclaw && \
     chown -R root:root /app && \
     chmod -R a-w /app
 

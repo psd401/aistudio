@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import secrets
+import signal
 import subprocess
 import sys
 import time
@@ -23,6 +24,64 @@ from agent_failures import emit_agent_metric, record_failure
 from chat_format import markdown_to_chat
 
 logger = logging.getLogger("harness_adapter")
+
+PROCESS_GROUP_QUIESCE_SECONDS = 2.0
+PROCESS_GROUP_POLL_SECONDS = 0.05
+
+
+def _process_group_has_live_members(group_id: int) -> bool:
+    """Return whether Linux reports a non-zombie member of one process group."""
+    try:
+        entries = os.scandir("/proc")
+    except OSError:
+        # Non-Linux fallback. Production AgentCore runtimes always provide
+        # /proc; killpg(0) is conservative where zombie state is unavailable.
+        try:
+            os.killpg(group_id, 0)
+            return True
+        except ProcessLookupError:
+            return False
+    with entries:
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                with open(
+                    f"/proc/{entry.name}/stat",
+                    encoding="utf-8",
+                ) as process_stat:
+                    value = process_stat.read(4096)
+            except (FileNotFoundError, PermissionError, ProcessLookupError):
+                continue
+            closing_parenthesis = value.rfind(")")
+            if closing_parenthesis < 0:
+                continue
+            fields = value[closing_parenthesis + 2:].split()
+            if len(fields) < 3:
+                continue
+            state = fields[0]
+            try:
+                process_group = int(fields[2])
+            except ValueError:
+                continue
+            if process_group == group_id and state != "Z":
+                return True
+    return False
+
+
+def _wait_for_process_group_quiescence(
+    group_id: int,
+    timeout_seconds: float = PROCESS_GROUP_QUIESCE_SECONDS,
+) -> None:
+    """Prove no process can still mutate the workspace after group SIGKILL."""
+    deadline = time.monotonic() + timeout_seconds
+    while _process_group_has_live_members(group_id):
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "OpenClaw process group did not become quiescent"
+            )
+        time.sleep(PROCESS_GROUP_POLL_SECONDS)
+
 
 # Session/agent ids from the gateway event stream are interpolated into a
 # transcript path, so they must be filename-safe before they touch the FS.
@@ -293,6 +352,7 @@ class OpenClawAdapter(HarnessAdapter):
     def __init__(self) -> None:
         self._gateway_port: int = 3100
         self._process: Optional[subprocess.Popen] = None
+        self._process_group_id: Optional[int] = None
         self._ready: bool = False
         # Per-container random gateway token (REV-INFRA-005). Generated once at
         # startup so it is never committed to source and never readable by the
@@ -342,7 +402,9 @@ class OpenClawAdapter(HarnessAdapter):
                     extra_groups=[],
                     umask=0o077,
                     cwd="/home/node",
+                    start_new_session=True,
                 )
+                self._process_group_id = self._process.pid
                 self._wait_for_ready(timeout=60)
                 # Give the gateway time to fully initialize WebSocket handling
                 time.sleep(3)
@@ -840,24 +902,19 @@ class OpenClawAdapter(HarnessAdapter):
                 # understand what OpenClaw is actually emitting when a turn
                 # hangs (CloudWatch only — no secrets leak).
                 #
-                # Deadline sizing: the enclosing budget stack is
-                #   Router Lambda (15 min) > undici fetch (14 min) > us.
-                # We leave a 1-minute margin under undici so we always
-                # surface a real "stalled" log line rather than getting
-                # killed mid-recv by an upstream timeout. Long research
-                # turns legitimately take 5-10 minutes (web_fetch heavy
-                # investigation), and the prior 120s ceiling was dumping
-                # the model's scratchpad as the final reply while the
-                # real answer continued to generate in the microVM after
-                # the entrypoint had already returned. See #890 incident
-                # logs 2026-04-22.
+                # Deadline sizing: the enclosing interactive budget is a
+                # 15-minute Router Lambda, but the terminal SSE result is now
+                # withheld until OpenClaw stops and the final workspace
+                # checkpoint is durably pushed. Reserve 350 seconds outside
+                # this turn for AgentCore cold start, the bounded proxy restart
+                # and 125-second workspace flush, and Chat delivery. Long work
+                # that reaches this roughly nine-minute ceiling returns early
+                # for the router to promote it to the two-hour job path.
                 #
                 # OPENCLAW_CHAT_DEADLINE_S env override for escape hatch,
-                # clamped to [60, 840] so a misconfig can't either starve
-                # the turn or exceed the undici/Lambda ceilings.
-                # 14 min — 30s under the cron Lambda's 14:30 AbortSignal so
-                # the harness gets a chance to return whatever it has
-                # accumulated before the client kills the connection.
+                # clamped to [60, 550] so a misconfig cannot consume the
+                # finalization reserve. Explicit async-job overrides retain
+                # their independently bounded two-hour ceiling.
                 deadline_s = self._resolve_deadline_s(deadline_s)
                 deadline = time.time() + deadline_s
                 got_final = False
@@ -881,9 +938,11 @@ class OpenClawAdapter(HarnessAdapter):
                 # and is now just a completion signal).
                 agent_assistant_accum: str = ""
                 # True when tool activity arrived after accumulated assistant
-                # text — the next assistant delta starts a NEW narration
-                # segment and gets a blank-line separator (issue #1138 F4;
-                # the run-on "…in Plaud.Good, done…" came from this path).
+                # text. The next assistant delta is a NEW assistant message,
+                # not a continuation of the pre-tool narration. Only that
+                # terminal segment is returned to Chat (the transcript keeps
+                # both messages). This prevents a toolUse assistant block and
+                # the final stop block being concatenated into one reply.
                 assistant_boundary_pending: bool = False
                 # Allow recv() to sit idle for up to 60s between events
                 # without raising — long tool calls (web_fetch, model
@@ -1014,11 +1073,17 @@ class OpenClawAdapter(HarnessAdapter):
                             # Newer OpenClaw builds report tool activity as
                             # `item`/`command_output` streams. Tool activity
                             # after accumulated text means the next assistant
-                            # delta starts a NEW narration segment — mark the
-                            # boundary so segments don't run together
-                            # ("...in Plaud.Good, done..."), issue #1138 F4.
-                            if agent_assistant_accum:
+                            # delta starts a NEW assistant segment.
+                            is_tool_activity = self._is_tool_activity_stream(
+                                stream,
+                                data,
+                            )
+                            if (
+                                is_tool_activity
+                                and (agent_assistant_accum or response_text)
+                            ):
                                 assistant_boundary_pending = True
+                                response_text = ""
                             # Native-tool mode (#1138 r12+) reports tool
                             # execution ONLY here — record it so telemetry's
                             # tool_calls and the empty-turn nudge below see
@@ -1030,8 +1095,9 @@ class OpenClawAdapter(HarnessAdapter):
                                 )
                         elif stream == "tool_call" and isinstance(data, dict):
                             # Same boundary rule for protocol-v3 tool events.
-                            if agent_assistant_accum:
+                            if agent_assistant_accum or response_text:
                                 assistant_boundary_pending = True
+                                response_text = ""
                             tool_id = (
                                 data.get("id")
                                 or data.get("toolCallId")
@@ -1044,8 +1110,9 @@ class OpenClawAdapter(HarnessAdapter):
                                 "started_at": time.time(),
                             }
                         elif stream == "tool_result" and isinstance(data, dict):
-                            if agent_assistant_accum:
+                            if agent_assistant_accum or response_text:
                                 assistant_boundary_pending = True
+                                response_text = ""
                             tool_id = (
                                 data.get("id")
                                 or data.get("toolCallId")
@@ -1101,7 +1168,11 @@ class OpenClawAdapter(HarnessAdapter):
                             # to the accumulator. Preserves content with
                             # newer OpenClaw builds without regressing older
                             # ones.
-                            if not response_text and agent_assistant_accum:
+                            if (
+                                not response_text
+                                and agent_assistant_accum
+                                and not assistant_boundary_pending
+                            ):
                                 response_text = agent_assistant_accum
                             got_final = True
                             break
@@ -1269,7 +1340,11 @@ class OpenClawAdapter(HarnessAdapter):
                         if status in {"started", "accepted"}:
                             continue
                         if status in {"final", "done"}:
-                            if not response_text and agent_assistant_accum:
+                            if (
+                                not response_text
+                                and agent_assistant_accum
+                                and not assistant_boundary_pending
+                            ):
                                 response_text = agent_assistant_accum
                             got_final = True
                             break
@@ -1615,10 +1690,12 @@ class OpenClawAdapter(HarnessAdapter):
         (#1138): the promoted job leg holds the SSE stream for up to 2 hours,
         so the override clamps to [60, 7200] (ceiling approved 2026-07-07).
         Interactive turns send no override and keep the env-var/default path
-        clamped to [60, 840] — bounded by the router Lambda's 15-min ceiling.
-        Garbage values degrade to the 840s default, never raise.
+        clamped to [60, 550]. This leaves at least 350 seconds of the Router
+        Lambda's 15-minute ceiling for cold start, a bounded proxy restart,
+        final workspace persistence, and response delivery. Garbage values
+        degrade to the 550s default, never raise.
         """
-        default_deadline_s = 840
+        default_deadline_s = 550
         if override is not None:
             try:
                 return max(60, min(7200, int(override)))
@@ -1631,7 +1708,7 @@ class OpenClawAdapter(HarnessAdapter):
             ))
         except ValueError:
             value = default_deadline_s
-        return max(60, min(840, value))
+        return max(60, min(550, value))
 
     @staticmethod
     def _accumulate_assistant(
@@ -1644,17 +1721,40 @@ class OpenClawAdapter(HarnessAdapter):
 
         `replace` resets the buffer (protocol v4 replace-mode delta).
         `boundary_pending` means tool activity separated this increment from
-        the previously accumulated text — i.e. the model started a NEW
-        narration segment — so join with a blank line instead of butting the
-        segments together (issue #1138 F4: "…in Plaud.Good, done…").
+        the previously accumulated text — i.e. OpenClaw started a NEW
+        assistant message. The earlier text was pre-tool narration, so replace
+        it and return only the terminal assistant block to Chat.
         Increments within one segment must never get separators; the caller
         only sets `boundary_pending` on tool events.
         """
         if replace:
             return increment
-        if boundary_pending and accum and increment:
-            return accum + "\n\n" + increment
+        if boundary_pending:
+            return increment
         return accum + increment
+
+    @staticmethod
+    def _is_tool_activity_stream(stream: object, data: object) -> bool:
+        """Return whether an event separates assistant messages around a tool.
+
+        ``item`` is a shared progress lane in OpenClaw: it carries executable
+        tool-like work, but also commentary and lifecycle plumbing. Treating
+        every item as a tool boundary can discard an already-complete terminal
+        answer when a non-tool progress item arrives immediately before the
+        final chat event.
+        """
+        if stream == "command_output":
+            return True
+        if stream != "item" or not isinstance(data, dict):
+            return False
+        return data.get("kind") in {
+            "tool",
+            "command",
+            "command_output",
+            "patch",
+            "search",
+            "api",
+        }
 
     @staticmethod
     def _extract_text(content) -> str:
@@ -1688,14 +1788,37 @@ class OpenClawAdapter(HarnessAdapter):
         return self._ready
 
     def shutdown(self) -> None:
-        """Stop the OpenClaw gateway process."""
+        """Stop the gateway and every tool/background child in its process group."""
         self._ready = False
-        if self._process and self._process.poll() is None:
+        if self._process:
             logger.info("Stopping OpenClaw gateway")
-            self._process.terminate()
-            try:
-                self._process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-                self._process.wait(timeout=10)
+            group_id = self._process_group_id
+            if isinstance(group_id, int) and group_id > 1:
+                try:
+                    os.killpg(group_id, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    if self._process.poll() is None:
+                        self._process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    pass
+                # The group leader can exit while a tool/background child
+                # ignores SIGTERM. Always kill the whole group after the
+                # bounded grace; ESRCH proves it was already gone.
+                try:
+                    os.killpg(group_id, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                if self._process.poll() is None:
+                    self._process.wait(timeout=10)
+                _wait_for_process_group_quiescence(group_id)
+            elif self._process.poll() is None:
+                self._process.terminate()
+                try:
+                    self._process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    self._process.kill()
+                    self._process.wait(timeout=10)
         self._process = None
+        self._process_group_id = None

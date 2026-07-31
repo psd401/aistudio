@@ -77,6 +77,7 @@ CANDIDATE_MANTLE_HOST_RE = re.compile(
 AUTHORITY_DIRECTORY = "/run/psd-agent-authority"
 INVOCATION_CONTEXT_PATH = f"{AUTHORITY_DIRECTORY}/invocation-context"
 REQUEST_PROOF_KEY_PATH = f"{AUTHORITY_DIRECTORY}/request-proof-key"
+WORKSPACE_SYNC_TOKEN_PATH = f"{AUTHORITY_DIRECTORY}/workspace-sync-token"
 WORKSPACE_FLUSH_TOKEN_PATH = f"{AUTHORITY_DIRECTORY}/workspace-flush-token"
 INVOCATION_IDENTITY_ROUTE = "/api/agent/invocation-identity"
 # Rolling-deploy compatibility: the existing model-broker route authenticates
@@ -608,29 +609,78 @@ def _read_workspace_flush_token() -> str | None:
     return token if re.fullmatch(r"[A-Za-z0-9_-]{43}", token) else ""
 
 
+def _read_workspace_sync_token() -> str | None:
+    try:
+        with open(WORKSPACE_SYNC_TOKEN_PATH, "r", encoding="ascii") as handle:
+            token = handle.read().strip()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return ""
+    return token if re.fullmatch(r"[A-Za-z0-9_-]{43}", token) else ""
+
+
 def _workspace_flush_request_allowed(
     route: str,
     payload: dict,
     supplied_token: str | None,
     flush_token: str | None,
+    supplied_sync_token: str | None = None,
+    sync_token: str | None = None,
 ) -> bool:
-    if flush_token is None:
-        return True
-    return (
-        route == "/api/agent/workspace-storage"
-        and payload.get("operation") in {"upload", "complete-upload"}
-        and isinstance(supplied_token, str)
-        and bool(flush_token)
-        and hmac.compare_digest(supplied_token, flush_token)
+    if route != "/api/agent/workspace-storage":
+        return flush_token is None
+    operation = payload.get("operation")
+    private_operation = (
+        operation in {
+            "list",
+            "download",
+            "upload",
+            "delete",
+            "ensure-checkpoint",
+            "commit-checkpoint",
+        }
+        or (
+            operation == "complete-upload"
+            and isinstance(payload.get("workspaceGeneration"), str)
+        )
     )
+    if private_operation:
+        sync_valid = (
+            isinstance(supplied_sync_token, str)
+            and bool(sync_token)
+            and hmac.compare_digest(supplied_sync_token, sync_token)
+        )
+        if not sync_valid:
+            return False
+        if flush_token is None:
+            return True
+        return (
+            isinstance(supplied_token, str)
+            and bool(flush_token)
+            and hmac.compare_digest(supplied_token, flush_token)
+        )
+    if operation not in {
+        "publish",
+        "download-public",
+        "complete-upload",
+    }:
+        return False
+    # Model-callable public operations remain available during an active turn,
+    # but the finalization drain closes them before root sync begins.
+    return flush_token is None
 
 
 class _FinalizationGate:
     """Drain privileged traffic before granting the root-only final flush."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, initially_finalizing: bool = False) -> None:
         self._condition = asyncio.Condition()
-        self._state = "open"
+        # A proxy replacement started by the wrapper while the root flush token
+        # exists must never reopen a race window for model-originated calls.
+        # Start directly in flushing state; the wrapper's subsequent `begin`
+        # transition remains idempotent and sees an empty active set.
+        self._state = "flushing" if initially_finalizing else "open"
         self._active_requests = 0
 
     async def enter(self, *, final_flush: bool = False) -> bool:
@@ -663,7 +713,9 @@ class _FinalizationGate:
             self._condition.notify_all()
 
 
-_finalization_gate = _FinalizationGate()
+_finalization_gate = _FinalizationGate(
+    initially_finalizing=_read_workspace_flush_token() is not None
+)
 
 
 def _valid_finalization_token(supplied_token: str | None) -> bool:
@@ -718,7 +770,11 @@ async def finalization_gate_middleware(request, handler):
     final_flush = False
     if request.path == "/agent-broker/api/agent/workspace-storage":
         flush_token = _read_workspace_flush_token()
+        sync_token = _read_workspace_sync_token()
         supplied_token = request.headers.get("X-Agent-Workspace-Flush")
+        supplied_sync_token = request.headers.get(
+            "X-Agent-Workspace-Sync"
+        )
         # Classify before reading the potentially slow, attacker-controlled
         # body. The unguessable root token is sufficient for gate admission;
         # handle_agent_broker still validates the exact operation after read.
@@ -726,6 +782,9 @@ async def finalization_gate_middleware(request, handler):
             isinstance(supplied_token, str)
             and bool(flush_token)
             and hmac.compare_digest(supplied_token, flush_token)
+            and isinstance(supplied_sync_token, str)
+            and bool(sync_token)
+            and hmac.compare_digest(supplied_sync_token, sync_token)
         )
 
     if not await _finalization_gate.enter(final_flush=final_flush):
@@ -1724,6 +1783,8 @@ async def handle_agent_broker(request: web.Request) -> web.StreamResponse:
         parsed,
         request.headers.get("X-Agent-Workspace-Flush"),
         _read_workspace_flush_token(),
+        request.headers.get("X-Agent-Workspace-Sync"),
+        _read_workspace_sync_token(),
     ):
         return web.json_response({"error": "Unsupported agent operation"}, status=404)
     try:

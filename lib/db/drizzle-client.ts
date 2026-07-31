@@ -94,50 +94,70 @@ function getDatabaseUrl(): string {
  * @see https://orm.drizzle.team/docs/connect-postgresql
  */
 let pgClient: ReturnType<typeof postgres> | null = null;
+let unretriedSessionPgClient: ReturnType<typeof postgres> | null = null;
+
+function createPgClient(
+  maxConnections: number,
+  applicationName: string,
+): ReturnType<typeof postgres> {
+  const sslEnabled = process.env.DB_SSL !== "false";
+  const sqlLoggingEnabled = process.env.SQL_LOGGING === "true";
+  const statementTimeoutMs = (() => {
+    const raw = process.env.DB_STATEMENT_TIMEOUT_MS;
+    const fallback = process.env.NODE_ENV === "production" ? 0 : 60_000;
+    if (raw === undefined || raw === "") return fallback;
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback;
+  })();
+  return postgres(getDatabaseUrl(), {
+    max: maxConnections,
+    idle_timeout: Number.parseInt(process.env.DB_IDLE_TIMEOUT || "20", 10),
+    connect_timeout: Number.parseInt(
+      process.env.DB_CONNECT_TIMEOUT || "10",
+      10,
+    ),
+    max_lifetime: 60 * 60,
+    prepare: true,
+    ssl: sslEnabled ? "require" : false,
+    onnotice: () => {},
+    debug: sqlLoggingEnabled,
+    connection: {
+      application_name: applicationName,
+      ...(statementTimeoutMs > 0
+        ? { statement_timeout: statementTimeoutMs }
+        : {}),
+    },
+  });
+}
 
 function getPgClient(): ReturnType<typeof postgres> {
   if (!pgClient) {
-    // SSL configuration: required for AWS Aurora, optional for local development
-    // Set DB_SSL=false for local PostgreSQL without SSL certificates
-    const sslEnabled = process.env.DB_SSL !== "false";
-
-    // SQL_LOGGING enables verbose query logging (opt-in for security)
-    // Set SQL_LOGGING=true to see all queries in console
-    const sqlLoggingEnabled = process.env.SQL_LOGGING === "true";
-
-    // Server-side statement timeout (2026-07-26 dev-server wedge): bounds any
-    // single statement — including lock waits — so a blocked query cannot hold
-    // a pool connection forever. Dev defaults to 60s; production defaults to
-    // disabled (0) to avoid changing query behavior there without an explicit
-    // opt-in via DB_STATEMENT_TIMEOUT_MS.
-    const statementTimeoutMs = (() => {
-      const raw = process.env.DB_STATEMENT_TIMEOUT_MS;
-      const fallback = process.env.NODE_ENV === "production" ? 0 : 60_000;
-      if (raw === undefined || raw === "") return fallback;
-      const parsed = Number.parseInt(raw, 10);
-      return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback;
-    })();
-
-    pgClient = postgres(getDatabaseUrl(), {
-      max: Number.parseInt(process.env.DB_MAX_CONNECTIONS || "20", 10),
-      idle_timeout: Number.parseInt(process.env.DB_IDLE_TIMEOUT || "20", 10),
-      connect_timeout: Number.parseInt(process.env.DB_CONNECT_TIMEOUT || "10", 10),
-      max_lifetime: 60 * 60, // 1 hour - forces reconnection for credential rotation
-      prepare: true, // Enable prepared statements for performance
-      ssl: sslEnabled ? "require" : false, // SSL required for AWS, optional for local dev
-      onnotice: () => {}, // Suppress PostgreSQL notices
-      debug: sqlLoggingEnabled, // Opt-in via SQL_LOGGING=true (default: off)
-      connection: {
-        // Identifies this app's connections in pg_stat_activity — the
-        // 2026-07-26 wedge diagnosis had no way to attribute connections.
-        application_name: process.env.DB_APPLICATION_NAME || "aistudio",
-        ...(statementTimeoutMs > 0
-          ? { statement_timeout: statementTimeoutMs }
-          : {}),
-      },
-    });
+    pgClient = createPgClient(
+      Number.parseInt(process.env.DB_MAX_CONNECTIONS || "20", 10),
+      process.env.DB_APPLICATION_NAME || "aistudio",
+    );
   }
   return pgClient;
+}
+
+function getUnretriedSessionPgClient(): ReturnType<typeof postgres> {
+  if (!unretriedSessionPgClient) {
+    const configured = Number.parseInt(
+      process.env.DB_ADVISORY_SESSION_MAX_CONNECTIONS ?? "",
+      10,
+    );
+    const maximum =
+      Number.isSafeInteger(configured) &&
+      configured >= 1 &&
+      configured <= 8
+        ? configured
+        : 4;
+    unretriedSessionPgClient = createPgClient(
+      maximum,
+      `${process.env.DB_APPLICATION_NAME || "aistudio"}-advisory`,
+    );
+  }
+  return unretriedSessionPgClient;
 }
 
 // ============================================
@@ -264,6 +284,133 @@ export type DrizzleDB = typeof db;
  * their `tx` parameter without re-deriving the `Parameters<...>` chain.
  */
 export type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/**
+ * One explicitly reserved postgres.js connection with non-retrying query and
+ * transaction helpers. This is for session-scoped PostgreSQL primitives (for
+ * example advisory locks) whose work must remain on one backend connection.
+ *
+ * Unlike executeQuery/executeTransaction, these helpers never retry the
+ * callback. It is therefore safe for the outer session callback to coordinate
+ * external idempotent work, while database transactions passed to
+ * executeTransaction must still contain database work only.
+ */
+export interface UnretriedDatabaseSession {
+  executeQuery<T>(
+    queryFn: (database: DrizzleDB) => Promise<T>,
+    context: string,
+  ): Promise<T>;
+  executeTransaction<T>(
+    transactionFn: (database: DrizzleDB) => Promise<T>,
+    context: string,
+  ): Promise<T>;
+}
+
+type ReservedPgClient = Awaited<
+  ReturnType<ReturnType<typeof postgres>["reserve"]>
+>;
+
+async function reserveUnretriedSession(
+  deadlineMs: number,
+): Promise<ReservedPgClient> {
+  const client = getUnretriedSessionPgClient();
+  const reservePromise = client.reserve();
+  let timedOut = false;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const guardedReserve = reservePromise.then((reserved) => {
+    if (timedOut) {
+      reserved.release();
+      throw new Error(
+        "Dedicated database session arrived after its acquire deadline",
+      );
+    }
+    return reserved;
+  });
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      timedOut = true;
+      reject(new Error("Dedicated database session acquire timed out"));
+    }, deadlineMs);
+  });
+  try {
+    return await Promise.race([guardedReserve, timeoutPromise]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+export async function withUnretriedDatabaseSession<T>(
+  sessionFn: (session: UnretriedDatabaseSession) => Promise<T>,
+  context: string,
+  options?: { deadlineMs?: number },
+): Promise<T> {
+  const requestId = generateRequestId();
+  const timer = startTimer(`drizzle_session_${context}`);
+  const log = createLogger({
+    requestId,
+    context: "drizzle-client",
+    operation: `session_${context}`,
+  });
+  const deadlineMs =
+    options?.deadlineMs ?? resolvePoolDeadlineMs("query");
+  let reserved:
+    | Awaited<ReturnType<ReturnType<typeof postgres>["reserve"]>>
+    | undefined;
+  try {
+    const acquired = await reserveUnretriedSession(
+      Number.isSafeInteger(deadlineMs) && deadlineMs > 0
+        ? deadlineMs
+        : 90_000,
+    );
+    reserved = acquired;
+    // postgres.js reserve() returns a connection-bound Sql function without
+    // copying the top-level client's `options` property at runtime. Drizzle
+    // needs only the parser/serializer maps during construction, so attach
+    // those exact maps from the owning dedicated client. Do not attach
+    // `.begin`: reserved Sql deliberately lacks it and transactions below are
+    // explicit BEGIN/COMMIT/ROLLBACK on this same backend connection.
+    const reservedForDrizzle = Object.assign(acquired, {
+      options: getUnretriedSessionPgClient().options,
+    });
+    const sessionDb = drizzle(reservedForDrizzle, { schema });
+    const session: UnretriedDatabaseSession = {
+      executeQuery: (queryFn) => queryFn(sessionDb),
+      executeTransaction: async (transactionFn) => {
+        let transactionOpen = false;
+        try {
+          await acquired.unsafe("BEGIN");
+          transactionOpen = true;
+          const result = await transactionFn(sessionDb);
+          await acquired.unsafe("COMMIT");
+          transactionOpen = false;
+          return result;
+        } catch (error) {
+          if (transactionOpen) {
+            try {
+              await acquired.unsafe("ROLLBACK");
+            } catch {
+              // Preserve the original failure. The caller's read-after-error
+              // logic determines whether COMMIT was durable or uncertain.
+            }
+          }
+          throw error;
+        }
+      },
+    };
+    const result = await sessionFn(session);
+    timer({ status: "success" });
+    return result;
+  } catch (error) {
+    timer({ status: "error" });
+    log.error("Dedicated database session failed", {
+      context,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  } finally {
+    reserved?.release();
+  }
+}
 
 // ============================================
 // Result Type Helpers
@@ -776,14 +923,24 @@ export async function validateDatabaseConnection(): Promise<{
  */
 export async function closeDatabase(): Promise<void> {
   const log = createLogger({ context: "closeDatabase" });
-  if (pgClient) {
-    log.info("Closing database connection pool");
-    await pgClient.end({ timeout: 5 }); // 5 second timeout
+  const clients = [pgClient, unretriedSessionPgClient].filter(
+    (value): value is ReturnType<typeof postgres> => value !== null,
+  );
+  if (clients.length > 0) {
+    log.info("Closing database connection pools", {
+      poolCount: clients.length,
+    });
+    await Promise.all(
+      clients.map((databaseClient) =>
+        databaseClient.end({ timeout: 5 }),
+      ),
+    );
     pgClient = null;
+    unretriedSessionPgClient = null;
     _db = null;
-    log.info("Database connection pool closed");
+    log.info("Database connection pools closed");
   } else {
-    log.info("Database connection pool was not initialized, skipping close");
+    log.info("Database connection pools were not initialized, skipping close");
   }
 }
 

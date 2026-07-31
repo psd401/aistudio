@@ -7,6 +7,7 @@ export interface ScheduledJobContext {
   fireKey?: string;
   userEmail: string;
   sessionId: string;
+  conversationSessionId?: string;
 }
 
 export interface ScheduledJobOutcome {
@@ -57,7 +58,7 @@ export async function recordScheduledJobTerminal(
         ? { scheduledRunId: job.scheduledRunId }
         : {}),
       ...(job.fireKey ? { fireKey: job.fireKey } : {}),
-      sessionId: job.sessionId,
+      sessionId: job.conversationSessionId ?? job.sessionId,
       ...outcome,
       ...(outcome.errorMessage
         ? { errorMessage: sanitizeDiagnostic(outcome.errorMessage, 4000) }

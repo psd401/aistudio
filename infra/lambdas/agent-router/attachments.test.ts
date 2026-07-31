@@ -294,6 +294,24 @@ const defineBuildWorkspacePathSuite2 = () => {
       buildWorkspacePath('a.txt', 1, now)
     );
   });
+
+  test('stable message identity makes retries idempotent and threads distinct', () => {
+    const first = buildWorkspacePath(
+      'report.pdf',
+      0,
+      now,
+      'messagehashone'
+    );
+    expect(first).toBe(
+      'attachments/20260706T235133-messagehashone-0-report.pdf'
+    );
+    expect(
+      buildWorkspacePath('report.pdf', 0, now, 'messagehashone')
+    ).toBe(first);
+    expect(
+      buildWorkspacePath('report.pdf', 0, now, 'messagehashtwo')
+    ).not.toBe(first);
+  });
 };
 
 describe('buildWorkspacePath', defineBuildWorkspacePathSuite2);

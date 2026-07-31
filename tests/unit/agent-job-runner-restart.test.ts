@@ -53,16 +53,11 @@ describe("job runner restart handling", () => {
     expect(source).toContain("resolveJobInvocation(job)")
   })
 
-  it("keeps the lock on the ORIGINAL session id", () => {
-    // The lock is what cron acquired before launching, and what the router
-    // checks to answer "still working on your earlier task". Moving it to the
-    // restart id would strand the original lock until its 14-minute TTL.
-    for (const call of [
-      "renewSessionLock(job.sessionId",
-      "releaseSessionLock(job.sessionId",
-    ]) {
-      expect(source).toContain(call)
-    }
+  it("keeps the inherited lock and bridges legacy jobs to the stable owner mutex", () => {
+    expect(source).toContain("resolveJobWorkspaceLockPlan(job)")
+    expect(source).toContain("lockPlan.inheritedLockId")
+    expect(source).toContain("lockPlan.bridgeLockId")
+    expect(source).toContain("tryAcquireSessionLock(")
     expect(source).not.toContain("renewSessionLock(invokeSessionId")
     expect(source).not.toContain("releaseSessionLock(invokeSessionId")
   })
@@ -80,6 +75,20 @@ describe("job runner restart handling", () => {
     expect(source).toContain("if (!ownsLock)")
     expect(source.slice(immediateRenewal, interval)).toContain(
       "job.lockToken,\n      log,\n      true,",
+    )
+  })
+
+  it("releases only after explicit workspace finalization proof", () => {
+    const proof = source.indexOf(
+      "agentResult.workspaceFinalizationConfirmed === true",
+    )
+    const releaseGuard = source.indexOf(
+      "if (workspaceFinalizationConfirmed)",
+    )
+    expect(proof).toBeGreaterThan(-1)
+    expect(releaseGuard).toBeGreaterThan(proof)
+    expect(source).toContain(
+      "Retaining background workspace lock after unconfirmed finalization",
     )
   })
 

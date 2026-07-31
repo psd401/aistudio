@@ -57,6 +57,12 @@ class PullTraversalTests(unittest.TestCase):
             node = pwd.getpwnam("node")
             os.chmod(Path(td), 0o755)
             os.chown(self.root, node.pw_uid, node.pw_gid)
+        workspace_sync._uploaded_state.clear()
+        self.addCleanup(workspace_sync._uploaded_state.clear)
+        workspace_sync._force_exact_workspace_restores.clear()
+        self.addCleanup(
+            workspace_sync._force_exact_workspace_restores.clear
+        )
 
     def _run_pull(self, keys, prefix="userA", entries=None, contents=None):
         downloaded = []
@@ -116,6 +122,110 @@ class PullTraversalTests(unittest.TestCase):
         self.assertEqual(escaped, [])
         self.assertTrue((self.root / "notes" / "ok.md").exists())
 
+    def test_forced_restore_prunes_uncommitted_local_extras_and_restores_seed(self):
+        # Dirty turn changed a required parent from a directory to a file.
+        (self.root / "memory").write_bytes(b"blocking file")
+        (self.root / "new-local.md").write_bytes(b"uncommitted")
+        outside = self.root.parent / "outside"
+        outside.mkdir()
+        (outside / "sentinel").write_bytes(b"outside")
+        (self.root / "state").symlink_to(outside, target_is_directory=True)
+        (self.root / "leaf.md").symlink_to(outside / "sentinel")
+        (self.root / "absent-link").symlink_to(outside / "sentinel")
+        os.mkfifo(self.root / "absent-fifo")
+        (self.root / "absent-empty-directory").mkdir()
+        directory_leaf = self.root / "directory-leaf.md"
+        directory_leaf.mkdir()
+        (directory_leaf / "dirty-child").write_bytes(b"uncommitted")
+        sidecar = (
+            self.root
+            / "agents"
+            / "main"
+            / "agent"
+            / "openclaw.sqlite-wal"
+        )
+        sidecar.parent.mkdir(parents=True)
+        sidecar.mkdir()
+        (sidecar / "uncommitted-pages").write_bytes(b"WAL pages")
+        reindex_lock = sidecar.parent / ".reindex-lock.sqlite"
+        reindex_lock.symlink_to(outside / "sentinel")
+        authored_wal = self.root / "notes-wal"
+        authored_journal = self.root / "project-journal"
+        authored_wal.write_bytes(b"authored")
+        authored_journal.write_bytes(b"authored")
+        (self.root / "IDENTITY.md").write_bytes(b"dirty identity")
+        (self.root / "SOUL.md").write_bytes(b"image-owned soul")
+        attachment = self.root / "attachments" / "input.pdf"
+        attachment.parent.mkdir()
+        attachment.write_bytes(b"router input")
+        workspace_sync.invalidate_local_workspace("owner-exact")
+
+        with mock.patch.object(
+            workspace_sync,
+            "_IMAGE_WORKSPACE_SEEDS",
+            {"IDENTITY.md": b"image identity"},
+        ):
+            self._run_pull(
+                [
+                    "memory/committed.md",
+                    "state/openclaw.sqlite",
+                    "leaf.md",
+                    "directory-leaf.md",
+                    "notes-wal",
+                    "project-journal",
+                ],
+                prefix="owner-exact",
+                contents={
+                    "memory/committed.md": b"committed",
+                    "state/openclaw.sqlite": b"database",
+                    "leaf.md": b"committed leaf",
+                    "directory-leaf.md": b"committed directory leaf",
+                    "notes-wal": b"authored",
+                    "project-journal": b"authored",
+                },
+            )
+
+        self.assertEqual(
+            (self.root / "memory" / "committed.md").read_bytes(),
+            b"committed",
+        )
+        self.assertFalse((self.root / "new-local.md").exists())
+        self.assertFalse((self.root / "absent-link").exists())
+        self.assertFalse((self.root / "absent-fifo").exists())
+        self.assertFalse((self.root / "absent-empty-directory").exists())
+        self.assertEqual(
+            (self.root / "state" / "openclaw.sqlite").read_bytes(),
+            b"database",
+        )
+        self.assertEqual((outside / "sentinel").read_bytes(), b"outside")
+        self.assertFalse((self.root / "leaf.md").is_symlink())
+        self.assertEqual(
+            (self.root / "leaf.md").read_bytes(),
+            b"committed leaf",
+        )
+        self.assertTrue((self.root / "directory-leaf.md").is_file())
+        self.assertEqual(
+            (self.root / "directory-leaf.md").read_bytes(),
+            b"committed directory leaf",
+        )
+        self.assertFalse(sidecar.exists())
+        self.assertFalse(reindex_lock.exists())
+        self.assertEqual(authored_wal.read_bytes(), b"authored")
+        self.assertEqual(authored_journal.read_bytes(), b"authored")
+        self.assertEqual(
+            (self.root / "IDENTITY.md").read_bytes(),
+            b"image identity",
+        )
+        self.assertEqual(
+            (self.root / "SOUL.md").read_bytes(),
+            b"image-owned soul",
+        )
+        self.assertEqual(attachment.read_bytes(), b"router input")
+        self.assertNotIn(
+            "owner-exact",
+            workspace_sync._force_exact_workspace_restores,
+        )
+
     def test_no_write_outside_workspace_dir(self):
         # Even if download_file were reached, assert nothing lands outside root.
         keys = ["../../tmp/pwned"]
@@ -123,6 +233,22 @@ class PullTraversalTests(unittest.TestCase):
         self.assertEqual(count, 0)
         self.assertEqual(downloaded, [])
         self.assertEqual(escaped, [])
+
+    def test_forced_restore_removes_attachment_root_symlink_only(self):
+        outside = self.root.parent / "outside-attachments"
+        outside.mkdir()
+        sentinel = outside / "sentinel"
+        sentinel.write_bytes(b"outside")
+        (self.root / "attachments").symlink_to(
+            outside,
+            target_is_directory=True,
+        )
+        workspace_sync.invalidate_local_workspace("owner-attachments")
+
+        self._run_pull([], prefix="owner-attachments")
+
+        self.assertFalse((self.root / "attachments").exists())
+        self.assertEqual(sentinel.read_bytes(), b"outside")
 
     def test_benign_nested_key_downloads(self):
         keys = ["a/b/c.md"]
@@ -166,6 +292,10 @@ class PullTraversalTests(unittest.TestCase):
             "agents/main/agent/openclaw-agent.sqlite",
             "agents/main/agent/openclaw-agent.sqlite-shm",
             "agents/main/sessions/s0001.jsonl",
+            (
+                "agents/main/session-sqlite-import-archive/"
+                "s0001.jsonl.imported-123"
+            ),
             "openclaw-workspace-state.json",
             "workspace-attestations/setup.attested",
             "memory/MEMORY.md",
@@ -181,6 +311,128 @@ class PullTraversalTests(unittest.TestCase):
                 "agents/main/agent/openclaw-agent.sqlite",
                 "memory/MEMORY.md",
             },
+        )
+
+    def test_successful_pull_primes_unchanged_push_cache(self):
+        count, _, _ = self._run_pull(
+            ["memory/MEMORY.md"],
+            prefix="owner-cache",
+            contents={"memory/MEMORY.md": b"durable"},
+        )
+        self.assertEqual(count, 1)
+
+        with mock.patch.object(
+            workspace_sync,
+            "WORKSPACE_DIR",
+            self.root,
+        ), mock.patch.object(
+            workspace_sync,
+            "_upload_spec",
+        ) as prepare:
+            self.assertEqual(
+                workspace_sync.push_workspace("owner-cache"),
+                0,
+            )
+
+        prepare.assert_not_called()
+
+    def test_file_changed_after_pull_still_uploads(self):
+        self._run_pull(
+            ["memory/MEMORY.md"],
+            prefix="owner-changed",
+            contents={"memory/MEMORY.md": b"before"},
+        )
+        restored = self.root / "memory" / "MEMORY.md"
+        restored.write_bytes(b"after-change")
+
+        with mock.patch.object(
+            workspace_sync,
+            "WORKSPACE_DIR",
+            self.root,
+        ), mock.patch.object(
+            workspace_sync,
+            "_upload_spec",
+            return_value=None,
+        ) as prepare:
+            self.assertEqual(
+                workspace_sync.push_workspace("owner-changed"),
+                1,
+            )
+
+        prepare.assert_called_once()
+
+    def test_same_size_same_mtime_replacement_still_uploads(self):
+        self._run_pull(
+            ["memory/MEMORY.md"],
+            prefix="owner-replaced",
+            contents={"memory/MEMORY.md": b"before"},
+        )
+        restored = self.root / "memory" / "MEMORY.md"
+        original = restored.stat()
+        replacement = restored.with_name("replacement.tmp")
+        replacement.write_bytes(b"after!")
+        os.replace(replacement, restored)
+        os.utime(
+            restored,
+            ns=(original.st_atime_ns, original.st_mtime_ns),
+        )
+        self.assertEqual(restored.stat().st_mtime_ns, original.st_mtime_ns)
+
+        with mock.patch.object(
+            workspace_sync,
+            "WORKSPACE_DIR",
+            self.root,
+        ), mock.patch.object(
+            workspace_sync,
+            "_upload_spec",
+            return_value=None,
+        ) as prepare:
+            self.assertEqual(
+                workspace_sync.push_workspace("owner-replaced"),
+                1,
+            )
+
+        prepare.assert_called_once()
+
+    def test_incomplete_pull_commits_no_upload_cache_entries(self):
+        def fake_broker(payload, **_kwargs):
+            self.assertEqual(payload, {"operation": "list"})
+            return {"paths": ["memory/ok.md", "memory/fail.md"]}
+
+        def fake_download_spec(relative):
+            if relative == "memory/fail.md":
+                raise RuntimeError("temporary download failure")
+            return ("https://download.invalid/ok", 2, {})
+
+        with mock.patch.object(
+            workspace_sync,
+            "WORKSPACE_DIR",
+            self.root,
+        ), mock.patch.object(
+            workspace_sync,
+            "SYNC_WORKERS",
+            1,
+        ), mock.patch.object(
+            workspace_sync,
+            "_broker_request",
+            side_effect=fake_broker,
+        ), mock.patch.object(
+            workspace_sync,
+            "_download_spec",
+            side_effect=fake_download_spec,
+        ), mock.patch.object(
+            workspace_sync.urllib.request,
+            "urlopen",
+            return_value=_FakeResponse(b"ok"),
+        ):
+            with self.assertRaises(workspace_sync.WorkspaceRestoreIncomplete):
+                workspace_sync.pull_workspace("owner-incomplete")
+
+        self.assertFalse(
+            any(
+                key[0] == "owner-incomplete"
+                for key in workspace_sync._uploaded_state
+            )
         )
 
     def test_restored_sqlite_discards_boot_generation_sidecars(self):
@@ -351,8 +603,10 @@ class PullTraversalTests(unittest.TestCase):
             entries=[{"path": "escape.md", "size": 0, "lastModified": 123}],
         )
 
-        self.assertEqual(count, 0)
+        self.assertEqual(count, 1)
         self.assertEqual(downloaded, [])
+        self.assertFalse((self.root / "escape.md").is_symlink())
+        self.assertEqual((self.root / "escape.md").read_bytes(), b"")
         self.assertEqual(protected.read_text(), "unchanged")
         after = protected.stat()
         self.assertEqual(after.st_uid, original.st_uid)
@@ -430,6 +684,496 @@ class PullTraversalTests(unittest.TestCase):
         broker.assert_not_called()
 
 
+class WorkspaceGenerationFenceTests(unittest.TestCase):
+    def setUp(self):
+        td = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, td, ignore_errors=True)
+        self.root = (Path(td) / "workspace").resolve()
+        self.root.mkdir()
+        workspace_sync._uploaded_state.clear()
+        workspace_sync._remote_workspace_snapshots.clear()
+        workspace_sync._committed_workspace_generations.clear()
+        workspace_sync._pending_workspace_generations.clear()
+        workspace_sync._pending_workspace_completions.clear()
+        workspace_sync._force_exact_workspace_restores.clear()
+        self.addCleanup(workspace_sync._uploaded_state.clear)
+        self.addCleanup(workspace_sync._remote_workspace_snapshots.clear)
+        self.addCleanup(
+            workspace_sync._committed_workspace_generations.clear
+        )
+        self.addCleanup(workspace_sync._pending_workspace_generations.clear)
+        self.addCleanup(workspace_sync._pending_workspace_completions.clear)
+        self.addCleanup(
+            workspace_sync._force_exact_workspace_restores.clear
+        )
+
+    def test_stale_warm_runtime_rehydrates_after_another_runtime_push(self):
+        remote = {"eTag": '"generation-a"', "body": b"from-runtime-a"}
+        downloads = []
+
+        def broker(payload, **_kwargs):
+            self.assertEqual(payload, {"operation": "list"})
+            return {
+                "paths": ["memory/MEMORY.md"],
+                "entries": [{
+                    "path": "memory/MEMORY.md",
+                    "size": len(remote["body"]),
+                    "lastModified": 1,
+                    "eTag": remote["eTag"],
+                }],
+            }
+
+        def download_spec(relative):
+            downloads.append((relative, remote["eTag"]))
+            return (
+                "https://download.invalid/memory",
+                len(remote["body"]),
+                {"Range": f"bytes=0-{len(remote['body']) - 1}"},
+            )
+
+        def ensure(_prefix, _deadline=None):
+            return workspace_sync._generation_for_entries({
+                "memory/MEMORY.md": (
+                    len(remote["body"]),
+                    remote["eTag"],
+                ),
+            })
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync,
+            "_ensure_workspace_checkpoint",
+            side_effect=ensure,
+        ), mock.patch.object(
+            workspace_sync, "_broker_request", side_effect=broker
+        ), mock.patch.object(
+            workspace_sync, "_download_spec", side_effect=download_spec
+        ), mock.patch.object(
+            workspace_sync.urllib.request,
+            "urlopen",
+            side_effect=lambda *_args, **_kwargs: _FakeResponse(
+                remote["body"]
+            ),
+        ):
+            self.assertEqual(workspace_sync.refresh_workspace("owner"), 1)
+            remote.update({
+                "eTag": '"generation-b"',
+                "body": b"newer-history-from-runtime-a",
+            })
+            self.assertEqual(workspace_sync.refresh_workspace("owner"), 1)
+            self.assertEqual(
+                (self.root / "memory" / "MEMORY.md").read_bytes(),
+                remote["body"],
+            )
+            self.assertEqual(workspace_sync.refresh_workspace("owner"), 0)
+
+        self.assertEqual(
+            downloads,
+            [
+                ("memory/MEMORY.md", '"generation-a"'),
+                ("memory/MEMORY.md", '"generation-b"'),
+            ],
+        )
+
+    def test_stale_warm_runtime_prunes_a_remote_deletion_before_next_push(self):
+        remote = {
+            "memory/keep.md": (b"keep", '"keep-a"'),
+            "memory/deleted.md": (b"delete-me", '"delete-a"'),
+        }
+        downloads = []
+
+        def broker(payload, **_kwargs):
+            self.assertEqual(payload, {"operation": "list"})
+            paths = sorted(remote)
+            return {
+                "paths": paths,
+                "entries": [
+                    {
+                        "path": relative,
+                        "size": len(remote[relative][0]),
+                        "lastModified": 1,
+                        "eTag": remote[relative][1],
+                    }
+                    for relative in paths
+                ],
+            }
+
+        def download_spec(relative):
+            body, e_tag = remote[relative]
+            downloads.append((relative, e_tag))
+            return (
+                f"https://download.invalid/{relative}",
+                len(body),
+                {"Range": f"bytes=0-{len(body) - 1}"},
+            )
+
+        def ensure(_prefix, _deadline=None):
+            return workspace_sync._generation_for_entries({
+                relative: (len(body), e_tag)
+                for relative, (body, e_tag) in remote.items()
+            })
+
+        def download(request, **_kwargs):
+            relative = request.full_url.removeprefix(
+                "https://download.invalid/"
+            )
+            return _FakeResponse(remote[relative][0])
+
+        attachment = self.root / "attachments" / "input.pdf"
+        attachment.parent.mkdir()
+        attachment.write_bytes(b"router-owned")
+        (self.root / "IDENTITY.md").write_bytes(b"stale model bytes")
+        (self.root / "SOUL.md").write_bytes(b"image-owned soul")
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync,
+            "_IMAGE_WORKSPACE_SEEDS",
+            {"IDENTITY.md": b"image identity"},
+        ), mock.patch.object(
+            workspace_sync,
+            "_ensure_workspace_checkpoint",
+            side_effect=ensure,
+        ), mock.patch.object(
+            workspace_sync, "_broker_request", side_effect=broker
+        ), mock.patch.object(
+            workspace_sync, "_download_spec", side_effect=download_spec
+        ), mock.patch.object(
+            workspace_sync.urllib.request,
+            "urlopen",
+            side_effect=download,
+        ):
+            self.assertEqual(workspace_sync.refresh_workspace("owner"), 2)
+            self.assertTrue((self.root / "memory" / "deleted.md").exists())
+
+            del remote["memory/deleted.md"]
+            self.assertEqual(workspace_sync.refresh_workspace("owner"), 1)
+            self.assertFalse(
+                (self.root / "memory" / "deleted.md").exists()
+            )
+            self.assertEqual(
+                (self.root / "memory" / "keep.md").read_bytes(),
+                b"keep",
+            )
+            self.assertEqual(attachment.read_bytes(), b"router-owned")
+            self.assertEqual(
+                (self.root / "IDENTITY.md").read_bytes(),
+                b"image identity",
+            )
+            self.assertEqual(
+                (self.root / "SOUL.md").read_bytes(),
+                b"image-owned soul",
+            )
+            self.assertEqual(workspace_sync.refresh_workspace("owner"), 0)
+
+        self.assertEqual(
+            downloads,
+            [
+                ("memory/deleted.md", '"delete-a"'),
+                ("memory/keep.md", '"keep-a"'),
+                ("memory/keep.md", '"keep-a"'),
+            ],
+        )
+        self.assertNotIn(
+            "owner",
+            workspace_sync._force_exact_workspace_restores,
+        )
+
+    def test_cacheless_restart_prunes_stale_local_state_exactly(self):
+        stale = self.root / "deleted-remotely.md"
+        stale.write_bytes(b"must not be resurrected")
+        attachment = self.root / "attachments" / "input.pdf"
+        attachment.parent.mkdir()
+        attachment.write_bytes(b"router-owned")
+        (self.root / "IDENTITY.md").write_bytes(b"stale model bytes")
+        (self.root / "SOUL.md").write_bytes(b"image-owned soul")
+        empty_generation = workspace_sync._generation_for_entries({})
+
+        def broker(payload, **_kwargs):
+            self.assertEqual(payload, {"operation": "list"})
+            return {"paths": [], "entries": []}
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync,
+            "_IMAGE_WORKSPACE_SEEDS",
+            {"IDENTITY.md": b"image identity"},
+        ), mock.patch.object(
+            workspace_sync,
+            "_ensure_workspace_checkpoint",
+            return_value=empty_generation,
+        ), mock.patch.object(
+            workspace_sync, "_broker_request", side_effect=broker
+        ), mock.patch.object(
+            workspace_sync, "_download_spec"
+        ) as download:
+            self.assertNotIn(
+                "owner",
+                workspace_sync._remote_workspace_snapshots,
+            )
+            self.assertEqual(workspace_sync.refresh_workspace("owner"), 0)
+
+        download.assert_not_called()
+        self.assertFalse(stale.exists())
+        self.assertEqual(attachment.read_bytes(), b"router-owned")
+        self.assertEqual(
+            (self.root / "IDENTITY.md").read_bytes(),
+            b"image identity",
+        )
+        self.assertEqual(
+            (self.root / "SOUL.md").read_bytes(),
+            b"image-owned soul",
+        )
+        self.assertNotIn(
+            "owner",
+            workspace_sync._force_exact_workspace_restores,
+        )
+
+    def test_incomplete_metadata_cannot_cross_checkpoint_boundary(self):
+        downloads = 0
+
+        def broker(payload, **_kwargs):
+            self.assertEqual(payload, {"operation": "list"})
+            return {
+                "paths": ["memory/MEMORY.md"],
+                "entries": [{
+                    "path": "memory/MEMORY.md",
+                    "size": 3,
+                    "lastModified": 1,
+                }],
+            }
+
+        def download_spec(_relative):
+            nonlocal downloads
+            downloads += 1
+            return (
+                "https://download.invalid/memory",
+                3,
+                {"Range": "bytes=0-2"},
+            )
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync,
+            "_ensure_workspace_checkpoint",
+            return_value="1" * 64,
+        ), mock.patch.object(
+            workspace_sync, "_broker_request", side_effect=broker
+        ), mock.patch.object(
+            workspace_sync, "_download_spec", side_effect=download_spec
+        ), mock.patch.object(
+            workspace_sync.urllib.request,
+            "urlopen",
+            side_effect=lambda *_args, **_kwargs: _FakeResponse(b"old"),
+        ):
+            with self.assertRaises(
+                workspace_sync.WorkspaceGenerationUnavailable
+            ):
+                workspace_sync.refresh_workspace("owner")
+
+        self.assertEqual(downloads, 0)
+
+    def test_generation_mismatch_aborts_before_any_upload(self):
+        (self.root / "state.sqlite").write_bytes(b"local-history")
+        workspace_sync._remote_workspace_snapshots["owner"] = (
+            workspace_sync._RemoteWorkspaceSnapshot(
+                paths=(),
+                sizes={},
+                e_tags={},
+                generation="1" * 64,
+            )
+        )
+        workspace_sync._committed_workspace_generations["owner"] = "1" * 64
+        changed = workspace_sync._RemoteWorkspaceSnapshot(
+            paths=(),
+            sizes={},
+            e_tags={},
+            generation="2" * 64,
+        )
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync,
+            "_ensure_workspace_checkpoint",
+            return_value="1" * 64,
+        ), mock.patch.object(
+            workspace_sync,
+            "_list_remote_workspace_snapshot",
+            return_value=changed,
+        ), mock.patch.object(
+            workspace_sync, "_upload_spec"
+        ) as prepare:
+            with self.assertRaises(
+                workspace_sync.WorkspaceGenerationConflict
+            ):
+                workspace_sync.push_workspace(
+                    "owner",
+                    expected_generation="1" * 64,
+                    require_generation=True,
+                )
+
+        prepare.assert_not_called()
+
+    def test_lost_completion_response_retries_the_same_reservation(self):
+        local = self.root / "state.sqlite"
+        local.write_bytes(b"local-history")
+        metadata = local.stat()
+        old_generation = "1" * 64
+        advanced_generation = "2" * 64
+        workspace_sync._pending_workspace_generations["owner"] = (
+            old_generation
+        )
+        workspace_sync._committed_workspace_generations["owner"] = (
+            old_generation
+        )
+        workspace_sync._pending_workspace_completions["owner"] = (
+            workspace_sync._PendingWorkspaceCompletion(
+                reservation_id="36bb0456-1c51-4fb8-97d1-4e87d02765ce",
+                relative="state.sqlite",
+                content_length=metadata.st_size,
+                modified_ns=metadata.st_mtime_ns,
+                changed_ns=metadata.st_ctime_ns,
+            )
+        )
+        committed = workspace_sync._RemoteWorkspaceSnapshot(
+            paths=("state.sqlite",),
+            sizes={"state.sqlite": metadata.st_size},
+            e_tags={"state.sqlite": '"new"'},
+            generation=advanced_generation,
+        )
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync,
+            "_complete_upload_reservation",
+            return_value=(advanced_generation, '"new"'),
+        ) as complete, mock.patch.object(
+            workspace_sync,
+            "_list_remote_workspace_snapshot",
+            return_value=committed,
+        ), mock.patch.object(
+            workspace_sync,
+            "_commit_workspace_checkpoint",
+            return_value=advanced_generation,
+        ), mock.patch.object(
+            workspace_sync, "_upload_spec"
+        ) as prepare:
+            self.assertEqual(
+                workspace_sync.push_workspace(
+                    "owner",
+                    expected_generation=old_generation,
+                    require_generation=True,
+                ),
+                0,
+            )
+
+        complete.assert_called_once_with(
+            "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
+            old_generation,
+            None,
+        )
+        prepare.assert_not_called()
+        self.assertNotIn(
+            "owner", workspace_sync._pending_workspace_completions
+        )
+        self.assertEqual(
+            workspace_sync.workspace_generation("owner"),
+            advanced_generation,
+        )
+
+    def test_file_to_directory_deletes_parent_before_child_promotion(self):
+        child = self.root / "a" / "b"
+        child.parent.mkdir()
+        child.write_bytes(b"child")
+        base_generation = "1" * 64
+        deleted_generation = "2" * 64
+        final_generation = "3" * 64
+        workspace_sync._committed_workspace_generations["owner"] = (
+            base_generation
+        )
+        before = workspace_sync._RemoteWorkspaceSnapshot(
+            paths=("a",),
+            sizes={"a": 4},
+            e_tags={"a": '"old"'},
+            generation=base_generation,
+        )
+        committed = workspace_sync._RemoteWorkspaceSnapshot(
+            paths=("a/b",),
+            sizes={"a/b": 5},
+            e_tags={"a/b": '"child"'},
+            generation=final_generation,
+        )
+        events = []
+        reservation = "36bb0456-1c51-4fb8-97d1-4e87d02765ce"
+        prepared = (
+            "https://upload.invalid/a-b",
+            reservation,
+            {
+                "Content-Length": "5",
+                "Content-Type": "application/octet-stream",
+                "x-amz-checksum-sha256":
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            },
+        )
+
+        with mock.patch.object(
+            workspace_sync,
+            "WORKSPACE_DIR",
+            self.root,
+        ), mock.patch.object(
+            workspace_sync,
+            "_ensure_workspace_checkpoint",
+            return_value=base_generation,
+        ), mock.patch.object(
+            workspace_sync,
+            "_list_remote_workspace_snapshot",
+            side_effect=[before, committed],
+        ), mock.patch.object(
+            workspace_sync,
+            "_upload_spec",
+            return_value=prepared,
+        ), mock.patch.object(
+            workspace_sync,
+            "_stream_upload",
+            side_effect=lambda *_args: events.append("stage"),
+        ), mock.patch.object(
+            workspace_sync,
+            "_delete_workspace_path",
+            side_effect=lambda *_args: (
+                events.append("delete") or deleted_generation
+            ),
+        ) as delete, mock.patch.object(
+            workspace_sync,
+            "_complete_upload_reservation",
+            side_effect=lambda *_args: (
+                events.append("promote") or (final_generation, '"child"')
+            ),
+        ), mock.patch.object(
+            workspace_sync,
+            "_commit_workspace_checkpoint",
+            side_effect=lambda *_args: events.append("commit")
+            or final_generation,
+        ):
+            self.assertEqual(
+                workspace_sync.push_workspace(
+                    "owner",
+                    expected_generation=base_generation,
+                    require_generation=True,
+                ),
+                2,
+            )
+
+        delete.assert_called_once_with("a", base_generation, None)
+        self.assertLess(events.index("delete"), events.index("promote"))
+        self.assertLess(events.index("promote"), events.index("commit"))
+
+
 class BoundedTransferTests(unittest.TestCase):
     def setUp(self):
         td = tempfile.mkdtemp()
@@ -473,12 +1217,15 @@ class BoundedTransferTests(unittest.TestCase):
             workspace_sync.urllib.request,
             "urlopen",
             return_value=_FakeResponse(b"abc", 4),
+        ), mock.patch.object(
+            workspace_sync,
+            "WORKSPACE_DIR",
+            self.root,
         ):
             with self.assertRaisesRegex(RuntimeError, "ended before"):
                 workspace_sync._download_workspace_file(
                     "https://download.invalid/x",
-                    destination,
-                    self.root,
+                    "existing.bin",
                     4,
                     {"Range": "bytes=0-3"},
                 )
@@ -503,11 +1250,14 @@ class BoundedTransferTests(unittest.TestCase):
         ) as download, mock.patch.object(
             workspace_sync.time,
             "sleep",
-        ) as sleep:
+        ) as sleep, mock.patch.object(
+            workspace_sync,
+            "WORKSPACE_DIR",
+            self.root,
+        ):
             workspace_sync._download_workspace_file(
                 "https://download.invalid/x",
-                destination,
-                self.root,
+                "restored.bin",
                 8,
                 {"Range": "bytes=0-7"},
             )
@@ -518,6 +1268,45 @@ class BoundedTransferTests(unittest.TestCase):
             sleep.call_args_list.count(mock.call(0.25)),
             1,
         )
+
+    def test_parallel_sibling_installs_share_missing_parents_safely(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+
+        sources = []
+        for index in range(12):
+            source = self.root / f"source-{index}"
+            source.write_bytes(f"value-{index}".encode())
+            sources.append(source)
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        barrier = threading.Barrier(len(sources))
+
+        def install(index):
+            barrier.wait()
+            workspace_sync._install_workspace_file(
+                sources[index],
+                f"shared/missing/child-{index}.txt",
+            )
+
+        with mock.patch.object(
+            workspace_sync,
+            "WORKSPACE_DIR",
+            workspace,
+        ):
+            with ThreadPoolExecutor(max_workers=len(sources)) as pool:
+                list(pool.map(install, range(len(sources))))
+
+        for index in range(len(sources)):
+            self.assertEqual(
+                (
+                    workspace
+                    / "shared"
+                    / "missing"
+                    / f"child-{index}.txt"
+                ).read_bytes(),
+                f"value-{index}".encode(),
+            )
 
     def test_pull_retries_exact_transient_broker_502(self):
         workspace = self.root / "workspace"
@@ -600,6 +1389,44 @@ class BoundedTransferTests(unittest.TestCase):
         self.assertEqual(request.call_count, 1)
         sleep.assert_not_called()
 
+    def test_checkpoint_uses_extended_single_inflight_timeout(self):
+        generation = "a" * 64
+        response = _FakeResponse(
+            json.dumps({
+                "checkpointReady": True,
+                "workspaceGeneration": generation,
+            }).encode("utf-8")
+        )
+        with mock.patch.object(
+            workspace_sync.urllib.request,
+            "urlopen",
+            return_value=response,
+        ) as request:
+            self.assertEqual(
+                workspace_sync._ensure_workspace_checkpoint("owner"),
+                generation,
+            )
+        self.assertEqual(
+            request.call_args.kwargs["timeout"],
+            workspace_sync.WORKSPACE_CHECKPOINT_BROKER_TIMEOUT_SECONDS,
+        )
+
+        with mock.patch.object(
+            workspace_sync.urllib.request,
+            "urlopen",
+            side_effect=TimeoutError("still running upstream"),
+        ) as timed_out, mock.patch.object(
+            workspace_sync.time,
+            "sleep",
+        ) as sleep:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "workspace broker network error",
+            ):
+                workspace_sync._ensure_workspace_checkpoint("owner")
+        self.assertEqual(timed_out.call_count, 1)
+        sleep.assert_not_called()
+
     def test_broker_exhaustion_still_fails_closed(self):
         failures = [
             workspace_sync.urllib.error.HTTPError(
@@ -668,6 +1495,46 @@ class BoundedTransferTests(unittest.TestCase):
         self.assertEqual(payload["contentLength"], 4)
         self.assertEqual(len(payload["checksumSha256"]), 44)
 
+    def test_zero_byte_file_is_uploaded_not_treated_as_deleted(self):
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        (workspace / "empty.txt").write_bytes(b"")
+        prepared = (
+            "https://upload.invalid/empty",
+            "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
+            {
+                "Content-Length": "0",
+                "Content-Type": "application/octet-stream",
+                "x-amz-checksum-sha256":
+                    "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+            },
+        )
+
+        with mock.patch.object(
+            workspace_sync,
+            "WORKSPACE_DIR",
+            workspace,
+        ), mock.patch.object(
+            workspace_sync,
+            "_upload_spec",
+            return_value=prepared,
+        ) as prepare, mock.patch.object(
+            workspace_sync,
+            "_stream_upload",
+        ) as stream, mock.patch.object(
+            workspace_sync,
+            "_broker_request",
+            return_value={"key": "owner/empty.txt"},
+        ):
+            self.assertEqual(workspace_sync.push_workspace("owner"), 1)
+
+        self.assertEqual(prepare.call_args.args[1], 0)
+        self.assertEqual(
+            prepare.call_args.args[3],
+            "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+        )
+        self.assertEqual(stream.call_args.args[2], 0)
+
     def test_upload_cache_is_isolated_by_signed_workspace_prefix(self):
         workspace = self.root / "workspace"
         workspace.mkdir()
@@ -678,6 +1545,7 @@ class BoundedTransferTests(unittest.TestCase):
         workspace_sync._uploaded_state[("owner-a", "note.txt")] = (
             metadata.st_size,
             metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
         )
         self.addCleanup(workspace_sync._uploaded_state.clear)
 
@@ -706,7 +1574,11 @@ class BoundedTransferTests(unittest.TestCase):
         sink.assert_called_once()
         self.assertEqual(
             workspace_sync._uploaded_state[("owner-b", "note.txt")],
-            (metadata.st_size, metadata.st_mtime_ns),
+            (
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_ctime_ns,
+            ),
         )
 
     def test_root_push_keeps_the_prefix_cache_in_the_long_lived_process(self):
@@ -728,22 +1600,35 @@ class BoundedTransferTests(unittest.TestCase):
 
     def test_only_root_can_attach_final_flush_authority(self):
         token_path = self.root / "workspace-flush-token"
+        sync_path = self.root / "workspace-sync-token"
         token_path.write_text("a" * 43)
+        sync_path.write_text("b" * 43)
         with mock.patch.object(
             workspace_sync,
             "WORKSPACE_FLUSH_TOKEN_PATH",
             str(token_path),
         ), mock.patch.object(
+            workspace_sync,
+            "WORKSPACE_SYNC_TOKEN_PATH",
+            str(sync_path),
+        ), mock.patch.object(
             workspace_sync.os, "geteuid", return_value=0
         ):
             self.assertEqual(
                 workspace_sync._workspace_flush_headers(),
-                {"X-Agent-Workspace-Flush": "a" * 43},
+                {
+                    "X-Agent-Workspace-Sync": "b" * 43,
+                    "X-Agent-Workspace-Flush": "a" * 43,
+                },
             )
         with mock.patch.object(
             workspace_sync,
             "WORKSPACE_FLUSH_TOKEN_PATH",
             str(token_path),
+        ), mock.patch.object(
+            workspace_sync,
+            "WORKSPACE_SYNC_TOKEN_PATH",
+            str(sync_path),
         ), mock.patch.object(
             workspace_sync.os, "geteuid", return_value=1000
         ):
@@ -1007,6 +1892,50 @@ class SQLitePersistenceTests(unittest.TestCase):
         self.assertEqual(prepared[-1], workspace_sync.OPENCLAW_MIGRATION_MARKER)
         self.assertEqual(prepared[:-1], ["state/openclaw.sqlite"])
 
+    def test_completed_migration_does_not_upload_generated_import_archive(self):
+        database = self.root / "state" / "openclaw.sqlite"
+        database.parent.mkdir(parents=True)
+        database.write_bytes(b"database")
+        archive = (
+            self.root
+            / "agents"
+            / "main"
+            / "session-sqlite-import-archive"
+            / "legacy.jsonl.imported-123"
+        )
+        archive.parent.mkdir(parents=True)
+        archive.write_bytes(b"redundant imported transcript")
+        with mock.patch.object(workspace_sync, "WORKSPACE_DIR", self.root):
+            workspace_sync.mark_openclaw_migration_complete()
+
+        prepared = []
+
+        def prepare(relative, *_args):
+            prepared.append(relative)
+            return None
+
+        workspace_sync._uploaded_state.clear()
+        self.addCleanup(workspace_sync._uploaded_state.clear)
+        with mock.patch.object(
+            workspace_sync,
+            "WORKSPACE_DIR",
+            self.root,
+        ), mock.patch.object(
+            workspace_sync,
+            "_upload_spec",
+            side_effect=prepare,
+        ):
+            self.assertEqual(workspace_sync.push_workspace("owner"), 2)
+
+        self.assertEqual(
+            prepared,
+            [
+                "state/openclaw.sqlite",
+                workspace_sync.OPENCLAW_MIGRATION_MARKER,
+            ],
+        )
+        self.assertTrue(archive.exists())
+
     def test_marker_upload_is_withheld_when_database_upload_fails(self):
         database = self.root / "state" / "openclaw.sqlite"
         database.parent.mkdir(parents=True)
@@ -1122,25 +2051,25 @@ class SQLitePersistenceTests(unittest.TestCase):
         )
 
     def test_legacy_archive_is_never_deleted_remotely(self):
-        # THE SAFETY INVARIANT. Skipping a download is only safe because the
-        # push is additive: it walks LOCAL files and uploads them, and nothing
-        # in the sync path enumerates S3 to remove keys. If a delete ever
-        # appeared, an unrestored transcript would become a deleted one — the
-        # same failed-READ-becomes-destructive-WRITE shape that destroyed a
-        # user's agent memory on 2026-07-27.
-        source = pathlib.Path(__file__).with_name("workspace_sync.py").read_text()
-        for forbidden in (
-            "DeleteObject",
-            "delete_object",
-            "DeleteObjects",
-            '"operation": "delete"',
-            "'operation': 'delete'",
-        ):
-            self.assertNotIn(
-                forbidden,
-                source,
-                f"workspace_sync must never delete remote objects (found {forbidden})",
-            )
+        remote = (
+            "agents/main/sessions/legacy.jsonl",
+            "agents/main/session-sqlite-import-archive/"
+            "legacy.jsonl.imported-123",
+            "openclaw-workspace-state.json",
+            "workspace-attestations/setup.attested",
+            "attachments/input.pdf",
+            "SOUL.md",
+            "memory/removed.md",
+        )
+
+        self.assertEqual(
+            workspace_sync._remote_mutable_paths_to_delete(
+                remote,
+                set(),
+                migration_complete=True,
+            ),
+            ["memory/removed.md"],
+        )
 
 
 if __name__ == "__main__":

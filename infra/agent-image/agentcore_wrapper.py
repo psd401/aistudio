@@ -85,6 +85,32 @@ def _safe_header_value(value: str, limit: int = 100) -> str:
     return re.sub(r'[\[\]\n\r]', '', value or '')[:limit]
 
 
+_OPENCLAW_SESSION_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,255}$")
+
+
+def _resolve_conversation_session_id(payload: object, runtime_session_id: str) -> str:
+    """Return a safe OpenClaw transcript key, falling back for old callers.
+
+    AgentCore's session id owns microVM affinity and workspace serialization.
+    The optional payload key owns only conversational memory. Keeping those
+    identities separate lets one durable owner workspace safely serve isolated
+    Google Chat threads without starting competing warm microVMs.
+    """
+    if not isinstance(payload, dict):
+        return runtime_session_id
+    candidate = payload.get("conversation_session_id")
+    if candidate is None:
+        return runtime_session_id
+    if isinstance(candidate, str) and _OPENCLAW_SESSION_KEY_RE.fullmatch(
+        candidate
+    ):
+        return candidate
+    logger.warning(
+        "Ignoring invalid conversation_session_id; using runtime session"
+    )
+    return runtime_session_id
+
+
 def _frame_user_message(
     *,
     user_message: str,
@@ -148,6 +174,7 @@ def _frame_user_message(
 _AUTHORITY_DIRECTORY = "/run/psd-agent-authority"
 _INVOCATION_CONTEXT_PATH = f"{_AUTHORITY_DIRECTORY}/invocation-context"
 _REQUEST_PROOF_KEY_PATH = f"{_AUTHORITY_DIRECTORY}/request-proof-key"
+_WORKSPACE_SYNC_TOKEN_PATH = f"{_AUTHORITY_DIRECTORY}/workspace-sync-token"
 _WORKSPACE_FLUSH_TOKEN_PATH = f"{_AUTHORITY_DIRECTORY}/workspace-flush-token"
 _INVOCATION_CONTEXT_RE = re.compile(
     r"^v1\.[A-Za-z0-9_-]{40,3500}\.[A-Za-z0-9_-]{43}$"
@@ -155,11 +182,44 @@ _INVOCATION_CONTEXT_RE = re.compile(
 _REQUEST_PROOF_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _invocation_lock = asyncio.Lock()
 FINAL_WORKSPACE_FLUSH_SECONDS = 120
-# HyperFrames may legitimately spend 30s resolving owner authority, 10s
-# connecting to Lambda, 780s waiting for its response, and 5s on local
-# transport. Finalization must outlive that 825s relay ceiling instead of
-# restarting the proxy and orphaning an accepted Lambda render.
-PROXY_FINALIZATION_DRAIN_SECONDS = 830
+# Interactive and cron callers run inside a 900-second Lambda. A stuck
+# privileged relay must not consume the time reserved for stopping OpenClaw,
+# checkpointing SQLite, and pushing the workspace. Give accepted calls 15
+# seconds to finish (plus the 5-second HTTP transport allowance below), then
+# let the existing fail-safe proxy restart cancel them.
+INTERACTIVE_PROXY_FINALIZATION_DRAIN_SECONDS = 15
+# Promoted jobs have an independently approved two-hour turn budget. They can
+# retain the full HyperFrames drain so an accepted 825-second synchronous
+# render is not orphaned merely because the model has finished its response.
+LONG_JOB_PROXY_FINALIZATION_DRAIN_SECONDS = 830
+# A payload deadline above this value is necessarily an explicit long-job
+# override: interactive configuration is clamped below it and cron sends its
+# own bounded deadline. Keep the threshold above the previous 600-second
+# interactive ceiling so a rolling deploy cannot accidentally select 830s.
+LONG_JOB_DEADLINE_THRESHOLD_SECONDS = 600
+PROXY_FINALIZATION_TRANSPORT_MARGIN_SECONDS = 5
+SHUTDOWN_PROXY_DRAIN_SECONDS = 5
+_shutdown_started = False
+
+
+def _resolve_proxy_finalization_drain_seconds(payload: object) -> int:
+    """Select the bounded interactive drain or the long-job drain.
+
+    This deliberately mirrors the harness's treatment of explicit numeric
+    ``deadline_s`` overrides. Missing or malformed values are interactive and
+    therefore fail safe to the short drain.
+    """
+    if isinstance(payload, dict):
+        try:
+            deadline_s = int(payload.get("deadline_s"))
+        except (TypeError, ValueError):
+            deadline_s = None
+        if (
+            deadline_s is not None
+            and deadline_s > LONG_JOB_DEADLINE_THRESHOLD_SECONDS
+        ):
+            return LONG_JOB_PROXY_FINALIZATION_DRAIN_SECONDS
+    return INTERACTIVE_PROXY_FINALIZATION_DRAIN_SECONDS
 
 
 def _install_invocation_authority(token, request_proof_key) -> bool:
@@ -175,7 +235,11 @@ def _install_invocation_authority(token, request_proof_key) -> bool:
         or not isinstance(request_proof_key, str)
         or not _REQUEST_PROOF_KEY_RE.fullmatch(request_proof_key)
     ):
-        for path in (_INVOCATION_CONTEXT_PATH, _REQUEST_PROOF_KEY_PATH):
+        for path in (
+            _INVOCATION_CONTEXT_PATH,
+            _REQUEST_PROOF_KEY_PATH,
+            _WORKSPACE_SYNC_TOKEN_PATH,
+        ):
             try:
                 os.unlink(path)
             except FileNotFoundError:
@@ -187,6 +251,7 @@ def _install_invocation_authority(token, request_proof_key) -> bool:
     for path, value in (
         (_INVOCATION_CONTEXT_PATH, token),
         (_REQUEST_PROOF_KEY_PATH, request_proof_key),
+        (_WORKSPACE_SYNC_TOKEN_PATH, secrets.token_urlsafe(32)),
     ):
         temporary_path = f"{path}.{os.getpid()}.tmp"
         with open(temporary_path, "w", encoding="ascii") as handle:
@@ -199,7 +264,11 @@ def _install_invocation_authority(token, request_proof_key) -> bool:
 
 def _revoke_invocation_authority() -> None:
     """Remove all local relay signing authority at the end of every turn."""
-    for path in (_INVOCATION_CONTEXT_PATH, _REQUEST_PROOF_KEY_PATH):
+    for path in (
+        _INVOCATION_CONTEXT_PATH,
+        _REQUEST_PROOF_KEY_PATH,
+        _WORKSPACE_SYNC_TOKEN_PATH,
+    ):
         try:
             os.unlink(path)
         except FileNotFoundError:
@@ -209,7 +278,11 @@ def _revoke_invocation_authority() -> None:
 def _invocation_authority_is_installed() -> bool:
     return all(
         os.path.isfile(path)
-        for path in (_INVOCATION_CONTEXT_PATH, _REQUEST_PROOF_KEY_PATH)
+        for path in (
+            _INVOCATION_CONTEXT_PATH,
+            _REQUEST_PROOF_KEY_PATH,
+            _WORKSPACE_SYNC_TOKEN_PATH,
+        )
     )
 
 
@@ -219,11 +292,27 @@ def _install_workspace_flush_lock() -> str:
     os.chmod(_AUTHORITY_DIRECTORY, 0o700)
     temporary_path = f"{_WORKSPACE_FLUSH_TOKEN_PATH}.{os.getpid()}.tmp"
     token = secrets.token_urlsafe(32)
-    with open(temporary_path, "w", encoding="ascii") as handle:
-        handle.write(token)
-        handle.write("\n")
-    os.chmod(temporary_path, 0o600)
-    os.replace(temporary_path, _WORKSPACE_FLUSH_TOKEN_PATH)
+    descriptor = os.open(
+        temporary_path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+            handle.write(token)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        # Atomic no-clobber publish. A SIGTERM racing the async finalizer must
+        # never replace that finalizer's token and invalidate its gate lease.
+        os.link(temporary_path, _WORKSPACE_FLUSH_TOKEN_PATH)
+    except FileExistsError as exc:
+        raise RuntimeError("workspace finalization is already active") from exc
+    finally:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
     return token
 
 
@@ -234,7 +323,11 @@ def _remove_workspace_flush_lock() -> None:
         pass
 
 
-def _set_proxy_finalization(action: str, token: str) -> None:
+def _set_proxy_finalization(
+    action: str,
+    token: str,
+    drain_seconds: int = INTERACTIVE_PROXY_FINALIZATION_DRAIN_SECONDS,
+) -> None:
     """Ask the loopback proxy to atomically drain or reopen privileged calls."""
     import urllib.error
     import urllib.request
@@ -247,7 +340,11 @@ def _set_proxy_finalization(action: str, token: str) -> None:
         method="POST",
         headers={"X-Agent-Workspace-Flush": token},
     )
-    timeout = PROXY_FINALIZATION_DRAIN_SECONDS + 5 if action == "begin" else 5
+    timeout = (
+        drain_seconds + PROXY_FINALIZATION_TRANSPORT_MARGIN_SECONDS
+        if action == "begin"
+        else PROXY_FINALIZATION_TRANSPORT_MARGIN_SECONDS
+    )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             if response.status != 200:
@@ -276,24 +373,31 @@ def _restart_mantle_proxy() -> None:
     start_mantle_proxy()
 
 
-async def _finalize_invocation_authority() -> None:
+async def _finalize_invocation_authority(
+    proxy_drain_seconds: int = INTERACTIVE_PROXY_FINALIZATION_DRAIN_SECONDS,
+) -> bool:
     """Stop OpenClaw, checkpoint SQLite, flush, then revoke turn authority."""
+    global _workspace_local_clean, _workspace_turn_writable
     loop = asyncio.get_running_loop()
     proxy_finalizing = False
     proxy_needs_recovery = False
+    stale_flush_lock = False
     flush_token: str | None = None
+    finalization_confirmed = False
     try:
         try:
             flush_token = _install_workspace_flush_lock()
         except Exception as exc:  # noqa: BLE001
             logger.error("turn-final relay lock failed: %s", exc)
-            return
+            stale_flush_lock = True
+            return False
         try:
             await loop.run_in_executor(
                 None,
                 _set_proxy_finalization,
                 "begin",
                 flush_token,
+                proxy_drain_seconds,
             )
             proxy_finalizing = True
         except Exception as exc:  # noqa: BLE001
@@ -309,6 +413,7 @@ async def _finalize_invocation_authority() -> None:
                     _set_proxy_finalization,
                     "begin",
                     flush_token,
+                    proxy_drain_seconds,
                 )
                 proxy_finalizing = True
                 proxy_needs_recovery = False
@@ -317,19 +422,25 @@ async def _finalize_invocation_authority() -> None:
                     "turn-final proxy restart/drain failed: %s",
                     restart_exc,
                 )
-                return
+                return False
         gateway_stopped = False
         try:
             await loop.run_in_executor(None, adapter.shutdown)
             gateway_stopped = True
         except Exception as exc:  # noqa: BLE001
             logger.warning("turn-final OpenClaw shutdown failed: %s", exc)
-        if (
-            gateway_stopped
-            and _current_workspace_prefix
+        workspace_flush_required = (
+            _current_workspace_prefix is not None
             and _workspace_prefix_hydrated
-            and _invocation_authority_is_installed()
-        ):
+            and _workspace_turn_writable
+            and not _workspace_local_clean
+        )
+        if gateway_stopped and workspace_flush_required:
+            if not _invocation_authority_is_installed():
+                logger.error(
+                    "turn-final workspace flush lacks invocation authority"
+                )
+                return False
             try:
                 await loop.run_in_executor(
                     None,
@@ -340,17 +451,38 @@ async def _finalize_invocation_authority() -> None:
                     workspace_sync.push_workspace,
                     _current_workspace_prefix,
                     deadline_monotonic=deadline,
+                    expected_generation=workspace_sync.workspace_generation(
+                        _current_workspace_prefix
+                    ),
+                    require_generation=True,
                 )
                 await asyncio.wait_for(
                     loop.run_in_executor(None, push),
                     timeout=FINAL_WORKSPACE_FLUSH_SECONDS + 5,
                 )
+                _workspace_local_clean = True
+                _workspace_turn_writable = False
+                finalization_confirmed = True
             except asyncio.TimeoutError:
                 logger.warning("turn-final workspace push exceeded deadline")
             except Exception as exc:  # noqa: BLE001
                 logger.warning("turn-final workspace push failed: %s", exc)
+        elif gateway_stopped:
+            finalization_confirmed = True
     finally:
         _revoke_invocation_authority()
+        if stale_flush_lock:
+            # A lock left by a dead proxy/container must not permanently pin
+            # the replacement proxy in its startup `flushing` state.
+            _remove_workspace_flush_lock()
+            try:
+                await loop.run_in_executor(None, _restart_mantle_proxy)
+            except Exception as restart_exc:  # noqa: BLE001
+                logger.error(
+                    "turn-final stale-lock proxy recovery failed: %s",
+                    restart_exc,
+                )
+        proxy_reopened = not (proxy_finalizing or proxy_needs_recovery)
         if proxy_finalizing and flush_token is not None:
             try:
                 await loop.run_in_executor(
@@ -359,6 +491,7 @@ async def _finalize_invocation_authority() -> None:
                     "end",
                     flush_token,
                 )
+                proxy_reopened = True
             except Exception as exc:  # noqa: BLE001
                 # Do not leave the next turn behind a permanently closed gate.
                 logger.warning(
@@ -367,6 +500,17 @@ async def _finalize_invocation_authority() -> None:
                 )
                 try:
                     await loop.run_in_executor(None, _restart_mantle_proxy)
+                    # A replacement sees the still-present flush token at
+                    # startup and intentionally starts closed. Reopen that
+                    # fresh in-memory gate with the same root token before
+                    # removing the file, or it remains permanently flushing.
+                    await loop.run_in_executor(
+                        None,
+                        _set_proxy_finalization,
+                        "end",
+                        flush_token,
+                    )
+                    proxy_reopened = True
                 except Exception as restart_exc:  # noqa: BLE001
                     logger.error(
                         "turn-final proxy recovery failed: %s",
@@ -375,12 +519,32 @@ async def _finalize_invocation_authority() -> None:
         elif proxy_needs_recovery:
             try:
                 await loop.run_in_executor(None, _restart_mantle_proxy)
+                await loop.run_in_executor(
+                    None,
+                    _set_proxy_finalization,
+                    "end",
+                    flush_token,
+                )
+                proxy_reopened = True
             except Exception as restart_exc:  # noqa: BLE001
                 logger.error(
                     "turn-final stuck proxy recovery failed: %s",
                     restart_exc,
                 )
-        _remove_workspace_flush_lock()
+        if not stale_flush_lock:
+            _remove_workspace_flush_lock()
+        if not proxy_reopened:
+            # Both authenticated reopen attempts failed. Once the token is
+            # gone, replace the proxy one final time so startup is provably
+            # open rather than leaving a live in-memory `flushing` gate.
+            try:
+                await loop.run_in_executor(None, _restart_mantle_proxy)
+            except Exception as restart_exc:  # noqa: BLE001
+                logger.error(
+                    "turn-final open proxy replacement failed: %s",
+                    restart_exc,
+                )
+    return finalization_confirmed
 
 
 def _serialize_invocations(function):
@@ -401,6 +565,10 @@ def _serialize_invocations(function):
     @functools.wraps(function)
     async def serialized(*args, **kwargs):
         finalized = False
+        payload = args[0] if args else kwargs.get("payload")
+        proxy_drain_seconds = _resolve_proxy_finalization_drain_seconds(
+            payload
+        )
         async with _invocation_lock:
             try:
                 async for event in function(*args, **kwargs):
@@ -409,14 +577,49 @@ def _serialize_invocations(function):
                         and isinstance(event, dict)
                         and "result" in event
                     ):
-                        await _finalize_invocation_authority()
+                        finalization_confirmed = (
+                            await _finalize_invocation_authority(
+                                proxy_drain_seconds
+                            )
+                        )
                         finalized = True
+                        metadata = event.get("metadata")
+                        terminal_metadata = (
+                            dict(metadata)
+                            if isinstance(metadata, dict)
+                            else {}
+                        )
+                        terminal_metadata[
+                            "workspace_finalization_confirmed"
+                        ] = finalization_confirmed
+                        if not finalization_confirmed:
+                            terminal_metadata["failed"] = True
+                            terminal_metadata[
+                                "error_class"
+                            ] = "WorkspaceFinalizationFailed"
+                            event = {
+                                **event,
+                                "result": (
+                                    "I completed the work but couldn't safely "
+                                    "save this agent's workspace. Your prior "
+                                    "history is preserved; please retry after "
+                                    "the agent service is repaired."
+                                ),
+                                "metadata": terminal_metadata,
+                            }
+                        else:
+                            event = {
+                                **event,
+                                "metadata": terminal_metadata,
+                            }
                     yield event
             finally:
                 # Async-generator finalization also runs this path when the
                 # streaming client disconnects or the invocation raises.
                 if not finalized:
-                    await _finalize_invocation_authority()
+                    await _finalize_invocation_authority(
+                        proxy_drain_seconds
+                    )
     return serialized
 
 
@@ -823,6 +1026,23 @@ def read_proxy_usage() -> dict:
 _current_workspace_prefix: str | None = None
 _workspace_prefix_bound = False
 _workspace_prefix_hydrated = False
+# A clean idle microVM must never push on SIGTERM: another build-rotated
+# runtime may have committed a newer authoritative generation while this one
+# slept. Only an active signed turn may make local state dirty, and every push
+# is fenced against the generation restored after acquiring the owner lock.
+_workspace_local_clean = True
+_workspace_turn_writable = False
+
+
+def _fail_closed_workspace_after_restore_error(prefix: str) -> None:
+    """Disable final pushes and force an exact restore after warm failure."""
+    global _workspace_prefix_hydrated
+    global _workspace_local_clean, _workspace_turn_writable
+    _workspace_turn_writable = False
+    _workspace_prefix_hydrated = False
+    _workspace_local_clean = False
+    if prefix:
+        workspace_sync.invalidate_local_workspace(prefix)
 
 
 def _bind_workspace_prefix(prefix: str) -> bool:
@@ -846,22 +1066,83 @@ def hydrate_github_auth(user_email: str) -> None:
 
 
 def handle_shutdown(signum, frame):
-    """Graceful shutdown — stop SQLite writers, checkpoint, then push."""
+    """Best-effort shutdown flush after closing the privileged workspace gate.
+
+    AgentCore may terminate a runtime before this bounded cleanup completes.
+    The durable guarantee is the normal pre-response turn-final checkpoint;
+    this path only attempts to preserve an active dirty turn without ever
+    allowing an unsafe or unfenced push.
+    """
+    global _shutdown_started
+    global _workspace_local_clean, _workspace_turn_writable
+    if _shutdown_started:
+        logger.warning("Ignoring duplicate shutdown signal %d", signum)
+        return
+    _shutdown_started = True
     logger.info("Received signal %d, shutting down", signum)
-    adapter.shutdown()
-    if _current_workspace_prefix and _workspace_prefix_hydrated:
+    flush_token: str | None = None
+    gate_acquired = False
+    try:
         try:
-            workspace_sync.prepare_sqlite_snapshot()
-            workspace_sync.push_workspace(_current_workspace_prefix)
+            flush_token = _install_workspace_flush_lock()
+            try:
+                _set_proxy_finalization(
+                    "begin",
+                    flush_token,
+                    SHUTDOWN_PROXY_DRAIN_SECONDS,
+                )
+            except Exception:
+                # Replacing the proxy cancels in-flight privileged work. The
+                # still-present token makes the replacement start closed.
+                _restart_mantle_proxy()
+                _set_proxy_finalization(
+                    "begin",
+                    flush_token,
+                    SHUTDOWN_PROXY_DRAIN_SECONDS,
+                )
+            gate_acquired = True
         except Exception as exc:  # noqa: BLE001
-            logger.warning("shutdown workspace push failed: %s", exc)
-    if _mantle_proxy_process and _mantle_proxy_process.poll() is None:
-        _mantle_proxy_process.terminate()
-        try:
-            _mantle_proxy_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _mantle_proxy_process.kill()
-    sys.exit(0)
+            logger.warning(
+                "shutdown workspace gate failed; push suppressed: %s",
+                exc,
+            )
+        adapter.shutdown()
+        if (
+            gate_acquired
+            and _current_workspace_prefix
+            and _workspace_prefix_hydrated
+            and _workspace_turn_writable
+            and not _workspace_local_clean
+            and _invocation_authority_is_installed()
+        ):
+            try:
+                workspace_sync.prepare_sqlite_snapshot()
+                deadline = (
+                    time.monotonic() + FINAL_WORKSPACE_FLUSH_SECONDS
+                )
+                workspace_sync.push_workspace(
+                    _current_workspace_prefix,
+                    deadline_monotonic=deadline,
+                    expected_generation=workspace_sync.workspace_generation(
+                        _current_workspace_prefix
+                    ),
+                    require_generation=True,
+                )
+                _workspace_local_clean = True
+                _workspace_turn_writable = False
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("shutdown workspace push failed: %s", exc)
+    finally:
+        _revoke_invocation_authority()
+        if _mantle_proxy_process and _mantle_proxy_process.poll() is None:
+            _mantle_proxy_process.terminate()
+            try:
+                _mantle_proxy_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                _mantle_proxy_process.kill()
+        if flush_token is not None:
+            _remove_workspace_flush_lock()
+        sys.exit(0)
 
 
 signal.signal(signal.SIGTERM, handle_shutdown)
@@ -1126,6 +1407,8 @@ def main():
             user_email                — caller's email (used as stable identity)
             user_display_name         — caller's display name for greetings
             workspace_prefix          — S3 prefix to mount as long-term memory
+            conversation_session_id   — OpenClaw transcript key; independent
+                                        from owner-wide AgentCore affinity
             invocation_context        — router-signed actor/owner/mode context
             invocation_request_proof_key
                                       — root-relay-only derived signing key
@@ -1139,8 +1422,12 @@ def main():
                                           attachmentResourceName?}]
         """
         global _workspace_prefix_hydrated
+        global _workspace_local_clean, _workspace_turn_writable
 
         session_id = getattr(context, "session_id", "unknown")
+        conversation_session_id = _resolve_conversation_session_id(
+            payload, session_id
+        )
         user_message = payload.get("prompt", "")
         user_email = payload.get("user_email") or payload.get("user_id", "unknown")
         display_name = payload.get("user_display_name", "")
@@ -1152,7 +1439,8 @@ def main():
         model_override = payload.get("model")
         # Optional turn-deadline override (async-job runner, #1138). Only the
         # job runner sends this; interactive router turns omit it and get the
-        # 840s default. Non-int garbage degrades to None (default behavior).
+        # 550s default, preserving time for final workspace persistence before
+        # the Router Lambda ends. Non-int garbage degrades to the default.
         raw_deadline = payload.get("deadline_s")
         try:
             deadline_s = int(raw_deadline) if raw_deadline is not None else None
@@ -1167,9 +1455,11 @@ def main():
         attachments_header = _render_attachments_header(payload.get("attachments"))
 
         logger.info(
-            "Invocation received: session=%s user=%s prefix=%s msg_length=%d "
-            "cross_user=%s audience=%s attachments=%d",
-            session_id, user_email, workspace_prefix or "-", len(user_message),
+            "Invocation received: runtime_session=%s conversation_session=%s "
+            "user=%s prefix=%s msg_length=%d cross_user=%s audience=%s "
+            "attachments=%d",
+            session_id, conversation_session_id, user_email,
+            workspace_prefix or "-", len(user_message),
             invoked_by_email or "no",
             audience or "dm",
             len(payload.get("attachments") or []),
@@ -1235,30 +1525,77 @@ def main():
                 None, hydrate_github_auth, user_email
             )
 
-        # This microVM is permanently bound to the prefix above, so a pull can
-        # never overlay a previous owner's local files. The image starts a
-        # gateway only to prove BOOT_OK; stop it before overlaying persisted
-        # SQLite state or running OpenClaw's one-time migration.
-        if workspace_prefix and not _workspace_prefix_hydrated:
+        # This microVM is permanently bound to the prefix above. Stop every
+        # writer, then compare the complete authoritative S3 generation after
+        # the router acquired the deployment-stable owner lock. A warm runtime
+        # skips downloads only when the remote generation is exactly unchanged;
+        # otherwise it rehydrates before OpenClaw can reopen SQLite.
+        if workspace_prefix:
             try:
                 await asyncio.get_running_loop().run_in_executor(
                     None,
                     adapter.shutdown,
                 )
+                # Never overlay local changes whose preceding final flush
+                # failed or timed out. Retry that exact fenced generation first;
+                # a conflict fails closed and preserves both local and remote
+                # history for diagnosis.
+                if (
+                    _workspace_prefix_hydrated
+                    and _workspace_turn_writable
+                    and not _workspace_local_clean
+                ):
+                    await asyncio.get_running_loop().run_in_executor(
+                        None,
+                        workspace_sync.prepare_sqlite_snapshot,
+                    )
+                    retry_push = functools.partial(
+                        workspace_sync.push_workspace,
+                        workspace_prefix,
+                        expected_generation=workspace_sync.workspace_generation(
+                            workspace_prefix
+                        ),
+                        require_generation=True,
+                    )
+                    await asyncio.get_running_loop().run_in_executor(
+                        None,
+                        retry_push,
+                    )
+                    _workspace_local_clean = True
+                    _workspace_turn_writable = False
                 pulled = await asyncio.get_running_loop().run_in_executor(
-                    None, workspace_sync.pull_workspace, workspace_prefix
+                    None,
+                    workspace_sync.refresh_workspace,
+                    workspace_prefix,
                 )
+                if workspace_sync.workspace_generation(workspace_prefix) is None:
+                    raise workspace_sync.WorkspaceGenerationUnavailable(
+                        "broker did not return authoritative generation metadata"
+                    )
                 if not workspace_sync.openclaw_migration_complete():
                     await asyncio.get_running_loop().run_in_executor(
                         None,
                         migrate_openclaw_workspace,
                     )
                     workspace_sync.mark_openclaw_migration_complete()
+                    _workspace_local_clean = False
+                    _workspace_turn_writable = True
                 logger.info(
-                    "workspace mounted: prefix=%s files=%d",
+                    "workspace synchronized: prefix=%s files=%d generation=%s",
                     workspace_prefix, pulled,
+                    workspace_sync.workspace_generation(
+                        workspace_prefix
+                    )[:12],
                 )
             except Exception as exc:  # noqa: BLE001
+                # The gateway is stopped, so make the failed warm tree
+                # permanently non-writable before yielding. This prevents the
+                # decorator's finalizer from retrying a local state that could
+                # not be reconciled, and forces the next invocation to perform
+                # an exact committed restore (including pruning local extras).
+                _fail_closed_workspace_after_restore_error(
+                    workspace_prefix
+                )
                 logger.error(
                     "workspace mount/migration FAILED (%s) — push DISABLED for "
                     "this microVM to protect the remote workspace",
@@ -1302,6 +1639,9 @@ def main():
         # it only after the owner workspace and per-turn attachments are fully
         # present, then mark the workspace writable for the final flush.
         try:
+            if workspace_prefix:
+                _workspace_local_clean = False
+                _workspace_turn_writable = True
             await asyncio.get_running_loop().run_in_executor(
                 None,
                 adapter.configure,
@@ -1360,7 +1700,11 @@ def main():
         # waits for the first chunk before sending headers, defeating the
         # streaming purpose.
         invocation_start = time.time()
-        yield {"type": "start", "session_id": session_id}
+        yield {
+            "type": "start",
+            "session_id": conversation_session_id,
+            "runtime_session_id": session_id,
+        }
 
         loop = asyncio.get_running_loop()
         # Snapshot the proxy's cumulative usage BEFORE the turn so we can take a
@@ -1377,7 +1721,7 @@ def main():
         # baseline must be fully read before process_task is scheduled.
         usage_baseline = await loop.run_in_executor(None, read_proxy_usage)
         process_task = loop.run_in_executor(
-            None, adapter.process, framed, session_id, model_override,
+            None, adapter.process, framed, conversation_session_id, model_override,
             deadline_s,
         )
 
@@ -1454,7 +1798,8 @@ def main():
         if isinstance(result, str):
             reply_text = result
             metadata: dict = {
-                "session_id": session_id,
+                "session_id": conversation_session_id,
+                "runtime_session_id": session_id,
                 "user_id": user_email,
                 "model": (
                     proxy_model
@@ -1486,7 +1831,8 @@ def main():
             input_tokens = proxy_in if proxy_measured else result.tokens_in
             output_tokens = proxy_out if proxy_measured else result.tokens_out
             metadata = {
-                "session_id": session_id,
+                "session_id": conversation_session_id,
+                "runtime_session_id": session_id,
                 "user_id": user_email,
                 # Real model id, in priority order: proxy-observed > harness-
                 # observed > caller override > the known default model. We

@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { createInvocationContextToken } from "./invocation-context";
+import {
+  createInvocationContextToken,
+  DEFAULT_INVOCATION_CONTEXT_TTL_SECONDS,
+  MAX_INVOCATION_CONTEXT_TTL_SECONDS,
+} from "./invocation-context";
+import { JOB_INVOCATION_CONTEXT_TTL_S } from "./job-promotion";
 
 const SECRET = "0123456789abcdef0123456789abcdef";
 
@@ -50,10 +55,13 @@ describe("createInvocationContextToken", () => {
       Buffer.from(payload, "base64url").toString("utf8")
     ) as { issuedAt: number; expiresAt: number };
 
-    expect(claims.expiresAt - claims.issuedAt).toBe(900);
+    const lifetime = claims.expiresAt - claims.issuedAt;
+    expect(lifetime).toBe(DEFAULT_INVOCATION_CONTEXT_TTL_SECONDS);
+    // 90s cold start + 550s interactive work + 200s bounded finalization.
+    expect(lifetime).toBeGreaterThanOrEqual(90 + 550 + 200);
   });
 
-  test("accepts the bounded two-hour job lifetime", () => {
+  test("accepts job authority that outlives two-hour work and finalization", () => {
     const token = createInvocationContextToken(
       SECRET,
       {
@@ -63,14 +71,23 @@ describe("createInvocationContextToken", () => {
         sessionId: "job-session",
         workspacePrefix: "p",
       },
-      { nowSeconds: 100, ttlSeconds: 7200, nonce: "job-lifetime" }
+      {
+        nowSeconds: 100,
+        ttlSeconds: JOB_INVOCATION_CONTEXT_TTL_S,
+        nonce: "job-lifetime",
+      }
     );
     const payload = token.split(".")[1]!;
     const claims = JSON.parse(
       Buffer.from(payload, "base64url").toString("utf8")
     ) as { issuedAt: number; expiresAt: number };
 
-    expect(claims.expiresAt - claims.issuedAt).toBe(7200);
+    expect(claims.expiresAt - claims.issuedAt).toBe(
+      JOB_INVOCATION_CONTEXT_TTL_S
+    );
+    expect(JOB_INVOCATION_CONTEXT_TTL_S).toBe(
+      MAX_INVOCATION_CONTEXT_TTL_SECONDS
+    );
   });
 
   test("rejects short secrets and lifetimes beyond the job ceiling", () => {
@@ -94,8 +111,10 @@ describe("createInvocationContextToken", () => {
           sessionId: "s",
           workspacePrefix: "p",
         },
-        { ttlSeconds: 7201 }
+        { ttlSeconds: MAX_INVOCATION_CONTEXT_TTL_SECONDS + 1 }
       )
-    ).toThrow("between 30 and 7200");
+    ).toThrow(
+      `between 30 and ${MAX_INVOCATION_CONTEXT_TTL_SECONDS}`
+    );
   });
 });

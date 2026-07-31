@@ -383,7 +383,8 @@ describe("agent-cron daily-session contention policy", () => {
     phase: "lock-contention" as const,
     severity: "warn" as const,
     errorMessage: "Scheduled turn lock is already held",
-    ownerFireKey: `${identity.key}-prior-fire`,
+    ownerFireKey:
+      `schedule-fire#${SCHEDULE_ID}#2026-07-28T14:55:00.000Z`,
   }
   const fireClaim = {
     claimed: true as const,
@@ -398,7 +399,28 @@ describe("agent-cron daily-session contention policy", () => {
       failure: {
         ...contention,
         errorMessage:
-          "Scheduled fire was coalesced because its daily session is still active",
+          "Scheduled fire was coalesced because the same schedule is still active",
+      },
+    })
+  })
+
+  it("retries a different schedule sharing the owner workspace lock", () => {
+    const otherScheduleContention = {
+      ...contention,
+      ownerFireKey:
+        "schedule-fire#another-schedule#2026-07-28T14:55:00.000Z",
+    }
+
+    expect(
+      resolveScheduleLockContention(otherScheduleContention, fireClaim),
+    ).toEqual({
+      action: "retry",
+      fireClaim,
+      failure: {
+        ...otherScheduleContention,
+        severity: "error",
+        errorMessage:
+          "Owner workspace is active for another schedule; retrying this fire",
       },
     })
   })

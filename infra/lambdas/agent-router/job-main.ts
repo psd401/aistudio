@@ -13,8 +13,9 @@
  *   - JOB_PAYLOAD env var carries the job (see job-promotion.ts).
  *   - AGENTCORE_TIMEOUT_MS_OVERRIDE is set on the task definition so the
  *     undici dispatcher in index.ts outlives the 2h invocation.
- *   - The router pre-acquired the kind='job' session lock; this process
- *     renews it at startup and every 5 minutes, then releases it on exit.
+ *   - The router pre-acquired the kind='job' workspace lock; this process
+ *     renews it at startup/every 5 minutes and releases only after the image
+ *     explicitly confirms turn-final workspace persistence.
  *   - ALWAYS posts something to the originating space: the final answer,
  *     the harness's failure frame, or a runner-error message. No silent
  *     deaths.
@@ -27,6 +28,7 @@ import {
   JOB_DEADLINE_S,
   parseJobPayload,
   resolveJobInvocation,
+  resolveJobWorkspaceLockPlan,
 } from './job-promotion';
 import {
   createLogger,
@@ -36,6 +38,7 @@ import {
   releaseSessionLock,
   renewSessionLock,
   sendGoogleChatResponse,
+  tryAcquireSessionLock,
   writeScheduledRun,
 } from './index';
 import { recordScheduledJobTerminal } from './scheduled-run-telemetry';
@@ -44,9 +47,8 @@ import {
   sanitizeEmailForLog,
 } from './log-sanitization';
 
-// The renewed lease is 14 minutes. A five-minute cadence leaves enough margin
-// for one complete transient renewal failure: the next attempt occurs around
-// minute ten, before the existing lease can expire.
+// The renewed lease is 30 minutes. A five-minute cadence leaves substantial
+// margin for transient renewal failures and turn-final workspace persistence.
 const RENEW_INTERVAL_MS = 5 * 60 * 1000;
 type JobPayload = ReturnType<typeof parseJobPayload>;
 type AgentResult = Awaited<ReturnType<typeof invokeAgentCore>>;
@@ -56,7 +58,7 @@ type JobLogger = ReturnType<typeof createLogger>;
  * Best-effort lock release when JOB_PAYLOAD fails full validation (review,
  * #1147): the router pre-acquired the kind='job' lock BEFORE launching this
  * task, so bailing on a malformed payload without releasing would leave
- * users hearing "still working on your earlier task" until the 14-min TTL
+ * users hearing "still working on your earlier task" until the 30-min TTL
  * expires. sessionId/lockToken are extracted loosely — independent of the
  * rest of the payload being valid.
  */
@@ -67,11 +69,15 @@ async function releaseLockFromRawPayload(
   if (!raw) return;
   try {
     const loose = JSON.parse(raw) as Record<string, unknown>;
+    const lockSessionId =
+      typeof loose.workspaceLockId === 'string' && loose.workspaceLockId
+        ? loose.workspaceLockId
+        : loose.sessionId;
     if (
-      typeof loose.sessionId === 'string' && loose.sessionId &&
+      typeof lockSessionId === 'string' && lockSessionId &&
       typeof loose.lockToken === 'string' && loose.lockToken
     ) {
-      await releaseSessionLock(loose.sessionId, loose.lockToken, log);
+      await releaseSessionLock(lockSessionId, loose.lockToken, log);
       log.warn('Released job lock after payload validation failure');
     }
   } catch {
@@ -97,7 +103,7 @@ async function recordCompletedJobResult(
   await logTelemetry(
     {
       userId: job.userEmail,
-      sessionId: job.sessionId,
+      sessionId: job.conversationSessionId ?? job.sessionId,
       model: agentResult.model,
       inputTokens: agentResult.inputTokens,
       outputTokens: agentResult.outputTokens,
@@ -120,7 +126,7 @@ async function recordCompletedJobResult(
         source: 'router',
         severity: 'error',
         userId: job.userEmail,
-        sessionId: job.sessionId,
+        sessionId: job.conversationSessionId ?? job.sessionId,
         scheduleName: job.scheduleName,
         model: agentResult.model,
         errorClass: agentResult.errorClass ?? 'JobLegError',
@@ -140,7 +146,7 @@ async function recordCompletedJobResult(
       ...(deliveryFailed
         ? {
             errorMessage:
-              'Google Chat room post and private DM fallback both failed' +
+              'Google Chat delivery failed in the originating space/thread' +
               (agentResult.failed
                 ? ` after agent error: ${agentResult.response}`
                 : ''),
@@ -196,7 +202,7 @@ async function handleJobRunnerError(
         'Some steps may have already completed — ask me to check before ' +
         'retrying.',
       log,
-      jobChatDeliveryContext(job)
+      jobChatDeliveryContext(job, true)
     );
   } catch (sendError) {
     log.error('Failed to post job-error message to Chat', {
@@ -212,7 +218,7 @@ async function handleJobRunnerError(
       source: 'router',
       severity: 'error',
       userId: job.userEmail,
-      sessionId: job.sessionId,
+      sessionId: job.conversationSessionId ?? job.sessionId,
       scheduleName: job.scheduleName,
       errorClass: 'JobRunnerError',
       errorMessage: message,
@@ -235,31 +241,35 @@ async function handleJobRunnerError(
   return 1;
 }
 
+async function readJobPayload(log: JobLogger): Promise<JobPayload> {
+  const rawPayload = process.env.JOB_PAYLOAD;
+  try {
+    return parseJobPayload(rawPayload);
+  } catch (error) {
+    await releaseLockFromRawPayload(rawPayload, log);
+    throw error;
+  }
+}
+
 async function main(): Promise<number> {
   const log = createLogger({ service: 'agent-job-runner' });
 
   // A broken payload means there is no Chat destination to post to —
   // log loudly, release the pre-acquired lock if recoverable, and exit
   // nonzero (CloudWatch is the record).
-  let job: JobPayload;
-  try {
-    job = parseJobPayload(process.env.JOB_PAYLOAD);
-  } catch (error) {
-    await releaseLockFromRawPayload(process.env.JOB_PAYLOAD, log);
-    throw error;
-  }
+  const job = await readJobPayload(log);
 
-  // A context-overflow promotion must NOT resume the session it came from.
-  // AgentCore sticky-routes by session id, so resuming would hand this leg the
-  // exact transcript that outgrew the model window — it would re-overflow on
-  // the first model call, having spent a Fargate cold start to get there.
-  // Restart in a fresh session from the original request instead.
+  // A context-overflow promotion must NOT resume the OpenClaw conversation it
+  // came from: that transcript would re-overflow on the first model call.
+  // New payloads restart only the logical conversation and retain the
+  // owner-wide AgentCore runtime; legacy payloads still rotate both identities.
   //
-  // The lock stays on the ORIGINAL session id: that is what the router checks
-  // to answer "still working on your earlier task", and what cron acquired
-  // before launching this task.
+  // The lock stays on the deployment-stable owner workspace key: that is what
+  // every interactive, scheduled, and promoted turn checks before touching
+  // the shared durable filesystem.
   const {
     invokeSessionId,
+    conversationSessionId,
     prompt,
     restart: isRestart,
   } = resolveJobInvocation(job);
@@ -267,6 +277,7 @@ async function main(): Promise<number> {
   log.info('Background job started', {
     sessionId: job.sessionId,
     invokeSessionId,
+    conversationSessionId: conversationSessionId ?? 'legacy',
     reason: job.reason ?? 'deadline',
     restart: isRestart,
     userEmail: sanitizeEmailForLog(job.userEmail),
@@ -275,6 +286,9 @@ async function main(): Promise<number> {
   });
 
   const startTime = Date.now();
+  const lockPlan = resolveJobWorkspaceLockPlan(job);
+  let bridgeLockToken: string | null = null;
+  let workspaceFinalizationConfirmed = false;
   let renewTimer: ReturnType<typeof setInterval> | undefined;
   try {
     // The inherited lease started before RunTask, so Fargate startup already
@@ -282,7 +296,7 @@ async function main(): Promise<number> {
     // cadence; otherwise a slow start plus one missed interval can expose the
     // session before the second attempt.
     const ownsLock = await renewSessionLock(
-      job.sessionId,
+      lockPlan.inheritedLockId,
       job.lockToken,
       log,
       true,
@@ -292,8 +306,35 @@ async function main(): Promise<number> {
         'Background job lost its session lock before execution',
       );
     }
+    if (lockPlan.bridgeLockId) {
+      bridgeLockToken = await tryAcquireSessionLock(
+        lockPlan.bridgeLockId,
+        log,
+        'job',
+      );
+      if (!bridgeLockToken) {
+        throw new Error(
+          'Background job could not acquire the stable workspace lock',
+        );
+      }
+      log.info('Legacy job acquired stable workspace lock bridge', {
+        inheritedLockId: lockPlan.inheritedLockId,
+        bridgeLockId: lockPlan.bridgeLockId,
+      });
+    }
     renewTimer = setInterval(() => {
-      void renewSessionLock(job.sessionId, job.lockToken, log);
+      void renewSessionLock(
+        lockPlan.inheritedLockId,
+        job.lockToken,
+        log,
+      );
+      if (lockPlan.bridgeLockId && bridgeLockToken) {
+        void renewSessionLock(
+          lockPlan.bridgeLockId,
+          bridgeLockToken,
+          log,
+        );
+      }
     }, RENEW_INTERVAL_MS);
 
     const agentResult = await invokeAgentCore(
@@ -304,11 +345,14 @@ async function main(): Promise<number> {
       {
         displayName: job.displayName,
         workspacePrefix: job.workspacePrefix,
+        ...(conversationSessionId ? { conversationSessionId } : {}),
         ...jobAgentAudienceContext(job),
         deadlineS: JOB_DEADLINE_S,
         runtimeIdOverride: job.runtimeId,
       }
     );
+    workspaceFinalizationConfirmed =
+      agentResult.workspaceFinalizationConfirmed === true;
 
     // Deliver exactly like the router's Step 6: truncate the raw response,
     // then prefix in shared spaces. A failed turn's response is already the
@@ -318,7 +362,7 @@ async function main(): Promise<number> {
       job.threadName,
       formatJobChatResponse(job, agentResult.response),
       log,
-      jobChatDeliveryContext(job)
+      jobChatDeliveryContext(job, true)
     );
 
     const latencyMs =
@@ -339,7 +383,28 @@ async function main(): Promise<number> {
     return exitCode;
   } finally {
     if (renewTimer) clearInterval(renewTimer);
-    await releaseSessionLock(job.sessionId, job.lockToken, log);
+    if (workspaceFinalizationConfirmed) {
+      await releaseSessionLock(
+        lockPlan.inheritedLockId,
+        job.lockToken,
+        log,
+      );
+      if (lockPlan.bridgeLockId && bridgeLockToken) {
+        await releaseSessionLock(
+          lockPlan.bridgeLockId,
+          bridgeLockToken,
+          log,
+        );
+      }
+    } else {
+      log.warn(
+        'Retaining background workspace lock after unconfirmed finalization',
+        {
+          inheritedLockId: lockPlan.inheritedLockId,
+          bridgeLockId: lockPlan.bridgeLockId,
+        },
+      );
+    }
   }
 }
 

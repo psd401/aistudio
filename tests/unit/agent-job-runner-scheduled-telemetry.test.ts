@@ -53,6 +53,33 @@ describe("promoted scheduled-run terminal telemetry", () => {
     })
   })
 
+  it("records the schedule transcript instead of runtime affinity", async () => {
+    const writer = jest.fn().mockResolvedValue(undefined)
+    const conversationSessionId =
+      "workspace-sched-36bb0456-2026-07-28"
+
+    await recordScheduledJobTerminal(
+      {
+        ...scheduledJob,
+        sessionId:
+          "agent-runtime-b08ac1084c116c38a63301096938e92e-build",
+        conversationSessionId,
+      },
+      {
+        status: "success",
+        inputTokens: 1,
+        outputTokens: 2,
+        latencyMs: 3,
+      },
+      writer,
+      logger(),
+    )
+
+    expect(writer).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: conversationSessionId }),
+    )
+  })
+
   it("persists the terminal result by promoted primary key", () => {
     expect(routerSource).toContain(
       "WHERE id = CAST(${params.scheduledRunId} AS bigint)",

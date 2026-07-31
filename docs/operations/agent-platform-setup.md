@@ -92,12 +92,11 @@ action in a multi-user space. There are two control planes to check:
    identities. Do not allow the app for Students or broaden it to the top-level
    organization without an explicit district policy decision. Google documents
    that an app allowed on a child OU but not its parent can be rejected in
-   shared spaces. The router handles that intentional least-privilege
-   configuration by recording the room-post 403 and delivering the completed
-   response privately to the human sender instead. The current Marketplace
-   allowlist limits those senders to the intended OUs. The unpublished **PSD
-   Agent Dev** app does not appear in the Marketplace allowlist; Google permits
-   an unpublished development app for up to five named testers while Chat apps
+   shared spaces. The router records a room-post 403 and retries the completed
+   response against the exact originating space and thread; it never reroutes
+   a shared-space answer into a private DM. The unpublished **PSD Agent Dev**
+   app does not appear in the Marketplace allowlist; Google permits an
+   unpublished development app for up to five named testers while Chat apps
    are enabled.
 3. Configure the two apps separately in **GCP Console** → **Google Chat API** →
    **Configuration**:
@@ -119,15 +118,12 @@ action in a multi-user space. There are two control planes to check:
    - A `403` stating that the organization's administrator restricts the Chat
      app is expected when the app is deliberately allowed only for Staff at a
      child OU and Google rejects app-authenticated shared-space operations.
-     Confirm that the router records `ChatPostPermissionDenied` and sends the
-     completed response to the human sender's existing DM with the policy
-     notice. The router is identity-aware, not OU-aware; the Marketplace
-     allowlist is what limits the current audience to Staff. Do not broaden the
-     app to Students to make this probe return 200.
+     Confirm that the router records `ChatPostPermissionDenied` and retries the
+     same completed response in the same room thread. It must never look up or
+     post to the sender's DM.
 
-   Then @mention the app and confirm either the room-thread reply (when policy
-   permits it) or the private DM fallback (under the Staff-only child-OU
-   policy).
+   Then @mention the app and confirm the response appears only in the exact
+   room thread where the mention originated.
 
 These settings are console-managed. The Google Cloud CLI has no `gcloud chat`
 command, and `gcloud workspace-add-ons deployments` manages add-on deployments,
@@ -142,9 +138,9 @@ There are two distinct identities that can post to Chat:
 
 - The **Chat app service account** receives mentions and posts router replies
   with the `chat.bot` scope. Workspace app policy can restrict this identity
-  in spaces even while its DMs to allowed users work. The router's 403 fallback
-  is also sent by this Chat app identity. The router does not inspect OU
-  membership; the Marketplace allowlist enforces the Staff-only audience.
+  in spaces even while its DMs to allowed users work. The router never changes
+  the destination on delivery failure: room replies stay bound to their
+  originating room and thread.
 - The per-user **`agnt_...` Workspace account** is a real delegated user used
   by the `psd-workspace` skill (`--scope agent`). OneSync places these accounts
   in **`/Miscellaneous/Agent Account`**, which has its own explicit
@@ -311,11 +307,10 @@ psql $DATABASE_URL -c "SELECT * FROM agent_sessions ORDER BY created_at DESC LIM
    - `agent_sessions` table has a new/updated row
 5. In a multi-user test space, @mention the agent in an existing thread and
    verify:
-   - When the Chat app may post to the room, the reply appears in the mention's
-     thread, not as a new top-level message.
-   - Under the intentional Staff-only child-OU policy, a room-post 403 produces
-     one private DM fallback to the human sender with the policy notice and does
-     not rerun the completed agent turn.
+   - The reply appears in the mention's exact thread, not as a new top-level
+     message or a private DM.
+   - A room-post failure queues the completed response for idempotent retry
+     against that same room and thread without rerunning the agent turn.
    - A shared-space request does not volunteer private memory content.
    - Before reading or summarizing the caller's Gmail, Calendar, or Drive, the
      agent asks for confirmation that the result may be shared publicly.
@@ -358,6 +353,463 @@ psql $DATABASE_URL -c "SELECT * FROM agent_sessions ORDER BY created_at DESC LIM
 
 To update the agent (new model config, system prompt changes, etc.):
 
+#### Dev workspace-generation cutover
+
+Releases that change `lib/agent-workspace/storage-broker.ts`, migration 169, or
+the agent image's `workspace_sync.py` require a paused, same-commit cutover.
+Do **not** deploy the image or storage broker into a live mixed-version fleet.
+AgentCore keeps existing sessions on the image version with which their
+microVM was created, so rotating `AGENT_BUILD_TAG` prevents new calls from
+reusing an old microVM but does not terminate that old writer.
+
+The hard cutover below deliberately removes and recreates only the
+CloudFormation-managed AgentCore Runtime. The workspace bucket and every
+object version remain in place. It also preserves the enabled/disabled state
+of each user schedule and lets Chat messages wait in SQS while the Router
+mapping is disabled.
+
+Build, canary-test, and push the exact-commit image before the maintenance
+window. The build gate signs its probe with an empty workspace prefix and
+omits `workspace_prefix` from the canary payload; the wrapper's hydrate and
+flush paths therefore remain disabled. The probe runs in a short-lived local
+container and cannot read or mutate a persistent user workspace. Pushing the
+immutable ECR artifact does not update AgentCore.
+
+```bash
+set -euo pipefail
+
+git diff --quiet
+git diff --cached --quiet
+test -z "$(git status --porcelain --untracked-files=all)"
+
+export AWS_REGION=us-east-1
+export EXPECTED_AWS_ACCOUNT=390844780692
+export ENVIRONMENT=dev
+export AGENT_IMAGE_TAG="workspace-generation-$(date -u +%Y%m%dT%H%M%SZ)"
+test "$(aws sts get-caller-identity \
+  --query Account \
+  --output text)" = "$EXPECTED_AWS_ACCOUNT"
+cd infra/agent-image
+./build-and-push.sh "$AGENT_IMAGE_TAG"
+export AGENT_IMAGE_DIGEST="$(aws ecr describe-images \
+  --region "$AWS_REGION" \
+  --repository-name psd-agent-base-dev \
+  --image-ids imageTag="$AGENT_IMAGE_TAG" \
+  --query 'imageDetails[0].imageDigest' \
+  --output text)"
+test -n "$AGENT_IMAGE_DIGEST"
+test "$AGENT_IMAGE_DIGEST" != "None"
+cd ../..
+printf 'AGENT_IMAGE_TAG=%s\nAGENT_IMAGE_DIGEST=%s\n' \
+  "$AGENT_IMAGE_TAG" "$AGENT_IMAGE_DIGEST"
+```
+
+Record the printed values. Run maintenance steps 1-6 from one shell on that
+same clean commit, exporting the recorded tag and digest first if it is a new
+shell. `jq`, Bun, Docker, and authenticated AWS/CDK CLIs are required. Do not
+run the AgentCore deployment command printed by `build-and-push.sh` until
+step 5.
+
+##### 1. Pause every persistent-workspace invocation source
+
+```bash
+set -euo pipefail
+
+export AWS_REGION=us-east-1
+export EXPECTED_AWS_ACCOUNT=390844780692
+export CUTOVER_ENV=dev
+export BASE_DOMAIN=aistudio.psd401.ai
+export AGENT_STACK=AIStudio-AgentPlatformStack-Dev
+export DATABASE_STACK=AIStudio-DatabaseStack-Dev
+export FRONTEND_STACK=AIStudio-FrontendStack-ECS-Dev
+export SCHEDULE_GROUP=psd-agent-dev
+export JOB_CLUSTER=psd-agent-jobs-dev
+export ROUTER_FUNCTION=psd-agent-router-dev
+export CRON_FUNCTION=psd-agent-cron-dev
+export CUTOVER_DIR
+CUTOVER_DIR="$(mktemp -d /tmp/psd-agent-dev-cutover.XXXXXX)"
+
+: "${AGENT_IMAGE_TAG:?export the prebuilt candidate tag}"
+: "${AGENT_IMAGE_DIGEST:?export the prebuilt candidate digest}"
+
+git diff --quiet
+git diff --cached --quiet
+test -z "$(git status --porcelain --untracked-files=all)"
+test "$(aws sts get-caller-identity \
+  --query Account \
+  --output text)" = "$EXPECTED_AWS_ACCOUNT"
+test "$(aws ecr describe-images \
+  --region "$AWS_REGION" \
+  --repository-name psd-agent-base-dev \
+  --image-ids imageTag="$AGENT_IMAGE_TAG" \
+  --query 'imageDetails[0].imageDigest' \
+  --output text)" = "$AGENT_IMAGE_DIGEST"
+
+OLD_RUNTIME_ID="$(aws cloudformation describe-stacks \
+  --stack-name "$AGENT_STACK" \
+  --query "Stacks[0].Outputs[?OutputKey=='AgentCoreRuntimeId'].OutputValue | [0]" \
+  --output text)"
+test -n "$OLD_RUNTIME_ID"
+test "$OLD_RUNTIME_ID" != "None"
+printf '%s\n' "$OLD_RUNTIME_ID" > "$CUTOVER_DIR/old-runtime-id"
+
+ROUTER_ESM_UUID="$(aws lambda list-event-source-mappings \
+  --function-name "$ROUTER_FUNCTION" \
+  --query 'EventSourceMappings[0].UUID' \
+  --output text)"
+ROUTER_ESM_COUNT="$(aws lambda list-event-source-mappings \
+  --function-name "$ROUTER_FUNCTION" \
+  --query 'length(EventSourceMappings)' \
+  --output text)"
+test "$ROUTER_ESM_COUNT" = "1"
+test -n "$ROUTER_ESM_UUID"
+test "$ROUTER_ESM_UUID" != "None"
+
+CRON_ESM_UUID="$(aws lambda list-event-source-mappings \
+  --function-name "$CRON_FUNCTION" \
+  --query 'EventSourceMappings[0].UUID' \
+  --output text)"
+CRON_ESM_COUNT="$(aws lambda list-event-source-mappings \
+  --function-name "$CRON_FUNCTION" \
+  --query 'length(EventSourceMappings)' \
+  --output text)"
+test "$CRON_ESM_COUNT" = "1"
+test -n "$CRON_ESM_UUID"
+test "$CRON_ESM_UUID" != "None"
+
+ROUTER_ESM_WAS_ENABLED="$(aws lambda get-event-source-mapping \
+  --uuid "$ROUTER_ESM_UUID" --query State --output text)"
+CRON_ESM_WAS_ENABLED="$(aws lambda get-event-source-mapping \
+  --uuid "$CRON_ESM_UUID" --query State --output text)"
+printf '%s\n' "$ROUTER_ESM_WAS_ENABLED" > "$CUTOVER_DIR/router-esm-state"
+printf '%s\n' "$CRON_ESM_WAS_ENABLED" > "$CUTOVER_DIR/cron-esm-state"
+
+if [ "$ROUTER_ESM_WAS_ENABLED" = "Enabled" ]; then
+  aws lambda update-event-source-mapping \
+    --uuid "$ROUTER_ESM_UUID" --no-enabled >/dev/null
+fi
+if [ "$CRON_ESM_WAS_ENABLED" = "Enabled" ]; then
+  aws lambda update-event-source-mapping \
+    --uuid "$CRON_ESM_UUID" --no-enabled >/dev/null
+fi
+
+while [ "$(aws lambda get-event-source-mapping \
+  --uuid "$ROUTER_ESM_UUID" --query State --output text)" != "Disabled" ]; do
+  sleep 5
+done
+while [ "$(aws lambda get-event-source-mapping \
+  --uuid "$CRON_ESM_UUID" --query State --output text)" != "Disabled" ]; do
+  sleep 5
+done
+```
+
+The Router has exactly one SQS mapping
+(`psd-agent-router-dev`), and Cron has exactly one reconciliation mapping
+(`psd-agent-cron-reconciliation-dev`). The count assertions intentionally
+abort if that topology changes instead of pausing an arbitrary mapping.
+
+Save and disable only schedules that were enabled when the cutover began:
+
+```bash
+: > "$CUTOVER_DIR/enabled-schedules"
+
+list_enabled_agent_schedules() {
+  aws scheduler list-schedules \
+    --group-name "$SCHEDULE_GROUP" \
+    --state ENABLED \
+    --query 'Schedules[].Name' \
+    --output text |
+    tr '\t' '\n' |
+    sed '/^$/d'
+}
+
+set_agent_schedule_state() {
+  schedule_name="$1"
+  schedule_state="$2"
+  aws scheduler get-schedule \
+    --group-name "$SCHEDULE_GROUP" \
+    --name "$schedule_name" \
+    --output json > "$CUTOVER_DIR/schedule-current.json"
+  jq --arg state "$schedule_state" \
+    'del(.Arn, .CreationDate, .LastModificationDate) | .State = $state' \
+    "$CUTOVER_DIR/schedule-current.json" \
+    > "$CUTOVER_DIR/schedule-update.json"
+  aws scheduler update-schedule \
+    --cli-input-json "file://$CUTOVER_DIR/schedule-update.json" >/dev/null
+  test "$(aws scheduler get-schedule \
+    --group-name "$SCHEDULE_GROUP" \
+    --name "$schedule_name" \
+    --query State \
+    --output text)" = "$schedule_state"
+}
+
+disable_enabled_agent_schedules() {
+  list_enabled_agent_schedules > "$CUTOVER_DIR/enabled-now"
+  while IFS= read -r schedule_name; do
+    [ -n "$schedule_name" ] || continue
+    if ! grep -Fqx "$schedule_name" "$CUTOVER_DIR/enabled-schedules"; then
+      printf '%s\n' "$schedule_name" >> "$CUTOVER_DIR/enabled-schedules"
+    fi
+    set_agent_schedule_state "$schedule_name" DISABLED
+  done < "$CUTOVER_DIR/enabled-now"
+  sort -u "$CUTOVER_DIR/enabled-schedules" \
+    -o "$CUTOVER_DIR/enabled-schedules"
+}
+
+disable_enabled_agent_schedules
+test -z "$(list_enabled_agent_schedules)"
+```
+
+##### 2. Drain in-flight old-image work
+
+Disabling an event source prevents new Lambda invocations but does not cancel
+one already running. Router and Cron each have a 15-minute timeout. Wait a
+full 16 minutes, then wait for every on-demand two-hour job-runner task to
+finish naturally. Do not use `ecs stop-task`: killing a task can interrupt its
+normal turn-final workspace checkpoint.
+
+```bash
+sleep 960
+
+while [ "$(aws ecs list-tasks \
+  --cluster "$JOB_CLUSTER" \
+  --desired-status RUNNING \
+  --query 'length(taskArns)' \
+  --output text)" != "0" ]; do
+  sleep 30
+done
+
+# A turn that was already active could have created a schedule while the first
+# snapshot was being disabled. Capture that state, disable it, and give any
+# resulting Cron invocation one final full drain window.
+disable_enabled_agent_schedules
+sleep 960
+
+while [ "$(aws ecs list-tasks \
+  --cluster "$JOB_CLUSTER" \
+  --desired-status RUNNING \
+  --query 'length(taskArns)' \
+  --output text)" != "0" ]; do
+  sleep 30
+done
+
+disable_enabled_agent_schedules
+test -z "$(list_enabled_agent_schedules)"
+```
+
+If the final assertion finds another enabled schedule, repeat the second
+16-minute drain window before continuing. At this point there are no new
+Router, scheduled, reconciliation, or promoted-job writers.
+
+##### 3. Remove the old runtime before changing the broker
+
+There is no list-all-runtime-sessions API that can prove every sticky microVM
+from every prior image version is gone. Deploying the AgentPlatform template
+once **without** image context removes the Runtime through CloudFormation,
+which terminates all of those sessions while leaving the S3 workspace bucket
+untouched. `--exclusively` is load-bearing: without it, CDK may include stack
+dependencies and destroy the required deployment order.
+
+```bash
+cd infra
+REMOVE_RUNTIME_ASSEMBLY="$CUTOVER_DIR/cdk-remove-runtime"
+bunx cdk synth "$AGENT_STACK" \
+  --exclusively \
+  --quiet \
+  --output "$REMOVE_RUNTIME_ASSEMBLY" \
+  --context baseDomain="$BASE_DOMAIN"
+test "$(jq \
+  '[.Resources[] | select(.Type == "AWS::BedrockAgentCore::Runtime")] | length' \
+  "$REMOVE_RUNTIME_ASSEMBLY/$AGENT_STACK.template.json")" = "0"
+bunx cdk deploy "$AGENT_STACK" \
+  --exclusively \
+  --context baseDomain="$BASE_DOMAIN"
+
+OLD_RUNTIME_ID="$(cat "$CUTOVER_DIR/old-runtime-id")"
+test "$(aws bedrock-agentcore-control list-agent-runtimes \
+  --query "length(agentRuntimes[?agentRuntimeId=='$OLD_RUNTIME_ID'])" \
+  --output text)" = "0"
+test "$(aws cloudformation describe-stacks \
+  --stack-name "$AGENT_STACK" \
+  --query "length(Stacks[0].Outputs[?OutputKey=='AgentCoreRuntimeId'])" \
+  --output text)" = "0"
+```
+
+Do not proceed if either assertion fails. A failed deletion means an old image
+may still write during its shutdown path.
+
+##### 4. Apply migration 169, then deploy the storage broker
+
+Migration `169-workspace-upload-zero-byte-files.sql` changes the upload
+reservation constraint from `expected_bytes > 0` to `expected_bytes >= 0`.
+It must be applied from the same commit before the new broker can reserve an
+empty regular file.
+
+```bash
+bunx cdk synth "$DATABASE_STACK" \
+  --exclusively \
+  --context baseDomain="$BASE_DOMAIN"
+bunx cdk deploy "$DATABASE_STACK" \
+  --exclusively \
+  --context baseDomain="$BASE_DOMAIN"
+
+DB_CLUSTER_ARN="$(aws ssm get-parameter \
+  --name /aistudio/dev/db-cluster-arn \
+  --query Parameter.Value \
+  --output text)"
+DB_SECRET_ARN="$(aws ssm get-parameter \
+  --name /aistudio/dev/db-secret-arn \
+  --query Parameter.Value \
+  --output text)"
+test "$(aws rds-data execute-statement \
+  --resource-arn "$DB_CLUSTER_ARN" \
+  --secret-arn "$DB_SECRET_ARN" \
+  --database aistudio \
+  --sql "SELECT status FROM migration_log WHERE description = '169-workspace-upload-zero-byte-files.sql' ORDER BY step_number DESC LIMIT 1" \
+  --query 'records[0][0].stringValue' \
+  --output text)" = "completed"
+
+bunx cdk synth "$FRONTEND_STACK" \
+  --exclusively \
+  --context baseDomain="$BASE_DOMAIN"
+bunx cdk deploy "$FRONTEND_STACK" \
+  --exclusively \
+  --context baseDomain="$BASE_DOMAIN"
+aws ecs wait services-stable \
+  --cluster aistudio-dev \
+  --services aistudio-dev
+```
+
+The exact-commit image is already present in ECR. Do not deploy or invoke it
+until the migration assertion and ECS steady-state wait both succeed.
+
+##### 5. Verify the prebuilt image, then recreate AgentCore
+
+```bash
+cd agent-image
+DISCOVERED_IMAGE_DIGEST="$(aws ecr describe-images \
+  --repository-name psd-agent-base-dev \
+  --image-ids imageTag="$AGENT_IMAGE_TAG" \
+  --query 'imageDetails[0].imageDigest' \
+  --output text)"
+test -n "$DISCOVERED_IMAGE_DIGEST"
+test "$DISCOVERED_IMAGE_DIGEST" != "None"
+if [ -n "${AGENT_IMAGE_DIGEST:-}" ]; then
+  test "$AGENT_IMAGE_DIGEST" = "$DISCOVERED_IMAGE_DIGEST"
+else
+  export AGENT_IMAGE_DIGEST="$DISCOVERED_IMAGE_DIGEST"
+fi
+
+SOURCE_COMMIT="$(git -C ../.. rev-parse HEAD)"
+ECR_URI="$(aws cloudformation describe-stacks \
+  --stack-name "$AGENT_STACK" \
+  --query "Stacks[0].Outputs[?OutputKey=='ECRRepositoryUri'].OutputValue" \
+  --output text)"
+if ! docker image inspect "$ECR_URI:$AGENT_IMAGE_TAG" >/dev/null 2>&1; then
+  ECR_REGISTRY="${ECR_URI%%/*}"
+  aws ecr get-login-password |
+    docker login --username AWS --password-stdin "$ECR_REGISTRY"
+  docker pull "$ECR_URI:$AGENT_IMAGE_TAG"
+fi
+test "$(docker image inspect "$ECR_URI:$AGENT_IMAGE_TAG" \
+  --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" \
+  = "$SOURCE_COMMIT"
+
+cd ..
+NEW_RUNTIME_ASSEMBLY="$CUTOVER_DIR/cdk-new-runtime"
+bunx cdk synth "$AGENT_STACK" \
+  --exclusively \
+  --quiet \
+  --output "$NEW_RUNTIME_ASSEMBLY" \
+  --context baseDomain="$BASE_DOMAIN" \
+  --context agentImageTag="$AGENT_IMAGE_TAG" \
+  --context agentImageDigest="$AGENT_IMAGE_DIGEST"
+test "$(jq \
+  '[.Resources[] | select(.Type == "AWS::BedrockAgentCore::Runtime")] | length' \
+  "$NEW_RUNTIME_ASSEMBLY/$AGENT_STACK.template.json")" = "1"
+grep -Fq "$AGENT_IMAGE_DIGEST" \
+  "$NEW_RUNTIME_ASSEMBLY/$AGENT_STACK.template.json"
+bunx cdk deploy "$AGENT_STACK" \
+  --exclusively \
+  --context baseDomain="$BASE_DOMAIN" \
+  --context agentImageTag="$AGENT_IMAGE_TAG" \
+  --context agentImageDigest="$AGENT_IMAGE_DIGEST"
+
+NEW_RUNTIME_ID="$(aws cloudformation describe-stacks \
+  --stack-name "$AGENT_STACK" \
+  --query "Stacks[0].Outputs[?OutputKey=='AgentCoreRuntimeId'].OutputValue | [0]" \
+  --output text)"
+test -n "$NEW_RUNTIME_ID"
+test "$NEW_RUNTIME_ID" != "None"
+test "$NEW_RUNTIME_ID" != "$OLD_RUNTIME_ID"
+test "$(aws bedrock-agentcore-control get-agent-runtime \
+  --agent-runtime-id "$NEW_RUNTIME_ID" \
+  --query status \
+  --output text)" = "READY"
+```
+
+The digest assertion prevents a mutable-tag deployment. Keep all sources
+paused if the Runtime is not `READY`.
+
+##### 6. Resume exactly the sources that were enabled
+
+Rediscover event-source UUIDs after the AgentPlatform deployment instead of
+assuming CloudFormation retained the old physical mappings:
+
+```bash
+ROUTER_ESM_UUID="$(aws lambda list-event-source-mappings \
+  --function-name "$ROUTER_FUNCTION" \
+  --query 'EventSourceMappings[0].UUID' \
+  --output text)"
+CRON_ESM_UUID="$(aws lambda list-event-source-mappings \
+  --function-name "$CRON_FUNCTION" \
+  --query 'EventSourceMappings[0].UUID' \
+  --output text)"
+test "$(aws lambda list-event-source-mappings \
+  --function-name "$ROUTER_FUNCTION" \
+  --query 'length(EventSourceMappings)' \
+  --output text)" = "1"
+test "$(aws lambda list-event-source-mappings \
+  --function-name "$CRON_FUNCTION" \
+  --query 'length(EventSourceMappings)' \
+  --output text)" = "1"
+
+if [ "$(cat "$CUTOVER_DIR/cron-esm-state")" = "Enabled" ]; then
+  aws lambda update-event-source-mapping \
+    --uuid "$CRON_ESM_UUID" --enabled >/dev/null
+  while [ "$(aws lambda get-event-source-mapping \
+    --uuid "$CRON_ESM_UUID" --query State --output text)" != "Enabled" ]; do
+    sleep 5
+  done
+fi
+
+while IFS= read -r schedule_name; do
+  [ -n "$schedule_name" ] || continue
+  set_agent_schedule_state "$schedule_name" ENABLED
+done < "$CUTOVER_DIR/enabled-schedules"
+
+if [ "$(cat "$CUTOVER_DIR/router-esm-state")" = "Enabled" ]; then
+  aws lambda update-event-source-mapping \
+    --uuid "$ROUTER_ESM_UUID" --enabled >/dev/null
+  while [ "$(aws lambda get-event-source-mapping \
+    --uuid "$ROUTER_ESM_UUID" --query State --output text)" != "Enabled" ]; do
+    sleep 5
+  done
+fi
+```
+
+Resume Cron and user schedules before the Router so queued Chat work cannot
+overtake a scheduled workspace writer. After the mappings report `Enabled`,
+send one DM and one threaded-space message, then verify both exact-destination
+replies and a successful `workspace_finalization_confirmed` marker before
+ending the maintenance window. If any step fails, leave the sources paused;
+SQS retains Router messages for four days and reconciliation messages for two.
+
+#### Image-only update
+
+For an image-only update that does not change the storage broker, its database
+contract, or `workspace_sync.py`:
+
 ```bash
 cd infra/agent-image
 # Edit Dockerfile, openclaw.json, psd-system-prompt.md as needed
@@ -365,10 +817,12 @@ cd infra/agent-image
 # docs/operations/agent-image-build-gate.md
 ./build-and-push.sh 2026-04-17-update-models
 
-# Redeploy with new image tag
+# Read the immutable digest printed by the script, then redeploy.
 cd ../
 bunx cdk deploy AIStudio-AgentPlatformStack-Dev \
+  --exclusively \
   --context agentImageTag=2026-04-17-update-models \
+  --context agentImageDigest=sha256:<digest-from-build-script> \
   --context baseDomain=yourdomain.com
 ```
 
@@ -595,9 +1049,9 @@ intent text.
 | Lambda timeout | AgentCore Runtime not deployed | Deploy with `--context agentImageTag=<tag>` |
 | "Google credentials secret contains invalid JSON" | Secret not populated | Run `aws secretsmanager put-secret-value` from step 2.2 |
 | "Database not configured, skipping telemetry" | DATABASE_HOST not set | Check Lambda env vars in CloudWatch |
-| Mention in a space gets no room reply; Router logs `403 "This organization's administrator restricts this Chat app from performing this action"` | The app is intentionally allowed only for Staff at a child OU, and Google blocks its `chat.bot` identity in the shared space | Do not broaden the app to Students. Confirm `ChatPostPermissionDenied` telemetry and the private DM fallback described in step 1.7. The separate `agnt_...` Workspace user's ability to post is unrelated. |
+| Mention in a space gets no room reply; Router logs a `403` | Google Chat rejected the app's post to the originating space/thread | Confirm `ChatPostPermissionDenied` telemetry and the exact-destination delivery retry. The router will not send the answer to a DM. |
 | Guardrail blocks everything | GUARDRAIL_FAIL_OPEN=false + guardrail misconfigured | Check guardrail rules in Bedrock console |
 | `web_search` reports `disabled or no provider available` | `parallel-free` is not selected or its pinned plugin is missing | Run `check_config_consistency.py`, rebuild the agent image, and run the `web-search-available` L2 task |
-| DLQ alarm firing | Messages failing after 3 retries | Check CloudWatch logs for Router Lambda errors |
+| DLQ alarm firing | Messages exhausted the Router retry budget | Check CloudWatch logs for Router Lambda errors and repeated workspace contention |
 | Pub/Sub push fails to SQS | SQS requires signed requests | Add API Gateway → SQS proxy in front of the queue |
 | Migration 065 failed | PL/pgSQL not compatible with RDS Data API | Fixed — redeploy DatabaseStack to retry |
