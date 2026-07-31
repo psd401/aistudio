@@ -140,6 +140,19 @@
   max-width: 95vw;
   border-radius: 16px;
 }
+/* Size scale for dialogs that need more than the 520px default but should NOT
+ * become full-viewport `wide` dialogs. `data-wide-mode` is not usable for this:
+ * it is owned by DialogContent's `wide` prop and pairs with inline 95vw/90vh
+ * styles, so setting the attribute by hand desyncs CSS from those styles.
+ * Applies to both token layers so Atrium and app dialogs stay the same size. */
+.mer-portal[data-slot="dialog-content"][data-mer-size="wide"],
+.app-mer-portal[data-slot="dialog-content"][data-mer-size="wide"] {
+  max-width: min(680px, calc(100vw - 32px));
+}
+.mer-portal[data-slot="dialog-content"][data-mer-size="xwide"],
+.app-mer-portal[data-slot="dialog-content"][data-mer-size="xwide"] {
+  max-width: min(1024px, calc(100vw - 32px));
+}
 /* Meridian dialog title/description type + close affordance. */
 .mer-portal[data-slot="dialog-content"] [data-slot="dialog-title"],
 .app-mer-portal[data-slot="dialog-content"] [data-slot="dialog-title"] {

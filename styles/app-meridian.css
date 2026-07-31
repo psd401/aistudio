@@ -230,12 +230,8 @@
   box-shadow: var(--mer-shadow-sheet);
 }
 
-/* The repositories picker carries genuinely wide rows (name + status badges +
- * provenance line). The shared 520px cap crushes them, so this surface opts
- * into a wider sheet without reaching for Atrium's 95vw wide-mode. */
-.app-mer-portal[data-slot="dialog-content"][data-mer-size="wide"] {
-  max-width: min(680px, calc(100vw - 32px));
-}
+/* The `data-mer-size` scale lives in atrium-meridian.css alongside the other
+ * shared portal rules, so Atrium and the app get identical dialog widths. */
 
 /*
  * Clickable card. Meridian deliberately has no `.mer-card:hover` — its cards are
