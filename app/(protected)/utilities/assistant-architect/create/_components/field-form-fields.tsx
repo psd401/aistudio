@@ -18,6 +18,7 @@ import {
   SelectValue
 } from "@/components/ui/select"
 import type { Control, ControllerRenderProps } from "react-hook-form"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface FormValues {
   name: string
@@ -109,7 +110,7 @@ function FieldTypeFieldContent({
             <SelectValue placeholder="Select type" />
           </SelectTrigger>
         </FormControl>
-        <SelectContent>
+        <SelectContent className={meridianPortalClassName}>
           <SelectItem value="short_text">Short Text</SelectItem>
           <SelectItem value="long_text">Long Text</SelectItem>
           <SelectItem value="select">Single Select</SelectItem>

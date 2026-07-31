@@ -15,27 +15,38 @@ interface AssistantCardProps {
   isHydrated?: boolean
 }
 
-// Category colors matching the dashboard design
+/**
+ * Category colours, on Meridian tokens.
+ *
+ * These are NOT decoration — they encode the assistant's category, so unlike
+ * the dashboard's old four-colour accent rainbow (deleted outright) the
+ * differentiation is worth keeping. What changed is where the colours come
+ * from: the previous hexes (#6B9E78 / #7B68A6 / #E8927C) were copied from the
+ * dashboard design that no longer exists, so they matched nothing.
+ *
+ * Violet is deliberately absent. In Meridian it means AI-agent presence and
+ * nothing else, so it cannot be spent on a category.
+ */
 const CATEGORY_COLORS: Record<CatalogAssistant['category'], { bg: string; text: string; icon: string }> = {
   pedagogical: {
-    bg: 'bg-[#6B9E78]/15',
-    text: 'text-[#6B9E78]',
-    icon: '#6B9E78'
+    bg: 'bg-[var(--mer-human-you)]/12',
+    text: 'text-[var(--mer-human-you)]',
+    icon: 'var(--mer-human-you)'
   },
   operational: {
-    bg: 'bg-[#7B68A6]/15',
-    text: 'text-[#7B68A6]',
-    icon: '#7B68A6'
+    bg: 'bg-[var(--mer-brand-mid)]/12',
+    text: 'text-[var(--mer-brand-mid)]',
+    icon: 'var(--mer-brand-mid)'
   },
   communications: {
-    bg: 'bg-[#E8927C]/15',
-    text: 'text-[#E8927C]',
-    icon: '#E8927C'
+    bg: 'bg-[var(--mer-human-other-1)]/12',
+    text: 'text-[var(--mer-human-other-1)]',
+    icon: 'var(--mer-human-other-1)'
   },
   other: {
-    bg: 'bg-[var(--brand-primary)]/10',
-    text: 'text-[var(--brand-primary)]',
-    icon: 'var(--brand-primary)'
+    bg: 'bg-[var(--mer-brand-tint)]',
+    text: 'text-[var(--mer-brand)]',
+    icon: 'var(--mer-brand)'
   }
 }
 
@@ -76,7 +87,7 @@ function AssistantCardComponent({ assistant, isHydrated = false }: AssistantCard
     <Card
       className={cn(
         "group relative flex flex-col transition-all duration-200",
-        "hover:shadow-lg hover:-translate-y-0.5"
+        "hover:border-[var(--mer-ink-muted)]"
       )}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}

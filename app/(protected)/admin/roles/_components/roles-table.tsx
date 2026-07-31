@@ -151,7 +151,7 @@ function RolesTableView({
               table.getRowModel().rows.map((row, index) => (
                 <TableRow
                   key={row.id}
-                  className={index % 2 === 0 ? "bg-white" : "bg-gray-50"}
+                  className={index % 2 === 0 ? "bg-card" : "bg-muted"}
                 >
                   {row.getVisibleCells().map((cell) => (
                     <TableCell key={cell.id}>

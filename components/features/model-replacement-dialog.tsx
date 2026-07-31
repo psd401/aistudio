@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Loader2, AlertTriangle, Info } from "lucide-react";
 import type { SelectAiModel } from "@/types";
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface ModelReplacementDialogProps {
   isOpen: boolean;
@@ -169,7 +170,7 @@ export function ModelReplacementDialog({
 
   return (
     <Dialog open={isOpen} onOpenChange={handleClose}>
-      <DialogContent className="sm:max-w-[600px]">
+      <DialogContent className={`sm:max-w-[600px] ${meridianPortalClassName}`}>
         <DialogHeader>
           <DialogTitle>Replace Model References</DialogTitle>
           <DialogDescription>
@@ -195,7 +196,7 @@ export function ModelReplacementDialog({
               <SelectTrigger id="replacement-model">
                 <SelectValue placeholder="Select a replacement model" />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent className={meridianPortalClassName}>
                 {replacementOptions.map((model) => (
                   <SelectItem key={model.id} value={model.id.toString()}>
                     <div className="flex items-center justify-between w-full">

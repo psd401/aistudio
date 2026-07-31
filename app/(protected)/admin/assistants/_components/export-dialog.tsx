@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button"
 import { Download, Loader2 } from "lucide-react"
 import { useToast } from "@/components/ui/use-toast"
 import { Alert, AlertDescription } from "@/components/ui/alert"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface ExportDialogProps {
   open: boolean
@@ -94,7 +95,7 @@ export function ExportDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className={meridianPortalClassName}>
         <DialogHeader>
           <DialogTitle>Export Assistants</DialogTitle>
           <DialogDescription>

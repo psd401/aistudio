@@ -84,6 +84,7 @@ import {
   deleteUser,
   type UserListItem,
 } from "@/actions/admin/user-management.actions"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 type RoleTab = "all" | "administrator" | "staff" | "student"
 
@@ -454,7 +455,7 @@ export function UsersPageClient({
         open={mutations.deleteDialog}
         onOpenChange={mutations.setDeleteDialog}
       >
-        <AlertDialogContent>
+        <AlertDialogContent className={meridianPortalClassName}>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete User</AlertDialogTitle>
             <AlertDialogDescription>

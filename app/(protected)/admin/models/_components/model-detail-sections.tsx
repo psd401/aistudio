@@ -31,6 +31,7 @@ import type {
   UpdateModelField,
 } from "./model-detail-form"
 import { PROVIDER_OPTIONS } from "./provider-badge"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 const capabilityOptions: MultiSelectOption[] = [
   { value: "chat", label: "Chat", description: "General conversation" },
@@ -99,7 +100,7 @@ export function IdentityPanel({
               <SelectTrigger>
                 <SelectValue placeholder="Select a provider" />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent className={meridianPortalClassName}>
                 {PROVIDER_OPTIONS.map((option) => (
                   <SelectItem key={option.value} value={option.value}>
                     {option.label}

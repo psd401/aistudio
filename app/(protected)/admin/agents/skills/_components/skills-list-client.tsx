@@ -26,6 +26,7 @@ import {
   deleteSkill,
   type SkillRow,
 } from "@/actions/admin/agent-skills.actions"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 const SCOPE_OPTIONS = [
   { value: "all", label: "All Scopes" },
@@ -115,7 +116,7 @@ export function SkillsListClient() {
           <SelectTrigger className="w-[180px]">
             <SelectValue placeholder="Filter by scope" />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className={meridianPortalClassName}>
             {SCOPE_OPTIONS.map((opt) => (
               <SelectItem key={opt.value} value={opt.value}>
                 {opt.label}

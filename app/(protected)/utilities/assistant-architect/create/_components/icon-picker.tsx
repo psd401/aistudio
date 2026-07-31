@@ -116,7 +116,7 @@ function IconPreview({ image }: { image: string }) {
   return (
     <div className="fixed z-[100] opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
       <div
-        className="absolute w-32 h-32 rounded-lg overflow-hidden shadow-lg ring-1 ring-black/10 bg-white"
+        className="absolute w-32 h-32 rounded-lg overflow-hidden shadow-lg ring-1 ring-black/10 bg-card"
         style={PREVIEW_POSITION}
       >
         <Image src={`/assistant_logos/${image}`} alt={image} fill className="object-cover" sizes="128px" />

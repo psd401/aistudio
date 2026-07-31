@@ -17,6 +17,7 @@ import { useAction } from "@/lib/hooks/use-action"
 import { toast } from "sonner"
 import type { PromptListItem as PromptListItemType } from "@/lib/prompt-library/types"
 import { format } from "date-fns"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface PromptListItemProps {
   prompt: PromptListItemType
@@ -116,7 +117,7 @@ export function PromptListItem({ prompt, onDelete }: PromptListItemProps) {
               <MoreVertical className="h-4 w-4" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
+          <DropdownMenuContent align="end" className={meridianPortalClassName}>
             <DropdownMenuItem onClick={handleEdit}>
               <Edit className="mr-2 h-4 w-4" />
               Edit

@@ -52,6 +52,7 @@ import {
 } from "@mdxeditor/editor"
 import type { SelectAiModel, SelectChainPrompt, SelectToolInputField } from "@/types"
 import type { AssistantModelFamily, AssistantModelRoutingMode } from "@/lib/db/schema/tables/assistant-architects"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 // Dynamic import MDXEditor to avoid SSR issues
 const MDXEditor = dynamic(() => import("@mdxeditor/editor").then(mod => mod.MDXEditor), { ssr: false })
@@ -782,7 +783,7 @@ function UnsavedChangesDialog({
 
   return (
     <AlertDialog open={open} onOpenChange={handleOpenChange}>
-      <AlertDialogContent className="z-[100]">
+      <AlertDialogContent className={`z-[100] ${meridianPortalClassName}`}>
         <AlertDialogHeader>
           <AlertDialogTitle>Unsaved Changes</AlertDialogTitle>
           <AlertDialogDescription>

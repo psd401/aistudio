@@ -48,6 +48,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { MigrationControlPanel } from "./migration-control-panel"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface RepositoryTableProps {
   repositories: RepositoryWithOwner[]
@@ -230,7 +231,7 @@ function DeleteRepositoryDialog({
 }: DeleteRepositoryDialogProps) {
   return (
     <AlertDialog open={repositoryId !== null} onOpenChange={onClose}>
-      <AlertDialogContent>
+      <AlertDialogContent className={meridianPortalClassName}>
         <AlertDialogHeader>
           <AlertDialogTitle>Are you sure?</AlertDialogTitle>
           <AlertDialogDescription>

@@ -27,6 +27,7 @@ import {
   type NexusRouterTier,
 } from "@/lib/nexus/model-router/types"
 import type { Setting } from "@/actions/db/settings-actions"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 const AUTOMATIC = "__automatic__"
 const TIER_OPTIONS: Array<{ value: NexusRouterTier; label: string }> = [
@@ -137,7 +138,7 @@ function RouterModelSelect({
       <SelectTrigger data-testid={testId} className="min-w-0">
         <SelectValue />
       </SelectTrigger>
-      <SelectContent>
+      <SelectContent className={meridianPortalClassName}>
         <SelectItem value={AUTOMATIC}>{automaticLabel}</SelectItem>
         {models.map(model => (
           <SelectItem key={model.id} value={model.modelId}>
@@ -197,7 +198,7 @@ function RoutingModeControls({
             <SelectTrigger id={control.id} data-testid={control.testId}>
               <SelectValue />
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent className={meridianPortalClassName}>
               <SelectItem value="active">Active — route live requests</SelectItem>
               <SelectItem value="shadow">
                 Observe only — record proposals, use fallback
@@ -368,7 +369,7 @@ function SpecialistGrid(props: SpecialistGridProps) {
           <SelectTrigger data-testid="nexus-router-psd-connector">
             <SelectValue />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className={meridianPortalClassName}>
             <SelectItem value={AUTOMATIC}>
               Match “{props.config.specialists.psdDataConnectorName}” by name
             </SelectItem>

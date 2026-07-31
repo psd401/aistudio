@@ -32,6 +32,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import type { Setting } from "@/actions/db/settings-actions"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 const formSchema = z.object({
   key: z.string().min(1, "Key is required").regex(/^[A-Z][\dA-Z_]*$/, "Key must start with uppercase letter, and contain only uppercase letters, numbers, and underscores"),
@@ -192,7 +193,7 @@ export function SettingsForm({ open, onOpenChange, onSave, setting }: SettingsFo
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[600px]" onInteractOutside={(e) => {
+      <DialogContent className={`max-h-[90vh] overflow-y-auto sm:max-w-[600px] ${meridianPortalClassName}`} onInteractOutside={(e) => {
         if (isSubmitting) {
           e.preventDefault()
         }
@@ -222,7 +223,7 @@ export function SettingsForm({ open, onOpenChange, onSave, setting }: SettingsFo
                           <SelectValue placeholder="Select a common setting or enter custom" />
                         </SelectTrigger>
                       </FormControl>
-                      <SelectContent>
+                      <SelectContent className={meridianPortalClassName}>
                         {commonSettings.map((s) => (
                           <SelectItem key={s.key} value={s.key}>
                             {s.key}
@@ -305,7 +306,7 @@ export function SettingsForm({ open, onOpenChange, onSave, setting }: SettingsFo
                         <SelectValue placeholder="Select a category" />
                       </SelectTrigger>
                     </FormControl>
-                    <SelectContent>
+                    <SelectContent className={meridianPortalClassName}>
                       {categories.map((cat) => (
                         <SelectItem key={cat.value} value={cat.value}>
                           {cat.label}

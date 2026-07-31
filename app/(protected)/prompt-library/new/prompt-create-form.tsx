@@ -17,6 +17,7 @@ import { MCPPopover } from "@/app/(protected)/nexus/_components/chat/mcp-popover
 import { TagInput } from "../_components/tag-input"
 import type { SelectAiModel } from "@/types"
 import type { PromptVisibility } from "@/lib/prompt-library/types"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface FormData {
   title: string
@@ -122,7 +123,7 @@ export function PromptCreateForm({
             <SelectTrigger className="w-48">
               <SelectValue />
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent className={meridianPortalClassName}>
               <SelectItem value="private">Private</SelectItem>
               <SelectItem value="public">Public</SelectItem>
             </SelectContent>

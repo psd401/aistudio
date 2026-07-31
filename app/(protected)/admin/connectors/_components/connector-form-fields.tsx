@@ -14,6 +14,7 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import type { McpAuthType, McpToolSource } from "@/lib/mcp/connector-types"
 import type { ConnectorFormValues } from "./connector-form-state"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 export type UpdateConnectorField = <K extends keyof ConnectorFormValues>(
   field: K,
@@ -69,7 +70,7 @@ export function BasicConnectorFields({
           <SelectTrigger>
             <SelectValue />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className={meridianPortalClassName}>
             <SelectItem value="http">HTTP</SelectItem>
             <SelectItem value="stdio">Stdio</SelectItem>
             <SelectItem value="websocket">WebSocket</SelectItem>
@@ -90,7 +91,7 @@ export function BasicConnectorFields({
           <SelectTrigger>
             <SelectValue />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className={meridianPortalClassName}>
             <SelectItem value="none">None</SelectItem>
             <SelectItem value="oauth">OAuth</SelectItem>
             <SelectItem value="api_key">API Key</SelectItem>
@@ -129,7 +130,7 @@ export function OAuthConnectorFields({
           <SelectTrigger>
             <SelectValue />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className={meridianPortalClassName}>
             <SelectItem value="mcp">MCP Server (default)</SelectItem>
             <SelectItem value="custom">Custom (REST API)</SelectItem>
           </SelectContent>

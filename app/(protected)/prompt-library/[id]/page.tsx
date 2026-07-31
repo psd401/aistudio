@@ -24,6 +24,7 @@ import { PromptEditForm } from "./prompt-edit-form"
 import type { SelectAiModel } from "@/types"
 import type { Prompt } from "@/lib/prompt-library/types"
 import type { PromptLibrarySettings } from "@/lib/db/types/jsonb"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 function PromptEditHeader({
   isDeleting,
@@ -65,7 +66,7 @@ function PromptEditHeader({
                 <Trash2 className="mr-2 h-4 w-4" /> Delete
               </Button>
             </AlertDialogTrigger>
-            <AlertDialogContent>
+            <AlertDialogContent className={meridianPortalClassName}>
               <AlertDialogHeader>
                 <AlertDialogTitle>Delete Prompt</AlertDialogTitle>
                 <AlertDialogDescription>

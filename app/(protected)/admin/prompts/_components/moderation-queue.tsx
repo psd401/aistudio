@@ -17,6 +17,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
+import { meridianPortalClassName } from '@/lib/meridian/fonts'
 
 interface ModerationQueueProps {
   items: ModerationQueueItem[]
@@ -40,7 +41,7 @@ function BulkActionConfirmation({
   const isApproval = action === 'approved'
   return (
     <AlertDialog open={action !== null} onOpenChange={onClose}>
-      <AlertDialogContent>
+      <AlertDialogContent className={meridianPortalClassName}>
         <AlertDialogHeader>
           <AlertDialogTitle>
             Confirm Bulk {isApproval ? 'Approval' : 'Rejection'}

@@ -32,7 +32,7 @@ export default async function NexusLayout({ children }: NexusLayoutProps) {
     <div className={`meridian ${fontMeridian.variable} flex h-screen overflow-hidden`}>
       <NavbarNested fullHeight />
       <main className="flex-1 lg:pl-[68px] overflow-hidden">
-        <div className="bg-white h-full">
+        <div className="bg-card h-full">
           {children}
         </div>
       </main>

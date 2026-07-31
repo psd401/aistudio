@@ -70,20 +70,20 @@ function ConnectorToolCard({
   toolCount,
 }: PropsWithChildren<ToolCardProps>) {
   return (
-    <Card className="mb-4 border-purple-200 bg-purple-50/30">
+    <Card className="mb-4 border-[var(--mer-border-agent)] bg-[var(--mer-agent-tint)]">
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             {isRunning ? (
-              <Loader2 className="h-4 w-4 text-purple-600 animate-spin" />
+              <Loader2 className="h-4 w-4 text-[var(--mer-agent)] animate-spin" />
             ) : (
-              <Plug className="h-4 w-4 text-purple-600" />
+              <Plug className="h-4 w-4 text-[var(--mer-agent)]" />
             )}
-            <span className="text-sm font-medium text-purple-900">
+            <span className="text-sm font-medium text-[var(--mer-agent)]">
               {label} Actions ({toolCount})
             </span>
             {isRunning && (
-              <span className="text-xs text-purple-600 animate-pulse">
+              <span className="text-xs text-[var(--mer-agent)] animate-pulse">
                 Running...
               </span>
             )}
@@ -96,7 +96,7 @@ function ConnectorToolCard({
             aria-label={
               isExpanded ? "Hide connector actions" : "Show connector actions"
             }
-            className="h-8 text-purple-700 hover:text-purple-900 hover:bg-purple-100"
+            className="h-8 text-[var(--mer-agent)] hover:text-[var(--mer-agent)] hover:bg-[var(--mer-agent-tint)]"
           >
             {isExpanded ? (
               <ChevronUp className="h-4 w-4 mr-1" />

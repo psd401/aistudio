@@ -35,16 +35,16 @@ const NODE_TYPE_COLORS: Record<string, string> = {
   decision: 'bg-blue-100 text-blue-800',
   evidence: 'bg-green-100 text-green-800',
   constraint: 'bg-orange-100 text-orange-800',
-  reasoning: 'bg-purple-100 text-purple-800',
+  reasoning: 'bg-[var(--mer-agent-tint)] text-[var(--mer-agent)]',
   person: 'bg-pink-100 text-pink-800',
   condition: 'bg-yellow-100 text-yellow-800',
-  request: 'bg-gray-100 text-gray-800',
+  request: 'bg-muted text-gray-800',
   policy: 'bg-red-100 text-red-800',
   outcome: 'bg-teal-100 text-teal-800',
 }
 
 function NodeTypeBadge({ type }: { type: string }) {
-  const colorClass = NODE_TYPE_COLORS[type] || 'bg-gray-100 text-gray-800'
+  const colorClass = NODE_TYPE_COLORS[type] || 'bg-muted text-gray-800'
   return (
     <Badge variant="secondary" className={`text-xs ${colorClass}`}>
       {type}

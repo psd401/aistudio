@@ -40,7 +40,7 @@ function ResponseHeader({
   onStop: () => void
 }) {
   return (
-    <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3 bg-gray-50">
+    <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3 bg-muted">
       <h3 className="font-semibold text-sm text-gray-900">
         {response.model?.name || 'Select a model'}
       </h3>

@@ -67,6 +67,7 @@ import {
 } from "@tanstack/react-table"
 import type { Table as ReactTable } from "@tanstack/react-table"
 import { useUncompiledReactTable } from "@/components/ui/use-uncompiled-react-table"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface Assistant {
   id: string
@@ -378,7 +379,7 @@ function CreateAssistantDialog({
           Add Assistant
         </Button>
       </DialogTrigger>
-      <DialogContent>
+      <DialogContent className={meridianPortalClassName}>
         <DialogHeader>
           <DialogTitle>Create Assistant</DialogTitle>
           <DialogDescription>
@@ -562,7 +563,7 @@ function AssistantAccessDialog({
 }) {
   return (
     <Dialog open={assistant !== null} onOpenChange={open => !open && onClose()}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className={`sm:max-w-md ${meridianPortalClassName}`}>
         <DialogHeader>
           <DialogTitle>Manage access</DialogTitle>
           <DialogDescription>

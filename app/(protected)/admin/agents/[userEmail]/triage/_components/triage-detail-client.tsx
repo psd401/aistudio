@@ -23,6 +23,7 @@ import {
   resetLearnedPatterns,
   type TriageStateSummary,
 } from "@/actions/admin/agent-triage.actions"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface Props {
   userEmail: string
@@ -399,7 +400,7 @@ function ConfirmDialog({
   const active = dialog ? copy[dialog] : null
   return (
     <AlertDialog open={dialog !== null} onOpenChange={(open) => !open && onClose()}>
-      <AlertDialogContent>
+      <AlertDialogContent className={meridianPortalClassName}>
         <AlertDialogHeader>
           <AlertDialogTitle>{active?.title}</AlertDialogTitle>
           <AlertDialogDescription>{active?.body}</AlertDialogDescription>

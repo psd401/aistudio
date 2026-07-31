@@ -29,6 +29,7 @@ import type {
   IdeaFormData,
   Note,
 } from './ideas-types';
+import { meridianPortalClassName } from '@/lib/meridian/fonts'
 
 function PrioritySelect(props: {
   value: string;
@@ -39,7 +40,7 @@ function PrioritySelect(props: {
       <SelectTrigger>
         <SelectValue placeholder="Select priority" />
       </SelectTrigger>
-      <SelectContent>
+      <SelectContent className={meridianPortalClassName}>
         <SelectItem value="low">Low</SelectItem>
         <SelectItem value="medium">Medium</SelectItem>
         <SelectItem value="high">High</SelectItem>
@@ -61,7 +62,7 @@ export function AddIdeaDialog(props: {
   const controller = props.controller;
   return (
     <Dialog open={controller.isOpen} onOpenChange={controller.setIsOpen}>
-      <DialogContent>
+      <DialogContent className={meridianPortalClassName}>
         <DialogHeader>
           <DialogTitle>Add New Idea</DialogTitle>
           <DialogDescription>
@@ -151,7 +152,7 @@ export function IdeaNotesDialog(props: {
   const controller = props.controller;
   return (
     <Dialog open={controller.isOpen} onOpenChange={controller.setIsOpen}>
-      <DialogContent className="sm:max-w-[600px]">
+      <DialogContent className={`sm:max-w-[600px] ${meridianPortalClassName}`}>
         <DialogHeader>
           <DialogTitle>Notes</DialogTitle>
           <DialogDescription>
@@ -199,7 +200,7 @@ export function EditIdeaDialog(props: {
   const controller = props.controller;
   return (
     <Dialog open={controller.isOpen} onOpenChange={controller.setIsOpen}>
-      <DialogContent>
+      <DialogContent className={meridianPortalClassName}>
         <DialogHeader>
           <DialogTitle>Edit Idea</DialogTitle>
           <DialogDescription>

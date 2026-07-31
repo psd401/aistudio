@@ -36,6 +36,7 @@ import type {
 } from "@/actions/admin/agent-cost-projection.actions"
 import { AGENT_MODEL_LABEL } from "@/lib/agents/platform-model"
 import { formatUsd } from "@/lib/utils/format-currency"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface Props {
   /** Token×pricing actual cost (source of truth). */
@@ -258,7 +259,7 @@ function ProjectionPanel({
             <SelectTrigger className="w-[280px] h-8 text-sm">
               <SelectValue placeholder="Select a model…" />
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent className={meridianPortalClassName}>
               {pricableModels.map((m) => (
                 <SelectItem key={m.modelId} value={m.modelId}>
                   {m.name} ({m.modelId})

@@ -28,6 +28,7 @@ import {
 } from "@/components/ui/dialog";
 import { IconLock, IconLockOpen, IconLoader2 } from "@tabler/icons-react";
 import { useResourceGrants, type ResourceType } from "./use-resource-grants";
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface ResourceGrantsEditorProps {
   resourceType: ResourceType;
@@ -163,7 +164,7 @@ export function ResourceGrantsDialog({
           </Button>
         )}
       </DialogTrigger>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className={`sm:max-w-md ${meridianPortalClassName}`}>
         <DialogHeader>
           <DialogTitle>Manage access</DialogTitle>
           <DialogDescription>

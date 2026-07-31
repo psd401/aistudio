@@ -16,6 +16,7 @@ import { useToast } from "@/components/ui/use-toast"
 import { deprecateToolVersionAction } from "@/actions/admin/tool-versions.actions"
 import type { ToolVersionWithUsage } from "@/lib/db/drizzle"
 import { DEFAULT_GRACE_PERIOD_DAYS } from "@/lib/db/schema/tables/tool-catalog"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface DeprecateVersionDialogProps {
   version: ToolVersionWithUsage
@@ -72,7 +73,7 @@ export function DeprecateVersionDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose(false)}>
-      <DialogContent>
+      <DialogContent className={meridianPortalClassName}>
         <DialogHeader>
           <DialogTitle>Deprecate {ref}</DialogTitle>
           <DialogDescription>

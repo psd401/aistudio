@@ -12,7 +12,7 @@ export default async function AdminLayout({
   return (
     <div className="flex min-h-screen">
       <NavbarNested fullHeight />
-      <main className="flex-1 lg:pl-[68px] min-w-0 bg-white">
+      <main className="flex-1 lg:pl-[68px] min-w-0 bg-card">
         <div className="p-4 sm:p-6 md:p-8 max-w-7xl mx-auto">
           <AdminBreadcrumb />
           {children}

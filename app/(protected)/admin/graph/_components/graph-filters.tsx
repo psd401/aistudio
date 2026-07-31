@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button"
 import { IconSearch, IconX } from "@tabler/icons-react"
 import { useDebounce } from "use-debounce"
 import { cn } from "@/lib/utils"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 // ============================================
 // Node Filters
@@ -102,7 +103,7 @@ export function NodeFilters({
         >
           <SelectValue placeholder="All Types" />
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent className={meridianPortalClassName}>
           <SelectItem value="all">All Types</SelectItem>
           {nodeTypes.map((type) => (
             <SelectItem key={type} value={type}>
@@ -119,7 +120,7 @@ export function NodeFilters({
         >
           <SelectValue placeholder="All Classes" />
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent className={meridianPortalClassName}>
           <SelectItem value="all">All Classes</SelectItem>
           {nodeClasses.map((cls) => (
             <SelectItem key={cls} value={cls}>
@@ -191,7 +192,7 @@ export function EdgeFilters({
         >
           <SelectValue placeholder="All Edge Types" />
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent className={meridianPortalClassName}>
           <SelectItem value="all">All Edge Types</SelectItem>
           {edgeTypes.map((type) => (
             <SelectItem key={type} value={type}>

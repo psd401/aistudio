@@ -6,6 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import type { AssistantModelFamily, AssistantModelRoutingMode } from "@/lib/db/schema/tables/assistant-architects"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 export interface ModelRoutingState {
   mode: AssistantModelRoutingMode
@@ -94,7 +95,7 @@ export function ModelRoutingSection({
               <SelectTrigger id="assistant-routing-family" data-testid="assistant-routing-family">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent className={meridianPortalClassName}>
                 {(Object.entries(FAMILY_LABELS) as Array<[AssistantModelFamily, string]>).map(([family, label]) => (
                   <SelectItem key={family} value={family}>{label}</SelectItem>
                 ))}

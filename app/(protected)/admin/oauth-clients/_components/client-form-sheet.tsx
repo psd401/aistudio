@@ -27,6 +27,7 @@ import {
   withPublicClientRequiredScopes,
 } from "@/lib/oauth/oauth-scopes"
 import type { OAuthApplicationType } from "@/lib/oauth/redirect-uri-policy"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 // ============================================
 // Props
@@ -186,7 +187,7 @@ function ClientConfigurationFields(props: ClientConfigurationFieldsProps) {
           <SelectTrigger id="applicationType">
             <SelectValue />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className={meridianPortalClassName}>
             <SelectItem value="web">Web application</SelectItem>
             <SelectItem value="browser_extension">Browser extension</SelectItem>
             <SelectItem value="native">Native application</SelectItem>
@@ -220,7 +221,7 @@ function ClientConfigurationFields(props: ClientConfigurationFieldsProps) {
           <SelectTrigger id="authMethod">
             <SelectValue />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className={meridianPortalClassName}>
             <SelectItem value="none">Public (PKCE only)</SelectItem>
             <SelectItem value="client_secret_post">
               Confidential (client secret)

@@ -71,6 +71,7 @@ import {
   getTriageSummaryList,
   type TriageSummaryRow,
 } from "@/actions/admin/agent-triage.actions"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 type DashboardTab =
   | "usage"
@@ -312,7 +313,7 @@ function DashboardHeader({
               <SelectTrigger className="w-[160px] h-8 text-sm">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent className={meridianPortalClassName}>
                 {DATE_RANGE_OPTIONS.map((opt) => (
                   <SelectItem key={opt.value} value={opt.value}>
                     {opt.label}

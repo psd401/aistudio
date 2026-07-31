@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/select"
 import { IconSearch } from "@tabler/icons-react"
 import type { PublicGraphNode } from "@/lib/graph"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 export interface EdgeFormData {
   sourceNodeId: string
@@ -71,7 +72,7 @@ function GraphNodeSelect({
           <SelectTrigger aria-label={`Select ${lowerLabel} node`}>
             <SelectValue placeholder={`Select ${lowerLabel} node...`} />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className={meridianPortalClassName}>
             {nodes.length === 0 ? (
               <div className="px-3 py-2 text-sm text-muted-foreground">
                 No nodes found

@@ -98,7 +98,7 @@ export function StatsCards({ stats, loading = false, className }: StatsCardsProp
     {
       label: "Admins",
       value: stats.admins,
-      icon: <IconShield className="h-5 w-5 text-purple-600" />,
+      icon: <IconShield className="h-5 w-5 text-[var(--mer-brand)]" />,
       trend: undefined
     }
   ]

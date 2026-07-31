@@ -30,6 +30,7 @@ import {
   type SkillReviewItem,
 } from "@/actions/admin/agent-skills.actions"
 import type { SkillScanFindings } from "@/lib/db/schema/tables/agent-skills"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 function ScanFindingsDisplay({ findings }: { findings: SkillScanFindings }) {
   const hasSecrets = findings.secrets && findings.secrets.length > 0
@@ -84,7 +85,7 @@ function RejectDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
+      <DialogContent className={`max-w-md ${meridianPortalClassName}`}>
         <DialogHeader>
           <DialogTitle>Reject Skill</DialogTitle>
           <DialogDescription>

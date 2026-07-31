@@ -40,6 +40,7 @@ import {
 import { useToast } from "@/components/ui/use-toast"
 import type { Setting } from "@/actions/db/settings-actions"
 import { getSettingActualValueAction } from "@/actions/db/settings-actions"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface SettingsTableProps {
   settings: Setting[]
@@ -316,7 +317,7 @@ export function SettingsTable({ settings, onEdit, onDelete }: SettingsTableProps
       </Table>
 
       <AlertDialog open={!!deleteKey} onOpenChange={() => setDeleteKey(null)}>
-        <AlertDialogContent>
+        <AlertDialogContent className={meridianPortalClassName}>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete Setting</AlertDialogTitle>
             <AlertDialogDescription>

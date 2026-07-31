@@ -66,6 +66,7 @@ import {
   isOneRosterSyncStatusActive,
   type OneRosterSyncStatus,
 } from "@/lib/roster/status-shared"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 type DateValue = Date | string | null
 
@@ -486,7 +487,7 @@ function ConnectionSettingsFields({
           <SelectTrigger data-testid="roster-auth-mode">
             <SelectValue placeholder="Select documented mode" />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className={meridianPortalClassName}>
             <SelectItem value="oauth1">OAuth1 HMAC direct</SelectItem>
             <SelectItem value="proxy">OAuth2 Proxy bearer</SelectItem>
           </SelectContent>
@@ -504,7 +505,7 @@ function ConnectionSettingsFields({
           <SelectTrigger data-testid="roster-api-version">
             <SelectValue />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className={meridianPortalClassName}>
             <SelectItem value="v1p1">v1p1 (default)</SelectItem>
             <SelectItem value="v1p2">v1p2</SelectItem>
           </SelectContent>
@@ -760,7 +761,7 @@ function RosterBrowser({ data }: { data: OneRosterAdminData }) {
               <SelectTrigger data-testid="roster-school-select">
                 <SelectValue placeholder="Select a school" />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent className={meridianPortalClassName}>
                 {data.schools.map(school => (
                   <SelectItem key={school.sourcedId} value={school.sourcedId}>
                     {school.name ?? school.sourcedId}

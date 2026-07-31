@@ -27,6 +27,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import type { Idea, SortMode } from './ideas-types';
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 export function IdeasHeader(props: {
   sortBy: SortMode;
@@ -51,7 +52,7 @@ export function IdeasHeader(props: {
             <SelectTrigger className="w-[180px]">
               <SelectValue placeholder="Sort by" />
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent className={meridianPortalClassName}>
               <SelectItem value="newest">Newest</SelectItem>
               <SelectItem value="priority">Priority</SelectItem>
               <SelectItem value="votes">Most Voted</SelectItem>
@@ -82,7 +83,7 @@ function IdeaCard(props: {
   return (
     <Card
       className={`flex flex-col ${
-        idea.status === 'completed' ? 'bg-gray-100' : ''
+        idea.status === 'completed' ? 'bg-muted' : ''
       }`}
     >
       <CardHeader>

@@ -42,7 +42,7 @@ export function NexusThinkingIndicator() {
           {/* Assistant Avatar */}
           <div className="flex-shrink-0">
             <Avatar className="h-8 w-8">
-              <AvatarFallback className="bg-gradient-to-r from-blue-500 to-purple-600 text-white">
+              <AvatarFallback className="bg-[var(--mer-agent)] text-white">
                 <motion.div
                   animate={{
                     rotate: 360,

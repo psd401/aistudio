@@ -32,6 +32,7 @@ import { format } from "date-fns"
 import { Badge } from "@/components/ui/badge"
 import { useToast } from "@/components/ui/use-toast"
 import { PageBranding } from "@/components/ui/page-branding"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 function RepositoriesTable({
   repositories,
@@ -253,7 +254,7 @@ export function RepositoryList() {
         open={!!deleteTarget}
         onOpenChange={(open) => !open && setDeleteTarget(null)}
       >
-        <AlertDialogContent>
+        <AlertDialogContent className={meridianPortalClassName}>
           <AlertDialogHeader>
             <AlertDialogTitle>
               {deleteTarget?.lifecycleStatus === "deleting"

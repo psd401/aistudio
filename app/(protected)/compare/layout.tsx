@@ -24,10 +24,10 @@ export default async function CompareLayout({
     <div className="flex min-h-screen">
       <NavbarNested fullHeight />
       <main className="flex-1 lg:pl-[68px]">
-        <div className="bg-white p-4 sm:p-6 md:p-8">
+        <div className="bg-card p-4 sm:p-6 md:p-8">
           <div className="flex flex-col">
             {/* Main Content */}
-            <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-white">
+            <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-card">
               {children}
             </div>
           </div>

@@ -71,7 +71,7 @@ export function SkillsCatalogClient({ initialSkills }: SkillsCatalogClientProps)
           {filtered.map((skill) => (
             <Card
               key={skill.id}
-              className="group relative flex flex-col transition-all duration-200 hover:shadow-lg hover:-translate-y-0.5"
+              className="group relative flex flex-col transition-colors duration-150 hover:border-[var(--mer-ink-muted)]"
               data-testid="skill-card"
             >
               <CardHeader>

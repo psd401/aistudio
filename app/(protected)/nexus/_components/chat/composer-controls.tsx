@@ -41,7 +41,7 @@ export function ComposerControls({
   onReconnectSuccess,
 }: ComposerControlsProps) {
   return (
-    <div className="flex items-center gap-1 px-2 py-1.5 border-b border-border/50">
+    <div className="flex items-center gap-1 px-2 py-1.5 border-b border-border">
       <ModelFamilySelector
         mode={routingMode}
         family={modelFamily}

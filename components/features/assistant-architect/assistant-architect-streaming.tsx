@@ -69,6 +69,7 @@ import { validateSSEEvent } from '@/lib/streaming/sse-event-schemas'
 import { processUnknownEvent } from '@/lib/streaming/graceful-degradation'
 import { sanitizeOptionLabel } from '@/lib/utils/sanitize-option-label'
 import { isConfirmationRequiredText } from '@/lib/agents/confirmation'
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 const log = createLogger({ moduleName: 'assistant-architect-streaming' })
 
@@ -1149,7 +1150,7 @@ function AssistantInputForm<TValues extends FieldValues>(props: {
                           }...`}
                         />
                       </SelectTrigger>
-                      <SelectContent>
+                      <SelectContent className={meridianPortalClassName}>
                         {renderSelectOptions(field.options)}
                       </SelectContent>
                     </Select>

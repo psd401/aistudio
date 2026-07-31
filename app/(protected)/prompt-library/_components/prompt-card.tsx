@@ -25,6 +25,7 @@ import { useAction } from "@/lib/hooks/use-action"
 import { toast } from "sonner"
 import type { PromptListItem } from "@/lib/prompt-library/types"
 import { format } from "date-fns"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface PromptCardProps {
   prompt: PromptListItem
@@ -63,7 +64,7 @@ export function PromptCard({ prompt, onDelete }: PromptCardProps) {
 
   return (
     <Card
-      className="group relative transition-shadow hover:shadow-lg"
+      className="group relative transition-colors duration-150 hover:border-[var(--mer-ink-muted)]"
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
     >
@@ -95,7 +96,7 @@ export function PromptCard({ prompt, onDelete }: PromptCardProps) {
                 <MoreVertical className="h-4 w-4" />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
+            <DropdownMenuContent align="end" className={meridianPortalClassName}>
               <DropdownMenuItem onClick={handleEdit}>
                 <Edit className="mr-2 h-4 w-4" />
                 Edit

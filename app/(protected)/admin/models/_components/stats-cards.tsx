@@ -103,7 +103,7 @@ export function StatsCards({ stats, loading = false, className }: StatsCardsProp
     {
       label: "Nexus Enabled",
       value: stats.nexusEnabled,
-      icon: <IconMessage className="h-5 w-5 text-purple-600" />,
+      icon: <IconMessage className="h-5 w-5 text-[var(--mer-brand-mid)]" />,
     },
   ]
 

@@ -60,6 +60,7 @@ import type {
 } from "@/lib/db/schema"
 import type { GroupWithCount, GroupRoleMappingView } from "@/lib/groups/queries"
 import { timeAgo } from "@/lib/atrium/relative-time"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 type ToastFn = ReturnType<typeof useToast>["toast"]
 
@@ -377,7 +378,7 @@ function SelectionTab({ rules, isPending, toast, onChanged, startTransition }: S
               <SelectTrigger className="w-full sm:w-40" data-testid="rule-type-select">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent className={meridianPortalClassName}>
                 <SelectItem value="pick">Exact email</SelectItem>
                 <SelectItem value="prefix">Email prefix</SelectItem>
               </SelectContent>
@@ -532,7 +533,7 @@ function MappingsTab({
                   <SelectTrigger className="w-full sm:w-72" data-testid="mapping-group-select">
                     <SelectValue placeholder="Select a group" />
                   </SelectTrigger>
-                  <SelectContent>
+                  <SelectContent className={meridianPortalClassName}>
                     {groupOptions.map((group) => (
                       <SelectItem key={group.id} value={group.groupEmail}>
                         {group.groupEmail}
@@ -544,7 +545,7 @@ function MappingsTab({
                   <SelectTrigger className="w-full sm:w-48" data-testid="mapping-role-select">
                     <SelectValue placeholder="Select a role" />
                   </SelectTrigger>
-                  <SelectContent>
+                  <SelectContent className={meridianPortalClassName}>
                     {roles.map((role) => (
                       <SelectItem key={role.id} value={String(role.id)}>
                         {role.name}
@@ -762,7 +763,7 @@ function MemberDialog({
 }) {
   return (
     <Dialog open={!!dialog} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-h-[80vh] overflow-hidden">
+      <DialogContent className={`max-h-[80vh] overflow-hidden ${meridianPortalClassName}`}>
         <DialogHeader>
           <DialogTitle className="font-mono text-sm break-all">{dialog?.groupEmail}</DialogTitle>
         </DialogHeader>

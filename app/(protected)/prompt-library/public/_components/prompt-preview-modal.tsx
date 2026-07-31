@@ -21,6 +21,7 @@ import {
 } from "@/actions/prompt-library.actions"
 import type { Prompt } from "@/lib/prompt-library/types"
 import { formatDistanceToNow } from "date-fns"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface PromptPreviewModalProps {
   open: boolean
@@ -207,7 +208,7 @@ export function PromptPreviewModal({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col">
+      <DialogContent className={`max-w-3xl max-h-[85vh] flex flex-col ${meridianPortalClassName}`}>
         {loading || !prompt ? (
           <div className="flex items-center justify-center py-12">
             <Loader2Icon className="h-8 w-8 animate-spin text-muted-foreground" />

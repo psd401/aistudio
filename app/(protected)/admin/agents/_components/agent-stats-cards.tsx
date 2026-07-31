@@ -91,7 +91,7 @@ export function AgentStatsCards({ stats, loading = false }: AgentStatsCardsProps
       value: stats.avgLatencyMs > 1000
         ? `${(stats.avgLatencyMs / 1000).toFixed(1)}s`
         : `${stats.avgLatencyMs}ms`,
-      icon: <IconClock className="h-5 w-5 text-purple-600" />,
+      icon: <IconClock className="h-5 w-5 text-[var(--mer-agent)]" />,
     },
     {
       label: "Guardrail Flags",
@@ -121,7 +121,7 @@ export function AgentStatsCards({ stats, loading = false }: AgentStatsCardsProps
       label: "p95 Model Calls / Turn",
       value: stats.p95ModelCallsPerTurn,
       subValue: "the long-tail turns",
-      icon: <IconChartBar className="h-5 w-5 text-indigo-600" />,
+      icon: <IconChartBar className="h-5 w-5 text-[var(--mer-agent)]" />,
     },
     {
       label: "Empty-Turn Rate",

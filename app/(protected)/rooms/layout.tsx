@@ -13,7 +13,7 @@ export default async function RoomsLayout({
   return (
     <div className="flex min-h-screen">
       <NavbarNested fullHeight />
-      <main className="min-w-0 flex-1 bg-white lg:pl-[68px]">
+      <main className="min-w-0 flex-1 bg-card lg:pl-[68px]">
         <div className="mx-auto max-w-7xl p-4 sm:p-6 md:p-8">
           {children}
         </div>

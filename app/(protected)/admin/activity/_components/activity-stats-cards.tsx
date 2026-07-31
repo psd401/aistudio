@@ -85,7 +85,7 @@ function activityCards(stats: ActivityStats | null): StatCardProps[] {
       {
         label: "Architect Executions",
         value: 0,
-        icon: <IconRobot className="h-5 w-5 text-purple-600" />,
+        icon: <IconRobot className="h-5 w-5 text-[var(--mer-agent)]" />,
       },
       {
         label: "Model Comparisons",
@@ -115,7 +115,7 @@ function activityCards(stats: ActivityStats | null): StatCardProps[] {
       label: "Architect Executions",
       value: stats.totalArchitectExecutions,
       subValue: `${stats.executions24h} today, ${stats.executions7d} this week`,
-      icon: <IconRobot className="h-5 w-5 text-purple-600" />,
+      icon: <IconRobot className="h-5 w-5 text-[var(--mer-agent)]" />,
     },
     {
       label: "Model Comparisons",
