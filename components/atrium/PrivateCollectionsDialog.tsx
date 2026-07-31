@@ -11,7 +11,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { CollectionManagementPanel } from "./CollectionManagementPanel";
-import { meridianPortalClassName } from "@/lib/atrium/meridian-fonts";
+import { meridianPortalClassName } from "@/lib/meridian/fonts";
 
 export function PrivateCollectionsDialog(): React.JSX.Element {
   return (

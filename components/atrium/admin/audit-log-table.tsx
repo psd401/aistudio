@@ -31,7 +31,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { meridianPortalClassName } from "@/lib/atrium/meridian-fonts";
+import { meridianPortalClassName } from "@/lib/meridian/fonts";
 
 // Known values of the varchar filter columns (see lib/content/audit.ts). "all"
 // is the unfiltered sentinel — Radix Select forbids an empty item value.

@@ -46,7 +46,7 @@ export interface RepositoryPickerProps {
    * Extra classes for the portaled DialogContent. Radix portals to
    * document.body, so a design-system scope on the page does NOT reach this
    * dialog — the caller passes its own scope class (e.g.
-   * `appMeridianPortalClassName`). Kept caller-supplied because this picker
+   * `meridianPortalClassName`). Kept caller-supplied because this picker
    * renders on both Meridian and non-Meridian surfaces.
    */
   contentClassName?: string

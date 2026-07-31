@@ -7,19 +7,19 @@ import { mkdirSync } from "node:fs";
  *
  * Drives the real `/atrium` shell as an authenticated `atrium-content` holder and
  * proves the Meridian foundation is wired:
- *  - the `.atrium-meridian` token scope is present on the shell root,
+ *  - the `.meridian` token scope is present on the shell root,
  *  - the 64px icon rail (nav "Atrium") renders with the Library tile,
  *  - the 236px workspace nav column mounts on the library index with its section
  *    tree + AGENT ACTIVITY panel,
  *  - and — critically — the Meridian scope does NOT leak onto a non-Atrium route
  *    (/dashboard has neither the scope class nor the rail).
  *
- * Screenshots land in docs/verification/atrium-meridian/ (visual evidence for the
+ * Screenshots land in docs/verification/meridian/ (visual evidence for the
  * PR). Gated behind PLAYWRIGHT_AUTH_ENABLED — see docs/guides/e2e-authenticated-
  * testing.md for the :3100 host-server prereqs.
  */
 
-const SHOT_DIR = "docs/verification/atrium-meridian";
+const SHOT_DIR = "docs/verification/meridian";
 
 test.describe("Atrium Meridian shell (authenticated)", () => {
   test.skip(
@@ -48,7 +48,7 @@ test.describe("Atrium Meridian shell (authenticated)", () => {
       ).toBeVisible();
 
       // Meridian token scope is present on the shell root.
-      await expect(page.locator(".atrium-meridian").first()).toBeVisible();
+      await expect(page.locator(".meridian").first()).toBeVisible();
 
       // The 64px icon rail (its own landmark) with the Library tile.
       const rail = page.getByRole("navigation", { name: "Atrium" });
@@ -83,7 +83,7 @@ test.describe("Atrium Meridian shell (authenticated)", () => {
       await page.goto("/dashboard");
       await expect(page).toHaveURL(/\/dashboard/);
       // Neither the scope class nor the Atrium rail exist off /atrium.
-      await expect(page.locator(".atrium-meridian")).toHaveCount(0);
+      await expect(page.locator(".meridian")).toHaveCount(0);
       await expect(
         page.getByRole("navigation", { name: "Atrium" })
       ).toHaveCount(0);

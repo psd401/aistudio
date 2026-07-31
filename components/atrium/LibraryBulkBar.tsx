@@ -33,7 +33,7 @@ import {
 import { updateContentAction } from "@/actions/db/atrium/update-content";
 import { deleteContentAction } from "@/actions/db/atrium/delete-content";
 import { collectionTreeAction } from "@/actions/db/atrium/collection-tree";
-import { meridianPortalClassName } from "@/lib/atrium/meridian-fonts";
+import { meridianPortalClassName } from "@/lib/meridian/fonts";
 import {
   flattenTree,
   NO_COLLECTION,

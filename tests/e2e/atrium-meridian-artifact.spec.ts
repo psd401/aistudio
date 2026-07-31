@@ -15,12 +15,12 @@ import { mkdirSync } from "node:fs";
  *    the live embedded-artifact block (the NodeView resolves the artifact and
  *    renders the Meridian bordered block with its title + Expand link).
  *
- * Screenshots land in docs/verification/atrium-meridian/ (PR visual evidence).
+ * Screenshots land in docs/verification/meridian/ (PR visual evidence).
  *
- * PREREQUISITES (why this is gated) — mirrors atrium-meridian-editor.spec.ts:
+ * PREREQUISITES (why this is gated) — mirrors meridian-editor.spec.ts:
  *  - Host dev server via `bun run server.ts` on :3100 (the collab WS lives in the
  *    custom server) with PLAYWRIGHT_AUTH_ENABLED=true.
- *  - Seed: tests/e2e/fixtures/atrium-meridian-artifact-seed.sql (an inline artifact,
+ *  - Seed: tests/e2e/fixtures/meridian-artifact-seed.sql (an inline artifact,
  *    a host document, and the embed backlink — all owned by the admin e2e-test-user,
  *    so the minted session has manage rights).
  *
@@ -38,12 +38,12 @@ const DOC_ID =
   process.env.ATRIUM_MERIDIAN_EMBED_DOC_ID ?? "a7100000-0000-4000-8000-00000000d002";
 const ARTIFACT_TITLE = "Meridian Metrics Artifact";
 const HOST_DOC_TITLE = "Meridian Embed Host Doc";
-const SHOT_DIR = "docs/verification/atrium-meridian";
+const SHOT_DIR = "docs/verification/meridian";
 
 test.describe("Atrium Meridian artifact viewer + embed (authenticated)", () => {
   test.skip(
     process.env.PLAYWRIGHT_AUTH_ENABLED !== "true",
-    "Requires the authed host dev server (collab WS) + seeded data — see tests/e2e/fixtures/atrium-meridian-artifact-seed.sql"
+    "Requires the authed host dev server (collab WS) + seeded data — see tests/e2e/fixtures/meridian-artifact-seed.sql"
   );
 
   test.beforeAll(() => {

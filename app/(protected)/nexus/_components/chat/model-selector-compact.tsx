@@ -10,7 +10,7 @@ import {
 import { Check, ChevronDown, Bot, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { SelectAiModel } from '@/types'
-import { appMeridianPortalClassName } from '@/lib/meridian/app-portal'
+import { meridianPortalClassName } from '@/lib/meridian/fonts'
 
 interface ModelSelectorCompactProps {
   models: SelectAiModel[]
@@ -116,7 +116,7 @@ export function ModelSelectorCompact({
           <ChevronDown className="h-3 w-3 shrink-0 opacity-50" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent className={`w-72 p-0 ${appMeridianPortalClassName}`} align="start">
+      <PopoverContent className={`w-72 p-0 ${meridianPortalClassName}`} align="start">
         <div className="p-3 border-b">
           <h4 className="font-medium text-sm">AI Model</h4>
           <p className="text-xs text-muted-foreground mt-0.5">

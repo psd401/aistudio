@@ -9,13 +9,13 @@ import { mkdirSync } from "node:fs";
  * the Meridian search field (⌘K-focusable), the filter chips (All / Docs /
  * Artifacts / Shared with me — the last exercising the new server `owner:
  * "shared"` filter), the content card grid, and the dashed "Create with the
- * agent" card. Screenshots land in docs/verification/atrium-meridian/.
+ * agent" card. Screenshots land in docs/verification/meridian/.
  *
  * Gated behind PLAYWRIGHT_AUTH_ENABLED — see docs/guides/e2e-authenticated-
  * testing.md for the :3100 host-server prereqs.
  */
 
-const SHOT_DIR = "docs/verification/atrium-meridian";
+const SHOT_DIR = "docs/verification/meridian";
 
 test.describe("Atrium Meridian library (authenticated)", () => {
   test.skip(

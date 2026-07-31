@@ -4,7 +4,7 @@
  * Dashboard home — Meridian design language, AI Studio palette.
  *
  * Ported from the original card grid as the first non-Atrium surface to adopt
- * Meridian (see `styles/app-meridian.css` for the token derivation). What was
+ * Meridian (see `styles/meridian.css` for the token derivation). What was
  * deliberately dropped, and why:
  *
  *  - The four-colour accent rainbow (navy / coral / purple / green, with three

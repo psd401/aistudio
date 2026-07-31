@@ -16,7 +16,7 @@ import { mkdirSync } from "node:fs";
  *    browser context editing the same doc makes the first context's presence stack
  *    grow (real Yjs awareness sync, not a faked dot).
  *
- * Screenshots land in docs/verification/atrium-meridian/ (PR visual evidence).
+ * Screenshots land in docs/verification/meridian/ (PR visual evidence).
  *
  * PREREQUISITES (why this is gated) — same as atrium-editor-rail.spec.ts:
  *  - Host dev server via `bun run server.ts` on :3100 (the collab WS lives in the
@@ -25,7 +25,7 @@ import { mkdirSync } from "node:fs";
  *    authenticated content API and deletes it after the presence check.
  */
 
-const SHOT_DIR = "docs/verification/atrium-meridian";
+const SHOT_DIR = "docs/verification/meridian";
 
 test.describe("Atrium Meridian editor (authenticated)", () => {
   test.skip(

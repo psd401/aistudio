@@ -10,7 +10,7 @@ import Link from 'next/link'
 import { cn } from '@/lib/utils'
 import { navigateToNewConversation } from '@/lib/nexus/conversation-navigation'
 import type { SidebarMode } from '@/lib/hooks/use-sidebar-state'
-import { appMeridianPortalClassName } from '@/lib/meridian/app-portal'
+import { meridianPortalClassName } from '@/lib/meridian/fonts'
 
 interface NexusSidebarProps {
   isOpen: boolean
@@ -92,7 +92,7 @@ export function NexusSidebar({
   if (mode === 'overlay') {
     return (
       <Sheet open={isOpen} onOpenChange={handleOpenChange}>
-        <SheetContent position="left" className={`w-[320px] p-0 ${appMeridianPortalClassName}`}>
+        <SheetContent position="left" className={`w-[320px] p-0 ${meridianPortalClassName}`}>
           <SheetHeader className="border-b px-4 py-3">
             <div className="flex items-center justify-between">
               <SheetTitle>Conversations</SheetTitle>

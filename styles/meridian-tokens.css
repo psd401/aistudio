@@ -1,0 +1,150 @@
+/*
+ * Meridian — THE token layer (AI Studio palette)
+ *
+ * One palette for the whole application. Atrium, the dashboard, Nexus and every
+ * surface that follows read these same values; there is no per-surface token
+ * set to keep in sync. Pair with `styles/meridian-core.css`, which holds the
+ * structure and references only these variables.
+ *
+ * SCOPES
+ *   `.meridian`         — put on a layout root; everything inside inherits.
+ *   `.meridian-portal`  — put on Radix Dialog/Select/Popover/DropdownMenu/Sheet
+ *                         content. Radix mounts portals on document.body,
+ *                         OUTSIDE any layout scope, so a portal that does not
+ *                         carry this class renders in the global cream theme
+ *                         however Meridian the page behind it is. Use the
+ *                         `meridianPortalClassName` constant, which also carries
+ *                         the font var.
+ *
+ * HOW THESE VALUES WERE DERIVED
+ * Not eyeballed. Meridian was originally a deep-teal system; porting it to the
+ * AI Studio palette held its CONTRAST STRUCTURE and swapped the hue. For each
+ * token we solved for the in-gamut colour on the app's hue matching the
+ * original's contrast ratio against its backdrop. Every relationship lands
+ * within 0.12 contrast points of the original:
+ *
+ *   ink on canvas        15.96 (was 15.84)   white on brand  13.82 (was 13.84)
+ *   ink on surface       17.10 (was 17.02)   border/surface   1.25 (was 1.25)
+ *   ink-muted/surface     3.13 (was  3.12)   brand/tint      12.12 (was 12.13)
+ *
+ * THE BRAND DECISION
+ * Whulge (the app's `--color-primary`, #1e6187) is only 6.74:1 against white,
+ * but Meridian's brand plays a filled-button role that assumes ~13.8:1 — every
+ * filled surface, active nav state and badge is built on a near-black brand.
+ * `--mer-brand` is Whulge's hue darkened to L=0.294, restoring that structure.
+ * This is what makes the system read crisp rather than washed. Do not lighten
+ * it back toward Whulge without re-checking every filled surface.
+ *
+ * SURFACES ARE COOL-NEUTRAL, NOT BLUE
+ * Chroma is held at 0.003 so canvas/sunken/border read neutral with a cool cast
+ * (channel spread 4). Higher chroma at these lightnesses looks like a blue wash.
+ *
+ * INK IS PACIFIC
+ * The app's own foreground, 10.65:1. A deeper near-black matching the original
+ * Meridian ink was trialled side by side and was indistinguishable in situ, so
+ * the app's identity wins. Do not re-propose it without a case that survives
+ * looking at it.
+ *
+ * VIOLET IS AGENT, ALWAYS AND ONLY
+ * The agent tokens are semantic, not decorative: they mark AI-agent presence.
+ * Humans get green / terracotta / blue. Never repurpose violet as an accent.
+ */
+
+.meridian,
+.meridian-portal {
+  /* ---- Surfaces (cool-neutral, chroma 0.003) ---- */
+  --mer-canvas: #f5f7f9; /* app background */
+  --mer-canvas-sunken: #eceef0; /* recessed wells, secondary fills */
+  --mer-surface: #ffffff; /* cards, sheets, top bars */
+  --mer-border: #e4e6e8; /* all hairline borders — opaque, never /40 */
+  --mer-border-agent: #ded8f2; /* border on agent-authored cards */
+
+  /* ---- Ink (Pacific hue 237.37) ---- */
+  --mer-ink: #1e4257; /* primary text */
+  --mer-ink-secondary: #334e60; /* secondary text, secondary buttons */
+  --mer-ink-muted: #8394a0; /* metadata, placeholders, labels */
+
+  /* ---- Brand (Whulge hue 237.66, darkened for the fill role) ---- */
+  --mer-brand: #003049; /* primary buttons, active nav, headers */
+  --mer-brand-hover: #001f30; /* pressed/hover state of a filled brand surface */
+  --mer-brand-tint: #ebf1f5; /* active-state fills, badges, icon chips */
+  --mer-brand-mid: #2a749f; /* chart fills, positive indicators, focus ring */
+
+  /* ---- Agent (violet — agent presence ONLY, never decorative) ---- */
+  --mer-agent: #6d4fc2;
+  --mer-agent-tint: #f0edfa;
+  --mer-agent-light: #8d74dc;
+  --mer-agent-soft: rgba(109, 79, 194, 0.06);
+
+  /* ---- Humans ---- */
+  --mer-human-you: #3e7c4f; /* current user (green) */
+  --mer-human-other-1: #b4552d; /* terracotta */
+  --mer-human-other-2: #4a7ce8; /* blue */
+
+  /* ---- Danger ----
+   * Distinct from --mer-human-other-1 on purpose. The original Meridian used
+   * the same terracotta #b4552d for BOTH a human identity colour and
+   * --color-destructive, so error text and surfaces read brown rather than
+   * wrong — an inline chat error looked like a warm decorative panel.
+   * The app's own destructive (#fb2c36) is only 3.81:1 against white, too
+   * light to carry error TEXT, so this is that hue darkened to 6.61:1 —
+   * restrained like the brand, but unmistakably red. */
+  --mer-danger: #b32227;
+  --mer-danger-tint: #ffedeb; /* error panel fill */
+
+  /* ---- Icon rail ---- */
+  --mer-rail-bg: #003049;
+  --mer-rail-active: rgba(235, 241, 245, 0.16);
+  --mer-rail-ink: rgba(235, 241, 245, 0.62);
+  --mer-rail-ink-active: #f5f7f9;
+
+  /* ---- Radii ---- */
+  --mer-r-card: 15px;
+  --mer-r-button: 9px;
+  --mer-r-chip: 7px;
+  --mer-r-pill: 99px;
+
+  /* ---- Shadows (cast on the brand hue) ---- */
+  --mer-shadow-card: 0 1px 3px rgba(0, 48, 73, 0.05);
+  --mer-shadow-sheet: 0 2px 16px rgba(0, 48, 73, 0.08);
+  --mer-shadow-toolbar: 0 8px 24px rgba(0, 30, 48, 0.3);
+
+  /* ---- Gradients (used sparingly) ---- */
+  --mer-grad-brand: linear-gradient(135deg, #003049, #014363, #01527a);
+  --mer-grad-cover: linear-gradient(115deg, #003049 0%, #01527a 45%, #6d4fc2 130%);
+  --mer-grad-agent-callout: linear-gradient(135deg, #eaf0f4, #f0edfa);
+
+  /* ---- shadcn/Tailwind-v4 theme remap ----
+   * The shared shadcn primitives read the Tailwind-v4 `--color-*` theme tokens
+   * (`bg-background`, `border`, `text-foreground`, …). Remapping them HERE means
+   * every shadcn surface inside a Meridian scope renders Meridian without any
+   * markup change — this is why converting a surface is mostly free. Nothing
+   * leaks: the global @theme in app/globals.css is untouched, so unconverted
+   * surfaces keep the cream palette until they opt in. */
+  --color-background: var(--mer-surface);
+  --color-foreground: var(--mer-ink);
+  --color-card: var(--mer-surface);
+  --color-card-foreground: var(--mer-ink);
+  --color-popover: var(--mer-surface);
+  --color-popover-foreground: var(--mer-ink);
+  --color-primary: var(--mer-brand);
+  --color-primary-foreground: #ffffff;
+  --color-secondary: var(--mer-canvas-sunken);
+  --color-secondary-foreground: var(--mer-ink-secondary);
+  --color-muted: var(--mer-canvas-sunken);
+  --color-muted-foreground: var(--mer-ink-muted);
+  --color-accent: var(--mer-brand-tint);
+  --color-accent-foreground: var(--mer-brand);
+  --color-destructive: var(--mer-danger);
+  --color-destructive-foreground: #ffffff;
+  --color-border: var(--mer-border);
+  --color-input: var(--mer-border);
+  --color-ring: var(--mer-brand-mid);
+
+  font-family: var(--font-meridian), ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  color: var(--mer-ink);
+  letter-spacing: -0.01em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}

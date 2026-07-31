@@ -8,7 +8,7 @@
  * off the style-injection surface. This module is the ONE definition of:
  *  - the valid keys (write validation via `isCoverGradientKey`), and
  *  - the CSS class a key maps to (`coverGradientClass`), whose gradient is defined
- *    in styles/atrium-meridian.css (`.mer-cover--<key>`).
+ *    in styles/meridian.css (`.mer-cover--<key>`).
  * shared by the editor (Change-cover picker + render), both readers, and the
  * settings write path so they can never drift.
  */

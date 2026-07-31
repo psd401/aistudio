@@ -6,7 +6,7 @@
  * + "View only" notice, and the reading sheet (title, "Published … · collection"
  * meta + "UP TO DATE" pill, body, provenance footer).
  *
- * This component OWNS the `.atrium-meridian` token scope + Schibsted Grotesk font
+ * This component OWNS the `.meridian` token scope + Schibsted Grotesk font
  * variable, so wrapping a reader's body in `<ReaderFrame>` is all a page needs to
  * pick up the Meridian tokens (the readers live outside the `/atrium` layout that
  * scopes them elsewhere). It is presentational — every decision (can this viewer
@@ -18,7 +18,7 @@
  */
 
 import Link from "next/link";
-import { fontMeridian } from "@/lib/atrium/meridian-fonts";
+import { fontMeridian } from "@/lib/meridian/fonts";
 import type { DocumentHeading } from "@/lib/content/render/headings";
 import { coverGradientClass } from "@/lib/atrium/cover";
 import { AtriumReaderNav } from "./AtriumReaderNav";
@@ -26,8 +26,8 @@ import { ReaderToc } from "./ReaderToc";
 // The readers live OUTSIDE the `/atrium` layout that scopes Meridian elsewhere, so
 // the reader frame must pull the token layer + `.mer-reader-*` chrome itself (the
 // pages already import the shared `atrium-content.css` body sink). Scoped under
-// `.atrium-meridian` — no leakage to the rest of the reader routes.
-import "@/styles/atrium-meridian.css";
+// `.meridian` — no leakage to the rest of the reader routes.
+import "@/styles/meridian.css";
 
 export interface ReaderFrameProps {
   /** The document/artifact title (rendered as the sheet heading). */
@@ -185,7 +185,7 @@ function FullBleedReaderFrame({
 }): React.JSX.Element {
   return (
     <div
-      className={`atrium-meridian ${fontMeridian.variable} mer-reader mer-reader--artifact`}
+      className={`meridian ${fontMeridian.variable} mer-reader mer-reader--artifact`}
     >
       <AtriumReaderNav authenticated={authenticated} />
       <div className="mer-reader-artifact-bar">
@@ -258,7 +258,7 @@ export function ReaderFrame({
   }
 
   return (
-    <div className={`atrium-meridian ${fontMeridian.variable} mer-reader`}>
+    <div className={`meridian ${fontMeridian.variable} mer-reader`}>
       <AtriumReaderNav authenticated={authenticated} />
 
       <div className="mer-reader-body">

@@ -4,7 +4,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sh
 import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from '@/components/ui/drawer'
 import { ConversationList } from '@/components/nexus/conversation-list'
 import { useMediaQuery } from '@/lib/hooks/use-media-query'
-import { appMeridianPortalClassName } from '@/lib/meridian/app-portal'
+import { meridianPortalClassName } from '@/lib/meridian/fonts'
 
 interface ConversationPanelProps {
   selectedConversationId?: string | null
@@ -35,7 +35,7 @@ export function ConversationPanel({ selectedConversationId, isOpen, onOpenChange
 
   return (
     <Sheet open={isOpen} onOpenChange={onOpenChange}>
-      <SheetContent position="right" className={`w-[400px] ${appMeridianPortalClassName}`}>
+      <SheetContent position="right" className={`w-[400px] ${meridianPortalClassName}`}>
         <SheetHeader>
           <SheetTitle>Conversations</SheetTitle>
         </SheetHeader>
