@@ -529,7 +529,7 @@ ENV OPENCLAW_SKIP_CRON=1
 # Firecracker snapshotter consistently fails overlay mount at 54+
 # layers (2026-05-18 incident). Folding six COPYs into one keeps us
 # safely under that ceiling.
-COPY *.py *.mjs /app/
+COPY *.py *.mjs workspace_policy.json /app/
 
 # Container OS clock is UTC. The wrapper reads the user's local time via
 # zoneinfo (requires the tzdata package installed above). TZ env var is set

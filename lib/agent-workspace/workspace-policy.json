@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "privatePath": {
+    "maxUtf8Bytes": 768,
+    "maxSegmentUtf8Bytes": 255,
+    "maxDepth": 64,
+    "rejectedCodePointRanges": [
+      [0, 31],
+      [92, 92],
+      [127, 159],
+      [1564, 1564],
+      [8206, 8207],
+      [8232, 8238],
+      [8294, 8297],
+      [55296, 57343]
+    ]
+  },
+  "checkpointExclusions": {
+    "relativePrefixes": [
+      "openclaw.json",
+      "openclaw.json.bak",
+      "agents/main/agent/models.json",
+      "logs/",
+      "update-check.json",
+      ".openclaw/",
+      "SOUL.md",
+      "skills/gws-",
+      "skills/psd-brand-guidelines/",
+      "skills/psd-credentials/",
+      "skills/psd-data/",
+      "skills/psd-failure-report/",
+      "skills/psd-freshservice/",
+      "skills/psd-github/",
+      "skills/psd-html-artifact/",
+      "skills/psd-html-output/",
+      "skills/psd-image-gen/",
+      "skills/psd-redrover/",
+      "skills/psd-rules/",
+      "skills/psd-schedules/",
+      "skills/psd-skills-meta/",
+      "skills/psd-workspace/"
+    ],
+    "suffixes": [
+      ".sock",
+      ".pid",
+      ".sqlite-wal",
+      ".sqlite-shm",
+      ".sqlite-journal",
+      ".reindex-lock.sqlite"
+    ],
+    "basenames": [
+      "plugins.sync.lock"
+    ],
+    "basenamePatterns": [
+      "^.+\\.sqlite\\.memory-reindex-[0-9A-Fa-f-]+(?:-(?:wal|shm|journal))?$"
+    ],
+    "segmentNames": [
+      "node_modules",
+      "site-packages",
+      "__pycache__",
+      ".mypy_cache",
+      ".pytest_cache",
+      ".ruff_cache",
+      ".turbo",
+      ".next"
+    ],
+    "exactVenvSegments": [
+      "venv",
+      ".venv"
+    ],
+    "hiddenVenvSuffix": "-venv"
+  }
+}

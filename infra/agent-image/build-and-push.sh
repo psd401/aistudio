@@ -52,6 +52,8 @@ fi
 BUILD_CONFIG="${SCRIPT_DIR}/openclaw.json"
 BUILD_DOCKERFILE="${SCRIPT_DIR}/Dockerfile"
 BOOTSTRAP_SOURCE_DIR="${SCRIPT_DIR}"
+CANONICAL_WORKSPACE_POLICY="${REPO_ROOT}/lib/agent-workspace/workspace-policy.json"
+STAGED_WORKSPACE_POLICY="${SCRIPT_DIR}/workspace_policy.json"
 CANDIDATE_STAGING=""
 CANDIDATE_METADATA=""
 CANDIDATE_ID=""
@@ -74,6 +76,7 @@ cleanup_build() {
     docker rm -f "${CID}" >/dev/null 2>&1 || true
   fi
   rm -f "${SCRIPT_DIR}/skills/validated-fs.cjs"
+  rm -f "${STAGED_WORKSPACE_POLICY}"
   case "${CANDIDATE_STAGING}" in
     "${SCRIPT_DIR}"/.candidate-staging.*)
       rm -rf -- "${CANDIDATE_STAGING}"
@@ -88,12 +91,23 @@ if ! [[ "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
   exit 1
 fi
 if [ -n "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=all -- \
-    infra/agent-image infra/validated-fs.cjs)" ]; then
+    infra/agent-image infra/validated-fs.cjs \
+    app/api/agent/workspace-storage/route.ts \
+    lib/agent-workspace/storage-broker.ts \
+    lib/agent-workspace/path-policy.ts \
+    lib/agent-workspace/workspace-policy.json \
+    scripts/agent-workspace/audit-live-workspace-paths.ts \
+    scripts/agent-workspace/workspace-policy-probe.py \
+    tests/unit/agent-image-openclaw-runtime-patch.test.ts \
+    tests/unit/lib/agent-workspace/path-policy.test.ts \
+    tests/unit/lib/agent-workspace/storage-broker-checkpoint.test.ts \
+    tests/unit/lib/agent-workspace/storage-broker-list.test.ts \
+    tests/unit/lib/agent-workspace/storage-broker-upload.test.ts \
+    tests/unit/lib/agent-workspace/storage-broker.test.ts)" ]; then
   echo "ERROR: agent-image sources are dirty; commit them before building." >&2
   echo "       Image provenance must identify the exact source content." >&2
   exit 1
 fi
-
 PYTHON="${PYTHON:-python3}"
 if [ -n "${CANDIDATE_MANIFEST}" ]; then
   CANDIDATE_STAGING="$(mktemp -d "${SCRIPT_DIR}/.candidate-staging.XXXXXX")"
@@ -162,19 +176,21 @@ echo ""
 # ---------------------------------------------------------------------------
 # Build-time eval gate (issue #1161). The image is an artifact optimized
 # against an evaluator: it must pass an automated gate BEFORE it is pushed, so
-# the build loop stops being "deploy and chat." Five checks —
+# the build loop stops being "deploy and chat." Seven checks —
 #   1. instruction-budget gate   (static, no Docker)   — over-budget bootstrap
 #   2. config self-consistency   (static, no Docker)   — bad config/provider pins
-#   3. plugin-aware validation   (Docker build)        — invalid complete config
-#   4. boot probe                (runtime, needs image) — dead-boot (no BOOT_OK)
-#   5. canary turn               (runtime, needs image) — non-answering agent
+#   3. path-contract parity      (static, no Docker)   — broker/image drift
+#   4. dev+prod inventory audit (AWS read-only)       — unrestorable history
+#   5. plugin-aware validation  (Docker build)        — invalid complete config
+#   6. boot probe               (runtime, needs image) — dead-boot (no BOOT_OK)
+#   7. canary turn              (runtime, needs image) — non-answering agent
 # Would have stopped r10 (dead-boot), r11 (missing provider), and the weeks-long
 # SOUL.md truncation on a laptop instead of in prod.
 #
 # Two separate bypasses, so an emergency doesn't disable more than it must:
 #   SKIP_PROBE_GATE=1   skips only the RUNTIME boot-probe + canary turn (checks
-#                       4-5) — reserved for a broken probe blocking releases.
-#   SKIP_STATIC_GATE=1  skips the cheap STATIC checks (1-2). These are pure file
+#                       6-7) — reserved for a broken probe blocking releases.
+#   SKIP_STATIC_GATE=1  skips the cheap STATIC checks (1-3). These are pure file
 #                       checks with no external dependency and essentially never
 #                       need bypassing — this exists only for a true emergency,
 #                       and is deliberately a DIFFERENT flag so SKIP_PROBE_GATE
@@ -214,6 +230,25 @@ else
     exit 1
   fi
   echo ""
+
+  echo "3. Cross-language workspace path contract..."
+  if ! "${PYTHON}" -m unittest \
+        "${SCRIPT_DIR}/test_workspace_sync.py" \
+        "${SCRIPT_DIR}/test_workspace_path_contract.py"; then
+    echo "ERROR: Python workspace path contract FAILED." >&2
+    exit 1
+  fi
+  if ! bun run --cwd "${REPO_ROOT}" test -- --runInBand --silent \
+        "${REPO_ROOT}/tests/unit/lib/agent-workspace/path-policy.test.ts" \
+        "${REPO_ROOT}/tests/unit/lib/agent-workspace/storage-broker.test.ts" \
+        "${REPO_ROOT}/tests/unit/lib/agent-workspace/storage-broker-list.test.ts" \
+        "${REPO_ROOT}/tests/unit/lib/agent-workspace/storage-broker-upload.test.ts" \
+        "${REPO_ROOT}/tests/unit/lib/agent-workspace/storage-broker-checkpoint.test.ts" \
+        "${REPO_ROOT}/tests/unit/agent-image-openclaw-runtime-patch.test.ts"; then
+    echo "ERROR: TypeScript workspace path contract FAILED." >&2
+    exit 1
+  fi
+  echo ""
 fi
 
 # Get ECR repository URI from CloudFormation outputs
@@ -237,6 +272,35 @@ echo "ECR URI: ${ECR_URI}"
 echo "Registry: ${ECR_REGISTRY}"
 echo ""
 
+# A clean canary workspace cannot prove that a new persistence contract can
+# restore years of existing filenames. Audit every registered workspace in
+# BOTH environments with the exact TypeScript policy before building. This is
+# read-only and emits only aggregate counts plus stable hashes on failures.
+AUDIT_SCRIPT="${REPO_ROOT}/scripts/agent-workspace/audit-live-workspace-paths.ts"
+if ! command -v bun >/dev/null 2>&1 || [ ! -r "${AUDIT_SCRIPT}" ]; then
+  echo "ERROR: bun and ${AUDIT_SCRIPT} are required for the workspace compatibility gate." >&2
+  exit 1
+fi
+echo "=== Existing workspace compatibility gate (dev + prod) ==="
+for AUDIT_ENVIRONMENT in dev prod; do
+  AUDIT_BUCKET=$(aws ssm get-parameter \
+    --name "/aistudio/${AUDIT_ENVIRONMENT}/agent-workspace-bucket-name" \
+    --query 'Parameter.Value' --output text --region "${REGION}")
+  if [ -z "${AUDIT_BUCKET}" ] || [ "${AUDIT_BUCKET}" = "None" ]; then
+    echo "ERROR: workspace bucket is unavailable for ${AUDIT_ENVIRONMENT}." >&2
+    exit 1
+  fi
+  echo "Auditing ${AUDIT_ENVIRONMENT} workspaces..."
+  ENVIRONMENT="${AUDIT_ENVIRONMENT}" AWS_REGION="${REGION}" \
+    PYTHON="${PYTHON}" \
+    bun run --cwd "${REPO_ROOT}" "${AUDIT_SCRIPT}" \
+      --bucket "${AUDIT_BUCKET}" \
+      --environment "${AUDIT_ENVIRONMENT}" \
+      --region "${REGION}"
+done
+echo "=== Existing workspace compatibility gate PASSED ==="
+echo ""
+
 # Authenticate Docker with ECR
 echo "Authenticating with ECR..."
 aws ecr get-login-password --region "${REGION}" | \
@@ -251,6 +315,10 @@ echo "Building image (ARM64)..."
 # Staged (gitignored) rather than checked in twice, so it can never drift from
 # infra/validated-fs.cjs.
 cp "${SCRIPT_DIR}/../validated-fs.cjs" "${SCRIPT_DIR}/skills/validated-fs.cjs"
+# The canonical persistence contract must live under lib/ so the frontend
+# Docker/CDK asset includes it. Stage that exact committed file into the
+# separate agent-image build context; workspace_sync.py loads it from /app.
+cp "${CANONICAL_WORKSPACE_POLICY}" "${STAGED_WORKSPACE_POLICY}"
 DOCKER_BUILD_ARGS=(
   --platform linux/arm64
   --build-arg "AISTUDIO_SOURCE_COMMIT=${SOURCE_COMMIT}"
@@ -273,6 +341,7 @@ if [ -n "${CANDIDATE_ID}" ]; then
 fi
 docker build "${DOCKER_BUILD_ARGS[@]}" "${SCRIPT_DIR}"
 rm -f "${SCRIPT_DIR}/skills/validated-fs.cjs"
+rm -f "${STAGED_WORKSPACE_POLICY}"
 
 # ---------------------------------------------------------------------------
 # Build-time eval gate (issue #1161): runtime boot probe + signed canary turn.
@@ -615,11 +684,19 @@ echo ""
 echo "Image:  ${ECR_URI}:${TAG}"
 echo "Digest: ${DIGEST}"
 echo ""
-echo "Next step — deploy AgentCore Runtime pinned to the immutable digest:"
-echo ""
-echo "  cd infra && bunx cdk deploy ${STACK_NAME} \\"
-echo "    --context agentImageTag=${TAG} \\"
-echo "    --context agentImageDigest=${DIGEST}"
+if [ "${ENVIRONMENT}" = "dev" ]; then
+  echo "NEXT STEP REQUIRES A PAUSED, SAME-COMMIT WORKSPACE CUTOVER."
+  echo "DO NOT deploy AgentPlatform directly or mix this image with the old broker."
+  echo "Follow all steps under 'Dev workspace-generation cutover' in:"
+  echo "  docs/operations/agent-platform-setup.md"
+  echo "The sequence pauses ingress, drains writers, deploys Frontend first,"
+  echo "then deploys AgentPlatform pinned to the digest above, and resumes ingress."
+else
+  echo "NEXT STEP REQUIRES AN ENVIRONMENT-SPECIFIC PAUSED, SAME-COMMIT CUTOVER."
+  echo "DO NOT substitute Dev resource names or deploy AgentPlatform directly."
+  echo "Stop until the ${ENVIRONMENT} pause/drain, post-drain inventory audit,"
+  echo "Frontend-first deploy, AgentPlatform deploy, and resume steps are validated."
+fi
 echo ""
 echo "After deploy, confirm the running build via CloudWatch:"
 echo "  aws logs tail /aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT \\"

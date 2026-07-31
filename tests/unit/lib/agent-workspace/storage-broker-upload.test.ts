@@ -80,7 +80,7 @@ function installCheckpointAwareS3(
 ): void {
   let responseIndex = 0
   let manifest = {
-    version: 1,
+    version: 2,
     signedWorkspacePrefix: "users/owner",
     workspaceGeneration: workspaceGenerationFromEntries(entries),
     entries: entries.map((entry, index) => ({
@@ -1334,7 +1334,7 @@ function defineVerifiedWorkspaceUploadReservationsSuite1Part6() {
       eTag: '"remote-old"',
     }])
     let checkpointManifest = {
-      version: 1,
+      version: 2,
       signedWorkspacePrefix: "users/owner",
       workspaceGeneration: expectedGeneration,
       entries: [{
