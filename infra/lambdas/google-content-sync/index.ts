@@ -156,6 +156,13 @@ class ConnectorRevokedError extends Error {
   }
 }
 
+class ConnectorPausedError extends Error {
+  constructor() {
+    super("Google Drive connector was paused during synchronization");
+    this.name = "ConnectorPausedError";
+  }
+}
+
 class ConnectorSelectionChangedError extends Error {
   constructor() {
     super("Google Drive selections changed during synchronization");
@@ -244,6 +251,7 @@ async function loadConnectorContext(
     "googleContent.loadConnector",
   );
   if (!connector || connector.status === "revoked") return null;
+  if (connector.status === "paused") throw new ConnectorPausedError();
 
   const [selections, sources, credentials] = await Promise.all([
     executeQuery(
@@ -314,6 +322,34 @@ async function accessTokenFor(context: ConnectorContext): Promise<string> {
     encryptedRefreshToken: context.encryptedRefreshToken,
   });
   return token.accessToken;
+}
+
+async function assertConnectorWorkCurrent(
+  context: ConnectorContext,
+): Promise<void> {
+  const [connector] = await executeQuery(
+    (db) =>
+      db
+        .select({
+          status: repositoryConnectors.status,
+          selectionRevision: repositoryConnectors.selectionRevision,
+        })
+        .from(repositoryConnectors)
+        .where(eq(repositoryConnectors.id, context.connector.id))
+        .limit(1),
+    "googleContent.assertWorkCurrent",
+  );
+  if (!connector || connector.status === "revoked") {
+    throw new ConnectorRevokedError();
+  }
+  if (connector.status === "paused") {
+    throw new ConnectorPausedError();
+  }
+  if (
+    connector.selectionRevision !== context.connector.selectionRevision
+  ) {
+    throw new ConnectorSelectionChangedError();
+  }
 }
 
 async function claimSync(
@@ -469,6 +505,9 @@ async function ensureSourceIdentity(input: {
       .for("update");
     if (!connector || connector.status === "revoked") {
       throw new ConnectorRevokedError();
+    }
+    if (connector.status === "paused") {
+      throw new ConnectorPausedError();
     }
     if (
       connector.selectionRevision !== input.context.connector.selectionRevision
@@ -707,6 +746,9 @@ async function importFile(
       .for("update");
     if (!connector || connector.status === "revoked") {
       throw new ConnectorRevokedError();
+    }
+    if (connector.status === "paused") {
+      throw new ConnectorPausedError();
     }
     if (connector.selectionRevision !== context.connector.selectionRevision) {
       throw new ConnectorSelectionChangedError();
@@ -1002,9 +1044,10 @@ async function selectedViaForFile(
 }
 
 async function markSourceMissing(
-  connectorId: string,
+  context: ConnectorContext,
   externalId: string,
 ): Promise<boolean> {
+  await assertConnectorWorkCurrent(context);
   const [updated] = await executeQuery(
     (db) =>
       db
@@ -1016,7 +1059,10 @@ async function markSourceMissing(
         })
         .where(
           and(
-            eq(repositoryConnectorSources.connectorId, connectorId),
+            eq(
+              repositoryConnectorSources.connectorId,
+              context.connector.id,
+            ),
             eq(repositoryConnectorSources.externalId, externalId),
             inArray(repositoryConnectorSources.status, [
               "active",
@@ -1032,9 +1078,11 @@ async function markSourceMissing(
 }
 
 async function markUnseenSourcesMissing(
-  connectorId: string,
+  context: ConnectorContext,
   seenIds: string[],
 ): Promise<number> {
+  await assertConnectorWorkCurrent(context);
+  const connectorId = context.connector.id;
   const condition =
     seenIds.length > 0
       ? and(
@@ -1137,6 +1185,7 @@ async function recordSourceFailure(
   externalId: string,
   error: unknown,
 ): Promise<void> {
+  await assertConnectorWorkCurrent(context);
   const message = error instanceof Error ? error.message : "Unknown sync error";
   await executeQuery(
     (db) =>
@@ -1183,6 +1232,7 @@ async function importFileIsolated(
   } catch (error) {
     if (
       error instanceof ConnectorRevokedError ||
+      error instanceof ConnectorPausedError ||
       error instanceof ConnectorSelectionChangedError
     ) {
       throw error;
@@ -1191,7 +1241,7 @@ async function importFileIsolated(
       error instanceof GoogleDriveApiError &&
       (error.status === 403 || error.status === 404)
     ) {
-      if (await markSourceMissing(context.connector.id, file.id)) {
+      if (await markSourceMissing(context, file.id)) {
         counters.missing += 1;
       } else {
         counters.failed += 1;
@@ -1215,7 +1265,7 @@ async function reconcileSelectionSnapshot(
     await importFileIsolated(context, client, file, selectedVia, counters);
   }
   counters.missing += await markUnseenSourcesMissing(
-    context.connector.id,
+    context,
     snapshot.files.map(({ file }) => file.id),
   );
 }
@@ -1256,6 +1306,7 @@ async function retryDeferredDownloads(
     } catch (error) {
       if (
         error instanceof ConnectorRevokedError ||
+        error instanceof ConnectorPausedError ||
         error instanceof ConnectorSelectionChangedError
       ) {
         throw error;
@@ -1264,7 +1315,7 @@ async function retryDeferredDownloads(
         error instanceof GoogleDriveApiError &&
         (error.status === 403 || error.status === 404)
       ) {
-        if (await markSourceMissing(context.connector.id, source.externalId)) {
+        if (await markSourceMissing(context, source.externalId)) {
           counters.missing += 1;
         } else {
           counters.failed += 1;
@@ -1288,7 +1339,7 @@ async function processGoogleDriveChange(
   counters: SyncCounters,
 ): Promise<boolean> {
   if (change.removed || !change.file || change.file.trashed) {
-    if (await markSourceMissing(context.connector.id, change.fileId)) {
+    if (await markSourceMissing(context, change.fileId)) {
       counters.missing += 1;
     }
     return false;
@@ -1298,7 +1349,7 @@ async function processGoogleDriveChange(
     if (file.mimeType === GOOGLE_FOLDER_MIME_TYPE) return true;
     const selectedVia = await selectedViaForFile(context, client, file);
     if (selectedVia.length === 0) {
-      if (await markSourceMissing(context.connector.id, file.id)) {
+      if (await markSourceMissing(context, file.id)) {
         counters.missing += 1;
       }
       return false;
@@ -1314,13 +1365,14 @@ async function processGoogleDriveChange(
   } catch (error) {
     if (
       error instanceof ConnectorRevokedError ||
+      error instanceof ConnectorPausedError ||
       error instanceof ConnectorSelectionChangedError
     ) {
       throw error;
     }
     if (!isGoogleDriveMissingError(error)) throw error;
     if (
-      await markSourceMissing(context.connector.id, change.fileId)
+      await markSourceMissing(context, change.fileId)
     ) {
       counters.missing += 1;
     } else {
@@ -1624,6 +1676,7 @@ async function failSync(
         and(
           eq(repositoryConnectors.id, connectorId),
           ne(repositoryConnectors.status, "revoked"),
+          ne(repositoryConnectors.status, "paused"),
         ),
       );
   }, "googleContent.failSync");
@@ -1678,9 +1731,44 @@ async function handleSyncFailure(
   traceId: string,
   error: unknown,
 ): Promise<void> {
-  if (error instanceof ConnectorRevokedError) {
-    await abandonClaimedSync(runId, "CONNECTOR_REVOKED", error.message);
+  const [currentConnector] = await executeQuery(
+    (db) =>
+      db
+        .select({ status: repositoryConnectors.status })
+        .from(repositoryConnectors)
+        .where(eq(repositoryConnectors.id, message.connectorId))
+        .limit(1),
+    "googleContent.failureLifecycleFence",
+  );
+  if (
+    !currentConnector ||
+    currentConnector.status === "revoked" ||
+    error instanceof ConnectorRevokedError
+  ) {
+    await abandonClaimedSync(
+      runId,
+      "CONNECTOR_REVOKED",
+      error instanceof Error
+        ? error.message
+        : "Google Drive connector was revoked during synchronization",
+    );
     log.info("Google Drive synchronization stopped after revocation", {
+      connectorId: message.connectorId,
+      runId,
+      traceId,
+    });
+    return;
+  }
+  if (
+    currentConnector.status === "paused" ||
+    error instanceof ConnectorPausedError
+  ) {
+    const pauseMessage =
+      error instanceof Error
+        ? error.message
+        : "Google Drive connector was paused during synchronization";
+    await abandonClaimedSync(runId, "CONNECTOR_PAUSED", pauseMessage);
+    log.info("Google Drive synchronization stopped after pause", {
       connectorId: message.connectorId,
       runId,
       traceId,
@@ -1752,6 +1840,7 @@ async function synchronize(
       counters,
       runId,
     );
+    await assertConnectorWorkCurrent(context);
     await applyDeletionGrace(context.connector.id, config.deletionGraceDays);
     await renewWatch(context, client, cursor);
     const completed = await completeSync({

@@ -48,11 +48,8 @@ describe("agentic cost-cap pricing", () => {
   it("resolves full context separately from the model output ceiling", () => {
     const limits = resolveTrustedAgenticTokenLimits(
       {
-        maxTokens: 4_096,
-        providerMetadata: {
-          max_context_length: 128_000,
-          max_output_tokens: 8_192,
-        },
+        contextWindowTokens: 128_000,
+        maxOutputTokens: 4_096,
       },
       32_768,
     )
@@ -70,10 +67,10 @@ describe("agentic cost-cap pricing", () => {
     ).toBe(145)
   })
 
-  it("fails closed when trusted context metadata is absent", () => {
+  it("fails closed when explicit trusted limits are absent", () => {
     expect(
       resolveTrustedAgenticTokenLimits(
-        { maxTokens: 4_096, providerMetadata: {} },
+        { contextWindowTokens: 128_000 },
         32_768,
       ),
     ).toBeNull()

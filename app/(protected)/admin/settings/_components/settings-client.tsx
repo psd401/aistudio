@@ -16,6 +16,11 @@ import {
   type NexusRouterConnectorOption,
   type NexusRouterModelOption,
 } from "./nexus-router-settings-card"
+import {
+  CONTENT_ROLLOUT_SETTING_KEYS,
+  ContentPlatformRolloutCard,
+  type ContentRolloutEvidence,
+} from "./content-platform-rollout-card"
 
 const CATEGORY_INFO: Record<string, { title: string; description: string }> = {
   ai: { title: "AI Configuration", description: "AI prompts, embeddings, and model configuration" },
@@ -37,6 +42,7 @@ interface SettingsClientProps {
   currentLogoUrl?: string
   nexusRouterModels?: NexusRouterModelOption[]
   nexusRouterConnectors?: NexusRouterConnectorOption[]
+  contentRolloutEvidence?: ContentRolloutEvidence
 }
 
 // eslint-disable-next-line max-lines-per-function -- Settings dashboard with CRUD handlers and tab rendering
@@ -45,6 +51,7 @@ export function SettingsClient({
   currentLogoUrl = "/logo.png",
   nexusRouterModels = [],
   nexusRouterConnectors = [],
+  contentRolloutEvidence,
 }: SettingsClientProps) {
   const [settings, setSettings] = useState(initialSettings)
   const [isFormOpen, setIsFormOpen] = useState(false)
@@ -286,8 +293,25 @@ export function SettingsClient({
                   {key === 'branding' && (
                     <LogoUpload currentLogoUrl={currentLogoUrl} />
                   )}
+                  {key === 'Content Platform' && contentRolloutEvidence ? (
+                    <ContentPlatformRolloutCard
+                      settings={categorySettings}
+                      evidence={contentRolloutEvidence}
+                      onSave={handleSave}
+                    />
+                  ) : null}
                   <SettingsTable
-                    settings={categorySettings}
+                    settings={
+                      key === 'Content Platform'
+                        ? categorySettings.filter(
+                            setting =>
+                              !CONTENT_ROLLOUT_SETTING_KEYS.includes(
+                                setting.key as
+                                  (typeof CONTENT_ROLLOUT_SETTING_KEYS)[number]
+                              )
+                          )
+                        : categorySettings
+                    }
                     onEdit={handleEdit}
                     onDelete={handleDelete}
                   />

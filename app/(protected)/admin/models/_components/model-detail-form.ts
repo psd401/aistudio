@@ -11,6 +11,9 @@ export interface ModelFormData {
   capabilities: string
   capabilitiesList: string[]
   maxTokens: number
+  contextWindowTokens: number | null
+  maxOutputTokens: number | null
+  agenticReady: boolean
   active: boolean
   nexusEnabled: boolean
   architectEnabled: boolean
@@ -46,6 +49,9 @@ export const emptyFormData: ModelFormData = {
   capabilities: "",
   capabilitiesList: [],
   maxTokens: 4096,
+  contextWindowTokens: null,
+  maxOutputTokens: null,
+  agenticReady: false,
   active: true,
   nexusEnabled: true,
   architectEnabled: true,
@@ -95,6 +101,7 @@ export function parseProviderMetadata(metadata: unknown): ProviderMetadata {
   }
 }
 
+// eslint-disable-next-line complexity -- This pure mapper normalizes each nullable persisted model field for the form.
 export function modelToFormData(model: SelectAiModel): ModelFormData {
   return {
     id: model.id,
@@ -105,6 +112,9 @@ export function modelToFormData(model: SelectAiModel): ModelFormData {
     capabilities: model.capabilities || "",
     capabilitiesList: parseCapabilities(model.capabilities),
     maxTokens: model.maxTokens || 4096,
+    contextWindowTokens: model.contextWindowTokens ?? null,
+    maxOutputTokens: model.maxOutputTokens ?? null,
+    agenticReady: model.agenticReady ?? false,
     active: model.active,
     nexusEnabled: model.nexusEnabled ?? true,
     architectEnabled: model.architectEnabled ?? true,

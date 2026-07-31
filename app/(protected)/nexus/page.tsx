@@ -35,9 +35,14 @@ import { useVoiceSession } from './_components/voice-mode/use-voice-session'
 import { getNexusChatPreferences, updateNexusChatPreferences } from '@/actions/settings/user-settings.actions'
 import type { NexusExperienceMode, NexusModelFamily } from '@/lib/nexus/model-router/types'
 import { createSynchronousValueAccessor } from '@/lib/nexus/synchronous-value-accessor'
+import { RepositoryPicker } from '@/components/features/repositories/repository-picker'
+import { Button } from '@/components/ui/button'
+import { Database } from 'lucide-react'
+import { getNexusAccessibleRepositoriesAction } from '@/actions/repositories/repository.actions'
 
 const log = createLogger({ moduleName: 'nexus-page' })
 const uuidSchema = z.string().uuid()
+const NEXUS_RESPONSE_HEADER_DEADLINE_MS = 2 * 60 * 1_000
 const toolNameSchema = z.string().max(100).regex(/^[\w:-]+$/)
 
 /** Zod schema for X-Connector-Tools response header — validates server-sent tool mapping */
@@ -46,10 +51,17 @@ const ConnectorToolsSchema = z.record(z.string(), z.object({
   serverName: z.string(),
 }))
 
-const ModelErrorSchema = z.object({ error: z.string().max(300) })
+const NexusErrorResponseSchema = z.object({
+  error: z.string().max(500).optional(),
+  code: z.string().max(100).optional(),
+  requestId: z.string().max(100).optional(),
+})
 const UserToolsResponseSchema = z.object({
   isSuccess: z.literal(true),
   data: z.array(z.string()),
+})
+const RepositoryBindingsResponseSchema = z.object({
+  directRepositoryIds: z.array(z.number().int().positive()).max(20),
 })
 
 // Loading spinner component for Suspense fallback
@@ -79,6 +91,8 @@ interface ConversationRuntimeProviderProps {
   skillId?: string
   /** Nexus Project binding; server verifies membership and conversation linkage. */
   projectId?: string
+  selectedRepositoryIds: number[]
+  repositorySelectionLoaded: boolean
   /** The open workspace object id/slug (`?workspace=`); binds §1087 content tools server-side. */
   workspaceId?: string
   attachmentAdapter: AttachmentAdapter
@@ -96,6 +110,8 @@ interface RuntimeValues {
   selectedModel: SelectAiModel | null
   sessionStatus: ReturnType<typeof useSession>['status']
   workspaceId?: string
+  selectedRepositoryIds: number[]
+  repositorySelectionLoaded: boolean
 }
 
 /** UUID format for validating X-Connector-Reconnect header values */
@@ -128,10 +144,36 @@ async function fetchNexusResponse(
   input: RequestInfo | URL,
   init?: RequestInit
 ): Promise<Response> {
+  const controller = new AbortController()
+  const upstreamSignal = init?.signal
+  let deadlineExceeded = false
+  const forwardAbort = () => controller.abort(upstreamSignal?.reason)
+  if (upstreamSignal?.aborted) {
+    forwardAbort()
+  } else {
+    upstreamSignal?.addEventListener('abort', forwardAbort, { once: true })
+  }
+  const deadline = setTimeout(() => {
+    deadlineExceeded = true
+    controller.abort()
+  }, NEXUS_RESPONSE_HEADER_DEADLINE_MS)
   try {
-    return await fetch(input, init)
+    return await fetch(input, { ...init, signal: controller.signal })
   } catch (networkError) {
     if (networkError instanceof Error && networkError.name === 'AbortError') {
+      if (deadlineExceeded) {
+        log.warn('Nexus did not begin responding before the client deadline', {
+          deadlineMs: NEXUS_RESPONSE_HEADER_DEADLINE_MS,
+        })
+        toast.error('Chat request timed out', {
+          description:
+            'Nexus did not begin responding. The request was stopped so you can try again.',
+          duration: 8000,
+        })
+        throw new Error('Nexus response timed out before streaming began', {
+          cause: networkError,
+        })
+      }
       throw networkError
     }
     const isOffline = typeof navigator !== 'undefined' && !navigator.onLine
@@ -146,45 +188,28 @@ async function fetchNexusResponse(
       duration: 8000,
     })
     throw networkError
+  } finally {
+    clearTimeout(deadline)
+    upstreamSignal?.removeEventListener('abort', forwardAbort)
   }
 }
 
-async function handleServerError(response: Response): Promise<void> {
-  if (response.status < 500) return
-
-  let description = 'An error occurred. Please try again.'
-  try {
-    const errorData = await response.clone().json()
-    if (typeof errorData?.error === 'string') {
-      description = errorData.error.slice(0, 200)
-    }
-  } catch {
-    // Keep the generic description when the error body is not JSON.
+function nexusErrorTitle(status: number, code?: string): string {
+  if (
+    code === "REPOSITORY_NOT_READY" ||
+    code === "REPOSITORY_DISCONNECTED"
+  ) {
+    return "Repository not ready"
   }
-  toast.error('Chat request failed', { description, duration: 8000 })
-  throw new Error(description)
-}
-
-async function handleModelUnavailable(response: Response): Promise<void> {
-  if (response.status !== 404) return
-
-  try {
-    const rawData: unknown = await response.clone().json()
-    const parsed = ModelErrorSchema.safeParse(rawData)
-    toast.error('Model Unavailable', {
-      description: parsed.success
-        ? parsed.data.error
-        : 'The selected model is no longer available. Please choose a different model.',
-      duration: 8000,
-    })
-    log.warn('Selected model not found on server')
-  } catch {
-    log.debug('Could not parse 404 response as JSON, showing generic toast')
-    toast.error('Model Unavailable', {
-      description: 'The selected model is no longer available. Please choose a different model.',
-      duration: 8000,
-    })
+  if (code === "REPOSITORY_BINDING_INACCESSIBLE") {
+    return "Repository access changed"
   }
+  if (code === "SKILL_NOT_AVAILABLE" || code === "SKILL_BINDING_CONFLICT") {
+    return "Skill unavailable"
+  }
+  if (status === 404) return "Model unavailable"
+  if (status === 409) return "Request cannot continue"
+  return "Chat request failed"
 }
 
 async function handleNexusResponseErrors(response: Response): Promise<void> {
@@ -201,9 +226,27 @@ async function handleNexusResponseErrors(response: Response): Promise<void> {
     throwSessionExpired('Session expired during chat request — 401 from server')
   }
 
-  await handleServerError(response)
-  await handleModelUnavailable(response)
   await handleContentBlockedResponse(response, log)
+  if (response.ok) return
+
+  const parsed = NexusErrorResponseSchema.safeParse(
+    await response.clone().json().catch(() => null) as unknown
+  )
+  const description = parsed.success && parsed.data.error
+    ? parsed.data.error
+    : `The request failed (HTTP ${response.status}). Please try again.`
+  const code = parsed.success ? parsed.data.code : undefined
+  log.warn("Nexus chat returned a non-streaming error", {
+    status: response.status,
+    code,
+    requestId: parsed.success ? parsed.data.requestId : undefined,
+  })
+  toast.error(nexusErrorTitle(response.status, code), {
+    description,
+    duration: 8000,
+  })
+  await response.body?.cancel().catch(() => {})
+  throw new Error(description)
 }
 
 function applyConversationHeader(response: Response, context: NexusFetchContext): void {
@@ -276,6 +319,8 @@ function ConversationRuntimeProvider({
   skillId,
   projectId,
   workspaceId,
+  selectedRepositoryIds,
+  repositorySelectionLoaded,
   attachmentAdapter,
   voiceAdapter,
   initialMessages = [],
@@ -295,6 +340,8 @@ function ConversationRuntimeProvider({
       selectedModel,
       sessionStatus,
       workspaceId,
+      selectedRepositoryIds,
+      repositorySelectionLoaded,
     })
   )
   runtimeValues.set({
@@ -304,6 +351,8 @@ function ConversationRuntimeProvider({
     selectedModel,
     sessionStatus,
     workspaceId,
+    selectedRepositoryIds,
+    repositorySelectionLoaded,
   })
 
   // Prevents the "Model not ready" toast from firing multiple times if body()
@@ -369,6 +418,9 @@ function ConversationRuntimeProvider({
           // Bind the open workspace object so the server offers §1087 read/edit tools.
           workspaceId: values.workspaceId || undefined,
           conversationId: values.conversationId || undefined,
+          repositoryIds: values.repositorySelectionLoaded
+            ? values.selectedRepositoryIds
+            : undefined,
           nexusMode: values.routingMode,
           modelFamily: values.routingMode === 'standard' ? 'auto' : values.modelFamily,
         }
@@ -405,6 +457,9 @@ interface NexusRuntimeWrapperProps {
   onModelFamilyChange: (family: NexusModelFamily) => void
   skillId?: string
   projectId?: string
+  selectedRepositoryIds: number[]
+  repositorySelectionLoaded: boolean
+  onRepositorySelectionChange: (repositoryIds: number[]) => void
   /** Open workspace object id/slug (`?workspace=`); passed to the runtime for §1087 tools. */
   workspaceId?: string
   attachmentAdapter: AttachmentAdapter
@@ -419,6 +474,53 @@ interface NexusRuntimeWrapperProps {
   canPromoteRepositoryAttachments: boolean
 }
 
+function NexusRepositorySelector({
+  selectedRepositoryIds,
+  onSelectionChange,
+}: {
+  selectedRepositoryIds: number[]
+  onSelectionChange: (repositoryIds: number[]) => void
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <Button
+        type="button"
+        size="icon"
+        variant={selectedRepositoryIds.length > 0 ? "secondary" : "ghost"}
+        className="relative size-8"
+        onClick={() => setOpen(true)}
+        aria-label={
+          selectedRepositoryIds.length > 0
+            ? `${selectedRepositoryIds.length} repositories selected`
+            : "Select repositories"
+        }
+        title="Conversation repositories"
+      >
+        <Database className="size-4" />
+        {selectedRepositoryIds.length > 0 ? (
+          <span className="absolute -right-1 -top-1 flex size-4 items-center justify-center rounded-full bg-primary text-[10px] text-primary-foreground">
+            {selectedRepositoryIds.length}
+          </span>
+        ) : null}
+      </Button>
+      <RepositoryPicker
+        open={open}
+        onOpenChange={setOpen}
+        selectedRepositoryIds={selectedRepositoryIds}
+        onSelectionChange={onSelectionChange}
+        selectionMode="multiple"
+        allowCreate={false}
+        closeOnSelect={false}
+        title="Conversation repositories"
+        description="Select durable repositories for this conversation. Nexus will recheck access and readiness on every turn."
+        loadRepositories={getNexusAccessibleRepositoriesAction}
+        maxSelections={20}
+      />
+    </>
+  )
+}
+
 function NexusRuntimeWrapper({
   conversationId,
   selectedModel,
@@ -430,6 +532,9 @@ function NexusRuntimeWrapper({
   onModelFamilyChange,
   skillId,
   projectId,
+  selectedRepositoryIds,
+  repositorySelectionLoaded,
+  onRepositorySelectionChange,
   workspaceId,
   attachmentAdapter,
   voiceAvailable,
@@ -495,12 +600,26 @@ function NexusRuntimeWrapper({
   // When voice is unavailable with a reason, show a disabled mic with tooltip
   // so users understand why voice is not accessible (Issue #876 reviewer feedback).
   const composerExtraActions = useMemo(
-    () => {
-      if (voiceAvailable) return <VoiceButton onVoiceStart={handleVoiceStart} />
-      if (voiceUnavailableReason) return <DisabledVoiceButton reason={voiceUnavailableReason} />
-      return null
-    },
-    [voiceAvailable, voiceUnavailableReason, handleVoiceStart]
+    () => (
+      <>
+        <NexusRepositorySelector
+          selectedRepositoryIds={selectedRepositoryIds}
+          onSelectionChange={onRepositorySelectionChange}
+        />
+        {voiceAvailable ? (
+          <VoiceButton onVoiceStart={handleVoiceStart} />
+        ) : voiceUnavailableReason ? (
+          <DisabledVoiceButton reason={voiceUnavailableReason} />
+        ) : null}
+      </>
+    ),
+    [
+      handleVoiceStart,
+      onRepositorySelectionChange,
+      selectedRepositoryIds,
+      voiceAvailable,
+      voiceUnavailableReason,
+    ]
   )
 
   return (
@@ -513,6 +632,8 @@ function NexusRuntimeWrapper({
       modelFamily={modelFamily}
       skillId={skillId}
       projectId={projectId}
+      selectedRepositoryIds={selectedRepositoryIds}
+      repositorySelectionLoaded={repositorySelectionLoaded}
       workspaceId={workspaceId}
       attachmentAdapter={attachmentAdapter}
       voiceAdapter={voiceAdapter}
@@ -953,6 +1074,15 @@ function NexusPageView({
                           onModelFamilyChange={runtimeProps.onModelFamilyChange}
                           skillId={runtimeProps.skillId}
                           projectId={runtimeProps.projectId}
+                          selectedRepositoryIds={
+                            runtimeProps.selectedRepositoryIds
+                          }
+                          repositorySelectionLoaded={
+                            runtimeProps.repositorySelectionLoaded
+                          }
+                          onRepositorySelectionChange={
+                            runtimeProps.onRepositorySelectionChange
+                          }
                           workspaceId={runtimeProps.workspaceId}
                           attachmentAdapter={runtimeProps.attachmentAdapter}
                           voiceAvailable={runtimeProps.voiceAvailable}
@@ -1018,6 +1148,154 @@ function useInvalidConversationRedirect(
   }, [router, urlConversationId, validatedConversationId])
 }
 
+function useNexusRepositorySelection(conversationId: string | null) {
+  const [selection, setSelection] = useState<{
+    conversationId: string | null
+    repositoryIds: number[]
+    loaded: boolean
+  }>(() => ({
+    conversationId,
+    repositoryIds: [],
+    loaded: conversationId === null,
+  }))
+  const selectedRepositoryIds =
+    selection.conversationId === conversationId
+      ? selection.repositoryIds
+      : []
+  const repositorySelectionLoaded =
+    selection.conversationId === conversationId
+      ? selection.loaded
+      : conversationId === null
+  const [selectedAccessor] = useState(() =>
+    createSynchronousValueAccessor({
+      conversationId,
+      repositoryIds: selectedRepositoryIds,
+      loaded: repositorySelectionLoaded,
+    })
+  )
+  selectedAccessor.set({
+    conversationId,
+    repositoryIds: selectedRepositoryIds,
+    loaded: repositorySelectionLoaded,
+  })
+  const selectionVersionRef = useRef(0)
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve())
+
+  useEffect(() => {
+    const loadVersion = selectionVersionRef.current + 1
+    selectionVersionRef.current = loadVersion
+    if (!conversationId) return
+    let cancelled = false
+    void fetch(`/api/nexus/conversations/${conversationId}/repositories`)
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(
+            `Repository binding load failed (${response.status})`
+          )
+        }
+        const parsed = RepositoryBindingsResponseSchema.safeParse(
+          await response.json() as unknown
+        )
+        if (!parsed.success) throw new Error("Invalid repository binding response")
+        if (
+          !cancelled &&
+          selectionVersionRef.current === loadVersion
+        ) {
+          const next = {
+            conversationId,
+            repositoryIds: parsed.data.directRepositoryIds,
+            loaded: true,
+          }
+          selectedAccessor.set(next)
+          setSelection(next)
+        }
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return
+        log.warn("Failed to load Nexus repository selections", {
+          conversationId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        toast.error("Could not load conversation repositories")
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [conversationId, selectedAccessor])
+
+  const updateSelection = useCallback(
+    (repositoryIds: number[]) => {
+      const targetConversationId = conversationId
+      const currentSelection = selectedAccessor.get()
+      const previous =
+        currentSelection.conversationId === targetConversationId
+          ? currentSelection.repositoryIds
+          : []
+      const next = {
+        conversationId: targetConversationId,
+        repositoryIds,
+        loaded: true,
+      }
+      selectedAccessor.set(next)
+      setSelection(next)
+      const mutationVersion = selectionVersionRef.current + 1
+      selectionVersionRef.current = mutationVersion
+      if (!conversationId) return
+      saveQueueRef.current = saveQueueRef.current
+        .catch(() => {
+          // A failed earlier selection must not prevent a newer selection from
+          // being persisted in order.
+        })
+        .then(async () => {
+          const response = await fetch(
+            `/api/nexus/conversations/${conversationId}/repositories`,
+            {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ repositoryIds }),
+            }
+          )
+          if (!response.ok) {
+            const payload = await response.json().catch(() => null) as {
+              error?: string
+            } | null
+            throw new Error(
+              payload?.error ??
+                `Repository binding update failed (${response.status})`
+            )
+          }
+        })
+        .catch((error: unknown) => {
+          if (selectionVersionRef.current === mutationVersion) {
+            const rollback = {
+              conversationId: targetConversationId,
+              repositoryIds: previous,
+              loaded: true,
+            }
+            selectedAccessor.set(rollback)
+            setSelection(rollback)
+          }
+          log.warn("Failed to save Nexus repository selections", {
+            conversationId: targetConversationId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          toast.error("Could not save conversation repositories", {
+            description:
+              error instanceof Error ? error.message : "Please try again.",
+          })
+        })
+    },
+    [conversationId, selectedAccessor]
+  )
+
+  return {
+    selectedRepositoryIds,
+    repositorySelectionLoaded,
+    updateSelection,
+  }
+}
+
+// eslint-disable-next-line max-lines-per-function -- This composition root wires stable Nexus runtime adapters and URL-scoped state.
 function NexusPageContent() {
   const {
     closeWorkspace,
@@ -1084,6 +1362,11 @@ function NexusPageContent() {
 
   // Conversation continuity state - initialize from validated URL parameter
   const [conversationId, setConversationId] = useState<string | null>(validatedConversationId)
+  const {
+    selectedRepositoryIds,
+    repositorySelectionLoaded,
+    updateSelection: onRepositorySelectionChange,
+  } = useNexusRepositorySelection(conversationId)
   const {
     attachmentAdapter,
     attachmentConversationId,
@@ -1203,6 +1486,9 @@ function NexusPageContent() {
     onToolsChange,
     processingAttachments,
     projectId: urlProjectId,
+    selectedRepositoryIds,
+    repositorySelectionLoaded,
+    onRepositorySelectionChange,
     routingMode,
     selectedModel,
     skillId: urlSkillId,

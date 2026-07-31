@@ -56,6 +56,7 @@ import type {
   RetrievalMode,
   RetrievalModality,
 } from "@/lib/repositories/retrieval-v2/types"
+import { RepositoryReadinessError } from "@/lib/repositories/readiness-service"
 
 // ============================================
 // Handler Map
@@ -181,16 +182,33 @@ async function handleRepositoriesSearch(
           allowedModalities.includes(value as RetrievalModality)
       )
     : undefined
-  return jsonResult(
-    await searchRepositoryCatalog({
-      cognitoSub: context.cognitoSub,
-      query,
-      repositoryIds: positiveIntegerArray(args.repositoryIds),
-      mode,
-      modalities,
-      limit: typeof args.limit === "number" ? args.limit : undefined,
-    })
-  )
+  try {
+    return jsonResult(
+      await searchRepositoryCatalog({
+        cognitoSub: context.cognitoSub,
+        query,
+        repositoryIds: positiveIntegerArray(args.repositoryIds),
+        mode,
+        modalities,
+        limit: typeof args.limit === "number" ? args.limit : undefined,
+      })
+    )
+  } catch (error) {
+    if (!(error instanceof RepositoryReadinessError)) throw error
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            error: error.code,
+            message: error.message,
+            repositories: error.repositories,
+          }),
+        },
+      ],
+      isError: true,
+    }
+  }
 }
 
 async function handleRepositoriesGetSource(

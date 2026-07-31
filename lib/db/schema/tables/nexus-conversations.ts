@@ -17,6 +17,7 @@ import type { NexusConversationMetadata } from "@/lib/db/types/jsonb";
 import { users } from "./users";
 import { nexusFolders } from "./nexus-folders";
 import { nexusProjects } from "./nexus-projects";
+import { psdAgentSkills } from "./agent-skills";
 
 export const nexusConversations = pgTable(
   "nexus_conversations",
@@ -32,6 +33,9 @@ export const nexusConversations = pgTable(
     modelUsed: varchar("model_used", { length: 100 }),
     folderId: uuid("folder_id").references(() => nexusFolders.id),
     projectId: uuid("project_id").references(() => nexusProjects.id, {
+      onDelete: "set null",
+    }),
+    skillId: uuid("skill_id").references(() => psdAgentSkills.id, {
       onDelete: "set null",
     }),
     messageCount: integer("message_count").default(0),

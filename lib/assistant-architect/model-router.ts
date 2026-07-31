@@ -26,6 +26,10 @@ import type {
   AssistantModelRoutingMode,
 } from "@/lib/db/schema/tables/assistant-architects"
 import { ASSISTANT_ARCHITECT_ROUTER_MODE_KEY } from "./model-router-config"
+import {
+  AGENTIC_MODEL_CONFIGURATION_ERROR,
+  isAgenticModelReady,
+} from "@/lib/agents/model-readiness"
 
 export { ASSISTANT_ARCHITECT_ROUTER_MODE_KEY } from "./model-router-config"
 
@@ -257,6 +261,7 @@ function activeRoutingMetadata(options: {
   }
 }
 
+// eslint-disable-next-line complexity -- Fail-closed agentic admission is layered onto legacy, shadow, and active routing modes.
 export async function routeAssistantArchitectModel(args: {
   text: string
   userId: number
@@ -264,6 +269,7 @@ export async function routeAssistantArchitectModel(args: {
   routingMode: AssistantModelRoutingMode
   requestedFamily?: AssistantModelFamily | null
   requirements?: ModelCapabilityRequirements
+  agenticRequired?: boolean
 }): Promise<AssistantArchitectModelRoute> {
   const fallback = await getAIModelById(args.fallbackModelDbId)
   if (!fallback?.modelId || !fallback.provider) {
@@ -272,15 +278,34 @@ export async function routeAssistantArchitectModel(args: {
   const requirements = args.requirements ?? {}
 
   if (args.routingMode === "legacy") {
+    if (args.agenticRequired && !isAgenticModelReady(fallback)) {
+      throw new Error(AGENTIC_MODEL_CONFIGURATION_ERROR)
+    }
     return pinnedRoute(fallback, args, "off", requirements)
   }
 
   const { config, mode } = await loadRouterConfiguration()
   if (mode === "off") {
+    if (args.agenticRequired && !isAgenticModelReady(fallback)) {
+      throw new Error(AGENTIC_MODEL_CONFIGURATION_ERROR)
+    }
     return pinnedRoute(fallback, args, mode, requirements)
   }
+  if (
+    mode === "shadow" &&
+    args.agenticRequired &&
+    !isAgenticModelReady(fallback)
+  ) {
+    throw new Error(AGENTIC_MODEL_CONFIGURATION_ERROR)
+  }
 
-  const models = await getArchitectEnabledModels()
+  const architectModels = await getArchitectEnabledModels()
+  const models = args.agenticRequired
+    ? architectModels.filter(isAgenticModelReady)
+    : architectModels
+  if (args.agenticRequired && models.length === 0) {
+    throw new Error(AGENTIC_MODEL_CONFIGURATION_ERROR)
+  }
   const accessibleIds = new Set(await filterAccessibleResourceIds(
     args.userId,
     "model",

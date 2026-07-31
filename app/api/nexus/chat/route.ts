@@ -105,6 +105,14 @@ import {
   NexusProjectAccessError,
   resolveNexusProjectChatContext,
 } from '@/lib/nexus/projects/project-service';
+import {
+  ConversationRepositoryBindingError,
+  getConversationRepositoryBindings,
+  loadValidatedConversationRepositoryContext,
+  replaceConversationRepositoryBindings,
+  repositoryBindingErrorResponse,
+} from '@/lib/nexus/conversation-repository-service';
+import { RepositoryReadinessError } from '@/lib/repositories/readiness-service';
 
 // Allow streaming responses up to 30 minutes. Deep Research runs take 5–25
 // minutes; standard chat and image-gen finish well within this window.
@@ -550,6 +558,7 @@ const ChatRequestSchema = z.object({
   // `allowed-tools` pin is enforced server-side over the client tool list (#925 AC#6).
   skillId: z.string().uuid().optional(),
   projectId: z.string().uuid().optional(),
+  repositoryIds: z.array(z.number().int().positive()).max(20).optional(),
   // When a workspace document/artifact is open beside the chat (`?workspace=<id|slug>`),
   // the server binds read/edit tools for THAT object (Atrium §1087). Loose validation
   // only — the tool builder canView/canEdit-gates server-side; cap length like other params.
@@ -1393,6 +1402,7 @@ async function getValidatedModelConfig(
 }
 
 /** Create a conversation or verify ownership of an existing one. */
+// eslint-disable-next-line complexity -- Ownership plus durable project/skill identity checks must complete before any message write.
 async function setupConversation(params: {
   conversationIdValue?: string;
   messages: z.infer<typeof ChatRequestSchema>['messages'];
@@ -1402,10 +1412,12 @@ async function setupConversation(params: {
   requestId: string;
   log: ReturnType<typeof createLogger>;
   projectId?: string;
+  skillId?: string;
 }): Promise<{
   conversationId: string;
   conversationTitle: string;
   created: boolean;
+  skillId?: string;
 } | { error: Response }> {
   const {
     conversationIdValue,
@@ -1416,11 +1428,33 @@ async function setupConversation(params: {
     requestId,
     log,
     projectId,
+    skillId: requestedSkillId,
   } = params;
 
   let conversationId = conversationIdValue || '';
   let conversationTitle = 'New Conversation';
   let created = false;
+  let effectiveSkillId: string | undefined;
+
+  if (requestedSkillId) {
+    const approvedSkill = await getApprovedSkillSession(requestedSkillId);
+    if (!approvedSkill) {
+      log.warn("Rejected unavailable Nexus skill binding", {
+        skillId: requestedSkillId,
+        userId,
+      });
+      return {
+        error: Response.json(
+          {
+            error: "The requested skill is no longer available",
+            code: "SKILL_NOT_AVAILABLE",
+            requestId,
+          },
+          { status: 409 }
+        ),
+      };
+    }
+  }
 
   if (!conversationId) {
     conversationTitle = generateConversationTitle(messages as UIMessage[]);
@@ -1430,10 +1464,12 @@ async function setupConversation(params: {
       modelId,
       title: conversationTitle,
       projectId,
+      skillId: requestedSkillId,
     });
     if ('error' in convResult) return convResult;
     conversationId = convResult.conversationId;
     created = true;
+    effectiveSkillId = requestedSkillId;
   } else {
     // Verify the authenticated user owns this conversation before appending messages.
     // Without this check any authenticated user can inject messages into any conversation.
@@ -1442,6 +1478,7 @@ async function setupConversation(params: {
         .select({
           id: nexusConversations.id,
           projectId: nexusConversations.projectId,
+          skillId: nexusConversations.skillId,
         })
         .from(nexusConversations)
         .where(and(
@@ -1473,9 +1510,53 @@ async function setupConversation(params: {
         )
       };
     }
+    const storedSkillId = owned[0]?.skillId ?? undefined;
+    if (
+      storedSkillId &&
+      requestedSkillId &&
+      storedSkillId !== requestedSkillId
+    ) {
+      log.warn("Conversation skill binding check failed", {
+        conversationId,
+        userId,
+        storedSkillId,
+        requestedSkillId,
+      });
+      return {
+        error: Response.json(
+          {
+            error: "Conversation is bound to a different skill",
+            code: "SKILL_BINDING_CONFLICT",
+            requestId,
+          },
+          { status: 409 }
+        ),
+      };
+    }
+    effectiveSkillId = storedSkillId ?? requestedSkillId;
+    if (!storedSkillId && requestedSkillId) {
+      await executeQuery(
+        (db) =>
+          db
+            .update(nexusConversations)
+            .set({ skillId: requestedSkillId, updatedAt: new Date() })
+            .where(
+              and(
+                eq(nexusConversations.id, conversationId),
+                eq(nexusConversations.userId, userId)
+              )
+            ),
+        "bindNexusConversationSkill"
+      );
+    }
   }
 
-  return { conversationId, conversationTitle, created };
+  return {
+    conversationId,
+    conversationTitle,
+    created,
+    skillId: effectiveSkillId,
+  };
 }
 
 async function bindAttachmentReferencesOrError(params: {
@@ -2007,6 +2088,8 @@ interface ConversationRepositoryContext {
   repositoryTokenMappingSink?: TokenMappingSink;
   attachmentTools: ToolSet;
   projectTools: ToolSet;
+  conversationTools: ToolSet;
+  durableRepositoryIds: number[];
 }
 
 type ConversationRepositoryResult =
@@ -2020,20 +2103,35 @@ async function buildRoutingEnabledTools(params: {
   enabledTools: string[];
   hasProjectBinding: boolean;
   hasSkillBinding: boolean;
+  requestedRepositoryIds: number[];
 }): Promise<string[]> {
-  const repositoryIds = params.conversationId
+  const attachmentRepositoryIds = params.conversationId
     ? await resolveNexusConversationRepositoryIds({
         ownerId: params.userId,
         conversationId: params.conversationId,
       })
     : [];
   const requiresAttachmentTools =
-    repositoryIds.length > 0 ||
+    attachmentRepositoryIds.length > 0 ||
     params.attachmentPreflight.requiresAttachmentTools;
+  const durableBindings = params.conversationId
+    ? await getConversationRepositoryBindings({
+        conversationId: params.conversationId,
+        userId: params.userId,
+      })
+    : [];
+  const hasDurableRepositoryBinding =
+    durableBindings.length > 0 ||
+    params.requestedRepositoryIds.length > 0 ||
+    params.hasProjectBinding ||
+    params.hasSkillBinding;
   return [
     ...new Set([
       ...params.enabledTools,
       ...(requiresAttachmentTools ? ["searchNexusAttachments"] : []),
+      ...(hasDurableRepositoryBinding
+        ? ["searchConversationRepositories"]
+        : []),
       ...(params.hasProjectBinding ? ["searchProjectRepositories"] : []),
       ...(params.hasSkillBinding ? ["searchSkillRepositories"] : []),
     ]),
@@ -2118,6 +2216,7 @@ async function prepareChatRequest(params: {
     enabledTools,
     hasProjectBinding: !!projectBinding,
     hasSkillBinding: !!data.skillId,
+    requestedRepositoryIds: data.repositoryIds ?? [],
   });
   return {
     ok: true,
@@ -2321,6 +2420,7 @@ async function resolveChatModel(params: {
   };
 }
 
+// eslint-disable-next-line complexity, max-lines-per-function -- One pre-stream boundary materializes and revalidates every attachment and durable binding source.
 async function prepareConversationRepositories(params: {
   prepared: PreparedChatRequest;
   resolved: ResolvedChatRequest;
@@ -2342,19 +2442,89 @@ async function prepareConversationRepositories(params: {
   if (bindingError) {
     return { ok: false, response: bindingError };
   }
+  try {
+    if (prepared.validationData.repositoryIds !== undefined) {
+      await replaceConversationRepositoryBindings({
+        conversationId: conversation.conversationId,
+        userId: prepared.userId,
+        repositoryIds: prepared.validationData.repositoryIds,
+        source: "direct",
+      });
+    }
+    if (prepared.projectBinding) {
+      await replaceConversationRepositoryBindings({
+        conversationId: conversation.conversationId,
+        userId: prepared.userId,
+        repositoryIds: prepared.projectBinding.repositoryIds,
+        source: "project",
+        sourceId: prepared.projectBinding.projectId,
+      });
+    }
+    if (conversation.skillId) {
+      const skill = await getApprovedSkillSession(conversation.skillId);
+      if (!skill) {
+        return {
+          ok: false,
+          response: Response.json(
+            {
+              error: "The skill bound to this conversation is unavailable",
+              code: "SKILL_NOT_AVAILABLE",
+              requestId,
+            },
+            { status: 409 }
+          ),
+        };
+      }
+      await replaceConversationRepositoryBindings({
+        conversationId: conversation.conversationId,
+        userId: prepared.userId,
+        repositoryIds: skill.repositoryIds,
+        source: "skill",
+        sourceId: conversation.skillId,
+      });
+    }
+  } catch (error) {
+    if (
+      error instanceof ConversationRepositoryBindingError ||
+      error instanceof RepositoryReadinessError
+    ) {
+      return {
+        ok: false,
+        response: repositoryBindingErrorResponse(error, requestId),
+      };
+    }
+    throw error;
+  }
+  const attachmentRepositoryIds = await resolveNexusConversationRepositoryIds({
+    ownerId: prepared.userId,
+    conversationId: conversation.conversationId,
+  });
+  let durableContext;
+  try {
+    durableContext = await loadValidatedConversationRepositoryContext({
+      conversationId: conversation.conversationId,
+      userId: prepared.userId,
+    });
+  } catch (error) {
+    if (
+      error instanceof ConversationRepositoryBindingError ||
+      error instanceof RepositoryReadinessError
+    ) {
+      return {
+        ok: false,
+        response: repositoryBindingErrorResponse(error, requestId),
+      };
+    }
+    throw error;
+  }
   await persistLastUserMessage({
     conversationId: conversation.conversationId,
     messages: resolved.persistenceMessagesWithParts as ChatMessages,
     dbModelId: resolved.dbModelId,
   });
-  const attachmentRepositoryIds = await resolveNexusConversationRepositoryIds({
-    ownerId: prepared.userId,
-    conversationId: conversation.conversationId,
-  });
   const repositoryTokenMappingSink =
     attachmentRepositoryIds.length > 0 ||
-    prepared.projectBinding ||
-    prepared.skillId
+    durableContext.repositoryIds.length > 0
       ? createTokenMappingSink()
       : undefined;
   const attachmentTools = repositoryTokenMappingSink
@@ -2376,6 +2546,17 @@ async function prepareConversationRepositories(params: {
             "Use this before making project-specific claims and cite returned sources.",
         })
       : {};
+  const conversationTools =
+    repositoryTokenMappingSink && durableContext.repositoryIds.length > 0
+      ? createNexusRepositorySearchTools({
+          repositoryIds: durableContext.repositoryIds,
+          userCognitoSub: prepared.session.sub,
+          tokenMappingSink: repositoryTokenMappingSink,
+          toolName: "searchConversationRepositories",
+          description:
+            "Search every durable repository bound to this Nexus conversation. Use this before making repository-dependent claims and cite the returned sources.",
+        })
+      : {};
   const { lightweightMessages } = await processMessagesWithAttachments(
     conversation.conversationId,
     resolved.messagesWithParts,
@@ -2387,6 +2568,8 @@ async function prepareConversationRepositories(params: {
       repositoryTokenMappingSink,
       attachmentTools,
       projectTools,
+      conversationTools,
+      durableRepositoryIds: durableContext.repositoryIds,
     },
   };
 }
@@ -2394,8 +2577,12 @@ async function prepareConversationRepositories(params: {
 function buildRepositoryPromptFragment(params: {
   projectBinding: SuccessfulProjectBinding;
   skillRepositoryIds: number[];
+  durableRepositoryIds: number[];
 }): string | undefined {
   const fragments = [
+    params.durableRepositoryIds.length > 0
+      ? "This conversation has durable repository bindings. Use searchConversationRepositories before making repository-dependent claims, and cite the returned source labels."
+      : null,
     params.projectBinding
       ? `You are working in the Nexus project "${params.projectBinding.name}". Follow these project instructions for this conversation:\n\n${params.projectBinding.instructions || "(No additional instructions.)"}\n\nUse searchProjectRepositories for project repository questions.`
       : null,
@@ -2439,7 +2626,7 @@ async function resolveToolsAndStream(params: {
   const skillBinding = await applySkillSessionBinding({
     scopedEnabledTools: resolved.catalogScopedEnabledTools,
     connectorToolResults: connectorTools,
-    skillId: prepared.skillId,
+    skillId: conversation.skillId,
     log,
   });
   assertAutomaticToolsAvailable(
@@ -2460,6 +2647,7 @@ async function resolveToolsAndStream(params: {
       : {};
   const repositoryTools: ToolSet = {
     ...repositories.attachmentTools,
+    ...repositories.conversationTools,
     ...repositories.projectTools,
     ...skillRepositoryTools,
   };
@@ -2509,6 +2697,7 @@ async function resolveToolsAndStream(params: {
     repositoryPromptFragment: buildRepositoryPromptFragment({
       projectBinding: prepared.projectBinding,
       skillRepositoryIds: skillBinding.skillRepositoryIds,
+      durableRepositoryIds: repositories.durableRepositoryIds,
     }),
     memoryTools: memoryContext.tools,
     userMemoryFragment: memoryContext.userMemoryFragment,
@@ -2525,17 +2714,12 @@ async function resolveToolsAndStream(params: {
   });
 }
 
-async function compensateFailedAttachmentTurn(params: {
+async function compensateFailedNewConversation(params: {
   prepared: PreparedChatRequest;
   conversation: SuccessfulConversationSetup;
   log: ReturnType<typeof createLogger>;
 }): Promise<void> {
-  if (
-    !params.conversation.created ||
-    params.prepared.attachmentPreflight.references.length === 0
-  ) {
-    return;
-  }
+  if (!params.conversation.created) return;
   try {
     await rollbackNewNexusAttachmentConversation({
       ownerId: params.prepared.userId,
@@ -2543,7 +2727,7 @@ async function compensateFailedAttachmentTurn(params: {
     });
   } catch (cleanupError) {
     params.log.error(
-      "Failed to compensate a failed repository attachment turn",
+      "Failed to compensate a failed first Nexus turn",
       {
         conversationId: params.conversation.conversationId,
         error:
@@ -2573,6 +2757,7 @@ async function executeStandardChatTurn(params: {
     requestId: params.requestId,
     log: params.log,
     projectId: params.prepared.projectBinding?.projectId,
+    skillId: params.prepared.skillId,
   });
   if ("error" in conversation) return conversation.error;
   try {
@@ -2584,7 +2769,14 @@ async function executeStandardChatTurn(params: {
       timer: params.timer,
       log: params.log,
     });
-    if (!repositories.ok) return repositories.response;
+    if (!repositories.ok) {
+      await compensateFailedNewConversation({
+        prepared: params.prepared,
+        conversation,
+        log: params.log,
+      });
+      return repositories.response;
+    }
     return await resolveToolsAndStream({
       prepared: params.prepared,
       resolved: params.resolved,
@@ -2596,7 +2788,7 @@ async function executeStandardChatTurn(params: {
       log: params.log,
     });
   } catch (turnError) {
-    await compensateFailedAttachmentTurn({
+    await compensateFailedNewConversation({
       prepared: params.prepared,
       conversation,
       log: params.log,
@@ -2662,6 +2854,17 @@ function buildChatErrorResponse(
   log: ReturnType<typeof createLogger>,
   timer: (data: Record<string, unknown>) => void
 ): Response {
+  if (
+    error instanceof ConversationRepositoryBindingError ||
+    error instanceof RepositoryReadinessError
+  ) {
+    log.warn("Nexus repository preflight rejected the turn", {
+      code: error.code,
+    });
+    timer({ status: "error", reason: error.code.toLowerCase() });
+    return repositoryBindingErrorResponse(error, requestId);
+  }
+
   if (error instanceof NexusSpecialistUnavailableError) {
     log.warn('Nexus specialist unavailable', {
       specialist: error.specialist,

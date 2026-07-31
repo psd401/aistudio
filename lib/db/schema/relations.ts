@@ -44,6 +44,7 @@ import { nexusTemplates } from "./tables/nexus-templates";
 import { nexusUserPreferences } from "./tables/nexus-user-preferences";
 import { nexusProviderMetrics } from "./tables/nexus-provider-metrics";
 import { nexusRepositoryBindings } from "./tables/nexus-repository-bindings";
+import { nexusConversationRepositories } from "./tables/nexus-conversation-repositories";
 
 // Nexus MCP
 import { nexusMcpServers } from "./tables/nexus-mcp-servers";
@@ -107,6 +108,7 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   toolEdits: many(toolEdits),
   nexusConversations: many(nexusConversations),
   nexusRepositoryBindings: many(nexusRepositoryBindings),
+  nexusConversationRepositories: many(nexusConversationRepositories),
   nexusFolders: many(nexusFolders),
   nexusShares: many(nexusShares),
   nexusTemplates: many(nexusTemplates),
@@ -283,6 +285,7 @@ export const nexusConversationsRelations = relations(
     promptUsageEvents: many(promptUsageEvents),
     documents: many(documents), // Added bidirectional relation for Issue #549
     repositoryBindings: many(nexusRepositoryBindings),
+    durableRepositoryBindings: many(nexusConversationRepositories),
   })
 );
 
@@ -299,6 +302,24 @@ export const nexusRepositoryBindingsRelations = relations(
     }),
     repository: one(knowledgeRepositories, {
       fields: [nexusRepositoryBindings.repositoryId],
+      references: [knowledgeRepositories.id],
+    }),
+  })
+);
+
+export const nexusConversationRepositoriesRelations = relations(
+  nexusConversationRepositories,
+  ({ one }) => ({
+    creator: one(users, {
+      fields: [nexusConversationRepositories.createdBy],
+      references: [users.id],
+    }),
+    conversation: one(nexusConversations, {
+      fields: [nexusConversationRepositories.conversationId],
+      references: [nexusConversations.id],
+    }),
+    repository: one(knowledgeRepositories, {
+      fields: [nexusConversationRepositories.repositoryId],
       references: [knowledgeRepositories.id],
     }),
   })
@@ -474,6 +495,7 @@ export const knowledgeRepositoriesRelations = relations(
     items: many(repositoryItems),
     access: many(repositoryAccess),
     nexusBindings: many(nexusRepositoryBindings),
+    nexusConversationBindings: many(nexusConversationRepositories),
   })
 );
 

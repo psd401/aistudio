@@ -1,5 +1,5 @@
 -- ============================================================================
--- 169: allow verified workspace uploads to represent empty files
+-- 171: allow verified workspace uploads to represent empty files
 -- ============================================================================
 --
 -- Empty regular files are real workspace state. The broker validates their

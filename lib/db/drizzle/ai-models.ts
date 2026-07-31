@@ -69,6 +69,9 @@ export interface AIModelData {
   description?: string | null;
   capabilities?: string | null;
   maxTokens?: number | null;
+  contextWindowTokens?: number | null;
+  maxOutputTokens?: number | null;
+  agenticReady?: boolean;
   active?: boolean;
   nexusEnabled?: boolean;
   architectEnabled?: boolean;
@@ -92,6 +95,9 @@ export interface AIModelUpdateData {
   description?: string | null;
   capabilities?: string | null;
   maxTokens?: number | null;
+  contextWindowTokens?: number | null;
+  maxOutputTokens?: number | null;
+  agenticReady?: boolean;
   active?: boolean;
   nexusEnabled?: boolean;
   architectEnabled?: boolean;
@@ -126,6 +132,9 @@ export async function getAIModels() {
           description: aiModels.description,
           capabilities: aiModels.capabilities,
           maxTokens: aiModels.maxTokens,
+          contextWindowTokens: aiModels.contextWindowTokens,
+          maxOutputTokens: aiModels.maxOutputTokens,
+          agenticReady: aiModels.agenticReady,
           active: aiModels.active,
           nexusEnabled: aiModels.nexusEnabled,
           architectEnabled: aiModels.architectEnabled,
@@ -228,6 +237,25 @@ export async function getArchitectEnabledModels() {
   );
 }
 
+/** Models that are explicitly safe for an agentic cost-bounded tool loop. */
+export async function getAgenticReadyArchitectModels() {
+  return executeQuery(
+    (db) =>
+      db
+        .select()
+        .from(aiModels)
+        .where(
+          and(
+            eq(aiModels.active, true),
+            eq(aiModels.architectEnabled, true),
+            eq(aiModels.agenticReady, true)
+          )
+        )
+        .orderBy(aiModels.provider, aiModels.name),
+    "getAgenticReadyArchitectModels"
+  );
+}
+
 /**
  * Get AI models by provider
  */
@@ -323,6 +351,9 @@ export async function createAIModel(modelData: AIModelData) {
           description: modelData.description,
           capabilities: modelData.capabilities,
           maxTokens: modelData.maxTokens,
+          contextWindowTokens: modelData.contextWindowTokens,
+          maxOutputTokens: modelData.maxOutputTokens,
+          agenticReady: modelData.agenticReady ?? false,
           active: modelData.active ?? true,
           nexusEnabled: modelData.nexusEnabled ?? true,
           architectEnabled: modelData.architectEnabled ?? true,
@@ -808,6 +839,9 @@ export interface BulkModelImportData {
   description?: string | null;
   capabilities?: string[] | null;
   maxTokens?: number | null;
+  contextWindowTokens?: number | null;
+  maxOutputTokens?: number | null;
+  agenticReady?: boolean;
   active?: boolean;
   nexusEnabled?: boolean;
   architectEnabled?: boolean;
@@ -918,6 +952,21 @@ async function updateImportedModel(
     capabilities:
       "capabilities" in model ? capabilities : existing.capabilities,
     maxTokens: importedValue(model, "maxTokens", existing.maxTokens),
+    contextWindowTokens: importedValue(
+      model,
+      "contextWindowTokens",
+      existing.contextWindowTokens
+    ),
+    maxOutputTokens: importedValue(
+      model,
+      "maxOutputTokens",
+      existing.maxOutputTokens
+    ),
+    agenticReady: importedValue(
+      model,
+      "agenticReady",
+      existing.agenticReady
+    ),
     active: importedValue(model, "active", existing.active),
     nexusEnabled: importedValue(model, "nexusEnabled", existing.nexusEnabled),
     architectEnabled: importedValue(
@@ -955,6 +1004,9 @@ async function createImportedModel(
     description: model.description,
     capabilities: model.capabilities ? JSON.stringify(model.capabilities) : null,
     maxTokens: model.maxTokens,
+    contextWindowTokens: model.contextWindowTokens,
+    maxOutputTokens: model.maxOutputTokens,
+    agenticReady: model.agenticReady ?? false,
     active: model.active ?? true,
     nexusEnabled: model.nexusEnabled ?? true,
     architectEnabled: model.architectEnabled ?? true,

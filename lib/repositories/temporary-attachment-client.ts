@@ -28,6 +28,27 @@ interface UploadTemporaryAttachmentInput {
   conversationId?: string;
 }
 
+async function fetchWithDeadline(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = 15_000
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("Temporary attachment status check timed out", {
+        cause: error,
+      });
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 async function parseErrorResponse(
   response: Response,
   fallback: string
@@ -44,7 +65,7 @@ export async function uploadTemporaryAttachment(
   const contentType =
     input.file.type.toLowerCase().split(";", 1)[0]?.trim() ||
     "application/octet-stream";
-  const response = await fetch("/api/repositories/temporary-attachments", {
+  const response = await fetchWithDeadline("/api/repositories/temporary-attachments", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -55,7 +76,7 @@ export async function uploadTemporaryAttachment(
       contentType,
       byteSize: input.file.size,
     }),
-  });
+  }, 30_000);
   if (!response.ok) {
     throw await parseErrorResponse(response, "Temporary attachment upload failed");
   }
@@ -74,7 +95,7 @@ export async function uploadTemporaryAttachment(
     initiated.upload,
     contentType
   );
-  const completionResponse = await fetch(
+  const completionResponse = await fetchWithDeadline(
     `/api/repositories/temporary-attachments/${initiated.bindingId}/complete`,
     {
       method: "POST",
@@ -84,7 +105,8 @@ export async function uploadTemporaryAttachment(
         name: input.file.name,
         parts,
       }),
-    }
+    },
+    30_000
   );
   if (!completionResponse.ok) {
     throw await parseErrorResponse(
@@ -103,8 +125,8 @@ export async function waitForTemporaryAttachment(
   let delayMs = options.initialDelayMs ?? 1_000;
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const response = await fetch(
-      `/api/repositories/temporary-attachments/${upload.reference.bindingId}/${upload.reference.itemId}`
+    const response = await fetchWithDeadline(
+      `/api/repositories/temporary-attachments/${upload.reference.bindingId}/${upload.reference.itemId}`,
     );
     if (!response.ok) {
       throw await parseErrorResponse(

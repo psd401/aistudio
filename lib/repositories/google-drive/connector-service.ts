@@ -435,6 +435,55 @@ export async function requestGoogleDriveSync(input: {
   );
 }
 
+export async function setGoogleDriveConnectorPaused(input: {
+  connectorId: string;
+  paused: boolean;
+}): Promise<{ status: "paused" | "pending" }> {
+  validateConnectorId(input.connectorId);
+  const status = await executeTransaction(
+    async (tx) => {
+      const [connector] = await tx
+        .select({ status: repositoryConnectors.status })
+        .from(repositoryConnectors)
+        .where(eq(repositoryConnectors.id, input.connectorId))
+        .limit(1)
+        .for("update");
+      if (!connector) throw new Error("Connector not found");
+      if (connector.status === "revoked") {
+        throw new Error("A disconnected connector cannot be resumed");
+      }
+      const nextStatus = input.paused ? "paused" : "pending";
+      await tx
+        .update(repositoryConnectors)
+        .set({
+          status: nextStatus,
+          // Every lifecycle transition invalidates the revision captured by an
+          // in-flight sync. Publication checks this token before it can advance
+          // the cursor or replace the last verified snapshot.
+          selectionRevision: sql`${repositoryConnectors.selectionRevision} + 1`,
+          nextSyncAt: input.paused
+            ? new Date("9999-12-31T23:59:59.999Z")
+            : new Date(),
+          ...(input.paused
+            ? {}
+            : { lastErrorCode: null, lastErrorMessage: null }),
+          updatedAt: new Date(),
+        })
+        .where(eq(repositoryConnectors.id, input.connectorId));
+      return nextStatus;
+    },
+    "googleDrive.setPaused",
+    { isolationLevel: "serializable" },
+  );
+  if (!input.paused) {
+    await requestGoogleDriveSync({
+      connectorId: input.connectorId,
+      trigger: "recovery",
+    });
+  }
+  return { status };
+}
+
 export async function getGoogleDriveConnectorCredential(input: {
   connectorId: string;
   userId: number;

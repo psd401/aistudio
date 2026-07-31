@@ -92,6 +92,34 @@ async function warmupConnectionPool(): Promise<void> {
   }
 }
 
+async function verifyDeploymentSchema(): Promise<void> {
+  const { createLogger } = await import("@/lib/logger")
+  const log = createLogger({
+    context: "instrumentation",
+    operation: "deploymentSchemaReadiness",
+  })
+
+  try {
+    const { verifyDeploymentSchemaReadiness } = await import(
+      "@/lib/deployment/schema-readiness"
+    )
+    const result = await verifyDeploymentSchemaReadiness()
+    log.info("Critical deployment schema verified", {
+      missingMigrationCount: result.missingMigrations.length,
+      cancellationConstraintReady: result.cancellationConstraintReady,
+      agenticModelColumnsReady: result.agenticModelColumnsReady,
+      nexusBindingColumnsReady: result.nexusBindingColumnsReady,
+      nexusBindingSourceConstraintReady:
+        result.nexusBindingSourceConstraintReady,
+      nexusSkillForeignKeyReady: result.nexusSkillForeignKeyReady,
+    })
+  } catch (error) {
+    log.error("Critical deployment schema verification failed", {
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
 /**
  * Sync the capability manifest to the database on startup.
  *
@@ -173,8 +201,9 @@ async function syncToolCatalog(): Promise<void> {
  * Called once when the Next.js server starts. Used to:
  * 1. Register shutdown handlers for graceful connection cleanup
  * 2. Warm up the database connection pool to avoid cold start latency
- * 3. Sync the code capability manifest into the database (#923)
- * 4. Sync the code tool catalog manifest into the database (#924)
+ * 3. Verify critical deployment migrations and constraints
+ * 4. Sync the code capability manifest into the database (#923)
+ * 5. Sync the code tool catalog manifest into the database (#924)
  *
  * Only runs in Node.js runtime (not Edge runtime or during builds).
  */
@@ -195,6 +224,15 @@ export async function register(): Promise<void> {
         // Errors already logged in warmupConnectionPool
       });
     });
+
+    // The lightweight ALB route remains unhealthy until this succeeds in
+    // production. A task built against newer repository code therefore cannot
+    // receive traffic while Aurora is still missing its required migrations.
+    setImmediate(() => {
+      verifyDeploymentSchema().catch(() => {
+        // Errors already logged and reflected in the process readiness state.
+      })
+    })
 
     // Sync capability manifest (async, non-blocking). Dispatched after the
     // warmup callback in registration order; the connection pool initializes

@@ -16,6 +16,15 @@ import {
   sanitizeForLogging
 } from "@/lib/logger"
 import { revalidateSettingsCache, getSetting } from "@/lib/settings-manager"
+import { getContentPlatformConfig } from "@/lib/repositories/content-platform/config"
+import { getRepositoryMigrationDashboard } from "@/lib/repositories/content-platform/migration-control-service"
+import {
+  applyProspectiveRolloutSetting,
+  evaluateRepositoryCutoverEvidence,
+  evaluateRolloutDependencies,
+  isContentRolloutBooleanKey,
+  parseContentRolloutBoolean,
+} from "@/lib/repositories/content-platform/rollout-control"
 
 export interface Setting {
   id: number
@@ -124,6 +133,45 @@ export async function upsertSettingAction(input: CreateSettingInput): Promise<Ac
       throw ErrorFactories.authzAdminRequired("manage settings")
     }
 
+    if (isContentRolloutBooleanKey(input.key)) {
+      const value = parseContentRolloutBoolean(input.value)
+      const current = await getContentPlatformConfig()
+      const prospective = applyProspectiveRolloutSetting(
+        current,
+        input.key,
+        value
+      )
+      const blockers = evaluateRolloutDependencies(prospective)
+      if (
+        value &&
+        input.key === "CONTENT_REPOSITORY_CUTOVER_ENABLED"
+      ) {
+        blockers.push(
+          ...evaluateRepositoryCutoverEvidence(
+            await getRepositoryMigrationDashboard()
+          )
+        )
+      }
+      if (
+        value &&
+        input.key === "CONTENT_LEGACY_RETIREMENT_ENABLED"
+      ) {
+        const dashboard = await getRepositoryMigrationDashboard()
+        blockers.push(
+          ...dashboard.retirement.blockers.filter(
+            (blocker) => blocker !== "legacy retirement is not enabled"
+          )
+        )
+      }
+      if (blockers.length > 0) {
+        throw ErrorFactories.invalidInput(
+          input.key,
+          input.value,
+          blockers.join("; ")
+        )
+      }
+    }
+
     // Upsert the setting using Drizzle
     log.debug("Upserting setting", { key: input.key })
     const setting = await upsertSetting(input)
@@ -173,6 +221,13 @@ export async function deleteSettingAction(key: string): Promise<ActionState<void
     if (!isAdmin) {
       log.warn("Setting deletion denied - not admin", { userId: session.sub, key })
       throw ErrorFactories.authzAdminRequired("delete settings")
+    }
+    if (isContentRolloutBooleanKey(key)) {
+      throw ErrorFactories.invalidInput(
+        "key",
+        key,
+        "Content rollout stages are managed by the guided rollout control and cannot be deleted"
+      )
     }
 
     log.info("Deleting setting from database", { key })
@@ -456,4 +511,3 @@ export async function getSettingActualValueAction(key: string): Promise<ActionSt
     })
   }
 }
-

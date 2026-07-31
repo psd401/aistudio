@@ -50,9 +50,14 @@ import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { storeExecutionEvent } from '@/lib/assistant-architect/event-storage';
 import { decodeMdxEditorEscapes } from '@/lib/utils/text-sanitizer';
 import {
+  collectBoundRepositoryIds,
   preflightAssistantRepositoryAccess,
   REPOSITORY_ACCESS_CHANGED_MESSAGE,
 } from '@/lib/assistant-architect/repository-access-preflight';
+import {
+  assertRepositoriesSearchable,
+  RepositoryReadinessError,
+} from '@/lib/repositories/readiness-service';
 import { resolveAssistantRuntimeRepositoryInputs } from '@/lib/assistant-architect/runtime-repository-inputs';
 import { createAgenticRepositoryContext } from '@/lib/assistant-architect/agentic-repository-context';
 import { updateConversation, getConversationById } from '@/lib/db/drizzle/nexus-conversations';
@@ -576,11 +581,24 @@ async function preflightExecutionGraphBeforeRateCap(params: {
     ok: false,
     response: new Response(
       JSON.stringify({
-        error: 'Access denied',
-        message: REPOSITORY_ACCESS_CHANGED_MESSAGE,
+        error:
+          repositoryAccess.errorCode === 'REPOSITORY_BINDING_INACCESSIBLE'
+            ? 'Access denied'
+            : 'Repository not ready',
+        code: repositoryAccess.errorCode,
+        message:
+          repositoryAccess.errorCode === 'REPOSITORY_BINDING_INACCESSIBLE'
+            ? REPOSITORY_ACCESS_CHANGED_MESSAGE
+            : 'A repository used by this assistant is not searchable yet. Wait for processing to finish or repair the repository before trying again.',
         requestId: params.requestId,
       }),
-      { status: 403, headers: { 'Content-Type': 'application/json' } }
+      {
+        status:
+          repositoryAccess.errorCode === 'REPOSITORY_BINDING_INACCESSIBLE'
+            ? 403
+            : 409,
+        headers: { 'Content-Type': 'application/json' },
+      }
     ),
   };
 }
@@ -621,11 +639,24 @@ async function validateArchitectPrompts(params: {
       ok: false,
       response: new Response(
         JSON.stringify({
-          error: 'Access denied',
-          message: REPOSITORY_ACCESS_CHANGED_MESSAGE,
+          error:
+            repositoryAccess.errorCode === 'REPOSITORY_BINDING_INACCESSIBLE'
+              ? 'Access denied'
+              : 'Repository not ready',
+          code: repositoryAccess.errorCode,
+          message:
+            repositoryAccess.errorCode === 'REPOSITORY_BINDING_INACCESSIBLE'
+              ? REPOSITORY_ACCESS_CHANGED_MESSAGE
+              : 'A repository used by this assistant is not searchable yet. Wait for processing to finish or repair the repository before trying again.',
           requestId: params.requestId,
         }),
-        { status: 403, headers: { 'Content-Type': 'application/json' } }
+        {
+          status:
+            repositoryAccess.errorCode === 'REPOSITORY_BINDING_INACCESSIBLE'
+              ? 403
+              : 409,
+          headers: { 'Content-Type': 'application/json' },
+        }
       ),
     };
   }
@@ -1105,6 +1136,7 @@ function buildExecuteRouteErrorResponse(
  * - Per-prompt tool configuration
  * - Database persistence via onFinish callbacks
  */
+// eslint-disable-next-line complexity, max-lines-per-function -- Execution orchestration keeps auth, repository preflight, rate caps, and SSE setup in one guarded boundary.
 export async function POST(req: Request) {
   const requestId = generateRequestId();
   const timer = startTimer('api.assistant-architect.execute');
@@ -1148,6 +1180,31 @@ export async function POST(req: Request) {
       );
     }
     const modelInputs = runtimeRepositoryInputs.modelInputs;
+    try {
+      await assertRepositoriesSearchable(
+        runtimeRepositoryInputs.repositoryIds
+      );
+    } catch (error) {
+      if (error instanceof RepositoryReadinessError) {
+        log.warn("Assistant runtime repository is not searchable", {
+          userId,
+          toolId,
+          code: error.code,
+        });
+        return Response.json(
+          {
+            error: "Repository not ready",
+            code: error.code,
+            message:
+              "A repository input is not searchable yet. Wait for processing to finish or repair the repository before trying again.",
+            repositories: error.repositories,
+            requestId,
+          },
+          { status: error.code === "REPOSITORY_BINDING_INACCESSIBLE" ? 403 : 409 }
+        );
+      }
+      throw error;
+    }
 
     // 6. Create the tool_execution record (rate-cap guarded for agentic mode)
     const created = await createToolExecutionRecord({
@@ -1175,6 +1232,13 @@ export async function POST(req: Request) {
     });
     if (!protectedGraph.ok) return protectedGraph.response;
     const { architect, prompts } = protectedGraph.value;
+    const promptRepositoryIds = collectBoundRepositoryIds(prompts).repositoryIds;
+    const conversationRepositoryIds = [
+      ...new Set([
+        ...promptRepositoryIds,
+        ...runtimeRepositoryInputs.repositoryIds,
+      ]),
+    ];
 
     // 7. Emit execution-start event
     await storeExecutionEvent(executionId, 'execution-start', {
@@ -1190,7 +1254,7 @@ export async function POST(req: Request) {
       ownerId: userId,
       inputs: modelInputs,
       executionId,
-      runtimeRepositoryIds: runtimeRepositoryInputs.repositoryIds,
+      repositoryIds: conversationRepositoryIds,
       references: runtimeRepositoryInputs.references,
       log,
     });
@@ -1912,6 +1976,7 @@ async function prepareAgenticRun(args: {
         fallbackModelDbId: drivingModelId,
         routingMode: args.context.modelRoutingMode,
         requestedFamily: args.context.modelRoutingFamily,
+        agenticRequired: true,
         requirements: {
           requiredTools: config.enabledToolIdentifiers,
           requiresFunctionCalling: Object.keys(effectiveTools).length > 0,
@@ -1952,10 +2017,16 @@ async function reserveAgenticRunCost(args: {
       args.run.resolved.connectorResults,
       args.requestId
     );
-    throw ErrorFactories.invalidInput(
-      'modelId',
-      String(modelData.modelId),
-      'A model with complete input and output pricing is required for agentic execution'
+    throw ErrorFactories.validationFailed(
+      [{
+        field: 'agenticModel',
+        message:
+          'The selected model is not agentic-ready because complete input and output pricing is missing',
+      }],
+      {
+        userMessage:
+          'Agentic execution is unavailable until an administrator completes this model’s pricing and enables Agentic Ready.',
+      }
     );
   }
   const tokenLimits = resolveTrustedAgenticTokenLimits(
@@ -1967,10 +2038,16 @@ async function reserveAgenticRunCost(args: {
       args.run.resolved.connectorResults,
       args.requestId
     );
-    throw ErrorFactories.invalidInput(
-      'modelId',
-      String(modelData.modelId),
-      'A trusted model context-token ceiling is required for agentic execution'
+    throw ErrorFactories.validationFailed(
+      [{
+        field: 'agenticModel',
+        message:
+          'The selected model is not agentic-ready because explicit context-window or maximum-output limits are missing',
+      }],
+      {
+        userMessage:
+          'Agentic execution is unavailable until an administrator configures explicit context and output limits and enables Agentic Ready.',
+      }
     );
   }
   const conservativeReservationCents = conservativeAgenticReservationCents(

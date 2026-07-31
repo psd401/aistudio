@@ -9,6 +9,7 @@ import {
 } from "@/lib/api";
 import { createLogger } from "@/lib/logger";
 import { searchRepositoryCatalog } from "@/lib/repositories/repository-catalog-service";
+import { RepositoryReadinessError } from "@/lib/repositories/readiness-service";
 
 const bodySchema = z.object({
   query: z.string().trim().min(1).max(2000),
@@ -47,6 +48,19 @@ export const POST = withApiAuth(
         requestId
       );
     } catch (error) {
+      if (error instanceof RepositoryReadinessError) {
+        log.warn("Repository search rejected by readiness preflight", {
+          code: error.code,
+          repositoryCount: error.repositories.length,
+        });
+        return createErrorResponse(
+          requestId,
+          error.code === "REPOSITORY_BINDING_INACCESSIBLE" ? 403 : 409,
+          error.code,
+          error.message,
+          { repositories: error.repositories }
+        );
+      }
       log.error("Failed to search repository catalog", {
         error: error instanceof Error ? error.message : String(error),
       });

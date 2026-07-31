@@ -355,7 +355,7 @@ To update the agent (new model config, system prompt changes, etc.):
 
 #### Dev workspace-generation cutover
 
-Releases that change `lib/agent-workspace/storage-broker.ts`, migration 169, or
+Releases that change `lib/agent-workspace/storage-broker.ts`, migration 171, or
 the agent image's `workspace_sync.py` require a paused, same-commit cutover.
 Do **not** deploy the image or storage broker into a live mixed-version fleet.
 AgentCore keeps existing sessions on the image version with which their
@@ -638,9 +638,9 @@ test "$(aws cloudformation describe-stacks \
 Do not proceed if either assertion fails. A failed deletion means an old image
 may still write during its shutdown path.
 
-##### 4. Apply migration 169, then deploy the storage broker
+##### 4. Apply migration 171, then deploy the storage broker
 
-Migration `169-workspace-upload-zero-byte-files.sql` changes the upload
+Migration `171-workspace-upload-zero-byte-files.sql` changes the upload
 reservation constraint from `expected_bytes > 0` to `expected_bytes >= 0`.
 It must be applied from the same commit before the new broker can reserve an
 empty regular file.
@@ -665,7 +665,7 @@ test "$(aws rds-data execute-statement \
   --resource-arn "$DB_CLUSTER_ARN" \
   --secret-arn "$DB_SECRET_ARN" \
   --database aistudio \
-  --sql "SELECT status FROM migration_log WHERE description = '169-workspace-upload-zero-byte-files.sql' ORDER BY step_number DESC LIMIT 1" \
+  --sql "SELECT status FROM migration_log WHERE description = '171-workspace-upload-zero-byte-files.sql' ORDER BY step_number DESC LIMIT 1" \
   --query 'records[0][0].stringValue' \
   --output text)" = "completed"
 

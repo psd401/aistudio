@@ -47,6 +47,11 @@ import {
   remainingAssistantExecutionTimeoutMs,
   settleCoordinatedAssistantExecution,
 } from "@/lib/assistant-architect/execution-coordinator"
+import {
+  ConversationRepositoryBindingError,
+  loadValidatedConversationRepositoryContext,
+} from "@/lib/nexus/conversation-repository-service"
+import { RepositoryReadinessError } from "@/lib/repositories/readiness-service"
 
 export const maxDuration = 900
 
@@ -171,7 +176,35 @@ async function loadConversationBinding(
     conversation?.provider === "assistant-architect" &&
     metadata?.assistantId === ids.assistantId
   if (isMatchingConversation) {
-    return { runtimeRepositoryIds: metadata.runtimeRepositoryIds }
+    try {
+      const context = await loadValidatedConversationRepositoryContext({
+        conversationId: ids.conversationId,
+        userId: auth.userId,
+      })
+      return {
+        runtimeRepositoryIds:
+          context.repositoryIds.length > 0
+            ? context.repositoryIds
+            : metadata.runtimeRepositoryIds,
+      }
+    } catch (error) {
+      if (
+        error instanceof ConversationRepositoryBindingError ||
+        error instanceof RepositoryReadinessError
+      ) {
+        const inaccessible =
+          error.code === "REPOSITORY_BINDING_INACCESSIBLE"
+        return {
+          response: createErrorResponse(
+            requestId,
+            inaccessible ? 403 : error.code === "CONVERSATION_NOT_FOUND" ? 404 : 409,
+            error.code,
+            error.message
+          ),
+        }
+      }
+      throw error
+    }
   }
   return {
     response: createErrorResponse(
@@ -183,6 +216,7 @@ async function loadConversationBinding(
   }
 }
 
+// eslint-disable-next-line complexity -- Follow-up setup must fail closed across assistant, model, ACL, and readiness races before persisting a message.
 async function loadFollowUpSetup(
   ids: FollowUpIds,
   runtimeRepositoryIds: number[],
@@ -236,12 +270,19 @@ async function loadFollowUpSetup(
     auth.cognitoSub
   )
   if (!repositoryAccess.isAllowed) {
+    const inaccessible =
+      repositoryAccess.errorCode === "REPOSITORY_BINDING_INACCESSIBLE" ||
+      repositoryAccess.errorCode === undefined
     return {
       response: createErrorResponse(
         requestId,
-        403,
-        "FORBIDDEN",
-        REPOSITORY_ACCESS_CHANGED_MESSAGE
+        inaccessible ? 403 : 409,
+        repositoryAccess.errorCode ??
+          "REPOSITORY_BINDING_INACCESSIBLE",
+        inaccessible
+          ? REPOSITORY_ACCESS_CHANGED_MESSAGE
+          : "A repository used by this conversation is not searchable yet.",
+        { repositoryIds: repositoryAccess.repositoryIds }
       ),
     }
   }

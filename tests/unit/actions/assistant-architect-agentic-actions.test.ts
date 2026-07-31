@@ -37,6 +37,11 @@ jest.mock("@/lib/tools/tool-registry", () => ({
   getAllTools: jest.fn(() => []),
 }))
 
+jest.mock("@/lib/db/drizzle/resource-access", () => ({
+  filterAccessibleResourceIds: jest.fn(() => Promise.resolve(new Set(["901"]))),
+  userCanAccessResource: jest.fn(() => Promise.resolve(true)),
+}))
+
 // The drizzle module is a large import; mock only the exports the action uses.
 jest.mock("@/lib/db/drizzle", () => ({
   AssistantApprovalValidationError: class extends Error {},
@@ -59,6 +64,20 @@ jest.mock("@/lib/db/drizzle", () => ({
   updateChainPrompt: jest.fn(),
   deleteChainPrompt: jest.fn(),
   getAIModels: jest.fn(() => Promise.resolve([])),
+  getArchitectEnabledModels: jest.fn(() =>
+    Promise.resolve([
+      {
+        id: 901,
+        active: true,
+        architectEnabled: true,
+        agenticReady: true,
+        contextWindowTokens: 200_000,
+        maxOutputTokens: 8_192,
+        inputCostPer1kTokens: "0.001",
+        outputCostPer1kTokens: "0.005",
+      },
+    ])
+  ),
   getAIModelById: jest.fn(() => Promise.resolve(null)),
   getAssistantArchitectsByStatus: jest.fn(() => Promise.resolve([])),
   getRoleByName: jest.fn(() => Promise.resolve(null)),

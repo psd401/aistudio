@@ -48,6 +48,7 @@ const mockCompleteJob = jest.fn()
 const mockFailJob = jest.fn()
 const mockParseRequestBody = jest.fn()
 const mockPreflightAssistantRepositoryAccess = jest.fn()
+const mockAssertRepositoriesSearchable = jest.fn()
 
 jest.mock("@/lib/api", () => ({
   withApiAuth:
@@ -111,6 +112,23 @@ jest.mock("@/lib/assistant-architect/repository-access-preflight", () => ({
     mockPreflightAssistantRepositoryAccess(...args),
 }))
 
+jest.mock("@/lib/repositories/readiness-service", () => {
+  class RepositoryReadinessError extends Error {
+    constructor(
+      readonly code: string,
+      message: string,
+      readonly repositories: unknown[]
+    ) {
+      super(message)
+    }
+  }
+  return {
+    RepositoryReadinessError,
+    assertRepositoriesSearchable: (...args: unknown[]) =>
+      mockAssertRepositoriesSearchable(...args),
+  }
+})
+
 jest.mock("@/lib/api/assistant-execution-service", () => ({
   executeAssistant: (...args: unknown[]) => mockExecuteAssistant(...args),
   executeAssistantForJobCompletion: (...args: unknown[]) =>
@@ -155,6 +173,7 @@ jest.mock("@/lib/logger", () => ({
 import { POST } from "@/app/api/v1/assistants/[id]/execute/route"
 import { verifyAssistantResourceGrants } from "@/lib/api"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
+import { RepositoryReadinessError } from "@/lib/repositories/readiness-service"
 
 const mockVerifyAssistantResourceGrants =
   verifyAssistantResourceGrants as jest.MockedFunction<
@@ -191,8 +210,10 @@ function setupExecutionRouteMocks() {
     isAllowed: true,
     repositoryIds: [],
   })
+  mockAssertRepositoriesSearchable.mockResolvedValue([])
 }
 
+// eslint-disable-next-line max-lines-per-function -- Async admission cases share one route-level mock harness.
 describe("v1 async assistant runtime repository inputs", () => {
   beforeEach(setupExecutionRouteMocks)
 
@@ -223,6 +244,7 @@ describe("v1 async assistant runtime repository inputs", () => {
     expect(
       mockPrepareAssistantExecutionInputs.mock.invocationCallOrder[0]
     ).toBeLessThan(mockCreateJob.mock.invocationCallOrder[0]!)
+    expect(mockAssertRepositoriesSearchable).toHaveBeenCalledWith([77])
     expect(mockExecuteAssistantForJobCompletion).toHaveBeenCalledWith({
       assistantId: 5,
       inputs: preparedInputs.inputs,
@@ -305,6 +327,69 @@ describe("v1 async assistant runtime repository inputs", () => {
 
     expect(response.status).toBe(403)
     expect(mockPrepareAssistantExecutionInputs).not.toHaveBeenCalled()
+    expect(mockCreateJob).not.toHaveBeenCalled()
+  })
+
+  it("returns repository readiness failures before creating a polling job", async () => {
+    mockPreflightAssistantRepositoryAccess.mockResolvedValue({
+      isAllowed: false,
+      repositoryIds: [91],
+      errorCode: "REPOSITORY_NOT_READY",
+    })
+
+    const response = await POST(
+      new NextRequest("http://localhost/api/v1/assistants/5/execute", {
+        method: "POST",
+        headers: { accept: "application/json" },
+      }),
+      { params: Promise.resolve({ id: "5" }) }
+    )
+
+    expect(response.status).toBe(409)
+    expect(JSON.parse(String(response.body)).error.code).toBe(
+      "REPOSITORY_NOT_READY"
+    )
+    expect(mockPrepareAssistantExecutionInputs).not.toHaveBeenCalled()
+    expect(mockCreateJob).not.toHaveBeenCalled()
+  })
+
+  it("rejects an unready runtime repository before creating a polling job", async () => {
+    mockPrepareAssistantExecutionInputs.mockResolvedValue({
+      ownerId: 7,
+      inputs: {},
+      runtimeRepositoryIds: [77],
+      runtimeRepositoryQuery: "runtime source",
+      references: [],
+    })
+    mockAssertRepositoriesSearchable.mockRejectedValue(
+      new RepositoryReadinessError(
+        "REPOSITORY_NOT_READY",
+        "Repository 77 is still processing",
+        [
+          {
+            repositoryId: 77,
+            readiness: "processing",
+            activeGenerationId: null,
+            indexedItemCount: 0,
+            segmentCount: 0,
+            lastIndexError: null,
+          },
+        ]
+      )
+    )
+
+    const response = await POST(
+      new NextRequest("http://localhost/api/v1/assistants/5/execute", {
+        method: "POST",
+        headers: { accept: "application/json" },
+      }),
+      { params: Promise.resolve({ id: "5" }) }
+    )
+
+    expect(response.status).toBe(409)
+    expect(JSON.parse(String(response.body)).error.code).toBe(
+      "REPOSITORY_NOT_READY"
+    )
     expect(mockCreateJob).not.toHaveBeenCalled()
   })
 

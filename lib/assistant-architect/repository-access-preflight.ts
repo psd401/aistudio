@@ -1,6 +1,11 @@
 import { getAccessibleRepositoriesByCognitoSub } from "@/lib/db/drizzle"
 import { createLogger } from "@/lib/logger"
 import { parseRepositoryIds } from "@/lib/utils/repository-utils"
+import {
+  assertRepositoriesSearchable,
+  RepositoryReadinessError,
+  type RepositoryReadinessErrorCode,
+} from "@/lib/repositories/readiness-service"
 
 export const REPOSITORY_ACCESS_CHANGED_MESSAGE =
   "Repository access changed. Request access to every repository used by this assistant before trying again."
@@ -12,6 +17,7 @@ interface RepositoryBoundPrompt {
 export interface RepositoryAccessPreflightResult {
   isAllowed: boolean
   repositoryIds: number[]
+  errorCode?: RepositoryReadinessErrorCode
 }
 
 function hasValidRepositoryBinding(
@@ -99,12 +105,35 @@ export async function preflightAssistantRepositoryAccess(
       repositories.length === repositoryIds.length &&
       repositoryIds.every((repositoryId) => accessibleIds.has(repositoryId))
 
-    return { isAllowed, repositoryIds }
+    if (!isAllowed) {
+      return {
+        isAllowed: false,
+        repositoryIds,
+        errorCode: "REPOSITORY_BINDING_INACCESSIBLE",
+      }
+    }
+    await assertRepositoriesSearchable(repositoryIds)
+    return { isAllowed: true, repositoryIds }
   } catch (error) {
+    if (error instanceof RepositoryReadinessError) {
+      log.warn("Assistant repository readiness preflight failed", {
+        repositoryCount: repositoryIds.length,
+        code: error.code,
+      })
+      return {
+        isAllowed: false,
+        repositoryIds,
+        errorCode: error.code,
+      }
+    }
     log.error("Assistant repository access preflight failed closed", {
       repositoryCount: repositoryIds.length,
       error: error instanceof Error ? error.message : String(error),
     })
-    return { isAllowed: false, repositoryIds }
+    return {
+      isAllowed: false,
+      repositoryIds,
+      errorCode: "REPOSITORY_BINDING_INACCESSIBLE",
+    }
   }
 }

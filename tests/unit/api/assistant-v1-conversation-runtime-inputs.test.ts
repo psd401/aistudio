@@ -49,6 +49,8 @@ const mockLogError = jest.fn()
 const mockPreflightAssistantRepositoryAccess = jest.fn()
 const mockBindNexusRequestAttachmentReferences = jest.fn()
 const mockRollbackNewNexusAttachmentConversation = jest.fn()
+const mockReplaceConversationRepositoryBindings = jest.fn()
+const mockAssertRepositoriesSearchable = jest.fn()
 
 jest.mock("@/lib/api", () => ({
   withApiAuth:
@@ -145,6 +147,30 @@ jest.mock("@/lib/nexus/request-attachment-binding", () => {
   }
 })
 
+jest.mock("@/lib/nexus/conversation-repository-service", () => {
+  class ConversationRepositoryBindingError extends Error {
+    code = "REPOSITORY_BINDING_INACCESSIBLE"
+    repositoryIds: number[] = []
+  }
+  return {
+    ConversationRepositoryBindingError,
+    replaceConversationRepositoryBindings: (...args: unknown[]) =>
+      mockReplaceConversationRepositoryBindings(...args),
+  }
+})
+
+jest.mock("@/lib/repositories/readiness-service", () => {
+  class RepositoryReadinessError extends Error {
+    code = "REPOSITORY_NOT_READY"
+    repositories: unknown[] = []
+  }
+  return {
+    RepositoryReadinessError,
+    assertRepositoriesSearchable: (...args: unknown[]) =>
+      mockAssertRepositoriesSearchable(...args),
+  }
+})
+
 jest.mock("@/lib/logger", () => ({
   createLogger: jest.fn(() => ({
     info: jest.fn(),
@@ -184,6 +210,8 @@ function defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part1() {
     mockCreateMessageWithStats.mockResolvedValue({ id: "message-1" })
     mockBindNexusRequestAttachmentReferences.mockResolvedValue(undefined)
     mockRollbackNewNexusAttachmentConversation.mockResolvedValue(undefined)
+    mockReplaceConversationRepositoryBindings.mockResolvedValue(undefined)
+    mockAssertRepositoriesSearchable.mockResolvedValue([])
     mockExecuteAssistant.mockResolvedValue({
       streamResponse: new Response("stream", {
         headers: { "content-type": "text/event-stream" },
@@ -242,6 +270,17 @@ function defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part1() {
       references: preparedInputs.references,
       conversationCreated: true,
     })
+    expect(mockAssertRepositoriesSearchable).toHaveBeenCalledWith([77])
+    expect(mockReplaceConversationRepositoryBindings).toHaveBeenCalledWith({
+      conversationId: "conversation-1",
+      userId: 7,
+      repositoryIds: [77],
+      source: "assistant",
+      sourceId: "5",
+    })
+    expect(
+      mockReplaceConversationRepositoryBindings.mock.invocationCallOrder[0]
+    ).toBeLessThan(mockCreateMessageWithStats.mock.invocationCallOrder[0]!)
     expect(
       mockBindNexusRequestAttachmentReferences.mock.invocationCallOrder[0]
     ).toBeLessThan(mockCreateMessageWithStats.mock.invocationCallOrder[0]!)
@@ -312,6 +351,7 @@ function defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part1() {
 
   }
 
+// eslint-disable-next-line max-lines-per-function -- Route lifecycle cases share one fully mocked execution harness.
 function defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part2() {
   it("retains every prompt-model authorization for legacy conversations", async () => {
     mockGetAssistantArchitect.mockResolvedValueOnce({
@@ -383,6 +423,34 @@ function defineV1AssistantConversationRuntimeRepositoryInputsSuite1Part2() {
     ).toBeLessThan(
       mockRollbackNewNexusAttachmentConversation.mock.invocationCallOrder[0]!
     )
+    expect(mockExecuteAssistant).not.toHaveBeenCalled()
+  })
+
+  it("compensates an attachment-free conversation when durable binding fails", async () => {
+    mockPrepareAssistantExecutionInputs.mockResolvedValue({
+      ownerId: 7,
+      inputs: {},
+      runtimeRepositoryIds: [],
+      runtimeRepositoryQuery: "",
+      references: [],
+    })
+    mockReplaceConversationRepositoryBindings.mockRejectedValue(
+      new Error("binding write failed")
+    )
+
+    const response = await POST(
+      new NextRequest("http://localhost/api/v1/assistants/5/conversations", {
+        method: "POST",
+      }),
+      { params: Promise.resolve({ id: "5" }) }
+    )
+
+    expect(response.status).toBe(500)
+    expect(mockRollbackNewNexusAttachmentConversation).toHaveBeenCalledWith({
+      ownerId: 7,
+      conversationId: "conversation-1",
+    })
+    expect(mockCreateMessageWithStats).not.toHaveBeenCalled()
     expect(mockExecuteAssistant).not.toHaveBeenCalled()
   })
 

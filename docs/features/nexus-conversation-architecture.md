@@ -456,6 +456,40 @@ path. See
 
 ---
 
+## Durable repository bindings
+
+Durable repository context is normalized in
+`nexus_conversation_repositories`; it is not stored only in a URL, client
+request, or message metadata. A binding records the conversation, repository,
+creator, and source identity (`direct`, `project`, `skill`, or `assistant`).
+Direct selections are managed by
+`/api/nexus/conversations/{id}/repositories`. Project, skill, and Assistant
+paths materialize their own source-scoped rows without deleting direct
+selections.
+
+The client keeps the selection behind the same synchronous-value-accessor
+pattern as the conversation ID. Do not add the selection array to runtime
+construction dependencies. On an existing conversation, omit `repositoryIds`
+from chat requests until the persisted direct selection has loaded; sending an
+empty array during that window would erase a valid binding. Selection writes
+are serialized so slower network responses cannot persist an older selection
+after a newer one.
+
+Every model turn reloads conversation ownership, current repository ACLs,
+lifecycle, and active-generation readiness. Search is offered automatically as
+`searchConversationRepositories` only after that validation. Repository-backed
+claims must use the tool and cite returned source labels. Structured preflight
+failures are `REPOSITORY_NOT_READY`, `REPOSITORY_DISCONNECTED`, or
+`REPOSITORY_BINDING_INACCESSIBLE`; the client must throw every non-streaming
+HTTP error before the AI SDK attempts SSE parsing.
+
+Forking copies project, skill, and normalized repository bindings. Assistant
+execution conversations bind the union of prompt-configured and runtime
+repositories with source `assistant`, so reopening the conversation directly
+in Nexus preserves the same context.
+
+---
+
 ## Nexus Projects
 
 Project chats use the same stable runtime and conversation ownership rules.
@@ -787,6 +821,12 @@ After making changes to conversation handling, test ALL of these scenarios:
 ---
 
 ## Version History
+
+### July 2026 - Durable repository context
+- **Problem:** Nexus could not explicitly select durable repositories, and skill/project/Assistant context could disappear after reload or direct navigation.
+- **Solution:** Added normalized source-scoped bindings, an ACL/readiness preflight on every turn, a persistent multi-select picker, automatic cited repository search, fork propagation, and Assistant execution propagation.
+- **Critical client rule:** Omit `repositoryIds` until existing bindings load; never pass an uninitialized empty selection.
+- **Breaking:** Requires migration `170-nexus-durable-repository-bindings.sql`.
 
 ### May 2026 - Multi-Step MCP Tool-Use Persistence (Issue #977)
 - **Problem:** `AI_MissingToolResultsError` ("Expected toolResult blocks") on follow-up messages in conversations that previously used MCP connector tools

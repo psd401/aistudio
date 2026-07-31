@@ -15,6 +15,12 @@ import type {
   RetrievalMode,
   RetrievalModality,
 } from "./retrieval-v2/types";
+import {
+  assertRepositoriesSearchable,
+  getRepositoryReadiness,
+  type RepositoryReadiness,
+  type RepositoryReadinessSnapshot,
+} from "./readiness-service";
 
 const MAX_REPOSITORIES = 50;
 const MAX_RESULTS = 50;
@@ -28,7 +34,11 @@ export interface RepositoryCatalogEntry {
   ownerName: string | null;
   visibility: "public" | "private";
   itemCount: number;
+  readiness: RepositoryReadiness;
   activeIndexGenerationId: string | null;
+  indexedItemCount: number;
+  segmentCount: number;
+  lastIndexError: string | null;
   lastUpdated: string | null;
   createdAt: string | null;
   updatedAt: string | null;
@@ -79,7 +89,8 @@ function clamp(value: number | undefined, fallback: number, maximum: number) {
 }
 
 function mapCatalogEntry(
-  repository: Awaited<ReturnType<typeof getUserAccessibleRepositories>>[number]
+  repository: Awaited<ReturnType<typeof getUserAccessibleRepositories>>[number],
+  readiness: RepositoryReadinessSnapshot | undefined
 ): RepositoryCatalogEntry {
   return {
     id: repository.id,
@@ -88,7 +99,12 @@ function mapCatalogEntry(
     ownerName: repository.ownerName,
     visibility: repository.isPublic ? "public" : "private",
     itemCount: Number(repository.itemCount),
-    activeIndexGenerationId: repository.activeIndexGenerationId,
+    readiness: readiness?.readiness ?? "failed",
+    activeIndexGenerationId:
+      readiness?.activeGenerationId ?? repository.activeIndexGenerationId,
+    indexedItemCount: readiness?.indexedItemCount ?? 0,
+    segmentCount: readiness?.segmentCount ?? 0,
+    lastIndexError: readiness?.lastIndexError ?? null,
     lastUpdated: toIso(repository.lastUpdated),
     createdAt: toIso(repository.createdAt),
     updatedAt: toIso(repository.updatedAt),
@@ -102,7 +118,7 @@ export async function listRepositoryCatalog(
   const query = options.query?.trim().toLocaleLowerCase();
   const limit = clamp(options.limit, MAX_REPOSITORIES, MAX_REPOSITORIES);
   const repositories = await getUserAccessibleRepositories(cognitoSub);
-  return repositories
+  const selected = repositories
     .filter((repository) => {
       if (!query) return true;
       return (
@@ -110,8 +126,13 @@ export async function listRepositoryCatalog(
         repository.description?.toLocaleLowerCase().includes(query) === true
       );
     })
-    .slice(0, limit)
-    .map(mapCatalogEntry);
+    .slice(0, limit);
+  const readiness = await getRepositoryReadiness(
+    selected.map((repository) => repository.id)
+  );
+  return selected.map((repository) =>
+    mapCatalogEntry(repository, readiness.get(repository.id))
+  );
 }
 
 export async function describeRepository(
@@ -120,7 +141,9 @@ export async function describeRepository(
 ): Promise<RepositoryCatalogEntry | null> {
   const repositories = await getUserAccessibleRepositories(cognitoSub);
   const repository = repositories.find((row) => row.id === repositoryId);
-  return repository ? mapCatalogEntry(repository) : null;
+  if (!repository) return null;
+  const readiness = await getRepositoryReadiness([repositoryId]);
+  return mapCatalogEntry(repository, readiness.get(repositoryId));
 }
 
 export async function searchRepositoryCatalog(input: {
@@ -142,6 +165,13 @@ export async function searchRepositoryCatalog(input: {
       : (await listRepositoryCatalog(input.cognitoSub)).map(
           (repository) => repository.id
         );
+  if (requestedIds.length > 0) {
+    const accessible = await getUserAccessibleRepositories(input.cognitoSub);
+    const accessibleIds = new Set(accessible.map((repository) => repository.id));
+    await assertRepositoriesSearchable(
+      repositoryIds.filter((repositoryId) => accessibleIds.has(repositoryId))
+    );
+  }
   return retrieveRepositoryContent({
     query: input.query,
     repositoryIds,

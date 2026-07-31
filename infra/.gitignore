@@ -41,3 +41,4 @@ lambdas/**/bun.lock
 !lambdas/url-processor/bun.lock
 !lambdas/textract-processor/bun.lock
 !lambdas/layers/secret-cache/nodejs/bun.lock
+!lambdas/document-processor-v2/package-lock.json

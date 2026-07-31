@@ -523,7 +523,10 @@ curl -H "Authorization: Bearer sk-your-key" \
 ```
 
 Each entry includes `id`, `name`, `description`, `ownerName`, `visibility`,
-`itemCount`, `activeIndexGenerationId`, and update timestamps.
+`itemCount`, `readiness`, `activeIndexGenerationId`, `indexedItemCount`,
+`segmentCount`, `lastIndexError`, and update timestamps. Readiness is one of
+`empty`, `processing`, `searchable`, `degraded`, `disconnected`, or `failed`;
+only `searchable` and `degraded` have a serving snapshot.
 
 #### `GET /api/v1/repositories/{id}`
 
@@ -549,7 +552,11 @@ durable repositories.
 `mode` is `keyword`, `vector`, or `hybrid`; modalities are `text`, `image`,
 `audio`, `video`, or `table`. Results use retrieval v2 and include immutable
 source citations. Unauthorized requested ids produce no results from those
-repositories; they never disclose whether the id exists.
+repositories; they never disclose whether the id exists. An explicitly
+requested accessible repository without a serving snapshot returns
+`409 REPOSITORY_NOT_READY` (or `REPOSITORY_DISCONNECTED`) instead of silently
+producing zero context. A binding that became inaccessible returns
+`403 REPOSITORY_BINDING_INACCESSIBLE`.
 
 #### `GET /api/v1/repositories/{id}/source`
 
@@ -1124,6 +1131,13 @@ conversation message, the server:
    for both eager retrieval and vector/keyword/hybrid repository tools; and
 5. reapplies the executing principal's current repository ACL before execution,
    inside retrieval, and inside each repository tool.
+
+Starting an Assistant conversation also writes that complete union into
+normalized Nexus conversation bindings before the first message. Resuming the
+conversation in Nexus therefore retains the Assistant's repository context.
+Unsearchable or disconnected sources fail before conversation creation with
+`409 REPOSITORY_NOT_READY` or `409 REPOSITORY_DISCONNECTED`; an ACL race returns
+`403 REPOSITORY_BINDING_INACCESSIBLE`.
 
 Assistant ownership never lends repository access. The synchronous REST path,
 the `Accept: application/json` async-job path, MCP `execute_assistant`, and the

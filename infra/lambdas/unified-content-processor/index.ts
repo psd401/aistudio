@@ -676,6 +676,7 @@ async function captionImage(
   };
 }
 
+// eslint-disable-next-line complexity -- Every dispatch page and message is fenced against generation supersession.
 async function queueEmbeddings(
   generationId: string,
   visualEnabled: boolean,
@@ -683,6 +684,22 @@ async function queueEmbeddings(
 ): Promise<void> {
   let lastChunkId = 0;
   for (;;) {
+    const [generation] = await executeQuery(
+      (db) =>
+        db
+          .select({ status: repositoryIndexGenerations.status })
+          .from(repositoryIndexGenerations)
+          .where(eq(repositoryIndexGenerations.id, generationId))
+          .limit(1),
+      "contentProcessor.embeddingGenerationFence",
+    );
+    if (!generation || generation.status !== "building") {
+      log.info("Stopped dispatching stale embedding generation", {
+        generationId,
+        status: generation?.status ?? "missing",
+      });
+      return;
+    }
     const chunks = await executeQuery(
       (db) =>
         db
@@ -742,6 +759,22 @@ async function queueEmbeddings(
         generationId,
         itemChunks
       )) {
+        const [currentGeneration] = await executeQuery(
+          (db) =>
+            db
+              .select({ status: repositoryIndexGenerations.status })
+              .from(repositoryIndexGenerations)
+              .where(eq(repositoryIndexGenerations.id, generationId))
+              .limit(1),
+          "contentProcessor.embeddingMessageFence",
+        );
+        if (!currentGeneration || currentGeneration.status !== "building") {
+          log.info("Stopped dispatching superseded embedding messages", {
+            generationId,
+            status: currentGeneration?.status ?? "missing",
+          });
+          return;
+        }
         await sqs.send(
           new SendMessageCommand({
             QueueUrl: embeddingQueueUrl,

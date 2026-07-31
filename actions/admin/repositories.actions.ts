@@ -34,6 +34,7 @@ import {
   finalizeRepositoryDeletion,
   finalizeRepositoryItemDeletion,
 } from "@/lib/repositories/content-platform/deletion-service";
+import { getRepositoryReadiness } from "@/lib/repositories/readiness-service";
 
 export interface RepositoryWithOwner extends Repository {
   ownerEmail: string | null;
@@ -97,9 +98,14 @@ export async function listAllRepositories(): Promise<
         (activeAndCurrent || repo.lifecycleStatus === "deleting")
       );
     });
+    const readinessByRepository = await getRepositoryReadiness(
+      repositoriesRaw.map((repository) => repository.id)
+    );
 
     // Convert to expected type
-    const repositories: RepositoryWithOwner[] = repositoriesRaw.map((repo) => ({
+    const repositories: RepositoryWithOwner[] = repositoriesRaw.map((repo) => {
+      const readiness = readinessByRepository.get(repo.id);
+      return {
       id: repo.id,
       name: repo.name,
       description: repo.description,
@@ -115,8 +121,13 @@ export async function listAllRepositories(): Promise<
       updatedAt: repo.updatedAt ?? new Date(),
       ownerEmail: repo.ownerEmail,
       itemCount: repo.itemCount,
+      readiness: readiness?.readiness ?? "failed",
+      indexedItemCount: readiness?.indexedItemCount ?? 0,
+      segmentCount: readiness?.segmentCount ?? 0,
+      lastIndexError: readiness?.lastIndexError ?? null,
       canManage: true,
-    }));
+      };
+    });
 
     log.info("All repositories fetched successfully", {
       repositoryCount: repositories.length,
@@ -172,6 +183,7 @@ function adminRepositoryUpdateData(input: AdminRepositoryUpdateInput): {
   return updateData;
 }
 
+// eslint-disable-next-line complexity -- Authorization, update validation, and readiness enrichment are one atomic action boundary.
 export async function adminUpdateRepository(
   input: AdminRepositoryUpdateInput,
 ): Promise<ActionState<Repository>> {
@@ -209,6 +221,9 @@ export async function adminUpdateRepository(
       log.error("Repository not found for update", { repositoryId: input.id });
       throw ErrorFactories.dbRecordNotFound("knowledge_repositories", input.id);
     }
+    const readiness = (await getRepositoryReadiness([resultRaw.id])).get(
+      resultRaw.id
+    );
 
     // Convert to expected type
     const result: Repository = {
@@ -225,6 +240,10 @@ export async function adminUpdateRepository(
       metadata: resultRaw.metadata ?? {},
       createdAt: resultRaw.createdAt ?? new Date(),
       updatedAt: resultRaw.updatedAt ?? new Date(),
+      readiness: readiness?.readiness ?? "failed",
+      indexedItemCount: readiness?.indexedItemCount ?? 0,
+      segmentCount: readiness?.segmentCount ?? 0,
+      lastIndexError: readiness?.lastIndexError ?? null,
       canManage: true,
     };
 

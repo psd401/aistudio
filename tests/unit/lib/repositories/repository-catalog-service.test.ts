@@ -9,6 +9,7 @@ const mockAccessibleRepositories = jest.fn();
 const mockAccessibleIds = jest.fn();
 const mockRetrieve = jest.fn();
 const mockExecuteQuery = jest.fn();
+const mockAssertRepositoriesSearchable = jest.fn();
 
 jest.mock("@/lib/db/drizzle", () => ({
   getUserAccessibleRepositories: (...args: unknown[]) =>
@@ -22,6 +23,26 @@ jest.mock("@/lib/db/drizzle-client", () => ({
 }));
 jest.mock("@/lib/repositories/retrieval-v2/service", () => ({
   retrieveRepositoryContent: (...args: unknown[]) => mockRetrieve(...args),
+}));
+jest.mock("@/lib/repositories/readiness-service", () => ({
+  getRepositoryReadiness: jest.fn(async (repositoryIds: number[]) =>
+    new Map(
+      repositoryIds.map((repositoryId) => [
+        repositoryId,
+        {
+          repositoryId,
+          readiness: repositoryId === 4 ? "searchable" : "empty",
+          activeGenerationId:
+            repositoryId === 4 ? "generation-4" : null,
+          indexedItemCount: repositoryId === 4 ? 3 : 0,
+          segmentCount: repositoryId === 4 ? 12 : 0,
+          lastIndexError: null,
+        },
+      ])
+    )
+  ),
+  assertRepositoriesSearchable: (...args: unknown[]) =>
+    mockAssertRepositoriesSearchable(...args),
 }));
 
 import {
@@ -74,6 +95,7 @@ describe("repository catalog service", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockAccessibleRepositories.mockResolvedValue(accessibleRows);
+    mockAssertRepositoriesSearchable.mockResolvedValue([]);
   });
 
   it("lists and describes only the repositories returned by the live ACL query", async () => {
@@ -87,7 +109,11 @@ describe("repository catalog service", () => {
         ownerName: "Policy Office",
         visibility: "private",
         itemCount: 3,
+        readiness: "searchable",
         activeIndexGenerationId: "generation-4",
+        indexedItemCount: 3,
+        segmentCount: 12,
+        lastIndexError: null,
         lastUpdated: "2026-02-02T00:00:00.000Z",
         createdAt: "2026-01-01T00:00:00.000Z",
         updatedAt: "2026-02-01T00:00:00.000Z",

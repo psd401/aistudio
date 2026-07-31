@@ -153,6 +153,34 @@ function RepositoryInformation({ repository }: RepositoryDetailProps) {
               {repository.activeIndexGenerationId || "Not published yet"}
             </dd>
           </div>
+          <div>
+            <dt className="text-sm font-medium text-muted-foreground">
+              Search readiness
+            </dt>
+            <dd className="mt-1 space-y-1">
+              <Badge
+                variant={
+                  repository.readiness === "searchable"
+                    ? "default"
+                    : repository.readiness === "degraded"
+                      ? "secondary"
+                      : "outline"
+                }
+                className="capitalize"
+              >
+                {repository.readiness}
+              </Badge>
+              <p className="text-xs text-muted-foreground">
+                {repository.indexedItemCount} indexed items ·{" "}
+                {repository.segmentCount} segments
+              </p>
+              {repository.lastIndexError ? (
+                <p className="text-xs text-destructive">
+                  {repository.lastIndexError}
+                </p>
+              ) : null}
+            </dd>
+          </div>
         </dl>
       </CardContent>
     </Card>
