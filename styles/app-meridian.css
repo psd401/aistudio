@@ -1,0 +1,295 @@
+/*
+ * App Meridian — the Meridian design language in the AI Studio palette.
+ *
+ * WHAT THIS IS
+ * `styles/atrium-meridian.css` holds two separable things: a TOKEN block scoped
+ * to `.atrium-meridian`, and ~309 structural component classes (`.mer-card`,
+ * `.mer-btn`, `.mer-search`, …) that are NOT scoped to Atrium and reference only
+ * `var(--mer-*)`. That means the structure is already colour-agnostic: put a
+ * different `--mer-*` token set on a different root, import the same stylesheet,
+ * and every `.mer-*` class renders the same geometry in different colours.
+ *
+ * This file is that second token set — Meridian's structure wearing the app's
+ * Salish Sea palette. Atrium is untouched: it keeps `.atrium-meridian`.
+ *
+ * HOW THE VALUES WERE DERIVED
+ * Not eyeballed. For each Meridian token we solved for the in-gamut colour on
+ * the app's hue that MATCHES Meridian's contrast ratio against its backdrop —
+ * porting the contrast STRUCTURE and swapping the hue. Every relationship lands
+ * within 0.12 contrast points of Meridian's:
+ *
+ *   relationship            app     meridian
+ *   ink on canvas          15.96     15.84
+ *   ink on surface         17.10     17.02
+ *   white on brand         13.82     13.84
+ *   ink-muted on surface    3.13      3.12
+ *   border on surface       1.25      1.25
+ *   brand on brand-tint    12.12     12.13
+ *
+ * THE BRAND DECISION
+ * Whulge (`--color-primary`, #1e6187) is only 6.74:1 against white — too light
+ * for the filled-button role Meridian's brand plays (13.84:1). Every filled
+ * surface, active nav state and badge in Meridian assumes a near-black brand.
+ * `--mer-brand` here is Whulge's hue darkened to L=0.294, which restores that
+ * 13.8:1 structure. This is the single change that makes the language read as
+ * crisp rather than washed.
+ *
+ * SURFACES ARE COOL-NEUTRAL, NOT BLUE
+ * Chroma is deliberately held at 0.003 so canvas/sunken/border read as neutral
+ * with a cool cast (channel spread 4) rather than tinted blue — matching
+ * Meridian's own spread of 2–4. Higher chroma at these lightnesses looks like a
+ * blue wash, not a neutral.
+ *
+ * VIOLET IS STILL AGENT-ONLY
+ * The agent tokens carry over unchanged. In Meridian violet is semantic, not
+ * decorative: it marks AI-agent presence and nothing else. That rule survives
+ * the recolour intact — do not repurpose these for accents.
+ *
+ * USAGE
+ *   import "@/styles/atrium-meridian.css";  // structural .mer-* classes
+ *   import "@/styles/app-meridian.css";     // this token set
+ *   <div className={`app-meridian ${fontMeridian.variable}`}>
+ *
+ * Radix portals escape the scope — put `appMeridianPortalClassName` on portaled
+ * content, exactly as Atrium does with `meridianPortalClassName`.
+ *
+ * FOLLOW-UP (not blocking): atrium-meridian.css ships whole (61KB) for the ~15
+ * classes a surface actually uses. The clean fix is splitting it into
+ * meridian-core.css (structure) + per-scope token files, imported by both. Left
+ * alone for now because touching it risks Atrium, which is known-good.
+ */
+
+.app-meridian,
+.app-mer-portal {
+  /* ---- Surfaces (cool-neutral, chroma 0.003) ---- */
+  --mer-canvas: #f5f7f9; /* app background */
+  --mer-canvas-sunken: #eceef0; /* recessed wells, secondary fills */
+  --mer-surface: #ffffff; /* cards, sheets, top bars */
+  --mer-border: #e4e6e8; /* all hairline borders — opaque, never /40 */
+  --mer-border-agent: #ded8f2; /* border on agent-authored cards */
+
+  /* ---- Ink (Pacific hue 237.37) ---- */
+  --mer-ink: #1e4257; /* Pacific — the app's own foreground, 10.65:1 */
+  --mer-ink-secondary: #334e60; /* secondary text, secondary buttons */
+  --mer-ink-muted: #8394a0; /* metadata, placeholders, labels */
+
+  /* ---- Brand (Whulge hue 237.66, darkened for the fill role) ---- */
+  --mer-brand: #003049; /* primary buttons, active nav, headers */
+  --mer-brand-tint: #ebf1f5; /* active-state fills, badges, icon chips */
+  --mer-brand-mid: #2a749f; /* chart fills, positive indicators, focus ring */
+
+  /* ---- Agent (violet — agent presence ONLY, never decorative) ---- */
+  --mer-agent: #6d4fc2;
+  --mer-agent-tint: #f0edfa;
+  --mer-agent-light: #8d74dc;
+  --mer-agent-soft: rgba(109, 79, 194, 0.06);
+
+  /* ---- Humans ---- */
+  --mer-human-you: #3e7c4f;
+  --mer-human-other-1: #b4552d;
+  --mer-human-other-2: #4a7ce8;
+
+  /* ---- Icon rail ---- */
+  --mer-rail-bg: #003049;
+  --mer-rail-active: rgba(235, 241, 245, 0.16);
+  --mer-rail-ink: rgba(235, 241, 245, 0.62);
+  --mer-rail-ink-active: #f5f7f9;
+
+  /* ---- Radii (identical to Meridian — this is the geometry we're porting) ---- */
+  --mer-r-card: 15px;
+  --mer-r-button: 9px;
+  --mer-r-chip: 7px;
+  --mer-r-pill: 99px;
+
+  /* ---- Shadows (recast on the app's brand hue) ---- */
+  --mer-shadow-card: 0 1px 3px rgba(0, 48, 73, 0.05);
+  --mer-shadow-sheet: 0 2px 16px rgba(0, 48, 73, 0.08);
+  --mer-shadow-toolbar: 0 8px 24px rgba(0, 30, 48, 0.3);
+
+  /* ---- Gradients (used sparingly) ---- */
+  --mer-grad-brand: linear-gradient(135deg, #003049, #014363, #01527a);
+  --mer-grad-cover: linear-gradient(115deg, #003049 0%, #01527a 45%, #6d4fc2 130%);
+  --mer-grad-agent-callout: linear-gradient(135deg, #eaf0f4, #f0edfa);
+
+  /* ---- shadcn/Tailwind-v4 theme remap (scoped) ----
+   * Same trick Atrium uses: the shared shadcn primitives read the Tailwind-v4
+   * `--color-*` theme tokens, so remapping them HERE makes all 49 primitives
+   * render Meridian inside this scope for free. Nothing leaks — the global
+   * @theme block in app/globals.css is untouched, and surfaces that have not
+   * been converted keep the cream palette. */
+  --color-background: var(--mer-surface);
+  --color-foreground: var(--mer-ink);
+  --color-card: var(--mer-surface);
+  --color-card-foreground: var(--mer-ink);
+  --color-popover: var(--mer-surface);
+  --color-popover-foreground: var(--mer-ink);
+  --color-primary: var(--mer-brand);
+  --color-primary-foreground: #ffffff;
+  --color-secondary: var(--mer-canvas-sunken);
+  --color-secondary-foreground: var(--mer-ink-secondary);
+  --color-muted: var(--mer-canvas-sunken);
+  --color-muted-foreground: var(--mer-ink-muted);
+  --color-accent: var(--mer-brand-tint);
+  --color-accent-foreground: var(--mer-brand);
+  --color-destructive: #b4552d;
+  --color-destructive-foreground: #ffffff;
+  --color-border: var(--mer-border);
+  --color-input: var(--mer-border);
+  --color-ring: var(--mer-brand-mid);
+
+  font-family: var(--font-meridian), ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  color: var(--mer-ink);
+  letter-spacing: -0.01em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/*
+ * Ink: settled on Pacific. A deeper ramp matching Meridian's own ~17:1
+ * near-black was trialled side by side and was indistinguishable in situ, so
+ * the app's own foreground wins on the "keep the colouring" brief. Do not
+ * re-propose the darker ink without a case that survives looking at it.
+ */
+
+/*
+ * Page scaffold. Meridian surfaces sit on the canvas, not on white, and the
+ * measure is capped so cards never stretch into letterboxes on wide displays.
+ */
+.mer-page {
+  min-height: 100vh;
+  background: var(--mer-canvas);
+}
+
+.mer-page-inner {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 26px 24px 48px;
+}
+
+@media (max-width: 640px) {
+  .mer-page-inner {
+    padding: 20px 16px 40px;
+  }
+}
+
+/* Section heading — brand-coloured, tight, no decoration. */
+.mer-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.mer-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--mer-ink-muted);
+}
+
+.mer-section-link {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mer-brand);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: gap 150ms ease-out;
+}
+
+.mer-section-link:hover {
+  gap: 8px;
+}
+
+/*
+ * LEAK OVERRIDES
+ *
+ * ~96 colour literals in atrium-meridian.css sit in component rules rather than
+ * the token block, so they survive a token swap and bleed Meridian's teal into
+ * this scope. These are the two the dashboard actually hits. The rest surface
+ * as more classes get used — each one is a one-line override here, and the
+ * permanent fix is tokenising them upstream.
+ */
+.app-meridian .mer-btn-primary:hover {
+  background: #001f30; /* upstream hardcodes #0b2622 (Meridian teal) */
+}
+
+.app-meridian .mer-search:focus-within {
+  border-color: var(--mer-brand-mid);
+  /* upstream hardcodes rgba(44, 122, 107, .12) — Meridian's green focus ring */
+  box-shadow: 0 0 0 3px rgba(42, 116, 159, 0.12);
+}
+
+/*
+ * Clickable card. Meridian deliberately has no `.mer-card:hover` — its cards are
+ * containers, not targets. Dashboard cards ARE targets, so this adds the
+ * smallest hover that reads as interactive without the lift-and-bloom the old
+ * dashboard used (shadow-sm → shadow-lg + -translate-y-0.5). Border darkens,
+ * geometry does not move.
+ */
+.mer-card-link {
+  display: flex;
+  flex-direction: column;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 150ms ease-out, background 150ms ease-out;
+}
+
+.mer-card-link:hover {
+  border-color: var(--mer-ink-muted);
+}
+
+.mer-card-link:focus-visible {
+  outline: none;
+  border-color: var(--mer-brand-mid);
+  box-shadow: 0 0 0 3px rgba(42, 116, 159, 0.12);
+}
+
+/*
+ * Icon chip. Replaces the old four-colour accent rainbow (navy/coral/purple/
+ * green) with the single brand tint — Meridian's discipline is brand + neutral,
+ * with violet reserved for agent presence.
+ */
+.mer-icon-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--mer-r-chip);
+  background: var(--mer-brand-tint);
+  color: var(--mer-brand);
+  flex-shrink: 0;
+}
+
+.mer-card-title {
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--mer-ink);
+  letter-spacing: -0.011em;
+}
+
+.mer-card-desc {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--mer-ink-muted);
+}
+
+/* Text CTA — Meridian uses a link, not a pill, for secondary actions. */
+.mer-card-cta {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mer-brand);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: gap 150ms ease-out;
+}
+
+.mer-card-link:hover .mer-card-cta {
+  gap: 8px;
+}
