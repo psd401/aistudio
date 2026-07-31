@@ -75,6 +75,10 @@ class VersionedS3 {
   }> = []
   sequence = 0
   failNextManifestPutAfterWrite = false
+  beforeCommand?: (
+    name: string,
+    input: Record<string, unknown>,
+  ) => Promise<void>
 
   add(
     key: string,
@@ -149,6 +153,7 @@ class VersionedS3 {
     const name = typed.constructor.name
     const input = typed.input
     this.commands.push({ name, input })
+    await this.beforeCommand?.(name, input)
     const key = String(input.Key ?? "")
 
     if (name === "ListObjectsV2Command") {
@@ -182,13 +187,29 @@ class VersionedS3 {
       }
     }
     if (name === "GetObjectCommand") {
-      const version = this.version(key)
+      const version = this.version(
+        key,
+        typeof input.VersionId === "string"
+          ? input.VersionId
+          : undefined,
+      )
+      if (
+        typeof input.IfMatch === "string" &&
+        input.IfMatch !== version.eTag
+      ) {
+        throw Object.assign(new Error("precondition failed"), {
+          name: "PreconditionFailed",
+          $metadata: { httpStatusCode: 412 },
+        })
+      }
       const body = version.body ?? ""
       return {
         ContentLength: Buffer.byteLength(body),
+        ETag: version.eTag,
         VersionId: version.versionId,
         Body: {
           transformToString: async () => body,
+          transformToByteArray: async () => Buffer.from(body),
         },
       }
     }
@@ -278,6 +299,15 @@ const CHECKSUM = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 const CONTENT_TYPE = "application/octet-stream"
 const RESERVATION_ONE = "11111111-2222-4333-8444-555555555555"
 const RESERVATION_TWO = "66666666-7777-4888-8999-000000000000"
+const RETIRED_EXEC_APPROVALS = `${JSON.stringify({
+  version: 1,
+  socket: {
+    path: "/home/node/.openclaw/exec-approvals.sock",
+    token: "AbCdEfGhIjKlMnOpQrStUvWxYz_12345",
+  },
+  defaults: {},
+  agents: {},
+})}\n`
 
 let store: VersionedS3
 let activeReservation: Record<string, unknown> | undefined
@@ -288,7 +318,39 @@ function workspaceGeneration(
   return workspaceGenerationFromEntries(paths)
 }
 
+function legacyWorkspaceGenerationIncludingExcluded(
+  entries: Array<{ path: string; size: number; eTag: string }>,
+): string {
+  const digest = createHash("sha256")
+  for (const entry of [...entries].sort((left, right) =>
+    Buffer.compare(
+      Buffer.from(left.path, "utf8"),
+      Buffer.from(right.path, "utf8"),
+    ),
+  )) {
+    const path = Buffer.from(entry.path, "utf8")
+    const eTag = Buffer.from(entry.eTag, "utf8")
+    const pathLength = Buffer.alloc(8)
+    pathLength.writeBigUInt64BE(BigInt(path.length))
+    const size = Buffer.alloc(8)
+    size.writeBigUInt64BE(BigInt(entry.size))
+    const eTagLength = Buffer.alloc(8)
+    eTagLength.writeBigUInt64BE(BigInt(eTag.length))
+    digest.update(pathLength)
+    digest.update(path)
+    digest.update(size)
+    digest.update(eTagLength)
+    digest.update(eTag)
+  }
+  return digest.digest("hex")
+}
+
 function manifestKey(): string {
+  const prefixHash = createHash("sha256").update(PREFIX).digest("hex")
+  return `.workspace-checkpoints/v2/${prefixHash}/manifest.json`
+}
+
+function legacyManifestKey(): string {
   const prefixHash = createHash("sha256").update(PREFIX).digest("hex")
   return `.workspace-checkpoints/v1/${prefixHash}/manifest.json`
 }
@@ -434,6 +496,389 @@ describe("durable workspace checkpoints", () => {
       ),
     ).toHaveLength(0)
     expect(store.current(manifestKey())?.scope).toBe("Scope=checkpoint")
+  })
+
+  it("accepts legacy punctuation and excludes regenerable trees from the checkpoint", async () => {
+    const durable = store.add(`${PREFIX}/memory/Review (draft), [v2].md`, {
+      size: 4,
+      eTag: '"durable"',
+      body: "keep",
+      scope: "Scope=private",
+    })
+    for (let index = 0; index < 5_500; index += 1) {
+      store.add(
+        `${PREFIX}/skills/example/.tts-venv/lib/python3.11/site-packages/pkg-${index}/script (dev).tmpl`,
+        {
+          size: 1,
+          eTag: `"generated-${index}"`,
+          body: "x",
+        },
+      )
+    }
+
+    const result = await ensureWorkspaceCheckpoint(PREFIX)
+
+    expect(result.workspaceGeneration).toBe(
+      workspaceGeneration([
+        {
+          path: "memory/Review (draft), [v2].md",
+          size: 4,
+          eTag: '"durable"',
+        },
+      ]),
+    )
+    expect(manifest().entries).toEqual([
+      expect.objectContaining({
+        path: "memory/Review (draft), [v2].md",
+        versionId: durable.versionId,
+      }),
+    ])
+    expect(
+      store.commands.filter(
+        (command) =>
+          command.name === "HeadObjectCommand" &&
+          String(command.input.Key).startsWith(`${PREFIX}/`),
+      ),
+    ).toHaveLength(1)
+  })
+
+  it("normalizes legacy exec approvals out of an existing v2 checkpoint without deleting owner state", async () => {
+    const durableMemory = store.add(`${PREFIX}/memory/MEMORY.md`, {
+      size: 4,
+      eTag: '"memory"',
+      body: "keep",
+      scope: "Scope=private",
+    })
+    const durableDatabase = store.add(`${PREFIX}/state/openclaw.sqlite`, {
+      size: 4,
+      eTag: '"sqlite"',
+      body: "data",
+      scope: "Scope=private",
+    })
+    const legacyApprovals = store.add(`${PREFIX}/exec-approvals.json`, {
+      size: Buffer.byteLength(RETIRED_EXEC_APPROVALS),
+      eTag: '"legacy"',
+      body: RETIRED_EXEC_APPROVALS,
+      scope: "Scope=private",
+    })
+    const oldEntries = [
+      {
+        path: "memory/MEMORY.md",
+        size: 4,
+        eTag: '"memory"',
+        source: "target",
+        versionId: durableMemory.versionId,
+        sourceETag: '"memory"',
+      },
+      {
+        path: "state/openclaw.sqlite",
+        size: 4,
+        eTag: '"sqlite"',
+        source: "target",
+        versionId: durableDatabase.versionId,
+        sourceETag: '"sqlite"',
+      },
+      {
+        path: "exec-approvals.json",
+        size: Buffer.byteLength(RETIRED_EXEC_APPROVALS),
+        eTag: '"legacy"',
+        source: "target",
+        versionId: legacyApprovals.versionId,
+        sourceETag: '"legacy"',
+      },
+    ]
+    const oldManifest = JSON.stringify({
+      version: 2,
+      signedWorkspacePrefix: PREFIX,
+      workspaceGeneration:
+        legacyWorkspaceGenerationIncludingExcluded(oldEntries),
+      entries: oldEntries,
+    })
+    store.add(manifestKey(), {
+      size: Buffer.byteLength(oldManifest),
+      eTag: '"old-manifest"',
+      body: oldManifest,
+      scope: "Scope=checkpoint",
+    })
+    const commandCount = store.commands.length
+
+    const result = await ensureWorkspaceCheckpoint(PREFIX)
+
+    const normalizedGeneration = workspaceGeneration([
+      { path: "memory/MEMORY.md", size: 4, eTag: '"memory"' },
+      { path: "state/openclaw.sqlite", size: 4, eTag: '"sqlite"' },
+    ])
+    expect(result).toEqual({
+      checkpointReady: true,
+      workspaceGeneration: normalizedGeneration,
+    })
+    expect(manifest()).toMatchObject({
+      version: 2,
+      signedWorkspacePrefix: PREFIX,
+      workspaceGeneration: normalizedGeneration,
+      entries: [
+        expect.objectContaining({
+          path: "memory/MEMORY.md",
+          versionId: durableMemory.versionId,
+        }),
+        expect.objectContaining({
+          path: "state/openclaw.sqlite",
+          versionId: durableDatabase.versionId,
+        }),
+      ],
+    })
+    expect(store.current(`${PREFIX}/memory/MEMORY.md`)).toEqual(
+      durableMemory,
+    )
+    expect(store.current(`${PREFIX}/state/openclaw.sqlite`)).toEqual(
+      durableDatabase,
+    )
+    expect(store.current(`${PREFIX}/exec-approvals.json`)).toEqual(
+      legacyApprovals,
+    )
+    expect(
+      store.commands.slice(commandCount).filter(
+        (command) =>
+          command.name === "CopyObjectCommand" ||
+          command.name === "DeleteObjectCommand",
+      ),
+    ).toHaveLength(0)
+  })
+
+  it("rejects an interrupted Doctor claim before normalizing its manifest entry", async () => {
+    const claimKey = `${PREFIX}/exec-approvals.json.doctor-importing`
+    const importingClaim = store.add(claimKey, {
+      size: Buffer.byteLength(RETIRED_EXEC_APPROVALS),
+      eTag: '"claim"',
+      body: RETIRED_EXEC_APPROVALS,
+      scope: "Scope=private",
+    })
+    // Simulate a current delete marker while the committed checkpoint still
+    // references the recoverable claim version. This reaches manifest-level
+    // validation rather than the current-list guard.
+    store.add(claimKey, {
+      size: 0,
+      eTag: '"claim-deleted"',
+      deleteMarker: true,
+    })
+    const entries = [{
+      path: "exec-approvals.json.doctor-importing",
+      size: Buffer.byteLength(RETIRED_EXEC_APPROVALS),
+      eTag: '"claim"',
+      source: "target",
+      versionId: importingClaim.versionId,
+      sourceETag: '"claim"',
+    }]
+    const oldManifest = JSON.stringify({
+      version: 2,
+      signedWorkspacePrefix: PREFIX,
+      workspaceGeneration:
+        legacyWorkspaceGenerationIncludingExcluded(entries),
+      entries,
+    })
+    store.add(manifestKey(), {
+      size: Buffer.byteLength(oldManifest),
+      eTag: '"claim-manifest"',
+      body: oldManifest,
+      scope: "Scope=checkpoint",
+    })
+    const commandCount = store.commands.length
+
+    await expect(ensureWorkspaceCheckpoint(PREFIX)).rejects.toThrow(
+      "Retired workspace host state requires controlled migration",
+    )
+    expect(
+      store.commands.slice(commandCount).some(
+        (command) =>
+          command.name === "PutObjectCommand" ||
+          command.name === "CopyObjectCommand" ||
+          command.name === "DeleteObjectCommand",
+      ),
+    ).toBe(false)
+    expect(store.versions(claimKey)).toContainEqual(importingClaim)
+  })
+
+  it("rejects any other excluded path in a v2 checkpoint", async () => {
+    const excluded = store.add(
+      `${PREFIX}/node_modules/legacy/index.js`,
+      {
+        size: 4,
+        eTag: '"excluded"',
+        body: "code",
+        scope: "Scope=private",
+      },
+    )
+    const entries = [{
+      path: "node_modules/legacy/index.js",
+      size: 4,
+      eTag: '"excluded"',
+      source: "target",
+      versionId: excluded.versionId,
+      sourceETag: '"excluded"',
+    }]
+    const oldManifest = JSON.stringify({
+      version: 2,
+      signedWorkspacePrefix: PREFIX,
+      workspaceGeneration:
+        legacyWorkspaceGenerationIncludingExcluded(entries),
+      entries,
+    })
+    store.add(manifestKey(), {
+      size: Buffer.byteLength(oldManifest),
+      eTag: '"invalid-manifest"',
+      body: oldManifest,
+      scope: "Scope=checkpoint",
+    })
+    const commandCount = store.commands.length
+
+    await expect(ensureWorkspaceCheckpoint(PREFIX)).rejects.toThrow(
+      "manifest is invalid",
+    )
+    expect(
+      store.commands.slice(commandCount).some(
+        (command) =>
+          command.name === "PutObjectCommand" ||
+          command.name === "CopyObjectCommand" ||
+          command.name === "DeleteObjectCommand",
+      ),
+    ).toBe(false)
+    expect(
+      store.current(`${PREFIX}/node_modules/legacy/index.js`),
+    ).toEqual(excluded)
+  })
+
+  it("rejects a retired-path manifest whose legacy generation is invalid", async () => {
+    const legacyApprovals = store.add(
+      `${PREFIX}/exec-approvals.json`,
+      {
+        size: Buffer.byteLength(RETIRED_EXEC_APPROVALS),
+        eTag: '"legacy"',
+        body: RETIRED_EXEC_APPROVALS,
+        scope: "Scope=private",
+      },
+    )
+    const oldManifest = JSON.stringify({
+      version: 2,
+      signedWorkspacePrefix: PREFIX,
+      workspaceGeneration: "0".repeat(64),
+      entries: [{
+        path: "exec-approvals.json",
+        size: Buffer.byteLength(RETIRED_EXEC_APPROVALS),
+        eTag: '"legacy"',
+        source: "target",
+        versionId: legacyApprovals.versionId,
+        sourceETag: '"legacy"',
+      }],
+    })
+    store.add(manifestKey(), {
+      size: Buffer.byteLength(oldManifest),
+      eTag: '"invalid-generation"',
+      body: oldManifest,
+      scope: "Scope=checkpoint",
+    })
+    const commandCount = store.commands.length
+
+    await expect(ensureWorkspaceCheckpoint(PREFIX)).rejects.toThrow(
+      "generation is invalid",
+    )
+    expect(
+      store.commands.slice(commandCount).some(
+        (command) =>
+          command.name === "PutObjectCommand" ||
+          command.name === "CopyObjectCommand" ||
+          command.name === "DeleteObjectCommand",
+      ),
+    ).toBe(false)
+    expect(store.current(`${PREFIX}/exec-approvals.json`)).toEqual(
+      legacyApprovals,
+    )
+  })
+
+  it("refuses to bless current state while a legacy v1 boundary exists", async () => {
+    const legacyBody = JSON.stringify({
+      version: 1,
+      entries: [{ path: "node_modules/legacy/index.js" }],
+    })
+    store.add(legacyManifestKey(), {
+      size: Buffer.byteLength(legacyBody),
+      eTag: '"legacy-manifest"',
+      body: legacyBody,
+      scope: "Scope=checkpoint",
+    })
+    store.add(`${PREFIX}/memory/durable.md`, {
+      size: 4,
+      eTag: '"durable"',
+      body: "keep",
+      scope: "Scope=private",
+    })
+
+    await expect(ensureWorkspaceCheckpoint(PREFIX)).rejects.toThrow(
+      "Legacy workspace checkpoint must be recovered before v2 bootstrap",
+    )
+
+    expect(store.current(manifestKey())).toBeUndefined()
+    expect(store.current(legacyManifestKey())?.body).toBe(legacyBody)
+  })
+
+  it("waits for every in-flight checkpoint worker before releasing the owner lock", async () => {
+    store.add(`${PREFIX}/memory/a.md`, {
+      size: 1,
+      eTag: '"a"',
+      body: "a",
+    })
+    store.add(`${PREFIX}/memory/b.md`, {
+      size: 1,
+      eTag: '"b"',
+      body: "b",
+    })
+    let finishSlow: (() => void) | undefined
+    const slow = new Promise<void>((resolve) => {
+      finishSlow = resolve
+    })
+    let slowSettled = false
+    let lockReleased = false
+    store.beforeCommand = async (name, input) => {
+      if (name !== "HeadObjectCommand") return
+      const key = String(input.Key)
+      if (key.endsWith("/memory/a.md")) {
+        throw new Error("checkpoint metadata failed")
+      }
+      if (key.endsWith("/memory/b.md")) {
+        await slow
+        slowSettled = true
+      }
+    }
+    withSessionMock.mockImplementation(
+      async (...args: unknown[]) => {
+        const callback = args[0] as (session: {
+          executeQuery: AsyncUnknownMock
+          executeTransaction: AsyncUnknownMock
+        }) => Promise<unknown>
+        return callback({
+          executeQuery: async (...queryArgs: unknown[]) => {
+            if (queryArgs[1] === "tryFenceWorkspaceUploadCompletion") {
+              return [{ acquired: true }]
+            }
+            if (queryArgs[1] === "releaseWorkspaceUploadCompletionFence") {
+              lockReleased = true
+              expect(slowSettled).toBe(true)
+              return [{ released: true }]
+            }
+            return executeQueryMock(...queryArgs)
+          },
+          executeTransaction: (...transactionArgs: unknown[]) =>
+            executeTransactionMock(...transactionArgs),
+        })
+      },
+    )
+
+    const checkpoint = ensureWorkspaceCheckpoint(PREFIX)
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(lockReleased).toBe(false)
+    finishSlow?.()
+
+    await expect(checkpoint).rejects.toThrow("checkpoint metadata failed")
+    expect(lockReleased).toBe(true)
   })
 
   it("recovers a crash-partial batch, preserves history, and idempotently commits the retry", async () => {
@@ -630,15 +1075,34 @@ describe("durable workspace checkpoints", () => {
     })
     const base = (await ensureWorkspaceCheckpoint(PREFIX))
       .workspaceGeneration
+    const commandsBeforeDelete = store.commands.length
 
     const deleted = await deleteWorkspacePath(
       PREFIX,
       "memory/remove.md",
       base,
     )
+    const firstDeleteCommands = store.commands.slice(commandsBeforeDelete)
+    expect(
+      firstDeleteCommands.filter(
+        (command) => command.name === "ListObjectsV2Command",
+      ),
+    ).toHaveLength(1)
+    expect(deleted.workspaceGeneration).toBe(
+      workspaceGeneration([
+        { path: "memory/keep.md", size: 4, eTag: '"keep"' },
+      ]),
+    )
     await expect(
       deleteWorkspacePath(PREFIX, "memory/remove.md", base),
     ).resolves.toEqual(deleted)
+    expect(
+      store.commands
+        .slice(commandsBeforeDelete)
+        .filter(
+          (command) => command.name === "ListObjectsV2Command",
+        ),
+    ).toHaveLength(2)
     expect(store.current(`${PREFIX}/memory/remove.md`)).toBeUndefined()
     expect(store.versions(`${PREFIX}/memory/remove.md`)).toEqual(
       expect.arrayContaining([retained]),

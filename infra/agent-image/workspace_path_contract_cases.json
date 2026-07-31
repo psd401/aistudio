@@ -1,0 +1,20 @@
+{
+  "valid": [
+    "memory/notes.md",
+    "skills/hagelk-morning-brief/.tts-venv/lib/python3.11/site-packages/setuptools/script (dev).tmpl",
+    "memory/Draft, final! [v2] #1 & notes's.txt",
+    "memory/Café/日本語/emoji-🧠.md"
+  ],
+  "invalid": [
+    { "path": "", "reason": "empty" },
+    { "path": "/absolute", "reason": "absolute" },
+    { "path": "trailing/", "reason": "trailing-slash" },
+    { "path": "repeated//slash", "reason": "empty-segment" },
+    { "path": "safe/../escape", "reason": "traversal-segment" },
+    { "path": "safe/./alias", "reason": "traversal-segment" },
+    { "path": "windows\\separator", "reason": "unsupported-character" },
+    { "path": "line\nbreak", "reason": "unsupported-character" },
+    { "path": "bidi-‮override", "reason": "unsupported-character" },
+    { "path": "line- separator", "reason": "unsupported-character" }
+  ]
+}

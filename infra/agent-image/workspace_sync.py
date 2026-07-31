@@ -102,6 +102,31 @@ class _PendingWorkspaceCompletion:
 
 
 WORKSPACE_DIR = Path("/home/node/.openclaw")
+
+
+def _workspace_policy_path(module_path: Path) -> Path:
+    module_directory = module_path.resolve().parent
+    repository_candidate = (
+        module_directory.parent.parent
+        / "lib"
+        / "agent-workspace"
+        / "workspace-policy.json"
+    )
+    image_candidate = module_directory / "workspace_policy.json"
+    return (
+        repository_candidate
+        if repository_candidate.is_file()
+        else image_candidate
+    )
+
+
+_WORKSPACE_POLICY_PATH = _workspace_policy_path(Path(__file__))
+with _WORKSPACE_POLICY_PATH.open(encoding="utf-8") as _policy_file:
+    _WORKSPACE_POLICY = json.load(_policy_file)
+if _WORKSPACE_POLICY.get("version") != 1:
+    raise RuntimeError("unsupported workspace persistence policy")
+_PRIVATE_PATH_POLICY = _WORKSPACE_POLICY["privatePath"]
+_CHECKPOINT_EXCLUSIONS = _WORKSPACE_POLICY["checkpointExclusions"]
 _IMAGE_SEED_RELATIVES = ("IDENTITY.md", "USER.md", "MEMORY.md")
 # Captured before the first owner hydration. If a dirty warm workspace must be
 # discarded, these per-image scaffolding files can be restored without
@@ -139,7 +164,7 @@ MAX_SYNC_FILES = 250_000
 # Was 4,000 — below live workspaces (two prefixes hold ~5,000 objects), so the
 # PUSH silently truncated and never uploaded the tail of a user's workspace.
 MAX_SYNC_ENTRIES = 250_000
-MAX_SYNC_DEPTH = 64
+MAX_SYNC_DEPTH = int(_PRIVATE_PATH_POLICY["maxDepth"])
 SYNC_WORKERS = 4
 TRANSFER_CHUNK_BYTES = 64 * 1024
 WORKSPACE_UPLOAD_CONTENT_TYPE = "application/octet-stream"
@@ -150,7 +175,13 @@ _TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 # generic 20-second broker read cap. Checkpoint calls are idempotent and are
 # deliberately not auto-retried: a client timeout does not prove the web tier
 # stopped working, and overlapping retries would queue behind the same lock.
-WORKSPACE_CHECKPOINT_BROKER_TIMEOUT_SECONDS = 55
+WORKSPACE_CHECKPOINT_BROKER_TIMEOUT_SECONDS = 240
+# Generation-fenced mutations scan the authoritative workspace while holding
+# the broker lock. Large migrated workspaces can legitimately take more than
+# the generic 20-second read timeout. Keep one request alive long enough to
+# settle rather than launching an overlapping retry; the turn-wide deadline
+# remains the hard upper bound.
+WORKSPACE_MUTATION_BROKER_TIMEOUT_SECONDS = 60
 WORKSPACE_FLUSH_TOKEN_PATH = (
     "/run/psd-agent-authority/workspace-flush-token"
 )
@@ -187,10 +218,17 @@ _SQLITE_TRANSIENT_SIDECAR_SUFFIXES = (
     "-shm",
     "-journal",
 )
-_SQLITE_MEMORY_REINDEX_RE = re.compile(
-    r"^.+\.sqlite\.memory-reindex-[0-9A-Fa-f-]+"
-    r"(?:-(?:wal|shm|journal))?$"
+_SKIP_BASENAME_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in _CHECKPOINT_EXCLUSIONS["basenamePatterns"]
 )
+
+
+def _matches_skip_basename_pattern(basename: str) -> bool:
+    return any(
+        pattern.fullmatch(basename)
+        for pattern in _SKIP_BASENAME_PATTERNS
+    )
 
 
 def _is_transient_read_error(error: BaseException) -> bool:
@@ -209,22 +247,48 @@ def _is_transient_read_error(error: BaseException) -> bool:
     )
 
 
+def _workspace_relative_rejection_reason(relative: object) -> str | None:
+    """Return the canonical cross-language rejection reason, if any."""
+    if not isinstance(relative, str) or not relative:
+        return "empty"
+    if relative.startswith("/"):
+        return "absolute"
+    if relative.endswith("/"):
+        return "trailing-slash"
+    try:
+        relative_bytes = relative.encode("utf-8")
+    except UnicodeEncodeError:
+        return "unsupported-character"
+    if len(relative_bytes) > int(_PRIVATE_PATH_POLICY["maxUtf8Bytes"]):
+        return "too-long"
+    rejected_ranges = _PRIVATE_PATH_POLICY["rejectedCodePointRanges"]
+    if any(
+        start <= ord(character) <= end
+        for character in relative
+        for start, end in rejected_ranges
+    ):
+        return "unsupported-character"
+
+    parts = tuple(relative.split("/"))
+    if len(parts) > MAX_SYNC_DEPTH:
+        return "too-deep"
+    for part in parts:
+        if not part:
+            return "empty-segment"
+        if part in (".", ".."):
+            return "traversal-segment"
+        if len(part.encode("utf-8")) > int(
+            _PRIVATE_PATH_POLICY["maxSegmentUtf8Bytes"]
+        ):
+            return "segment-too-long"
+    return None
+
+
 def _validate_workspace_relative(relative: str) -> tuple[str, ...]:
     """Return safe lexical path parts without consulting mutable symlinks."""
-    if (
-        not isinstance(relative, str)
-        or not relative
-        or relative.startswith("/")
-        or "\x00" in relative
-    ):
+    if _workspace_relative_rejection_reason(relative) is not None:
         raise OSError("invalid workspace file path")
-    parts = tuple(relative.split("/"))
-    if (
-        len(parts) > MAX_SYNC_DEPTH
-        or any(part in ("", ".", "..") for part in parts)
-    ):
-        raise OSError("invalid workspace file path")
-    return parts
+    return tuple(relative.split("/"))
 
 
 def _install_workspace_file(source: Path, relative: str) -> None:
@@ -565,58 +629,15 @@ def _materialize_empty_workspace_file(
 # intentionally NOT on this list — those are agent-written, user-owned,
 # and must round-trip.
 #
-# Match is: "skip if the relative path equals or starts with any entry".
-_SKIP_RELATIVE_PREFIXES = (
-    "openclaw.json",                  # gateway config
-    "openclaw.json.bak",               # gateway config backup
-    "agents/main/agent/models.json",   # per-agent provider/model config
-    "logs/",                           # gateway telemetry, not memory
-    "update-check.json",               # gateway version probe state
-    ".openclaw/",                      # nested OpenClaw internal state
-    "SOUL.md",                         # system prompt — image-owned
-    # Image-bundled skills — every file under these prefixes is shipped by
-    # the container deploy and must never be overlaid by S3 state. Same
-    # class of bug as SOUL.md (2026-04-26): stale skill files in each
-    # user's S3 prefix (debug-*.js, old SKILL.md, old common.js) were
-    # pulled on cold-start and overwriting the new image's psd-workspace
-    # skill, so Phase 1 user_account scope handling never took effect
-    # after the image was rebuilt and redeployed.
-    #
-    # IMPORTANT: skills/user/ is the agent's own authoring scratchpad —
-    # NOT image-owned, must round-trip. Don't blanket-skip skills/.
-    # Image-bundled skills now live at /opt/psd-skills/, OUTSIDE this
-    # workspace dir, so they CANNOT be overlaid by S3 state — the path
-    # separation makes the "agent overwrites a district skill" bug class
-    # physically impossible. The skip entries below remain as a defense
-    # against S3 pollution: stale files exist in some users' workspace
-    # prefixes from the pre-separation era, and an agent that hand-creates
-    # `~/.openclaw/skills/psd-foo/` would sync that scratch to S3 forever.
-    # Skipping these prefixes prevents both. Keep the list aligned with
-    # the directories that exist at /opt/psd-skills/.
-    "skills/gws-",
-    "skills/psd-brand-guidelines/",
-    "skills/psd-credentials/",
-    "skills/psd-data/",
-    "skills/psd-failure-report/",
-    "skills/psd-freshservice/",
-    "skills/psd-github/",
-    "skills/psd-html-artifact/",
-    # psd-html-output was REMOVED from the image (superseded by psd-html-artifact),
-    # but its skip entry is intentionally retained: stale objects may linger in
-    # some users' pre-separation S3 prefixes, and skipping the pull keeps the
-    # deleted skill from being resurrected under ~/.openclaw/skills/ on sync.
-    "skills/psd-html-output/",
-    "skills/psd-image-gen/",
-    # psd-redrover was REMOVED from the image (#1396 — Red Rover data is now
-    # served through the warehouse via psd-data, which authenticates as the
-    # calling user), but its skip entry is intentionally retained for the same
-    # reason as psd-html-output above: stale synced copies in users' S3
-    # prefixes must not be resurrected under ~/.openclaw/skills/ on sync.
-    "skills/psd-redrover/",
-    "skills/psd-rules/",
-    "skills/psd-schedules/",
-    "skills/psd-skills-meta/",
-    "skills/psd-workspace/",
+# Exact paths and prefix paths are separate so retiring one generated control
+# file can never hide similarly named user content. The values live in
+# workspace_policy.json so the web checkpoint and image runtime cannot
+# silently drift into different definitions of durable state.
+_SKIP_EXACT_PATHS = frozenset(
+    _CHECKPOINT_EXCLUSIONS["exactPaths"]
+)
+_SKIP_RELATIVE_PREFIXES = tuple(
+    _CHECKPOINT_EXCLUSIONS["relativePrefixes"]
 )
 
 # Filename suffixes that are always runtime cruft. SQLite WAL/SHM files are
@@ -624,17 +645,8 @@ _SKIP_RELATIVE_PREFIXES = (
 # while the gateway is live produced mismatched database generations in S3.
 # The wrapper now stops the gateway and checkpoints the main database before
 # every push.
-_SKIP_SUFFIXES = (
-    ".sock",
-    ".pid",
-    ".sqlite-wal",
-    ".sqlite-shm",
-    ".sqlite-journal",
-    ".reindex-lock.sqlite",
-)
-_SKIP_BASENAMES = frozenset({
-    "plugins.sync.lock",
-})
+_SKIP_SUFFIXES = tuple(_CHECKPOINT_EXCLUSIONS["suffixes"])
+_SKIP_BASENAMES = frozenset(_CHECKPOINT_EXCLUSIONS["basenames"])
 
 # Directory names that hold REGENERABLE build artifacts, matched at ANY depth.
 #
@@ -647,16 +659,15 @@ _SKIP_BASENAMES = frozenset({
 # Matched per path SEGMENT rather than as a prefix, because they appear
 # mid-path — e.g. skills/<name>/.tts-venv/lib/python3.11/site-packages/pip/...
 # — which the prefix list above cannot express.
-_SKIP_SEGMENT_NAMES = frozenset({
-    "node_modules",
-    "site-packages",
-    "__pycache__",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".turbo",
-    ".next",
-})
+_SKIP_SEGMENT_NAMES = frozenset(
+    _CHECKPOINT_EXCLUSIONS["segmentNames"]
+)
+_EXACT_VENV_SEGMENTS = frozenset(
+    _CHECKPOINT_EXCLUSIONS["exactVenvSegments"]
+)
+_HIDDEN_VENV_SUFFIX = str(
+    _CHECKPOINT_EXCLUSIONS["hiddenVenvSuffix"]
+)
 
 
 def _is_regenerable_segment(segment: str) -> bool:
@@ -671,9 +682,9 @@ def _is_regenerable_segment(segment: str) -> bool:
     # restored nor uploaded. The two failure modes are not symmetric — an
     # unmatched venv only costs sync time, an over-matched skill loses work —
     # so keep the match narrow and let a stray visible venv ride along.
-    if segment in ("venv", ".venv"):
+    if segment in _EXACT_VENV_SEGMENTS:
         return True
-    return segment.startswith(".") and segment.endswith("-venv")
+    return segment.startswith(".") and segment.endswith(_HIDDEN_VENV_SUFFIX)
 
 
 # Legacy session transcripts.
@@ -718,17 +729,28 @@ def _is_imported_legacy_state(relative: str) -> bool:
 def _should_skip_relative(relative: str) -> bool:
     """True if this workspace-relative path is gateway-owned, not user memory."""
     rel = relative.lstrip("/")
+    if rel in _SKIP_EXACT_PATHS:
+        return True
     for prefix in _SKIP_RELATIVE_PREFIXES:
         if rel == prefix or rel.startswith(prefix):
             return True
-    basename = Path(rel).name
+    basename = rel.split("/")[-1]
     if basename in _SKIP_BASENAMES:
         return True
-    if _SQLITE_MEMORY_REINDEX_RE.fullmatch(basename):
+    if _matches_skip_basename_pattern(basename):
         return True
     if any(_is_regenerable_segment(seg) for seg in rel.split("/")):
         return True
     return any(rel.endswith(suf) for suf in _SKIP_SUFFIXES)
+
+
+def _is_checkpoint_managed_relative(relative: str) -> bool:
+    """True only for mutable state represented by the atomic checkpoint."""
+    return (
+        relative != "attachments"
+        and not relative.startswith("attachments/")
+        and not _should_skip_relative(relative)
+    )
 
 
 def _preserve_image_owned_relative(relative: str) -> bool:
@@ -739,7 +761,7 @@ def _preserve_image_owned_relative(relative: str) -> bool:
             rel == prefix or rel.startswith(prefix)
             for prefix in _SKIP_RELATIVE_PREFIXES
         )
-        or Path(rel).name in _SKIP_BASENAMES
+        or rel.split("/")[-1] in _SKIP_BASENAMES
         or any(_is_regenerable_segment(part) for part in rel.split("/"))
     )
 
@@ -912,6 +934,39 @@ def _remove_workspace_entry_no_follow(
     finally:
         os.close(directory_fd)
     os.rmdir(name, dir_fd=parent_fd)
+
+
+def _discard_retired_local_control_state(
+    deadline_monotonic: float | None = None,
+) -> None:
+    """Remove retired exact host-state paths before OpenClaw can probe them.
+
+    These paths are neither image-owned nor user history. Pinned OpenClaw
+    refuses to start while either one exists, so a contaminated warm microVM
+    must not preserve them merely because checkpoint sync excludes them.
+    """
+    workspace_fd = os.open(
+        WORKSPACE_DIR,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    try:
+        for relative in sorted(_SKIP_EXACT_PATHS):
+            _remaining_timeout(deadline_monotonic, 60)
+            parts = Path(relative).parts
+            if len(parts) != 1 or parts[0] in ("", ".", ".."):
+                raise WorkspaceRestoreIncomplete(
+                    "retired control-state path is not root-relative"
+                )
+            try:
+                _remove_workspace_entry_no_follow(
+                    workspace_fd,
+                    parts[0],
+                    deadline_monotonic=deadline_monotonic,
+                )
+            except FileNotFoundError:
+                continue
+    finally:
+        os.close(workspace_fd)
 
 
 def _prepare_committed_remote_parents(
@@ -1133,7 +1188,7 @@ def _iter_workspace_sqlite_sidecars(
                             ))
                             or name.endswith(".reindex-lock.sqlite")
                             or bool(
-                                _SQLITE_MEMORY_REINDEX_RE.fullmatch(name)
+                                _matches_skip_basename_pattern(name)
                             )
                         )
                         if is_sqlite_transient:
@@ -1159,7 +1214,7 @@ def _discard_uncommitted_local_state(
         name = Path(relative).name
         remove_transient = (
             name.endswith(".reindex-lock.sqlite")
-            or bool(_SQLITE_MEMORY_REINDEX_RE.fullmatch(name))
+            or _matches_skip_basename_pattern(name)
         )
         if not remove_transient:
             for suffix in ("-wal", "-shm", "-journal"):
@@ -1207,6 +1262,14 @@ def _broker_request(
         else ()
     )
     for attempt in range(len(retry_delays) + 1):
+        # A spent turn-wide budget is terminal. Calculate it outside the
+        # network exception handler so the local deadline is never mistaken
+        # for a transient socket timeout and retried after finalization has
+        # already expired.
+        request_timeout = _remaining_timeout(
+            deadline_monotonic,
+            maximum_timeout_seconds,
+        )
         request = urllib.request.Request(
             "http://127.0.0.1:18791/agent-broker/api/agent/workspace-storage",
             data=body,
@@ -1219,10 +1282,7 @@ def _broker_request(
         try:
             with urllib.request.urlopen(
                 request,
-                timeout=_remaining_timeout(
-                    deadline_monotonic,
-                    maximum_timeout_seconds,
-                ),
+                timeout=request_timeout,
             ) as response:
                 result = json.loads(response.read())
             if not isinstance(result, dict):
@@ -1389,6 +1449,9 @@ def _complete_upload_reservation(
         },
         deadline_monotonic,
         retry_transient=True,
+        maximum_timeout_seconds=(
+            WORKSPACE_MUTATION_BROKER_TIMEOUT_SECONDS
+        ),
     )
     next_generation = completed.get("workspaceGeneration")
     e_tag = completed.get("eTag")
@@ -1419,6 +1482,9 @@ def _delete_workspace_path(
         },
         deadline_monotonic,
         retry_transient=True,
+        maximum_timeout_seconds=(
+            WORKSPACE_MUTATION_BROKER_TIMEOUT_SECONDS
+        ),
     )
     next_generation = result.get("workspaceGeneration")
     if (
@@ -1576,12 +1642,13 @@ def _generation_for_entries(
     """Hash one complete S3 listing with an unambiguous cross-language format."""
     digest = hashlib.sha256()
     for relative in sorted(entries):
-        if relative == "attachments" or relative.startswith("attachments/"):
-            # Chat ingress writes immutable attachments while holding the
-            # workspace lock, and the wrapper explicitly pulls referenced
-            # attachment paths per turn. Keep them outside mutable-history CAS
-            # so an upload does not force a multi-thousand-object restore.
+        if not _is_checkpoint_managed_relative(relative):
+            # Router inputs, deployed config, telemetry, transient databases,
+            # and regenerable dependency trees are not mutable user history.
+            # Keep the exact exclusion set aligned with the web checkpoint via
+            # workspace_policy.json so neither side hashes a different state.
             continue
+        _validate_workspace_relative(relative)
         size, e_tag = entries[relative]
         path_bytes = relative.encode("utf-8")
         e_tag_bytes = e_tag.encode("utf-8")
@@ -1627,6 +1694,18 @@ def _list_remote_workspace_snapshot(
         for relative in paths:
             if not isinstance(relative, str) or not relative:
                 raise RuntimeError("workspace broker returned invalid path")
+            if _is_checkpoint_managed_relative(relative):
+                rejection_reason = _workspace_relative_rejection_reason(
+                    relative
+                )
+                if rejection_reason is not None:
+                    path_hash = hashlib.sha256(
+                        relative.encode("utf-8", errors="surrogatepass")
+                    ).hexdigest()[:16]
+                    raise WorkspaceRestoreIncomplete(
+                        "restore incompatible workspace path "
+                        f"reason={rejection_reason} path_hash={path_hash}"
+                    )
             if relative in seen_paths:
                 raise RuntimeError("workspace broker returned duplicate path")
             if len(listed_paths) >= MAX_SYNC_FILES:
@@ -1742,13 +1821,27 @@ def pull_workspace(
     if not prefix:
         return 0
 
-    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
-
     # Collect the complete listing before choosing downloads. The durable
     # migration marker sorts after agents/* in S3, so deciding page-by-page can
     # mistakenly trim the very JSONL history a first-time migration needs.
     snapshot = _snapshot or _list_remote_workspace_snapshot(prefix)
     listed_paths = list(snapshot.paths)
+    for relative in listed_paths:
+        if not _is_checkpoint_managed_relative(relative):
+            continue
+        rejection_reason = _workspace_relative_rejection_reason(relative)
+        if rejection_reason is not None:
+            path_hash = hashlib.sha256(
+                relative.encode("utf-8", errors="surrogatepass")
+            ).hexdigest()[:16]
+            raise WorkspaceRestoreIncomplete(
+                "restore incompatible workspace path "
+                f"reason={rejection_reason} path_hash={path_hash}"
+            )
+
+    # No local tree mutation is permitted until the entire authoritative path
+    # set has passed the same contract as the web checkpoint.
+    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     listed_sizes = snapshot.sizes
     skipped = 0
     exact_restore_paths = set(listed_paths)
@@ -1853,14 +1946,9 @@ def pull_workspace(
             # with a WAL/SHM file from another point in time.
             skipped += 1
             continue
-        # Validate the lexical key only. The installer walks literal dirfds
-        # with O_NOFOLLOW, so a local symlink cannot redirect committed bytes.
-        try:
-            _validate_workspace_relative(relative)
-        except OSError:
-            logger.warning("workspace pull skip (path escape) %s", relative)
-            skipped += 1
-            continue
+        # The complete authoritative set was validated before any local
+        # mutation. Keep this assertion beside the install boundary too.
+        _validate_workspace_relative(relative)
         to_download.append((relative, listed_sizes.get(relative)))
 
     restored_signatures: dict[str, tuple[int, int, int]] = {}
@@ -1934,6 +2022,10 @@ def refresh_workspace(prefix: str) -> int:
     """Refresh a warm workspace after the owner-wide lock changes hands."""
     if not prefix:
         return 0
+    # The gateway is stopped before refresh. Remove retired OpenClaw host
+    # control files even when the durable generation is unchanged; otherwise
+    # its migration gate can keep a reused microVM permanently bricked.
+    _discard_retired_local_control_state()
     checkpoint_generation = _ensure_workspace_checkpoint(prefix)
     snapshot = _list_remote_workspace_snapshot(prefix)
     if snapshot.generation is None:
@@ -2192,6 +2284,21 @@ def _iter_workspace_files(
                     )
                     if _should_skip_relative(relative):
                         continue
+                    rejection_reason = _workspace_relative_rejection_reason(
+                        relative
+                    )
+                    if rejection_reason is not None:
+                        path_hash = hashlib.sha256(
+                            relative.encode(
+                                "utf-8",
+                                errors="surrogatepass",
+                            )
+                        ).hexdigest()[:16]
+                        raise WorkspacePushIncomplete(
+                            "workspace traversal found an incompatible path "
+                            f"reason={rejection_reason} "
+                            f"path_hash={path_hash}"
+                        )
                     try:
                         if entry.is_dir(follow_symlinks=False):
                             if len(Path(relative).parts) <= MAX_SYNC_DEPTH:
@@ -2421,13 +2528,24 @@ def push_workspace(
                 marker_upload = None
             _pending_workspace_generations[prefix] = current_generation
             _pending_workspace_completions.pop(prefix, None)
-        # Re-read immediately before opening an upload reservation. This is a
-        # client-side early abort; the broker repeats the exact comparison
-        # under its cross-instance commit mutex before each target promotion.
-        before_upload = _list_remote_workspace_snapshot(
-            prefix,
-            deadline_monotonic,
-        )
+        # The successful restore/refresh already retained the complete remote
+        # snapshot. `_ensure_workspace_checkpoint` just re-read the
+        # authoritative workspace under the broker lock and proved that its
+        # generation still equals this cache. Re-listing thousands of legacy
+        # objects here adds no information. A resumed partial push does not
+        # have that guarantee, so it deliberately falls back to a fresh list.
+        cached_before_upload = _remote_workspace_snapshots.get(prefix)
+        if (
+            not continuing_pending_push
+            and cached_before_upload is not None
+            and cached_before_upload.generation == current_generation
+        ):
+            before_upload = cached_before_upload
+        else:
+            before_upload = _list_remote_workspace_snapshot(
+                prefix,
+                deadline_monotonic,
+            )
         if before_upload.generation is None:
             raise WorkspaceGenerationUnavailable(
                 "workspace broker metadata is incomplete; refusing final push"
@@ -2508,7 +2626,7 @@ def push_workspace(
         pair: tuple[str, str, int, int, int, str],
         prepared: _PreparedWorkspaceUpload,
         generation: str,
-    ) -> str:
+    ) -> tuple[str, str | None]:
         (
             _path,
             relative,
@@ -2523,7 +2641,7 @@ def push_workspace(
                 modified_ns,
                 changed_ns,
             )
-            return generation
+            return generation, prepared.unchanged_e_tag
         if prepared.reservation_id is None:
             raise RuntimeError(
                 "workspace upload reservation id is unavailable"
@@ -2538,7 +2656,7 @@ def push_workspace(
                     changed_ns=changed_ns,
                 )
             )
-            next_generation, _e_tag = _complete_upload_reservation(
+            next_generation, e_tag = _complete_upload_reservation(
                 prepared.reservation_id,
                 generation,
                 deadline_monotonic,
@@ -2549,7 +2667,7 @@ def push_workspace(
                 modified_ns,
                 changed_ns,
             )
-            return next_generation
+            return next_generation, e_tag
         completed = _broker_request(
             {
                 "operation": "complete-upload",
@@ -2565,7 +2683,8 @@ def push_workspace(
                 modified_ns,
                 changed_ns,
             )
-            return generation
+            e_tag = completed.get("eTag")
+            return generation, e_tag if isinstance(e_tag, str) else None
         if (
             not isinstance(completed.get("key"), str)
             or not isinstance(completed.get("eTag"), str)
@@ -2581,7 +2700,7 @@ def push_workspace(
             modified_ns,
             changed_ns,
         )
-        return next_generation
+        return next_generation, completed["eTag"]
 
     count = 0
     started = time.monotonic()
@@ -2608,12 +2727,24 @@ def push_workspace(
 
     try:
         assert current_generation is not None
+        final_entries = (
+            {
+                relative: (
+                    before_upload.sizes[relative],
+                    before_upload.e_tags[relative],
+                )
+                for relative in before_upload.paths
+            }
+            if require_generation
+            else {}
+        )
         for relative in to_delete:
             current_generation = _delete_workspace_path(
                 relative,
                 current_generation,
                 deadline_monotonic,
             )
+            final_entries.pop(relative, None)
             _uploaded_state.pop((prefix, relative), None)
             if require_generation:
                 _pending_workspace_generations[prefix] = (
@@ -2621,11 +2752,17 @@ def push_workspace(
                 )
             count += 1
         for pair, prepared in staged:
-            current_generation = _complete_one(
+            current_generation, e_tag = _complete_one(
                 pair,
                 prepared,
                 current_generation,
             )
+            if require_generation and e_tag is None:
+                raise WorkspaceGenerationUnavailable(
+                    "workspace upload completion returned no generation metadata"
+                )
+            if e_tag is not None:
+                final_entries[pair[1]] = (pair[2], e_tag)
             if require_generation:
                 _pending_workspace_generations[prefix] = current_generation
             count += 1
@@ -2643,33 +2780,52 @@ def push_workspace(
                     "workspace push incomplete (migration marker stage failed) "
                     f"for prefix {prefix}: {marker_error or 'unknown error'}"
                 )
-            current_generation = _complete_one(
+            current_generation, marker_e_tag = _complete_one(
                 marker_pair,
                 marker_prepared,
                 current_generation,
             )
+            if require_generation and marker_e_tag is None:
+                raise WorkspaceGenerationUnavailable(
+                    "workspace marker completion returned no generation metadata"
+                )
+            if marker_e_tag is not None:
+                final_entries[marker_pair[1]] = (
+                    marker_pair[2],
+                    marker_e_tag,
+                )
             if require_generation:
                 _pending_workspace_generations[prefix] = current_generation
             count += 1
 
         if require_generation:
-            committed = _list_remote_workspace_snapshot(
-                prefix,
-                deadline_monotonic,
-            )
-            if committed.generation is None:
-                raise WorkspaceGenerationUnavailable(
-                    "workspace broker metadata became incomplete after push"
-                )
-            if committed.generation != current_generation:
+            synthesized_generation = _generation_for_entries(final_entries)
+            if synthesized_generation != current_generation:
                 raise WorkspaceGenerationConflict(
-                    "authoritative workspace changed during final push"
+                    "workspace mutation results did not form the broker generation"
                 )
+            # This call performs the authoritative full snapshot read under
+            # the broker lock and refuses the commit unless it exactly equals
+            # current_generation. A separate client-side full listing right
+            # before it was the same check twice and consumed another large
+            # fraction of the turn-final deadline.
             _commit_workspace_checkpoint(
                 prefix,
                 base_checkpoint_generation,
                 current_generation,
                 deadline_monotonic,
+            )
+            committed = _RemoteWorkspaceSnapshot(
+                paths=tuple(sorted(final_entries)),
+                sizes={
+                    relative: metadata[0]
+                    for relative, metadata in final_entries.items()
+                },
+                e_tags={
+                    relative: metadata[1]
+                    for relative, metadata in final_entries.items()
+                },
+                generation=current_generation,
             )
             _remote_workspace_snapshots[prefix] = committed
             _pending_workspace_generations.pop(prefix, None)

@@ -17,7 +17,7 @@ const send = jest.fn()
 jest.mock("@aws-sdk/client-s3", () => ({
   S3Client: jest.fn().mockImplementation(() => ({ send })),
   ListObjectsV2Command: jest.fn().mockImplementation((input) => ({ input })),
-  GetObjectCommand: jest.fn(),
+  GetObjectCommand: jest.fn().mockImplementation((input) => ({ input })),
   PutObjectCommand: jest.fn(),
   HeadObjectCommand: jest.fn(),
   DeleteObjectCommand: jest.fn(),
@@ -34,6 +34,15 @@ jest.mock("@aws-sdk/s3-request-presigner", () => ({
 import { listWorkspaceObjects } from "@/lib/agent-workspace/storage-broker"
 
 const PREFIX = "hagelk-db0f32b5"
+const RETIRED_SOURCE = `${JSON.stringify({
+  version: 1,
+  socket: {
+    path: "/home/node/.openclaw/exec-approvals.sock",
+    token: "AbCdEfGhIjKlMnOpQrStUvWxYz_12345",
+  },
+  defaults: {},
+  agents: {},
+})}\n`
 
 beforeEach(() => {
   send.mockReset()
@@ -132,7 +141,104 @@ describe("listWorkspaceObjects", () => {
     expect(result.paths).toEqual(["ok.md"])
     expect(JSON.stringify(result)).not.toContain("secret.md")
   })
+})
 
+describe("retired exec approvals listing", () => {
+  it("hides a verified generated source but preserves similarly named durable state", async () => {
+    send.mockResolvedValueOnce({
+      Contents: [
+        {
+          Key: `${PREFIX}/exec-approvals.json`,
+          Size: Buffer.byteLength(RETIRED_SOURCE),
+          ETag: '"retired"',
+        },
+        {
+          Key: `${PREFIX}/exec-approvals.json.backup`,
+          Size: 4,
+          ETag: '"durable"',
+        },
+      ],
+    }).mockResolvedValueOnce({
+      ContentLength: Buffer.byteLength(RETIRED_SOURCE),
+      ETag: '"retired"',
+      Body: {
+        transformToByteArray: async () => Buffer.from(RETIRED_SOURCE),
+      },
+    })
+
+    const result = await listWorkspaceObjects(PREFIX)
+
+    expect(result.paths).toEqual(["exec-approvals.json.backup"])
+    expect(result.entries.map((entry) => entry.path)).toEqual(
+      result.paths,
+    )
+    expect(send).toHaveBeenCalledTimes(2)
+    expect(send.mock.calls[1][0].input).toMatchObject({
+      Key: `${PREFIX}/exec-approvals.json`,
+      IfMatch: '"retired"',
+      Range: "bytes=0-4095",
+    })
+  })
+
+  it("fails closed on an interrupted Doctor claim without reading its body", async () => {
+    send.mockResolvedValue({
+      Contents: [{
+        Key: `${PREFIX}/exec-approvals.json.doctor-importing`,
+        Size: Buffer.byteLength(RETIRED_SOURCE),
+        ETag: '"claim"',
+      }],
+    })
+
+    await expect(listWorkspaceObjects(PREFIX)).rejects.toThrow(
+      "Retired workspace host state requires controlled migration",
+    )
+    expect(send).toHaveBeenCalledTimes(1)
+  })
+
+  it("fails closed instead of hiding a legacy approvals policy", async () => {
+    const unsafe = RETIRED_SOURCE.replace(
+      '"defaults":{}',
+      '"defaults":{"security":"deny"}',
+    )
+    send.mockResolvedValueOnce({
+      Contents: [{
+        Key: `${PREFIX}/exec-approvals.json`,
+        Size: Buffer.byteLength(unsafe),
+        ETag: '"unsafe"',
+      }],
+    }).mockResolvedValueOnce({
+      ContentLength: Buffer.byteLength(unsafe),
+      ETag: '"unsafe"',
+      Body: {
+        transformToByteArray: async () => Buffer.from(unsafe),
+      },
+    })
+
+    await expect(listWorkspaceObjects(PREFIX)).rejects.toThrow(
+      "Retired workspace host state requires controlled migration",
+    )
+  })
+
+  it("fails closed when the source changes after the bounded list", async () => {
+    send.mockResolvedValueOnce({
+      Contents: [{
+        Key: `${PREFIX}/exec-approvals.json`,
+        Size: Buffer.byteLength(RETIRED_SOURCE),
+        ETag: '"listed"',
+      }],
+    }).mockRejectedValueOnce(Object.assign(new Error("changed"), {
+      name: "PreconditionFailed",
+      $metadata: { httpStatusCode: 412 },
+    }))
+
+    await expect(listWorkspaceObjects(PREFIX)).rejects.toThrow(
+      "Retired workspace host state requires controlled migration",
+    )
+    expect(send.mock.calls[1][0].input.IfMatch).toBe('"listed"')
+  })
+})
+
+describe("listWorkspaceObjects continuation and path checks", () => {
   it("passes the continuation token through", async () => {
     send.mockResolvedValue({
       Contents: [{ Key: `${PREFIX}/a.md`, Size: 1, LastModified: new Date() }],
@@ -143,5 +249,39 @@ describe("listWorkspaceObjects", () => {
 
     expect(result.continuationToken).toBe("next-page")
     expect(send.mock.calls[0][0].input.ContinuationToken).toBe("prev-page")
+  })
+
+  it("returns ordinary punctuation from persisted user history", async () => {
+    send.mockResolvedValue({
+      Contents: [
+        {
+          Key: `${PREFIX}/memory/Review (draft), [v2].md`,
+          Size: 4,
+          LastModified: new Date(),
+          ETag: '"punctuation"',
+        },
+      ],
+    })
+
+    const result = await listWorkspaceObjects(PREFIX)
+
+    expect(result.paths).toEqual(["memory/Review (draft), [v2].md"])
+  })
+
+  it("fails closed before returning an incompatible durable path", async () => {
+    send.mockResolvedValue({
+      Contents: [
+        {
+          Key: `${PREFIX}/memory/bad\\name.md`,
+          Size: 4,
+          LastModified: new Date(),
+          ETag: '"invalid"',
+        },
+      ],
+    })
+
+    await expect(listWorkspaceObjects(PREFIX)).rejects.toThrow(
+      "Persisted workspace path is incompatible with the storage contract",
+    )
   })
 })

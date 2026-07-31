@@ -362,6 +362,14 @@ AgentCore keeps existing sessions on the image version with which their
 microVM was created, so rotating `AGENT_BUILD_TAG` prevents new calls from
 reusing an old microVM but does not terminate that old writer.
 
+This pause is also required when retiring a checkpoint path. The current
+broker excludes the exact generated `exec-approvals.json` source (and an
+interrupted Doctor claim) from listings and normalizes the one older v2
+manifest that recorded it. The owner object itself is deliberately retained.
+An old frontend task must never run checkpoint recovery after that
+normalization, because its older policy would treat the retained object as an
+uncommitted extra. Wait for ECS steady state before recreating AgentCore.
+
 The hard cutover below deliberately removes and recreates only the
 CloudFormation-managed AgentCore Runtime. The workspace bucket and every
 object version remain in place. It also preserves the enabled/disabled state
@@ -601,6 +609,34 @@ If the final assertion finds another enabled schedule, repeat the second
 16-minute drain window before continuing. At this point there are no new
 Router, scheduled, reconciliation, or promoted-job writers.
 
+Re-run the exact workspace compatibility gate after the last writer drains.
+This is a hard precondition for the v2 checkpoint namespace: any v1 control
+object means an older checkpoint may still be the last committed boundary, so
+the cutover must stop rather than blessing a possibly partial current state.
+
+```bash
+WORKSPACE_BUCKET="$(aws ssm get-parameter \
+  --name "/aistudio/${CUTOVER_ENV}/agent-workspace-bucket-name" \
+  --query 'Parameter.Value' \
+  --output text \
+  --region "$AWS_REGION")"
+test -n "$WORKSPACE_BUCKET"
+test "$WORKSPACE_BUCKET" != "None"
+bun run scripts/agent-workspace/audit-live-workspace-paths.ts \
+  --bucket "$WORKSPACE_BUCKET" \
+  --environment "$CUTOVER_ENV" \
+  --region "$AWS_REGION"
+```
+
+The audit is read-only. It scans the whole bucket, including orphaned prefixes,
+and bounded-reads only the retired exec-approval source objects. It must report
+zero interrupted claims and empty `retiredExecApprovalFailures`,
+`legacyV1CheckpointObjectHashes`, `unknownCheckpointObjectHashes`, path,
+conflict, and TypeScript/Python parity failure arrays before continuing. A
+retired source is safe only when it is the exact generated socket-only shape;
+any defaults, agent policy, allowlist, malformed body, or changed ETag stops the
+cutover without exposing the socket token.
+
 ##### 3. Remove the old runtime before changing the broker
 
 There is no list-all-runtime-sessions API that can prove every sticky microVM
@@ -637,6 +673,22 @@ test "$(aws cloudformation describe-stacks \
 
 Do not proceed if either assertion fails. A failed deletion means an old image
 may still write during its shutdown path.
+
+Runtime deletion invokes the old wrapper's shutdown finalizer, so close that
+last-write window by running the same read-only bucket audit one final time
+after the old Runtime is confirmed absent and before deploying the broker:
+
+```bash
+bun run scripts/agent-workspace/audit-live-workspace-paths.ts \
+  --bucket "$WORKSPACE_BUCKET" \
+  --environment "$CUTOVER_ENV" \
+  --region "$AWS_REGION"
+```
+
+Do not continue unless the final audit again reports zero interrupted claims
+and no retired exec-approval, checkpoint-control, path, conflict, or parity
+failures. Keep ingress and schedules paused through this check and the broker
+and Runtime deployments below.
 
 ##### 4. Apply migration 171, then deploy the storage broker
 
