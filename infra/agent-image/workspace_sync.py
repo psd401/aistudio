@@ -46,6 +46,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from contextlib import closing
 from pathlib import Path
 from typing import Optional
 
@@ -110,6 +111,11 @@ OPENCLAW_MIGRATION_MARKER = "state/psd-openclaw-sqlite-migration-v1.json"
 _OPENCLAW_MIGRATION_MARKER_BYTES = (
     b'{"version":1,"storage":"openclaw-sqlite","legacyArchivePreserved":true}\n'
 )
+_SQLITE_TRANSIENT_SIDECAR_SUFFIXES = (
+    "-wal",
+    "-shm",
+    "-journal",
+)
 
 
 def _install_workspace_file(
@@ -129,6 +135,20 @@ destination = pathlib.Path(sys.argv[2])
 resolved = destination.resolve(strict=False)
 resolved.relative_to(root)
 resolved.parent.mkdir(parents=True, exist_ok=True)
+if resolved.name.endswith(".sqlite"):
+    sidecar_names = [
+        f"{resolved.name}{suffix}" for suffix in sys.argv[3].split(",")
+    ]
+    sidecar_names.extend([
+        ".reindex-lock.sqlite",
+        f"{resolved.name}.reindex-lock.sqlite",
+    ])
+    for sidecar_name in sidecar_names:
+        sidecar = resolved.with_name(sidecar_name)
+        try:
+            sidecar.unlink()
+        except FileNotFoundError:
+            pass
 temporary = resolved.with_name(f".{resolved.name}.{uuid.uuid4().hex}.tmp")
 try:
     with temporary.open("xb") as output:
@@ -161,6 +181,7 @@ finally:
                 writer,
                 str(workspace_root),
                 str(destination),
+                ",".join(_SQLITE_TRANSIENT_SIDECAR_SUFFIXES),
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
@@ -927,6 +948,24 @@ def mark_openclaw_migration_complete() -> None:
         raise
 
 
+def _is_managed_openclaw_sqlite(relative: str) -> bool:
+    """Return whether a SQLite path is durable OpenClaw/Codex state."""
+    if relative in {
+        "state/openclaw.sqlite",
+        "tasks/runs.sqlite",
+        "flows/registry.sqlite",
+        "memory/main.sqlite",
+    }:
+        return True
+    parts = Path(relative).parts
+    return (
+        len(parts) >= 4
+        and parts[0] == "agents"
+        and parts[2] == "agent"
+        and relative.endswith(".sqlite")
+    )
+
+
 def prepare_sqlite_snapshot() -> int:
     """Checkpoint and validate every persisted OpenClaw database.
 
@@ -934,15 +973,14 @@ def prepare_sqlite_snapshot() -> int:
     integrity check aborts the subsequent push, preserving the last known-good
     remote database rather than replacing it with a torn generation.
     """
-    candidates = [WORKSPACE_DIR / "state" / "openclaw.sqlite"]
-    candidates.extend(
-        (WORKSPACE_DIR / "agents").glob("*/agent/openclaw-agent.sqlite")
+    candidates = sorted(
+        WORKSPACE_DIR / relative
+        for relative in _iter_workspace_files()
+        if _is_managed_openclaw_sqlite(relative)
     )
     checked = 0
     workspace_root = WORKSPACE_DIR.resolve()
     for database in candidates:
-        if not database.exists():
-            continue
         resolved = database.resolve()
         try:
             resolved.relative_to(workspace_root)
@@ -950,7 +988,10 @@ def prepare_sqlite_snapshot() -> int:
             raise RuntimeError("SQLite database escaped workspace root") from exc
         if resolved != database.absolute():
             raise RuntimeError("SQLite database path contains a symlink")
-        with sqlite3.connect(str(database), timeout=30) as connection:
+        database_uri = f"{database.as_uri()}?mode=rw"
+        with closing(
+            sqlite3.connect(database_uri, uri=True, timeout=30)
+        ) as connection:
             checkpoint = connection.execute(
                 "PRAGMA wal_checkpoint(TRUNCATE)"
             ).fetchone()

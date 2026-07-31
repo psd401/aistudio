@@ -182,6 +182,67 @@ class PullTraversalTests(unittest.TestCase):
             },
         )
 
+    def test_restored_sqlite_discards_boot_generation_sidecars(self):
+        restored_source = self.root.parent / "restored.sqlite"
+        connection = sqlite3.connect(restored_source)
+        connection.execute("CREATE TABLE history (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO history VALUES ('preserved')")
+        connection.commit()
+        connection.close()
+        restored_bytes = restored_source.read_bytes()
+
+        destination = self.root / "state" / "openclaw.sqlite"
+        destination.parent.mkdir()
+        boot_connection = sqlite3.connect(destination)
+        boot_connection.execute("PRAGMA journal_mode=WAL")
+        boot_connection.execute("PRAGMA wal_autocheckpoint=0")
+        boot_connection.execute("CREATE TABLE boot_state (value TEXT NOT NULL)")
+        boot_connection.execute("INSERT INTO boot_state VALUES ('discard me')")
+        boot_connection.commit()
+        boot_wal = destination.with_name(f"{destination.name}-wal").read_bytes()
+        boot_shm = destination.with_name(f"{destination.name}-shm").read_bytes()
+        boot_connection.close()
+
+        transient_paths = [
+            destination.with_name(f"{destination.name}-wal"),
+            destination.with_name(f"{destination.name}-shm"),
+            destination.with_name(f"{destination.name}-journal"),
+            destination.with_name(".reindex-lock.sqlite"),
+            destination.with_name(
+                f"{destination.name}.reindex-lock.sqlite"
+            ),
+        ]
+        transient_paths[0].write_bytes(boot_wal)
+        transient_paths[1].write_bytes(boot_shm)
+        protected = self.root.parent / "protected-sidecar-target"
+        protected.write_bytes(b"unchanged")
+        transient_paths[2].symlink_to(protected)
+        for transient in transient_paths[3:]:
+            transient.write_bytes(b"boot-generation transient state")
+        unrelated = destination.with_name(f"{destination.name}.backup")
+        unrelated.write_bytes(b"keep")
+
+        count, _, escaped = self._run_pull(
+            ["state/openclaw.sqlite"],
+            contents={"state/openclaw.sqlite": restored_bytes},
+        )
+
+        self.assertEqual(count, 1)
+        self.assertEqual(escaped, [])
+        self.assertTrue(all(not path.exists() for path in transient_paths))
+        self.assertEqual(protected.read_bytes(), b"unchanged")
+        self.assertEqual(unrelated.read_bytes(), b"keep")
+        restored = sqlite3.connect(destination)
+        self.assertEqual(
+            restored.execute("SELECT value FROM history").fetchall(),
+            [("preserved",)],
+        )
+        self.assertEqual(
+            restored.execute("PRAGMA integrity_check").fetchone(),
+            ("ok",),
+        )
+        restored.close()
+
     def test_invalid_marker_bytes_restore_legacy_archive(self):
         keys = [
             workspace_sync.OPENCLAW_MIGRATION_MARKER,
@@ -811,6 +872,70 @@ class SQLitePersistenceTests(unittest.TestCase):
         )
         self.assertEqual(restored.execute("PRAGMA integrity_check").fetchone(), ("ok",))
         restored.close()
+
+    def test_checkpoint_covers_every_persisted_sqlite_database(self):
+        relative_databases = (
+            "state/openclaw.sqlite",
+            "tasks/runs.sqlite",
+            "flows/registry.sqlite",
+            "agents/main/agent/openclaw-agent.sqlite",
+            "agents/main/agent/codex-home/goals_1.sqlite",
+            "memory/main.sqlite",
+        )
+        connections = []
+        for relative in relative_databases:
+            database = self.root / relative
+            database.parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(database)
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA wal_autocheckpoint=0")
+            connection.execute("CREATE TABLE durable (value TEXT NOT NULL)")
+            connection.execute(
+                "INSERT INTO durable VALUES (?)",
+                (relative,),
+            )
+            connection.commit()
+            connections.append(connection)
+        reindex_lock = (
+            self.root / "agents" / "main" / "agent" / ".reindex-lock.sqlite"
+        )
+        reindex_lock.write_bytes(b"not a database")
+
+        try:
+            with mock.patch.object(workspace_sync, "WORKSPACE_DIR", self.root):
+                self.assertEqual(
+                    workspace_sync.prepare_sqlite_snapshot(),
+                    len(relative_databases),
+                )
+        finally:
+            for connection in connections:
+                connection.close()
+
+        for relative in relative_databases:
+            database = self.root / relative
+            restored = sqlite3.connect(database)
+            self.assertEqual(
+                restored.execute("SELECT value FROM durable").fetchall(),
+                [(relative,)],
+            )
+            self.assertEqual(
+                restored.execute("PRAGMA integrity_check").fetchone(),
+                ("ok",),
+            )
+            restored.close()
+
+    def test_checkpoint_ignores_unmanaged_sqlite_named_file(self):
+        attachment = self.root / "attachments" / "not-a-database.sqlite"
+        attachment.parent.mkdir()
+        attachment.write_bytes(b"user attachment, not SQLite")
+
+        with mock.patch.object(workspace_sync, "WORKSPACE_DIR", self.root):
+            self.assertEqual(workspace_sync.prepare_sqlite_snapshot(), 0)
+
+        self.assertEqual(
+            attachment.read_bytes(),
+            b"user attachment, not SQLite",
+        )
 
     def test_legacy_archive_is_never_deleted_remotely(self):
         # THE SAFETY INVARIANT. Skipping a download is only safe because the
