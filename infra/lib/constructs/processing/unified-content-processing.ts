@@ -585,6 +585,7 @@ export class UnifiedContentProcessing extends Construct {
     });
   }
 
+  // eslint-disable-next-line max-lines-per-function -- Keeping related repository metrics and alarms together makes the emitted dashboard auditable.
   private createOperationalDashboard(
     props: UnifiedContentProcessingProps,
     resources: UnifiedContentResources
@@ -650,7 +651,30 @@ export class UnifiedContentProcessing extends Construct {
           }),
         ],
         width: 12,
-      })
+      }),
+      new cloudwatch.GraphWidget({
+        title: "Repository readiness and generations",
+        left: [
+          operationalMetric("UnavailableItems"),
+          operationalMetric("ActiveRepositoriesWithoutSearchableContent"),
+          operationalMetric("FailedGenerations"),
+          operationalMetric("StalledBuildingGenerations"),
+        ],
+        right: [operationalMetric("AgenticReadyModels")],
+        width: 12,
+      }),
+      new cloudwatch.GraphWidget({
+        title: "Repository use and retrieval quality",
+        left: [
+          operationalMetric(
+            "ConversationRepositoryBindingRate24h",
+            "Average",
+          ),
+          operationalMetric("RetrievalZeroResultRatio24h", "Average"),
+        ],
+        right: [operationalMetric("ConnectorRevocations24h")],
+        width: 12,
+      }),
     );
     const migrationBlockerAlarm = new cloudwatch.Alarm(
       this,
@@ -705,10 +729,104 @@ export class UnifiedContentProcessing extends Construct {
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       }
     );
+    const repositoryReadinessAlarm = new cloudwatch.Alarm(
+      this,
+      "RepositoryReadinessAlarm",
+      {
+        alarmName: `aistudio-${props.environment}-repository-readiness-failures`,
+        alarmDescription:
+          "Unavailable items, failed/stalled generations, or active repositories without searchable content require repair",
+        metric: new cloudwatch.MathExpression({
+          expression: "unavailable + unsearchable + failed + stalled",
+          usingMetrics: {
+            unavailable: operationalMetric("UnavailableItems"),
+            unsearchable: operationalMetric(
+              "ActiveRepositoriesWithoutSearchableContent",
+            ),
+            failed: operationalMetric("FailedGenerations"),
+            stalled: operationalMetric("StalledBuildingGenerations"),
+          },
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 2,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }
+    );
+    const agenticModelReadinessAlarm = new cloudwatch.Alarm(
+      this,
+      "AgenticModelReadinessAlarm",
+      {
+        alarmName: `aistudio-${props.environment}-agentic-models-unavailable`,
+        alarmDescription:
+          "No active Architect model has complete pricing and token-limit admission metadata",
+        metric: operationalMetric("AgenticReadyModels"),
+        threshold: 1,
+        evaluationPeriods: 2,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+      }
+    );
+    const connectorRevocationAlarm = new cloudwatch.Alarm(
+      this,
+      "ConnectorRevocationAlarm",
+      {
+        alarmName: `aistudio-${props.environment}-repository-connector-revocations`,
+        alarmDescription:
+          "One or more repository connectors were revoked in the last 24 hours",
+        metric: operationalMetric("ConnectorRevocations24h"),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }
+    );
+    const repositoryBindingRateAlarm = new cloudwatch.Alarm(
+      this,
+      "RepositoryBindingRateAlarm",
+      {
+        alarmName: `aistudio-${props.environment}-repository-binding-rate`,
+        alarmDescription:
+          "A recent project, skill, or Assistant conversation is missing its durable repository binding",
+        metric: operationalMetric(
+          "ConversationRepositoryBindingRate24h",
+          "Average",
+        ),
+        threshold: 0.95,
+        evaluationPeriods: 2,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }
+    );
+    const retrievalZeroResultAlarm = new cloudwatch.Alarm(
+      this,
+      "RetrievalZeroResultAlarm",
+      {
+        alarmName: `aistudio-${props.environment}-repository-zero-result-rate`,
+        alarmDescription:
+          "More than half of recent canonical retrieval shadow observations returned no results",
+        metric: operationalMetric("RetrievalZeroResultRatio24h", "Average"),
+        threshold: 0.5,
+        evaluationPeriods: 2,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }
+    );
     for (const alarm of [
       migrationBlockerAlarm,
       staleRepositoryAlarm,
       connectorFailureAlarm,
+      repositoryReadinessAlarm,
+      agenticModelReadinessAlarm,
+      connectorRevocationAlarm,
+      repositoryBindingRateAlarm,
+      retrievalZeroResultAlarm,
     ]) {
       cdk.Tags.of(alarm).add("Environment", props.environment);
       cdk.Tags.of(alarm).add("ManagedBy", "cdk");

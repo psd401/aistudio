@@ -10,6 +10,8 @@ import { executeQuery } from "@/lib/db/drizzle-client"
 import { nexusMcpServers } from "@/lib/db/schema"
 import { hasCapability } from "@/lib/ai/capability-utils"
 import { inferFamily } from "@/lib/nexus/model-router/router"
+import { getRepositoryMigrationDashboard } from "@/lib/repositories/content-platform/migration-control-service"
+import { evaluateRepositoryCutoverEvidence } from "@/lib/repositories/content-platform/rollout-control"
 
 export const metadata = adminPageMetadata("/admin/settings")
 
@@ -17,7 +19,7 @@ export default async function SettingsPage() {
   await requireRole("administrator")
 
   // Fetch settings, routing options, and current logo URL in parallel.
-  const [settingsResult, logoResult, models, connectors] = await Promise.all([
+  const [settingsResult, logoResult, models, connectors, migrationDashboard] = await Promise.all([
     getSettingsAction(),
     getBrandingLogoUrlAction(),
     getNexusEnabledModels(),
@@ -25,6 +27,7 @@ export default async function SettingsPage() {
       db => db.select({ id: nexusMcpServers.id, name: nexusMcpServers.name }).from(nexusMcpServers),
       "getNexusRouterAdminConnectors"
     ),
+    getRepositoryMigrationDashboard(),
   ])
   const settings = settingsResult.isSuccess ? settingsResult.data : []
   const currentLogoUrl = (logoResult.isSuccess && logoResult.data) ? logoResult.data : "/logo.png"
@@ -55,6 +58,27 @@ export default async function SettingsPage() {
               || hasCapability(model.capabilities, "grounding"),
           }))}
           nexusRouterConnectors={connectors}
+          contentRolloutEvidence={{
+            blockers: [
+              ...new Set([
+                ...evaluateRepositoryCutoverEvidence(migrationDashboard),
+                ...migrationDashboard.retirement.blockers.filter(
+                  blocker => blocker !== "legacy retirement is not enabled"
+                ),
+              ]),
+            ],
+            dryRunCompleted: migrationDashboard.dryRunCompleted,
+            rollbackDrillCompleted:
+              migrationDashboard.rollbackDrillCompleted,
+            uncoveredSources: migrationDashboard.inventory.reduce(
+              (total, entry) => total + entry.uncovered,
+              0
+            ),
+            activeRunCount: migrationDashboard.activeRunCount,
+            staleRepositoryCount: migrationDashboard.staleRepositoryCount,
+            shadowObservations:
+              migrationDashboard.retrievalShadow.observations,
+          }}
         />
       </Suspense>
     </div>

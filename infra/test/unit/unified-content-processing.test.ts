@@ -140,6 +140,32 @@ test("alarms on stalled work, failures, migration blockers, and stale indexes", 
     EvaluationPeriods: 2,
     TreatMissingData: "notBreaching",
   });
+  template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+    AlarmName: "aistudio-dev-repository-readiness-failures",
+    Threshold: 1,
+    EvaluationPeriods: 2,
+    TreatMissingData: "notBreaching",
+  });
+  template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+    AlarmName: "aistudio-dev-agentic-models-unavailable",
+    Threshold: 1,
+    EvaluationPeriods: 2,
+    TreatMissingData: "breaching",
+  });
+  template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+    AlarmName: "aistudio-dev-repository-connector-revocations",
+    Threshold: 1,
+  });
+  template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+    AlarmName: "aistudio-dev-repository-binding-rate",
+    Threshold: 0.95,
+    EvaluationPeriods: 2,
+  });
+  template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+    AlarmName: "aistudio-dev-repository-zero-result-rate",
+    Threshold: 0.5,
+    EvaluationPeriods: 2,
+  });
 });
 
 test("scans only canonical repository objects and tags the verdict", () => {
@@ -323,6 +349,9 @@ test("publishes a tagged operational dashboard and namespace-scoped metrics", ()
   const dashboardJson = JSON.stringify(dashboards);
   expect(dashboardJson).toContain("Migration reconciliation");
   expect(dashboardJson).toContain("Retrieval shadow parity");
+  expect(dashboardJson).toContain("Repository readiness and generations");
+  expect(dashboardJson).toContain("AgenticReadyModels");
+  expect(dashboardJson).toContain("ConversationRepositoryBindingRate24h");
   const policies = JSON.stringify(template.findResources("AWS::IAM::Role"));
   expect(policies).toContain("PublishUnifiedContentOperationalMetrics");
   expect(policies).toContain("AIStudio/UnifiedContent");

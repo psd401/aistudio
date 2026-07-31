@@ -171,6 +171,10 @@ the owner-bound agent schedule record and Scheduler-target migration.
 #### [operations/unified-content-migration-retirement.md](./operations/unified-content-migration-retirement.md)
 Inventory, backfill, reconciliation, cutover, rollback, and legacy-content retirement runbook.
 
+#### [operations/repository-reliability-recovery.md](./operations/repository-reliability-recovery.md)
+Dev-first repository recovery, production drift reconciliation, guarded cutover
+order, and cross-surface acceptance gates.
+
 #### [operations/tool-management.md](./operations/tool-management.md)
 Managing Assistant Architect tools and permissions.
 

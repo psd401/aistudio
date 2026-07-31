@@ -50,6 +50,7 @@ function RepositoriesTable({
           <TableHead>Description</TableHead>
           <TableHead>Owner</TableHead>
           <TableHead>Items</TableHead>
+          <TableHead>Readiness</TableHead>
           <TableHead>Visibility</TableHead>
           <TableHead>Access</TableHead>
           <TableHead>Created</TableHead>
@@ -75,6 +76,26 @@ function RepositoriesTable({
               <Badge variant="secondary">
                 {repository.itemCount || 0} items
               </Badge>
+            </TableCell>
+            <TableCell>
+              <div className="space-y-1">
+                <Badge
+                  variant={
+                    repository.readiness === "searchable"
+                      ? "default"
+                      : repository.readiness === "degraded"
+                        ? "secondary"
+                        : "outline"
+                  }
+                  className="capitalize"
+                >
+                  {repository.readiness}
+                </Badge>
+                <p className="text-xs text-muted-foreground">
+                  {repository.indexedItemCount} indexed ·{" "}
+                  {repository.segmentCount} segments
+                </p>
+              </div>
             </TableCell>
             <TableCell>
               <div className="flex items-center gap-1">

@@ -8,12 +8,44 @@ import {
 import { resolveUserId } from '@/lib/auth/resolve-user';
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { nexusConversations } from '@/lib/db/schema';
+import { copyConversationRepositoryBindings } from '@/lib/nexus/conversation-repository-service';
+import { and, eq } from 'drizzle-orm';
 
 
 interface ForkRequest {
   atMessageId?: string;
   newTitle?: string;
   metadata?: Record<string, unknown>;
+}
+
+async function rollbackFailedFork(
+  forkedConversationId: string | null,
+  userId: number | null,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  if (!forkedConversationId || userId === null) return;
+  try {
+    await executeQuery(
+      (db) =>
+        db
+          .delete(nexusConversations)
+          .where(
+            and(
+              eq(nexusConversations.id, forkedConversationId),
+              eq(nexusConversations.userId, userId)
+            )
+          ),
+      "rollbackFailedConversationFork"
+    );
+  } catch (cleanupError) {
+    log.error("Failed to remove incomplete conversation fork", {
+      forkedConversationId,
+      error:
+        cleanupError instanceof Error
+          ? cleanupError.message
+          : String(cleanupError),
+    });
+  }
 }
 
 /**
@@ -33,7 +65,9 @@ export async function POST(
   });
   
   log.info('POST /api/nexus/conversations/[id]/fork - Forking conversation');
-  
+  let forkedConversationId: string | null = null;
+  let resolvedUserId: number | null = null;
+
   try {
     // Authenticate user
     const session = await getServerSession();
@@ -45,6 +79,7 @@ export async function POST(
     
     // Get numeric user ID (provisions if missing)
     const userId = await resolveUserId(session, requestId);
+    resolvedUserId = userId;
 
     // Parse request body
     const body: ForkRequest = await req.json();
@@ -81,6 +116,8 @@ export async function POST(
             title: newTitle,
             provider: original.provider,
             modelUsed: original.modelUsed,
+            projectId: original.projectId,
+            skillId: original.skillId,
             externalId: null, // New external_id will be set on first message
             cacheKey: null, // New cache_key will be generated
             messageCount: 0,
@@ -98,6 +135,13 @@ export async function POST(
           }),
       "forkConversation"
     );
+    forkedConversationId = forkedConversation.id;
+
+    await copyConversationRepositoryBindings({
+      fromConversationId: originalConversationId,
+      toConversationId: forkedConversation.id,
+      userId,
+    });
     
     // Record fork events for both conversations
     await Promise.all([
@@ -159,6 +203,7 @@ export async function POST(
     });
     
   } catch (error) {
+    await rollbackFailedFork(forkedConversationId, resolvedUserId, log);
     timer({ status: 'error' });
     log.error('Failed to fork conversation', {
       originalConversationId,

@@ -731,7 +731,11 @@ paths:
                     ownerName: Policy Office
                     visibility: private
                     itemCount: 18
+                    readiness: searchable
                     activeIndexGenerationId: 11111111-2222-4333-8444-555555555555
+                    indexedItemCount: 18
+                    segmentCount: 926
+                    lastIndexError: null
                     lastUpdated: "2026-07-26T18:00:00.000Z"
                 meta: { requestId: req_abc123, count: 1 }
         "400":
@@ -1014,6 +1018,27 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "409":
+          description: An accessible requested repository is not searchable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                processing:
+                  value:
+                    success: false
+                    error:
+                      code: REPOSITORY_NOT_READY
+                      message: A bound repository is not ready for search
+                    meta: { requestId: req_abc123 }
+                disconnected:
+                  value:
+                    success: false
+                    error:
+                      code: REPOSITORY_DISCONNECTED
+                      message: A bound repository is disconnected and has no searchable content
+                    meta: { requestId: req_abc123 }
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -1750,6 +1775,15 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            A prompt-bound or runtime repository is not searchable or has been
+            disconnected. The error code is `REPOSITORY_NOT_READY` or
+            `REPOSITORY_DISCONNECTED`; no execution or polling job is created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "413":
           description: Execution request body exceeds the 128 KiB transport limit.
           content:
@@ -1780,9 +1814,10 @@ paths:
         contains authoritative human-readable labels, never binding IDs,
         repository IDs, item IDs, or caller-carried marker names. An invalid
         marker therefore cannot leave an empty conversation.
-        Resolved runtime repositories are bound to the new conversation before
-        its first message write and retained as bounded server-owned metadata for
-        ACL-safe follow-up retrieval. A binding or first-write failure removes
+        Resolved runtime repositories and every prompt-bound repository are
+        copied into normalized durable conversation bindings before the first
+        message write. Nexus can therefore resume the conversation with the same
+        ACL-safe repository context. A binding or first-write failure removes
         the empty conversation while leaving the temporary source retryable.
 
         Required scope: `assistants:execute` (or the narrower
@@ -1845,6 +1880,15 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            A prompt-bound or runtime repository is not searchable or has been
+            disconnected. The error code is `REPOSITORY_NOT_READY` or
+            `REPOSITORY_DISCONNECTED`; no conversation is created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "413":
           description: Conversation request body exceeds the 128 KiB transport limit.
           content:
@@ -1874,8 +1918,9 @@ paths:
         holding the assistant-row lock and repeats approved-status and current
         grant checks before loading the graph. That row blocks import
         replacement until streaming finishes or fails. The server then unions
-        every prompt-bound repository with the conversation's bounded runtime
-        repository IDs and rechecks the executing principal's current ACL. The
+        every prompt-bound repository with the conversation's normalized
+        Assistant repository bindings and rechecks the executing principal's
+        current ACL and repository readiness. The
         model receives bounded hybrid retrieval context and vector, keyword, and
         hybrid repository tools. Only the caller's original message text is
         persisted; retrieved source context is request-local.
@@ -1917,6 +1962,15 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: Conversation not found or not bound to this assistant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: |
+            A bound repository is not searchable or has been disconnected. The
+            error code is `REPOSITORY_NOT_READY` or
+            `REPOSITORY_DISCONNECTED`; no user message is persisted.
           content:
             application/json:
               schema:
@@ -3812,7 +3866,14 @@ components:
     # -- Repository catalog --
     RepositoryCatalogEntry:
       type: object
-      required: [id, name, visibility, itemCount]
+      required:
+        - id
+        - name
+        - visibility
+        - itemCount
+        - readiness
+        - indexedItemCount
+        - segmentCount
       properties:
         id: { type: integer }
         name: { type: string }
@@ -3822,7 +3883,13 @@ components:
           type: string
           enum: [public, private]
         itemCount: { type: integer }
+        readiness:
+          type: string
+          enum: [empty, processing, searchable, degraded, disconnected, failed]
         activeIndexGenerationId: { type: [string, "null"], format: uuid }
+        indexedItemCount: { type: integer, minimum: 0 }
+        segmentCount: { type: integer, minimum: 0 }
+        lastIndexError: { type: [string, "null"] }
         lastUpdated: { type: [string, "null"], format: date-time }
         createdAt: { type: [string, "null"], format: date-time }
         updatedAt: { type: [string, "null"], format: date-time }

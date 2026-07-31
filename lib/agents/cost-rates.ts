@@ -10,47 +10,27 @@ export interface CostRates {
 
 export function resolveTrustedAgenticTokenLimits(
   model: {
-    maxTokens?: unknown
-    providerMetadata?: unknown
+    contextWindowTokens?: unknown
+    maxOutputTokens?: unknown
   },
   serverOutputCeiling: number,
 ): { contextTokens: number; maxOutputTokens: number } | null {
   if (
     !Number.isSafeInteger(serverOutputCeiling) ||
     serverOutputCeiling < 1 ||
-    typeof model.maxTokens !== "number" ||
-    !Number.isSafeInteger(model.maxTokens) ||
-    model.maxTokens < 1 ||
-    !model.providerMetadata ||
-    typeof model.providerMetadata !== "object" ||
-    Array.isArray(model.providerMetadata)
+    typeof model.contextWindowTokens !== "number" ||
+    !Number.isSafeInteger(model.contextWindowTokens) ||
+    model.contextWindowTokens < 1 ||
+    typeof model.maxOutputTokens !== "number" ||
+    !Number.isSafeInteger(model.maxOutputTokens) ||
+    model.maxOutputTokens < 1 ||
+    model.maxOutputTokens > model.contextWindowTokens
   ) {
     return null
   }
-  const metadata = model.providerMetadata as Record<string, unknown>
-  const contextTokens = metadata.max_context_length
-  if (
-    typeof contextTokens !== "number" ||
-    !Number.isSafeInteger(contextTokens) ||
-    contextTokens < 1
-  ) {
-    return null
-  }
-  const modelOutputTokens = model.maxTokens
-  const metadataOutputTokens = metadata.max_output_tokens
-  const trustedMetadataOutput =
-    typeof metadataOutputTokens === "number" &&
-    Number.isSafeInteger(metadataOutputTokens) &&
-    metadataOutputTokens > 0
-      ? metadataOutputTokens
-      : modelOutputTokens
   return {
-    contextTokens,
-    maxOutputTokens: Math.min(
-      modelOutputTokens,
-      trustedMetadataOutput,
-      serverOutputCeiling,
-    ),
+    contextTokens: model.contextWindowTokens,
+    maxOutputTokens: Math.min(model.maxOutputTokens, serverOutputCeiling),
   }
 }
 

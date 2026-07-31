@@ -124,7 +124,7 @@ describe("Assistant Architect runtime repository execution integration", () => {
       "createAssistantExecutionConversation({"
     );
     expect(routeSource).toContain(
-      "runtimeRepositoryIds: runtimeRepositoryInputs.repositoryIds"
+      "repositoryIds: conversationRepositoryIds"
     );
     expect(routeSource).toContain(
       "references: runtimeRepositoryInputs.references"

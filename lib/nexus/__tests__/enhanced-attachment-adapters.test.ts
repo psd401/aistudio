@@ -343,6 +343,46 @@ const defineHybridDocumentAdapterSuite1 = () => {
         },
       ]);
     });
+
+    it('stops polling immediately when the document job is terminally failed', async () => {
+      const originalFetch = globalThis.fetch;
+      const fetchMock = jest.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            status: 'failed',
+            error: 'Document extraction failed',
+          }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          },
+        ),
+      );
+      globalThis.fetch = fetchMock as typeof fetch;
+
+      try {
+        const pollForResults = (
+          adapter as unknown as {
+            pollForResults(
+              jobId: string,
+              fileName: string,
+              maxAttempts?: number,
+            ): Promise<unknown>;
+          }
+        ).pollForResults.bind(adapter);
+
+        await expect(
+          pollForResults('failed-job', 'broken.pdf', 60),
+        ).rejects.toThrow('Document extraction failed');
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      } finally {
+        if (originalFetch) {
+          globalThis.fetch = originalFetch;
+        } else {
+          Reflect.deleteProperty(globalThis, 'fetch');
+        }
+      }
+    });
   ;
 
   describe('validateFileType', defineValidateFileTypeSuite99);

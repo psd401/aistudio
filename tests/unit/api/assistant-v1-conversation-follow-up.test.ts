@@ -54,6 +54,7 @@ const mockCreateRepositoryTools = jest.fn()
 const mockStream = jest.fn()
 const mockCreateCoordinatedAssistantExecution = jest.fn()
 const mockSettleCoordinatedAssistantExecution = jest.fn()
+const mockLoadValidatedConversationRepositoryContext = jest.fn()
 
 jest.mock("@/lib/api", () => ({
   withApiAuth:
@@ -126,6 +127,24 @@ jest.mock("@/lib/assistant-architect/repository-access-preflight", () => ({
   preflightAssistantRepositoryAccess: (...args: unknown[]) =>
     mockPreflightAssistantRepositoryAccess(...args),
 }))
+
+jest.mock("@/lib/nexus/conversation-repository-service", () => {
+  class ConversationRepositoryBindingError extends Error {
+    code = "REPOSITORY_BINDING_INACCESSIBLE"
+  }
+  return {
+    ConversationRepositoryBindingError,
+    loadValidatedConversationRepositoryContext: (...args: unknown[]) =>
+      mockLoadValidatedConversationRepositoryContext(...args),
+  }
+})
+
+jest.mock("@/lib/repositories/readiness-service", () => {
+  class RepositoryReadinessError extends Error {
+    code = "REPOSITORY_NOT_READY"
+  }
+  return { RepositoryReadinessError }
+})
 
 jest.mock("@/lib/assistant-architect/knowledge-retrieval", () => ({
   retrieveKnowledgeForPrompt: (...args: unknown[]) =>
@@ -219,6 +238,17 @@ function setupFollowUpMocks() {
   mockPreflightAssistantRepositoryAccess.mockResolvedValue({
     isAllowed: true,
     repositoryIds: [11, 12, 77],
+  })
+  mockLoadValidatedConversationRepositoryContext.mockResolvedValue({
+    bindings: [
+      {
+        repositoryId: 77,
+        source: "assistant",
+        sourceId: "5",
+      },
+    ],
+    repositoryIds: [77],
+    readiness: [],
   })
   mockGetAIModelById.mockResolvedValue({
     id: 3,

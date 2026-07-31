@@ -41,6 +41,10 @@ import {
   preflightAssistantRepositoryAccess,
   REPOSITORY_ACCESS_CHANGED_MESSAGE,
 } from "@/lib/assistant-architect/repository-access-preflight"
+import {
+  assertRepositoriesSearchable,
+  RepositoryReadinessError,
+} from "@/lib/repositories/readiness-service"
 
 // Allow streaming responses up to 15 minutes for long chains
 export const maxDuration = 900
@@ -120,6 +124,7 @@ type ExecutionAuthorization =
   | { ok: true; assistantId: number }
   | { ok: false; response: NextResponse }
 
+// eslint-disable-next-line complexity -- Execution admission combines catalog, scope, grants, repository ACL, and readiness checks.
 async function authorizeExecution(
   request: NextRequest,
   auth: ApiAuthContext,
@@ -204,13 +209,20 @@ async function authorizeExecution(
     auth.cognitoSub
   )
   if (!repositoryAccess.isAllowed) {
+    const inaccessible =
+      repositoryAccess.errorCode === "REPOSITORY_BINDING_INACCESSIBLE" ||
+      repositoryAccess.errorCode === undefined
     return {
       ok: false,
       response: createErrorResponse(
         requestId,
-        403,
-        "FORBIDDEN",
-        REPOSITORY_ACCESS_CHANGED_MESSAGE
+        inaccessible ? 403 : 409,
+        repositoryAccess.errorCode ??
+          "REPOSITORY_BINDING_INACCESSIBLE",
+        inaccessible
+          ? REPOSITORY_ACCESS_CHANGED_MESSAGE
+          : "A repository used by this assistant is not searchable yet.",
+        { repositoryIds: repositoryAccess.repositoryIds }
       ),
     }
   }
@@ -223,6 +235,15 @@ function assistantExecutionErrorResponse(
   assistantId: number,
   log: ReturnType<typeof createLogger>
 ): NextResponse {
+  if (error instanceof RepositoryReadinessError) {
+    return createErrorResponse(
+      requestId,
+      error.code === "REPOSITORY_BINDING_INACCESSIBLE" ? 403 : 409,
+      error.code,
+      error.message,
+      { repositories: error.repositories }
+    )
+  }
   if (isAssistantRuntimeRepositoryInputError(error)) {
     return createErrorResponse(
       requestId,
@@ -320,6 +341,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       inputs,
       auth.userId
     )
+    await assertRepositoriesSearchable(preparedInputs.runtimeRepositoryIds)
 
     if (wantsJson) {
       // Async mode: return 202 with job ID, execute in background

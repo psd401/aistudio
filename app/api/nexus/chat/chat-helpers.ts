@@ -99,10 +99,11 @@ export async function createConversation(params: {
   modelId: string;
   title: string;
   projectId?: string;
+  skillId?: string;
 }): Promise<
   { conversationId: string } | { error: Response; requestId?: string }
 > {
-  const { userId, provider, modelId, title, projectId } = params;
+  const { userId, provider, modelId, title, projectId, skillId } = params;
 
   const sanitizedTitle = sanitizeTextForDatabase(title);
   const now = new Date();
@@ -114,6 +115,7 @@ export async function createConversation(params: {
         .values({
           userId,
           projectId,
+          skillId,
           provider,
           modelUsed: modelId,
           title: sanitizedTitle,

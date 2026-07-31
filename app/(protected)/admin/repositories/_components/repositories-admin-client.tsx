@@ -71,6 +71,7 @@ function RepositoryTable({
                 <TableHead>Owner</TableHead>
                 <TableHead>Visibility</TableHead>
                 <TableHead>Items</TableHead>
+                <TableHead>Readiness</TableHead>
                 <TableHead>Created</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
@@ -78,7 +79,7 @@ function RepositoryTable({
             <TableBody>
               {repositories.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
+                  <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
                     No repositories found
                   </TableCell>
                 </TableRow>
@@ -113,6 +114,29 @@ function RepositoryTable({
                         <Package className="h-4 w-4 text-muted-foreground" />
                         <span>{repository.itemCount || 0}</span>
                       </div>
+                    </TableCell>
+                    <TableCell>
+                      <Badge
+                        variant={
+                          repository.readiness === "searchable"
+                            ? "default"
+                            : repository.readiness === "degraded"
+                              ? "secondary"
+                              : "outline"
+                        }
+                        className="capitalize"
+                      >
+                        {repository.readiness}
+                      </Badge>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        {repository.indexedItemCount} indexed ·{" "}
+                        {repository.segmentCount} segments
+                      </div>
+                      {repository.lastIndexError ? (
+                        <div className="mt-1 max-w-64 truncate text-xs text-destructive">
+                          {repository.lastIndexError}
+                        </div>
+                      ) : null}
                     </TableCell>
                     <TableCell>
                       {new Date(repository.createdAt).toLocaleDateString()}

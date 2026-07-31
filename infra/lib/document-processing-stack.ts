@@ -3,8 +3,10 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as eventsources from 'aws-cdk-lib/aws-lambda-event-sources';
+import * as path from 'node:path';
 import { Construct } from 'constructs';
 
 export interface DocumentProcessingStackProps extends cdk.StackProps {
@@ -347,51 +349,92 @@ export class DocumentProcessingStack extends cdk.Stack {
     processorRole: iam.Role
   ): { standard: lambda.Function; highMemory: lambda.Function } {
     const { environment } = props;
+    const repositoryRoot = path.join(__dirname, "../..");
+    const processorRoot = path.join(
+      repositoryRoot,
+      "infra/lambdas/document-processor-v2"
+    );
+    const processorEntry = path.join(processorRoot, "index.ts");
+    const depsLockFilePath = path.join(processorRoot, "package-lock.json");
+    const bundling: lambdaNodejs.BundlingOptions = {
+      format: lambdaNodejs.OutputFormat.CJS,
+      target: "node20",
+      sourceMap: true,
+      minify: false,
+      externalModules: ["@aws-sdk/*"],
+      // These packages are deliberately installed from the processor's own
+      // lockfile instead of being inlined. This preserves the processor's
+      // pinned pdf-parse v1 API and avoids esbuild rewriting pdf-parse's
+      // module-parent bootstrap into a test fixture load at Lambda startup.
+      nodeModules: [
+        "pdf-parse",
+        "mammoth",
+        "@e965/xlsx",
+        "csv-parse",
+        "marked",
+        "jszip",
+        "xml2js",
+      ],
+    };
 
     // Standard Lambda processor (3GB memory, 15 min timeout)
-    const standardProcessor = new lambda.Function(this, 'StandardProcessor', {
-      functionName: `AIStudio-DocumentProcessor-Standard-${environment}`,
-      runtime: lambda.Runtime.NODEJS_20_X,
-      handler: 'dist/index.handler',
-      code: lambda.Code.fromAsset('lambdas/document-processor-v2'),
-      memorySize: 3008, // 3GB for standard processing
-      timeout: cdk.Duration.minutes(15),
-      role: processorRole,
-      environment: {
-        DOCUMENTS_BUCKET_NAME: this.documentsBucket.bucketName,
-        DOCUMENT_JOBS_TABLE: this.documentJobsTable.tableName,
-        HIGH_MEMORY_QUEUE_URL: this.highMemoryQueue.queueUrl,
-        DLQ_URL: this.processingDLQ.queueUrl,
-        ...(props.rdsClusterArn && { DATABASE_RESOURCE_ARN: props.rdsClusterArn }),
-        ...(props.rdsSecretArn && { DATABASE_SECRET_ARN: props.rdsSecretArn }),
-        DATABASE_NAME: 'aistudio',
-      },
-      deadLetterQueue: this.processingDLQ,
-      retryAttempts: 2,
-    });
+    const standardProcessor = new lambdaNodejs.NodejsFunction(
+      this,
+      'StandardProcessor',
+      {
+        functionName: `AIStudio-DocumentProcessor-Standard-${environment}`,
+        runtime: lambda.Runtime.NODEJS_20_X,
+        entry: processorEntry,
+        handler: 'handler',
+        depsLockFilePath,
+        projectRoot: processorRoot,
+        bundling,
+        memorySize: 3008, // 3GB for standard processing
+        timeout: cdk.Duration.minutes(15),
+        role: processorRole,
+        environment: {
+          DOCUMENTS_BUCKET_NAME: this.documentsBucket.bucketName,
+          DOCUMENT_JOBS_TABLE: this.documentJobsTable.tableName,
+          HIGH_MEMORY_QUEUE_URL: this.highMemoryQueue.queueUrl,
+          DLQ_URL: this.processingDLQ.queueUrl,
+          ...(props.rdsClusterArn && { DATABASE_RESOURCE_ARN: props.rdsClusterArn }),
+          ...(props.rdsSecretArn && { DATABASE_SECRET_ARN: props.rdsSecretArn }),
+          DATABASE_NAME: 'aistudio',
+        },
+        deadLetterQueue: this.processingDLQ,
+        retryAttempts: 2,
+      }
+    );
 
     // High-memory Lambda processor
     // PowerTuning Result (2025-10-24): 10240MB → 1536MB (85% reduction)
-    const highMemoryProcessor = new lambda.Function(this, 'HighMemoryProcessor', {
-      functionName: `AIStudio-DocumentProcessor-HighMemory-${environment}`,
-      runtime: lambda.Runtime.NODEJS_20_X,
-      handler: 'dist/index.handler',
-      code: lambda.Code.fromAsset('lambdas/document-processor-v2'),
-      memorySize: 1536, // Optimized via PowerTuning from 10GB
-      timeout: cdk.Duration.minutes(15), // Lambda max timeout is 15 minutes
-      role: processorRole,
-      environment: {
-        DOCUMENTS_BUCKET_NAME: this.documentsBucket.bucketName,
-        DOCUMENT_JOBS_TABLE: this.documentJobsTable.tableName,
-        DLQ_URL: this.processingDLQ.queueUrl,
-        PROCESSOR_TYPE: 'HIGH_MEMORY',
-        ...(props.rdsClusterArn && { DATABASE_RESOURCE_ARN: props.rdsClusterArn }),
-        ...(props.rdsSecretArn && { DATABASE_SECRET_ARN: props.rdsSecretArn }),
-        DATABASE_NAME: 'aistudio',
-      },
-      deadLetterQueue: this.processingDLQ,
-      retryAttempts: 1, // Fewer retries for expensive operations
-    });
+    const highMemoryProcessor = new lambdaNodejs.NodejsFunction(
+      this,
+      'HighMemoryProcessor',
+      {
+        functionName: `AIStudio-DocumentProcessor-HighMemory-${environment}`,
+        runtime: lambda.Runtime.NODEJS_20_X,
+        entry: processorEntry,
+        handler: 'handler',
+        depsLockFilePath,
+        projectRoot: processorRoot,
+        bundling,
+        memorySize: 1536, // Optimized via PowerTuning from 10GB
+        timeout: cdk.Duration.minutes(15), // Lambda max timeout is 15 minutes
+        role: processorRole,
+        environment: {
+          DOCUMENTS_BUCKET_NAME: this.documentsBucket.bucketName,
+          DOCUMENT_JOBS_TABLE: this.documentJobsTable.tableName,
+          DLQ_URL: this.processingDLQ.queueUrl,
+          PROCESSOR_TYPE: 'HIGH_MEMORY',
+          ...(props.rdsClusterArn && { DATABASE_RESOURCE_ARN: props.rdsClusterArn }),
+          ...(props.rdsSecretArn && { DATABASE_SECRET_ARN: props.rdsSecretArn }),
+          DATABASE_NAME: 'aistudio',
+        },
+        deadLetterQueue: this.processingDLQ,
+        retryAttempts: 1, // Fewer retries for expensive operations
+      }
+    );
 
     return { standard: standardProcessor, highMemory: highMemoryProcessor };
   }

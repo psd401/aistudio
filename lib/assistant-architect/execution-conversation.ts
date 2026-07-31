@@ -6,6 +6,7 @@ import {
   rollbackNewNexusAttachmentConversation,
 } from "@/lib/nexus/request-attachment-binding";
 import type { TemporaryAttachmentReference } from "@/lib/repositories/temporary-attachment-contract";
+import { replaceConversationRepositoryBindings } from "@/lib/nexus/conversation-repository-service";
 
 type ExecutionConversationLogger = Pick<
   ReturnType<typeof createLogger>,
@@ -20,7 +21,7 @@ export interface CreateAssistantExecutionConversationInput {
   log: ExecutionConversationLogger;
   ownerId: number;
   references: TemporaryAttachmentReference[];
-  runtimeRepositoryIds: number[];
+  repositoryIds: number[];
 }
 
 function formatExecutionInputs(inputs: Record<string, unknown>): string {
@@ -67,7 +68,7 @@ export async function createAssistantExecutionConversation(
         assistantName: input.assistantName,
         executionId: input.executionId,
         executionStatus: "running",
-        runtimeRepositoryIds: input.runtimeRepositoryIds,
+        repositoryIds: input.repositoryIds,
       },
     });
     conversationId = conversation.id;
@@ -79,6 +80,14 @@ export async function createAssistantExecutionConversation(
       conversationCreated: true,
     });
     referencesBound = input.references.length > 0;
+
+    await replaceConversationRepositoryBindings({
+      conversationId,
+      userId: input.ownerId,
+      repositoryIds: input.repositoryIds,
+      source: "assistant",
+      sourceId: String(input.assistantId),
+    });
 
     const userContent = formatExecutionInputs(input.inputs);
     await createMessageWithStats({
@@ -96,7 +105,10 @@ export async function createAssistantExecutionConversation(
     });
     return conversationId;
   } catch (conversationError) {
-    if (conversationId && referencesBound) {
+    if (
+      conversationId &&
+      (referencesBound || input.references.length === 0)
+    ) {
       try {
         await rollbackNewNexusAttachmentConversation({
           ownerId: input.ownerId,

@@ -2,6 +2,7 @@ const mockCreateConversation = jest.fn();
 const mockCreateMessageWithStats = jest.fn();
 const mockBindNexusRequestAttachmentReferences = jest.fn();
 const mockRollbackNewNexusAttachmentConversation = jest.fn();
+const mockReplaceConversationRepositoryBindings = jest.fn();
 
 jest.mock("@/lib/db/drizzle/nexus-conversations", () => ({
   createConversation: (...args: unknown[]) => mockCreateConversation(...args),
@@ -22,6 +23,10 @@ jest.mock("@/lib/nexus/request-attachment-binding", () => ({
   rollbackNewNexusAttachmentConversation: (...args: unknown[]) =>
     mockRollbackNewNexusAttachmentConversation(...args),
 }));
+jest.mock("@/lib/nexus/conversation-repository-service", () => ({
+  replaceConversationRepositoryBindings: (...args: unknown[]) =>
+    mockReplaceConversationRepositoryBindings(...args),
+}));
 
 import { createAssistantExecutionConversation } from "@/lib/assistant-architect/execution-conversation";
 
@@ -34,6 +39,7 @@ const REFERENCES = [
   },
 ];
 
+// eslint-disable-next-line max-lines-per-function -- Shared lifecycle assertions exercise creation, durable binding, and rollback as one contract.
 describe("createAssistantExecutionConversation", () => {
   const log = {
     error: jest.fn(),
@@ -46,6 +52,7 @@ describe("createAssistantExecutionConversation", () => {
     mockCreateMessageWithStats.mockResolvedValue({ id: "message-1" });
     mockBindNexusRequestAttachmentReferences.mockResolvedValue(undefined);
     mockRollbackNewNexusAttachmentConversation.mockResolvedValue(undefined);
+    mockReplaceConversationRepositoryBindings.mockResolvedValue([]);
   });
 
   it("binds runtime references before persisting a resumable first message", async () => {
@@ -62,7 +69,7 @@ describe("createAssistantExecutionConversation", () => {
         log,
         ownerId: 7,
         references: REFERENCES,
-        runtimeRepositoryIds: [77],
+        repositoryIds: [77],
       })
     ).resolves.toBe(CONVERSATION_ID);
 
@@ -76,7 +83,7 @@ describe("createAssistantExecutionConversation", () => {
           assistantName: "Research Assistant",
           executionId: 55,
           executionStatus: "running",
-          runtimeRepositoryIds: [77],
+          repositoryIds: [77],
         },
       })
     );
@@ -85,6 +92,13 @@ describe("createAssistantExecutionConversation", () => {
       conversationId: CONVERSATION_ID,
       references: REFERENCES,
       conversationCreated: true,
+    });
+    expect(mockReplaceConversationRepositoryBindings).toHaveBeenCalledWith({
+      conversationId: CONVERSATION_ID,
+      userId: 7,
+      repositoryIds: [77],
+      source: "assistant",
+      sourceId: "5",
     });
     expect(mockCreateMessageWithStats).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -116,7 +130,7 @@ describe("createAssistantExecutionConversation", () => {
         log,
         ownerId: 7,
         references: REFERENCES,
-        runtimeRepositoryIds: [77],
+        repositoryIds: [77],
       })
     ).resolves.toBeUndefined();
 
@@ -145,10 +159,35 @@ describe("createAssistantExecutionConversation", () => {
         log,
         ownerId: 7,
         references: REFERENCES,
-        runtimeRepositoryIds: [77],
+        repositoryIds: [77],
       })
     ).resolves.toBeUndefined();
 
+    expect(mockRollbackNewNexusAttachmentConversation).toHaveBeenCalledWith({
+      ownerId: 7,
+      conversationId: CONVERSATION_ID,
+    });
+  });
+
+  it("removes an empty conversation when durable binding fails without attachments", async () => {
+    mockReplaceConversationRepositoryBindings.mockRejectedValue(
+      new Error("repository binding failed")
+    );
+
+    await expect(
+      createAssistantExecutionConversation({
+        assistantId: 5,
+        assistantName: "Research Assistant",
+        executionId: 55,
+        inputs: {},
+        log,
+        ownerId: 7,
+        references: [],
+        repositoryIds: [77],
+      })
+    ).resolves.toBeUndefined();
+
+    expect(mockCreateMessageWithStats).not.toHaveBeenCalled();
     expect(mockRollbackNewNexusAttachmentConversation).toHaveBeenCalledWith({
       ownerId: 7,
       conversationId: CONVERSATION_ID,
@@ -172,7 +211,7 @@ describe("createAssistantExecutionConversation", () => {
         log,
         ownerId: 7,
         references: REFERENCES,
-        runtimeRepositoryIds: [77],
+        repositoryIds: [77],
       })
     ).resolves.toBeUndefined();
 

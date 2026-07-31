@@ -1,4 +1,5 @@
 const mockGetAccessibleRepositoriesByCognitoSub = jest.fn()
+const mockAssertRepositoriesSearchable = jest.fn()
 
 jest.mock("@/lib/db/drizzle", () => ({
   getAccessibleRepositoriesByCognitoSub: (...args: unknown[]) =>
@@ -16,6 +17,11 @@ jest.mock("@/lib/logger", () => ({
     error: jest.fn(),
   })),
 }))
+jest.mock("@/lib/repositories/readiness-service", () => ({
+  assertRepositoriesSearchable: (...args: unknown[]) =>
+    mockAssertRepositoriesSearchable(...args),
+  RepositoryReadinessError: class RepositoryReadinessError extends Error {},
+}))
 
 import {
   collectBoundRepositoryIds,
@@ -25,6 +31,7 @@ import {
 describe("Assistant Architect repository execution preflight", () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    mockAssertRepositoriesSearchable.mockResolvedValue([])
   })
 
   it("collects every distinct repository bound across the prompt chain", () => {
@@ -50,6 +57,7 @@ describe("Assistant Architect repository execution preflight", () => {
     )).resolves.toEqual({
       isAllowed: false,
       repositoryIds: [7, 8],
+      errorCode: "REPOSITORY_BINDING_INACCESSIBLE",
     })
   })
 

@@ -328,25 +328,52 @@ async function retryWithBackoff<T>(
 
 type EmbeddingDb = Awaited<ReturnType<typeof getDb>>;
 
+async function canonicalGenerationAcceptsWrites(
+  db: EmbeddingDb,
+  generationId: string,
+): Promise<boolean> {
+  const [generation] = await db.execute<{ status: CanonicalGenerationStatus }>(
+    sql`
+      SELECT status
+      FROM repository_index_generations
+      WHERE id = ${generationId}::uuid
+      LIMIT 1
+    `,
+  );
+  return generation?.status === "building";
+}
+
 async function writeVisualEmbeddings(params: {
   db: EmbeddingDb;
   message: EmbeddingMessage;
   baseSettings: EmbeddingSettings;
   descriptor: ReturnType<typeof parseEmbeddingDescriptor>;
-}): Promise<void> {
+}): Promise<boolean> {
   const modalities =
     params.message.modalities ??
     params.message.chunkIds.map(() => 'text' as const);
   const indexes = modalities.flatMap((modality, index) =>
     modality === 'image' || modality === 'video' ? [index] : []
   );
-  if (indexes.length === 0) return;
+  if (indexes.length === 0) return true;
   const visualSettings: EmbeddingSettings = {
     ...params.baseSettings,
     provider: params.descriptor.provider,
     modelId: params.descriptor.modelId,
     dimensions: params.descriptor.dimensions,
   };
+  if (
+    !params.message.generationId ||
+    !(await canonicalGenerationAcceptsWrites(
+      params.db,
+      params.message.generationId,
+    ))
+  ) {
+    log.info("Acknowledging stale visual embedding work before provider call", {
+      generationId: params.message.generationId,
+    });
+    return false;
+  }
   const sourceCache = new Map<string, string>();
   const inputs = await Promise.all(
     indexes.map(async (index) => ({
@@ -365,6 +392,18 @@ async function writeVisualEmbeddings(params: {
   if (embeddings.length !== indexes.length) {
     throw new Error('Visual embedding provider returned a mismatched vector count');
   }
+  if (
+    !params.message.generationId ||
+    !(await canonicalGenerationAcceptsWrites(
+      params.db,
+      params.message.generationId,
+    ))
+  ) {
+    log.info("Acknowledging superseded visual embedding work", {
+      generationId: params.message.generationId,
+    });
+    return false;
+  }
   for (const [position, messageIndex] of indexes.entries()) {
     const chunkId = params.message.chunkIds[messageIndex];
     const embedding = embeddings[position];
@@ -377,14 +416,32 @@ async function writeVisualEmbeddings(params: {
       SET visual_embedding = ${embeddingValue}::vector
       WHERE id = ${chunkId}
         AND index_generation_id = ${params.message.generationId}::uuid
+        AND EXISTS (
+          SELECT 1
+          FROM repository_index_generations generation
+          WHERE generation.id = ${params.message.generationId}::uuid
+            AND generation.status = 'building'
+        )
       RETURNING id
     `);
     if (updated.length !== 1) {
+      if (
+        !(await canonicalGenerationAcceptsWrites(
+          params.db,
+          params.message.generationId,
+        ))
+      ) {
+        log.info("Acknowledging superseded visual embedding batch", {
+          generationId: params.message.generationId,
+        });
+        return false;
+      }
       throw new Error(
         `Visual chunk ${chunkId} does not belong to generation ${params.message.generationId}`
       );
     }
   }
+  return true;
 }
 
 async function resolveRecordEmbeddingSettings(
@@ -430,6 +487,12 @@ async function resolveRecordEmbeddingSettings(
     });
     return null;
   }
+  if (generation.status !== "building") {
+    log.info(`Skipping immutable active generation ${message.generationId}`, {
+      status: generation.status,
+    });
+    return null;
+  }
   const baseSettings = await getEmbeddingSettings();
   const descriptor = parseEmbeddingDescriptor(
     generation.embedding_model,
@@ -442,12 +505,13 @@ async function resolveRecordEmbeddingSettings(
       )
     : null;
   if (visualDescriptor) {
-    await writeVisualEmbeddings({
+    const visualWritten = await writeVisualEmbeddings({
       db,
       message,
       baseSettings,
       descriptor: visualDescriptor,
     });
+    if (!visualWritten) return null;
   }
   return {
     ...baseSettings,
@@ -478,7 +542,19 @@ async function writeTextEmbeddings(params: {
   db: EmbeddingDb;
   message: EmbeddingMessage;
   settings: EmbeddingSettings;
-}): Promise<void> {
+}): Promise<boolean> {
+  if (
+    params.message.generationId &&
+    !(await canonicalGenerationAcceptsWrites(
+      params.db,
+      params.message.generationId,
+    ))
+  ) {
+    log.info("Acknowledging stale text embedding work before provider call", {
+      generationId: params.message.generationId,
+    });
+    return false;
+  }
   const embeddings = await retryWithBackoff(
     () => generateEmbeddings(params.message.texts, params.settings),
     3,
@@ -488,6 +564,18 @@ async function writeTextEmbeddings(params: {
     throw new Error(
       `Embedding provider returned ${embeddings.length} vectors for ${params.message.chunkIds.length} chunks (item ${params.message.itemId})`
     );
+  }
+  if (
+    params.message.generationId &&
+    !(await canonicalGenerationAcceptsWrites(
+      params.db,
+      params.message.generationId,
+    ))
+  ) {
+    log.info("Acknowledging superseded text embedding work", {
+      generationId: params.message.generationId,
+    });
+    return false;
   }
   for (const [index, chunkId] of params.message.chunkIds.entries()) {
     const embedding = embeddings[index];
@@ -507,9 +595,26 @@ async function writeTextEmbeddings(params: {
         SET embedding = ${embeddingValue}::vector
         WHERE id = ${chunkId}
           AND index_generation_id = ${params.message.generationId}::uuid
+          AND EXISTS (
+            SELECT 1
+            FROM repository_index_generations generation
+            WHERE generation.id = ${params.message.generationId}::uuid
+              AND generation.status = 'building'
+          )
         RETURNING id
       `);
       if (updated.length !== 1) {
+        if (
+          !(await canonicalGenerationAcceptsWrites(
+            params.db,
+            params.message.generationId,
+          ))
+        ) {
+          log.info("Acknowledging superseded text embedding batch", {
+            generationId: params.message.generationId,
+          });
+          return false;
+        }
         throw new Error(
           `Chunk ${chunkId} does not belong to generation ${params.message.generationId}`
         );
@@ -520,6 +625,7 @@ async function writeTextEmbeddings(params: {
       );
     }
   }
+  return true;
 }
 
 async function countPendingGenerationChunks(
@@ -651,7 +757,8 @@ async function processRecord(record: SQSRecord): Promise<void> {
     );
     const settings = await resolveRecordEmbeddingSettings(db, message);
     if (!settings) return;
-    await writeTextEmbeddings({ db, message, settings });
+    const textWritten = await writeTextEmbeddings({ db, message, settings });
+    if (!textWritten) return;
     const pendingGenerationChunks = await countPendingGenerationChunks(
       db,
       message.generationId,
