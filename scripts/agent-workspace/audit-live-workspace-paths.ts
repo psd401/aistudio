@@ -7,6 +7,7 @@ import {
   type AttributeValue,
 } from "@aws-sdk/client-dynamodb"
 import {
+  GetObjectCommand,
   paginateListObjectsV2,
   S3Client,
 } from "@aws-sdk/client-s3"
@@ -15,6 +16,13 @@ import {
   workspaceRelativePathRejectionReason,
   type WorkspacePathRejectionReason,
 } from "@/lib/agent-workspace/path-policy"
+import {
+  MAX_RETIRED_EXEC_APPROVALS_BYTES,
+  RETIRED_EXEC_APPROVALS_CLAIM_PATH,
+  RETIRED_EXEC_APPROVALS_SOURCE_PATH,
+  validateRetiredExecApprovalsRead,
+  type RetiredExecApprovalsValidationReason,
+} from "@/lib/agent-workspace/retired-exec-approvals"
 import {
   workspaceGenerationFromEntries,
   type WorkspaceGenerationEntry,
@@ -61,6 +69,35 @@ type CheckpointControlAudit = {
   unknownObjectHashes: string[]
 }
 
+type RetiredExecApprovalAuditReason =
+  | RetiredExecApprovalsValidationReason
+  | "read-failed"
+
+type RetiredExecApprovalFailure = {
+  ownerHash: string
+  objectHash: string
+  reason: RetiredExecApprovalAuditReason
+}
+
+type RetiredExecApprovalCandidate = {
+  key: string
+  ownerPrefix: string
+  ownerHash: string
+  objectHash: string
+  registered: boolean
+  size: number | undefined
+  eTag: string | undefined
+}
+
+type BucketInventoryAudit = {
+  retiredExecApprovalSources: number
+  retiredExecApprovalClaims: number
+  retiredExecApprovalSafeSources: number
+  retiredExecApprovalOrphanSources: number
+  retiredExecApprovalOrphanSourceOwnerHashes: string[]
+  retiredExecApprovalFailures: RetiredExecApprovalFailure[]
+}
+
 function parseArgs(argv: readonly string[]): AuditOptions {
   const values = new Map<string, string>()
   for (let index = 0; index < argv.length; index += 2) {
@@ -84,6 +121,215 @@ function parseArgs(argv: readonly string[]): AuditOptions {
 
 function shortHash(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 16)
+}
+
+function retiredExecApprovalPathFromKey(
+  key: string,
+  registeredPrefixes: ReadonlySet<string>,
+): {
+  ownerPrefix: string
+  retiredPath: string
+  exactWorkspaceRoot: boolean
+} | null {
+  for (const ownerPrefix of registeredPrefixes) {
+    for (const relativePath of [
+      RETIRED_EXEC_APPROVALS_SOURCE_PATH,
+      RETIRED_EXEC_APPROVALS_CLAIM_PATH,
+    ]) {
+      if (key === `${ownerPrefix}/${relativePath}`) {
+        return {
+          ownerPrefix,
+          retiredPath: relativePath,
+          exactWorkspaceRoot: true,
+        }
+      }
+    }
+  }
+
+  const firstSeparator = key.indexOf("/")
+  if (firstSeparator > 0) {
+    const ownerPrefix = key.slice(0, firstSeparator)
+    const relativePath = key.slice(firstSeparator + 1)
+    if (
+      relativePath === RETIRED_EXEC_APPROVALS_SOURCE_PATH ||
+      relativePath === RETIRED_EXEC_APPROVALS_CLAIM_PATH
+    ) {
+      return {
+        ownerPrefix,
+        retiredPath: relativePath,
+        exactWorkspaceRoot: true,
+      }
+    }
+  }
+
+  for (const relativePath of [
+    RETIRED_EXEC_APPROVALS_SOURCE_PATH,
+    RETIRED_EXEC_APPROVALS_CLAIM_PATH,
+  ]) {
+    if (key === relativePath) {
+      return {
+        ownerPrefix: "",
+        retiredPath: relativePath,
+        exactWorkspaceRoot: false,
+      }
+    }
+    const suffix = `/${relativePath}`
+    if (key.endsWith(suffix)) {
+      return {
+        ownerPrefix: key.slice(0, -suffix.length),
+        retiredPath: relativePath,
+        exactWorkspaceRoot: false,
+      }
+    }
+  }
+  return null
+}
+
+function isPreconditionFailure(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false
+  const candidate = error as {
+    name?: unknown
+    $metadata?: { httpStatusCode?: unknown }
+  }
+  return (
+    candidate.name === "PreconditionFailed" ||
+    candidate.$metadata?.httpStatusCode === 412
+  )
+}
+
+async function validateRetiredExecApprovalCandidate(
+  client: S3Client,
+  bucket: string,
+  candidate: RetiredExecApprovalCandidate,
+): Promise<RetiredExecApprovalAuditReason | null> {
+  if (
+    candidate.size === undefined ||
+    !Number.isSafeInteger(candidate.size) ||
+    candidate.size < 0
+  ) {
+    return "invalid-size"
+  }
+  if (candidate.size > MAX_RETIRED_EXEC_APPROVALS_BYTES) {
+    return "body-too-large"
+  }
+  if (!candidate.eTag) return "missing-etag"
+
+  try {
+    const response = await client.send(
+      new GetObjectCommand({
+        Bucket: bucket,
+        Key: candidate.key,
+        IfMatch: candidate.eTag,
+        Range: `bytes=0-${MAX_RETIRED_EXEC_APPROVALS_BYTES - 1}`,
+      }),
+    )
+    if (!response.Body) return "read-failed"
+    const body = await response.Body.transformToByteArray()
+    return validateRetiredExecApprovalsRead(
+      { size: candidate.size, eTag: candidate.eTag },
+      {
+        size: response.ContentLength ?? Number.NaN,
+        eTag: response.ETag ?? "",
+        body,
+      },
+    )
+  } catch (error: unknown) {
+    return isPreconditionFailure(error) ? "etag-mismatch" : "read-failed"
+  }
+}
+
+/**
+ * Inventory the whole bucket so retired host state in an unregistered/orphaned
+ * prefix cannot escape the release gate. Source bodies are fetched only with
+ * a bounded range and the ETag observed by ListObjectsV2 as an If-Match guard.
+ */
+async function auditBucketInventory(
+  client: S3Client,
+  bucket: string,
+  registeredPrefixes: ReadonlySet<string>,
+): Promise<BucketInventoryAudit> {
+  const sourceCandidates: RetiredExecApprovalCandidate[] = []
+  const failures: RetiredExecApprovalFailure[] = []
+  const orphanSourceOwnerHashes = new Set<string>()
+  let sources = 0
+  let orphanSources = 0
+  let claims = 0
+
+  for await (const page of paginateListObjectsV2(
+    { client, pageSize: 1_000 },
+    { Bucket: bucket },
+  )) {
+    for (const object of page.Contents ?? []) {
+      const key = object.Key
+      if (!key) continue
+
+      const retiredPath = retiredExecApprovalPathFromKey(
+        key,
+        registeredPrefixes,
+      )
+      if (!retiredPath) continue
+      const identity = {
+        ownerHash: shortHash(retiredPath.ownerPrefix),
+        objectHash: shortHash(key),
+      }
+      if (retiredPath.retiredPath === RETIRED_EXEC_APPROVALS_CLAIM_PATH) {
+        claims += 1
+        failures.push({ ...identity, reason: "claim-present" })
+        continue
+      }
+      sources += 1
+      if (!registeredPrefixes.has(retiredPath.ownerPrefix)) {
+        orphanSources += 1
+        orphanSourceOwnerHashes.add(identity.ownerHash)
+      }
+      if (!retiredPath.exactWorkspaceRoot) {
+        failures.push({ ...identity, reason: "unexpected-path" })
+        continue
+      }
+      sourceCandidates.push({
+        key,
+        ownerPrefix: retiredPath.ownerPrefix,
+        ...identity,
+        registered: registeredPrefixes.has(retiredPath.ownerPrefix),
+        size: object.Size,
+        eTag: object.ETag,
+      })
+    }
+  }
+
+  const validationReasons = await mapWithConcurrency(
+    sourceCandidates,
+    8,
+    (candidate) =>
+      validateRetiredExecApprovalCandidate(client, bucket, candidate),
+  )
+  let safeSources = 0
+  for (const [index, reason] of validationReasons.entries()) {
+    const candidate = sourceCandidates[index]!
+    if (reason) {
+      failures.push({
+        ownerHash: candidate.ownerHash,
+        objectHash: candidate.objectHash,
+        reason,
+      })
+    } else {
+      safeSources += 1
+    }
+  }
+
+  failures.sort((left, right) =>
+    left.objectHash.localeCompare(right.objectHash),
+  )
+  return {
+    retiredExecApprovalSources: sources,
+    retiredExecApprovalClaims: claims,
+    retiredExecApprovalSafeSources: safeSources,
+    retiredExecApprovalOrphanSources: orphanSources,
+    retiredExecApprovalOrphanSourceOwnerHashes: [
+      ...orphanSourceOwnerHashes,
+    ].sort(),
+    retiredExecApprovalFailures: failures,
+  }
 }
 
 function workspacePrefixFromItem(
@@ -302,17 +548,19 @@ async function mapWithConcurrency<T, U>(
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2))
-  const prefixes = await registeredWorkspacePrefixes(
+  const registeredPrefixes = await registeredWorkspacePrefixes(
     options.environment,
     options.region,
   )
+  const registeredPrefixSet = new Set(registeredPrefixes)
   const client = new S3Client({ region: options.region })
-  const [controlAudit, audits] = await Promise.all([
+  const [controlAudit, bucketInventory] = await Promise.all([
     auditCheckpointControlNamespace(client, options.bucket),
-    mapWithConcurrency(prefixes, 8, (prefix) =>
-      auditWorkspace(client, options.bucket, prefix),
-    ),
+    auditBucketInventory(client, options.bucket, registeredPrefixSet),
   ])
+  const audits = await mapWithConcurrency(registeredPrefixes, 8, (prefix) =>
+    auditWorkspace(client, options.bucket, prefix),
+  )
   const populated = audits.filter((audit) => audit.objects > 0)
   const failures = audits.flatMap((audit) => audit.failures)
   const conflicts = audits.flatMap((audit) => audit.conflicts)
@@ -325,7 +573,7 @@ async function main(): Promise<void> {
         }
   const summary = {
     environment: options.environment,
-    registeredWorkspaces: prefixes.length,
+    registeredWorkspaces: registeredPrefixes.length,
     populatedWorkspaces: populated.length,
     objects: audits.reduce((sum, audit) => sum + audit.objects, 0),
     checkpointManagedObjects: audits.reduce(
@@ -350,6 +598,17 @@ async function main(): Promise<void> {
     currentV2CheckpointControlObjects: controlAudit.currentVersionObjects,
     legacyV1CheckpointObjectHashes: controlAudit.legacyV1ObjectHashes,
     unknownCheckpointObjectHashes: controlAudit.unknownObjectHashes,
+    retiredExecApprovalSources:
+      bucketInventory.retiredExecApprovalSources,
+    retiredExecApprovalClaims: bucketInventory.retiredExecApprovalClaims,
+    retiredExecApprovalSafeSources:
+      bucketInventory.retiredExecApprovalSafeSources,
+    retiredExecApprovalOrphanSources:
+      bucketInventory.retiredExecApprovalOrphanSources,
+    retiredExecApprovalOrphanSourceOwnerHashes:
+      bucketInventory.retiredExecApprovalOrphanSourceOwnerHashes,
+    retiredExecApprovalFailures:
+      bucketInventory.retiredExecApprovalFailures,
     incompatiblePaths: failures,
     fileDescendantConflicts: conflicts,
     pythonClassificationMismatches: parity.classificationMismatches,
@@ -361,6 +620,7 @@ async function main(): Promise<void> {
     conflicts.length > 0 ||
     parity.classificationMismatches.length > 0 ||
     parity.generationMismatches.length > 0 ||
+    bucketInventory.retiredExecApprovalFailures.length > 0 ||
     controlAudit.legacyV1ObjectHashes.length > 0 ||
     controlAudit.unknownObjectHashes.length > 0
   ) {

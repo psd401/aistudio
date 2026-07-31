@@ -762,7 +762,15 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
                 (self.root / "memory" / "MEMORY.md").read_bytes(),
                 remote["body"],
             )
+            retired_source = self.root / "exec-approvals.json"
+            retired_source.write_bytes(b"stale host token")
+            retired_claim = (
+                self.root / "exec-approvals.json.doctor-importing"
+            )
+            retired_claim.mkdir()
             self.assertEqual(workspace_sync.refresh_workspace("owner"), 0)
+            self.assertFalse(retired_source.exists())
+            self.assertFalse(retired_claim.exists())
 
         self.assertEqual(
             downloads,
@@ -885,6 +893,10 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
         attachment.write_bytes(b"router-owned")
         (self.root / "IDENTITY.md").write_bytes(b"stale model bytes")
         (self.root / "SOUL.md").write_bytes(b"image-owned soul")
+        retired_source = self.root / "exec-approvals.json"
+        retired_source.write_bytes(b"stale runtime control")
+        retired_claim = self.root / "exec-approvals.json.doctor-importing"
+        retired_claim.write_bytes(b"interrupted migration")
         empty_generation = workspace_sync._generation_for_entries({})
 
         def broker(payload, **_kwargs):
@@ -923,6 +935,8 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
             (self.root / "SOUL.md").read_bytes(),
             b"image-owned soul",
         )
+        self.assertFalse(retired_source.exists())
+        self.assertFalse(retired_claim.exists())
         self.assertNotIn(
             "owner",
             workspace_sync._force_exact_workspace_restores,

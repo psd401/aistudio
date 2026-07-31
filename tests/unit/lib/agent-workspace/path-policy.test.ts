@@ -1,6 +1,7 @@
 import contractCases from "@/infra/agent-image/workspace_path_contract_cases.json"
 import {
   isCheckpointManagedWorkspacePath,
+  isWorkspaceCheckpointExcluded,
   validateWorkspaceRelativePath,
   workspaceRelativePathRejectionReason,
 } from "@/lib/agent-workspace/path-policy"
@@ -53,5 +54,20 @@ describe("canonical private workspace path policy", () => {
       false,
     )
     expect(isCheckpointManagedWorkspacePath("memory/notes (v2).md")).toBe(true)
+  })
+
+  it.each([
+    "exec-approvals.json",
+    "exec-approvals.json.doctor-importing",
+  ])("excludes restored OpenClaw compatibility state at %s", (path) => {
+    expect(isWorkspaceCheckpointExcluded(path)).toBe(true)
+    expect(isCheckpointManagedWorkspacePath(path)).toBe(false)
+  })
+
+  it("keeps similarly named user paths checkpoint-managed", () => {
+    expect(isWorkspaceCheckpointExcluded("exec-approvals.json.backup"))
+      .toBe(false)
+    expect(isCheckpointManagedWorkspacePath("exec-approvals.json.backup"))
+      .toBe(true)
   })
 })

@@ -95,11 +95,13 @@ if [ -n "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=all -- \
     app/api/agent/workspace-storage/route.ts \
     lib/agent-workspace/storage-broker.ts \
     lib/agent-workspace/path-policy.ts \
+    lib/agent-workspace/retired-exec-approvals.ts \
     lib/agent-workspace/workspace-policy.json \
     scripts/agent-workspace/audit-live-workspace-paths.ts \
     scripts/agent-workspace/workspace-policy-probe.py \
     tests/unit/agent-image-openclaw-runtime-patch.test.ts \
     tests/unit/lib/agent-workspace/path-policy.test.ts \
+    tests/unit/lib/agent-workspace/retired-exec-approvals.test.ts \
     tests/unit/lib/agent-workspace/storage-broker-checkpoint.test.ts \
     tests/unit/lib/agent-workspace/storage-broker-list.test.ts \
     tests/unit/lib/agent-workspace/storage-broker-upload.test.ts \
@@ -180,16 +182,19 @@ echo ""
 #   1. instruction-budget gate   (static, no Docker)   — over-budget bootstrap
 #   2. config self-consistency   (static, no Docker)   — bad config/provider pins
 #   3. path-contract parity      (static, no Docker)   — broker/image drift
-#   4. dev+prod inventory audit (AWS read-only)       — unrestorable history
+#   4. dev+prod inventory audit (AWS read-only)       — unrestorable history /
+#                                                       unsafe retired policy
 #   5. plugin-aware validation  (Docker build)        — invalid complete config
-#   6. boot probe               (runtime, needs image) — dead-boot (no BOOT_OK)
-#   7. canary turn              (runtime, needs image) — non-answering agent
+#   6. host-state probe         (runtime, local image) — restored legacy gate
+#   7. boot probe               (runtime, needs image) — dead-boot (no BOOT_OK)
+#   8. canary turn              (runtime, needs image) — non-answering agent
 # Would have stopped r10 (dead-boot), r11 (missing provider), and the weeks-long
 # SOUL.md truncation on a laptop instead of in prod.
 #
 # Two separate bypasses, so an emergency doesn't disable more than it must:
-#   SKIP_PROBE_GATE=1   skips only the RUNTIME boot-probe + canary turn (checks
-#                       6-7) — reserved for a broken probe blocking releases.
+#   SKIP_PROBE_GATE=1   skips only the RUNTIME host-state, boot, and canary
+#                       checks (6-8) — reserved for a broken probe blocking
+#                       releases.
 #   SKIP_STATIC_GATE=1  skips the cheap STATIC checks (1-3). These are pure file
 #                       checks with no external dependency and essentially never
 #                       need bypassing — this exists only for a true emergency,
@@ -240,6 +245,7 @@ else
   fi
   if ! bun run --cwd "${REPO_ROOT}" test -- --runInBand --silent \
         "${REPO_ROOT}/tests/unit/lib/agent-workspace/path-policy.test.ts" \
+        "${REPO_ROOT}/tests/unit/lib/agent-workspace/retired-exec-approvals.test.ts" \
         "${REPO_ROOT}/tests/unit/lib/agent-workspace/storage-broker.test.ts" \
         "${REPO_ROOT}/tests/unit/lib/agent-workspace/storage-broker-list.test.ts" \
         "${REPO_ROOT}/tests/unit/lib/agent-workspace/storage-broker-upload.test.ts" \
@@ -363,11 +369,17 @@ rm -f "${STAGED_WORKSPACE_POLICY}"
 # unverified image reaching ECR is exactly the outcome #1161 exists to prevent.
 if [ "${SKIP_PROBE_GATE:-0}" = "1" ]; then
   echo ""
-  echo "WARNING: SKIP_PROBE_GATE=1 — runtime boot/canary probe BYPASSED."
+  echo "WARNING: SKIP_PROBE_GATE=1 — runtime host-state/boot/canary probes BYPASSED."
   echo "         This image is NOT boot-verified. See docs/operations/agent-image-build-gate.md"
 else
   echo ""
-  echo "=== Build-time eval gate (1161): runtime boot probe + canary turn ==="
+  echo "=== Build-time eval gate (1161): host-state + boot + canary probes ==="
+  echo "Image-local restored host-state contract probe..."
+  docker run --rm --platform linux/arm64 --user node \
+    --entrypoint python3 "${ECR_URI}:${TAG}" \
+    /app/probe_workspace_state_contract.py
+  echo "  Restored host-state contract probe PASSED."
+  echo ""
   PROBE_APP_BASE_URL="${AGENT_PROBE_APP_BASE_URL:-}"
   PROBE_INVOCATION_CONTEXT="${AGENT_PROBE_INVOCATION_CONTEXT:-}"
   PROBE_REQUEST_PROOF_KEY="${AGENT_PROBE_REQUEST_PROOF_KEY:-}"

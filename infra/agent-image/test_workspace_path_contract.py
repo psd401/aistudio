@@ -88,6 +88,22 @@ class WorkspacePathContractTests(unittest.TestCase):
             )
         )
 
+    def test_exec_approvals_compatibility_state_is_checkpoint_excluded(self):
+        for relative in (
+            "exec-approvals.json",
+            "exec-approvals.json.doctor-importing",
+        ):
+            with self.subTest(relative=relative):
+                self.assertTrue(workspace_sync._should_skip_relative(relative))
+                self.assertFalse(
+                    workspace_sync._is_checkpoint_managed_relative(relative)
+                )
+        self.assertTrue(
+            workspace_sync._is_checkpoint_managed_relative(
+                "exec-approvals.json.backup"
+            )
+        )
+
     def test_shallow_image_layout_uses_adjacent_staged_policy(self):
         with tempfile.TemporaryDirectory() as directory:
             image_dir = Path(directory) / "app"

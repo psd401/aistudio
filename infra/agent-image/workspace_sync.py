@@ -623,9 +623,13 @@ def _materialize_empty_workspace_file(
 # intentionally NOT on this list — those are agent-written, user-owned,
 # and must round-trip.
 #
-# Match is: "skip if the relative path equals or starts with any entry".
-# The values live in workspace_policy.json so the web checkpoint and image
-# runtime cannot silently drift into different definitions of durable state.
+# Exact paths and prefix paths are separate so retiring one generated control
+# file can never hide similarly named user content. The values live in
+# workspace_policy.json so the web checkpoint and image runtime cannot
+# silently drift into different definitions of durable state.
+_SKIP_EXACT_PATHS = frozenset(
+    _CHECKPOINT_EXCLUSIONS["exactPaths"]
+)
 _SKIP_RELATIVE_PREFIXES = tuple(
     _CHECKPOINT_EXCLUSIONS["relativePrefixes"]
 )
@@ -719,6 +723,8 @@ def _is_imported_legacy_state(relative: str) -> bool:
 def _should_skip_relative(relative: str) -> bool:
     """True if this workspace-relative path is gateway-owned, not user memory."""
     rel = relative.lstrip("/")
+    if rel in _SKIP_EXACT_PATHS:
+        return True
     for prefix in _SKIP_RELATIVE_PREFIXES:
         if rel == prefix or rel.startswith(prefix):
             return True
@@ -922,6 +928,39 @@ def _remove_workspace_entry_no_follow(
     finally:
         os.close(directory_fd)
     os.rmdir(name, dir_fd=parent_fd)
+
+
+def _discard_retired_local_control_state(
+    deadline_monotonic: float | None = None,
+) -> None:
+    """Remove retired exact host-state paths before OpenClaw can probe them.
+
+    These paths are neither image-owned nor user history. Pinned OpenClaw
+    refuses to start while either one exists, so a contaminated warm microVM
+    must not preserve them merely because checkpoint sync excludes them.
+    """
+    workspace_fd = os.open(
+        WORKSPACE_DIR,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    try:
+        for relative in sorted(_SKIP_EXACT_PATHS):
+            _remaining_timeout(deadline_monotonic, 60)
+            parts = Path(relative).parts
+            if len(parts) != 1 or parts[0] in ("", ".", ".."):
+                raise WorkspaceRestoreIncomplete(
+                    "retired control-state path is not root-relative"
+                )
+            try:
+                _remove_workspace_entry_no_follow(
+                    workspace_fd,
+                    parts[0],
+                    deadline_monotonic=deadline_monotonic,
+                )
+            except FileNotFoundError:
+                continue
+    finally:
+        os.close(workspace_fd)
 
 
 def _prepare_committed_remote_parents(
@@ -1966,6 +2005,10 @@ def refresh_workspace(prefix: str) -> int:
     """Refresh a warm workspace after the owner-wide lock changes hands."""
     if not prefix:
         return 0
+    # The gateway is stopped before refresh. Remove retired OpenClaw host
+    # control files even when the durable generation is unchanged; otherwise
+    # its migration gate can keep a reused microVM permanently bricked.
+    _discard_retired_local_control_state()
     checkpoint_generation = _ensure_workspace_checkpoint(prefix)
     snapshot = _list_remote_workspace_snapshot(prefix)
     if snapshot.generation is None:
