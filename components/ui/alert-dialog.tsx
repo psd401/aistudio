@@ -28,7 +28,10 @@ const AlertDialogOverlay = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <AlertDialogPrimitive.Overlay
     className={cn(
-      "fixed inset-0 z-50 bg-background/80 backdrop-blur-sm transition-opacity animate-in fade-in",
+      // Neutral scrim — see the note in sheet.tsx. `bg-background` portaled outside
+      // the scope resolved to the global cream, which is why the delete-confirm
+      // backdrop was tan.
+      "fixed inset-0 z-50 bg-black/50 backdrop-blur-sm transition-opacity animate-in fade-in",
       className
     )}
     {...props}

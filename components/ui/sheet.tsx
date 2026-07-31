@@ -46,7 +46,12 @@ const SheetOverlay = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <SheetPrimitive.Overlay
     className={cn(
-      "fixed inset-0 z-50 bg-background/80 backdrop-blur-sm transition-all duration-100 data-[state=closed]:animate-out data-[state=closed]:fade-out data-[state=open]:fade-in",
+      // A scrim must be a neutral wash, not the surface colour. `bg-background` is
+      // a THEME token, and the overlay portals to document.body OUTSIDE any
+      // design-system scope — so it resolved to the global cream and painted the
+      // whole screen tan behind every sheet. Matches dialog.tsx, which was
+      // already correct.
+      "fixed inset-0 z-50 bg-black/50 backdrop-blur-sm transition-all duration-100 data-[state=closed]:animate-out data-[state=closed]:fade-out data-[state=open]:fade-in",
       className
     )}
     {...props}

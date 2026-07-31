@@ -5,8 +5,23 @@ import {
   upsertSettingAction, 
   deleteSettingAction 
 } from "@/actions/db/settings-actions"
-import { withErrorHandling } from "@/lib/api-utils"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
+
+/**
+ * These handlers return the ActionState envelope ({ isSuccess, message, data })
+ * DIRECTLY, which is what the settings client reads.
+ *
+ * They previously ran inside `withErrorHandling`, which wraps whatever the
+ * handler returns in `{ success, data, requestId }`. Because each handler
+ * returned a NextResponse rather than a plain value, that wrapper serialised the
+ * NextResponse — producing `{"success":true,"data":{},"requestId":"..."}` and
+ * discarding isSuccess, message and the saved row entirely.
+ *
+ * The visible symptom was the Edit Setting modal saving correctly and then never
+ * closing: the client checks `result.isSuccess`, which was undefined, so it took
+ * the failure branch on every successful save. Do not reintroduce the wrapper
+ * here without also changing what the client reads.
+ */
 
 // GET /api/admin/settings - Get all settings
 export async function GET() {
@@ -16,7 +31,7 @@ export async function GET() {
   
   log.info("GET /api/admin/settings - Fetching settings");
   
-  return withErrorHandling(async () => {
+  try {
     // Check admin authorization
     const authError = await requireAdmin();
     if (authError) {
@@ -31,7 +46,16 @@ export async function GET() {
     timer({ status: "success", count: result.data?.length || 0 });
     
     return NextResponse.json(result, { headers: { "X-Request-Id": requestId } })
-  })
+  } catch (error) {
+    timer({ status: "error" })
+    log.error("Settings route failed", {
+      error: error instanceof Error ? error.message : "Unknown error",
+    })
+    return NextResponse.json(
+      { isSuccess: false, message: "Request failed. Please try again." },
+      { status: 500, headers: { "X-Request-Id": requestId } }
+    )
+  }
 }
 
 // POST /api/admin/settings - Create or update a setting
@@ -42,7 +66,7 @@ export async function POST(req: NextRequest) {
   
   log.info("POST /api/admin/settings - Upserting setting");
   
-  return withErrorHandling(async () => {
+  try {
     // Check admin authorization
     const authError = await requireAdmin();
     if (authError) {
@@ -65,7 +89,16 @@ export async function POST(req: NextRequest) {
     }
     
     return NextResponse.json(result, { headers: { "X-Request-Id": requestId } })
-  })
+  } catch (error) {
+    timer({ status: "error" })
+    log.error("Settings route failed", {
+      error: error instanceof Error ? error.message : "Unknown error",
+    })
+    return NextResponse.json(
+      { isSuccess: false, message: "Request failed. Please try again." },
+      { status: 500, headers: { "X-Request-Id": requestId } }
+    )
+  }
 }
 
 // DELETE /api/admin/settings?key=SETTING_KEY - Delete a setting
@@ -76,7 +109,7 @@ export async function DELETE(req: NextRequest) {
   
   log.info("DELETE /api/admin/settings - Deleting setting");
   
-  return withErrorHandling(async () => {
+  try {
     // Check admin authorization
     const authError = await requireAdmin();
     if (authError) {
@@ -107,5 +140,14 @@ export async function DELETE(req: NextRequest) {
     }
     
     return NextResponse.json(result, { headers: { "X-Request-Id": requestId } })
-  })
+  } catch (error) {
+    timer({ status: "error" })
+    log.error("Settings route failed", {
+      error: error instanceof Error ? error.message : "Unknown error",
+    })
+    return NextResponse.json(
+      { isSuccess: false, message: "Request failed. Please try again." },
+      { status: 500, headers: { "X-Request-Id": requestId } }
+    )
+  }
 }

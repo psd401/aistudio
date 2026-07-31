@@ -593,7 +593,13 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
       {loading ? (
         <StatsCardsSkeleton />
       ) : (
-        <StatsCards stats={stats} />
+        <StatsCards
+          stats={stats}
+          activeProvider={filters.provider}
+          onProviderSelect={(provider) =>
+            handleFiltersChange({ ...filters, provider })
+          }
+        />
       )}
 
       {/* Filters */}

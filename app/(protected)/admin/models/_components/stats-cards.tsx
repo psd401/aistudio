@@ -68,6 +68,10 @@ interface StatsCardsProps {
   stats: ModelStats
   loading?: boolean
   className?: string
+  /** Currently applied provider filter ("all" when unfiltered). */
+  activeProvider?: string
+  /** Click a provider chip to filter the table; clicking the active one clears it. */
+  onProviderSelect?: (provider: string) => void
 }
 
 // Provider icon mapping
@@ -88,7 +92,7 @@ function getProviderIcon(provider: string) {
   return <IconBrain className="h-4 w-4" />
 }
 
-export function StatsCards({ stats, loading = false, className }: StatsCardsProps) {
+export function StatsCards({ stats, loading = false, className, activeProvider, onProviderSelect }: StatsCardsProps) {
   const cards = [
     {
       label: "Total Models",
@@ -121,22 +125,39 @@ export function StatsCards({ stats, loading = false, className }: StatsCardsProp
         ))}
       </div>
 
-      {/* Provider breakdown */}
+      {/* Provider breakdown. Card already supplies p-6, and CardContent adds its
+          own mt-4 — the old `py-4` on top of both left a large gap above the
+          label. mt-0 lets Card's padding stand alone. */}
       {!loading && Object.keys(stats.byProvider).length > 0 && (
-        <Card>
-          <CardContent className="py-4">
-            <p className="text-sm text-muted-foreground font-medium mb-2">By Provider</p>
-            <div className="flex flex-wrap gap-3">
-              {Object.entries(stats.byProvider).map(([provider, count]) => (
-                <div
-                  key={provider}
-                  className="flex items-center gap-2 px-3 py-1.5 bg-muted rounded-full text-sm"
-                >
-                  {getProviderIcon(provider)}
-                  <span className="font-medium">{provider}</span>
-                  <span className="text-muted-foreground">({count})</span>
-                </div>
-              ))}
+        <Card className="p-4">
+          <CardContent className="mt-0">
+            <p className="text-xs uppercase tracking-wide text-muted-foreground font-semibold mb-2.5">
+              By Provider
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {Object.entries(stats.byProvider).map(([provider, count]) => {
+                const active = activeProvider === provider
+                return (
+                  <button
+                    key={provider}
+                    type="button"
+                    onClick={() => onProviderSelect?.(active ? "all" : provider)}
+                    aria-pressed={active}
+                    className={cn(
+                      "flex items-center gap-2 px-3 py-1.5 rounded-full text-sm border transition-colors",
+                      active
+                        ? "bg-[var(--mer-brand)] text-white border-[var(--mer-brand)]"
+                        : "bg-muted border-transparent hover:border-[var(--mer-ink-muted)]"
+                    )}
+                  >
+                    {getProviderIcon(provider)}
+                    <span className="font-medium">{provider}</span>
+                    <span className={active ? "opacity-80" : "text-muted-foreground"}>
+                      ({count})
+                    </span>
+                  </button>
+                )
+              })}
             </div>
           </CardContent>
         </Card>
