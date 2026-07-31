@@ -26,6 +26,7 @@ from agentcore_wrapper import (  # noqa: E402
     _attachment_workspace_paths,
     _frame_user_message,
     _render_attachments_header,
+    _resolve_conversation_session_id,
     _sanitize_header_field,
 )
 
@@ -40,6 +41,33 @@ for _m in _stubbed_by_us:
     del sys.modules[_m]
 
 _safe = agentcore_wrapper._safe_header_value
+
+
+class TestConversationSessionIdentity(unittest.TestCase):
+    def test_uses_thread_scoped_conversation_id(self):
+        self.assertEqual(
+            _resolve_conversation_session_id(
+                {"conversation_session_id": "owner-chat-thread_1-build"},
+                "owner-runtime-build",
+            ),
+            "owner-chat-thread_1-build",
+        )
+
+    def test_old_or_invalid_callers_fall_back_to_runtime_session(self):
+        runtime_session = "owner-runtime-build"
+        self.assertEqual(
+            _resolve_conversation_session_id({}, runtime_session),
+            runtime_session,
+        )
+        for invalid in ("../other-owner", "space/thread", "", "x" * 257, 123):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(
+                    _resolve_conversation_session_id(
+                        {"conversation_session_id": invalid},
+                        runtime_session,
+                    ),
+                    runtime_session,
+                )
 
 
 class TestCandidateProviderHydration(unittest.TestCase):
@@ -297,11 +325,13 @@ class TestInvocationContextInstaller(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             context_path = os.path.join(directory, "invocation-context")
             key_path = os.path.join(directory, "request-proof-key")
+            sync_path = os.path.join(directory, "workspace-sync-token")
             with mock.patch.multiple(
                 agentcore_wrapper,
                 _AUTHORITY_DIRECTORY=directory,
                 _INVOCATION_CONTEXT_PATH=context_path,
                 _REQUEST_PROOF_KEY_PATH=key_path,
+                _WORKSPACE_SYNC_TOKEN_PATH=sync_path,
             ):
                 self.assertTrue(
                     agentcore_wrapper._install_invocation_authority(
@@ -312,9 +342,15 @@ class TestInvocationContextInstaller(unittest.TestCase):
                 self.assertEqual(context_file.read(), token + "\n")
             with open(key_path, encoding="ascii") as key_file:
                 self.assertEqual(key_file.read(), proof_key + "\n")
+            with open(sync_path, encoding="ascii") as sync_file:
+                self.assertRegex(
+                    sync_file.read().strip(),
+                    r"^[A-Za-z0-9_-]{43}$",
+                )
             self.assertEqual(os.stat(directory).st_mode & 0o777, 0o700)
             self.assertEqual(os.stat(context_path).st_mode & 0o777, 0o600)
             self.assertEqual(os.stat(key_path).st_mode & 0o777, 0o600)
+            self.assertEqual(os.stat(sync_path).st_mode & 0o777, 0o600)
 
     def test_rejects_malformed_authority_and_removes_stale_values(self):
         import os
@@ -323,15 +359,19 @@ class TestInvocationContextInstaller(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             context_path = os.path.join(directory, "invocation-context")
             key_path = os.path.join(directory, "request-proof-key")
+            sync_path = os.path.join(directory, "workspace-sync-token")
             with open(context_path, "w", encoding="ascii") as context_file:
                 context_file.write(f"v1.{'a' * 40}.{'b' * 43}\n")
             with open(key_path, "w", encoding="ascii") as key_file:
                 key_file.write("c" * 43)
+            with open(sync_path, "w", encoding="ascii") as sync_file:
+                sync_file.write("d" * 43)
             with mock.patch.multiple(
                 agentcore_wrapper,
                 _AUTHORITY_DIRECTORY=directory,
                 _INVOCATION_CONTEXT_PATH=context_path,
                 _REQUEST_PROOF_KEY_PATH=key_path,
+                _WORKSPACE_SYNC_TOKEN_PATH=sync_path,
             ):
                 self.assertFalse(
                     agentcore_wrapper._install_invocation_authority(
@@ -340,6 +380,7 @@ class TestInvocationContextInstaller(unittest.TestCase):
                 )
             self.assertFalse(os.path.exists(context_path))
             self.assertFalse(os.path.exists(key_path))
+            self.assertFalse(os.path.exists(sync_path))
 
     def test_revokes_both_authority_files(self):
         import os
@@ -348,19 +389,24 @@ class TestInvocationContextInstaller(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             context_path = os.path.join(directory, "invocation-context")
             key_path = os.path.join(directory, "request-proof-key")
+            sync_path = os.path.join(directory, "workspace-sync-token")
             with open(context_path, "w", encoding="ascii") as context_file:
                 context_file.write("context")
             with open(key_path, "w", encoding="ascii") as key_file:
                 key_file.write("proof")
+            with open(sync_path, "w", encoding="ascii") as sync_file:
+                sync_file.write("sync")
             with mock.patch.multiple(
                 agentcore_wrapper,
                 _AUTHORITY_DIRECTORY=directory,
                 _INVOCATION_CONTEXT_PATH=context_path,
                 _REQUEST_PROOF_KEY_PATH=key_path,
+                _WORKSPACE_SYNC_TOKEN_PATH=sync_path,
             ):
                 agentcore_wrapper._revoke_invocation_authority()
             self.assertFalse(os.path.exists(context_path))
             self.assertFalse(os.path.exists(key_path))
+            self.assertFalse(os.path.exists(sync_path))
 
     def test_image_keeps_wrapper_and_relay_immutable_to_model_uid(self):
         from pathlib import Path
@@ -461,16 +507,178 @@ class TestSerializedInvocationSignature(unittest.TestCase):
         async def drive():
             return [e async for e in wrapped({"p": 1}, "ctx")]
 
-        events = asyncio.run(drive())
+        with mock.patch.object(
+            agentcore_wrapper,
+            "_finalize_invocation_authority",
+            new=mock.AsyncMock(return_value=True),
+        ):
+            events = asyncio.run(drive())
         self.assertEqual(seen["payload"], {"p": 1})
         self.assertEqual(seen["context"], "ctx")
-        self.assertEqual(events, [{"result": "ok"}])
+        self.assertEqual(events, [{
+            "result": "ok",
+            "metadata": {"workspace_finalization_confirmed": True},
+        }])
 
 
 class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
-    def test_privileged_drain_outlives_render_without_expanding_flush_budget(self):
+    def test_finalization_budgets_keep_interactive_drain_bounded(self):
         self.assertEqual(agentcore_wrapper.FINAL_WORKSPACE_FLUSH_SECONDS, 120)
-        self.assertEqual(agentcore_wrapper.PROXY_FINALIZATION_DRAIN_SECONDS, 830)
+        self.assertEqual(
+            agentcore_wrapper.INTERACTIVE_PROXY_FINALIZATION_DRAIN_SECONDS,
+            15,
+        )
+        self.assertEqual(
+            agentcore_wrapper.LONG_JOB_PROXY_FINALIZATION_DRAIN_SECONDS,
+            830,
+        )
+        self.assertEqual(
+            agentcore_wrapper._resolve_proxy_finalization_drain_seconds({}),
+            15,
+        )
+        self.assertEqual(
+            agentcore_wrapper._resolve_proxy_finalization_drain_seconds(
+                {"deadline_s": 550}
+            ),
+            15,
+        )
+        self.assertEqual(
+            agentcore_wrapper._resolve_proxy_finalization_drain_seconds(
+                {"deadline_s": 600}
+            ),
+            15,
+        )
+        self.assertEqual(
+            agentcore_wrapper._resolve_proxy_finalization_drain_seconds(
+                {"deadline_s": "not-a-number"}
+            ),
+            15,
+        )
+        self.assertEqual(
+            agentcore_wrapper._resolve_proxy_finalization_drain_seconds(
+                {"deadline_s": 7200}
+            ),
+            830,
+        )
+
+    def test_interactive_drain_http_client_wait_is_twenty_seconds(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.status = 200
+        with mock.patch(
+            "urllib.request.urlopen",
+            return_value=response,
+        ) as urlopen:
+            agentcore_wrapper._set_proxy_finalization(
+                "begin",
+                "flush-token",
+                agentcore_wrapper.INTERACTIVE_PROXY_FINALIZATION_DRAIN_SECONDS,
+            )
+
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 20)
+
+    async def test_serialized_interactive_turn_passes_short_drain(self):
+        async def invocation(payload):
+            yield {"result": payload["result"]}
+
+        serialized = agentcore_wrapper._serialize_invocations(invocation)
+        with mock.patch.object(
+            agentcore_wrapper,
+            "_finalize_invocation_authority",
+            new=mock.AsyncMock(return_value=True),
+        ) as finalize:
+            events = [
+                event
+                async for event in serialized({"result": "interactive"})
+            ]
+
+        self.assertEqual(events[0]["result"], "interactive")
+        finalize.assert_awaited_once_with(15)
+
+    async def test_serialized_long_job_retains_full_drain(self):
+        async def invocation(payload):
+            yield {"result": payload["result"]}
+
+        serialized = agentcore_wrapper._serialize_invocations(invocation)
+        with mock.patch.object(
+            agentcore_wrapper,
+            "_finalize_invocation_authority",
+            new=mock.AsyncMock(return_value=True),
+        ) as finalize:
+            events = [
+                event
+                async for event in serialized({
+                    "result": "job",
+                    "deadline_s": 7200,
+                })
+            ]
+
+        self.assertEqual(events[0]["result"], "job")
+        finalize.assert_awaited_once_with(830)
+
+    async def test_terminal_success_is_withheld_when_workspace_flush_fails(self):
+        async def invocation():
+            yield {"result": "model said done", "metadata": {"model": "test"}}
+
+        serialized = agentcore_wrapper._serialize_invocations(invocation)
+        with mock.patch.object(
+            agentcore_wrapper,
+            "_finalize_invocation_authority",
+            new=mock.AsyncMock(return_value=False),
+        ):
+            events = [event async for event in serialized()]
+
+        self.assertEqual(len(events), 1)
+        self.assertNotEqual(events[0]["result"], "model said done")
+        self.assertEqual(
+            events[0]["metadata"],
+            {
+                "model": "test",
+                "workspace_finalization_confirmed": False,
+                "failed": True,
+                "error_class": "WorkspaceFinalizationFailed",
+            },
+        )
+
+    async def test_gateway_quiescence_failure_suppresses_workspace_snapshot(self):
+        with mock.patch.multiple(
+            agentcore_wrapper,
+            _current_workspace_prefix="owner-prefix",
+            _workspace_prefix_hydrated=True,
+            _workspace_turn_writable=True,
+            _workspace_local_clean=False,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_install_workspace_flush_lock",
+            return_value="f" * 43,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_remove_workspace_flush_lock",
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_revoke_invocation_authority",
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_set_proxy_finalization",
+        ), mock.patch.object(
+            agentcore_wrapper.adapter,
+            "shutdown",
+            side_effect=RuntimeError(
+                "OpenClaw process group did not become quiescent"
+            ),
+        ), mock.patch.object(
+            agentcore_wrapper.workspace_sync,
+            "prepare_sqlite_snapshot",
+        ) as prepare, mock.patch.object(
+            agentcore_wrapper.workspace_sync,
+            "push_workspace",
+        ) as push:
+            finalized = (
+                await agentcore_wrapper._finalize_invocation_authority()
+            )
+
+        self.assertFalse(finalized)
+        prepare.assert_not_called()
+        push.assert_not_called()
 
     async def test_second_drain_failure_restarts_stuck_proxy_again(self):
         import os
@@ -479,8 +687,9 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             context_path = os.path.join(directory, "invocation-context")
             key_path = os.path.join(directory, "request-proof-key")
+            sync_path = os.path.join(directory, "workspace-sync-token")
             flush_path = os.path.join(directory, "workspace-flush-token")
-            for path in (context_path, key_path):
+            for path in (context_path, key_path, sync_path):
                 with open(path, "w", encoding="ascii") as authority_file:
                     authority_file.write("authority")
 
@@ -489,6 +698,7 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
                 _AUTHORITY_DIRECTORY=directory,
                 _INVOCATION_CONTEXT_PATH=context_path,
                 _REQUEST_PROOF_KEY_PATH=key_path,
+                _WORKSPACE_SYNC_TOKEN_PATH=sync_path,
                 _WORKSPACE_FLUSH_TOKEN_PATH=flush_path,
                 _current_workspace_prefix=None,
             ), mock.patch.object(
@@ -501,11 +711,147 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
             ) as restart:
                 await agentcore_wrapper._finalize_invocation_authority()
 
-            self.assertEqual(transition.call_count, 2)
-            self.assertEqual(restart.call_count, 2)
+            self.assertEqual(transition.call_count, 3)
+            self.assertEqual(
+                [call.args[0] for call in transition.call_args_list],
+                ["begin", "begin", "end"],
+            )
+            self.assertEqual(restart.call_count, 3)
             self.assertFalse(os.path.exists(context_path))
             self.assertFalse(os.path.exists(key_path))
+            self.assertFalse(os.path.exists(sync_path))
             self.assertFalse(os.path.exists(flush_path))
+
+    async def test_stale_flush_lock_is_removed_before_open_proxy_restart(self):
+        events = []
+        with mock.patch.multiple(
+            agentcore_wrapper,
+            _current_workspace_prefix=None,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_install_workspace_flush_lock",
+            side_effect=RuntimeError("workspace finalization is already active"),
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_remove_workspace_flush_lock",
+            side_effect=lambda: events.append("remove"),
+        ) as remove, mock.patch.object(
+            agentcore_wrapper,
+            "_restart_mantle_proxy",
+            side_effect=lambda: events.append("restart"),
+        ) as restart, mock.patch.object(
+            agentcore_wrapper,
+            "_revoke_invocation_authority",
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_set_proxy_finalization",
+        ) as transition, mock.patch.object(
+            agentcore_wrapper.adapter,
+            "shutdown",
+        ) as shutdown:
+            self.assertFalse(
+                await agentcore_wrapper._finalize_invocation_authority()
+            )
+
+        self.assertEqual(events, ["remove", "restart"])
+        remove.assert_called_once_with()
+        restart.assert_called_once_with()
+        transition.assert_not_called()
+        shutdown.assert_not_called()
+
+    async def test_replacement_proxy_is_reopened_after_end_failure(self):
+        transitions = []
+        end_attempts = 0
+
+        def transition(action, _token, _drain_seconds=15):
+            nonlocal end_attempts
+            transitions.append(action)
+            if action == "end":
+                end_attempts += 1
+                if end_attempts == 1:
+                    raise RuntimeError("old proxy disappeared")
+
+        with mock.patch.multiple(
+            agentcore_wrapper,
+            _current_workspace_prefix=None,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_install_workspace_flush_lock",
+            return_value="f" * 43,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_remove_workspace_flush_lock",
+        ) as remove_lock, mock.patch.object(
+            agentcore_wrapper,
+            "_revoke_invocation_authority",
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_set_proxy_finalization",
+            side_effect=transition,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_restart_mantle_proxy",
+        ) as restart, mock.patch.object(
+            agentcore_wrapper.adapter,
+            "shutdown",
+        ):
+            self.assertTrue(
+                await agentcore_wrapper._finalize_invocation_authority()
+            )
+
+        self.assertEqual(transitions, ["begin", "end", "end"])
+        restart.assert_called_once_with()
+        remove_lock.assert_called_once_with()
+
+    async def test_double_end_failure_restarts_open_after_token_removal(self):
+        events = []
+
+        def transition(action, _token, _drain_seconds=15):
+            events.append(action)
+            if action == "end":
+                raise RuntimeError("proxy reopen failed")
+
+        with mock.patch.multiple(
+            agentcore_wrapper,
+            _current_workspace_prefix=None,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_install_workspace_flush_lock",
+            return_value="f" * 43,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_remove_workspace_flush_lock",
+            side_effect=lambda: events.append("remove-token"),
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_revoke_invocation_authority",
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_set_proxy_finalization",
+            side_effect=transition,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_restart_mantle_proxy",
+            side_effect=lambda: events.append("restart"),
+        ), mock.patch.object(
+            agentcore_wrapper.adapter,
+            "shutdown",
+        ):
+            self.assertTrue(
+                await agentcore_wrapper._finalize_invocation_authority()
+            )
+
+        self.assertEqual(
+            events,
+            [
+                "begin",
+                "end",
+                "restart",
+                "end",
+                "remove-token",
+                "restart",
+            ],
+        )
 
     async def test_post_turn_relay_authority_is_gone_after_final_push(self):
         import os
@@ -514,11 +860,14 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             context_path = os.path.join(directory, "invocation-context")
             key_path = os.path.join(directory, "request-proof-key")
+            sync_path = os.path.join(directory, "workspace-sync-token")
             flush_path = os.path.join(directory, "workspace-flush-token")
             with open(context_path, "w", encoding="ascii") as context_file:
                 context_file.write("context")
             with open(key_path, "w", encoding="ascii") as key_file:
                 key_file.write("proof")
+            with open(sync_path, "w", encoding="ascii") as sync_file:
+                sync_file.write("s" * 43)
 
             async def invocation():
                 yield {"type": "start"}
@@ -530,9 +879,12 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
                 _AUTHORITY_DIRECTORY=directory,
                 _INVOCATION_CONTEXT_PATH=context_path,
                 _REQUEST_PROOF_KEY_PATH=key_path,
+                _WORKSPACE_SYNC_TOKEN_PATH=sync_path,
                 _WORKSPACE_FLUSH_TOKEN_PATH=flush_path,
                 _current_workspace_prefix="owner-prefix",
                 _workspace_prefix_hydrated=True,
+                _workspace_turn_writable=True,
+                _workspace_local_clean=False,
             ), mock.patch.object(
                 agentcore_wrapper.workspace_sync,
                 "push_workspace",
@@ -551,7 +903,15 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
                 stream = serialized()
                 self.assertEqual(await anext(stream), {"type": "start"})
                 self.assertTrue(os.path.exists(context_path))
-                self.assertEqual(await anext(stream), {"result": "done"})
+                self.assertEqual(
+                    await anext(stream),
+                    {
+                        "result": "done",
+                        "metadata": {
+                            "workspace_finalization_confirmed": True
+                        },
+                    },
+                )
                 self.assertFalse(os.path.exists(context_path))
                 self.assertFalse(os.path.exists(key_path))
                 self.assertFalse(os.path.exists(flush_path))
@@ -565,12 +925,14 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
                 push.call_args.kwargs["deadline_monotonic"],
                 agentcore_wrapper.time.monotonic(),
             )
+            self.assertTrue(push.call_args.kwargs["require_generation"])
             self.assertEqual(
                 [call.args[0] for call in transition.call_args_list],
                 ["begin", "end"],
             )
             self.assertFalse(os.path.exists(context_path))
             self.assertFalse(os.path.exists(key_path))
+            self.assertFalse(os.path.exists(sync_path))
 
     async def test_client_disconnect_still_revokes_authority(self):
         import os
@@ -579,8 +941,9 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             context_path = os.path.join(directory, "invocation-context")
             key_path = os.path.join(directory, "request-proof-key")
+            sync_path = os.path.join(directory, "workspace-sync-token")
             flush_path = os.path.join(directory, "workspace-flush-token")
-            for path in (context_path, key_path):
+            for path in (context_path, key_path, sync_path):
                 with open(path, "w", encoding="ascii") as authority_file:
                     authority_file.write("authority")
 
@@ -594,6 +957,7 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
                 _AUTHORITY_DIRECTORY=directory,
                 _INVOCATION_CONTEXT_PATH=context_path,
                 _REQUEST_PROOF_KEY_PATH=key_path,
+                _WORKSPACE_SYNC_TOKEN_PATH=sync_path,
                 _WORKSPACE_FLUSH_TOKEN_PATH=flush_path,
                 _current_workspace_prefix="owner-prefix",
                 _workspace_prefix_hydrated=True,
@@ -729,6 +1093,319 @@ class TestWorkspacePrefixBinding(unittest.TestCase):
             "owner-a",
         )
         self.assertTrue(agentcore_wrapper._workspace_prefix_hydrated)
+
+    def test_failed_warm_restore_disables_push_and_forces_exact_rehydrate(self):
+        with mock.patch.object(
+            agentcore_wrapper.workspace_sync,
+            "invalidate_local_workspace",
+        ) as invalidate, mock.patch.multiple(
+            agentcore_wrapper,
+            _workspace_prefix_hydrated=True,
+            _workspace_turn_writable=True,
+            _workspace_local_clean=False,
+        ):
+            agentcore_wrapper._fail_closed_workspace_after_restore_error(
+                "owner-prefix"
+            )
+            self.assertFalse(
+                agentcore_wrapper._workspace_prefix_hydrated
+            )
+            self.assertFalse(agentcore_wrapper._workspace_turn_writable)
+            self.assertFalse(agentcore_wrapper._workspace_local_clean)
+        invalidate.assert_called_once_with("owner-prefix")
+
+
+class TestShutdownFinalization(unittest.TestCase):
+    def test_active_dirty_shutdown_attempt_drains_before_push_and_cleans_up(self):
+        events = []
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.terminate.side_effect = lambda: events.append("terminate")
+        process.wait.side_effect = lambda **_kwargs: events.append("wait")
+
+        with mock.patch.multiple(
+            agentcore_wrapper,
+            _shutdown_started=False,
+            _current_workspace_prefix="owner-prefix",
+            _workspace_prefix_hydrated=True,
+            _workspace_turn_writable=True,
+            _workspace_local_clean=False,
+            _mantle_proxy_process=process,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_install_workspace_flush_lock",
+            side_effect=lambda: events.append("install") or "f" * 43,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_set_proxy_finalization",
+            side_effect=lambda action, *_args: events.append(action),
+        ), mock.patch.object(
+            agentcore_wrapper.adapter,
+            "shutdown",
+            side_effect=lambda: events.append("shutdown"),
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_invocation_authority_is_installed",
+            return_value=True,
+        ), mock.patch.object(
+            agentcore_wrapper.workspace_sync,
+            "prepare_sqlite_snapshot",
+            side_effect=lambda: events.append("prepare"),
+        ), mock.patch.object(
+            agentcore_wrapper.workspace_sync,
+            "workspace_generation",
+            return_value="a" * 64,
+        ), mock.patch.object(
+            agentcore_wrapper.workspace_sync,
+            "push_workspace",
+            side_effect=lambda *_args, **_kwargs: events.append("push"),
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_revoke_invocation_authority",
+            side_effect=lambda: events.append("revoke"),
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_remove_workspace_flush_lock",
+            side_effect=lambda: events.append("remove"),
+        ), mock.patch.object(
+            agentcore_wrapper.sys,
+            "exit",
+            side_effect=SystemExit(0),
+        ):
+            with self.assertRaises(SystemExit):
+                agentcore_wrapper.handle_shutdown(15, None)
+            self.assertTrue(agentcore_wrapper._workspace_local_clean)
+            self.assertFalse(agentcore_wrapper._workspace_turn_writable)
+
+        self.assertEqual(
+            events,
+            [
+                "install",
+                "begin",
+                "shutdown",
+                "prepare",
+                "push",
+                "revoke",
+                "terminate",
+                "wait",
+                "remove",
+            ],
+        )
+
+    def test_shutdown_restarts_after_first_drain_failure_then_pushes(self):
+        events = []
+        begin_attempts = 0
+
+        def transition(action, *_args):
+            nonlocal begin_attempts
+            events.append(action)
+            begin_attempts += 1
+            if begin_attempts == 1:
+                raise RuntimeError("old proxy stuck")
+
+        with mock.patch.multiple(
+            agentcore_wrapper,
+            _shutdown_started=False,
+            _current_workspace_prefix="owner-prefix",
+            _workspace_prefix_hydrated=True,
+            _workspace_turn_writable=True,
+            _workspace_local_clean=False,
+            _mantle_proxy_process=None,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_install_workspace_flush_lock",
+            side_effect=lambda: events.append("install") or "f" * 43,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_set_proxy_finalization",
+            side_effect=transition,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_restart_mantle_proxy",
+            side_effect=lambda: events.append("restart"),
+        ), mock.patch.object(
+            agentcore_wrapper.adapter,
+            "shutdown",
+            side_effect=lambda: events.append("shutdown"),
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_invocation_authority_is_installed",
+            return_value=True,
+        ), mock.patch.object(
+            agentcore_wrapper.workspace_sync,
+            "prepare_sqlite_snapshot",
+            side_effect=lambda: events.append("prepare"),
+        ), mock.patch.object(
+            agentcore_wrapper.workspace_sync,
+            "workspace_generation",
+            return_value="a" * 64,
+        ), mock.patch.object(
+            agentcore_wrapper.workspace_sync,
+            "push_workspace",
+            side_effect=lambda *_args, **_kwargs: events.append("push"),
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_revoke_invocation_authority",
+            side_effect=lambda: events.append("revoke"),
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_remove_workspace_flush_lock",
+            side_effect=lambda: events.append("remove"),
+        ), mock.patch.object(
+            agentcore_wrapper.sys,
+            "exit",
+            side_effect=SystemExit(0),
+        ):
+            with self.assertRaises(SystemExit):
+                agentcore_wrapper.handle_shutdown(15, None)
+
+        self.assertEqual(
+            events,
+            [
+                "install",
+                "begin",
+                "restart",
+                "begin",
+                "shutdown",
+                "prepare",
+                "push",
+                "revoke",
+                "remove",
+            ],
+        )
+
+    def test_shutdown_second_drain_failure_suppresses_push(self):
+        with mock.patch.multiple(
+            agentcore_wrapper,
+            _shutdown_started=False,
+            _current_workspace_prefix="owner-prefix",
+            _workspace_prefix_hydrated=True,
+            _workspace_turn_writable=True,
+            _workspace_local_clean=False,
+            _mantle_proxy_process=None,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_install_workspace_flush_lock",
+            return_value="f" * 43,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_set_proxy_finalization",
+            side_effect=RuntimeError("still stuck"),
+        ) as transition, mock.patch.object(
+            agentcore_wrapper,
+            "_restart_mantle_proxy",
+        ) as restart, mock.patch.object(
+            agentcore_wrapper.adapter,
+            "shutdown",
+        ), mock.patch.object(
+            agentcore_wrapper.workspace_sync,
+            "push_workspace",
+        ) as push, mock.patch.object(
+            agentcore_wrapper,
+            "_remove_workspace_flush_lock",
+        ) as remove, mock.patch.object(
+            agentcore_wrapper.sys,
+            "exit",
+            side_effect=SystemExit(0),
+        ):
+            with self.assertRaises(SystemExit):
+                agentcore_wrapper.handle_shutdown(15, None)
+
+        self.assertEqual(transition.call_count, 2)
+        restart.assert_called_once_with()
+        push.assert_not_called()
+        remove.assert_called_once_with()
+
+    def test_gate_failure_suppresses_shutdown_push(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        with mock.patch.multiple(
+            agentcore_wrapper,
+            _shutdown_started=False,
+            _current_workspace_prefix="owner-prefix",
+            _workspace_prefix_hydrated=True,
+            _workspace_turn_writable=True,
+            _workspace_local_clean=False,
+            _mantle_proxy_process=process,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_install_workspace_flush_lock",
+            side_effect=RuntimeError("already finalizing"),
+        ), mock.patch.object(
+            agentcore_wrapper.adapter,
+            "shutdown",
+        ) as shutdown, mock.patch.object(
+            agentcore_wrapper.workspace_sync,
+            "push_workspace",
+        ) as push, mock.patch.object(
+            agentcore_wrapper,
+            "_remove_workspace_flush_lock",
+        ) as remove, mock.patch.object(
+            agentcore_wrapper.sys,
+            "exit",
+            side_effect=SystemExit(0),
+        ):
+            with self.assertRaises(SystemExit):
+                agentcore_wrapper.handle_shutdown(15, None)
+
+        shutdown.assert_called_once_with()
+        push.assert_not_called()
+        remove.assert_not_called()
+        process.terminate.assert_called_once_with()
+
+    def test_preexisting_flush_token_is_not_clobbered(self):
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            flush_path = os.path.join(directory, "workspace-flush-token")
+            with open(flush_path, "w", encoding="ascii") as handle:
+                handle.write("existing-owner\n")
+            with mock.patch.multiple(
+                agentcore_wrapper,
+                _AUTHORITY_DIRECTORY=directory,
+                _WORKSPACE_FLUSH_TOKEN_PATH=flush_path,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "already active",
+                ):
+                    agentcore_wrapper._install_workspace_flush_lock()
+            with open(flush_path, encoding="ascii") as handle:
+                self.assertEqual(handle.read(), "existing-owner\n")
+
+    def test_clean_idle_shutdown_never_pushes(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        with mock.patch.multiple(
+            agentcore_wrapper,
+            _shutdown_started=False,
+            _current_workspace_prefix="owner-prefix",
+            _workspace_prefix_hydrated=True,
+            _workspace_turn_writable=False,
+            _workspace_local_clean=True,
+            _mantle_proxy_process=process,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_install_workspace_flush_lock",
+            return_value="f" * 43,
+        ), mock.patch.object(
+            agentcore_wrapper,
+            "_set_proxy_finalization",
+        ), mock.patch.object(
+            agentcore_wrapper.adapter,
+            "shutdown",
+        ), mock.patch.object(
+            agentcore_wrapper.workspace_sync,
+            "push_workspace",
+        ) as push, mock.patch.object(
+            agentcore_wrapper.sys,
+            "exit",
+            side_effect=SystemExit(0),
+        ):
+            with self.assertRaises(SystemExit):
+                agentcore_wrapper.handle_shutdown(15, None)
+        push.assert_not_called()
 
 
 class SafeHeaderValueTests(unittest.TestCase):
@@ -995,6 +1672,102 @@ class TestPullFiles(unittest.TestCase):
         )
         self.assertEqual(pulled, 0)
         self.assertEqual(downloaded, [])
+
+    def test_literal_attachment_install_replaces_parent_and_leaf_symlinks(self):
+        import io
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        import workspace_sync
+
+        class FakeResponse(io.BytesIO):
+            def __init__(self, body):
+                super().__init__(body)
+                self.headers = {"Content-Length": str(len(body))}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                self.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace = base / "workspace"
+            workspace.mkdir()
+            outside = base / "outside"
+            outside.mkdir()
+            sentinel = outside / "sentinel"
+            sentinel.write_bytes(b"outside")
+            (workspace / "attachments").symlink_to(
+                outside,
+                target_is_directory=True,
+            )
+
+            bodies = {
+                "attachments/parent-link.pdf": b"parent",
+                "attachments/leaf-link.pdf": b"leaf",
+            }
+
+            def download_spec(relative):
+                body = bodies[relative]
+                return (
+                    f"https://download.invalid/{relative}",
+                    len(body),
+                    {"Range": f"bytes=0-{len(body) - 1}"},
+                )
+
+            def open_download(request, **_kwargs):
+                relative = request.full_url.removeprefix(
+                    "https://download.invalid/"
+                )
+                return FakeResponse(bodies[relative])
+
+            with mock.patch.object(
+                workspace_sync,
+                "WORKSPACE_DIR",
+                workspace,
+            ), mock.patch.object(
+                workspace_sync,
+                "_download_spec",
+                side_effect=download_spec,
+            ), mock.patch.object(
+                workspace_sync.urllib.request,
+                "urlopen",
+                side_effect=open_download,
+            ):
+                self.assertEqual(
+                    workspace_sync.pull_files(
+                        "user-prefix",
+                        ["attachments/parent-link.pdf"],
+                    ),
+                    1,
+                )
+                (workspace / "attachments" / "leaf-link.pdf").symlink_to(
+                    sentinel
+                )
+                self.assertEqual(
+                    workspace_sync.pull_files(
+                        "user-prefix",
+                        ["attachments/leaf-link.pdf"],
+                    ),
+                    1,
+                )
+
+            self.assertFalse((workspace / "attachments").is_symlink())
+            self.assertEqual(
+                (workspace / "attachments" / "parent-link.pdf").read_bytes(),
+                b"parent",
+            )
+            self.assertFalse(
+                (workspace / "attachments" / "leaf-link.pdf").is_symlink()
+            )
+            self.assertEqual(
+                (workspace / "attachments" / "leaf-link.pdf").read_bytes(),
+                b"leaf",
+            )
+            self.assertEqual(sentinel.read_bytes(), b"outside")
 
     def test_empty_prefix_is_a_noop(self):
         import workspace_sync

@@ -1,9 +1,12 @@
 /**
  * Scheduled-task deadline ordering.
  *
- * Three clocks bound a scheduled turn and they must fire in this order:
+ * Four clocks bound a scheduled turn and they must fire in this order:
  *
- *   harness turn deadline  <  fetch abort  <  Lambda timeout (900s hard max)
+ *   harness turn deadline
+ *     < final workspace persistence
+ *     < fetch abort
+ *     < Lambda timeout (900s hard max)
  *
  * When that ordering inverts, the outer layer kills a turn the inner layer was
  * about to complete, and the owner gets an error instead of an answer.
@@ -20,17 +23,53 @@
  */
 
 import {
+  DEADLINE_ORDERING_GUARD_S,
+  GATEWAY_SHUTDOWN_MAX_S,
   HARNESS_DEADLINE_MAX_S,
   HARNESS_DEADLINE_MIN_S,
+  HARNESS_LEAD_S,
+  INTERACTIVE_PROXY_DRAIN_CLIENT_MAX_S,
+  PROXY_RESTART_MAX_S,
   REPLY_RESERVE_MS,
+  STARTUP_RESERVE_S,
+  WORKSPACE_FINALIZATION_BOUNDED_MAX_S,
+  WORKSPACE_FINALIZATION_RESERVE_S,
+  WORKSPACE_FLUSH_MAX_S,
   resolveAbortMs,
   resolveTurnDeadlineS,
 } from "../../infra/lambdas/agent-cron/turn-deadline"
+import {
+  createScheduledInvocationContextToken,
+  SCHEDULED_INVOCATION_CONTEXT_TTL_S,
+} from "../../infra/lambdas/agent-cron/invocation-context"
 
 /** AWS hard ceiling for Lambda, and what the cron function is configured to. */
 const LAMBDA_MAX_MS = 900_000
 
 describe("scheduled-task turn deadline", () => {
+  it("keeps scheduled broker authority alive through finalization", () => {
+    const token = createScheduledInvocationContextToken(
+      "0123456789abcdef0123456789abcdef",
+      {
+        ownerEmail: "owner@psd401.net",
+        sessionId: "scheduled-session",
+        workspacePrefix: "owner-a1b2c3d4",
+      },
+      { nowSeconds: 100, nonce: "scheduled-authority" }
+    )
+    const claims = JSON.parse(
+      Buffer.from(token.split(".")[1]!, "base64url").toString("utf8")
+    ) as { issuedAt: number; expiresAt: number }
+    const lifetime = claims.expiresAt - claims.issuedAt
+
+    expect(lifetime).toBe(SCHEDULED_INVOCATION_CONTEXT_TTL_S)
+    expect(lifetime).toBeGreaterThanOrEqual(
+      STARTUP_RESERVE_S
+      + HARNESS_DEADLINE_MAX_S
+      + WORKSPACE_FINALIZATION_BOUNDED_MAX_S
+    )
+  })
+
   it("keeps harness deadline < abort < remaining time", () => {
     // The core invariant, checked across the whole plausible range of
     // remaining-time values rather than at one convenient point.
@@ -54,6 +93,44 @@ describe("scheduled-task turn deadline", () => {
     // Without this the Lambda dies mid-post and the owner gets silence rather
     // than a failure message.
     expect(resolveAbortMs(LAMBDA_MAX_MS)).toBe(LAMBDA_MAX_MS - REPLY_RESERVE_MS)
+  })
+
+  it("reserves the wrapper's complete final workspace persistence budget", () => {
+    expect(WORKSPACE_FINALIZATION_RESERVE_S).toBeGreaterThanOrEqual(200)
+    for (const remainingMs of [LAMBDA_MAX_MS, 880_000, 800_000, 600_000]) {
+      const deadlineMs = resolveTurnDeadlineS(remainingMs) * 1000
+      const finalizationMs = WORKSPACE_FINALIZATION_RESERVE_S * 1000
+      const startupMs = STARTUP_RESERVE_S * 1000
+      const harnessLeadMs = HARNESS_LEAD_S * 1000
+
+      expect(
+        startupMs + deadlineMs + harnessLeadMs + finalizationMs,
+      ).toBeLessThan(
+        resolveAbortMs(remainingMs),
+      )
+    }
+  })
+
+  it("uses the true bounded interactive finalization maximum", () => {
+    expect(WORKSPACE_FINALIZATION_BOUNDED_MAX_S).toBe(
+      INTERACTIVE_PROXY_DRAIN_CLIENT_MAX_S
+        + PROXY_RESTART_MAX_S
+        + GATEWAY_SHUTDOWN_MAX_S
+        + WORKSPACE_FLUSH_MAX_S,
+    )
+    expect(WORKSPACE_FINALIZATION_BOUNDED_MAX_S).toBe(200)
+    expect(WORKSPACE_FINALIZATION_RESERVE_S).toBeGreaterThanOrEqual(
+      WORKSPACE_FINALIZATION_BOUNDED_MAX_S,
+    )
+
+    const completeLambdaBudgetS =
+      STARTUP_RESERVE_S
+      + HARNESS_DEADLINE_MAX_S
+      + HARNESS_LEAD_S
+      + WORKSPACE_FINALIZATION_BOUNDED_MAX_S
+      + REPLY_RESERVE_MS / 1000
+      + DEADLINE_ORDERING_GUARD_S
+    expect(completeLambdaBudgetS).toBeLessThan(LAMBDA_MAX_MS / 1000)
   })
 
   it("would have let the 2026-07-27 dispatch report a partial", () => {
@@ -82,7 +159,7 @@ describe("scheduled-task turn deadline", () => {
   })
 
   it("respects the harness clamp so the value is not silently rewritten", () => {
-    // harness_adapter.py clamps to [60, 840] for a non-job turn; sending
+    // harness_adapter.py clamps to [60, 550] for a non-job turn; sending
     // anything outside that range means the deadline we reasoned about is not
     // the deadline in force.
     for (const remainingMs of [LAMBDA_MAX_MS, 500_000, 200_000, 95_000]) {

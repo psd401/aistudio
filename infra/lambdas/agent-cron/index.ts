@@ -80,6 +80,11 @@ import {
   type LockedJobResult,
 } from './job-lock';
 import {
+  ownerRuntimeSessionId,
+  ownerWorkspaceLockId,
+  scheduledConversationSessionId,
+} from './workspace-identity';
+import {
   createPromotedRun,
   createRunTelemetry,
   isPromotedRunPending,
@@ -222,6 +227,7 @@ const AGENT_INVOCATION_SIGNING_SECRET_ID =
   process.env.AGENT_INVOCATION_SIGNING_SECRET_ID || '';
 const SESSION_LOCKS_TABLE = process.env.SESSION_LOCKS_TABLE || '';
 const JOB_CONTAINER_NAME = process.env.JOB_CONTAINER_NAME || 'job-runner';
+const ROUTER_QUEUE_URL = process.env.ROUTER_QUEUE_URL || '';
 const SCHEDULE_RECONCILIATION_QUEUE_URL =
   process.env.SCHEDULE_RECONCILIATION_QUEUE_URL || '';
 
@@ -261,6 +267,11 @@ interface InvokeResult {
   inputTokens: number;
   outputTokens: number;
   ok: boolean;
+  /**
+   * True when deleting the lock is safe: either no runtime call started, or
+   * terminal metadata explicitly proved final workspace shutdown and push.
+   */
+  workspaceFinalizationConfirmed: boolean;
   /**
    * Harness error class from the response metadata, when the turn failed.
    *
@@ -447,8 +458,17 @@ async function consumeAgentCoreStream(
   return lastResultEvent;
 }
 
-function invokeFailure(response: string): InvokeResult {
-  return { response, inputTokens: 0, outputTokens: 0, ok: false };
+function invokeFailure(
+  response: string,
+  workspaceFinalizationConfirmed = false,
+): InvokeResult {
+  return {
+    response,
+    inputTokens: 0,
+    outputTokens: 0,
+    ok: false,
+    workspaceFinalizationConfirmed,
+  };
 }
 
 function resolveAgentCoreRuntimeArn(
@@ -466,6 +486,7 @@ function resolveAgentCoreRuntimeArn(
     return {
       failure: invokeFailure(
         'Agent configuration error — missing AWS account ID.',
+        true,
       ),
     };
   }
@@ -479,7 +500,11 @@ async function createAgentCoreRequest(options: {
   prompt: string;
   userEmail: string;
   sessionId: string;
-  userContext: { displayName?: string; workspacePrefix?: string };
+  userContext: {
+    displayName?: string;
+    workspacePrefix?: string;
+    conversationSessionId?: string;
+  };
   remainingMs: () => number;
 }): Promise<HttpRequest> {
   const {
@@ -519,12 +544,15 @@ async function createAgentCoreRequest(options: {
       user_email: userEmail,
       user_display_name: userContext.displayName ?? '',
       workspace_prefix: userContext.workspacePrefix ?? '',
+      ...(userContext.conversationSessionId
+        ? { conversation_session_id: userContext.conversationSessionId }
+        : {}),
       invocation_context: invocationContext,
       invocation_request_proof_key: deriveScheduledRequestProofKey(
         invocationSecret,
         invocationContext,
       ),
-      // Without this the harness falls back to its fixed 840s default, which is
+      // Without this the harness falls back to its fixed 550s default, which is
       // measured from a later start than our abort and so can never fire first.
       deadline_s: turnDeadlineS,
       source: 'scheduled',
@@ -581,11 +609,14 @@ function toInvokeResult(responseBody: Record<string, unknown>): InvokeResult {
   const result = typeof rawResult === 'string' && rawResult.length > 0
     ? rawResult
     : 'No response from agent.';
-  const ok = typeof rawResult === 'string' && rawResult.length > 0;
   const metadata =
     responseBody.metadata && typeof responseBody.metadata === 'object'
       ? (responseBody.metadata as Record<string, unknown>)
       : {};
+  const ok =
+    typeof rawResult === 'string' &&
+    rawResult.length > 0 &&
+    metadata.failed !== true;
   const errorClass =
     typeof metadata.error_class === 'string' && metadata.error_class
       ? metadata.error_class
@@ -598,7 +629,13 @@ function toInvokeResult(responseBody: Record<string, unknown>): InvokeResult {
       typeof metadata.output_tokens === 'number' ? metadata.output_tokens : 0,
     ok,
     errorClass,
+    workspaceFinalizationConfirmed:
+      metadata.workspace_finalization_confirmed === true,
   };
+}
+
+function shouldRetainScheduledTurnLock(result: InvokeResult): boolean {
+  return !result.workspaceFinalizationConfirmed;
 }
 
 interface AgentCoreInvocation {
@@ -606,7 +643,11 @@ interface AgentCoreInvocation {
   userEmail: string;
   sessionId: string;
   log: Logger;
-  userContext: { displayName?: string; workspacePrefix?: string };
+  userContext: {
+    displayName?: string;
+    workspacePrefix?: string;
+    conversationSessionId?: string;
+  };
   remainingMs: () => number;
 }
 
@@ -623,7 +664,7 @@ async function invokeAgentCore(
   } = invocation;
   const runtimeId = await getRuntimeId(log);
   if (!runtimeId) {
-    return invokeFailure('Agent is not yet deployed.');
+    return invokeFailure('Agent is not yet deployed.', true);
   }
 
   const invokeStart = Date.now();
@@ -689,7 +730,12 @@ async function invokeAgentCore(
  * agent_failures, then falls back to posting the partial response.
  */
 interface ScheduledJobInput {
+  /** Build-rotated AgentCore runtime affinity. */
   sessionId: string;
+  /** Deployment-stable owner workspace mutex shared with interactive turns. */
+  workspaceLockId: string;
+  /** Schedule/day-scoped OpenClaw transcript identity. */
+  conversationSessionId: string;
   scheduleId: string;
   runtimeId: string;
   userEmail: string;
@@ -960,6 +1006,8 @@ async function launchScheduledJob(
   } = options;
   const payload = buildJobPayload({
     sessionId: input.sessionId,
+    workspaceLockId: input.workspaceLockId,
+    conversationSessionId: input.conversationSessionId,
     reason: input.reason,
     lockToken,
     runtimeId: input.runtimeId,
@@ -1062,7 +1110,7 @@ async function promoteScheduledTurnToJob(
     };
   }
   const renewal = await renewJobLock(
-    input.sessionId,
+    input.workspaceLockId,
     lockToken,
     SESSION_LOCKS_TABLE,
     jobLockDynamoClient,
@@ -1129,12 +1177,19 @@ async function promoteScheduledTurnToJob(
   }
 }
 
-async function sendChatMessage(
+type PreparedScheduledChatMessage = {
+  requestBody: Record<string, unknown>;
+  retryText: string;
+  responseLength: number;
+  hasCards: boolean;
+  hasAccessoryWidgets: boolean;
+};
+
+function prepareScheduledChatMessage(
   spaceName: string,
   text: string,
   log: Logger,
-): Promise<void> {
-  const chatClient = await getChatClient();
+): PreparedScheduledChatMessage {
   // Lift any PSD_AGENT_RICH_V1 envelope out of the reply before truncating —
   // the sentinels are way past the 4096 ceiling when the envelope is real,
   // and we want the card payload to survive intact. Mirrors the
@@ -1161,15 +1216,109 @@ async function sendChatMessage(
     if (envelope.accessoryWidgets) requestBody.accessoryWidgets = envelope.accessoryWidgets;
   }
 
+  return {
+    requestBody,
+    // The durable outbox intentionally carries the already-normalized prose.
+    // Its strict 32-KiB envelope can therefore never reject a response that
+    // the initial Chat call accepted after applying the 4096-char limit.
+    retryText: truncated,
+    responseLength: truncated.length,
+    hasCards: Boolean(envelope?.cardsV2),
+    hasAccessoryWidgets: Boolean(envelope?.accessoryWidgets),
+  };
+}
+
+async function sendPreparedChatMessage(
+  spaceName: string,
+  prepared: PreparedScheduledChatMessage,
+  log: Logger,
+  requestId?: string,
+): Promise<void> {
+  const chatClient = await getChatClient();
   await chatClient.spaces.messages.create({
     parent: spaceName,
-    requestBody,
+    ...(requestId ? { requestId } : {}),
+    requestBody: prepared.requestBody,
   });
   log.info('Scheduled response sent to Google Chat', {
     space: spaceName,
-    responseLength: truncated.length,
-    hasCards: !!envelope?.cardsV2,
-    hasAccessoryWidgets: !!envelope?.accessoryWidgets,
+    responseLength: prepared.responseLength,
+    hasCards: prepared.hasCards,
+    hasAccessoryWidgets: prepared.hasAccessoryWidgets,
+  });
+}
+
+async function sendChatMessage(
+  spaceName: string,
+  text: string,
+  log: Logger,
+  requestId?: string,
+): Promise<void> {
+  return sendPreparedChatMessage(
+    spaceName,
+    prepareScheduledChatMessage(spaceName, text, log),
+    log,
+    requestId,
+  );
+}
+
+async function enqueueScheduledChatDelivery(
+  spaceName: string,
+  text: string,
+  requestId: string,
+  log: Logger,
+): Promise<void> {
+  if (!ROUTER_QUEUE_URL) {
+    throw new Error('ROUTER_QUEUE_URL is not configured');
+  }
+  const messageBody = buildScheduledChatDeliveryEnvelope(
+    spaceName,
+    text,
+    requestId,
+  );
+  if (Buffer.byteLength(messageBody, 'utf8') > 32 * 1024) {
+    throw new Error('Scheduled Chat delivery envelope is too large');
+  }
+  let lastError: unknown;
+  for (const delayMs of [0, 250, 750]) {
+    if (delayMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+    try {
+      await sqsClient.send(
+        new SendMessageCommand({
+          QueueUrl: ROUTER_QUEUE_URL,
+          MessageBody: messageBody,
+          DelaySeconds: 15,
+        }),
+      );
+      lastError = undefined;
+      break;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (lastError) throw lastError;
+  log.warn('Queued scheduled response for durable Chat delivery retry', {
+    space: spaceName,
+    requestId,
+  });
+}
+
+function buildScheduledChatDeliveryEnvelope(
+  spaceName: string,
+  text: string,
+  requestId: string,
+): string {
+  return JSON.stringify({
+    kind: 'agent-chat-delivery-v1',
+    spaceName,
+    text,
+    deliveryContext: {
+      isSharedSpace: false,
+      durableDelivery: false,
+      deliveryRequestId: requestId,
+    },
   });
 }
 
@@ -1183,6 +1332,8 @@ interface ScheduledResultContext {
   scheduleName: string;
   startTime: number;
   sessionId: string;
+  runtimeSessionId: string;
+  workspaceLockId: string;
   fireIdentity: ScheduleFireIdentity | null;
   result: InvokeResult;
   log: Logger;
@@ -1389,7 +1540,15 @@ async function tryPromoteScheduledResult(
   context: ScheduledResultContext,
   lockToken: string,
 ): Promise<boolean> {
-  const { schedule, scheduleName, sessionId, result, log } = context;
+  const {
+    schedule,
+    scheduleName,
+    sessionId,
+    runtimeSessionId,
+    workspaceLockId,
+    result,
+    log,
+  } = context;
   const reason = promotionReason(result.errorClass);
   if (reason === null) return false;
   const runtimeId = await getRuntimeId(log);
@@ -1413,7 +1572,9 @@ async function tryPromoteScheduledResult(
   }
   const promotion = await promoteScheduledTurnToJob({
     input: {
-      sessionId,
+      sessionId: runtimeSessionId,
+      workspaceLockId,
+      conversationSessionId: sessionId,
       scheduleId: schedule.scheduleId,
       runtimeId,
       userEmail: schedule.ownerEmail,
@@ -1486,33 +1647,55 @@ async function deliverScheduledResult(
   context: ScheduledResultContext,
 ): Promise<HandlerResult> {
   const { schedule, scheduleName, sessionId, result, startTime, log } = context;
+  const deliveryText = `📋 **${scheduleName}**\n\n${result.response}`;
+  const preparedDelivery = prepareScheduledChatMessage(
+    schedule.dmSpaceName,
+    deliveryText,
+    log,
+  );
+  const deliveryRequestId = crypto.randomUUID();
   try {
-    await sendChatMessage(
+    await sendPreparedChatMessage(
       schedule.dmSpaceName,
-      `📋 **${scheduleName}**\n\n${result.response}`,
+      preparedDelivery,
       log,
+      deliveryRequestId,
     );
   } catch (error) {
-    const detail = errorDetail(error);
-    log.error('Failed to deliver scheduled response', {
-      error: detail,
-    });
-    await runTelemetry.recordRun(
-      {
-        fireKey: context.fireIdentity?.key,
-        userEmail: schedule.ownerEmail,
-        scheduleId: schedule.scheduleId,
-        scheduleName,
-        sessionId,
-        inputTokens: result.inputTokens,
-        outputTokens: result.outputTokens,
-        latencyMs: Date.now() - startTime,
-        status: 'error',
-        errorMessage: `Chat delivery failed: ${detail}`,
-      },
-      log,
-    );
-    return { status: 'error', scheduleId: schedule.scheduleId };
+    const initialDetail = errorDetail(error);
+    try {
+      await enqueueScheduledChatDelivery(
+        schedule.dmSpaceName,
+        preparedDelivery.retryText,
+        deliveryRequestId,
+        log,
+      );
+    } catch (enqueueError) {
+      const enqueueDetail = errorDetail(enqueueError);
+      log.error('Failed to deliver or durably queue scheduled response', {
+        deliveryError: initialDetail,
+        enqueueError: enqueueDetail,
+        deliveryRequestId,
+      });
+      await runTelemetry.recordRun(
+        {
+          fireKey: context.fireIdentity?.key,
+          userEmail: schedule.ownerEmail,
+          scheduleId: schedule.scheduleId,
+          scheduleName,
+          sessionId,
+          inputTokens: result.inputTokens,
+          outputTokens: result.outputTokens,
+          latencyMs: Date.now() - startTime,
+          status: 'error',
+          errorMessage:
+            `Chat delivery failed: ${initialDetail}; ` +
+            `durable enqueue failed: ${enqueueDetail}`,
+        },
+        log,
+      );
+      return { status: 'error', scheduleId: schedule.scheduleId };
+    }
   }
   const status: 'success' | 'error' = result.ok ? 'success' : 'error';
   await runTelemetry.recordRun(
@@ -1546,6 +1729,8 @@ interface LockedScheduleContext {
   schedule: AuthorizedSchedule;
   scheduleName: string;
   sessionId: string;
+  runtimeSessionId: string;
+  workspaceLockId: string;
   startTime: number;
   fireIdentity: ScheduleFireIdentity | null;
   lambdaContext: LambdaContext;
@@ -1560,6 +1745,8 @@ async function executeLockedScheduledTurn(
     schedule,
     scheduleName,
     sessionId,
+    runtimeSessionId,
+    workspaceLockId,
     startTime,
     lambdaContext,
     log,
@@ -1573,11 +1760,12 @@ async function executeLockedScheduledTurn(
   const result = await invokeAgentCore({
     prompt: schedule.prompt,
     userEmail: schedule.ownerEmail,
-    sessionId,
+    sessionId: runtimeSessionId,
     log,
     userContext: {
       displayName: schedule.displayName,
       workspacePrefix: schedule.workspacePrefix,
+      conversationSessionId: sessionId,
     },
     remainingMs: () => lambdaContext.getRemainingTimeInMillis(),
   });
@@ -1586,6 +1774,8 @@ async function executeLockedScheduledTurn(
     scheduleName,
     startTime,
     sessionId,
+    runtimeSessionId,
+    workspaceLockId,
     fireIdentity: context.fireIdentity,
     result,
     log,
@@ -1598,7 +1788,7 @@ async function executeLockedScheduledTurn(
   }
   return {
     value: await deliverScheduledResult(scheduledResult),
-    retainLock: false,
+    retainLock: shouldRetainScheduledTurnLock(result),
   };
 }
 
@@ -1702,7 +1892,7 @@ async function runLockedScheduleTurn(
 ): Promise<LockedJobResult<HandlerResult>> {
   try {
     return await runWithJobLock(
-      context.sessionId,
+      context.workspaceLockId,
       SESSION_LOCKS_TABLE,
       jobLockDynamoClient,
       context.log,
@@ -2009,6 +2199,14 @@ async function handleScheduledRunReconciliationEvent(
   return result;
 }
 
+export const agentCronTestHelpers = {
+  buildScheduledChatDeliveryEnvelope,
+  prepareScheduledChatMessage,
+  invokeFailure,
+  toInvokeResult,
+  shouldRetainScheduledTurnLock,
+};
+
 export async function handler(
   event: ScheduleReferenceEvent | JobRunnerStoppedEvent | SQSEvent,
   context: LambdaContext,
@@ -2056,20 +2254,30 @@ export async function handler(
     email: sanitizeEmailForLog(schedule.ownerEmail),
   });
 
-  // Session ID — stable for a schedule within a calendar day and isolated from
-  // interactive sessions. The shared ID lets the conditional lock serialize
-  // repeated fires. Bound the length for AgentCore's session-id limits.
+  // Three deliberately separate identities:
+  // - conversation: one schedule/day transcript;
+  // - runtime: owner-wide AgentCore affinity, rotated with each deployment;
+  // - workspace lock: stable across sources and deploy overlap.
   const dateKey =
     fireIdentity?.scheduledTime.slice(0, 10)
     ?? new Date().toISOString().split('T')[0];
-  const prefix = schedule.workspacePrefix.substring(0, 40);
-  const sessionId =
-    `${prefix}-sched-${schedule.scheduleId.substring(0, 12)}-${dateKey}`;
+  const sessionId = scheduledConversationSessionId(
+    schedule.workspacePrefix,
+    schedule.scheduleId,
+    dateKey,
+  );
+  const runtimeSessionId = ownerRuntimeSessionId(
+    schedule.workspacePrefix,
+    process.env.AGENT_BUILD_TAG || 'unset',
+  );
+  const workspaceLockId = ownerWorkspaceLockId(schedule.workspacePrefix);
 
   const lockedContext = {
     schedule,
     scheduleName,
     sessionId,
+    runtimeSessionId,
+    workspaceLockId,
     startTime,
     fireIdentity,
     lambdaContext: context,

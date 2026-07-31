@@ -4,8 +4,11 @@ import {
   createPublicArtifactUpload,
   createPublicArtifactDownloadUrl,
   completeWorkspaceUpload,
+  commitWorkspaceCheckpoint,
+  deleteWorkspacePath,
   createWorkspaceDownloadUrl,
   createWorkspaceUploadUrl,
+  ensureWorkspaceCheckpoint,
   listWorkspaceObjects,
   WorkspaceStorageAdmissionError,
   WorkspaceStorageCompletionError,
@@ -22,6 +25,8 @@ const ALLOWED_FIELDS = new Set([
   "idempotencyKey",
   "checksumSha256",
   "reservationId",
+  "baseWorkspaceGeneration",
+  "workspaceGeneration",
 ])
 const STORAGE_OPERATIONS = new Set([
   "list",
@@ -30,6 +35,9 @@ const STORAGE_OPERATIONS = new Set([
   "publish",
   "download-public",
   "complete-upload",
+  "ensure-checkpoint",
+  "commit-checkpoint",
+  "delete",
 ])
 
 type StorageRequest = {
@@ -40,6 +48,9 @@ type StorageRequest = {
     | "publish"
     | "download-public"
     | "complete-upload"
+    | "ensure-checkpoint"
+    | "commit-checkpoint"
+    | "delete"
   path?: string
   continuationToken?: string
   contentType?: string
@@ -47,6 +58,8 @@ type StorageRequest = {
   idempotencyKey?: string
   checksumSha256?: string
   reservationId?: string
+  baseWorkspaceGeneration?: string
+  workspaceGeneration?: string
 }
 
 type AgentInvocation = NonNullable<
@@ -61,7 +74,7 @@ function hasValidStorageFields(body: Record<string, unknown>): boolean {
   const contentLengthValid =
     body.contentLength === undefined ||
     (Number.isSafeInteger(body.contentLength) &&
-      (body.contentLength as number) >= 1)
+      (body.contentLength as number) >= 0)
   const idempotencyKeyValid =
     body.idempotencyKey === undefined ||
     (typeof body.idempotencyKey === "string" &&
@@ -75,6 +88,14 @@ function hasValidStorageFields(body: Record<string, unknown>): boolean {
     body.reservationId === undefined ||
     (typeof body.reservationId === "string" &&
       /^[0-9a-f-]{36}$/i.test(body.reservationId))
+  const workspaceGenerationValid =
+    body.workspaceGeneration === undefined ||
+    (typeof body.workspaceGeneration === "string" &&
+      /^[0-9a-f]{64}$/.test(body.workspaceGeneration))
+  const baseWorkspaceGenerationValid =
+    body.baseWorkspaceGeneration === undefined ||
+    (typeof body.baseWorkspaceGeneration === "string" &&
+      /^[0-9a-f]{64}$/.test(body.baseWorkspaceGeneration))
   return [
     isOptionalString(body.path),
     isOptionalString(body.continuationToken),
@@ -83,6 +104,8 @@ function hasValidStorageFields(body: Record<string, unknown>): boolean {
     idempotencyKeyValid,
     checksumValid,
     reservationValid,
+    baseWorkspaceGenerationValid,
+    workspaceGenerationValid,
   ].every(Boolean)
 }
 
@@ -98,6 +121,8 @@ function parseRequest(value: unknown): StorageRequest | null {
   return body as StorageRequest
 }
 
+// Explicit operation dispatch is easier to audit than dynamic broker lookup.
+// eslint-disable-next-line complexity
 async function executeStorageOperation(
   input: StorageRequest,
   context: AgentInvocation
@@ -123,7 +148,30 @@ async function executeStorageOperation(
         : null
     case "complete-upload":
       return input.reservationId
-        ? completeWorkspaceUpload(context.ownerEmail, input.reservationId)
+        ? completeWorkspaceUpload(
+            context.ownerEmail,
+            input.reservationId,
+            context.workspacePrefix,
+            input.workspaceGeneration,
+          )
+        : null
+    case "ensure-checkpoint":
+      return ensureWorkspaceCheckpoint(context.workspacePrefix)
+    case "commit-checkpoint":
+      return input.baseWorkspaceGeneration && input.workspaceGeneration
+        ? commitWorkspaceCheckpoint(
+            context.workspacePrefix,
+            input.baseWorkspaceGeneration,
+            input.workspaceGeneration,
+          )
+        : null
+    case "delete":
+      return input.path && input.workspaceGeneration
+        ? deleteWorkspacePath(
+            context.workspacePrefix,
+            input.path,
+            input.workspaceGeneration,
+          )
         : null
   }
 }
@@ -135,9 +183,10 @@ function executePrivateUpload(
 ): Promise<object> | null {
   if (
     !input.path ||
-    !input.contentLength ||
+    input.contentLength === undefined ||
     !input.idempotencyKey ||
-    !input.checksumSha256
+    !input.checksumSha256 ||
+    !input.workspaceGeneration
   ) return null
   return createWorkspaceUploadUrl({
     ownerEmail: context.ownerEmail,

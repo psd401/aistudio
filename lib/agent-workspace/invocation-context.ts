@@ -14,9 +14,10 @@ export const AGENT_REQUEST_PROOF_BODY_SHA256_HEADER = "x-agent-request-proof-bod
 export const AGENT_REQUEST_PROOF_SIGNATURE_HEADER = "x-agent-request-proof-signature"
 export const AGENT_INVOCATION_CONTEXT_AUDIENCE = "psd-agent-internal"
 // Interactive contexts still default to 15 minutes at the trusted issuer.
-// The verifier permits the bounded two-hour job-runner ceiling so a promoted
-// AgentCore turn does not lose broker authority partway through execution.
-const MAX_TOKEN_TTL_SECONDS = 2 * 60 * 60
+// The verifier permits a bounded 2.5-hour job authority: model work remains
+// capped at two hours, while the final 30 minutes cover cold start, privileged
+// request drain, and durable workspace checkpointing.
+export const MAX_AGENT_INVOCATION_CONTEXT_TTL_SECONDS = 150 * 60
 const MAX_CLOCK_SKEW_SECONDS = 30
 const REQUEST_PROOF_VERSION = "v1"
 const MAX_PROOF_BODY_BYTES = 32 * 1024 * 1024
@@ -128,7 +129,8 @@ function isCurrentInvocation(
     claims.issuedAt <= nowSeconds + MAX_CLOCK_SKEW_SECONDS
     && claims.expiresAt >= nowSeconds - MAX_CLOCK_SKEW_SECONDS
     && claims.expiresAt > claims.issuedAt
-    && claims.expiresAt - claims.issuedAt <= MAX_TOKEN_TTL_SECONDS
+    && claims.expiresAt - claims.issuedAt
+      <= MAX_AGENT_INVOCATION_CONTEXT_TTL_SECONDS
     && (!allowedModes || allowedModes.includes(claims.mode))
   )
 }

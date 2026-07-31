@@ -23,31 +23,67 @@ jest.mock('@/lib/logger', () => ({
 // All mock state lives INSIDE the factory (retrieved via requireMock below) —
 // out-of-scope references break under SWC's jest.mock hoisting.
 jest.mock('postgres', () => {
-  const clients: Array<{ end: jest.Mock; options: object }> = []
+  const clients: Array<{
+    end: jest.Mock
+    reserve: jest.Mock
+    options: object
+  }> = []
+  const reservedSessions: Array<{
+    release: jest.Mock
+    unsafe: jest.Mock
+    options: object
+  }> = []
   const factory = jest.fn(() => {
+    const reserve = jest.fn(async () => {
+      const reserved = {
+        release: jest.fn(),
+        unsafe: jest
+          .fn<() => Promise<unknown[]>>()
+          .mockResolvedValue([]),
+        options: { parsers: {}, serializers: {} },
+      }
+      reservedSessions.push(reserved)
+      return reserved
+    })
     const client = {
       end: jest.fn(() => Promise.resolve()),
+      reserve,
       // drizzle's postgres-js driver reads these off the client at construct.
       options: { parsers: {}, serializers: {} },
     }
-    clients.push(client as unknown as { end: jest.Mock; options: object })
+    clients.push(client)
     return client
   })
-  return { __esModule: true, default: factory, __clients: clients }
+  return {
+    __esModule: true,
+    default: factory,
+    __clients: clients,
+    __reservedSessions: reservedSessions,
+  }
 })
 
 const postgresMock = jest.requireMock<{
   default: jest.Mock
-  __clients: Array<{ end: jest.Mock }>
+  __clients: Array<{ end: jest.Mock; reserve: jest.Mock }>
+  __reservedSessions: Array<{ release: jest.Mock; unsafe: jest.Mock }>
 }>('postgres')
 const pgFactory = postgresMock.default
 const createdClients = postgresMock.__clients
+const reservedSessions = postgresMock.__reservedSessions
+
+async function returnFortyTwo(): Promise<number> {
+  return 42
+}
 
 // jest.setup.js globally mocks drizzle-client (to block real DB connections);
 // this suite exercises the REAL module against the mocked `postgres` factory
 // above (repo pattern: jest.requireActual, see the graph-embeddings note in
 // jest.setup.js).
-const { getDb, rebuildWedgedPool } = jest.requireActual<
+const {
+  getDb,
+  rebuildWedgedPool,
+  withUnretriedDatabaseSession,
+} = jest.requireActual<
   typeof import('@/lib/db/drizzle-client')
 >('@/lib/db/drizzle-client')
 
@@ -82,5 +118,79 @@ describe('rebuildWedgedPool', () => {
     expect(createdClients[1].end).not.toHaveBeenCalled()
     getDb()
     expect(pgFactory).toHaveBeenCalledTimes(2)
+  })
+
+  it('reserves one connection, invokes side-effecting work once, and always releases', async () => {
+    if (createdClients.length === 0) getDb()
+    const callback = jest.fn(async () => {
+      throw new Error('external effect failed')
+    })
+
+    await expect(
+      withUnretriedDatabaseSession(
+        callback,
+        'nonReplayableWorkspaceFence',
+        { deadlineMs: 1_000 },
+      ),
+    ).rejects.toThrow('external effect failed')
+
+    expect(callback).toHaveBeenCalledTimes(1)
+    expect(createdClients.at(-1)?.reserve).toHaveBeenCalledTimes(1)
+    expect(reservedSessions).toHaveLength(1)
+    expect(reservedSessions[0]?.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('runs BEGIN and COMMIT on the exact reserved client without drizzle begin()', async () => {
+    const result = await withUnretriedDatabaseSession(
+      (session) =>
+        session.executeTransaction(returnFortyTwo, 'manualTransaction'),
+      'manualReservedTransaction',
+      { deadlineMs: 1_000 },
+    )
+
+    expect(result).toBe(42)
+    const reserved = reservedSessions.at(-1)
+    expect(reserved?.unsafe.mock.calls.map((call) => call[0])).toEqual([
+      'BEGIN',
+      'COMMIT',
+    ])
+    expect(reserved?.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('releases a reservation that arrives after the acquire deadline exactly once', async () => {
+    let resolveReserve!: (reserved: {
+      release: jest.Mock
+      unsafe: jest.Mock
+      options: object
+    }) => void
+    const lateReserve = new Promise<{
+      release: jest.Mock
+      unsafe: jest.Mock
+      options: object
+    }>((resolve) => {
+      resolveReserve = resolve
+    })
+    const dedicatedClient = createdClients.at(-1)
+    dedicatedClient?.reserve.mockImplementationOnce(() => lateReserve)
+    const callback = jest.fn(async () => undefined)
+    const timedOut = withUnretriedDatabaseSession(
+      callback,
+      'lateReservedSession',
+      { deadlineMs: 10 },
+    )
+    await expect(timedOut).rejects.toThrow('acquire timed out')
+    const late = {
+      release: jest.fn(),
+      unsafe: jest
+        .fn<() => Promise<unknown[]>>()
+        .mockResolvedValue([]),
+      options: { parsers: {}, serializers: {} },
+    }
+    resolveReserve(late)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(callback).not.toHaveBeenCalled()
+    expect(late.release).toHaveBeenCalledTimes(1)
   })
 })

@@ -160,6 +160,7 @@
     "167-deep-research-interaction-binding.sql",
     "168-repository-item-cancelled-status.sql",
     "169-agentic-model-readiness.sql",
-    "170-nexus-durable-repository-bindings.sql"
+    "170-nexus-durable-repository-bindings.sql",
+    "171-workspace-upload-zero-byte-files.sql"
   ]
 }

@@ -16,7 +16,14 @@ function migration(name: string): string {
 
 describe("repository reliability migrations", () => {
   it("orders agentic admission and Nexus bindings after cancellation support", () => {
-    expect(manifest.migrationFiles.slice(-3)).toEqual([
+    const cancellationIndex = manifest.migrationFiles.indexOf(
+      "168-repository-item-cancelled-status.sql"
+    );
+
+    expect(cancellationIndex).toBeGreaterThanOrEqual(0);
+    expect(
+      manifest.migrationFiles.slice(cancellationIndex, cancellationIndex + 3)
+    ).toEqual([
       "168-repository-item-cancelled-status.sql",
       "169-agentic-model-readiness.sql",
       "170-nexus-durable-repository-bindings.sql",

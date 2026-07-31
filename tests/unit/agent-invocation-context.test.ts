@@ -7,6 +7,7 @@ import {
   AGENT_REQUEST_PROOF_SIGNATURE_HEADER,
   AGENT_REQUEST_PROOF_TIMESTAMP_HEADER,
   AGENT_REQUEST_PROOF_VERSION_HEADER,
+  MAX_AGENT_INVOCATION_CONTEXT_TTL_SECONDS,
   verifyAgentInvocationContext,
 } from "@/lib/agent-workspace/invocation-context"
 import {
@@ -144,19 +145,19 @@ describe("verifyAgentInvocationContext request authority", () => {
     )
   })
 
-  it("accepts fresh broker proofs throughout a bounded two-hour job", async () => {
+  it("accepts fresh broker proofs through bounded job finalization", async () => {
     const jobContext = token({
       issuedAt: 100,
-      expiresAt: 7300,
+      expiresAt: 100 + MAX_AGENT_INVOCATION_CONTEXT_TTL_SECONDS,
       nonce: "job-invocation-nonce",
     })
     const result = await verifyAgentInvocationContext(
       request({
         context: jobContext,
-        timestamp: 7200,
+        timestamp: 9000,
       }),
       {
-        nowSeconds: 7200,
+        nowSeconds: 9000,
         allowedModes: ["owner"],
         consumeNonce: consumed,
       }
@@ -165,14 +166,15 @@ describe("verifyAgentInvocationContext request authority", () => {
     expect(result).toMatchObject({
       ownerEmail: "owner@psd401.net",
       issuedAt: 100,
-      expiresAt: 7300,
+      expiresAt: 100 + MAX_AGENT_INVOCATION_CONTEXT_TTL_SECONDS,
     })
   })
 
-  it("rejects invocation contexts beyond the two-hour ceiling", async () => {
+  it("rejects invocation contexts beyond the job authority ceiling", async () => {
     const overlongContext = token({
       issuedAt: 100,
-      expiresAt: 7301,
+      expiresAt:
+        101 + MAX_AGENT_INVOCATION_CONTEXT_TTL_SECONDS,
       nonce: "overlong-invocation-nonce",
     })
 

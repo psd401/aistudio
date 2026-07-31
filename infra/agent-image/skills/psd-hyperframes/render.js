@@ -36,7 +36,9 @@ const MAX_RELAY_PAYLOAD_BYTES =
 // The renderer is capped at 720s. The root relay may then spend up to 60s on
 // Lambda cleanup/upload/response, but first it must resolve the signed owner
 // and connect to Lambda. Cover every sequential phase plus a transport margin;
-// 825s remains below the interactive turn's 840s ceiling.
+// promoted long jobs retain this complete 825s window. Interactive/cron
+// finalization may cancel a still-running relay to preserve workspace state
+// inside their separate 900s Lambda ceiling.
 const IDENTITY_TIMEOUT_MS = 30_000;
 const LAMBDA_CONNECT_TIMEOUT_MS = 10_000;
 const LAMBDA_READ_TIMEOUT_MS = 780_000;

@@ -183,7 +183,6 @@ test('relay timeout covers identity, Lambda connect/read, and transport budgets'
       RELAY_TRANSPORT_MARGIN_MS,
   );
   expect(RELAY_TIMEOUT_MS).toBe(825_000);
-  expect(RELAY_TIMEOUT_MS).toBeLessThan(840_000);
   expect(MAX_RELAY_PAYLOAD_BYTES).toBe(MAX_INVOKE_PAYLOAD_BYTES - 512);
 });
 

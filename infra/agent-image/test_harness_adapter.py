@@ -158,6 +158,120 @@ class GatewayTokenTests(unittest.TestCase):
         self.assertNotIn("AWS_BEARER_TOKEN_BEDROCK", child_environment)
         self.assertNotIn("BEDROCK_API_KEY_SECRET_ARN", child_environment)
         self.assertNotIn("CANDIDATE_MANTLE_BEARER_TOKEN", child_environment)
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+
+    def test_shutdown_kills_stubborn_children_after_parent_exits(self):
+        adapter = harness_adapter.OpenClawAdapter()
+        process = mock.Mock()
+        process.pid = 4242
+        process.poll.side_effect = [None, 0]
+        adapter._process = process
+        adapter._process_group_id = process.pid
+
+        with mock.patch.object(
+            harness_adapter.os,
+            "killpg",
+        ) as kill_group, mock.patch.object(
+            harness_adapter,
+            "_wait_for_process_group_quiescence",
+        ) as wait_for_group:
+            adapter.shutdown()
+
+        self.assertEqual(
+            kill_group.call_args_list,
+            [
+                mock.call(4242, harness_adapter.signal.SIGTERM),
+                mock.call(4242, harness_adapter.signal.SIGKILL),
+            ],
+        )
+        process.terminate.assert_not_called()
+        process.wait.assert_called_once_with(timeout=10)
+        wait_for_group.assert_called_once_with(4242)
+        self.assertIsNone(adapter._process)
+        self.assertIsNone(adapter._process_group_id)
+
+    def test_shutdown_kills_the_process_group_after_timeout(self):
+        adapter = harness_adapter.OpenClawAdapter()
+        process = mock.Mock()
+        process.pid = 4343
+        process.poll.return_value = None
+        process.wait.side_effect = [
+            harness_adapter.subprocess.TimeoutExpired("openclaw", 10),
+            None,
+        ]
+        adapter._process = process
+        adapter._process_group_id = process.pid
+
+        with mock.patch.object(
+            harness_adapter.os,
+            "killpg",
+        ) as kill_group, mock.patch.object(
+            harness_adapter,
+            "_wait_for_process_group_quiescence",
+        ) as wait_for_group:
+            adapter.shutdown()
+
+        self.assertEqual(
+            kill_group.call_args_list,
+            [
+                mock.call(4343, harness_adapter.signal.SIGTERM),
+                mock.call(4343, harness_adapter.signal.SIGKILL),
+            ],
+        )
+        self.assertEqual(process.wait.call_count, 2)
+        wait_for_group.assert_called_once_with(4343)
+
+    def test_process_group_quiescence_waits_until_all_members_are_gone(self):
+        with mock.patch.object(
+            harness_adapter,
+            "_process_group_has_live_members",
+            side_effect=[True, True, False],
+        ) as has_live_members, mock.patch.object(
+            harness_adapter.time,
+            "monotonic",
+            return_value=10.0,
+        ), mock.patch.object(
+            harness_adapter.time,
+            "sleep",
+        ) as sleep:
+            harness_adapter._wait_for_process_group_quiescence(
+                4444,
+                timeout_seconds=1.0,
+            )
+
+        self.assertEqual(has_live_members.call_count, 3)
+        self.assertEqual(
+            sleep.call_args_list,
+            [
+                mock.call(harness_adapter.PROCESS_GROUP_POLL_SECONDS),
+                mock.call(harness_adapter.PROCESS_GROUP_POLL_SECONDS),
+            ],
+        )
+
+    def test_process_group_quiescence_timeout_raises(self):
+        with mock.patch.object(
+            harness_adapter,
+            "_process_group_has_live_members",
+            return_value=True,
+        ) as has_live_members, mock.patch.object(
+            harness_adapter.time,
+            "monotonic",
+            side_effect=[10.0, 11.0],
+        ), mock.patch.object(
+            harness_adapter.time,
+            "sleep",
+        ) as sleep:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "process group did not become quiescent",
+            ):
+                harness_adapter._wait_for_process_group_quiescence(
+                    4545,
+                    timeout_seconds=1.0,
+                )
+
+        has_live_members.assert_called_once_with(4545)
+        sleep.assert_not_called()
 
     def test_gateway_socket_suppresses_browser_origin_header(self):
         websocket_module = mock.Mock()
@@ -297,17 +411,175 @@ class TestAccumulateAssistant(unittest.TestCase):
         a = self.acc(a, " recordings.", False, False)
         self.assertEqual(a, "Now let's find recordings.")
 
-    def test_boundary_after_tool_activity_inserts_blank_line(self):
-        a = self.acc("Now let's find recordings from 7/1 in Plaud.", "Good, done.", False, True)
-        self.assertEqual(
-            a, "Now let's find recordings from 7/1 in Plaud.\n\nGood, done."
+    def test_boundary_after_tool_activity_starts_terminal_assistant(self):
+        # Live regression shape: transcript seq54 was an assistant toolUse
+        # message with narration, seq55 was its tool result, and seq56 was the
+        # terminal assistant stop message. Google Chat must receive seq56 only.
+        a = self.acc(
+            "Found it. This box has no channels config.",
+            "Summary for you and the codex agent:",
+            False,
+            True,
         )
+        self.assertEqual(a, "Summary for you and the codex agent:")
 
     def test_replace_resets_buffer_regardless_of_boundary(self):
         self.assertEqual(self.acc("old text", "fresh", True, True), "fresh")
 
-    def test_boundary_with_empty_accum_adds_no_leading_separator(self):
+    def test_boundary_with_empty_accum_starts_cleanly(self):
         self.assertEqual(self.acc("", "First words", False, True), "First words")
+
+    def test_only_tool_like_item_streams_create_assistant_boundaries(self):
+        is_boundary = OpenClawAdapter._is_tool_activity_stream
+        self.assertTrue(is_boundary("item", {"kind": "tool"}))
+        self.assertTrue(is_boundary("item", {"kind": "patch"}))
+        self.assertTrue(is_boundary("command_output", {}))
+        self.assertFalse(is_boundary("item", {"kind": "commentary"}))
+        self.assertFalse(is_boundary("item", {"kind": "lifecycle"}))
+        self.assertFalse(is_boundary("item", {}))
+
+
+class TestTerminalAssistantSelection(unittest.TestCase):
+    """A toolUse assistant block must not be folded into the terminal reply."""
+
+    def test_process_returns_only_post_tool_terminal_assistant(self):
+        chat_id = None
+
+        class FakeWebSocket:
+            def __init__(self, messages):
+                self.messages = list(messages)
+                self.sent = []
+
+            def send(self, payload):
+                nonlocal chat_id
+                parsed = json.loads(payload)
+                self.sent.append(parsed)
+                if parsed.get("method") == "chat.send":
+                    chat_id = parsed["id"]
+
+            def recv(self):
+                message = self.messages.pop(0)
+                return message() if callable(message) else message
+
+            def settimeout(self, _timeout):
+                return None
+
+            def close(self):
+                return None
+
+        def envelope(**fields):
+            return json.dumps(fields)
+
+        def current_run_event(event, payload):
+            return envelope(
+                type="event",
+                event=event,
+                payload={"runId": chat_id, **payload},
+            )
+
+        messages = [
+            envelope(type="event", event="connect.challenge", payload={}),
+            lambda: envelope(
+                type="res",
+                id=socket.sent[-1]["id"],
+                ok=True,
+                payload={},
+            ),
+            lambda: envelope(
+                type="res",
+                id=socket.sent[-1]["id"],
+                ok=True,
+                payload={"tools": []},
+            ),
+            lambda: envelope(
+                type="res",
+                id=socket.sent[-1]["id"],
+                ok=True,
+                payload={},
+            ),
+            lambda: envelope(
+                type="res",
+                id=chat_id,
+                ok=True,
+                payload={"runId": chat_id, "status": "started"},
+            ),
+            lambda: current_run_event(
+                "agent",
+                {
+                    "stream": "assistant",
+                    "data": {"deltaText": "Found it. Pre-tool narration."},
+                },
+            ),
+            lambda: current_run_event(
+                "agent",
+                {
+                    "stream": "item",
+                    "data": {
+                        "itemId": "tool-54",
+                        "phase": "start",
+                        "kind": "tool",
+                        "name": "skill_workshop",
+                    },
+                },
+            ),
+            lambda: current_run_event(
+                "agent",
+                {
+                    "stream": "item",
+                    "data": {
+                        "itemId": "tool-54",
+                        "phase": "end",
+                        "kind": "tool",
+                        "name": "skill_workshop",
+                        "status": "completed",
+                        "output": "No skill proposals matched.",
+                    },
+                },
+            ),
+            lambda: current_run_event(
+                "agent",
+                {
+                    "stream": "assistant",
+                    "data": {
+                        "deltaText": "Summary for you and the codex agent."
+                    },
+                },
+            ),
+            lambda: current_run_event(
+                "chat",
+                {"state": "final"},
+            ),
+        ]
+        socket = FakeWebSocket(messages)
+        fake_websocket_module = mock.Mock()
+        fake_websocket_module.create_connection.return_value = socket
+        fake_websocket_module.WebSocketTimeoutException = TimeoutError
+        adapter = OpenClawAdapter()
+        adapter._ready = True
+
+        with (
+            mock.patch.dict(sys.modules, {"websocket": fake_websocket_module}),
+            mock.patch.object(
+                adapter,
+                "_read_turn_usage",
+                return_value={
+                    "input": 0,
+                    "output": 0,
+                    "cache_read": 0,
+                    "cache_write": 0,
+                    "model_calls": 0,
+                    "capture_complete": False,
+                },
+            ),
+        ):
+            result = adapter.process("Diagnose this", "session-terminal")
+
+        self.assertEqual(
+            result.text,
+            "Summary for you and the codex agent.",
+        )
+        self.assertNotIn("Pre-tool narration", result.text)
+        self.assertEqual(len(result.tool_calls), 1)
 
 
 class TestResolveDeadline(unittest.TestCase):
@@ -315,8 +587,8 @@ class TestResolveDeadline(unittest.TestCase):
 
     resolve = staticmethod(OpenClawAdapter._resolve_deadline_s)
 
-    def test_no_override_defaults_to_840(self):
-        self.assertEqual(self.resolve(None), 840)
+    def test_no_override_reserves_finalization_time(self):
+        self.assertEqual(self.resolve(None), 550)
 
     def test_job_override_passes_within_ceiling(self):
         self.assertEqual(self.resolve(7200), 7200)
@@ -327,13 +599,13 @@ class TestResolveDeadline(unittest.TestCase):
         self.assertEqual(self.resolve(5), 60)
 
     def test_garbage_override_degrades_to_default(self):
-        self.assertEqual(self.resolve("not-a-number"), 840)
+        self.assertEqual(self.resolve("not-a-number"), 550)
 
-    def test_env_path_still_clamped_to_840(self):
+    def test_env_path_still_clamped_to_interactive_ceiling(self):
         import os
         from unittest import mock
         with mock.patch.dict(os.environ, {"OPENCLAW_CHAT_DEADLINE_S": "7200"}):
-            self.assertEqual(self.resolve(None), 840)
+            self.assertEqual(self.resolve(None), 550)
 
 
 class TestChatDeadlineRegression(unittest.TestCase):

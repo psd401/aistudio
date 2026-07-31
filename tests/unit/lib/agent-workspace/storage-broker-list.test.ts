@@ -48,11 +48,13 @@ describe("listWorkspaceObjects", () => {
           Key: `${PREFIX}/agents/main/sessions/a.jsonl`,
           Size: 250_000,
           LastModified: new Date("2026-07-27T06:00:00Z"),
+          ETag: '"generation-a"',
         },
         {
           Key: `${PREFIX}/memory/MEMORY.md`,
           Size: 13_683,
           LastModified: new Date("2026-07-20T00:00:00Z"),
+          ETag: '"generation-memory"',
         },
       ],
     })
@@ -64,11 +66,13 @@ describe("listWorkspaceObjects", () => {
         path: "agents/main/sessions/a.jsonl",
         size: 250_000,
         lastModified: Math.floor(Date.parse("2026-07-27T06:00:00Z") / 1000),
+        eTag: '"generation-a"',
       },
       {
         path: "memory/MEMORY.md",
         size: 13_683,
         lastModified: Math.floor(Date.parse("2026-07-20T00:00:00Z") / 1000),
+        eTag: '"generation-memory"',
       },
     ])
   })
@@ -108,7 +112,9 @@ describe("listWorkspaceObjects", () => {
 
     const result = await listWorkspaceObjects(PREFIX)
 
-    expect(result.entries).toEqual([{ path: "a.md", size: 0, lastModified: 0 }])
+    expect(result.entries).toEqual([
+      { path: "a.md", size: 0, lastModified: 0, eTag: "" },
+    ])
     expect(result.paths).toEqual(["a.md"])
   })
 

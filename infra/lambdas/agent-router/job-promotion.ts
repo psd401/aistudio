@@ -4,14 +4,16 @@
  * A multi-step agent turn that cannot finish inside the router Lambda's
  * ~14-minute window, or whose transcript overflows the model context, is
  * promoted EXACTLY ONCE into a long-lived ECS Fargate job-runner task.
- * Deadlines resume the same AgentCore session; overflow recovery starts a
- * fresh session from the original request. Job invocations get a 2-hour
- * ceiling (AgentCore itself may run up to 8h).
+ * Deadlines resume the same logical conversation; overflow recovery starts a
+ * fresh logical conversation from the original request. New payloads retain
+ * one owner-wide AgentCore runtime for workspace safety. Job invocations get a
+ * 2-hour ceiling (AgentCore itself may run up to 8h).
  *
  * This module holds the dependency-free pieces (promotion predicate, job
  * payload build/parse, continuation prompt) so they can be unit tested
  * without the Lambda runtime — the ECS RunTask wiring stays in index.ts.
  */
+import * as crypto from 'node:crypto';
 
 /** Turn error classes that mean "ran out of clock", not "broke". */
 const DEADLINE_ERROR_CLASSES = new Set([
@@ -31,6 +33,26 @@ const CONTEXT_OVERFLOW_ERROR_CLASS = 'ContextOverflow';
  * in agent-image/harness_adapter.py (_resolve_deadline_s, max 7200).
  */
 export const JOB_DEADLINE_S = 7200;
+
+/**
+ * Broker authority must outlive the model-work deadline because the terminal
+ * AgentCore result is withheld until the wrapper has drained privileged
+ * traffic and durably checkpointed the workspace.
+ *
+ * Worst-case long-job finalization is bounded to 1,020 seconds:
+ *   835s long proxy drain + 35s proxy replacement + 5s retry transition
+ *   + 20s gateway shutdown + 125s workspace flush.
+ *
+ * A 2.5-hour token therefore leaves another 780 seconds for AgentCore cold
+ * start, request transport, and clock skew without extending the approved
+ * two-hour harness work ceiling.
+ */
+export const JOB_FINALIZATION_BOUNDED_MAX_S = 1_020;
+export const JOB_AUTHORITY_STARTUP_MARGIN_S = 780;
+export const JOB_INVOCATION_CONTEXT_TTL_S =
+  JOB_DEADLINE_S
+  + JOB_FINALIZATION_BOUNDED_MAX_S
+  + JOB_AUTHORITY_STARTUP_MARGIN_S;
 
 /**
  * Why a turn was promoted. Drives OPPOSITE handling in the runner:
@@ -74,8 +96,12 @@ export function shouldPromoteToJob(errorClass: string | undefined): boolean {
  * complete request or fail promotion rather than silently execute half of it.
  */
 export interface JobPayload {
-  /** AgentCore session to resume (sticky-routes to the same microVM). */
+  /** Build-rotated AgentCore runtime affinity identity. */
   sessionId: string;
+  /** Deployment-stable owner workspace mutex; legacy jobs fall back to sessionId. */
+  workspaceLockId?: string;
+  /** OpenClaw transcript identity for the originating Chat space/thread. */
+  conversationSessionId?: string;
   /** See PromotionReason. Defaults to 'deadline' when absent. */
   reason?: PromotionReason;
   /** Session-lock token the router pre-acquired with kind='job'. */
@@ -83,7 +109,7 @@ export interface JobPayload {
   /** Resolved AgentCore runtime id/ARN (runner skips the SSM lookup). */
   runtimeId: string;
   userEmail: string;
-  /** Google Chat users/{id}; enables shared-space reply fallback to DM. */
+  /** Originating Google Chat user identity retained for payload compatibility. */
   googleIdentity?: string;
   displayName: string;
   workspacePrefix: string;
@@ -106,24 +132,61 @@ export interface JobPayload {
 
 export interface JobInvocation {
   invokeSessionId: string;
+  conversationSessionId?: string;
   prompt: string;
   restart: boolean;
+}
+
+export interface JobWorkspaceLockPlan {
+  inheritedLockId: string;
+  bridgeLockId?: string;
+}
+
+/** Deployment-stable owner mutex, byte-compatible with router + cron. */
+export function workspaceLockIdFromPrefix(
+  workspacePrefix: string
+): string {
+  const workspaceHash = crypto
+    .createHash('sha256')
+    .update(`owner-workspace-lock\0${workspacePrefix}`)
+    .digest('hex');
+  return `agent-workspace-${workspaceHash}`;
+}
+
+/**
+ * New jobs inherit the stable lock directly. A payload queued by an older
+ * deployment owns only its build-rotated session lock, so the runner must keep
+ * that lease and additionally acquire the stable owner lock before touching
+ * the workspace.
+ */
+export function resolveJobWorkspaceLockPlan(
+  job: Pick<JobPayload, 'sessionId' | 'workspaceLockId' | 'workspacePrefix'>
+): JobWorkspaceLockPlan {
+  if (job.workspaceLockId) {
+    return { inheritedLockId: job.workspaceLockId };
+  }
+  return {
+    inheritedLockId: job.sessionId,
+    bridgeLockId: workspaceLockIdFromPrefix(job.workspacePrefix),
+  };
 }
 
 export function jobChatDeliveryContext(
   job: Pick<
     JobPayload,
-    'isDM' | 'googleIdentity' | 'userEmail' | 'sessionId'
-  >
+    | 'isDM'
+    | 'userEmail'
+    | 'sessionId'
+    | 'conversationSessionId'
+  >,
+  durableDelivery = false
 ) {
   const isSharedSpace = !job.isDM;
   return {
     isSharedSpace,
-    ...(isSharedSpace && job.googleIdentity
-      ? { senderGoogleIdentity: job.googleIdentity }
-      : {}),
+    durableDelivery,
     userId: job.userEmail,
-    sessionId: job.sessionId,
+    sessionId: job.conversationSessionId ?? job.sessionId,
   };
 }
 
@@ -161,21 +224,35 @@ export function formatJobChatResponse(
 }
 
 /**
- * Select the runner's session and prompt together. A deadline resumes the
- * existing session, while context overflow must discard that transcript and
- * restart from the original request.
+ * Select the runner's runtime, transcript, and prompt together. A deadline
+ * resumes the existing transcript, while context overflow must discard that
+ * transcript and restart from the original request.
  */
 export function resolveJobInvocation(
   job: Pick<
     JobPayload,
-    'sessionId' | 'lockToken' | 'reason' | 'promptExcerpt'
+    | 'sessionId'
+    | 'conversationSessionId'
+    | 'lockToken'
+    | 'reason'
+    | 'promptExcerpt'
   >
 ): JobInvocation {
   const restart = job.reason === 'context-overflow';
+  const conversationSessionId = job.conversationSessionId
+    ? restart
+      ? restartSessionId(job.conversationSessionId, job.lockToken)
+      : job.conversationSessionId
+    : undefined;
   return {
-    invokeSessionId: restart
-      ? restartSessionId(job.sessionId, job.lockToken)
-      : job.sessionId,
+    // New payloads keep one owner-wide runtime even when an overflowing
+    // OpenClaw transcript must restart. Legacy payloads lacked a separate
+    // conversation id, so retain their original fresh-runtime behavior.
+    invokeSessionId:
+      restart && !conversationSessionId
+        ? restartSessionId(job.sessionId, job.lockToken)
+        : job.sessionId,
+    ...(conversationSessionId ? { conversationSessionId } : {}),
     prompt: restart
       ? buildOverflowRestartPrompt(job.promptExcerpt)
       : buildContinuationPrompt(job.promptExcerpt),
@@ -194,9 +271,25 @@ const SCHEDULE_NAME_MAX_LENGTH = 120;
  * than at launch with an opaque RunTask rejection.
  */
 const MAX_PAYLOAD_BYTES = 8 * 1024;
+const AGENTCORE_SESSION_ID_MAX_LENGTH = 100;
+const AGENTCORE_SESSION_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
+
+function assertAgentCoreSessionId(sessionId: string): void {
+  if (
+    sessionId.length === 0 ||
+    sessionId.length > AGENTCORE_SESSION_ID_MAX_LENGTH ||
+    !AGENTCORE_SESSION_ID_PATTERN.test(sessionId)
+  ) {
+    throw new Error(
+      `JOB_PAYLOAD invalid field: sessionId (must match AgentCore's ${AGENTCORE_SESSION_ID_MAX_LENGTH}-character contract)`
+    );
+  }
+}
 
 export function buildJobPayload(input: {
   sessionId: string;
+  workspaceLockId?: string;
+  conversationSessionId?: string;
   reason?: PromotionReason;
   lockToken: string;
   runtimeId: string;
@@ -214,8 +307,15 @@ export function buildJobPayload(input: {
   originalPrompt: string;
   responsePrefix?: string;
 }): string {
+  assertAgentCoreSessionId(input.sessionId);
   const payload: JobPayload = {
     sessionId: input.sessionId,
+    ...(input.workspaceLockId
+      ? { workspaceLockId: input.workspaceLockId }
+      : {}),
+    ...(input.conversationSessionId
+      ? { conversationSessionId: input.conversationSessionId }
+      : {}),
     ...(input.reason ? { reason: input.reason } : {}),
     lockToken: input.lockToken,
     runtimeId: input.runtimeId,
@@ -279,6 +379,30 @@ function readScheduledRunId(
   return value && /^\d{1,20}$/.test(value) ? value : undefined;
 }
 
+function readConversationSessionFields(
+  obj: Record<string, unknown>
+): Pick<JobPayload, 'conversationSessionId'> {
+  const value = boundedOptionalString(
+    obj,
+    'conversationSessionId',
+    256
+  );
+  if (value && !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(value)) {
+    throw new Error('JOB_PAYLOAD invalid field: conversationSessionId');
+  }
+  return value ? { conversationSessionId: value } : {};
+}
+
+function readWorkspaceLockFields(
+  obj: Record<string, unknown>
+): Pick<JobPayload, 'workspaceLockId'> {
+  const value = boundedOptionalString(obj, 'workspaceLockId', 256);
+  if (value && !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(value)) {
+    throw new Error('JOB_PAYLOAD invalid field: workspaceLockId');
+  }
+  return value ? { workspaceLockId: value } : {};
+}
+
 /**
  * Parse + validate a JOB_PAYLOAD env value in the runner. Throws with a
  * field-specific message on anything missing — the runner catches, logs,
@@ -310,8 +434,14 @@ export function parseJobPayload(raw: string | undefined): JobPayload {
   const scheduledRunId = readScheduledRunId(obj);
   const fireKey = boundedOptionalString(obj, 'fireKey', 192);
   const googleIdentity = boundedOptionalString(obj, 'googleIdentity', 256);
+  const conversationSessionFields = readConversationSessionFields(obj);
+  const workspaceLockFields = readWorkspaceLockFields(obj);
+  const sessionId = requireString('sessionId');
+  assertAgentCoreSessionId(sessionId);
   return {
-    sessionId: requireString('sessionId'),
+    sessionId,
+    ...workspaceLockFields,
+    ...conversationSessionFields,
     // Unknown/absent -> 'deadline'. A payload from an older cron build must
     // keep resuming the session, not silently switch to a fresh one.
     ...(obj.reason === 'context-overflow' || obj.reason === 'deadline'
@@ -395,11 +525,11 @@ export function buildOverflowRestartPrompt(promptExcerpt: string): string {
 }
 
 /**
- * Session id for a restart leg — unique per PROMOTION, not per day.
+ * Session key for a restart leg — unique per PROMOTION, not per day.
  *
- * A fresh id is what actually discards the overflowing transcript: AgentCore
- * sticky-routes by session, so reusing the id hands the runner the very history
- * that blew the window.
+ * A fresh OpenClaw conversation id is what actually discards the overflowing
+ * transcript. Legacy payloads also use this helper to rotate AgentCore
+ * affinity because they predate the separate conversation key.
  *
  * The uniqueness has to come from the lock token, not a counter. A scheduled
  * session id is date-based and STABLE for the whole UTC day
@@ -410,8 +540,8 @@ export function buildOverflowRestartPrompt(promptExcerpt: string): string {
  * or blending two separate runs. The lock token is a fresh UUID per promotion,
  * which makes each restart distinct while staying deterministic for tests.
  *
- * Suffix replaced rather than appended, and bounded to 8 hex chars, because
- * AgentCore enforces a session-id length limit.
+ * Suffix replaced rather than appended, and bounded to 8 hex chars, so both
+ * OpenClaw and legacy AgentCore keys remain within the platform length limit.
  */
 export function restartSessionId(sessionId: string, lockToken: string): string {
   const base = sessionId.replace(/-r[0-9a-f]{1,12}$/i, '');

@@ -2,8 +2,10 @@ import * as crypto from "node:crypto";
 
 export const INVOCATION_CONTEXT_AUDIENCE = "psd-agent-internal";
 export const INVOCATION_CONTEXT_VERSION = 1;
-const DEFAULT_TTL_SECONDS = 15 * 60;
-const MAX_TTL_SECONDS = 2 * 60 * 60;
+export const DEFAULT_INVOCATION_CONTEXT_TTL_SECONDS = 15 * 60;
+// The job harness still stops model work at two hours. The extra 30 minutes
+// exists only so the root wrapper can drain and commit the workspace afterward.
+export const MAX_INVOCATION_CONTEXT_TTL_SECONDS = 150 * 60;
 
 export type InvocationMode = "owner" | "consultation" | "scheduled";
 
@@ -122,9 +124,16 @@ export function createInvocationContextToken(
   }
 
   const nowSeconds = options.nowSeconds ?? Math.floor(Date.now() / 1000);
-  const ttlSeconds = options.ttlSeconds ?? DEFAULT_TTL_SECONDS;
-  if (!Number.isInteger(ttlSeconds) || ttlSeconds < 30 || ttlSeconds > MAX_TTL_SECONDS) {
-    throw new Error(`Agent invocation context TTL must be between 30 and ${MAX_TTL_SECONDS} seconds`);
+  const ttlSeconds =
+    options.ttlSeconds ?? DEFAULT_INVOCATION_CONTEXT_TTL_SECONDS;
+  if (
+    !Number.isInteger(ttlSeconds) ||
+    ttlSeconds < 30 ||
+    ttlSeconds > MAX_INVOCATION_CONTEXT_TTL_SECONDS
+  ) {
+    throw new Error(
+      `Agent invocation context TTL must be between 30 and ${MAX_INVOCATION_CONTEXT_TTL_SECONDS} seconds`
+    );
   }
 
   const claims: InvocationContextClaims = {

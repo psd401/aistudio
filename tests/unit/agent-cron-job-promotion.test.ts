@@ -47,7 +47,14 @@ const cronSource = stripComments(
 )
 
 const baseInput = {
-  sessionId: "hagelk-db0f32b5-sched-5123b45b-2026-07-27",
+  sessionId:
+    "agent-rt-6edbd4b628862780694c4603746287bc62336928d8d9d80f" +
+    "a929f271a1035461-859f49d608d4d7edb7168b91",
+  workspaceLockId:
+    "agent-workspace-2cdfb7ff9607dc22d20acda80b1c3874368189d8" +
+    "021174107587921631fe2e08",
+  conversationSessionId:
+    "hagelk-db0f32b5-sched-5123b45b-2026-07-27",
   lockToken: "lock-token-abc",
   runtimeId: "arn:aws:bedrock-agentcore:us-east-1:390844780692:runtime/psd_agent_dev-abc",
   userEmail: "hagelk@psd401.net",
@@ -70,6 +77,10 @@ const baseInput = {
       const parsed = parseJobPayload(buildFromCron(baseInput))
 
       expect(parsed.sessionId).toBe(baseInput.sessionId)
+      expect(parsed.workspaceLockId).toBe(baseInput.workspaceLockId)
+      expect(parsed.conversationSessionId).toBe(
+        baseInput.conversationSessionId
+      )
       expect(parsed.lockToken).toBe(baseInput.lockToken)
       expect(parsed.runtimeId).toBe(baseInput.runtimeId)
       expect(parsed.userEmail).toBe(baseInput.userEmail)
@@ -89,6 +100,31 @@ const baseInput = {
       // tolerate (it defaults displayName and promptExcerpt) but that would
       // still change runner behaviour.
       expect(buildFromCron(baseInput)).toBe(buildFromRouter(baseInput))
+    })
+
+    it("enforces AgentCore's runtime session-id contract in both bundles", () => {
+      expect(baseInput.sessionId).toHaveLength(98)
+      expect(baseInput.sessionId).toMatch(
+        /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/
+      )
+
+      for (const build of [buildFromCron, buildFromRouter]) {
+        expect(() =>
+          build({ ...baseInput, sessionId: "s".repeat(101) })
+        ).toThrow("invalid field: sessionId")
+        expect(() =>
+          build({ ...baseInput, sessionId: "invalid/session" })
+        ).toThrow("invalid field: sessionId")
+      }
+
+      const parsed = JSON.parse(buildFromRouter(baseInput)) as Record<
+        string,
+        unknown
+      >
+      parsed.sessionId = "s".repeat(101)
+      expect(() => parseJobPayload(JSON.stringify(parsed))).toThrow(
+        "invalid field: sessionId"
+      )
     })
 
     it("agrees with the router on every recoverable class", () => {
@@ -322,7 +358,7 @@ const baseInput = {
   })
 
   describe("runner invocation selection", () => {
-    it("restarts context overflow with a derived session and restart prompt", () => {
+    it("restarts only the logical transcript after context overflow", () => {
       const invocation = resolveJobInvocation({
         ...baseInput,
         reason: "context-overflow",
@@ -330,7 +366,10 @@ const baseInput = {
       })
 
       expect(invocation.restart).toBe(true)
-      expect(invocation.invokeSessionId).not.toBe(baseInput.sessionId)
+      expect(invocation.invokeSessionId).toBe(baseInput.sessionId)
+      expect(invocation.conversationSessionId).not.toBe(
+        baseInput.conversationSessionId
+      )
       expect(invocation.prompt).toContain("[job-restart]")
       expect(invocation.prompt).toContain(baseInput.originalPrompt)
     })
@@ -344,7 +383,24 @@ const baseInput = {
 
       expect(invocation.restart).toBe(false)
       expect(invocation.invokeSessionId).toBe(baseInput.sessionId)
+      expect(invocation.conversationSessionId).toBe(
+        baseInput.conversationSessionId
+      )
       expect(invocation.prompt).toContain("[job-continuation]")
+    })
+
+    it("retains the safe legacy restart behavior without split identities", () => {
+      const invocation = resolveJobInvocation({
+        sessionId: baseInput.conversationSessionId,
+        lockToken: baseInput.lockToken,
+        reason: "context-overflow",
+        promptExcerpt: baseInput.originalPrompt,
+      })
+
+      expect(invocation.invokeSessionId).not.toBe(
+        baseInput.conversationSessionId
+      )
+      expect(invocation.conversationSessionId).toBeUndefined()
     })
   })
 

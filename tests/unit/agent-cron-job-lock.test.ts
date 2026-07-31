@@ -1,4 +1,6 @@
 import {
+  JOB_LOCK_LEASE_SECONDS,
+  JOB_LOCK_RENEW_INTERVAL_MS,
   releaseJobLock,
   renewJobLock,
   runWithJobLock,
@@ -16,6 +18,7 @@ describe("agent-cron per-schedule promotion lock", () => {
   it("uses one conditional lock row to reject overlapping invocations", async () => {
     const put = jest.fn().mockResolvedValue({})
     const deleteItem = jest.fn().mockResolvedValue({})
+    const nowSeconds = Math.floor(Date.now() / 1000)
 
     const result = await tryAcquireJobLock(
       SESSION_ID,
@@ -34,6 +37,9 @@ describe("agent-cron per-schedule promotion lock", () => {
       ConditionExpression:
         "attribute_not_exists(sessionId) OR expiresAt < :now",
     })
+    expect(
+      put.mock.calls[0][0].Item.expiresAt - nowSeconds,
+    ).toBeGreaterThanOrEqual(JOB_LOCK_LEASE_SECONDS)
   })
 
   it("correlates a session lock with the immutable schedule fire", async () => {
@@ -102,7 +108,7 @@ describe("agent-cron per-schedule promotion lock", () => {
       runWithJobLock(
         SESSION_ID,
         TABLE,
-        { put, delete: deleteItem },
+        { put, delete: deleteItem, update: jest.fn() },
         logger(),
         { execute },
       ),
@@ -128,7 +134,7 @@ describe("agent-cron per-schedule promotion lock", () => {
       runWithJobLock(
         SESSION_ID,
         TABLE,
-        { put, delete: jest.fn() },
+        { put, delete: jest.fn(), update: jest.fn() },
         logger(),
         { execute },
       ),
@@ -164,7 +170,7 @@ describe("agent-cron same-fire lock recovery", () => {
       runWithJobLock(
         SESSION_ID,
         TABLE,
-        { put, get, delete: deleteItem },
+        { put, get, delete: deleteItem, update: jest.fn() },
         logger(),
         { execute, fireKey },
       ),
@@ -202,6 +208,7 @@ describe("agent-cron session-lock lifecycle", () => {
 
   it("renews the transferred lock before launching the background runner", async () => {
     const update = jest.fn().mockResolvedValue({})
+    const nowSeconds = Math.floor(Date.now() / 1000)
 
     await expect(
       renewJobLock(
@@ -224,11 +231,16 @@ describe("agent-cron session-lock lifecycle", () => {
         }),
       }),
     )
+    expect(
+      update.mock.calls[0][0].ExpressionAttributeValues[":expiresAt"]
+        - nowSeconds,
+    ).toBeGreaterThanOrEqual(JOB_LOCK_LEASE_SECONDS)
   })
 
   it("releases the pre-invocation lock after a normal scheduled turn", async () => {
     const put = jest.fn().mockResolvedValue({})
     const deleteItem = jest.fn().mockResolvedValue({})
+    const update = jest.fn().mockResolvedValue({})
     const execute = jest.fn().mockResolvedValue({
       value: "delivered",
       retainLock: false,
@@ -238,7 +250,7 @@ describe("agent-cron session-lock lifecycle", () => {
       runWithJobLock(
         SESSION_ID,
         TABLE,
-        { put, delete: deleteItem },
+        { put, delete: deleteItem, update },
         logger(),
         { execute },
       ),
@@ -251,6 +263,7 @@ describe("agent-cron session-lock lifecycle", () => {
   it("transfers the pre-invocation lock to a promoted background job", async () => {
     const put = jest.fn().mockResolvedValue({})
     const deleteItem = jest.fn().mockResolvedValue({})
+    const update = jest.fn().mockResolvedValue({})
     const execute = jest.fn().mockResolvedValue({
       value: "promoted",
       retainLock: true,
@@ -260,7 +273,7 @@ describe("agent-cron session-lock lifecycle", () => {
       runWithJobLock(
         SESSION_ID,
         TABLE,
-        { put, delete: deleteItem },
+        { put, delete: deleteItem, update },
         logger(),
         { execute },
       ),
@@ -268,5 +281,65 @@ describe("agent-cron session-lock lifecycle", () => {
 
     expect(execute).toHaveBeenCalledWith(expect.any(String))
     expect(deleteItem).not.toHaveBeenCalled()
+  })
+
+  it("retains the lease when scheduled execution throws before an explicit outcome", async () => {
+    const put = jest.fn().mockResolvedValue({})
+    const update = jest.fn().mockResolvedValue({})
+    const deleteItem = jest.fn().mockResolvedValue({})
+
+    await expect(
+      runWithJobLock(
+        SESSION_ID,
+        TABLE,
+        { put, delete: deleteItem, update },
+        logger(),
+        {
+          execute: async () => {
+            throw new Error("delivery disconnected")
+          },
+        },
+      ),
+    ).rejects.toThrow("delivery disconnected")
+
+    expect(deleteItem).not.toHaveBeenCalled()
+  })
+
+  it("renews a synchronous scheduled turn every five minutes", async () => {
+    const put = jest.fn().mockResolvedValue({})
+    const update = jest.fn().mockResolvedValue({})
+    const deleteItem = jest.fn().mockResolvedValue({})
+    const intervals: number[] = []
+    const stoppedTimers: unknown[] = []
+
+    await expect(
+      runWithJobLock(
+        SESSION_ID,
+        TABLE,
+        { put, delete: deleteItem, update },
+        logger(),
+        {
+          execute: async () => ({
+            value: "delivered",
+            retainLock: false,
+          }),
+          renewalScheduler: {
+            start: (callback, intervalMs) => {
+              intervals.push(intervalMs)
+              callback()
+              return "renewal-timer"
+            },
+            stop: timer => {
+              stoppedTimers.push(timer)
+            },
+          },
+        },
+      ),
+    ).resolves.toEqual({ executed: true, value: "delivered" })
+
+    expect(intervals).toEqual([JOB_LOCK_RENEW_INTERVAL_MS])
+    expect(update).toHaveBeenCalledTimes(1)
+    expect(stoppedTimers).toEqual(["renewal-timer"])
+    expect(deleteItem).toHaveBeenCalledTimes(1)
   })
 })

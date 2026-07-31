@@ -12,11 +12,16 @@ import {
   formatJobChatResponse,
   jobAgentAudienceContext,
   jobChatDeliveryContext,
+  JOB_AUTHORITY_STARTUP_MARGIN_S,
   JOB_DEADLINE_S,
+  JOB_FINALIZATION_BOUNDED_MAX_S,
+  JOB_INVOCATION_CONTEXT_TTL_S,
   parseJobPayload,
   promotionReason,
   resolveJobInvocation,
+  resolveJobWorkspaceLockPlan,
   shouldPromoteToJob,
+  workspaceLockIdFromPrefix,
 } from './job-promotion';
 
 describe('shouldPromoteToJob', () => {
@@ -47,6 +52,8 @@ describe('shouldPromoteToJob', () => {
 
 const BASE = {
   sessionId: 'user-abc123-deadbeef-tag',
+  workspaceLockId: 'agent-workspace-deadbeef',
+  conversationSessionId: 'user-abc123-chat-thread1-tag',
   lockToken: 'tok-1',
   runtimeId: 'psd_agent_dev-XYZ',
   userEmail: 'hagelk@psd401.net',
@@ -62,6 +69,10 @@ describe('buildJobPayload / parseJobPayload round-trip', () => {
   test('round-trips all fields', () => {
     const parsed = parseJobPayload(buildJobPayload({ ...BASE, threadName: 'spaces/AAA/threads/t1' }));
     expect(parsed.sessionId).toBe(BASE.sessionId);
+    expect(parsed.workspaceLockId).toBe(BASE.workspaceLockId);
+    expect(parsed.conversationSessionId).toBe(
+      BASE.conversationSessionId
+    );
     expect(parsed.lockToken).toBe(BASE.lockToken);
     expect(parsed.runtimeId).toBe(BASE.runtimeId);
     expect(parsed.userEmail).toBe(BASE.userEmail);
@@ -93,7 +104,10 @@ describe('buildJobPayload / parseJobPayload round-trip', () => {
 
     const invocation = resolveJobInvocation(parsed);
     expect(invocation.restart).toBe(true);
-    expect(invocation.invokeSessionId).not.toBe(BASE.sessionId);
+    expect(invocation.invokeSessionId).toBe(BASE.sessionId);
+    expect(invocation.conversationSessionId).not.toBe(
+      BASE.conversationSessionId
+    );
     expect(invocation.prompt).toContain('[job-restart]');
     expect(invocation.prompt).toContain(BASE.originalPrompt);
   });
@@ -148,6 +162,46 @@ describe('buildJobPayload / parseJobPayload round-trip', () => {
     const missing = JSON.stringify({ sessionId: 's' });
     expect(() => parseJobPayload(missing)).toThrow('lockToken');
   });
+
+  test('rejects physical AgentCore session ids outside the API contract', () => {
+    expect(() =>
+      buildJobPayload({ ...BASE, sessionId: 's'.repeat(101) })
+    ).toThrow('invalid field: sessionId');
+    expect(() =>
+      buildJobPayload({ ...BASE, sessionId: 'invalid/session' })
+    ).toThrow('invalid field: sessionId');
+
+    const payload = JSON.parse(buildJobPayload(BASE)) as Record<
+      string,
+      unknown
+    >;
+    payload.sessionId = 's'.repeat(101);
+    expect(() => parseJobPayload(JSON.stringify(payload))).toThrow(
+      'invalid field: sessionId'
+    );
+  });
+});
+
+describe('legacy promoted-job workspace lock bridge', () => {
+  test('new payloads continue using their inherited stable lock', () => {
+    expect(resolveJobWorkspaceLockPlan(BASE)).toEqual({
+      inheritedLockId: BASE.workspaceLockId,
+    });
+  });
+
+  test('legacy payloads retain the old lease and derive the owner-wide bridge', () => {
+    const legacy = {
+      sessionId: BASE.sessionId,
+      workspacePrefix: BASE.workspacePrefix,
+    };
+    expect(resolveJobWorkspaceLockPlan(legacy)).toEqual({
+      inheritedLockId: BASE.sessionId,
+      bridgeLockId: workspaceLockIdFromPrefix(BASE.workspacePrefix),
+    });
+    expect(workspaceLockIdFromPrefix(BASE.workspacePrefix)).toMatch(
+      /^agent-workspace-[0-9a-f]{64}$/
+    );
+  });
 });
 
 describe('buildContinuationPrompt', () => {
@@ -194,7 +248,23 @@ describe('formatJobChatResponse', () => {
 });
 
 describe('promoted-job Chat context', () => {
-  test('retains the sender identity and public audience for room delivery', () => {
+  test('uses the logical conversation id for delivery diagnostics', () => {
+    expect(
+      jobChatDeliveryContext({
+        isDM: true,
+        userEmail: BASE.userEmail,
+        sessionId: BASE.sessionId,
+        conversationSessionId: BASE.conversationSessionId,
+      })
+    ).toEqual({
+      isSharedSpace: false,
+      durableDelivery: false,
+      userId: BASE.userEmail,
+      sessionId: BASE.conversationSessionId,
+    });
+  });
+
+  test('retains public audience without adding a cross-channel destination', () => {
     const roomJob = {
       isDM: false,
       googleIdentity: BASE.googleIdentity,
@@ -204,7 +274,13 @@ describe('promoted-job Chat context', () => {
 
     expect(jobChatDeliveryContext(roomJob)).toEqual({
       isSharedSpace: true,
-      senderGoogleIdentity: BASE.googleIdentity,
+      durableDelivery: false,
+      userId: BASE.userEmail,
+      sessionId: BASE.sessionId,
+    });
+    expect(jobChatDeliveryContext(roomJob, true)).toEqual({
+      isSharedSpace: true,
+      durableDelivery: true,
       userId: BASE.userEmail,
       sessionId: BASE.sessionId,
     });
@@ -213,7 +289,7 @@ describe('promoted-job Chat context', () => {
     });
   });
 
-  test('omits sender fallback and public audience for DM delivery', () => {
+  test('omits public audience for DM delivery', () => {
     const dmJob = {
       isDM: true,
       googleIdentity: BASE.googleIdentity,
@@ -223,6 +299,7 @@ describe('promoted-job Chat context', () => {
 
     expect(jobChatDeliveryContext(dmJob)).toEqual({
       isSharedSpace: false,
+      durableDelivery: false,
       userId: BASE.userEmail,
       sessionId: BASE.sessionId,
     });
@@ -231,7 +308,15 @@ describe('promoted-job Chat context', () => {
 });
 
 describe('JOB_DEADLINE_S', () => {
-  test('matches the approved 2-hour ceiling (harness clamp mirror)', () => {
+  test('keeps two-hour work while authority covers terminal persistence', () => {
     expect(JOB_DEADLINE_S).toBe(7200);
+    expect(JOB_FINALIZATION_BOUNDED_MAX_S).toBe(1020);
+    expect(JOB_AUTHORITY_STARTUP_MARGIN_S).toBe(780);
+    expect(JOB_INVOCATION_CONTEXT_TTL_S).toBe(9000);
+    expect(JOB_INVOCATION_CONTEXT_TTL_S).toBe(
+      JOB_DEADLINE_S
+      + JOB_FINALIZATION_BOUNDED_MAX_S
+      + JOB_AUTHORITY_STARTUP_MARGIN_S
+    );
   });
 });

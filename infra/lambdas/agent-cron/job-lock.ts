@@ -7,6 +7,9 @@ import type {
 import * as crypto from 'node:crypto';
 import { sanitizeDiagnostic } from './diagnostic-sanitization';
 
+export const JOB_LOCK_LEASE_SECONDS = 30 * 60;
+export const JOB_LOCK_RENEW_INTERVAL_MS = 5 * 60 * 1000;
+
 interface JobLockLogger {
   warn: (message: string, metadata?: Record<string, unknown>) => void;
 }
@@ -54,6 +57,11 @@ export interface LockedJobExecution<T> {
   retainLock: boolean;
 }
 
+export interface JobLockRenewalScheduler {
+  start(callback: () => void, intervalMs: number): unknown;
+  stop(timer: unknown): void;
+}
+
 export type LockedJobResult<T> =
   | { executed: true; value: T }
   | { executed: false; lock: JobLockFailure };
@@ -61,7 +69,14 @@ export type LockedJobResult<T> =
 export interface JobLockExecutionOptions<T> {
   execute: (lockToken: string) => Promise<LockedJobExecution<T>>;
   fireKey?: string;
+  renewalScheduler?: JobLockRenewalScheduler;
 }
+
+const defaultJobLockRenewalScheduler: JobLockRenewalScheduler = {
+  start: (callback, intervalMs) => setInterval(callback, intervalMs),
+  stop: (timer) =>
+    clearInterval(timer as ReturnType<typeof setInterval>),
+};
 
 export async function tryAcquireJobLock(
   sessionId: string,
@@ -88,9 +103,9 @@ export async function tryAcquireJobLock(
         TableName: tableName,
         Item: {
           sessionId,
-          // Covers the Lambda's full 15-minute budget plus Fargate handoff.
-          // The job runner renews the same token after a successful promotion.
-          expiresAt: nowS + 16 * 60,
+          // Covers cold restore, the Lambda's 14-minute harness budget, and
+          // the wrapper's bounded final flush even if renewal is missed.
+          expiresAt: nowS + JOB_LOCK_LEASE_SECONDS,
           lockToken,
           kind: 'job',
           claimedAt: new Date().toISOString(),
@@ -221,7 +236,8 @@ export async function renewJobLock(
       UpdateExpression: 'SET expiresAt = :expiresAt',
       ConditionExpression: 'lockToken = :token',
       ExpressionAttributeValues: {
-        ':expiresAt': Math.floor(Date.now() / 1000) + 16 * 60,
+        ':expiresAt':
+          Math.floor(Date.now() / 1000) + JOB_LOCK_LEASE_SECONDS,
         ':token': lockToken,
       },
     });
@@ -241,15 +257,15 @@ export async function renewJobLock(
 }
 
 /**
- * Acquire a session lock before executing any scheduled turn. Normal turns
- * release it after delivery; successful promotions retain the same token for
- * the background runner, preventing a duplicate invocation from reaching
- * AgentCore or launching a second job.
+ * Acquire a session lock before executing any scheduled turn. Confirmed turns
+ * release it after delivery; uncertain completion and successful promotions
+ * retain the token, preventing a duplicate invocation from reaching AgentCore
+ * or launching a second job.
  */
 export async function runWithJobLock<T>(
   sessionId: string,
   tableName: string,
-  dynamoClient: JobLockDynamoClient,
+  dynamoClient: JobLockDynamoClient & JobLockLeaseDynamoClient,
   log: JobLockLogger,
   options: JobLockExecutionOptions<T>,
 ): Promise<LockedJobResult<T>> {
@@ -304,16 +320,57 @@ export async function runWithJobLock<T>(
     return { executed: false, lock };
   }
 
-  let retainLock = false;
+  const lockToken = lock.lockToken;
+  // Fail safe once execution begins. A thrown callback may mean the transport
+  // disconnected while AgentCore is still stopping OpenClaw or flushing its
+  // workspace. Only an explicit completed execution may authorize deletion.
+  let retainLock = true;
+  let renewalInFlight: Promise<void> | undefined;
+  const renewOnce = () => {
+    if (renewalInFlight) return;
+    renewalInFlight = (async () => {
+      try {
+        const renewal = await renewJobLock(
+          sessionId,
+          lockToken,
+          tableName,
+          dynamoClient,
+          log,
+        );
+        if (!renewal.acquired) {
+          log.warn('Scheduled turn workspace lock renewal was not confirmed', {
+            phase: renewal.phase,
+          });
+        }
+      } catch (error) {
+        log.warn('Scheduled turn workspace lock renewal threw unexpectedly', {
+          error: sanitizeDiagnostic(
+            error instanceof Error ? error.message : String(error),
+          ),
+        });
+      } finally {
+        renewalInFlight = undefined;
+      }
+    })();
+  };
+  const renewalScheduler =
+    options.renewalScheduler ?? defaultJobLockRenewalScheduler;
+  const renewalTimer = renewalScheduler.start(
+    renewOnce,
+    JOB_LOCK_RENEW_INTERVAL_MS,
+  );
   try {
-    const execution = await options.execute(lock.lockToken);
+    const execution = await options.execute(lockToken);
     retainLock = execution.retainLock;
     return { executed: true, value: execution.value };
   } finally {
+    renewalScheduler.stop(renewalTimer);
+    const pendingRenewal = renewalInFlight;
+    if (pendingRenewal) await pendingRenewal;
     if (!retainLock) {
       await releaseJobLock(
         sessionId,
-        lock.lockToken,
+        lockToken,
         tableName,
         dynamoClient,
         log,

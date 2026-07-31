@@ -119,10 +119,17 @@ function sanitizeDriveFileId(value: unknown): string | undefined {
  * a filesystem path under /home/node/.openclaw/ inside the microVM, so it
  * must be safe for both: the filename is reduced to `[A-Za-z0-9._-]`, leading
  * dots are stripped (no hidden files, no `..` traversal), and length is
- * bounded. A UTC timestamp + per-message index prefix keeps repeated uploads
- * of the same filename from overwriting each other.
+ * bounded. A stable message-identity hash plus per-message index makes
+ * redelivery idempotent while keeping same-name uploads from different Chat
+ * messages/threads distinct. The timestamp is the Chat message create time,
+ * not retry time.
  */
-export function buildWorkspacePath(name: string, index: number, now: Date): string {
+export function buildWorkspacePath(
+  name: string,
+  index: number,
+  now: Date,
+  messageIdentity = ''
+): string {
   let safeName = name
     .replace(/[^A-Za-z0-9._-]+/g, '-')
     .replace(/^[.-]+/, '')
@@ -137,7 +144,9 @@ export function buildWorkspacePath(name: string, index: number, now: Date): stri
   if (!safeName) safeName = 'file';
   // 2026-07-06T23:51:33.123Z -> 20260706T235133
   const stamp = now.toISOString().replace(/[-:]/g, '').slice(0, 15);
-  return `attachments/${stamp}-${index}-${safeName}`;
+  const stableIdentity = messageIdentity.replace(/[^A-Za-z0-9_-]/g, '');
+  const identityPart = stableIdentity ? `${stableIdentity}-` : '';
+  return `attachments/${stamp}-${identityPart}${index}-${safeName}`;
 }
 
 function deriveDriveName(mimeType: string): string {

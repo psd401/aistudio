@@ -242,6 +242,11 @@ export class AgentPlatformStack extends cdk.Stack {
     this.createMcpKeyBootstrap(props, resources);
     this.createAgentCoreRole(props, resources);
     this.createLambdaRoles(props, resources);
+    // Cron and background jobs both enqueue durable Chat deliveries onto the
+    // router queue. Construct the queue before either consumer is wired so
+    // their environment variables and least-privilege grants never dereference
+    // an uninitialized resource during synth.
+    this.createRouterQueues(props, resources);
     this.createAgentRuntimeAndPolicies(props, resources);
     this.createSkillBuilder(props, resources);
     this.createCronAndScheduler(props, resources);
@@ -251,7 +256,6 @@ export class AgentPlatformStack extends cdk.Stack {
     this.createTriageWorker(props, resources);
     this.createTriageDispatcher(props, resources);
     this.createTriageDigest(props, resources);
-    this.createRouterQueues(props, resources);
     this.createRouterLambda(props, resources);
     this.createMintLambda(props, resources);
     this.createJobRunner(props, resources);
@@ -2204,6 +2208,11 @@ export class AgentPlatformStack extends cdk.Stack {
         DATABASE_NAME: props.databaseName ?? 'aistudio',
         AWS_ACCOUNT_ID: this.account,
         AGENT_INVOCATION_SIGNING_SECRET_ID: resources.agentInvocationSigningSecret.secretName,
+        // Must match the router so cron and interactive turns share one
+        // build-rotated owner runtime while their deployment-stable workspace
+        // lock continues to span old/new microVM overlap.
+        AGENT_BUILD_TAG: resources.agentBuildTag,
+        ROUTER_QUEUE_URL: resources.routerQueue.queueUrl,
         SCHEDULE_RECONCILIATION_QUEUE_URL:
           resources.cronReconciliationQueue.queueUrl,
       },
@@ -2215,6 +2224,7 @@ export class AgentPlatformStack extends cdk.Stack {
     // Grant Cron Lambda access to Google credentials secret
     resources.googleCredentialsSecret.grantRead(resources.cronLambdaRole);
     resources.agentInvocationSigningSecret.grantRead(resources.cronLambdaRole);
+    resources.routerQueue.grantSendMessages(resources.cronLambdaRole);
     resources.cronReconciliationQueue.grantSendMessages(
       resources.cronLambdaRole,
     );
@@ -3047,7 +3057,11 @@ export class AgentPlatformStack extends cdk.Stack {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       deadLetterQueue: {
         queue: resources.routerDlq,
-        maxReceiveCount: 3, // 3 retries before DLQ
+        // Workspace contention is transferred to a fresh, bounded delayed
+        // record by the router. Keep ordinary malformed/permanent failures on
+        // the standard three-receive path so they reach the DLQ before the
+        // four-day source retention expires.
+        maxReceiveCount: 3,
       },
     });
     cdk.Tags.of(resources.routerQueue).add('Environment', environment);
@@ -3160,6 +3174,7 @@ export class AgentPlatformStack extends cdk.Stack {
         // The role already has PutObject via ServiceRoleFactory s3Buckets.
         WORKSPACE_BUCKET: resources.workspaceBucket.bucketName,
         MESSAGE_DEDUP_TABLE: resources.messageDedupTable.tableName,
+        ROUTER_QUEUE_URL: resources.routerQueue.queueUrl,
         SESSION_LOCKS_TABLE: resources.sessionLocksTable.tableName,
         INTERAGENT_TABLE: resources.interAgentTable.tableName,
         MAX_INTERAGENT_MESSAGES_PER_HOUR: '5',
@@ -3423,6 +3438,7 @@ export class AgentPlatformStack extends cdk.Stack {
         AWS_ACCOUNT_ID: this.account,
         NODE_ENV: 'production',
         SESSION_LOCKS_TABLE: resources.sessionLocksTable.tableName,
+        ROUTER_QUEUE_URL: resources.routerQueue.queueUrl,
         GOOGLE_CREDENTIALS_SECRET_ARN: resources.googleCredentialsSecret.secretArn,
         AGENT_INVOCATION_SIGNING_SECRET_ID: resources.agentInvocationSigningSecret.secretName,
         DATABASE_HOST: props.databaseHost,
@@ -3447,6 +3463,7 @@ export class AgentPlatformStack extends cdk.Stack {
     resources.agentInvocationSigningSecret.grantRead(jobTaskDef.taskRole);
     resources.dbSecret.grantRead(jobTaskDef.taskRole);
     resources.sessionLocksTable.grantReadWriteData(jobTaskDef.taskRole);
+    resources.routerQueue.grantSendMessages(jobTaskDef.taskRole);
 
     const jobRunnerSg = new ec2.SecurityGroup(this, 'JobRunnerSg', {
       vpc: resources.vpc,
@@ -3566,6 +3583,7 @@ export class AgentPlatformStack extends cdk.Stack {
         reportBatchItemFailures: true,
       }),
     );
+    resources.routerQueue.grantSendMessages(resources.routerLambdaRole);
   }
 
   private createJobRunnerStoppedRule(
@@ -3820,9 +3838,9 @@ export class AgentPlatformStack extends cdk.Stack {
     const { environment } = props;
     resources.alarmTopic = resources.agentAlarmTopic;
 
-    // CloudWatch alarm on the DLQ — fires when any message lands in the dead-letter
-    // queue, meaning a user's message was silently dropped after 3 retries. In a K-12
-    // environment this warrants immediate investigation.
+    // CloudWatch alarm on the DLQ — fires when any message exhausts the Router
+    // retry budget. Workspace-contention retries are intentionally long-lived
+    // so independent Chat threads are queued instead of dropped.
     const dlqAlarm = new cloudwatch.Alarm(this, 'RouterDlqAlarm', {
       alarmName: `psd-agent-router-dlq-${environment}`,
       alarmDescription: 'Agent Router DLQ received messages — investigate dropped messages',

@@ -9,10 +9,12 @@
  *
  * THE BUG THIS EXISTS TO PREVENT
  *
- * Three clocks bound a scheduled turn, and they must fire in this order:
+ * Four clocks bound a scheduled turn, and they must fire in this order:
  *
- *   harness turn deadline  <  our fetch abort  <  Lambda timeout (900s, an AWS
- *                                                 hard ceiling we cannot raise)
+ *   harness turn deadline
+ *     < wrapper final workspace persistence
+ *     < our fetch abort
+ *     < Lambda timeout (900s, an AWS hard ceiling we cannot raise)
  *
  * Each gap gives the next layer out time to do its job: the harness stops work
  * and returns a PARTIAL answer, we post that answer to Chat, and Lambda lets us
@@ -50,17 +52,48 @@ export const REPLY_RESERVE_MS = 30_000;
  */
 export const STARTUP_RESERVE_S = 90;
 
+/** Short-drain client timeout: 15s drain plus 5s HTTP transport allowance. */
+export const INTERACTIVE_PROXY_DRAIN_CLIENT_MAX_S = 20;
+
+/**
+ * Killing a stuck proxy takes at most two 5s waits. Starting its replacement
+ * has a 20s poll deadline plus one in-flight 2s health probe and loop jitter.
+ */
+export const PROXY_RESTART_MAX_S = 35;
+
+/** OpenClaw shutdown has one 10s terminate wait and one 10s kill wait. */
+export const GATEWAY_SHUTDOWN_MAX_S = 20;
+
+/** Workspace push: 120s operation deadline plus the 5s asyncio allowance. */
+export const WORKSPACE_FLUSH_MAX_S = 125;
+
+/**
+ * The terminal SSE result is withheld across this entire bounded path. Keep
+ * the arithmetic explicit so changing any Python timeout cannot silently
+ * invalidate the 900-second Lambda budget.
+ */
+export const WORKSPACE_FINALIZATION_BOUNDED_MAX_S =
+  INTERACTIVE_PROXY_DRAIN_CLIENT_MAX_S
+  + PROXY_RESTART_MAX_S
+  + GATEWAY_SHUTDOWN_MAX_S
+  + WORKSPACE_FLUSH_MAX_S;
+export const WORKSPACE_FINALIZATION_RESERVE_S =
+  WORKSPACE_FINALIZATION_BOUNDED_MAX_S;
+
 /** Time for the harness to stop work, assemble a partial, and stream it back. */
 export const HARNESS_LEAD_S = 20;
+
+/** Preserve strict ordering even when all whole-second budgets line up. */
+export const DEADLINE_ORDERING_GUARD_S = 1;
 
 /**
  * Clamp applied by the harness itself for a non-job turn
  * (agent-image/harness_adapter.py `_resolve_deadline_s`). Sending a value
  * outside this range is pointless: the harness silently clamps it, and a
- * garbage value degrades to its 840s default rather than raising.
+ * garbage value degrades to its 550s default rather than raising.
  */
 export const HARNESS_DEADLINE_MIN_S = 60;
-export const HARNESS_DEADLINE_MAX_S = 840;
+export const HARNESS_DEADLINE_MAX_S = 550;
 
 /**
  * Deadline to hand the agent, in seconds, derived from the Lambda's real
@@ -68,7 +101,12 @@ export const HARNESS_DEADLINE_MAX_S = 840;
  */
 export function resolveTurnDeadlineS(remainingMs: number): number {
   const abortBudgetS = Math.floor((remainingMs - REPLY_RESERVE_MS) / 1000);
-  const usable = abortBudgetS - STARTUP_RESERVE_S - HARNESS_LEAD_S;
+  const usable =
+    abortBudgetS
+    - STARTUP_RESERVE_S
+    - WORKSPACE_FINALIZATION_RESERVE_S
+    - HARNESS_LEAD_S
+    - DEADLINE_ORDERING_GUARD_S;
   return Math.min(
     HARNESS_DEADLINE_MAX_S,
     Math.max(HARNESS_DEADLINE_MIN_S, usable),

@@ -93,6 +93,8 @@ export function shouldPromoteToJob(errorClass: string | undefined): boolean {
  */
 export interface JobPayload {
   sessionId: string;
+  workspaceLockId?: string;
+  conversationSessionId?: string;
   /**
    * Why the turn was promoted. Optional so a payload written by an older cron
    * build still parses; the runner defaults it to 'deadline', which is the
@@ -122,9 +124,25 @@ const PROMPT_EXCERPT_MAX = 2000;
  * than at launch with an opaque RunTask rejection.
  */
 const MAX_PAYLOAD_BYTES = 8 * 1024;
+const AGENTCORE_SESSION_ID_MAX_LENGTH = 100;
+const AGENTCORE_SESSION_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
+
+function assertAgentCoreSessionId(sessionId: string): void {
+  if (
+    sessionId.length === 0 ||
+    sessionId.length > AGENTCORE_SESSION_ID_MAX_LENGTH ||
+    !AGENTCORE_SESSION_ID_PATTERN.test(sessionId)
+  ) {
+    throw new Error(
+      `JOB_PAYLOAD invalid field: sessionId (must match AgentCore's ${AGENTCORE_SESSION_ID_MAX_LENGTH}-character contract)`
+    );
+  }
+}
 
 export function buildJobPayload(input: {
   sessionId: string;
+  workspaceLockId?: string;
+  conversationSessionId?: string;
   reason?: PromotionReason;
   lockToken: string;
   runtimeId: string;
@@ -140,8 +158,15 @@ export function buildJobPayload(input: {
   isDM: boolean;
   originalPrompt: string;
 }): string {
+  assertAgentCoreSessionId(input.sessionId);
   const payload: JobPayload = {
     sessionId: input.sessionId,
+    ...(input.workspaceLockId
+      ? { workspaceLockId: input.workspaceLockId }
+      : {}),
+    ...(input.conversationSessionId
+      ? { conversationSessionId: input.conversationSessionId }
+      : {}),
     ...(input.reason ? { reason: input.reason } : {}),
     lockToken: input.lockToken,
     runtimeId: input.runtimeId,
