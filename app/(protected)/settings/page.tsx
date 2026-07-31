@@ -37,7 +37,7 @@ export default async function SettingsPage() {
     ])
 
   return (
-    <div className="max-w-4xl">
+    <div className="max-w-4xl mx-auto">
       <div className="mb-6">
         <PageBranding />
         <h1 className="text-2xl font-semibold text-gray-900">Settings</h1>

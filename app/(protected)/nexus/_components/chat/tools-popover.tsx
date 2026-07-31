@@ -13,6 +13,7 @@ import { Wrench, Globe, Code2, ImageIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getAvailableToolsForModel, type ToolConfig } from '@/lib/tools/client-tool-registry'
 import type { SelectAiModel } from '@/types'
+import { meridianPortalClassName } from '@/lib/meridian/fonts'
 
 const WEB_SEARCH_TOOL_NAME = 'webSearch'
 
@@ -178,7 +179,7 @@ export function ToolsPopover({
           )}
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-72 p-0" align="start">
+      <PopoverContent className={`w-72 p-0 ${meridianPortalClassName}`} align="start">
         <div className="p-3 border-b">
           <h4 className="font-medium text-sm">AI Tools</h4>
           <p className="text-xs text-muted-foreground mt-0.5">

@@ -84,7 +84,7 @@ export default async function AdminHubPage() {
                     data-testid={`admin-card-${page.slug}`}
                     className="group focus:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-xl"
                   >
-                    <Card className="h-full transition-all duration-200 group-hover:shadow-lg group-hover:-translate-y-0.5">
+                    <Card className="h-full transition-colors duration-150 group-hover:border-[var(--mer-ink-muted)]">
                       <CardHeader className="pb-2">
                         <div className="flex items-center gap-3">
                           <div

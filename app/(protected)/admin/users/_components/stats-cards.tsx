@@ -22,7 +22,7 @@ function StatCard({ label, value, icon, trend, loading, className }: StatCardPro
   if (loading) {
     return (
       <Card className={className}>
-        <CardContent className="pt-6">
+        <CardContent>
           <div className="flex items-center justify-between">
             <div className="space-y-2">
               <Skeleton className="h-4 w-24" />
@@ -38,7 +38,7 @@ function StatCard({ label, value, icon, trend, loading, className }: StatCardPro
 
   return (
     <Card className={className} data-testid="stat-card" data-stat-label={label}>
-      <CardContent className="pt-6">
+      <CardContent>
         <div className="flex items-center justify-between">
           <div>
             <p className="text-sm text-muted-foreground font-medium">{label}</p>
@@ -98,7 +98,7 @@ export function StatsCards({ stats, loading = false, className }: StatsCardsProp
     {
       label: "Admins",
       value: stats.admins,
-      icon: <IconShield className="h-5 w-5 text-purple-600" />,
+      icon: <IconShield className="h-5 w-5 text-[var(--mer-brand)]" />,
       trend: undefined
     }
   ]

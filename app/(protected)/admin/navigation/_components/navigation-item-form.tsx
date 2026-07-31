@@ -17,6 +17,7 @@ import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 import React from "react"
 import { generateToolIdentifier } from "@/lib/utils"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface NavigationItemFormProps {
   open: boolean
@@ -118,7 +119,7 @@ function LabelTypeFields({ form }: { form: UseFormReturn<FormValues> }) {
                   <SelectValue placeholder="Select type" />
                 </SelectTrigger>
               </FormControl>
-              <SelectContent>
+              <SelectContent className={meridianPortalClassName}>
                 <SelectItem value="link">Link</SelectItem>
                 <SelectItem value="section">Section</SelectItem>
                 <SelectItem value="page">Page</SelectItem>
@@ -167,7 +168,7 @@ function IconLinkFields({ form }: { form: UseFormReturn<FormValues> }) {
                   </SelectValue>
                 </SelectTrigger>
               </FormControl>
-              <SelectContent>
+              <SelectContent className={meridianPortalClassName}>
                 <ScrollArea className="h-[200px]">
                   {Object.entries(iconMap).map(([name, Icon]) => (
                     <SelectItem key={name} value={name}>
@@ -264,7 +265,7 @@ function PlacementFields({
                   <SelectValue placeholder="Select parent" />
                 </SelectTrigger>
               </FormControl>
-              <SelectContent className="max-h-60 overflow-y-auto">
+              <SelectContent className={`max-h-60 overflow-y-auto ${meridianPortalClassName}`}>
                 <SelectItem value="none">None</SelectItem>
                 {parents.map(parent => (
                   <SelectItem key={parent.id} value={String(parent.id)}>
@@ -297,7 +298,7 @@ function PlacementFields({
                   <SelectValue placeholder="Select capability" />
                 </SelectTrigger>
               </FormControl>
-              <SelectContent>
+              <SelectContent className={meridianPortalClassName}>
                 <SelectItem value="none">None</SelectItem>
                 {capabilities.map(capability => (
                   <SelectItem
@@ -342,7 +343,7 @@ function RequiredRoleField({
                 <SelectValue placeholder="Select role" />
               </SelectTrigger>
             </FormControl>
-            <SelectContent>
+            <SelectContent className={meridianPortalClassName}>
               <SelectItem value="none">None</SelectItem>
               {roles.map(role => (
                 <SelectItem key={role.id} value={role.name}>
@@ -379,7 +380,7 @@ function NavigationDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="h-[90vh] max-h-[90vh] p-0 sm:max-w-[700px] flex flex-col">
+      <DialogContent className={`h-[90vh] max-h-[90vh] p-0 sm:max-w-[700px] flex flex-col ${meridianPortalClassName}`}>
         <DialogHeader className="bg-background p-6 pb-4 border-b">
           <DialogTitle>
             {initialData ? "Edit Navigation Item" : "Add Navigation Item"}

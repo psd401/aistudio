@@ -23,6 +23,7 @@ import { useRouter } from "next/navigation"
 import { AssistantPreview } from "@/app/(protected)/utilities/assistant-architect/[id]/edit/preview/_components/assistant-preview"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface AssistantArchitectApprovalProps {
   request: SelectAssistantArchitect & {
@@ -48,7 +49,7 @@ function AssistantDetailsDialog({
           View Details
         </Button>
       </DialogTrigger>
-      <DialogContent className="w-full max-w-3xl">
+      <DialogContent className={`w-full max-w-3xl ${meridianPortalClassName}`}>
         <DialogHeader>
           <DialogTitle>Assistant Preview: {request.name}</DialogTitle>
         </DialogHeader>

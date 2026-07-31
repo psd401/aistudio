@@ -45,6 +45,7 @@ import {
   type BrowserRepositoryUpload,
 } from "@/lib/repositories/content-platform/browser-upload"
 import { GoogleDriveConnectorPanel } from "./google-drive-connector-panel"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 // File size limits - will be loaded from environment
 const ACCEPTED_FILE_TYPES = [
@@ -704,7 +705,7 @@ export function FileUploadModal({
         onOpenChange(nextOpen)
       }}
     >
-      <DialogContent className="sm:max-w-[600px]">
+      <DialogContent className={`sm:max-w-[600px] ${meridianPortalClassName}`}>
         <DialogHeader>
           <DialogTitle>Add Item to Repository</DialogTitle>
           <DialogDescription>

@@ -7,6 +7,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface UserRoleSelectProps {
   currentRole: string;
@@ -24,7 +25,7 @@ export function UserRoleSelect({ currentRole, onRoleChange, disabled }: UserRole
       <SelectTrigger className="w-[180px]">
         <SelectValue placeholder="Select a role" />
       </SelectTrigger>
-      <SelectContent>
+      <SelectContent className={meridianPortalClassName}>
         <SelectItem value="student">Student</SelectItem>
         <SelectItem value="staff">Staff</SelectItem>
         <SelectItem value="administrator">Administrator</SelectItem>

@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button"
 import { IconSearch, IconX } from "@tabler/icons-react"
 import { useDebounce } from "use-debounce"
 import { cn } from "@/lib/utils"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 export type UserStatus = "all" | "active" | "inactive" | "pending"
 
@@ -127,7 +128,7 @@ export function UserFilters({
         <SelectTrigger className="w-full sm:w-[160px]" aria-label="Filter by status">
           <SelectValue placeholder="All Statuses" />
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent className={meridianPortalClassName}>
           {STATUS_OPTIONS.map((option) => (
             <SelectItem key={option.value} value={option.value}>
               {option.label}
@@ -142,7 +143,7 @@ export function UserFilters({
           <SelectTrigger className="w-full sm:w-[160px]" aria-label="Filter by role">
             <SelectValue placeholder="All Roles" />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className={meridianPortalClassName}>
             <SelectItem value="all">All Roles</SelectItem>
             {roles.map((r) => (
               <SelectItem key={r.id} value={r.name}>

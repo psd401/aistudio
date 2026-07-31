@@ -27,6 +27,7 @@ import {
 import { createLogger } from "@/lib/client-logger"
 import { createUserApiKey } from "@/actions/settings/user-settings.actions"
 import { API_SCOPES, getScopesForRoles, type ApiScope } from "@/lib/api-keys/scopes"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 const log = createLogger({ component: "ApiKeyCreateDialog" })
 
@@ -115,7 +116,7 @@ function ApiKeyFormFields({
           <SelectTrigger id="expires-in">
             <SelectValue />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className={meridianPortalClassName}>
             <SelectItem value="30">30 days</SelectItem>
             <SelectItem value="90">90 days (Recommended)</SelectItem>
             <SelectItem value="365">1 year</SelectItem>
@@ -209,7 +210,7 @@ export function ApiKeyCreateDialog({
         onOpenChange(isOpen)
       }}
     >
-      <DialogContent className="sm:max-w-2xl flex flex-col max-h-[85vh]">
+      <DialogContent className={`sm:max-w-2xl flex flex-col max-h-[85vh] ${meridianPortalClassName}`}>
         <DialogHeader className="shrink-0">
           <DialogTitle>Generate API Key</DialogTitle>
           <DialogDescription>

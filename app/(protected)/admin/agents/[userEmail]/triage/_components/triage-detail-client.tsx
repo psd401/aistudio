@@ -23,6 +23,7 @@ import {
   resetLearnedPatterns,
   type TriageStateSummary,
 } from "@/actions/admin/agent-triage.actions"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface Props {
   userEmail: string
@@ -102,7 +103,7 @@ export function TriageDetailClient({ userEmail }: Props) {
       <div className="space-y-4">
         <h1 className="text-2xl font-semibold">Email Triage · {userEmail}</h1>
         <Card>
-          <CardContent className="pt-6 text-muted-foreground">
+          <CardContent className="text-muted-foreground">
             No triage row for this user. They have not enabled triage yet, or it
             has been forcefully reset.
           </CardContent>
@@ -399,7 +400,7 @@ function ConfirmDialog({
   const active = dialog ? copy[dialog] : null
   return (
     <AlertDialog open={dialog !== null} onOpenChange={(open) => !open && onClose()}>
-      <AlertDialogContent>
+      <AlertDialogContent className={meridianPortalClassName}>
         <AlertDialogHeader>
           <AlertDialogTitle>{active?.title}</AlertDialogTitle>
           <AlertDialogDescription>{active?.body}</AlertDialogDescription>

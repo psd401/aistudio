@@ -25,6 +25,7 @@ import { usePromptSave } from "../hooks/use-prompt-save"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import type { PromptVisibility } from "@/lib/prompt-library/types"
 import type { PromptLibrarySettings } from "@/lib/db/types/jsonb"
+import { meridianPortalClassName } from '@/lib/meridian/fonts'
 
 interface PromptSaveDialogProps {
   open: boolean
@@ -100,7 +101,7 @@ function PromptSaveFields({
         <Label htmlFor="visibility">Visibility</Label>
         <Select value={visibility} onValueChange={(value) => onVisibilityChange(value as PromptVisibility)}>
           <SelectTrigger id="visibility"><SelectValue /></SelectTrigger>
-          <SelectContent>
+          <SelectContent className={meridianPortalClassName}>
             <SelectItem value="private">
               <div className="flex flex-col items-start">
                 <span className="font-medium">Private</span>
@@ -224,7 +225,7 @@ export function PromptSaveDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[600px] max-h-[90vh]">
+      <DialogContent className={`sm:max-w-[600px] max-h-[90vh] ${meridianPortalClassName}`}>
         <DialogHeader>
           <DialogTitle>Save Prompt to Library</DialogTitle>
           <DialogDescription>

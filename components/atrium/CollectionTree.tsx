@@ -56,7 +56,7 @@ function TreeRow({
       <div
         // `data-selected` is a stable styling hook: the Meridian shell restyles
         // the selected row via `.mer-navcol [data-selected="true"]` (see
-        // styles/atrium-meridian.css) rather than depending on the Tailwind
+        // styles/meridian.css) rather than depending on the Tailwind
         // utility class strings below, which have no compile-time link to that CSS
         // and are shared with the reader sidebar. It is inert everywhere else.
         data-selected={isSelected ? "true" : undefined}

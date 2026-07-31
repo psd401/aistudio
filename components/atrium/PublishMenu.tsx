@@ -54,7 +54,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { meridianPortalClassName } from "@/lib/atrium/meridian-fonts";
+import { meridianPortalClassName } from "@/lib/meridian/fonts";
 import { listPublicationsAction } from "@/actions/db/atrium/list-publications";
 import { getVisibilityAction } from "@/actions/db/atrium/get-visibility";
 import {

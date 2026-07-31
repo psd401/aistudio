@@ -39,6 +39,7 @@ import {
   IconDeviceFloppy,
   IconX,
 } from "@tabler/icons-react"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 // User detail type with extended activity info
 export interface UserDetail {
@@ -92,10 +93,10 @@ interface UserDetailSheetProps {
 function ActivityTypeBadge({ type }: { type: ActivityLogEntry["type"] }) {
   const config: Record<ActivityLogEntry["type"], { label: string; className: string }> = {
     login: { label: "Login", className: "bg-blue-100 text-blue-800" },
-    assistant: { label: "Assistant", className: "bg-purple-100 text-purple-800" },
+    assistant: { label: "Assistant", className: "bg-[var(--mer-agent-tint)] text-[var(--mer-agent)]" },
     prompt: { label: "Prompt", className: "bg-green-100 text-green-800" },
     nexus: { label: "Nexus", className: "bg-orange-100 text-orange-800" },
-    settings: { label: "Settings", className: "bg-gray-100 text-gray-800" },
+    settings: { label: "Settings", className: "bg-muted text-gray-800" },
   }
 
   const { label, className } = config[type]
@@ -247,7 +248,7 @@ function UserOverviewTab({
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className={meridianPortalClassName}>
                   {roles.map(role => (
                     <SelectItem key={role.id} value={role.name}>
                       {role.name}

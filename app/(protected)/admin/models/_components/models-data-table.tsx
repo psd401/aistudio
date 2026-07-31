@@ -37,6 +37,7 @@ import {
 } from "@tabler/icons-react"
 import { cn } from "@/lib/utils"
 import { ProviderBadge } from "./provider-badge"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 // Extended model type for the table
 export interface ModelTableRow {
@@ -196,7 +197,7 @@ function useModelColumns({
                 <span className="sr-only">Open menu</span>
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
+            <DropdownMenuContent align="end" className={meridianPortalClassName}>
               <DropdownMenuItem onClick={() => onViewModel(row.original)}>
                 <IconEdit className="mr-2 h-4 w-4" />
                 Edit Model

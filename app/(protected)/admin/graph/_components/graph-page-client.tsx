@@ -50,6 +50,7 @@ import {
 } from "@/actions/graph.actions"
 import type { NodeConnection, PublicGraphNode } from "@/lib/graph"
 import type { SelectGraphEdge } from "@/lib/db/types"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 type ActiveTab = "nodes" | "edges"
 type SetNodes = Dispatch<SetStateAction<PublicGraphNode[]>>
@@ -587,7 +588,7 @@ function GraphDeleteDialogs({
     <>
       {/* Delete Node Confirmation */}
       <AlertDialog open={deleteNodeDialog} onOpenChange={setDeleteNodeDialog}>
-        <AlertDialogContent>
+        <AlertDialogContent className={meridianPortalClassName}>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete Node</AlertDialogTitle>
             <AlertDialogDescription>
@@ -611,7 +612,7 @@ function GraphDeleteDialogs({
 
       {/* Delete Edge Confirmation */}
       <AlertDialog open={deleteEdgeDialog} onOpenChange={setDeleteEdgeDialog}>
-        <AlertDialogContent>
+        <AlertDialogContent className={meridianPortalClassName}>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete Edge</AlertDialogTitle>
             <AlertDialogDescription>

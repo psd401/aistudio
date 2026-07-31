@@ -192,6 +192,10 @@ async function createRoomThroughUi(
     timeout: 15_000,
   });
 
+  // The room editor is a modal now — it used to sit permanently in a right-hand
+  // column, which made "New room" (a state reset) look like a dead button.
+  await page.getByTestId("room-create-new").click();
+  await expect(page.getByTestId("room-name")).toBeVisible({ timeout: 10_000 });
   await page.getByTestId("room-name").fill(fixture.roomName);
   await page.getByTestId(`room-section-${fixture.linkedClassId}`).check();
   await page

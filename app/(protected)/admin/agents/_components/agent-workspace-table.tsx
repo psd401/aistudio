@@ -104,7 +104,7 @@ export function AgentWorkspaceTable() {
   if (loading) {
     return (
       <Card>
-        <CardContent className="pt-6 text-center text-muted-foreground">Loading workspace connection status...</CardContent>
+        <CardContent className="text-center text-muted-foreground">Loading workspace connection status...</CardContent>
       </Card>
     )
   }
@@ -112,7 +112,7 @@ export function AgentWorkspaceTable() {
   if (!data) {
     return (
       <Card>
-        <CardContent className="pt-6 text-center text-muted-foreground">No data available.</CardContent>
+        <CardContent className="text-center text-muted-foreground">No data available.</CardContent>
       </Card>
     )
   }

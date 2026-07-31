@@ -23,9 +23,9 @@ import { authenticateContext } from "./helpers/session-auth";
  * (tests/smoke/atrium-artifact-sandbox-*.smoke.ts, atrium-embed-paste.smoke.ts) and
  * the unit tests, since the sandbox origin isn't configured in dev.
  *
- * PREREQUISITES (why gated) — mirrors atrium-meridian-artifact.spec.ts:
+ * PREREQUISITES (why gated) — mirrors meridian-artifact.spec.ts:
  *  - Host dev server on :3100 with PLAYWRIGHT_AUTH_ENABLED=true.
- *  - Seed: tests/e2e/fixtures/atrium-meridian-artifact-seed.sql (a DRAFT artifact +
+ *  - Seed: tests/e2e/fixtures/meridian-artifact-seed.sql (a DRAFT artifact +
  *    a host doc, owned by the admin e2e-test-user → the minted session owns them).
  */
 
@@ -36,7 +36,7 @@ const ARTIFACT_TITLE = "Meridian Metrics Artifact";
 test.describe("Atrium artifact-UI fixes (authenticated)", () => {
   test.skip(
     process.env.PLAYWRIGHT_AUTH_ENABLED !== "true",
-    "Requires the authed host dev server + seeded data — see tests/e2e/fixtures/atrium-meridian-artifact-seed.sql"
+    "Requires the authed host dev server + seeded data — see tests/e2e/fixtures/meridian-artifact-seed.sql"
   );
 
   test("code-tab-renders: the Code tab mounts CodeMirror without crashing", async ({

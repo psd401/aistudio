@@ -13,9 +13,16 @@ const Card = React.forwardRef<
   <div
     ref={ref}
     className={cn(
-      "rounded-xl border border-border/40 bg-card text-card-foreground",
-      "transition-all duration-200 ease-in-out",
-      "hover:shadow-[0_4px_12px_0px_rgba(0,0,0,0.05)] hover:border-border/60",
+      // Radius follows the design system when one is in scope, falling back to
+      // the previous 12px on surfaces that have not adopted it.
+      "rounded-[var(--mer-r-card,0.75rem)] border border-border bg-card text-card-foreground",
+      // Opaque hairline, not `border-border/40`. The washed border was baked
+      // into the primitive, so every card in the app read soft no matter what
+      // its call site did.
+      // No hover bloom either: a Card is a CONTAINER. The old
+      // `hover:shadow-… hover:border-border/60` fired on static cards that were
+      // not clickable at all. Cards that ARE targets opt in explicitly — see
+      // `.mer-card-link` and the per-surface `hover:border-[var(--mer-ink-muted)]`.
       !noPadding && "p-6",
       className
     )}

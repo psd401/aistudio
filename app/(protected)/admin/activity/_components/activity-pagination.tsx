@@ -9,6 +9,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { IconChevronLeft, IconChevronRight } from "@tabler/icons-react"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface ActivityPaginationProps {
   page: number
@@ -45,7 +46,7 @@ export function ActivityPagination({
           <SelectTrigger className="w-[70px] h-8">
             <SelectValue />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className={meridianPortalClassName}>
             <SelectItem value="10">10</SelectItem>
             <SelectItem value="25">25</SelectItem>
             <SelectItem value="50">50</SelectItem>

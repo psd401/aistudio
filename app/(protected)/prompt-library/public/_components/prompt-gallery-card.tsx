@@ -35,7 +35,7 @@ export function PromptGalleryCard({ prompt }: PromptGalleryCardProps) {
 
   return (
     <>
-      <Card className="group hover:shadow-xl transition-all duration-300 hover:-translate-y-1 flex flex-col h-full">
+      <Card className="group hover:border-[var(--mer-ink-muted)] transition-colors duration-150 flex flex-col h-full">
         <CardHeader className="pb-2 flex-none">
           <div className="flex items-start gap-3">
             {/* Icon */}

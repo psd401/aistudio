@@ -42,6 +42,7 @@ import type { SelectAiModel, SelectChainPrompt, SelectToolInputField } from "@/t
 import React from "react"
 import { PromptEditorModal } from "@/components/features/assistant-architect/prompt-editor-modal"
 import type { AssistantModelFamily, AssistantModelRoutingMode } from "@/lib/db/schema/tables/assistant-architects"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 // Parallel group multiplier constant - supports up to 1000 nodes per position level
 // Used to encode position into parallel group ID: (position * MULTIPLIER + index)
@@ -884,7 +885,7 @@ export function PromptsPageClient({
 
       {/* Delete Confirmation Dialog */}
       <AlertDialog open={showDeleteDialog} onOpenChange={handleDeleteDialogOpenChange}>
-        <AlertDialogContent>
+        <AlertDialogContent className={meridianPortalClassName}>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete Prompt</AlertDialogTitle>
             <AlertDialogDescription>

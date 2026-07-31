@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { X } from "lucide-react"
 import { TagFilterDropdown } from "./tag-filter-dropdown"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface SearchFilterBarProps {
   selectedTags: string[]
@@ -47,7 +48,7 @@ export function SearchFilterBar({
             <SelectTrigger className="w-[140px]">
               <SelectValue />
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent className={meridianPortalClassName}>
               <SelectItem value="usage">Most Used</SelectItem>
               <SelectItem value="views">Most Viewed</SelectItem>
               <SelectItem value="created">Most Recent</SelectItem>

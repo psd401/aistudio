@@ -1,0 +1,20 @@
+/*
+ * Meridian — the single entry point. Import THIS, not the parts.
+ *
+ *   import "@/styles/meridian.css";
+ *
+ * The design system is split for authoring clarity:
+ *   meridian-tokens.css  the one palette (values)
+ *   meridian-core.css    the shared `.mer-*` structure (no values of its own)
+ *
+ * Core is inert without tokens — its rules read `var(--mer-*)` exclusively. A
+ * surface that imports only core renders structure with no colour and falls
+ * back to the global cream theme. That is not hypothetical: splitting the
+ * original combined stylesheet did exactly that to Atrium, whose layout had
+ * always imported a single file. This barrel exists so a surface cannot import
+ * half a design system.
+ *
+ * Order matters: tokens first, so core's rules resolve against them.
+ */
+@import "./meridian-tokens.css";
+@import "./meridian-core.css";

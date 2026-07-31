@@ -15,14 +15,14 @@ export default function TestUserPage() {
       
       <div className="mb-4">
         <h2 className="text-xl font-semibold">User:</h2>
-        <pre className="bg-gray-100 p-4 rounded">
+        <pre className="bg-muted p-4 rounded">
           {JSON.stringify(user, null, 2)}
         </pre>
       </div>
 
       <div className="mb-4">
         <h2 className="text-xl font-semibold">Roles:</h2>
-        <pre className="bg-gray-100 p-4 rounded">
+        <pre className="bg-muted p-4 rounded">
           {JSON.stringify(roles, null, 2)}
         </pre>
       </div>

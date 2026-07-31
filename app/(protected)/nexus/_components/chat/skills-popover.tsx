@@ -7,6 +7,7 @@ import {
   PopoverTrigger,
 } from '@/components/ui/popover'
 import { Sparkles } from 'lucide-react'
+import { meridianPortalClassName } from '@/lib/meridian/fonts'
 
 interface SkillsPopoverProps {
   // Future: skills configuration
@@ -33,7 +34,7 @@ export function SkillsPopover({ disabled = true }: SkillsPopoverProps) {
           <span className="hidden sm:inline">Skills</span>
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-64 p-4" align="start">
+      <PopoverContent className={`w-64 p-4 ${meridianPortalClassName}`} align="start">
         <div className="text-center">
           <Sparkles className="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
           <h4 className="font-medium text-sm">Skills</h4>

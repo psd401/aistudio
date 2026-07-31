@@ -14,6 +14,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 // ============================================
 // Component
@@ -43,7 +44,7 @@ export function ApiKeyCreatedDisplay({
 
   return (
     <AlertDialog open onOpenChange={() => {}}>
-      <AlertDialogContent className="sm:max-w-lg">
+      <AlertDialogContent className={`sm:max-w-lg ${meridianPortalClassName}`}>
         <AlertDialogHeader>
           <AlertDialogTitle className="flex items-center gap-2">
             <AlertTriangle className="h-5 w-5 text-amber-500" />

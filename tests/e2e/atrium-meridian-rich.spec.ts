@@ -23,9 +23,9 @@ import { mkdirSync } from "node:fs";
  *    reader render is proven by the markdown-render + embed-render smokes, which
  *    exercise the identical reader pipeline).
  *
- * Screenshots land in docs/verification/atrium-meridian/ (PR visual evidence).
+ * Screenshots land in docs/verification/meridian/ (PR visual evidence).
  *
- * PREREQUISITES (why this is gated) — same as atrium-meridian-editor.spec.ts:
+ * PREREQUISITES (why this is gated) — same as meridian-editor.spec.ts:
  *  - Host dev server via `bun run server.ts` on :3100 (the collab WS lives in the
  *    custom server) with PLAYWRIGHT_AUTH_ENABLED=true.
  *  - Seed: tests/e2e/fixtures/atrium-editor-seed.sql (the admin-owned document
@@ -36,7 +36,7 @@ const DOC_ID =
   process.env.ATRIUM_EDITOR_E2E_ID ?? "a7100000-0000-4000-8000-000000006060";
 const ARTIFACT_ID =
   process.env.ATRIUM_ARTIFACT_E2E_ID ?? "a7100000-0000-4000-8000-000000007070";
-const SHOT_DIR = "docs/verification/atrium-meridian";
+const SHOT_DIR = "docs/verification/meridian";
 const EMOJI = "🎯";
 
 function defineAtriumMeridianRichContentAuthenticatedSuite1Part1() {

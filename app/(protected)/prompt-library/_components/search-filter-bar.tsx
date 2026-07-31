@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/select"
 import { usePromptLibraryStore, type VisibilityFilter, type SortBy } from "@/lib/stores/prompt-library-store"
 import { X } from "lucide-react"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 export function SearchFilterBar() {
   const {
@@ -39,7 +40,7 @@ export function SearchFilterBar() {
             <SelectTrigger className="w-32">
               <SelectValue />
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent className={meridianPortalClassName}>
               <SelectItem value="all">All</SelectItem>
               <SelectItem value="private">Private</SelectItem>
               <SelectItem value="public">Public</SelectItem>
@@ -54,7 +55,7 @@ export function SearchFilterBar() {
             <SelectTrigger className="w-32">
               <SelectValue />
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent className={meridianPortalClassName}>
               <SelectItem value="created">Date Created</SelectItem>
               <SelectItem value="usage">Usage Count</SelectItem>
               <SelectItem value="views">View Count</SelectItem>

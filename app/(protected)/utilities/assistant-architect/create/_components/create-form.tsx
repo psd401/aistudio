@@ -121,6 +121,25 @@ function createInitialAgenticConfig(initialData?: SelectAssistantArchitect): Age
   }
 }
 
+/**
+ * Validation used to fail silently — saveAssistant() just returned null, so a
+ * blocked "Continue" looked exactly like a dead button: no toast, no scroll, no
+ * focus, nothing in the console. Say which field is wrong and focus it.
+ */
+function reportValidationFailure(
+  form: UseFormReturn<FormValues>,
+  toast: ReturnType<typeof useToast>["toast"]
+) {
+  const errors = form.formState.errors
+  const firstField = Object.keys(errors)[0] as keyof FormValues | undefined
+  const message =
+    firstField && typeof errors[firstField]?.message === "string"
+      ? (errors[firstField]?.message as string)
+      : "Check the highlighted fields and try again."
+  toast({ title: "Cannot continue", description: message, variant: "destructive" })
+  if (firstField) form.setFocus(firstField)
+}
+
 export function CreateForm({ initialData, initialInputFields = [] }: CreateFormProps) {
   const router = useRouter()
   const { toast } = useToast()
@@ -157,10 +176,14 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
     }
   })
 
+
   const saveAssistant = useCallback(async (): Promise<string | null> => {
     const values = form.getValues()
     const isValid = await form.trigger()
-    if (!isValid) return null
+    if (!isValid) {
+      reportValidationFailure(form, toast)
+      return null
+    }
 
     const agenticPayload = toAgenticPayload(agentic)
     const routingPayload = {

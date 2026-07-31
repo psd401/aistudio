@@ -34,6 +34,7 @@ import {
   IconArrowRight,
 } from "@tabler/icons-react"
 import { cn } from "@/lib/utils"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 export interface EdgeTableRow {
   id: string
@@ -158,7 +159,7 @@ function useEdgeColumns(
                 <span className="sr-only">Open menu</span>
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
+            <DropdownMenuContent align="end" className={meridianPortalClassName}>
               <DropdownMenuItem
                 onClick={() => onDeleteEdge(row.original)}
                 className="text-destructive focus:text-destructive"

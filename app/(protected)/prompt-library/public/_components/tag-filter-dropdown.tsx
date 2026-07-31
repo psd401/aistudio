@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input"
 import { getPopularTags } from "@/actions/prompt-library-tags.actions"
 import type { PromptTag } from "@/lib/prompt-library/types"
 import { createLogger } from "@/lib/client-logger"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 const log = createLogger({ moduleName: "tag-filter-dropdown" })
 
@@ -87,7 +88,7 @@ export function TagFilterDropdown({
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="start"
-        className="w-[240px]"
+        className={`w-[240px] ${meridianPortalClassName}`}
         onCloseAutoFocus={(e) => e.preventDefault()}
       >
         {/* Search Input */}

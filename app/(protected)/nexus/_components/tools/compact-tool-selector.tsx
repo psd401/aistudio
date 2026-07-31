@@ -14,6 +14,7 @@ import { Globe, Code2, Wrench, ChevronDown } from 'lucide-react'
 import type { SelectAiModel } from '@/types'
 import { getAvailableToolsForModel, type ToolConfig } from '@/lib/tools'
 import { createLogger } from '@/lib/client-logger'
+import { meridianPortalClassName } from '@/lib/meridian/fonts'
 
 const log = createLogger({ moduleName: 'compact-tool-selector' })
 
@@ -98,7 +99,7 @@ export function CompactToolSelector({
           <ChevronDown className="h-3 w-3" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-56">
+      <DropdownMenuContent align="end" className={`w-56 ${meridianPortalClassName}`}>
         <div className="px-2 py-1.5">
           <p className="text-xs font-medium text-muted-foreground">AI Tools</p>
         </div>

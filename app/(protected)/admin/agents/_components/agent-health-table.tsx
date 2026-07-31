@@ -85,25 +85,25 @@ export function AgentHealthTable({ data, loading = false }: Props) {
     <div className="space-y-4">
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
         <Card>
-          <CardContent className="pt-6">
+          <CardContent>
             <div className="text-xs uppercase tracking-wide text-muted-foreground">Active Agents</div>
             <div className="text-2xl font-semibold mt-1">{data.totalUsers}</div>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="pt-6">
+          <CardContent>
             <div className="text-xs uppercase tracking-wide text-muted-foreground">Abandoned (7d+)</div>
             <div className="text-2xl font-semibold mt-1">{data.abandonedCount}</div>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="pt-6">
+          <CardContent>
             <div className="text-xs uppercase tracking-wide text-muted-foreground">Total Skills</div>
             <div className="text-2xl font-semibold mt-1">{data.totalSkills}</div>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="pt-6">
+          <CardContent>
             <div className="text-xs uppercase tracking-wide text-muted-foreground">Total Workspace</div>
             <div className="text-2xl font-semibold mt-1">{formatBytes(data.totalWorkspaceBytes)}</div>
           </CardContent>

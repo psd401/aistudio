@@ -69,6 +69,40 @@ STARTED_PID=""
 LOCK_ACQUIRED=0
 CLEANED=0
 LOCK_DIR="/tmp/aistudio-e2e-local.lock"
+
+# Evidence-screenshot paths the specs write into. These are TRACKED files (they
+# are committed as proof for PRs), so every run re-renders ~35 PNGs and leaves
+# the tree dirty with pure noise — which then has to be stashed or discarded by
+# hand before any merge or rebase.
+#
+# Restoring them wholesale would clobber screenshots someone regenerated ON
+# PURPOSE, so snapshot which of these were ALREADY dirty before the run and, on
+# exit, restore only the ones this run dirtied. Intentional updates survive; the
+# incidental churn does not.
+SHOT_PATHS=(.verification docs/verification)
+# `-uall` lists individual untracked FILES rather than collapsing a new directory
+# to one entry, so a run that creates a whole folder is cleaned file by file.
+shots_status() { git status --porcelain -uall -- "${SHOT_PATHS[@]}" 2>/dev/null; }
+PRE_DIRTY_SHOTS="$(shots_status | awk '{print $NF}')"
+
+restore_untouched_shots() {
+  local line code f
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    code="${line:0:2}"
+    f="${line##* }"
+    # Already dirty before this run? Then it is someone's deliberate change —
+    # leave it exactly as found.
+    printf '%s\n' "$PRE_DIRTY_SHOTS" | grep -Fxq "$f" && continue
+    case "$code" in
+      '??') rm -f "$f" ;;                        # created by this run
+      *)    git checkout -- "$f" >/dev/null 2>&1 ;;  # re-rendered by this run
+    esac
+  done < <(shots_status)
+  # Drop directories the run left empty after its files were removed.
+  find "${SHOT_PATHS[@]}" -type d -empty -delete >/dev/null 2>&1 || true
+}
+
 on_exit() {
   # One-shot: cleanup must run exactly once. By the time a second invocation
   # could fire, a NEWER run may own the lock — releasing it again would strand
@@ -79,6 +113,8 @@ on_exit() {
     kill "$STARTED_PID" >/dev/null 2>&1
     git checkout -- tsconfig.json >/dev/null 2>&1
   fi
+  # Unconditional: the specs write these whoever started the server.
+  restore_untouched_shots
   [ "$LOCK_ACQUIRED" = "1" ] && rm -rf "$LOCK_DIR"
   return 0
 }

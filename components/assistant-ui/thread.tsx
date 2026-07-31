@@ -363,7 +363,15 @@ const Composer: FC<ComposerProps> = ({
       <ThreadPrimitive.Empty>
         <ThreadWelcomeSuggestions actions={suggestedActions} />
       </ThreadPrimitive.Empty>
-      <ComposerPrimitive.Root className="relative flex w-full flex-col rounded-2xl border border-border focus-within:ring-2 focus-within:ring-black focus-within:ring-offset-2 dark:focus-within:ring-white overflow-hidden">
+      {/*
+        Focus ring uses the `ring` theme token rather than a hardcoded black.
+        This component is shared (Nexus + assistant-architect), and --color-ring
+        is defined in every scope — Meridian resolves it to --mer-brand-mid, the
+        global theme to Whulge — so it stays correct in both. The previous
+        ring-black + ring-offset-2 drew a heavy black outline around the composer
+        whenever it held focus, which it does on load.
+      */}
+      <ComposerPrimitive.Root className="relative flex w-full flex-col rounded-2xl border border-border focus-within:ring-2 focus-within:ring-ring overflow-hidden">
         {/* Control dock for model, tools, skills, MCP */}
         {onModelChange && onToolsChange && onRoutingModeChange && onModelFamilyChange && (
           <ComposerControls

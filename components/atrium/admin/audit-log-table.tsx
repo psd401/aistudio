@@ -31,6 +31,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import { meridianPortalClassName } from "@/lib/meridian/fonts";
 
 // Known values of the varchar filter columns (see lib/content/audit.ts). "all"
 // is the unfiltered sentinel — Radix Select forbids an empty item value.
@@ -111,7 +112,7 @@ function AuditFilters({
         <SelectTrigger className="w-[170px]" aria-label="Filter by action">
           <SelectValue placeholder="Action" />
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent className={meridianPortalClassName}>
           <SelectItem value="all">All actions</SelectItem>
           {ACTIONS.map((value) => (
             <SelectItem key={value} value={value}>
@@ -125,7 +126,7 @@ function AuditFilters({
         <SelectTrigger className="w-[130px]" aria-label="Filter by surface">
           <SelectValue placeholder="Surface" />
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent className={meridianPortalClassName}>
           <SelectItem value="all">All surfaces</SelectItem>
           {SURFACES.map((value) => (
             <SelectItem key={value} value={value}>
@@ -139,7 +140,7 @@ function AuditFilters({
         <SelectTrigger className="w-[180px]" aria-label="Filter by outcome">
           <SelectValue placeholder="Outcome" />
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent className={meridianPortalClassName}>
           <SelectItem value="all">All outcomes</SelectItem>
           {OUTCOMES.map((value) => (
             <SelectItem key={value} value={value}>

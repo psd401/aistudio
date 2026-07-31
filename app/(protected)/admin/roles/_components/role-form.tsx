@@ -24,6 +24,7 @@ import { useForm } from "react-hook-form"
 import { useToast } from "@/components/ui/use-toast"
 import { z } from "zod"
 import { useRouter } from "next/navigation"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 const formSchema = z.object({
   name: z.string().min(1, "Name is required"),
@@ -99,7 +100,7 @@ export function RoleForm({ role, onClose }: RoleFormProps) {
 
   return (
     <Dialog open={true} onOpenChange={() => onClose()}>
-      <DialogContent>
+      <DialogContent className={meridianPortalClassName}>
         <DialogHeader>
           <DialogTitle>
             {role?.id ? "Edit Role" : "Create Role"}

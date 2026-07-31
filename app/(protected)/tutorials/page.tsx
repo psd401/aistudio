@@ -104,7 +104,7 @@ function SearchBar() {
         placeholder="Search tutorials..."
         className={cn(
           'w-full h-12 pl-12 pr-4 rounded-xl',
-          'bg-white border border-border/40 shadow-sm',
+          'bg-card border border-border shadow-sm',
           'text-sm placeholder:text-muted-foreground',
           'focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]/40',
           'transition-all duration-200'
@@ -129,8 +129,8 @@ function VideoThumbnail({ video, size = 'normal' }: { video: VideoTutorial; size
         <div className="flex flex-col items-center gap-2">
           <div
             className={cn(
-              'rounded-full bg-white/20 flex items-center justify-center',
-              'group-hover:bg-white/30 transition-colors',
+              'rounded-full bg-card/20 flex items-center justify-center',
+              'group-hover:bg-card/30 transition-colors',
               isFeatured ? 'w-16 h-16' : 'w-12 h-12'
             )}
           >
@@ -156,7 +156,7 @@ function VideoThumbnail({ video, size = 'normal' }: { video: VideoTutorial; size
 
 function FeaturedVideoCard({ video }: { video: VideoTutorial }) {
   return (
-    <div className="bg-white rounded-2xl border border-border/40 shadow-sm overflow-hidden mb-8">
+    <div className="bg-card rounded-2xl border border-border shadow-sm overflow-hidden mb-8">
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-0">
         {/* Video Embed - aspect-video gives 16:9 ratio */}
         <div className="relative w-full aspect-video">
@@ -174,7 +174,7 @@ function FeaturedVideoCard({ video }: { video: VideoTutorial }) {
           )}
         </div>
         <div className="p-6 lg:p-8 flex flex-col justify-center">
-          <div className="inline-flex items-center gap-2 px-3 py-1 bg-[#E8927C]/15 text-[#E8927C] rounded-full text-sm font-medium w-fit mb-4">
+          <div className="inline-flex items-center gap-2 px-3 py-1 bg-[var(--mer-brand-tint)] text-[var(--mer-brand)] rounded-full text-sm font-medium w-fit mb-4">
             <IconPlayerPlay size={14} />
             Featured Tutorial
           </div>
@@ -194,9 +194,9 @@ function VideoCard({ video }: { video: VideoTutorial }) {
   return (
     <div
       className={cn(
-        'bg-white rounded-2xl border border-border/40 shadow-sm overflow-hidden',
+        'bg-card rounded-2xl border border-border shadow-sm overflow-hidden',
         'transition-all duration-200 ease-out',
-        !video.embedUrl && 'hover:shadow-lg hover:border-border/60 hover:-translate-y-0.5'
+        !video.embedUrl && 'hover:border-[var(--mer-ink-muted)]'
       )}
     >
       {video.embedUrl ? (
@@ -232,9 +232,9 @@ function ResourceCard({ resource }: { resource: WrittenResource }) {
       target={resource.type === 'link' ? '_blank' : undefined}
       rel={resource.type === 'link' ? 'noopener noreferrer' : undefined}
       className={cn(
-        'group bg-white rounded-2xl border border-border/40 shadow-sm p-5',
+        'group bg-card rounded-2xl border border-border shadow-sm p-5',
         'transition-all duration-200 ease-out',
-        'hover:shadow-lg hover:border-border/60 hover:-translate-y-0.5',
+        'hover:border-[var(--mer-ink-muted)]',
         'flex items-start gap-4'
       )}
     >
@@ -267,7 +267,7 @@ function SectionHeader({ title }: { title: string }) {
 export default function TutorialsPage() {
   const { appName } = useBranding();
   return (
-    <div className="min-h-screen bg-[#FBF7F4]">
+    <div className="mer-page">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
         {/* Header */}
         <div className="mb-6">

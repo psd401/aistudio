@@ -18,6 +18,7 @@ import {
 } from '@/actions/mcp-connector.actions'
 import { openOAuthPopup } from './oauth-popup'
 import type { McpConnectionStatus } from '@/lib/mcp/connector-types'
+import { meridianPortalClassName } from '@/lib/meridian/fonts'
 
 interface MCPPopoverProps {
   enabledConnectors: string[]
@@ -220,7 +221,7 @@ function MCPPopoverView({
           )}
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-72 p-0" align="start">
+      <PopoverContent className={`w-72 p-0 ${meridianPortalClassName}`} align="start">
         <div className="p-3 border-b">
           <h4 className="font-medium text-sm">Connections</h4>
           <p className="text-xs text-muted-foreground mt-0.5">

@@ -14,6 +14,7 @@ import { IconSearch, IconX } from "@tabler/icons-react"
 import { useDebounce } from "use-debounce"
 import { cn } from "@/lib/utils"
 import { PROVIDER_OPTIONS } from "./provider-badge"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 export type ModelStatus = "all" | "active" | "inactive"
 export type AvailabilityFilter = "all" | "nexus" | "architect"
@@ -134,7 +135,7 @@ export function ModelFilters({
         <SelectTrigger className="w-full sm:w-[140px]" aria-label="Filter by status">
           <SelectValue placeholder="All Status" />
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent className={meridianPortalClassName}>
           {STATUS_OPTIONS.map((option) => (
             <SelectItem key={option.value} value={option.value}>
               {option.label}
@@ -148,7 +149,7 @@ export function ModelFilters({
         <SelectTrigger className="w-full sm:w-[160px]" aria-label="Filter by provider">
           <SelectValue placeholder="All Providers" />
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent className={meridianPortalClassName}>
           <SelectItem value="all">All Providers</SelectItem>
           {PROVIDER_OPTIONS.map((option) => (
             <SelectItem key={option.value} value={option.value}>
@@ -163,7 +164,7 @@ export function ModelFilters({
         <SelectTrigger className="w-full sm:w-[160px]" aria-label="Filter by availability">
           <SelectValue placeholder="All Features" />
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent className={meridianPortalClassName}>
           {AVAILABILITY_OPTIONS.map((option) => (
             <SelectItem key={option.value} value={option.value}>
               {option.label}

@@ -28,8 +28,8 @@ export function WizardSteps({ steps, className }: WizardStepsProps) {
                 className={cn(
                   "flex h-12 w-12 items-center justify-center rounded-full border-2 text-lg font-semibold",
                   step.isCurrent && "border-blue-500 bg-blue-500 text-white",
-                  step.isComplete && "border-blue-500 bg-white text-blue-500",
-                  !step.isCurrent && !step.isComplete && "border-gray-300 bg-white text-gray-300"
+                  step.isComplete && "border-blue-500 bg-card text-blue-500",
+                  !step.isCurrent && !step.isComplete && "border-gray-300 bg-card text-gray-300"
                 )}
               >
                 {step.number}

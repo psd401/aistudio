@@ -36,6 +36,7 @@ import type {
 } from "@/actions/admin/agent-cost-projection.actions"
 import { AGENT_MODEL_LABEL } from "@/lib/agents/platform-model"
 import { formatUsd } from "@/lib/utils/format-currency"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface Props {
   /** Token×pricing actual cost (source of truth). */
@@ -107,7 +108,7 @@ function ModelCostPanel({ costByModel }: { costByModel: AgentCostByModel | null 
           Model cost (tokens × pricing)
         </h3>
         <Card>
-          <CardContent className="pt-6">
+          <CardContent>
             <EmptyRow text="Model cost data unavailable — the query failed to load (see the error notification). This is NOT a $0 reading; retry the range." />
           </CardContent>
         </Card>
@@ -258,7 +259,7 @@ function ProjectionPanel({
             <SelectTrigger className="w-[280px] h-8 text-sm">
               <SelectValue placeholder="Select a model…" />
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent className={meridianPortalClassName}>
               {pricableModels.map((m) => (
                 <SelectItem key={m.modelId} value={m.modelId}>
                   {m.name} ({m.modelId})
@@ -442,7 +443,7 @@ function CostExplorerPanel({ data }: { data: AgentCostSummary | null }) {
 function SummaryStat({ label, value }: { label: string; value: string }) {
   return (
     <Card>
-      <CardContent className="pt-6">
+      <CardContent>
         <div className="text-xs uppercase tracking-wide text-muted-foreground">
           {label}
         </div>

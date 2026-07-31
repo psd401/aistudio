@@ -20,6 +20,7 @@ import type {
   ComparisonDetailItem,
 } from "@/actions/admin/activity-management.actions"
 import { getComparisonDetail } from "@/actions/admin/activity-management.actions"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface ComparisonDetailSheetProps {
   open: boolean
@@ -67,7 +68,7 @@ export function ComparisonDetailSheet({
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className="w-full sm:max-w-2xl overflow-hidden flex flex-col">
+      <SheetContent className={`w-full sm:max-w-2xl overflow-hidden flex flex-col ${meridianPortalClassName}`}>
         <SheetHeader>
           <SheetTitle>Model Comparison</SheetTitle>
           <SheetDescription>Comparison ID: {comparison.id}</SheetDescription>

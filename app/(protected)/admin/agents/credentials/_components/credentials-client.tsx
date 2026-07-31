@@ -60,6 +60,7 @@ import {
   type CredentialRequestRow,
   type CredentialAuditRow,
 } from "@/actions/admin/agent-credentials.actions"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 function ProvisionCredentialDialog({
   request,
@@ -87,7 +88,7 @@ function ProvisionCredentialDialog({
         if (!open) onClose()
       }}
     >
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className={`sm:max-w-lg ${meridianPortalClassName}`}>
         <DialogHeader>
           <DialogTitle>Provision credential</DialogTitle>
           <DialogDescription>
@@ -114,7 +115,7 @@ function ProvisionCredentialDialog({
                 <SelectTrigger id="provision-scope">
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className={meridianPortalClassName}>
                   <SelectItem value="shared">
                     shared — psd-agent-creds/&lt;env&gt;/shared/
                     {request.credentialName}
@@ -415,7 +416,7 @@ function ProvisionForm({ onSuccess }: { onSuccess: () => void }) {
         </form>
 
         <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-          <AlertDialogContent>
+          <AlertDialogContent className={meridianPortalClassName}>
             <AlertDialogHeader>
               <AlertDialogTitle>Confirm Secret Provisioning</AlertDialogTitle>
               <AlertDialogDescription>

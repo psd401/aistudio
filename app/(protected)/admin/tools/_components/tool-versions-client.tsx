@@ -30,6 +30,7 @@ import {
 import type { ToolVersionWithUsage } from "@/lib/db/drizzle"
 import { DeprecateVersionDialog } from "./deprecate-version-dialog"
 import { ToolVersionRow } from "./tool-version-row"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface ToolVersionsClientProps {
   identifiers: ToolIdentifierSummary[]
@@ -112,7 +113,7 @@ function RemoveVersionDialog({
     + (version?.usage.assistantPromptCount ?? 0)
   return (
     <AlertDialog open={version !== null} onOpenChange={(open) => !open && onClose()}>
-      <AlertDialogContent>
+      <AlertDialogContent className={meridianPortalClassName}>
         <AlertDialogHeader>
           <AlertDialogTitle>
             Remove {version ? `${version.identifier}@${version.version}` : ""}?

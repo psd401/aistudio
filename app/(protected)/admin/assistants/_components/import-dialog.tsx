@@ -16,6 +16,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
 import { ExportFormat } from "@/lib/assistant-export-import"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface ImportDialogProps {
   open: boolean
@@ -235,7 +236,7 @@ function ImportDialogView({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className={`max-w-2xl ${meridianPortalClassName}`}>
         <DialogHeader>
           <DialogTitle>Import Assistants</DialogTitle>
           <DialogDescription>

@@ -23,7 +23,7 @@
  * creates the editor once and never rebuilds it on provider timing).
  *
  * TipTap/y-prosemirror are pure ESM (not jest-loadable); this hook is exercised
- * by the gated Playwright spec tests/e2e/atrium-meridian-editor.spec.ts.
+ * by the gated Playwright spec tests/e2e/meridian-editor.spec.ts.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";

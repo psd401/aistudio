@@ -29,6 +29,7 @@ import { useBranding } from '@/contexts/branding-context';
 import { iconMap, IconName } from './icon-map';
 import { LinksGroup } from './navbar-links-group';
 import { cn } from '@/lib/utils';
+import { meridianPortalClassName } from '@/lib/meridian/fonts'
 
 /**
  * Raw navigation item from the API
@@ -657,7 +658,7 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
           <SidebarButton icon={Bug} label="Report a Bug" isExpanded={isExpanded} />
         </div>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-[500px]">
+      <DialogContent className={`sm:max-w-[500px] ${meridianPortalClassName}`}>
         <DialogHeader>
           <DialogTitle>Report a Bug</DialogTitle>
           <DialogDescription>

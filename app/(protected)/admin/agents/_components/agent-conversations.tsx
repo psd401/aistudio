@@ -36,6 +36,7 @@ import {
   type ConversationDetail,
 } from "@/actions/admin/agent-conversations.actions"
 import { formatDate } from "@/lib/date-utils"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 /**
  * Strip Unicode control characters (except common whitespace) that could
@@ -220,7 +221,7 @@ export function AgentConversationsTab() {
               <SelectTrigger className="w-[160px] h-8 text-sm">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent className={meridianPortalClassName}>
                 {DAYS_OPTIONS.map((o) => (
                   <SelectItem key={o.value} value={o.value}>
                     {o.label}
@@ -260,7 +261,7 @@ export function AgentConversationsTab() {
           }
         }}
       >
-        <SheetContent className="w-full sm:max-w-2xl overflow-y-auto">
+        <SheetContent className={`w-full sm:max-w-2xl overflow-y-auto ${meridianPortalClassName}`}>
           <SheetHeader>
             <SheetTitle>Session detail</SheetTitle>
             <SheetDescription className="font-mono text-xs break-all">

@@ -21,7 +21,7 @@ export default async function AssistantsPage() {
         </p>
       </div>
       <Card>
-        <CardContent className="pt-6">
+        <CardContent>
           <Suspense fallback={<AssistantsTableSkeleton />}>
             <AssistantsTableContent />
           </Suspense>

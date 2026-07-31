@@ -29,6 +29,7 @@ import {
   updateCapabilityAction,
 } from "@/actions/admin/capabilities.actions"
 import type { CapabilityRow } from "./capabilities-table"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 // identifier/name mirror the capabilities table VARCHAR(100) columns.
 const createSchema = z.object({
@@ -122,7 +123,7 @@ export function CapabilityForm({ capability, onClose }: CapabilityFormProps) {
 
   return (
     <Dialog open onOpenChange={() => onClose()}>
-      <DialogContent>
+      <DialogContent className={meridianPortalClassName}>
         <DialogHeader>
           <DialogTitle>
             {isEditing

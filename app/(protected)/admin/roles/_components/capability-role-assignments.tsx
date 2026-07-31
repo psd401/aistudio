@@ -14,6 +14,7 @@ import {
   setCapabilityRoleAssignmentAction,
 } from "@/actions/admin/capabilities.actions"
 import type { CapabilityRow, RoleOption } from "./capabilities-table"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface CapabilityRoleAssignmentsProps {
   capability: CapabilityRow
@@ -105,7 +106,7 @@ export function CapabilityRoleAssignments({
 
   return (
     <Dialog open onOpenChange={() => onClose()}>
-      <DialogContent>
+      <DialogContent className={meridianPortalClassName}>
         <DialogHeader>
           <DialogTitle>Role assignments — {capability.name}</DialogTitle>
         </DialogHeader>

@@ -28,7 +28,10 @@ const AlertDialogOverlay = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <AlertDialogPrimitive.Overlay
     className={cn(
-      "fixed inset-0 z-50 bg-background/80 backdrop-blur-sm transition-opacity animate-in fade-in",
+      // Neutral scrim — see the note in sheet.tsx. `bg-background` portaled outside
+      // the scope resolved to the global cream, which is why the delete-confirm
+      // backdrop was tan.
+      "fixed inset-0 z-50 bg-black/50 backdrop-blur-sm transition-opacity animate-in fade-in",
       className
     )}
     {...props}
@@ -45,6 +48,11 @@ const AlertDialogContent = React.forwardRef<
     <AlertDialogOverlay />
     <AlertDialogPrimitive.Content
       ref={ref}
+      // Meridian's portal surface rules match on data-slot; DialogContent emits
+      // one and this did not, so alert dialogs inside a Meridian scope kept the
+      // default shadcn sheet (8px radius, shadow-lg) while every other modal
+      // picked up the Meridian one. Additive attribute — inert outside Meridian.
+      data-slot="alert-dialog-content"
       className={cn(
         "fixed z-50 grid w-full max-w-lg scale-100 gap-4 border bg-background p-6 opacity-100 shadow-lg animate-in fade-in-90 slide-in-from-bottom-10 sm:rounded-lg sm:zoom-in-90 sm:slide-in-from-bottom-0",
         className
@@ -88,6 +96,7 @@ const AlertDialogTitle = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof AlertDialogPrimitive.Title>
 >(({ className, ...props }, ref) => (
   <AlertDialogPrimitive.Title
+    data-slot="alert-dialog-title"
     ref={ref}
     className={cn("text-lg font-semibold", className)}
     {...props}
@@ -100,6 +109,7 @@ const AlertDialogDescription = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof AlertDialogPrimitive.Description>
 >(({ className, ...props }, ref) => (
   <AlertDialogPrimitive.Description
+    data-slot="alert-dialog-description"
     ref={ref}
     className={cn("text-sm text-muted-foreground", className)}
     {...props}

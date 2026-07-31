@@ -37,6 +37,7 @@ import {
   type McpServerWithStats,
 } from "@/actions/admin/connector.actions"
 import { Plus, Trash2, Pencil } from "lucide-react"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface Props {
   initialServers: McpServerWithStats[]
@@ -136,7 +137,7 @@ function ConnectorsTable({
                         <Trash2 className="h-4 w-4 text-destructive" />
                       </Button>
                     </AlertDialogTrigger>
-                    <AlertDialogContent>
+                    <AlertDialogContent className={meridianPortalClassName}>
                       <AlertDialogHeader>
                         <AlertDialogTitle>Delete Connector</AlertDialogTitle>
                         <AlertDialogDescription>
@@ -225,7 +226,7 @@ export function ConnectorsPageClient({ initialServers, fetchError: initialFetchE
               Add Connector
             </Button>
           </DialogTrigger>
-          <DialogContent className="sm:max-w-lg max-h-[85vh] overflow-y-auto">
+          <DialogContent className={`sm:max-w-lg max-h-[85vh] overflow-y-auto ${meridianPortalClassName}`}>
             <DialogHeader>
               <DialogTitle>
                 {editingServer ? "Edit Connector" : "Add Connector"}

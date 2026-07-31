@@ -29,7 +29,7 @@ import { mkdirSync } from 'node:fs'
  * default CI (no seeded session) skips.
  */
 
-const SHOT_DIR = 'docs/verification/atrium-meridian'
+const SHOT_DIR = 'docs/verification/meridian'
 
 /**
  * Pin the grid to a single seeded probe via the library search box. The search

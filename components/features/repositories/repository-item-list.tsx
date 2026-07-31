@@ -64,6 +64,7 @@ import {
 } from "lucide-react"
 import { format } from "date-fns"
 import { useToast } from "@/components/ui/use-toast"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface RepositoryItemListProps {
   repositoryId: number
@@ -337,7 +338,7 @@ function RepositoryItemDialogs({
           open={deleteTarget !== null}
           onOpenChange={open => !open && onCloseDelete()}
         >
-          <AlertDialogContent>
+          <AlertDialogContent className={meridianPortalClassName}>
             <AlertDialogHeader>
               <AlertDialogTitle>Remove Item</AlertDialogTitle>
               <AlertDialogDescription>
@@ -369,7 +370,7 @@ function RepositoryItemDialogs({
         open={detailTarget !== null}
         onOpenChange={open => !open && onCloseDetail()}
       >
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-4xl">
+        <DialogContent className={`max-h-[90vh] overflow-y-auto sm:max-w-4xl ${meridianPortalClassName}`}>
           <DialogHeader>
             <DialogTitle>Repository item details</DialogTitle>
             <DialogDescription>

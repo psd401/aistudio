@@ -44,6 +44,7 @@ import { formatDate } from "@/lib/date-utils"
 import { UserAvatar } from "./user-avatar"
 import { RoleBadgeList } from "./role-badge"
 import { StatusIndicator, type UserStatus } from "./status-indicator"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 // Extended user type for the table
 export interface UserTableRow {
@@ -211,7 +212,7 @@ function useUserColumns({
                   <span className="sr-only">Open menu</span>
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
+              <DropdownMenuContent align="end" className={meridianPortalClassName}>
                 <DropdownMenuItem onClick={() => onViewUser(user)}>
                   <IconEye className="mr-2 h-4 w-4" />
                   View Details

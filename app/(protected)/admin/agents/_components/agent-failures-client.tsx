@@ -52,6 +52,7 @@ import {
   type FailureRange,
   type FailureRow,
 } from "@/actions/admin/agent-failures.actions"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 const RANGE_OPTIONS: { value: FailureRange; label: string }[] = [
   { value: "7d", label: "Last 7 days" },
@@ -240,7 +241,7 @@ function FailureToolbar({
           <SelectTrigger className="w-[160px] h-8 text-sm">
             <SelectValue />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className={meridianPortalClassName}>
             {RANGE_OPTIONS.map(option => (
               <SelectItem key={option.value} value={option.value}>
                 {option.label}
@@ -276,7 +277,7 @@ function FailureToolbar({
             <SelectTrigger className={`${filter.width} h-8 text-sm`}>
               <SelectValue />
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent className={meridianPortalClassName}>
               {filter.options.map(option => (
                 <SelectItem key={option.value} value={option.value}>
                   {option.label}
@@ -474,7 +475,7 @@ function FailureDialogs({
   return (
     <>
       <Dialog open={ackOpen} onOpenChange={onAckOpenChange}>
-        <DialogContent>
+        <DialogContent className={meridianPortalClassName}>
           <DialogHeader>
             <DialogTitle>Acknowledge {selectedCount} failure(s)</DialogTitle>
             <DialogDescription>
@@ -503,7 +504,7 @@ function FailureDialogs({
         </DialogContent>
       </Dialog>
       <Dialog open={bundleOpen} onOpenChange={onBundleOpenChange}>
-        <DialogContent className="max-w-3xl">
+        <DialogContent className={`max-w-3xl ${meridianPortalClassName}`}>
           <DialogHeader>
             <DialogTitle>Troubleshooting bundle</DialogTitle>
             <DialogDescription>

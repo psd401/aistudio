@@ -36,6 +36,7 @@ import {
   IconTrash,
 } from "@tabler/icons-react"
 import { cn } from "@/lib/utils"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 export interface NodeTableRow {
   id: string
@@ -150,7 +151,7 @@ function useNodeColumns({
                 <span className="sr-only">Open menu</span>
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
+            <DropdownMenuContent align="end" className={meridianPortalClassName}>
               <DropdownMenuItem onClick={() => onViewNode(row.original)}>
                 <IconEye className="mr-2 h-4 w-4" />
                 View Details

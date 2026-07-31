@@ -9,6 +9,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface TriageQuickJumpProps {
   users: { email: string; enabled: boolean }[]
@@ -48,7 +49,7 @@ export function TriageQuickJump({ users }: TriageQuickJumpProps) {
         >
           <SelectValue placeholder="Jump to a user's triage page…" />
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent className={meridianPortalClassName}>
           {users.map(user => (
             <SelectItem key={user.email} value={user.email}>
               {user.email}

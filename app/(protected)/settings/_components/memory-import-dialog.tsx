@@ -40,6 +40,7 @@ import {
   type MemoryImportCandidate,
   type MemoryImportVendor,
 } from "@/lib/nexus/memory/memory-import-schemas"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 const log = createLogger({ component: "MemoryImportDialog" })
 
@@ -192,7 +193,7 @@ function ImportSourceStep({
           >
             <SelectValue />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className={meridianPortalClassName}>
             {MEMORY_IMPORT_VENDORS.map((option) => (
               <SelectItem key={option} value={option}>
                 {MEMORY_IMPORT_VENDOR_GUIDES[option].label}
@@ -368,7 +369,7 @@ function ImportReviewStep({
                 >
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className={meridianPortalClassName}>
                   {MEMORY_CATEGORIES.map((category) => (
                     <SelectItem
                       key={category.value}
@@ -589,7 +590,7 @@ export function MemoryImportDialog({
 
   return (
     <Dialog open={open} onOpenChange={dialog.handleOpenChange}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className={`max-w-2xl ${meridianPortalClassName}`}>
         <DialogHeader>
           <DialogTitle>Import memories</DialogTitle>
           <DialogDescription>

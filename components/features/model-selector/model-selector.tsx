@@ -21,6 +21,7 @@ import type {
   ModelSelectorProps,
 } from "./model-selector-types"
 import type { SelectAiModel } from "@/types"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface ModelListProps {
   accessibleCount: number
@@ -267,7 +268,7 @@ function ModelSelectorContent({
         </Button>
       </PopoverTrigger>
       <PopoverContent 
-        className="w-[400px] p-0 z-[100]" 
+        className={`w-[400px] p-0 z-[100] ${meridianPortalClassName}`} 
         align="start"
         onOpenAutoFocus={(e) => {
           // Focus the search input when opening

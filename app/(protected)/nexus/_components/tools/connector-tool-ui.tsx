@@ -205,7 +205,7 @@ function ConnectorIcon({
     );
   }
   return (
-    <Plug className="text-purple-600" style={{ width: size, height: size }} />
+    <Plug className="text-[var(--mer-agent)]" style={{ width: size, height: size }} />
   );
 }
 
@@ -285,7 +285,7 @@ function LinkResult({ url }: { url: string }) {
       href={url}
       target="_blank"
       rel="noopener noreferrer"
-      className="inline-flex items-center gap-1.5 text-sm text-purple-700 hover:text-purple-900 hover:underline"
+      className="inline-flex items-center gap-1.5 text-sm text-[var(--mer-agent)] hover:text-[var(--mer-agent)] hover:underline"
     >
       <ExternalLink className="h-3.5 w-3.5" />
       {url.length > 60 ? `${url.substring(0, 57)}...` : url}
@@ -304,7 +304,7 @@ function ErrorResult({ text }: { text: string }) {
 
 function JsonResult({ text }: { text: string }) {
   return (
-    <pre className="text-xs bg-gray-50 p-2 rounded overflow-x-auto max-h-48 text-gray-800">
+    <pre className="text-xs bg-muted p-2 rounded overflow-x-auto max-h-48 text-gray-800">
       {text}
     </pre>
   );
@@ -352,9 +352,9 @@ function ResultTypeIcon({ parsed }: { parsed: ParsedResult[] }) {
   const hasImage = parsed.some((p) => p.type === "image");
   const hasLink = parsed.some((p) => p.type === "link");
 
-  if (hasImage) return <ImageIcon className="h-3.5 w-3.5 text-purple-600" />;
-  if (hasLink) return <ExternalLink className="h-3.5 w-3.5 text-purple-600" />;
-  return <FileText className="h-3.5 w-3.5 text-purple-600" />;
+  if (hasImage) return <ImageIcon className="h-3.5 w-3.5 text-[var(--mer-agent)]" />;
+  if (hasLink) return <ExternalLink className="h-3.5 w-3.5 text-[var(--mer-agent)]" />;
+  return <FileText className="h-3.5 w-3.5 text-[var(--mer-agent)]" />;
 }
 
 /** Get a compact preview string for the first result item */
@@ -442,7 +442,7 @@ function ConnectorToolCard({
   const isExpanded = manualExpanded !== null ? manualExpanded : isError;
 
   return (
-    <div className="mb-4 w-full rounded-lg border border-purple-200 bg-purple-50/30 overflow-hidden">
+    <div className="mb-4 w-full rounded-lg border border-[var(--mer-border-agent)] bg-[var(--mer-agent-tint)] overflow-hidden">
       {/* Header */}
       <div className="flex items-center gap-2.5 px-4 py-3">
         {/* Connector icon */}
@@ -451,18 +451,18 @@ function ConnectorToolCard({
         {/* Tool info */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-purple-900 truncate">
+            <span className="text-sm font-medium text-[var(--mer-agent)] truncate">
               {displayName}
             </span>
             <Badge
               variant="outline"
-              className="text-[10px] px-1.5 py-0 border-purple-300 text-purple-700"
+              className="text-[10px] px-1.5 py-0 border-[var(--mer-border-agent)] text-[var(--mer-agent)]"
             >
               {connectorInfo.serverName}
             </Badge>
           </div>
           {!isExpanded && !isLoading && (
-            <div className="text-xs text-purple-700/70 truncate mt-0.5">
+            <div className="text-xs text-[var(--mer-agent)]/70 truncate mt-0.5">
               {argsSummary}
             </div>
           )}
@@ -477,10 +477,10 @@ function ConnectorToolCard({
           {isLoading ? (
             <div className="flex items-center gap-1.5">
               <Loader2
-                className="h-4 w-4 text-purple-600 animate-spin"
+                className="h-4 w-4 text-[var(--mer-agent)] animate-spin"
                 aria-hidden="true"
               />
-              <span className="text-xs text-purple-600 animate-pulse">
+              <span className="text-xs text-[var(--mer-agent)] animate-pulse">
                 Running...
               </span>
             </div>
@@ -503,7 +503,7 @@ function ConnectorToolCard({
             onClick={toggleExpanded}
             aria-expanded={isExpanded}
             aria-label={isExpanded ? "Hide tool details" : "Show tool details"}
-            className="h-9 w-9 p-0 text-purple-700 hover:text-purple-900 hover:bg-purple-100"
+            className="h-9 w-9 p-0 text-[var(--mer-agent)] hover:text-[var(--mer-agent)] hover:bg-[var(--mer-agent-tint)]"
           >
             {isExpanded ? (
               <ChevronUp className="h-4 w-4" />
@@ -516,13 +516,13 @@ function ConnectorToolCard({
 
       {/* Expanded content */}
       {isExpanded && (
-        <div className="border-t border-purple-200 px-4 py-3 space-y-3">
+        <div className="border-t border-[var(--mer-border-agent)] px-4 py-3 space-y-3">
           {/* Arguments */}
           <div>
-            <div className="text-xs font-semibold text-purple-900 mb-1">
+            <div className="text-xs font-semibold text-[var(--mer-agent)] mb-1">
               Arguments
             </div>
-            <pre className="text-xs bg-purple-50 p-2 rounded overflow-x-auto overflow-y-auto max-h-48 text-purple-800 whitespace-pre-wrap">
+            <pre className="text-xs bg-[var(--mer-agent-tint)] p-2 rounded overflow-x-auto overflow-y-auto max-h-48 text-[var(--mer-agent)] whitespace-pre-wrap">
               {argsText.length > 10_000
                 ? `${argsText.slice(0, 10_000)}…`
                 : argsText}
@@ -534,7 +534,7 @@ function ConnectorToolCard({
             <div>
               <div className="flex items-center gap-1.5 mb-1">
                 <ResultTypeIcon parsed={parsedResult} />
-                <span className="text-xs font-semibold text-purple-900">
+                <span className="text-xs font-semibold text-[var(--mer-agent)]">
                   Result
                 </span>
               </div>
@@ -546,8 +546,8 @@ function ConnectorToolCard({
 
       {/* Compact result preview (when collapsed and has result) */}
       {!isExpanded && !isLoading && parsedResult.length > 0 && !isError && (
-        <div className="border-t border-purple-100 px-4 py-2">
-          <div className="text-xs text-purple-700 truncate">
+        <div className="border-t border-[var(--mer-border-agent)] px-4 py-2">
+          <div className="text-xs text-[var(--mer-agent)] truncate">
             {getPreviewText(parsedResult)}
           </div>
         </div>

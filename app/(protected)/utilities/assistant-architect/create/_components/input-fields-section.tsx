@@ -15,6 +15,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface InputFieldsSectionProps {
   inputFields: SelectToolInputField[]
@@ -221,7 +222,7 @@ function DeleteFieldDialog({ field, isDeleting, onConfirm, onCancel }: DeleteFie
 
   return (
     <AlertDialog open={!!field} onOpenChange={handleOpenChange}>
-      <AlertDialogContent>
+      <AlertDialogContent className={meridianPortalClassName}>
         <AlertDialogHeader>
           <AlertDialogTitle>Delete Input Field</AlertDialogTitle>
           <AlertDialogDescription>

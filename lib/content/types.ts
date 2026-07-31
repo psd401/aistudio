@@ -243,7 +243,7 @@ export interface ContentObjectDTO {
   tags: string[];
   /**
    * Meridian slice F (migration 103). `coverGradient` is a preset key selecting one
-   * of the fixed cover gradients (styles/atrium-meridian.css `--mer-grad-cover-*`),
+   * of the fixed cover gradients (styles/meridian.css `--mer-grad-cover-*`),
    * or null for no cover band. `icon` is a single emoji shown on the library card /
    * cover tile, or null for the kind's default icon. Both presentation-only.
    */

@@ -20,6 +20,7 @@ import type {
 } from "@/actions/admin/activity-management.actions"
 import { getConversationMessages } from "@/actions/admin/activity-management.actions"
 import { cn } from "@/lib/utils"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface NexusDetailSheetProps {
   open: boolean
@@ -65,7 +66,7 @@ export function NexusDetailSheet({
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className="w-full sm:max-w-xl overflow-hidden flex flex-col">
+      <SheetContent className={`w-full sm:max-w-xl overflow-hidden flex flex-col ${meridianPortalClassName}`}>
         <SheetHeader>
           <SheetTitle className="truncate">
             {conversation.title || "Untitled Conversation"}

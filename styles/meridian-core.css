@@ -1,146 +1,87 @@
 /*
- * Atrium — Meridian design layer (Epic #1059 redesign)
+ * Meridian — design system CORE (structure only, no colour values of its own)
  *
- * A calm, modern workspace skin for Atrium: soft light surfaces, a deep-teal
- * brand, and a violet accent RESERVED EXCLUSIVELY for AI-agent presence.
+ * THE ONE structural layer for the whole application. Every surface on Meridian
+ * imports this file: /atrium, /dashboard, /nexus and everything that follows.
+ * There is no such thing as an "Atrium component" and an "AI Studio component" —
+ * there is one `.mer-*` vocabulary, defined here exactly once.
  *
- * SCOPE: every token and component class lives under `.atrium-meridian`, which
- * the Atrium `layout.tsx` puts on the shell root only. The global app palette
- * (`app/globals.css` @theme) and non-Atrium routes (/dashboard, /nexus, …) are
- * therefore untouched — verify there is no token leakage.
+ * WHAT BELONGS HERE
+ * Geometry, spacing, type scale, states, layout — anything that would be the
+ * same whatever the palette was. Rules read `var(--mer-*)` and never hardcode a
+ * colour, so the token layer decides how they look.
  *
- * LIGHT MODE ONLY (approved plan decision 1.4): no dark variants. Atrium dark
- * mode is already partially broken today and is intentionally out of scope.
+ * WHAT DOES NOT
+ * Token VALUES. Those live in `styles/meridian-tokens.css`, applied via the
+ * `.meridian` scope class (and `.meridian-portal` for Radix content, which
+ * mounts on document.body outside any scope).
  *
- * Token values are authoritative from the Meridian design handoff (README.md).
- * RULE: violet = agent, always and only. Humans get green / terracotta / blue.
+ * INVARIANT: a structural class is defined in THIS file and nowhere else.
+ * A second definition elsewhere silently wins or loses by import order — that
+ * is how the two stylesheets briefly disagreed about `.mer-icon-chip`. Add
+ * variants as modifiers (`.mer-icon-chip-sm`), never as redefinitions.
+ *
+ * LIGHT MODE ONLY: no dark variants. Nothing in the app sets `dark` on <html>.
+ * RULE: violet = AI agent, always and only. Humans get green / terracotta /
+ * blue. That is semantic, not decorative — do not repurpose it as an accent.
+ *
+ * Formerly `styles/atrium-meridian.css`, which carried Atrium's teal token
+ * block inline. The name implied Atrium ownership of what was always shared.
  */
-
-.atrium-meridian,
-.mer-portal {
-  /* ---- Surfaces ---- */
-  --mer-canvas: #f6f7f5; /* app background */
-  --mer-canvas-sunken: #edefec; /* editor desk behind the sheet */
-  --mer-surface: #ffffff; /* cards, sheets, top bars */
-  --mer-border: #e4e7e3; /* all hairline borders */
-  --mer-border-agent: #ded8f2; /* border on agent-authored cards */
-
-  /* ---- Ink ---- */
-  --mer-ink: #191d1c; /* primary text */
-  --mer-ink-secondary: #454d49; /* secondary text, secondary buttons */
-  --mer-ink-muted: #8b948f; /* metadata, placeholders, labels */
-
-  /* ---- Brand (deep teal) ---- */
-  --mer-brand: #10322e; /* primary buttons, active nav, headers */
-  --mer-brand-tint: #e9f2ef; /* active-state fills, badges, icon chips */
-  --mer-brand-mid: #2c7a6b; /* chart fills, positive indicators */
-
-  /* ---- Agent (violet — agent presence ONLY) ---- */
-  --mer-agent: #6d4fc2; /* avatars, badges, underlines */
-  --mer-agent-tint: #f0edfa; /* agent badge fills */
-  --mer-agent-light: #8d74dc; /* chart gradient top for agent series */
-  --mer-agent-soft: rgba(109, 79, 194, 0.06); /* agent-edit wash */
-
-  /* ---- Humans ---- */
-  --mer-human-you: #3e7c4f; /* current user's avatar/edit color (green) */
-  --mer-human-other-1: #b4552d; /* terracotta */
-  --mer-human-other-2: #4a7ce8; /* blue */
-
-  /* ---- Icon rail ---- */
-  --mer-rail-bg: #10322e;
-  --mer-rail-active: rgba(233, 242, 239, 0.16);
-  --mer-rail-ink: rgba(233, 242, 239, 0.62);
-  --mer-rail-ink-active: #f6f7f5;
-
-  /* ---- Radii ---- */
-  --mer-r-card: 15px;
-  --mer-r-button: 9px;
-  --mer-r-chip: 7px;
-  --mer-r-pill: 99px;
-
-  /* ---- Shadows ---- */
-  --mer-shadow-card: 0 1px 3px rgba(16, 50, 46, 0.05);
-  --mer-shadow-sheet: 0 2px 16px rgba(16, 50, 46, 0.08);
-  --mer-shadow-toolbar: 0 8px 24px rgba(25, 29, 28, 0.3);
-
-  /* ---- Gradients (used sparingly) ---- */
-  --mer-grad-brand: linear-gradient(135deg, #10322e, #164a42, #1d5a4b);
-  --mer-grad-cover: linear-gradient(115deg, #10322e 0%, #1d5a4b 45%, #6d4fc2 130%);
-  --mer-grad-agent-callout: linear-gradient(135deg, #eaf1ee, #f0edfa);
-
-  /* ---- shadcn/Tailwind-v4 theme remap (scoped to Atrium) ----
-   * The shared shadcn primitives (Dialog / Select / Popover / DropdownMenu /
-   * Button / Input / Label) read the Tailwind-v4 `--color-*` theme tokens
-   * (`bg-background`, `bg-popover`, `border`, `text-foreground`, …). Remapping
-   * those tokens HERE — under the Atrium scope only — makes every shadcn surface
-   * rendered inside Atrium (including portaled content that carries `.mer-portal`)
-   * render Meridian instead of the global cream palette. Nothing leaks to
-   * /dashboard or /nexus (they are outside this scope). */
-  --color-background: var(--mer-surface);
-  --color-foreground: var(--mer-ink);
-  --color-card: var(--mer-surface);
-  --color-card-foreground: var(--mer-ink);
-  --color-popover: var(--mer-surface);
-  --color-popover-foreground: var(--mer-ink);
-  --color-primary: var(--mer-brand);
-  --color-primary-foreground: #ffffff;
-  --color-secondary: var(--mer-canvas-sunken);
-  --color-secondary-foreground: var(--mer-ink-secondary);
-  --color-muted: var(--mer-canvas-sunken);
-  --color-muted-foreground: var(--mer-ink-muted);
-  --color-accent: var(--mer-brand-tint);
-  --color-accent-foreground: var(--mer-brand);
-  --color-destructive: #b4552d;
-  --color-destructive-foreground: #ffffff;
-  --color-border: var(--mer-border);
-  --color-input: var(--mer-border);
-  --color-ring: var(--mer-brand-mid);
-
-  font-family: var(--font-meridian), ui-sans-serif, system-ui, -apple-system,
-    "Segoe UI", sans-serif;
-  color: var(--mer-ink);
-  letter-spacing: -0.01em;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
 
 /* The app canvas background belongs to the full-page Atrium scope only — a
  * portaled modal/menu must NOT paint the canvas behind its own white surface. */
-.atrium-meridian {
+.meridian {
   background: var(--mer-canvas);
 }
 
 /* ============================================================================
  * PORTALED SURFACES (Meridian) — Radix Dialog / Select / Popover / DropdownMenu
- * content portals to document.body, OUTSIDE the `.atrium-meridian` shell scope.
+ * content portals to document.body, OUTSIDE the `.meridian` shell scope.
  * Each Atrium portal carries `meridianPortalClassName` (`.mer-portal` + the
  * Schibsted Grotesk font var), which the token block above turns Meridian. These
  * rules add the real Meridian dialog surface (white, 16px radius, elevated
  * shadow, centered max-width — NEVER the full-viewport width the base shadcn
  * DialogContent renders because this repo's variant carries no max-width).
  * ========================================================================== */
-.mer-portal[data-slot="dialog-content"] {
+/* One portal class for one palette. These rules are pure structure and read
+ * only var(--mer-*), so the token layer supplies the colour. */
+.meridian-portal[data-slot="dialog-content"],
+.meridian-portal[data-slot="alert-dialog-content"] {
   background: var(--mer-surface);
   border: 1px solid var(--mer-border);
   border-radius: 16px;
-  box-shadow: 0 2px 16px rgba(16, 50, 46, 0.07);
+  box-shadow: 0 2px 16px rgba(0, 48, 73, 0.07);
   /* Cap the width — the base non-wide DialogContent is `w-full` with no
    * max-width, so without this every Atrium modal stretches edge-to-edge. */
   max-width: min(520px, calc(100vw - 32px));
 }
 /* Keep opt-in wide dialogs (data-wide-mode) at their own size. */
-.mer-portal[data-slot="dialog-content"][data-wide-mode="active"] {
+.meridian-portal[data-slot="dialog-content"][data-wide-mode="active"] {
   max-width: 95vw;
   border-radius: 16px;
 }
+/* Size scale for dialogs that need more than the 520px default but should NOT
+ * become full-viewport `wide` dialogs. `data-wide-mode` is not usable for this:
+ * it is owned by DialogContent's `wide` prop and pairs with inline 95vw/90vh
+ * styles, so setting the attribute by hand desyncs CSS from those styles.
+ * Applies to both token layers so Atrium and app dialogs stay the same size. */
+.meridian-portal[data-slot="dialog-content"][data-mer-size="wide"] {
+  max-width: min(680px, calc(100vw - 32px));
+}
+.meridian-portal[data-slot="dialog-content"][data-mer-size="xwide"] {
+  max-width: min(1024px, calc(100vw - 32px));
+}
 /* Meridian dialog title/description type + close affordance. */
-.mer-portal[data-slot="dialog-content"] [data-slot="dialog-title"] {
+.meridian-portal[data-slot="dialog-content"] [data-slot="dialog-title"],
+.meridian-portal[data-slot="alert-dialog-content"] [data-slot="alert-dialog-title"] {
   font-size: 17px;
   font-weight: 700;
   letter-spacing: -0.01em;
   color: var(--mer-ink);
 }
-.mer-portal[data-slot="dialog-content"] [data-slot="dialog-description"] {
+.meridian-portal[data-slot="dialog-content"] [data-slot="dialog-description"],
+.meridian-portal[data-slot="alert-dialog-content"] [data-slot="alert-dialog-description"] {
   color: var(--mer-ink-muted);
 }
 
@@ -354,7 +295,7 @@
   border-color: var(--mer-brand);
 }
 .mer-btn-primary:hover {
-  background: #0b2622;
+  background: var(--mer-brand-hover);
 }
 .mer-btn-agent {
   background: var(--mer-agent);
@@ -383,7 +324,7 @@
   color: var(--mer-brand);
 }
 .mer-badge-draft {
-  background: #f1f2f0;
+  background: var(--mer-canvas-sunken);
   color: var(--mer-ink-secondary);
 }
 .mer-badge-agent {
@@ -426,10 +367,10 @@
  * this purpose (not its Tailwind utility class strings, which have no link to
  * this file). Restricted to `.mer-navcol` so nothing else is affected.
  * ========================================================================== */
-.atrium-meridian .mer-navcol nav[aria-label="Content sections"] {
+.meridian .mer-navcol nav[aria-label="Content sections"] {
   color: var(--mer-ink-secondary);
 }
-.atrium-meridian .mer-navcol [data-selected="true"] {
+.meridian .mer-navcol [data-selected="true"] {
   background: var(--mer-brand-tint) !important;
   color: var(--mer-brand) !important;
   font-weight: 600;
@@ -471,7 +412,7 @@
 }
 .mer-search:focus-within {
   border-color: var(--mer-brand-mid);
-  box-shadow: 0 0 0 3px rgba(44, 122, 107, 0.12);
+  box-shadow: 0 0 0 3px rgba(42, 116, 159, 0.12);
 }
 .mer-search-icon {
   color: var(--mer-ink-muted);
@@ -656,7 +597,7 @@
     border-color 160ms ease-out;
 }
 .mer-lib-card:hover {
-  box-shadow: 0 4px 14px rgba(16, 50, 46, 0.1);
+  box-shadow: 0 4px 14px rgba(0, 48, 73, 0.1);
   transform: translateY(-1px);
 }
 .mer-lib-card-head {
@@ -714,7 +655,7 @@
   max-width: 100%;
   padding: 2px 9px;
   border-radius: var(--mer-r-pill);
-  background: #f1f2f0;
+  background: var(--mer-canvas-sunken);
   color: var(--mer-ink-secondary);
   font-size: 10.5px;
   font-weight: 600;
@@ -874,7 +815,7 @@
   width: 48px;
   height: 48px;
   border-radius: 12px;
-  background: #f1f2f0;
+  background: var(--mer-canvas-sunken);
   color: var(--mer-ink-secondary);
 }
 .mer-lib-empty-title {
@@ -1100,7 +1041,7 @@
   padding: 0 16px;
 }
 .mer-ectl-primary:hover:not(:disabled) {
-  background: #0b2622;
+  background: var(--mer-brand-hover);
 }
 .mer-ectl-danger:hover:not(:disabled) {
   color: #b4552d;
@@ -1255,7 +1196,7 @@
   bottom: -26px;
   width: 180px;
   height: 180px;
-  background: radial-gradient(circle, rgba(233, 242, 239, 0.16), transparent 66%);
+  background: radial-gradient(circle, rgba(235, 241, 245, 0.16), transparent 66%);
 }
 .mer-cover::after {
   right: 60px;
@@ -1267,9 +1208,9 @@
 /* Preset gradients (keys in lib/atrium/cover.ts). `default` is the handoff cover. */
 .mer-cover--default { background: var(--mer-grad-cover); }
 .mer-cover--sunrise { background: linear-gradient(115deg, #b4552d 0%, #c07a1e 48%, #6d4fc2 130%); }
-.mer-cover--forest { background: linear-gradient(115deg, #10322e 0%, #2c7a6b 55%, #3e7c4f 120%); }
+.mer-cover--forest { background: linear-gradient(115deg, var(--mer-brand) 0%, var(--mer-brand-mid) 55%, #3e7c4f 120%); }
 .mer-cover--violet { background: linear-gradient(115deg, #3b2a6b 0%, #6d4fc2 55%, #8d74dc 120%); }
-.mer-cover--dusk { background: linear-gradient(115deg, #191d1c 0%, #454d49 45%, #6d4fc2 130%); }
+.mer-cover--dusk { background: linear-gradient(115deg, var(--mer-ink) 0%, var(--mer-ink-secondary) 45%, #6d4fc2 130%); }
 
 /* "Change cover · 🖼" glass pill (editor only). */
 .mer-cover-change {
@@ -1299,7 +1240,7 @@
   height: 56px;
   border-radius: 14px;
   background: #fff;
-  box-shadow: 0 2px 10px rgba(16, 50, 46, 0.14);
+  box-shadow: 0 2px 10px rgba(0, 48, 73, 0.14);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1440,40 +1381,40 @@
 
 /* Sheet body typography — scoped to the Meridian editor only (readers keep the
  * base .atrium-content type until slice E wraps them in .atrium-meridian). */
-.atrium-meridian .mer-sheet .atrium-content {
+.meridian .mer-sheet .atrium-content {
   font-size: 15.5px;
   line-height: 1.75;
-  color: #2b302e;
+  color: var(--mer-ink);
 }
-.atrium-meridian .mer-sheet .atrium-content .ProseMirror {
+.meridian .mer-sheet .atrium-content .ProseMirror {
   min-height: 320px;
 }
-.atrium-meridian .mer-sheet .atrium-content .ProseMirror:focus {
+.meridian .mer-sheet .atrium-content .ProseMirror:focus {
   outline: none;
 }
 
 /* Editor tables (ProseMirror) — the TableKit nodes need visible cell borders,
  * a selected-cell wash, and a column-resize handle. */
-.atrium-meridian .mer-sheet .atrium-content table {
+.meridian .mer-sheet .atrium-content table {
   border-collapse: collapse;
   width: 100%;
   margin: 1em 0;
   table-layout: fixed;
   overflow: hidden;
 }
-.atrium-meridian .mer-sheet .atrium-content td,
-.atrium-meridian .mer-sheet .atrium-content th {
+.meridian .mer-sheet .atrium-content td,
+.meridian .mer-sheet .atrium-content th {
   border: 1px solid var(--mer-border);
   padding: 6px 10px;
   vertical-align: top;
   position: relative;
 }
-.atrium-meridian .mer-sheet .atrium-content th {
+.meridian .mer-sheet .atrium-content th {
   background: var(--mer-canvas);
   font-weight: 600;
   text-align: left;
 }
-.atrium-meridian .mer-sheet .atrium-content .selectedCell::after {
+.meridian .mer-sheet .atrium-content .selectedCell::after {
   content: "";
   position: absolute;
   inset: 0;
@@ -1481,7 +1422,7 @@
   opacity: 0.55;
   pointer-events: none;
 }
-.atrium-meridian .mer-sheet .atrium-content .column-resize-handle {
+.meridian .mer-sheet .atrium-content .column-resize-handle {
   position: absolute;
   right: -2px;
   top: 0;
@@ -1570,10 +1511,10 @@
   transition: background 130ms ease-out;
 }
 .mer-bubble-btn:hover {
-  background: rgba(246, 247, 245, 0.14);
+  background: rgba(245, 247, 249, 0.14);
 }
 .mer-bubble-btn[data-active="true"] {
-  background: rgba(246, 247, 245, 0.22);
+  background: rgba(245, 247, 249, 0.22);
 }
 .mer-bubble-btn-b {
   font-weight: 700;
@@ -1591,7 +1532,7 @@
   width: 1px;
   align-self: stretch;
   margin: 2px 3px;
-  background: rgba(246, 247, 245, 0.18);
+  background: rgba(245, 247, 249, 0.18);
 }
 .mer-bubble-text {
   font-weight: 600;
@@ -1654,10 +1595,10 @@
   white-space: nowrap;
 }
 .mer-bubble-pop-item:hover {
-  background: rgba(246, 247, 245, 0.14);
+  background: rgba(245, 247, 249, 0.14);
 }
 .mer-bubble-pop-item[data-active="true"] {
-  background: rgba(246, 247, 245, 0.22);
+  background: rgba(245, 247, 249, 0.22);
 }
 
 /* Embed-artifact picker popover (scrollable list of the viewer's artifacts) */
@@ -1676,7 +1617,7 @@
 .mer-bubble-pop-empty {
   padding: 7px 12px;
   font-size: 12.5px;
-  color: rgba(246, 247, 245, 0.6);
+  color: rgba(245, 247, 249, 0.6);
   white-space: nowrap;
 }
 
@@ -1689,7 +1630,7 @@
 .mer-bubble-media-tabs {
   display: inline-flex;
   gap: 2px;
-  background: rgba(246, 247, 245, 0.1);
+  background: rgba(245, 247, 249, 0.1);
   border-radius: 7px;
   padding: 2px;
 }
@@ -1698,7 +1639,7 @@
   padding: 5px 8px;
   font-size: 12px;
   font-weight: 600;
-  color: rgba(246, 247, 245, 0.7);
+  color: rgba(245, 247, 249, 0.7);
   background: transparent;
   border: none;
   border-radius: 5px;
@@ -1757,7 +1698,7 @@
   width: 22px;
   height: 22px;
   border-radius: 6px;
-  border: 1px solid rgba(246, 247, 245, 0.25);
+  border: 1px solid rgba(245, 247, 249, 0.25);
   cursor: pointer;
   padding: 0;
 }
@@ -1855,7 +1796,7 @@
 .mer-comment-body {
   font-size: 13px;
   line-height: 1.5;
-  color: #2b302e;
+  color: var(--mer-ink);
   white-space: pre-wrap;
 }
 .mer-comment-actions {
@@ -1887,7 +1828,7 @@
   color: var(--mer-agent);
 }
 .mer-comments-empty {
-  border: 1.5px dashed #c9cfcb;
+  border: 1.5px dashed var(--mer-border);
   border-radius: 12px;
   padding: 12px 14px;
   font-size: 12px;
@@ -2362,7 +2303,7 @@
   background: var(--mer-surface);
   border: 1px solid var(--mer-border);
   border-radius: 16px;
-  box-shadow: 0 2px 16px rgba(16, 50, 46, 0.07);
+  box-shadow: 0 2px 16px rgba(0, 48, 73, 0.07);
   padding: 44px 56px 48px;
 }
 @media (max-width: 720px) {
@@ -2504,4 +2445,139 @@
 .mer-copy-link-btn:hover {
   color: var(--mer-ink);
   background: var(--mer-canvas-sunken);
+}
+
+
+
+/*
+ * Ink: settled on Pacific. A deeper ramp matching Meridian's own ~17:1
+ * near-black was trialled side by side and was indistinguishable in situ, so
+ * the app's own foreground wins on the "keep the colouring" brief. Do not
+ * re-propose the darker ink without a case that survives looking at it.
+ */
+
+/*
+ * Page scaffold. Meridian surfaces sit on the canvas, not on white, and the
+ * measure is capped so cards never stretch into letterboxes on wide displays.
+ */
+.mer-page {
+  min-height: 100vh;
+  background: var(--mer-canvas);
+}
+
+.mer-page-inner {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 26px 24px 48px;
+}
+
+@media (max-width: 640px) {
+  .mer-page-inner {
+    padding: 20px 16px 40px;
+  }
+}
+
+/* Section heading — brand-coloured, tight, no decoration. */
+.mer-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.mer-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--mer-ink-muted);
+}
+
+.mer-section-link {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mer-brand);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: gap 150ms ease-out;
+}
+
+.mer-section-link:hover {
+  gap: 8px;
+}
+
+
+/*
+ * Clickable card. Meridian deliberately has no `.mer-card:hover` — its cards are
+ * containers, not targets. Dashboard cards ARE targets, so this adds the
+ * smallest hover that reads as interactive without the lift-and-bloom the old
+ * dashboard used (shadow-sm → shadow-lg + -translate-y-0.5). Border darkens,
+ * geometry does not move.
+ */
+.mer-card-link {
+  display: flex;
+  flex-direction: column;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 150ms ease-out, background 150ms ease-out;
+}
+
+.mer-card-link:hover {
+  border-color: var(--mer-ink-muted);
+}
+
+.mer-card-link:focus-visible {
+  outline: none;
+  border-color: var(--mer-brand-mid);
+  box-shadow: 0 0 0 3px rgba(42, 116, 159, 0.12);
+}
+
+/*
+ * Icon chip. Replaces the old four-colour accent rainbow (navy/coral/purple/
+ * green) with the single brand tint — Meridian's discipline is brand + neutral,
+ * with violet reserved for agent presence.
+ */
+/*
+ * Size MODIFIER, not a redefinition. `.mer-icon-chip` already exists in
+ * this file (34px / 9px radius) and Atrium renders it in
+ * LibraryList. An earlier revision of this file redefined the base class at
+ * 30px/7px, which was invisible only because Atrium's layout does not import
+ * this stylesheet — the moment anything loaded both, Atrium's chips would have
+ * silently shrunk. Compose instead: `mer-icon-chip mer-icon-chip-sm`.
+ */
+.mer-icon-chip-sm {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--mer-r-chip);
+}
+
+.mer-card-title {
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--mer-ink);
+  letter-spacing: -0.011em;
+}
+
+.mer-card-desc {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--mer-ink-muted);
+}
+
+/* Text CTA — Meridian uses a link, not a pill, for secondary actions. */
+.mer-card-cta {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mer-brand);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: gap 150ms ease-out;
+}
+
+.mer-card-link:hover .mer-card-cta {
+  gap: 8px;
 }

@@ -48,7 +48,7 @@ import { Globe, Lock, Users, Building2, Share2, X } from "lucide-react";
 import { getVisibilityAction } from "@/actions/db/atrium/get-visibility";
 import { setVisibilityAction } from "@/actions/db/atrium/set-visibility";
 import { listGrantOptionsAction } from "@/actions/db/atrium/list-grant-options";
-import { meridianPortalClassName } from "@/lib/atrium/meridian-fonts";
+import { meridianPortalClassName } from "@/lib/meridian/fonts";
 import { listPublicationsAction } from "@/actions/db/atrium/list-publications";
 import { PeoplePicker } from "./PeoplePicker";
 import { CopyableLink } from "./CopyableLink";

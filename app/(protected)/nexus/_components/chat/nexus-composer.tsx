@@ -67,7 +67,7 @@ export function NexusComposer({
                 : placeholder
             }
             disabled={isLoading || disabled}
-            className="min-h-[20px] w-full resize-none border-0 bg-white dark:bg-gray-900 p-0 text-base placeholder:text-muted-foreground focus-visible:ring-0"
+            className="min-h-[20px] w-full resize-none border-0 bg-card dark:bg-gray-900 p-0 text-base placeholder:text-muted-foreground focus-visible:ring-0"
             rows={1}
           />
         </div>

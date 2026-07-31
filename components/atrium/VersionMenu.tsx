@@ -35,7 +35,7 @@ import {
 } from "@/components/ui/dialog";
 import { listContentVersionsAction, rollbackVersionAction } from "@/actions/db/atrium/rollback-version";
 import type { VersionSummary } from "@/actions/db/atrium/list-versions";
-import { meridianPortalClassName } from "@/lib/atrium/meridian-fonts";
+import { meridianPortalClassName } from "@/lib/meridian/fonts";
 import { createLogger } from "@/lib/client-logger";
 
 const log = createLogger({ component: "VersionMenu" });

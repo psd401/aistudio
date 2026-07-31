@@ -16,13 +16,13 @@ import { mkdirSync } from "node:fs";
  *    session-dependent chrome (no avatar) and no Edit link;
  *  - the 404 existence-mask still holds (an out-of-building user 404s, not 403).
  *
- * Screenshots land in docs/verification/atrium-meridian/ (07-reader-*). Gated behind
+ * Screenshots land in docs/verification/meridian/ (07-reader-*). Gated behind
  * PLAYWRIGHT_AUTH_ENABLED — see docs/guides/e2e-authenticated-testing.md for the
  * :3100 host-server + seed prereqs (atrium-reference-seed.sql + seed-atrium-doc-state
  * for /c/; atrium-public-seed.sql for /p/).
  */
 
-const SHOT_DIR = "docs/verification/atrium-meridian";
+const SHOT_DIR = "docs/verification/meridian";
 const SLUG = "board-procedure-4040";
 const PUBLIC_SLUG = process.env.ATRIUM_PUBLIC_SLUG ?? "atrium-public-welcome";
 

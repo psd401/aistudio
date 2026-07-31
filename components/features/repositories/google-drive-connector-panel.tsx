@@ -26,6 +26,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import type { GoogleDriveConnectorView } from "@/lib/repositories/google-drive/connector-service";
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface PickerSession {
   connectorId: string;
@@ -638,7 +639,7 @@ export function GoogleDriveConnectorPanel({
           if (!open && pendingAction === null) setDisconnectTarget(null);
         }}
       >
-        <AlertDialogContent>
+        <AlertDialogContent className={meridianPortalClassName}>
           <AlertDialogHeader>
             <AlertDialogTitle>
               Disconnect and remove linked Google Drive content?

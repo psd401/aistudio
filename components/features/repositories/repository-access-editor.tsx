@@ -42,6 +42,7 @@ import {
   Trash2,
   UserRound,
 } from "lucide-react"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 interface RepositoryAccessEditorProps {
   repositoryId: number
@@ -156,7 +157,7 @@ function GrantControls({
         <SelectTrigger aria-label="Grant type">
           <SelectValue />
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent className={meridianPortalClassName}>
           <SelectItem value="user">User</SelectItem>
           <SelectItem value="role">Role</SelectItem>
         </SelectContent>
@@ -168,7 +169,7 @@ function GrantControls({
         >
           <SelectValue placeholder={`Select a ${grantKind}`} />
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent className={meridianPortalClassName}>
           {grantKind === "user"
             ? availableUsers.map((user) => (
                 <SelectItem key={user.id} value={String(user.id)}>

@@ -50,7 +50,7 @@ const providerConfig: Record<
 }
 
 const variantStyles: Record<ProviderVariant, string> = {
-  default: "bg-gray-100 text-gray-800 hover:bg-gray-100",
+  default: "bg-muted text-gray-800 hover:bg-muted",
   openai: "bg-emerald-100 text-emerald-800 hover:bg-emerald-100",
   bedrock: "bg-orange-100 text-orange-800 hover:bg-orange-100",
   google: "bg-blue-100 text-blue-800 hover:bg-blue-100",

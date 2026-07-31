@@ -57,7 +57,7 @@ function NavigationLoading() {
         <Skeleton className="mt-2 h-4 w-64" />
       </div>
       <Card>
-        <CardContent className="space-y-2 pt-6">
+        <CardContent className="space-y-2">
           <Skeleton className="h-10 w-full" />
           <Skeleton className="h-10 w-full" />
           <Skeleton className="h-10 w-full" />
@@ -131,7 +131,7 @@ function NavigationTree({
   }
   return (
     <Card>
-      <CardContent className="pt-6">
+      <CardContent>
         <DndContext
           sensors={sensors}
           collisionDetection={closestCenter}

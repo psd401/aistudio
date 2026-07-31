@@ -46,7 +46,7 @@ export function AgentConnectClient() {
     return (
       <div className="flex min-h-screen items-center justify-center bg-gray-50">
         <Card className="w-full max-w-md">
-          <CardContent className="pt-6 text-center">
+          <CardContent className="text-center">
             <p className="text-muted-foreground">Verifying consent link...</p>
           </CardContent>
         </Card>

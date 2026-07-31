@@ -35,6 +35,7 @@ import {
   type ComparisonActivityItem,
   type StatsDateRange,
 } from "@/actions/admin/activity-management.actions"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 type ActivityTab = "nexus" | "executions" | "comparisons"
 
@@ -154,7 +155,7 @@ function ActivityHeader({
               <SelectTrigger className="w-[160px] h-8 text-sm">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent className={meridianPortalClassName}>
                 {DATE_RANGE_OPTIONS.map((option) => (
                   <SelectItem key={option.value} value={option.value}>
                     {option.label}

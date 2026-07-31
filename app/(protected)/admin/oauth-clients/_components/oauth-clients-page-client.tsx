@@ -40,6 +40,7 @@ import { ClientFormSheet } from "./client-form-sheet"
 import type { OAuthClientRow } from "@/actions/oauth/oauth-client.actions"
 import { revokeOAuthClient, listOAuthClients } from "@/actions/oauth/oauth-client.actions"
 import { Plus, Ban } from "lucide-react"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 // ============================================
 // Component
@@ -104,7 +105,7 @@ function OAuthClientTableRow({
                 <Ban className="h-4 w-4 text-destructive" />
               </Button>
             </AlertDialogTrigger>
-            <AlertDialogContent>
+            <AlertDialogContent className={meridianPortalClassName}>
               <AlertDialogHeader>
                 <AlertDialogTitle>Revoke Client</AlertDialogTitle>
                 <AlertDialogDescription>
@@ -163,7 +164,7 @@ export function OAuthClientsPageClient({ initialClients }: Props) {
               Register Client
             </Button>
           </SheetTrigger>
-          <SheetContent className="sm:max-w-lg">
+          <SheetContent className={`sm:max-w-lg ${meridianPortalClassName}`}>
             <SheetHeader>
               <SheetTitle>Register OAuth Client</SheetTitle>
               <SheetDescription>

@@ -12,6 +12,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import type { NexusExperienceMode, NexusModelFamily } from "@/lib/nexus/model-router/types"
+import { meridianPortalClassName } from '@/lib/meridian/fonts'
 
 type AdvancedFamily = Exclude<NexusModelFamily, "auto">
 
@@ -48,7 +49,7 @@ export function ModelFamilySelector({
           <ChevronDown className="h-3 w-3 opacity-50" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent className="w-52" align="start">
+      <DropdownMenuContent className={`w-52 ${meridianPortalClassName}`} align="start">
         <DropdownMenuItem
           data-testid="nexus-mode-standard"
           onSelect={() => onModeChange("standard")}
