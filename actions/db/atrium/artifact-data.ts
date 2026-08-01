@@ -31,7 +31,8 @@ import { getUserRequester } from "./requester";
 const NAMESPACE_RE = /^[a-z0-9_-]{1,64}$/;
 const MAX_CONTENT_ID_LENGTH = 200;
 const MAX_PAYLOAD_BYTES = 8 * 1024;
-const MAX_PAYLOAD_VALUES = MAX_PAYLOAD_BYTES;
+// Independent work cap for structural validation; it is not a byte-budget alias.
+const MAX_PAYLOAD_VALUES = 8_192;
 const DEFAULT_LIST_LIMIT = 50;
 const MAX_LIST_LIMIT = 200;
 const SUBMIT_RATE_LIMIT = 120;
@@ -86,7 +87,6 @@ interface ArtifactRecordRow {
   createdAt: Date;
   userFirstName: string | null;
   userLastName: string | null;
-  userEmail: string | null;
 }
 
 function validateContentId(contentId: unknown): string {
@@ -279,7 +279,7 @@ function displayNameFor(row: ArtifactRecordRow): string {
     .filter((part): part is string => Boolean(part))
     .join(" ")
     .trim();
-  return fullName || row.userEmail?.split("@")[0] || "Unknown user";
+  return fullName || "Unknown user";
 }
 
 function toArtifactRecordDTO(row: ArtifactRecordRow): ArtifactRecordDTO {
@@ -456,7 +456,6 @@ export async function listArtifactRecords(
             createdAt: contentDataRecords.createdAt,
             userFirstName: users.firstName,
             userLastName: users.lastName,
-            userEmail: users.email,
           })
           .from(contentDataRecords)
           .leftJoin(users, eq(contentDataRecords.userId, users.id))

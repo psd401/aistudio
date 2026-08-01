@@ -341,7 +341,7 @@ describe("submitArtifactRecord validation", () => {
 });
 
 describe("listArtifactRecords", () => {
-  it("returns newest records with server-resolved display names", async () => {
+  it("returns server-resolved names without exposing email identifiers", async () => {
     mockLimit.mockResolvedValueOnce([
       {
         id: "record-2",
@@ -350,7 +350,6 @@ describe("listArtifactRecords", () => {
         createdAt: new Date("2026-08-01T20:05:00.000Z"),
         userFirstName: "Ada",
         userLastName: "Lovelace",
-        userEmail: "ada@example.com",
       },
       {
         id: "record-1",
@@ -378,7 +377,7 @@ describe("listArtifactRecords", () => {
       {
         id: "record-1",
         userId: 8,
-        displayName: "student",
+        displayName: "Unknown user",
         payload: { score: 42 },
         createdAt: CREATED_AT.toISOString(),
       },
