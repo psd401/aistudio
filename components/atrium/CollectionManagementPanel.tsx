@@ -5,7 +5,7 @@
  * administrator's district hierarchy panel (#1438).
  */
 
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { Archive, FolderPlus, RotateCcw, Save } from "lucide-react";
 import {
   createCollectionAction,
@@ -534,7 +534,29 @@ export function CollectionManagementPanel({
       row.scope === (mode === "private" ? "private" : "district")
   );
 
+  /**
+   * Bumped by every USER-initiated editor change ("New", picking a row).
+   * `refresh(selectId)` awaits a server action and then selects the saved row,
+   * so a click that lands during that await was silently overwritten when the
+   * transition resolved: pressing "New" straight after a save put the blank
+   * form up, then the late setEditor restored the collection just saved.
+   *
+   * That is what made nesting impossible — `parentOptions` filters out
+   * `editor.id`, so with the editor forced back onto the new collection it
+   * could never be chosen as a parent. Measured directly: after clicking "New"
+   * the Name field still held the saved collection's name at +50ms through
+   * +5000ms, and the collection never appeared as a Parent option.
+   */
+  const editorGenerationRef = useRef(0);
+
+  /** Use for every user-initiated editor change so a late refresh cannot win. */
+  function setEditorFromUser(next: EditorState): void {
+    editorGenerationRef.current += 1;
+    setEditor(next);
+  }
+
   function refresh(selectId?: string): void {
+    const generationAtStart = editorGenerationRef.current;
     startTransition(async () => {
       const result = await listManageableCollectionsAction(mode);
       if (!result.isSuccess) {
@@ -543,7 +565,8 @@ export function CollectionManagementPanel({
       }
       const next = result.data ?? [];
       setCollections(next);
-      if (selectId) {
+      // Only adopt the saved row if the user has not moved on in the meantime.
+      if (selectId && editorGenerationRef.current === generationAtStart) {
         const row = next.find((item) => item.id === selectId);
         if (row) setEditor(editorFor(row));
       }
@@ -628,14 +651,14 @@ export function CollectionManagementPanel({
         mode={mode}
         rows={rows}
         onNew={() =>
-          setEditor({
+          setEditorFromUser({
             ...EMPTY_EDITOR,
             defaultVisibilityLevel:
               mode === "private" ? "private" : "internal",
             inheritGrants: mode !== "private",
           })
         }
-        onSelect={(row) => setEditor(editorFor(row))}
+        onSelect={(row) => setEditorFromUser(editorFor(row))}
       />
       <CollectionEditor
         mode={mode}
