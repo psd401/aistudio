@@ -223,20 +223,16 @@ export async function submitArtifactRecord(
   try {
     const session = await getServerSession();
     if (!session?.sub) throw ErrorFactories.authNoSession();
-    const requester = await getUserRequester(requestId, session);
-    if (requester.kind !== "user" || requester.userId == null) {
-      throw ErrorFactories.authNoSession();
-    }
-    const userId = requester.userId;
 
-    // Consume the caller's budget before any payload serialization. Server
-    // Actions share a large global body limit, so an over-limit caller must not
-    // repeatedly force this action to stringify artifact-defined input.
+    // The authenticated Cognito subject is stable per user and available before
+    // requester resolution, which performs database-backed role/group lookups.
+    // Consume the budget first so an over-limit caller cannot force those
+    // lookups or any payload serialization.
     const rateLimit = consumeRateLimit({
       interval: SUBMIT_RATE_WINDOW_MS,
       uniqueTokenPerInterval: SUBMIT_RATE_LIMIT,
       namespace: SUBMIT_RATE_NAMESPACE,
-      identifier: `user:${userId}`,
+      identifier: `user-sub:${session.sub}`,
     });
     if (!rateLimit.allowed) {
       throw ErrorFactories.bizRateLimitExceeded(
@@ -245,6 +241,12 @@ export async function submitArtifactRecord(
         new Date(rateLimit.resetTime).toISOString()
       );
     }
+
+    const requester = await getUserRequester(requestId, session);
+    if (requester.kind !== "user" || requester.userId == null) {
+      throw ErrorFactories.authNoSession();
+    }
+    const userId = requester.userId;
 
     const contentId = validateContentId(input?.contentId);
     const namespace = validateNamespace(input?.namespace);

@@ -161,7 +161,7 @@ describe("submitArtifactRecord", () => {
     );
     expect(mockValues.mock.calls[0][0]).not.toHaveProperty("userId", 999);
     expect(mockConsumeRateLimit).toHaveBeenCalledWith(
-      expect.objectContaining({ identifier: "user:7" })
+      expect.objectContaining({ identifier: "user-sub:cognito-user-7" })
     );
   });
 
@@ -285,6 +285,7 @@ describe("submitArtifactRecord", () => {
       expect.objectContaining({ code: "BIZ_RATE_LIMIT_EXCEEDED" })
     );
     expect(result.message).toMatch(/too many requests/i);
+    expect(mockGetUserRequester).not.toHaveBeenCalled();
     expect(mockContentGet).not.toHaveBeenCalled();
     expect(mockInsert).not.toHaveBeenCalled();
   });
