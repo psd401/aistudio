@@ -1,4 +1,4 @@
-"use server"
+"use server";
 
 /**
  * Session-authenticated persistence for sandboxed Atrium artifacts (#1517).
@@ -124,8 +124,6 @@ function validatePayload(payload: unknown): ValidatedPayload {
     );
   }
 
-  validateJsonValue(payload);
-
   for (const key of RESERVED_IDENTITY_KEYS) {
     if (Object.prototype.hasOwnProperty.call(payload, key)) {
       throw ErrorFactories.invalidInput(
@@ -155,6 +153,10 @@ function validatePayload(payload: unknown): ValidatedPayload {
       MAX_PAYLOAD_BYTES
     );
   }
+
+  // Enforce the serialized byte budget before walking the graph so a very
+  // large array/object cannot expand the structural-validation work queue.
+  validateJsonValue(payload);
 
   let serializedShape: unknown;
   try {
@@ -211,7 +213,7 @@ function validateJsonValue(value: unknown): void {
     seen.add(current);
 
     if (Array.isArray(current)) {
-      pending.push(...current);
+      for (const item of current) pending.push(item);
       continue;
     }
 
