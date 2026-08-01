@@ -255,6 +255,16 @@ export interface UserProfile {
 }
 
 // ============================================
+// Atrium Artifact Data JSONB Types
+// ============================================
+
+/**
+ * Artifact-defined record data persisted by the Atrium Artifact Data Service.
+ * The action layer bounds serialized size and rejects reserved identity keys.
+ */
+export type ArtifactDataPayload = Record<string, unknown>;
+
+// ============================================
 // Prompt Library JSONB Types
 // ============================================
 
