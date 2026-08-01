@@ -92,6 +92,7 @@ export {
 } from "../../../lib/repositories/content-platform/text-processing";
 import {
   MAX_INLINE_ARTIFACT_CHARACTERS,
+  canonicalTextArtifactKey,
   publishDocumentVersion,
   type PublishableArtifact,
   type PublishableSegment,
@@ -1017,6 +1018,33 @@ async function recoverLegacyInlineTextSources(leaseOwner: string): Promise<void>
   }
 }
 
+/**
+ * The canonical-text SHA-256 already bound to an item version, or null when
+ * nothing is bound yet — either because this is the first publish or because a
+ * legacy row is still awaiting its hash backfill. Both null cases want the
+ * object written; only a bound, *differing* hash does not.
+ */
+async function boundCanonicalTextSha256(
+  itemVersionId: string,
+  processorVersion: string,
+): Promise<string | null> {
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .select({ sha256: repositoryArtifacts.sha256 })
+        .from(repositoryArtifacts)
+        .where(
+          eq(
+            repositoryArtifacts.artifactKey,
+            canonicalTextArtifactKey(itemVersionId, processorVersion),
+          ),
+        )
+        .limit(1),
+    "unifiedContentProcessor.boundCanonicalTextSha256",
+  );
+  return rows[0]?.sha256 ?? null;
+}
+
 async function storeCanonicalText(
   repositoryId: number,
   itemVersionId: string,
@@ -1034,17 +1062,33 @@ async function storeCanonicalText(
     return { canonicalText, canonicalTextSha256 };
   }
   const objectKey = canonicalTextArtifactObjectKey(repositoryId, itemVersionId, processorVersion);
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: bucket,
-      Key: objectKey,
-      Body: canonicalText,
-      ContentType: "text/markdown; charset=utf-8",
-      ChecksumSHA256: Buffer.from(canonicalTextSha256, "hex").toString(
-        "base64",
-      ),
-    }),
+  // This key is deterministic, so a republish of an already-published item
+  // version targets the very object its `repository_artifacts` row is bound to
+  // by hash. Sanitization can legitimately change those bytes, and the replay
+  // binding is only validated later, inside publishDocumentVersion. Writing
+  // unconditionally would overwrite the object first and *then* throw the
+  // mismatch — leaving the row bound to a hash that no longer describes the
+  // object, permanently, because that mismatch is classified terminal and so
+  // is never retried. Only write when nothing is bound yet or the bound hash
+  // already agrees; otherwise leave S3 untouched and let publishDocumentVersion
+  // reject the replay with storage still self-consistent.
+  const boundSha256 = await boundCanonicalTextSha256(
+    itemVersionId,
+    processorVersion,
   );
+  if (boundSha256 === null || boundSha256 === canonicalTextSha256) {
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: objectKey,
+        Body: canonicalText,
+        ContentType: "text/markdown; charset=utf-8",
+        ChecksumSHA256: Buffer.from(canonicalTextSha256, "hex").toString(
+          "base64",
+        ),
+      }),
+    );
+  }
   return { canonicalTextObjectKey: objectKey, canonicalTextSha256 };
 }
 
