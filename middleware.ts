@@ -93,6 +93,24 @@ const CONTENT_SECURITY_POLICY =
   "connect-src 'self' https://*.amazonaws.com wss://*.amazonaws.com https://api.anthropic.com https://api.openai.com https://apis.google.com; " +
   `frame-src ${FRAME_SRC}; ` +
   "frame-ancestors 'none';";
+const ARTIFACT_DATA_E2E_PROBE_HEADER =
+  "X-AIStudio-Artifact-Data-E2E-Probe";
+
+function isLoopbackHostname(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "[::1]"
+  );
+}
+
+function isArtifactDataE2EProbeEnabled(req: NextRequest): boolean {
+  return (
+    process.env.NODE_ENV !== "production" &&
+    process.env.ATRIUM_ARTIFACT_DATA_E2E_ACTION_PROBE === "true" &&
+    isLoopbackHostname(req.nextUrl.hostname)
+  );
+}
 
 /**
  * Local authenticated-E2E harness only: after Playwright loads the protected
@@ -105,17 +123,18 @@ const CONTENT_SECURITY_POLICY =
  * disabled and the page itself also returns 404.
  */
 function isLocalArtifactDataActionProbe(req: NextRequest): boolean {
-  const isLoopbackRequest =
-    req.nextUrl.hostname === "localhost" ||
-    req.nextUrl.hostname === "127.0.0.1" ||
-    req.nextUrl.hostname === "[::1]";
   return (
-    process.env.NODE_ENV !== "production" &&
-    process.env.ATRIUM_ARTIFACT_DATA_E2E_ACTION_PROBE === "true" &&
-    isLoopbackRequest &&
+    isArtifactDataE2EProbeEnabled(req) &&
     req.method === "POST" &&
     req.nextUrl.pathname === "/test-user/artifact-data" &&
     req.headers.has("next-action")
+  );
+}
+
+function isArtifactDataE2EProbeHealthCheck(req: NextRequest): boolean {
+  return (
+    isArtifactDataE2EProbeEnabled(req) &&
+    req.nextUrl.pathname === "/api/healthz"
   );
 }
 
@@ -180,6 +199,11 @@ export default authMiddleware((req) => {
   response.headers.set('X-Content-Type-Options', 'nosniff');
   response.headers.set('X-Frame-Options', 'DENY');
   response.headers.set('X-XSS-Protection', '1; mode=block');
+  if (isArtifactDataE2EProbeHealthCheck(req)) {
+    // The local runner uses this marker to avoid reusing an ordinary dev server
+    // whose process environment cannot exercise the cleared-session probe.
+    response.headers.set(ARTIFACT_DATA_E2E_PROBE_HEADER, "enabled");
+  }
   // CSP is set here (not next.config) so frame-src can include the runtime-known
   // Atrium sandbox origin. Single source → no intersection with a build-time
   // policy. See next.config.mjs note (#1052).

@@ -58,6 +58,31 @@ async function cleanupArtifact(
   }
 }
 
+async function restoreOwnerSessionForCleanup(
+  context: import("@playwright/test").BrowserContext,
+  contentId: string | undefined
+): Promise<void> {
+  if (!contentId) return;
+  try {
+    await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB);
+  } catch (error) {
+    expect
+      .soft(error, `Could not restore owner session for cleanup of ${contentId}`)
+      .toBeUndefined();
+  }
+}
+
+async function closeContextSoftly(
+  context: import("@playwright/test").BrowserContext,
+  label: string
+): Promise<void> {
+  try {
+    await context.close();
+  } catch (error) {
+    expect.soft(error, `Could not close ${label} browser context`).toBeUndefined();
+  }
+}
+
 test.describe("Atrium Artifact Data Service — route guard (always-run)", () => {
   test("the local action harness is auth-gated", async ({ request }) => {
     const response = await request.get(HARNESS_PATH, { maxRedirects: 0 });
@@ -168,11 +193,9 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
       await expect(result).toContainText('"isSuccess": true');
       await expect(result).not.toContainText(marker);
     } finally {
-      if (contentId) {
-        await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB);
-      }
+      await restoreOwnerSessionForCleanup(context, contentId);
       await cleanupArtifact(page, contentId);
-      await context.close();
+      await closeContextSoftly(context, "cleared-session artifact-data");
     }
   });
 

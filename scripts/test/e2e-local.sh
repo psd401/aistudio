@@ -203,6 +203,15 @@ port_owner_cwd() {
   lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | awk '/^n/ { print substr($0, 2); exit }'
 }
 
+# A same-worktree server is reusable only when it was started by this E2E
+# runner with the action-auth probe enabled. Process environments are immutable,
+# so an ordinary dev server cannot be retrofitted with the flag after startup.
+server_has_artifact_data_probe() {
+  curl -sf --max-time 3 -D - -o /dev/null \
+    "http://localhost:$1/api/healthz" 2>/dev/null |
+    grep -Fqi 'x-aistudio-artifact-data-e2e-probe: enabled'
+}
+
 # Two passes: prefer REUSING this worktree's own healthy server anywhere in the
 # range over starting a fresh one on a lower free port (a redundant boot wastes
 # a bun install + server start). Health probes carry --max-time: a server that
@@ -211,7 +220,7 @@ port_owner_cwd() {
 REUSE=0
 CHOSEN_PORT=""
 for port in $(seq "$E2E_PORT" $((E2E_PORT + 9))); do
-  if curl -sf --max-time 3 "http://localhost:${port}/api/healthz" >/dev/null 2>&1 &&
+  if server_has_artifact_data_probe "$port" &&
      [ "$(port_owner_cwd "$port")" = "$ROOT_CANON" ]; then
     REUSE=1; CHOSEN_PORT="$port"; break
   fi
@@ -220,7 +229,11 @@ if [ "$REUSE" != "1" ]; then
   for port in $(seq "$E2E_PORT" $((E2E_PORT + 9))); do
     if curl -sf --max-time 3 "http://localhost:${port}/api/healthz" >/dev/null 2>&1; then
       owner="$(port_owner_cwd "$port")"
-      echo "e2e-local: :$port serves ${owner:-an unknown directory}, not this worktree — can't gate this push on it."
+      if [ "$owner" = "$ROOT_CANON" ]; then
+        echo "e2e-local: :$port serves this worktree without the artifact-data E2E action probe — starting an isolated server elsewhere."
+      else
+        echo "e2e-local: :$port serves ${owner:-an unknown directory}, not this worktree — can't gate this push on it."
+      fi
     elif [ -n "$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null)" ]; then
       echo "e2e-local: :$port is occupied by a non-healthy listener — skipping."
     else
@@ -280,7 +293,7 @@ else
   echo -n "e2e-local: waiting for $BASE "
   ready=0
   for attempt in $(seq 1 90); do
-    curl -sf --max-time 3 "$BASE/api/healthz" >/dev/null 2>&1 && { ready=1; echo "— ready"; break; }
+    server_has_artifact_data_probe "$E2E_PORT" && { ready=1; echo "— ready"; break; }
     echo -n "."; sleep 2
   done
   if [ "$ready" != "1" ]; then
