@@ -216,10 +216,6 @@ export async function submitArtifactRecord(
       payloadBytes: payload.bytes,
     });
 
-    // Resolves the canonical object id and preserves the shared 404 mask for a
-    // missing or non-viewable target before any record-specific work occurs.
-    const content = await contentService.get(requester, contentId);
-
     const rateLimit = consumeRateLimit({
       interval: SUBMIT_RATE_WINDOW_MS,
       uniqueTokenPerInterval: SUBMIT_RATE_LIMIT,
@@ -233,6 +229,11 @@ export async function submitArtifactRecord(
         new Date(rateLimit.resetTime).toISOString()
       );
     }
+
+    // Resolves the canonical object id and preserves the shared 404 mask for a
+    // missing or non-viewable target. The per-user guard runs first so a caller
+    // over budget cannot keep generating database-backed visibility lookups.
+    const content = await contentService.get(requester, contentId);
 
     const [created] = await executeQuery(
       (db) =>

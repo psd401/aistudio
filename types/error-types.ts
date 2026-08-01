@@ -197,8 +197,10 @@ export interface BusinessLogicError extends TypedError {
     current: number
     resetAt?: string
   }
-  retryAfterSeconds?: number
-  resetAt?: string
+  rateLimit?: {
+    retryAfterSeconds: number
+    resetAt: string
+  }
 }
 
 /**

@@ -23,7 +23,8 @@ export interface RateLimitDecision {
   resetTime: number;
 }
 
-// In-memory store for rate limiting (consider using Redis in production)
+// TODO: Move enforcement that must span multiple application tasks to a shared
+// store. This in-memory map intentionally provides only a per-process guard.
 const rateLimitStore = new Map<string, { count: number; resetTime: number }>();
 let rateLimiterInstance = 0;
 

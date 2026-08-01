@@ -289,7 +289,7 @@ export const ErrorFactories = {
     createTypedError<BusinessLogicError>(
       ErrorCode.BIZ_RATE_LIMIT_EXCEEDED,
       `Rate limit exceeded for ${operation}. Retry after ${retryAfterSeconds}s`,
-      { operation, retryAfterSeconds, resetAt, ...details }
+      { operation, rateLimit: { retryAfterSeconds, resetAt }, ...details }
     ),
 
   // Streaming and Provider Errors

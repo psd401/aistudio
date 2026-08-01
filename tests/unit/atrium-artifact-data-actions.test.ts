@@ -187,6 +187,17 @@ describe("submitArtifactRecord", () => {
     expect(mockInsert).not.toHaveBeenCalled();
   });
 
+  it("rejects an empty content id before visibility or persistence", async () => {
+    const result = await submitArtifactRecord({
+      ...validSubmitInput,
+      contentId: "   ",
+    });
+
+    expect(result.isSuccess).toBe(false);
+    expect(mockContentGet).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+
   it.each(["Leaderboard", "two words", "", "a".repeat(65)])(
     "rejects invalid namespace %p",
     async (namespace) => {
@@ -223,11 +234,11 @@ describe("submitArtifactRecord", () => {
 
     expect(result.isSuccess).toBe(false);
     expect(result.message).not.toMatch(/forbidden|permission/i);
-    expect(mockConsumeRateLimit).not.toHaveBeenCalled();
+    expect(mockConsumeRateLimit).toHaveBeenCalledTimes(1);
     expect(mockInsert).not.toHaveBeenCalled();
   });
 
-  it("exercises the per-user rate-limit refusal without writing", async () => {
+  it("refuses an over-limit caller before visibility or persistence", async () => {
     mockConsumeRateLimit.mockReturnValueOnce({
       allowed: false,
       retryAfterSeconds: 30,
@@ -243,7 +254,7 @@ describe("submitArtifactRecord", () => {
       expect.objectContaining({ code: "BIZ_RATE_LIMIT_EXCEEDED" })
     );
     expect(result.message).toMatch(/too many requests/i);
-    expect(mockContentGet).toHaveBeenCalledTimes(1);
+    expect(mockContentGet).not.toHaveBeenCalled();
     expect(mockInsert).not.toHaveBeenCalled();
   });
 });
