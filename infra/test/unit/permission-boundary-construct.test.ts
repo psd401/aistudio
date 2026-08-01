@@ -59,6 +59,23 @@ describe("PermissionBoundaryConstruct", () => {
     );
   });
 
+  test("prod permits durable SQS delivery retries to change message visibility", () => {
+    expect(allowedActions("prod")).toContain("sqs:ChangeMessageVisibility");
+  });
+
+  test.each(["dev", "prod"] as const)(
+    "%s permits the schedule backfill operations used after deployment",
+    (environment) => {
+      expect(allowedActions(environment)).toEqual(
+        expect.arrayContaining([
+          "scheduler:ListSchedules",
+          "scheduler:GetSchedule",
+          "scheduler:UpdateSchedule",
+        ])
+      );
+    }
+  );
+
   test("prod permits service roles to release only the two agent DynamoDB claim tables", () => {
     const statement = policyStatements("prod").find(
       (candidate) =>
