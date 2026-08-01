@@ -549,14 +549,26 @@ export function CollectionManagementPanel({
    */
   const editorGenerationRef = useRef(0);
 
-  /** Use for every user-initiated editor change so a late refresh cannot win. */
+  /**
+   * The ONLY way user intent should reach `editor`. Covers "New", selecting a
+   * row, and every in-place field edit — a partial guard leaves exactly the
+   * same race open for whichever path it misses.
+   */
   function setEditorFromUser(next: EditorState): void {
     editorGenerationRef.current += 1;
     setEditor(next);
   }
 
-  function refresh(selectId?: string): void {
-    const generationAtStart = editorGenerationRef.current;
+  /**
+   * @param expectedGeneration Editor generation this refresh is allowed to
+   *   overwrite. Callers that await BEFORE calling refresh must capture it
+   *   before their own await — otherwise an edit made during that await is
+   *   already folded into the counter by the time refresh snapshots it, and
+   *   the guard silently passes. Defaults to "whatever it is now" for the
+   *   plain reload case.
+   */
+  function refresh(selectId?: string, expectedGeneration?: number): void {
+    const generationAtStart = expectedGeneration ?? editorGenerationRef.current;
     startTransition(async () => {
       const result = await listManageableCollectionsAction(mode);
       if (!result.isSuccess) {
@@ -588,6 +600,10 @@ export function CollectionManagementPanel({
   function save(): void {
     setError(null);
     setNotice(null);
+    // Captured BEFORE the server round-trip: anything the user types into the
+    // still-open form while the save is in flight must survive the refresh that
+    // follows it.
+    const generationAtSave = editorGenerationRef.current;
     startTransition(async () => {
       const position = editor.position.trim()
         ? Number(editor.position)
@@ -624,7 +640,7 @@ export function CollectionManagementPanel({
       }
       setNotice(editor.id ? "Collection updated" : "Collection created");
       announceTreeChange();
-      refresh(result.data.id);
+      refresh(result.data.id, generationAtSave);
     });
   }
 
@@ -670,7 +686,11 @@ export function CollectionManagementPanel({
         error={error}
         notice={notice}
         isPending={isPending}
-        onChange={setEditor}
+        // Field edits count as user intent too: typing in the still-open form
+        // while a save's refresh is in flight must not be overwritten when that
+        // refresh resolves. Routing every mutation through the guarded setter is
+        // what makes the generation counter actually complete.
+        onChange={setEditorFromUser}
         onSave={save}
         onToggleArchived={toggleArchived}
       />
