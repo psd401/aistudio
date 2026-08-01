@@ -14,6 +14,7 @@ import {
   collectSupersededRepositoryGenerations,
   GENERATION_GC_CHUNK_BATCH,
   GENERATION_GC_GENERATION_BATCH,
+  GENERATION_GC_REPOSITORY_BATCH,
   SUPERSEDED_GENERATION_KEEP_PER_REPOSITORY,
   SUPERSEDED_GENERATION_RETENTION_HOURS,
 } from "@/lib/repositories/content-platform/generation-retention";
@@ -50,8 +51,9 @@ describe("superseded repository generation retention", () => {
     );
 
     const now = new Date("2026-08-01T12:00:00.000Z");
+    const repositoryBatchSize = 37;
     await expect(
-      collectSupersededRepositoryGenerations({ now }),
+      collectSupersededRepositoryGenerations({ now, repositoryBatchSize }),
     ).resolves.toEqual({
       chunksDeleted: 20_000,
       generationsDeleted: 17,
@@ -81,6 +83,9 @@ describe("superseded repository generation retention", () => {
       expect(compiled.sql).toContain(
         "(candidate_generation.superseded_at, candidate_generation.id) <",
       );
+      expect(compiled.sql).toContain(
+        "ORDER BY oldest_candidate.superseded_at",
+      );
       expect(compiled.sql).toContain("candidate_generation.superseded_at <");
       expect(compiled.sql).not.toContain("generation.created_at <");
       expect(compiled.sql).toContain(
@@ -99,6 +104,7 @@ describe("superseded repository generation retention", () => {
       expect(compiled.params).toContain(
         SUPERSEDED_GENERATION_KEEP_PER_REPOSITORY - 1,
       );
+      expect(compiled.params).toContain(repositoryBatchSize);
       expect(compiled.params).toContain(GENERATION_GC_GENERATION_BATCH);
       expect(compiled.sql).not.toMatch(
         /generation\.status\s+(?:=|IN)\s*\(?\s*'(?:active|building)'/i,
@@ -115,6 +121,7 @@ describe("superseded repository generation retention", () => {
     expect(SUPERSEDED_GENERATION_RETENTION_HOURS).toBe(24);
     expect(SUPERSEDED_GENERATION_KEEP_PER_REPOSITORY).toBe(3);
     expect(GENERATION_GC_CHUNK_BATCH).toBe(20_000);
+    expect(GENERATION_GC_REPOSITORY_BATCH).toBe(200);
     expect(GENERATION_GC_GENERATION_BATCH).toBe(200);
   });
 
@@ -122,6 +129,7 @@ describe("superseded repository generation retention", () => {
     ["retentionHours", { retentionHours: 0 }],
     ["keepPerRepository", { keepPerRepository: 0 }],
     ["chunkBatchSize", { chunkBatchSize: 0 }],
+    ["repositoryBatchSize", { repositoryBatchSize: 0 }],
     ["generationBatchSize", { generationBatchSize: 0 }],
   ])("rejects an unsafe %s override", async (name, options) => {
     await expect(

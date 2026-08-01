@@ -4,6 +4,7 @@ import { executeTransaction, toPgRows } from "@/lib/db/drizzle-client";
 export const SUPERSEDED_GENERATION_RETENTION_HOURS = 24;
 export const SUPERSEDED_GENERATION_KEEP_PER_REPOSITORY = 3;
 export const GENERATION_GC_CHUNK_BATCH = 20_000;
+export const GENERATION_GC_REPOSITORY_BATCH = 200;
 export const GENERATION_GC_GENERATION_BATCH = 200;
 
 export interface CollectSupersededRepositoryGenerationsOptions {
@@ -15,6 +16,8 @@ export interface CollectSupersededRepositoryGenerationsOptions {
   keepPerRepository?: number;
   /** Test override; production always uses the exported chunk batch size. */
   chunkBatchSize?: number;
+  /** Test override; production always uses the exported repository batch size. */
+  repositoryBatchSize?: number;
   /** Test override; production always uses the exported generation batch size. */
   generationBatchSize?: number;
 }
@@ -43,6 +46,7 @@ function deletedCount(result: unknown): number {
 function eligibleGenerationCtes(params: {
   eligibleBefore: string;
   keepPerRepository: number;
+  repositoryBatchSize: number;
   generationBatchSize: number;
 }): SQL {
   const keepFloorOffset = params.keepPerRepository - 1;
@@ -64,8 +68,9 @@ function eligibleGenerationCtes(params: {
         OFFSET ${keepFloorOffset}
         LIMIT 1
       ) keep_floor
-      WHERE EXISTS (
-        SELECT 1
+      CROSS JOIN LATERAL (
+        SELECT candidate_generation.superseded_at,
+               candidate_generation.id
         FROM repository_index_generations candidate_generation
         WHERE candidate_generation.repository_id = repository.id
           AND candidate_generation.status = 'superseded'
@@ -78,10 +83,14 @@ function eligibleGenerationCtes(params: {
             FROM knowledge_repositories active_repository
             WHERE active_repository.active_index_generation_id = candidate_generation.id
           )
-      )
-      ORDER BY repository.id
+        ORDER BY candidate_generation.superseded_at, candidate_generation.id
+        LIMIT 1
+      ) oldest_candidate
+      ORDER BY oldest_candidate.superseded_at,
+               oldest_candidate.id,
+               repository.id
       FOR UPDATE OF repository SKIP LOCKED
-      LIMIT ${params.generationBatchSize}
+      LIMIT ${params.repositoryBatchSize}
     ),
     eligible_generations AS MATERIALIZED (
       SELECT generation.id
@@ -116,6 +125,10 @@ function eligibleGenerationCtes(params: {
  * and generation rows are locked with SKIP LOCKED so multiple scheduler
  * invocations cannot work on the same parents. Chunks are removed first in a
  * ctid-bounded batch; a parent is deleted only after it is childless.
+ * Eligible repositories are ordered by their oldest candidate so sustained
+ * work on low repository IDs cannot starve older garbage elsewhere. The owner
+ * row lock stabilizes every supported pointer update; the global pointer guard
+ * additionally fails closed on pre-existing cross-repository pointer skew.
  */
 export async function collectSupersededRepositoryGenerations(
   options: CollectSupersededRepositoryGenerationsOptions = {},
@@ -132,6 +145,10 @@ export async function collectSupersededRepositoryGenerations(
     options.chunkBatchSize ?? GENERATION_GC_CHUNK_BATCH,
     "chunkBatchSize",
   );
+  const repositoryBatchSize = requirePositiveInteger(
+    options.repositoryBatchSize ?? GENERATION_GC_REPOSITORY_BATCH,
+    "repositoryBatchSize",
+  );
   const generationBatchSize = requirePositiveInteger(
     options.generationBatchSize ?? GENERATION_GC_GENERATION_BATCH,
     "generationBatchSize",
@@ -146,6 +163,7 @@ export async function collectSupersededRepositoryGenerations(
         WITH ${eligibleGenerationCtes({
           eligibleBefore,
           keepPerRepository,
+          repositoryBatchSize,
           generationBatchSize,
         })},
         selected_chunks AS (
@@ -169,6 +187,7 @@ export async function collectSupersededRepositoryGenerations(
         WITH ${eligibleGenerationCtes({
           eligibleBefore,
           keepPerRepository,
+          repositoryBatchSize,
           generationBatchSize,
         })},
         deleted_generations AS (

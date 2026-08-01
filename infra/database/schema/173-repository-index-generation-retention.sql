@@ -16,6 +16,9 @@ ALTER TABLE repository_index_generations
 ALTER TABLE repository_index_generations
   ALTER COLUMN superseded_at DROP DEFAULT;
 
+-- The normal historical backlog already has the fast-default value. This is
+-- only an idempotent recovery for a partial run or a row written during the
+-- short interval between removing the default and installing the trigger.
 UPDATE repository_index_generations
 SET superseded_at = statement_timestamp()
 WHERE status = 'superseded'
