@@ -285,6 +285,13 @@ export const ErrorFactories = {
       { operation, quota: { limit, current, resetAt }, ...details }
     ),
 
+  bizRateLimitExceeded: (operation: string, retryAfterSeconds: number, resetAt: string, details?: Partial<BusinessLogicError>) =>
+    createTypedError<BusinessLogicError>(
+      ErrorCode.BIZ_RATE_LIMIT_EXCEEDED,
+      `Rate limit exceeded for ${operation}. Retry after ${retryAfterSeconds}s`,
+      { operation, retryAfterSeconds, resetAt, ...details }
+    ),
+
   // Streaming and Provider Errors
   providerUnavailable: (provider: string, details?: Partial<ExternalServiceError>) =>
     createTypedError<ExternalServiceError>(
@@ -338,6 +345,7 @@ function isRetryableError(code: ErrorCode): boolean {
     ErrorCode.DB_POOL_EXHAUSTED,
     ErrorCode.EXTERNAL_SERVICE_TIMEOUT,
     ErrorCode.EXTERNAL_API_RATE_LIMIT,
+    ErrorCode.BIZ_RATE_LIMIT_EXCEEDED,
     ErrorCode.AWS_SERVICE_ERROR,
     ErrorCode.S3_UPLOAD_FAILED,
     ErrorCode.S3_DOWNLOAD_FAILED,

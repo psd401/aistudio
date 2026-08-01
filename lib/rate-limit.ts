@@ -9,6 +9,20 @@ interface RateLimitConfig {
   namespace?: string;
 }
 
+export interface DirectRateLimitConfig {
+  interval: number;
+  uniqueTokenPerInterval: number;
+  namespace: string;
+  identifier: string;
+}
+
+export interface RateLimitDecision {
+  allowed: boolean;
+  retryAfterSeconds: number;
+  remaining: number;
+  resetTime: number;
+}
+
 // In-memory store for rate limiting (consider using Redis in production)
 const rateLimitStore = new Map<string, { count: number; resetTime: number }>();
 let rateLimiterInstance = 0;
@@ -52,6 +66,56 @@ async function getIdentifier(request: NextRequest, skipAuth: boolean): Promise<s
 }
 
 /**
+ * Consume one request from a named, in-memory rate-limit bucket.
+ *
+ * Server actions do not receive a `NextRequest`, so they cannot use the route
+ * middleware wrapper below. This direct form lets an already-authenticated
+ * caller supply its server-derived identifier while sharing the same store and
+ * fixed-window behavior as API routes.
+ */
+export function consumeRateLimit(
+  config: DirectRateLimitConfig
+): RateLimitDecision {
+  const storeKey = `${config.namespace}:${config.identifier}`;
+  const now = Date.now();
+  let entry = rateLimitStore.get(storeKey);
+
+  if (!entry || entry.resetTime < now) {
+    entry = {
+      count: 1,
+      resetTime: now + config.interval,
+    };
+    rateLimitStore.set(storeKey, entry);
+    return {
+      allowed: true,
+      retryAfterSeconds: 0,
+      remaining: Math.max(config.uniqueTokenPerInterval - 1, 0),
+      resetTime: entry.resetTime,
+    };
+  }
+
+  if (entry.count >= config.uniqueTokenPerInterval) {
+    return {
+      allowed: false,
+      retryAfterSeconds: Math.max(
+        Math.ceil((entry.resetTime - now) / 1000),
+        1
+      ),
+      remaining: 0,
+      resetTime: entry.resetTime,
+    };
+  }
+
+  entry.count += 1;
+  return {
+    allowed: true,
+    retryAfterSeconds: 0,
+    remaining: Math.max(config.uniqueTokenPerInterval - entry.count, 0),
+    resetTime: entry.resetTime,
+  };
+}
+
+/**
  * Rate limiting middleware
  */
 export function rateLimit(config: RateLimitConfig) {
@@ -61,50 +125,35 @@ export function rateLimit(config: RateLimitConfig) {
     request: NextRequest
   ): Promise<NextResponse | null> {
     const identifier = await getIdentifier(request, config.skipAuth || false);
-    const storeKey = `${namespace}:${identifier}`;
-    const now = Date.now();
-    
-    // Get or create rate limit entry
-    let entry = rateLimitStore.get(storeKey);
-    
-    if (!entry || entry.resetTime < now) {
-      // Create new entry
-      entry = {
-        count: 1,
-        resetTime: now + config.interval
-      };
-      rateLimitStore.set(storeKey, entry);
-      return null; // Allow request
-    }
-    
-    // Check if limit exceeded
-    if (entry.count >= config.uniqueTokenPerInterval) {
-      const retryAfter = Math.ceil((entry.resetTime - now) / 1000);
-      
+    const decision = consumeRateLimit({
+      interval: config.interval,
+      uniqueTokenPerInterval: config.uniqueTokenPerInterval,
+      namespace,
+      identifier,
+    });
+
+    if (!decision.allowed) {
       return NextResponse.json(
         {
           isSuccess: false,
           message: 'Too many requests. Please try again later.',
           error: {
             code: 'RATE_LIMIT_EXCEEDED',
-            retryAfter
+            retryAfter: decision.retryAfterSeconds
           }
         },
         {
           status: 429,
           headers: {
-            'Retry-After': String(retryAfter),
+            'Retry-After': String(decision.retryAfterSeconds),
             'X-RateLimit-Limit': String(config.uniqueTokenPerInterval),
             'X-RateLimit-Remaining': '0',
-            'X-RateLimit-Reset': String(entry.resetTime)
+            'X-RateLimit-Reset': String(decision.resetTime)
           }
         }
       );
     }
-    
-    // Increment count
-    entry.count++;
-    
+
     // Add rate limit headers to response
     return null; // Allow request, headers will be added by wrapper
   };

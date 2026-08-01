@@ -59,6 +59,7 @@ export enum ErrorCode {
   BIZ_INVALID_STATE = "BIZ_INVALID_STATE",
   BIZ_OPERATION_NOT_ALLOWED = "BIZ_OPERATION_NOT_ALLOWED",
   BIZ_QUOTA_EXCEEDED = "BIZ_QUOTA_EXCEEDED",
+  BIZ_RATE_LIMIT_EXCEEDED = "BIZ_RATE_LIMIT_EXCEEDED",
   BIZ_DUPLICATE_OPERATION = "BIZ_DUPLICATE_OPERATION",
   BIZ_DEPENDENCY_ERROR = "BIZ_DEPENDENCY_ERROR",
   
@@ -185,6 +186,7 @@ export interface BusinessLogicError extends TypedError {
   code: ErrorCode.BIZ_INVALID_STATE | 
         ErrorCode.BIZ_OPERATION_NOT_ALLOWED |
         ErrorCode.BIZ_QUOTA_EXCEEDED |
+        ErrorCode.BIZ_RATE_LIMIT_EXCEEDED |
         ErrorCode.BIZ_DUPLICATE_OPERATION |
         ErrorCode.BIZ_DEPENDENCY_ERROR
   operation: string
@@ -195,6 +197,8 @@ export interface BusinessLogicError extends TypedError {
     current: number
     resetAt?: string
   }
+  retryAfterSeconds?: number
+  resetAt?: string
 }
 
 /**
@@ -286,6 +290,7 @@ export const ERROR_STATUS_CODES: Record<ErrorCode, number> = {
   // 429 Too Many Requests
   [ErrorCode.EXTERNAL_API_RATE_LIMIT]: 429,
   [ErrorCode.BIZ_QUOTA_EXCEEDED]: 429,
+  [ErrorCode.BIZ_RATE_LIMIT_EXCEEDED]: 429,
   
   // 500 Internal Server Error
   [ErrorCode.DB_CONNECTION_FAILED]: 500,
@@ -367,6 +372,7 @@ export function getUserMessage(code: ErrorCode): string {
     [ErrorCode.BIZ_INVALID_STATE]: "This operation cannot be performed in the current state",
     [ErrorCode.BIZ_OPERATION_NOT_ALLOWED]: "This operation is not allowed",
     [ErrorCode.BIZ_QUOTA_EXCEEDED]: "You have exceeded your quota. Please upgrade or wait for reset",
+    [ErrorCode.BIZ_RATE_LIMIT_EXCEEDED]: "Too many requests. Please wait a moment and try again",
     [ErrorCode.BIZ_DUPLICATE_OPERATION]: "This operation has already been performed",
     [ErrorCode.BIZ_DEPENDENCY_ERROR]: "Cannot complete this operation due to dependency issues",
     
