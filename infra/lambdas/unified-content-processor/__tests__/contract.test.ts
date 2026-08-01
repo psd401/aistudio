@@ -356,7 +356,8 @@ describe("sanitizeProcessedContent", () => {
       segments: [cleanSegment, poisonedSegment],
     });
 
-    expect(result.canonicalText).toBe("Clean segment\n\nPoisoned  segment");
+    // Canonical text is replay-bound and never queued, so it stays byte-identical.
+    expect(result.canonicalText).toBe("Clean segment\n\nPoisoned ￿ segment");
     // Untouched segment is returned by reference — byte-identical, same hash.
     expect(result.segments[0]).toBe(cleanSegment);
     expect(result.segments[0].contentHash).toBe(sha256("Clean segment"));
@@ -403,6 +404,21 @@ describe("sanitizeProcessedContent", () => {
     expect(sanitizeProcessedContent(content)).toBe(content);
   });
 
+  test("returns the same object when unsafe characters exist only in canonical text", () => {
+    const content = {
+      canonicalText: "Replay-bound ￿ artifact",
+      segments: [
+        {
+          chunkIndex: 0,
+          content: "Clean searchable segment",
+          contentHash: sha256("Clean searchable segment"),
+        },
+      ],
+    };
+
+    expect(sanitizeProcessedContent(content)).toBe(content);
+  });
+
   test("preserves unrelated segment fields on a sanitised segment", () => {
     const result = sanitizeProcessedContent({
       canonicalText: "text",
@@ -428,7 +444,7 @@ describe("sanitizeProcessedContent", () => {
     });
   });
 
-  test("produces canonical text and segments that are SQS-legal", () => {
+  test("preserves replay-bound canonical text while making segments SQS-legal", () => {
     const poisoned = "a￿b\uD800c﷐d\u{1FFFF}e";
     const result = sanitizeProcessedContent({
       canonicalText: poisoned,
@@ -437,9 +453,9 @@ describe("sanitizeProcessedContent", () => {
       ],
     });
 
-    expect(hasIllegalCodePoint(result.canonicalText)).toBe(false);
+    expect(result.canonicalText).toBe(poisoned);
+    expect(hasIllegalCodePoint(result.canonicalText)).toBe(true);
     expect(hasIllegalCodePoint(result.segments[0].content)).toBe(false);
-    expect(result.canonicalText).toBe("abcde");
     expect(result.segments[0].contentHash).toBe(sha256("abcde"));
   });
 
@@ -463,9 +479,9 @@ describe("sanitizeProcessedContent", () => {
 });
 
 // publishDocumentVersion asserts that reprocessing an already-published item
-// version reproduces its canonical artifact byte-for-byte. A sanitizer that
-// rewrote clean content would break that binding for a large share of the
-// corpus, so this pins that the write-time pass is removal-only.
+// version reproduces its canonical artifact byte-for-byte. Even removal-only
+// sanitization would break that binding for an existing poisoned artifact, so
+// canonical text must not be rewritten on this path at all.
 describe("sanitizeProcessedContent replay safety", () => {
   const sha256 = (value: string) =>
     createHash("sha256").update(value).digest("hex");
@@ -499,7 +515,7 @@ describe("sanitizeProcessedContent replay safety", () => {
     expect(result.segments[0].contentHash).toBe(sha256(canonicalText));
   });
 
-  test("changes only content that genuinely carries illegal code points", () => {
+  test("leaves poisoned canonical text byte-identical while sanitising segments", () => {
     const clean = "Café   guide";
     const poisoned = `${clean} ￿`;
     const content = {
@@ -512,7 +528,7 @@ describe("sanitizeProcessedContent replay safety", () => {
 
     const result = sanitizeProcessedContent(content);
 
-    expect(result.canonicalText).toBe(`${clean} `);
+    expect(result.canonicalText).toBe(poisoned);
     expect(result.segments[0]).toBe(content.segments[0]);
     expect(result.segments[1].content).toBe(`${clean} `);
     expect(result.segments[1].contentHash).toBe(sha256(`${clean} `));

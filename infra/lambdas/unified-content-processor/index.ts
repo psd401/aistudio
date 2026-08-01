@@ -1817,9 +1817,9 @@ async function publishProcessedContent(
   inspection: InspectionResult,
   rawContent: ProcessedContent,
 ): Promise<void> {
-  // Strip messaging-unsafe code points once, before anything durable is
-  // written, so the canonical artifact and the chunk rows agree with each
-  // other and with the payloads that will later be queued for embedding.
+  // Strip messaging-unsafe code points from searchable segments before they
+  // become chunk rows. Canonical text stays byte-identical because it is bound
+  // to processor-versioned replay coordinates and is never sent to SQS.
   const content = sanitizeProcessedContent(rawContent);
   const canonicalArtifact = await storeCanonicalText(
     state.source.repositoryId,
