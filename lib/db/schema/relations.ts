@@ -97,6 +97,10 @@ import { apiKeyUsage } from "./tables/api-key-usage";
 // Agent Workspace Integration
 import { psdAgentWorkspaceTokens } from "./tables/agent-workspace-tokens";
 
+// Atrium Artifact Data
+import { contentObjects } from "./tables/content-objects";
+import { contentDataRecords } from "./tables/content-data-records";
+
 // ============================================
 // User Relations
 // ============================================
@@ -130,6 +134,7 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   graphNodes: many(graphNodes),
   graphEdges: many(graphEdges),
   apiKeys: many(apiKeys),
+  contentDataRecords: many(contentDataRecords),
   // One-to-one with nexus_user_preferences (user_id is the primary key)
   preferences: one(nexusUserPreferences, {
     fields: [users.id],
@@ -141,6 +146,28 @@ export const usersRelations = relations(users, ({ one, many }) => ({
     references: [psdAgentWorkspaceTokens.ownerUserId],
   }),
 }));
+
+// ============================================
+// Atrium Artifact Data Relations (#1516)
+// ============================================
+
+export const contentObjectsRelations = relations(contentObjects, ({ many }) => ({
+  dataRecords: many(contentDataRecords),
+}));
+
+export const contentDataRecordsRelations = relations(
+  contentDataRecords,
+  ({ one }) => ({
+    content: one(contentObjects, {
+      fields: [contentDataRecords.contentId],
+      references: [contentObjects.id],
+    }),
+    user: one(users, {
+      fields: [contentDataRecords.userId],
+      references: [users.id],
+    }),
+  })
+);
 
 export const rolesRelations = relations(roles, ({ many }) => ({
   userRoles: many(userRoles),
