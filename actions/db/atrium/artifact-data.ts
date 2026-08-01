@@ -31,6 +31,7 @@ import { getUserRequester } from "./requester";
 const NAMESPACE_RE = /^[a-z0-9_-]{1,64}$/;
 const MAX_CONTENT_ID_LENGTH = 200;
 const MAX_PAYLOAD_BYTES = 8 * 1024;
+const MAX_PAYLOAD_VALUES = MAX_PAYLOAD_BYTES;
 const DEFAULT_LIST_LIMIT = 50;
 const MAX_LIST_LIMIT = 200;
 const SUBMIT_RATE_LIMIT = 120;
@@ -189,6 +190,19 @@ function validatePayload(payload: unknown): ValidatedPayload {
 function validateJsonValue(value: unknown): void {
   const pending: unknown[] = [value];
   const seen = new WeakSet<object>();
+  let discoveredValues = 1;
+
+  const enqueue = (next: unknown): void => {
+    discoveredValues += 1;
+    if (discoveredValues > MAX_PAYLOAD_VALUES) {
+      throw ErrorFactories.invalidInput(
+        "payload",
+        null,
+        "payload contains too many values"
+      );
+    }
+    pending.push(next);
+  };
 
   while (pending.length > 0) {
     const current = pending.pop();
@@ -213,7 +227,7 @@ function validateJsonValue(value: unknown): void {
     seen.add(current);
 
     if (Array.isArray(current)) {
-      for (const item of current) pending.push(item);
+      for (const item of current) enqueue(item);
       continue;
     }
 
@@ -225,7 +239,12 @@ function validateJsonValue(value: unknown): void {
         "payload must contain only plain JSON objects"
       );
     }
-    pending.push(...Object.values(current as Record<string, unknown>));
+    const record = current as Record<string, unknown>;
+    for (const key in record) {
+      if (Object.prototype.hasOwnProperty.call(record, key)) {
+        enqueue(record[key]);
+      }
+    }
   }
 }
 

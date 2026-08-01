@@ -221,6 +221,26 @@ describe("submitArtifactRecord validation", () => {
     expect(mockInsert).not.toHaveBeenCalled();
   });
 
+  it("bounds traversal when many undefined fields serialize away", async () => {
+    const payload: Record<string, unknown> = Object.create(null) as Record<
+      string,
+      unknown
+    >;
+    for (let index = 0; index < 9_000; index += 1) {
+      payload[`field-${index}`] = undefined;
+    }
+
+    const result = await submitArtifactRecord({
+      ...validSubmitInput,
+      payload,
+    });
+
+    expect(result.isSuccess).toBe(false);
+    expect(mockGetUserRequester).not.toHaveBeenCalled();
+    expect(mockContentGet).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+
   it("rejects an empty content id before visibility or persistence", async () => {
     const result = await submitArtifactRecord({
       ...validSubmitInput,
