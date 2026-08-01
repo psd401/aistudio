@@ -451,3 +451,60 @@ describe("sanitizeProcessedContent", () => {
     expect(hasIllegalCodePoint(message.texts[0])).toBe(false);
   });
 });
+
+// publishDocumentVersion asserts that reprocessing an already-published item
+// version reproduces its canonical artifact byte-for-byte. A sanitizer that
+// rewrote clean content would break that binding for a large share of the
+// corpus, so this pins that the write-time pass is removal-only.
+describe("sanitizeProcessedContent replay safety", () => {
+  const sha256 = (value: string) =>
+    createHash("sha256").update(value).digest("hex");
+
+  test("is a total no-op for SQS-clean content, including non-NFC text", () => {
+    const canonicalText = [
+      "Café study guide", // NFD accent
+      "Width   spaced", // EN QUAD
+      "10 Å resolution", // ANGSTROM SIGN
+      "豈 compatibility", // CJK compatibility ideograph
+      "party \u{1F389}",
+    ].join("\n\n");
+    const content = {
+      canonicalText,
+      segments: [
+        {
+          chunkIndex: 0,
+          content: canonicalText,
+          contentHash: sha256(canonicalText),
+          contextPrefix: "Chapter   1",
+        },
+      ],
+    };
+
+    const result = sanitizeProcessedContent(content);
+
+    // Same object identity: nothing was rewritten, so a replay reproduces the
+    // exact bytes the artifact already holds.
+    expect(result).toBe(content);
+    expect(result.canonicalText).toBe(canonicalText);
+    expect(result.segments[0].contentHash).toBe(sha256(canonicalText));
+  });
+
+  test("changes only content that genuinely carries illegal code points", () => {
+    const clean = "Café   guide";
+    const poisoned = `${clean} ￿`;
+    const content = {
+      canonicalText: poisoned,
+      segments: [
+        { chunkIndex: 0, content: clean, contentHash: sha256(clean) },
+        { chunkIndex: 1, content: poisoned, contentHash: sha256(poisoned) },
+      ],
+    };
+
+    const result = sanitizeProcessedContent(content);
+
+    expect(result.canonicalText).toBe(`${clean} `);
+    expect(result.segments[0]).toBe(content.segments[0]);
+    expect(result.segments[1].content).toBe(`${clean} `);
+    expect(result.segments[1].contentHash).toBe(sha256(`${clean} `));
+  });
+});

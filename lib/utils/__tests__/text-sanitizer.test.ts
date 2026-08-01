@@ -391,9 +391,18 @@ describe('sanitizeTextForMessaging', () => {
     expect(sanitizeTextForMessaging('퟿�')).toBe('퟿�');
   });
 
-  it('normalizes to NFC', () => {
-    // e + combining acute -> precomposed é
-    expect(sanitizeTextForMessaging('café')).toBe('café');
+  it('does NOT Unicode-normalize — removal only', () => {
+    // This function feeds content that publishDocumentVersion replays and
+    // compares byte-for-byte. NFC would rewrite ~1,120 SQS-legal code points
+    // that are routine in extracted PDF text, breaking that replay binding
+    // for a large share of the corpus while adding nothing to SQS safety.
+    // If this test starts failing, normalization was reintroduced — don't.
+    const decomposed = 'cafe\u0301';
+    expect(sanitizeTextForMessaging(decomposed)).toBe(decomposed);
+    expect(sanitizeTextForMessaging('\u2000')).toBe('\u2000'); // EN QUAD
+    expect(sanitizeTextForMessaging('\u212B')).toBe('\u212B'); // ANGSTROM SIGN
+    expect(sanitizeTextForMessaging('\uF900')).toBe('\uF900'); // CJK compat ideograph
+    expect(sanitizeTextForMessaging('\u0344')).toBe('\u0344'); // would expand under NFC
   });
 
   it('returns an empty string for non-string and empty input', () => {
@@ -407,6 +416,14 @@ describe('sanitizeTextForMessaging', () => {
     const poisoned = 'chunk ￿ text \uD800 more ﷐ end \u{1FFFF}';
     expect(Buffer.byteLength(sanitizeTextForMessaging(poisoned), 'utf8'))
       .toBeLessThanOrEqual(Buffer.byteLength(poisoned, 'utf8'));
+
+    // The guarantee has to hold for the inputs that would break it under NFC:
+    // composition exclusions and U+0344 expand rather than shrink.
+    for (const expanding of ['\u0958', '\u09DC', '\u0F43', '\uFB2C', '\u0344']) {
+      const input = expanding.repeat(500);
+      expect(Buffer.byteLength(sanitizeTextForMessaging(input), 'utf8'))
+        .toBeLessThanOrEqual(Buffer.byteLength(input, 'utf8'));
+    }
   });
 
   it('is idempotent', () => {
@@ -415,7 +432,7 @@ describe('sanitizeTextForMessaging', () => {
   });
 
   it('leaves already-clean text byte-identical', () => {
-    const clean = 'Grade 3 standards\n\tCCSS.MATH.CONTENT.3.OA.A.1 \u{1F389} café';
+    const clean = 'Grade 3 standards\n\tCCSS.MATH.CONTENT.3.OA.A.1 \u{1F389} cafe\u0301';
     expect(sanitizeTextForMessaging(clean)).toBe(clean);
   });
 });
@@ -451,8 +468,20 @@ describe('containsMessagingUnsafeCharacters', () => {
     expect(containsMessagingUnsafeCharacters(42 as unknown as string)).toBe(false);
   });
 
-  it('agrees with sanitizeTextForMessaging', () => {
-    const samples = ['clean', 'a￿b', 'party \u{1F389}', 'a\uD800b', 'a\u{10FFFF}b'];
+  it('is exactly the inverse of "sanitize is a no-op"', () => {
+    const samples = [
+      'clean',
+      'a￿b',
+      'party \u{1F389}',
+      'a\uD800b',
+      'a\u{10FFFF}b',
+      // Non-NFC inputs are the counterexample that a normalizing sanitizer
+      // would break: the predicate only sees the strip class, so the two must
+      // stay removal-only to agree.
+      'cafe\u0301',
+      '\u2000\u212B\uF900\u0344',
+      'a﷐b\u{1FFFE}c',
+    ];
     for (const sample of samples) {
       expect(containsMessagingUnsafeCharacters(sample)).toBe(
         sanitizeTextForMessaging(sample) !== sample

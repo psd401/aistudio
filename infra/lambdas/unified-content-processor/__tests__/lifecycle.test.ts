@@ -201,3 +201,27 @@ describe("SQS invalid message body classification", () => {
     ).toMatchObject({ terminal: false, code: "TRANSIENT_PROCESSING_ERROR" });
   });
 });
+
+// A canonical-artifact replay mismatch means the processor produced different
+// bytes for an item version that was already published. Retrying replays the
+// same deterministic output, so the whole budget is burned for nothing.
+describe("canonical artifact replay mismatch classification", () => {
+  test.each([
+    "Existing canonical artifact coordinates do not match the replay",
+    "Existing canonical artifact object key does not match the replay",
+    "Existing canonical artifact inline text does not match the replay",
+    "Existing canonical artifact SHA-256 does not match the replay",
+    "Existing canonical artifact has no bound payload",
+  ])("classifies %s as terminal", (message) => {
+    expect(classifyContentProcessingError(new Error(message))).toMatchObject({
+      terminal: true,
+      code: "INVALID_SOURCE_CONTENT",
+    });
+  });
+
+  test("does not swallow unrelated 'match' wording as terminal", () => {
+    expect(
+      classifyContentProcessingError(new Error("Connection reset while matching"))
+    ).toMatchObject({ terminal: false });
+  });
+});

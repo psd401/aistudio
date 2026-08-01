@@ -50,7 +50,7 @@ export function sanitizeTextForDatabase(text: string): string {
 }
 
 /**
- * Code points that AWS SQS rejects in a message body.
+ * Code points removed before text is put in an AWS SQS message body.
  *
  * SQS accepts only the XML 1.0 character set:
  *   #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
@@ -59,12 +59,21 @@ export function sanitizeTextForDatabase(text: string): string {
  * "Invalid binary character '#xFFFF' was found in the message body".
  *
  * The class below is built once at module load and covers:
- * - C0 controls except tab/newline/carriage return, plus DEL
- * - unpaired surrogates — under the `u` flag a well-formed pair is a single
- *   supplementary code point, so `\uD800-\uDFFF` matches *only* lone surrogates
- *   and emoji/supplementary CJK survive untouched
- * - the BMP noncharacters U+FDD0-U+FDEF, U+FFFE and U+FFFF
- * - the U+nFFFE/U+nFFFF noncharacter pair in each of the 16 supplementary planes
+ * - C0 controls except tab/newline/carriage return — rejected by SQS
+ * - unpaired surrogates — rejected by SQS. Under the `u` flag a well-formed
+ *   pair is a single supplementary code point, so `\uD800-\uDFFF` matches
+ *   *only* lone surrogates and emoji/supplementary CJK survive untouched
+ * - U+FFFE and U+FFFF — U+FFFF is the code point that failed 188 production
+ *   index generations
+ *
+ * It also removes three things the production above technically permits, on
+ * purpose: DEL (U+007F), the noncharacter arc U+FDD0-U+FDEF, and the
+ * U+nFFFE/U+nFFFF pair in each of the 16 supplementary planes. Unicode
+ * reserves all of these as noncharacters that must never appear in
+ * interchanged text, and different AWS SDK/endpoint versions have not been
+ * consistent about which of them they reject. Stripping them is 65 code
+ * points of deliberate over-caution with no legitimate document content in
+ * range.
  */
 const SUPPLEMENTARY_NONCHARACTER_RANGES = Array.from(
   { length: 16 },
@@ -99,8 +108,19 @@ const MESSAGING_UNSAFE_PROBE = new RegExp(MESSAGING_UNSAFE_CHARACTER_CLASS, 'u')
  * SQS rejects outright. Well-formed surrogate pairs (emoji, supplementary CJK)
  * are preserved — they are legal `[#x10000-#x10FFFF]` characters.
  *
- * Sanitized text is never longer than its input, so callers that size batches
- * against a byte ceiling stay correct.
+ * Deliberately **removal-only** — it does not Unicode-normalize. Unlike
+ * {@link sanitizeTextForDatabase}, this function runs over content that is
+ * hashed and replayed: `publishDocumentVersion` asserts that reprocessing an
+ * already-published item version reproduces byte-identical canonical text.
+ * NFC rewrites ~1,120 perfectly SQS-legal code points that are routine in
+ * extracted PDF text (EN/EM QUAD, ANGSTROM SIGN, CJK compatibility
+ * ideographs, every NFD-decomposed accent), so normalizing here would break
+ * that replay binding for a large share of the corpus while contributing
+ * nothing to SQS safety. If normalization is ever wanted it belongs in the
+ * processors at extraction time, behind a `processorVersion` bump.
+ *
+ * Because it only ever deletes, the result is never longer than its input, so
+ * callers that size batches against a byte ceiling stay correct.
  *
  * @param text - The text to sanitize
  * @returns Text containing only code points SQS accepts
@@ -117,7 +137,7 @@ export function sanitizeTextForMessaging(text: string): string {
   if (!text || typeof text !== 'string') {
     return '';
   }
-  return text.replace(MESSAGING_UNSAFE_PATTERN, '').normalize('NFC');
+  return text.replace(MESSAGING_UNSAFE_PATTERN, '');
 }
 
 /**
@@ -125,6 +145,11 @@ export function sanitizeTextForMessaging(text: string): string {
  *
  * Useful for asserting payload safety in tests and for logging how much
  * content required sanitization, without paying for a full rewrite.
+ *
+ * Exactly the inverse of "{@link sanitizeTextForMessaging} is a no-op":
+ * because that function only deletes members of this same character class,
+ * `containsMessagingUnsafeCharacters(t) === (sanitizeTextForMessaging(t) !== t)`
+ * for every input. A test pins this equivalence — keep the two in step.
  *
  * @param text - The text to check
  * @returns Whether the text holds any messaging-unsafe code point

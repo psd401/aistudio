@@ -176,15 +176,29 @@ interface SanitizableContent<TSegment extends SanitizableSegment> {
 }
 
 /**
- * Normalise processed content at write time so poisoned code points never
- * reach durable storage in the first place.
+ * Strip messaging-unsafe code points from the canonical text and searchable
+ * segments at write time, so newly published content never carries them into
+ * durable storage.
  *
  * Runs immediately before the canonical text is stored, which covers every
  * processor (text, pdf, office, image, media) including the Textract and BDA
- * paths. `contentHash` is recomputed **only** for segments whose content
- * actually changed — untouched segments are returned by reference, so a clean
- * publication is byte-identical to what it was before this pass existed and
- * the stored hash keeps matching the stored bytes.
+ * paths. It covers `canonicalText`, `segments[].content` and
+ * `segments[].contextPrefix` — the fields that become chunk rows and therefore
+ * SQS payloads. `artifactMetadata` and `additionalArtifacts[].textInline` are
+ * deliberately left alone: nothing queues them, and rewriting them would move
+ * their own replay bindings.
+ *
+ * `contentHash` is recomputed **only** for segments whose content actually
+ * changed — untouched segments are returned by reference, so the stored hash
+ * keeps matching the stored bytes.
+ *
+ * Because sanitizeTextForMessaging only ever deletes, content with no illegal
+ * code points comes back byte-identical. That matters: publishDocumentVersion
+ * asserts that reprocessing an already-published item version reproduces its
+ * canonical artifact exactly, so any rewrite of clean content here would break
+ * the replay binding. Genuinely poisoned content does change, and that replay
+ * mismatch is classified terminal in lifecycle.ts rather than burning the
+ * whole retry budget.
  *
  * The canonical text's own digest is not recomputed here: storeCanonicalText
  * hashes whatever it is handed, so passing sanitized text through keeps the S3
