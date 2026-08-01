@@ -23,10 +23,34 @@ const {
   extractJsonArg,
   injectMarkers,
   enforcePhase1Gates,
+  workspaceBrokerRejectionPayload,
 } = require('./common');
 
 test('module exports the configured workspace broker URL', () => {
   expect(typeof APP_BASE_URL).toBe('string');
+});
+
+describe('workspace broker rejection payload', () => {
+  test('preserves structured validator fields for the agent caller', () => {
+    expect(
+      workspaceBrokerRejectionPayload({
+        error: 'Workspace operation is not allowed: drive files delete',
+        reason: 'operation_not_allowed',
+        operation: 'drive files delete',
+      })
+    ).toEqual({
+      status: 'workspace-command-rejected',
+      error: 'Workspace operation is not allowed: drive files delete',
+      reason: 'operation_not_allowed',
+      operation: 'drive files delete',
+    });
+  });
+
+  test('leaves non-validator broker failures on the transport-error path', () => {
+    expect(
+      workspaceBrokerRejectionPayload({ error: 'Workspace operation failed' })
+    ).toBeNull();
+  });
 });
 
 function tmpFile(content, ext = '.json') {

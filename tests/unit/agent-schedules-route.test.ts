@@ -21,13 +21,22 @@ jest.mock("@/lib/agent-workspace/invocation-context", () => ({
   verifyAgentInvocationContext: jest.fn(
     async (
       _request: unknown,
-      options?: { allowedModes?: readonly string[] }
-    ) =>
-      context &&
-      (!options?.allowedModes ||
-        options.allowedModes.includes(context.mode))
-        ? context
+      options?: {
+        allowedModes?: readonly string[]
+        reportModeMismatch?: boolean
+      }
+    ) => {
+      if (!context) return null
+      if (
+        !options?.allowedModes ||
+        options.allowedModes.includes(context.mode)
+      ) {
+        return context
+      }
+      return options.reportModeMismatch
+        ? { reason: "mode_not_allowed", context }
         : null
+    }
   ),
 }))
 jest.mock("@/lib/agent-schedules/service", () => {
@@ -82,17 +91,34 @@ beforeEach(() => {
 })
 
 describe("POST /api/agent/schedules", () => {
-  it("rejects absent or non-owner signed contexts", async () => {
+  it("keeps failed invocation verification opaque", async () => {
     context = null
-    expect((await POST(request({ operation: "list" }))).status).toBe(403)
-    context = {
-      actorEmail: "owner@psd401.net",
-      ownerEmail: "owner@psd401.net",
-      mode: "scheduled",
-    }
-    expect((await POST(request({ operation: "list" }))).status).toBe(403)
+    const response = await POST(request({ operation: "create" }))
+
+    expect(response.status).toBe(403)
+    await expect(response.json()).resolves.toEqual({ error: "Forbidden" })
     expect(serviceFactoryMock).not.toHaveBeenCalled()
   })
+
+  it.each(["create", "list", "update", "delete"])(
+    "names the schedule management gate for verified non-owner %s requests",
+    async (operation) => {
+      context = {
+        actorEmail: "owner@psd401.net",
+        ownerEmail: "owner@psd401.net",
+        mode: "scheduled",
+      }
+      const response = await POST(request({ operation }))
+
+      expect(response.status).toBe(403)
+      await expect(response.json()).resolves.toEqual({
+        error: "Schedule management requires a live owner-mode turn",
+        reason: "mode_not_allowed",
+        mode: "scheduled",
+      })
+      expect(serviceFactoryMock).not.toHaveBeenCalled()
+    }
+  )
 
   it.each([
     "ownerEmail",

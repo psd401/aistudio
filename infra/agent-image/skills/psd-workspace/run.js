@@ -63,6 +63,7 @@
 const {
   fail,
   emit,
+  workspaceBrokerRejectionPayload,
   parseArgs,
   validateUserEmail,
   splitCommand,
@@ -175,6 +176,11 @@ async function handleWorkspaceError(err) {
   }
   if (isWorkspaceAuthError(response.status)) {
     await emitWorkspaceConsent(response);
+  }
+  const rejection = workspaceBrokerRejectionPayload(response);
+  if (rejection) {
+    emit(rejection);
+    process.exit(12);
   }
   fail(`Workspace broker failed: ${err.message}`, 12);
 }

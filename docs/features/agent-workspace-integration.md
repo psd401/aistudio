@@ -109,14 +109,14 @@ auditable after the fact.
 
 ## Runtime error contract
 
-The skill emits a single JSON line on stdout (or a stderr message for exit 12)
-and a non-zero exit code when auth isn't ready:
+The skill emits a single JSON line on stdout (or a stderr message for an
+unstructured exit-12 transport/provider failure) and a non-zero exit code:
 
 | Exit | Status | Slot | Meaning |
 |---|---|---|---|
 | 10 | `needs-auth` | user | No refresh token yet — consent URL in payload |
 | 11 | `token-revoked` | user | `invalid_grant` from Google — consent URL in payload |
-| 12 | (stderr) | both | Broker, policy, CLI, or Google failure; inspect the error text and request ID |
+| 12 | `workspace-command-rejected` or stderr | both | Trusted validator failures are structured; transport, CLI, and Google failures use stderr |
 | 13 | `phase1-forbidden` | both | A Phase-1 hard gate refused the command |
 | 14 | `account-provisioning` | agent | agnt_ account being auto-created — retry later, nothing to click |
 | 15 | `scope-upgrade-required` | user | Stored grant predates required Drive scopes — send the returned consent URL so the user can grant the additional permission |
@@ -125,6 +125,19 @@ User-slot 10/11/15 payloads carry `consent_url`; `SOUL.md` instructs the agent
 to paste it verbatim into Chat and stop the turn. For exit 15, explain that one
 additional Drive permission is needed rather than saying authorization was
 missing or revoked. Exit 14 carries **no** URL.
+
+Trusted command-validator failures use a structured JSON contract with
+`status: "workspace-command-rejected"`, `error`, `reason`, and `operation` on
+skill stdout. An operation missing from the allowlist returns
+`reason: "operation_not_allowed"`; other command-shape policy failures return
+`reason: "workspace_command_rejected"`. These fields describe only the
+submitted command shape and never reveal whether a Workspace resource exists
+or which ACLs it has. Sheet value appends and updates are agent-slot-only;
+human user-slot attempts return the existing agent-owned-account policy error.
+They intentionally remain available to scheduled jobs for content-sync use
+cases and remain outside the structural `batchupdate` provenance gate: their
+blast radius is the sheets created by or deliberately shared with the agent
+account.
 
 ## Deployment checklist
 
@@ -357,8 +370,9 @@ Complete the remaining lifecycle checks:
 1. Map the skill exit code using the runtime error contract above.
 2. Check the router, frontend broker, and `/aws/lambda/psd-agent-mint-<env>`
    logs with the shared request ID.
-3. Exit 12 with `Workspace operation is not allowed` is a trusted broker
-   allowlist rejection; exit 13 is a Phase 1 policy rejection. They are not
+3. Exit 12 with `reason: "operation_not_allowed"` is a trusted broker allowlist
+   rejection; use its `operation` field instead of parsing the human-readable
+   message. Exit 13 is a Phase 1 policy rejection. They are not
    interchangeable.
 4. A Google error saying the organization restricts the **Chat app** belongs
    to the router's `chat.bot` identity and Workspace app policy. It is separate

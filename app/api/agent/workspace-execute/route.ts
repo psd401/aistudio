@@ -13,6 +13,8 @@ import {
   validateEmailTaskWorkspaceCommand,
   validateScheduledWorkspaceCommand,
   validateWorkspaceCommand,
+  workspaceOperation,
+  WorkspaceCommandValidationError,
   type WorkspaceCommand,
 } from "@/lib/agent-workspace/command-executor"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
@@ -74,12 +76,15 @@ function validateCommandForMode(
     }
     return null
   } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Workspace command rejected"
+    const rejection =
+      error instanceof WorkspaceCommandValidationError ? error : null
     return NextResponse.json(
       {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Workspace command rejected",
+        error: message,
+        reason: rejection?.reason ?? "workspace_command_rejected",
+        operation: rejection?.operation ?? workspaceOperation(command.argv),
       },
       { status: 400 },
     )

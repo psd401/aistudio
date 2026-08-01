@@ -28,6 +28,26 @@ function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
 }
 
+function workspaceBrokerRejectionPayload(response) {
+  if (
+    !response ||
+    typeof response !== 'object' ||
+    typeof response.reason !== 'string' ||
+    typeof response.operation !== 'string'
+  ) {
+    return null;
+  }
+  return {
+    status: 'workspace-command-rejected',
+    error:
+      typeof response.error === 'string'
+        ? response.error
+        : 'Workspace command rejected',
+    reason: response.reason,
+    operation: response.operation,
+  };
+}
+
 function parseArgs(argv) {
   const args = {};
   for (let i = 2; i < argv.length; i++) {
@@ -963,6 +983,7 @@ module.exports = {
   APP_BASE_URL,
   fail,
   emit,
+  workspaceBrokerRejectionPayload,
   parseArgs,
   validateUserEmail,
   splitCommand,

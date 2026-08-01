@@ -128,10 +128,25 @@ export async function POST(request: NextRequest) {
   const requestId = generateRequestId()
   const invocation = await verifyAgentInvocationContext(request, {
     allowedModes: ["owner"],
+    reportModeMismatch: true,
   })
   if (!invocation) {
     log.warn("Schedule broker request has no owner-mode context", { requestId })
     return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+  }
+  if ("reason" in invocation) {
+    log.warn("Schedule broker request used a disallowed invocation mode", {
+      requestId,
+      mode: invocation.context.mode,
+    })
+    return NextResponse.json(
+      {
+        error: "Schedule management requires a live owner-mode turn",
+        reason: invocation.reason,
+        mode: invocation.context.mode,
+      },
+      { status: 403 }
+    )
   }
 
   let rawBody: unknown
