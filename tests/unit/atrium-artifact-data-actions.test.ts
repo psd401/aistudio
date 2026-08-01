@@ -178,7 +178,9 @@ describe("submitArtifactRecord", () => {
       expect(mockInsert).not.toHaveBeenCalled();
     }
   );
+});
 
+describe("submitArtifactRecord validation", () => {
   it("rejects a payload over 8 KiB before persistence", async () => {
     const result = await submitArtifactRecord({
       ...validSubmitInput,
@@ -204,6 +206,21 @@ describe("submitArtifactRecord", () => {
     expect(mockInsert).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["Map", new Map([["score", 42]])],
+    ["nested Set", { scores: new Set([42]) }],
+  ])("rejects a non-JSON %s payload without lossy serialization", async (_label, payload) => {
+    const result = await submitArtifactRecord({
+      ...validSubmitInput,
+      payload: payload as unknown as Record<string, unknown>,
+    });
+
+    expect(result.isSuccess).toBe(false);
+    expect(mockGetUserRequester).not.toHaveBeenCalled();
+    expect(mockContentGet).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+
   it("rejects an empty content id before visibility or persistence", async () => {
     const result = await submitArtifactRecord({
       ...validSubmitInput,
@@ -211,6 +228,18 @@ describe("submitArtifactRecord", () => {
     });
 
     expect(result.isSuccess).toBe(false);
+    expect(mockContentGet).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+
+  it("rejects a content id over the supported 200-character bound", async () => {
+    const result = await submitArtifactRecord({
+      ...validSubmitInput,
+      contentId: "a".repeat(201),
+    });
+
+    expect(result.isSuccess).toBe(false);
+    expect(mockGetUserRequester).not.toHaveBeenCalled();
     expect(mockContentGet).not.toHaveBeenCalled();
     expect(mockInsert).not.toHaveBeenCalled();
   });
@@ -339,6 +368,12 @@ describe("listArtifactRecords", () => {
       "polyatomic-ion-mahjong"
     );
     expect(mockLimit).toHaveBeenCalledWith(50);
+    expect(mockConsumeRateLimit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        identifier: "user-sub:cognito-user-7",
+        namespace: "atrium-artifact-record-list",
+      })
+    );
   });
 
   it("clamps a requested limit above 200", async () => {
@@ -368,6 +403,38 @@ describe("listArtifactRecords", () => {
     });
 
     expect(result.isSuccess).toBe(false);
+    expect(mockContentGet).not.toHaveBeenCalled();
+    expect(mockSelect).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized content id before requester or visibility lookups", async () => {
+    const result = await listArtifactRecords({
+      ...validListInput,
+      contentId: "a".repeat(201),
+    });
+
+    expect(result.isSuccess).toBe(false);
+    expect(mockGetUserRequester).not.toHaveBeenCalled();
+    expect(mockContentGet).not.toHaveBeenCalled();
+    expect(mockSelect).not.toHaveBeenCalled();
+  });
+
+  it("refuses an over-limit reader before requester or database lookups", async () => {
+    mockConsumeRateLimit.mockReturnValueOnce({
+      allowed: false,
+      retryAfterSeconds: 10,
+      remaining: 0,
+      resetTime: Date.now() + 10_000,
+    });
+
+    const result = await listArtifactRecords(validListInput);
+
+    expect(result.isSuccess).toBe(false);
+    if (result.isSuccess) return;
+    expect(result.error).toEqual(
+      expect.objectContaining({ code: "BIZ_RATE_LIMIT_EXCEEDED" })
+    );
+    expect(mockGetUserRequester).not.toHaveBeenCalled();
     expect(mockContentGet).not.toHaveBeenCalled();
     expect(mockSelect).not.toHaveBeenCalled();
   });

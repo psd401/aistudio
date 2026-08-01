@@ -29,12 +29,16 @@ import type { ActionState } from "@/types";
 import { getUserRequester } from "./requester";
 
 const NAMESPACE_RE = /^[a-z0-9_-]{1,64}$/;
+const MAX_CONTENT_ID_LENGTH = 200;
 const MAX_PAYLOAD_BYTES = 8 * 1024;
 const DEFAULT_LIST_LIMIT = 50;
 const MAX_LIST_LIMIT = 200;
 const SUBMIT_RATE_LIMIT = 120;
+const LIST_RATE_LIMIT = 600;
 const SUBMIT_RATE_WINDOW_MS = 60 * 1000;
+const LIST_RATE_WINDOW_MS = 60 * 1000;
 const SUBMIT_RATE_NAMESPACE = "atrium-artifact-record-submit";
+const LIST_RATE_NAMESPACE = "atrium-artifact-record-list";
 const RESERVED_IDENTITY_KEYS = new Set(["userId", "user_id"]);
 
 export interface SubmitArtifactRecordInput {
@@ -88,7 +92,16 @@ function validateContentId(contentId: unknown): string {
   if (typeof contentId !== "string" || !contentId.trim()) {
     throw ErrorFactories.missingRequiredField("contentId");
   }
-  return contentId.trim();
+  const normalized = contentId.trim();
+  if (normalized.length > MAX_CONTENT_ID_LENGTH) {
+    throw ErrorFactories.valueOutOfRange(
+      "contentId",
+      normalized.length,
+      1,
+      MAX_CONTENT_ID_LENGTH
+    );
+  }
+  return normalized;
 }
 
 function validateNamespace(namespace: unknown): string {
@@ -110,6 +123,8 @@ function validatePayload(payload: unknown): ValidatedPayload {
       "payload must be a JSON object"
     );
   }
+
+  validateJsonValue(payload);
 
   for (const key of RESERVED_IDENTITY_KEYS) {
     if (Object.prototype.hasOwnProperty.call(payload, key)) {
@@ -167,6 +182,49 @@ function validatePayload(payload: unknown): ValidatedPayload {
     serialized,
     bytes,
   };
+}
+
+function validateJsonValue(value: unknown): void {
+  const pending: unknown[] = [value];
+  const seen = new WeakSet<object>();
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (
+      current === null ||
+      typeof current === "string" ||
+      typeof current === "boolean"
+    ) {
+      continue;
+    }
+    if (typeof current === "number" && Number.isFinite(current)) {
+      continue;
+    }
+    if (typeof current !== "object") {
+      throw ErrorFactories.invalidInput(
+        "payload",
+        null,
+        "payload must contain only JSON values"
+      );
+    }
+    if (seen.has(current)) continue;
+    seen.add(current);
+
+    if (Array.isArray(current)) {
+      pending.push(...current);
+      continue;
+    }
+
+    const prototype = Object.getPrototypeOf(current);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw ErrorFactories.invalidInput(
+        "payload",
+        null,
+        "payload must contain only plain JSON objects"
+      );
+    }
+    pending.push(...Object.values(current as Record<string, unknown>));
+  }
 }
 
 function normalizeScope(scope: unknown): ArtifactRecordScope {
@@ -242,15 +300,15 @@ export async function submitArtifactRecord(
       );
     }
 
+    const contentId = validateContentId(input?.contentId);
+    const namespace = validateNamespace(input?.namespace);
+    const payload = validatePayload(input?.payload);
     const requester = await getUserRequester(requestId, session);
     if (requester.kind !== "user" || requester.userId == null) {
       throw ErrorFactories.authNoSession();
     }
     const userId = requester.userId;
 
-    const contentId = validateContentId(input?.contentId);
-    const namespace = validateNamespace(input?.namespace);
-    const payload = validatePayload(input?.payload);
     log.info("Action started: submit artifact record", {
       contentId: sanitizeForLogging(contentId),
       namespace,
@@ -318,16 +376,34 @@ export async function listArtifactRecords(
   try {
     const session = await getServerSession();
     if (!session?.sub) throw ErrorFactories.authNoSession();
+
+    // List reads are cheap and bounded, but a sandbox can still poll them at a
+    // pathological rate. Consume a generous budget before requester resolution
+    // so repeated calls cannot amplify into role/group and visibility queries.
+    const rateLimit = consumeRateLimit({
+      interval: LIST_RATE_WINDOW_MS,
+      uniqueTokenPerInterval: LIST_RATE_LIMIT,
+      namespace: LIST_RATE_NAMESPACE,
+      identifier: `user-sub:${session.sub}`,
+    });
+    if (!rateLimit.allowed) {
+      throw ErrorFactories.bizRateLimitExceeded(
+        "list artifact records",
+        rateLimit.retryAfterSeconds,
+        new Date(rateLimit.resetTime).toISOString()
+      );
+    }
+
+    const contentId = validateContentId(input?.contentId);
+    const namespace = validateNamespace(input?.namespace);
+    const scope = normalizeScope(input?.scope);
+    const limit = normalizeLimit(input?.limit);
     const requester = await getUserRequester(requestId, session);
     if (requester.kind !== "user" || requester.userId == null) {
       throw ErrorFactories.authNoSession();
     }
     const userId = requester.userId;
 
-    const contentId = validateContentId(input?.contentId);
-    const namespace = validateNamespace(input?.namespace);
-    const scope = normalizeScope(input?.scope);
-    const limit = normalizeLimit(input?.limit);
     log.info("Action started: list artifact records", {
       contentId: sanitizeForLogging(contentId),
       namespace,
