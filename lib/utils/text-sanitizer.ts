@@ -50,6 +50,93 @@ export function sanitizeTextForDatabase(text: string): string {
 }
 
 /**
+ * Code points that AWS SQS rejects in a message body.
+ *
+ * SQS accepts only the XML 1.0 character set:
+ *   #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+ *
+ * A body containing anything else is rejected with
+ * "Invalid binary character '#xFFFF' was found in the message body".
+ *
+ * The class below is built once at module load and covers:
+ * - C0 controls except tab/newline/carriage return, plus DEL
+ * - unpaired surrogates — under the `u` flag a well-formed pair is a single
+ *   supplementary code point, so `\uD800-\uDFFF` matches *only* lone surrogates
+ *   and emoji/supplementary CJK survive untouched
+ * - the BMP noncharacters U+FDD0-U+FDEF, U+FFFE and U+FFFF
+ * - the U+nFFFE/U+nFFFF noncharacter pair in each of the 16 supplementary planes
+ */
+const SUPPLEMENTARY_NONCHARACTER_RANGES = Array.from(
+  { length: 16 },
+  (_unused, index) => {
+    const planeNoncharacter = (index + 1) * 0x10000 + 0xfffe;
+    return `\\u{${planeNoncharacter.toString(16)}}-\\u{${(planeNoncharacter + 1).toString(16)}}`;
+  }
+).join('');
+
+const MESSAGING_UNSAFE_CHARACTER_CLASS =
+  '[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F' +
+  '\\uD800-\\uDFFF' +
+  '\\uFDD0-\\uFDEF' +
+  '\\uFFFE\\uFFFF' +
+  SUPPLEMENTARY_NONCHARACTER_RANGES +
+  ']';
+
+// Two instances: the global one drives `replace`, the non-global one backs the
+// predicate. Sharing a single /g/ regex across `.test()` calls would leak
+// `lastIndex` between callers and return alternating results.
+const MESSAGING_UNSAFE_PATTERN = new RegExp(
+  MESSAGING_UNSAFE_CHARACTER_CLASS,
+  'gu'
+);
+const MESSAGING_UNSAFE_PROBE = new RegExp(MESSAGING_UNSAFE_CHARACTER_CLASS, 'u');
+
+/**
+ * Sanitizes text for safe transport in an AWS SQS message body.
+ *
+ * Stricter than {@link sanitizeTextForDatabase}: it additionally removes the
+ * Unicode noncharacters and unpaired surrogates that PostgreSQL tolerates but
+ * SQS rejects outright. Well-formed surrogate pairs (emoji, supplementary CJK)
+ * are preserved — they are legal `[#x10000-#x10FFFF]` characters.
+ *
+ * Sanitized text is never longer than its input, so callers that size batches
+ * against a byte ceiling stay correct.
+ *
+ * @param text - The text to sanitize
+ * @returns Text containing only code points SQS accepts
+ *
+ * @example
+ * ```typescript
+ * await sqs.send(new SendMessageCommand({
+ *   QueueUrl: queueUrl,
+ *   MessageBody: JSON.stringify({ text: sanitizeTextForMessaging(chunk) }),
+ * }));
+ * ```
+ */
+export function sanitizeTextForMessaging(text: string): string {
+  if (!text || typeof text !== 'string') {
+    return '';
+  }
+  return text.replace(MESSAGING_UNSAFE_PATTERN, '').normalize('NFC');
+}
+
+/**
+ * Returns true when the text contains a code point SQS would reject.
+ *
+ * Useful for asserting payload safety in tests and for logging how much
+ * content required sanitization, without paying for a full rewrite.
+ *
+ * @param text - The text to check
+ * @returns Whether the text holds any messaging-unsafe code point
+ */
+export function containsMessagingUnsafeCharacters(text: string): boolean {
+  if (!text || typeof text !== 'string') {
+    return false;
+  }
+  return MESSAGING_UNSAFE_PROBE.test(text);
+}
+
+/**
  * Validates if a string contains null bytes or other problematic sequences.
  * Useful for debugging or validation before database operations.
  *
