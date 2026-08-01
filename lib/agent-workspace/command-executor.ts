@@ -89,6 +89,10 @@ const REQUIRES_AGENT_CREATED_PROVENANCE = new Set([
   "tasks tasks update",
 ])
 
+// Sheet values append/update intentionally stay outside the provenance gate:
+// issue #1514 restores content sync for sheets the agent account created or
+// that a user deliberately shared with it. Batch structural edits remain gated.
+
 // Derived rather than enumerated: every allowlisted Chat write leaves the
 // owner's own Workspace data and therefore has to reach the audit log, so a
 // Chat operation cannot be added to ALLOWED_WRITES without being audited.
@@ -126,6 +130,7 @@ const MAX_ARGUMENT_LENGTH = 200_000
 const MAX_TOTAL_LENGTH = 500_000
 const MAX_DIAGNOSTIC_OPERATION_LENGTH = 128
 const OPERATION_TOO_LONG = "<operation-too-long>"
+const OPERATION_UNAVAILABLE = "<operation-unavailable>"
 function hasUnsafeControlCharacter(value: string): boolean {
   for (const character of value) {
     const codePoint = character.codePointAt(0)
@@ -184,9 +189,8 @@ function operationExceedsDiagnosticLimit(argv: readonly string[]): boolean {
 }
 
 export function workspaceOperation(argv: readonly string[]): string {
-  return operationExceedsDiagnosticLimit(argv)
-    ? OPERATION_TOO_LONG
-    : operationTokens(argv).join(" ")
+  if (operationExceedsDiagnosticLimit(argv)) return OPERATION_TOO_LONG
+  return operationTokens(argv).join(" ") || OPERATION_UNAVAILABLE
 }
 
 function argumentValue(argv: readonly string[], flag: string): string | null {
@@ -483,6 +487,9 @@ export function validateScheduledWorkspaceCommand(
 ): void {
   validateWorkspaceCommand(command)
   const { operation } = normalizedOperation(command.argv)
+  // Scheduled Sheet value sync is an intentional #1514 use case. Only Chat
+  // posts retain a live-confirmation gate because they message third parties;
+  // Sheet writes remain confined to the agent account's Google ACL boundary.
   if (ALLOWED_CHAT_WRITES.has(operation)) {
     throw new Error(
       "Scheduled Workspace runs cannot post Google Chat messages without live user confirmation"

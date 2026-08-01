@@ -369,6 +369,15 @@ function defineTrustedWorkspaceCommandPolicySuite1Part3() {it("rejects Gmail mod
       })
     ).not.toThrow()
   })
+
+  it.each([
+    ["append", ["sheets", "spreadsheets", "values", "append"]],
+    ["update", ["sheets", "spreadsheets", "values", "update"]],
+  ])("allows intentional scheduled Sheet value %s sync", (_name, argv) => {
+    expect(() =>
+      validateScheduledWorkspaceCommand({ scope: "agent", argv })
+    ).not.toThrow()
+  })
 }
 
 const defineTrustedWorkspaceCommandPolicySuite1 = () => {
@@ -425,6 +434,10 @@ describe("Workspace operation diagnostics", () => {
     expect(workspaceOperation(["X".repeat(1_000_000)])).toBe(
       "<operation-too-long>"
     )
+  })
+
+  it("uses an explicit sentinel when no operation tokens are available", () => {
+    expect(workspaceOperation(["--help"])).toBe("<operation-unavailable>")
   })
 })
 

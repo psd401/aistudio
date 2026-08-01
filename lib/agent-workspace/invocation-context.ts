@@ -86,6 +86,8 @@ function modesCheckedBeforeRequestProof(
     "allowedModes"
   > & { reportModeMismatch?: boolean }
 ): readonly AgentInvocationMode[] | undefined {
+  // Detailed mismatch reporting is safe only after token, request proof, and
+  // nonce verification. Default callers keep the earlier fail-fast mode check.
   return options.reportModeMismatch ? undefined : options.allowedModes
 }
 

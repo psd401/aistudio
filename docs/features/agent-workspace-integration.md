@@ -109,14 +109,14 @@ auditable after the fact.
 
 ## Runtime error contract
 
-The skill emits a single JSON line on stdout (or a stderr message for exit 12)
-and a non-zero exit code when auth isn't ready:
+The skill emits a single JSON line on stdout (or a stderr message for an
+unstructured exit-12 transport/provider failure) and a non-zero exit code:
 
 | Exit | Status | Slot | Meaning |
 |---|---|---|---|
 | 10 | `needs-auth` | user | No refresh token yet — consent URL in payload |
 | 11 | `token-revoked` | user | `invalid_grant` from Google — consent URL in payload |
-| 12 | (stderr) | both | Broker, policy, CLI, or Google failure; inspect the error text and request ID |
+| 12 | `workspace-command-rejected` or stderr | both | Trusted validator failures are structured; transport, CLI, and Google failures use stderr |
 | 13 | `phase1-forbidden` | both | A Phase-1 hard gate refused the command |
 | 14 | `account-provisioning` | agent | agnt_ account being auto-created — retry later, nothing to click |
 | 15 | `scope-upgrade-required` | user | Stored grant predates required Drive scopes — send the returned consent URL so the user can grant the additional permission |
@@ -127,12 +127,17 @@ additional Drive permission is needed rather than saying authorization was
 missing or revoked. Exit 14 carries **no** URL.
 
 Trusted command-validator failures use a structured JSON contract with
-`error`, `reason`, and `operation`. An operation missing from the allowlist
-returns `reason: "operation_not_allowed"`; other command-shape policy failures
-return `reason: "workspace_command_rejected"`. These fields describe only the
+`status: "workspace-command-rejected"`, `error`, `reason`, and `operation` on
+skill stdout. An operation missing from the allowlist returns
+`reason: "operation_not_allowed"`; other command-shape policy failures return
+`reason: "workspace_command_rejected"`. These fields describe only the
 submitted command shape and never reveal whether a Workspace resource exists
 or which ACLs it has. Sheet value appends and updates are agent-slot-only;
 human user-slot attempts return the existing agent-owned-account policy error.
+They intentionally remain available to scheduled jobs for content-sync use
+cases and remain outside the structural `batchupdate` provenance gate: their
+blast radius is the sheets created by or deliberately shared with the agent
+account.
 
 ## Deployment checklist
 

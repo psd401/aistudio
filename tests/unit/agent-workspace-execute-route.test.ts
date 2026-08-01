@@ -116,4 +116,20 @@ describe("POST /api/agent/workspace-execute validator errors", () => {
       operation: "<operation-too-long>",
     })
   })
+
+  it("uses a meaningful sentinel for a flag-first invalid command", async () => {
+    const response = await POST(
+      request({
+        scope: "agent",
+        argv: ["--help"],
+      })
+    )
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toEqual({
+      error: "Workspace command must name a service and operation",
+      reason: "workspace_command_rejected",
+      operation: "<operation-unavailable>",
+    })
+  })
 })
