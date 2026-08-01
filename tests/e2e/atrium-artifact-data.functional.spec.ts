@@ -130,7 +130,7 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
       await expect(result).not.toContainText(SEEDED_ADMIN_EMAIL);
     } finally {
       await cleanupArtifact(page, contentId);
-      await context.close();
+      await closeContextSoftly(context, "happy-path artifact-data");
     }
   });
 
@@ -240,11 +240,11 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
         await expect(result).toContainText("CONTENT_NOT_FOUND");
         await expect(result).not.toContainText(/forbidden|permission/i);
       } finally {
-        await viewerContext.close();
+        await closeContextSoftly(viewerContext, "non-viewer artifact-data");
       }
     } finally {
       await cleanupArtifact(ownerPage, contentId);
-      await ownerContext.close();
+      await closeContextSoftly(ownerContext, "owner artifact-data");
     }
   });
 });
