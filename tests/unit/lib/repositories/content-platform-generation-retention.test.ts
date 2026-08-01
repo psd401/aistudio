@@ -65,26 +65,39 @@ describe("superseded repository generation retention", () => {
     expect(generationDeletion).toBeDefined();
 
     for (const compiled of [chunkDeletion!, generationDeletion!]) {
-      expect(compiled.sql).toContain("generation.status = 'superseded'");
-      expect(compiled.sql).toContain("row_number() OVER");
-      expect(compiled.sql).toContain("PARTITION BY generation.repository_id");
+      expect(compiled.sql).toContain("kept_generation.status = 'superseded'");
       expect(compiled.sql).toContain(
-        "ORDER BY generation.superseded_at DESC, generation.id DESC",
+        "candidate_generation.status = 'superseded'",
       );
-      expect(compiled.sql).toContain("generation.superseded_at <");
+      expect(compiled.sql).not.toContain("row_number() OVER");
+      expect(compiled.sql).toContain("CROSS JOIN LATERAL");
+      expect(compiled.sql).toContain(
+        "kept_generation.repository_id = repository.id",
+      );
+      expect(compiled.sql).toContain(
+        "ORDER BY kept_generation.superseded_at DESC, kept_generation.id DESC",
+      );
+      expect(compiled.sql).toContain("OFFSET");
+      expect(compiled.sql).toContain(
+        "(candidate_generation.superseded_at, candidate_generation.id) <",
+      );
+      expect(compiled.sql).toContain("candidate_generation.superseded_at <");
       expect(compiled.sql).not.toContain("generation.created_at <");
       expect(compiled.sql).toContain(
-        "generation.id IS DISTINCT FROM repository.active_index_generation_id",
+        "candidate_generation.id IS DISTINCT FROM repository.active_index_generation_id",
       );
       expect(compiled.sql).toContain(
-        "active_repository.active_index_generation_id = generation.id",
+        "active_repository.active_index_generation_id = candidate_generation.id",
       );
       expect(compiled.sql).toContain(
-        "FOR UPDATE OF generation, repository SKIP LOCKED",
+        "FOR UPDATE OF repository SKIP LOCKED",
+      );
+      expect(compiled.sql).toContain(
+        "FOR UPDATE OF candidate_generation SKIP LOCKED",
       );
       expect(compiled.params).toContain("2026-07-31T12:00:00.000Z");
       expect(compiled.params).toContain(
-        SUPERSEDED_GENERATION_KEEP_PER_REPOSITORY,
+        SUPERSEDED_GENERATION_KEEP_PER_REPOSITORY - 1,
       );
       expect(compiled.params).toContain(GENERATION_GC_GENERATION_BATCH);
       expect(compiled.sql).not.toMatch(

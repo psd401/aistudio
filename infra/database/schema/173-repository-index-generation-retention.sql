@@ -26,21 +26,9 @@ SET superseded_at = NULL
 WHERE status <> 'superseded'
   AND superseded_at IS NOT NULL;
 
-CREATE OR REPLACE FUNCTION set_repository_index_generation_superseded_at()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-BEGIN
-  IF NEW.status <> 'superseded' THEN
-    NEW.superseded_at = NULL;
-  ELSIF TG_OP = 'INSERT' THEN
-    NEW.superseded_at = clock_timestamp();
-  ELSIF OLD.status IS DISTINCT FROM 'superseded' THEN
-    NEW.superseded_at = clock_timestamp();
-  END IF;
-  RETURN NEW;
-END;
-$$;
+-- Keep the body on one single-quoted line. The db-init Lambda's line-based SQL
+-- splitter treats an interior line ending in ");" as the end of a function.
+CREATE OR REPLACE FUNCTION set_repository_index_generation_superseded_at() RETURNS trigger AS 'BEGIN IF NEW.status <> ''superseded'' THEN NEW.superseded_at := NULL; ELSIF TG_OP = ''INSERT'' THEN NEW.superseded_at := clock_timestamp(); ELSIF OLD.status IS DISTINCT FROM ''superseded'' THEN NEW.superseded_at := clock_timestamp(); END IF; RETURN NEW; END;' LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS trg_repository_index_generation_superseded_at
   ON repository_index_generations;
@@ -53,8 +41,13 @@ CREATE INDEX IF NOT EXISTS idx_repository_index_generations_superseded_retention
   ON repository_index_generations (repository_id, superseded_at DESC, id DESC)
   WHERE status = 'superseded';
 
+CREATE INDEX IF NOT EXISTS idx_knowledge_repositories_active_index_generation
+  ON knowledge_repositories (active_index_generation_id)
+  WHERE active_index_generation_id IS NOT NULL;
+
 -- ROLLBACK SQL (for manual rollback if needed)
 -- DROP INDEX IF EXISTS idx_repository_index_generations_superseded_retention;
+-- DROP INDEX IF EXISTS idx_knowledge_repositories_active_index_generation;
 -- DROP TRIGGER IF EXISTS trg_repository_index_generation_superseded_at ON repository_index_generations;
 -- DROP FUNCTION IF EXISTS set_repository_index_generation_superseded_at();
 -- ALTER TABLE repository_index_generations DROP COLUMN IF EXISTS superseded_at;

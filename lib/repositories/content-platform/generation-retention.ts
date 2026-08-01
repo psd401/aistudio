@@ -45,35 +45,65 @@ function eligibleGenerationCtes(params: {
   keepPerRepository: number;
   generationBatchSize: number;
 }): SQL {
+  const keepFloorOffset = params.keepPerRepository - 1;
+
   return sql`
-    ranked_superseded AS (
-      SELECT generation.id,
-             row_number() OVER (
-               PARTITION BY generation.repository_id
-               ORDER BY generation.superseded_at DESC, generation.id DESC
-             ) AS superseded_rank
-      FROM repository_index_generations generation
-      WHERE generation.status = 'superseded'
+    eligible_repositories AS MATERIALIZED (
+      SELECT repository.id,
+             repository.active_index_generation_id,
+             keep_floor.superseded_at AS keep_floor_superseded_at,
+             keep_floor.id AS keep_floor_id
+      FROM knowledge_repositories repository
+      CROSS JOIN LATERAL (
+        SELECT kept_generation.superseded_at,
+               kept_generation.id
+        FROM repository_index_generations kept_generation
+        WHERE kept_generation.repository_id = repository.id
+          AND kept_generation.status = 'superseded'
+        ORDER BY kept_generation.superseded_at DESC, kept_generation.id DESC
+        OFFSET ${keepFloorOffset}
+        LIMIT 1
+      ) keep_floor
+      WHERE EXISTS (
+        SELECT 1
+        FROM repository_index_generations candidate_generation
+        WHERE candidate_generation.repository_id = repository.id
+          AND candidate_generation.status = 'superseded'
+          AND candidate_generation.superseded_at < ${params.eligibleBefore}::timestamptz
+          AND (candidate_generation.superseded_at, candidate_generation.id) <
+              (keep_floor.superseded_at, keep_floor.id)
+          AND candidate_generation.id IS DISTINCT FROM repository.active_index_generation_id
+          AND NOT EXISTS (
+            SELECT 1
+            FROM knowledge_repositories active_repository
+            WHERE active_repository.active_index_generation_id = candidate_generation.id
+          )
+      )
+      ORDER BY repository.id
+      FOR UPDATE OF repository SKIP LOCKED
+      LIMIT ${params.generationBatchSize}
     ),
-    eligible_generations AS (
+    eligible_generations AS MATERIALIZED (
       SELECT generation.id
-      FROM repository_index_generations generation
-      INNER JOIN ranked_superseded ranked
-        ON ranked.id = generation.id
-      INNER JOIN knowledge_repositories repository
-        ON repository.id = generation.repository_id
-      WHERE generation.status = 'superseded'
-        AND generation.superseded_at < ${params.eligibleBefore}::timestamptz
-        AND ranked.superseded_rank > ${params.keepPerRepository}
-        AND generation.id IS DISTINCT FROM repository.active_index_generation_id
-        AND NOT EXISTS (
-          SELECT 1
-          FROM knowledge_repositories active_repository
-          WHERE active_repository.active_index_generation_id = generation.id
-        )
-      ORDER BY generation.superseded_at, generation.id
-      -- Keep the serving pointer stable until both deletion phases commit.
-      FOR UPDATE OF generation, repository SKIP LOCKED
+      FROM eligible_repositories repository
+      CROSS JOIN LATERAL (
+        SELECT candidate_generation.id
+        FROM repository_index_generations candidate_generation
+        WHERE candidate_generation.repository_id = repository.id
+          AND candidate_generation.status = 'superseded'
+          AND candidate_generation.superseded_at < ${params.eligibleBefore}::timestamptz
+          AND (candidate_generation.superseded_at, candidate_generation.id) <
+              (repository.keep_floor_superseded_at, repository.keep_floor_id)
+          AND candidate_generation.id IS DISTINCT FROM repository.active_index_generation_id
+          AND NOT EXISTS (
+            SELECT 1
+            FROM knowledge_repositories active_repository
+            WHERE active_repository.active_index_generation_id = candidate_generation.id
+          )
+        ORDER BY candidate_generation.superseded_at, candidate_generation.id
+        FOR UPDATE OF candidate_generation SKIP LOCKED
+        LIMIT ${params.generationBatchSize}
+      ) generation
       LIMIT ${params.generationBatchSize}
     )
   `;
@@ -81,9 +111,11 @@ function eligibleGenerationCtes(params: {
 
 /**
  * Delete one bounded batch from repository generations that are safely beyond
- * the rollback window. Generation rows are locked with SKIP LOCKED so multiple
- * scheduler invocations cannot work on the same parents. Chunks are removed
- * first in a ctid-bounded batch; a parent is deleted only after it is childless.
+ * the rollback window. The keep floor is found with a bounded per-repository
+ * index probe instead of ranking the complete superseded history. Repository
+ * and generation rows are locked with SKIP LOCKED so multiple scheduler
+ * invocations cannot work on the same parents. Chunks are removed first in a
+ * ctid-bounded batch; a parent is deleted only after it is childless.
  */
 export async function collectSupersededRepositoryGenerations(
   options: CollectSupersededRepositoryGenerationsOptions = {},

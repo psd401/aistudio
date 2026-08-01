@@ -34,8 +34,8 @@ describe("migration 173 repository generation retention", () => {
     expect(migration).toContain(
       "CREATE TRIGGER trg_repository_index_generation_superseded_at",
     );
-    expect(migration).toContain("NEW.superseded_at = clock_timestamp()");
-    expect(migration).toContain("ELSIF TG_OP = 'INSERT' THEN");
+    expect(migration).toContain("NEW.superseded_at := clock_timestamp()");
+    expect(migration).toContain("ELSIF TG_OP = ''INSERT'' THEN");
     expect(migration).not.toContain("TG_OP = 'INSERT' OR OLD.status");
     expect(migration).toMatch(
       /CREATE INDEX IF NOT EXISTS\s+idx_repository_index_generations_superseded_retention/i,
@@ -43,6 +43,28 @@ describe("migration 173 repository generation retention", () => {
     expect(migration).toContain(
       "ON repository_index_generations (repository_id, superseded_at DESC, id DESC)",
     );
+    expect(migration).toMatch(
+      /CREATE INDEX IF NOT EXISTS\s+idx_knowledge_repositories_active_index_generation/i,
+    );
+    expect(migration).toContain(
+      "ON knowledge_repositories (active_index_generation_id)",
+    );
     expect(migration).toContain("WHERE status = 'superseded'");
+  });
+
+  it("encodes the trigger function for the production line-based SQL splitter", () => {
+    const functionLines = migration
+      .split("\n")
+      .filter((line) =>
+        line.startsWith(
+          "CREATE OR REPLACE FUNCTION set_repository_index_generation_superseded_at()",
+        ),
+      );
+
+    expect(functionLines).toHaveLength(1);
+    expect(functionLines[0]).toMatch(
+      /^CREATE OR REPLACE FUNCTION .+ RETURNS trigger AS '.+' LANGUAGE plpgsql;$/,
+    );
+    expect(migration).not.toContain("AS $$");
   });
 });
