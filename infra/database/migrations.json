@@ -162,6 +162,7 @@
     "169-agentic-model-readiness.sql",
     "170-nexus-durable-repository-bindings.sql",
     "171-workspace-upload-zero-byte-files.sql",
-    "172-content-data-records.sql"
+    "172-content-data-records.sql",
+    "173-repository-index-generation-retention.sql"
   ]
 }
