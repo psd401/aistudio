@@ -368,6 +368,14 @@ function manifestKey(): string {
   return `.workspace-checkpoints/v2/${prefixHash}/manifest.json`
 }
 
+function anchorKey(relativePath: string): string {
+  const prefixHash = createHash("sha256").update(PREFIX).digest("hex")
+  const pathHash = createHash("sha256")
+    .update(Buffer.from(relativePath, "utf8"))
+    .digest("hex")
+  return `.workspace-checkpoints/v2/${prefixHash}/anchors/${pathHash}`
+}
+
 function legacyManifestKey(): string {
   const prefixHash = createHash("sha256").update(PREFIX).digest("hex")
   return `.workspace-checkpoints/v1/${prefixHash}/manifest.json`
@@ -1397,6 +1405,89 @@ describe("durable workspace checkpoints", () => {
         store.current(finalizationJournalKey())?.body ?? "{}",
       ),
     ).toMatchObject({ state: "committed", result })
+  })
+
+  it("recovers an identical promoted payload after its anchored staging object was removed", async () => {
+    const relativePath = "state/a.sqlite"
+    store.add(`${PREFIX}/${relativePath}`, {
+      size: 4,
+      eTag: '"same"',
+      body: "same",
+      checksum: CHECKSUM,
+      contentType: CONTENT_TYPE,
+      scope: "Scope=private",
+    })
+    const expiresAt = Math.floor(Date.now() / 1000) + 60
+    const checkpoint = await ensureFinalizationCheckpoint(
+      "invocation-identical-promotion",
+      expiresAt,
+    )
+    const anchored = store.add(anchorKey(relativePath), {
+      size: 4,
+      eTag: '"anchor-same"',
+      body: "same",
+      checksum: CHECKSUM,
+      contentType: CONTENT_TYPE,
+      scope: "Scope=checkpoint",
+    })
+    const anchoredManifest = manifest()
+    const anchoredEntry = (
+      anchoredManifest.entries as Array<Record<string, unknown>>
+    )[0]!
+    anchoredEntry.source = "anchor"
+    anchoredEntry.versionId = anchored.versionId
+    anchoredEntry.sourceETag = anchored.eTag
+    const anchoredBody = JSON.stringify(anchoredManifest)
+    store.add(manifestKey(), {
+      size: Buffer.byteLength(anchoredBody),
+      eTag: '"anchored-manifest"',
+      body: anchoredBody,
+      scope: "Scope=checkpoint",
+    })
+    stageWorkspaceUpload(
+      RESERVATION_ONE,
+      relativePath,
+      '"same"',
+      "same",
+    )
+    const stagingKey = String(activeReservation?.stagingKey)
+    const promoted = store.add(`${PREFIX}/${relativePath}`, {
+      size: 4,
+      eTag: '"same"',
+      body: "same",
+      checksum: CHECKSUM,
+      contentType: CONTENT_TYPE,
+      scope: "Scope=private",
+    })
+    store.objects.delete(stagingKey)
+    seedPendingFinalizationJournal(
+      checkpoint.workspaceGeneration,
+      checkpoint.proof,
+      [RESERVATION_ONE],
+    )
+    returnActiveReservationAsVerifying()
+    const beforeRetry = store.commands.length
+
+    const result = await finalizeWorkspaceCheckpoint(
+      "owner@example.com",
+      PREFIX,
+      checkpoint.workspaceGeneration,
+      [RESERVATION_ONE],
+      [],
+      checkpoint.proof,
+      "invocation-identical-promotion",
+      expiresAt,
+    )
+
+    expect(result.uploads[0]?.eTag).toBe('"same"')
+    expect(store.current(`${PREFIX}/${relativePath}`)?.versionId).toBe(
+      promoted.versionId,
+    )
+    expect(
+      store.commands.slice(beforeRetry).filter(
+        (command) => command.name === "CopyObjectCommand",
+      ),
+    ).toHaveLength(0)
   })
 
   it("returns a newly claimed reservation when pending recovery fails", async () => {

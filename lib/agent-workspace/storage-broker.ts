@@ -4078,14 +4078,16 @@ async function recoverWorkspaceFinalizationClaim(
     if (!isS3ObjectNotFound(error)) throw error
   }
 
-  const targetIsCommittedBase =
+  const targetMatchesBaseContent =
     current !== undefined &&
     baseEntry !== undefined &&
     current.ContentLength === baseEntry.size &&
-    current.ETag === baseEntry.eTag &&
-    (baseEntry.source === "anchor" ||
-      current.VersionId === baseEntry.versionId)
-  if (targetIsCommittedBase || (!current && !baseEntry)) {
+    current.ETag === baseEntry.eTag
+  const targetIsExactCommittedVersion =
+    targetMatchesBaseContent &&
+    baseEntry?.source === "target" &&
+    current?.VersionId === baseEntry.versionId
+  if (targetIsExactCommittedVersion || (!current && !baseEntry)) {
     return { reservation, relativePath }
   }
   if (!current) {
@@ -4104,6 +4106,13 @@ async function recoverWorkspaceFinalizationClaim(
       ? current.ETag
       : undefined
   if (!promotedETag || !current.VersionId) {
+    // Once a base entry is anchored its target VersionId is deliberately no
+    // longer retained in the manifest. Matching base content is therefore the
+    // only safe unpromoted state when the current target is not the exact
+    // reserved payload.
+    if (targetMatchesBaseContent && baseEntry?.source === "anchor") {
+      return { reservation, relativePath }
+    }
     throw new WorkspaceStorageSettlementUncertainError(
       "Pending workspace upload target has an unknown version",
     )
