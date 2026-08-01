@@ -639,6 +639,7 @@ def _workspace_flush_request_allowed(
             "delete",
             "ensure-checkpoint",
             "commit-checkpoint",
+            "finalize-checkpoint",
         }
         or (
             operation == "complete-upload"

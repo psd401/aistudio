@@ -1,4 +1,9 @@
-import { createHash, randomUUID } from "node:crypto"
+import {
+  createHash,
+  createHmac,
+  randomUUID,
+  timingSafeEqual,
+} from "node:crypto"
 import {
   CopyObjectCommand,
   DeleteObjectCommand,
@@ -36,6 +41,7 @@ import {
   releaseResourceAdmission,
 } from "@/lib/resource-admission"
 import { createLogger } from "@/lib/logger"
+import { getSecretString } from "@/lib/agent-workspace/secrets-manager"
 import {
   isCheckpointManagedWorkspacePath,
   validateWorkspaceRelativePath,
@@ -63,6 +69,8 @@ const MAX_PUBLIC_RETAINED_OBJECTS = 1_000
 const UPLOAD_RESERVATION_MS = 5 * 60 * 1000
 const SHA256_BASE64_RE = /^[A-Za-z0-9+/]{43}=$/
 const WORKSPACE_GENERATION_RE = /^[0-9a-f]{64}$/
+const WORKSPACE_RESERVATION_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const MAX_WORKSPACE_GENERATION_OBJECTS = 250_000
 const WORKSPACE_CHECKPOINT_VERSION = 2 as const
 const WORKSPACE_CHECKPOINT_CONTROL_PREFIX = ".workspace-checkpoints/v2"
@@ -73,6 +81,14 @@ const WORKSPACE_CHECKPOINT_CONCURRENCY = 32
 // response limits. Large workspaces retain the legacy generation-only
 // response and the agent image falls back to the paginated list operation.
 const MAX_INLINE_WORKSPACE_CHECKPOINT_SNAPSHOT_BYTES = 512 * 1024
+const WORKSPACE_FINALIZATION_PROOF_VERSION = "v1"
+const MAX_WORKSPACE_FINALIZATION_PROOF_BYTES = 4 * 1024
+// The prepared replay record contains the next checkpoint manifest plus the
+// bounded mutation result. Keep a hard cap even though both source payloads
+// are independently bounded, so a corrupt control object can never force an
+// unbounded read into the web tier.
+const MAX_WORKSPACE_FINALIZATION_JOURNAL_BYTES =
+  MAX_WORKSPACE_CHECKPOINT_BYTES * 2
 // These paths were checkpoint-managed before they were identified as
 // generated OpenClaw host state. Every current or manifest-bound source is
 // content-validated below before exclusion; a policy or interrupted claim
@@ -735,7 +751,142 @@ export type WorkspaceCheckpointSnapshot = {
 export type EnsureWorkspaceCheckpointResult = {
   checkpointReady: true
   workspaceGeneration: string
+  atomicCheckpointCommitVersion?: 1
+  checkpointFinalizationProof?: string
   checkpointSnapshot?: WorkspaceCheckpointSnapshot
+}
+
+type WorkspaceFinalizationBinding = {
+  invocationNonce: string
+  expiresAt: number
+}
+
+type WorkspaceFinalizationProofClaims = {
+  version: 1
+  signedWorkspacePrefix: string
+  workspaceGeneration: string
+  invocationNonce: string
+  expiresAt: number
+}
+
+async function workspaceFinalizationProofSecret(): Promise<string> {
+  const inline = process.env.AGENT_INVOCATION_SIGNING_SECRET
+  if (inline) return inline
+  const secretId = process.env.AGENT_INVOCATION_SIGNING_SECRET_ID
+  if (!secretId) {
+    throw new WorkspaceStorageCompletionError(
+      "Workspace finalization proof secret is unavailable",
+    )
+  }
+  const secret = await getSecretString(secretId)
+  if (!secret) {
+    throw new WorkspaceStorageCompletionError(
+      "Workspace finalization proof secret is unavailable",
+    )
+  }
+  return secret
+}
+
+async function createWorkspaceFinalizationProof(
+  signedWorkspacePrefix: string,
+  workspaceGeneration: string,
+  binding: WorkspaceFinalizationBinding,
+): Promise<string> {
+  const claims: WorkspaceFinalizationProofClaims = {
+    version: 1,
+    signedWorkspacePrefix: validateTrustedPrefix(
+      signedWorkspacePrefix,
+    ),
+    workspaceGeneration,
+    invocationNonce: binding.invocationNonce,
+    expiresAt: binding.expiresAt,
+  }
+  const encoded = Buffer.from(JSON.stringify(claims), "utf8").toString(
+    "base64url",
+  )
+  const signature = createHmac(
+    "sha256",
+    await workspaceFinalizationProofSecret(),
+  )
+    .update(`${WORKSPACE_FINALIZATION_PROOF_VERSION}.${encoded}`)
+    .digest("base64url")
+  return `${WORKSPACE_FINALIZATION_PROOF_VERSION}.${encoded}.${signature}`
+}
+
+// Proof verification deliberately checks every authenticated claim before use.
+// eslint-disable-next-line complexity
+async function verifyWorkspaceFinalizationProof(
+  proof: string,
+  expected: WorkspaceFinalizationProofClaims,
+): Promise<void> {
+  if (
+    !proof ||
+    Buffer.byteLength(proof, "utf8") >
+      MAX_WORKSPACE_FINALIZATION_PROOF_BYTES
+  ) {
+    throw new WorkspaceStorageCompletionError(
+      "Workspace finalization proof is invalid",
+    )
+  }
+  const parts = proof.split(".")
+  if (
+    parts.length !== 3 ||
+    parts[0] !== WORKSPACE_FINALIZATION_PROOF_VERSION ||
+    !parts[1] ||
+    !parts[2]
+  ) {
+    throw new WorkspaceStorageCompletionError(
+      "Workspace finalization proof is invalid",
+    )
+  }
+  const expectedSignature = createHmac(
+    "sha256",
+    await workspaceFinalizationProofSecret(),
+  )
+    .update(`${parts[0]}.${parts[1]}`)
+    .digest()
+  let providedSignature: Buffer
+  let claims: unknown
+  try {
+    providedSignature = Buffer.from(parts[2], "base64url")
+    claims = JSON.parse(
+      Buffer.from(parts[1], "base64url").toString("utf8"),
+    )
+  } catch {
+    throw new WorkspaceStorageCompletionError(
+      "Workspace finalization proof is invalid",
+    )
+  }
+  if (providedSignature.length !== expectedSignature.length) {
+    timingSafeEqual(expectedSignature, expectedSignature)
+    throw new WorkspaceStorageCompletionError(
+      "Workspace finalization proof is invalid",
+    )
+  }
+  if (!timingSafeEqual(providedSignature, expectedSignature)) {
+    throw new WorkspaceStorageCompletionError(
+      "Workspace finalization proof is invalid",
+    )
+  }
+  const candidate = claims as Partial<WorkspaceFinalizationProofClaims>
+  if (
+    !claims ||
+    typeof claims !== "object" ||
+    Array.isArray(claims) ||
+    Object.keys(claims).length !== 5 ||
+    candidate.version !== expected.version ||
+    candidate.signedWorkspacePrefix !==
+      expected.signedWorkspacePrefix ||
+    candidate.workspaceGeneration !== expected.workspaceGeneration ||
+    candidate.invocationNonce !== expected.invocationNonce ||
+    candidate.expiresAt !== expected.expiresAt ||
+    !Number.isInteger(candidate.expiresAt) ||
+    candidate.expiresAt! < Math.floor(Date.now() / 1000)
+  ) {
+    throw new WorkspaceStorageCompletionError(
+      "Workspace finalization proof is invalid",
+    )
+  }
 }
 
 /**
@@ -1687,8 +1838,10 @@ async function recoverWorkspaceCheckpoint(
 
 export async function ensureWorkspaceCheckpoint(
   signedWorkspacePrefix: string,
+  finalizationBinding?: WorkspaceFinalizationBinding,
 ): Promise<EnsureWorkspaceCheckpointResult> {
-  return withWorkspaceGenerationLock(
+  const checkpoint =
+    await withWorkspaceGenerationLock<EnsureWorkspaceCheckpointResult>(
     signedWorkspacePrefix,
     async () => {
       let snapshot = await readWorkspaceGenerationSnapshot(
@@ -1722,12 +1875,32 @@ export async function ensureWorkspaceCheckpoint(
       }
       const checkpointSnapshot = inlineWorkspaceCheckpointSnapshot(snapshot)
       return {
-        checkpointReady: true,
+        checkpointReady: true as const,
         workspaceGeneration: manifest.workspaceGeneration,
         ...(checkpointSnapshot ? { checkpointSnapshot } : {}),
       }
     },
   )
+  if (!finalizationBinding) return checkpoint
+  if (
+    !finalizationBinding.invocationNonce ||
+    !Number.isInteger(finalizationBinding.expiresAt) ||
+    finalizationBinding.expiresAt < Math.floor(Date.now() / 1000)
+  ) {
+    throw new WorkspaceStorageCompletionError(
+      "Workspace finalization binding is invalid",
+    )
+  }
+  return {
+    ...checkpoint,
+    atomicCheckpointCommitVersion: 1,
+    checkpointFinalizationProof:
+      await createWorkspaceFinalizationProof(
+        signedWorkspacePrefix,
+        checkpoint.workspaceGeneration,
+        finalizationBinding,
+      ),
+  }
 }
 
 export async function commitWorkspaceCheckpoint(
@@ -3023,6 +3196,8 @@ async function finishClaimedUpload(
   generationFence?: {
     signedWorkspacePrefix: string
     expectedGeneration: string
+    snapshot?: WorkspaceGenerationSnapshot
+    checkpointAlreadyAnchored?: boolean
   },
 ): Promise<CompletedWorkspaceUpload> {
   const bucket = bucketName()
@@ -3061,9 +3236,11 @@ async function finishClaimedUpload(
           "Workspace upload target is not mutable user state",
         )
       }
-      generationSnapshot = await readWorkspaceGenerationSnapshot(
-        generationFence.signedWorkspacePrefix,
-      )
+      generationSnapshot =
+        generationFence.snapshot ??
+        await readWorkspaceGenerationSnapshot(
+          generationFence.signedWorkspacePrefix,
+        )
       if (
         generationSnapshot.generation !==
         generationFence.expectedGeneration
@@ -3073,10 +3250,12 @@ async function finishClaimedUpload(
         )
       }
       generationChecked = true
-      await anchorCommittedCheckpointPathBeforePromotion(
-        generationFence.signedWorkspacePrefix,
-        targetRelativePath,
-      )
+      if (!generationFence.checkpointAlreadyAnchored) {
+        await anchorCommittedCheckpointPathBeforePromotion(
+          generationFence.signedWorkspacePrefix,
+          targetRelativePath,
+        )
+      }
     }
     const priorVersions = await supersededUploadVersions(
       ownerKey,
@@ -3130,6 +3309,7 @@ async function finishClaimedUpload(
       workspaceGeneration = workspaceGenerationFromEntries(
         [...generationSnapshot.entries.values()],
       )
+      generationSnapshot.generation = workspaceGeneration
     }
     return {
       key: claimed.targetKey,
@@ -3172,6 +3352,999 @@ async function finishClaimedUpload(
       database,
       onCapacityRelease,
     })
+  }
+}
+
+export type FinalizeWorkspaceCheckpointResult = {
+  checkpointCommitted: true
+  workspaceGeneration: string
+  uploads: Array<{
+    reservationId: string
+    key: string
+    eTag: string
+  }>
+  deletions: Array<{
+    path: string
+    deleted: boolean
+  }>
+}
+
+type WorkspaceFinalizationJournalRequest = {
+  ownerHash: string
+  signedWorkspacePrefix: string
+  baseWorkspaceGeneration: string
+  proofHash: string
+  reservationIds: string[]
+  deletedPaths: string[]
+  requestDigest: string
+}
+
+type PendingWorkspaceFinalizationJournal =
+  WorkspaceFinalizationJournalRequest & {
+    version: 1
+    state: "pending"
+  }
+
+type PreparedWorkspaceFinalizationJournal =
+  WorkspaceFinalizationJournalRequest & {
+    version: 1
+    state: "prepared" | "committed"
+    baseManifestDigest: string
+    result: FinalizeWorkspaceCheckpointResult
+    nextManifest: WorkspaceCheckpointManifest
+  }
+
+type WorkspaceFinalizationJournal =
+  | PendingWorkspaceFinalizationJournal
+  | PreparedWorkspaceFinalizationJournal
+
+function workspaceFinalizationJournalKey(
+  signedWorkspacePrefix: string,
+): string {
+  return `${checkpointNamespace(signedWorkspacePrefix)}/last-finalization.json`
+}
+
+function workspaceFinalizationOwnerHash(ownerKey: string): string {
+  return createHash("sha256").update(ownerKey).digest("hex")
+}
+
+function workspaceFinalizationProofHash(proof: string): string {
+  return createHash("sha256").update(proof).digest("hex")
+}
+
+function workspaceFinalizationRequestDigest(
+  request: Omit<WorkspaceFinalizationJournalRequest, "requestDigest">,
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        version: 1,
+        ownerHash: request.ownerHash,
+        signedWorkspacePrefix: request.signedWorkspacePrefix,
+        baseWorkspaceGeneration: request.baseWorkspaceGeneration,
+        proofHash: request.proofHash,
+        reservationIds: request.reservationIds,
+        deletedPaths: request.deletedPaths,
+      }),
+    )
+    .digest("hex")
+}
+
+function workspaceCheckpointManifestDigest(
+  manifest: WorkspaceCheckpointManifest,
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify(manifest))
+    .digest("hex")
+}
+
+function createWorkspaceFinalizationJournalRequest(options: {
+  ownerKey: string
+  signedWorkspacePrefix: string
+  baseWorkspaceGeneration: string
+  proof: string
+  reservationIds: readonly string[]
+  deletedPaths: readonly string[]
+}): WorkspaceFinalizationJournalRequest {
+  const requestWithoutDigest = {
+    ownerHash: workspaceFinalizationOwnerHash(options.ownerKey),
+    signedWorkspacePrefix: options.signedWorkspacePrefix,
+    baseWorkspaceGeneration: options.baseWorkspaceGeneration,
+    proofHash: workspaceFinalizationProofHash(options.proof),
+    reservationIds: [...options.reservationIds],
+    deletedPaths: [...options.deletedPaths],
+  }
+  return {
+    ...requestWithoutDigest,
+    requestDigest: workspaceFinalizationRequestDigest(
+      requestWithoutDigest,
+    ),
+  }
+}
+
+function isExactRecord(
+  value: Record<string, unknown>,
+  fields: readonly string[],
+): boolean {
+  const actual = Object.keys(value).sort()
+  const expected = [...fields].sort()
+  return (
+    actual.length === expected.length &&
+    actual.every((field, index) => field === expected[index])
+  )
+}
+
+function stringArraysEqual(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((item, index) => item === right[index])
+  )
+}
+
+function workspaceFinalizationRequestsEqual(
+  left: WorkspaceFinalizationJournalRequest,
+  right: WorkspaceFinalizationJournalRequest,
+): boolean {
+  return (
+    left.ownerHash === right.ownerHash &&
+    left.signedWorkspacePrefix === right.signedWorkspacePrefix &&
+    left.baseWorkspaceGeneration === right.baseWorkspaceGeneration &&
+    left.proofHash === right.proofHash &&
+    left.requestDigest === right.requestDigest &&
+    stringArraysEqual(left.reservationIds, right.reservationIds) &&
+    stringArraysEqual(left.deletedPaths, right.deletedPaths)
+  )
+}
+
+function parseWorkspaceFinalizationStringArray(
+  value: unknown,
+  validate: (item: string) => boolean,
+): string[] | null {
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_WORKSPACE_GENERATION_OBJECTS
+  ) {
+    return null
+  }
+  const items: string[] = []
+  const seen = new Set<string>()
+  for (const candidate of value) {
+    if (typeof candidate !== "string" || !validate(candidate)) return null
+    if (seen.has(candidate)) return null
+    seen.add(candidate)
+    items.push(candidate)
+  }
+  return items
+}
+
+// A persisted result is hostile input; every nested field is validated.
+// eslint-disable-next-line complexity
+function parseWorkspaceFinalizationResult(
+  value: unknown,
+  signedWorkspacePrefix: string,
+  reservationIds: readonly string[],
+  deletedPaths: readonly string[],
+): FinalizeWorkspaceCheckpointResult | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null
+  }
+  const candidate = value as Record<string, unknown>
+  if (
+    !isExactRecord(candidate, [
+      "checkpointCommitted",
+      "workspaceGeneration",
+      "uploads",
+      "deletions",
+    ]) ||
+    candidate.checkpointCommitted !== true ||
+    typeof candidate.workspaceGeneration !== "string" ||
+    !WORKSPACE_GENERATION_RE.test(candidate.workspaceGeneration) ||
+    !Array.isArray(candidate.uploads) ||
+    candidate.uploads.length !== reservationIds.length ||
+    !Array.isArray(candidate.deletions) ||
+    candidate.deletions.length !== deletedPaths.length
+  ) {
+    return null
+  }
+
+  const uploads: FinalizeWorkspaceCheckpointResult["uploads"] = []
+  for (let index = 0; index < candidate.uploads.length; index += 1) {
+    const raw = candidate.uploads[index]
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null
+    const upload = raw as Record<string, unknown>
+    if (
+      !isExactRecord(upload, ["reservationId", "key", "eTag"]) ||
+      upload.reservationId !== reservationIds[index] ||
+      typeof upload.key !== "string" ||
+      !upload.key.startsWith(`${signedWorkspacePrefix}/`) ||
+      typeof upload.eTag !== "string" ||
+      upload.eTag.length === 0 ||
+      upload.eTag.length > 1_024
+    ) {
+      return null
+    }
+    const relativePath = upload.key.slice(signedWorkspacePrefix.length + 1)
+    if (
+      !isCheckpointManagedWorkspacePath(relativePath) ||
+      ownerWorkspaceKey(signedWorkspacePrefix, relativePath) !== upload.key
+    ) {
+      return null
+    }
+    uploads.push({
+      reservationId: upload.reservationId,
+      key: upload.key,
+      eTag: upload.eTag,
+    })
+  }
+
+  const deletions: FinalizeWorkspaceCheckpointResult["deletions"] = []
+  for (let index = 0; index < candidate.deletions.length; index += 1) {
+    const raw = candidate.deletions[index]
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null
+    const deletion = raw as Record<string, unknown>
+    if (
+      !isExactRecord(deletion, ["path", "deleted"]) ||
+      deletion.path !== deletedPaths[index] ||
+      typeof deletion.deleted !== "boolean"
+    ) {
+      return null
+    }
+    deletions.push({
+      path: deletion.path,
+      deleted: deletion.deleted,
+    })
+  }
+  return {
+    checkpointCommitted: true,
+    workspaceGeneration: candidate.workspaceGeneration,
+    uploads,
+    deletions,
+  }
+}
+
+// Persisted control state is treated as hostile until every field is checked.
+// eslint-disable-next-line complexity
+function parseWorkspaceFinalizationJournal(
+  value: unknown,
+  signedWorkspacePrefix: string,
+): WorkspaceFinalizationJournal {
+  const invalid = (): never => {
+    throw new WorkspaceStorageCompletionError(
+      "Workspace finalization journal is invalid",
+    )
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return invalid()
+  }
+  const candidate = value as Record<string, unknown>
+  const commonFields = [
+    "version",
+    "state",
+    "ownerHash",
+    "signedWorkspacePrefix",
+    "baseWorkspaceGeneration",
+    "proofHash",
+    "reservationIds",
+    "deletedPaths",
+    "requestDigest",
+  ] as const
+  const prepared =
+    candidate.state === "prepared" || candidate.state === "committed"
+  if (
+    !isExactRecord(
+      candidate,
+      prepared
+        ? [
+            ...commonFields,
+            "baseManifestDigest",
+            "result",
+            "nextManifest",
+          ]
+        : commonFields,
+    ) ||
+    candidate.version !== 1 ||
+    (candidate.state !== "pending" && !prepared) ||
+    typeof candidate.ownerHash !== "string" ||
+    !WORKSPACE_GENERATION_RE.test(candidate.ownerHash) ||
+    candidate.signedWorkspacePrefix !== signedWorkspacePrefix ||
+    typeof candidate.baseWorkspaceGeneration !== "string" ||
+    !WORKSPACE_GENERATION_RE.test(candidate.baseWorkspaceGeneration) ||
+    typeof candidate.proofHash !== "string" ||
+    !WORKSPACE_GENERATION_RE.test(candidate.proofHash) ||
+    typeof candidate.requestDigest !== "string" ||
+    !WORKSPACE_GENERATION_RE.test(candidate.requestDigest)
+  ) {
+    return invalid()
+  }
+  const reservationIds = parseWorkspaceFinalizationStringArray(
+    candidate.reservationIds,
+    (item) => WORKSPACE_RESERVATION_ID_RE.test(item),
+  )
+  const deletedPaths = parseWorkspaceFinalizationStringArray(
+    candidate.deletedPaths,
+    (item) => {
+      try {
+        return (
+          validateWorkspaceRelativePath(item) === item &&
+          isCheckpointManagedWorkspacePath(item)
+        )
+      } catch {
+        return false
+      }
+    },
+  )
+  if (
+    !reservationIds ||
+    !deletedPaths ||
+    reservationIds.length + deletedPaths.length >
+      MAX_WORKSPACE_GENERATION_OBJECTS
+  ) {
+    return invalid()
+  }
+  const request = {
+    ownerHash: candidate.ownerHash,
+    signedWorkspacePrefix,
+    baseWorkspaceGeneration: candidate.baseWorkspaceGeneration,
+    proofHash: candidate.proofHash,
+    reservationIds,
+    deletedPaths,
+  }
+  if (
+    workspaceFinalizationRequestDigest(request) !== candidate.requestDigest
+  ) {
+    return invalid()
+  }
+  const base: WorkspaceFinalizationJournalRequest = {
+    ...request,
+    requestDigest: candidate.requestDigest,
+  }
+  if (!prepared) {
+    return { version: 1, state: "pending", ...base }
+  }
+  const result = parseWorkspaceFinalizationResult(
+    candidate.result,
+    signedWorkspacePrefix,
+    reservationIds,
+    deletedPaths,
+  )
+  if (!result) return invalid()
+  if (
+    typeof candidate.baseManifestDigest !== "string" ||
+    !WORKSPACE_GENERATION_RE.test(candidate.baseManifestDigest)
+  ) {
+    return invalid()
+  }
+  const nextManifest = parseWorkspaceCheckpointManifest(
+    candidate.nextManifest,
+    signedWorkspacePrefix,
+  ).manifest
+  if (nextManifest.workspaceGeneration !== result.workspaceGeneration) {
+    return invalid()
+  }
+  return {
+    version: 1,
+    state: candidate.state as "prepared" | "committed",
+    ...base,
+    baseManifestDigest: candidate.baseManifestDigest,
+    result,
+    nextManifest,
+  }
+}
+
+async function readWorkspaceFinalizationJournal(
+  signedWorkspacePrefix: string,
+): Promise<WorkspaceFinalizationJournal | null> {
+  let response
+  try {
+    response = await s3Client().send(
+      new GetObjectCommand({
+        Bucket: bucketName(),
+        Key: workspaceFinalizationJournalKey(signedWorkspacePrefix),
+      }),
+    )
+  } catch (error) {
+    if (isS3ObjectNotFound(error)) return null
+    throw error
+  }
+  if (
+    !Number.isSafeInteger(response.ContentLength) ||
+    !response.ContentLength ||
+    response.ContentLength > MAX_WORKSPACE_FINALIZATION_JOURNAL_BYTES ||
+    !response.Body
+  ) {
+    throw new WorkspaceStorageCompletionError(
+      "Workspace finalization journal is invalid",
+    )
+  }
+  const serialized = await response.Body.transformToString("utf-8")
+  if (Buffer.byteLength(serialized, "utf8") !== response.ContentLength) {
+    throw new WorkspaceStorageCompletionError(
+      "Workspace finalization journal is invalid",
+    )
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(serialized)
+  } catch {
+    throw new WorkspaceStorageCompletionError(
+      "Workspace finalization journal is invalid",
+    )
+  }
+  return parseWorkspaceFinalizationJournal(parsed, signedWorkspacePrefix)
+}
+
+async function writeWorkspaceFinalizationJournal(
+  journal: WorkspaceFinalizationJournal,
+): Promise<void> {
+  const serialized = JSON.stringify(journal)
+  const contentLength = Buffer.byteLength(serialized, "utf8")
+  if (
+    contentLength === 0 ||
+    contentLength > MAX_WORKSPACE_FINALIZATION_JOURNAL_BYTES
+  ) {
+    throw new WorkspaceStorageCompletionError(
+      "Workspace finalization journal exceeds its size backstop",
+    )
+  }
+  try {
+    const written = await s3Client().send(
+      new PutObjectCommand({
+        Bucket: bucketName(),
+        Key: workspaceFinalizationJournalKey(
+          journal.signedWorkspacePrefix,
+        ),
+        Body: serialized,
+        ContentLength: contentLength,
+        ContentType: "application/json",
+        Tagging: "Scope=checkpoint",
+      }),
+    )
+    if (!written.VersionId) {
+      throw new WorkspaceStorageCompletionError(
+        "Workspace finalization journal returned no object version",
+      )
+    }
+  } catch (error) {
+    // S3 PutObject can commit durably while its HTTP response is lost. The
+    // stable versioned journal key is strongly consistent, so an exact
+    // read-after-error makes each phase transition safely idempotent.
+    let persisted: WorkspaceFinalizationJournal | null
+    try {
+      persisted = await readWorkspaceFinalizationJournal(
+        journal.signedWorkspacePrefix,
+      )
+    } catch {
+      throw error
+    }
+    if (
+      persisted &&
+      workspaceFinalizationJournalsEqual(persisted, journal)
+    ) {
+      return
+    }
+    throw error
+  }
+}
+
+function workspaceFinalizationResultsEqual(
+  left: FinalizeWorkspaceCheckpointResult,
+  right: FinalizeWorkspaceCheckpointResult,
+): boolean {
+  return (
+    left.checkpointCommitted === right.checkpointCommitted &&
+    left.workspaceGeneration === right.workspaceGeneration &&
+    left.uploads.length === right.uploads.length &&
+    left.uploads.every((upload, index) => {
+      const candidate = right.uploads[index]
+      return (
+        candidate !== undefined &&
+        upload.reservationId === candidate.reservationId &&
+        upload.key === candidate.key &&
+        upload.eTag === candidate.eTag
+      )
+    }) &&
+    left.deletions.length === right.deletions.length &&
+    left.deletions.every((deletion, index) => {
+      const candidate = right.deletions[index]
+      return (
+        candidate !== undefined &&
+        deletion.path === candidate.path &&
+        deletion.deleted === candidate.deleted
+      )
+    })
+  )
+}
+
+function workspaceCheckpointManifestsEqual(
+  left: WorkspaceCheckpointManifest,
+  right: WorkspaceCheckpointManifest,
+): boolean {
+  if (
+    left.version !== right.version ||
+    left.signedWorkspacePrefix !== right.signedWorkspacePrefix ||
+    left.workspaceGeneration !== right.workspaceGeneration ||
+    left.entries.length !== right.entries.length
+  ) return false
+  return left.entries.every((entry, index) => {
+    const candidate = right.entries[index]
+    return (
+      candidate !== undefined &&
+      entry.path === candidate.path &&
+      entry.size === candidate.size &&
+      entry.eTag === candidate.eTag &&
+      entry.source === candidate.source &&
+      entry.versionId === candidate.versionId &&
+      entry.sourceETag === candidate.sourceETag
+    )
+  })
+}
+
+function workspaceFinalizationJournalsEqual(
+  left: WorkspaceFinalizationJournal,
+  right: WorkspaceFinalizationJournal,
+): boolean {
+  if (
+    left.version !== right.version ||
+    left.state !== right.state ||
+    !workspaceFinalizationRequestsEqual(left, right)
+  ) {
+    return false
+  }
+  if (left.state === "pending" || right.state === "pending") {
+    return left.state === right.state
+  }
+  return (
+    left.baseManifestDigest === right.baseManifestDigest &&
+    workspaceFinalizationResultsEqual(left.result, right.result) &&
+    workspaceCheckpointManifestsEqual(
+      left.nextManifest,
+      right.nextManifest,
+    )
+  )
+}
+
+async function verifyPreparedWorkspaceFinalizationTargets(
+  journal: PreparedWorkspaceFinalizationJournal,
+): Promise<void> {
+  const finalEntries = new Map(
+    journal.nextManifest.entries.map((entry) => [entry.path, entry]),
+  )
+  for (const upload of journal.result.uploads) {
+    const path = upload.key.slice(journal.signedWorkspacePrefix.length + 1)
+    const entry = finalEntries.get(path)
+    if (!entry || entry.eTag !== upload.eTag) {
+      throw new WorkspaceStorageCompletionError(
+        "Prepared workspace finalization upload is invalid",
+      )
+    }
+    const current = await s3Client().send(
+      new HeadObjectCommand({
+        Bucket: bucketName(),
+        Key: upload.key,
+      }),
+    )
+    if (
+      current.ContentLength !== entry.size ||
+      current.ETag !== entry.eTag ||
+      current.VersionId !== entry.versionId
+    ) {
+      throw new WorkspaceStorageCompletionError(
+        "Prepared workspace finalization target changed",
+      )
+    }
+  }
+  for (const deletion of journal.result.deletions) {
+    if (!deletion.deleted) continue
+    try {
+      await s3Client().send(
+        new HeadObjectCommand({
+          Bucket: bucketName(),
+          Key: ownerWorkspaceKey(
+            journal.signedWorkspacePrefix,
+            deletion.path,
+          ),
+        }),
+      )
+    } catch (error) {
+      if (isS3ObjectNotFound(error)) continue
+      throw error
+    }
+    throw new WorkspaceStorageCompletionError(
+      "Prepared workspace finalization deletion changed",
+    )
+  }
+}
+
+/**
+ * Publish every turn-final workspace mutation behind one generation fence.
+ *
+ * `ensureWorkspaceCheckpoint` already performed the authoritative full S3
+ * scan after the Router acquired the owner-wide lease. Its signed proof lets
+ * this operation seed the batch from the exact committed manifest instead of
+ * repeating that same scan once per changed SQLite file. The manifest Put
+ * below remains the single commit point; exact-version anchors are durable
+ * before the first target mutation, so the ordinary ensure path can recover a
+ * crash-partial batch without losing the prior checkpoint.
+ */
+// The explicit phases keep the fail-closed boundary auditable in one place.
+// eslint-disable-next-line max-lines-per-function, max-params
+export async function finalizeWorkspaceCheckpoint(
+  ownerEmail: string,
+  signedWorkspacePrefix: string,
+  baseWorkspaceGeneration: string,
+  reservationIds: readonly string[],
+  deletedPaths: readonly string[],
+  checkpointFinalizationProof: string,
+  invocationNonce: string,
+  invocationExpiresAt: number,
+): Promise<FinalizeWorkspaceCheckpointResult> {
+  const prefix = validateTrustedPrefix(signedWorkspacePrefix)
+  const ownerKey = ownerEmail.trim().toLowerCase()
+  if (
+    !WORKSPACE_GENERATION_RE.test(baseWorkspaceGeneration) ||
+    !invocationNonce ||
+    !Number.isInteger(invocationExpiresAt) ||
+    reservationIds.length + deletedPaths.length >
+      MAX_WORKSPACE_GENERATION_OBJECTS
+  ) {
+    throw new Error("Invalid workspace checkpoint batch")
+  }
+  const normalizedReservationIds = reservationIds.map((id) => {
+    if (!WORKSPACE_RESERVATION_ID_RE.test(id)) {
+      throw new Error("Invalid workspace checkpoint batch")
+    }
+    return id.toLowerCase()
+  })
+  if (
+    new Set(normalizedReservationIds.map((id) => id.toLowerCase()))
+      .size !== normalizedReservationIds.length
+  ) {
+    throw new Error("Invalid workspace checkpoint batch")
+  }
+  const normalizedDeletedPaths = deletedPaths.map((path) => {
+    const normalized = validateWorkspaceRelativePath(path)
+    if (!isCheckpointManagedWorkspacePath(normalized)) {
+      throw new Error("Invalid workspace checkpoint batch")
+    }
+    return normalized
+  })
+  if (new Set(normalizedDeletedPaths).size !== normalizedDeletedPaths.length) {
+    throw new Error("Invalid workspace checkpoint batch")
+  }
+  const journalRequest = createWorkspaceFinalizationJournalRequest({
+    ownerKey,
+    signedWorkspacePrefix: prefix,
+    baseWorkspaceGeneration,
+    proof: checkpointFinalizationProof,
+    reservationIds: normalizedReservationIds,
+    deletedPaths: normalizedDeletedPaths,
+  })
+  const leasesToDrop: WorkspaceUploadReservation[] = []
+  try {
+    return await withWorkspaceGenerationLock(
+      prefix,
+      // All mutation phases stay inside one owner-wide generation fence.
+      // eslint-disable-next-line max-lines-per-function, complexity
+      async (database) => {
+        let manifest = await readWorkspaceCheckpointManifest(prefix)
+        const existingJournal = await readWorkspaceFinalizationJournal(
+          prefix,
+        )
+        if (
+          existingJournal &&
+          workspaceFinalizationRequestsEqual(
+            existingJournal,
+            journalRequest,
+          )
+        ) {
+          if (existingJournal.state !== "pending") {
+            if (
+              manifest &&
+              workspaceCheckpointManifestsEqual(
+                manifest,
+                existingJournal.nextManifest,
+              )
+            ) {
+              if (existingJournal.state === "prepared") {
+                await writeWorkspaceFinalizationJournal({
+                  ...existingJournal,
+                  state: "committed",
+                })
+              }
+              return existingJournal.result
+            }
+            if (
+              existingJournal.state === "prepared" &&
+              manifest &&
+              workspaceCheckpointManifestDigest(manifest) ===
+                existingJournal.baseManifestDigest
+            ) {
+              await verifyPreparedWorkspaceFinalizationTargets(
+                existingJournal,
+              )
+              await writeWorkspaceCheckpointManifest(
+                existingJournal.nextManifest,
+              )
+              await writeWorkspaceFinalizationJournal({
+                ...existingJournal,
+                state: "committed",
+              })
+              return existingJournal.result
+            }
+            throw new WorkspaceStorageCompletionError(
+              "Workspace generation changed after checkpoint finalization",
+            )
+          }
+        }
+        await verifyWorkspaceFinalizationProof(
+          checkpointFinalizationProof,
+          {
+            version: 1,
+            signedWorkspacePrefix: prefix,
+            workspaceGeneration: baseWorkspaceGeneration,
+            invocationNonce,
+            expiresAt: invocationExpiresAt,
+          },
+        )
+        if (
+          !manifest ||
+          manifest.workspaceGeneration !== baseWorkspaceGeneration
+        ) {
+          throw new WorkspaceStorageCompletionError(
+            "Workspace generation changed before checkpoint finalization",
+          )
+        }
+        await writeWorkspaceFinalizationJournal({
+          version: 1,
+          state: "pending",
+          ...journalRequest,
+        })
+        const snapshot: WorkspaceGenerationSnapshot = {
+          generation: manifest.workspaceGeneration,
+          entries: new Map(
+            manifest.entries.map((entry) => [
+              entry.path,
+              {
+                path: entry.path,
+                size: entry.size,
+                eTag: entry.eTag,
+              },
+            ]),
+          ),
+        }
+
+        const claimed: WorkspaceUploadReservation[] = []
+        try {
+          for (const reservationId of normalizedReservationIds) {
+            const claim = await claimUploadCompletion(
+              ownerKey,
+              reservationId,
+              database,
+              false,
+              true,
+            )
+            if (claim.kind !== "claimed") {
+              throw new WorkspaceStorageCompletionError(
+                "Workspace checkpoint batch is not retryable",
+              )
+            }
+            claimed.push(claim.reservation)
+          }
+
+          const uploadPaths = new Set<string>()
+          for (const reservation of claimed) {
+            const ownerPrefix = `${prefix}/`
+            if (
+              reservation.publicArtifact ||
+              !reservation.targetKey.startsWith(ownerPrefix)
+            ) {
+              throw new WorkspaceStorageCompletionError(
+                "Workspace upload target does not match its signed prefix",
+              )
+            }
+            const relativePath = reservation.targetKey.slice(
+              ownerPrefix.length,
+            )
+            if (
+              !isCheckpointManagedWorkspacePath(relativePath) ||
+              uploadPaths.has(relativePath) ||
+              normalizedDeletedPaths.includes(relativePath)
+            ) {
+              throw new WorkspaceStorageCompletionError(
+                "Workspace checkpoint batch contains conflicting paths",
+              )
+            }
+            uploadPaths.add(relativePath)
+            const staged = await inspectStagedUpload(
+              reservation,
+              bucketName(),
+            )
+            if (!staged.matches || !staged.versionId) {
+              throw new WorkspaceStorageCompletionError(
+                "Uploaded object did not match its reservation",
+              )
+            }
+          }
+
+          const plannedEntries = new Map(snapshot.entries)
+          for (const path of normalizedDeletedPaths) {
+            plannedEntries.delete(path)
+          }
+          for (const reservation of claimed) {
+            const relativePath = reservation.targetKey.slice(
+              prefix.length + 1,
+            )
+            plannedEntries.set(relativePath, {
+              path: relativePath,
+              size: reservation.expectedBytes,
+              eTag: `pending-${reservation.id}`,
+            })
+          }
+          assertPrefixFreeWorkspaceEntries([...plannedEntries.values()])
+        } catch (error) {
+          await Promise.allSettled(
+            claimed.map((reservation) =>
+              resetWorkspaceUploadClaim(reservation.id, database),
+            ),
+          )
+          throw error
+        }
+
+        const mutationPaths = new Set(normalizedDeletedPaths)
+        for (const reservation of claimed) {
+          mutationPaths.add(
+            reservation.targetKey.slice(prefix.length + 1),
+          )
+        }
+        try {
+          for (const path of mutationPaths) {
+            await anchorCommittedCheckpointPathBeforePromotion(
+              prefix,
+              path,
+            )
+          }
+          const anchoredManifest = await readWorkspaceCheckpointManifest(
+            prefix,
+          )
+          if (
+            !anchoredManifest ||
+            anchoredManifest.workspaceGeneration !==
+              baseWorkspaceGeneration
+          ) {
+            throw new WorkspaceStorageCompletionError(
+              "Workspace checkpoint anchor generation changed",
+            )
+          }
+          manifest = anchoredManifest
+          const baseManifestDigest = workspaceCheckpointManifestDigest(
+            anchoredManifest,
+          )
+
+          const deletions: FinalizeWorkspaceCheckpointResult["deletions"] = []
+          for (const path of normalizedDeletedPaths) {
+            const currentEntry = snapshot.entries.get(path)
+            if (!currentEntry) {
+              deletions.push({ path, deleted: false })
+              continue
+            }
+            const committedEntry = manifest.entries.find(
+              (entry) => entry.path === path,
+            )
+            if (
+              !committedEntry ||
+              committedEntry.size !== currentEntry.size ||
+              committedEntry.eTag !== currentEntry.eTag
+            ) {
+              throw new WorkspaceStorageCompletionError(
+                "Workspace delete target is not in the committed checkpoint",
+              )
+            }
+            const deleted = await s3Client().send(
+              new DeleteObjectCommand({
+                Bucket: bucketName(),
+                Key: ownerWorkspaceKey(prefix, path),
+              }),
+            )
+            if (deleted.DeleteMarker !== true || !deleted.VersionId) {
+              throw new WorkspaceStorageCompletionError(
+                "Workspace path deletion was not version preserving",
+              )
+            }
+            snapshot.entries.delete(path)
+            snapshot.generation = workspaceGenerationFromEntries(
+              [...snapshot.entries.values()],
+            )
+            deletions.push({ path, deleted: true })
+          }
+
+          const uploads: FinalizeWorkspaceCheckpointResult["uploads"] = []
+          for (const [index, reservation] of claimed.entries()) {
+            const completed = await finishClaimedUpload(
+              reservation,
+              ownerKey,
+              reservation.id,
+              database,
+              () => {
+                leasesToDrop.push(reservation)
+              },
+              {
+                signedWorkspacePrefix: prefix,
+                expectedGeneration: snapshot.generation,
+                snapshot,
+                checkpointAlreadyAnchored: true,
+              },
+            )
+            if (!completed.eTag || !completed.workspaceGeneration) {
+              throw new WorkspaceStorageCompletionError(
+                "Workspace batch promotion returned incomplete metadata",
+              )
+            }
+            uploads.push({
+              reservationId: normalizedReservationIds[index]!,
+              key: completed.key,
+              eTag: completed.eTag,
+            })
+            await Promise.allSettled([
+              settleLease(
+                reservation.byteLeaseId,
+                reservation.expectedBytes,
+              ),
+              settleLease(reservation.objectLeaseId, 1),
+            ])
+          }
+
+          const nextManifest = await captureWorkspaceCheckpointManifest(
+            prefix,
+            snapshot,
+            manifest,
+          )
+          if (nextManifest.workspaceGeneration !== snapshot.generation) {
+            throw new WorkspaceStorageCompletionError(
+              "Workspace checkpoint batch generation is incomplete",
+            )
+          }
+          const result: FinalizeWorkspaceCheckpointResult = {
+            checkpointCommitted: true,
+            workspaceGeneration: nextManifest.workspaceGeneration,
+            uploads,
+            deletions,
+          }
+          const preparedJournal: PreparedWorkspaceFinalizationJournal = {
+            version: 1,
+            state: "prepared",
+            ...journalRequest,
+            baseManifestDigest,
+            result,
+            nextManifest,
+          }
+          await writeWorkspaceFinalizationJournal(preparedJournal)
+          await writeWorkspaceCheckpointManifest(nextManifest)
+          await writeWorkspaceFinalizationJournal({
+            ...preparedJournal,
+            state: "committed",
+          })
+          return result
+        } catch (error) {
+          await Promise.allSettled(
+            claimed.map((reservation) =>
+              resetWorkspaceUploadClaim(reservation.id, database),
+            ),
+          )
+          throw error
+        }
+      },
+    )
+  } catch (error) {
+    await Promise.allSettled(
+      leasesToDrop.flatMap((reservation) => [
+        dropLease(reservation.byteLeaseId),
+        dropLease(reservation.objectLeaseId),
+      ]),
+    )
+    throw error
   }
 }
 

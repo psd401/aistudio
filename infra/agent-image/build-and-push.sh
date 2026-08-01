@@ -236,11 +236,12 @@ else
   fi
   echo ""
 
-  echo "3. Cross-language workspace path contract..."
+  echo "3. Cross-language workspace persistence contracts..."
   if ! "${PYTHON}" -m unittest \
         "${SCRIPT_DIR}/test_workspace_sync.py" \
+        "${SCRIPT_DIR}/test_mantle_proxy.py" \
         "${SCRIPT_DIR}/test_workspace_path_contract.py"; then
-    echo "ERROR: Python workspace path contract FAILED." >&2
+    echo "ERROR: Python workspace persistence contract FAILED." >&2
     exit 1
   fi
   if ! bun run --cwd "${REPO_ROOT}" test -- --runInBand --silent \
@@ -250,8 +251,9 @@ else
         "${REPO_ROOT}/tests/unit/lib/agent-workspace/storage-broker-list.test.ts" \
         "${REPO_ROOT}/tests/unit/lib/agent-workspace/storage-broker-upload.test.ts" \
         "${REPO_ROOT}/tests/unit/lib/agent-workspace/storage-broker-checkpoint.test.ts" \
+        "${REPO_ROOT}/tests/unit/agent-workspace-storage-route.test.ts" \
         "${REPO_ROOT}/tests/unit/agent-image-openclaw-runtime-patch.test.ts"; then
-    echo "ERROR: TypeScript workspace path contract FAILED." >&2
+    echo "ERROR: TypeScript workspace persistence contract FAILED." >&2
     exit 1
   fi
   echo ""

@@ -392,6 +392,16 @@ export class AgentPlatformStack extends cdk.Stack {
           // this as an InvalidRequest that fails the whole stack update.
         },
         {
+          id: 'cleanup-checkpoint-control-versions',
+          tagFilters: { Scope: 'checkpoint' },
+          noncurrentVersionExpiration: cdk.Duration.days(30),
+          // Checkpoint manifests, anchors, and finalization records remain
+          // durable at their current version. Only superseded control-plane
+          // versions age out after the recovery window. As with the private
+          // tag-filtered rule above, this rule intentionally carries no
+          // multipart-abort action because S3 rejects that combination.
+        },
+        {
           // Bucket-wide abort of abandoned multipart uploads, with no prefix
           // or tag filter so it is a legal home for the action the rule above
           // cannot carry. Keeps the cleanup intent that the tag-filtered rule

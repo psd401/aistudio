@@ -75,6 +75,8 @@ class VersionedS3 {
   }> = []
   sequence = 0
   failNextManifestPutAfterWrite = false
+  failNextManifestPutBeforeWrite = false
+  failNextJournalPutAfterWrite = false
   beforeCommand?: (
     name: string,
     input: Record<string, unknown>,
@@ -215,12 +217,26 @@ class VersionedS3 {
     }
     if (name === "PutObjectCommand") {
       const body = String(input.Body ?? "")
+      if (
+        key.endsWith("/manifest.json") &&
+        this.failNextManifestPutBeforeWrite
+      ) {
+        this.failNextManifestPutBeforeWrite = false
+        throw new Error("manifest put failed before write")
+      }
       const stored = this.add(key, {
         size: Buffer.byteLength(body),
         eTag: `"manifest-${this.sequence + 1}"`,
         body,
         scope: String(input.Tagging ?? ""),
       })
+      if (
+        key.endsWith("/last-finalization.json") &&
+        this.failNextJournalPutAfterWrite
+      ) {
+        this.failNextJournalPutAfterWrite = false
+        throw new Error("journal response lost after durable put")
+      }
       if (
         key.endsWith("/manifest.json") &&
         this.failNextManifestPutAfterWrite
@@ -286,6 +302,8 @@ let commitWorkspaceCheckpoint:
   typeof import("@/lib/agent-workspace/storage-broker").commitWorkspaceCheckpoint
 let completeWorkspaceUpload:
   typeof import("@/lib/agent-workspace/storage-broker").completeWorkspaceUpload
+let finalizeWorkspaceCheckpoint:
+  typeof import("@/lib/agent-workspace/storage-broker").finalizeWorkspaceCheckpoint
 let deleteWorkspacePath:
   typeof import("@/lib/agent-workspace/storage-broker").deleteWorkspacePath
 let workspaceGenerationFromEntries:
@@ -355,6 +373,11 @@ function legacyManifestKey(): string {
   return `.workspace-checkpoints/v1/${prefixHash}/manifest.json`
 }
 
+function finalizationJournalKey(): string {
+  const prefixHash = createHash("sha256").update(PREFIX).digest("hex")
+  return `.workspace-checkpoints/v2/${prefixHash}/last-finalization.json`
+}
+
 function manifest(): Record<string, unknown> {
   return JSON.parse(store.current(manifestKey())!.body ?? "{}") as Record<
     string,
@@ -382,11 +405,45 @@ function stagedReservation(
   }
 }
 
+async function ensureFinalizationCheckpoint(
+  invocationNonce: string,
+  expiresAt: number,
+): Promise<{ workspaceGeneration: string; proof: string }> {
+  const checkpoint = await ensureWorkspaceCheckpoint(PREFIX, {
+    invocationNonce,
+    expiresAt,
+  })
+  if (!checkpoint.checkpointFinalizationProof) {
+    throw new Error("checkpoint finalization proof was not issued")
+  }
+  return {
+    workspaceGeneration: checkpoint.workspaceGeneration,
+    proof: checkpoint.checkpointFinalizationProof,
+  }
+}
+
+function stageWorkspaceUpload(
+  reservationId: string,
+  relativePath: string,
+  eTag: string,
+  body: string,
+): void {
+  activeReservation = stagedReservation(reservationId, relativePath)
+  store.add(String(activeReservation.stagingKey), {
+    size: Buffer.byteLength(body),
+    eTag,
+    body,
+    checksum: CHECKSUM,
+    contentType: CONTENT_TYPE,
+  })
+}
+
 beforeAll(async () => {
   const broker = await import("@/lib/agent-workspace/storage-broker")
   ensureWorkspaceCheckpoint = broker.ensureWorkspaceCheckpoint
   commitWorkspaceCheckpoint = broker.commitWorkspaceCheckpoint
   completeWorkspaceUpload = broker.completeWorkspaceUpload
+  finalizeWorkspaceCheckpoint = broker.finalizeWorkspaceCheckpoint
   deleteWorkspacePath = broker.deleteWorkspacePath
   workspaceGenerationFromEntries = broker.workspaceGenerationFromEntries
   resetWorkspaceStorageClientForTests =
@@ -396,6 +453,7 @@ beforeAll(async () => {
 beforeEach(() => {
   jest.clearAllMocks()
   process.env.AGENT_WORKSPACE_BUCKET = BUCKET
+  process.env.AGENT_INVOCATION_SIGNING_SECRET = "test-finalization-secret"
   resetWorkspaceStorageClientForTests()
   store = new VersionedS3()
   activeReservation = undefined
@@ -1096,6 +1154,401 @@ describe("durable workspace checkpoints", () => {
       source: "target",
       versionId: store.current(`${PREFIX}/state/a.sqlite`)?.versionId,
     })
+  })
+
+  it("atomically finalizes an exact batch with one full scan and survives a lost journal response", async () => {
+    store.add(`${PREFIX}/state/a.sqlite`, {
+      size: 4,
+      eTag: '"a-old"',
+      body: "aaaa",
+      scope: "Scope=private",
+    })
+    store.add(`${PREFIX}/memory/remove.md`, {
+      size: 4,
+      eTag: '"remove-old"',
+      body: "old!",
+      scope: "Scope=private",
+    })
+    const expiresAt = Math.floor(Date.now() / 1000) + 60
+    const checkpoint = await ensureFinalizationCheckpoint(
+      "invocation-normal",
+      expiresAt,
+    )
+    stageWorkspaceUpload(
+      RESERVATION_ONE,
+      "state/a.sqlite",
+      '"a-new"',
+      "nnnn",
+    )
+    const beforeFinalize = store.commands.length
+    store.failNextJournalPutAfterWrite = true
+
+    const result = await finalizeWorkspaceCheckpoint(
+      "owner@example.com",
+      PREFIX,
+      checkpoint.workspaceGeneration,
+      [RESERVATION_ONE],
+      ["memory/remove.md"],
+      checkpoint.proof,
+      "invocation-normal",
+      expiresAt,
+    )
+
+    expect(result).toEqual({
+      checkpointCommitted: true,
+      workspaceGeneration: workspaceGeneration([
+        { path: "state/a.sqlite", size: 4, eTag: '"a-new"' },
+      ]),
+      uploads: [
+        {
+          reservationId: RESERVATION_ONE,
+          key: `${PREFIX}/state/a.sqlite`,
+          eTag: '"a-new"',
+        },
+      ],
+      deletions: [{ path: "memory/remove.md", deleted: true }],
+    })
+    expect(store.current(`${PREFIX}/state/a.sqlite`)?.body).toBe("nnnn")
+    expect(store.current(`${PREFIX}/memory/remove.md`)).toBeUndefined()
+    expect(manifest().workspaceGeneration).toBe(
+      result.workspaceGeneration,
+    )
+    expect(
+      (manifest().entries as Array<Record<string, unknown>>)[0],
+    ).toMatchObject({
+      path: "state/a.sqlite",
+      source: "target",
+      versionId: store.current(`${PREFIX}/state/a.sqlite`)?.versionId,
+    })
+    expect(
+      JSON.parse(
+        store.current(finalizationJournalKey())?.body ?? "{}",
+      ),
+    ).toMatchObject({
+      state: "committed",
+      reservationIds: [RESERVATION_ONE],
+      deletedPaths: ["memory/remove.md"],
+      result,
+    })
+    expect(
+      store.commands.filter(
+        (command) => command.name === "ListObjectsV2Command",
+      ),
+    ).toHaveLength(1)
+    expect(
+      store.commands.slice(beforeFinalize).filter(
+        (command) => command.name === "ListObjectsV2Command",
+      ),
+    ).toHaveLength(0)
+  })
+
+  it("rejects a mismatched proof and never starts its pending journal or mutations", async () => {
+    const expiresAt = Math.floor(Date.now() / 1000) + 60
+    const checkpoint = await ensureFinalizationCheckpoint(
+      "invocation-proof",
+      expiresAt,
+    )
+    stageWorkspaceUpload(
+      RESERVATION_ONE,
+      "state/a.sqlite",
+      '"a-new"',
+      "nnnn",
+    )
+    const beforeFinalize = store.commands.length
+
+    await expect(
+      finalizeWorkspaceCheckpoint(
+        "owner@example.com",
+        PREFIX,
+        checkpoint.workspaceGeneration,
+        [RESERVATION_ONE],
+        [],
+        checkpoint.proof,
+        "different-invocation",
+        expiresAt,
+      ),
+    ).rejects.toThrow("finalization proof is invalid")
+
+    expect(store.current(finalizationJournalKey())).toBeUndefined()
+    expect(store.current(`${PREFIX}/state/a.sqlite`)).toBeUndefined()
+    expect(
+      store.commands.slice(beforeFinalize).some(
+        (command) =>
+          command.name === "CopyObjectCommand" ||
+          command.name === "DeleteObjectCommand" ||
+          command.name === "PutObjectCommand" ||
+          command.name === "ListObjectsV2Command",
+      ),
+    ).toBe(false)
+  })
+
+  it("replays a committed result under a new invocation and rejects it after a later checkpoint", async () => {
+    const expiresAt = Math.floor(Date.now() / 1000) + 5
+    const checkpoint = await ensureFinalizationCheckpoint(
+      "invocation-original",
+      expiresAt,
+    )
+    stageWorkspaceUpload(
+      RESERVATION_ONE,
+      "state/a.sqlite",
+      '"a-new"',
+      "nnnn",
+    )
+    const original = await finalizeWorkspaceCheckpoint(
+      "owner@example.com",
+      PREFIX,
+      checkpoint.workspaceGeneration,
+      [RESERVATION_ONE],
+      [],
+      checkpoint.proof,
+      "invocation-original",
+      expiresAt,
+    )
+    const beforeReplay = store.commands.length
+    const now = jest
+      .spyOn(Date, "now")
+      .mockReturnValue((expiresAt + 10) * 1_000)
+    try {
+      await expect(
+        finalizeWorkspaceCheckpoint(
+          "owner@example.com",
+          PREFIX,
+          checkpoint.workspaceGeneration,
+          [RESERVATION_ONE],
+          [],
+          checkpoint.proof,
+          "invocation-retry",
+          expiresAt + 300,
+        ),
+      ).resolves.toEqual(original)
+
+      expect(
+        store.commands.slice(beforeReplay).some(
+          (command) =>
+            command.name === "CopyObjectCommand" ||
+            command.name === "DeleteObjectCommand" ||
+            command.name === "PutObjectCommand" ||
+            command.name === "ListObjectsV2Command",
+        ),
+      ).toBe(false)
+
+      const currentEntries = manifest().entries as Array<
+        Record<string, unknown>
+      >
+      const later = store.add(`${PREFIX}/memory/later.md`, {
+        size: 5,
+        eTag: '"later"',
+        body: "later",
+        scope: "Scope=private",
+      })
+      const laterEntry = {
+        path: "memory/later.md",
+        size: 5,
+        eTag: '"later"',
+        source: "target",
+        versionId: later.versionId,
+        sourceETag: '"later"',
+      }
+      const laterEntries = [...currentEntries, laterEntry].sort(
+        (left, right) => String(left.path).localeCompare(String(right.path)),
+      )
+      const laterGeneration = workspaceGeneration(
+        laterEntries.map((entry) => ({
+          path: String(entry.path),
+          size: Number(entry.size),
+          eTag: String(entry.eTag),
+        })),
+      )
+      const laterManifest = JSON.stringify({
+        version: 2,
+        signedWorkspacePrefix: PREFIX,
+        workspaceGeneration: laterGeneration,
+        entries: laterEntries,
+      })
+      store.add(manifestKey(), {
+        size: Buffer.byteLength(laterManifest),
+        eTag: '"later-manifest"',
+        body: laterManifest,
+        scope: "Scope=checkpoint",
+      })
+      const beforeStaleReplay = store.commands.length
+
+      await expect(
+        finalizeWorkspaceCheckpoint(
+          "owner@example.com",
+          PREFIX,
+          checkpoint.workspaceGeneration,
+          [RESERVATION_ONE],
+          [],
+          checkpoint.proof,
+          "invocation-retry",
+          expiresAt + 300,
+        ),
+      ).rejects.toThrow(
+        "generation changed after checkpoint finalization",
+      )
+      expect(manifest().workspaceGeneration).toBe(laterGeneration)
+      expect(
+        store.commands.slice(beforeStaleReplay).some(
+          (command) =>
+            command.name === "CopyObjectCommand" ||
+            command.name === "DeleteObjectCommand" ||
+            command.name === "PutObjectCommand" ||
+            command.name === "ListObjectsV2Command",
+        ),
+      ).toBe(false)
+    } finally {
+      now.mockRestore()
+    }
+  })
+
+  it("publishes a prepared exact manifest on a later invocation without repeating mutations", async () => {
+    const expiresAt = Math.floor(Date.now() / 1000) + 5
+    const checkpoint = await ensureFinalizationCheckpoint(
+      "invocation-prepared",
+      expiresAt,
+    )
+    stageWorkspaceUpload(
+      RESERVATION_ONE,
+      "state/a.sqlite",
+      '"a-new"',
+      "nnnn",
+    )
+    store.failNextManifestPutBeforeWrite = true
+
+    await expect(
+      finalizeWorkspaceCheckpoint(
+        "owner@example.com",
+        PREFIX,
+        checkpoint.workspaceGeneration,
+        [RESERVATION_ONE],
+        [],
+        checkpoint.proof,
+        "invocation-prepared",
+        expiresAt,
+      ),
+    ).rejects.toThrow("manifest put failed before write")
+
+    expect(manifest().workspaceGeneration).toBe(
+      checkpoint.workspaceGeneration,
+    )
+    expect(
+      JSON.parse(
+        store.current(finalizationJournalKey())?.body ?? "{}",
+      ),
+    ).toMatchObject({ state: "prepared" })
+    const promotedVersion = store.current(
+      `${PREFIX}/state/a.sqlite`,
+    )?.versionId
+    const beforeReplay = store.commands.length
+    const now = jest
+      .spyOn(Date, "now")
+      .mockReturnValue((expiresAt + 10) * 1_000)
+    try {
+      const replayed = await finalizeWorkspaceCheckpoint(
+        "owner@example.com",
+        PREFIX,
+        checkpoint.workspaceGeneration,
+        [RESERVATION_ONE],
+        [],
+        checkpoint.proof,
+        "invocation-later",
+        expiresAt + 300,
+      )
+
+      expect(replayed).toMatchObject({
+        checkpointCommitted: true,
+        uploads: [{ reservationId: RESERVATION_ONE }],
+      })
+      expect(manifest().workspaceGeneration).toBe(
+        replayed.workspaceGeneration,
+      )
+      expect(
+        store.current(`${PREFIX}/state/a.sqlite`)?.versionId,
+      ).toBe(promotedVersion)
+      expect(
+        JSON.parse(
+          store.current(finalizationJournalKey())?.body ?? "{}",
+        ),
+      ).toMatchObject({ state: "committed", result: replayed })
+      expect(
+        store.commands.slice(beforeReplay).some(
+          (command) =>
+            command.name === "CopyObjectCommand" ||
+            command.name === "DeleteObjectCommand" ||
+            command.name === "ListObjectsV2Command",
+        ),
+      ).toBe(false)
+    } finally {
+      now.mockRestore()
+    }
+  })
+
+  it("fails closed when an exact pending journal is retried by a different invocation", async () => {
+    const expiresAt = Math.floor(Date.now() / 1000) + 5
+    const checkpoint = await ensureFinalizationCheckpoint(
+      "invocation-pending",
+      expiresAt,
+    )
+    const proofHash = createHash("sha256")
+      .update(checkpoint.proof)
+      .digest("hex")
+    const ownerHash = createHash("sha256")
+      .update("owner@example.com")
+      .digest("hex")
+    const request = {
+      version: 1,
+      ownerHash,
+      signedWorkspacePrefix: PREFIX,
+      baseWorkspaceGeneration: checkpoint.workspaceGeneration,
+      proofHash,
+      reservationIds: [] as string[],
+      deletedPaths: [] as string[],
+    }
+    const requestDigest = createHash("sha256")
+      .update(JSON.stringify(request))
+      .digest("hex")
+    const journal = JSON.stringify({
+      version: 1,
+      state: "pending",
+      ownerHash,
+      signedWorkspacePrefix: PREFIX,
+      baseWorkspaceGeneration: checkpoint.workspaceGeneration,
+      proofHash,
+      reservationIds: [],
+      deletedPaths: [],
+      requestDigest,
+    })
+    store.add(finalizationJournalKey(), {
+      size: Buffer.byteLength(journal),
+      eTag: '"pending-journal"',
+      body: journal,
+      scope: "Scope=checkpoint",
+    })
+    const now = jest
+      .spyOn(Date, "now")
+      .mockReturnValue((expiresAt + 10) * 1_000)
+    try {
+      await expect(
+        finalizeWorkspaceCheckpoint(
+          "owner@example.com",
+          PREFIX,
+          checkpoint.workspaceGeneration,
+          [],
+          [],
+          checkpoint.proof,
+          "invocation-later",
+          expiresAt + 300,
+        ),
+      ).rejects.toThrow("finalization proof is invalid")
+      expect(
+        JSON.parse(
+          store.current(finalizationJournalKey())?.body ?? "{}",
+        ),
+      ).toMatchObject({ state: "pending", requestDigest })
+    } finally {
+      now.mockRestore()
+    }
   })
 
   it("fails closed on a corrupt committed manifest before mutating workspace targets", async () => {
