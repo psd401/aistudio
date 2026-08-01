@@ -1,7 +1,7 @@
 ---
 type: Platform Overview
 title: Agent Platform & Skills System
-description: Extensible agent skill system with 31 domain-specific capabilities, Google Workspace integration, Cedar governance, and MCP tool exposure for K-12 AI assistants.
+description: Extensible agent skill system with 34 domain-specific capabilities, Google Workspace integration, Cedar governance, and MCP tool exposure for K-12 AI assistants.
 tags: [agents, skills, mcp, workspace, governance]
 ---
 
@@ -34,6 +34,7 @@ infra/agent-image/skills/{skill-name}/
 - `psd-rules` — Tier-1 governance rules for agent behavior
 - `psd-conversation-coach` — Crucial Conversations framework coaching for difficult conversations
 - `psd-morning-brief` — Personalized daily newspaper/podcast delivered through private Atrium artifacts
+- `psd-observances` — Cited dates for national observances, awareness months, state school holidays, and education conferences via NSPRA calendar lookups
 
 **Content & Media**
 - `psd-aistudio` — Live capability discovery + authenticated actions in AI Studio
