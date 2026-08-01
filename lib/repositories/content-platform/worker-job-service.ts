@@ -14,6 +14,7 @@ import {
   type RepositoryProcessingJobRow,
   type RepositoryProcessingMetrics,
 } from "@/lib/db/schema";
+import { REPOSITORY_PUBLICATION_LOCK_TIMEOUT_MS } from "./publication-contention";
 
 export type RestartableManagedService =
   | "textract"
@@ -133,6 +134,21 @@ export function resolveRepositoryProcessingAttemptRefund(params: {
       ? { ...params.metrics, contentionRefunds: contentionRefunds + 1 }
       : params.metrics,
   };
+}
+
+/** Bound the second lock wait needed to durably record a refunded contention. */
+export async function configureRepositoryProcessingFailureTransaction(
+  tx: { execute(query: ReturnType<typeof sql>): PromiseLike<unknown> },
+  decision: RepositoryProcessingFailureDecision
+): Promise<void> {
+  if (decision.refundAttempt !== true) return;
+  await tx.execute(sql`
+    SELECT set_config(
+      'lock_timeout',
+      ${REPOSITORY_PUBLICATION_LOCK_TIMEOUT_MS.toString()},
+      true
+    )
+  `);
 }
 
 interface RepositoryProcessingMutationLockTransaction {
@@ -894,14 +910,16 @@ export async function recordRepositoryProcessingFailure(
 ): Promise<RepositoryProcessingFailureResult> {
   const now = options.now ?? new Date();
   return executeTransaction(
-    (tx) =>
-      recordRepositoryProcessingFailureInTransaction({
+    async (tx) => {
+      await configureRepositoryProcessingFailureTransaction(tx, decision);
+      return recordRepositoryProcessingFailureInTransaction({
         tx,
         message,
         decision,
         options,
         now,
-      }),
+      });
+    },
     "contentProcessor.recordFailure"
   );
 }

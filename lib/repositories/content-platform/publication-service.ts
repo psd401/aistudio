@@ -31,7 +31,10 @@ import { canReuseRepositoryEmbeddings } from "@/lib/repositories/embedding-confi
 import {
   isRepositoryPublicationContention,
   RepositoryPublicationContentionError,
+  REPOSITORY_PUBLICATION_LOCK_TIMEOUT_MS,
 } from "./publication-contention";
+
+export { REPOSITORY_PUBLICATION_LOCK_TIMEOUT_MS } from "./publication-contention";
 
 export interface PublishableSegment {
   content: string;
@@ -121,7 +124,6 @@ export function isPublicationTargetActive(
 export type PublishPdfVersionResult = PublishDocumentVersionResult;
 
 export const MAX_INLINE_ARTIFACT_CHARACTERS = 1_000_000;
-export const REPOSITORY_PUBLICATION_LOCK_TIMEOUT_MS = 5_000;
 export const REPOSITORY_PUBLICATION_STATEMENT_TIMEOUT_MS = 240_000;
 export const REPOSITORY_PUBLICATION_TRANSACTION_DEADLINE_MS = 270_000;
 

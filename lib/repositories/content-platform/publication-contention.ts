@@ -1,6 +1,8 @@
 const REPOSITORY_PUBLICATION_CONTENTION_MESSAGE =
   /lock timeout|could not obtain lock|deadlock detected/i;
 
+export const REPOSITORY_PUBLICATION_LOCK_TIMEOUT_MS = 5_000;
+
 interface ErrorLike {
   cause?: unknown;
   code?: unknown;

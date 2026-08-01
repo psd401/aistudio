@@ -4,6 +4,7 @@ import { jest } from "@jest/globals";
 import type { SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import {
+  configureRepositoryProcessingFailureTransaction,
   isBdaInvocationExternallyActive,
   lockRepositoryProcessingMutationTarget,
   MAX_REPOSITORY_PUBLICATION_CONTENTION_REFUNDS,
@@ -12,6 +13,42 @@ import {
 } from "@/lib/repositories/content-platform/worker-job-service";
 
 const dialect = new PgDialect();
+
+describe("repository processing failure lock timeout", () => {
+  it("bounds the lock wait when recording a refundable contention", async () => {
+    const execute = jest.fn<(query: SQL) => Promise<unknown>>(async () => []);
+
+    await configureRepositoryProcessingFailureTransaction(
+      { execute },
+      {
+        terminal: false,
+        code: "REPOSITORY_PUBLICATION_CONTENTION",
+        message: "lock wait expired",
+        refundAttempt: true,
+      }
+    );
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    const compiled = dialect.sqlToQuery(execute.mock.calls[0]![0]);
+    expect(compiled.sql).toContain("'lock_timeout'");
+    expect(compiled.params).toEqual(["5000"]);
+  });
+
+  it("preserves the existing failure transaction policy otherwise", async () => {
+    const execute = jest.fn<(query: SQL) => Promise<unknown>>(async () => []);
+
+    await configureRepositoryProcessingFailureTransaction(
+      { execute },
+      {
+        terminal: false,
+        code: "TRANSIENT_PROCESSING_ERROR",
+        message: "temporary outage",
+      }
+    );
+
+    expect(execute).not.toHaveBeenCalled();
+  });
+});
 
 describe("repository processing attempt refunds", () => {
   it("refunds publication contention and increments its durable counter", () => {
