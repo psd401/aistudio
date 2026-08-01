@@ -37,10 +37,10 @@ async function createPrivateArtifact(
 }
 
 async function cleanupArtifact(
-  page: import("@playwright/test").Page,
+  page: import("@playwright/test").Page | undefined,
   contentId: string | undefined
 ): Promise<void> {
-  if (!contentId) return;
+  if (!page || !contentId) return;
   try {
     const response = await page.request.delete(`/api/v1/content/${contentId}`);
     expect
@@ -102,11 +102,12 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
     browser,
   }) => {
     const context = await browser.newContext();
-    await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB);
-    const page = await context.newPage();
+    let page: import("@playwright/test").Page | undefined;
     let contentId: string | undefined;
 
     try {
+      await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB);
+      page = await context.newPage();
       const marker = `artifact-data-${Date.now()}`;
       contentId = await createPrivateArtifact(page, marker);
       await page.goto(HARNESS_PATH);
@@ -138,11 +139,12 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
     browser,
   }) => {
     const context = await browser.newContext();
-    await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB);
-    const page = await context.newPage();
+    let page: import("@playwright/test").Page | undefined;
     let contentId: string | undefined;
 
     try {
+      await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB);
+      page = await context.newPage();
       const marker = `artifact-data-unauthenticated-${Date.now()}`;
       contentId = await createPrivateArtifact(page, marker);
       await page.goto(HARNESS_PATH);
@@ -203,27 +205,28 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
     browser,
   }) => {
     const ownerContext = await browser.newContext();
-    await authenticateContext(
-      ownerContext,
-      SEEDED_ADMIN_EMAIL,
-      SEEDED_ADMIN_SUB
-    );
-    const ownerPage = await ownerContext.newPage();
+    let ownerPage: import("@playwright/test").Page | undefined;
     let contentId: string | undefined;
 
     try {
+      await authenticateContext(
+        ownerContext,
+        SEEDED_ADMIN_EMAIL,
+        SEEDED_ADMIN_SUB
+      );
+      ownerPage = await ownerContext.newPage();
       contentId = await createPrivateArtifact(
         ownerPage,
         `artifact-data-private-${Date.now()}`
       );
 
       const viewerContext = await browser.newContext();
-      await authenticateContext(
-        viewerContext,
-        SEEDED_NO_CAPABILITY_EMAIL,
-        SEEDED_NO_CAPABILITY_SUB
-      );
       try {
+        await authenticateContext(
+          viewerContext,
+          SEEDED_NO_CAPABILITY_EMAIL,
+          SEEDED_NO_CAPABILITY_SUB
+        );
         const viewerPage = await viewerContext.newPage();
         await viewerPage.goto(HARNESS_PATH);
         await viewerPage
