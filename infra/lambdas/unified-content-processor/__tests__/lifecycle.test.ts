@@ -151,3 +151,53 @@ describe("unified content lifecycle policy", () => {
     ).toBe("2026-07-22T18:00:00.000Z");
   });
 });
+
+// The exact rejection SQS returned for the 188 poisoned index generations.
+// Each burned all five retry attempts on a failure that could never succeed.
+const SQS_INVALID_BINARY_CHARACTER =
+  "Invalid binary character '#xFFFF' was found in the message body, the set of allowed " +
+  "characters is #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF].";
+
+describe("SQS invalid message body classification", () => {
+  test("classifies the exact production rejection as terminal on attempt 1", () => {
+    expect(
+      classifyContentProcessingError(new Error(SQS_INVALID_BINARY_CHARACTER))
+    ).toEqual({
+      terminal: true,
+      code: "INVALID_SOURCE_CONTENT",
+      message: SQS_INVALID_BINARY_CHARACTER,
+    });
+  });
+
+  test("stays terminal when the SDK error carries no HTTP metadata", () => {
+    const error = Object.assign(new Error(SQS_INVALID_BINARY_CHARACTER), {
+      name: "InvalidMessageContents",
+    });
+    expect(classifyContentProcessingError(error)).toMatchObject({
+      terminal: true,
+      code: "INVALID_SOURCE_CONTENT",
+    });
+  });
+
+  test("matches either half of the rejection independently", () => {
+    expect(
+      classifyContentProcessingError(
+        new Error("Invalid binary character was found in the message body")
+      )
+    ).toMatchObject({ terminal: true, code: "INVALID_SOURCE_CONTENT" });
+    expect(
+      classifyContentProcessingError(
+        new Error("the set of allowed characters is #x9 | #xA | #xD")
+      )
+    ).toMatchObject({ terminal: true, code: "INVALID_SOURCE_CONTENT" });
+  });
+
+  test("does not make unrelated SQS failures terminal", () => {
+    expect(
+      classifyContentProcessingError(new Error("SQS connection reset by peer"))
+    ).toMatchObject({ terminal: false, code: "TRANSIENT_PROCESSING_ERROR" });
+    expect(
+      classifyContentProcessingError(new Error("Request timeout contacting SQS"))
+    ).toMatchObject({ terminal: false, code: "TRANSIENT_PROCESSING_ERROR" });
+  });
+});

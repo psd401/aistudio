@@ -34,7 +34,7 @@ const RETRYABLE_AWS_ERROR =
   /(?:throttl|timeout|timedout|requesttimeout|serviceunavailable|internalserver|slowdown|temporar|network|connection)/i;
 
 const PERMANENT_MESSAGE =
-  /(?:outside (?:its|the) .*namespace|unsupported content type|has no S3 object key|has no declared content type|exceeds the configured|OCR is disabled|superseded item version|requires a clean malware inspection|segments? (?:cannot be empty|must have)|requires a page citation|must be stored as an artifact object|did not match|does not match the item version)/i;
+  /(?:outside (?:its|the) .*namespace|unsupported content type|has no S3 object key|has no declared content type|exceeds the configured|OCR is disabled|superseded item version|requires a clean malware inspection|segments? (?:cannot be empty|must have)|requires a page citation|must be stored as an artifact object|did not match|does not match the item version|Invalid binary character|set of allowed characters is)/i;
 
 function errorMessage(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 4_000);
