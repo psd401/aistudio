@@ -14,7 +14,6 @@ import {
   type RepositoryProcessingJobRow,
   type RepositoryProcessingMetrics,
 } from "@/lib/db/schema";
-import { REPOSITORY_PUBLICATION_LOCK_TIMEOUT_MS } from "./publication-contention";
 
 export type RestartableManagedService =
   | "textract"
@@ -134,21 +133,6 @@ export function resolveRepositoryProcessingAttemptRefund(params: {
       ? { ...params.metrics, contentionRefunds: contentionRefunds + 1 }
       : params.metrics,
   };
-}
-
-/** Bound the second lock wait needed to durably record a refunded contention. */
-export async function configureRepositoryProcessingFailureTransaction(
-  tx: { execute(query: ReturnType<typeof sql>): PromiseLike<unknown> },
-  decision: RepositoryProcessingFailureDecision
-): Promise<void> {
-  if (decision.refundAttempt !== true) return;
-  await tx.execute(sql`
-    SELECT set_config(
-      'lock_timeout',
-      ${REPOSITORY_PUBLICATION_LOCK_TIMEOUT_MS.toString()},
-      true
-    )
-  `);
 }
 
 interface RepositoryProcessingMutationLockTransaction {
@@ -842,6 +826,55 @@ async function recordRetryFailure(params: {
   return { action: "retry", delaySeconds };
 }
 
+/**
+ * Persist a publication-contention refund while locking only the job row.
+ * This transaction never seeks an ancestor lifecycle lock, so it cannot wait
+ * behind the publication transaction's contested repository row or invert the
+ * repository -> item -> job -> version lock order.
+ */
+async function recordRefundedPublicationContentionInTransaction(params: {
+  tx: DbTransaction;
+  message: RepositoryProcessingJobMessage;
+  decision: RepositoryProcessingFailureDecision;
+  options: RecordRepositoryProcessingFailureOptions;
+  now: Date;
+}): Promise<RepositoryProcessingFailureResult | null> {
+  const [job] = await params.tx
+    .select()
+    .from(repositoryProcessingJobs)
+    .where(
+      and(
+        eq(repositoryProcessingJobs.id, params.message.jobId),
+        eq(
+          repositoryProcessingJobs.itemVersionId,
+          params.message.itemVersionId
+        )
+      )
+    )
+    .limit(1)
+    .for("update");
+  if (!job || job.status === "succeeded" || job.status === "cancelled") {
+    return { action: "ignore" };
+  }
+  const activeBdaInvocation = isBdaInvocationExternallyActive(job.metrics);
+  const attemptRefund = resolveRepositoryProcessingAttemptRefund({
+    activeBdaInvocation,
+    attempt: job.attempt,
+    decision: params.decision,
+    metrics: job.metrics,
+  });
+  if (!attemptRefund.refundAttempt) return null;
+  return recordRetryFailure({
+    tx: params.tx,
+    decision: params.decision,
+    job,
+    now: params.now,
+    retryDelaySeconds: params.options.retryDelaySeconds,
+    activeBdaInvocation,
+    attemptRefund,
+  });
+}
+
 async function recordRepositoryProcessingFailureInTransaction(params: {
   tx: DbTransaction;
   message: RepositoryProcessingJobMessage;
@@ -909,17 +942,29 @@ export async function recordRepositoryProcessingFailure(
   options: RecordRepositoryProcessingFailureOptions
 ): Promise<RepositoryProcessingFailureResult> {
   const now = options.now ?? new Date();
+  if (decision.refundAttempt === true) {
+    const refunded = await executeTransaction(
+      (tx) =>
+        recordRefundedPublicationContentionInTransaction({
+          tx,
+          message,
+          decision,
+          options,
+          now,
+        }),
+      "contentProcessor.recordContentionRefund"
+    );
+    if (refunded) return refunded;
+  }
   return executeTransaction(
-    async (tx) => {
-      await configureRepositoryProcessingFailureTransaction(tx, decision);
-      return recordRepositoryProcessingFailureInTransaction({
+    (tx) =>
+      recordRepositoryProcessingFailureInTransaction({
         tx,
         message,
         decision,
         options,
         now,
-      });
-    },
+      }),
     "contentProcessor.recordFailure"
   );
 }
