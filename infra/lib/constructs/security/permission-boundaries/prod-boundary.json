@@ -193,14 +193,15 @@
       }
     },
     {
-      "Sid": "RequireMFAForDynamoDBDeleteExceptAgentLocks",
-      "_comment": "The agent router (a Lambda service role, never MFA-present) must DeleteItem to release per-session locks (agent-router index.ts releaseSessionLock). The blanket MFA-deny above previously blocked it, so locks only expired via TTL (14m) causing same-session serialization. Keep the MFA requirement for every other table; carve out only the session-locks tables.",
+      "Sid": "RequireMFAForDynamoDBDeleteExceptAgentState",
+      "_comment": "The agent router (a Lambda service role, never MFA-present) must DeleteItem to release per-session locks and message-dedup claims used by durable workspace deferral. Keep the MFA requirement for every other table; carve out only those two narrowly named agent-state tables.",
       "Effect": "Deny",
       "Action": [
         "dynamodb:DeleteItem"
       ],
       "NotResource": [
-        "arn:aws:dynamodb:*:*:table/psd-agent-session-locks-*"
+        "arn:aws:dynamodb:*:*:table/psd-agent-session-locks-*",
+        "arn:aws:dynamodb:*:*:table/psd-agent-message-dedup-*"
       ],
       "Condition": {
         "BoolIfExists": {

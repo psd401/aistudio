@@ -5,9 +5,10 @@ import { PermissionBoundaryConstruct } from "../../lib/constructs/security/permi
 type PolicyStatement = {
   Sid?: string;
   Action?: string | string[];
+  NotResource?: string | string[];
 };
 
-function allowedActions(environment: "dev" | "prod"): string[] {
+function policyStatements(environment: "dev" | "prod"): PolicyStatement[] {
   const app = new cdk.App();
   const stack = new cdk.Stack(app, `PermissionBoundary-${environment}`, {
     env: { account: "123456789012", region: "us-east-1" },
@@ -17,9 +18,13 @@ function allowedActions(environment: "dev" | "prod"): string[] {
   const policies = Template.fromStack(stack).findResources(
     "AWS::IAM::ManagedPolicy"
   );
-  const statements = Object.values(policies).flatMap((policy) =>
+  return Object.values(policies).flatMap((policy) =>
     (policy.Properties?.PolicyDocument?.Statement ?? []) as PolicyStatement[]
   );
+}
+
+function allowedActions(environment: "dev" | "prod"): string[] {
+  const statements = policyStatements(environment);
   const allowedServices = statements.find(
     (statement) => statement.Sid === "AllowedServices"
   );
@@ -52,6 +57,19 @@ describe("PermissionBoundaryConstruct", () => {
         "s3:ListBucketVersions",
       ])
     );
+  });
+
+  test("prod permits service roles to release only the two agent DynamoDB claim tables", () => {
+    const statement = policyStatements("prod").find(
+      (candidate) =>
+        candidate.Sid === "RequireMFAForDynamoDBDeleteExceptAgentState"
+    );
+
+    expect(statement?.Action).toBe("dynamodb:DeleteItem");
+    expect(statement?.NotResource).toEqual([
+      "arn:aws:dynamodb:*:*:table/psd-agent-session-locks-*",
+      "arn:aws:dynamodb:*:*:table/psd-agent-message-dedup-*",
+    ]);
   });
 
   test.each(["dev", "prod"] as const)(

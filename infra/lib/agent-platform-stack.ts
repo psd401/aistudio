@@ -1921,6 +1921,16 @@ export class AgentPlatformStack extends cdk.Stack {
         ? agentcore.AgentRuntimeArtifact.fromEcrRepository(resources.ecrRepository, imageTag)
         : undefined;
 
+    // Keep the Runtime security group independent of the image-gated Runtime.
+    // AgentCore ENIs can survive Runtime deletion for hours, so deleting this
+    // group in the same deployment can leave CloudFormation waiting on an
+    // in-use security group. The construct ID intentionally matches the ID the
+    // AgentCore L2 previously created implicitly, preserving its logical ID.
+    const runtimeSecurityGroup = new ec2.SecurityGroup(this, 'SecurityGroup', {
+      vpc: resources.vpc,
+      allowAllOutbound: true,
+    });
+
     if (artifact) {
       resources.runtime = new agentcore.Runtime(this, 'AgentCoreRuntime', {
         runtimeName: `psd_agent_${environment}`,
@@ -1937,6 +1947,7 @@ export class AgentPlatformStack extends cdk.Stack {
             subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
             availabilityZones: ['us-east-1b', 'us-east-1c'],
           },
+          securityGroups: [runtimeSecurityGroup],
         }),
         description: `PSD AI Agent Platform runtime (${environment})`,
         environmentVariables: runtimeEnvVars,
