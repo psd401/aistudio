@@ -15,9 +15,14 @@ interface CreatedContentResponse {
   };
 }
 
+interface ListedContentResponse {
+  data?: unknown;
+}
+
 async function createPrivateArtifact(
   page: import("@playwright/test").Page,
-  title: string
+  title: string,
+  onCreated: (contentId: string) => void
 ): Promise<string> {
   const response = await page.request.post("/api/v1/content", {
     data: {
@@ -27,8 +32,12 @@ async function createPrivateArtifact(
       bodyFormat: "html",
     },
   });
-  expect(response.status()).toBe(201);
   const body = (await response.json()) as CreatedContentResponse;
+  if (typeof body.data?.id === "string") {
+    // Teardown owns the ID before either response assertion can throw.
+    onCreated(body.data.id);
+  }
+  expect(response.status()).toBe(201);
   expect(typeof body.data?.id).toBe("string");
   if (typeof body.data?.id !== "string") {
     throw new TypeError("Artifact create response did not include an id");
@@ -36,24 +45,61 @@ async function createPrivateArtifact(
   return body.data.id;
 }
 
+function isListedContentItem(
+  value: unknown
+): value is { id: string; title: string } {
+  if (typeof value !== "object" || value === null) return false;
+  const item = value as Record<string, unknown>;
+  return typeof item.id === "string" && typeof item.title === "string";
+}
+
+async function findArtifactIdByTitle(
+  page: import("@playwright/test").Page,
+  title: string
+): Promise<string | undefined> {
+  const response = await page.request.get(
+    "/api/v1/content?kind=artifact&query=" + encodeURIComponent(title)
+  );
+  expect
+    .soft(
+      response.ok(),
+      "Artifact fallback lookup returned HTTP " + response.status()
+    )
+    .toBe(true);
+  if (!response.ok()) return undefined;
+
+  const body = (await response.json()) as ListedContentResponse;
+  if (!Array.isArray(body.data)) return undefined;
+  return body.data.find(
+    (item): item is { id: string; title: string } =>
+      isListedContentItem(item) && item.title === title
+  )?.id;
+}
+
 async function cleanupArtifact(
   page: import("@playwright/test").Page | undefined,
-  contentId: string | undefined
+  contentId: string | undefined,
+  title: string
 ): Promise<void> {
-  if (!page || !contentId) return;
+  if (!page) return;
   try {
-    const response = await page.request.delete(`/api/v1/content/${contentId}`);
+    const cleanupId = contentId ?? (await findArtifactIdByTitle(page, title));
+    if (!cleanupId) return;
+    const response = await page.request.delete("/api/v1/content/" + cleanupId);
     expect
       .soft(
         response.ok(),
-        `Artifact cleanup returned HTTP ${response.status()} for ${contentId}`
+        "Artifact cleanup returned HTTP " +
+          response.status() +
+          " for " +
+          cleanupId
       )
       .toBe(true);
   } catch (error) {
     // A soft assertion reports teardown failures without replacing the primary
     // failure that sent the test into finally.
     expect
-      .soft(error, `Artifact cleanup request threw for ${contentId}`)
+      .soft(error, "Artifact cleanup request threw for " + (contentId ?? title))
       .toBeUndefined();
   }
 }
@@ -104,12 +150,14 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
     const context = await browser.newContext();
     let page: import("@playwright/test").Page | undefined;
     let contentId: string | undefined;
+    const marker = `E2E artifact-data-${Date.now()}`;
 
     try {
       await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB);
       page = await context.newPage();
-      const marker = `E2E artifact-data-${Date.now()}`;
-      contentId = await createPrivateArtifact(page, marker);
+      contentId = await createPrivateArtifact(page, marker, (createdId) => {
+        contentId = createdId;
+      });
       await page.goto(HARNESS_PATH);
 
       await page.getByTestId("artifact-data-content-id").fill(contentId);
@@ -130,7 +178,7 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
       await expect(result).toContainText("Test User");
       await expect(result).not.toContainText(SEEDED_ADMIN_EMAIL);
     } finally {
-      await cleanupArtifact(page, contentId);
+      await cleanupArtifact(page, contentId, marker);
       await closeContextSoftly(context, "happy-path artifact-data");
     }
   });
@@ -141,12 +189,14 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
     const context = await browser.newContext();
     let page: import("@playwright/test").Page | undefined;
     let contentId: string | undefined;
+    const marker = `E2E artifact-data-unauthenticated-${Date.now()}`;
 
     try {
       await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB);
       page = await context.newPage();
-      const marker = `E2E artifact-data-unauthenticated-${Date.now()}`;
-      contentId = await createPrivateArtifact(page, marker);
+      contentId = await createPrivateArtifact(page, marker, (createdId) => {
+        contentId = createdId;
+      });
       await page.goto(HARNESS_PATH);
       // The protected layout initializes NextAuth after navigation. Let that
       // response settle before clearing cookies; otherwise an already-in-flight
@@ -196,7 +246,7 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
       await expect(result).not.toContainText(marker);
     } finally {
       await restoreOwnerSessionForCleanup(context, contentId);
-      await cleanupArtifact(page, contentId);
+      await cleanupArtifact(page, contentId, marker);
       await closeContextSoftly(context, "cleared-session artifact-data");
     }
   });
@@ -207,6 +257,7 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
     const ownerContext = await browser.newContext();
     let ownerPage: import("@playwright/test").Page | undefined;
     let contentId: string | undefined;
+    const title = `E2E artifact-data-private-${Date.now()}`;
 
     try {
       await authenticateContext(
@@ -215,10 +266,9 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
         SEEDED_ADMIN_SUB
       );
       ownerPage = await ownerContext.newPage();
-      contentId = await createPrivateArtifact(
-        ownerPage,
-        `E2E artifact-data-private-${Date.now()}`
-      );
+      contentId = await createPrivateArtifact(ownerPage, title, (createdId) => {
+        contentId = createdId;
+      });
 
       const viewerContext = await browser.newContext();
       try {
@@ -246,7 +296,7 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
         await closeContextSoftly(viewerContext, "non-viewer artifact-data");
       }
     } finally {
-      await cleanupArtifact(ownerPage, contentId);
+      await cleanupArtifact(ownerPage, contentId, title);
       await closeContextSoftly(ownerContext, "owner artifact-data");
     }
   });
