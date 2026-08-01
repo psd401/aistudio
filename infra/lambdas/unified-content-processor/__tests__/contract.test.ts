@@ -221,22 +221,32 @@ const POISONED =
  * Deliberately written without reusing the production sanitizer's regex so the
  * assertions cannot pass merely because both share the same bug.
  */
+/**
+ * The non-surrogate half of the transcription: true when a BMP code unit is
+ * one SQS rejects. Split out from `hasIllegalCodePoint` purely to keep both
+ * functions under the repo's cyclomatic-complexity ceiling; the combined
+ * predicate is unchanged.
+ */
+function isIllegalBmpUnit(unit: number): boolean {
+  if (unit === 0x09 || unit === 0x0A || unit === 0x0D) return false; // tab / LF / CR
+  if (unit < 0x20 || unit === 0x7F) return true;
+  if (unit >= 0xFDD0 && unit <= 0xFDEF) return true;
+  return unit === 0xFFFE || unit === 0xFFFF;
+}
+
 function hasIllegalCodePoint(value: string): boolean {
   for (let index = 0; index < value.length; index++) {
     const unit = value.charCodeAt(index);
-    if (unit >= 0xd800 && unit <= 0xdbff) {
+    if (unit >= 0xD800 && unit <= 0xDBFF) {
       const next = value.charCodeAt(index + 1);
-      if (!(next >= 0xdc00 && next <= 0xdfff)) return true; // lone high surrogate
-      const codePoint = (unit - 0xd800) * 0x400 + (next - 0xdc00) + 0x10000;
-      if ((codePoint & 0xfffe) === 0xfffe) return true; // U+nFFFE / U+nFFFF
+      if (!(next >= 0xDC00 && next <= 0xDFFF)) return true; // lone high surrogate
+      const codePoint = (unit - 0xD800) * 0x400 + (next - 0xDC00) + 0x10000;
+      if ((codePoint & 0xFFFE) === 0xFFFE) return true; // U+nFFFE / U+nFFFF
       index++;
       continue;
     }
-    if (unit >= 0xdc00 && unit <= 0xdfff) return true; // lone low surrogate
-    if (unit === 0x09 || unit === 0x0a || unit === 0x0d) continue;
-    if (unit < 0x20 || unit === 0x7f) return true;
-    if (unit >= 0xfdd0 && unit <= 0xfdef) return true;
-    if (unit === 0xfffe || unit === 0xffff) return true;
+    if (unit >= 0xDC00 && unit <= 0xDFFF) return true; // lone low surrogate
+    if (isIllegalBmpUnit(unit)) return true;
   }
   return false;
 }

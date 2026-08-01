@@ -78,7 +78,7 @@ export function sanitizeTextForDatabase(text: string): string {
 const SUPPLEMENTARY_NONCHARACTER_RANGES = Array.from(
   { length: 16 },
   (_unused, index) => {
-    const planeNoncharacter = (index + 1) * 0x10000 + 0xfffe;
+    const planeNoncharacter = (index + 1) * 0x10000 + 0xFFFE;
     return `\\u{${planeNoncharacter.toString(16)}}-\\u{${(planeNoncharacter + 1).toString(16)}}`;
   }
 ).join('');
@@ -94,10 +94,15 @@ const MESSAGING_UNSAFE_CHARACTER_CLASS =
 // Two instances: the global one drives `replace`, the non-global one backs the
 // predicate. Sharing a single /g/ regex across `.test()` calls would leak
 // `lastIndex` between callers and return alternating results.
+// Both constructors take a module-private constant assembled at load time from
+// a fixed 16-iteration loop over literal code points — no caller input reaches
+// either one, so the non-literal-regexp warning does not apply here.
+// eslint-disable-next-line security/detect-non-literal-regexp
 const MESSAGING_UNSAFE_PATTERN = new RegExp(
   MESSAGING_UNSAFE_CHARACTER_CLASS,
   'gu'
 );
+// eslint-disable-next-line security/detect-non-literal-regexp
 const MESSAGING_UNSAFE_PROBE = new RegExp(MESSAGING_UNSAFE_CHARACTER_CLASS, 'u');
 
 /**

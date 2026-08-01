@@ -341,7 +341,7 @@ describe('sanitizeTextForMessaging', () => {
   it('strips the U+FDD0-U+FDEF noncharacter arc', () => {
     expect(sanitizeTextForMessaging('a﷐b﷯c')).toBe('abc');
     // The whole arc, not just its endpoints.
-    for (let cp = 0xfdd0; cp <= 0xfdef; cp++) {
+    for (let cp = 0xFDD0; cp <= 0xFDEF; cp++) {
       expect(sanitizeTextForMessaging(`x${String.fromCodePoint(cp)}y`)).toBe('xy');
     }
   });
@@ -349,8 +349,8 @@ describe('sanitizeTextForMessaging', () => {
   it('strips U+nFFFE and U+nFFFF in every supplementary plane', () => {
     for (let plane = 1; plane <= 16; plane++) {
       const base = plane * 0x10000;
-      expect(sanitizeTextForMessaging(`a${String.fromCodePoint(base + 0xfffe)}b`)).toBe('ab');
-      expect(sanitizeTextForMessaging(`a${String.fromCodePoint(base + 0xffff)}b`)).toBe('ab');
+      expect(sanitizeTextForMessaging(`a${String.fromCodePoint(base + 0xFFFE)}b`)).toBe('ab');
+      expect(sanitizeTextForMessaging(`a${String.fromCodePoint(base + 0xFFFF)}b`)).toBe('ab');
     }
   });
 
