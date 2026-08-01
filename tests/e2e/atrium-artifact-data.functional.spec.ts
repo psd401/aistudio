@@ -108,7 +108,7 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
     try {
       await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB);
       page = await context.newPage();
-      const marker = `artifact-data-${Date.now()}`;
+      const marker = `E2E artifact-data-${Date.now()}`;
       contentId = await createPrivateArtifact(page, marker);
       await page.goto(HARNESS_PATH);
 
@@ -145,7 +145,7 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
     try {
       await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB);
       page = await context.newPage();
-      const marker = `artifact-data-unauthenticated-${Date.now()}`;
+      const marker = `E2E artifact-data-unauthenticated-${Date.now()}`;
       contentId = await createPrivateArtifact(page, marker);
       await page.goto(HARNESS_PATH);
       // The protected layout initializes NextAuth after navigation. Let that
@@ -217,7 +217,7 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
       ownerPage = await ownerContext.newPage();
       contentId = await createPrivateArtifact(
         ownerPage,
-        `artifact-data-private-${Date.now()}`
+        `E2E artifact-data-private-${Date.now()}`
       );
 
       const viewerContext = await browser.newContext();
