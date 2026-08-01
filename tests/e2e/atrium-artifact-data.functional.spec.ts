@@ -8,6 +8,8 @@ import {
 } from "./helpers/session-auth";
 
 const HARNESS_PATH = "/test-user/artifact-data";
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface CreatedContentResponse {
   data?: {
@@ -17,6 +19,10 @@ interface CreatedContentResponse {
 
 interface ListedContentResponse {
   data?: unknown;
+}
+
+function isUuid(value: unknown): value is string {
+  return typeof value === "string" && UUID_PATTERN.test(value);
 }
 
 async function createPrivateArtifact(
@@ -33,14 +39,14 @@ async function createPrivateArtifact(
     },
   });
   const body = (await response.json()) as CreatedContentResponse;
-  if (typeof body.data?.id === "string") {
+  if (isUuid(body.data?.id)) {
     // Teardown owns the ID before either response assertion can throw.
     onCreated(body.data.id);
   }
   expect(response.status()).toBe(201);
-  expect(typeof body.data?.id).toBe("string");
-  if (typeof body.data?.id !== "string") {
-    throw new TypeError("Artifact create response did not include an id");
+  expect(isUuid(body.data?.id)).toBe(true);
+  if (!isUuid(body.data?.id)) {
+    throw new TypeError("Artifact create response did not include a UUID id");
   }
   return body.data.id;
 }
@@ -83,8 +89,18 @@ async function cleanupArtifact(
 ): Promise<void> {
   if (!page) return;
   try {
-    const cleanupId = contentId ?? (await findArtifactIdByTitle(page, title));
+    // The exact-title lookup is authoritative: a malformed create response
+    // must never make teardown delete an unrelated object by returned ID.
+    const cleanupId = await findArtifactIdByTitle(page, title);
     if (!cleanupId) return;
+    if (contentId && contentId !== cleanupId) {
+      expect
+        .soft(
+          contentId,
+          "Create response ID did not match the exact-title fixture"
+        )
+        .toBe(cleanupId);
+    }
     const response = await page.request.delete("/api/v1/content/" + cleanupId);
     expect
       .soft(
