@@ -2,8 +2,9 @@
  * Append-only records submitted by authenticated Atrium artifacts (#1516).
  *
  * Records are scoped to a content object and attributed to the session user
- * that submitted them. They intentionally have no `updated_at` or retention
- * column: artifact data is immutable and retained until its content is deleted.
+ * that submitted them. If that user is later hard-deleted, attribution is set
+ * to null while the record remains. They intentionally have no `updated_at` or
+ * retention column: artifact data is immutable until its content is deleted.
  */
 
 import { sql } from "drizzle-orm";
@@ -29,9 +30,9 @@ export const contentDataRecords = pgTable(
       .references(() => contentObjects.id, { onDelete: "cascade" })
       .notNull(),
     namespace: varchar("namespace", { length: 64 }).notNull(),
-    userId: integer("user_id")
-      .references(() => users.id)
-      .notNull(),
+    userId: integer("user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
     payload: jsonb("payload").$type<ArtifactDataPayload>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true })
       .defaultNow()

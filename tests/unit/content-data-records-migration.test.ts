@@ -35,8 +35,9 @@ describe("migration 172 content data records", () => {
       /content_id UUID NOT NULL REFERENCES content_objects\(id\) ON DELETE CASCADE/i,
     );
     expect(normalizedSql).toMatch(
-      /user_id INTEGER NOT NULL REFERENCES users\(id\)/i,
+      /user_id INTEGER REFERENCES users\(id\) ON DELETE SET NULL/i,
     );
+    expect(normalizedSql).not.toMatch(/user_id INTEGER NOT NULL/i);
     expect(normalizedSql).toMatch(/payload JSONB NOT NULL/i);
     expect(normalizedSql).toMatch(
       /created_at TIMESTAMPTZ NOT NULL DEFAULT NOW\(\)/i,
