@@ -728,12 +728,16 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
             )
 
         def ensure(_prefix, _deadline=None):
-            return workspace_sync._generation_for_entries({
+            generation = workspace_sync._generation_for_entries({
                 "memory/MEMORY.md": (
                     len(remote["body"]),
                     remote["eTag"],
                 ),
             })
+            return workspace_sync._EnsuredWorkspaceCheckpoint(
+                generation=generation,
+                snapshot=None,
+            )
 
         with mock.patch.object(
             workspace_sync, "WORKSPACE_DIR", self.root
@@ -813,10 +817,14 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
             )
 
         def ensure(_prefix, _deadline=None):
-            return workspace_sync._generation_for_entries({
+            generation = workspace_sync._generation_for_entries({
                 relative: (len(body), e_tag)
                 for relative, (body, e_tag) in remote.items()
             })
+            return workspace_sync._EnsuredWorkspaceCheckpoint(
+                generation=generation,
+                snapshot=None,
+            )
 
         def download(request, **_kwargs):
             relative = request.full_url.removeprefix(
@@ -912,7 +920,10 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
         ), mock.patch.object(
             workspace_sync,
             "_ensure_workspace_checkpoint",
-            return_value=empty_generation,
+            return_value=workspace_sync._EnsuredWorkspaceCheckpoint(
+                generation=empty_generation,
+                snapshot=None,
+            ),
         ), mock.patch.object(
             workspace_sync, "_broker_request", side_effect=broker
         ), mock.patch.object(
@@ -970,7 +981,10 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
         ), mock.patch.object(
             workspace_sync,
             "_ensure_workspace_checkpoint",
-            return_value="1" * 64,
+            return_value=workspace_sync._EnsuredWorkspaceCheckpoint(
+                generation="1" * 64,
+                snapshot=None,
+            ),
         ), mock.patch.object(
             workspace_sync, "_broker_request", side_effect=broker
         ), mock.patch.object(
@@ -987,6 +1001,165 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
 
         self.assertEqual(downloads, 0)
 
+    def test_refresh_consumes_inline_checkpoint_snapshot_without_list(self):
+        relative = "memory/empty.md"
+        e_tag = '"empty"'
+        generation = workspace_sync._generation_for_entries({
+            relative: (0, e_tag),
+        })
+        response = {
+            "checkpointReady": True,
+            "workspaceGeneration": generation,
+            "checkpointSnapshot": {
+                "workspaceGeneration": generation,
+                "entries": [{
+                    "path": relative,
+                    "size": 0,
+                    "eTag": e_tag,
+                }],
+            },
+        }
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync,
+            "_broker_request",
+            return_value=response,
+        ) as broker, mock.patch.object(
+            workspace_sync,
+            "_list_remote_workspace_snapshot",
+        ) as list_snapshot:
+            self.assertEqual(workspace_sync.refresh_workspace("owner"), 1)
+
+        broker.assert_called_once()
+        self.assertEqual(
+            broker.call_args.args[0],
+            {"operation": "ensure-checkpoint"},
+        )
+        list_snapshot.assert_not_called()
+        self.assertEqual((self.root / relative).read_bytes(), b"")
+        self.assertEqual(
+            workspace_sync._remote_workspace_snapshots["owner"].generation,
+            generation,
+        )
+        self.assertEqual(
+            workspace_sync._committed_workspace_generations["owner"],
+            generation,
+        )
+
+    def test_refresh_falls_back_when_checkpoint_snapshot_is_absent(self):
+        generation = workspace_sync._generation_for_entries({})
+        response = {
+            "checkpointReady": True,
+            "workspaceGeneration": generation,
+        }
+        listed = workspace_sync._RemoteWorkspaceSnapshot(
+            paths=(),
+            sizes={},
+            e_tags={},
+            generation=generation,
+        )
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync,
+            "_broker_request",
+            return_value=response,
+        ), mock.patch.object(
+            workspace_sync,
+            "_list_remote_workspace_snapshot",
+            return_value=listed,
+        ) as list_snapshot:
+            self.assertEqual(workspace_sync.refresh_workspace("owner"), 0)
+
+        list_snapshot.assert_called_once_with("owner")
+
+    def test_present_malformed_checkpoint_snapshot_fails_closed(self):
+        generation = workspace_sync._generation_for_entries({})
+        valid_entry = {
+            "path": "memory/MEMORY.md",
+            "size": 3,
+            "eTag": '"memory"',
+        }
+        malformed_snapshots = [
+            None,
+            {},
+            {
+                "workspaceGeneration": generation,
+                "entries": "not-an-array",
+            },
+            {
+                "workspaceGeneration": generation,
+                "entries": [{**valid_entry, "size": False}],
+            },
+            {
+                "workspaceGeneration": generation,
+                "entries": [valid_entry, valid_entry],
+            },
+            {
+                "workspaceGeneration": generation,
+                "entries": [{**valid_entry, "extra": True}],
+            },
+            {
+                "workspaceGeneration": generation,
+                "entries": [{
+                    "path": "attachments/input.pdf",
+                    "size": 3,
+                    "eTag": '"attachment"',
+                }],
+            },
+        ]
+
+        for snapshot in malformed_snapshots:
+            with self.subTest(snapshot=snapshot), mock.patch.object(
+                workspace_sync,
+                "_broker_request",
+                return_value={
+                    "checkpointReady": True,
+                    "workspaceGeneration": generation,
+                    "checkpointSnapshot": snapshot,
+                },
+            ):
+                with self.assertRaises(
+                    workspace_sync.WorkspaceGenerationUnavailable
+                ):
+                    workspace_sync._ensure_workspace_checkpoint("owner")
+
+    def test_checkpoint_snapshot_generation_mismatches_fail_closed(self):
+        entry = {
+            "path": "memory/MEMORY.md",
+            "size": 3,
+            "eTag": '"memory"',
+        }
+        top_generation = "a" * 64
+        snapshots = [
+            {
+                "workspaceGeneration": "b" * 64,
+                "entries": [],
+            },
+            {
+                "workspaceGeneration": top_generation,
+                "entries": [entry],
+            },
+        ]
+
+        for snapshot in snapshots:
+            with self.subTest(snapshot=snapshot), mock.patch.object(
+                workspace_sync,
+                "_broker_request",
+                return_value={
+                    "checkpointReady": True,
+                    "workspaceGeneration": top_generation,
+                    "checkpointSnapshot": snapshot,
+                },
+            ):
+                with self.assertRaises(
+                    workspace_sync.WorkspaceGenerationConflict
+                ):
+                    workspace_sync._ensure_workspace_checkpoint("owner")
+
     def test_generation_mismatch_aborts_before_any_upload(self):
         (self.root / "state.sqlite").write_bytes(b"local-history")
         workspace_sync._committed_workspace_generations["owner"] = "1" * 64
@@ -1002,8 +1175,7 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
         ), mock.patch.object(
             workspace_sync,
             "_ensure_workspace_checkpoint",
-            return_value="1" * 64,
-        ), mock.patch.object(
+        ) as ensure, mock.patch.object(
             workspace_sync,
             "_list_remote_workspace_snapshot",
             return_value=changed,
@@ -1019,6 +1191,7 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
                     require_generation=True,
                 )
 
+        ensure.assert_not_called()
         prepare.assert_not_called()
 
     def test_lost_completion_response_retries_the_same_reservation(self):
@@ -1055,13 +1228,16 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
             workspace_sync, "WORKSPACE_DIR", self.root
         ), mock.patch.object(
             workspace_sync,
-            "_complete_upload_reservation",
-            return_value=(advanced_generation, '"new"'),
-        ) as complete, mock.patch.object(
+            "_ensure_workspace_checkpoint",
+        ) as ensure, mock.patch.object(
             workspace_sync,
             "_list_remote_workspace_snapshot",
             return_value=committed,
-        ), mock.patch.object(
+        ) as list_snapshot, mock.patch.object(
+            workspace_sync,
+            "_complete_upload_reservation",
+            return_value=(advanced_generation, '"new"'),
+        ) as complete, mock.patch.object(
             workspace_sync,
             "_commit_workspace_checkpoint",
             return_value=advanced_generation,
@@ -1077,6 +1253,8 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
                 0,
             )
 
+        ensure.assert_not_called()
+        list_snapshot.assert_called_once_with("owner", None)
         complete.assert_called_once_with(
             "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
             old_generation,
@@ -1131,8 +1309,7 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
         ), mock.patch.object(
             workspace_sync,
             "_ensure_workspace_checkpoint",
-            return_value=base_generation,
-        ), mock.patch.object(
+        ) as ensure, mock.patch.object(
             workspace_sync,
             "_list_remote_workspace_snapshot",
             return_value=before,
@@ -1171,11 +1348,50 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
                 2,
             )
 
+        ensure.assert_not_called()
         delete.assert_called_once_with("a", base_generation, None)
         self.assertLess(events.index("delete"), events.index("promote"))
         self.assertLess(events.index("promote"), events.index("commit"))
 
-    def test_verified_restore_cache_avoids_duplicate_pre_and_post_lists(self):
+    def test_fresh_push_requires_checkpoint_and_expected_generation_match(self):
+        (self.root / "state.sqlite").write_bytes(b"local-history")
+        expected_generation = workspace_sync._generation_for_entries({})
+        workspace_sync._committed_workspace_generations["owner"] = "1" * 64
+        workspace_sync._remote_workspace_snapshots["owner"] = (
+            workspace_sync._RemoteWorkspaceSnapshot(
+                paths=(),
+                sizes={},
+                e_tags={},
+                generation=expected_generation,
+            )
+        )
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync,
+            "_ensure_workspace_checkpoint",
+        ) as ensure, mock.patch.object(
+            workspace_sync,
+            "_list_remote_workspace_snapshot",
+        ) as list_snapshot, mock.patch.object(
+            workspace_sync,
+            "_upload_spec",
+        ) as prepare:
+            with self.assertRaises(
+                workspace_sync.WorkspaceGenerationConflict
+            ):
+                workspace_sync.push_workspace(
+                    "owner",
+                    expected_generation=expected_generation,
+                    require_generation=True,
+                )
+
+        ensure.assert_not_called()
+        list_snapshot.assert_not_called()
+        prepare.assert_not_called()
+
+    def test_fresh_push_uses_verified_cache_without_preflight_scan(self):
         local = self.root / "state.sqlite"
         local.write_bytes(b"local-history")
         size = local.stat().st_size
@@ -1213,8 +1429,7 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
         ), mock.patch.object(
             workspace_sync,
             "_ensure_workspace_checkpoint",
-            return_value=base_generation,
-        ), mock.patch.object(
+        ) as ensure, mock.patch.object(
             workspace_sync,
             "_list_remote_workspace_snapshot",
         ) as list_snapshot, mock.patch.object(
@@ -1242,6 +1457,7 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
                 1,
             )
 
+        ensure.assert_not_called()
         list_snapshot.assert_not_called()
         commit.assert_called_once_with(
             "owner",
@@ -1483,10 +1699,9 @@ class BoundedTransferTests(unittest.TestCase):
             "urlopen",
             return_value=response,
         ) as request:
-            self.assertEqual(
-                workspace_sync._ensure_workspace_checkpoint("owner"),
-                generation,
-            )
+            checkpoint = workspace_sync._ensure_workspace_checkpoint("owner")
+            self.assertEqual(checkpoint.generation, generation)
+            self.assertIsNone(checkpoint.snapshot)
         self.assertEqual(
             request.call_args.kwargs["timeout"],
             workspace_sync.WORKSPACE_CHECKPOINT_BROKER_TIMEOUT_SECONDS,

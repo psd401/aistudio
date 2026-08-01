@@ -8,7 +8,7 @@ describe("production build reproducibility", () => {
   it("uses checked-in font assets instead of build-time Google downloads", () => {
     for (const modulePath of [
       ["lib", "fonts.ts"],
-      ["lib", "atrium", "meridian-fonts.ts"],
+      ["lib", "meridian", "fonts.ts"],
     ]) {
       const source = validatedFs.readFileSync(projectFile(...modulePath), "utf8");
       expect(source).toContain("next/font/local");

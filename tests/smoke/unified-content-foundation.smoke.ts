@@ -1220,6 +1220,7 @@ try {
         .where(eq(repositoryItems.id, legacyTextItem.id)),
     "smoke.unifiedContent.attachLegacyInlineVersion"
   );
+  const legacyRecoveryNow = new Date();
   const [legacyTextJob] = await executeQuery(
     (db) =>
       db
@@ -1231,6 +1232,7 @@ try {
           idempotencyKey: `${legacyTextVersion.id}:inspect:unified-content-v1`,
           attempt: CONTENT_PROCESSING_MAX_ATTEMPTS,
           maxAttempts: CONTENT_PROCESSING_MAX_ATTEMPTS,
+          availableAt: legacyRecoveryNow,
           lastErrorCode: "RETRY_BUDGET_EXHAUSTED",
           lastErrorMessage: "Processing job exhausted its retry budget",
         })
@@ -1238,7 +1240,6 @@ try {
     "smoke.unifiedContent.createLegacyInlineJob"
   );
   assert.ok(legacyTextJob);
-  const legacyRecoveryNow = new Date();
   const legacyClaims = await claimLegacyInlineTextRecoveries({
     leaseOwner: "legacy-inline-smoke:first",
     repositoryId: repository.id,

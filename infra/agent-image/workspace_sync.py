@@ -85,6 +85,12 @@ class _RemoteWorkspaceSnapshot:
 
 
 @dataclass(frozen=True)
+class _EnsuredWorkspaceCheckpoint:
+    generation: str
+    snapshot: Optional[_RemoteWorkspaceSnapshot]
+
+
+@dataclass(frozen=True)
 class _PreparedWorkspaceUpload:
     upload_url: Optional[str]
     reservation_id: Optional[str]
@@ -1498,10 +1504,103 @@ def _delete_workspace_path(
     return next_generation
 
 
+def _parse_checkpoint_snapshot(
+    value: object,
+    checkpoint_generation: str,
+) -> _RemoteWorkspaceSnapshot:
+    """Validate the broker's inline authoritative checkpoint snapshot."""
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"workspaceGeneration", "entries"}
+    ):
+        raise WorkspaceGenerationUnavailable(
+            "workspace broker returned a malformed checkpoint snapshot"
+        )
+    snapshot_generation = value.get("workspaceGeneration")
+    entries = value.get("entries")
+    if (
+        not isinstance(snapshot_generation, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", snapshot_generation)
+        or not isinstance(entries, list)
+    ):
+        raise WorkspaceGenerationUnavailable(
+            "workspace broker returned a malformed checkpoint snapshot"
+        )
+    if snapshot_generation != checkpoint_generation:
+        raise WorkspaceGenerationConflict(
+            "workspace checkpoint snapshot generation disagreed with checkpoint"
+        )
+    if len(entries) > MAX_SYNC_FILES:
+        raise WorkspaceRestoreIncomplete(
+            "restore incomplete (file-count backstop reached)"
+        )
+
+    paths: list[str] = []
+    sizes: dict[str, int] = {}
+    e_tags: dict[str, str] = {}
+    for entry in entries:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"path", "size", "eTag"}
+        ):
+            raise WorkspaceGenerationUnavailable(
+                "workspace broker returned a malformed checkpoint snapshot entry"
+            )
+        relative = entry.get("path")
+        size = entry.get("size")
+        e_tag = entry.get("eTag")
+        if (
+            not isinstance(relative, str)
+            or not relative
+            or relative in sizes
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+            or size > MAX_SYNC_FILE_BYTES
+            or not isinstance(e_tag, str)
+            or not e_tag
+            or len(e_tag) > 1_024
+        ):
+            raise WorkspaceGenerationUnavailable(
+                "workspace broker returned a malformed checkpoint snapshot entry"
+            )
+        if not _is_checkpoint_managed_relative(relative):
+            raise WorkspaceGenerationUnavailable(
+                "workspace checkpoint snapshot included an unmanaged path"
+            )
+        rejection_reason = _workspace_relative_rejection_reason(relative)
+        if rejection_reason is not None:
+            path_hash = hashlib.sha256(
+                relative.encode("utf-8", errors="surrogatepass")
+            ).hexdigest()[:16]
+            raise WorkspaceRestoreIncomplete(
+                "restore incompatible workspace path "
+                f"reason={rejection_reason} path_hash={path_hash}"
+            )
+        paths.append(relative)
+        sizes[relative] = size
+        e_tags[relative] = e_tag
+
+    computed_generation = _generation_for_entries({
+        relative: (sizes[relative], e_tags[relative])
+        for relative in paths
+    })
+    if computed_generation != snapshot_generation:
+        raise WorkspaceGenerationConflict(
+            "workspace checkpoint snapshot did not form its claimed generation"
+        )
+    return _RemoteWorkspaceSnapshot(
+        paths=tuple(paths),
+        sizes=sizes,
+        e_tags=e_tags,
+        generation=snapshot_generation,
+    )
+
+
 def _ensure_workspace_checkpoint(
     prefix: str,
     deadline_monotonic: float | None = None,
-) -> str:
+) -> _EnsuredWorkspaceCheckpoint:
     """Recover or establish the broker's last complete workspace checkpoint."""
     result = _broker_request(
         {"operation": "ensure-checkpoint"},
@@ -1519,7 +1618,18 @@ def _ensure_workspace_checkpoint(
         raise WorkspaceGenerationUnavailable(
             "workspace broker did not establish a durable checkpoint"
         )
-    return generation
+    snapshot = (
+        _parse_checkpoint_snapshot(
+            result["checkpointSnapshot"],
+            generation,
+        )
+        if "checkpointSnapshot" in result
+        else None
+    )
+    return _EnsuredWorkspaceCheckpoint(
+        generation=generation,
+        snapshot=snapshot,
+    )
 
 
 def _commit_workspace_checkpoint(
@@ -2026,13 +2136,17 @@ def refresh_workspace(prefix: str) -> int:
     # control files even when the durable generation is unchanged; otherwise
     # its migration gate can keep a reused microVM permanently bricked.
     _discard_retired_local_control_state()
-    checkpoint_generation = _ensure_workspace_checkpoint(prefix)
-    snapshot = _list_remote_workspace_snapshot(prefix)
+    checkpoint = _ensure_workspace_checkpoint(prefix)
+    snapshot = checkpoint.snapshot
+    if snapshot is None:
+        # Rolling compatibility: an older broker does not include the
+        # authoritative snapshot captured while establishing the checkpoint.
+        snapshot = _list_remote_workspace_snapshot(prefix)
     if snapshot.generation is None:
         raise WorkspaceGenerationUnavailable(
             "workspace broker metadata is incomplete after checkpoint recovery"
         )
-    if snapshot.generation != checkpoint_generation:
+    if snapshot.generation != checkpoint.generation:
         raise WorkspaceGenerationConflict(
             "workspace broker did not restore the committed checkpoint"
         )
@@ -2041,7 +2155,7 @@ def refresh_workspace(prefix: str) -> int:
         cached is not None
         and cached.generation == snapshot.generation
     ):
-        _committed_workspace_generations[prefix] = checkpoint_generation
+        _committed_workspace_generations[prefix] = checkpoint.generation
         logger.info(
             "workspace refresh: prefix=%s generation=%s unchanged",
             prefix,
@@ -2062,7 +2176,7 @@ def refresh_workspace(prefix: str) -> int:
         snapshot.generation[:12] if snapshot.generation else "untrusted",
     )
     pulled = pull_workspace(prefix, snapshot)
-    _committed_workspace_generations[prefix] = checkpoint_generation
+    _committed_workspace_generations[prefix] = checkpoint.generation
     return pulled
 
 
@@ -2482,18 +2596,13 @@ def push_workspace(
             raise WorkspaceGenerationUnavailable(
                 "committed workspace checkpoint is unavailable"
             )
-        if not continuing_pending_push:
-            ensured_generation = _ensure_workspace_checkpoint(
-                prefix,
-                deadline_monotonic,
+        if (
+            not continuing_pending_push
+            and base_checkpoint_generation != current_generation
+        ):
+            raise WorkspaceGenerationConflict(
+                "hydrated workspace generation disagreed with checkpoint"
             )
-            if (
-                ensured_generation != base_checkpoint_generation
-                or ensured_generation != current_generation
-            ):
-                raise WorkspaceGenerationConflict(
-                    "committed workspace changed before final push"
-                )
         pending_completion = _pending_workspace_completions.get(prefix)
         if pending_completion is not None:
             current_generation, _e_tag = _complete_upload_reservation(
@@ -2528,12 +2637,10 @@ def push_workspace(
                 marker_upload = None
             _pending_workspace_generations[prefix] = current_generation
             _pending_workspace_completions.pop(prefix, None)
-        # The successful restore/refresh already retained the complete remote
-        # snapshot. `_ensure_workspace_checkpoint` just re-read the
-        # authoritative workspace under the broker lock and proved that its
-        # generation still equals this cache. Re-listing thousands of legacy
-        # objects here adds no information. A resumed partial push does not
-        # have that guarantee, so it deliberately falls back to a fresh list.
+        # The successful restore/refresh retained the complete checkpoint
+        # snapshot while the owner-wide lease was held. A resumed partial push
+        # no longer has that exact base, so it deliberately re-lists before
+        # replaying its pending completion.
         cached_before_upload = _remote_workspace_snapshots.get(prefix)
         if (
             not continuing_pending_push

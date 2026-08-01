@@ -69,6 +69,10 @@ const WORKSPACE_CHECKPOINT_CONTROL_PREFIX = ".workspace-checkpoints/v2"
 const LEGACY_WORKSPACE_CHECKPOINT_CONTROL_PREFIX = ".workspace-checkpoints/v1"
 const MAX_WORKSPACE_CHECKPOINT_BYTES = 64 * 1024 * 1024
 const WORKSPACE_CHECKPOINT_CONCURRENCY = 32
+// Keep the inline checkpoint snapshot comfortably below API Gateway/Lambda
+// response limits. Large workspaces retain the legacy generation-only
+// response and the agent image falls back to the paginated list operation.
+const MAX_INLINE_WORKSPACE_CHECKPOINT_SNAPSHOT_BYTES = 512 * 1024
 // These paths were checkpoint-managed before they were identified as
 // generated OpenClaw host state. Every current or manifest-bound source is
 // content-validated below before exclusion; a policy or interrupted claim
@@ -723,6 +727,17 @@ export type WorkspaceGenerationEntry = {
   eTag: string
 }
 
+export type WorkspaceCheckpointSnapshot = {
+  workspaceGeneration: string
+  entries: WorkspaceGenerationEntry[]
+}
+
+export type EnsureWorkspaceCheckpointResult = {
+  checkpointReady: true
+  workspaceGeneration: string
+  checkpointSnapshot?: WorkspaceCheckpointSnapshot
+}
+
 /**
  * Hash mutable workspace state with the same unambiguous binary framing used
  * by the agent image. Router-owned attachments are immutable, written under
@@ -1085,6 +1100,53 @@ function mutableWorkspaceEntries(
         Buffer.from(right.path, "utf8"),
       ),
     )
+}
+
+function inlineWorkspaceCheckpointSnapshot(
+  snapshot: WorkspaceGenerationSnapshot,
+): WorkspaceCheckpointSnapshot | undefined {
+  const entries: WorkspaceGenerationEntry[] = []
+  const serializedPrefix =
+    `{"workspaceGeneration":${JSON.stringify(
+      snapshot.generation,
+    )},"entries":[`
+  let serializedBytes =
+    Buffer.byteLength(serializedPrefix, "utf8") +
+    Buffer.byteLength("]}", "utf8")
+  for (const entry of snapshot.entries.values()) {
+    if (!isCheckpointManagedWorkspacePath(entry.path)) continue
+    const responseEntry: WorkspaceGenerationEntry = {
+      path: entry.path,
+      size: entry.size,
+      eTag: entry.eTag,
+    }
+    serializedBytes +=
+      (entries.length === 0 ? 0 : 1) +
+      Buffer.byteLength(JSON.stringify(responseEntry), "utf8")
+    if (
+      serializedBytes > MAX_INLINE_WORKSPACE_CHECKPOINT_SNAPSHOT_BYTES
+    ) {
+      return undefined
+    }
+    entries.push(responseEntry)
+  }
+  entries.sort((left, right) =>
+    Buffer.compare(
+      Buffer.from(left.path, "utf8"),
+      Buffer.from(right.path, "utf8"),
+    ),
+  )
+  const workspaceGeneration = workspaceGenerationFromEntries(entries)
+  if (workspaceGeneration !== snapshot.generation) {
+    throw new WorkspaceStorageCompletionError(
+      "Workspace checkpoint snapshot generation is incomplete",
+    )
+  }
+  const candidate: WorkspaceCheckpointSnapshot = {
+    workspaceGeneration,
+    entries,
+  }
+  return candidate
 }
 
 function assertPrefixFreeWorkspaceEntries(
@@ -1511,7 +1573,10 @@ async function recoverWorkspaceCheckpoint(
   signedWorkspacePrefix: string,
   manifest: WorkspaceCheckpointManifest,
   snapshot: WorkspaceGenerationSnapshot,
-): Promise<WorkspaceCheckpointManifest> {
+): Promise<{
+  manifest: WorkspaceCheckpointManifest
+  snapshot: WorkspaceGenerationSnapshot
+}> {
   const expected = new Map(
     manifest.entries.map((entry) => [entry.path, entry]),
   )
@@ -1614,19 +1679,19 @@ async function recoverWorkspaceCheckpoint(
     // the equivalent recovered generation only after every target is restored.
     await writeWorkspaceCheckpointManifest(recoveredManifest)
   }
-  return recoveredManifest
+  return {
+    manifest: recoveredManifest,
+    snapshot: recoveredSnapshot,
+  }
 }
 
 export async function ensureWorkspaceCheckpoint(
   signedWorkspacePrefix: string,
-): Promise<{
-  checkpointReady: true
-  workspaceGeneration: string
-}> {
+): Promise<EnsureWorkspaceCheckpointResult> {
   return withWorkspaceGenerationLock(
     signedWorkspacePrefix,
     async () => {
-      const snapshot = await readWorkspaceGenerationSnapshot(
+      let snapshot = await readWorkspaceGenerationSnapshot(
         signedWorkspacePrefix,
       )
       let manifest = await readWorkspaceCheckpointManifest(
@@ -1642,15 +1707,24 @@ export async function ensureWorkspaceCheckpoint(
       } else if (
         snapshot.generation !== manifest.workspaceGeneration
       ) {
-        manifest = await recoverWorkspaceCheckpoint(
+        const recovered = await recoverWorkspaceCheckpoint(
           signedWorkspacePrefix,
           manifest,
           snapshot,
         )
+        manifest = recovered.manifest
+        snapshot = recovered.snapshot
       }
+      if (snapshot.generation !== manifest.workspaceGeneration) {
+        throw new WorkspaceStorageCompletionError(
+          "Workspace checkpoint snapshot generation is incomplete",
+        )
+      }
+      const checkpointSnapshot = inlineWorkspaceCheckpointSnapshot(snapshot)
       return {
         checkpointReady: true,
         workspaceGeneration: manifest.workspaceGeneration,
+        ...(checkpointSnapshot ? { checkpointSnapshot } : {}),
       }
     },
   )
@@ -1686,11 +1760,12 @@ export async function commitWorkspaceCheckpoint(
       )
       if (manifest.workspaceGeneration === workspaceGeneration) {
         if (snapshot.generation !== workspaceGeneration) {
-          manifest = await recoverWorkspaceCheckpoint(
+          const recovered = await recoverWorkspaceCheckpoint(
             signedWorkspacePrefix,
             manifest,
             snapshot,
           )
+          manifest = recovered.manifest
         }
         if (manifest.workspaceGeneration !== workspaceGeneration) {
           throw new WorkspaceStorageCompletionError(

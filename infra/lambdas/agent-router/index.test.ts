@@ -32,6 +32,7 @@ const {
   buildAgentInvocationContext,
   sendGoogleChatResponseWithDependencies,
   deferWorkspaceTurn,
+  workspaceRetryDelaySeconds,
   workspaceDeferredRecordNeedsRetry,
   WorkspaceTurnDeferredError,
   isDuplicateMessage,
@@ -631,7 +632,7 @@ describe("workspace turn durable deferral", () => {
     expect(values[":now"]).toBeNumber()
   })
 
-  test("releases the dedup claim and requeues a bounded copy in one minute", async () => {
+  test("releases the dedup claim and requeues the first copy within five seconds", async () => {
     const previousQueueUrl = process.env.ROUTER_QUEUE_URL
     process.env.ROUTER_QUEUE_URL =
       "https://sqs.us-east-1.amazonaws.com/123456789012/router"
@@ -676,12 +677,18 @@ describe("workspace turn durable deferral", () => {
     }
 
     expect(releasedClaims).toEqual(["spaces/room/messages/two"])
+    const retryAfterSeconds = workspaceRetryDelaySeconds(
+      { firstDeferredAt: 1_700_000_000, attempt: 1 },
+      "spaces/room/messages/two"
+    )
+    expect(retryAfterSeconds).toBeGreaterThanOrEqual(1)
+    expect(retryAfterSeconds).toBeLessThanOrEqual(5)
     expect(enqueued).toEqual([
       {
         QueueUrl:
           "https://sqs.us-east-1.amazonaws.com/123456789012/router",
         MessageBody: "{\"message\":{\"data\":\"original\"}}",
-        DelaySeconds: 60,
+        DelaySeconds: retryAfterSeconds,
         MessageAttributes: {
           TraceId: {
             DataType: "String",
@@ -731,6 +738,107 @@ describe("workspace turn durable deferral", () => {
 
     expect(requeued).toBe(false)
     expect(enqueued).toHaveLength(0)
+  })
+})
+
+describe("workspace turn retry backoff", () => {
+  test("uses deterministic exponential bands from persisted attempt state", () => {
+    const firstDeferredAt = 1_700_000_000
+    const messageIdentity = "spaces/room/messages/backoff"
+    const delays = Array.from({ length: 7 }, (_, index) =>
+      workspaceRetryDelaySeconds(
+        { firstDeferredAt, attempt: index + 1 },
+        messageIdentity
+      )
+    )
+
+    expect(delays[0]).toBeGreaterThanOrEqual(1)
+    expect(delays[0]).toBeLessThanOrEqual(5)
+    expect(delays[1]).toBeGreaterThan(delays[0])
+    expect(delays[1]).toBeLessThanOrEqual(10)
+    expect(delays[2]).toBeGreaterThan(delays[1])
+    expect(delays[2]).toBeLessThanOrEqual(20)
+    expect(delays[3]).toBeGreaterThan(delays[2])
+    expect(delays[3]).toBeLessThanOrEqual(40)
+    expect(delays[4]).toBeGreaterThan(delays[3])
+    expect(delays[4]).toBeLessThanOrEqual(60)
+    expect(delays[5]).toBe(60)
+    expect(delays[6]).toBe(60)
+    expect(
+      workspaceRetryDelaySeconds(
+        { firstDeferredAt, attempt: 4 },
+        messageIdentity
+      )
+    ).toBe(delays[3])
+
+    const identityDelays = new Set(
+      Array.from({ length: 12 }, (_, index) =>
+        workspaceRetryDelaySeconds(
+          { firstDeferredAt, attempt: 4 },
+          `spaces/room/messages/backoff-${index}`
+        )
+      )
+    )
+    expect(identityDelays.size).toBeGreaterThan(1)
+  })
+
+  test("advances the persisted attempt when requeueing a copied record", async () => {
+    const previousQueueUrl = process.env.ROUTER_QUEUE_URL
+    process.env.ROUTER_QUEUE_URL =
+      "https://sqs.us-east-1.amazonaws.com/123456789012/router"
+    const messageIdentity = "spaces/room/messages/persisted-backoff"
+    const firstDeferredAt = 1_700_000_000
+    const enqueued: Array<Record<string, unknown>> = []
+    try {
+      const requeued = await deferWorkspaceTurn(
+        {
+          body: "original",
+          messageAttributes: {
+            PsdWorkspaceDeferV1: {
+              dataType: "String",
+              stringValue: JSON.stringify({ firstDeferredAt, attempt: 1 }),
+            },
+          },
+        } as Parameters<typeof deferWorkspaceTurn>[0],
+        new WorkspaceTurnDeferredError(
+          messageIdentity,
+          "workspace-contended"
+        ),
+        TEST_LOG,
+        {
+          releaseClaim: async () => true,
+          enqueue: async input => {
+            enqueued.push(input)
+          },
+          nowSeconds: () => firstDeferredAt + 4,
+        }
+      )
+      expect(requeued).toBe(true)
+    } finally {
+      if (previousQueueUrl === undefined) {
+        delete process.env.ROUTER_QUEUE_URL
+      } else {
+        process.env.ROUTER_QUEUE_URL = previousQueueUrl
+      }
+    }
+
+    const retryAfterSeconds = workspaceRetryDelaySeconds(
+      { firstDeferredAt, attempt: 2 },
+      messageIdentity
+    )
+    expect(retryAfterSeconds).toBeGreaterThanOrEqual(6)
+    expect(retryAfterSeconds).toBeLessThanOrEqual(10)
+    expect(enqueued).toEqual([
+      expect.objectContaining({
+        DelaySeconds: retryAfterSeconds,
+        MessageAttributes: {
+          PsdWorkspaceDeferV1: {
+            DataType: "String",
+            StringValue: JSON.stringify({ firstDeferredAt, attempt: 2 }),
+          },
+        },
+      }),
+    ])
   })
 })
 
