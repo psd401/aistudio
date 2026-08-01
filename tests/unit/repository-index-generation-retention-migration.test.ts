@@ -29,10 +29,14 @@ describe("migration 173 repository generation retention", () => {
     expect(migration).toContain(
       "ADD COLUMN IF NOT EXISTS superseded_at timestamptz",
     );
+    expect(migration).toContain("DEFAULT statement_timestamp()");
+    expect(migration).toContain("ALTER COLUMN superseded_at DROP DEFAULT");
     expect(migration).toContain(
       "CREATE TRIGGER trg_repository_index_generation_superseded_at",
     );
-    expect(migration).toContain("NEW.superseded_at = now()");
+    expect(migration).toContain("NEW.superseded_at = clock_timestamp()");
+    expect(migration).toContain("ELSIF TG_OP = 'INSERT' THEN");
+    expect(migration).not.toContain("TG_OP = 'INSERT' OR OLD.status");
     expect(migration).toMatch(
       /CREATE INDEX IF NOT EXISTS\s+idx_repository_index_generations_superseded_retention/i,
     );

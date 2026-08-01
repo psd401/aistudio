@@ -4,10 +4,11 @@
  */
 
 import assert from "node:assert/strict";
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import {
   closeDatabase,
   executeQuery,
+  executeTransaction,
 } from "@/lib/db/drizzle-client";
 import {
   knowledgeRepositories,
@@ -99,13 +100,36 @@ try {
         .where(eq(knowledgeRepositories.id, repository.id)),
     "smoke.generationRetention.setInitialServingPointer",
   );
-  await executeQuery(
-    (db) =>
-      db
+  const supersessionTransition = await executeTransaction(
+    async (tx) => {
+      const [transactionClock] = await tx.execute<{
+        transaction_started_at: Date | string;
+      }>(sql`SELECT transaction_timestamp() AS transaction_started_at`);
+      assert.ok(transactionClock);
+      await tx.execute(sql`SELECT pg_sleep(0.02)`);
+      await tx
         .update(repositoryIndexGenerations)
         .set({ status: "superseded" })
-        .where(eq(repositoryIndexGenerations.id, longLived.id)),
+        .where(eq(repositoryIndexGenerations.id, longLived.id));
+      const [transitioned] = await tx
+        .select({ supersededAt: repositoryIndexGenerations.supersededAt })
+        .from(repositoryIndexGenerations)
+        .where(eq(repositoryIndexGenerations.id, longLived.id));
+      assert.ok(transitioned?.supersededAt);
+      return {
+        supersededAt: transitioned.supersededAt,
+        transactionStartedAt:
+          transactionClock.transaction_started_at instanceof Date
+            ? transactionClock.transaction_started_at
+            : new Date(transactionClock.transaction_started_at),
+      };
+    },
     "smoke.generationRetention.supersedeLongLived",
+  );
+  assert.ok(
+    supersessionTransition.supersededAt.getTime() >
+      supersessionTransition.transactionStartedAt.getTime(),
+    "superseded_at must use the transition clock, not transaction start",
   );
   await executeQuery(
     (db) =>

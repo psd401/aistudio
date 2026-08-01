@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { executeTransaction, toPgRows } from "@/lib/db/drizzle-client";
 
 export const SUPERSEDED_GENERATION_RETENTION_HOURS = 24;
@@ -40,6 +40,45 @@ function deletedCount(result: unknown): number {
   return row?.deleted_count ?? 0;
 }
 
+function eligibleGenerationCtes(params: {
+  eligibleBefore: string;
+  keepPerRepository: number;
+  generationBatchSize: number;
+}): SQL {
+  return sql`
+    ranked_superseded AS (
+      SELECT generation.id,
+             row_number() OVER (
+               PARTITION BY generation.repository_id
+               ORDER BY generation.superseded_at DESC, generation.id DESC
+             ) AS superseded_rank
+      FROM repository_index_generations generation
+      WHERE generation.status = 'superseded'
+    ),
+    eligible_generations AS (
+      SELECT generation.id
+      FROM repository_index_generations generation
+      INNER JOIN ranked_superseded ranked
+        ON ranked.id = generation.id
+      INNER JOIN knowledge_repositories repository
+        ON repository.id = generation.repository_id
+      WHERE generation.status = 'superseded'
+        AND generation.superseded_at < ${params.eligibleBefore}::timestamptz
+        AND ranked.superseded_rank > ${params.keepPerRepository}
+        AND generation.id IS DISTINCT FROM repository.active_index_generation_id
+        AND NOT EXISTS (
+          SELECT 1
+          FROM knowledge_repositories active_repository
+          WHERE active_repository.active_index_generation_id = generation.id
+        )
+      ORDER BY generation.superseded_at, generation.id
+      -- Keep the serving pointer stable until both deletion phases commit.
+      FOR UPDATE OF generation, repository SKIP LOCKED
+      LIMIT ${params.generationBatchSize}
+    )
+  `;
+}
+
 /**
  * Delete one bounded batch from repository generations that are safely beyond
  * the rollback window. Generation rows are locked with SKIP LOCKED so multiple
@@ -72,36 +111,11 @@ export async function collectSupersededRepositoryGenerations(
   return executeTransaction(
     async (tx) => {
       const chunksResult = await tx.execute(sql`
-        WITH ranked_superseded AS (
-          SELECT generation.id,
-                 row_number() OVER (
-                   PARTITION BY generation.repository_id
-                   ORDER BY generation.superseded_at DESC, generation.id DESC
-                 ) AS superseded_rank
-          FROM repository_index_generations generation
-          WHERE generation.status = 'superseded'
-        ),
-        eligible_generations AS (
-          SELECT generation.id
-          FROM repository_index_generations generation
-          INNER JOIN ranked_superseded ranked
-            ON ranked.id = generation.id
-          INNER JOIN knowledge_repositories repository
-            ON repository.id = generation.repository_id
-          WHERE generation.status = 'superseded'
-            AND generation.superseded_at < ${eligibleBefore}::timestamptz
-            AND ranked.superseded_rank > ${keepPerRepository}
-            AND generation.id IS DISTINCT FROM repository.active_index_generation_id
-            AND NOT EXISTS (
-              SELECT 1
-              FROM knowledge_repositories active_repository
-              WHERE active_repository.active_index_generation_id = generation.id
-            )
-          ORDER BY generation.superseded_at, generation.id
-          -- Keep the serving pointer stable until both deletion phases commit.
-          FOR UPDATE OF generation, repository SKIP LOCKED
-          LIMIT ${generationBatchSize}
-        ),
+        WITH ${eligibleGenerationCtes({
+          eligibleBefore,
+          keepPerRepository,
+          generationBatchSize,
+        })},
         selected_chunks AS (
           SELECT chunk.ctid AS row_id
           FROM repository_item_chunks chunk
@@ -120,36 +134,11 @@ export async function collectSupersededRepositoryGenerations(
       `);
 
       const generationsResult = await tx.execute(sql`
-        WITH ranked_superseded AS (
-          SELECT generation.id,
-                 row_number() OVER (
-                   PARTITION BY generation.repository_id
-                   ORDER BY generation.superseded_at DESC, generation.id DESC
-                 ) AS superseded_rank
-          FROM repository_index_generations generation
-          WHERE generation.status = 'superseded'
-        ),
-        eligible_generations AS (
-          SELECT generation.id
-          FROM repository_index_generations generation
-          INNER JOIN ranked_superseded ranked
-            ON ranked.id = generation.id
-          INNER JOIN knowledge_repositories repository
-            ON repository.id = generation.repository_id
-          WHERE generation.status = 'superseded'
-            AND generation.superseded_at < ${eligibleBefore}::timestamptz
-            AND ranked.superseded_rank > ${keepPerRepository}
-            AND generation.id IS DISTINCT FROM repository.active_index_generation_id
-            AND NOT EXISTS (
-              SELECT 1
-              FROM knowledge_repositories active_repository
-              WHERE active_repository.active_index_generation_id = generation.id
-            )
-          ORDER BY generation.superseded_at, generation.id
-          -- Keep the serving pointer stable until both deletion phases commit.
-          FOR UPDATE OF generation, repository SKIP LOCKED
-          LIMIT ${generationBatchSize}
-        ),
+        WITH ${eligibleGenerationCtes({
+          eligibleBefore,
+          keepPerRepository,
+          generationBatchSize,
+        })},
         deleted_generations AS (
           DELETE FROM repository_index_generations generation
           USING eligible_generations eligible,

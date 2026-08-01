@@ -8,24 +8,35 @@
 -- ============================================================================
 
 ALTER TABLE repository_index_generations
-  ADD COLUMN IF NOT EXISTS superseded_at timestamptz;
+  ADD COLUMN IF NOT EXISTS superseded_at timestamptz
+  DEFAULT statement_timestamp();
+
+-- PostgreSQL stores a non-volatile ADD COLUMN default in table metadata instead
+-- of rewriting the backlog. New application rows rely on the trigger below.
+ALTER TABLE repository_index_generations
+  ALTER COLUMN superseded_at DROP DEFAULT;
 
 UPDATE repository_index_generations
-SET superseded_at = now()
+SET superseded_at = statement_timestamp()
 WHERE status = 'superseded'
   AND superseded_at IS NULL;
+
+UPDATE repository_index_generations
+SET superseded_at = NULL
+WHERE status <> 'superseded'
+  AND superseded_at IS NOT NULL;
 
 CREATE OR REPLACE FUNCTION set_repository_index_generation_superseded_at()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-  IF NEW.status = 'superseded' THEN
-    IF TG_OP = 'INSERT' OR OLD.status IS DISTINCT FROM 'superseded' THEN
-      NEW.superseded_at = now();
-    END IF;
-  ELSE
+  IF NEW.status <> 'superseded' THEN
     NEW.superseded_at = NULL;
+  ELSIF TG_OP = 'INSERT' THEN
+    NEW.superseded_at = clock_timestamp();
+  ELSIF OLD.status IS DISTINCT FROM 'superseded' THEN
+    NEW.superseded_at = clock_timestamp();
   END IF;
   RETURN NEW;
 END;
