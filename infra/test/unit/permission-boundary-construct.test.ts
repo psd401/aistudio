@@ -59,6 +59,10 @@ describe("PermissionBoundaryConstruct", () => {
     );
   });
 
+  test("prod permits durable SQS delivery retries to change message visibility", () => {
+    expect(allowedActions("prod")).toContain("sqs:ChangeMessageVisibility");
+  });
+
   test("prod permits service roles to release only the two agent DynamoDB claim tables", () => {
     const statement = policyStatements("prod").find(
       (candidate) =>

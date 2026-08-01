@@ -43,6 +43,7 @@
         "sqs:ReceiveMessage",
         "sqs:DeleteMessage",
         "sqs:GetQueueAttributes",
+        "sqs:ChangeMessageVisibility",
         "sns:Publish",
         "ecr:GetAuthorizationToken",
         "ecr:BatchCheckLayerAvailability",
