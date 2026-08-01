@@ -148,6 +148,26 @@ async function pruneCollections(
         "this would delete. Widen the pattern or clean those first."
     );
   }
+
+  // content_objects.collection_id is ON DELETE NO ACTION, so ANY surviving
+  // content still filed under one of these collections rejects the delete and
+  // rolls back the whole transaction — including the content and graph prunes
+  // that already succeeded. The E2E content delete runs earlier in this same
+  // transaction, so this only bites when a NON-E2E object was filed into an
+  // E2E collection by hand; refuse with a usable message rather than surfacing
+  // a raw FK violation.
+  const contentRefs = await tx<{ n: number }[]>`
+    SELECT count(*)::int AS n
+      FROM content_objects o
+     WHERE o.collection_id IN ${tx(ids)}
+  `;
+  if ((contentRefs[0]?.n ?? 0) > 0) {
+    throw new Error(
+      `Refusing: ${contentRefs[0].n} content object(s) are still filed under ` +
+        "collections this would delete (content_objects.collection_id is NO " +
+        "ACTION). Move or delete that content first."
+    );
+  }
   const deleted = await tx<{ id: string }[]>`
     DELETE FROM content_collections
      WHERE id IN ${tx(ids)}
