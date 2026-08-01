@@ -41,7 +41,8 @@ describe('canonical embedding generation lifecycle', () => {
     ).toThrow('invalid or mismatched chunk data');
   });
 
-  test('acknowledges superseded and failed generations as stale', () => {
+  test('acknowledges collected, superseded, and failed generations as stale', () => {
+    expect(shouldSkipCanonicalGeneration(null)).toBe(true);
     expect(shouldSkipCanonicalGeneration('superseded')).toBe(true);
     expect(shouldSkipCanonicalGeneration('failed')).toBe(true);
     expect(shouldSkipCanonicalGeneration('building')).toBe(false);

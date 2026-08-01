@@ -76,7 +76,7 @@ export async function collectSupersededRepositoryGenerations(
           SELECT generation.id,
                  row_number() OVER (
                    PARTITION BY generation.repository_id
-                   ORDER BY generation.created_at DESC, generation.id DESC
+                   ORDER BY generation.superseded_at DESC, generation.id DESC
                  ) AS superseded_rank
           FROM repository_index_generations generation
           WHERE generation.status = 'superseded'
@@ -89,7 +89,7 @@ export async function collectSupersededRepositoryGenerations(
           INNER JOIN knowledge_repositories repository
             ON repository.id = generation.repository_id
           WHERE generation.status = 'superseded'
-            AND generation.created_at < ${eligibleBefore}::timestamptz
+            AND generation.superseded_at < ${eligibleBefore}::timestamptz
             AND ranked.superseded_rank > ${keepPerRepository}
             AND generation.id IS DISTINCT FROM repository.active_index_generation_id
             AND NOT EXISTS (
@@ -97,7 +97,7 @@ export async function collectSupersededRepositoryGenerations(
               FROM knowledge_repositories active_repository
               WHERE active_repository.active_index_generation_id = generation.id
             )
-          ORDER BY generation.created_at, generation.id
+          ORDER BY generation.superseded_at, generation.id
           FOR UPDATE OF generation SKIP LOCKED
           LIMIT ${generationBatchSize}
         ),
@@ -124,7 +124,7 @@ export async function collectSupersededRepositoryGenerations(
           SELECT generation.id,
                  row_number() OVER (
                    PARTITION BY generation.repository_id
-                   ORDER BY generation.created_at DESC, generation.id DESC
+                   ORDER BY generation.superseded_at DESC, generation.id DESC
                  ) AS superseded_rank
           FROM repository_index_generations generation
           WHERE generation.status = 'superseded'
@@ -137,7 +137,7 @@ export async function collectSupersededRepositoryGenerations(
           INNER JOIN knowledge_repositories repository
             ON repository.id = generation.repository_id
           WHERE generation.status = 'superseded'
-            AND generation.created_at < ${eligibleBefore}::timestamptz
+            AND generation.superseded_at < ${eligibleBefore}::timestamptz
             AND ranked.superseded_rank > ${keepPerRepository}
             AND generation.id IS DISTINCT FROM repository.active_index_generation_id
             AND NOT EXISTS (
@@ -145,7 +145,7 @@ export async function collectSupersededRepositoryGenerations(
               FROM knowledge_repositories active_repository
               WHERE active_repository.active_index_generation_id = generation.id
             )
-          ORDER BY generation.created_at, generation.id
+          ORDER BY generation.superseded_at, generation.id
           FOR UPDATE OF generation SKIP LOCKED
           LIMIT ${generationBatchSize}
         ),
@@ -156,7 +156,7 @@ export async function collectSupersededRepositoryGenerations(
           WHERE generation.id = eligible.id
             AND repository.id = generation.repository_id
             AND generation.status = 'superseded'
-            AND generation.created_at < ${eligibleBefore}::timestamptz
+            AND generation.superseded_at < ${eligibleBefore}::timestamptz
             AND generation.id IS DISTINCT FROM repository.active_index_generation_id
             AND NOT EXISTS (
               SELECT 1

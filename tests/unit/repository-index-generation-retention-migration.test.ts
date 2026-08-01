@@ -5,12 +5,12 @@ import path from "node:path";
 
 const migrationName = "173-repository-index-generation-retention.sql";
 const migration = fs.readFileSync(
-  path.join(process.cwd(), "infra/database/schema", migrationName),
+  path.join(__dirname, "../../infra/database/schema", migrationName),
   "utf8",
 );
 const manifest = JSON.parse(
   fs.readFileSync(
-    path.join(process.cwd(), "infra/database/migrations.json"),
+    path.join(__dirname, "../../infra/database/migrations.json"),
     "utf8",
   ),
 ) as { migrationFiles: string[] };
@@ -25,12 +25,19 @@ describe("migration 173 repository generation retention", () => {
     expect(manifest.migrationFiles[previousIndex + 1]).toBe(migrationName);
   });
 
-  it("adds the partial ordering index used by the bounded collector", () => {
+  it("tracks supersession time and adds the collector ordering index", () => {
+    expect(migration).toContain(
+      "ADD COLUMN IF NOT EXISTS superseded_at timestamptz",
+    );
+    expect(migration).toContain(
+      "CREATE TRIGGER trg_repository_index_generation_superseded_at",
+    );
+    expect(migration).toContain("NEW.superseded_at = now()");
     expect(migration).toMatch(
       /CREATE INDEX IF NOT EXISTS\s+idx_repository_index_generations_superseded_retention/i,
     );
     expect(migration).toContain(
-      "ON repository_index_generations (repository_id, created_at DESC, id DESC)",
+      "ON repository_index_generations (repository_id, superseded_at DESC, id DESC)",
     );
     expect(migration).toContain("WHERE status = 'superseded'");
   });

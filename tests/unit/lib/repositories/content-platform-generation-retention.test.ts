@@ -69,8 +69,10 @@ describe("superseded repository generation retention", () => {
       expect(compiled.sql).toContain("row_number() OVER");
       expect(compiled.sql).toContain("PARTITION BY generation.repository_id");
       expect(compiled.sql).toContain(
-        "ORDER BY generation.created_at DESC, generation.id DESC",
+        "ORDER BY generation.superseded_at DESC, generation.id DESC",
       );
+      expect(compiled.sql).toContain("generation.superseded_at <");
+      expect(compiled.sql).not.toContain("generation.created_at <");
       expect(compiled.sql).toContain(
         "generation.id IS DISTINCT FROM repository.active_index_generation_id",
       );

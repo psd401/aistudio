@@ -74,5 +74,11 @@ describe("repository reliability source contracts", () => {
     expect(embeddingWorker).toContain(
       "Acknowledging stale visual embedding work before provider call"
     );
+    expect(embeddingWorker).toContain(
+      "Skipping collected embedding generation"
+    );
+    expect(embeddingWorker).not.toContain(
+      "Index generation ${message.generationId} was not found"
+    );
   });
 });

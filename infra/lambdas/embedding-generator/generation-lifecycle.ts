@@ -166,9 +166,9 @@ export function assertValidEmbeddingMessage(
 
 /** Stale generations must acknowledge queued batches without doing model work. */
 export function shouldSkipCanonicalGeneration(
-  status: CanonicalGenerationStatus
+  status: CanonicalGenerationStatus | null
 ): boolean {
-  return status === 'superseded' || status === 'failed';
+  return status === null || status === 'superseded' || status === 'failed';
 }
 
 /**

@@ -5,8 +5,8 @@ import path from "node:path";
 
 const runtimeSource = fs.readFileSync(
   path.join(
-    process.cwd(),
-    "infra/lambdas/unified-content-processor/index.ts",
+    __dirname,
+    "../../infra/lambdas/unified-content-processor/index.ts",
   ),
   "utf8",
 );

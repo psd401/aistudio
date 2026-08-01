@@ -463,7 +463,8 @@ async function resolveRecordEmbeddingSettings(
     LIMIT 1
   `);
   if (!generation) {
-    throw new Error(`Index generation ${message.generationId} was not found`);
+    log.info(`Skipping collected embedding generation ${message.generationId}`);
+    return null;
   }
   if (shouldSkipCanonicalGeneration(generation.status)) {
     log.info(`Skipping stale embedding generation ${message.generationId}`, {
