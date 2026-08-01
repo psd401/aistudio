@@ -5,6 +5,8 @@
  * without importing the Lambda handler (whose clients are created at module load).
  */
 
+import { RepositoryPublicationContentionError } from "../../../lib/repositories/content-platform/publication-contention";
+
 export type DeferredProcessingReason =
   | "CONTENT_PLATFORM_DISABLED"
   | "AWAITING_SECURITY_SCAN"
@@ -20,6 +22,7 @@ export interface ProcessingFailureDecision {
   terminal: boolean;
   code: string;
   message: string;
+  refundAttempt?: boolean;
   resetManagedService?: "textract" | "bedrock-data-automation";
 }
 
@@ -107,6 +110,14 @@ export function classifyContentProcessingError(
   error: unknown
 ): ProcessingFailureDecision {
   const message = errorMessage(error);
+  if (error instanceof RepositoryPublicationContentionError) {
+    return {
+      terminal: false,
+      code: "REPOSITORY_PUBLICATION_CONTENTION",
+      message,
+      refundAttempt: true,
+    };
+  }
   if (error instanceof PermanentContentProcessingError) {
     return { terminal: true, code: error.code, message };
   }

@@ -60,8 +60,11 @@ export interface RepositoryProcessingFailureDecision {
   terminal: boolean;
   code: string;
   message: string;
+  refundAttempt?: boolean;
   resetManagedService?: RestartableManagedService;
 }
+
+export const MAX_REPOSITORY_PUBLICATION_CONTENTION_REFUNDS = 20;
 
 export interface RepositoryProcessingDlqReconciliationResult {
   acknowledge: boolean;
@@ -94,6 +97,42 @@ export function isBdaInvocationExternallyActive(
     metrics.bdaInvocationArn &&
       metrics.bdaInvocationState !== "terminal"
   );
+}
+
+export interface RepositoryProcessingAttemptRefund {
+  refundAttempt: boolean;
+  attempt?: number;
+  metrics: RepositoryProcessingMetrics;
+}
+
+/**
+ * Refund transient publication contention without allowing a wedged repository
+ * to retry forever. Active BDA writers retain their existing uncapped refund.
+ */
+export function resolveRepositoryProcessingAttemptRefund(params: {
+  activeBdaInvocation: boolean;
+  attempt: number;
+  decision: RepositoryProcessingFailureDecision;
+  metrics: RepositoryProcessingMetrics;
+}): RepositoryProcessingAttemptRefund {
+  const contentionRefunds = Math.max(
+    0,
+    params.metrics.contentionRefunds ?? 0
+  );
+  const refundContention =
+    !params.decision.terminal &&
+    params.decision.refundAttempt === true &&
+    contentionRefunds < MAX_REPOSITORY_PUBLICATION_CONTENTION_REFUNDS;
+
+  return {
+    refundAttempt: params.activeBdaInvocation || refundContention,
+    ...(params.activeBdaInvocation || refundContention
+      ? { attempt: Math.max(0, params.attempt - 1) }
+      : {}),
+    metrics: refundContention
+      ? { ...params.metrics, contentionRefunds: contentionRefunds + 1 }
+      : params.metrics,
+  };
 }
 
 interface RepositoryProcessingMutationLockTransaction {
@@ -753,32 +792,33 @@ async function recordRetryFailure(params: {
   now: Date;
   retryDelaySeconds: (attempt: number) => number;
   activeBdaInvocation: boolean;
+  attemptRefund: RepositoryProcessingAttemptRefund;
 }): Promise<RepositoryProcessingFailureResult> {
   const delaySeconds = params.retryDelaySeconds(params.job.attempt);
   const restartManagedService = params.activeBdaInvocation
     ? undefined
     : params.decision.resetManagedService;
+  const retryMetrics = restartManagedService
+    ? resetManagedServiceMetrics(
+        params.attemptRefund.metrics,
+        restartManagedService
+      )
+    : params.attemptRefund.metrics;
+  const metricsChanged = retryMetrics !== params.job.metrics;
   await params.tx
     .update(repositoryProcessingJobs)
     .set({
       status: "pending",
-      ...(params.activeBdaInvocation
-        ? { attempt: Math.max(0, params.job.attempt - 1) }
-        : {}),
+      ...(params.attemptRefund.attempt === undefined
+        ? {}
+        : { attempt: params.attemptRefund.attempt }),
       availableAt: new Date(params.now.getTime() + delaySeconds * 1_000),
       leaseOwner: null,
       leaseExpiresAt: null,
       lastErrorCode: params.decision.code,
       lastErrorMessage: params.decision.message,
-      ...(restartManagedService
-        ? {
-            metrics: resetManagedServiceMetrics(
-              params.job.metrics,
-              restartManagedService
-            ),
-            startedAt: params.now,
-          }
-        : {}),
+      ...(metricsChanged ? { metrics: retryMetrics } : {}),
+      ...(restartManagedService ? { startedAt: params.now } : {}),
       finishedAt: null,
       updatedAt: params.now,
     })
@@ -812,8 +852,14 @@ async function recordRepositoryProcessingFailureInTransaction(params: {
     return { action: "ignore" };
   }
   const activeBdaInvocation = isBdaInvocationExternallyActive(job.metrics);
+  const attemptRefund = resolveRepositoryProcessingAttemptRefund({
+    activeBdaInvocation,
+    attempt: job.attempt,
+    decision: params.decision,
+    metrics: job.metrics,
+  });
   const terminal =
-    !activeBdaInvocation &&
+    !attemptRefund.refundAttempt &&
     (params.decision.terminal || job.attempt >= job.maxAttempts);
   if (terminal) {
     return recordTerminalFailure({
@@ -832,6 +878,7 @@ async function recordRepositoryProcessingFailureInTransaction(params: {
     now: params.now,
     retryDelaySeconds: params.options.retryDelaySeconds,
     activeBdaInvocation,
+    attemptRefund,
   });
 }
 

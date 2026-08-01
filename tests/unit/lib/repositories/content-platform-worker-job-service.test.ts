@@ -6,10 +6,70 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import {
   isBdaInvocationExternallyActive,
   lockRepositoryProcessingMutationTarget,
+  MAX_REPOSITORY_PUBLICATION_CONTENTION_REFUNDS,
   resetManagedServiceMetrics,
+  resolveRepositoryProcessingAttemptRefund,
 } from "@/lib/repositories/content-platform/worker-job-service";
 
 const dialect = new PgDialect();
+
+describe("repository processing attempt refunds", () => {
+  it("refunds publication contention and increments its durable counter", () => {
+    expect(
+      resolveRepositoryProcessingAttemptRefund({
+        activeBdaInvocation: false,
+        attempt: 4,
+        decision: {
+          terminal: false,
+          code: "REPOSITORY_PUBLICATION_CONTENTION",
+          message: "lock wait expired",
+          refundAttempt: true,
+        },
+        metrics: { provider: "unified-content", contentionRefunds: 3 },
+      })
+    ).toEqual({
+      refundAttempt: true,
+      attempt: 3,
+      metrics: { provider: "unified-content", contentionRefunds: 4 },
+    });
+  });
+
+  it("stops refunding publication contention at the cap", () => {
+    const metrics = {
+      provider: "unified-content",
+      contentionRefunds: MAX_REPOSITORY_PUBLICATION_CONTENTION_REFUNDS,
+    };
+    expect(
+      resolveRepositoryProcessingAttemptRefund({
+        activeBdaInvocation: false,
+        attempt: 1,
+        decision: {
+          terminal: false,
+          code: "REPOSITORY_PUBLICATION_CONTENTION",
+          message: "lock wait expired",
+          refundAttempt: true,
+        },
+        metrics,
+      })
+    ).toEqual({ refundAttempt: false, metrics });
+  });
+
+  it("does not refund ordinary retryable failures", () => {
+    const metrics = { provider: "unified-content" };
+    expect(
+      resolveRepositoryProcessingAttemptRefund({
+        activeBdaInvocation: false,
+        attempt: 2,
+        decision: {
+          terminal: false,
+          code: "TRANSIENT_PROCESSING_ERROR",
+          message: "temporary outage",
+        },
+        metrics,
+      })
+    ).toEqual({ refundAttempt: false, metrics });
+  });
+});
 
 describe("unified-content worker managed-service recovery", () => {
   it("clears all Textract run identity and its wait clock", () => {
