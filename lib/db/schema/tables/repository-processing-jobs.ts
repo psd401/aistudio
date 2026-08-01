@@ -91,6 +91,8 @@ export interface RepositoryProcessingMetrics {
   chapterCount?: number;
   speakerCount?: number;
   estimatedCostUsd?: number;
+  /** Publication lock waits refunded without consuming the normal retry budget. */
+  contentionRefunds?: number;
 }
 
 export const repositoryProcessingJobs = pgTable(

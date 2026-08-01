@@ -5,6 +5,26 @@ import {
   processingRetryDelaySeconds,
   RetryableManagedServiceJobError,
 } from "../lifecycle";
+import { RepositoryPublicationContentionError } from "../../../../lib/repositories/content-platform/publication-contention";
+
+describe("repository publication contention lifecycle", () => {
+  test("refunds a retry when repository publication loses the lock race", () => {
+    expect(
+      classifyContentProcessingError(
+        new RepositoryPublicationContentionError(
+          Object.assign(new Error("canceling statement due to lock timeout"), {
+            code: "55P03",
+          })
+        )
+      )
+    ).toEqual({
+      terminal: false,
+      code: "REPOSITORY_PUBLICATION_CONTENTION",
+      message: "canceling statement due to lock timeout",
+      refundAttempt: true,
+    });
+  });
+});
 
 describe("unified content lifecycle policy", () => {
   test("classifies deterministic source failures as terminal", () => {
