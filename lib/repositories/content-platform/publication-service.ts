@@ -214,8 +214,21 @@ export async function configureRepositoryPublicationTransaction(
   `);
 }
 
+/**
+ * The `repository_artifacts.artifact_key` a canonical-text artifact is bound
+ * under. Exported so a producer can look up the hash already bound to an item
+ * version *before* overwriting the deterministic object that hash describes —
+ * see `storeCanonicalText` in the unified-content-processor.
+ */
+export function canonicalTextArtifactKey(
+  itemVersionId: string,
+  processorVersion: string
+): string {
+  return `${itemVersionId}:canonical_text:${processorVersion}`;
+}
+
 function artifactKey(input: PublishDocumentVersionInput): string {
-  return `${input.itemVersionId}:canonical_text:${input.processorVersion}`;
+  return canonicalTextArtifactKey(input.itemVersionId, input.processorVersion);
 }
 
 function additionalArtifactKey(

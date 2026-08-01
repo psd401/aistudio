@@ -1,5 +1,7 @@
 import {
   sanitizeTextForDatabase,
+  sanitizeTextForMessaging,
+  containsMessagingUnsafeCharacters,
   validateTextEncoding,
   sanitizeTextWithMetrics,
   decodeHtmlEntities,
@@ -320,5 +322,198 @@ describe('Real-world scenarios', () => {
     expect(result).toContain('"number": 123');
     expect(result).not.toContain('\x00');
     expect(result).not.toContain('\x01');
+  });
+});
+
+// SQS accepts only the XML 1.0 character set:
+//   #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+// Anything outside it is rejected with "Invalid binary character ... was found
+// in the message body", which is what poisoned 188 production index generations.
+describe('sanitizeTextForMessaging', () => {
+  it('strips U+FFFF, the code point that broke production', () => {
+    expect(sanitizeTextForMessaging('math￿standards')).toBe('mathstandards');
+  });
+
+  it('strips U+FFFE', () => {
+    expect(sanitizeTextForMessaging('a￾b')).toBe('ab');
+  });
+
+  it('strips the U+FDD0-U+FDEF noncharacter arc', () => {
+    expect(sanitizeTextForMessaging('a﷐b﷯c')).toBe('abc');
+    // The whole arc, not just its endpoints.
+    for (let cp = 0xFDD0; cp <= 0xFDEF; cp++) {
+      expect(sanitizeTextForMessaging(`x${String.fromCodePoint(cp)}y`)).toBe('xy');
+    }
+  });
+
+  it('strips U+nFFFE and U+nFFFF in every supplementary plane', () => {
+    for (let plane = 1; plane <= 16; plane++) {
+      const base = plane * 0x10000;
+      expect(sanitizeTextForMessaging(`a${String.fromCodePoint(base + 0xFFFE)}b`)).toBe('ab');
+      expect(sanitizeTextForMessaging(`a${String.fromCodePoint(base + 0xFFFF)}b`)).toBe('ab');
+    }
+  });
+
+  it('preserves well-formed surrogate pairs (emoji)', () => {
+    expect(sanitizeTextForMessaging('celebrate \u{1F389}!')).toBe('celebrate \u{1F389}!');
+  });
+
+  it('preserves supplementary-plane CJK', () => {
+    expect(sanitizeTextForMessaging('\u{20000}\u{2A6DF}')).toBe('\u{20000}\u{2A6DF}');
+  });
+
+  it('strips a lone high surrogate', () => {
+    expect(sanitizeTextForMessaging('a\uD800b')).toBe('ab');
+    expect(sanitizeTextForMessaging('a\uDBFFb')).toBe('ab');
+  });
+
+  it('strips a lone low surrogate', () => {
+    expect(sanitizeTextForMessaging('a\uDC00b')).toBe('ab');
+    expect(sanitizeTextForMessaging('a\uDFFFb')).toBe('ab');
+  });
+
+  it('strips a high surrogate that is not followed by a low surrogate', () => {
+    // "\uD83D" would start an emoji but is orphaned here.
+    expect(sanitizeTextForMessaging('emoji \uD83D end')).toBe('emoji  end');
+  });
+
+  it('preserves tab, newline and carriage return', () => {
+    expect(sanitizeTextForMessaging('a\tb\nc\rd')).toBe('a\tb\nc\rd');
+  });
+
+  it('strips C0 controls and DEL', () => {
+    expect(sanitizeTextForMessaging('a\x00\x01\x08\x0B\x0C\x0E\x1F\x7Fb')).toBe('ab');
+  });
+
+  it('preserves the boundary code points SQS allows', () => {
+    // U+D7FF is the last code point before the surrogate block; U+E000 the
+    // first after it; U+FFFD (replacement character) is explicitly legal.
+    expect(sanitizeTextForMessaging('퟿�')).toBe('퟿�');
+  });
+
+  it('does NOT Unicode-normalize — removal only', () => {
+    // This function feeds content that publishDocumentVersion replays and
+    // compares byte-for-byte. NFC would rewrite ~1,120 SQS-legal code points
+    // that are routine in extracted PDF text, breaking that replay binding
+    // for a large share of the corpus while adding nothing to SQS safety.
+    // If this test starts failing, normalization was reintroduced — don't.
+    const decomposed = 'cafe\u0301';
+    expect(sanitizeTextForMessaging(decomposed)).toBe(decomposed);
+    expect(sanitizeTextForMessaging('\u2000')).toBe('\u2000'); // EN QUAD
+    expect(sanitizeTextForMessaging('\u212B')).toBe('\u212B'); // ANGSTROM SIGN
+    expect(sanitizeTextForMessaging('\uF900')).toBe('\uF900'); // CJK compat ideograph
+    expect(sanitizeTextForMessaging('\u0344')).toBe('\u0344'); // would expand under NFC
+  });
+
+  it('returns an empty string for non-string and empty input', () => {
+    expect(sanitizeTextForMessaging('')).toBe('');
+    expect(sanitizeTextForMessaging(null as unknown as string)).toBe('');
+    expect(sanitizeTextForMessaging(undefined as unknown as string)).toBe('');
+    expect(sanitizeTextForMessaging(42 as unknown as string)).toBe('');
+  });
+
+  it('never grows the string, so byte-budgeted batching stays correct', () => {
+    const poisoned = 'chunk ￿ text \uD800 more ﷐ end \u{1FFFF}';
+    expect(Buffer.byteLength(sanitizeTextForMessaging(poisoned), 'utf8'))
+      .toBeLessThanOrEqual(Buffer.byteLength(poisoned, 'utf8'));
+
+    // The guarantee has to hold for the inputs that would break it under NFC:
+    // composition exclusions and U+0344 expand rather than shrink.
+    for (const expanding of ['\u0958', '\u09DC', '\u0F43', '\uFB2C', '\u0344']) {
+      const input = expanding.repeat(500);
+      expect(Buffer.byteLength(sanitizeTextForMessaging(input), 'utf8'))
+        .toBeLessThanOrEqual(Buffer.byteLength(input, 'utf8'));
+    }
+  });
+
+  it('is idempotent', () => {
+    const once = sanitizeTextForMessaging('a￿b\uD800c \u{1F389}');
+    expect(sanitizeTextForMessaging(once)).toBe(once);
+  });
+
+  it('leaves already-clean text byte-identical', () => {
+    const clean = 'Grade 3 standards\n\tCCSS.MATH.CONTENT.3.OA.A.1 \u{1F389} cafe\u0301';
+    expect(sanitizeTextForMessaging(clean)).toBe(clean);
+  });
+});
+
+describe('containsMessagingUnsafeCharacters', () => {
+  it('detects the noncharacters and lone surrogates', () => {
+    expect(containsMessagingUnsafeCharacters('a￿b')).toBe(true);
+    expect(containsMessagingUnsafeCharacters('a￾b')).toBe(true);
+    expect(containsMessagingUnsafeCharacters('a﷐b')).toBe(true);
+    expect(containsMessagingUnsafeCharacters('a\uD800b')).toBe(true);
+    expect(containsMessagingUnsafeCharacters('a\uDC00b')).toBe(true);
+    expect(containsMessagingUnsafeCharacters('a\u{1FFFE}b')).toBe(true);
+    expect(containsMessagingUnsafeCharacters('a\x00b')).toBe(true);
+  });
+
+  it('accepts legal text including emoji and whitespace', () => {
+    expect(containsMessagingUnsafeCharacters('plain text')).toBe(false);
+    expect(containsMessagingUnsafeCharacters('a\tb\nc\rd')).toBe(false);
+    expect(containsMessagingUnsafeCharacters('party \u{1F389}')).toBe(false);
+    expect(containsMessagingUnsafeCharacters('퟿�')).toBe(false);
+  });
+
+  it('is stateless across calls (no shared regex lastIndex)', () => {
+    const poisoned = 'a￿b';
+    expect(containsMessagingUnsafeCharacters(poisoned)).toBe(true);
+    expect(containsMessagingUnsafeCharacters(poisoned)).toBe(true);
+    expect(containsMessagingUnsafeCharacters(poisoned)).toBe(true);
+  });
+
+  it('returns false for non-string and empty input', () => {
+    expect(containsMessagingUnsafeCharacters('')).toBe(false);
+    expect(containsMessagingUnsafeCharacters(null as unknown as string)).toBe(false);
+    expect(containsMessagingUnsafeCharacters(42 as unknown as string)).toBe(false);
+  });
+
+  it('is exactly the inverse of "sanitize is a no-op"', () => {
+    const samples = [
+      'clean',
+      'a￿b',
+      'party \u{1F389}',
+      'a\uD800b',
+      'a\u{10FFFF}b',
+      // Non-NFC inputs are the counterexample that a normalizing sanitizer
+      // would break: the predicate only sees the strip class, so the two must
+      // stay removal-only to agree.
+      'cafe\u0301',
+      '\u2000\u212B\uF900\u0344',
+      'a﷐b\u{1FFFE}c',
+    ];
+    for (const sample of samples) {
+      expect(containsMessagingUnsafeCharacters(sample)).toBe(
+        sanitizeTextForMessaging(sample) !== sample
+      );
+    }
+  });
+});
+
+// Regression guard: the messaging sanitizer must not have widened the database
+// one. sanitizeTextForDatabase is used by lib/document-processing.ts and has a
+// locked contract — it strips C0 controls only and lets noncharacters through.
+describe('sanitizeTextForDatabase is unchanged by the messaging sanitizer', () => {
+  it('still passes noncharacters through untouched', () => {
+    expect(sanitizeTextForDatabase('a￿b')).toBe('a￿b');
+    expect(sanitizeTextForDatabase('a￾b')).toBe('a￾b');
+    expect(sanitizeTextForDatabase('a﷐b')).toBe('a﷐b');
+    expect(sanitizeTextForDatabase('a\u{1FFFF}b')).toBe('a\u{1FFFF}b');
+  });
+
+  it('still passes lone surrogates through untouched', () => {
+    expect(sanitizeTextForDatabase('a\uD800b')).toBe('a\uD800b');
+    expect(sanitizeTextForDatabase('a\uDC00b')).toBe('a\uDC00b');
+  });
+
+  it('still strips exactly the C0 set it always stripped', () => {
+    expect(sanitizeTextForDatabase('a\x00\x01\x08\x0B\x0C\x0E\x1F\x7Fb')).toBe('ab');
+    expect(sanitizeTextForDatabase('a\tb\nc\rd')).toBe('a\tb\nc\rd');
+  });
+
+  it('is strictly weaker than sanitizeTextForMessaging', () => {
+    const poisoned = 'a￿\x00\uD800b';
+    expect(sanitizeTextForDatabase(poisoned)).not.toBe(sanitizeTextForMessaging(poisoned));
+    expect(sanitizeTextForMessaging(poisoned)).toBe('ab');
   });
 });
