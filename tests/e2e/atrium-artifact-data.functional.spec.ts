@@ -59,10 +59,10 @@ function isListedContentItem(
   return typeof item.id === "string" && typeof item.title === "string";
 }
 
-async function findArtifactIdByTitle(
+async function findArtifactIdsByTitle(
   page: import("@playwright/test").Page,
   title: string
-): Promise<string | undefined> {
+): Promise<string[] | undefined> {
   const response = await page.request.get(
     "/api/v1/content?kind=artifact&query=" + encodeURIComponent(title)
   );
@@ -76,10 +76,12 @@ async function findArtifactIdByTitle(
 
   const body = (await response.json()) as ListedContentResponse;
   if (!Array.isArray(body.data)) return undefined;
-  return body.data.find(
-    (item): item is { id: string; title: string } =>
-      isListedContentItem(item) && item.title === title
-  )?.id;
+  return body.data
+    .filter(
+      (item): item is { id: string; title: string } =>
+        isListedContentItem(item) && item.title === title
+    )
+    .map((item) => item.id);
 }
 
 async function cleanupArtifact(
@@ -91,8 +93,20 @@ async function cleanupArtifact(
   try {
     // The exact-title lookup is authoritative: a malformed create response
     // must never make teardown delete an unrelated object by returned ID.
-    const cleanupId = await findArtifactIdByTitle(page, title);
-    if (!cleanupId) return;
+    const cleanupIds = await findArtifactIdsByTitle(page, title);
+    if (!cleanupIds) return;
+    expect
+      .soft(
+        cleanupIds.length,
+        "Artifact cleanup requires one unambiguous exact-title fixture"
+      )
+      .toBe(1);
+    if (cleanupIds.length !== 1) return;
+    const [cleanupId] = cleanupIds;
+    expect
+      .soft(isUuid(cleanupId), "Exact-title fixture did not have a UUID id")
+      .toBe(true);
+    if (!isUuid(cleanupId)) return;
     if (contentId && contentId !== cleanupId) {
       expect
         .soft(
@@ -100,6 +114,7 @@ async function cleanupArtifact(
           "Create response ID did not match the exact-title fixture"
         )
         .toBe(cleanupId);
+      return;
     }
     const response = await page.request.delete("/api/v1/content/" + cleanupId);
     expect
