@@ -1,3 +1,5 @@
+/** @jest-environment node */
+
 import type { NextRequest } from "next/server"
 
 const verifyContextMock = jest.fn()
@@ -9,6 +11,7 @@ const createPublicArtifactDownloadUrlMock = jest.fn()
 const completeWorkspaceUploadMock = jest.fn()
 const ensureWorkspaceCheckpointMock = jest.fn()
 const commitWorkspaceCheckpointMock = jest.fn()
+const finalizeWorkspaceCheckpointMock = jest.fn()
 const deleteWorkspacePathMock = jest.fn()
 
 jest.mock("@/lib/agent-workspace/invocation-context", () => ({
@@ -34,6 +37,8 @@ jest.mock("@/lib/agent-workspace/storage-broker", () => ({
     ensureWorkspaceCheckpointMock(...args),
   commitWorkspaceCheckpoint: (...args: unknown[]) =>
     commitWorkspaceCheckpointMock(...args),
+  finalizeWorkspaceCheckpoint: (...args: unknown[]) =>
+    finalizeWorkspaceCheckpointMock(...args),
   deleteWorkspacePath: (...args: unknown[]) =>
     deleteWorkspacePathMock(...args),
 }))
@@ -49,6 +54,8 @@ jest.mock("@/lib/logger", () => ({
 import { POST } from "@/app/api/agent/workspace-storage/route"
 import { WorkspaceStorageCompletionError } from "@/lib/agent-workspace/storage-broker"
 
+const CHECKPOINT_FINALIZATION_PROOF = "signed-checkpoint-finalization-proof"
+
 function request(body: unknown): NextRequest {
   return {
     json: async () => body,
@@ -63,6 +70,7 @@ beforeEach(() => {
     mode: "owner",
     sessionId: "session-1",
     nonce: "nonce-1",
+    expiresAt: 2_000_000_000,
     workspacePrefix: "workspaces/owner/",
   })
   listWorkspaceObjectsMock.mockResolvedValue({ keys: [] })
@@ -79,6 +87,10 @@ beforeEach(() => {
     workspaceGeneration: "1".repeat(64),
   })
   commitWorkspaceCheckpointMock.mockResolvedValue({
+    checkpointCommitted: true,
+    workspaceGeneration: "2".repeat(64),
+  })
+  finalizeWorkspaceCheckpointMock.mockResolvedValue({
     checkpointCommitted: true,
     workspaceGeneration: "2".repeat(64),
   })
@@ -212,6 +224,8 @@ describe("POST /api/agent/workspace-storage", () => {
     ensureWorkspaceCheckpointMock.mockResolvedValueOnce({
       checkpointReady: true,
       workspaceGeneration,
+      atomicCheckpointCommitVersion: 1,
+      checkpointFinalizationProof: CHECKPOINT_FINALIZATION_PROOF,
       checkpointSnapshot,
     })
 
@@ -220,10 +234,16 @@ describe("POST /api/agent/workspace-storage", () => {
     expect(await ensured.json()).toEqual({
       checkpointReady: true,
       workspaceGeneration,
+      atomicCheckpointCommitVersion: 1,
+      checkpointFinalizationProof: CHECKPOINT_FINALIZATION_PROOF,
       checkpointSnapshot,
     })
     expect(ensureWorkspaceCheckpointMock).toHaveBeenCalledWith(
       "workspaces/owner/",
+      {
+        invocationNonce: "nonce-1",
+        expiresAt: 2_000_000_000,
+      },
     )
 
     const committed = await POST(
@@ -258,6 +278,256 @@ describe("POST /api/agent/workspace-storage", () => {
     expect(missingBase.status).toBe(400)
     expect(malformedBase.status).toBe(400)
     expect(commitWorkspaceCheckpointMock).not.toHaveBeenCalled()
+  })
+
+  it("finalizes an ordered upload and deletion batch for the signed owner", async () => {
+    const reservationIds = [
+      "11111111-2222-4333-8444-555555555555",
+      "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    ]
+    const deletedPaths = ["memory/old.md", "state/removed.sqlite"]
+
+    const response = await POST(
+      request({
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds,
+        deletedPaths,
+        checkpointFinalizationProof: CHECKPOINT_FINALIZATION_PROOF,
+      }),
+    )
+
+    expect(response.status).toBe(200)
+    expect(finalizeWorkspaceCheckpointMock).toHaveBeenCalledWith(
+      "owner@example.com",
+      "workspaces/owner/",
+      "1".repeat(64),
+      reservationIds,
+      deletedPaths,
+      CHECKPOINT_FINALIZATION_PROOF,
+      "nonce-1",
+      2_000_000_000,
+    )
+  })
+
+  it("accepts a deletion path at the canonical UTF-8 byte limit", async () => {
+    const boundaryPath = [
+      "a".repeat(255),
+      "b".repeat(255),
+      "c".repeat(254),
+      "d",
+    ].join("/")
+
+    const response = await POST(
+      request({
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds: [],
+        deletedPaths: [boundaryPath],
+        checkpointFinalizationProof: CHECKPOINT_FINALIZATION_PROOF,
+      }),
+    )
+
+    expect(Buffer.byteLength(boundaryPath, "utf8")).toBe(768)
+    expect(response.status).toBe(200)
+    expect(finalizeWorkspaceCheckpointMock).toHaveBeenCalled()
+  })
+
+  it.each([
+    [
+      "a missing array",
+      {
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds: [],
+        checkpointFinalizationProof: CHECKPOINT_FINALIZATION_PROOF,
+      },
+    ],
+    [
+      "a malformed base generation",
+      {
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "not-a-generation",
+        reservationIds: [],
+        deletedPaths: [],
+        checkpointFinalizationProof: CHECKPOINT_FINALIZATION_PROOF,
+      },
+    ],
+    [
+      "a malformed reservation UUID",
+      {
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds: ["not-a-uuid"],
+        deletedPaths: [],
+        checkpointFinalizationProof: CHECKPOINT_FINALIZATION_PROOF,
+      },
+    ],
+    [
+      "a non-array reservation list",
+      {
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds: "11111111-2222-4333-8444-555555555555",
+        deletedPaths: [],
+        checkpointFinalizationProof: CHECKPOINT_FINALIZATION_PROOF,
+      },
+    ],
+    [
+      "duplicate reservation UUIDs",
+      {
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds: [
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE",
+        ],
+        deletedPaths: [],
+        checkpointFinalizationProof: CHECKPOINT_FINALIZATION_PROOF,
+      },
+    ],
+    [
+      "an empty deletion path",
+      {
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds: [],
+        deletedPaths: ["   "],
+        checkpointFinalizationProof: CHECKPOINT_FINALIZATION_PROOF,
+      },
+    ],
+    [
+      "duplicate deletion paths",
+      {
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds: [],
+        deletedPaths: ["memory/old.md", "memory/old.md"],
+        checkpointFinalizationProof: CHECKPOINT_FINALIZATION_PROOF,
+      },
+    ],
+    [
+      "a non-string deletion path",
+      {
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds: [],
+        deletedPaths: [42],
+        checkpointFinalizationProof: CHECKPOINT_FINALIZATION_PROOF,
+      },
+    ],
+    [
+      "a deletion path over the canonical UTF-8 byte limit",
+      {
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds: [],
+        deletedPaths: [
+          [
+            "a".repeat(255),
+            "b".repeat(255),
+            "c".repeat(255),
+            "dd",
+          ].join("/"),
+        ],
+        checkpointFinalizationProof: CHECKPOINT_FINALIZATION_PROOF,
+      },
+    ],
+    [
+      "a multibyte deletion path over the canonical UTF-8 byte limit",
+      {
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds: [],
+        deletedPaths: [
+          Array.from({ length: 4 }, () => "é".repeat(96)).join("/"),
+        ],
+        checkpointFinalizationProof: CHECKPOINT_FINALIZATION_PROOF,
+      },
+    ],
+    [
+      "a missing finalization proof",
+      {
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds: [],
+        deletedPaths: [],
+      },
+    ],
+    [
+      "an empty finalization proof",
+      {
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds: [],
+        deletedPaths: [],
+        checkpointFinalizationProof: "",
+      },
+    ],
+    [
+      "a non-string finalization proof",
+      {
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds: [],
+        deletedPaths: [],
+        checkpointFinalizationProof: 42,
+      },
+    ],
+    [
+      "an oversized finalization proof",
+      {
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds: [],
+        deletedPaths: [],
+        checkpointFinalizationProof: "x".repeat(4_097),
+      },
+    ],
+    [
+      "a multibyte finalization proof over the byte limit",
+      {
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds: [],
+        deletedPaths: [],
+        checkpointFinalizationProof: "💥".repeat(1_025),
+      },
+    ],
+    [
+      "an undeclared field",
+      {
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds: [],
+        deletedPaths: [],
+        checkpointFinalizationProof: CHECKPOINT_FINALIZATION_PROOF,
+        workspaceGeneration: "2".repeat(64),
+      },
+    ],
+  ])("rejects finalize-checkpoint with %s", async (_label, body) => {
+    const response = await POST(request(body))
+
+    expect(response.status).toBe(400)
+    expect(finalizeWorkspaceCheckpointMock).not.toHaveBeenCalled()
+  })
+
+  it("caps the total finalize-checkpoint batch cardinality", async () => {
+    const response = await POST(
+      request({
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds: [],
+        checkpointFinalizationProof: CHECKPOINT_FINALIZATION_PROOF,
+        deletedPaths: Array.from(
+          { length: 250_001 },
+          (_value, index) => `memory/deleted-${index}.md`,
+        ),
+      }),
+    )
+
+    expect(response.status).toBe(400)
+    expect(finalizeWorkspaceCheckpointMock).not.toHaveBeenCalled()
   })
 
   it("generation-fences deletes inside the signed prefix", async () => {

@@ -689,16 +689,24 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
         workspace_sync._uploaded_state.clear()
         workspace_sync._remote_workspace_snapshots.clear()
         workspace_sync._committed_workspace_generations.clear()
+        workspace_sync._atomic_checkpoint_finalization_capabilities.clear()
         workspace_sync._pending_workspace_generations.clear()
         workspace_sync._pending_workspace_completions.clear()
+        workspace_sync._pending_atomic_workspace_finalizations.clear()
         workspace_sync._force_exact_workspace_restores.clear()
         self.addCleanup(workspace_sync._uploaded_state.clear)
         self.addCleanup(workspace_sync._remote_workspace_snapshots.clear)
         self.addCleanup(
             workspace_sync._committed_workspace_generations.clear
         )
+        self.addCleanup(
+            workspace_sync._atomic_checkpoint_finalization_capabilities.clear
+        )
         self.addCleanup(workspace_sync._pending_workspace_generations.clear)
         self.addCleanup(workspace_sync._pending_workspace_completions.clear)
+        self.addCleanup(
+            workspace_sync._pending_atomic_workspace_finalizations.clear
+        )
         self.addCleanup(
             workspace_sync._force_exact_workspace_restores.clear
         )
@@ -1075,6 +1083,80 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
             self.assertEqual(workspace_sync.refresh_workspace("owner"), 0)
 
         list_snapshot.assert_called_once_with("owner")
+
+    def test_refresh_records_atomic_finalization_capability_and_proof(self):
+        generation = workspace_sync._generation_for_entries({})
+        response = {
+            "checkpointReady": True,
+            "workspaceGeneration": generation,
+            "atomicCheckpointCommitVersion": 1,
+            "checkpointFinalizationProof": "opaque-proof",
+            "checkpointSnapshot": {
+                "workspaceGeneration": generation,
+                "entries": [],
+            },
+        }
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync,
+            "_broker_request",
+            return_value=response,
+        ):
+            self.assertEqual(workspace_sync.refresh_workspace("owner"), 0)
+
+        self.assertEqual(
+            workspace_sync._atomic_checkpoint_finalization_capabilities[
+                "owner"
+            ],
+            workspace_sync._AtomicCheckpointFinalizationCapability(
+                version=1,
+                proof="opaque-proof",
+            ),
+        )
+
+    def test_malformed_atomic_finalization_capability_fails_closed(self):
+        generation = workspace_sync._generation_for_entries({})
+        malformed = [
+            {"atomicCheckpointCommitVersion": 1},
+            {"checkpointFinalizationProof": "proof"},
+            {
+                "atomicCheckpointCommitVersion": True,
+                "checkpointFinalizationProof": "proof",
+            },
+            {
+                "atomicCheckpointCommitVersion": 2,
+                "checkpointFinalizationProof": "proof",
+            },
+            {
+                "atomicCheckpointCommitVersion": 1,
+                "checkpointFinalizationProof": "",
+            },
+            {
+                "atomicCheckpointCommitVersion": 1,
+                "checkpointFinalizationProof": "x" * 4_097,
+            },
+            {
+                "atomicCheckpointCommitVersion": 1,
+                "checkpointFinalizationProof": "\ud800",
+            },
+        ]
+
+        for capability in malformed:
+            with self.subTest(capability=capability), mock.patch.object(
+                workspace_sync,
+                "_broker_request",
+                return_value={
+                    "checkpointReady": True,
+                    "workspaceGeneration": generation,
+                    **capability,
+                },
+            ):
+                with self.assertRaises(
+                    workspace_sync.WorkspaceGenerationUnavailable
+                ):
+                    workspace_sync._ensure_workspace_checkpoint("owner")
 
     def test_present_malformed_checkpoint_snapshot_fails_closed(self):
         generation = workspace_sync._generation_for_entries({})
@@ -1468,6 +1550,770 @@ class WorkspaceGenerationFenceTests(unittest.TestCase):
         self.assertEqual(
             workspace_sync._remote_workspace_snapshots["owner"].generation,
             final_generation,
+        )
+
+    def test_atomic_push_finalizes_uploads_and_deletions_in_one_request(self):
+        local = self.root / "state.sqlite"
+        local.write_bytes(b"new-history")
+        metadata = local.stat()
+        reservation = "36bb0456-1c51-4fb8-97d1-4e87d02765ce"
+        base_entries = {
+            "deleted.md": (4, '"deleted"'),
+            "state.sqlite": (3, '"old"'),
+        }
+        base_generation = workspace_sync._generation_for_entries(
+            base_entries
+        )
+        final_generation = workspace_sync._generation_for_entries({
+            "state.sqlite": (metadata.st_size, '"new"'),
+        })
+        workspace_sync._remote_workspace_snapshots["owner"] = (
+            workspace_sync._RemoteWorkspaceSnapshot(
+                paths=tuple(sorted(base_entries)),
+                sizes={
+                    relative: value[0]
+                    for relative, value in base_entries.items()
+                },
+                e_tags={
+                    relative: value[1]
+                    for relative, value in base_entries.items()
+                },
+                generation=base_generation,
+            )
+        )
+        workspace_sync._committed_workspace_generations["owner"] = (
+            base_generation
+        )
+        workspace_sync._atomic_checkpoint_finalization_capabilities[
+            "owner"
+        ] = workspace_sync._AtomicCheckpointFinalizationCapability(
+            version=1,
+            proof="opaque-proof",
+        )
+        prepared = workspace_sync._PreparedWorkspaceUpload(
+            upload_url="https://upload.invalid/state",
+            reservation_id=reservation,
+            required_headers={
+                "Content-Length": str(metadata.st_size),
+                "Content-Type": "application/octet-stream",
+                "x-amz-checksum-sha256":
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            },
+        )
+        response = {
+            "checkpointCommitted": True,
+            "workspaceGeneration": final_generation,
+            "uploads": [{
+                "reservationId": reservation,
+                "key": "owner/state.sqlite",
+                "eTag": '"new"',
+            }],
+            "deletions": [{"path": "deleted.md", "deleted": True}],
+        }
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync,
+            "_upload_spec",
+            return_value=prepared,
+        ), mock.patch.object(
+            workspace_sync, "_stream_upload"
+        ), mock.patch.object(
+            workspace_sync,
+            "_broker_request",
+            return_value=response,
+        ) as broker, mock.patch.object(
+            workspace_sync, "_delete_workspace_path"
+        ) as legacy_delete, mock.patch.object(
+            workspace_sync, "_complete_upload_reservation"
+        ) as legacy_complete, mock.patch.object(
+            workspace_sync, "_commit_workspace_checkpoint"
+        ) as legacy_commit:
+            self.assertEqual(
+                workspace_sync.push_workspace(
+                    "owner",
+                    expected_generation=base_generation,
+                    require_generation=True,
+                ),
+                2,
+            )
+
+        self.assertEqual(
+            broker.call_args.args[0],
+            {
+                "operation": "finalize-checkpoint",
+                "baseWorkspaceGeneration": base_generation,
+                "checkpointFinalizationProof": "opaque-proof",
+                "reservationIds": [reservation],
+                "deletedPaths": ["deleted.md"],
+            },
+        )
+        legacy_delete.assert_not_called()
+        legacy_complete.assert_not_called()
+        legacy_commit.assert_not_called()
+        self.assertEqual(
+            workspace_sync.workspace_generation("owner"),
+            final_generation,
+        )
+        self.assertEqual(
+            workspace_sync._uploaded_state[("owner", "state.sqlite")],
+            (
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_ctime_ns,
+            ),
+        )
+        self.assertNotIn(
+            "owner", workspace_sync._pending_atomic_workspace_finalizations
+        )
+        self.assertNotIn(
+            "owner",
+            workspace_sync._atomic_checkpoint_finalization_capabilities,
+        )
+
+    def test_atomic_push_commits_an_empty_batch_without_legacy_calls(self):
+        generation = workspace_sync._generation_for_entries({})
+        workspace_sync._remote_workspace_snapshots["owner"] = (
+            workspace_sync._RemoteWorkspaceSnapshot(
+                paths=(), sizes={}, e_tags={}, generation=generation
+            )
+        )
+        workspace_sync._committed_workspace_generations["owner"] = generation
+        workspace_sync._atomic_checkpoint_finalization_capabilities[
+            "owner"
+        ] = workspace_sync._AtomicCheckpointFinalizationCapability(
+            version=1,
+            proof="opaque-proof",
+        )
+        response = {
+            "checkpointCommitted": True,
+            "workspaceGeneration": generation,
+            "uploads": [],
+            "deletions": [],
+        }
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync, "_broker_request", return_value=response
+        ) as broker, mock.patch.object(
+            workspace_sync, "_upload_spec"
+        ) as upload, mock.patch.object(
+            workspace_sync, "_commit_workspace_checkpoint"
+        ) as legacy_commit:
+            self.assertEqual(
+                workspace_sync.push_workspace(
+                    "owner",
+                    expected_generation=generation,
+                    require_generation=True,
+                ),
+                0,
+            )
+
+        self.assertEqual(
+            broker.call_args.args[0],
+            {
+                "operation": "finalize-checkpoint",
+                "baseWorkspaceGeneration": generation,
+                "checkpointFinalizationProof": "opaque-proof",
+                "reservationIds": [],
+                "deletedPaths": [],
+            },
+        )
+        upload.assert_not_called()
+        legacy_commit.assert_not_called()
+
+    def test_atomic_push_retries_exact_pending_batch_after_bad_generation(self):
+        local = self.root / "state.sqlite"
+        local.write_bytes(b"new-history")
+        metadata = local.stat()
+        reservation = "36bb0456-1c51-4fb8-97d1-4e87d02765ce"
+        base_generation = workspace_sync._generation_for_entries({})
+        final_generation = workspace_sync._generation_for_entries({
+            "state.sqlite": (metadata.st_size, '"new"'),
+        })
+        workspace_sync._remote_workspace_snapshots["owner"] = (
+            workspace_sync._RemoteWorkspaceSnapshot(
+                paths=(),
+                sizes={},
+                e_tags={},
+                generation=base_generation,
+            )
+        )
+        workspace_sync._committed_workspace_generations["owner"] = (
+            base_generation
+        )
+        workspace_sync._atomic_checkpoint_finalization_capabilities[
+            "owner"
+        ] = workspace_sync._AtomicCheckpointFinalizationCapability(
+            version=1,
+            proof="opaque-proof",
+        )
+        prepared = workspace_sync._PreparedWorkspaceUpload(
+            upload_url="https://upload.invalid/state",
+            reservation_id=reservation,
+            required_headers={},
+        )
+
+        def response(generation):
+            return {
+                "checkpointCommitted": True,
+                "workspaceGeneration": generation,
+                "uploads": [{
+                    "reservationId": reservation,
+                    "key": "owner/state.sqlite",
+                    "eTag": '"new"',
+                }],
+                "deletions": [],
+            }
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync,
+            "_upload_spec",
+            return_value=prepared,
+        ) as prepare, mock.patch.object(
+            workspace_sync, "_stream_upload"
+        ) as stream, mock.patch.object(
+            workspace_sync,
+            "_broker_request",
+            side_effect=[response("f" * 64), response(final_generation)],
+        ) as broker:
+            with self.assertRaises(
+                workspace_sync.WorkspaceGenerationConflict
+            ):
+                workspace_sync.push_workspace(
+                    "owner",
+                    expected_generation=base_generation,
+                    require_generation=True,
+                )
+            self.assertIn(
+                "owner",
+                workspace_sync._pending_atomic_workspace_finalizations,
+            )
+            # A retry runs under a newly authenticated invocation. Its fresh
+            # capability must not rewrite the exact old batch journal key.
+            workspace_sync._atomic_checkpoint_finalization_capabilities[
+                "owner"
+            ] = workspace_sync._AtomicCheckpointFinalizationCapability(
+                version=1,
+                proof="new-invocation-proof",
+            )
+            self.assertEqual(
+                workspace_sync.push_workspace(
+                    "owner",
+                    expected_generation=base_generation,
+                    require_generation=True,
+                ),
+                0,
+            )
+
+        self.assertEqual(prepare.call_count, 1)
+        self.assertEqual(stream.call_count, 1)
+        self.assertEqual(broker.call_count, 2)
+        self.assertEqual(
+            broker.call_args_list[1].args[0][
+                "checkpointFinalizationProof"
+            ],
+            "opaque-proof",
+        )
+        self.assertEqual(
+            workspace_sync.workspace_generation("owner"),
+            final_generation,
+        )
+
+    def test_atomic_apply_rejects_upload_key_for_another_workspace(self):
+        reservation = "36bb0456-1c51-4fb8-97d1-4e87d02765ce"
+        pending = workspace_sync._PendingAtomicWorkspaceFinalization(
+            base_generation=workspace_sync._generation_for_entries({}),
+            proof="opaque-proof",
+            uploads=(workspace_sync._PendingWorkspaceCompletion(
+                reservation_id=reservation,
+                relative="state.sqlite",
+                content_length=3,
+                modified_ns=1,
+                changed_ns=2,
+            ),),
+            unchanged_uploads=(),
+            deleted_paths=(),
+            base_entries=(),
+        )
+        finalized = workspace_sync._FinalizedWorkspaceCheckpoint(
+            generation=workspace_sync._generation_for_entries({
+                "state.sqlite": (3, '"new"'),
+            }),
+            uploads=((reservation, "other-owner/state.sqlite", '"new"'),),
+            deletions=(),
+        )
+
+        with self.assertRaises(workspace_sync.WorkspacePushIncomplete):
+            workspace_sync._apply_atomic_workspace_finalization(
+                "owner",
+                pending,
+                finalized,
+            )
+
+        self.assertNotIn(("owner", "state.sqlite"), workspace_sync._uploaded_state)
+        self.assertNotIn("owner", workspace_sync._remote_workspace_snapshots)
+
+    def test_atomic_finalize_response_is_exactly_validated(self):
+        reservation = "36bb0456-1c51-4fb8-97d1-4e87d02765ce"
+        valid = {
+            "checkpointCommitted": True,
+            "workspaceGeneration": "a" * 64,
+            "uploads": [{
+                "reservationId": reservation,
+                "key": "owner/state.sqlite",
+                "eTag": '"new"',
+            }],
+            "deletions": [{"path": "deleted.md", "deleted": True}],
+        }
+        malformed = [
+            {**valid, "extra": True},
+            {**valid, "checkpointCommitted": False},
+            {**valid, "workspaceGeneration": "A" * 64},
+            {**valid, "uploads": []},
+            {
+                **valid,
+                "uploads": [{**valid["uploads"][0], "extra": True}],
+            },
+            {
+                **valid,
+                "uploads": [{
+                    **valid["uploads"][0],
+                    "reservationId":
+                        "46bb0456-1c51-4fb8-97d1-4e87d02765ce",
+                }],
+            },
+            {**valid, "deletions": []},
+            {
+                **valid,
+                "deletions": [{"path": "other.md", "deleted": True}],
+            },
+            {
+                **valid,
+                "deletions": [{"path": "deleted.md", "deleted": 1}],
+            },
+        ]
+
+        for result in malformed:
+            with self.subTest(result=result), mock.patch.object(
+                workspace_sync,
+                "_broker_request",
+                return_value=result,
+            ):
+                with self.assertRaises(
+                    workspace_sync.WorkspacePushIncomplete
+                ):
+                    workspace_sync._finalize_workspace_checkpoint(
+                        "0" * 64,
+                        "opaque-proof",
+                        (reservation,),
+                        ("deleted.md",),
+                    )
+
+    def test_atomic_finalize_rejects_untransportable_proof_before_request(self):
+        reservation = "36bb0456-1c51-4fb8-97d1-4e87d02765ce"
+        for proof in ("x" * 4_097, "\ud800"):
+            with self.subTest(proof_length=len(proof)), mock.patch.object(
+                workspace_sync,
+                "_broker_request",
+            ) as broker:
+                with self.assertRaises(
+                    workspace_sync.WorkspacePushIncomplete
+                ):
+                    workspace_sync._finalize_workspace_checkpoint(
+                        "0" * 64,
+                        proof,
+                        (reservation,),
+                        (),
+                    )
+            broker.assert_not_called()
+
+    def test_atomic_finalize_request_matches_route_uuid_and_item_limits(self):
+        invalid_reservations = (
+            # UUID version nibble must be RFC 1-8.
+            "36bb0456-1c51-0fb8-97d1-4e87d02765ce",
+            # UUID variant nibble must be RFC 8, 9, a, or b.
+            "36bb0456-1c51-4fb8-77d1-4e87d02765ce",
+        )
+        for reservation in invalid_reservations:
+            with self.subTest(reservation=reservation), mock.patch.object(
+                workspace_sync,
+                "_broker_request",
+            ) as broker:
+                with self.assertRaises(
+                    workspace_sync.WorkspacePushIncomplete
+                ):
+                    workspace_sync._finalize_workspace_checkpoint(
+                        "0" * 64,
+                        "opaque-proof",
+                        (reservation,),
+                        (),
+                    )
+            broker.assert_not_called()
+
+        valid_reservation = "36bb0456-1c51-4fb8-97d1-4e87d02765ce"
+        with mock.patch.object(
+            workspace_sync,
+            "MAX_WORKSPACE_FINALIZATION_ITEMS",
+            1,
+        ), mock.patch.object(
+            workspace_sync,
+            "_broker_request",
+        ) as broker:
+            with self.assertRaises(workspace_sync.WorkspacePushIncomplete):
+                workspace_sync._finalize_workspace_checkpoint(
+                    "0" * 64,
+                    "opaque-proof",
+                    (valid_reservation,),
+                    ("deleted.md",),
+                )
+        broker.assert_not_called()
+
+    def test_atomic_finalize_falls_back_only_for_parse_time_old_route_400(self):
+        local = self.root / "state.sqlite"
+        local.write_bytes(b"new-history")
+        metadata = local.stat()
+        reservation = "36bb0456-1c51-4fb8-97d1-4e87d02765ce"
+        base_generation = workspace_sync._generation_for_entries({})
+        final_generation = workspace_sync._generation_for_entries({
+            "state.sqlite": (metadata.st_size, '"new"'),
+        })
+        workspace_sync._remote_workspace_snapshots["owner"] = (
+            workspace_sync._RemoteWorkspaceSnapshot(
+                paths=(), sizes={}, e_tags={}, generation=base_generation
+            )
+        )
+        workspace_sync._committed_workspace_generations["owner"] = (
+            base_generation
+        )
+        workspace_sync._atomic_checkpoint_finalization_capabilities[
+            "owner"
+        ] = workspace_sync._AtomicCheckpointFinalizationCapability(
+            version=1,
+            proof="opaque-proof",
+        )
+        prepared = workspace_sync._PreparedWorkspaceUpload(
+            upload_url="https://upload.invalid/state",
+            reservation_id=reservation,
+            required_headers={},
+        )
+        old_route_rejection = workspace_sync._WorkspaceBrokerHttpError(
+            400,
+            '{"error":"Invalid storage request"}',
+            {"error": "Invalid storage request"},
+        )
+
+        def commit(prefix, base, final, _deadline):
+            self.assertEqual((prefix, base, final), (
+                "owner", base_generation, final_generation
+            ))
+            workspace_sync._committed_workspace_generations[prefix] = final
+            return final
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync, "_upload_spec", return_value=prepared
+        ), mock.patch.object(
+            workspace_sync, "_stream_upload"
+        ), mock.patch.object(
+            workspace_sync,
+            "_broker_request",
+            side_effect=old_route_rejection,
+        ), mock.patch.object(
+            workspace_sync,
+            "_complete_upload_reservation",
+            return_value=(final_generation, '"new"'),
+        ) as complete, mock.patch.object(
+            workspace_sync,
+            "_commit_workspace_checkpoint",
+            side_effect=commit,
+        ) as checkpoint:
+            self.assertEqual(
+                workspace_sync.push_workspace(
+                    "owner",
+                    expected_generation=base_generation,
+                    require_generation=True,
+                ),
+                1,
+            )
+
+        complete.assert_called_once_with(reservation, base_generation, None)
+        checkpoint.assert_called_once()
+        self.assertNotIn(
+            "owner",
+            workspace_sync._atomic_checkpoint_finalization_capabilities,
+        )
+        self.assertEqual(
+            workspace_sync.workspace_generation("owner"),
+            final_generation,
+        )
+
+    def test_old_route_fallback_completes_migration_marker_last(self):
+        database = self.root / "state" / "openclaw.sqlite"
+        database.parent.mkdir(parents=True)
+        database.write_bytes(b"database")
+        with mock.patch.object(workspace_sync, "WORKSPACE_DIR", self.root):
+            workspace_sync.mark_openclaw_migration_complete()
+        marker = self.root / workspace_sync.OPENCLAW_MIGRATION_MARKER
+        base_generation = workspace_sync._generation_for_entries({})
+        database_generation = workspace_sync._generation_for_entries({
+            "state/openclaw.sqlite": (database.stat().st_size, '"database"'),
+        })
+        final_generation = workspace_sync._generation_for_entries({
+            "state/openclaw.sqlite": (database.stat().st_size, '"database"'),
+            workspace_sync.OPENCLAW_MIGRATION_MARKER: (
+                marker.stat().st_size,
+                '"marker"',
+            ),
+        })
+        workspace_sync._remote_workspace_snapshots["owner"] = (
+            workspace_sync._RemoteWorkspaceSnapshot(
+                paths=(),
+                sizes={},
+                e_tags={},
+                generation=base_generation,
+            )
+        )
+        workspace_sync._committed_workspace_generations["owner"] = (
+            base_generation
+        )
+        workspace_sync._atomic_checkpoint_finalization_capabilities[
+            "owner"
+        ] = workspace_sync._AtomicCheckpointFinalizationCapability(
+            version=1,
+            proof="opaque-proof",
+        )
+        reservations = {
+            "state/openclaw.sqlite":
+                "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
+            workspace_sync.OPENCLAW_MIGRATION_MARKER:
+                "46bb0456-1c51-4fb8-97d1-4e87d02765ce",
+        }
+        staged_paths = []
+        completion_order = []
+
+        def prepare(relative, *_args):
+            staged_paths.append(relative)
+            return workspace_sync._PreparedWorkspaceUpload(
+                upload_url=f"https://upload.invalid/{relative}",
+                reservation_id=reservations[relative],
+                required_headers={},
+            )
+
+        def complete(reservation, generation, _deadline):
+            completion_order.append(reservation)
+            if reservation == reservations["state/openclaw.sqlite"]:
+                self.assertEqual(generation, base_generation)
+                return database_generation, '"database"'
+            self.assertEqual(generation, database_generation)
+            return final_generation, '"marker"'
+
+        def commit(prefix, base, final, _deadline):
+            self.assertEqual(
+                (prefix, base, final),
+                ("owner", base_generation, final_generation),
+            )
+            workspace_sync._committed_workspace_generations[prefix] = final
+            return final
+
+        old_route_rejection = workspace_sync._WorkspaceBrokerHttpError(
+            400,
+            '{"error":"Invalid storage request"}',
+            {"error": "Invalid storage request"},
+        )
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync, "_upload_spec", side_effect=prepare
+        ), mock.patch.object(
+            workspace_sync, "_stream_upload"
+        ), mock.patch.object(
+            workspace_sync,
+            "_broker_request",
+            side_effect=old_route_rejection,
+        ), mock.patch.object(
+            workspace_sync,
+            "_complete_upload_reservation",
+            side_effect=complete,
+        ), mock.patch.object(
+            workspace_sync,
+            "_commit_workspace_checkpoint",
+            side_effect=commit,
+        ):
+            self.assertEqual(
+                workspace_sync.push_workspace(
+                    "owner",
+                    expected_generation=base_generation,
+                    require_generation=True,
+                ),
+                2,
+            )
+
+        self.assertEqual(
+            staged_paths,
+            [
+                "state/openclaw.sqlite",
+                workspace_sync.OPENCLAW_MIGRATION_MARKER,
+            ],
+        )
+        self.assertEqual(
+            completion_order,
+            [
+                reservations["state/openclaw.sqlite"],
+                reservations[workspace_sync.OPENCLAW_MIGRATION_MARKER],
+            ],
+        )
+
+    def test_atomic_finalize_does_not_fallback_for_ambiguous_400(self):
+        pending = workspace_sync._PendingAtomicWorkspaceFinalization(
+            base_generation="0" * 64,
+            proof="opaque-proof",
+            uploads=(),
+            unchanged_uploads=(),
+            deleted_paths=(),
+            base_entries=(),
+        )
+        workspace_sync._pending_workspace_generations["owner"] = "0" * 64
+        workspace_sync._pending_atomic_workspace_finalizations[
+            "owner"
+        ] = pending
+        workspace_sync._committed_workspace_generations["owner"] = "0" * 64
+        ambiguous = workspace_sync._WorkspaceBrokerHttpError(
+            400,
+            '{"error":"Workspace storage operation failed"}',
+            {"error": "Workspace storage operation failed"},
+        )
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync,
+            "_broker_request",
+            side_effect=ambiguous,
+        ), mock.patch.object(
+            workspace_sync, "_commit_workspace_checkpoint"
+        ) as legacy_commit:
+            with self.assertRaises(workspace_sync._WorkspaceBrokerHttpError):
+                workspace_sync.push_workspace(
+                    "owner",
+                    expected_generation="0" * 64,
+                    require_generation=True,
+                )
+
+        legacy_commit.assert_not_called()
+        self.assertIs(
+            workspace_sync._pending_atomic_workspace_finalizations["owner"],
+            pending,
+        )
+
+    def test_pending_atomic_retry_never_falls_back_after_prior_ambiguity(self):
+        generation = workspace_sync._generation_for_entries({})
+        workspace_sync._remote_workspace_snapshots["owner"] = (
+            workspace_sync._RemoteWorkspaceSnapshot(
+                paths=(), sizes={}, e_tags={}, generation=generation
+            )
+        )
+        workspace_sync._committed_workspace_generations["owner"] = generation
+        workspace_sync._atomic_checkpoint_finalization_capabilities[
+            "owner"
+        ] = workspace_sync._AtomicCheckpointFinalizationCapability(
+            version=1,
+            proof="opaque-proof",
+        )
+        broker_url = (
+            "http://127.0.0.1:18791"
+            "/agent-broker/api/agent/workspace-storage"
+        )
+        transient = workspace_sync.urllib.error.HTTPError(
+            broker_url,
+            502,
+            "Bad Gateway",
+            {},
+            io.BytesIO(b"temporary"),
+        )
+        old_route_rejection = workspace_sync.urllib.error.HTTPError(
+            broker_url,
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(b'{"error":"Invalid storage request"}'),
+        )
+        next_invocation_old_route_rejection = (
+            workspace_sync.urllib.error.HTTPError(
+                broker_url,
+                400,
+                "Bad Request",
+                {},
+                io.BytesIO(b'{"error":"Invalid storage request"}'),
+            )
+        )
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync.urllib.request,
+            "urlopen",
+            side_effect=[
+                transient,
+                old_route_rejection,
+                next_invocation_old_route_rejection,
+            ],
+        ) as request, mock.patch.object(
+            workspace_sync.time, "sleep"
+        ) as sleep, mock.patch.object(
+            workspace_sync,
+            "_legacy_finalize_pending_atomic_workspace",
+        ) as legacy_fallback:
+            with self.assertRaises(
+                workspace_sync._WorkspaceBrokerHttpError
+            ) as raised:
+                workspace_sync.push_workspace(
+                    "owner",
+                    expected_generation=generation,
+                    require_generation=True,
+                )
+            pending = (
+                workspace_sync._pending_atomic_workspace_finalizations[
+                    "owner"
+                ]
+            )
+            # The next invocation reaches an old task on its first attempt.
+            # That 400 is locally parse-time-safe but cannot erase ambiguity
+            # from the retained batch's earlier new-task attempt.
+            with self.assertRaises(
+                workspace_sync._WorkspaceBrokerHttpError
+            ) as retried:
+                workspace_sync.push_workspace(
+                    "owner",
+                    expected_generation=generation,
+                    require_generation=True,
+                )
+
+        self.assertEqual(request.call_count, 3)
+        sleep.assert_called_once_with(0.25)
+        self.assertEqual(raised.exception.status, 400)
+        self.assertEqual(raised.exception.prior_transient_attempts, 1)
+        self.assertFalse(
+            workspace_sync._is_side_effect_free_finalize_rejection(
+                raised.exception
+            )
+        )
+        self.assertEqual(retried.exception.status, 400)
+        self.assertEqual(retried.exception.prior_transient_attempts, 0)
+        self.assertTrue(
+            workspace_sync._is_side_effect_free_finalize_rejection(
+                retried.exception
+            )
+        )
+        legacy_fallback.assert_not_called()
+        self.assertIs(
+            workspace_sync._pending_atomic_workspace_finalizations["owner"],
+            pending,
         )
 
 

@@ -83,6 +83,11 @@ describe('Agent workspace lifecycle admission invariants', () => {
             TagFilters: [{ Key: 'Scope', Value: 'private' }],
             NoncurrentVersionExpiration: { NoncurrentDays: 30 },
           }),
+          Match.objectLike({
+            Id: 'cleanup-checkpoint-control-versions',
+            TagFilters: [{ Key: 'Scope', Value: 'checkpoint' }],
+            NoncurrentVersionExpiration: { NoncurrentDays: 30 },
+          }),
         ]),
       },
     });

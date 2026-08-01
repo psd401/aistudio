@@ -591,6 +591,7 @@ class TestAgentBrokerRoute(unittest.TestCase):
             "complete-upload",
             "ensure-checkpoint",
             "commit-checkpoint",
+            "finalize-checkpoint",
         ):
             payload = {"operation": operation}
             if operation == "complete-upload":
@@ -644,6 +645,7 @@ class TestAgentBrokerRoute(unittest.TestCase):
             "upload",
             "delete",
             "ensure-checkpoint",
+            "finalize-checkpoint",
         ):
             self.assertFalse(
                 _workspace_flush_request_allowed(

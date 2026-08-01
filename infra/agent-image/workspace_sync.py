@@ -88,6 +88,8 @@ class _RemoteWorkspaceSnapshot:
 class _EnsuredWorkspaceCheckpoint:
     generation: str
     snapshot: Optional[_RemoteWorkspaceSnapshot]
+    atomic_checkpoint_commit_version: Optional[int] = None
+    checkpoint_finalization_proof: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +107,45 @@ class _PendingWorkspaceCompletion:
     content_length: int
     modified_ns: int
     changed_ns: int
+
+
+@dataclass(frozen=True)
+class _AtomicCheckpointFinalizationCapability:
+    version: int
+    proof: str
+
+
+@dataclass(frozen=True)
+class _PendingAtomicWorkspaceFinalization:
+    base_generation: str
+    proof: str
+    uploads: tuple[_PendingWorkspaceCompletion, ...]
+    unchanged_uploads: tuple[tuple[str, int, int, int, str], ...]
+    deleted_paths: tuple[str, ...]
+    base_entries: tuple[tuple[str, int, str], ...]
+
+
+@dataclass(frozen=True)
+class _FinalizedWorkspaceCheckpoint:
+    generation: str
+    uploads: tuple[tuple[str, str, str], ...]
+    deletions: tuple[tuple[str, bool], ...]
+
+
+class _WorkspaceBrokerHttpError(RuntimeError):
+    """An HTTP rejection whose exact response remains available to callers."""
+
+    def __init__(
+        self,
+        status: int,
+        detail: str,
+        error_body: object,
+        prior_transient_attempts: int = 0,
+    ):
+        super().__init__(f"workspace broker HTTP {status}: {detail}")
+        self.status = status
+        self.error_body = error_body
+        self.prior_transient_attempts = prior_transient_attempts
 
 
 WORKSPACE_DIR = Path("/home/node/.openclaw")
@@ -182,12 +223,14 @@ _TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 # deliberately not auto-retried: a client timeout does not prove the web tier
 # stopped working, and overlapping retries would queue behind the same lock.
 WORKSPACE_CHECKPOINT_BROKER_TIMEOUT_SECONDS = 240
-# Generation-fenced mutations scan the authoritative workspace while holding
-# the broker lock. Large migrated workspaces can legitimately take more than
-# the generic 20-second read timeout. Keep one request alive long enough to
-# settle rather than launching an overlapping retry; the turn-wide deadline
-# remains the hard upper bound.
+# Atomic finalization uses the checkpoint manifest and proof instead of
+# rescanning once per mutation. Mixed-version and legacy fallback operations
+# can still perform generation-fenced scans while holding the broker lock, so
+# keep one request alive beyond the generic 20-second read timeout; the
+# turn-wide deadline remains the hard upper bound.
 WORKSPACE_MUTATION_BROKER_TIMEOUT_SECONDS = 60
+MAX_WORKSPACE_FINALIZATION_PROOF_BYTES = 4 * 1024
+MAX_WORKSPACE_FINALIZATION_ITEMS = 250_000
 WORKSPACE_FLUSH_TOKEN_PATH = (
     "/run/psd-agent-authority/workspace-flush-token"
 )
@@ -200,6 +243,9 @@ _remote_workspace_snapshots: dict[str, _RemoteWorkspaceSnapshot] = {}
 # complete turn. Individual S3 target versions are promoted one at a time, so
 # their raw generation is not committed until the manifest advances last.
 _committed_workspace_generations: dict[str, str] = {}
+_atomic_checkpoint_finalization_capabilities: dict[
+    str, _AtomicCheckpointFinalizationCapability
+] = {}
 # When target promotions succeeded but final verification/listing did not, the
 # wrapper remains dirty and retries from this broker-returned generation. Do
 # not discard it on transient post-commit errors: that would strand a fully
@@ -207,6 +253,9 @@ _committed_workspace_generations: dict[str, str] = {}
 _pending_workspace_generations: dict[str, str] = {}
 _pending_workspace_completions: dict[
     str, _PendingWorkspaceCompletion
+] = {}
+_pending_atomic_workspace_finalizations: dict[
+    str, _PendingAtomicWorkspaceFinalization
 ] = {}
 _force_exact_workspace_restores: set[str] = set()
 
@@ -827,8 +876,10 @@ def invalidate_local_workspace(prefix: str) -> None:
         return
     _remote_workspace_snapshots.pop(prefix, None)
     _committed_workspace_generations.pop(prefix, None)
+    _atomic_checkpoint_finalization_capabilities.pop(prefix, None)
     _pending_workspace_generations.pop(prefix, None)
     _pending_workspace_completions.pop(prefix, None)
+    _pending_atomic_workspace_finalizations.pop(prefix, None)
     for state_key in [
         key for key in _uploaded_state if key[0] == prefix
     ]:
@@ -1299,8 +1350,15 @@ def _broker_request(
                 detail = exc.read(500).decode("utf-8", errors="replace")
             finally:
                 exc.close()
-            error = RuntimeError(
-                f"workspace broker HTTP {exc.code}: {detail}"
+            try:
+                error_body: object = json.loads(detail)
+            except (TypeError, ValueError):
+                error_body = None
+            error = _WorkspaceBrokerHttpError(
+                exc.code,
+                detail,
+                error_body,
+                prior_transient_attempts=attempt,
             )
             if exc.code not in _TRANSIENT_HTTP_STATUSES:
                 raise error from exc
@@ -1597,6 +1655,17 @@ def _parse_checkpoint_snapshot(
     )
 
 
+def _is_valid_checkpoint_finalization_proof(value: object) -> bool:
+    """Return whether an opaque proof can be transported losslessly as UTF-8."""
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return False
+    return len(encoded) <= MAX_WORKSPACE_FINALIZATION_PROOF_BYTES
+
+
 def _ensure_workspace_checkpoint(
     prefix: str,
     deadline_monotonic: float | None = None,
@@ -1618,6 +1687,24 @@ def _ensure_workspace_checkpoint(
         raise WorkspaceGenerationUnavailable(
             "workspace broker did not establish a durable checkpoint"
         )
+    has_atomic_version = "atomicCheckpointCommitVersion" in result
+    has_finalization_proof = "checkpointFinalizationProof" in result
+    atomic_version = result.get("atomicCheckpointCommitVersion")
+    finalization_proof = result.get("checkpointFinalizationProof")
+    if has_atomic_version != has_finalization_proof:
+        raise WorkspaceGenerationUnavailable(
+            "workspace broker returned an incomplete finalization capability"
+        )
+    if has_atomic_version and (
+        atomic_version != 1
+        or isinstance(atomic_version, bool)
+        or not _is_valid_checkpoint_finalization_proof(
+            finalization_proof
+        )
+    ):
+        raise WorkspaceGenerationUnavailable(
+            "workspace broker returned a malformed finalization capability"
+        )
     snapshot = (
         _parse_checkpoint_snapshot(
             result["checkpointSnapshot"],
@@ -1629,6 +1716,12 @@ def _ensure_workspace_checkpoint(
     return _EnsuredWorkspaceCheckpoint(
         generation=generation,
         snapshot=snapshot,
+        atomic_checkpoint_commit_version=(
+            atomic_version if has_atomic_version else None
+        ),
+        checkpoint_finalization_proof=(
+            finalization_proof if has_finalization_proof else None
+        ),
     )
 
 
@@ -1660,6 +1753,133 @@ def _commit_workspace_checkpoint(
         )
     _committed_workspace_generations[prefix] = committed_generation
     return committed_generation
+
+
+def _finalize_workspace_checkpoint(
+    base_generation: str,
+    proof: str,
+    reservation_ids: tuple[str, ...],
+    deleted_paths: tuple[str, ...],
+    deadline_monotonic: float | None = None,
+) -> _FinalizedWorkspaceCheckpoint:
+    """Atomically promote every staged mutation and publish its checkpoint."""
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", base_generation)
+        or not _is_valid_checkpoint_finalization_proof(proof)
+        or len({value.lower() for value in reservation_ids}) != len(
+            reservation_ids
+        )
+        or len(set(deleted_paths)) != len(deleted_paths)
+        or (
+            len(reservation_ids) + len(deleted_paths)
+            > MAX_WORKSPACE_FINALIZATION_ITEMS
+        )
+        or any(
+            re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-"
+                r"[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                reservation_id,
+                flags=re.IGNORECASE,
+            ) is None
+            for reservation_id in reservation_ids
+        )
+    ):
+        raise WorkspacePushIncomplete(
+            "workspace atomic finalization request is malformed"
+        )
+    result = _broker_request(
+        {
+            "operation": "finalize-checkpoint",
+            "baseWorkspaceGeneration": base_generation,
+            "checkpointFinalizationProof": proof,
+            "reservationIds": list(reservation_ids),
+            "deletedPaths": list(deleted_paths),
+        },
+        deadline_monotonic,
+        retry_transient=True,
+        maximum_timeout_seconds=(
+            WORKSPACE_MUTATION_BROKER_TIMEOUT_SECONDS
+        ),
+    )
+    if set(result) != {
+        "checkpointCommitted",
+        "workspaceGeneration",
+        "uploads",
+        "deletions",
+    }:
+        raise WorkspacePushIncomplete(
+            "workspace broker returned a malformed atomic finalization"
+        )
+    generation = result.get("workspaceGeneration")
+    raw_uploads = result.get("uploads")
+    raw_deletions = result.get("deletions")
+    if (
+        result.get("checkpointCommitted") is not True
+        or not isinstance(generation, str)
+        or re.fullmatch(r"[0-9a-f]{64}", generation) is None
+        or not isinstance(raw_uploads, list)
+        or not isinstance(raw_deletions, list)
+        or len(raw_uploads) != len(reservation_ids)
+        or len(raw_deletions) != len(deleted_paths)
+    ):
+        raise WorkspacePushIncomplete(
+            "workspace broker returned a malformed atomic finalization"
+        )
+
+    uploads: list[tuple[str, str, str]] = []
+    for expected_reservation_id, entry in zip(
+        reservation_ids,
+        raw_uploads,
+    ):
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"reservationId", "key", "eTag"}
+            or entry.get("reservationId") != expected_reservation_id
+            or not isinstance(entry.get("key"), str)
+            or not entry["key"]
+            or not isinstance(entry.get("eTag"), str)
+            or not entry["eTag"]
+            or len(entry["eTag"]) > 1_024
+        ):
+            raise WorkspacePushIncomplete(
+                "workspace broker returned a malformed atomic upload result"
+            )
+        uploads.append(
+            (entry["reservationId"], entry["key"], entry["eTag"])
+        )
+
+    deletions: list[tuple[str, bool]] = []
+    for expected_path, entry in zip(deleted_paths, raw_deletions):
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"path", "deleted"}
+            or entry.get("path") != expected_path
+            or not isinstance(entry.get("deleted"), bool)
+        ):
+            raise WorkspacePushIncomplete(
+                "workspace broker returned a malformed atomic deletion result"
+            )
+        deletions.append((entry["path"], entry["deleted"]))
+
+    return _FinalizedWorkspaceCheckpoint(
+        generation=generation,
+        uploads=tuple(uploads),
+        deletions=tuple(deletions),
+    )
+
+
+def _is_side_effect_free_finalize_rejection(error: BaseException) -> bool:
+    """Return whether the first wire attempt was rejected before dispatch.
+
+    A later old-task 400 cannot erase ambiguity from an earlier timeout or
+    transient response that may have followed a successful new-task commit.
+    """
+    return (
+        isinstance(error, _WorkspaceBrokerHttpError)
+        and error.status == 400
+        and error.prior_transient_attempts == 0
+        and error.error_body == {"error": "Invalid storage request"}
+    )
 
 
 def _download_bounded(
@@ -2113,6 +2333,7 @@ def pull_workspace(
         _remote_workspace_snapshots[prefix] = snapshot
     _pending_workspace_generations.pop(prefix, None)
     _pending_workspace_completions.pop(prefix, None)
+    _pending_atomic_workspace_finalizations.pop(prefix, None)
     _force_exact_workspace_restores.discard(prefix)
 
     logger.info(
@@ -2137,6 +2358,18 @@ def refresh_workspace(prefix: str) -> int:
     # its migration gate can keep a reused microVM permanently bricked.
     _discard_retired_local_control_state()
     checkpoint = _ensure_workspace_checkpoint(prefix)
+    if (
+        checkpoint.atomic_checkpoint_commit_version == 1
+        and checkpoint.checkpoint_finalization_proof is not None
+    ):
+        _atomic_checkpoint_finalization_capabilities[prefix] = (
+            _AtomicCheckpointFinalizationCapability(
+                version=1,
+                proof=checkpoint.checkpoint_finalization_proof,
+            )
+        )
+    else:
+        _atomic_checkpoint_finalization_capabilities.pop(prefix, None)
     snapshot = checkpoint.snapshot
     if snapshot is None:
         # Rolling compatibility: an older broker does not include the
@@ -2460,6 +2693,178 @@ def _remote_mutable_paths_to_delete(
     )
 
 
+def _apply_atomic_workspace_finalization(
+    prefix: str,
+    pending: _PendingAtomicWorkspaceFinalization,
+    finalized: _FinalizedWorkspaceCheckpoint,
+) -> str:
+    """Validate the batch generation before publishing any local cache state."""
+    final_entries = {
+        relative: (size, e_tag)
+        for relative, size, e_tag in pending.base_entries
+    }
+    for relative in pending.deleted_paths:
+        final_entries.pop(relative, None)
+    for (
+        relative,
+        content_length,
+        _modified_ns,
+        _changed_ns,
+        e_tag,
+    ) in pending.unchanged_uploads:
+        final_entries[relative] = (content_length, e_tag)
+    if len(finalized.uploads) != len(pending.uploads):
+        raise WorkspacePushIncomplete(
+            "workspace atomic finalization omitted an upload"
+        )
+    for completion, upload in zip(pending.uploads, finalized.uploads):
+        reservation_id, key, e_tag = upload
+        if (
+            reservation_id != completion.reservation_id
+            or key != f"{prefix}/{completion.relative}"
+        ):
+            raise WorkspacePushIncomplete(
+                "workspace atomic finalization returned mismatched upload metadata"
+            )
+        final_entries[completion.relative] = (
+            completion.content_length,
+            e_tag,
+        )
+
+    synthesized_generation = _generation_for_entries(final_entries)
+    if synthesized_generation != finalized.generation:
+        raise WorkspaceGenerationConflict(
+            "workspace atomic mutation results did not form the broker generation"
+        )
+
+    # Publish caches only after the complete response and local generation have
+    # been verified. A malformed/lost response leaves the exact batch pending.
+    for relative in pending.deleted_paths:
+        _uploaded_state.pop((prefix, relative), None)
+    for completion in pending.uploads:
+        _uploaded_state[(prefix, completion.relative)] = (
+            completion.content_length,
+            completion.modified_ns,
+            completion.changed_ns,
+        )
+    for (
+        relative,
+        content_length,
+        modified_ns,
+        changed_ns,
+        _e_tag,
+    ) in pending.unchanged_uploads:
+        _uploaded_state[(prefix, relative)] = (
+            content_length,
+            modified_ns,
+            changed_ns,
+        )
+
+    committed = _RemoteWorkspaceSnapshot(
+        paths=tuple(sorted(final_entries)),
+        sizes={
+            relative: metadata[0]
+            for relative, metadata in final_entries.items()
+        },
+        e_tags={
+            relative: metadata[1]
+            for relative, metadata in final_entries.items()
+        },
+        generation=finalized.generation,
+    )
+    _remote_workspace_snapshots[prefix] = committed
+    _committed_workspace_generations[prefix] = finalized.generation
+    _atomic_checkpoint_finalization_capabilities.pop(prefix, None)
+    _pending_workspace_generations.pop(prefix, None)
+    _pending_workspace_completions.pop(prefix, None)
+    _pending_atomic_workspace_finalizations.pop(prefix, None)
+    return finalized.generation
+
+
+def _legacy_finalize_pending_atomic_workspace(
+    prefix: str,
+    pending: _PendingAtomicWorkspaceFinalization,
+    deadline_monotonic: float | None,
+) -> str:
+    """Finish a parse-time-rejected batch through the old fenced protocol."""
+    _atomic_checkpoint_finalization_capabilities.pop(prefix, None)
+    _pending_atomic_workspace_finalizations.pop(prefix, None)
+    current_generation = pending.base_generation
+    final_entries = {
+        relative: (size, e_tag)
+        for relative, size, e_tag in pending.base_entries
+    }
+    for relative in pending.deleted_paths:
+        current_generation = _delete_workspace_path(
+            relative,
+            current_generation,
+            deadline_monotonic,
+        )
+        final_entries.pop(relative, None)
+        _uploaded_state.pop((prefix, relative), None)
+        _pending_workspace_generations[prefix] = current_generation
+
+    for completion in pending.uploads:
+        _pending_workspace_completions[prefix] = completion
+        current_generation, e_tag = _complete_upload_reservation(
+            completion.reservation_id,
+            current_generation,
+            deadline_monotonic,
+        )
+        _pending_workspace_completions.pop(prefix, None)
+        _uploaded_state[(prefix, completion.relative)] = (
+            completion.content_length,
+            completion.modified_ns,
+            completion.changed_ns,
+        )
+        final_entries[completion.relative] = (
+            completion.content_length,
+            e_tag,
+        )
+        _pending_workspace_generations[prefix] = current_generation
+
+    for (
+        relative,
+        content_length,
+        modified_ns,
+        changed_ns,
+        e_tag,
+    ) in pending.unchanged_uploads:
+        _uploaded_state[(prefix, relative)] = (
+            content_length,
+            modified_ns,
+            changed_ns,
+        )
+        final_entries[relative] = (content_length, e_tag)
+
+    synthesized_generation = _generation_for_entries(final_entries)
+    if synthesized_generation != current_generation:
+        raise WorkspaceGenerationConflict(
+            "workspace mutation results did not form the broker generation"
+        )
+    _commit_workspace_checkpoint(
+        prefix,
+        pending.base_generation,
+        current_generation,
+        deadline_monotonic,
+    )
+    _remote_workspace_snapshots[prefix] = _RemoteWorkspaceSnapshot(
+        paths=tuple(sorted(final_entries)),
+        sizes={
+            relative: metadata[0]
+            for relative, metadata in final_entries.items()
+        },
+        e_tags={
+            relative: metadata[1]
+            for relative, metadata in final_entries.items()
+        },
+        generation=current_generation,
+    )
+    _pending_workspace_generations.pop(prefix, None)
+    _pending_workspace_completions.pop(prefix, None)
+    return current_generation
+
+
 def push_workspace(
     prefix: str,
     deadline_monotonic: float | None = None,
@@ -2582,6 +2987,7 @@ def push_workspace(
         continuing_pending_push = (
             prefix in _pending_workspace_generations
             or prefix in _pending_workspace_completions
+            or prefix in _pending_atomic_workspace_finalizations
         )
         base_checkpoint_generation = _committed_workspace_generations.get(
             prefix
@@ -2596,6 +3002,76 @@ def push_workspace(
             raise WorkspaceGenerationUnavailable(
                 "committed workspace checkpoint is unavailable"
             )
+        pending_atomic = _pending_atomic_workspace_finalizations.get(prefix)
+        if pending_atomic is not None:
+            if (
+                current_generation != pending_atomic.base_generation
+                or base_checkpoint_generation
+                != pending_atomic.base_generation
+            ):
+                raise WorkspaceGenerationConflict(
+                    "pending atomic finalization lost its base generation"
+                )
+            current_pairs = list(to_upload)
+            if marker_upload is not None:
+                current_pairs.append(marker_upload)
+            current_signatures = {
+                pair[1]: (pair[2], pair[3], pair[4])
+                for pair in current_pairs
+            }
+            pending_signatures = {
+                completion.relative: (
+                    completion.content_length,
+                    completion.modified_ns,
+                    completion.changed_ns,
+                )
+                for completion in pending_atomic.uploads
+            }
+            pending_signatures.update({
+                relative: (content_length, modified_ns, changed_ns)
+                for (
+                    relative,
+                    content_length,
+                    modified_ns,
+                    changed_ns,
+                    _e_tag,
+                ) in pending_atomic.unchanged_uploads
+            })
+            if (
+                current_signatures != pending_signatures
+                or any(
+                    relative in local_mutable_paths
+                    for relative in pending_atomic.deleted_paths
+                )
+            ):
+                raise WorkspaceGenerationConflict(
+                    "local workspace changed while atomic finalization was pending"
+                )
+            # A retained batch has already crossed an ambiguous attempt
+            # boundary. Even an exact old-route 400 on this later invocation
+            # cannot prove the original attempt was side-effect-free, so only
+            # an idempotent atomic replay may resolve it.
+            finalized = _finalize_workspace_checkpoint(
+                pending_atomic.base_generation,
+                pending_atomic.proof,
+                tuple(
+                    completion.reservation_id
+                    for completion in pending_atomic.uploads
+                ),
+                pending_atomic.deleted_paths,
+                deadline_monotonic,
+            )
+            current_generation = _apply_atomic_workspace_finalization(
+                prefix,
+                pending_atomic,
+                finalized,
+            )
+            logger.info(
+                "workspace push resumed: prefix=%s generation=%s",
+                prefix,
+                current_generation[:12],
+            )
+            return 0
         if (
             not continuing_pending_push
             and base_checkpoint_generation != current_generation
@@ -2831,6 +3307,19 @@ def push_workspace(
             f"workspace push incomplete ({len(stage_errors)} file error(s)) "
             f"for prefix {prefix}"
         )
+    # Stage the migration marker last. Atomic-capable brokers promote this
+    # reservation in the same checkpoint as every database/state object; the
+    # legacy path below still completes it after the earlier staged entries.
+    if marker_upload is not None:
+        marker_pair, marker_prepared, marker_error = _stage_one(
+            marker_upload
+        )
+        if marker_error is not None or marker_prepared is None:
+            raise WorkspacePushIncomplete(
+                "workspace push incomplete (migration marker stage failed) "
+                f"for prefix {prefix}: {marker_error or 'unknown error'}"
+            )
+        staged.append((marker_pair, marker_prepared))
 
     try:
         assert current_generation is not None
@@ -2845,6 +3334,89 @@ def push_workspace(
             if require_generation
             else {}
         )
+        capability = _atomic_checkpoint_finalization_capabilities.get(prefix)
+        if require_generation and capability is not None:
+            pending_uploads: list[_PendingWorkspaceCompletion] = []
+            unchanged_uploads: list[
+                tuple[str, int, int, int, str]
+            ] = []
+            for pair, prepared in staged:
+                if prepared.unchanged_e_tag is not None:
+                    unchanged_uploads.append((
+                        pair[1],
+                        pair[2],
+                        pair[3],
+                        pair[4],
+                        prepared.unchanged_e_tag,
+                    ))
+                    continue
+                if prepared.reservation_id is None:
+                    raise WorkspacePushIncomplete(
+                        "workspace atomic upload reservation is unavailable"
+                    )
+                pending_uploads.append(_PendingWorkspaceCompletion(
+                    reservation_id=prepared.reservation_id,
+                    relative=pair[1],
+                    content_length=pair[2],
+                    modified_ns=pair[3],
+                    changed_ns=pair[4],
+                ))
+            pending_atomic = _PendingAtomicWorkspaceFinalization(
+                base_generation=base_checkpoint_generation,
+                proof=capability.proof,
+                uploads=tuple(pending_uploads),
+                unchanged_uploads=tuple(unchanged_uploads),
+                deleted_paths=tuple(to_delete),
+                base_entries=tuple(
+                    (
+                        relative,
+                        before_upload.sizes[relative],
+                        before_upload.e_tags[relative],
+                    )
+                    for relative in before_upload.paths
+                ),
+            )
+            _pending_atomic_workspace_finalizations[prefix] = pending_atomic
+            atomic_committed = True
+            try:
+                finalized = _finalize_workspace_checkpoint(
+                    pending_atomic.base_generation,
+                    pending_atomic.proof,
+                    tuple(
+                        completion.reservation_id
+                        for completion in pending_atomic.uploads
+                    ),
+                    pending_atomic.deleted_paths,
+                    deadline_monotonic,
+                )
+                current_generation = _apply_atomic_workspace_finalization(
+                    prefix,
+                    pending_atomic,
+                    finalized,
+                )
+            except Exception as exc:
+                if not _is_side_effect_free_finalize_rejection(exc):
+                    raise
+                atomic_committed = False
+                current_generation = (
+                    _legacy_finalize_pending_atomic_workspace(
+                        prefix,
+                        pending_atomic,
+                        deadline_monotonic,
+                    )
+                )
+            count = len(to_delete) + len(staged)
+            elapsed = time.monotonic() - started
+            logger.info(
+                "workspace push: prefix=%s files=%d generation=%s "
+                "elapsed_s=%.1f atomic=%s",
+                prefix,
+                count,
+                current_generation[:12],
+                elapsed,
+                atomic_committed,
+            )
+            return count
         for relative in to_delete:
             current_generation = _delete_workspace_path(
                 relative,
@@ -2870,37 +3442,6 @@ def push_workspace(
                 )
             if e_tag is not None:
                 final_entries[pair[1]] = (pair[2], e_tag)
-            if require_generation:
-                _pending_workspace_generations[prefix] = current_generation
-            count += 1
-
-        # Commit the migration boundary last. If this upload is interrupted,
-        # the next microVM safely replays the preserved legacy archive. Once
-        # the marker exists remotely, every database/state object from this
-        # snapshot has already completed and been verified by the broker.
-        if marker_upload is not None:
-            marker_pair, marker_prepared, marker_error = _stage_one(
-                marker_upload
-            )
-            if marker_error is not None or marker_prepared is None:
-                raise WorkspacePushIncomplete(
-                    "workspace push incomplete (migration marker stage failed) "
-                    f"for prefix {prefix}: {marker_error or 'unknown error'}"
-                )
-            current_generation, marker_e_tag = _complete_one(
-                marker_pair,
-                marker_prepared,
-                current_generation,
-            )
-            if require_generation and marker_e_tag is None:
-                raise WorkspaceGenerationUnavailable(
-                    "workspace marker completion returned no generation metadata"
-                )
-            if marker_e_tag is not None:
-                final_entries[marker_pair[1]] = (
-                    marker_pair[2],
-                    marker_e_tag,
-                )
             if require_generation:
                 _pending_workspace_generations[prefix] = current_generation
             count += 1

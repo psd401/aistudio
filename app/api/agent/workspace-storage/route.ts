@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer"
 import { NextRequest, NextResponse } from "next/server"
 import { verifyAgentInvocationContext } from "@/lib/agent-workspace/invocation-context"
 import {
@@ -9,10 +10,12 @@ import {
   createWorkspaceDownloadUrl,
   createWorkspaceUploadUrl,
   ensureWorkspaceCheckpoint,
+  finalizeWorkspaceCheckpoint,
   listWorkspaceObjects,
   WorkspaceStorageAdmissionError,
   WorkspaceStorageCompletionError,
 } from "@/lib/agent-workspace/storage-broker"
+import { workspaceRelativePathRejectionReason } from "@/lib/agent-workspace/path-policy"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
 
 const log = createLogger({ module: "agent-workspace-storage" })
@@ -25,8 +28,11 @@ const ALLOWED_FIELDS = new Set([
   "idempotencyKey",
   "checksumSha256",
   "reservationId",
+  "reservationIds",
   "baseWorkspaceGeneration",
   "workspaceGeneration",
+  "deletedPaths",
+  "checkpointFinalizationProof",
 ])
 const STORAGE_OPERATIONS = new Set([
   "list",
@@ -37,8 +43,21 @@ const STORAGE_OPERATIONS = new Set([
   "complete-upload",
   "ensure-checkpoint",
   "commit-checkpoint",
+  "finalize-checkpoint",
   "delete",
 ])
+const FINALIZE_CHECKPOINT_FIELDS = new Set([
+  "operation",
+  "baseWorkspaceGeneration",
+  "reservationIds",
+  "deletedPaths",
+  "checkpointFinalizationProof",
+])
+const MAX_FINALIZE_CHECKPOINT_ITEMS = 250_000
+const MAX_CHECKPOINT_FINALIZATION_PROOF_LENGTH = 4_096
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const WORKSPACE_GENERATION_RE = /^[0-9a-f]{64}$/
 
 type StorageRequest = {
   operation:
@@ -50,6 +69,7 @@ type StorageRequest = {
     | "complete-upload"
     | "ensure-checkpoint"
     | "commit-checkpoint"
+    | "finalize-checkpoint"
     | "delete"
   path?: string
   continuationToken?: string
@@ -58,8 +78,11 @@ type StorageRequest = {
   idempotencyKey?: string
   checksumSha256?: string
   reservationId?: string
+  reservationIds?: string[]
   baseWorkspaceGeneration?: string
   workspaceGeneration?: string
+  deletedPaths?: string[]
+  checkpointFinalizationProof?: string
 }
 
 type AgentInvocation = NonNullable<
@@ -91,11 +114,11 @@ function hasValidStorageFields(body: Record<string, unknown>): boolean {
   const workspaceGenerationValid =
     body.workspaceGeneration === undefined ||
     (typeof body.workspaceGeneration === "string" &&
-      /^[0-9a-f]{64}$/.test(body.workspaceGeneration))
+      WORKSPACE_GENERATION_RE.test(body.workspaceGeneration))
   const baseWorkspaceGenerationValid =
     body.baseWorkspaceGeneration === undefined ||
     (typeof body.baseWorkspaceGeneration === "string" &&
-      /^[0-9a-f]{64}$/.test(body.baseWorkspaceGeneration))
+      WORKSPACE_GENERATION_RE.test(body.baseWorkspaceGeneration))
   return [
     isOptionalString(body.path),
     isOptionalString(body.continuationToken),
@@ -109,6 +132,57 @@ function hasValidStorageFields(body: Record<string, unknown>): boolean {
   ].every(Boolean)
 }
 
+function isOrderedUniqueStringArray(
+  value: unknown,
+  isValid: (item: string) => boolean,
+  normalize: (item: string) => string = (item) => item,
+): value is string[] {
+  if (!Array.isArray(value) || value.length > MAX_FINALIZE_CHECKPOINT_ITEMS) {
+    return false
+  }
+  const seen = new Set<string>()
+  for (const item of value) {
+    if (typeof item !== "string" || !isValid(item)) return false
+    const identity = normalize(item)
+    if (seen.has(identity)) return false
+    seen.add(identity)
+  }
+  return true
+}
+
+function hasValidFinalizeCheckpointFields(
+  body: Record<string, unknown>,
+): boolean {
+  if (
+    Object.keys(body).some(
+      (field) => !FINALIZE_CHECKPOINT_FIELDS.has(field),
+    ) ||
+    typeof body.baseWorkspaceGeneration !== "string" ||
+    !WORKSPACE_GENERATION_RE.test(body.baseWorkspaceGeneration) ||
+    typeof body.checkpointFinalizationProof !== "string" ||
+    body.checkpointFinalizationProof.length === 0 ||
+    Buffer.byteLength(body.checkpointFinalizationProof, "utf8") >
+      MAX_CHECKPOINT_FINALIZATION_PROOF_LENGTH ||
+    !isOrderedUniqueStringArray(
+      body.reservationIds,
+      (item) => UUID_RE.test(item),
+      (item) => item.toLowerCase(),
+    ) ||
+    !isOrderedUniqueStringArray(
+      body.deletedPaths,
+      (item) =>
+        item.trim().length > 0 &&
+        workspaceRelativePathRejectionReason(item) === null,
+    )
+  ) {
+    return false
+  }
+  return (
+    body.reservationIds.length + body.deletedPaths.length <=
+    MAX_FINALIZE_CHECKPOINT_ITEMS
+  )
+}
+
 function parseRequest(value: unknown): StorageRequest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null
   const body = value as Record<string, unknown>
@@ -118,6 +192,15 @@ function parseRequest(value: unknown): StorageRequest | null {
     !STORAGE_OPERATIONS.has(body.operation) ||
     !hasValidStorageFields(body)
   ) return null
+  if (body.operation === "finalize-checkpoint") {
+    if (!hasValidFinalizeCheckpointFields(body)) return null
+  } else if (
+    body.reservationIds !== undefined ||
+    body.deletedPaths !== undefined ||
+    body.checkpointFinalizationProof !== undefined
+  ) {
+    return null
+  }
   return body as StorageRequest
 }
 
@@ -156,13 +239,32 @@ async function executeStorageOperation(
           )
         : null
     case "ensure-checkpoint":
-      return ensureWorkspaceCheckpoint(context.workspacePrefix)
+      return ensureWorkspaceCheckpoint(context.workspacePrefix, {
+        invocationNonce: context.nonce,
+        expiresAt: context.expiresAt,
+      })
     case "commit-checkpoint":
       return input.baseWorkspaceGeneration && input.workspaceGeneration
         ? commitWorkspaceCheckpoint(
             context.workspacePrefix,
             input.baseWorkspaceGeneration,
             input.workspaceGeneration,
+          )
+        : null
+    case "finalize-checkpoint":
+      return input.baseWorkspaceGeneration &&
+        input.reservationIds &&
+        input.deletedPaths &&
+        input.checkpointFinalizationProof
+        ? finalizeWorkspaceCheckpoint(
+            context.ownerEmail,
+            context.workspacePrefix,
+            input.baseWorkspaceGeneration,
+            input.reservationIds,
+            input.deletedPaths,
+            input.checkpointFinalizationProof,
+            context.nonce,
+            context.expiresAt,
           )
         : null
     case "delete":
