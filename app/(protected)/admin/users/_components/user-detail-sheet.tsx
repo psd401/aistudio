@@ -487,7 +487,17 @@ export function UserDetailSheet({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className={cn("w-[90vw] h-[90vh] max-w-[90vw] flex flex-col p-0", className)}>
+      {/* meridianPortalClassName is applied HERE, not left to the caller: Radix
+          portals this to document.body, and the one call site passes no
+          className — so without it this dialog rendered the pre-Meridian cream
+          sheet in the system font. The prop still composes on top. */}
+      <DialogContent
+        className={cn(
+          "w-[90vw] h-[90vh] max-w-[90vw] flex flex-col p-0",
+          meridianPortalClassName,
+          className
+        )}
+      >
         <UserDetailHeader
           isEditing={isEditing}
           isSaving={isSaving}
