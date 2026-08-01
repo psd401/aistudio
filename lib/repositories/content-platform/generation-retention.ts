@@ -98,7 +98,8 @@ export async function collectSupersededRepositoryGenerations(
               WHERE active_repository.active_index_generation_id = generation.id
             )
           ORDER BY generation.superseded_at, generation.id
-          FOR UPDATE OF generation SKIP LOCKED
+          -- Keep the serving pointer stable until both deletion phases commit.
+          FOR UPDATE OF generation, repository SKIP LOCKED
           LIMIT ${generationBatchSize}
         ),
         selected_chunks AS (
@@ -106,7 +107,6 @@ export async function collectSupersededRepositoryGenerations(
           FROM repository_item_chunks chunk
           INNER JOIN eligible_generations eligible
             ON eligible.id = chunk.index_generation_id
-          ORDER BY chunk.id
           LIMIT ${chunkBatchSize}
         ),
         deleted_chunks AS (
@@ -146,7 +146,8 @@ export async function collectSupersededRepositoryGenerations(
               WHERE active_repository.active_index_generation_id = generation.id
             )
           ORDER BY generation.superseded_at, generation.id
-          FOR UPDATE OF generation SKIP LOCKED
+          -- Keep the serving pointer stable until both deletion phases commit.
+          FOR UPDATE OF generation, repository SKIP LOCKED
           LIMIT ${generationBatchSize}
         ),
         deleted_generations AS (

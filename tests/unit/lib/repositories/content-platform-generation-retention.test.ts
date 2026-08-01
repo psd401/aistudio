@@ -80,7 +80,7 @@ describe("superseded repository generation retention", () => {
         "active_repository.active_index_generation_id = generation.id",
       );
       expect(compiled.sql).toContain(
-        "FOR UPDATE OF generation SKIP LOCKED",
+        "FOR UPDATE OF generation, repository SKIP LOCKED",
       );
       expect(compiled.params).toContain("2026-07-31T12:00:00.000Z");
       expect(compiled.params).toContain(
@@ -94,6 +94,7 @@ describe("superseded repository generation retention", () => {
 
     expect(chunkDeletion!.sql).toContain("chunk.ctid AS row_id");
     expect(chunkDeletion!.sql).toContain("chunk.ctid = selected.row_id");
+    expect(chunkDeletion!.sql).not.toContain("ORDER BY chunk.id");
     expect(chunkDeletion!.params).toContain(GENERATION_GC_CHUNK_BATCH);
     expect(generationDeletion!.sql).toContain(
       "remaining_chunk.index_generation_id = generation.id",
