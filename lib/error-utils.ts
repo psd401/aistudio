@@ -461,6 +461,10 @@ function handleTypedError(
   options: ResolvedHandleErrorOptions,
   log: ErrorLog
 ): ActionState<never> {
+  const rateLimit =
+    error.code === ErrorCode.BIZ_RATE_LIMIT_EXCEEDED
+      ? (error as BusinessLogicError).rateLimit
+      : undefined
   const details = sanitizeForLogging({
     code: error.code,
     details: error.details,
@@ -468,6 +472,7 @@ function handleTypedError(
     retryable: error.retryable,
     service: error.service,
     operation: error.operation,
+    rateLimit,
     ...options.metadata
   })
   logErrorAtLevel(
@@ -480,9 +485,20 @@ function handleTypedError(
   return {
     isSuccess: false,
     message: error.userMessage || fallbackMessage,
-    ...(options.includeErrorInResponse && {
-      error: { code: error.code, message: error.message, details }
-    })
+    ...(rateLimit
+      ? {
+          // Retry metadata is part of the safe action contract, not internal
+          // diagnostics, so production callers can distinguish and back off.
+          error: {
+            code: error.code,
+            statusCode: error.statusCode ?? 429,
+            retryAfterSeconds: rateLimit.retryAfterSeconds,
+            resetAt: rateLimit.resetAt,
+          },
+        }
+      : options.includeErrorInResponse
+        ? { error: { code: error.code, message: error.message, details } }
+        : {})
   }
 }
 

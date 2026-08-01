@@ -132,6 +132,15 @@ function validatePayload(payload: unknown): ValidatedPayload {
     );
   }
 
+  const bytes = new TextEncoder().encode(serialized).byteLength;
+  if (bytes > MAX_PAYLOAD_BYTES) {
+    throw ErrorFactories.fileTooLarge(
+      "payload",
+      bytes,
+      MAX_PAYLOAD_BYTES
+    );
+  }
+
   let serializedShape: unknown;
   try {
     serializedShape = JSON.parse(serialized) as unknown;
@@ -151,15 +160,6 @@ function validatePayload(payload: unknown): ValidatedPayload {
       "payload",
       null,
       "payload must serialize to a JSON object"
-    );
-  }
-
-  const bytes = new TextEncoder().encode(serialized).byteLength;
-  if (bytes > MAX_PAYLOAD_BYTES) {
-    throw ErrorFactories.fileTooLarge(
-      "payload",
-      bytes,
-      MAX_PAYLOAD_BYTES
     );
   }
 
