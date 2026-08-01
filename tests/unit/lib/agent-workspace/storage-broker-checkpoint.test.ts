@@ -438,6 +438,51 @@ function stageWorkspaceUpload(
   })
 }
 
+function seedPendingFinalizationJournal(
+  workspaceGeneration: string,
+  proof: string,
+  reservationIds: string[],
+  deletedPaths: string[] = [],
+): void {
+  const request = {
+    version: 1,
+    ownerHash: createHash("sha256")
+      .update("owner@example.com")
+      .digest("hex"),
+    signedWorkspacePrefix: PREFIX,
+    baseWorkspaceGeneration: workspaceGeneration,
+    proofHash: createHash("sha256").update(proof).digest("hex"),
+    reservationIds,
+    deletedPaths,
+  }
+  const body = JSON.stringify({
+    ...request,
+    state: "pending",
+    requestDigest: createHash("sha256")
+      .update(JSON.stringify(request))
+      .digest("hex"),
+  })
+  store.add(finalizationJournalKey(), {
+    size: Buffer.byteLength(body),
+    eTag: '"pending-journal"',
+    body,
+    scope: "Scope=checkpoint",
+  })
+}
+
+function returnActiveReservationAsVerifying(): void {
+  executeQueryMock.mockImplementation(async (...args: unknown[]) => {
+    const label = args[1]
+    if (label === "claimWorkspaceUploadCompletion") return []
+    if (label === "getWorkspaceUploadCompletion") {
+      return activeReservation ? [activeReservation] : []
+    }
+    if (label === "getSupersededWorkspaceUploadVersions") return []
+    if (label === "confirmWorkspaceUploadSettlement") return []
+    return []
+  })
+}
+
 beforeAll(async () => {
   const broker = await import("@/lib/agent-workspace/storage-broker")
   ensureWorkspaceCheckpoint = broker.ensureWorkspaceCheckpoint
@@ -1240,6 +1285,160 @@ describe("durable workspace checkpoints", () => {
         (command) => command.name === "ListObjectsV2Command",
       ),
     ).toHaveLength(0)
+  })
+
+  it("reclaims an exact pending batch after a crash midway through reservation claims", async () => {
+    const expiresAt = Math.floor(Date.now() / 1000) + 60
+    const checkpoint = await ensureFinalizationCheckpoint(
+      "invocation-mid-claim",
+      expiresAt,
+    )
+    stageWorkspaceUpload(
+      RESERVATION_ONE,
+      "state/a.sqlite",
+      '"a-new"',
+      "nnnn",
+    )
+    seedPendingFinalizationJournal(
+      checkpoint.workspaceGeneration,
+      checkpoint.proof,
+      [RESERVATION_ONE],
+    )
+    returnActiveReservationAsVerifying()
+    const beforeRetry = store.commands.length
+
+    const result = await finalizeWorkspaceCheckpoint(
+      "owner@example.com",
+      PREFIX,
+      checkpoint.workspaceGeneration,
+      [RESERVATION_ONE],
+      [],
+      checkpoint.proof,
+      "invocation-mid-claim",
+      expiresAt,
+    )
+
+    expect(result.uploads).toEqual([
+      {
+        reservationId: RESERVATION_ONE,
+        key: `${PREFIX}/state/a.sqlite`,
+        eTag: '"a-new"',
+      },
+    ])
+    expect(store.current(`${PREFIX}/state/a.sqlite`)?.body).toBe("nnnn")
+    expect(manifest().workspaceGeneration).toBe(
+      result.workspaceGeneration,
+    )
+    expect(
+      store.commands.slice(beforeRetry).filter(
+        (command) => command.name === "ListObjectsV2Command",
+      ),
+    ).toHaveLength(0)
+  })
+
+  it("rolls forward an exact pending batch after promotion but before journal preparation", async () => {
+    const expiresAt = Math.floor(Date.now() / 1000) + 60
+    const checkpoint = await ensureFinalizationCheckpoint(
+      "invocation-post-promotion",
+      expiresAt,
+    )
+    stageWorkspaceUpload(
+      RESERVATION_ONE,
+      "state/a.sqlite",
+      '"a-new"',
+      "nnnn",
+    )
+    const promoted = store.add(`${PREFIX}/state/a.sqlite`, {
+      size: 4,
+      eTag: '"a-new"',
+      body: "nnnn",
+      checksum: CHECKSUM,
+      contentType: CONTENT_TYPE,
+      scope: "Scope=private",
+    })
+    seedPendingFinalizationJournal(
+      checkpoint.workspaceGeneration,
+      checkpoint.proof,
+      [RESERVATION_ONE],
+    )
+    returnActiveReservationAsVerifying()
+    const beforeRetry = store.commands.length
+
+    const result = await finalizeWorkspaceCheckpoint(
+      "owner@example.com",
+      PREFIX,
+      checkpoint.workspaceGeneration,
+      [RESERVATION_ONE],
+      [],
+      checkpoint.proof,
+      "invocation-post-promotion",
+      expiresAt,
+    )
+
+    expect(result.uploads[0]).toMatchObject({
+      reservationId: RESERVATION_ONE,
+      eTag: '"a-new"',
+    })
+    expect(store.current(`${PREFIX}/state/a.sqlite`)?.versionId).toBe(
+      promoted.versionId,
+    )
+    expect(
+      store.commands.slice(beforeRetry).filter(
+        (command) => command.name === "CopyObjectCommand",
+      ),
+    ).toHaveLength(0)
+    expect(
+      store.commands.slice(beforeRetry).filter(
+        (command) => command.name === "ListObjectsV2Command",
+      ),
+    ).toHaveLength(0)
+    expect(
+      JSON.parse(
+        store.current(finalizationJournalKey())?.body ?? "{}",
+      ),
+    ).toMatchObject({ state: "committed", result })
+  })
+
+  it("returns a newly claimed reservation when pending recovery fails", async () => {
+    const expiresAt = Math.floor(Date.now() / 1000) + 60
+    const checkpoint = await ensureFinalizationCheckpoint(
+      "invocation-recovery-reject",
+      expiresAt,
+    )
+    stageWorkspaceUpload(
+      RESERVATION_ONE,
+      "state/a.sqlite",
+      '"a-new"',
+      "nnnn",
+    )
+    store.add(`${PREFIX}/state/a.sqlite`, {
+      size: 7,
+      eTag: '"unknown"',
+      body: "unknown",
+      checksum: "not-the-reserved-checksum",
+      contentType: "text/plain",
+      scope: "Scope=private",
+    })
+
+    await expect(
+      finalizeWorkspaceCheckpoint(
+        "owner@example.com",
+        PREFIX,
+        checkpoint.workspaceGeneration,
+        [RESERVATION_ONE],
+        [],
+        checkpoint.proof,
+        "invocation-recovery-reject",
+        expiresAt,
+      ),
+    ).rejects.toThrow("unknown version")
+
+    expect(
+      executeQueryMock.mock.calls.some(
+        (call) =>
+          call[1] === "resetWorkspaceUploadCompletionClaim",
+      ),
+    ).toBe(true)
   })
 
   it("rejects a mismatched proof and never starts its pending journal or mutations", async () => {

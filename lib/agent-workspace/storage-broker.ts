@@ -82,6 +82,8 @@ const WORKSPACE_CHECKPOINT_CONCURRENCY = 32
 // response and the agent image falls back to the paginated list operation.
 const MAX_INLINE_WORKSPACE_CHECKPOINT_SNAPSHOT_BYTES = 512 * 1024
 const WORKSPACE_FINALIZATION_PROOF_VERSION = "v1"
+const WORKSPACE_FINALIZATION_PROOF_DOMAIN =
+  "aistudio.workspace-checkpoint-finalization"
 const MAX_WORKSPACE_FINALIZATION_PROOF_BYTES = 4 * 1024
 // The prepared replay record contains the next checkpoint manifest plus the
 // bounded mutation result. Keep a hard cap even though both source payloads
@@ -808,7 +810,10 @@ async function createWorkspaceFinalizationProof(
     "sha256",
     await workspaceFinalizationProofSecret(),
   )
-    .update(`${WORKSPACE_FINALIZATION_PROOF_VERSION}.${encoded}`)
+    .update(
+      `${WORKSPACE_FINALIZATION_PROOF_DOMAIN}:` +
+        `${WORKSPACE_FINALIZATION_PROOF_VERSION}.${encoded}`,
+    )
     .digest("base64url")
   return `${WORKSPACE_FINALIZATION_PROOF_VERSION}.${encoded}.${signature}`
 }
@@ -843,7 +848,9 @@ async function verifyWorkspaceFinalizationProof(
     "sha256",
     await workspaceFinalizationProofSecret(),
   )
-    .update(`${parts[0]}.${parts[1]}`)
+    .update(
+      `${WORKSPACE_FINALIZATION_PROOF_DOMAIN}:${parts[0]}.${parts[1]}`,
+    )
     .digest()
   let providedSignature: Buffer
   let claims: unknown
@@ -3958,6 +3965,164 @@ async function verifyPreparedWorkspaceFinalizationTargets(
   }
 }
 
+type WorkspaceFinalizationClaim = {
+  reservation: WorkspaceUploadReservation
+  relativePath: string
+  promotedETag?: string
+}
+
+async function removeRecoveredUploadStaging(
+  reservation: WorkspaceUploadReservation,
+): Promise<void> {
+  let versionId: string | undefined
+  try {
+    const staged = await s3Client().send(
+      new HeadObjectCommand({
+        Bucket: bucketName(),
+        Key: reservation.stagingKey,
+      }),
+    )
+    versionId =
+      typeof staged.VersionId === "string" && staged.VersionId.length > 0
+        ? staged.VersionId
+        : undefined
+  } catch (error) {
+    if (isS3ObjectNotFound(error)) return
+    throw error
+  }
+  if (!versionId) {
+    throw new WorkspaceStorageSettlementUncertainError(
+      "Recovered workspace upload staging version is unavailable",
+    )
+  }
+  await s3Client().send(
+    new DeleteObjectCommand({
+      Bucket: bucketName(),
+      Key: reservation.stagingKey,
+      VersionId: versionId,
+    }),
+  )
+}
+
+/**
+ * Classify a reservation from an exact pending batch after an invocation may
+ * have died anywhere between claim and journal preparation. A target that is
+ * still the committed base is safe to promote; an exact reserved payload is a
+ * previously completed promotion and is settled in place. Anything else is
+ * fail-closed rather than overwriting an unknown current version.
+ */
+// The explicit state classifier keeps crash recovery in one auditable boundary.
+// eslint-disable-next-line complexity
+async function recoverWorkspaceFinalizationClaim(
+  claim: Awaited<ReturnType<typeof claimUploadCompletion>>,
+  signedWorkspacePrefix: string,
+  baseEntry: WorkspaceCheckpointEntry | undefined,
+  database: UnretriedDatabaseSession,
+): Promise<WorkspaceFinalizationClaim> {
+  const reservation = claim.reservation
+  const ownerPrefix = `${validateTrustedPrefix(signedWorkspacePrefix)}/`
+  if (
+    reservation.publicArtifact ||
+    !reservation.targetKey.startsWith(ownerPrefix)
+  ) {
+    throw new WorkspaceStorageCompletionError(
+      "Workspace upload target does not match its signed prefix",
+    )
+  }
+  const relativePath = reservation.targetKey.slice(ownerPrefix.length)
+  if (!isCheckpointManagedWorkspacePath(relativePath)) {
+    throw new WorkspaceStorageCompletionError(
+      "Workspace upload target is not mutable user state",
+    )
+  }
+
+  if (claim.kind === "committed") {
+    if (!reservation.objectVersionId) {
+      throw new WorkspaceStorageCompletionError(
+        "Committed workspace upload has no verified object version",
+      )
+    }
+    const eTag = await committedUploadMatches(
+      reservation.targetKey,
+      reservation.objectVersionId,
+      reservation.expectedBytes,
+      reservation.checksumSha256,
+      reservation.contentType,
+    )
+    if (!eTag) {
+      throw new WorkspaceStorageCompletionError(
+        "Committed workspace upload no longer matches its reservation",
+      )
+    }
+    return { reservation, relativePath, promotedETag: eTag }
+  }
+
+  let current:
+    | {
+        ContentLength?: number
+        ETag?: string
+        VersionId?: string
+        ChecksumSHA256?: string
+        ContentType?: string
+      }
+    | undefined
+  try {
+    current = await s3Client().send(
+      new HeadObjectCommand({
+        Bucket: bucketName(),
+        Key: reservation.targetKey,
+        ChecksumMode: "ENABLED",
+      }),
+    )
+  } catch (error) {
+    if (!isS3ObjectNotFound(error)) throw error
+  }
+
+  const targetIsCommittedBase =
+    current !== undefined &&
+    baseEntry !== undefined &&
+    current.ContentLength === baseEntry.size &&
+    current.ETag === baseEntry.eTag &&
+    (baseEntry.source === "anchor" ||
+      current.VersionId === baseEntry.versionId)
+  if (targetIsCommittedBase || (!current && !baseEntry)) {
+    return { reservation, relativePath }
+  }
+  if (!current) {
+    throw new WorkspaceStorageSettlementUncertainError(
+      "Pending workspace upload target no longer matches its base",
+    )
+  }
+  const promotedETag =
+    current.ContentLength === reservation.expectedBytes &&
+    current.ChecksumSHA256 === reservation.checksumSha256 &&
+    current.ContentType === reservation.contentType &&
+    typeof current.ETag === "string" &&
+    current.ETag.length > 0 &&
+    typeof current.VersionId === "string" &&
+    current.VersionId.length > 0
+      ? current.ETag
+      : undefined
+  if (!promotedETag || !current.VersionId) {
+    throw new WorkspaceStorageSettlementUncertainError(
+      "Pending workspace upload target has an unknown version",
+    )
+  }
+  await removeRecoveredUploadStaging(reservation)
+  const priorVersions = await supersededUploadVersions(
+    reservation.ownerKey,
+    reservation.targetKey,
+    database,
+  )
+  await settleUploadReservation(
+    reservation.id,
+    current.VersionId,
+    priorVersions.map((prior) => prior.id),
+    database,
+  )
+  return { reservation, relativePath, promotedETag }
+}
+
 /**
  * Publish every turn-final workspace mutation behind one generation fence.
  *
@@ -4116,8 +4281,14 @@ export async function finalizeWorkspaceCheckpoint(
           ),
         }
 
-        const claimed: WorkspaceUploadReservation[] = []
+        const batchUploads: WorkspaceFinalizationClaim[] = []
+        const claimedReservations: WorkspaceUploadReservation[] = []
+        const deletedPathSet = new Set(normalizedDeletedPaths)
         try {
+          const baseEntries = new Map(
+            manifest.entries.map((entry) => [entry.path, entry]),
+          )
+          const uploadPaths = new Set<string>()
           for (const reservationId of normalizedReservationIds) {
             const claim = await claimUploadCompletion(
               ownerKey,
@@ -4126,67 +4297,64 @@ export async function finalizeWorkspaceCheckpoint(
               false,
               true,
             )
-            if (claim.kind !== "claimed") {
-              throw new WorkspaceStorageCompletionError(
-                "Workspace checkpoint batch is not retryable",
-              )
-            }
-            claimed.push(claim.reservation)
-          }
-
-          const uploadPaths = new Set<string>()
-          for (const reservation of claimed) {
-            const ownerPrefix = `${prefix}/`
-            if (
-              reservation.publicArtifact ||
-              !reservation.targetKey.startsWith(ownerPrefix)
-            ) {
-              throw new WorkspaceStorageCompletionError(
-                "Workspace upload target does not match its signed prefix",
-              )
-            }
-            const relativePath = reservation.targetKey.slice(
-              ownerPrefix.length,
+            claimedReservations.push(claim.reservation)
+            const recovered = await recoverWorkspaceFinalizationClaim(
+              claim,
+              prefix,
+              baseEntries.get(
+                claim.reservation.targetKey.slice(prefix.length + 1),
+              ),
+              database,
             )
             if (
-              !isCheckpointManagedWorkspacePath(relativePath) ||
-              uploadPaths.has(relativePath) ||
-              normalizedDeletedPaths.includes(relativePath)
+              uploadPaths.has(recovered.relativePath) ||
+              deletedPathSet.has(recovered.relativePath)
             ) {
               throw new WorkspaceStorageCompletionError(
                 "Workspace checkpoint batch contains conflicting paths",
               )
             }
-            uploadPaths.add(relativePath)
-            const staged = await inspectStagedUpload(
-              reservation,
-              bucketName(),
-            )
-            if (!staged.matches || !staged.versionId) {
-              throw new WorkspaceStorageCompletionError(
-                "Uploaded object did not match its reservation",
+            uploadPaths.add(recovered.relativePath)
+            batchUploads.push(recovered)
+            if (recovered.promotedETag) {
+              snapshot.entries.set(recovered.relativePath, {
+                path: recovered.relativePath,
+                size: recovered.reservation.expectedBytes,
+                eTag: recovered.promotedETag,
+              })
+            } else {
+              const staged = await inspectStagedUpload(
+                recovered.reservation,
+                bucketName(),
               )
+              if (!staged.matches || !staged.versionId) {
+                throw new WorkspaceStorageCompletionError(
+                  "Uploaded object did not match its reservation",
+                )
+              }
             }
           }
+          snapshot.generation = workspaceGenerationFromEntries(
+            [...snapshot.entries.values()],
+          )
 
           const plannedEntries = new Map(snapshot.entries)
           for (const path of normalizedDeletedPaths) {
             plannedEntries.delete(path)
           }
-          for (const reservation of claimed) {
-            const relativePath = reservation.targetKey.slice(
-              prefix.length + 1,
-            )
-            plannedEntries.set(relativePath, {
-              path: relativePath,
-              size: reservation.expectedBytes,
-              eTag: `pending-${reservation.id}`,
+          for (const upload of batchUploads) {
+            plannedEntries.set(upload.relativePath, {
+              path: upload.relativePath,
+              size: upload.reservation.expectedBytes,
+              eTag:
+                upload.promotedETag ??
+                `pending-${upload.reservation.id}`,
             })
           }
           assertPrefixFreeWorkspaceEntries([...plannedEntries.values()])
         } catch (error) {
           await Promise.allSettled(
-            claimed.map((reservation) =>
+            claimedReservations.map((reservation) =>
               resetWorkspaceUploadClaim(reservation.id, database),
             ),
           )
@@ -4194,10 +4362,8 @@ export async function finalizeWorkspaceCheckpoint(
         }
 
         const mutationPaths = new Set(normalizedDeletedPaths)
-        for (const reservation of claimed) {
-          mutationPaths.add(
-            reservation.targetKey.slice(prefix.length + 1),
-          )
+        for (const upload of batchUploads) {
+          mutationPaths.add(upload.relativePath)
         }
         try {
           for (const path of mutationPaths) {
@@ -4261,31 +4427,36 @@ export async function finalizeWorkspaceCheckpoint(
           }
 
           const uploads: FinalizeWorkspaceCheckpointResult["uploads"] = []
-          for (const [index, reservation] of claimed.entries()) {
-            const completed = await finishClaimedUpload(
-              reservation,
-              ownerKey,
-              reservation.id,
-              database,
-              () => {
-                leasesToDrop.push(reservation)
-              },
-              {
-                signedWorkspacePrefix: prefix,
-                expectedGeneration: snapshot.generation,
-                snapshot,
-                checkpointAlreadyAnchored: true,
-              },
-            )
-            if (!completed.eTag || !completed.workspaceGeneration) {
-              throw new WorkspaceStorageCompletionError(
-                "Workspace batch promotion returned incomplete metadata",
+          for (const [index, upload] of batchUploads.entries()) {
+            const reservation = upload.reservation
+            let eTag = upload.promotedETag
+            if (!eTag) {
+              const completed = await finishClaimedUpload(
+                reservation,
+                ownerKey,
+                reservation.id,
+                database,
+                () => {
+                  leasesToDrop.push(reservation)
+                },
+                {
+                  signedWorkspacePrefix: prefix,
+                  expectedGeneration: snapshot.generation,
+                  snapshot,
+                  checkpointAlreadyAnchored: true,
+                },
               )
+              if (!completed.eTag || !completed.workspaceGeneration) {
+                throw new WorkspaceStorageCompletionError(
+                  "Workspace batch promotion returned incomplete metadata",
+                )
+              }
+              eTag = completed.eTag
             }
             uploads.push({
               reservationId: normalizedReservationIds[index]!,
-              key: completed.key,
-              eTag: completed.eTag,
+              key: reservation.targetKey,
+              eTag,
             })
             await Promise.allSettled([
               settleLease(
@@ -4329,7 +4500,7 @@ export async function finalizeWorkspaceCheckpoint(
           return result
         } catch (error) {
           await Promise.allSettled(
-            claimed.map((reservation) =>
+            claimedReservations.map((reservation) =>
               resetWorkspaceUploadClaim(reservation.id, database),
             ),
           )

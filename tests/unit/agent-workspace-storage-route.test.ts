@@ -310,6 +310,29 @@ describe("POST /api/agent/workspace-storage", () => {
     )
   })
 
+  it("accepts a deletion path at the canonical UTF-8 byte limit", async () => {
+    const boundaryPath = [
+      "a".repeat(255),
+      "b".repeat(255),
+      "c".repeat(254),
+      "d",
+    ].join("/")
+
+    const response = await POST(
+      request({
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds: [],
+        deletedPaths: [boundaryPath],
+        checkpointFinalizationProof: CHECKPOINT_FINALIZATION_PROOF,
+      }),
+    )
+
+    expect(Buffer.byteLength(boundaryPath, "utf8")).toBe(768)
+    expect(response.status).toBe(200)
+    expect(finalizeWorkspaceCheckpointMock).toHaveBeenCalled()
+  })
+
   it.each([
     [
       "a missing array",
@@ -390,6 +413,35 @@ describe("POST /api/agent/workspace-storage", () => {
         baseWorkspaceGeneration: "1".repeat(64),
         reservationIds: [],
         deletedPaths: [42],
+        checkpointFinalizationProof: CHECKPOINT_FINALIZATION_PROOF,
+      },
+    ],
+    [
+      "a deletion path over the canonical UTF-8 byte limit",
+      {
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds: [],
+        deletedPaths: [
+          [
+            "a".repeat(255),
+            "b".repeat(255),
+            "c".repeat(255),
+            "dd",
+          ].join("/"),
+        ],
+        checkpointFinalizationProof: CHECKPOINT_FINALIZATION_PROOF,
+      },
+    ],
+    [
+      "a multibyte deletion path over the canonical UTF-8 byte limit",
+      {
+        operation: "finalize-checkpoint",
+        baseWorkspaceGeneration: "1".repeat(64),
+        reservationIds: [],
+        deletedPaths: [
+          Array.from({ length: 4 }, () => "é".repeat(96)).join("/"),
+        ],
         checkpointFinalizationProof: CHECKPOINT_FINALIZATION_PROOF,
       },
     ],

@@ -15,6 +15,7 @@ import {
   WorkspaceStorageAdmissionError,
   WorkspaceStorageCompletionError,
 } from "@/lib/agent-workspace/storage-broker"
+import { workspaceRelativePathRejectionReason } from "@/lib/agent-workspace/path-policy"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
 
 const log = createLogger({ module: "agent-workspace-storage" })
@@ -169,7 +170,9 @@ function hasValidFinalizeCheckpointFields(
     ) ||
     !isOrderedUniqueStringArray(
       body.deletedPaths,
-      (item) => item.trim().length > 0,
+      (item) =>
+        item.trim().length > 0 &&
+        workspaceRelativePathRejectionReason(item) === null,
     )
   ) {
     return false
