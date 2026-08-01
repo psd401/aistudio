@@ -15,6 +15,19 @@ export interface WorkspaceCommandResult {
   stderr: string
 }
 
+export type WorkspaceCommandRejectionReason = "operation_not_allowed"
+
+export class WorkspaceCommandValidationError extends Error {
+  constructor(
+    message: string,
+    readonly reason: WorkspaceCommandRejectionReason,
+    readonly operation: string
+  ) {
+    super(message)
+    this.name = "WorkspaceCommandValidationError"
+  }
+}
+
 const READ_ACTIONS = new Set([
   "download",
   "export",
@@ -59,6 +72,8 @@ const ALLOWED_WRITES = new Set([
   "gmail users drafts update",
   "gmail users messages modify",
   "sheets spreadsheets create",
+  "sheets spreadsheets values append",
+  "sheets spreadsheets values update",
   "slides presentations create",
   "tasks tasks insert",
 ])
@@ -87,6 +102,8 @@ const AGENT_ONLY_WRITES = new Set([
   "drive files copy",
   "drive files create",
   "sheets spreadsheets create",
+  "sheets spreadsheets values append",
+  "sheets spreadsheets values update",
   "slides presentations create",
 ])
 
@@ -107,6 +124,8 @@ const DRIVE_CONTENT_FLAG =
 const MAX_ARGUMENTS = 80
 const MAX_ARGUMENT_LENGTH = 200_000
 const MAX_TOTAL_LENGTH = 500_000
+const MAX_DIAGNOSTIC_OPERATION_LENGTH = 128
+const OPERATION_TOO_LONG = "<operation-too-long>"
 function hasUnsafeControlCharacter(value: string): boolean {
   for (const character of value) {
     const codePoint = character.codePointAt(0)
@@ -143,6 +162,31 @@ function operationTokens(argv: readonly string[]): string[] {
     if (positional.length === 4) break
   }
   return positional
+}
+
+function operationExceedsDiagnosticLimit(argv: readonly string[]): boolean {
+  let positionalCount = 0
+  let operationLength = 0
+  for (const token of argv) {
+    if (token.startsWith("-")) break
+    const separatorLength = positionalCount === 0 ? 0 : 1
+    if (
+      operationLength + separatorLength + token.length >
+      MAX_DIAGNOSTIC_OPERATION_LENGTH
+    ) {
+      return true
+    }
+    operationLength += separatorLength + token.length
+    positionalCount += 1
+    if (positionalCount === 4) break
+  }
+  return false
+}
+
+export function workspaceOperation(argv: readonly string[]): string {
+  return operationExceedsDiagnosticLimit(argv)
+    ? OPERATION_TOO_LONG
+    : operationTokens(argv).join(" ")
 }
 
 function argumentValue(argv: readonly string[], flag: string): string | null {
@@ -269,6 +313,9 @@ function validateWorkspaceArguments(argv: readonly string[]): void {
   if (totalLength > MAX_TOTAL_LENGTH) {
     throw new Error("Workspace command is too large")
   }
+  if (operationExceedsDiagnosticLimit(argv)) {
+    throw new Error("Workspace command contains an invalid operation")
+  }
   if (writesResponseToCallerPath(argv)) {
     throw new Error("Workspace command cannot write response data to a file")
   }
@@ -281,16 +328,23 @@ function validateWorkspaceMutation(
   action: string,
   tokens: string[]
 ): void {
+  const helperVerb = tokens.find((token) => token.startsWith("+"))
+  if (helperVerb === "+read") {
+    throw new Error(
+      "Workspace read command contains a mutation operation: helper verb `+read` is not permitted; use the canonical read action (e.g. `sheets spreadsheets values get`)"
+    )
+  }
   if (READ_ACTIONS.has(action)) {
     // A trailing read action must not smuggle an earlier mutation past the
     // write allowlist. `+`-prefixed tokens are always helper verbs, never
     // resources, so screening the whole class covers `+reply`, `+reply-all`
     // and `+forward` without having to enumerate each new helper here.
-    if (
-      tokens
-        .slice(0, -1)
-        .some((token) => token.startsWith("+") || MUTATING_ACTIONS.has(token))
-    ) {
+    if (helperVerb) {
+      throw new Error(
+        `Workspace read command contains a mutation operation: helper verb \`${helperVerb}\` is not permitted; use the canonical read action (e.g. \`sheets spreadsheets values get\`)`
+      )
+    }
+    if (tokens.slice(0, -1).some((token) => MUTATING_ACTIONS.has(token))) {
       throw new Error("Workspace read command contains a mutation operation")
     }
     return
@@ -309,7 +363,12 @@ function validateWorkspaceMutation(
     )
   }
   if (!ALLOWED_WRITES.has(operation)) {
-    throw new Error(`Workspace operation is not allowed: ${operation}`)
+    const diagnosticOperation = workspaceOperation(argv)
+    throw new WorkspaceCommandValidationError(
+      `Workspace operation is not allowed: ${diagnosticOperation}`,
+      "operation_not_allowed",
+      diagnosticOperation
+    )
   }
   if (scope === "user" && AGENT_ONLY_WRITES.has(operation)) {
     throw new Error("This operation must use the agent-owned Workspace account")

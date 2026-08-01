@@ -126,6 +126,14 @@ to paste it verbatim into Chat and stop the turn. For exit 15, explain that one
 additional Drive permission is needed rather than saying authorization was
 missing or revoked. Exit 14 carries **no** URL.
 
+Trusted command-validator failures use a structured JSON contract with
+`error`, `reason`, and `operation`. An operation missing from the allowlist
+returns `reason: "operation_not_allowed"`; other command-shape policy failures
+return `reason: "workspace_command_rejected"`. These fields describe only the
+submitted command shape and never reveal whether a Workspace resource exists
+or which ACLs it has. Sheet value appends and updates are agent-slot-only;
+human user-slot attempts return the existing agent-owned-account policy error.
+
 ## Deployment checklist
 
 1. **GCP Console** (one-time): create the OAuth client per the Epic spec —
@@ -357,8 +365,9 @@ Complete the remaining lifecycle checks:
 1. Map the skill exit code using the runtime error contract above.
 2. Check the router, frontend broker, and `/aws/lambda/psd-agent-mint-<env>`
    logs with the shared request ID.
-3. Exit 12 with `Workspace operation is not allowed` is a trusted broker
-   allowlist rejection; exit 13 is a Phase 1 policy rejection. They are not
+3. Exit 12 with `reason: "operation_not_allowed"` is a trusted broker allowlist
+   rejection; use its `operation` field instead of parsing the human-readable
+   message. Exit 13 is a Phase 1 policy rejection. They are not
    interchangeable.
 4. A Google error saying the organization restricts the **Chat app** belongs
    to the router's `chat.bot` identity and Workspace app policy. It is separate

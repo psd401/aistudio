@@ -265,3 +265,66 @@ describe("verifyAgentInvocationContext request authority", () => {
     expect(two?.ownerEmail).toBe("other@psd401.net")
   })
 })
+
+describe("verifyAgentInvocationContext mode mismatch reporting", () => {
+  const consumed = jest.fn(async () => true)
+
+  beforeEach(() => {
+    process.env.AGENT_INVOCATION_SIGNING_SECRET = SECRET
+    consumed.mockClear()
+  })
+
+  afterEach(() => {
+    delete process.env.AGENT_INVOCATION_SIGNING_SECRET
+  })
+
+  it("optionally distinguishes a verified context with a disallowed mode", async () => {
+    const scheduledContext = token({ mode: "scheduled" })
+    const defaultResult = await verifyAgentInvocationContext(
+      request({ context: scheduledContext }),
+      {
+        nowSeconds: 120,
+        allowedModes: ["owner"],
+        consumeNonce: consumed,
+      }
+    )
+    const detailedResult = await verifyAgentInvocationContext(
+      request({ context: scheduledContext }),
+      {
+        nowSeconds: 120,
+        allowedModes: ["owner"],
+        consumeNonce: consumed,
+        reportModeMismatch: true,
+      }
+    )
+
+    expect(defaultResult).toBeNull()
+    expect(detailedResult).toMatchObject({
+      reason: "mode_not_allowed",
+      context: {
+        ownerEmail: "owner@psd401.net",
+        mode: "scheduled",
+      },
+    })
+    expect(consumed).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not report mode details when request verification fails", async () => {
+    const scheduledContext = token({ mode: "scheduled" })
+    const result = await verifyAgentInvocationContext(
+      request({
+        context: scheduledContext,
+        signature: "A".repeat(43),
+      }),
+      {
+        nowSeconds: 120,
+        allowedModes: ["owner"],
+        consumeNonce: consumed,
+        reportModeMismatch: true,
+      }
+    )
+
+    expect(result).toBeNull()
+    expect(consumed).not.toHaveBeenCalled()
+  })
+})

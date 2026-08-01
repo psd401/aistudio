@@ -4,6 +4,7 @@ import {
   validateEmailTaskWorkspaceCommand,
   validateScheduledWorkspaceCommand,
   validateWorkspaceCommand,
+  workspaceOperation,
 } from "@/lib/agent-workspace/command-executor"
 
 const DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -377,6 +378,55 @@ const defineTrustedWorkspaceCommandPolicySuite1 = () => {
 };
 
 describe("trusted Workspace command policy", defineTrustedWorkspaceCommandPolicySuite1)
+
+describe("Sheet value command policy", () => {
+  it.each([
+    ["sheets", "spreadsheets", "values", "append"],
+    ["sheets", "spreadsheets", "values", "update"],
+  ])("allows agent-owned Sheet value writes via %s %s %s %s", (...argv) => {
+    expect(() =>
+      validateWorkspaceCommand({ scope: "agent", argv })
+    ).not.toThrow()
+  })
+
+  it.each([
+    ["sheets", "spreadsheets", "values", "append"],
+    ["sheets", "spreadsheets", "values", "update"],
+  ])("keeps Sheet value writes off the human user slot", (...argv) => {
+    expect(() =>
+      validateWorkspaceCommand({ scope: "user", argv })
+    ).toThrow(/agent-owned Workspace account/)
+  })
+
+  it("allows canonical Sheet value reads and corrects the +read helper", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "agent",
+        argv: ["sheets", "spreadsheets", "values", "get"],
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "agent",
+        argv: ["sheets", "+read", "get"],
+      })
+    ).toThrow(/`\+read`.*`sheets spreadsheets values get`/)
+  })
+})
+
+describe("Workspace operation diagnostics", () => {
+  it("preserves ordinary command operations", () => {
+    expect(
+      workspaceOperation(["SHEETS", "spreadsheets", "values", "update"])
+    ).toBe("sheets spreadsheets values update")
+  })
+
+  it("replaces oversized operations with an explicit bounded sentinel", () => {
+    expect(workspaceOperation(["X".repeat(1_000_000)])).toBe(
+      "<operation-too-long>"
+    )
+  })
+})
 
 const defineWorkspaceUserSlotScopeUpgradesSuite2 = () => {
   const oldScopes = DRIVE_FILE_SCOPE

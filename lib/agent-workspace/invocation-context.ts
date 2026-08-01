@@ -44,6 +44,51 @@ export interface AgentInvocationContext {
   nonce: string
 }
 
+export interface AgentInvocationModeMismatch {
+  reason: "mode_not_allowed"
+  context: AgentInvocationContext
+}
+
+interface AgentInvocationVerificationOptions {
+  nowSeconds?: number
+  allowedModes?: readonly AgentInvocationMode[]
+  consumeNonce?: typeof consumeRequestNonce
+}
+
+interface AgentInvocationVerificationOptionsWithModeMismatch
+  extends AgentInvocationVerificationOptions {
+  reportModeMismatch: true
+}
+
+interface AgentInvocationVerificationOptionsWithoutModeMismatch
+  extends AgentInvocationVerificationOptions {
+  reportModeMismatch?: false
+}
+
+function invocationModeResult(
+  claims: AgentInvocationContext,
+  options: Pick<
+    AgentInvocationVerificationOptions,
+    "allowedModes"
+  > & { reportModeMismatch?: boolean }
+): AgentInvocationContext | AgentInvocationModeMismatch | null {
+  if (!options.allowedModes || options.allowedModes.includes(claims.mode)) {
+    return claims
+  }
+  return options.reportModeMismatch
+    ? { reason: "mode_not_allowed", context: claims }
+    : null
+}
+
+function modesCheckedBeforeRequestProof(
+  options: Pick<
+    AgentInvocationVerificationOptions,
+    "allowedModes"
+  > & { reportModeMismatch?: boolean }
+): readonly AgentInvocationMode[] | undefined {
+  return options.reportModeMismatch ? undefined : options.allowedModes
+}
+
 function isInvocationMode(value: unknown): value is AgentInvocationMode {
   return (
     value === "owner" ||
@@ -316,14 +361,20 @@ async function hasMatchingBodyHash(
  * not merely identity metadata: privileged routes must derive the owner from
  * this object and reject any conflicting body selector.
  */
+export function verifyAgentInvocationContext(
+  request: NextRequest,
+  options: AgentInvocationVerificationOptionsWithModeMismatch
+): Promise<AgentInvocationContext | AgentInvocationModeMismatch | null>
+export function verifyAgentInvocationContext(
+  request: NextRequest,
+  options?: AgentInvocationVerificationOptionsWithoutModeMismatch
+): Promise<AgentInvocationContext | null>
 export async function verifyAgentInvocationContext(
   request: NextRequest,
-  options: {
-    nowSeconds?: number
-    allowedModes?: readonly AgentInvocationMode[]
-    consumeNonce?: typeof consumeRequestNonce
+  options: AgentInvocationVerificationOptions & {
+    reportModeMismatch?: boolean
   } = {}
-): Promise<AgentInvocationContext | null> {
+): Promise<AgentInvocationContext | AgentInvocationModeMismatch | null> {
   const token = request.headers.get(AGENT_INVOCATION_CONTEXT_HEADER)
   if (!token || token.length > 4096) return null
 
@@ -333,7 +384,13 @@ export async function verifyAgentInvocationContext(
   const claims = decodeInvocationToken(token, secret)
   if (!claims) return null
   const nowSeconds = options.nowSeconds ?? Math.floor(Date.now() / 1000)
-  if (!isCurrentInvocation(claims, nowSeconds, options.allowedModes)) return null
+  if (
+    !isCurrentInvocation(
+      claims,
+      nowSeconds,
+      modesCheckedBeforeRequestProof(options)
+    )
+  ) return null
 
   const proof = getRequestProofHeaders(request)
   if (!proof) return null
@@ -359,6 +416,5 @@ export async function verifyAgentInvocationContext(
     expiresAt: claims.expiresAt + MAX_CLOCK_SKEW_SECONDS,
   })
   if (!consumed) return null
-
-  return claims
+  return invocationModeResult(claims, options)
 }
