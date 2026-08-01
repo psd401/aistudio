@@ -72,6 +72,29 @@ function searchBox(page: import('@playwright/test').Page) {
   return page.getByRole('textbox', { name: 'Search content by title or tag' })
 }
 
+/**
+ * Wait until the grid has COMMITTED a fetch for `query`.
+ *
+ * The search is debounced and fetched server-side, so right after filling the
+ * box the grid still shows the previous result set. A read-only assertion does
+ * not care — the card it is waiting for is on screen either way. But anything
+ * that MUTATES per-row UI state does: checkbox selection is lost when the
+ * debounced response commits and re-renders the list, so a bulk selection made
+ * too early silently evaporates and `bulk-count` never appears.
+ *
+ * `data-results-query` exists for exactly this (see the settled-state note in
+ * useLibraryPage) — it is set in the same state batch as the items, so it can
+ * never describe a grid that is not on screen.
+ */
+async function awaitResultsFor(
+  page: import('@playwright/test').Page,
+  query: string
+) {
+  await expect(
+    page.locator(`section[data-results-query="${query}"]`)
+  ).toBeVisible({ timeout: 15000 })
+}
+
 function defineAtriumLibraryPolishSearchTagsBulkAuthenticatedSuite1Part1() {
   test.skip(
     process.env.PLAYWRIGHT_AUTH_ENABLED !== 'true',
@@ -210,6 +233,9 @@ function defineAtriumLibraryPolishSearchTagsBulkAuthenticatedSuite1Part2() {test
 
       await page.goto('/atrium')
       await searchBox(page).fill(tag)
+      // Selection is per-row React state: it must not be made against a grid
+      // that the debounced search is about to replace.
+      await awaitResultsFor(page, tag)
       await expect(page.getByTestId(`select-${ids[0]}`)).toBeVisible({
         timeout: 15000,
       })

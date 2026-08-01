@@ -68,6 +68,20 @@ const FIXTURE_ID_PREFIX = "a7100000-%";
  */
 const GRAPH_E2E_NAME_REGEX = "(E2E-[A-Z]+-|E2EGRAPH)[0-9]{12,}";
 
+/**
+ * Collections the Atrium collection-management specs create. They are NOT
+ * children of content_objects, so the content delete above never reached them
+ * and they accumulated every run — on 2026-08-01 the local DB held 47 of them
+ * and atrium-collection-management.functional timed out at its 180s budget
+ * until they were pruned by hand (twice).
+ *
+ * Anchored to the exact shapes those specs generate ("E2E Private <token>",
+ * "E2E Child <token>", "E2E Admin Private <token>", "E2E District <token>") so
+ * a real collection that merely starts with "E2E" is never matched.
+ */
+const COLLECTION_E2E_NAME_REGEX =
+  "^E2E (Private|Child|Admin Private|District) [A-Za-z0-9]+$";
+
 interface CandidateRow {
   id: string;
   title: string;
@@ -105,6 +119,61 @@ function parseArgs(argv: string[]): { yes: boolean; minAgeMinutes: number } {
     }
   }
   return { yes, minAgeMinutes };
+}
+
+/**
+ * Prune the Atrium collection fixtures. Split out of main() only to keep that
+ * function inside the max-lines budget.
+ */
+async function pruneCollections(
+  // Same cast rationale as the transaction body in main(): postgres.js types
+  // TransactionSql as non-callable, so callers hand us the re-cast handle.
+  tx: ReturnType<typeof postgres>,
+  collectionCandidates: { id: string }[]
+): Promise<void> {
+  if (collectionCandidates.length === 0) return;
+  const ids = collectionCandidates.map((c) => c.id);
+  // A flat delete is safe: parents and their children both match the anchored
+  // E2E name shapes, so the whole subtree goes in one statement. Guard first
+  // that nothing OUTSIDE the matched set is parented to a row being removed.
+  const orphanRisk = await tx<{ n: number }[]>`
+    SELECT count(*)::int AS n
+      FROM content_collections c
+     WHERE c.parent_id IN ${tx(ids)}
+       AND c.id NOT IN ${tx(ids)}
+  `;
+  if ((orphanRisk[0]?.n ?? 0) > 0) {
+    throw new Error(
+      `Refusing: ${orphanRisk[0].n} surviving collection(s) are children of rows ` +
+        "this would delete. Widen the pattern or clean those first."
+    );
+  }
+
+  // content_objects.collection_id is ON DELETE NO ACTION, so ANY surviving
+  // content still filed under one of these collections rejects the delete and
+  // rolls back the whole transaction — including the content and graph prunes
+  // that already succeeded. The E2E content delete runs earlier in this same
+  // transaction, so this only bites when a NON-E2E object was filed into an
+  // E2E collection by hand; refuse with a usable message rather than surfacing
+  // a raw FK violation.
+  const contentRefs = await tx<{ n: number }[]>`
+    SELECT count(*)::int AS n
+      FROM content_objects o
+     WHERE o.collection_id IN ${tx(ids)}
+  `;
+  if ((contentRefs[0]?.n ?? 0) > 0) {
+    throw new Error(
+      `Refusing: ${contentRefs[0].n} content object(s) are still filed under ` +
+        "collections this would delete (content_objects.collection_id is NO " +
+        "ACTION). Move or delete that content first."
+    );
+  }
+  const deleted = await tx<{ id: string }[]>`
+    DELETE FROM content_collections
+     WHERE id IN ${tx(ids)}
+     RETURNING id
+  `;
+  log.success(`Deleted ${deleted.length} content_collections rows.`);
 }
 
 async function main(): Promise<void> {
@@ -161,7 +230,18 @@ async function main(): Promise<void> {
          AND created_at < now() - make_interval(mins => ${minAgeMinutes})
     `;
 
-    if (candidates.length === 0 && graphCandidates.length === 0) {
+    const collectionCandidates = await sql<{ id: string }[]>`
+      SELECT id
+        FROM content_collections
+       WHERE name ~ ${COLLECTION_E2E_NAME_REGEX}
+         AND created_at < now() - make_interval(mins => ${minAgeMinutes})
+    `;
+
+    if (
+      candidates.length === 0 &&
+      graphCandidates.length === 0 &&
+      collectionCandidates.length === 0
+    ) {
       log.success("Nothing to clean up — no E2E-pattern rows older than the age guard.");
       return;
     }
@@ -184,6 +264,9 @@ async function main(): Promise<void> {
 
     log.info(
       `Matched ${graphCandidates.length} graph_nodes rows (E2E-tagged decision/graph fixtures)`
+    );
+    log.info(
+      `Matched ${collectionCandidates.length} content_collections rows (E2E-named private/district collections)`
     );
 
     if (!yes) {
@@ -264,6 +347,8 @@ async function main(): Promise<void> {
           `Deleted ${deletedGraph.length} graph_nodes rows (edges removed via ON DELETE CASCADE).`
         );
       }
+
+      await pruneCollections(tx, collectionCandidates);
     });
   } finally {
     await sql.end();
