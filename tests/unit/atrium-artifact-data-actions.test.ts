@@ -97,7 +97,10 @@ const REQUESTER = {
   groups: [],
   isAdmin: false,
 };
-const CONTENT = { id: "11111111-1111-4111-8111-111111111111" };
+const CONTENT = {
+  id: "11111111-1111-4111-8111-111111111111",
+  kind: "artifact",
+};
 const CREATED_AT = new Date("2026-08-01T20:00:00.000Z");
 
 const validSubmitInput: SubmitArtifactRecordInput = {
@@ -187,6 +190,20 @@ describe("submitArtifactRecord", () => {
     expect(mockInsert).not.toHaveBeenCalled();
   });
 
+  it("rejects an object that serializes to a JSON scalar", async () => {
+    const result = await submitArtifactRecord({
+      ...validSubmitInput,
+      payload: new Date("2026-08-01T20:00:00.000Z") as unknown as Record<
+        string,
+        unknown
+      >,
+    });
+
+    expect(result.isSuccess).toBe(false);
+    expect(mockContentGet).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+
   it("rejects an empty content id before visibility or persistence", async () => {
     const result = await submitArtifactRecord({
       ...validSubmitInput,
@@ -235,6 +252,15 @@ describe("submitArtifactRecord", () => {
     expect(result.isSuccess).toBe(false);
     expect(result.message).not.toMatch(/forbidden|permission/i);
     expect(mockConsumeRateLimit).toHaveBeenCalledTimes(1);
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+
+  it("rejects a viewable document before persistence", async () => {
+    mockContentGet.mockResolvedValueOnce({ ...CONTENT, kind: "document" });
+
+    const result = await submitArtifactRecord(validSubmitInput);
+
+    expect(result.isSuccess).toBe(false);
     expect(mockInsert).not.toHaveBeenCalled();
   });
 
@@ -362,6 +388,15 @@ describe("listArtifactRecords", () => {
 
     expect(result.isSuccess).toBe(false);
     expect(result.message).not.toMatch(/forbidden|permission/i);
+    expect(mockSelect).not.toHaveBeenCalled();
+  });
+
+  it("rejects listing records for a viewable document", async () => {
+    mockContentGet.mockResolvedValueOnce({ ...CONTENT, kind: "document" });
+
+    const result = await listArtifactRecords(validListInput);
+
+    expect(result.isSuccess).toBe(false);
     expect(mockSelect).not.toHaveBeenCalled();
   });
 });

@@ -132,7 +132,29 @@ function validatePayload(payload: unknown): ValidatedPayload {
     );
   }
 
-  const bytes = Buffer.byteLength(serialized, "utf8");
+  let serializedShape: unknown;
+  try {
+    serializedShape = JSON.parse(serialized) as unknown;
+  } catch {
+    throw ErrorFactories.invalidInput(
+      "payload",
+      null,
+      "payload must serialize to a JSON object"
+    );
+  }
+  if (
+    serializedShape === null ||
+    typeof serializedShape !== "object" ||
+    Array.isArray(serializedShape)
+  ) {
+    throw ErrorFactories.invalidInput(
+      "payload",
+      null,
+      "payload must serialize to a JSON object"
+    );
+  }
+
+  const bytes = new TextEncoder().encode(serialized).byteLength;
   if (bytes > MAX_PAYLOAD_BYTES) {
     throw ErrorFactories.fileTooLarge(
       "payload",
@@ -234,6 +256,11 @@ export async function submitArtifactRecord(
     // missing or non-viewable target. The per-user guard runs first so a caller
     // over budget cannot keep generating database-backed visibility lookups.
     const content = await contentService.get(requester, contentId);
+    if (content.kind !== "artifact") {
+      throw ErrorFactories.validationFailed([
+        { field: "contentId", message: "Content is not an artifact" },
+      ]);
+    }
 
     const [created] = await executeQuery(
       (db) =>
@@ -304,6 +331,19 @@ export async function listArtifactRecords(
     });
 
     const content = await contentService.get(requester, contentId);
+    if (content.kind !== "artifact") {
+      throw ErrorFactories.validationFailed([
+        { field: "contentId", message: "Content is not an artifact" },
+      ]);
+    }
+    const conditions = [
+      eq(contentDataRecords.contentId, content.id),
+      eq(contentDataRecords.namespace, namespace),
+    ];
+    if (scope === "mine") {
+      conditions.push(eq(contentDataRecords.userId, userId));
+    }
+
     const rows = await executeQuery(
       (db) =>
         db
@@ -318,15 +358,7 @@ export async function listArtifactRecords(
           })
           .from(contentDataRecords)
           .leftJoin(users, eq(contentDataRecords.userId, users.id))
-          .where(
-            and(
-              eq(contentDataRecords.contentId, content.id),
-              eq(contentDataRecords.namespace, namespace),
-              scope === "mine"
-                ? eq(contentDataRecords.userId, userId)
-                : undefined
-            )
-          )
+          .where(and(...conditions))
           .orderBy(
             desc(contentDataRecords.createdAt),
             desc(contentDataRecords.id)
