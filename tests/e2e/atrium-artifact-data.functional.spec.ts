@@ -99,6 +99,73 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
     }
   });
 
+  test("cleared sessions cannot submit or list through the Server Action transport", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext();
+    await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB);
+    const page = await context.newPage();
+    let contentId: string | undefined;
+
+    try {
+      const marker = `artifact-data-unauthenticated-${Date.now()}`;
+      contentId = await createPrivateArtifact(page, marker);
+      await page.goto(HARNESS_PATH);
+      // The protected layout initializes NextAuth after navigation. Let that
+      // response settle before clearing cookies; otherwise an already-in-flight
+      // session response can repopulate the jar after clearCookies() returns.
+      await page.waitForLoadState("networkidle");
+
+      await page.getByTestId("artifact-data-content-id").fill(contentId);
+      await page.getByTestId("artifact-data-namespace").fill("e2e_auth_probe");
+      await page
+        .getByTestId("artifact-data-payload")
+        .fill(JSON.stringify({ marker, score: 7 }));
+
+      // Keep the already-loaded action references, but remove the identity used
+      // by the subsequent Server Action POSTs. The local-only middleware probe
+      // permits these exact POSTs through so the actions' own auth checks run.
+      await context.clearCookies();
+
+      const authCookies = (await context.cookies()).filter((cookie) =>
+        cookie.name.includes("authjs.session-token")
+      );
+      expect(authCookies).toEqual([]);
+
+      const result = page.getByTestId("artifact-data-result");
+      const submitRequestPromise = page.waitForRequest(
+        (request) => request.headers()["next-action"] !== undefined
+      );
+      await page.getByTestId("artifact-data-submit").click();
+      const submitRequest = await submitRequestPromise;
+      expect((await submitRequest.allHeaders()).cookie ?? "").not.toContain(
+        "authjs.session-token"
+      );
+      await expect(result).toContainText('"operation": "submit"');
+      await expect(result).toContainText('"isSuccess": false');
+      await expect(result).toContainText("AUTH_NO_SESSION");
+
+      await page.getByTestId("artifact-data-list").click();
+      await expect(result).toContainText('"operation": "list"');
+      await expect(result).toContainText('"isSuccess": false');
+      await expect(result).toContainText("AUTH_NO_SESSION");
+
+      // Restore the owner session only to verify that the rejected submit did
+      // not persist anything. This also gives teardown an authenticated API.
+      await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB);
+      await page.getByTestId("artifact-data-list").click();
+      await expect(result).toContainText('"operation": "list"');
+      await expect(result).toContainText('"isSuccess": true');
+      await expect(result).not.toContainText(marker);
+    } finally {
+      if (contentId) {
+        await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB);
+      }
+      await cleanupArtifact(page, contentId);
+      await context.close();
+    }
+  });
+
   test("a non-viewer receives the same NotFound mask without record data", async ({
     browser,
   }) => {

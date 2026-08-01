@@ -98,8 +98,21 @@ export default authMiddleware((req) => {
   const { nextUrl, auth } = req;
   const isLoggedIn = !!auth;
 
+  // Local authenticated-E2E harness only: after Playwright loads the protected
+  // page with a valid session, it clears the session cookie and invokes the
+  // Artifact Data Server Actions. Let only those exact development-mode POSTs
+  // reach the actions so their own auth boundary is exercised through the real
+  // Next.js transport. Deployed builds always use NODE_ENV=production, where
+  // this exception is disabled and the page itself also returns 404.
+  const isLocalArtifactDataActionProbe =
+    process.env.NODE_ENV !== "production" &&
+    req.method === "POST" &&
+    nextUrl.pathname === "/test-user/artifact-data" &&
+    req.headers.has("next-action");
+
   // Check if path is public
   const isPublicPath =
+    isLocalArtifactDataActionProbe ||
     EXACT_PUBLIC_PATHS.has(nextUrl.pathname) ||
     PUBLIC_PATHS.some(
       (path) =>
