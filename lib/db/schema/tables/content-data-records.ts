@@ -45,9 +45,9 @@ export const contentDataRecords = pgTable(
       t.createdAt.desc(),
     ),
     index("idx_content_data_records_user").on(
+      t.userId,
       t.contentId,
       t.namespace,
-      t.userId,
     ),
     check(
       "chk_content_data_records_namespace",

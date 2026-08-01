@@ -58,7 +58,7 @@ describe("migration 172 content data records", () => {
       /CREATE INDEX IF NOT EXISTS idx_content_data_records_lookup ON content_data_records \(content_id, namespace, created_at DESC\)/i,
     );
     expect(normalizedSql).toMatch(
-      /CREATE INDEX IF NOT EXISTS idx_content_data_records_user ON content_data_records \(content_id, namespace, user_id\)/i,
+      /CREATE INDEX IF NOT EXISTS idx_content_data_records_user ON content_data_records \(user_id, content_id, namespace\)/i,
     );
   });
 

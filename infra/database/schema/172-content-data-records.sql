@@ -28,7 +28,7 @@ CREATE INDEX IF NOT EXISTS idx_content_data_records_lookup
   ON content_data_records (content_id, namespace, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_content_data_records_user
-  ON content_data_records (content_id, namespace, user_id);
+  ON content_data_records (user_id, content_id, namespace);
 
 -- ROLLBACK SQL (for manual rollback if needed)
 -- DROP TABLE IF EXISTS content_data_records;
