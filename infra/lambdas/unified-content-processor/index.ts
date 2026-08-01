@@ -108,6 +108,7 @@ import {
   isRepositoryObjectKey,
   pagesFromTextract,
   parseContentProcessingMessage,
+  sanitizeProcessedContent,
   type ContentProcessingMessage,
 } from "./contract";
 import { CONTENT_SWEEP_REDISPATCHABLE_STATUSES } from "../../../lib/repositories/content-platform/job-state";
@@ -1770,8 +1771,12 @@ async function processNonMediaContent(
 async function publishProcessedContent(
   state: MessageProcessingState,
   inspection: InspectionResult,
-  content: ProcessedContent,
+  rawContent: ProcessedContent,
 ): Promise<void> {
+  // Strip messaging-unsafe code points once, before anything durable is
+  // written, so the canonical artifact and the chunk rows agree with each
+  // other and with the payloads that will later be queued for embedding.
+  const content = sanitizeProcessedContent(rawContent);
   const canonicalArtifact = await storeCanonicalText(
     state.source.repositoryId,
     state.message.itemVersionId,

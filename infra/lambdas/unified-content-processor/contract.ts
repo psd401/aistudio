@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { isRepositorySourceObjectKey } from "../../../lib/repositories/content-platform/object-key";
+import { sanitizeTextForMessaging } from "../../../lib/utils/text-sanitizer";
 
 export interface ContentProcessingMessage {
   jobId: string;
@@ -162,6 +164,67 @@ export function canonicalTextArtifactObjectKey(
   return `repositories/${repositoryId}/artifacts/${itemVersionId}/${safeProcessorVersion}/canonical.md`;
 }
 
+interface SanitizableSegment {
+  content: string;
+  contentHash: string;
+  contextPrefix?: string;
+}
+
+interface SanitizableContent<TSegment extends SanitizableSegment> {
+  canonicalText: string;
+  segments: TSegment[];
+}
+
+/**
+ * Normalise processed content at write time so poisoned code points never
+ * reach durable storage in the first place.
+ *
+ * Runs immediately before the canonical text is stored, which covers every
+ * processor (text, pdf, office, image, media) including the Textract and BDA
+ * paths. `contentHash` is recomputed **only** for segments whose content
+ * actually changed — untouched segments are returned by reference, so a clean
+ * publication is byte-identical to what it was before this pass existed and
+ * the stored hash keeps matching the stored bytes.
+ *
+ * The canonical text's own digest is not recomputed here: storeCanonicalText
+ * hashes whatever it is handed, so passing sanitized text through keeps the S3
+ * body, its ChecksumSHA256 and canonicalTextSha256 mutually consistent.
+ */
+export function sanitizeProcessedContent<
+  TSegment extends SanitizableSegment,
+  TContent extends SanitizableContent<TSegment>,
+>(content: TContent): TContent {
+  const canonicalText = sanitizeTextForMessaging(content.canonicalText);
+  let changed = canonicalText !== content.canonicalText;
+
+  const segments = content.segments.map((segment) => {
+    const sanitizedContent = sanitizeTextForMessaging(segment.content);
+    const sanitizedContextPrefix =
+      segment.contextPrefix === undefined
+        ? undefined
+        : sanitizeTextForMessaging(segment.contextPrefix);
+    if (
+      sanitizedContent === segment.content &&
+      sanitizedContextPrefix === segment.contextPrefix
+    ) {
+      return segment;
+    }
+    changed = true;
+    const next: TSegment = { ...segment, content: sanitizedContent };
+    if (sanitizedContextPrefix !== undefined) {
+      next.contextPrefix = sanitizedContextPrefix;
+    }
+    if (sanitizedContent !== segment.content) {
+      next.contentHash = createHash("sha256")
+        .update(sanitizedContent)
+        .digest("hex");
+    }
+    return next;
+  });
+
+  return changed ? { ...content, canonicalText, segments } : content;
+}
+
 function embeddingMessage(
   itemId: number,
   generationId: string,
@@ -171,8 +234,15 @@ function embeddingMessage(
     itemId,
     generationId,
     chunkIds: chunks.map((chunk) => chunk.id),
+    // Sanitize at the single send-time chokepoint. Both queueEmbeddings and the
+    // recovery dispatcher build their payloads here, and this is also the
+    // function batchEmbeddingMessages sizes against — so byte accounting stays
+    // exact while poisoned chunks that already exist in older index generations
+    // are neutralised on their way out.
     texts: chunks.map((chunk) =>
-      [chunk.contextPrefix?.trim(), chunk.content].filter(Boolean).join("\n")
+      sanitizeTextForMessaging(
+        [chunk.contextPrefix?.trim(), chunk.content].filter(Boolean).join("\n")
+      )
     ),
     modalities: chunks.map((chunk) => chunk.modality ?? "text"),
     visualSources: chunks.map((chunk) =>
