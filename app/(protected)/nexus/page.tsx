@@ -39,7 +39,6 @@ import { RepositoryPicker } from '@/components/features/repositories/repository-
 import { Button } from '@/components/ui/button'
 import { Database } from 'lucide-react'
 import { getNexusAccessibleRepositoriesAction } from '@/actions/repositories/repository.actions'
-import { meridianPortalClassName } from '@/lib/meridian/fonts'
 
 const log = createLogger({ moduleName: 'nexus-page' })
 const uuidSchema = z.string().uuid()
@@ -520,7 +519,6 @@ function NexusRepositorySelector({
         // Radix portals this dialog to document.body, outside the page's
         // `.meridian` scope — without this it renders in the global cream
         // palette and the system font.
-        contentClassName={meridianPortalClassName}
       />
     </>
   )

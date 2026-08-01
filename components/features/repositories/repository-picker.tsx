@@ -28,6 +28,7 @@ import {
   Lock,
   Search,
 } from "lucide-react"
+import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
 export interface RepositoryPickerProps {
   open: boolean
@@ -43,11 +44,21 @@ export interface RepositoryPickerProps {
   loadRepositories?: typeof getUserAccessibleRepositoriesAction
   maxSelections?: number
   /**
-   * Extra classes for the portaled DialogContent. Radix portals to
-   * document.body, so a design-system scope on the page does NOT reach this
-   * dialog — the caller passes its own scope class (e.g.
-   * `meridianPortalClassName`). Kept caller-supplied because this picker
-   * renders on both Meridian and non-Meridian surfaces.
+   * Extra classes for the portaled DialogContent.
+   *
+   * Radix portals to document.body, so the Meridian scope on the page does NOT
+   * reach this dialog — it needs the class on the content itself. That now
+   * DEFAULTS to `meridianPortalClassName` rather than being caller-supplied.
+   *
+   * It was originally opt-in because this picker also rendered on surfaces that
+   * had not adopted Meridian. That stopped being true once the scope moved to
+   * app/(protected)/layout.tsx: every surface reaching this component is
+   * Meridian, and the two call sites that were deliberately left opted-out
+   * (assistant-architect's repository browser and the repository source picker)
+   * silently kept rendering the old cream dialog.
+   *
+   * Pass a value only to ADD classes or to render somewhere genuinely outside
+   * the design system.
    */
   contentClassName?: string
 }
@@ -296,7 +307,7 @@ export function RepositoryPicker({
   description = "Select an accessible durable knowledge repository.",
   loadRepositories = getUserAccessibleRepositoriesAction,
   maxSelections,
-  contentClassName,
+  contentClassName = meridianPortalClassName,
 }: RepositoryPickerProps) {
   const { toast } = useToast()
   const [repositories, setRepositories] =
