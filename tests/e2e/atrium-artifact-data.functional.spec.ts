@@ -42,9 +42,19 @@ async function cleanupArtifact(
 ): Promise<void> {
   if (!contentId) return;
   try {
-    await page.request.delete(`/api/v1/content/${contentId}`);
-  } catch {
-    // Best-effort teardown must not hide the assertion that actually failed.
+    const response = await page.request.delete(`/api/v1/content/${contentId}`);
+    expect
+      .soft(
+        response.ok(),
+        `Artifact cleanup returned HTTP ${response.status()} for ${contentId}`
+      )
+      .toBe(true);
+  } catch (error) {
+    // A soft assertion reports teardown failures without replacing the primary
+    // failure that sent the test into finally.
+    expect
+      .soft(error, `Artifact cleanup request threw for ${contentId}`)
+      .toBeUndefined();
   }
 }
 

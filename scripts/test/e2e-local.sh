@@ -272,6 +272,7 @@ else
   AUTH_URL="$BASE" NEXT_DIST_DIR=.next-e2e \
   DATABASE_URL="${E2E_DATABASE_URL:-postgresql://postgres:postgres@localhost:5432/aistudio}" \
   ATRIUM_LOCAL_STORAGE_DIR="${E2E_ATRIUM_STORAGE_DIR:-/tmp/aistudio-atrium-e2e-${E2E_PORT}}" \
+  ATRIUM_ARTIFACT_DATA_E2E_ACTION_PROBE=true \
   API_RATE_LIMIT_DEFAULT_RPM="${E2E_API_RATE_LIMIT_RPM:-600}" \
   DB_SSL="${E2E_DB_SSL:-false}" PORT="$E2E_PORT" HOSTNAME=127.0.0.1 \
     bun run server.ts > "$SERVER_LOG" 2>&1 &
