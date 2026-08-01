@@ -227,6 +227,29 @@ jest.mock('@/components/ui/checkbox', () => {
   }
 })
 
+// The generic Radix mapper aliases all primitive packages to one module. The
+// alert-dialog mock above would otherwise replace the Switch primitives too.
+jest.mock('@/components/ui/switch', () => ({
+  Switch: ({
+    checked,
+    onCheckedChange,
+    ...props
+  }: {
+    checked?: boolean
+    onCheckedChange?: (checked: boolean) => void
+    'aria-label'?: string
+    disabled?: boolean
+  }) => (
+    <button
+      {...props}
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={() => onCheckedChange?.(!checked)}
+    />
+  ),
+}))
+
 // Create global form data store for test
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let globalFormData: any = {
@@ -311,20 +334,35 @@ describe('SettingsClient', () => {
     };
   })
 
-  it('renders seeded Content Platform settings in their own category', () => {
-    render(<SettingsClient initialSettings={[{
-      id: 2,
-      key: 'CONTENT_PLATFORM_ENABLED',
-      value: 'false',
-      description: 'Enable the unified repository content platform.',
-      category: 'Content Platform',
-      isSecret: false,
-      hasValue: true,
-      createdAt: new Date(),
-      updatedAt: new Date()
-    }]} />)
+  it('renders seeded Content Platform settings in the guided rollout controls', () => {
+    render(
+      <SettingsClient
+        initialSettings={[{
+          id: 2,
+          key: 'CONTENT_PLATFORM_ENABLED',
+          value: 'false',
+          description: 'Enable the unified repository content platform.',
+          category: 'Content Platform',
+          isSecret: false,
+          hasValue: true,
+          createdAt: new Date(),
+          updatedAt: new Date()
+        }]}
+        contentRolloutEvidence={{
+          blockers: [],
+          dryRunCompleted: false,
+          rollbackDrillCompleted: false,
+          uncoveredSources: 0,
+          activeRunCount: 0,
+          staleRepositoryCount: 0,
+          shadowObservations: 0,
+        }}
+      />
+    )
 
     expect(screen.getAllByText('Content Platform')).toHaveLength(2)
+    expect(screen.getByText('Guided repository rollout')).toBeInTheDocument()
+    expect(screen.getByText('1. Platform foundation')).toBeInTheDocument()
     expect(screen.getByText('CONTENT_PLATFORM_ENABLED')).toBeInTheDocument()
     expect(screen.getByText(/Unified document ingestion/)).toBeInTheDocument()
   })

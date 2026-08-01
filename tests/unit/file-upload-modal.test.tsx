@@ -26,6 +26,34 @@ jest.mock("@/lib/repositories/content-platform/browser-upload", () => ({
 jest.mock("@/components/ui/use-toast", () => ({
   useToast: () => ({ toast: mockToast }),
 }))
+jest.mock("@radix-ui/react-alert-dialog", () => {
+  const React = require("react")
+  const primitive = (displayName: string, tag = "div") => {
+    function MockAlertDialogPrimitive({
+      children,
+    }: {
+      children?: React.ReactNode
+    }) {
+      return React.createElement(tag, null, children)
+    }
+    MockAlertDialogPrimitive.displayName = displayName
+    return MockAlertDialogPrimitive
+  }
+
+  const mockExports = {
+    Root: primitive("AlertDialogRoot"),
+    Trigger: primitive("AlertDialogTrigger", "button"),
+    Portal: primitive("AlertDialogPortal"),
+    Overlay: primitive("AlertDialogOverlay"),
+    Content: primitive("AlertDialogContent"),
+    Title: primitive("AlertDialogTitle", "h2"),
+    Description: primitive("AlertDialogDescription", "p"),
+    Action: primitive("AlertDialogAction", "button"),
+    Cancel: primitive("AlertDialogCancel", "button"),
+  }
+
+  return { __esModule: true, ...mockExports }
+})
 jest.mock("@/components/ui/form", () => {
   const React = require("react")
   const {
