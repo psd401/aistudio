@@ -271,8 +271,13 @@ describe("submitArtifactRecord", () => {
       remaining: 0,
       resetTime: Date.now() + 30_000,
     });
+    const circularPayload: Record<string, unknown> = {};
+    circularPayload.self = circularPayload;
 
-    const result = await submitArtifactRecord(validSubmitInput);
+    const result = await submitArtifactRecord({
+      ...validSubmitInput,
+      payload: circularPayload,
+    });
 
     expect(result.isSuccess).toBe(false);
     if (result.isSuccess) return;

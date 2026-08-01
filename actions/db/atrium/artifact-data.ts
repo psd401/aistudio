@@ -229,15 +229,9 @@ export async function submitArtifactRecord(
     }
     const userId = requester.userId;
 
-    const contentId = validateContentId(input?.contentId);
-    const namespace = validateNamespace(input?.namespace);
-    const payload = validatePayload(input?.payload);
-    log.info("Action started: submit artifact record", {
-      contentId: sanitizeForLogging(contentId),
-      namespace,
-      payloadBytes: payload.bytes,
-    });
-
+    // Consume the caller's budget before any payload serialization. Server
+    // Actions share a large global body limit, so an over-limit caller must not
+    // repeatedly force this action to stringify artifact-defined input.
     const rateLimit = consumeRateLimit({
       interval: SUBMIT_RATE_WINDOW_MS,
       uniqueTokenPerInterval: SUBMIT_RATE_LIMIT,
@@ -251,6 +245,15 @@ export async function submitArtifactRecord(
         new Date(rateLimit.resetTime).toISOString()
       );
     }
+
+    const contentId = validateContentId(input?.contentId);
+    const namespace = validateNamespace(input?.namespace);
+    const payload = validatePayload(input?.payload);
+    log.info("Action started: submit artifact record", {
+      contentId: sanitizeForLogging(contentId),
+      namespace,
+      payloadBytes: payload.bytes,
+    });
 
     // Resolves the canonical object id and preserves the shared 404 mask for a
     // missing or non-viewable target. The per-user guard runs first so a caller
