@@ -141,7 +141,7 @@ export async function POST(request: NextRequest) {
     })
     return NextResponse.json(
       {
-        error: "Schedule creation requires a live owner-mode turn",
+        error: "Schedule management requires a live owner-mode turn",
         reason: invocation.reason,
         mode: invocation.context.mode,
       },

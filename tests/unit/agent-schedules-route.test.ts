@@ -100,22 +100,25 @@ describe("POST /api/agent/schedules", () => {
     expect(serviceFactoryMock).not.toHaveBeenCalled()
   })
 
-  it("names the owner-mode gate for a verified non-owner context", async () => {
-    context = {
-      actorEmail: "owner@psd401.net",
-      ownerEmail: "owner@psd401.net",
-      mode: "scheduled",
-    }
-    const response = await POST(request({ operation: "create" }))
+  it.each(["create", "list", "update", "delete"])(
+    "names the schedule management gate for verified non-owner %s requests",
+    async (operation) => {
+      context = {
+        actorEmail: "owner@psd401.net",
+        ownerEmail: "owner@psd401.net",
+        mode: "scheduled",
+      }
+      const response = await POST(request({ operation }))
 
-    expect(response.status).toBe(403)
-    await expect(response.json()).resolves.toEqual({
-      error: "Schedule creation requires a live owner-mode turn",
-      reason: "mode_not_allowed",
-      mode: "scheduled",
-    })
-    expect(serviceFactoryMock).not.toHaveBeenCalled()
-  })
+      expect(response.status).toBe(403)
+      await expect(response.json()).resolves.toEqual({
+        error: "Schedule management requires a live owner-mode turn",
+        reason: "mode_not_allowed",
+        mode: "scheduled",
+      })
+      expect(serviceFactoryMock).not.toHaveBeenCalled()
+    }
+  )
 
   it.each([
     "ownerEmail",
