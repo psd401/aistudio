@@ -52,6 +52,11 @@ describe("superseded repository generation retention", () => {
 
     const now = new Date("2026-08-01T12:00:00.000Z");
     const repositoryBatchSize = 37;
+    const repositoryProbeAnchor = (
+      BigInt(Math.floor(now.getTime() / 60_000)) *
+      BigInt(repositoryBatchSize) *
+      104_729n
+    ).toString();
     await expect(
       collectSupersededRepositoryGenerations({ now, repositoryBatchSize }),
     ).resolves.toEqual({
@@ -72,6 +77,14 @@ describe("superseded repository generation retention", () => {
         "candidate_generation.status = 'superseded'",
       );
       expect(compiled.sql).not.toContain("row_number() OVER");
+      expect(compiled.sql).toContain("repository_probe_ids AS MATERIALIZED");
+      expect(compiled.sql).toContain(
+        "WHERE repository.id >= probe_start.id",
+      );
+      expect(compiled.sql).toContain(
+        "WHERE repository.id < probe_start.id",
+      );
+      expect(compiled.sql).toContain("FROM repository_probe_ids probe");
       expect(compiled.sql).toContain("CROSS JOIN LATERAL");
       expect(compiled.sql).toContain(
         "kept_generation.repository_id = repository.id",
@@ -104,6 +117,7 @@ describe("superseded repository generation retention", () => {
       expect(compiled.params).toContain(
         SUPERSEDED_GENERATION_KEEP_PER_REPOSITORY - 1,
       );
+      expect(compiled.params).toContain(repositoryProbeAnchor);
       expect(compiled.params).toContain(repositoryBatchSize);
       expect(compiled.params).toContain(GENERATION_GC_GENERATION_BATCH);
       expect(compiled.sql).not.toMatch(

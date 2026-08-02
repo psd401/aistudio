@@ -50,6 +50,18 @@ describe("migration 173 repository generation retention", () => {
       "ON knowledge_repositories (active_index_generation_id)",
     );
     expect(migration).toContain("WHERE status = 'superseded'");
+
+    const triggerIndex = migration.indexOf(
+      "CREATE TRIGGER trg_repository_index_generation_superseded_at",
+    );
+    const finalBackfillIndex = migration.lastIndexOf(
+      "SET superseded_at = statement_timestamp()",
+    );
+    expect(triggerIndex).toBeGreaterThanOrEqual(0);
+    expect(finalBackfillIndex).toBeGreaterThan(triggerIndex);
+    expect(
+      migration.match(/SET superseded_at = statement_timestamp\(\)/g),
+    ).toHaveLength(2);
   });
 
   it("encodes the trigger function for the production line-based SQL splitter", () => {

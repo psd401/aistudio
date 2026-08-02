@@ -6,6 +6,8 @@ export const SUPERSEDED_GENERATION_KEEP_PER_REPOSITORY = 3;
 export const GENERATION_GC_CHUNK_BATCH = 20_000;
 export const GENERATION_GC_REPOSITORY_BATCH = 200;
 export const GENERATION_GC_GENERATION_BATCH = 200;
+/** Prime stride prevents the minute-based probe window from aligning to ID blocks. */
+const GENERATION_GC_REPOSITORY_PROBE_STRIDE = 104_729n;
 
 export interface CollectSupersededRepositoryGenerationsOptions {
   /** Testable clock; production always uses the current time. */
@@ -46,18 +48,48 @@ function deletedCount(result: unknown): number {
 function eligibleGenerationCtes(params: {
   eligibleBefore: string;
   keepPerRepository: number;
+  repositoryProbeAnchor: string;
   repositoryBatchSize: number;
   generationBatchSize: number;
 }): SQL {
   const keepFloorOffset = params.keepPerRepository - 1;
 
   return sql`
+    repository_probe_start AS (
+      SELECT mod(
+               ${params.repositoryProbeAnchor}::bigint,
+               COALESCE(max(repository.id), 0)::bigint + 1
+             )::integer AS id
+      FROM knowledge_repositories repository
+    ),
+    repository_probe_ids AS MATERIALIZED (
+      (
+        SELECT repository.id
+        FROM knowledge_repositories repository
+        CROSS JOIN repository_probe_start probe_start
+        WHERE repository.id >= probe_start.id
+        ORDER BY repository.id
+        LIMIT ${params.repositoryBatchSize}
+      )
+      UNION ALL
+      (
+        SELECT repository.id
+        FROM knowledge_repositories repository
+        CROSS JOIN repository_probe_start probe_start
+        WHERE repository.id < probe_start.id
+        ORDER BY repository.id
+        LIMIT ${params.repositoryBatchSize}
+      )
+      LIMIT ${params.repositoryBatchSize}
+    ),
     eligible_repositories AS MATERIALIZED (
       SELECT repository.id,
              repository.active_index_generation_id,
              keep_floor.superseded_at AS keep_floor_superseded_at,
              keep_floor.id AS keep_floor_id
-      FROM knowledge_repositories repository
+      FROM repository_probe_ids probe
+      INNER JOIN knowledge_repositories repository
+        ON repository.id = probe.id
       CROSS JOIN LATERAL (
         SELECT kept_generation.superseded_at,
                kept_generation.id
@@ -126,9 +158,11 @@ function eligibleGenerationCtes(params: {
  * invocations cannot work on the same parents. Chunks are removed first in a
  * ctid-bounded batch; a parent is deleted only after it is childless.
  * Eligible repositories are ordered by their oldest candidate so sustained
- * work on low repository IDs cannot starve older garbage elsewhere. The owner
- * row lock stabilizes every supported pointer update; the global pointer guard
- * additionally fails closed on pre-existing cross-repository pointer skew.
+ * work on low repository IDs cannot starve older garbage elsewhere. A rotating
+ * keyset window bounds steady-state repository probes even when nothing is
+ * eligible. The owner row lock stabilizes every supported pointer update; the
+ * global pointer guard additionally fails closed on pre-existing
+ * cross-repository pointer skew.
  */
 export async function collectSupersededRepositoryGenerations(
   options: CollectSupersededRepositoryGenerationsOptions = {},
@@ -153,9 +187,15 @@ export async function collectSupersededRepositoryGenerations(
     options.generationBatchSize ?? GENERATION_GC_GENERATION_BATCH,
     "generationBatchSize",
   );
+  const collectionNow = options.now ?? new Date();
   const eligibleBefore = new Date(
-    (options.now ?? new Date()).getTime() - retentionHours * 60 * 60_000,
+    collectionNow.getTime() - retentionHours * 60 * 60_000,
   ).toISOString();
+  const repositoryProbeAnchor = (
+    BigInt(Math.floor(collectionNow.getTime() / 60_000)) *
+    BigInt(repositoryBatchSize) *
+    GENERATION_GC_REPOSITORY_PROBE_STRIDE
+  ).toString();
 
   return executeTransaction(
     async (tx) => {
@@ -163,6 +203,7 @@ export async function collectSupersededRepositoryGenerations(
         WITH ${eligibleGenerationCtes({
           eligibleBefore,
           keepPerRepository,
+          repositoryProbeAnchor,
           repositoryBatchSize,
           generationBatchSize,
         })},
@@ -187,6 +228,7 @@ export async function collectSupersededRepositoryGenerations(
         WITH ${eligibleGenerationCtes({
           eligibleBefore,
           keepPerRepository,
+          repositoryProbeAnchor,
           repositoryBatchSize,
           generationBatchSize,
         })},

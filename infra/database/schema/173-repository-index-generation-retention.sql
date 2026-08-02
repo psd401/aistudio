@@ -48,6 +48,14 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_repositories_active_index_generation
   ON knowledge_repositories (active_index_generation_id)
   WHERE active_index_generation_id IS NOT NULL;
 
+-- The production runner commits statements individually. Close the only gap
+-- (default removed, trigger not installed yet) after the trigger is active so
+-- no superseded row can remain permanently ineligible with a NULL timestamp.
+UPDATE repository_index_generations
+SET superseded_at = statement_timestamp()
+WHERE status = 'superseded'
+  AND superseded_at IS NULL;
+
 -- ROLLBACK SQL (for manual rollback if needed)
 -- DROP INDEX IF EXISTS idx_repository_index_generations_superseded_retention;
 -- DROP INDEX IF EXISTS idx_knowledge_repositories_active_index_generation;
