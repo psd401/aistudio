@@ -73,26 +73,26 @@ describe("superseded repository generation retention", () => {
       generationDeletion,
       cursorUpdate,
     ] = compiledQueries;
-    expect(cursorInsert?.sql).toContain("ON CONFLICT (key) DO NOTHING");
-    expect(cursorRead?.sql).toContain("FOR UPDATE");
-    expect(cursorRead?.params).toContain("REPOSITORY_GENERATION_GC_CURSOR");
-    expect(repositoryProbe?.sql).toContain("repository.id >");
-    expect(repositoryProbe?.sql).toContain("repository.id <=");
-    expect(repositoryProbe?.sql).toContain("ORDER BY probe.probe_segment, probe.id");
-    expect(repositoryProbe?.params).toContain(950);
-    expect(repositoryProbe?.params).toContain(repositoryBatchSize);
-    expect(timestampBackfill?.sql).toContain(
+    expect(cursorInsert!.sql).toContain("ON CONFLICT (key) DO NOTHING");
+    expect(cursorRead!.sql).toContain("FOR UPDATE");
+    expect(cursorRead!.params).toContain("REPOSITORY_GENERATION_GC_CURSOR");
+    expect(repositoryProbe!.sql).toContain("repository.id >");
+    expect(repositoryProbe!.sql).toContain("repository.id <=");
+    expect(repositoryProbe!.sql).toContain("ORDER BY probe.probe_segment, probe.id");
+    expect(repositoryProbe!.params).toContain(950);
+    expect(repositoryProbe!.params).toContain(repositoryBatchSize);
+    expect(timestampBackfill!.sql).toContain(
       "generation.superseded_at IS NULL",
     );
-    expect(timestampBackfill?.sql).toContain(
+    expect(timestampBackfill!.sql).toContain(
       "FOR UPDATE OF generation SKIP LOCKED",
     );
-    expect(timestampBackfill?.sql).toContain(
+    expect(timestampBackfill!.sql).toContain(
       "SET superseded_at = clock_timestamp()",
     );
-    expect(timestampBackfill?.params).toContain(GENERATION_GC_TIMESTAMP_BATCH);
-    expect(cursorUpdate?.sql).toContain("UPDATE settings");
-    expect(cursorUpdate?.params).toContain("1300");
+    expect(timestampBackfill!.params).toContain(GENERATION_GC_TIMESTAMP_BATCH);
+    expect(cursorUpdate!.sql).toContain("UPDATE settings");
+    expect(cursorUpdate!.params).toContain("1300");
     expect(chunkDeletion).toBeDefined();
     expect(generationDeletion).toBeDefined();
 
