@@ -117,7 +117,7 @@ async function cleanupArtifact(
     // A soft assertion reports teardown failures without replacing the primary
     // failure that sent the test into finally.
     expect
-      .soft(error, "Artifact cleanup request threw for " + (contentId ?? title))
+      .soft(error, "Artifact cleanup request threw for " + contentId)
       .toBeUndefined();
   }
 }
