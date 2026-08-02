@@ -29,6 +29,10 @@
   script-src 'unsafe-inline'). We render only ONE message (the first valid one
   is replaced on each subsequent valid message) and never eval arbitrary strings
   ourselves beyond reconstructing the author's own script nodes.
+
+  Before any artifact code runs, this host installs window.AtriumData. The helper
+  uses postMessage to ask the authenticated parent for scoped data operations;
+  it does not weaken the frame CSP or give artifact code direct network access.
 -->
 <html lang="en">
   <head>
@@ -73,6 +77,133 @@
           }
           return false;
         }
+
+        var DATA_REQUEST_TYPE = "atrium-artifact-data-request";
+        var DATA_RESPONSE_TYPE = "atrium-artifact-data-response";
+        var DATA_REQUEST_TIMEOUT_MS = 10000;
+        var MAX_PENDING_DATA_REQUESTS = 32;
+        var pendingDataRequests = new Map();
+        // Capture the primitives before artifact scripts can replace globals.
+        var parentWindow = window.parent;
+        var postToParent = parentWindow.postMessage.bind(parentWindow);
+        var createRequestId =
+          window.crypto && typeof window.crypto.randomUUID === "function"
+            ? window.crypto.randomUUID.bind(window.crypto)
+            : null;
+        var scheduleTimeout = window.setTimeout.bind(window);
+        var cancelTimeout = window.clearTimeout.bind(window);
+
+        function handleDataResponse(event) {
+          // Match the exact parent WindowProxy rather than trusting any window
+          // that happens to share the parent's origin. The parent bridge applies
+          // the reciprocal check against this frame's contentWindow.
+          if (event.source !== parentWindow) return;
+          var data = event.data;
+          if (
+            !data ||
+            data.type !== DATA_RESPONSE_TYPE ||
+            typeof data.requestId !== "string" ||
+            typeof data.ok !== "boolean"
+          ) {
+            return;
+          }
+
+          var pending = pendingDataRequests.get(data.requestId);
+          if (!pending) return;
+
+          pendingDataRequests.delete(data.requestId);
+          cancelTimeout(pending.timeoutId);
+          if (data.ok) {
+            pending.resolve(data.data);
+          } else {
+            pending.reject(
+              new Error(
+                typeof data.error === "string" && data.error
+                  ? data.error
+                  : "Atrium data bridge is unavailable"
+              )
+            );
+          }
+        }
+
+        // Install exactly one response listener. Unknown, late, spoofed-source,
+        // and non-data messages are ignored without disturbing pending calls.
+        window.addEventListener("message", handleDataResponse);
+
+        function requestData(op, namespace, fields) {
+          if (!createRequestId) {
+            return Promise.reject(
+              new Error("Atrium data bridge is unavailable")
+            );
+          }
+          if (pendingDataRequests.size >= MAX_PENDING_DATA_REQUESTS) {
+            return Promise.reject(
+              new Error("Atrium data bridge has too many pending requests")
+            );
+          }
+
+          return new Promise(function (resolve, reject) {
+            var requestId;
+            try {
+              requestId = createRequestId();
+            } catch (_err) {
+              reject(new Error("Atrium data bridge is unavailable"));
+              return;
+            }
+            if (pendingDataRequests.has(requestId)) {
+              reject(new Error("Atrium data request ID collision"));
+              return;
+            }
+            var timeoutId = scheduleTimeout(function () {
+              pendingDataRequests.delete(requestId);
+              reject(new Error("Atrium data request timed out"));
+            }, DATA_REQUEST_TIMEOUT_MS);
+
+            pendingDataRequests.set(requestId, {
+              resolve: resolve,
+              reject: reject,
+              timeoutId: timeoutId,
+            });
+
+            var message = {
+              type: DATA_REQUEST_TYPE,
+              requestId: requestId,
+              op: op,
+              namespace: namespace,
+            };
+            if (op === "submit") {
+              message.payload = fields.payload;
+            } else {
+              if (fields.limit !== undefined) message.limit = fields.limit;
+              if (fields.scope !== undefined) message.scope = fields.scope;
+            }
+
+            try {
+              // The parent is a concrete app origin, but this document is opaque
+              // because the iframe intentionally omits allow-same-origin. `*` is
+              // therefore required for delivery; the receiver authenticates the
+              // sender by WindowProxy identity.
+              postToParent(message, "*");
+            } catch (_err) {
+              pendingDataRequests.delete(requestId);
+              cancelTimeout(timeoutId);
+              reject(new Error("Atrium data bridge is unavailable"));
+            }
+          });
+        }
+
+        window.AtriumData = {
+          submit: function (namespace, payload) {
+            return requestData("submit", namespace, { payload: payload });
+          },
+          list: function (namespace, options) {
+            options = options || {};
+            return requestData("list", namespace, {
+              limit: options.limit,
+              scope: options.scope,
+            });
+          },
+        };
 
         // Recreate <script> nodes so the browser executes them (innerHTML does
         // not run injected scripts). We recreate the artifact's OWN <script> nodes
