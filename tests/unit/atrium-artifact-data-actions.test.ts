@@ -241,6 +241,7 @@ describe("submitArtifactRecord validation", () => {
   });
 
   it("bounds traversal when many undefined fields serialize away", async () => {
+    const stringifySpy = jest.spyOn(JSON, "stringify");
     const payload: Record<string, unknown> = Object.create(null) as Record<
       string,
       unknown
@@ -249,15 +250,20 @@ describe("submitArtifactRecord validation", () => {
       payload[`field-${index}`] = undefined;
     }
 
-    const result = await submitArtifactRecord({
-      ...validSubmitInput,
-      payload,
-    });
+    try {
+      const result = await submitArtifactRecord({
+        ...validSubmitInput,
+        payload,
+      });
 
-    expect(result.isSuccess).toBe(false);
-    expect(mockGetUserRequester).not.toHaveBeenCalled();
-    expect(mockContentGet).not.toHaveBeenCalled();
-    expect(mockInsert).not.toHaveBeenCalled();
+      expect(stringifySpy).not.toHaveBeenCalled();
+      expect(result.isSuccess).toBe(false);
+      expect(mockGetUserRequester).not.toHaveBeenCalled();
+      expect(mockContentGet).not.toHaveBeenCalled();
+      expect(mockInsert).not.toHaveBeenCalled();
+    } finally {
+      stringifySpy.mockRestore();
+    }
   });
 
   it("rejects an empty content id before visibility or persistence", async () => {

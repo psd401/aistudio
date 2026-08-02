@@ -148,6 +148,12 @@ function validatePayload(payload: unknown): ValidatedPayload {
     }
   }
 
+  // Walk the original value before JSON.stringify so fields that serialization
+  // would omit cannot force an unbounded pre-validation traversal. The walk
+  // caps both discovered values and cumulative string/key code units before
+  // performing per-string Unicode scans.
+  validateJsonValue(payload);
+
   let serialized: string;
   try {
     serialized = safeJsonbStringify(payload);
@@ -178,12 +184,6 @@ function validatePayload(payload: unknown): ValidatedPayload {
       MAX_PAYLOAD_BYTES
     );
   }
-
-  // Enforce the serialized byte budget before walking the graph so a very
-  // large array/object cannot expand the structural-validation work queue.
-  // Walk the original value deliberately: reject undefined and other values
-  // JSON.stringify would silently omit instead of accepting a lossy payload.
-  validateJsonValue(payload);
 
   let serializedShape: unknown;
   try {
