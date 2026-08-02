@@ -87,6 +87,8 @@ export interface RepositoryItem {
   processingStatus: string
   processingError: string | null
   canRetry?: boolean
+  embeddedChunks: number
+  totalChunks: number
   createdAt: Date
   updatedAt: Date
 }
@@ -287,6 +289,8 @@ function mapToRepositoryItem(itemRaw: RawRepositoryItem): RepositoryItem {
     processingStatus: itemRaw.processingStatus ?? 'pending',
     processingError: itemRaw.processingError,
     canRetry: false,
+    embeddedChunks: 0,
+    totalChunks: 0,
     createdAt: itemRaw.createdAt ?? new Date(),
     updatedAt: itemRaw.updatedAt ?? new Date()
   }
@@ -677,6 +681,8 @@ export async function addDocumentWithPresignedUrl(
       processingStatus: itemRaw.processingStatus ?? 'pending',
       processingError: itemRaw.processingError,
       canRetry: false,
+      embeddedChunks: 0,
+      totalChunks: 0,
       createdAt: itemRaw.createdAt ?? new Date(),
       updatedAt: itemRaw.updatedAt ?? new Date()
     }
@@ -884,6 +890,8 @@ export async function addUrlItem(
       processingStatus: itemRaw.processingStatus ?? 'pending',
       processingError: itemRaw.processingError,
       canRetry: false,
+      embeddedChunks: 0,
+      totalChunks: 0,
       createdAt: itemRaw.createdAt ?? new Date(),
       updatedAt: itemRaw.updatedAt ?? new Date()
     }
@@ -1068,6 +1076,8 @@ export async function addTextItem(
       processingStatus: itemRaw.processingStatus ?? 'pending',
       processingError: itemRaw.processingError,
       canRetry: false,
+      embeddedChunks: 0,
+      totalChunks: 0,
       createdAt: itemRaw.createdAt ?? new Date(),
       updatedAt: itemRaw.updatedAt ?? new Date()
     }
@@ -1146,6 +1156,8 @@ export async function removeRepositoryItem(
       processingStatus: itemRaw.processingStatus ?? 'pending',
       processingError: itemRaw.processingError,
       canRetry: false,
+      embeddedChunks: 0,
+      totalChunks: 0,
       createdAt: itemRaw.createdAt ?? new Date(),
       updatedAt: itemRaw.updatedAt ?? new Date()
     }
@@ -1261,6 +1273,12 @@ export async function listRepositoryItems(
     // Convert to action type
     const items: RepositoryItem[] = itemsRaw.map(item => {
       const canonical = canonicalStatuses.get(item.id)
+      const embeddingCoverage = canonical
+        ? {
+            embeddedChunks: canonical.embeddedChunks,
+            totalChunks: canonical.totalChunks,
+          }
+        : { embeddedChunks: 0, totalChunks: 0 }
       return {
         id: item.id,
         repositoryId: item.repositoryId,
@@ -1280,6 +1298,7 @@ export async function listRepositoryItems(
               item.processingError,
             )
           : false,
+        ...embeddingCoverage,
         createdAt: item.createdAt ?? new Date(),
         updatedAt: item.updatedAt ?? new Date()
       }
@@ -1528,6 +1547,8 @@ export async function searchRepositoryItems(
       processingStatus: item.processingStatus ?? 'pending',
       processingError: item.processingError,
       canRetry: false,
+      embeddedChunks: 0,
+      totalChunks: 0,
       createdAt: item.createdAt ?? new Date(),
       updatedAt: item.updatedAt ?? new Date()
     }))

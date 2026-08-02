@@ -24,6 +24,8 @@ export interface CanonicalRepositoryItemStatus {
   processingStatus: CanonicalItemProcessingStatus;
   processingError: string | null;
   canRetry: boolean;
+  embeddedChunks: number;
+  totalChunks: number;
 }
 
 /** Legacy/pre-canonical failure messages a repository manager can retry through the canonical pipeline. */
@@ -33,6 +35,8 @@ export const RETRYABLE_LEGACY_FAILURE_PREFIXES = [
   "Legacy URL processing failed",
   "Canonical content processing does not support",
   "Content processing never started",
+  "Embedding generation could not be queued",
+  "Legacy URL processing does not generate embeddings",
 ] as const;
 
 export function isRetryableLegacyItemFailure(
@@ -67,6 +71,8 @@ interface CanonicalStatusRow {
   buildingGeneration: boolean;
   failedGeneration: boolean;
   generationError: string | null;
+  embeddedChunks: number;
+  totalChunks: number;
 }
 
 export function resolveCanonicalItemStatus(
@@ -78,6 +84,8 @@ export function resolveCanonicalItemStatus(
       processingStatus: "embedded",
       processingError: null,
       canRetry: false,
+      embeddedChunks: row.embeddedChunks,
+      totalChunks: row.totalChunks,
     };
   }
 
@@ -87,6 +95,8 @@ export function resolveCanonicalItemStatus(
       processingStatus: "retrying",
       processingError: null,
       canRetry: false,
+      embeddedChunks: row.embeddedChunks,
+      totalChunks: row.totalChunks,
     };
   }
 
@@ -96,6 +106,8 @@ export function resolveCanonicalItemStatus(
       processingStatus: "failed",
       processingError: canonicalFailureMessage(row),
       canRetry: row.storageStatus !== "blocked" && row.inspectionStatus !== "blocked",
+      embeddedChunks: row.embeddedChunks,
+      totalChunks: row.totalChunks,
     };
   }
 
@@ -105,6 +117,8 @@ export function resolveCanonicalItemStatus(
       processingStatus: "processing_embeddings",
       processingError: null,
       canRetry: false,
+      embeddedChunks: row.embeddedChunks,
+      totalChunks: row.totalChunks,
     };
   }
 
@@ -118,6 +132,8 @@ export function resolveCanonicalItemStatus(
       processingStatus: "retrying",
       processingError: null,
       canRetry: false,
+      embeddedChunks: row.embeddedChunks,
+      totalChunks: row.totalChunks,
     };
   }
 
@@ -129,6 +145,8 @@ export function resolveCanonicalItemStatus(
         : "pending",
     processingError: null,
     canRetry: false,
+    embeddedChunks: row.embeddedChunks,
+    totalChunks: row.totalChunks,
   };
 }
 
@@ -207,6 +225,44 @@ export async function getCanonicalRepositoryItemStatuses(
               AND failed_generation.status = 'failed'
             ORDER BY failed_generation.created_at DESC
             LIMIT 1
+          )`,
+          totalChunks: sql<number>`(
+            SELECT COUNT(*)::integer
+            FROM ${repositoryItemChunks} coverage_chunk
+            WHERE coverage_chunk.item_id = ${repositoryItems.id}
+              AND coverage_chunk.index_generation_id = (
+                SELECT coverage_generation.id
+                FROM ${repositoryIndexGenerations} coverage_generation
+                WHERE coverage_generation.status IN ('building', 'active')
+                  AND EXISTS (
+                    SELECT 1
+                    FROM ${repositoryItemChunks} generation_item_chunk
+                    WHERE generation_item_chunk.index_generation_id = coverage_generation.id
+                      AND generation_item_chunk.item_id = ${repositoryItems.id}
+                  )
+                ORDER BY coverage_generation.created_at DESC, coverage_generation.id DESC
+                LIMIT 1
+              )
+          )`,
+          embeddedChunks: sql<number>`(
+            SELECT COUNT(*) FILTER (
+              WHERE coverage_chunk.embedding IS NOT NULL
+            )::integer
+            FROM ${repositoryItemChunks} coverage_chunk
+            WHERE coverage_chunk.item_id = ${repositoryItems.id}
+              AND coverage_chunk.index_generation_id = (
+                SELECT coverage_generation.id
+                FROM ${repositoryIndexGenerations} coverage_generation
+                WHERE coverage_generation.status IN ('building', 'active')
+                  AND EXISTS (
+                    SELECT 1
+                    FROM ${repositoryItemChunks} generation_item_chunk
+                    WHERE generation_item_chunk.index_generation_id = coverage_generation.id
+                      AND generation_item_chunk.item_id = ${repositoryItems.id}
+                  )
+                ORDER BY coverage_generation.created_at DESC, coverage_generation.id DESC
+                LIMIT 1
+              )
           )`,
         })
         .from(repositoryItems)

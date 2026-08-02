@@ -379,6 +379,8 @@ export async function adminGetRepositoryItems(
         item.processingStatus,
         item.processingError,
       ),
+      embeddedChunks: 0,
+      totalChunks: 0,
       createdAt: item.createdAt ?? new Date(),
       updatedAt: item.updatedAt ?? new Date(),
     }));

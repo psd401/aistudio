@@ -55,6 +55,8 @@ const mockGetCanonicalRepositoryItemStatuses = jest.fn<
     processingStatus: string
     processingError: string | null
     canRetry: boolean
+    embeddedChunks: number
+    totalChunks: number
   }>>
 >(() => Promise.resolve(new Map()))
 const mockRetryCanonicalRepositoryItem = jest.fn<
@@ -256,6 +258,8 @@ it('projects canonical failure state instead of a misleading legacy completion',
     processingStatus: 'failed',
     processingError: 'Item version object key is outside its repository namespace',
     canRetry: true,
+    embeddedChunks: 12,
+    totalChunks: 20,
   }]]))
 
   const result = await mod.listRepositoryItems(5)
@@ -267,6 +271,8 @@ it('projects canonical failure state instead of a misleading legacy completion',
       processingStatus: 'failed',
       processingError: 'Item version object key is outside its repository namespace',
       canRetry: true,
+      embeddedChunks: 12,
+      totalChunks: 20,
     }),
   ])
 })
@@ -289,6 +295,8 @@ it('redacts internal processing failures and retry controls from shared readers'
     processingStatus: 'failed',
     processingError: 's3://private-bucket/internal/source-key',
     canRetry: true,
+    embeddedChunks: 12,
+    totalChunks: 20,
   }]]))
 
   const result = await mod.listRepositoryItems(5)
@@ -300,6 +308,8 @@ it('redacts internal processing failures and retry controls from shared readers'
       processingStatus: 'failed',
       processingError: null,
       canRetry: false,
+      embeddedChunks: 12,
+      totalChunks: 20,
     }),
   ])
 })

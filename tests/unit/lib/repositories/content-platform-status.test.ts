@@ -24,6 +24,8 @@ function statusRow(
     buildingGeneration: false,
     failedGeneration: false,
     generationError: null,
+    embeddedChunks: 4,
+    totalChunks: 9,
     ...overrides,
   };
 }
@@ -32,13 +34,21 @@ describe("canonical repository item status", () => {
   it("treats an active canonical generation as authoritative", () => {
     expect(
       resolveCanonicalItemStatus(
-        statusRow({ active: true, jobStatus: "failed", jobError: "stale error" })
+        statusRow({
+          active: true,
+          jobStatus: "failed",
+          jobError: "stale error",
+          embeddedChunks: 9,
+          totalChunks: 9,
+        })
       )
     ).toEqual({
       itemId: 7,
       processingStatus: "embedded",
       processingError: null,
       canRetry: false,
+      embeddedChunks: 9,
+      totalChunks: 9,
     });
   });
 
@@ -71,6 +81,8 @@ describe("canonical repository item status", () => {
       processingStatus: "failed",
       processingError: "The document could not be parsed",
       canRetry: true,
+      embeddedChunks: 4,
+      totalChunks: 9,
     });
   });
 
@@ -139,6 +151,8 @@ describe("canonical repository item status", () => {
         processingStatus: "retrying",
         processingError: null,
         canRetry: false,
+        embeddedChunks: 4,
+        totalChunks: 9,
       });
     }
   });
@@ -159,6 +173,9 @@ describe("canonical repository item status", () => {
     ).toBe("pending");
   });
 
+});
+
+describe("canonical repository item embedding coverage", () => {
   it("exposes a terminal failed embedding generation", () => {
     expect(
       resolveCanonicalItemStatus(
@@ -176,6 +193,26 @@ describe("canonical repository item status", () => {
       processingError: "Embedding provider rejected the model",
       canRetry: true,
     });
+  });
+
+  it("carries counts through every status branch", () => {
+    const branches: Array<
+      Partial<Parameters<typeof resolveCanonicalItemStatus>[0]>
+    > = [
+      { active: true },
+      { postDeployRecovery: "embedding-concurrency-v1" },
+      { versionStatus: "failed", jobStatus: "failed" },
+      { versionStatus: "completed" },
+      { jobStatus: "pending", jobAttempt: 1 },
+      {},
+    ];
+
+    for (const overrides of branches) {
+      expect(resolveCanonicalItemStatus(statusRow(overrides))).toMatchObject({
+        embeddedChunks: 4,
+        totalChunks: 9,
+      });
+    }
   });
 });
 

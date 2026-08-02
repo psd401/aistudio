@@ -450,8 +450,11 @@ async function processURL(job: URLProcessingJob) {
     // Store chunks
     await storeChunks(job.itemId, chunks);
 
-    // Update status to completed
-    await updateItemStatus(job.itemId, 'completed');
+    await updateItemStatus(
+      job.itemId,
+      'embedding_failed',
+      'Legacy URL processing does not generate embeddings. Retry this item.'
+    );
     await updateJobStatus(job.jobId, 'completed', {
       url: job.url,
       chunksCreated: chunks.length,
