@@ -4,15 +4,17 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeAll, beforeEach, describe, expect, it, jest } from "@jest/globals";
 
-const mockGetServerSession = jest.fn();
-const mockGetUserIdFromSession = jest.fn();
-const mockHasRole = jest.fn();
-const mockGetRepositoryById = jest.fn();
-const mockAssertRepositoryReadAccess = jest.fn();
-const mockGetContentPlatformConfig = jest.fn();
-const mockExecuteSearch = jest.fn();
-const mockRevalidatePath = jest.fn();
-const mockTimer = jest.fn();
+type AsyncMock = (...args: unknown[]) => Promise<unknown>;
+
+const mockGetServerSession = jest.fn<AsyncMock>();
+const mockGetUserIdFromSession = jest.fn<AsyncMock>();
+const mockHasRole = jest.fn<AsyncMock>();
+const mockGetRepositoryById = jest.fn<AsyncMock>();
+const mockAssertRepositoryReadAccess = jest.fn<AsyncMock>();
+const mockGetContentPlatformConfig = jest.fn<AsyncMock>();
+const mockExecuteSearch = jest.fn<AsyncMock>();
+const mockRevalidatePath = jest.fn<(...args: unknown[]) => void>();
+const mockTimer = jest.fn<(...args: unknown[]) => void>();
 
 jest.mock("next/cache", () => ({ revalidatePath: mockRevalidatePath }));
 jest.mock("@/lib/auth/server-session", () => ({
@@ -172,6 +174,11 @@ describe("recordRepositoryRetrievalShadowSampleAction", () => {
       },
     });
     expect(mockExecuteSearch).toHaveBeenCalledTimes(2);
+    expect(mockAssertRepositoryReadAccess).toHaveBeenCalledWith(
+      41,
+      "admin-sub",
+      { allowAdministratorOverride: false },
+    );
     expect(mockExecuteSearch).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({

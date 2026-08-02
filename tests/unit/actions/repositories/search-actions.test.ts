@@ -22,7 +22,9 @@ const mockGetContentPlatformConfig = jest.fn(() => Promise.resolve({
   readV2Enabled: false,
   retrievalShadowEnabled: false,
 }))
-const mockRecordRepositoryRetrievalShadow = jest.fn(() => Promise.resolve())
+const mockRecordRepositoryRetrievalShadow = jest.fn<(...a: unknown[]) => Promise<void>>(
+  () => Promise.resolve()
+)
 const mockWarn = jest.fn()
 
 jest.mock('@/lib/auth/server-session', () => ({ getServerSession: mockGetServerSession }))

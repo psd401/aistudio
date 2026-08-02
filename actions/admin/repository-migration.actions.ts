@@ -329,6 +329,7 @@ export async function recordRepositoryRetrievalShadowSampleAction(input: {
       await assertRepositoryReadAccess(
         input.repositoryId,
         administrator.cognitoSub,
+        { allowAdministratorOverride: false },
       );
     } catch (error) {
       if (!isRecordNotFoundError(error)) throw error;

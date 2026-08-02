@@ -125,6 +125,11 @@ describe("shared repository-access guards", () => {
 
     isAdministrator = true;
     await expect(assertRepositoryReadAccess(8, "user-1")).resolves.toBeUndefined();
+    await expect(
+      assertRepositoryReadAccess(8, "user-1", {
+        allowAdministratorOverride: false,
+      })
+    ).rejects.toBeDefined();
     await expect(assertRepositoryReadAccess(4, "user-1")).rejects.toBeDefined();
     await expect(assertRepositoryReadAccess(9, "user-1")).rejects.toBeDefined();
   });
