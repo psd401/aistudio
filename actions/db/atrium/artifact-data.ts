@@ -65,7 +65,6 @@ export interface ListArtifactRecordsInput {
 
 export interface ArtifactRecordDTO {
   id: string;
-  userId: number | null;
   displayName: string;
   payload: ArtifactDataPayload;
   createdAt: string;
@@ -82,7 +81,6 @@ interface ValidatedPayload {
 
 interface ArtifactRecordRow {
   id: string;
-  userId: number | null;
   payload: ArtifactDataPayload;
   createdAt: Date;
   userFirstName: string | null;
@@ -332,7 +330,6 @@ function displayNameFor(row: ArtifactRecordRow): string {
 function toArtifactRecordDTO(row: ArtifactRecordRow): ArtifactRecordDTO {
   return {
     id: row.id,
-    userId: row.userId,
     displayName: displayNameFor(row),
     payload: row.payload,
     createdAt: row.createdAt.toISOString(),
@@ -500,7 +497,6 @@ export async function listArtifactRecords(
         db
           .select({
             id: contentDataRecords.id,
-            userId: contentDataRecords.userId,
             payload: contentDataRecords.payload,
             createdAt: contentDataRecords.createdAt,
             userFirstName: users.firstName,

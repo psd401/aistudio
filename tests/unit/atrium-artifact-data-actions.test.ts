@@ -406,8 +406,34 @@ describe("submitArtifactRecord PostgreSQL JSON compatibility", () => {
   });
 });
 
+describe("listArtifactRecords scope filtering", () => {
+  it("binds the caller identity for mine scope", async () => {
+    const result = await listArtifactRecords({
+      ...validListInput,
+      scope: "mine",
+    });
+
+    expect(result.isSuccess).toBe(true);
+    expect(mockWhere).toHaveBeenCalledTimes(1);
+    const whereClause = mockWhere.mock.calls[0]?.[0] as SQL | undefined;
+    if (!whereClause) throw new Error("Expected a list query WHERE clause");
+    const rendered = new PgDialect().sqlToQuery(whereClause);
+    const userIdBinding = rendered.sql.match(
+      /"content_data_records"\."user_id" = \$(\d+)/
+    );
+    if (!userIdBinding?.[1]) {
+      throw new Error("Expected a bound user_id predicate for mine scope");
+    }
+    const parameterIndex = Number.parseInt(userIdBinding[1], 10) - 1;
+    expect(rendered.params[parameterIndex]).toBe(REQUESTER.userId);
+    expect(rendered.params).toEqual(
+      expect.arrayContaining([CONTENT.id, validListInput.namespace])
+    );
+  });
+});
+
 describe("listArtifactRecords", () => {
-  it("returns server-resolved names without exposing email identifiers", async () => {
+  it("returns server-resolved names without exposing user identifiers", async () => {
     mockLimit.mockResolvedValueOnce([
       {
         id: "record-2",
@@ -435,14 +461,12 @@ describe("listArtifactRecords", () => {
     expect(result.data.records).toEqual([
       {
         id: "record-2",
-        userId: 7,
         displayName: "Ada Lovelace",
         payload: { score: 84 },
         createdAt: "2026-08-01T20:05:00.000Z",
       },
       {
         id: "record-1",
-        userId: 8,
         displayName: "Unknown user",
         payload: { score: 42 },
         createdAt: CREATED_AT.toISOString(),
@@ -469,25 +493,6 @@ describe("listArtifactRecords", () => {
 
     expect(result.isSuccess).toBe(true);
     expect(mockLimit).toHaveBeenCalledWith(200);
-  });
-
-  it("supports the caller-only mine scope", async () => {
-    const result = await listArtifactRecords({
-      ...validListInput,
-      scope: "mine",
-    });
-
-    expect(result.isSuccess).toBe(true);
-    expect(mockWhere).toHaveBeenCalledTimes(1);
-    const whereClause = mockWhere.mock.calls[0]?.[0] as SQL | undefined;
-    if (!whereClause) throw new Error("Expected a list query WHERE clause");
-    const rendered = new PgDialect().sqlToQuery(whereClause);
-    expect(rendered.sql).toContain('"content_data_records"."user_id" = $3');
-    expect(rendered.params).toEqual([
-      CONTENT.id,
-      validListInput.namespace,
-      REQUESTER.userId,
-    ]);
   });
 
   it("rejects an invalid scope before visibility or database access", async () => {
