@@ -311,6 +311,38 @@ describe("signed-owner Atrium artifact data reads", () => {
   })
 })
 
+describe("signed-owner Atrium artifact data content-kind guard", () => {
+  it("rejects a visible non-artifact before record or authoring access", async () => {
+    contentGetMock.mockResolvedValue({
+      id: "document-1",
+      kind: "document",
+    })
+
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "request-data-document",
+      method: "GET",
+      path: "/document-1/data",
+      query: { namespace: "leaderboard" },
+    })
+
+    expect(result).toEqual({
+      httpStatus: 400,
+      payload: {
+        error: {
+          code: "VALIDATION_ERROR",
+          message: "Content is not an artifact",
+          details: { field: "contentId" },
+        },
+        requestId: "request-data-document",
+      },
+    })
+    expect(contentGetMock).toHaveBeenCalledWith(requester, "document-1")
+    expect(dataSelectMock).not.toHaveBeenCalled()
+    expect(assertContentAuthoringCapabilityMock).not.toHaveBeenCalled()
+  })
+})
+
 describe("signed-owner Atrium operations", () => {
   it("keeps archived manageable collections discoverable without widening content access", async () => {
     const district = {
