@@ -42,6 +42,7 @@ import {
   deleteRepositoryItemStorage,
   dispatchContentProcessingJob,
   getCanonicalRepositoryItemStatuses,
+  isRetryableLegacyItemFailure,
   isCanonicalUploadContentType,
   isRepositorySourceObjectKey,
   registerCanonicalText,
@@ -86,6 +87,8 @@ export interface RepositoryItem {
   processingStatus: string
   processingError: string | null
   canRetry?: boolean
+  embeddedChunks: number
+  totalChunks: number
   createdAt: Date
   updatedAt: Date
 }
@@ -286,6 +289,8 @@ function mapToRepositoryItem(itemRaw: RawRepositoryItem): RepositoryItem {
     processingStatus: itemRaw.processingStatus ?? 'pending',
     processingError: itemRaw.processingError,
     canRetry: false,
+    embeddedChunks: 0,
+    totalChunks: 0,
     createdAt: itemRaw.createdAt ?? new Date(),
     updatedAt: itemRaw.updatedAt ?? new Date()
   }
@@ -676,6 +681,8 @@ export async function addDocumentWithPresignedUrl(
       processingStatus: itemRaw.processingStatus ?? 'pending',
       processingError: itemRaw.processingError,
       canRetry: false,
+      embeddedChunks: 0,
+      totalChunks: 0,
       createdAt: itemRaw.createdAt ?? new Date(),
       updatedAt: itemRaw.updatedAt ?? new Date()
     }
@@ -883,6 +890,8 @@ export async function addUrlItem(
       processingStatus: itemRaw.processingStatus ?? 'pending',
       processingError: itemRaw.processingError,
       canRetry: false,
+      embeddedChunks: 0,
+      totalChunks: 0,
       createdAt: itemRaw.createdAt ?? new Date(),
       updatedAt: itemRaw.updatedAt ?? new Date()
     }
@@ -1067,6 +1076,8 @@ export async function addTextItem(
       processingStatus: itemRaw.processingStatus ?? 'pending',
       processingError: itemRaw.processingError,
       canRetry: false,
+      embeddedChunks: 0,
+      totalChunks: 0,
       createdAt: itemRaw.createdAt ?? new Date(),
       updatedAt: itemRaw.updatedAt ?? new Date()
     }
@@ -1145,6 +1156,8 @@ export async function removeRepositoryItem(
       processingStatus: itemRaw.processingStatus ?? 'pending',
       processingError: itemRaw.processingError,
       canRetry: false,
+      embeddedChunks: 0,
+      totalChunks: 0,
       createdAt: itemRaw.createdAt ?? new Date(),
       updatedAt: itemRaw.updatedAt ?? new Date()
     }
@@ -1260,6 +1273,12 @@ export async function listRepositoryItems(
     // Convert to action type
     const items: RepositoryItem[] = itemsRaw.map(item => {
       const canonical = canonicalStatuses.get(item.id)
+      const embeddingCoverage = canonical
+        ? {
+            embeddedChunks: canonical.embeddedChunks,
+            totalChunks: canonical.totalChunks,
+          }
+        : { embeddedChunks: 0, totalChunks: 0 }
       return {
         id: item.id,
         repositoryId: item.repositoryId,
@@ -1274,9 +1293,12 @@ export async function listRepositoryItems(
           : null,
         canRetry: canManageRepository
           ? canonical?.canRetry ??
-            (item.processingStatus === "failed" &&
-              item.processingError?.startsWith("Canonical content registration failed") === true)
+            isRetryableLegacyItemFailure(
+              item.processingStatus,
+              item.processingError,
+            )
           : false,
+        ...embeddingCoverage,
         createdAt: item.createdAt ?? new Date(),
         updatedAt: item.updatedAt ?? new Date()
       }
@@ -1316,8 +1338,15 @@ async function prepareRepositoryItemRetry(
     await assertCanonicalRetryNotQuarantined(item.currentVersionId)
   }
 
+  // Retry is an explicit, operator-initiated recovery action for an item that
+  // already failed, so it registers through the canonical pipeline
+  // unconditionally — exactly as the URL branch below always has. Routing it
+  // through the dual-write gate instead would make every failure this action
+  // advertises as retryable ("Content processing never started", "Embedding
+  // generation could not be queued", …) unrecoverable in the legacy
+  // configuration where those failures are actually produced.
   if (item.type === "text") {
-    const canonical = await registerCanonicalTextIfEnabled({
+    const canonical = await registerCanonicalText({
       itemId: item.id,
       repositoryId: item.repositoryId,
       userId,
@@ -1325,11 +1354,6 @@ async function prepareRepositoryItemRetry(
       content: item.source,
       traceId: requestId,
     })
-    if (!canonical) {
-      throw ErrorFactories.sysConfigurationError(
-        "Canonical content processing is disabled"
-      )
-    }
     return {
       itemVersionId: canonical.version.id,
       processingJobId: canonical.inspectJob.id,
@@ -1387,7 +1411,7 @@ async function prepareRepositoryItemRetry(
       "A positive content length and content type are required"
     )
   }
-  const canonical = await registerCanonicalUploadIfEnabled({
+  const canonical = await registerCanonicalUpload({
     itemId: item.id,
     userId,
     objectKey: copied.key,
@@ -1396,11 +1420,6 @@ async function prepareRepositoryItemRetry(
     byteSize: copiedMetadata.contentLength,
     traceId: requestId,
   })
-  if (!canonical) {
-    throw ErrorFactories.sysConfigurationError(
-      "Canonical content processing is disabled"
-    )
-  }
   return {
     itemVersionId: canonical.version.id,
     processingJobId: canonical.inspectJob.id,
@@ -1525,6 +1544,8 @@ export async function searchRepositoryItems(
       processingStatus: item.processingStatus ?? 'pending',
       processingError: item.processingError,
       canRetry: false,
+      embeddedChunks: 0,
+      totalChunks: 0,
       createdAt: item.createdAt ?? new Date(),
       updatedAt: item.updatedAt ?? new Date()
     }))

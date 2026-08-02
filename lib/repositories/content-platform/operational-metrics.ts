@@ -1,5 +1,10 @@
 import { sql } from "drizzle-orm";
 import { executeQuery, toPgRows } from "@/lib/db/drizzle-client";
+import {
+  getContentPlatformConfig,
+  isCanonicalRepositoryUploadActive,
+} from "./config";
+import { ORPHANED_ITEM_SWEEP_MINUTES } from "./orphaned-item-sweep";
 
 export interface ContentPlatformOperationalSnapshot {
   activeRepositoriesWithoutSearchableContent: number;
@@ -7,12 +12,15 @@ export interface ContentPlatformOperationalSnapshot {
   conversationRepositoryBindingRate: number;
   connectorFailures: number;
   connectorRevocations24h: number;
+  chunksMissingEmbeddings: number;
   estimatedCostUsd: number;
   failedJobs: number;
   migrationFailed: number;
   migrationMismatches: number;
   migrationUnrecoverable: number;
   migrationVerified: number;
+  orphanedItems: number;
+  itemsSearchableWithoutEmbeddings: number;
   pendingJobs: number;
   retrievalOverlapRatio: number;
   retrievalShadowObservations: number;
@@ -29,12 +37,15 @@ interface OperationalSnapshotRow {
   conversation_repository_binding_rate: number | string;
   connector_failures: number | string;
   connector_revocations_24h: number | string;
+  chunks_missing_embeddings: number | string;
   estimated_cost_usd: number | string;
   failed_jobs: number | string;
   migration_failed: number | string;
   migration_mismatches: number | string;
   migration_unrecoverable: number | string;
   migration_verified: number | string;
+  orphaned_items: number | string;
+  items_searchable_without_embeddings: number | string;
   pending_jobs: number | string;
   retrieval_overlap_ratio: number | string;
   retrieval_shadow_observations: number | string;
@@ -51,11 +62,47 @@ function finiteNumber(value: number | string | null | undefined): number {
 }
 
 /**
+ * Version-less items past the sweep age bound. Only meaningful once canonical
+ * registration is unconditional — before the repository cutover the legacy
+ * pipeline's live SQS/Textract work is version-less by design, so this
+ * predicate would report healthy backlog as orphaned. Mirrors the guard in
+ * `failOrphanedRepositoryItems` so the metric never claims orphans the sweep
+ * deliberately refuses to touch.
+ */
+const ORPHANED_ITEMS_COUNT_SQL = sql`(
+            SELECT COUNT(*)::integer
+            FROM repository_items item
+            INNER JOIN knowledge_repositories repository
+              ON repository.id = item.repository_id
+            WHERE item.lifecycle_status = 'active'
+              AND repository.lifecycle_status = 'active'
+              AND item.processing_status IN (
+                'pending',
+                'processing',
+                'processing_ocr'
+              )
+              AND item.current_version_id IS NULL
+              AND item.updated_at < NOW() - (
+                ${ORPHANED_ITEM_SWEEP_MINUTES} * INTERVAL '1 minute'
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM repository_item_versions version
+                INNER JOIN repository_processing_jobs job
+                  ON job.item_version_id = version.id
+                WHERE version.item_id = item.id
+              )
+          )`;
+
+/**
  * Load one bounded operational snapshot for the unified-content CloudWatch
  * dashboard. All time-series values use the same rolling 24-hour window.
  */
 // eslint-disable-next-line complexity, max-lines-per-function -- A single bounded database round trip produces a point-in-time, internally consistent snapshot.
 export async function getContentPlatformOperationalSnapshot(): Promise<ContentPlatformOperationalSnapshot> {
+  const canonicalUploadActive = isCanonicalRepositoryUploadActive(
+    await getContentPlatformConfig(),
+  );
   const result = await executeQuery(
     // eslint-disable-next-line max-lines-per-function -- The correlated aggregates intentionally share one snapshot and timestamp.
     (db) =>
@@ -66,6 +113,42 @@ export async function getContentPlatformOperationalSnapshot(): Promise<ContentPl
             FROM repository_items
             WHERE lifecycle_status = 'unavailable'
           ) AS unavailable_items,
+          ${canonicalUploadActive ? ORPHANED_ITEMS_COUNT_SQL : sql`0::integer`} AS orphaned_items,
+          (
+            SELECT COUNT(*)::integer
+            FROM repository_item_chunks chunk
+            INNER JOIN repository_items item
+              ON item.id = chunk.item_id
+            LEFT JOIN repository_index_generations generation
+              ON generation.id = chunk.index_generation_id
+            INNER JOIN knowledge_repositories repository
+              ON repository.id = item.repository_id
+            WHERE chunk.embedding IS NULL
+              AND (
+                chunk.index_generation_id IS NULL
+                OR generation.status IN ('building', 'active')
+              )
+              AND item.lifecycle_status = 'active'
+              AND repository.lifecycle_status = 'active'
+          ) AS chunks_missing_embeddings,
+          (
+            SELECT COUNT(DISTINCT item.id)::integer
+            FROM repository_items item
+            INNER JOIN repository_item_chunks chunk
+              ON chunk.item_id = item.id
+            LEFT JOIN repository_index_generations generation
+              ON generation.id = chunk.index_generation_id
+            INNER JOIN knowledge_repositories repository
+              ON repository.id = item.repository_id
+            WHERE item.processing_status IN ('completed', 'embedded')
+              AND chunk.embedding IS NULL
+              AND (
+                chunk.index_generation_id IS NULL
+                OR generation.status IN ('building', 'active')
+              )
+              AND item.lifecycle_status = 'active'
+              AND repository.lifecycle_status = 'active'
+          ) AS items_searchable_without_embeddings,
           (
             SELECT COUNT(*)::integer
             FROM repository_index_generations
@@ -245,12 +328,17 @@ export async function getContentPlatformOperationalSnapshot(): Promise<ContentPl
     ),
     connectorFailures: finiteNumber(row?.connector_failures),
     connectorRevocations24h: finiteNumber(row?.connector_revocations_24h),
+    chunksMissingEmbeddings: finiteNumber(row?.chunks_missing_embeddings),
     estimatedCostUsd: finiteNumber(row?.estimated_cost_usd),
     failedJobs: finiteNumber(row?.failed_jobs),
     migrationFailed: finiteNumber(row?.migration_failed),
     migrationMismatches: finiteNumber(row?.migration_mismatches),
     migrationUnrecoverable: finiteNumber(row?.migration_unrecoverable),
     migrationVerified: finiteNumber(row?.migration_verified),
+    orphanedItems: finiteNumber(row?.orphaned_items),
+    itemsSearchableWithoutEmbeddings: finiteNumber(
+      row?.items_searchable_without_embeddings,
+    ),
     pendingJobs: finiteNumber(row?.pending_jobs),
     retrievalOverlapRatio: finiteNumber(row?.retrieval_overlap_ratio),
     retrievalShadowObservations: finiteNumber(
@@ -272,12 +360,15 @@ export const CONTENT_PLATFORM_METRIC_UNITS = {
   ConversationRepositoryBindingRate24h: "None",
   ConnectorFailures: "Count",
   ConnectorRevocations24h: "Count",
+  ChunksMissingEmbeddings: "Count",
   EstimatedProcessingCostUsd24h: "None",
   FailedJobs24h: "Count",
   MigrationFailed: "Count",
   MigrationMismatches: "Count",
   MigrationUnrecoverable: "Count",
   MigrationVerified: "Count",
+  OrphanedItems: "Count",
+  ItemsSearchableWithoutEmbeddings: "Count",
   PendingJobs: "Count",
   RetrievalOverlapRatio24h: "None",
   RetrievalShadowObservations24h: "Count",
@@ -299,12 +390,16 @@ export function contentPlatformMetricValues(
       snapshot.conversationRepositoryBindingRate,
     ConnectorFailures: snapshot.connectorFailures,
     ConnectorRevocations24h: snapshot.connectorRevocations24h,
+    ChunksMissingEmbeddings: snapshot.chunksMissingEmbeddings,
     EstimatedProcessingCostUsd24h: snapshot.estimatedCostUsd,
     FailedJobs24h: snapshot.failedJobs,
     MigrationFailed: snapshot.migrationFailed,
     MigrationMismatches: snapshot.migrationMismatches,
     MigrationUnrecoverable: snapshot.migrationUnrecoverable,
     MigrationVerified: snapshot.migrationVerified,
+    OrphanedItems: snapshot.orphanedItems,
+    ItemsSearchableWithoutEmbeddings:
+      snapshot.itemsSearchableWithoutEmbeddings,
     PendingJobs: snapshot.pendingJobs,
     RetrievalOverlapRatio24h: snapshot.retrievalOverlapRatio,
     RetrievalShadowObservations24h: snapshot.retrievalShadowObservations,

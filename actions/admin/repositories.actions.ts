@@ -35,6 +35,7 @@ import {
   finalizeRepositoryItemDeletion,
 } from "@/lib/repositories/content-platform/deletion-service";
 import { getRepositoryReadiness } from "@/lib/repositories/readiness-service";
+import { isRetryableLegacyItemFailure } from "@/lib/repositories/content-platform/status-service";
 
 export interface RepositoryWithOwner extends Repository {
   ownerEmail: string | null;
@@ -374,6 +375,12 @@ export async function adminGetRepositoryItems(
       metadata: item.metadata ?? {},
       processingStatus: item.processingStatus ?? "pending",
       processingError: item.processingError,
+      canRetry: isRetryableLegacyItemFailure(
+        item.processingStatus,
+        item.processingError,
+      ),
+      embeddedChunks: 0,
+      totalChunks: 0,
       createdAt: item.createdAt ?? new Date(),
       updatedAt: item.updatedAt ?? new Date(),
     }));

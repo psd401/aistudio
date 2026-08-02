@@ -1,7 +1,11 @@
 /** @jest-environment node */
 
 import { describe, expect, it } from "@jest/globals";
-import { resolveCanonicalItemStatus } from "@/lib/repositories/content-platform/status-service";
+import {
+  isRetryableLegacyItemFailure,
+  resolveCanonicalItemStatus,
+  RETRYABLE_LEGACY_FAILURE_PREFIXES,
+} from "@/lib/repositories/content-platform/status-service";
 
 function statusRow(
   overrides: Partial<Parameters<typeof resolveCanonicalItemStatus>[0]> = {}
@@ -20,6 +24,8 @@ function statusRow(
     buildingGeneration: false,
     failedGeneration: false,
     generationError: null,
+    embeddedChunks: 4,
+    totalChunks: 9,
     ...overrides,
   };
 }
@@ -28,13 +34,21 @@ describe("canonical repository item status", () => {
   it("treats an active canonical generation as authoritative", () => {
     expect(
       resolveCanonicalItemStatus(
-        statusRow({ active: true, jobStatus: "failed", jobError: "stale error" })
+        statusRow({
+          active: true,
+          jobStatus: "failed",
+          jobError: "stale error",
+          embeddedChunks: 9,
+          totalChunks: 9,
+        })
       )
     ).toEqual({
       itemId: 7,
       processingStatus: "embedded",
       processingError: null,
       canRetry: false,
+      embeddedChunks: 9,
+      totalChunks: 9,
     });
   });
 
@@ -67,6 +81,8 @@ describe("canonical repository item status", () => {
       processingStatus: "failed",
       processingError: "The document could not be parsed",
       canRetry: true,
+      embeddedChunks: 4,
+      totalChunks: 9,
     });
   });
 
@@ -135,6 +151,8 @@ describe("canonical repository item status", () => {
         processingStatus: "retrying",
         processingError: null,
         canRetry: false,
+        embeddedChunks: 4,
+        totalChunks: 9,
       });
     }
   });
@@ -155,6 +173,9 @@ describe("canonical repository item status", () => {
     ).toBe("pending");
   });
 
+});
+
+describe("canonical repository item embedding coverage", () => {
   it("exposes a terminal failed embedding generation", () => {
     expect(
       resolveCanonicalItemStatus(
@@ -172,5 +193,60 @@ describe("canonical repository item status", () => {
       processingError: "Embedding provider rejected the model",
       canRetry: true,
     });
+  });
+
+  it("carries counts through every status branch", () => {
+    const branches: Array<
+      Partial<Parameters<typeof resolveCanonicalItemStatus>[0]>
+    > = [
+      { active: true },
+      { postDeployRecovery: "embedding-concurrency-v1" },
+      { versionStatus: "failed", jobStatus: "failed" },
+      { versionStatus: "completed" },
+      { jobStatus: "pending", jobAttempt: 1 },
+      {},
+    ];
+
+    for (const overrides of branches) {
+      expect(resolveCanonicalItemStatus(statusRow(overrides))).toMatchObject({
+        embeddedChunks: 4,
+        totalChunks: 9,
+      });
+    }
+  });
+});
+
+describe("legacy repository item retryability", () => {
+  it.each(RETRYABLE_LEGACY_FAILURE_PREFIXES)(
+    "allows managers to retry a failed item with the %s prefix",
+    (prefix) => {
+      expect(
+        isRetryableLegacyItemFailure("failed", `${prefix}. Retry this item.`),
+      ).toBe(true);
+    },
+  );
+
+  it("rejects arbitrary failure messages", () => {
+    expect(
+      isRetryableLegacyItemFailure("failed", "An unrelated provider failed"),
+    ).toBe(false);
+  });
+
+  it("never retries completed items", () => {
+    expect(
+      isRetryableLegacyItemFailure(
+        "completed",
+        `${RETRYABLE_LEGACY_FAILURE_PREFIXES[0]}. Retry this item.`,
+      ),
+    ).toBe(false);
+  });
+
+  it("allows known embedding failures to retry through the canonical pipeline", () => {
+    expect(
+      isRetryableLegacyItemFailure(
+        "embedding_failed",
+        `${RETRYABLE_LEGACY_FAILURE_PREFIXES[0]}. Retry this item.`,
+      ),
+    ).toBe(true);
   });
 });

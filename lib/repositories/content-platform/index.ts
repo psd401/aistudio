@@ -26,3 +26,4 @@ export * from "./lifecycle-service";
 export * from "./upload-lifecycle-service";
 export * from "./deletion-service";
 export * from "./upload-state";
+export * from "./orphaned-item-sweep";

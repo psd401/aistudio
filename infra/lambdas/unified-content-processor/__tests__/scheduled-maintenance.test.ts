@@ -103,4 +103,14 @@ describe("scheduled unified-content maintenance", () => {
     ]);
     expect(errors).toEqual(["superseded-generation-retention"]);
   });
+
+  test("registers the orphaned-item sweep", () => {
+    const runtimeSource = fs.readFileSync(
+      path.join(__dirname, "../index.ts"),
+      "utf8",
+    );
+
+    expect(runtimeSource).toContain('name: "orphaned-item-sweep"');
+    expect(runtimeSource).toContain("await failOrphanedRepositoryItems()");
+  });
 });

@@ -1431,6 +1431,8 @@ try {
     processingStatus: "failed",
     processingError: "simulated terminal processing failure",
     canRetry: true,
+    embeddedChunks: 0,
+    totalChunks: 0,
   });
 
   // Migration 123 must not replay an unrelated terminal user failure merely
@@ -1566,6 +1568,8 @@ try {
     processingStatus: "retrying",
     processingError: null,
     canRetry: false,
+    embeddedChunks: 0,
+    totalChunks: 0,
   });
   await assert.rejects(
     retryCanonicalRepositoryItem(

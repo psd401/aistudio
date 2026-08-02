@@ -72,6 +72,8 @@ interface RepositoryItemListProps {
   onAddItem?: () => void
 }
 
+const chunkCountFormatter = new Intl.NumberFormat("en-US")
+
 function ItemType({ type }: { type: string }) {
   const icons: Record<string, ReactNode> = {
     document: <FileText className="h-4 w-4" />,
@@ -288,7 +290,15 @@ function RepositoryItemsTable({
               </div>
             </TableCell>
             <TableCell>
-              <ItemStatusBadge status={item.processingStatus} />
+              <div className="flex items-center gap-2">
+                <ItemStatusBadge status={item.processingStatus} />
+                {item.processingStatus === "processing_embeddings" && (
+                  <span className="text-xs text-muted-foreground whitespace-nowrap">
+                    Embedding {chunkCountFormatter.format(item.embeddedChunks)} /{" "}
+                    {chunkCountFormatter.format(item.totalChunks)}
+                  </span>
+                )}
+              </div>
             </TableCell>
             <TableCell>
               {item.createdAt

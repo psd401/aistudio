@@ -163,6 +163,7 @@ import {
 } from "../../../lib/repositories/embedding-configuration";
 import { enforceNexusRepositoryLifecycle } from "../../../lib/repositories/content-platform/lifecycle-service";
 import { cleanupExpiredRepositoryUploads } from "../../../lib/repositories/content-platform/upload-lifecycle-service";
+import { failOrphanedRepositoryItems } from "../../../lib/repositories/content-platform/orphaned-item-sweep";
 import { cleanupExpiredContentIdempotencyRecords } from "../../../lib/content/idempotency-cleanup";
 import { processNextRepositoryMigrationBatch } from "../../../lib/repositories/content-platform/migration-runner";
 import { createS3RepositoryMigrationStorage } from "../../../lib/repositories/content-platform/migration-s3-storage";
@@ -2035,6 +2036,13 @@ async function runSupersededGenerationRetention(): Promise<void> {
   }
 }
 
+async function runOrphanedItemSweep(): Promise<void> {
+  const result = await failOrphanedRepositoryItems();
+  if (result.failed > 0) {
+    log.info("Failed orphaned repository items", { failed: result.failed });
+  }
+}
+
 export async function handler(
   event: SQSEvent | EventBridgeEvent<string, unknown>,
   context: Context
@@ -2074,6 +2082,7 @@ export async function handler(
             }
           },
         },
+        { name: "orphaned-item-sweep", run: runOrphanedItemSweep },
         {
           name: "nexus-ephemeral-lifecycle",
           run: async () => {
@@ -2126,10 +2135,7 @@ export async function handler(
             }
           },
         },
-        {
-          name: "content-platform-operational-metrics",
-          run: publishContentPlatformOperationalMetrics,
-        },
+        { name: "content-platform-operational-metrics", run: publishContentPlatformOperationalMetrics },
         {
           name: "processing-dlq-reconciliation",
           run: drainRecoveredProcessingDlq,

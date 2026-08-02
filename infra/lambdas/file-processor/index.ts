@@ -531,9 +531,20 @@ async function processFile(job: ProcessingJob) {
         // Update status to indicate embeddings are being processed
         await updateItemStatus(job.itemId, 'processing_embeddings');
       } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error';
         console.error('Failed to queue embeddings:', error);
-        // Don't fail the whole job if embedding queueing fails
-        await updateItemStatus(job.itemId, 'completed');
+        await updateItemStatus(
+          job.itemId,
+          'embedding_failed',
+          'Embedding generation could not be queued. Retry this item.'
+        );
+        await updateJobStatus(
+          job.jobId,
+          'failed',
+          { fileName: job.fileName },
+          message
+        );
+        return;
       }
     } else {
       // Update status to completed if no embedding queue configured
