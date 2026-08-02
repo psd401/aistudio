@@ -176,6 +176,7 @@ describe("recordRepositoryRetrievalShadowSampleAction", () => {
       },
     });
     expect(mockExecuteSearch).toHaveBeenCalledTimes(2);
+    expect(mockGetContentPlatformConfig).toHaveBeenCalledWith({ fresh: true });
     expect(mockAssertRepositoryReadAccess).toHaveBeenCalledWith(
       41,
       "admin-sub",

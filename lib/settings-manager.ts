@@ -1,15 +1,41 @@
 import { getSettingValue as getSettingValueDrizzle } from "@/lib/db/drizzle"
 import logger from "@/lib/logger"
 
+interface SettingsCacheEntry {
+  value: string | null
+  timestamp: number
+}
+
+interface SettingsCacheState {
+  values: Map<string, SettingsCacheEntry>
+  pendingRefreshes: Map<string, symbol>
+  revision: number
+}
+
+const globalSettingsCache = globalThis as typeof globalThis & {
+  __aiStudioSettingsCache?: SettingsCacheState
+}
+const sharedSettingsCache =
+  globalSettingsCache.__aiStudioSettingsCache ??
+  (globalSettingsCache.__aiStudioSettingsCache = {
+    values: new Map<string, SettingsCacheEntry>(),
+    pendingRefreshes: new Map<string, symbol>(),
+    revision: 0,
+  })
+
 // Cache for settings to avoid repeated database queries
 // Uses stale-while-revalidate: serves stale value immediately while refreshing in background
-const settingsCache = new Map<string, { value: string | null; timestamp: number }>()
+// The state lives on globalThis so independently bundled Next.js route and
+// server-action modules invalidate the same in-process cache.
+const settingsCache = sharedSettingsCache.values
 const CACHE_TTL = 5 * 60 * 1000 // 5 minutes
 // On DB error, retry after this shorter window rather than waiting the full TTL
 const RETRY_AFTER_ERROR_MS = 30 * 1000 // 30 seconds
 
-// Track in-flight background refreshes to avoid duplicate fetches
-const pendingRefreshes = new Set<string>()
+// Track in-flight background refreshes to avoid duplicate fetches. Tokens let
+// invalidation supersede an older request without that request later deleting
+// or overwriting newer cache state.
+const pendingRefreshes = sharedSettingsCache.pendingRefreshes
 
 // Mask credential/secret key names in log output to avoid leaking config surface
 const SENSITIVE_KEY_PATTERN = /KEY|SECRET|PASSWORD|TOKEN|CREDENTIAL/i
@@ -23,10 +49,18 @@ export function maskKey(key: string): string {
 // Do not call backgroundRefresh() for Lambda+Bedrock keys from other code paths.
 function backgroundRefresh(key: string): void {
   if (pendingRefreshes.has(key)) return
-  pendingRefreshes.add(key)
+  const refreshToken = Symbol(key)
+  const refreshRevision = sharedSettingsCache.revision
+  pendingRefreshes.set(key, refreshToken)
 
   getSettingValueDrizzle(key)
     .then((dbValue) => {
+      if (
+        sharedSettingsCache.revision !== refreshRevision ||
+        pendingRefreshes.get(key) !== refreshToken
+      ) {
+        return
+      }
       if (dbValue !== null) {
         // Fresh value from DB — update cache
         settingsCache.set(key, { value: dbValue, timestamp: Date.now() })
@@ -48,6 +82,12 @@ function backgroundRefresh(key: string): void {
     })
     .catch((error) => {
       logger.error(`[SettingsManager] Background refresh failed for ${maskKey(key)}:`, error)
+      if (
+        sharedSettingsCache.revision !== refreshRevision ||
+        pendingRefreshes.get(key) !== refreshToken
+      ) {
+        return
+      }
       // On error, retry after a short window (not full TTL) so we recover quickly when DB is back
       const stale = settingsCache.get(key)
       if (stale) {
@@ -58,7 +98,9 @@ function backgroundRefresh(key: string): void {
       }
     })
     .finally(() => {
-      pendingRefreshes.delete(key)
+      if (pendingRefreshes.get(key) === refreshToken) {
+        pendingRefreshes.delete(key)
+      }
     })
 }
 
@@ -134,6 +176,7 @@ export async function getSettings(keys: string[]): Promise<Record<string, string
 // Also cancels any pending background refresh for the key to prevent a stale
 // in-flight promise from writing old data back into the cache after invalidation.
 export async function revalidateSettingsCache(key?: string): Promise<void> {
+  sharedSettingsCache.revision += 1
   if (key) {
     settingsCache.delete(key)
     pendingRefreshes.delete(key)

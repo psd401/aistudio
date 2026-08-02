@@ -583,7 +583,10 @@ export async function recordRepositoryRetrievalShadowSampleAction(input: {
       );
     }
 
-    const contentConfig = await getContentPlatformConfig();
+    // Rollout toggles are operational controls. Read them directly from the
+    // database so a just-enabled shadow cannot be hidden by another bundle or
+    // task's settings cache.
+    const contentConfig = await getContentPlatformConfig({ fresh: true });
     const outcomes: RepositoryRetrievalShadowSampleOutcome[] = [];
     for (const query of queries) {
       const search = await executeSearch({

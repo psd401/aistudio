@@ -36,6 +36,10 @@ import type {
   RepositoryMigrationDashboard,
   RepositoryMigrationException,
 } from "@/lib/repositories/content-platform/migration-control-service";
+import {
+  MigrationExceptionReasonDialog,
+  type MigrationExceptionReasonRequest,
+} from "./migration-exception-reason-dialog";
 
 interface MigrationPanelState {
   dashboard: RepositoryMigrationDashboard;
@@ -252,8 +256,8 @@ function MigrationExceptions({
   exceptions: RepositoryMigrationException[];
   disabled: boolean;
   runAction: MigrationActionRunner;
-  approveMismatch: (item: RepositoryMigrationException) => Promise<void>;
-  excludeException: (item: RepositoryMigrationException) => Promise<void>;
+  approveMismatch: (item: RepositoryMigrationException) => void;
+  excludeException: (item: RepositoryMigrationException) => void;
 }) {
   if (exceptions.length === 0) return null;
   return (
@@ -314,8 +318,8 @@ function ExceptionRecoveryActions({
   item: RepositoryMigrationException;
   disabled: boolean;
   runAction: MigrationActionRunner;
-  approveMismatch: (item: RepositoryMigrationException) => Promise<void>;
-  excludeException: (item: RepositoryMigrationException) => Promise<void>;
+  approveMismatch: (item: RepositoryMigrationException) => void;
+  excludeException: (item: RepositoryMigrationException) => void;
 }) {
   if (item.status !== "mismatch") {
     return (
@@ -335,7 +339,7 @@ function ExceptionRecoveryActions({
         <Button
           size="sm"
           variant="destructive"
-          onClick={() => void excludeException(item)}
+          onClick={() => excludeException(item)}
           disabled={disabled}
         >
           Exclude
@@ -360,13 +364,60 @@ function ExceptionRecoveryActions({
       <Button
         size="sm"
         variant="secondary"
-        onClick={() => void approveMismatch(item)}
+        onClick={() => approveMismatch(item)}
         disabled={disabled}
       >
         Approve
       </Button>
     </>
   );
+}
+
+function useMigrationExceptionReason(runAction: MigrationActionRunner) {
+  const [request, setRequest] =
+    useState<MigrationExceptionReasonRequest | null>(null);
+  const [reason, setReason] = useState("");
+  const close = useCallback(() => {
+    setRequest(null);
+    setReason("");
+  }, []);
+  const approveMismatch = useCallback((item: RepositoryMigrationException) => {
+    setReason("");
+    setRequest({ kind: "approve", item });
+  }, []);
+  const excludeException = useCallback((item: RepositoryMigrationException) => {
+    setReason("");
+    setRequest({ kind: "exclude", item });
+  }, []);
+  const submit = useCallback(async () => {
+    if (!request || reason.trim().length < 10) return;
+    const auditReason = reason.trim();
+    close();
+    if (request.kind === "exclude") {
+      await runAction(`exclude:${request.item.id}`, () =>
+        excludeRepositoryMigrationExceptionAction({
+          migrationItemId: request.item.id,
+          reason: auditReason,
+        }),
+      );
+      return;
+    }
+    await runAction(`approve:${request.item.id}`, () =>
+      approveRepositoryMigrationMismatchAction({
+        migrationItemId: request.item.id,
+        reason: auditReason,
+      }),
+    );
+  }, [close, reason, request, runAction]);
+  return {
+    approveMismatch,
+    close,
+    excludeException,
+    reason,
+    request,
+    setReason,
+    submit,
+  };
 }
 
 export function MigrationControlPanel() {
@@ -426,37 +477,7 @@ export function MigrationControlPanel() {
     [load, toast],
   );
 
-  const approveMismatch = useCallback(
-    async (item: RepositoryMigrationException) => {
-      const reason = window.prompt(
-        "Document why this extraction difference is acceptable (10-1000 characters):",
-      );
-      if (!reason) return;
-      await runAction(`approve:${item.id}`, () =>
-        approveRepositoryMigrationMismatchAction({
-          migrationItemId: item.id,
-          reason,
-        }),
-      );
-    },
-    [runAction],
-  );
-
-  const excludeException = useCallback(
-    async (item: RepositoryMigrationException) => {
-      const reason = window.prompt(
-        "Document why this failed or unrecoverable legacy source is intentionally excluded from cutover (10-1000 characters):",
-      );
-      if (!reason) return;
-      await runAction(`exclude:${item.id}`, () =>
-        excludeRepositoryMigrationExceptionAction({
-          migrationItemId: item.id,
-          reason,
-        }),
-      );
-    },
-    [runAction],
-  );
+  const exceptionReason = useMigrationExceptionReason(runAction);
 
   if (loading && !state) {
     return (
@@ -513,10 +534,18 @@ export function MigrationControlPanel() {
           exceptions={exceptions}
           disabled={controlsDisabled}
           runAction={runAction}
-          approveMismatch={approveMismatch}
-          excludeException={excludeException}
+          approveMismatch={exceptionReason.approveMismatch}
+          excludeException={exceptionReason.excludeException}
         />
       </CardContent>
+      <MigrationExceptionReasonDialog
+        busy={pendingAction !== null}
+        onClose={exceptionReason.close}
+        onReasonChange={exceptionReason.setReason}
+        onSubmit={() => void exceptionReason.submit()}
+        reason={exceptionReason.reason}
+        request={exceptionReason.request}
+      />
     </Card>
   );
 }

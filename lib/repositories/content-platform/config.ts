@@ -1,4 +1,5 @@
 import { getSettings } from "@/lib/settings-manager";
+import { getSettingValue } from "@/lib/db/drizzle";
 
 export const CONTENT_PLATFORM_SETTING_KEYS = {
   enabled: "CONTENT_PLATFORM_ENABLED",
@@ -310,8 +311,16 @@ export function parseContentPlatformConfig(
   };
 }
 
-export async function getContentPlatformConfig(): Promise<ContentPlatformConfig> {
+export async function getContentPlatformConfig(options?: {
+  fresh?: boolean;
+}): Promise<ContentPlatformConfig> {
   const keys = Object.values(CONTENT_PLATFORM_SETTING_KEYS);
+  if (options?.fresh) {
+    const entries = await Promise.all(
+      keys.map(async (key) => [key, await getSettingValue(key)] as const),
+    );
+    return parseContentPlatformConfig(Object.fromEntries(entries));
+  }
   return parseContentPlatformConfig(await getSettings(keys));
 }
 

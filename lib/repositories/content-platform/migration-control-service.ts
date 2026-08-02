@@ -785,6 +785,9 @@ export async function runRepositoryMigrationRollbackDrill(
         sourceKinds: ["repository_item"],
         snapshot: {
           counts: { repository_item: 1 },
+          rollbackDrill: true,
+          migrationItemId: sample.migration_id,
+          canonicalItemId: sample.item_id,
         },
         metrics: { rolledBack: 1 },
         startedAt: now,
@@ -792,24 +795,7 @@ export async function runRepositoryMigrationRollbackDrill(
       })
       .returning();
     if (!run) throw new Error("Failed to record rollback drill");
-    await tx.execute(sql`
-      UPDATE repository_migration_runs
-      SET snapshot = snapshot || jsonb_build_object(
-        'rollbackDrill', true,
-        'migrationItemId', ${sample.migration_id},
-        'canonicalItemId', ${sample.item_id}
-      )
-      WHERE id = ${run.id}::uuid
-    `);
-    return {
-      ...run,
-      snapshot: {
-        ...run.snapshot,
-        rollbackDrill: true,
-        migrationItemId: sample.migration_id,
-        canonicalItemId: sample.item_id,
-      } as RepositoryMigrationSnapshot,
-    };
+    return run;
   }, "contentMigration.rollbackDrill");
 }
 
