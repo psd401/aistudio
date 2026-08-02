@@ -87,9 +87,8 @@ describe("superseded repository generation retention", () => {
     expect(timestampBackfill!.sql).toContain(
       "FOR UPDATE OF generation SKIP LOCKED",
     );
-    expect(timestampBackfill!.sql).toContain(
-      "SET superseded_at = clock_timestamp()",
-    );
+    expect(timestampBackfill!.sql).toContain("ORDER BY generation.created_at, generation.id");
+    expect(timestampBackfill!.sql).toContain("SET superseded_at = statement_timestamp()");
     expect(timestampBackfill!.params).toContain(GENERATION_GC_TIMESTAMP_BATCH);
     expect(cursorUpdate!.sql).toContain("UPDATE settings");
     expect(cursorUpdate!.params).toContain("1300");

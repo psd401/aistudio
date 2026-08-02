@@ -148,19 +148,21 @@ async function backfillMissingSupersessionTimes(
   tx: DbTransaction,
   generationBatchSize: number,
 ): Promise<number> {
+  // Oldest-first batches receive one timestamp per statement. Later batches
+  // therefore remain newer, while created_at breaks ties within each batch.
   const result = await tx.execute(sql`
     WITH selected_generations AS MATERIALIZED (
       SELECT generation.id
       FROM repository_index_generations generation
       WHERE generation.status = 'superseded'
         AND generation.superseded_at IS NULL
-      ORDER BY generation.id
+      ORDER BY generation.created_at, generation.id
       FOR UPDATE OF generation SKIP LOCKED
       LIMIT ${generationBatchSize}
     ),
     timestamped_generations AS (
       UPDATE repository_index_generations generation
-      SET superseded_at = clock_timestamp()
+      SET superseded_at = statement_timestamp()
       FROM selected_generations selected
       WHERE generation.id = selected.id
         AND generation.status = 'superseded'

@@ -4,7 +4,7 @@
  */
 
 import assert from "node:assert/strict";
-import { eq, inArray, sql } from "drizzle-orm";
+import { asc, eq, inArray, sql } from "drizzle-orm";
 import {
   closeDatabase,
   executeQuery,
@@ -250,15 +250,79 @@ try {
         .insert(repositoryIndexGenerations)
         .values(
           [1, 2, 3, 4, 5].map((sequence) => ({
+            id: `00000000-0000-4000-8000-${(6 - sequence)
+              .toString()
+              .padStart(12, "0")}`,
             repositoryId: repository.id,
             status: "superseded" as const,
             processorVersion: `generation-retention-backlog-${sequence}`,
+            createdAt: new Date(now.getTime() - (10 - sequence) * HOUR_MS),
           })),
         )
         .returning({ id: repositoryIndexGenerations.id }),
     "smoke.generationRetention.createBacklogGenerations",
   );
   assert.equal(backlogGenerations.length, 5);
+
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryIndexGenerations)
+        .set({ supersededAt: null })
+        .where(
+          inArray(
+            repositoryIndexGenerations.id,
+            backlogGenerations.map((generation) => generation.id),
+          ),
+        ),
+    "smoke.generationRetention.simulateLegacyBackfill",
+  );
+
+  const backfillOptions = {
+    now,
+    retentionHours: 365 * 24,
+    generationBatchSize: 2,
+    perRepositoryGenerationBatchSize: 2,
+  };
+  for (const expectedTimestampCount of [2, 2, 1]) {
+    assert.deepEqual(
+      await collectSupersededRepositoryGenerations(backfillOptions),
+      {
+        generationsTimestamped: expectedTimestampCount,
+        chunksDeleted: 0,
+        generationsDeleted: 0,
+      },
+    );
+  }
+
+  const backfilledGenerations = await executeQuery(
+    (db) =>
+      db
+        .select({
+          createdAt: repositoryIndexGenerations.createdAt,
+          supersededAt: repositoryIndexGenerations.supersededAt,
+        })
+        .from(repositoryIndexGenerations)
+        .where(
+          inArray(
+            repositoryIndexGenerations.id,
+            backlogGenerations.map((generation) => generation.id),
+          ),
+        )
+        .orderBy(asc(repositoryIndexGenerations.createdAt)),
+    "smoke.generationRetention.readLegacyBackfillOrder",
+  );
+  for (const [index, generation] of backfilledGenerations.entries()) {
+    assert.ok(generation.supersededAt);
+    if (index > 0) {
+      assert.ok(backfilledGenerations[index - 1]!.supersededAt);
+      assert.ok(
+        backfilledGenerations[index - 1]!.supersededAt!.getTime() <=
+          generation.supersededAt.getTime(),
+        "legacy backfill timestamps must preserve created_at order across batches",
+      );
+    }
+  }
 
   for (const [index, generation] of backlogGenerations.entries()) {
     await executeQuery(

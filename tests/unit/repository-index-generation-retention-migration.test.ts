@@ -44,6 +44,9 @@ describe("migration 173 repository generation retention", () => {
       /CREATE INDEX IF NOT EXISTS\s+idx_repository_index_generations_superseded_backfill/i,
     );
     expect(migration).toContain(
+      "ON repository_index_generations (created_at, id)",
+    );
+    expect(migration).toContain(
       "ON repository_index_generations (repository_id, superseded_at DESC, created_at DESC, id DESC)",
     );
     expect(migration).toMatch(

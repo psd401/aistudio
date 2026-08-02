@@ -25,7 +25,7 @@ EXECUTE FUNCTION set_repository_index_generation_superseded_at();
 -- collector gives them a conservative new rollback window in bounded batches;
 -- migration 173 never rewrites the complete generation table in one statement.
 CREATE INDEX IF NOT EXISTS idx_repository_index_generations_superseded_backfill
-  ON repository_index_generations (id)
+  ON repository_index_generations (created_at, id)
   WHERE status = 'superseded' AND superseded_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_repository_index_generations_superseded_retention
