@@ -5,6 +5,7 @@
 
 import {
   boolean,
+  index,
   integer,
   jsonb,
   pgTable,
@@ -15,6 +16,7 @@ import {
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { users } from "./users";
 
 export const knowledgeRepositories = pgTable(
@@ -48,5 +50,8 @@ export const knowledgeRepositories = pgTable(
       table.id,
       table.ownerId
     ),
+    index("idx_knowledge_repositories_active_index_generation")
+      .on(table.activeIndexGenerationId)
+      .where(sql`${table.activeIndexGenerationId} IS NOT NULL`),
   ]
 );

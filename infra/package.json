@@ -10,7 +10,7 @@
     "build:all": "bun run build && bun run build:lambdas",
     "watch": "tsc -w",
     "test": "jest",
-    "test:lambdas": "cd lambdas/agent-skill-builder && bun install && bun run test",
+    "test:lambdas": "bun test lambdas/embedding-generator/__tests__ && cd lambdas/agent-skill-builder && bun install && bun run test",
     "typecheck:unified-content": "tsc --project lambdas/unified-content-processor/tsconfig.json",
     "cdk": "cdk"
   },

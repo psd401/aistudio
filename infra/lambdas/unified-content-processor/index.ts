@@ -167,6 +167,7 @@ import { cleanupExpiredContentIdempotencyRecords } from "../../../lib/content/id
 import { processNextRepositoryMigrationBatch } from "../../../lib/repositories/content-platform/migration-runner";
 import { createS3RepositoryMigrationStorage } from "../../../lib/repositories/content-platform/migration-s3-storage";
 import { cleanupRepositoryRetrievalShadow } from "../../../lib/repositories/content-platform/retrieval-shadow";
+import { collectSupersededRepositoryGenerations } from "../../../lib/repositories/content-platform/generation-retention";
 import {
   CONTENT_PLATFORM_METRIC_UNITS,
   contentPlatformMetricValues,
@@ -2019,6 +2020,21 @@ function isSqsEvent(event: SQSEvent | EventBridgeEvent<string, unknown>): event 
   return "Records" in event;
 }
 
+async function runSupersededGenerationRetention(): Promise<void> {
+  const result = await collectSupersededRepositoryGenerations();
+  if (
+    result.generationsTimestamped > 0 ||
+    result.chunksDeleted > 0 ||
+    result.generationsDeleted > 0
+  ) {
+    log.info("Collected superseded repository index generations", {
+      generationsTimestamped: result.generationsTimestamped,
+      chunksDeleted: result.chunksDeleted,
+      generationsDeleted: result.generationsDeleted,
+    });
+  }
+}
+
 export async function handler(
   event: SQSEvent | EventBridgeEvent<string, unknown>,
   context: Context
@@ -2127,6 +2143,7 @@ export async function handler(
           name: "embedding-dlq-reconciliation",
           run: drainRecoveredEmbeddingDlq,
         },
+        { name: "superseded-generation-retention", run: runSupersededGenerationRetention },
       ],
       (taskName, error) => {
         log.error("Unified content maintenance stage failed", {

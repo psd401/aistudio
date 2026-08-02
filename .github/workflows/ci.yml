@@ -315,6 +315,11 @@ jobs:
       env:
         CI: true
 
+    - name: Run repository generation-retention smoke
+      run: bun run test:smoke:generation-retention
+      env:
+        CI: true
+
     - name: Run OAuth client trust audit smoke
       run: bun run test:smoke:oauth-client-trust-audit
       env:

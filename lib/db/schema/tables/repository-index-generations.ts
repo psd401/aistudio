@@ -48,6 +48,7 @@ export const repositoryIndexGenerations = pgTable(
       .notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     publishedAt: timestamp("published_at", { withTimezone: true }),
+    supersededAt: timestamp("superseded_at", { withTimezone: true }),
   },
   (t) => [
     index("idx_repository_index_generations_history").on(
@@ -62,6 +63,17 @@ export const repositoryIndexGenerations = pgTable(
         t.id
       )
       .where(sql`${t.status} IN ('building', 'active', 'failed')`),
+    index("idx_repository_index_generations_superseded_retention")
+      .on(
+        t.repositoryId,
+        t.supersededAt.desc(),
+        t.createdAt.desc(),
+        t.id.desc()
+      )
+      .where(sql`${t.status} = 'superseded'`),
+    index("idx_repository_index_generations_superseded_backfill")
+      .on(t.createdAt, t.id)
+      .where(sql`${t.status} = 'superseded' AND ${t.supersededAt} IS NULL`),
   ]
 );
 
