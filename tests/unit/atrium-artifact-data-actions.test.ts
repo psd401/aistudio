@@ -374,6 +374,17 @@ describe("submitArtifactRecord PostgreSQL JSON compatibility", () => {
     expect(mockContentGet).not.toHaveBeenCalled();
     expect(mockInsert).not.toHaveBeenCalled();
   });
+
+  it("accepts valid surrogate pairs in values and keys", async () => {
+    const result = await submitArtifactRecord({
+      ...validSubmitInput,
+      payload: { ["emoji-\uD83D\uDE00"]: "\uD83D\uDE00" },
+    });
+
+    expect(result.isSuccess).toBe(true);
+    expect(mockContentGet).toHaveBeenCalled();
+    expect(mockInsert).toHaveBeenCalled();
+  });
 });
 
 describe("listArtifactRecords", () => {
