@@ -41,7 +41,7 @@ FOR EACH ROW
 EXECUTE FUNCTION set_repository_index_generation_superseded_at();
 
 CREATE INDEX IF NOT EXISTS idx_repository_index_generations_superseded_retention
-  ON repository_index_generations (repository_id, superseded_at DESC, id DESC)
+  ON repository_index_generations (repository_id, superseded_at DESC, created_at DESC, id DESC)
   WHERE status = 'superseded';
 
 CREATE INDEX IF NOT EXISTS idx_knowledge_repositories_active_index_generation

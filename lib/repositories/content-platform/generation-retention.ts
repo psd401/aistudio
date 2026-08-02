@@ -86,39 +86,49 @@ function eligibleGenerationCtes(params: {
       SELECT repository.id,
              repository.active_index_generation_id,
              keep_floor.superseded_at AS keep_floor_superseded_at,
+             keep_floor.created_at AS keep_floor_created_at,
              keep_floor.id AS keep_floor_id
       FROM repository_probe_ids probe
       INNER JOIN knowledge_repositories repository
         ON repository.id = probe.id
       CROSS JOIN LATERAL (
         SELECT kept_generation.superseded_at,
+               kept_generation.created_at,
                kept_generation.id
         FROM repository_index_generations kept_generation
         WHERE kept_generation.repository_id = repository.id
           AND kept_generation.status = 'superseded'
-        ORDER BY kept_generation.superseded_at DESC, kept_generation.id DESC
+        ORDER BY kept_generation.superseded_at DESC,
+                 kept_generation.created_at DESC,
+                 kept_generation.id DESC
         OFFSET ${keepFloorOffset}
         LIMIT 1
       ) keep_floor
       CROSS JOIN LATERAL (
         SELECT candidate_generation.superseded_at,
+               candidate_generation.created_at,
                candidate_generation.id
         FROM repository_index_generations candidate_generation
         WHERE candidate_generation.repository_id = repository.id
           AND candidate_generation.status = 'superseded'
           AND candidate_generation.superseded_at < ${params.eligibleBefore}::timestamptz
-          AND (candidate_generation.superseded_at, candidate_generation.id) <
-              (keep_floor.superseded_at, keep_floor.id)
+          AND (candidate_generation.superseded_at,
+               candidate_generation.created_at,
+               candidate_generation.id) <
+              (keep_floor.superseded_at, keep_floor.created_at, keep_floor.id)
           AND candidate_generation.id IS DISTINCT FROM repository.active_index_generation_id
           AND NOT EXISTS (
             SELECT 1
             FROM knowledge_repositories active_repository
             WHERE active_repository.active_index_generation_id = candidate_generation.id
           )
-        ORDER BY candidate_generation.superseded_at, candidate_generation.id
+        ORDER BY candidate_generation.superseded_at,
+                 candidate_generation.created_at,
+                 candidate_generation.id
         LIMIT 1
       ) oldest_candidate
       ORDER BY oldest_candidate.superseded_at,
+               oldest_candidate.created_at,
                oldest_candidate.id,
                repository.id
       FOR UPDATE OF repository SKIP LOCKED
@@ -133,15 +143,21 @@ function eligibleGenerationCtes(params: {
         WHERE candidate_generation.repository_id = repository.id
           AND candidate_generation.status = 'superseded'
           AND candidate_generation.superseded_at < ${params.eligibleBefore}::timestamptz
-          AND (candidate_generation.superseded_at, candidate_generation.id) <
-              (repository.keep_floor_superseded_at, repository.keep_floor_id)
+          AND (candidate_generation.superseded_at,
+               candidate_generation.created_at,
+               candidate_generation.id) <
+              (repository.keep_floor_superseded_at,
+               repository.keep_floor_created_at,
+               repository.keep_floor_id)
           AND candidate_generation.id IS DISTINCT FROM repository.active_index_generation_id
           AND NOT EXISTS (
             SELECT 1
             FROM knowledge_repositories active_repository
             WHERE active_repository.active_index_generation_id = candidate_generation.id
           )
-        ORDER BY candidate_generation.superseded_at, candidate_generation.id
+        ORDER BY candidate_generation.superseded_at,
+                 candidate_generation.created_at,
+                 candidate_generation.id
         FOR UPDATE OF candidate_generation SKIP LOCKED
         LIMIT ${params.generationBatchSize}
       ) generation

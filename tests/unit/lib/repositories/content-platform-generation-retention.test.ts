@@ -90,12 +90,14 @@ describe("superseded repository generation retention", () => {
         "kept_generation.repository_id = repository.id",
       );
       expect(compiled.sql).toContain(
-        "ORDER BY kept_generation.superseded_at DESC, kept_generation.id DESC",
+        "ORDER BY kept_generation.superseded_at DESC,",
       );
+      expect(compiled.sql).toContain("kept_generation.created_at DESC");
       expect(compiled.sql).toContain("OFFSET");
       expect(compiled.sql).toContain(
-        "(candidate_generation.superseded_at, candidate_generation.id) <",
+        "candidate_generation.created_at,",
       );
+      expect(compiled.sql).toContain("keep_floor.created_at, keep_floor.id");
       expect(compiled.sql).toContain(
         "ORDER BY oldest_candidate.superseded_at",
       );

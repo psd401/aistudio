@@ -64,7 +64,12 @@ export const repositoryIndexGenerations = pgTable(
       )
       .where(sql`${t.status} IN ('building', 'active', 'failed')`),
     index("idx_repository_index_generations_superseded_retention")
-      .on(t.repositoryId, t.supersededAt.desc(), t.id.desc())
+      .on(
+        t.repositoryId,
+        t.supersededAt.desc(),
+        t.createdAt.desc(),
+        t.id.desc()
+      )
       .where(sql`${t.status} = 'superseded'`),
   ]
 );

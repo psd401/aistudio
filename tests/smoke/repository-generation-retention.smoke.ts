@@ -82,7 +82,9 @@ try {
             repositoryId: repository.id,
             status: "superseded" as const,
             processorVersion: `generation-retention-old-${daysOld}`,
-            createdAt: new Date(now.getTime() - 10 * 24 * HOUR_MS),
+            createdAt: new Date(
+              now.getTime() - (10 + daysOld) * 24 * HOUR_MS,
+            ),
           })),
         ])
         .returning({ id: repositoryIndexGenerations.id }),
@@ -155,9 +157,9 @@ try {
         db
           .update(repositoryIndexGenerations)
           .set({
-            supersededAt: new Date(
-              now.getTime() - (index + 1) * 24 * HOUR_MS,
-            ),
+            // Migration 173 gives the historical backlog one shared timestamp.
+            // created_at must deterministically break that deployment-time tie.
+            supersededAt: new Date(now.getTime() - 4 * 24 * HOUR_MS),
           })
           .where(eq(repositoryIndexGenerations.id, generation.id)),
       `smoke.generationRetention.ageGeneration.${index}`,
