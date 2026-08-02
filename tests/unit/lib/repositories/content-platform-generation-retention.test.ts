@@ -31,21 +31,18 @@ describe("superseded repository generation retention", () => {
 
   it("compiles bounded deletion with every active-generation safety guard", async () => {
     const queries: SQL[] = [];
-    const execute = jest
-      .fn<(query: SQL) => Promise<Array<{ deleted_count: number }>>>(
-        async (query) => {
-          queries.push(query);
-          return [];
-        },
-      )
-      .mockImplementationOnce(async (query) => {
-        queries.push(query);
-        return [{ deleted_count: 20_000 }];
-      })
-      .mockImplementationOnce(async (query) => {
-        queries.push(query);
-        return [{ deleted_count: 17 }];
-      });
+    const responses: unknown[] = [
+      [],
+      [{ repository_id: 950 }],
+      [{ id: 1_001 }, { id: 1_300 }],
+      [{ deleted_count: 20_000 }],
+      [{ deleted_count: 17 }],
+      [],
+    ];
+    const execute = jest.fn<(query: SQL) => Promise<unknown>>(async (query) => {
+      queries.push(query);
+      return responses[queries.length - 1];
+    });
 
     mockExecuteTransaction.mockImplementationOnce(async (callback) =>
       callback({ execute } as never),
@@ -53,10 +50,6 @@ describe("superseded repository generation retention", () => {
 
     const now = new Date("2026-08-01T12:00:00.000Z");
     const repositoryBatchSize = 37;
-    const repositoryProbeAnchor = (
-      BigInt(Math.floor(now.getTime() / 60_000)) *
-      BigInt(repositoryBatchSize)
-    ).toString();
     await expect(
       collectSupersededRepositoryGenerations({ now, repositoryBatchSize }),
     ).resolves.toEqual({
@@ -64,10 +57,22 @@ describe("superseded repository generation retention", () => {
       generationsDeleted: 17,
     });
 
-    expect(queries).toHaveLength(2);
-    const [chunkDeletion, generationDeletion] = queries.map((query) =>
+    expect(queries).toHaveLength(6);
+    const compiledQueries = queries.map((query) =>
       new PgDialect().sqlToQuery(query),
     );
+    const [cursorInsert, cursorRead, repositoryProbe, chunkDeletion, generationDeletion, cursorUpdate] =
+      compiledQueries;
+    expect(cursorInsert?.sql).toContain("ON CONFLICT (key) DO NOTHING");
+    expect(cursorRead?.sql).toContain("FOR UPDATE");
+    expect(cursorRead?.params).toContain("REPOSITORY_GENERATION_GC_CURSOR");
+    expect(repositoryProbe?.sql).toContain("repository.id >");
+    expect(repositoryProbe?.sql).toContain("repository.id <=");
+    expect(repositoryProbe?.sql).toContain("ORDER BY probe.probe_segment, probe.id");
+    expect(repositoryProbe?.params).toContain(950);
+    expect(repositoryProbe?.params).toContain(repositoryBatchSize);
+    expect(cursorUpdate?.sql).toContain("UPDATE settings");
+    expect(cursorUpdate?.params).toContain("1300");
     expect(chunkDeletion).toBeDefined();
     expect(generationDeletion).toBeDefined();
 
@@ -78,12 +83,7 @@ describe("superseded repository generation retention", () => {
       );
       expect(compiled.sql).not.toContain("row_number() OVER");
       expect(compiled.sql).toContain("repository_probe_ids AS MATERIALIZED");
-      expect(compiled.sql).toContain(
-        "WHERE repository.id >= probe_start.id",
-      );
-      expect(compiled.sql).toContain(
-        "WHERE repository.id < probe_start.id",
-      );
+      expect(compiled.sql).toContain("WITH ORDINALITY AS probe");
       expect(compiled.sql).toContain("FROM repository_probe_ids probe");
       expect(compiled.sql).toContain("CROSS JOIN LATERAL");
       expect(compiled.sql).toContain(
@@ -120,8 +120,8 @@ describe("superseded repository generation retention", () => {
       expect(compiled.params).toContain(
         SUPERSEDED_GENERATION_KEEP_PER_REPOSITORY - 1,
       );
-      expect(compiled.params).toContain(repositoryProbeAnchor);
-      expect(compiled.params).toContain(repositoryBatchSize);
+      expect(compiled.params).toContain(1_001);
+      expect(compiled.params).toContain(1_300);
       expect(compiled.params).toContain(GENERATION_GC_GENERATION_BATCH);
       expect(compiled.params).toContain(GENERATION_GC_PER_REPOSITORY_BATCH);
       expect(compiled.sql).not.toMatch(

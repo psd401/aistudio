@@ -8,6 +8,8 @@ export const GENERATION_GC_REPOSITORY_BATCH = 200;
 export const GENERATION_GC_GENERATION_BATCH = 200;
 export const GENERATION_GC_PER_REPOSITORY_BATCH = 10;
 
+const GENERATION_GC_CURSOR_SETTING_KEY = "REPOSITORY_GENERATION_GC_CURSOR";
+
 export interface CollectSupersededRepositoryGenerationsOptions {
   /** Testable clock; production always uses the current time. */
   now?: Date;
@@ -34,6 +36,14 @@ interface DeletedCountRow {
   deleted_count: number;
 }
 
+interface RepositoryProbeCursorRow {
+  repository_id: number;
+}
+
+interface RepositoryProbeRow {
+  id: number;
+}
+
 function requirePositiveInteger(value: number, name: string): number {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new Error(`${name} must be a positive integer`);
@@ -46,43 +56,32 @@ function deletedCount(result: unknown): number {
   return row?.deleted_count ?? 0;
 }
 
+function integerArray(values: number[]): SQL {
+  if (values.length === 0) {
+    return sql`ARRAY[]::integer[]`;
+  }
+
+  return sql`ARRAY[${sql.join(
+    values.map((value) => sql`${value}`),
+    sql`, `,
+  )}]::integer[]`;
+}
+
 function eligibleGenerationCtes(params: {
   eligibleBefore: string;
   keepPerRepository: number;
-  repositoryProbeAnchor: string;
-  repositoryBatchSize: number;
+  repositoryIds: number[];
   generationBatchSize: number;
   perRepositoryGenerationBatchSize: number;
 }): SQL {
   const keepFloorOffset = params.keepPerRepository - 1;
 
   return sql`
-    repository_probe_start AS (
-      SELECT mod(
-               ${params.repositoryProbeAnchor}::bigint,
-               COALESCE(max(repository.id), 0)::bigint + 1
-             )::integer AS id
-      FROM knowledge_repositories repository
-    ),
     repository_probe_ids AS MATERIALIZED (
-      (
-        SELECT repository.id
-        FROM knowledge_repositories repository
-        CROSS JOIN repository_probe_start probe_start
-        WHERE repository.id >= probe_start.id
-        ORDER BY repository.id
-        LIMIT ${params.repositoryBatchSize}
-      )
-      UNION ALL
-      (
-        SELECT repository.id
-        FROM knowledge_repositories repository
-        CROSS JOIN repository_probe_start probe_start
-        WHERE repository.id < probe_start.id
-        ORDER BY repository.id
-        LIMIT ${params.repositoryBatchSize}
-      )
-      LIMIT ${params.repositoryBatchSize}
+      SELECT probe.id
+      FROM unnest(${integerArray(params.repositoryIds)})
+        WITH ORDINALITY AS probe(id, probe_order)
+      ORDER BY probe.probe_order
     ),
     eligible_repositories AS MATERIALIZED (
       SELECT repository.id,
@@ -134,7 +133,7 @@ function eligibleGenerationCtes(params: {
                oldest_candidate.id,
                repository.id
       FOR UPDATE OF repository SKIP LOCKED
-      LIMIT ${params.repositoryBatchSize}
+      LIMIT ${params.repositoryIds.length}
     ),
     eligible_generations AS MATERIALIZED (
       SELECT generation.id
@@ -182,12 +181,13 @@ function eligibleGenerationCtes(params: {
  * invocations cannot work on the same parents. Chunks are removed first in a
  * ctid-bounded batch; a parent is deleted only after it is childless.
  * Eligible repositories are ordered by their oldest candidate so sustained
- * work on low repository IDs cannot starve older garbage elsewhere. A rotating
- * keyset window bounds steady-state repository probes even when nothing is
- * eligible, while a per-repository generation cap prevents one backlog from
- * consuming the entire global batch. The owner row lock stabilizes every
- * supported pointer update; the global pointer guard additionally fails closed
- * on pre-existing cross-repository pointer skew.
+ * work on low repository IDs cannot starve older garbage elsewhere. A
+ * persisted existing-key cursor makes each rotating repository probe bounded
+ * by the live repository count even when IDs are sparse, while a
+ * per-repository generation cap prevents one backlog from consuming the
+ * entire global batch. The owner row lock stabilizes every supported pointer
+ * update; the global pointer guard additionally fails closed on pre-existing
+ * cross-repository pointer skew.
  */
 export async function collectSupersededRepositoryGenerations(
   options: CollectSupersededRepositoryGenerationsOptions = {},
@@ -221,16 +221,61 @@ export async function collectSupersededRepositoryGenerations(
   const eligibleBefore = new Date(
     collectionNow.getTime() - retentionHours * 60 * 60_000,
   ).toISOString();
-  // Advance by exactly one window per minute. For any modulus N, every common
-  // divisor of N and the step is no larger than the window, so the B-wide
-  // wraparound keyset windows cover every repository without a coprime guess.
-  const repositoryProbeAnchor = (
-    BigInt(Math.floor(collectionNow.getTime() / 60_000)) *
-    BigInt(repositoryBatchSize)
-  ).toString();
-
   return executeTransaction(
     async (tx) => {
+      await tx.execute(sql`
+        INSERT INTO settings (key, value, description, category, is_secret)
+        VALUES (
+          ${GENERATION_GC_CURSOR_SETTING_KEY},
+          '0',
+          'Internal checkpoint: last repository ID probed by generation retention',
+          'repositories',
+          false
+        )
+        ON CONFLICT (key) DO NOTHING
+      `);
+
+      const cursorResult = await tx.execute(sql`
+        SELECT CASE
+                 WHEN value ~ '^[0-9]{1,10}$'
+                   THEN LEAST(value::numeric, 2147483647)::integer
+                 ELSE 0
+               END AS repository_id
+        FROM settings
+        WHERE key = ${GENERATION_GC_CURSOR_SETTING_KEY}
+        FOR UPDATE
+      `);
+      const [cursorRow] = toPgRows<RepositoryProbeCursorRow>(cursorResult);
+      const repositoryProbeCursor = cursorRow?.repository_id ?? 0;
+
+      const probeResult = await tx.execute(sql`
+        WITH forward_probe AS MATERIALIZED (
+          SELECT repository.id, 0 AS probe_segment
+          FROM knowledge_repositories repository
+          WHERE repository.id > ${repositoryProbeCursor}
+          ORDER BY repository.id
+          LIMIT ${repositoryBatchSize}
+        ),
+        wrapped_probe AS MATERIALIZED (
+          SELECT repository.id, 1 AS probe_segment
+          FROM knowledge_repositories repository
+          WHERE repository.id <= ${repositoryProbeCursor}
+          ORDER BY repository.id
+          LIMIT ${repositoryBatchSize}
+        )
+        SELECT probe.id
+        FROM (
+          SELECT * FROM forward_probe
+          UNION ALL
+          SELECT * FROM wrapped_probe
+        ) probe
+        ORDER BY probe.probe_segment, probe.id
+        LIMIT ${repositoryBatchSize}
+      `);
+      const repositoryIds = toPgRows<RepositoryProbeRow>(probeResult).map(
+        (row) => row.id,
+      );
+
       // Keep the phases as sequential statements: sibling data-modifying CTEs
       // share one snapshot, so a combined statement would not see chunk deletes
       // when deciding whether a generation is childless.
@@ -238,8 +283,7 @@ export async function collectSupersededRepositoryGenerations(
         WITH ${eligibleGenerationCtes({
           eligibleBefore,
           keepPerRepository,
-          repositoryProbeAnchor,
-          repositoryBatchSize,
+          repositoryIds,
           generationBatchSize,
           perRepositoryGenerationBatchSize,
         })},
@@ -264,8 +308,7 @@ export async function collectSupersededRepositoryGenerations(
         WITH ${eligibleGenerationCtes({
           eligibleBefore,
           keepPerRepository,
-          repositoryProbeAnchor,
-          repositoryBatchSize,
+          repositoryIds,
           generationBatchSize,
           perRepositoryGenerationBatchSize,
         })},
@@ -293,6 +336,16 @@ export async function collectSupersededRepositoryGenerations(
         SELECT count(*)::integer AS deleted_count
         FROM deleted_generations
       `);
+
+      const lastRepositoryId = repositoryIds.at(-1);
+      if (lastRepositoryId !== undefined) {
+        await tx.execute(sql`
+          UPDATE settings
+          SET value = ${lastRepositoryId.toString()},
+              updated_at = statement_timestamp()
+          WHERE key = ${GENERATION_GC_CURSOR_SETTING_KEY}
+        `);
+      }
 
       return {
         chunksDeleted: deletedCount(chunksResult),

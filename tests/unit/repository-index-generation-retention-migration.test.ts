@@ -32,7 +32,7 @@ describe("migration 173 repository generation retention", () => {
     expect(migration).toContain("DEFAULT statement_timestamp()");
     expect(migration).toContain("ALTER COLUMN superseded_at DROP DEFAULT");
     expect(migration).toContain(
-      "CREATE TRIGGER trg_repository_index_generation_superseded_at",
+      "CREATE OR REPLACE TRIGGER trg_repository_index_generation_superseded_at",
     );
     expect(migration).toContain("NEW.superseded_at := clock_timestamp()");
     expect(migration).toContain("ELSIF TG_OP = ''INSERT'' THEN");
@@ -50,18 +50,28 @@ describe("migration 173 repository generation retention", () => {
       "ON knowledge_repositories (active_index_generation_id)",
     );
     expect(migration).toContain("WHERE status = 'superseded'");
+    expect(migration).toContain("REPOSITORY_GENERATION_GC_CURSOR");
 
+    const addColumnIndex = migration.indexOf(
+      "ADD COLUMN IF NOT EXISTS superseded_at timestamptz",
+    );
     const triggerIndex = migration.indexOf(
-      "CREATE TRIGGER trg_repository_index_generation_superseded_at",
+      "CREATE OR REPLACE TRIGGER trg_repository_index_generation_superseded_at",
     );
-    const finalBackfillIndex = migration.lastIndexOf(
-      "SET superseded_at = statement_timestamp()",
+    const dropDefaultIndex = migration.indexOf(
+      "ALTER COLUMN superseded_at DROP DEFAULT",
     );
+    const historicalBackfillIndex = migration.indexOf(
+      "SET superseded_at = clock_timestamp()",
+    );
+    expect(addColumnIndex).toBeGreaterThanOrEqual(0);
     expect(triggerIndex).toBeGreaterThanOrEqual(0);
-    expect(finalBackfillIndex).toBeGreaterThan(triggerIndex);
-    expect(
-      migration.match(/SET superseded_at = statement_timestamp\(\)/g),
-    ).toHaveLength(2);
+    expect(triggerIndex).toBeGreaterThan(addColumnIndex);
+    expect(dropDefaultIndex).toBeGreaterThan(triggerIndex);
+    expect(historicalBackfillIndex).toBeGreaterThan(triggerIndex);
+    expect(migration).not.toMatch(
+      /\nDROP TRIGGER IF EXISTS trg_repository_index_generation_superseded_at/,
+    );
   });
 
   it("encodes the trigger function for the production line-based SQL splitter", () => {
