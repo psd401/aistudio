@@ -19,6 +19,28 @@ const collectionVisibleListMock = jest.fn()
 const collectionManageableListMock = jest.fn()
 const collectionCreateMock = jest.fn()
 const collectionUpdateMock = jest.fn()
+const contentGetMock = jest.fn()
+
+const dataLimitMock = jest.fn()
+const dataOrderByMock = jest.fn(() => ({ limit: dataLimitMock }))
+const dataWhereMock = jest.fn(() => ({ orderBy: dataOrderByMock }))
+const dataLeftJoinMock = jest.fn(() => ({ where: dataWhereMock }))
+const dataFromMock = jest.fn(() => ({ leftJoin: dataLeftJoinMock }))
+const dataSelectMock = jest.fn(() => ({ from: dataFromMock }))
+
+interface FakeDb {
+  select: typeof dataSelectMock
+}
+
+type QueryCallback = (db: FakeDb) => unknown
+const executeQueryMock = jest.fn(
+  async (query: QueryCallback, _operation: string) => query({ select: dataSelectMock })
+)
+
+jest.mock("@/lib/db/drizzle-client", () => ({
+  executeQuery: (query: QueryCallback, operation: string) =>
+    executeQueryMock(query, operation),
+}))
 
 jest.mock("@/lib/db/drizzle/users", () => ({
   getUserByEmail: (...args: unknown[]) => getUserByEmailMock(...args),
@@ -60,6 +82,11 @@ jest.mock("@/lib/content", () => {
       super(message, "CONTENT_FORBIDDEN", 403)
     }
   }
+  class MockNotFoundError extends MockContentError {
+    constructor(message = "Not found") {
+      super(message, "CONTENT_NOT_FOUND", 404)
+    }
+  }
   class MockValidationError extends MockContentError {
     constructor(message = "Invalid", details?: Record<string, unknown>) {
       super(message, "VALIDATION_ERROR", 400, details)
@@ -68,12 +95,13 @@ jest.mock("@/lib/content", () => {
   return {
     ApprovalRequiredError: MockApprovalRequiredError,
     ForbiddenError: MockForbiddenError,
+    NotFoundError: MockNotFoundError,
     ValidationError: MockValidationError,
     isContentError: (error: unknown) => error instanceof MockContentError,
     contentService: {
       list: (...args: unknown[]) => contentListMock(...args),
       create: (...args: unknown[]) => contentCreateMock(...args),
-      get: jest.fn(),
+      get: (...args: unknown[]) => contentGetMock(...args),
       update: jest.fn(),
       createVersion: jest.fn(),
       loadForEdit: jest.fn(),
@@ -110,6 +138,7 @@ jest.mock("@/lib/content", () => {
 import {
   ApprovalRequiredError,
   ForbiddenError,
+  NotFoundError,
 } from "@/lib/content"
 import { executeOwnerAtriumOperation } from "@/lib/agent-workspace/atrium-owner-operation"
 
@@ -134,6 +163,184 @@ beforeEach(() => {
     async (_requester: unknown, value: unknown) => value
   )
   auditMock.mockResolvedValue(undefined)
+  contentGetMock.mockResolvedValue({
+    id: "content-1",
+    kind: "artifact",
+  })
+  dataLimitMock.mockResolvedValue([])
+})
+
+describe("signed-owner Atrium artifact data reads", () => {
+  it("returns the #1517 record and display-name shape as the signed owner", async () => {
+    dataLimitMock.mockResolvedValue([
+      {
+        id: "record-2",
+        payload: { score: 84 },
+        createdAt: new Date("2026-08-02T03:00:00.000Z"),
+        userFirstName: " Ada ",
+        userLastName: "Lovelace",
+      },
+      {
+        id: "record-1",
+        payload: { score: 42 },
+        createdAt: new Date("2026-08-02T02:00:00.000Z"),
+        userFirstName: null,
+        userLastName: null,
+      },
+    ])
+
+    await expect(
+      executeOwnerAtriumOperation({
+        ownerEmail: "owner@psd401.net",
+        requestId: "request-data",
+        method: "GET",
+        path: "/content-1/data",
+        query: { namespace: "leaderboard" },
+      })
+    ).resolves.toEqual({
+      httpStatus: 200,
+      payload: {
+        data: {
+          records: [
+            {
+              id: "record-2",
+              displayName: "Ada Lovelace",
+              payload: { score: 84 },
+              createdAt: "2026-08-02T03:00:00.000Z",
+            },
+            {
+              id: "record-1",
+              displayName: "Unknown user",
+              payload: { score: 42 },
+              createdAt: "2026-08-02T02:00:00.000Z",
+            },
+          ],
+        },
+        meta: { requestId: "request-data" },
+      },
+    })
+    expect(contentGetMock).toHaveBeenCalledWith(requester, "content-1")
+    expect(dataLimitMock).toHaveBeenCalledWith(50)
+    expect(executeQueryMock).toHaveBeenCalledWith(
+      expect.any(Function),
+      "agentAtrium.listArtifactRecords"
+    )
+    expect(assertContentAuthoringCapabilityMock).not.toHaveBeenCalled()
+  })
+
+  it("clamps a requested limit above 200", async () => {
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "request-data-limit",
+      method: "GET",
+      path: "/content-1/data",
+      query: { namespace: "leaderboard", limit: "1000" },
+    })
+
+    expect(result.httpStatus).toBe(200)
+    expect(dataLimitMock).toHaveBeenCalledWith(200)
+  })
+
+  it.each([
+    {
+      query: {} as Record<string, string>,
+      field: "namespace",
+      constraint: "namespace",
+    },
+    {
+      query: { namespace: "Leaderboard!" },
+      field: "namespace",
+      constraint: "namespace must be 1-64 lowercase",
+    },
+    {
+      query: { namespace: "leaderboard", limit: "not-a-number" },
+      field: "limit",
+      constraint: "limit must be a positive base-10 integer",
+    },
+  ])(
+    "rejects malformed data query %# with a structured constraint",
+    async ({ query, field, constraint }) => {
+      const result = await executeOwnerAtriumOperation({
+        ownerEmail: "owner@psd401.net",
+        requestId: "request-data-invalid",
+        method: "GET",
+        path: "/content-1/data",
+        query,
+      })
+
+      expect(result.httpStatus).toBe(400)
+      expect(result.payload).toEqual(
+        expect.objectContaining({
+          error: expect.objectContaining({
+            code: "VALIDATION_ERROR",
+            details: expect.arrayContaining([
+              expect.objectContaining({ path: [field] }),
+            ]),
+          }),
+        })
+      )
+      expect(JSON.stringify(result.payload)).toContain(constraint)
+      expect(contentGetMock).not.toHaveBeenCalled()
+      expect(dataSelectMock).not.toHaveBeenCalled()
+    }
+  )
+
+  it("masks a non-viewable artifact as not found before record or permission access", async () => {
+    contentGetMock.mockRejectedValue(new NotFoundError("Content not found"))
+
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "request-data-hidden",
+      method: "GET",
+      path: "/hidden-content/data",
+      query: { namespace: "leaderboard" },
+    })
+
+    expect(result).toEqual({
+      httpStatus: 404,
+      payload: {
+        error: {
+          code: "CONTENT_NOT_FOUND",
+          message: "Content not found",
+        },
+        requestId: "request-data-hidden",
+      },
+    })
+    expect(dataSelectMock).not.toHaveBeenCalled()
+    expect(assertContentAuthoringCapabilityMock).not.toHaveBeenCalled()
+  })
+})
+
+describe("signed-owner Atrium artifact data content-kind guard", () => {
+  it("rejects a visible non-artifact before record or authoring access", async () => {
+    contentGetMock.mockResolvedValue({
+      id: "document-1",
+      kind: "document",
+    })
+
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "request-data-document",
+      method: "GET",
+      path: "/document-1/data",
+      query: { namespace: "leaderboard" },
+    })
+
+    expect(result).toEqual({
+      httpStatus: 400,
+      payload: {
+        error: {
+          code: "VALIDATION_ERROR",
+          message: "Content is not an artifact",
+          details: { field: "contentId" },
+        },
+        requestId: "request-data-document",
+      },
+    })
+    expect(contentGetMock).toHaveBeenCalledWith(requester, "document-1")
+    expect(dataSelectMock).not.toHaveBeenCalled()
+    expect(assertContentAuthoringCapabilityMock).not.toHaveBeenCalled()
+  })
 })
 
 describe("signed-owner Atrium operations", () => {

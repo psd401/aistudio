@@ -1,3 +1,4 @@
+import { and, desc, eq } from "drizzle-orm"
 import { z } from "zod"
 import {
   ApprovalRequiredError,
@@ -29,6 +30,36 @@ import {
   updateCollectionBodySchema,
 } from "@/lib/content/rest"
 import { getUserByEmail } from "@/lib/db/drizzle/users"
+import { executeQuery } from "@/lib/db/drizzle-client"
+import { contentDataRecords, users } from "@/lib/db/schema"
+import type { ArtifactDataPayload } from "@/lib/db/types/jsonb"
+
+const ARTIFACT_DATA_NAMESPACE_RE = /^[a-z0-9_-]{1,64}$/
+const DEFAULT_ARTIFACT_DATA_LIMIT = 50
+const MAX_ARTIFACT_DATA_LIMIT = 200
+
+const artifactDataQuerySchema = z
+  .object({
+    namespace: z.string().regex(ARTIFACT_DATA_NAMESPACE_RE, {
+      message:
+        "namespace must be 1-64 lowercase letters, numbers, underscores, or hyphens",
+    }),
+    limit: z
+      .string()
+      .regex(/^[1-9][0-9]*$/, {
+        message: "limit must be a positive base-10 integer",
+      })
+      .optional(),
+  })
+  .strict()
+
+type ArtifactDataRecordRow = {
+  id: string
+  payload: ArtifactDataPayload
+  createdAt: Date
+  userFirstName: string | null
+  userLastName: string | null
+}
 
 const visibilitySchema = z
   .object({
@@ -219,6 +250,23 @@ function parsePath(path: string): string[] {
   })
 }
 
+function artifactDataLimit(value: string | undefined): number {
+  if (value === undefined) return DEFAULT_ARTIFACT_DATA_LIMIT
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed)
+    ? Math.min(parsed, MAX_ARTIFACT_DATA_LIMIT)
+    : MAX_ARTIFACT_DATA_LIMIT
+}
+
+function artifactDataDisplayName(row: ArtifactDataRecordRow): string {
+  const fullName = [row.userFirstName, row.userLastName]
+    .map((part) => part?.trim())
+    .filter((part): part is string => Boolean(part))
+    .join(" ")
+    .trim()
+  return fullName || "Unknown user"
+}
+
 async function ownerRequester(ownerEmail: string): Promise<{
   req: Requester
   cognitoSub: string
@@ -286,6 +334,80 @@ async function executeSingleSegmentRead(
   return success({ ...object, url: contentDeepLink(object.slug) }, requestId)
 }
 
+async function executeTwoSegmentRead(
+  req: Requester,
+  input: AgentAtriumOperationInput,
+  contentId: string,
+  operation: string
+): Promise<AgentAtriumOperationResult | null> {
+  // Committed markdown source. `GET /<id>` deliberately omits a DOCUMENT's
+  // text (it lives in the collaborative store, `bodyLocation: "proof"`), so
+  // this is the only read that returns a document body — without it an agent
+  // cannot use an existing Atrium document as an input.
+  if (operation === "source") {
+    const source = await contentSourceService.read(req, contentId)
+    return success(source, input.requestId)
+  }
+
+  if (operation === "assets") {
+    const assets = await contentAssetService.list(req, contentId)
+    return success(assets, input.requestId)
+  }
+
+  if (operation !== "data") return null
+
+  const query = artifactDataQuerySchema.parse(input.query ?? {})
+  const limit = artifactDataLimit(query.limit)
+
+  // Resolve the object before touching its records. `contentService.get`
+  // preserves the shared 404 mask for missing and non-viewable content, and
+  // this read branch returns before the authoring-capability gate below.
+  const content = await contentService.get(req, contentId)
+  if (content.kind !== "artifact") {
+    throw new ValidationError("Content is not an artifact", {
+      field: "contentId",
+    })
+  }
+
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: contentDataRecords.id,
+          payload: contentDataRecords.payload,
+          createdAt: contentDataRecords.createdAt,
+          userFirstName: users.firstName,
+          userLastName: users.lastName,
+        })
+        .from(contentDataRecords)
+        .leftJoin(users, eq(contentDataRecords.userId, users.id))
+        .where(
+          and(
+            eq(contentDataRecords.contentId, content.id),
+            eq(contentDataRecords.namespace, query.namespace)
+          )
+        )
+        .orderBy(
+          desc(contentDataRecords.createdAt),
+          desc(contentDataRecords.id)
+        )
+        .limit(limit),
+    "agentAtrium.listArtifactRecords"
+  )
+
+  return success(
+    {
+      records: (rows as ArtifactDataRecordRow[]).map((row) => ({
+        id: row.id,
+        displayName: artifactDataDisplayName(row),
+        payload: row.payload,
+        createdAt: row.createdAt.toISOString(),
+      })),
+    },
+    input.requestId
+  )
+}
+
 /**
  * The READ half of the fixed surface.
  *
@@ -332,18 +454,8 @@ async function executeAtriumRead(
     return executeSingleSegmentRead(req, segments[0], input.requestId)
   }
 
-  // Committed markdown source. `GET /<id>` deliberately omits a DOCUMENT's
-  // text (it lives in the collaborative store, `bodyLocation: "proof"`), so
-  // this is the only read that returns a document body — without it an agent
-  // cannot use an existing Atrium document as an input.
-  if (segments.length === 2 && segments[1] === "source") {
-    const source = await contentSourceService.read(req, segments[0])
-    return success(source, input.requestId)
-  }
-
-  if (segments.length === 2 && segments[1] === "assets") {
-    const assets = await contentAssetService.list(req, segments[0])
-    return success(assets, input.requestId)
+  if (segments.length === 2) {
+    return executeTwoSegmentRead(req, input, segments[0], segments[1])
   }
 
   if (
