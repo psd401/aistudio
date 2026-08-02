@@ -241,6 +241,7 @@ async function loadNextRepositoryCandidate(
   cursor: number,
   maximumId: number,
 ): Promise<RepositoryCandidate | null> {
+  const discoverUntrackedSources = run.snapshot.retryOnly !== true;
   const row = toPgRows<{
     id: number;
     owner_id: number;
@@ -298,12 +299,12 @@ async function loadNextRepositoryCandidate(
               )
             )
             AND (
-              NOT EXISTS (
+              (${discoverUntrackedSources} = TRUE AND NOT EXISTS (
                 SELECT 1
                 FROM repository_migration_items migration
                 WHERE migration.source_kind = 'repository_item'
                   AND migration.source_id = item.id
-              )
+              ))
               OR EXISTS (
                 SELECT 1
                 FROM repository_migration_items migration
@@ -347,6 +348,7 @@ async function loadNextCandidate(
 ): Promise<MigrationCandidate | null> {
   const cursor = run.cursor[sourceKind] ?? 0;
   const maximumId = run.snapshot.maximumIds?.[sourceKind] ?? 0;
+  const discoverUntrackedSources = run.snapshot.retryOnly !== true;
   if (cursor >= maximumId) return null;
 
   if (sourceKind === "repository_item") {
@@ -388,6 +390,22 @@ async function loadNextCandidate(
             FROM documents document
             WHERE document.id > ${cursor}
               AND document.id <= ${maximumId}
+              AND (
+                ${discoverUntrackedSources} = TRUE
+                OR EXISTS (
+                  SELECT 1
+                  FROM repository_migration_items migration
+                  WHERE migration.source_kind = 'nexus_document'
+                    AND migration.source_id = document.id
+                    AND migration.run_id = ${run.id}::uuid
+                    AND migration.status IN (
+                      'pending',
+                      'migrating',
+                      'failed',
+                      'unrecoverable'
+                    )
+                )
+              )
             ORDER BY document.id
             LIMIT 1
           `),
@@ -425,6 +443,22 @@ async function loadNextCandidate(
           WHERE job.type = 'pdf-to-markdown'
             AND job.id > ${cursor}
             AND job.id <= ${maximumId}
+            AND (
+              ${discoverUntrackedSources} = TRUE
+              OR EXISTS (
+                SELECT 1
+                FROM repository_migration_items migration
+                WHERE migration.source_kind = 'assistant_pdf_job'
+                  AND migration.source_id = job.id
+                  AND migration.run_id = ${run.id}::uuid
+                  AND migration.status IN (
+                    'pending',
+                    'migrating',
+                    'failed',
+                    'unrecoverable'
+                  )
+              )
+            )
           ORDER BY job.id
           LIMIT 1
         `),

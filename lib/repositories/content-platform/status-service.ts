@@ -26,6 +26,7 @@ export interface CanonicalRepositoryItemStatus {
   canRetry: boolean;
   embeddedChunks: number;
   totalChunks: number;
+  activeEmbeddingComplete: boolean;
 }
 
 /** Legacy/pre-canonical failure messages a repository manager can retry through the canonical pipeline. */
@@ -66,8 +67,10 @@ interface CanonicalStatusRow {
     | "unified-content-runtime-v2"
     | "unified-content-artifact-v3"
     | "embedding-concurrency-v1"
+    | "content-message-sanitizer-v1"
     | null;
   active: boolean;
+  activeEmbeddingComplete: boolean;
   buildingGeneration: boolean;
   failedGeneration: boolean;
   generationError: string | null;
@@ -86,6 +89,7 @@ export function resolveCanonicalItemStatus(
       canRetry: false,
       embeddedChunks: row.embeddedChunks,
       totalChunks: row.totalChunks,
+      activeEmbeddingComplete: row.activeEmbeddingComplete,
     };
   }
 
@@ -97,6 +101,7 @@ export function resolveCanonicalItemStatus(
       canRetry: false,
       embeddedChunks: row.embeddedChunks,
       totalChunks: row.totalChunks,
+      activeEmbeddingComplete: row.activeEmbeddingComplete,
     };
   }
 
@@ -108,6 +113,7 @@ export function resolveCanonicalItemStatus(
       canRetry: row.storageStatus !== "blocked" && row.inspectionStatus !== "blocked",
       embeddedChunks: row.embeddedChunks,
       totalChunks: row.totalChunks,
+      activeEmbeddingComplete: row.activeEmbeddingComplete,
     };
   }
 
@@ -119,6 +125,7 @@ export function resolveCanonicalItemStatus(
       canRetry: false,
       embeddedChunks: row.embeddedChunks,
       totalChunks: row.totalChunks,
+      activeEmbeddingComplete: row.activeEmbeddingComplete,
     };
   }
 
@@ -134,6 +141,7 @@ export function resolveCanonicalItemStatus(
       canRetry: false,
       embeddedChunks: row.embeddedChunks,
       totalChunks: row.totalChunks,
+      activeEmbeddingComplete: row.activeEmbeddingComplete,
     };
   }
 
@@ -147,6 +155,7 @@ export function resolveCanonicalItemStatus(
     canRetry: false,
     embeddedChunks: row.embeddedChunks,
     totalChunks: row.totalChunks,
+    activeEmbeddingComplete: row.activeEmbeddingComplete,
   };
 }
 
@@ -199,6 +208,13 @@ export async function getCanonicalRepositoryItemStatuses(
             FROM ${repositoryItemChunks} active_chunk
             WHERE active_chunk.item_version_id = ${repositoryItemVersions.id}
               AND active_chunk.index_generation_id = ${knowledgeRepositories.activeIndexGenerationId}
+          )`,
+          activeEmbeddingComplete: sql<boolean>`NOT EXISTS (
+            SELECT 1
+            FROM ${repositoryItemChunks} active_chunk
+            WHERE active_chunk.item_version_id = ${repositoryItemVersions.id}
+              AND active_chunk.index_generation_id = ${knowledgeRepositories.activeIndexGenerationId}
+              AND active_chunk.embedding IS NULL
           )`,
           buildingGeneration: sql<boolean>`EXISTS (
             SELECT 1

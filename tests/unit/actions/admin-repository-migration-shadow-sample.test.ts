@@ -42,6 +42,8 @@ jest.mock(
     approveRepositoryMigrationMismatch: jest.fn(),
     getRepositoryMigrationDashboard: jest.fn(),
     listRepositoryMigrationExceptions: jest.fn(),
+    MAX_FAILED_REPOSITORY_MIGRATION_RETRIES: 250,
+    retryFailedRepositoryMigrationItems: jest.fn(),
     retryRepositoryMigrationItem: jest.fn(),
     runRepositoryMigrationRollbackDrill: jest.fn(),
     startRepositoryMigrationRun: jest.fn(),
