@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import { executeQuery, toPgRows } from "@/lib/db/drizzle-client";
+import { ORPHANED_ITEM_SWEEP_MINUTES } from "./orphaned-item-sweep";
 
 export interface ContentPlatformOperationalSnapshot {
   activeRepositoriesWithoutSearchableContent: number;
@@ -13,6 +14,7 @@ export interface ContentPlatformOperationalSnapshot {
   migrationMismatches: number;
   migrationUnrecoverable: number;
   migrationVerified: number;
+  orphanedItems: number;
   pendingJobs: number;
   retrievalOverlapRatio: number;
   retrievalShadowObservations: number;
@@ -35,6 +37,7 @@ interface OperationalSnapshotRow {
   migration_mismatches: number | string;
   migration_unrecoverable: number | string;
   migration_verified: number | string;
+  orphaned_items: number | string;
   pending_jobs: number | string;
   retrieval_overlap_ratio: number | string;
   retrieval_shadow_observations: number | string;
@@ -66,6 +69,30 @@ export async function getContentPlatformOperationalSnapshot(): Promise<ContentPl
             FROM repository_items
             WHERE lifecycle_status = 'unavailable'
           ) AS unavailable_items,
+          (
+            SELECT COUNT(*)::integer
+            FROM repository_items item
+            INNER JOIN knowledge_repositories repository
+              ON repository.id = item.repository_id
+            WHERE item.lifecycle_status = 'active'
+              AND repository.lifecycle_status = 'active'
+              AND item.processing_status IN (
+                'pending',
+                'processing',
+                'processing_ocr'
+              )
+              AND item.current_version_id IS NULL
+              AND item.updated_at < NOW() - (
+                ${ORPHANED_ITEM_SWEEP_MINUTES} * INTERVAL '1 minute'
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM repository_item_versions version
+                INNER JOIN repository_processing_jobs job
+                  ON job.item_version_id = version.id
+                WHERE version.item_id = item.id
+              )
+          ) AS orphaned_items,
           (
             SELECT COUNT(*)::integer
             FROM repository_index_generations
@@ -251,6 +278,7 @@ export async function getContentPlatformOperationalSnapshot(): Promise<ContentPl
     migrationMismatches: finiteNumber(row?.migration_mismatches),
     migrationUnrecoverable: finiteNumber(row?.migration_unrecoverable),
     migrationVerified: finiteNumber(row?.migration_verified),
+    orphanedItems: finiteNumber(row?.orphaned_items),
     pendingJobs: finiteNumber(row?.pending_jobs),
     retrievalOverlapRatio: finiteNumber(row?.retrieval_overlap_ratio),
     retrievalShadowObservations: finiteNumber(
@@ -278,6 +306,7 @@ export const CONTENT_PLATFORM_METRIC_UNITS = {
   MigrationMismatches: "Count",
   MigrationUnrecoverable: "Count",
   MigrationVerified: "Count",
+  OrphanedItems: "Count",
   PendingJobs: "Count",
   RetrievalOverlapRatio24h: "None",
   RetrievalShadowObservations24h: "Count",
@@ -305,6 +334,7 @@ export function contentPlatformMetricValues(
     MigrationMismatches: snapshot.migrationMismatches,
     MigrationUnrecoverable: snapshot.migrationUnrecoverable,
     MigrationVerified: snapshot.migrationVerified,
+    OrphanedItems: snapshot.orphanedItems,
     PendingJobs: snapshot.pendingJobs,
     RetrievalOverlapRatio24h: snapshot.retrievalOverlapRatio,
     RetrievalShadowObservations24h: snapshot.retrievalShadowObservations,

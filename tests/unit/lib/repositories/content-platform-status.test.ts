@@ -1,7 +1,11 @@
 /** @jest-environment node */
 
 import { describe, expect, it } from "@jest/globals";
-import { resolveCanonicalItemStatus } from "@/lib/repositories/content-platform/status-service";
+import {
+  isRetryableLegacyItemFailure,
+  resolveCanonicalItemStatus,
+  RETRYABLE_LEGACY_FAILURE_PREFIXES,
+} from "@/lib/repositories/content-platform/status-service";
 
 function statusRow(
   overrides: Partial<Parameters<typeof resolveCanonicalItemStatus>[0]> = {}
@@ -172,5 +176,40 @@ describe("canonical repository item status", () => {
       processingError: "Embedding provider rejected the model",
       canRetry: true,
     });
+  });
+});
+
+describe("legacy repository item retryability", () => {
+  it.each(RETRYABLE_LEGACY_FAILURE_PREFIXES)(
+    "allows managers to retry a failed item with the %s prefix",
+    (prefix) => {
+      expect(
+        isRetryableLegacyItemFailure("failed", `${prefix}. Retry this item.`),
+      ).toBe(true);
+    },
+  );
+
+  it("rejects arbitrary failure messages", () => {
+    expect(
+      isRetryableLegacyItemFailure("failed", "An unrelated provider failed"),
+    ).toBe(false);
+  });
+
+  it("never retries completed items", () => {
+    expect(
+      isRetryableLegacyItemFailure(
+        "completed",
+        `${RETRYABLE_LEGACY_FAILURE_PREFIXES[0]}. Retry this item.`,
+      ),
+    ).toBe(false);
+  });
+
+  it("allows known embedding failures to retry through the canonical pipeline", () => {
+    expect(
+      isRetryableLegacyItemFailure(
+        "embedding_failed",
+        `${RETRYABLE_LEGACY_FAILURE_PREFIXES[0]}. Retry this item.`,
+      ),
+    ).toBe(true);
   });
 });

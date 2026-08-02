@@ -19,6 +19,7 @@ describe("unified content operational metrics", () => {
       migrationMismatches: 5,
       migrationUnrecoverable: 6,
       migrationVerified: 7,
+      orphanedItems: 11,
       pendingJobs: 8,
       retrievalOverlapRatio: 0.75,
       retrievalShadowObservations: 9,

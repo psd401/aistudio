@@ -63,6 +63,11 @@ const mockRetryCanonicalRepositoryItem = jest.fn<
 const mockAssertCanonicalRetryNotQuarantined = jest.fn<
   (...a: unknown[]) => Promise<void>
 >(() => Promise.resolve())
+const mockIsRetryableLegacyItemFailure = jest.fn(
+  (processingStatus: string | null, processingError: string | null) =>
+    (processingStatus === 'failed' || processingStatus === 'embedding_failed') &&
+    processingError?.startsWith('Legacy URL processing failed') === true
+)
 const mockRegisterCanonicalTextIfEnabled = jest.fn<
   (...a: unknown[]) => Promise<unknown>
 >(() => Promise.resolve(null))
@@ -144,6 +149,7 @@ jest.mock('@/lib/repositories/content-platform', () => ({
   dispatchContentProcessingJob: mockDispatchContentProcessingJob,
   deleteRepositoryItemStorage: mockDeleteRepositoryItemStorage,
   getCanonicalRepositoryItemStatuses: mockGetCanonicalRepositoryItemStatuses,
+  isRetryableLegacyItemFailure: mockIsRetryableLegacyItemFailure,
   retryCanonicalRepositoryItem: mockRetryCanonicalRepositoryItem,
   assertCanonicalRetryNotQuarantined: mockAssertCanonicalRetryNotQuarantined,
 }))
@@ -292,6 +298,61 @@ it('redacts internal processing failures and retry controls from shared readers'
     expect.objectContaining({
       id: 38,
       processingStatus: 'failed',
+      processingError: null,
+      canRetry: false,
+    }),
+  ])
+})
+
+it('projects a retry control for a manager when a version-less legacy URL failed', async () => {
+  mockGetRepositoryItems.mockResolvedValue([{
+    id: 122,
+    repositoryId: 40,
+    type: 'url',
+    name: 'Legacy URL',
+    source: 'https://example.com/legacy',
+    metadata: {},
+    currentVersionId: null,
+    processingStatus: 'failed',
+    processingError: 'Legacy URL processing failed. Retry this item.',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  }])
+
+  const result = await mod.listRepositoryItems(40)
+
+  expect(result.isSuccess).toBe(true)
+  expect(result.data).toEqual([
+    expect.objectContaining({
+      id: 122,
+      processingError: 'Legacy URL processing failed. Retry this item.',
+      canRetry: true,
+    }),
+  ])
+})
+
+it('does not expose the version-less legacy retry control to a non-manager', async () => {
+  mockCanModifyRepository.mockResolvedValue(false)
+  mockGetRepositoryItems.mockResolvedValue([{
+    id: 123,
+    repositoryId: 40,
+    type: 'url',
+    name: 'Legacy URL',
+    source: 'https://example.com/legacy',
+    metadata: {},
+    currentVersionId: null,
+    processingStatus: 'failed',
+    processingError: 'Legacy URL processing failed. Retry this item.',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  }])
+
+  const result = await mod.listRepositoryItems(40)
+
+  expect(result.isSuccess).toBe(true)
+  expect(result.data).toEqual([
+    expect.objectContaining({
+      id: 123,
       processingError: null,
       canRetry: false,
     }),

@@ -42,6 +42,7 @@ import {
   deleteRepositoryItemStorage,
   dispatchContentProcessingJob,
   getCanonicalRepositoryItemStatuses,
+  isRetryableLegacyItemFailure,
   isCanonicalUploadContentType,
   isRepositorySourceObjectKey,
   registerCanonicalText,
@@ -1274,8 +1275,10 @@ export async function listRepositoryItems(
           : null,
         canRetry: canManageRepository
           ? canonical?.canRetry ??
-            (item.processingStatus === "failed" &&
-              item.processingError?.startsWith("Canonical content registration failed") === true)
+            isRetryableLegacyItemFailure(
+              item.processingStatus,
+              item.processingError,
+            )
           : false,
         createdAt: item.createdAt ?? new Date(),
         updatedAt: item.updatedAt ?? new Date()

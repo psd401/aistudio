@@ -26,6 +26,29 @@ export interface CanonicalRepositoryItemStatus {
   canRetry: boolean;
 }
 
+/** Legacy/pre-canonical failure messages a repository manager can retry through the canonical pipeline. */
+export const RETRYABLE_LEGACY_FAILURE_PREFIXES = [
+  "Canonical content registration failed",
+  "Canonical URL snapshot failed",
+  "Legacy URL processing failed",
+  "Canonical content processing does not support",
+  "Content processing never started",
+] as const;
+
+export function isRetryableLegacyItemFailure(
+  processingStatus: string | null,
+  processingError: string | null,
+): boolean {
+  return (
+    (processingStatus === "failed" ||
+      processingStatus === "embedding_failed") &&
+    processingError !== null &&
+    RETRYABLE_LEGACY_FAILURE_PREFIXES.some((prefix) =>
+      processingError.startsWith(prefix),
+    )
+  );
+}
+
 interface CanonicalStatusRow {
   itemId: number;
   versionStatus: "pending" | "processing" | "completed" | "failed" | "cancelled";
