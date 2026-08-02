@@ -1,5 +1,9 @@
 import { sql, type SQL } from "drizzle-orm";
-import { executeTransaction, toPgRows } from "@/lib/db/drizzle-client";
+import {
+  executeTransaction,
+  toPgRows,
+  type DbTransaction,
+} from "@/lib/db/drizzle-client";
 
 export const SUPERSEDED_GENERATION_RETENTION_HOURS = 24;
 export const SUPERSEDED_GENERATION_KEEP_PER_REPOSITORY = 3;
@@ -65,6 +69,77 @@ function integerArray(values: number[]): SQL {
     values.map((value) => sql`${value}`),
     sql`, `,
   )}]::integer[]`;
+}
+
+async function lockAndSelectRepositoryProbe(
+  tx: DbTransaction,
+  repositoryBatchSize: number,
+): Promise<number[]> {
+  await tx.execute(sql`
+    INSERT INTO settings (key, value, description, category, is_secret)
+    VALUES (
+      ${GENERATION_GC_CURSOR_SETTING_KEY},
+      '0',
+      'Internal checkpoint: last repository ID probed by generation retention',
+      'repositories',
+      false
+    )
+    ON CONFLICT (key) DO NOTHING
+  `);
+
+  const cursorResult = await tx.execute(sql`
+    SELECT CASE
+             WHEN value ~ '^[0-9]{1,10}$'
+               THEN LEAST(value::numeric, 2147483647)::integer
+             ELSE 0
+           END AS repository_id
+    FROM settings
+    WHERE key = ${GENERATION_GC_CURSOR_SETTING_KEY}
+    FOR UPDATE
+  `);
+  const [cursorRow] = toPgRows<RepositoryProbeCursorRow>(cursorResult);
+  const repositoryProbeCursor = cursorRow?.repository_id ?? 0;
+
+  const probeResult = await tx.execute(sql`
+    WITH forward_probe AS MATERIALIZED (
+      SELECT repository.id, 0 AS probe_segment
+      FROM knowledge_repositories repository
+      WHERE repository.id > ${repositoryProbeCursor}
+      ORDER BY repository.id
+      LIMIT ${repositoryBatchSize}
+    ),
+    wrapped_probe AS MATERIALIZED (
+      SELECT repository.id, 1 AS probe_segment
+      FROM knowledge_repositories repository
+      WHERE repository.id <= ${repositoryProbeCursor}
+      ORDER BY repository.id
+      LIMIT ${repositoryBatchSize}
+    )
+    SELECT probe.id
+    FROM (
+      SELECT * FROM forward_probe
+      UNION ALL
+      SELECT * FROM wrapped_probe
+    ) probe
+    ORDER BY probe.probe_segment, probe.id
+    LIMIT ${repositoryBatchSize}
+  `);
+  return toPgRows<RepositoryProbeRow>(probeResult).map((row) => row.id);
+}
+
+async function advanceRepositoryProbeCursor(
+  tx: DbTransaction,
+  repositoryIds: number[],
+): Promise<void> {
+  const lastRepositoryId = repositoryIds.at(-1);
+  if (lastRepositoryId === undefined) return;
+
+  await tx.execute(sql`
+    UPDATE settings
+    SET value = ${lastRepositoryId.toString()},
+        updated_at = statement_timestamp()
+    WHERE key = ${GENERATION_GC_CURSOR_SETTING_KEY}
+  `);
 }
 
 function eligibleGenerationCtes(params: {
@@ -223,57 +298,9 @@ export async function collectSupersededRepositoryGenerations(
   ).toISOString();
   return executeTransaction(
     async (tx) => {
-      await tx.execute(sql`
-        INSERT INTO settings (key, value, description, category, is_secret)
-        VALUES (
-          ${GENERATION_GC_CURSOR_SETTING_KEY},
-          '0',
-          'Internal checkpoint: last repository ID probed by generation retention',
-          'repositories',
-          false
-        )
-        ON CONFLICT (key) DO NOTHING
-      `);
-
-      const cursorResult = await tx.execute(sql`
-        SELECT CASE
-                 WHEN value ~ '^[0-9]{1,10}$'
-                   THEN LEAST(value::numeric, 2147483647)::integer
-                 ELSE 0
-               END AS repository_id
-        FROM settings
-        WHERE key = ${GENERATION_GC_CURSOR_SETTING_KEY}
-        FOR UPDATE
-      `);
-      const [cursorRow] = toPgRows<RepositoryProbeCursorRow>(cursorResult);
-      const repositoryProbeCursor = cursorRow?.repository_id ?? 0;
-
-      const probeResult = await tx.execute(sql`
-        WITH forward_probe AS MATERIALIZED (
-          SELECT repository.id, 0 AS probe_segment
-          FROM knowledge_repositories repository
-          WHERE repository.id > ${repositoryProbeCursor}
-          ORDER BY repository.id
-          LIMIT ${repositoryBatchSize}
-        ),
-        wrapped_probe AS MATERIALIZED (
-          SELECT repository.id, 1 AS probe_segment
-          FROM knowledge_repositories repository
-          WHERE repository.id <= ${repositoryProbeCursor}
-          ORDER BY repository.id
-          LIMIT ${repositoryBatchSize}
-        )
-        SELECT probe.id
-        FROM (
-          SELECT * FROM forward_probe
-          UNION ALL
-          SELECT * FROM wrapped_probe
-        ) probe
-        ORDER BY probe.probe_segment, probe.id
-        LIMIT ${repositoryBatchSize}
-      `);
-      const repositoryIds = toPgRows<RepositoryProbeRow>(probeResult).map(
-        (row) => row.id,
+      const repositoryIds = await lockAndSelectRepositoryProbe(
+        tx,
+        repositoryBatchSize,
       );
 
       // Keep the phases as sequential statements: sibling data-modifying CTEs
@@ -337,15 +364,7 @@ export async function collectSupersededRepositoryGenerations(
         FROM deleted_generations
       `);
 
-      const lastRepositoryId = repositoryIds.at(-1);
-      if (lastRepositoryId !== undefined) {
-        await tx.execute(sql`
-          UPDATE settings
-          SET value = ${lastRepositoryId.toString()},
-              updated_at = statement_timestamp()
-          WHERE key = ${GENERATION_GC_CURSOR_SETTING_KEY}
-        `);
-      }
+      await advanceRepositoryProbeCursor(tx, repositoryIds);
 
       return {
         chunksDeleted: deletedCount(chunksResult),
