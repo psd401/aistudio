@@ -33,6 +33,9 @@ const MAX_CONTENT_ID_LENGTH = 200;
 const MAX_PAYLOAD_BYTES = 8 * 1024;
 // Independent work cap for structural validation; it is not a byte-budget alias.
 const MAX_PAYLOAD_VALUES = 8_192;
+// Include original strings and keys that JSON.stringify would omit so lossy
+// inputs cannot bypass the serialized byte limit and force unbounded scanning.
+const MAX_PAYLOAD_STRING_CODE_UNITS = MAX_PAYLOAD_BYTES;
 const DEFAULT_LIST_LIMIT = 50;
 const MAX_LIST_LIMIT = 200;
 const SUBMIT_RATE_LIMIT = 120;
@@ -209,6 +212,19 @@ function validateJsonValue(value: unknown): void {
   const pending: unknown[] = [value];
   const seen = new WeakSet<object>();
   let discoveredValues = 1;
+  let discoveredStringCodeUnits = 0;
+
+  const validateBoundedString = (next: string): void => {
+    discoveredStringCodeUnits += next.length;
+    if (discoveredStringCodeUnits > MAX_PAYLOAD_STRING_CODE_UNITS) {
+      throw ErrorFactories.invalidInput(
+        "payload",
+        null,
+        "payload contains too much string data"
+      );
+    }
+    validateJsonString(next);
+  };
 
   const enqueue = (next: unknown): void => {
     discoveredValues += 1;
@@ -228,7 +244,7 @@ function validateJsonValue(value: unknown): void {
       continue;
     }
     if (typeof current === "string") {
-      validateJsonString(current);
+      validateBoundedString(current);
       continue;
     }
     if (typeof current === "number" && Number.isFinite(current)) {
@@ -260,7 +276,7 @@ function validateJsonValue(value: unknown): void {
     const record = current as Record<string, unknown>;
     for (const key in record) {
       if (Object.prototype.hasOwnProperty.call(record, key)) {
-        validateJsonString(key);
+        validateBoundedString(key);
         enqueue(record[key]);
       }
     }

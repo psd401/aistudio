@@ -359,6 +359,24 @@ describe("submitArtifactRecord validation", () => {
   });
 });
 
+describe("submitArtifactRecord original string bounds", () => {
+  it("bounds omitted object-key scanning by original string length", async () => {
+    const payload = {
+      ["x".repeat(8 * 1024 + 1)]: undefined,
+    };
+
+    const result = await submitArtifactRecord({
+      ...validSubmitInput,
+      payload,
+    });
+
+    expect(result.isSuccess).toBe(false);
+    expect(mockGetUserRequester).not.toHaveBeenCalled();
+    expect(mockContentGet).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+});
+
 describe("artifact content id PostgreSQL compatibility", () => {
   it.each([
     ["NUL", `artifact\u0000slug`],
