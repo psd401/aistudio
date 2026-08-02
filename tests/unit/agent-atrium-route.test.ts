@@ -57,7 +57,17 @@ beforeEach(() => {
 describe("POST /api/agent/atrium", () => {
   it("requires signed authority and rejects owner selectors", async () => {
     context = null
-    expect((await POST(request({ method: "GET", path: "" }))).status).toBe(403)
+    expect(
+      (
+        await POST(
+          request({
+            method: "GET",
+            path: "/content-1/data",
+            query: { namespace: "leaderboard" },
+          })
+        )
+      ).status
+    ).toBe(403)
     context = {
       ownerEmail: "owner@psd401.net",
       actorEmail: "owner@psd401.net",
@@ -117,6 +127,25 @@ describe("POST /api/agent/atrium", () => {
     )
   })
 
+  it("admits an owner-bound artifact data read and forwards its bounds", async () => {
+    const response = await POST(
+      request({
+        method: "GET",
+        path: "/content-1/data",
+        query: { namespace: "leaderboard", limit: "200" },
+      })
+    )
+
+    expect(response.status).toBe(200)
+    expect(executeOwnerAtriumOperationMock).toHaveBeenCalledWith({
+      ownerEmail: "owner@psd401.net",
+      requestId: "request-test",
+      method: "GET",
+      path: "/content-1/data",
+      query: { namespace: "leaderboard", limit: "200" },
+    })
+  })
+
   it.each([
     ["POST", "/content-1/publish/public_web"],
     ["GET", "/content-1/../../admin"],
@@ -133,6 +162,9 @@ describe("POST /api/agent/atrium", () => {
     ["PATCH", "/content-1/assets"],
     ["DELETE", "/collections/content-1"],
     ["PATCH", "/collections/content-1/archive"],
+    ["POST", "/content-1/data"],
+    ["PATCH", "/content-1/data"],
+    ["DELETE", "/content-1/data"],
   ])("rejects operation %s %s outside the fixed API surface", async (method, path) => {
     const response = await POST(request({ method, path }))
     expect(response.status).toBe(400)

@@ -12,6 +12,8 @@ const ALLOWED_QUERY_KEYS = new Set([
   "tag",
   "query",
   "since",
+  "namespace",
+  "limit",
 ])
 const IDENTIFIER = "[A-Za-z0-9%._~-]{1,384}"
 
@@ -30,6 +32,7 @@ const ALLOWED_PATHS: Record<AtriumBody["method"], readonly RegExp[]> = {
     // Committed markdown source — the ONLY way an agent can read a document's
     // body text (`GET /<id>` returns bodyLocation "proof" with no text).
     new RegExp(`^/${IDENTIFIER}/source$`),
+    new RegExp(`^/${IDENTIFIER}/data$`),
     // Authored image assets (#1284): metadata list, plus a bounded
     // base64 byte read so an agent can copy an image between objects.
     new RegExp(`^/${IDENTIFIER}/assets$`),
