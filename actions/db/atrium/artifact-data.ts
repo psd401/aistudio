@@ -217,11 +217,11 @@ function validateJsonValue(value: unknown): void {
 
   while (pending.length > 0) {
     const current = pending.pop();
-    if (
-      current === null ||
-      typeof current === "string" ||
-      typeof current === "boolean"
-    ) {
+    if (current === null || typeof current === "boolean") {
+      continue;
+    }
+    if (typeof current === "string") {
+      validateJsonString(current);
       continue;
     }
     if (typeof current === "number" && Number.isFinite(current)) {
@@ -253,9 +253,31 @@ function validateJsonValue(value: unknown): void {
     const record = current as Record<string, unknown>;
     for (const key in record) {
       if (Object.prototype.hasOwnProperty.call(record, key)) {
+        validateJsonString(key);
         enqueue(record[key]);
       }
     }
+  }
+}
+
+function validateJsonString(value: string): void {
+  let hasInvalidSurrogate = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xDC00 && next <= 0xDFFF)) hasInvalidSurrogate = true;
+      else index += 1;
+    } else if (code >= 0xDC00 && code <= 0xDFFF) {
+      hasInvalidSurrogate = true;
+    }
+  }
+  if (value.includes("\u0000") || hasInvalidSurrogate) {
+    throw ErrorFactories.invalidInput(
+      "payload",
+      null,
+      "payload strings and object keys must use PostgreSQL-compatible Unicode"
+    );
   }
 }
 

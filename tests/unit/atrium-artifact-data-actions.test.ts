@@ -357,6 +357,25 @@ describe("submitArtifactRecord validation", () => {
   });
 });
 
+describe("submitArtifactRecord PostgreSQL JSON compatibility", () => {
+  it.each([
+    ["NUL string value", { value: "before\u0000after" }],
+    ["NUL object key", { ["before\u0000after"]: 42 }],
+    ["unpaired high surrogate", { value: "\uD800" }],
+    ["unpaired low-surrogate key", { ["\uDC00"]: 42 }],
+  ])("rejects PostgreSQL-incompatible %s", async (_label, payload) => {
+    const result = await submitArtifactRecord({
+      ...validSubmitInput,
+      payload,
+    });
+
+    expect(result.isSuccess).toBe(false);
+    expect(mockGetUserRequester).not.toHaveBeenCalled();
+    expect(mockContentGet).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+});
+
 describe("listArtifactRecords", () => {
   it("returns server-resolved names without exposing email identifiers", async () => {
     mockLimit.mockResolvedValueOnce([
