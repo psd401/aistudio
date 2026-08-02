@@ -87,8 +87,12 @@ const RENDER_RETRY_MS = 300;
 const RENDER_MAX_ATTEMPTS = 40;
 /** Keep a hostile artifact from queueing unbounded server-action work. */
 const MAX_IN_FLIGHT_DATA_REQUESTS = 8;
+const MAX_DATA_PAYLOAD_BYTES = 8 * 1024;
+const MAX_DATA_PAYLOAD_VALUES = 8_192;
+const MAX_DATA_PAYLOAD_STRING_CODE_UNITS = MAX_DATA_PAYLOAD_BYTES;
 /** One response for every bridge failure; never expose action or database detail. */
 const DATA_BRIDGE_ERROR_MESSAGE = "Artifact data request failed";
+const DATA_NAMESPACE_RE = /^[a-z0-9_-]{1,64}$/;
 const REQUEST_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -176,6 +180,96 @@ function isSubmitPayload(payload: unknown): payload is ArtifactDataPayload {
   return typeof payload === "object" && payload !== null && !Array.isArray(payload);
 }
 
+function isPlainJsonObject(value: object): boolean {
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+/**
+ * Bound parent-side work before Next serializes a payload for the Server Action.
+ * The action remains the authority and repeats its full validation; this mirror
+ * prevents an artifact from using the action transport itself as an oversized
+ * allocation/traffic amplifier.
+ */
+function hasBoundedJsonStructure(value: unknown): boolean {
+  type ValidationFrame =
+    | { kind: "value"; value: unknown }
+    | { kind: "leave"; value: object };
+
+  const pending: ValidationFrame[] = [{ kind: "value", value }];
+  const activePath = new WeakSet<object>();
+  let discoveredValues = 1;
+  let discoveredStringCodeUnits = 0;
+
+  const countString = (next: string): void => {
+    discoveredStringCodeUnits += next.length;
+    if (discoveredStringCodeUnits > MAX_DATA_PAYLOAD_STRING_CODE_UNITS) {
+      throw new Error("payload string bound exceeded");
+    }
+  };
+  const enqueue = (next: unknown): void => {
+    discoveredValues += 1;
+    if (discoveredValues > MAX_DATA_PAYLOAD_VALUES) {
+      throw new Error("payload value bound exceeded");
+    }
+    pending.push({ kind: "value", value: next });
+  };
+  const enterContainer = (next: object): void => {
+    if (activePath.has(next)) throw new Error("payload cycle");
+    activePath.add(next);
+    pending.push({ kind: "leave", value: next });
+  };
+
+  try {
+    while (pending.length > 0) {
+      const frame = pending.pop()!;
+      if (frame.kind === "leave") {
+        activePath.delete(frame.value);
+        continue;
+      }
+
+      const current = frame.value;
+      if (current === null || typeof current === "boolean") continue;
+      if (typeof current === "string") {
+        countString(current);
+        continue;
+      }
+      if (typeof current === "number" && Number.isFinite(current)) continue;
+      if (typeof current !== "object") return false;
+
+      if (Array.isArray(current)) {
+        enterContainer(current);
+        for (const item of current) enqueue(item);
+        continue;
+      }
+
+      if (!isPlainJsonObject(current)) return false;
+      enterContainer(current);
+      const record = current as Record<string, unknown>;
+      for (const key in record) {
+        if (Object.prototype.hasOwnProperty.call(record, key)) {
+          countString(key);
+          enqueue(record[key]);
+        }
+      }
+    }
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+function isPayloadWithinBridgeBounds(payload: ArtifactDataPayload): boolean {
+  if (!hasBoundedJsonStructure(payload)) return false;
+  try {
+    const serialized = JSON.stringify(payload);
+    if (!serialized || serialized.length > MAX_DATA_PAYLOAD_BYTES) return false;
+    return new TextEncoder().encode(serialized).byteLength <= MAX_DATA_PAYLOAD_BYTES;
+  } catch {
+    return false;
+  }
+}
+
 function hasValidListOptions(candidate: Record<string, unknown>): boolean {
   const validLimit =
     candidate.limit === undefined ||
@@ -249,6 +343,9 @@ function useArtifactDataBridge({
       if (
         !dataBridgeEnabled ||
         !contentId ||
+        !DATA_NAMESPACE_RE.test(request.namespace) ||
+        (request.op === "submit" &&
+          !isPayloadWithinBridgeBounds(request.payload)) ||
         inFlightDataRequestsRef.current >= MAX_IN_FLIGHT_DATA_REQUESTS
       ) {
         frameWindow.postMessage(dataBridgeFailure(request.requestId), "*");

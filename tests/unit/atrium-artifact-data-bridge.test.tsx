@@ -207,6 +207,29 @@ describe("ArtifactSandbox artifact data bridge", () => {
 });
 
 describe("ArtifactSandbox artifact data bridge failure controls", () => {
+  it("rejects an oversized payload before invoking or serializing a Server Action", async () => {
+    const { frameWindow, postMessage } = mountSandbox(true);
+    const request = {
+      ...submitRequest(REQUEST_IDS[0]),
+      payload: { value: "x".repeat(8 * 1024 + 1) },
+    };
+
+    await sendMessage(request, frameWindow);
+
+    expect(submitArtifactRecordMock).not.toHaveBeenCalled();
+    expect(dataResponses(postMessage)).toEqual([
+      {
+        message: {
+          type: "atrium-artifact-data-response",
+          requestId: REQUEST_IDS[0],
+          ok: false,
+          error: "Artifact data request failed",
+        },
+        targetOrigin: "*",
+      },
+    ]);
+  });
+
   it("refuses every request when disabled and never invokes either action", async () => {
     const { frameWindow, postMessage } = mountSandbox(false);
 
