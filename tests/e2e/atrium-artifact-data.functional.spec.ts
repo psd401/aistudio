@@ -17,12 +17,23 @@ interface CreatedContentResponse {
   };
 }
 
-interface ListedContentResponse {
-  data?: unknown;
+interface ContentLookupResponse {
+  data?: {
+    id?: unknown;
+    kind?: unknown;
+    title?: unknown;
+    version?: {
+      bodyInline?: unknown;
+    } | null;
+  };
 }
 
 function isUuid(value: unknown): value is string {
   return typeof value === "string" && UUID_PATTERN.test(value);
+}
+
+function artifactFixtureBody(title: string): string {
+  return `<p>Artifact data E2E probe for ${title}</p>`;
 }
 
 async function createPrivateArtifact(
@@ -34,7 +45,7 @@ async function createPrivateArtifact(
     data: {
       kind: "artifact",
       title,
-      body: "<p>Artifact data E2E probe</p>",
+      body: artifactFixtureBody(title),
       bodyFormat: "html",
     },
   });
@@ -51,79 +62,55 @@ async function createPrivateArtifact(
   return body.data.id;
 }
 
-function isListedContentItem(
-  value: unknown
-): value is { id: string; title: string } {
-  if (typeof value !== "object" || value === null) return false;
-  const item = value as Record<string, unknown>;
-  return typeof item.id === "string" && typeof item.title === "string";
-}
-
-async function findArtifactIdsByTitle(
-  page: import("@playwright/test").Page,
-  title: string
-): Promise<string[] | undefined> {
-  const response = await page.request.get(
-    "/api/v1/content?kind=artifact&query=" + encodeURIComponent(title)
-  );
-  expect
-    .soft(
-      response.ok(),
-      "Artifact fallback lookup returned HTTP " + response.status()
-    )
-    .toBe(true);
-  if (!response.ok()) return undefined;
-
-  const body = (await response.json()) as ListedContentResponse;
-  if (!Array.isArray(body.data)) return undefined;
-  return body.data
-    .filter(
-      (item): item is { id: string; title: string } =>
-        isListedContentItem(item) && item.title === title
-    )
-    .map((item) => item.id);
-}
-
 async function cleanupArtifact(
   page: import("@playwright/test").Page | undefined,
   contentId: string | undefined,
   title: string
 ): Promise<void> {
-  if (!page) return;
+  if (!page || !contentId) return;
   try {
-    // The exact-title lookup is authoritative: a malformed create response
-    // must never make teardown delete an unrelated object by returned ID.
-    const cleanupIds = await findArtifactIdsByTitle(page, title);
-    if (!cleanupIds) return;
+    expect
+      .soft(isUuid(contentId), "Captured artifact fixture ID was not a UUID")
+      .toBe(true);
+    if (!isUuid(contentId)) return;
+
+    // Never delete solely because create returned an ID. First prove that the
+    // UUID-addressed, owner-visible object carries this test's unique title and
+    // body marker. If create did not return a trustworthy UUID, the recognized
+    // `E2E ` title prefix leaves the orphan recoverable by db:cleanup:e2e.
+    const lookupResponse = await page.request.get(
+      "/api/v1/content/" + contentId
+    );
     expect
       .soft(
-        cleanupIds.length,
-        "Artifact cleanup requires one unambiguous exact-title fixture"
+        lookupResponse.ok(),
+        "Artifact cleanup lookup returned HTTP " + lookupResponse.status()
       )
-      .toBe(1);
-    if (cleanupIds.length !== 1) return;
-    const [cleanupId] = cleanupIds;
-    expect
-      .soft(isUuid(cleanupId), "Exact-title fixture did not have a UUID id")
       .toBe(true);
-    if (!isUuid(cleanupId)) return;
-    if (contentId && contentId !== cleanupId) {
-      expect
-        .soft(
-          contentId,
-          "Create response ID did not match the exact-title fixture"
-        )
-        .toBe(cleanupId);
-      return;
-    }
-    const response = await page.request.delete("/api/v1/content/" + cleanupId);
+    if (!lookupResponse.ok()) return;
+
+    const lookupBody = (await lookupResponse.json()) as ContentLookupResponse;
+    const isExpectedFixture =
+      lookupBody.data?.id === contentId &&
+      lookupBody.data.kind === "artifact" &&
+      lookupBody.data.title === title &&
+      lookupBody.data.version?.bodyInline === artifactFixtureBody(title);
+    expect
+      .soft(
+        isExpectedFixture,
+        "UUID-addressed content did not match the artifact fixture markers"
+      )
+      .toBe(true);
+    if (!isExpectedFixture) return;
+
+    const response = await page.request.delete("/api/v1/content/" + contentId);
     expect
       .soft(
         response.ok(),
         "Artifact cleanup returned HTTP " +
           response.status() +
           " for " +
-          cleanupId
+          contentId
       )
       .toBe(true);
   } catch (error) {
@@ -181,7 +168,7 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
     const context = await browser.newContext();
     let page: import("@playwright/test").Page | undefined;
     let contentId: string | undefined;
-    const marker = `E2E artifact-data-${Date.now()}`;
+    const marker = `E2E artifact-data-${crypto.randomUUID()}`;
 
     try {
       await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB);
@@ -220,7 +207,7 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
     const context = await browser.newContext();
     let page: import("@playwright/test").Page | undefined;
     let contentId: string | undefined;
-    const marker = `E2E artifact-data-unauthenticated-${Date.now()}`;
+    const marker = `E2E artifact-data-unauthenticated-${crypto.randomUUID()}`;
 
     try {
       await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB);
@@ -288,7 +275,7 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
     const ownerContext = await browser.newContext();
     let ownerPage: import("@playwright/test").Page | undefined;
     let contentId: string | undefined;
-    const title = `E2E artifact-data-private-${Date.now()}`;
+    const title = `E2E artifact-data-private-${crypto.randomUUID()}`;
 
     try {
       await authenticateContext(
