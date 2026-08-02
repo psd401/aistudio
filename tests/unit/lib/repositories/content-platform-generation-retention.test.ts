@@ -101,6 +101,7 @@ describe("superseded repository generation retention", () => {
       expect(compiled.sql).toContain(
         "ORDER BY oldest_candidate.superseded_at",
       );
+      expect(compiled.sql).toContain("ORDER BY generation.superseded_at");
       expect(compiled.sql).toContain("candidate_generation.superseded_at <");
       expect(compiled.sql).not.toContain("generation.created_at <");
       expect(compiled.sql).toContain(

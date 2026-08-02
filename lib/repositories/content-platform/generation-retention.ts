@@ -140,7 +140,9 @@ function eligibleGenerationCtes(params: {
       SELECT generation.id
       FROM eligible_repositories repository
       CROSS JOIN LATERAL (
-        SELECT candidate_generation.id
+        SELECT candidate_generation.id,
+               candidate_generation.superseded_at,
+               candidate_generation.created_at
         FROM repository_index_generations candidate_generation
         WHERE candidate_generation.repository_id = repository.id
           AND candidate_generation.status = 'superseded'
@@ -163,6 +165,10 @@ function eligibleGenerationCtes(params: {
         FOR UPDATE OF candidate_generation SKIP LOCKED
         LIMIT ${params.perRepositoryGenerationBatchSize}
       ) generation
+      ORDER BY generation.superseded_at,
+               generation.created_at,
+               generation.id,
+               repository.id
       LIMIT ${params.generationBatchSize}
     )
   `;
@@ -225,6 +231,9 @@ export async function collectSupersededRepositoryGenerations(
 
   return executeTransaction(
     async (tx) => {
+      // Keep the phases as sequential statements: sibling data-modifying CTEs
+      // share one snapshot, so a combined statement would not see chunk deletes
+      // when deciding whether a generation is childless.
       const chunksResult = await tx.execute(sql`
         WITH ${eligibleGenerationCtes({
           eligibleBefore,
