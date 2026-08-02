@@ -1066,6 +1066,11 @@ export class EcsServiceConstruct extends Construct {
       // ECS service's authoritative auth origin so deployed links are never
       // relative or dependent on a separately hand-managed value.
       ATRIUM_PUBLIC_BASE_URL: props.authUrl,
+      // Absolute origin the agent broker (/api/agent/aistudio) uses to build the
+      // internal /api/mcp URL. Required — the route throws when it is unset, so
+      // every aistudio-MCP skill call fails closed without it. Same authoritative
+      // origin as AUTH_URL; the broker also enforces HTTPS.
+      APP_BASE_URL: props.authUrl,
       AUTH_COGNITO_CLIENT_ID: props.cognitoClientId,
       AUTH_COGNITO_ISSUER: props.cognitoIssuer,
       // Legacy RDS Data API variables (kept for backward compatibility during migration)
