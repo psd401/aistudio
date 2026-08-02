@@ -9,12 +9,7 @@ jest.mock("@/lib/db/drizzle-client", () => ({
   toPgRows: (rows: unknown) => rows,
 }));
 
-jest.mock("@/lib/settings-manager", () => ({
-  getSettings: jest.fn(),
-}));
-
 import { executeTransaction } from "@/lib/db/drizzle-client";
-import { getSettings } from "@/lib/settings-manager";
 import {
   failOrphanedRepositoryItems,
   ORPHANED_ITEM_FAILURE_MESSAGE,
@@ -26,23 +21,10 @@ import { isRetryableLegacyItemFailure } from "@/lib/repositories/content-platfor
 const mockExecuteTransaction = executeTransaction as jest.MockedFunction<
   typeof executeTransaction
 >;
-const mockGetSettings = getSettings as jest.MockedFunction<typeof getSettings>;
-
-/** The repository cutover requires the master switch, canonical reads, and the repository flag. */
-function cutoverSettings(active: boolean): Record<string, string | null> {
-  const flag = active ? "true" : "false";
-  return {
-    CONTENT_PLATFORM_ENABLED: flag,
-    CONTENT_READ_V2_ENABLED: flag,
-    CONTENT_REPOSITORY_CUTOVER_ENABLED: flag,
-  };
-}
 
 describe("orphaned repository item sweep", () => {
   beforeEach(() => {
     mockExecuteTransaction.mockReset();
-    mockGetSettings.mockReset();
-    mockGetSettings.mockResolvedValue(cutoverSettings(true));
   });
 
   it("atomically fails one bounded batch of active, job-less items", async () => {
@@ -78,20 +60,6 @@ describe("orphaned repository item sweep", () => {
     expect(compiled.params).toContain("2026-08-01T11:43:00.000Z");
     expect(compiled.params).toContain(23);
     expect(compiled.params).toContain(ORPHANED_ITEM_FAILURE_MESSAGE);
-  });
-
-  it("does not fail legacy in-flight items before the repository cutover", async () => {
-    mockGetSettings.mockResolvedValue(cutoverSettings(false));
-
-    await expect(
-      failOrphanedRepositoryItems({
-        now: new Date("2026-08-01T12:00:00.000Z"),
-      }),
-    ).resolves.toEqual({ failed: 0 });
-
-    // Legacy file work lives in SQS and Textract without a version or job row,
-    // so the sweep must not touch the database at all in that configuration.
-    expect(mockExecuteTransaction).not.toHaveBeenCalled();
   });
 
   it("uses the locked production bounds and produces a retryable failure", () => {

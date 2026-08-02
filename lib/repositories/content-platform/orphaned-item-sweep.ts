@@ -3,10 +3,6 @@ import {
   executeTransaction,
   toPgRows,
 } from "@/lib/db/drizzle-client";
-import {
-  getContentPlatformConfig,
-  isCanonicalRepositoryUploadActive,
-} from "./config";
 
 export const ORPHANED_ITEM_SWEEP_MINUTES = 60;
 export const ORPHANED_ITEM_SWEEP_BATCH = 100;
@@ -37,24 +33,10 @@ function requirePositiveInteger(value: number, name: string): number {
  * Fail one bounded batch of pre-canonical items whose registration never
  * created a current version or processing job. Locked rows are skipped so
  * overlapping scheduled invocations cannot claim the same item.
- *
- * The sweep only runs after the repository cutover. Before it, the legacy
- * pipeline owns processing and its live work is invisible to this predicate:
- * queued file work lives in SQS, OCR continues asynchronously through Textract,
- * and neither writes a `repository_item_versions` or `repository_processing_jobs`
- * row. Age alone would then mark a slow-but-healthy queue or a long OCR as
- * failed and let the UI start a competing canonical retry before the original
- * worker wrote its result. Once canonical registration is unconditional, every
- * active item is expected to carry a version, so a version-less item past the
- * age bound really is a registration that never started.
  */
 export async function failOrphanedRepositoryItems(
   options: FailOrphanedRepositoryItemsOptions = {},
 ): Promise<{ failed: number }> {
-  if (!isCanonicalRepositoryUploadActive(await getContentPlatformConfig())) {
-    return { failed: 0 };
-  }
-
   const now = options.now ?? new Date();
   const minimumAgeMinutes = requirePositiveInteger(
     options.minimumAgeMinutes ?? ORPHANED_ITEM_SWEEP_MINUTES,

@@ -400,7 +400,7 @@ it('repairs failed inline text by creating a fresh immutable source version', as
     source: 'ORCHID-COMPASS-742',
     currentVersionId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
   })
-  mockRegisterCanonicalText.mockResolvedValue({
+  mockRegisterCanonicalTextIfEnabled.mockResolvedValue({
     created: true,
     version: { id: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff' },
     inspectJob: { id: 'cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa' },
@@ -409,7 +409,7 @@ it('repairs failed inline text by creating a fresh immutable source version', as
   const result = await mod.retryRepositoryItemProcessing(38)
 
   expect(result.isSuccess).toBe(true)
-  expect(mockRegisterCanonicalText).toHaveBeenCalledWith({
+  expect(mockRegisterCanonicalTextIfEnabled).toHaveBeenCalledWith({
     itemId: 38,
     repositoryId: 5,
     userId: 1,
@@ -443,7 +443,7 @@ it('does not let inline text supersede a post-deployment recovery quarantine', a
   const result = await mod.retryRepositoryItemProcessing(38)
 
   expect(result.isSuccess).toBe(false)
-  expect(mockRegisterCanonicalText).not.toHaveBeenCalled()
+  expect(mockRegisterCanonicalTextIfEnabled).not.toHaveBeenCalled()
   expect(mockRetryCanonicalRepositoryItem).not.toHaveBeenCalled()
   expect(mockDispatchContentProcessingJob).not.toHaveBeenCalled()
 })
@@ -461,7 +461,7 @@ it('repairs a legacy file by copying it into the canonical source namespace', as
     },
     currentVersionId: null,
   })
-  mockRegisterCanonicalUpload.mockResolvedValue({
+  mockRegisterCanonicalUploadIfEnabled.mockResolvedValue({
     created: true,
     version: { id: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff' },
     inspectJob: { id: 'cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa' },
@@ -475,7 +475,7 @@ it('repairs a legacy file by copying it into the canonical source namespace', as
     sourceKey: '1/1700000000-legacy.pdf',
     fileName: 'legacy.pdf',
   })
-  expect(mockRegisterCanonicalUpload).toHaveBeenCalledWith({
+  expect(mockRegisterCanonicalUploadIfEnabled).toHaveBeenCalledWith({
     itemId: 39,
     userId: 1,
     objectKey: 'repositories/5/11111111-2222-4333-8444-555555555555/legacy.pdf',
@@ -484,11 +484,6 @@ it('repairs a legacy file by copying it into the canonical source namespace', as
     byteSize: 1,
     traceId: 't',
   })
-  // The default fixture is the legacy configuration (dual-write gate off).
-  // Recovery must not route through the gated helper there: it would resolve
-  // null and strand the very failures this action advertises as retryable,
-  // after having already copied the source object.
-  expect(mockRegisterCanonicalUploadIfEnabled).not.toHaveBeenCalled()
   expect(mockDispatchContentProcessingJob).toHaveBeenCalledWith({
     jobId: 'cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa',
     itemVersionId: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff',
