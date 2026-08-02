@@ -11,6 +11,7 @@ export const GENERATION_GC_CHUNK_BATCH = 20_000;
 export const GENERATION_GC_REPOSITORY_BATCH = 200;
 export const GENERATION_GC_GENERATION_BATCH = 200;
 export const GENERATION_GC_PER_REPOSITORY_BATCH = 10;
+export const GENERATION_GC_TIMESTAMP_BATCH = 200;
 
 const GENERATION_GC_CURSOR_SETTING_KEY = "REPOSITORY_GENERATION_GC_CURSOR";
 
@@ -32,12 +33,13 @@ export interface CollectSupersededRepositoryGenerationsOptions {
 }
 
 export interface SupersededGenerationCollectionResult {
+  generationsTimestamped: number;
   chunksDeleted: number;
   generationsDeleted: number;
 }
 
-interface DeletedCountRow {
-  deleted_count: number;
+interface AffectedCountRow {
+  affected_count: number;
 }
 
 interface RepositoryProbeCursorRow {
@@ -55,9 +57,9 @@ function requirePositiveInteger(value: number, name: string): number {
   return value;
 }
 
-function deletedCount(result: unknown): number {
-  const [row] = toPgRows<DeletedCountRow>(result);
-  return row?.deleted_count ?? 0;
+function affectedCount(result: unknown): number {
+  const [row] = toPgRows<AffectedCountRow>(result);
+  return row?.affected_count ?? 0;
 }
 
 function integerArray(values: number[]): SQL {
@@ -140,6 +142,35 @@ async function advanceRepositoryProbeCursor(
         updated_at = statement_timestamp()
     WHERE key = ${GENERATION_GC_CURSOR_SETTING_KEY}
   `);
+}
+
+async function backfillMissingSupersessionTimes(
+  tx: DbTransaction,
+  generationBatchSize: number,
+): Promise<number> {
+  const result = await tx.execute(sql`
+    WITH selected_generations AS MATERIALIZED (
+      SELECT generation.id
+      FROM repository_index_generations generation
+      WHERE generation.status = 'superseded'
+        AND generation.superseded_at IS NULL
+      ORDER BY generation.id
+      FOR UPDATE OF generation SKIP LOCKED
+      LIMIT ${generationBatchSize}
+    ),
+    timestamped_generations AS (
+      UPDATE repository_index_generations generation
+      SET superseded_at = clock_timestamp()
+      FROM selected_generations selected
+      WHERE generation.id = selected.id
+        AND generation.status = 'superseded'
+        AND generation.superseded_at IS NULL
+      RETURNING 1
+    )
+    SELECT count(*)::integer AS affected_count
+    FROM timestamped_generations
+  `);
+  return affectedCount(result);
 }
 
 function eligibleGenerationCtes(params: {
@@ -302,6 +333,10 @@ export async function collectSupersededRepositoryGenerations(
         tx,
         repositoryBatchSize,
       );
+      const generationsTimestamped = await backfillMissingSupersessionTimes(
+        tx,
+        Math.min(generationBatchSize, GENERATION_GC_TIMESTAMP_BATCH),
+      );
 
       // Keep the phases as sequential statements: sibling data-modifying CTEs
       // share one snapshot, so a combined statement would not see chunk deletes
@@ -327,7 +362,7 @@ export async function collectSupersededRepositoryGenerations(
           WHERE chunk.ctid = selected.row_id
           RETURNING 1
         )
-        SELECT count(*)::integer AS deleted_count
+        SELECT count(*)::integer AS affected_count
         FROM deleted_chunks
       `);
 
@@ -360,15 +395,16 @@ export async function collectSupersededRepositoryGenerations(
             )
           RETURNING 1
         )
-        SELECT count(*)::integer AS deleted_count
+        SELECT count(*)::integer AS affected_count
         FROM deleted_generations
       `);
 
       await advanceRepositoryProbeCursor(tx, repositoryIds);
 
       return {
-        chunksDeleted: deletedCount(chunksResult),
-        generationsDeleted: deletedCount(generationsResult),
+        generationsTimestamped,
+        chunksDeleted: affectedCount(chunksResult),
+        generationsDeleted: affectedCount(generationsResult),
       };
     },
     "contentPlatform.collectSupersededRepositoryGenerations",

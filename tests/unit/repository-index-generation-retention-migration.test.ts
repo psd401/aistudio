@@ -29,8 +29,8 @@ describe("migration 173 repository generation retention", () => {
     expect(migration).toContain(
       "ADD COLUMN IF NOT EXISTS superseded_at timestamptz",
     );
-    expect(migration).toContain("DEFAULT statement_timestamp()");
-    expect(migration).toContain("ALTER COLUMN superseded_at DROP DEFAULT");
+    expect(migration).not.toContain("DEFAULT statement_timestamp()");
+    expect(migration).not.toContain("ALTER COLUMN superseded_at DROP DEFAULT");
     expect(migration).toContain(
       "CREATE OR REPLACE TRIGGER trg_repository_index_generation_superseded_at",
     );
@@ -39,6 +39,9 @@ describe("migration 173 repository generation retention", () => {
     expect(migration).not.toContain("TG_OP = 'INSERT' OR OLD.status");
     expect(migration).toMatch(
       /CREATE INDEX IF NOT EXISTS\s+idx_repository_index_generations_superseded_retention/i,
+    );
+    expect(migration).toMatch(
+      /CREATE INDEX IF NOT EXISTS\s+idx_repository_index_generations_superseded_backfill/i,
     );
     expect(migration).toContain(
       "ON repository_index_generations (repository_id, superseded_at DESC, created_at DESC, id DESC)",
@@ -58,17 +61,12 @@ describe("migration 173 repository generation retention", () => {
     const triggerIndex = migration.indexOf(
       "CREATE OR REPLACE TRIGGER trg_repository_index_generation_superseded_at",
     );
-    const dropDefaultIndex = migration.indexOf(
-      "ALTER COLUMN superseded_at DROP DEFAULT",
-    );
-    const historicalBackfillIndex = migration.indexOf(
-      "SET superseded_at = clock_timestamp()",
-    );
     expect(addColumnIndex).toBeGreaterThanOrEqual(0);
     expect(triggerIndex).toBeGreaterThanOrEqual(0);
     expect(triggerIndex).toBeGreaterThan(addColumnIndex);
-    expect(dropDefaultIndex).toBeGreaterThan(triggerIndex);
-    expect(historicalBackfillIndex).toBeGreaterThan(triggerIndex);
+    expect(migration).not.toMatch(
+      /\nUPDATE repository_index_generations\s+SET superseded_at/,
+    );
     expect(migration).not.toMatch(
       /\nDROP TRIGGER IF EXISTS trg_repository_index_generation_superseded_at/,
     );

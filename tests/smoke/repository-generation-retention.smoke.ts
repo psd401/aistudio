@@ -192,10 +192,23 @@ try {
   assert.ok(freshlySuperseded.createdAt < new Date(now.getTime() - 89 * 24 * HOUR_MS));
   assert.ok(freshlySuperseded.supersededAt >= new Date(now.getTime() - HOUR_MS));
 
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryIndexGenerations)
+        .set({ supersededAt: null })
+        .where(eq(repositoryIndexGenerations.id, longLived.id)),
+    "smoke.generationRetention.simulateLegacyMissingTimestamp",
+  );
+
   await assert.doesNotReject(async () =>
     assert.deepEqual(
       await collectSupersededRepositoryGenerations({ now }),
-      { chunksDeleted: 2, generationsDeleted: 2 },
+      {
+        generationsTimestamped: 1,
+        chunksDeleted: 2,
+        generationsDeleted: 2,
+      },
     ),
   );
 

@@ -71,6 +71,9 @@ export const repositoryIndexGenerations = pgTable(
         t.id.desc()
       )
       .where(sql`${t.status} = 'superseded'`),
+    index("idx_repository_index_generations_superseded_backfill")
+      .on(t.id)
+      .where(sql`${t.status} = 'superseded' AND ${t.supersededAt} IS NULL`),
   ]
 );
 

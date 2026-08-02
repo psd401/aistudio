@@ -2022,8 +2022,13 @@ function isSqsEvent(event: SQSEvent | EventBridgeEvent<string, unknown>): event 
 
 async function runSupersededGenerationRetention(): Promise<void> {
   const result = await collectSupersededRepositoryGenerations();
-  if (result.chunksDeleted > 0 || result.generationsDeleted > 0) {
+  if (
+    result.generationsTimestamped > 0 ||
+    result.chunksDeleted > 0 ||
+    result.generationsDeleted > 0
+  ) {
     log.info("Collected superseded repository index generations", {
+      generationsTimestamped: result.generationsTimestamped,
       chunksDeleted: result.chunksDeleted,
       generationsDeleted: result.generationsDeleted,
     });

@@ -16,6 +16,7 @@ import {
   GENERATION_GC_GENERATION_BATCH,
   GENERATION_GC_PER_REPOSITORY_BATCH,
   GENERATION_GC_REPOSITORY_BATCH,
+  GENERATION_GC_TIMESTAMP_BATCH,
   SUPERSEDED_GENERATION_KEEP_PER_REPOSITORY,
   SUPERSEDED_GENERATION_RETENTION_HOURS,
 } from "@/lib/repositories/content-platform/generation-retention";
@@ -35,8 +36,9 @@ describe("superseded repository generation retention", () => {
       [],
       [{ repository_id: 950 }],
       [{ id: 1_001 }, { id: 1_300 }],
-      [{ deleted_count: 20_000 }],
-      [{ deleted_count: 17 }],
+      [{ affected_count: 12 }],
+      [{ affected_count: 20_000 }],
+      [{ affected_count: 17 }],
       [],
     ];
     const execute = jest.fn<(query: SQL) => Promise<unknown>>(async (query) => {
@@ -53,16 +55,24 @@ describe("superseded repository generation retention", () => {
     await expect(
       collectSupersededRepositoryGenerations({ now, repositoryBatchSize }),
     ).resolves.toEqual({
+      generationsTimestamped: 12,
       chunksDeleted: 20_000,
       generationsDeleted: 17,
     });
 
-    expect(queries).toHaveLength(6);
+    expect(queries).toHaveLength(7);
     const compiledQueries = queries.map((query) =>
       new PgDialect().sqlToQuery(query),
     );
-    const [cursorInsert, cursorRead, repositoryProbe, chunkDeletion, generationDeletion, cursorUpdate] =
-      compiledQueries;
+    const [
+      cursorInsert,
+      cursorRead,
+      repositoryProbe,
+      timestampBackfill,
+      chunkDeletion,
+      generationDeletion,
+      cursorUpdate,
+    ] = compiledQueries;
     expect(cursorInsert?.sql).toContain("ON CONFLICT (key) DO NOTHING");
     expect(cursorRead?.sql).toContain("FOR UPDATE");
     expect(cursorRead?.params).toContain("REPOSITORY_GENERATION_GC_CURSOR");
@@ -71,6 +81,16 @@ describe("superseded repository generation retention", () => {
     expect(repositoryProbe?.sql).toContain("ORDER BY probe.probe_segment, probe.id");
     expect(repositoryProbe?.params).toContain(950);
     expect(repositoryProbe?.params).toContain(repositoryBatchSize);
+    expect(timestampBackfill?.sql).toContain(
+      "generation.superseded_at IS NULL",
+    );
+    expect(timestampBackfill?.sql).toContain(
+      "FOR UPDATE OF generation SKIP LOCKED",
+    );
+    expect(timestampBackfill?.sql).toContain(
+      "SET superseded_at = clock_timestamp()",
+    );
+    expect(timestampBackfill?.params).toContain(GENERATION_GC_TIMESTAMP_BATCH);
     expect(cursorUpdate?.sql).toContain("UPDATE settings");
     expect(cursorUpdate?.params).toContain("1300");
     expect(chunkDeletion).toBeDefined();
@@ -142,6 +162,7 @@ describe("superseded repository generation retention", () => {
     expect(GENERATION_GC_REPOSITORY_BATCH).toBe(200);
     expect(GENERATION_GC_GENERATION_BATCH).toBe(200);
     expect(GENERATION_GC_PER_REPOSITORY_BATCH).toBe(10);
+    expect(GENERATION_GC_TIMESTAMP_BATCH).toBe(200);
   });
 
   it.each([
