@@ -1,5 +1,9 @@
 import { sql } from "drizzle-orm";
 import { executeQuery, toPgRows } from "@/lib/db/drizzle-client";
+import {
+  getContentPlatformConfig,
+  isCanonicalRepositoryUploadActive,
+} from "./config";
 import { ORPHANED_ITEM_SWEEP_MINUTES } from "./orphaned-item-sweep";
 
 export interface ContentPlatformOperationalSnapshot {
@@ -58,22 +62,14 @@ function finiteNumber(value: number | string | null | undefined): number {
 }
 
 /**
- * Load one bounded operational snapshot for the unified-content CloudWatch
- * dashboard. All time-series values use the same rolling 24-hour window.
+ * Version-less items past the sweep age bound. Only meaningful once canonical
+ * registration is unconditional — before the repository cutover the legacy
+ * pipeline's live SQS/Textract work is version-less by design, so this
+ * predicate would report healthy backlog as orphaned. Mirrors the guard in
+ * `failOrphanedRepositoryItems` so the metric never claims orphans the sweep
+ * deliberately refuses to touch.
  */
-// eslint-disable-next-line complexity, max-lines-per-function -- A single bounded database round trip produces a point-in-time, internally consistent snapshot.
-export async function getContentPlatformOperationalSnapshot(): Promise<ContentPlatformOperationalSnapshot> {
-  const result = await executeQuery(
-    // eslint-disable-next-line max-lines-per-function -- The correlated aggregates intentionally share one snapshot and timestamp.
-    (db) =>
-      db.execute(sql`
-        SELECT
-          (
-            SELECT COUNT(*)::integer
-            FROM repository_items
-            WHERE lifecycle_status = 'unavailable'
-          ) AS unavailable_items,
-          (
+const ORPHANED_ITEMS_COUNT_SQL = sql`(
             SELECT COUNT(*)::integer
             FROM repository_items item
             INNER JOIN knowledge_repositories repository
@@ -96,7 +92,28 @@ export async function getContentPlatformOperationalSnapshot(): Promise<ContentPl
                   ON job.item_version_id = version.id
                 WHERE version.item_id = item.id
               )
-          ) AS orphaned_items,
+          )`;
+
+/**
+ * Load one bounded operational snapshot for the unified-content CloudWatch
+ * dashboard. All time-series values use the same rolling 24-hour window.
+ */
+// eslint-disable-next-line complexity, max-lines-per-function -- A single bounded database round trip produces a point-in-time, internally consistent snapshot.
+export async function getContentPlatformOperationalSnapshot(): Promise<ContentPlatformOperationalSnapshot> {
+  const canonicalUploadActive = isCanonicalRepositoryUploadActive(
+    await getContentPlatformConfig(),
+  );
+  const result = await executeQuery(
+    // eslint-disable-next-line max-lines-per-function -- The correlated aggregates intentionally share one snapshot and timestamp.
+    (db) =>
+      db.execute(sql`
+        SELECT
+          (
+            SELECT COUNT(*)::integer
+            FROM repository_items
+            WHERE lifecycle_status = 'unavailable'
+          ) AS unavailable_items,
+          ${canonicalUploadActive ? ORPHANED_ITEMS_COUNT_SQL : sql`0::integer`} AS orphaned_items,
           (
             SELECT COUNT(*)::integer
             FROM repository_item_chunks chunk
