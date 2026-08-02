@@ -359,6 +359,23 @@ describe("submitArtifactRecord validation", () => {
   });
 });
 
+describe("artifact content id PostgreSQL compatibility", () => {
+  it.each([
+    ["NUL", `artifact\u0000slug`],
+    ["unpaired surrogate", `artifact\uD800slug`],
+  ])("rejects a content id containing %s", async (_label, contentId) => {
+    const result = await submitArtifactRecord({
+      ...validSubmitInput,
+      contentId,
+    });
+
+    expect(result.isSuccess).toBe(false);
+    expect(mockGetUserRequester).not.toHaveBeenCalled();
+    expect(mockContentGet).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+});
+
 describe("submitArtifactRecord PostgreSQL JSON compatibility", () => {
   it.each([
     ["NUL string value", { value: "before\u0000after" }],
@@ -488,6 +505,18 @@ describe("listArtifactRecords", () => {
     const result = await listArtifactRecords({
       ...validListInput,
       contentId: "a".repeat(201),
+    });
+
+    expect(result.isSuccess).toBe(false);
+    expect(mockGetUserRequester).not.toHaveBeenCalled();
+    expect(mockContentGet).not.toHaveBeenCalled();
+    expect(mockSelect).not.toHaveBeenCalled();
+  });
+
+  it("rejects a NUL-bearing content id before requester or database access", async () => {
+    const result = await listArtifactRecords({
+      ...validListInput,
+      contentId: `artifact\u0000slug`,
     });
 
     expect(result.isSuccess).toBe(false);

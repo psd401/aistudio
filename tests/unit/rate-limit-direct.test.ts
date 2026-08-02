@@ -32,7 +32,7 @@ describe("consumeRateLimit", () => {
       remaining: 0,
     });
 
-    jest.advanceTimersByTime(60_001);
+    jest.advanceTimersByTime(60_000);
 
     expect(consumeRateLimit(config)).toMatchObject({
       allowed: true,

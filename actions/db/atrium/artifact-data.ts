@@ -102,6 +102,13 @@ function validateContentId(contentId: unknown): string {
       MAX_CONTENT_ID_LENGTH
     );
   }
+  if (hasPostgresIncompatibleUnicode(normalized)) {
+    throw ErrorFactories.invalidInput(
+      "contentId",
+      null,
+      "contentId must use PostgreSQL-compatible Unicode"
+    );
+  }
   return normalized;
 }
 
@@ -262,19 +269,24 @@ function validateJsonValue(value: unknown): void {
   }
 }
 
-function validateJsonString(value: string): void {
-  let hasInvalidSurrogate = false;
+function hasPostgresIncompatibleUnicode(value: string): boolean {
+  if (value.includes("\u0000")) return true;
+
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
     if (code >= 0xD800 && code <= 0xDBFF) {
       const next = value.charCodeAt(index + 1);
-      if (!(next >= 0xDC00 && next <= 0xDFFF)) hasInvalidSurrogate = true;
+      if (!(next >= 0xDC00 && next <= 0xDFFF)) return true;
       else index += 1;
     } else if (code >= 0xDC00 && code <= 0xDFFF) {
-      hasInvalidSurrogate = true;
+      return true;
     }
   }
-  if (value.includes("\u0000") || hasInvalidSurrogate) {
+  return false;
+}
+
+function validateJsonString(value: string): void {
+  if (hasPostgresIncompatibleUnicode(value)) {
     throw ErrorFactories.invalidInput(
       "payload",
       null,

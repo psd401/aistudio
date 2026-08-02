@@ -37,7 +37,7 @@ function nextRateLimiterNamespace(prefix: string): string {
 const rateLimitCleanupTimer = setInterval(() => {
   const now = Date.now();
   for (const [key, value] of rateLimitStore.entries()) {
-    if (value.resetTime < now) {
+    if (value.resetTime <= now) {
       rateLimitStore.delete(key);
     }
   }
@@ -81,7 +81,7 @@ export function consumeRateLimit(
   const now = Date.now();
   let entry = rateLimitStore.get(storeKey);
 
-  if (!entry || entry.resetTime < now) {
+  if (!entry || entry.resetTime <= now) {
     entry = {
       count: 1,
       resetTime: now + config.interval,
