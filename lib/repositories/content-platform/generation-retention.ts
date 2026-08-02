@@ -239,7 +239,6 @@ function eligibleGenerationCtes(params: {
                oldest_candidate.id,
                repository.id
       FOR UPDATE OF repository SKIP LOCKED
-      LIMIT ${params.repositoryIds.length}
     ),
     eligible_generations AS MATERIALIZED (
       SELECT generation.id

@@ -244,8 +244,80 @@ try {
   );
   assert.equal(remainingChunks.length, 2);
 
+  const backlogGenerations = await executeQuery(
+    (db) =>
+      db
+        .insert(repositoryIndexGenerations)
+        .values(
+          [1, 2, 3, 4, 5].map((sequence) => ({
+            repositoryId: repository.id,
+            status: "superseded" as const,
+            processorVersion: `generation-retention-backlog-${sequence}`,
+          })),
+        )
+        .returning({ id: repositoryIndexGenerations.id }),
+    "smoke.generationRetention.createBacklogGenerations",
+  );
+  assert.equal(backlogGenerations.length, 5);
+
+  for (const [index, generation] of backlogGenerations.entries()) {
+    await executeQuery(
+      (db) =>
+        db
+          .update(repositoryIndexGenerations)
+          .set({
+            supersededAt: new Date(now.getTime() - (200 - index) * HOUR_MS),
+          })
+          .where(eq(repositoryIndexGenerations.id, generation.id)),
+      `smoke.generationRetention.ageBacklogGeneration.${index}`,
+    );
+    await executeQuery(
+      (db) =>
+        db.insert(repositoryItemChunks).values({
+          itemId: item.id,
+          indexGenerationId: generation.id,
+          content: `generation retention backlog chunk ${index}`,
+          chunkIndex: 100 + index,
+        }),
+      `smoke.generationRetention.createBacklogChunk.${index}`,
+    );
+  }
+
+  const boundedOptions = {
+    now,
+    generationBatchSize: 2,
+    perRepositoryGenerationBatchSize: 2,
+  };
+  assert.deepEqual(await collectSupersededRepositoryGenerations(boundedOptions), {
+    generationsTimestamped: 0,
+    chunksDeleted: 2,
+    generationsDeleted: 2,
+  });
+  assert.deepEqual(await collectSupersededRepositoryGenerations(boundedOptions), {
+    generationsTimestamped: 0,
+    chunksDeleted: 2,
+    generationsDeleted: 2,
+  });
+
+  const remainingBacklog = await executeQuery(
+    (db) =>
+      db
+        .select({ id: repositoryIndexGenerations.id })
+        .from(repositoryIndexGenerations)
+        .where(
+          inArray(
+            repositoryIndexGenerations.id,
+            backlogGenerations.map((generation) => generation.id),
+          ),
+    ),
+    "smoke.generationRetention.readRemainingBacklog",
+  );
+  assert.deepEqual(remainingBacklog, [
+    { id: backlogGenerations.at(-1)!.id },
+  ]);
+
   process.stdout.write(
-    "repository-generation-retention smoke: transition window, keep floor, and bounded deletion passed\n",
+    "repository-generation-retention smoke: transition window, keep floor, and repeated bounded deletion passed\n",
   );
 } finally {
   await executeQuery(
