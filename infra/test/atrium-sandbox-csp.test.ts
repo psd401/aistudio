@@ -53,8 +53,9 @@ describe('AtriumSandboxStack CSP media-src', () => {
     expect(csp).not.toContain('s3.us-east-1.amazonaws.com');
   });
 
-  it('keeps connect-src none (media-src does not open an exfil channel)', () => {
+  it('keeps the default and network sources closed', () => {
     const csp = cspOf({ allowedMediaOrigins: [BUCKET_ORIGIN] });
+    expect(csp).toContain("default-src 'none'");
     expect(csp).toContain("connect-src 'none'");
   });
 
