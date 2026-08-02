@@ -91,17 +91,22 @@ interface ArtifactRecordRow {
 }
 
 function validateContentId(contentId: unknown): string {
-  if (typeof contentId !== "string" || !contentId.trim()) {
+  if (typeof contentId !== "string") {
     throw ErrorFactories.missingRequiredField("contentId");
   }
-  const normalized = contentId.trim();
-  if (normalized.length > MAX_CONTENT_ID_LENGTH) {
+  // Bound attacker-controlled work before trim scans or allocates a normalized
+  // copy. Padded IDs are invalid rather than a path around the raw input cap.
+  if (contentId.length > MAX_CONTENT_ID_LENGTH) {
     throw ErrorFactories.valueOutOfRange(
       "contentId",
-      normalized.length,
+      contentId.length,
       1,
       MAX_CONTENT_ID_LENGTH
     );
+  }
+  const normalized = contentId.trim();
+  if (!normalized) {
+    throw ErrorFactories.missingRequiredField("contentId");
   }
   if (hasPostgresIncompatibleUnicode(normalized)) {
     throw ErrorFactories.invalidInput(

@@ -271,18 +271,6 @@ describe("submitArtifactRecord validation", () => {
     expect(mockInsert).not.toHaveBeenCalled();
   });
 
-  it("rejects a content id over the supported 200-character bound", async () => {
-    const result = await submitArtifactRecord({
-      ...validSubmitInput,
-      contentId: "a".repeat(201),
-    });
-
-    expect(result.isSuccess).toBe(false);
-    expect(mockGetUserRequester).not.toHaveBeenCalled();
-    expect(mockContentGet).not.toHaveBeenCalled();
-    expect(mockInsert).not.toHaveBeenCalled();
-  });
-
   it.each(["Leaderboard", "two words", "", "a".repeat(65)])(
     "rejects invalid namespace %p",
     async (namespace) => {
@@ -377,7 +365,24 @@ describe("submitArtifactRecord original string bounds", () => {
   });
 });
 
-describe("artifact content id PostgreSQL compatibility", () => {
+describe("artifact content id validation", () => {
+  it("rejects an oversized raw content id before trimming it", async () => {
+    const trimSpy = jest.spyOn(String.prototype, "trim");
+    try {
+      const result = await submitArtifactRecord({
+        ...validSubmitInput,
+        contentId: `artifact${" ".repeat(201)}`,
+      });
+      expect(trimSpy).not.toHaveBeenCalled();
+      expect(result.isSuccess).toBe(false);
+      expect(mockGetUserRequester).not.toHaveBeenCalled();
+      expect(mockContentGet).not.toHaveBeenCalled();
+      expect(mockInsert).not.toHaveBeenCalled();
+    } finally {
+      trimSpy.mockRestore();
+    }
+  });
+
   it.each([
     ["NUL", `artifact\u0000slug`],
     ["unpaired surrogate", `artifact\uD800slug`],
