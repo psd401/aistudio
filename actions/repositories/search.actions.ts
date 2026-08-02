@@ -13,17 +13,14 @@ import {
   startTimer,
   sanitizeForLogging
 } from "@/lib/logger"
-import { vectorSearch, keywordSearch, hybridSearch, type SearchResult } from "@/lib/repositories/search-service"
-import { retrieveRepositoryContent } from "@/lib/repositories/retrieval-v2/service"
-import type { RetrievalResult } from "@/lib/repositories/retrieval-v2/types"
+import type { SearchResult } from "@/lib/repositories/search-service"
 import { hasCapabilityAccess } from "@/utils/roles"
 import { assertRepositoryReadAccess } from "@/lib/repositories/repository-access-guard"
 import {
   getContentPlatformConfig,
   isCanonicalRepositoryUploadActive,
-  type ContentPlatformConfig,
 } from "@/lib/repositories/content-platform/config"
-import { recordRepositoryRetrievalShadow } from "@/lib/repositories/content-platform/retrieval-shadow"
+import { executeSearch } from "@/lib/repositories/search-execution"
 
 export interface SearchRepositoryParams {
   query: string
@@ -31,144 +28,6 @@ export interface SearchRepositoryParams {
   searchType?: 'vector' | 'keyword' | 'hybrid'
   limit?: number
   vectorWeight?: number
-}
-
-interface SearchDispatchOptions {
-  searchType: 'vector' | 'keyword' | 'hybrid'
-  query: string
-  repositoryId: number
-  limit: number
-  vectorWeight: number
-  canonicalOnly: boolean
-}
-
-type RetrievalDiagnostics = Awaited<
-  ReturnType<typeof retrieveRepositoryContent>
->["diagnostics"]
-
-interface ExecuteSearchOptions extends SearchDispatchOptions {
-  userCognitoSub: string
-  contentConfig: ContentPlatformConfig
-  log: ReturnType<typeof createLogger>
-}
-
-// Dispatch to the requested search mode with pre-clamped bounds (not exported:
-// a "use server" file may only export async server actions).
-async function dispatchSearch({
-  searchType,
-  query,
-  repositoryId,
-  limit,
-  vectorWeight,
-  canonicalOnly,
-}: SearchDispatchOptions): Promise<SearchResult[]> {
-  const commonOptions = { repositoryId, limit, canonicalOnly }
-  switch (searchType) {
-    case 'vector':
-      return vectorSearch(query, commonOptions)
-    case 'keyword':
-      return keywordSearch(query, commonOptions)
-    case 'hybrid':
-    default:
-      return hybridSearch(query, { ...commonOptions, vectorWeight })
-  }
-}
-
-async function executeSearch(
-  options: ExecuteSearchOptions
-): Promise<{
-  results: SearchResult[]
-  diagnostics?: RetrievalDiagnostics
-}> {
-  if (options.canonicalOnly) {
-    const retrieval = await retrieveRepositoryContent({
-      query: options.query,
-      repositoryIds: [options.repositoryId],
-      userCognitoSub: options.userCognitoSub,
-      mode: options.searchType,
-      limit: options.limit,
-      denseWeight: options.vectorWeight,
-      includeLegacyCompatibility: false,
-    })
-    return {
-      results: retrieval.results.map(toLegacySearchResult),
-      diagnostics: retrieval.diagnostics,
-    }
-  }
-
-  const legacyStartedAt = Date.now()
-  const results = await dispatchSearch(options)
-  await recordRetrievalShadowIfEnabled(
-    options,
-    results,
-    Date.now() - legacyStartedAt
-  )
-  return { results }
-}
-
-async function recordRetrievalShadowIfEnabled(
-  options: ExecuteSearchOptions,
-  legacyResults: SearchResult[],
-  legacyDurationMs: number
-): Promise<void> {
-  const { contentConfig } = options
-  if (
-    !contentConfig.enabled ||
-    !contentConfig.readV2Enabled ||
-    !contentConfig.retrievalShadowEnabled
-  ) {
-    return
-  }
-
-  const canonicalStartedAt = Date.now()
-  try {
-    const canonicalShadow = await retrieveRepositoryContent({
-      query: options.query,
-      repositoryIds: [options.repositoryId],
-      userCognitoSub: options.userCognitoSub,
-      mode: options.searchType,
-      limit: options.limit,
-      denseWeight: options.vectorWeight,
-      includeLegacyCompatibility: false,
-    })
-    await recordRepositoryRetrievalShadow({
-      repositoryId: options.repositoryId,
-      product: "repository_manager",
-      searchMode: options.searchType,
-      legacyItemIds: legacyResults.map((result) => result.itemId),
-      canonicalItemIds: canonicalShadow.results.map((result) => result.itemId),
-      legacyDurationMs,
-      canonicalDurationMs: Date.now() - canonicalStartedAt,
-    })
-  } catch (shadowError) {
-    options.log.warn(
-      "Canonical retrieval shadow failed without affecting legacy search",
-      {
-        error:
-          shadowError instanceof Error
-            ? shadowError.message
-            : String(shadowError),
-      }
-    )
-  }
-}
-
-function toLegacySearchResult(result: RetrievalResult): SearchResult {
-  return {
-    chunkId: result.chunkId,
-    itemId: result.itemId,
-    itemName: result.itemName,
-    content: result.content,
-    similarity: result.similarity,
-    chunkIndex: result.chunkIndex,
-    metadata: result.metadata,
-    citation: {
-      itemStableId: result.itemStableId,
-      itemVersionId: result.itemVersionId,
-      versionNumber: result.versionNumber,
-      sourceLocator: result.sourceLocator,
-    },
-  }
 }
 
 export async function searchRepository(

@@ -79,11 +79,13 @@ export async function assertUserManagedDurableRepository(
  * Throw `dbRecordNotFound` unless the caller (`cognitoSub`) can access the
  * active durable repository (public / owner / `repository_access` grant).
  * Administrators may inspect any durable repository through Repository Manager,
- * including private repositories they do not own.
+ * including private repositories they do not own. Callers that must match the
+ * canonical retrieval access model can disable that override.
  */
 export async function assertRepositoryReadAccess(
   repositoryId: number,
-  cognitoSub: string
+  cognitoSub: string,
+  options: { allowAdministratorOverride?: boolean } = {},
 ): Promise<void> {
   await assertUserManagedDurableRepository(repositoryId);
 
@@ -95,7 +97,10 @@ export async function assertRepositoryReadAccess(
     return;
   }
 
-  if (await checkUserRoleByCognitoSub(cognitoSub, "administrator")) {
+  if (
+    options.allowAdministratorOverride !== false &&
+    (await checkUserRoleByCognitoSub(cognitoSub, "administrator"))
+  ) {
     return;
   }
 
