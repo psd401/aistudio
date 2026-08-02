@@ -76,6 +76,11 @@ It is built to the agent-native principles AI Studio already leans toward:
 
 **The one non-negotiable architectural commitment:** the **content API is the source of truth for how content is created, versioned, and published. Every surface is a client of it** — the in-app editors beside nexus chat, external agents over MCP, scripts over REST, and scheduled skill runs. There is no UI-only creation path. This is what makes "how do agents outside nexus create content" a non-question: they use the same API the editors use.
 
+For the shipped first-party persistence bridge used by sandboxed artifacts, see
+[Atrium artifact data](./atrium-artifact-data.md). It documents the append-only
+data model, `postMessage` trust boundary, unchanged CSP, agent read path, and the
+locked decisions from epic #1515.
+
 ## 2. Scope and non-goals
 
 **In scope (v1 + near term)**

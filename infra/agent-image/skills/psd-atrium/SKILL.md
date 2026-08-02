@@ -1,7 +1,7 @@
 ---
 name: psd-atrium
-summary: Read and write AI Studio Atrium content — PSD's collaborative document + live-artifact workspace with an intranet publishing flow. Find/read/create/edit/archive/delete documents and artifacts, embed images in them, and publish them, version-based, over /api/v1/content. Artifacts fully support HTML/CSS/JavaScript (including <script>/<style>).
-description: Use this to work with Atrium, PSD's collaborative content workspace in AI Studio (documents + interactive artifacts, with an internal "intranet" publishing flow). Find and read Atrium documents/artifacts, create new ones, edit them (append or replace), archive them, hard-delete ones you own, and publish/unpublish to a destination. Interactive artifacts fully support real HTML, CSS, and JavaScript — including <script>, <style>, and inline style="…" — pass raw code; the skill base64-encodes it automatically so nothing is stripped or blocked (do NOT work around with legacy attributes like bgcolor/width). Atrium is REAL and live — never say the district has no content workspace. Version-based: reads return the last saved version and edits create a new version; the real-time collaborative editor rail is not reachable from here.
+summary: Read and write AI Studio Atrium content — PSD's collaborative document + live-artifact workspace with an intranet publishing flow. Find/read/create/edit/archive/delete documents and artifacts, embed images, add first-party artifact persistence with AtriumData, and publish them. Artifacts fully support HTML/CSS/JavaScript (including <script>/<style>).
+description: Use this to work with Atrium, PSD's collaborative content workspace in AI Studio (documents + interactive artifacts, with an internal "intranet" publishing flow). Find and read Atrium documents/artifacts, create new ones, edit them (append or replace), add live artifact persistence with window.AtriumData, archive them, hard-delete ones you own, and publish/unpublish to a destination. Interactive artifacts fully support real HTML, CSS, and JavaScript — including <script>, <style>, and inline style="…" — pass raw code; the skill base64-encodes it automatically so nothing is stripped or blocked (do NOT work around with legacy attributes like bgcolor/width). Atrium is REAL and live — never say the district has no content workspace. Version-based: reads return the last saved version and edits create a new version; the real-time collaborative editor rail is not reachable from here.
 allowed-tools: Bash(node:*)
 ---
 
@@ -165,6 +165,180 @@ node run.js create-artifact --title "Chart" --code "<html><style>…</style><scr
 > JS/CSS is the intended way to build an artifact. Artifacts render only inside a
 > cross-origin sandboxed iframe, never on the app origin.
 
+### Persist data inside an artifact (`window.AtriumData`)
+
+Use the first-party `window.AtriumData` bridge whenever an artifact must remember
+scores, responses, progress, or other small JSON records across users or devices.
+The sandbox host installs it before artifact scripts run. It is live in the
+authenticated `/c/<slug>` reader; signed-out/public readers and preview-only
+surfaces fail the bridge closed, so always catch rejections and show a signed-out
+state.
+
+```js
+const created = await window.AtriumData.submit("leaderboard", {
+  score: 1250,
+  durationMs: 48210,
+});
+// => { id: "<record uuid>", createdAt: "<ISO timestamp>" }
+
+const result = await window.AtriumData.list("leaderboard", {
+  limit: 200,       // optional; defaults to 50 and is capped at 200
+  scope: "all",    // optional: "all" (default) or "mine"
+});
+// => { records: [{ id, displayName, payload, createdAt }, ...] }
+```
+
+- Use a namespace matching `[a-z0-9_-]{1,64}`. Keep each submitted plain-JSON
+  object at or below 8 KiB. Records are append-only.
+- Treat `displayName` as authoritative. The authenticated server session supplies
+  identity and attributes each record. **Never ask a player to type a name, put
+  `userId`/`user_id` in the payload, or implement a name profanity filter.**
+- Wrap every bridge call in `try`/`catch`. A disabled bridge, signed-out reader,
+  timeout, invalid input, or denied content access rejects the Promise.
+
+The following are **not live persistence options inside an Atrium artifact**:
+
+- `fetch()` and `XMLHttpRequest` are blocked by the unchanged sandbox CSP
+  `connect-src 'none'`.
+- `localStorage` and `sessionStorage` throw because the sandboxed frame has an
+  opaque origin; even device-local storage would not provide cross-device data.
+- Google Forms/Sheets and Apps Script Web Apps require a network request from the
+  artifact, so they are blocked by the same CSP and cannot be its live data source.
+  Do not propose cron-generated JSON snapshots as a substitute for live records.
+
+#### Complete copy-pasteable leaderboard
+
+This standalone artifact submits at game end, loads on leaderboard open, renders
+server-supplied names safely, and handles a signed-out or disabled bridge. A real
+game can call `window.gameEnded(score)` from its existing game-over path.
+
+```html
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Atrium leaderboard</title>
+    <style>
+      body { font: 16px system-ui, sans-serif; max-width: 36rem; margin: 2rem auto; padding: 0 1rem; }
+      form, header { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+      input { width: 8rem; }
+      #leaderboard { margin-top: 1.5rem; }
+      #scores[hidden] { display: none; }
+    </style>
+  </head>
+  <body>
+    <h1>Game</h1>
+    <form id="game-over-form">
+      <label>Final score <input id="final-score" type="number" min="0" required /></label>
+      <button type="submit">End game</button>
+    </form>
+
+    <section id="leaderboard" aria-labelledby="leaderboard-title">
+      <header>
+        <h2 id="leaderboard-title">Leaderboard</h2>
+        <button id="open-leaderboard" type="button">Open leaderboard</button>
+      </header>
+      <p id="leaderboard-status" role="status">Open the leaderboard to load scores.</p>
+      <ol id="scores" hidden></ol>
+    </section>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const NAMESPACE = "leaderboard";
+        const status = document.getElementById("leaderboard-status");
+        const scores = document.getElementById("scores");
+        const form = document.getElementById("game-over-form");
+        const scoreInput = document.getElementById("final-score");
+        const openButton = document.getElementById("open-leaderboard");
+
+        function bridgeAvailable() {
+          return window.AtriumData &&
+            typeof window.AtriumData.submit === "function" &&
+            typeof window.AtriumData.list === "function";
+        }
+
+        function showSignedOut() {
+          scores.replaceChildren();
+          scores.hidden = true;
+          status.textContent = "Sign in to see scores.";
+        }
+
+        function renderLeaderboard(records) {
+          const ranked = records
+            .filter((record) => Number.isFinite(Number(record.payload?.score)))
+            .sort((a, b) => Number(b.payload.score) - Number(a.payload.score));
+
+          scores.replaceChildren();
+          for (const record of ranked) {
+            const item = document.createElement("li");
+            item.textContent = `${record.displayName} — ${Number(record.payload.score)}`;
+            scores.appendChild(item);
+          }
+          scores.hidden = ranked.length === 0;
+          status.textContent = ranked.length === 0 ? "No scores yet." : `${ranked.length} scores`;
+        }
+
+        async function loadLeaderboard() {
+          if (!bridgeAvailable()) {
+            showSignedOut();
+            return;
+          }
+          status.textContent = "Loading scores…";
+          try {
+            const result = await window.AtriumData.list(NAMESPACE, {
+              limit: 200,
+              scope: "all",
+            });
+            renderLeaderboard(Array.isArray(result.records) ? result.records : []);
+          } catch {
+            showSignedOut();
+          }
+        }
+
+        async function gameEnded(finalScore) {
+          if (!bridgeAvailable()) {
+            showSignedOut();
+            return;
+          }
+          try {
+            await window.AtriumData.submit(NAMESPACE, { score: Number(finalScore) });
+            await loadLeaderboard();
+          } catch {
+            showSignedOut();
+          }
+        }
+
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          void gameEnded(scoreInput.valueAsNumber);
+        });
+        openButton.addEventListener("click", () => void loadLeaderboard());
+        window.gameEnded = gameEnded;
+      })();
+    </script>
+  </body>
+</html>
+```
+
+#### Read records for a teacher-facing dashboard
+
+Use the existing owner-bound Atrium client rather than inventing another data
+client. `list-data` invokes the signed broker's `GET /<id>/data` operation:
+
+```bash
+node run.js list-data --id <artifact-uuid-or-slug> --namespace leaderboard --limit 200
+```
+
+The broker applies the signed workspace owner's visibility, confirms the target
+is an artifact, and returns newest-first
+`{ records: [{ id, displayName, payload, createdAt }] }`. It returns no email or
+user id. This is the agent read path for building a teacher-facing dashboard;
+artifact code itself must use `AtriumData.list()`. This broker surface is not an
+`/api/v1/` endpoint.
+
 Optional on both: `--visibility private|group|internal|public` and
 `--grants role:staff,building:GHS` (group grants). Requesting `public` needs the
 human-held `content:publish_public`; **without it the object is created PRIVATE**
@@ -283,3 +457,5 @@ node run.js set-visibility --id <id> --level group --grants role:staff,building:
    `publish` (destination) and/or `set-visibility` as separate, explicit steps.
 6. **Your writes use the signed owner's requester.** Keep everything you write
    appropriate; it is attributed to, and gated by, that user's permissions.
+7. **Persist artifact data only with `AtriumData`.** Never substitute Sheets,
+   Apps Script, direct network calls, or browser storage for live artifact data.

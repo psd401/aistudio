@@ -5,6 +5,7 @@
  * Confirms each subcommand hits the correct HTTP method + path + body:
  *   find            → GET    /            (kind/collection/tag/status/query)
  *   read            → GET    /<id>        (+ inline body extraction)
+ *   list-data       → GET    /<id>/data   (namespace + limit)
  *   create-document → POST   /            (kind=document, bodyFormat=markdown)
  *   create-artifact → POST   /            (kind=artifact, code→body)
  *   edit (replace)  → POST   /<id>/versions
@@ -151,6 +152,64 @@ test('find rejects an invalid --kind (exit 1)', async () => {
     code = err.code;
   }
   expect(code).toBe(1);
+});
+
+test('list-data reads artifact records through the fixed broker path', async () => {
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: {
+      records: [
+        {
+          id: 'record-1',
+          displayName: 'Alex Rivera',
+          payload: { score: 42 },
+          createdAt: '2026-08-01T12:00:00.000Z',
+        },
+      ],
+    },
+  });
+
+  await run(
+    'list-data',
+    '--id',
+    'chemistry/game',
+    '--namespace',
+    'leaderboard',
+    '--limit',
+    '200'
+  );
+
+  expect(restCalls).toEqual([
+    {
+      method: 'GET',
+      path: '/chemistry%2Fgame/data',
+      opts: { query: { namespace: 'leaderboard', limit: '200' } },
+    },
+  ]);
+  expect(emitted).toEqual([
+    {
+      records: [
+        {
+          id: 'record-1',
+          displayName: 'Alex Rivera',
+          payload: { score: 42 },
+          createdAt: '2026-08-01T12:00:00.000Z',
+        },
+      ],
+    },
+  ]);
+});
+
+test('list-data requires an artifact namespace before calling the broker', async () => {
+  let code;
+  try {
+    await run('list-data', '--id', 'artifact-1');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+  expect(restCalls).toHaveLength(0);
 });
 
 test('collection commands map to the fixed owner-bound broker surface', async () => {

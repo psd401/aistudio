@@ -18,6 +18,7 @@
  *                    [--tag <t>] [--status draft|published|archived] [--query <text>]
  *   node run.js read --id <idOrSlug>
  *   node run.js read-source --id <idOrSlug>
+ *   node run.js list-data --id <idOrSlug> --namespace <name> [--limit <1-200>]
  *   node run.js list-assets --id <idOrSlug>
  *   node run.js upload-asset --id <id> --file <path> [--alt <text>]
  *                    [--filename <name>] [--purpose document_image|capture_step]
@@ -105,6 +106,8 @@ function usage() {
       '       [--status draft|published|archived] [--query <title text>]',
       '  read --id <idOrSlug>',
       "  read-source --id <idOrSlug>   (a DOCUMENT's committed body TEXT — `read` never returns it)",
+      '  list-data --id <idOrSlug> --namespace <name> [--limit <1-200>]',
+      '            (artifact records for teacher-facing dashboards)',
       '  list-assets --id <idOrSlug>',
       '',
       'Images (authored assets — the canonical way to put a picture in a document):',
@@ -344,6 +347,18 @@ async function readSource(args) {
     note:
       'Committed source of the last saved version. A document open in the live editor may be AHEAD of this until someone snapshots a version.',
   });
+}
+
+async function listArtifactData(args) {
+  const id = requireStr(args, 'id', 'id');
+  const namespace = requireStr(args, 'namespace', 'namespace');
+  const limit = optStr(args, 'limit', 'limit');
+  const { payload } = await restFetch(
+    'GET',
+    `/${encodeURIComponent(id)}/data`,
+    { query: { namespace, limit } }
+  );
+  emit(payload);
 }
 
 async function listAssets(args) {
@@ -733,6 +748,7 @@ const COMMANDS = {
   list: findObjects,
   read: readObject,
   'read-source': readSource,
+  'list-data': listArtifactData,
   'list-assets': listAssets,
   'upload-asset': uploadAsset,
   'get-asset': getAsset,

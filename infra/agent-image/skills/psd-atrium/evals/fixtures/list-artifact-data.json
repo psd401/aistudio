@@ -1,0 +1,29 @@
+[
+  {
+    "route": "/api/agent/atrium",
+    "method": "POST",
+    "request_body": {
+      "method": "GET",
+      "path": "/eval-1521-artifact/data",
+      "query": {"namespace": "leaderboard", "limit": "200"}
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "httpStatus": 200,
+        "payload": {
+          "data": {
+            "records": [
+              {
+                "id": "eval-1521-record",
+                "displayName": "Alex Rivera",
+                "payload": {"score": 1250},
+                "createdAt": "2026-08-01T12:00:00.000Z"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+]
