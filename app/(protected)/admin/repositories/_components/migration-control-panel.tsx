@@ -24,6 +24,7 @@ import {
 import { useToast } from "@/components/ui/use-toast";
 import {
   approveRepositoryMigrationMismatchAction,
+  excludeRepositoryMigrationExceptionAction,
   getRepositoryMigrationDashboardAction,
   reprocessRepositoryMigrationItemAction,
   retryRepositoryMigrationItemAction,
@@ -246,11 +247,13 @@ function MigrationExceptions({
   disabled,
   runAction,
   approveMismatch,
+  excludeException,
 }: {
   exceptions: RepositoryMigrationException[];
   disabled: boolean;
   runAction: MigrationActionRunner;
   approveMismatch: (item: RepositoryMigrationException) => Promise<void>;
+  excludeException: (item: RepositoryMigrationException) => Promise<void>;
 }) {
   if (exceptions.length === 0) return null;
   return (
@@ -290,6 +293,7 @@ function MigrationExceptions({
                   disabled={disabled}
                   runAction={runAction}
                   approveMismatch={approveMismatch}
+                  excludeException={excludeException}
                 />
               </TableCell>
             </TableRow>
@@ -305,26 +309,38 @@ function ExceptionRecoveryActions({
   disabled,
   runAction,
   approveMismatch,
+  excludeException,
 }: {
   item: RepositoryMigrationException;
   disabled: boolean;
   runAction: MigrationActionRunner;
   approveMismatch: (item: RepositoryMigrationException) => Promise<void>;
+  excludeException: (item: RepositoryMigrationException) => Promise<void>;
 }) {
   if (item.status !== "mismatch") {
     return (
-      <Button
-        size="sm"
-        variant="outline"
-        onClick={() =>
-          void runAction(`retry:${item.id}`, () =>
-            retryRepositoryMigrationItemAction(item.id),
-          )
-        }
-        disabled={disabled}
-      >
-        Retry
-      </Button>
+      <>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() =>
+            void runAction(`retry:${item.id}`, () =>
+              retryRepositoryMigrationItemAction(item.id),
+            )
+          }
+          disabled={disabled}
+        >
+          Retry
+        </Button>
+        <Button
+          size="sm"
+          variant="destructive"
+          onClick={() => void excludeException(item)}
+          disabled={disabled}
+        >
+          Exclude
+        </Button>
+      </>
     );
   }
   return (
@@ -426,6 +442,22 @@ export function MigrationControlPanel() {
     [runAction],
   );
 
+  const excludeException = useCallback(
+    async (item: RepositoryMigrationException) => {
+      const reason = window.prompt(
+        "Document why this failed or unrecoverable legacy source is intentionally excluded from cutover (10-1000 characters):",
+      );
+      if (!reason) return;
+      await runAction(`exclude:${item.id}`, () =>
+        excludeRepositoryMigrationExceptionAction({
+          migrationItemId: item.id,
+          reason,
+        }),
+      );
+    },
+    [runAction],
+  );
+
   if (loading && !state) {
     return (
       <Card data-testid="content-migration-panel">
@@ -482,6 +514,7 @@ export function MigrationControlPanel() {
           disabled={controlsDisabled}
           runAction={runAction}
           approveMismatch={approveMismatch}
+          excludeException={excludeException}
         />
       </CardContent>
     </Card>

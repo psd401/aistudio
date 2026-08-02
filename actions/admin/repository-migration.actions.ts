@@ -9,6 +9,7 @@ import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 import type { ActionState } from "@/types/actions-types";
 import {
   approveRepositoryMigrationMismatch,
+  excludeRepositoryMigrationException,
   getRepositoryMigrationDashboard,
   listRepositoryMigrationExceptions,
   MAX_FAILED_REPOSITORY_MIGRATION_RETRIES,
@@ -401,6 +402,29 @@ export async function approveRepositoryMigrationMismatchAction(input: {
       context: "admin.contentMigration.approveMismatch",
       requestId,
       operation: "approveRepositoryMigrationMismatchAction",
+    });
+  }
+}
+
+export async function excludeRepositoryMigrationExceptionAction(input: {
+  migrationItemId: string;
+  reason: string;
+}): Promise<ActionState<void>> {
+  const requestId = generateRequestId();
+  const timer = startTimer("admin.contentMigration.excludeException");
+  try {
+    const { userId: excludedBy } = await requireMigrationAdministrator();
+    await excludeRepositoryMigrationException({ ...input, excludedBy });
+    timer({ status: "success" });
+    revalidatePath(ADMIN_REPOSITORIES_PATH);
+    revalidatePath(ADMIN_SETTINGS_PATH);
+    return createSuccess(undefined, "Migration source excluded from cutover");
+  } catch (error) {
+    timer({ status: "error" });
+    return handleError(error, "Failed to exclude migration source.", {
+      context: "admin.contentMigration.excludeException",
+      requestId,
+      operation: "excludeRepositoryMigrationExceptionAction",
     });
   }
 }

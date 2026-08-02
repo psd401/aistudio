@@ -78,4 +78,18 @@ describe("repository migration retry targeting", () => {
     expect(statusFilter).toBeGreaterThan(functionStart);
     expect(limit).toBeGreaterThan(statusFilter);
   });
+
+  it("treats audited exclusions as accounted-for migration inventory", () => {
+    expect(
+      migrationControlService.match(
+        /migration\.status IN \('verified', 'excluded'\)/g,
+      ),
+    ).toHaveLength(3);
+    expect(migrationControlService).toContain(
+      "export async function excludeRepositoryMigrationException",
+    );
+    expect(migrationControlService).toContain(
+      'contentMigration.excludeException',
+    );
+  });
 });

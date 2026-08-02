@@ -38,6 +38,9 @@ describe.each(retirementGateSources)(
         "FROM repository_connector_sources connector_source",
       );
       expect(source).toContain("connector_source.status = 'unsupported'");
+      expect(
+        source.match(/migration\.status IN \('verified', 'excluded'\)/g),
+      ).toHaveLength(3);
     });
   },
 );

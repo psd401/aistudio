@@ -47,6 +47,10 @@ export interface RepositoryMigrationItemMetadata {
   rollbackObjectKeys?: string[];
   exclusionReason?: string;
   excludedAt?: string;
+  excludedBy?: number;
+  exclusionPreviousStatus?: "failed" | "unrecoverable";
+  exclusionPreviousErrorCode?: string;
+  exclusionPreviousErrorMessage?: string;
   lastReconciledRunId?: string;
 }
 
