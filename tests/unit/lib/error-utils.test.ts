@@ -85,6 +85,28 @@ describe("handleError", () => {
     })
   })
 
+  it("keeps safe rate-limit retry metadata in production responses", () => {
+    const resetAt = "2026-08-01T20:30:00.000Z"
+    const error = ErrorFactories.bizRateLimitExceeded(
+      "submit artifact records",
+      30,
+      resetAt
+    )
+
+    expect(handleError(error, "Fallback", {
+      includeErrorInResponse: false,
+    })).toEqual({
+      isSuccess: false,
+      message: "Too many requests. Please wait a moment and try again",
+      error: {
+        code: "BIZ_RATE_LIMIT_EXCEEDED",
+        statusCode: 429,
+        retryAfterSeconds: 30,
+        resetAt,
+      },
+    })
+  })
+
   it("handles non-Error throws as unknown failures", () => {
     const result = handleError({ reason: "bad" }, "Safe message", {
       includeErrorInResponse: true,

@@ -285,6 +285,13 @@ export const ErrorFactories = {
       { operation, quota: { limit, current, resetAt }, ...details }
     ),
 
+  bizRateLimitExceeded: (operation: string, retryAfterSeconds: number, resetAt: string, details?: Partial<BusinessLogicError>) =>
+    createTypedError<BusinessLogicError>(
+      ErrorCode.BIZ_RATE_LIMIT_EXCEEDED,
+      `Rate limit exceeded for ${operation}. Retry after ${retryAfterSeconds}s`,
+      { operation, rateLimit: { retryAfterSeconds, resetAt }, ...details }
+    ),
+
   // Streaming and Provider Errors
   providerUnavailable: (provider: string, details?: Partial<ExternalServiceError>) =>
     createTypedError<ExternalServiceError>(
@@ -338,6 +345,7 @@ function isRetryableError(code: ErrorCode): boolean {
     ErrorCode.DB_POOL_EXHAUSTED,
     ErrorCode.EXTERNAL_SERVICE_TIMEOUT,
     ErrorCode.EXTERNAL_API_RATE_LIMIT,
+    ErrorCode.BIZ_RATE_LIMIT_EXCEEDED,
     ErrorCode.AWS_SERVICE_ERROR,
     ErrorCode.S3_UPLOAD_FAILED,
     ErrorCode.S3_DOWNLOAD_FAILED,
@@ -453,6 +461,10 @@ function handleTypedError(
   options: ResolvedHandleErrorOptions,
   log: ErrorLog
 ): ActionState<never> {
+  const rateLimit =
+    error.code === ErrorCode.BIZ_RATE_LIMIT_EXCEEDED
+      ? (error as BusinessLogicError).rateLimit
+      : undefined;
   const details = sanitizeForLogging({
     code: error.code,
     details: error.details,
@@ -460,6 +472,7 @@ function handleTypedError(
     retryable: error.retryable,
     service: error.service,
     operation: error.operation,
+    rateLimit,
     ...options.metadata
   })
   logErrorAtLevel(
@@ -472,9 +485,20 @@ function handleTypedError(
   return {
     isSuccess: false,
     message: error.userMessage || fallbackMessage,
-    ...(options.includeErrorInResponse && {
-      error: { code: error.code, message: error.message, details }
-    })
+    ...(rateLimit
+      ? {
+          // Retry metadata is part of the safe action contract, not internal
+          // diagnostics, so production callers can distinguish and back off.
+          error: {
+            code: error.code,
+            statusCode: error.statusCode ?? 429,
+            retryAfterSeconds: rateLimit.retryAfterSeconds,
+            resetAt: rateLimit.resetAt,
+          },
+        }
+      : options.includeErrorInResponse
+        ? { error: { code: error.code, message: error.message, details } }
+        : {})
   }
 }
 

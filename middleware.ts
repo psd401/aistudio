@@ -1,7 +1,11 @@
 import { authMiddleware } from "@/auth";
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { getArtifactSandboxOrigin } from "@/lib/content/artifact-sandbox-config";
 import { inAppSignInCallbackUrl } from "@/lib/auth/sign-in-callback";
+import {
+  isArtifactDataE2EProbeEnabled,
+  isLocalArtifactDataActionProbe,
+} from "@/lib/auth/artifact-data-e2e-probe";
 import { isOidcProviderResumePath } from "@/lib/oauth/resume-path";
 
 // Public paths that don't require authentication
@@ -93,6 +97,47 @@ const CONTENT_SECURITY_POLICY =
   "connect-src 'self' https://*.amazonaws.com wss://*.amazonaws.com https://api.anthropic.com https://api.openai.com https://apis.google.com; " +
   `frame-src ${FRAME_SRC}; ` +
   "frame-ancestors 'none';";
+const ARTIFACT_DATA_E2E_PROBE_HEADER =
+  "X-AIStudio-Artifact-Data-E2E-Probe";
+
+function artifactDataE2EProbeContext(req: NextRequest) {
+  // nextUrl.hostname may be derived from Host, so loopback is defense in depth;
+  // the production NODE_ENV check is the non-negotiable deployment boundary.
+  return {
+    nodeEnv: process.env.NODE_ENV,
+    probeFlag: process.env.ATRIUM_ARTIFACT_DATA_E2E_ACTION_PROBE,
+    hostname: req.nextUrl.hostname,
+  };
+}
+
+/**
+ * Local authenticated-E2E harness only: after Playwright loads the protected
+ * page with a valid session, it clears the session cookie and invokes the
+ * Artifact Data Server Actions. Let only those exact development-mode POSTs
+ * reach the actions so their own auth boundary is exercised through the real
+ * Next.js transport. The local E2E runner opts in explicitly and binds its
+ * server to loopback; ordinary development servers do not enable the probe.
+ * Deployed builds always use NODE_ENV=production, where this exception is
+ * disabled and the page itself also returns 404.
+ */
+function isLocalArtifactDataActionProbeRequest(req: NextRequest): boolean {
+  const context = artifactDataE2EProbeContext(req);
+  if (!isArtifactDataE2EProbeEnabled(context)) return false;
+
+  return isLocalArtifactDataActionProbe({
+    ...context,
+    method: req.method,
+    pathname: req.nextUrl.pathname,
+    hasNextActionHeader: req.headers.has("next-action"),
+  });
+}
+
+function isArtifactDataE2EProbeHealthCheck(req: NextRequest): boolean {
+  return (
+    isArtifactDataE2EProbeEnabled(artifactDataE2EProbeContext(req)) &&
+    req.nextUrl.pathname === "/api/healthz"
+  );
+}
 
 export default authMiddleware((req) => {
   const { nextUrl, auth } = req;
@@ -100,6 +145,7 @@ export default authMiddleware((req) => {
 
   // Check if path is public
   const isPublicPath =
+    isLocalArtifactDataActionProbeRequest(req) ||
     EXACT_PUBLIC_PATHS.has(nextUrl.pathname) ||
     PUBLIC_PATHS.some(
       (path) =>
@@ -154,6 +200,11 @@ export default authMiddleware((req) => {
   response.headers.set('X-Content-Type-Options', 'nosniff');
   response.headers.set('X-Frame-Options', 'DENY');
   response.headers.set('X-XSS-Protection', '1; mode=block');
+  if (isArtifactDataE2EProbeHealthCheck(req)) {
+    // The local runner uses this marker to avoid reusing an ordinary dev server
+    // whose process environment cannot exercise the cleared-session probe.
+    response.headers.set(ARTIFACT_DATA_E2E_PROBE_HEADER, "enabled");
+  }
   // CSP is set here (not next.config) so frame-src can include the runtime-known
   // Atrium sandbox origin. Single source → no intersection with a build-time
   // policy. See next.config.mjs note (#1052).

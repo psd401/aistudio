@@ -1,0 +1,575 @@
+"use server";
+
+/**
+ * Session-authenticated persistence for sandboxed Atrium artifacts (#1517).
+ *
+ * These actions are the sole human write/read boundary for
+ * `content_data_records`. The sandbox bridge supplies only artifact-defined
+ * data; content identity and user identity are resolved by this parent-side,
+ * authenticated boundary. Both operations call `contentService.get`, preserving
+ * the shared 404 mask for missing and non-viewable content.
+ */
+
+import { and, desc, eq, sql } from "drizzle-orm";
+import {
+  createLogger,
+  generateRequestId,
+  sanitizeForLogging,
+  startTimer,
+} from "@/lib/logger";
+import { createSuccess, ErrorFactories, handleError } from "@/lib/error-utils";
+import { getServerSession } from "@/lib/auth/server-session";
+import { contentService } from "@/lib/content";
+import { executeQuery } from "@/lib/db/drizzle-client";
+import { contentDataRecords, users } from "@/lib/db/schema";
+import { safeJsonbStringify } from "@/lib/db/json-utils";
+import type { ArtifactDataPayload } from "@/lib/db/types/jsonb";
+import { consumeRateLimit } from "@/lib/rate-limit";
+import type { ActionState } from "@/types";
+import { getUserRequester } from "./requester";
+
+const NAMESPACE_RE = /^[a-z0-9_-]{1,64}$/;
+const MAX_CONTENT_ID_LENGTH = 200;
+const MAX_PAYLOAD_BYTES = 8 * 1024;
+// Independent work cap for structural validation; it is not a byte-budget alias.
+const MAX_PAYLOAD_VALUES = 8_192;
+// Include original strings and keys that JSON.stringify would omit so lossy
+// inputs cannot bypass the serialized byte limit and force unbounded scanning.
+const MAX_PAYLOAD_STRING_CODE_UNITS = MAX_PAYLOAD_BYTES;
+const DEFAULT_LIST_LIMIT = 50;
+const MAX_LIST_LIMIT = 200;
+const SUBMIT_RATE_LIMIT = 120;
+const LIST_RATE_LIMIT = 600;
+const SUBMIT_RATE_WINDOW_MS = 60 * 1000;
+const LIST_RATE_WINDOW_MS = 60 * 1000;
+const SUBMIT_RATE_NAMESPACE = "atrium-artifact-record-submit";
+const LIST_RATE_NAMESPACE = "atrium-artifact-record-list";
+const RESERVED_IDENTITY_KEYS = new Set(["userId", "user_id"]);
+
+export interface SubmitArtifactRecordInput {
+  contentId: string;
+  namespace: string;
+  payload: ArtifactDataPayload;
+}
+
+export interface SubmitArtifactRecordResult {
+  id: string;
+  createdAt: string;
+}
+
+export type ArtifactRecordScope = "all" | "mine";
+
+export interface ListArtifactRecordsInput {
+  contentId: string;
+  namespace: string;
+  limit?: number;
+  scope?: ArtifactRecordScope;
+}
+
+export interface ArtifactRecordDTO {
+  id: string;
+  displayName: string;
+  payload: ArtifactDataPayload;
+  createdAt: string;
+}
+
+export interface ListArtifactRecordsResult {
+  records: ArtifactRecordDTO[];
+}
+
+interface ValidatedPayload {
+  serialized: string;
+  bytes: number;
+}
+
+interface ArtifactRecordRow {
+  id: string;
+  payload: ArtifactDataPayload;
+  createdAt: Date;
+  userFirstName: string | null;
+  userLastName: string | null;
+}
+
+function validateContentId(contentId: unknown): string {
+  if (typeof contentId !== "string") {
+    throw ErrorFactories.missingRequiredField("contentId");
+  }
+  // Bound attacker-controlled work before trim scans or allocates a normalized
+  // copy. Padded IDs are invalid rather than a path around the raw input cap.
+  if (contentId.length > MAX_CONTENT_ID_LENGTH) {
+    throw ErrorFactories.valueOutOfRange(
+      "contentId",
+      contentId.length,
+      1,
+      MAX_CONTENT_ID_LENGTH
+    );
+  }
+  const normalized = contentId.trim();
+  if (!normalized) {
+    throw ErrorFactories.missingRequiredField("contentId");
+  }
+  if (hasPostgresIncompatibleUnicode(normalized)) {
+    throw ErrorFactories.invalidInput(
+      "contentId",
+      null,
+      "contentId must use PostgreSQL-compatible Unicode"
+    );
+  }
+  return normalized;
+}
+
+function validateNamespace(namespace: unknown): string {
+  if (typeof namespace !== "string" || !NAMESPACE_RE.test(namespace)) {
+    throw ErrorFactories.invalidFormat(
+      "namespace",
+      namespace,
+      "1-64 lowercase letters, numbers, underscores, or hyphens"
+    );
+  }
+  return namespace;
+}
+
+function validatePayload(payload: unknown): ValidatedPayload {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw ErrorFactories.invalidInput(
+      "payload",
+      null,
+      "payload must be a JSON object"
+    );
+  }
+
+  for (const key of RESERVED_IDENTITY_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(payload, key)) {
+      throw ErrorFactories.invalidInput(
+        "payload",
+        key,
+        `payload must not contain reserved identity key '${key}'`
+      );
+    }
+  }
+
+  // Walk the original value before JSON.stringify so fields that serialization
+  // would omit cannot force an unbounded pre-validation traversal. The walk
+  // caps both discovered values and cumulative string/key code units before
+  // performing per-string Unicode scans.
+  validateJsonValue(payload);
+
+  let serialized: string;
+  try {
+    serialized = safeJsonbStringify(payload);
+  } catch {
+    throw ErrorFactories.invalidInput(
+      "payload",
+      null,
+      "payload must be JSON serializable"
+    );
+  }
+
+  // UTF-8 always uses at least one byte per UTF-16 code unit. Reject by that
+  // allocation-free lower bound first so a huge ASCII payload cannot make
+  // TextEncoder materialize another huge buffer just to discover it is too big.
+  if (serialized.length > MAX_PAYLOAD_BYTES) {
+    throw ErrorFactories.fileTooLarge(
+      "payload",
+      serialized.length,
+      MAX_PAYLOAD_BYTES
+    );
+  }
+
+  const bytes = new TextEncoder().encode(serialized).byteLength;
+  if (bytes > MAX_PAYLOAD_BYTES) {
+    throw ErrorFactories.fileTooLarge(
+      "payload",
+      bytes,
+      MAX_PAYLOAD_BYTES
+    );
+  }
+
+  let serializedShape: unknown;
+  try {
+    serializedShape = JSON.parse(serialized) as unknown;
+  } catch {
+    throw ErrorFactories.invalidInput(
+      "payload",
+      null,
+      "payload must serialize to a JSON object"
+    );
+  }
+  if (
+    serializedShape === null ||
+    typeof serializedShape !== "object" ||
+    Array.isArray(serializedShape)
+  ) {
+    throw ErrorFactories.invalidInput(
+      "payload",
+      null,
+      "payload must serialize to a JSON object"
+    );
+  }
+
+  return {
+    serialized,
+    bytes,
+  };
+}
+
+function validateJsonValue(value: unknown): void {
+  type ValidationFrame =
+    | { kind: "value"; value: unknown }
+    | { kind: "leave"; value: object };
+
+  const pending: ValidationFrame[] = [{ kind: "value", value }];
+  const activePath = new WeakSet<object>();
+  let discoveredValues = 1;
+  let discoveredStringCodeUnits = 0;
+
+  const validateBoundedString = (next: string): void => {
+    discoveredStringCodeUnits += next.length;
+    if (discoveredStringCodeUnits > MAX_PAYLOAD_STRING_CODE_UNITS) {
+      throw ErrorFactories.invalidInput(
+        "payload",
+        null,
+        "payload contains too much string data"
+      );
+    }
+    validateJsonString(next);
+  };
+
+  const enqueue = (next: unknown): void => {
+    discoveredValues += 1;
+    if (discoveredValues > MAX_PAYLOAD_VALUES) {
+      throw ErrorFactories.invalidInput(
+        "payload",
+        null,
+        "payload contains too many values"
+      );
+    }
+    pending.push({ kind: "value", value: next });
+  };
+
+  const enterContainer = (next: object): void => {
+    if (activePath.has(next)) {
+      throw ErrorFactories.invalidInput(
+        "payload",
+        null,
+        "payload must not contain cycles"
+      );
+    }
+    activePath.add(next);
+    pending.push({ kind: "leave", value: next });
+  };
+
+  while (pending.length > 0) {
+    const frame = pending.pop()!;
+    if (frame.kind === "leave") {
+      activePath.delete(frame.value);
+      continue;
+    }
+
+    const current = frame.value;
+    if (current === null || typeof current === "boolean") {
+      continue;
+    }
+    if (typeof current === "string") {
+      validateBoundedString(current);
+      continue;
+    }
+    if (typeof current === "number" && Number.isFinite(current)) {
+      continue;
+    }
+    if (typeof current !== "object") {
+      throw ErrorFactories.invalidInput(
+        "payload",
+        null,
+        "payload must contain only JSON values"
+      );
+    }
+    if (Array.isArray(current)) {
+      enterContainer(current);
+      for (const item of current) enqueue(item);
+      continue;
+    }
+
+    const prototype = Object.getPrototypeOf(current);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw ErrorFactories.invalidInput(
+        "payload",
+        null,
+        "payload must contain only plain JSON objects"
+      );
+    }
+    enterContainer(current);
+    const record = current as Record<string, unknown>;
+    for (const key in record) {
+      if (Object.prototype.hasOwnProperty.call(record, key)) {
+        validateBoundedString(key);
+        enqueue(record[key]);
+      }
+    }
+  }
+}
+
+function hasPostgresIncompatibleUnicode(value: string): boolean {
+  if (value.includes("\u0000")) return true;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xDC00 && next <= 0xDFFF)) return true;
+      else index += 1;
+    } else if (code >= 0xDC00 && code <= 0xDFFF) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function validateJsonString(value: string): void {
+  if (hasPostgresIncompatibleUnicode(value)) {
+    throw ErrorFactories.invalidInput(
+      "payload",
+      null,
+      "payload strings and object keys must use PostgreSQL-compatible Unicode"
+    );
+  }
+}
+
+function normalizeScope(scope: unknown): ArtifactRecordScope {
+  if (scope === undefined) return "all";
+  if (scope !== "all" && scope !== "mine") {
+    throw ErrorFactories.invalidInput(
+      "scope",
+      scope,
+      "scope must be 'all' or 'mine'"
+    );
+  }
+  return scope;
+}
+
+function normalizeLimit(limit: unknown): number {
+  if (limit === undefined) return DEFAULT_LIST_LIMIT;
+  if (typeof limit !== "number" || !Number.isFinite(limit) || limit < 1) {
+    throw ErrorFactories.valueOutOfRange(
+      "limit",
+      typeof limit === "number" ? limit : 0,
+      1,
+      MAX_LIST_LIMIT
+    );
+  }
+  return Math.min(Math.floor(limit), MAX_LIST_LIMIT);
+}
+
+function displayNameFor(row: ArtifactRecordRow): string {
+  const fullName = [row.userFirstName, row.userLastName]
+    .map((part) => part?.trim())
+    .filter((part): part is string => Boolean(part))
+    .join(" ")
+    .trim();
+  return fullName || "Unknown user";
+}
+
+function toArtifactRecordDTO(row: ArtifactRecordRow): ArtifactRecordDTO {
+  return {
+    id: row.id,
+    displayName: displayNameFor(row),
+    payload: row.payload,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+export async function submitArtifactRecord(
+  input: SubmitArtifactRecordInput
+): Promise<ActionState<SubmitArtifactRecordResult>> {
+  const requestId = generateRequestId();
+  const timer = startTimer("submitArtifactRecord");
+  const log = createLogger({ requestId, action: "submitArtifactRecord" });
+
+  try {
+    const session = await getServerSession();
+    if (!session?.sub) throw ErrorFactories.authNoSession();
+
+    // The authenticated Cognito subject is stable per user and available before
+    // requester resolution, which performs database-backed role/group lookups.
+    // Consume the budget first so an over-limit caller cannot force those
+    // lookups or any payload serialization.
+    const rateLimit = consumeRateLimit({
+      interval: SUBMIT_RATE_WINDOW_MS,
+      uniqueTokenPerInterval: SUBMIT_RATE_LIMIT,
+      namespace: SUBMIT_RATE_NAMESPACE,
+      identifier: `user-sub:${session.sub}`,
+    });
+    if (!rateLimit.allowed) {
+      throw ErrorFactories.bizRateLimitExceeded(
+        "submit artifact records",
+        rateLimit.retryAfterSeconds,
+        new Date(rateLimit.resetTime).toISOString()
+      );
+    }
+
+    const contentId = validateContentId(input?.contentId);
+    const namespace = validateNamespace(input?.namespace);
+    const payload = validatePayload(input?.payload);
+    const requester = await getUserRequester(requestId, session);
+    // Keep the action boundary fail-closed if requester resolution broadens.
+    if (requester.kind !== "user" || requester.userId == null) {
+      throw ErrorFactories.authNoSession();
+    }
+    const userId = requester.userId;
+
+    log.info("Action started: submit artifact record", {
+      contentId: sanitizeForLogging(contentId),
+      namespace,
+      payloadBytes: payload.bytes,
+    });
+
+    // Resolves the canonical object id and preserves the shared 404 mask for a
+    // missing or non-viewable target. The per-user guard runs first so a caller
+    // over budget cannot keep generating database-backed visibility lookups.
+    const content = await contentService.get(requester, contentId);
+    if (content.kind !== "artifact") {
+      throw ErrorFactories.validationFailed([
+        { field: "contentId", message: "Content is not an artifact" },
+      ]);
+    }
+
+    const [created] = await executeQuery(
+      (db) =>
+        db
+          .insert(contentDataRecords)
+          .values({
+            contentId: content.id,
+            namespace,
+            userId,
+            payload: sql`${payload.serialized}::jsonb`,
+          })
+          .returning({
+            id: contentDataRecords.id,
+            createdAt: contentDataRecords.createdAt,
+          }),
+      "atrium.submitArtifactRecord"
+    );
+    if (!created) {
+      throw ErrorFactories.dbQueryFailed("insert content_data_records");
+    }
+
+    const result = {
+      id: created.id,
+      createdAt: created.createdAt.toISOString(),
+    };
+    timer({ status: "success" });
+    log.info("Artifact record submitted", {
+      contentId: content.id,
+      recordId: created.id,
+      userId,
+    });
+    return createSuccess(result, "Artifact record submitted");
+  } catch (error) {
+    timer({ status: "error" });
+    return handleError(error, "Failed to submit artifact record", {
+      context: "submitArtifactRecord",
+      requestId,
+      operation: "submitArtifactRecord",
+    });
+  }
+}
+
+export async function listArtifactRecords(
+  input: ListArtifactRecordsInput
+): Promise<ActionState<ListArtifactRecordsResult>> {
+  const requestId = generateRequestId();
+  const timer = startTimer("listArtifactRecords");
+  const log = createLogger({ requestId, action: "listArtifactRecords" });
+
+  try {
+    const session = await getServerSession();
+    if (!session?.sub) throw ErrorFactories.authNoSession();
+
+    // List reads are cheap and bounded, but a sandbox can still poll them at a
+    // pathological rate. Consume a generous budget before requester resolution
+    // so repeated calls cannot amplify into role/group and visibility queries.
+    const rateLimit = consumeRateLimit({
+      interval: LIST_RATE_WINDOW_MS,
+      uniqueTokenPerInterval: LIST_RATE_LIMIT,
+      namespace: LIST_RATE_NAMESPACE,
+      identifier: `user-sub:${session.sub}`,
+    });
+    if (!rateLimit.allowed) {
+      throw ErrorFactories.bizRateLimitExceeded(
+        "list artifact records",
+        rateLimit.retryAfterSeconds,
+        new Date(rateLimit.resetTime).toISOString()
+      );
+    }
+
+    const contentId = validateContentId(input?.contentId);
+    const namespace = validateNamespace(input?.namespace);
+    const scope = normalizeScope(input?.scope);
+    const limit = normalizeLimit(input?.limit);
+    const requester = await getUserRequester(requestId, session);
+    // Keep the action boundary fail-closed if requester resolution broadens.
+    if (requester.kind !== "user" || requester.userId == null) {
+      throw ErrorFactories.authNoSession();
+    }
+    const userId = requester.userId;
+
+    log.info("Action started: list artifact records", {
+      contentId: sanitizeForLogging(contentId),
+      namespace,
+      scope,
+      limit,
+    });
+
+    const content = await contentService.get(requester, contentId);
+    if (content.kind !== "artifact") {
+      throw ErrorFactories.validationFailed([
+        { field: "contentId", message: "Content is not an artifact" },
+      ]);
+    }
+    const conditions = [
+      eq(contentDataRecords.contentId, content.id),
+      eq(contentDataRecords.namespace, namespace),
+    ];
+    if (scope === "mine") {
+      conditions.push(eq(contentDataRecords.userId, userId));
+    }
+
+    const rows = await executeQuery(
+      (db) =>
+        db
+          .select({
+            id: contentDataRecords.id,
+            payload: contentDataRecords.payload,
+            createdAt: contentDataRecords.createdAt,
+            userFirstName: users.firstName,
+            userLastName: users.lastName,
+          })
+          .from(contentDataRecords)
+          .leftJoin(users, eq(contentDataRecords.userId, users.id))
+          .where(and(...conditions))
+          .orderBy(
+            desc(contentDataRecords.createdAt),
+            desc(contentDataRecords.id)
+          )
+          .limit(limit),
+      "atrium.listArtifactRecords"
+    );
+
+    const records = (rows as ArtifactRecordRow[]).map(toArtifactRecordDTO);
+    timer({ status: "success" });
+    log.info("Artifact records listed", {
+      contentId: content.id,
+      namespace,
+      scope,
+      count: records.length,
+    });
+    return createSuccess({ records }, "Artifact records loaded");
+  } catch (error) {
+    timer({ status: "error" });
+    return handleError(error, "Failed to list artifact records", {
+      context: "listArtifactRecords",
+      requestId,
+      operation: "listArtifactRecords",
+    });
+  }
+}
