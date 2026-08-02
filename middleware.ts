@@ -2,6 +2,10 @@ import { authMiddleware } from "@/auth";
 import { NextResponse, type NextRequest } from "next/server";
 import { getArtifactSandboxOrigin } from "@/lib/content/artifact-sandbox-config";
 import { inAppSignInCallbackUrl } from "@/lib/auth/sign-in-callback";
+import {
+  isArtifactDataE2EProbeEnabled,
+  isLocalArtifactDataActionProbe,
+} from "@/lib/auth/artifact-data-e2e-probe";
 import { isOidcProviderResumePath } from "@/lib/oauth/resume-path";
 
 // Public paths that don't require authentication
@@ -96,20 +100,14 @@ const CONTENT_SECURITY_POLICY =
 const ARTIFACT_DATA_E2E_PROBE_HEADER =
   "X-AIStudio-Artifact-Data-E2E-Probe";
 
-function isLoopbackHostname(hostname: string): boolean {
-  return (
-    hostname === "localhost" ||
-    hostname === "127.0.0.1" ||
-    hostname === "[::1]"
-  );
-}
-
-function isArtifactDataE2EProbeEnabled(req: NextRequest): boolean {
-  return (
-    process.env.NODE_ENV !== "production" &&
-    process.env.ATRIUM_ARTIFACT_DATA_E2E_ACTION_PROBE === "true" &&
-    isLoopbackHostname(req.nextUrl.hostname)
-  );
+function artifactDataE2EProbeContext(req: NextRequest) {
+  // nextUrl.hostname may be derived from Host, so loopback is defense in depth;
+  // the production NODE_ENV check is the non-negotiable deployment boundary.
+  return {
+    nodeEnv: process.env.NODE_ENV,
+    probeFlag: process.env.ATRIUM_ARTIFACT_DATA_E2E_ACTION_PROBE,
+    hostname: req.nextUrl.hostname,
+  };
 }
 
 /**
@@ -122,18 +120,21 @@ function isArtifactDataE2EProbeEnabled(req: NextRequest): boolean {
  * Deployed builds always use NODE_ENV=production, where this exception is
  * disabled and the page itself also returns 404.
  */
-function isLocalArtifactDataActionProbe(req: NextRequest): boolean {
-  return (
-    isArtifactDataE2EProbeEnabled(req) &&
-    req.method === "POST" &&
-    req.nextUrl.pathname === "/test-user/artifact-data" &&
-    req.headers.has("next-action")
-  );
+function isLocalArtifactDataActionProbeRequest(req: NextRequest): boolean {
+  const context = artifactDataE2EProbeContext(req);
+  if (!isArtifactDataE2EProbeEnabled(context)) return false;
+
+  return isLocalArtifactDataActionProbe({
+    ...context,
+    method: req.method,
+    pathname: req.nextUrl.pathname,
+    hasNextActionHeader: req.headers.has("next-action"),
+  });
 }
 
 function isArtifactDataE2EProbeHealthCheck(req: NextRequest): boolean {
   return (
-    isArtifactDataE2EProbeEnabled(req) &&
+    isArtifactDataE2EProbeEnabled(artifactDataE2EProbeContext(req)) &&
     req.nextUrl.pathname === "/api/healthz"
   );
 }
@@ -144,7 +145,7 @@ export default authMiddleware((req) => {
 
   // Check if path is public
   const isPublicPath =
-    isLocalArtifactDataActionProbe(req) ||
+    isLocalArtifactDataActionProbeRequest(req) ||
     EXACT_PUBLIC_PATHS.has(nextUrl.pathname) ||
     PUBLIC_PATHS.some(
       (path) =>
