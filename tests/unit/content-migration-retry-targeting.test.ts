@@ -25,6 +25,20 @@ const migrationRunner = readFileSync(
   ),
   "utf8",
 );
+const migrationControlPanel = readFileSync(
+  resolve(
+    process.cwd(),
+    "app/(protected)/admin/repositories/_components/migration-control-panel.tsx",
+  ),
+  "utf8",
+);
+const migrationReasonDialog = readFileSync(
+  resolve(
+    process.cwd(),
+    "app/(protected)/admin/repositories/_components/migration-exception-reason-dialog.tsx",
+  ),
+  "utf8",
+);
 
 describe("repository migration retry targeting", () => {
   it("marks both single and bounded bulk retry runs as retry-only", () => {
@@ -91,5 +105,35 @@ describe("repository migration retry targeting", () => {
     expect(migrationControlService).toContain(
       'contentMigration.excludeException',
     );
+  });
+
+  it("records rollback-drill audit evidence in the initial run insert", () => {
+    const functionStart = migrationControlService.indexOf(
+      "export async function runRepositoryMigrationRollbackDrill",
+    );
+    const functionEnd = migrationControlService.indexOf(
+      "function migrationMetricsFromRows",
+      functionStart,
+    );
+    const rollbackDrill = migrationControlService.slice(
+      functionStart,
+      functionEnd,
+    );
+
+    expect(rollbackDrill).toContain("rollbackDrill: true");
+    expect(rollbackDrill).toContain("migrationItemId: sample.migration_id");
+    expect(rollbackDrill).toContain("canonicalItemId: sample.item_id");
+    expect(rollbackDrill).not.toContain("UPDATE repository_migration_runs");
+  });
+
+  it("collects audit reasons in an accessible application dialog", () => {
+    expect(migrationControlPanel).not.toContain("window.prompt");
+    expect(migrationControlPanel).toContain("MigrationExceptionReasonDialog");
+    expect(migrationReasonDialog).toContain("<DialogTitle>");
+    expect(migrationReasonDialog).toContain(
+      'Label htmlFor="migration-exception-reason"',
+    );
+    expect(migrationReasonDialog).toContain("minLength={10}");
+    expect(migrationReasonDialog).toContain("maxLength={1000}");
   });
 });

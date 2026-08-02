@@ -18,7 +18,11 @@ jest.mock("@/lib/aws/s3-client", () => ({
   clearS3Cache: jest.fn(),
 }));
 
-import { revalidateSettingsCache, Settings } from "@/lib/settings-manager";
+import {
+  getSetting,
+  revalidateSettingsCache,
+  Settings,
+} from "@/lib/settings-manager";
 
 describe("Settings.getS3", () => {
   beforeEach(async () => {
@@ -57,5 +61,43 @@ describe("Settings.getS3", () => {
       bucket: "environment-documents",
       region: "us-east-2",
     });
+  });
+
+  it("does not let an invalidated background refresh overwrite a newer value", async () => {
+    jest.useFakeTimers({ now: new Date("2026-08-02T00:00:00.000Z") });
+    let resolveStaleRefresh: ((value: string | null) => void) | undefined;
+    try {
+      mockGetSettingValue.mockReset();
+      mockGetSettingValue.mockResolvedValueOnce("false");
+      await expect(getSetting("CONTENT_RETRIEVAL_SHADOW_ENABLED")).resolves.toBe(
+        "false",
+      );
+
+      jest.advanceTimersByTime(5 * 60 * 1000 + 1);
+      mockGetSettingValue.mockImplementationOnce(
+        () =>
+          new Promise<string | null>((resolve) => {
+            resolveStaleRefresh = resolve;
+          }),
+      );
+      await expect(getSetting("CONTENT_RETRIEVAL_SHADOW_ENABLED")).resolves.toBe(
+        "false",
+      );
+
+      await revalidateSettingsCache("CONTENT_RETRIEVAL_SHADOW_ENABLED");
+      mockGetSettingValue.mockResolvedValueOnce("true");
+      await expect(getSetting("CONTENT_RETRIEVAL_SHADOW_ENABLED")).resolves.toBe(
+        "true",
+      );
+
+      resolveStaleRefresh?.("false");
+      await Promise.resolve();
+      await Promise.resolve();
+      await expect(getSetting("CONTENT_RETRIEVAL_SHADOW_ENABLED")).resolves.toBe(
+        "true",
+      );
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
