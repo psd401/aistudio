@@ -214,8 +214,12 @@ function validatePayload(payload: unknown): ValidatedPayload {
 }
 
 function validateJsonValue(value: unknown): void {
-  const pending: unknown[] = [value];
-  const seen = new WeakSet<object>();
+  type ValidationFrame =
+    | { kind: "value"; value: unknown }
+    | { kind: "leave"; value: object };
+
+  const pending: ValidationFrame[] = [{ kind: "value", value }];
+  const activePath = new WeakSet<object>();
   let discoveredValues = 1;
   let discoveredStringCodeUnits = 0;
 
@@ -240,11 +244,29 @@ function validateJsonValue(value: unknown): void {
         "payload contains too many values"
       );
     }
-    pending.push(next);
+    pending.push({ kind: "value", value: next });
+  };
+
+  const enterContainer = (next: object): void => {
+    if (activePath.has(next)) {
+      throw ErrorFactories.invalidInput(
+        "payload",
+        null,
+        "payload must not contain cycles"
+      );
+    }
+    activePath.add(next);
+    pending.push({ kind: "leave", value: next });
   };
 
   while (pending.length > 0) {
-    const current = pending.pop();
+    const frame = pending.pop()!;
+    if (frame.kind === "leave") {
+      activePath.delete(frame.value);
+      continue;
+    }
+
+    const current = frame.value;
     if (current === null || typeof current === "boolean") {
       continue;
     }
@@ -262,10 +284,8 @@ function validateJsonValue(value: unknown): void {
         "payload must contain only JSON values"
       );
     }
-    if (seen.has(current)) continue;
-    seen.add(current);
-
     if (Array.isArray(current)) {
+      enterContainer(current);
       for (const item of current) enqueue(item);
       continue;
     }
@@ -278,6 +298,7 @@ function validateJsonValue(value: unknown): void {
         "payload must contain only plain JSON objects"
       );
     }
+    enterContainer(current);
     const record = current as Record<string, unknown>;
     for (const key in record) {
       if (Object.prototype.hasOwnProperty.call(record, key)) {

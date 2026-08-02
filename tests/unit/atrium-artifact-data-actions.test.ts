@@ -369,6 +369,29 @@ describe("submitArtifactRecord original string bounds", () => {
     expect(mockContentGet).not.toHaveBeenCalled();
     expect(mockInsert).not.toHaveBeenCalled();
   });
+
+  it("bounds repeated-reference expansion before serialization", async () => {
+    const stringifySpy = jest.spyOn(JSON, "stringify");
+    let repeated: Record<string, unknown> = { leaf: true };
+    for (let depth = 0; depth < 14; depth += 1) {
+      repeated = { left: repeated, right: repeated };
+    }
+
+    try {
+      const result = await submitArtifactRecord({
+        ...validSubmitInput,
+        payload: { repeated },
+      });
+
+      expect(stringifySpy).not.toHaveBeenCalled();
+      expect(result.isSuccess).toBe(false);
+      expect(mockGetUserRequester).not.toHaveBeenCalled();
+      expect(mockContentGet).not.toHaveBeenCalled();
+      expect(mockInsert).not.toHaveBeenCalled();
+    } finally {
+      stringifySpy.mockRestore();
+    }
+  });
 });
 
 describe("artifact content id validation", () => {
