@@ -6,6 +6,8 @@
  */
 
 import { NotFoundError } from "@/lib/content/errors";
+import type { SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import type {
   ListArtifactRecordsInput,
   SubmitArtifactRecordInput,
@@ -41,7 +43,7 @@ const mockInsert = jest.fn(() => ({ values: mockValues }));
 
 const mockLimit = jest.fn();
 const mockOrderBy = jest.fn(() => ({ limit: mockLimit }));
-const mockWhere = jest.fn(() => ({ orderBy: mockOrderBy }));
+const mockWhere = jest.fn((_condition: unknown) => ({ orderBy: mockOrderBy }));
 const mockLeftJoin = jest.fn(() => ({ where: mockWhere }));
 const mockFrom = jest.fn(() => ({ leftJoin: mockLeftJoin }));
 const mockSelect = jest.fn(() => ({ from: mockFrom }));
@@ -460,6 +462,15 @@ describe("listArtifactRecords", () => {
 
     expect(result.isSuccess).toBe(true);
     expect(mockWhere).toHaveBeenCalledTimes(1);
+    const whereClause = mockWhere.mock.calls[0]?.[0] as SQL | undefined;
+    if (!whereClause) throw new Error("Expected a list query WHERE clause");
+    const rendered = new PgDialect().sqlToQuery(whereClause);
+    expect(rendered.sql).toContain('"content_data_records"."user_id" = $3');
+    expect(rendered.params).toEqual([
+      CONTENT.id,
+      validListInput.namespace,
+      REQUESTER.userId,
+    ]);
   });
 
   it("rejects an invalid scope before visibility or database access", async () => {

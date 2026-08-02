@@ -168,6 +168,8 @@ function validatePayload(payload: unknown): ValidatedPayload {
 
   // Enforce the serialized byte budget before walking the graph so a very
   // large array/object cannot expand the structural-validation work queue.
+  // Walk the original value deliberately: reject undefined and other values
+  // JSON.stringify would silently omit instead of accepting a lossy payload.
   validateJsonValue(payload);
 
   let serializedShape: unknown;
@@ -358,6 +360,7 @@ export async function submitArtifactRecord(
     const namespace = validateNamespace(input?.namespace);
     const payload = validatePayload(input?.payload);
     const requester = await getUserRequester(requestId, session);
+    // Keep the action boundary fail-closed if requester resolution broadens.
     if (requester.kind !== "user" || requester.userId == null) {
       throw ErrorFactories.authNoSession();
     }
@@ -453,6 +456,7 @@ export async function listArtifactRecords(
     const scope = normalizeScope(input?.scope);
     const limit = normalizeLimit(input?.limit);
     const requester = await getUserRequester(requestId, session);
+    // Keep the action boundary fail-closed if requester resolution broadens.
     if (requester.kind !== "user" || requester.userId == null) {
       throw ErrorFactories.authNoSession();
     }

@@ -464,7 +464,7 @@ function handleTypedError(
   const rateLimit =
     error.code === ErrorCode.BIZ_RATE_LIMIT_EXCEEDED
       ? (error as BusinessLogicError).rateLimit
-      : undefined
+      : undefined;
   const details = sanitizeForLogging({
     code: error.code,
     details: error.details,
