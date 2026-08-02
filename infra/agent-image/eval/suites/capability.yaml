@@ -2,6 +2,7 @@
 tasks:
   - ../../skills/chat-card/evals/morning-brief-card.yaml
   - ../../skills/psd-aistudio/evals/explain-without-call.yaml
+  - ../../skills/psd-atrium/evals/add-artifact-persistence.yaml
   - ../../skills/psd-atrium/evals/draft-without-publish.yaml
   - ../../skills/psd-brand-guidelines/evals/logo-variant-choice.yaml
   - ../../skills/psd-canva/evals/ideas-without-design.yaml

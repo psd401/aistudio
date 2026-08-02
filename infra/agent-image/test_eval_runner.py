@@ -219,6 +219,7 @@ class SuiteLoadingTests(unittest.TestCase):
 
         negative_task_ids = {
             "aistudio-explain-without-call",
+            "atrium-add-artifact-persistence",
             "atrium-draft-without-publish",
             "canva-ideas-without-design",
             "chat-card-single-sentence-plain-text",

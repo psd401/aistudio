@@ -240,6 +240,9 @@ Tool integration for Assistant Architect prompts.
 #### [features/atrium-collection-management.md](./features/atrium-collection-management.md)
 **Atrium collection management** — district/shared and owner-bound private hierarchies, inherited view/create grants, lifecycle and conflict rules, explicit count/filter semantics, audit coverage, and the UI/REST/skill surfaces.
 
+#### [features/atrium-artifact-data.md](./features/atrium-artifact-data.md)
+**Atrium artifact data** — session-authenticated `AtriumData.submit()` / `list()` persistence for sandboxed artifacts, the source-authenticated `postMessage` protocol, append-only records, agent broker reads, CSP invariants, and locked design decisions.
+
 #### [features/assistant-architect-json-import-spec.md](./features/assistant-architect-json-import-spec.md)
 **Complete JSON import specification** for generating valid assistant import files. Includes schema reference, field types, variable substitution, execution patterns, and comprehensive examples.
 

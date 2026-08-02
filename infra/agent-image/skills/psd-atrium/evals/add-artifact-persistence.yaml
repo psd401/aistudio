@@ -1,0 +1,12 @@
+id: atrium-add-artifact-persistence
+skill: psd-atrium
+level: L0
+workspace: pure
+suite: capability
+prompt: "An existing Atrium HTML game already computes finalScore. Show the JavaScript needed to add a live cross-device leaderboard: submit when the game ends, list when the leaderboard opens, render server-supplied player names, and show a sign-in state when persistence is unavailable. Do not create or edit Atrium content. Return the implementation and one sentence of rationale; do not discuss or include alternative persistence mechanisms."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"AtriumData\\s*\\.\\s*submit\\s*\\("}
+  - {"type":"output_match","pattern":"AtriumData\\s*\\.\\s*list\\s*\\("}
+  - {"type":"output_match","pattern":"sign in.{0,40}scores|scores.{0,40}sign in","ignore_case":true}
+  - {"type":"output_match","pattern":"(?is)\\A(?!.*(?:Google\\s+(?:Sheets|Forms)|Apps\\s+Script|fetch\\s*\\(|new\\s+XMLHttpRequest|localStorage|sessionStorage)).*\\Z"}

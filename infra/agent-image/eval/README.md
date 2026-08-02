@@ -242,7 +242,7 @@ status 2.
 
 ## Nightly and on-demand runs
 
-`.github/workflows/agent-eval-nightly.yml` runs all 53 regression and capability
+`.github/workflows/agent-eval-nightly.yml` runs all 55 regression and capability
 tasks at three trials nightly on an ARM64 runner. It resolves the immutable
 image currently exposed by the dev AgentCore runtime, verifies its AI Studio
 source labels, uploads only the safe summary, removes both JSONL transcripts
@@ -392,7 +392,7 @@ Run the path-filtered/scheduled upstream release comparison locally with:
 python3 infra/agent-image/check_eval_coverage.py --verify-upstream
 ```
 
-The regression and capability manifests contain 53 tasks total. At least 25%
+The regression and capability manifests contain 55 tasks total. At least 25%
 are explicit negative cases: they prove that a route or side effect is not
 used, rather than treating non-invocation as an unobserved success.
 

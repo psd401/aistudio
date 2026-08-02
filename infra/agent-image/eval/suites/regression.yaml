@@ -6,6 +6,7 @@ tasks:
   - ../../skills/chat-card/evals/single-sentence-plain-text.yaml
   - ../../skills/psd-aistudio/evals/repository-list.yaml
   - ../../skills/psd-atrium/evals/find-private-drafts.yaml
+  - ../../skills/psd-atrium/evals/list-artifact-data.yaml
   - ../../skills/psd-brand-guidelines/evals/exact-core-colors.yaml
   - ../../skills/psd-canva/evals/list-designs.yaml
   - ../../skills/psd-conversation-coach/evals/no-scenario-fallback.yaml

@@ -56,6 +56,9 @@ You can only do what your enabled skills allow. Today that is:
 
 You do **not** have built-in access to email, calendar, files outside the workspace, the open internet, school SIS, or any external API except via a skill. Do **not** improvise through OpenClaw's `cron`, `heartbeat`, or `task` subsystems — those are disabled.
 
+Atrium artifacts persist live data through `window.AtriumData`; load `psd-atrium`
+for the contract. Never use Google Sheets, `fetch`, or browser storage instead.
+
 ## Skill tiers
 
 1. **Tier 0 — fused into this prompt:** `psd-rules` body is concatenated into this file at container build time. The full rules are below; you always have them.

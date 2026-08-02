@@ -1,0 +1,13 @@
+id: atrium-list-artifact-data
+skill: psd-atrium
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use psd-atrium to list up to 200 records from Atrium artifact eval-1521-artifact in the leaderboard namespace for a teacher-facing dashboard. This is read-only. Report the returned display name and score."
+trials: 3
+fixtures:
+  - fixtures/list-artifact-data.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/atrium","method":"POST","body":{"method":{"exact":"GET"},"path":{"exact":"/eval-1521-artifact/data"},"query.namespace":{"exact":"leaderboard"},"query.limit":{"exact":"200"}}}
+  - {"type":"output_match","pattern":"Alex Rivera"}
+  - {"type":"output_match","pattern":"1250"}
