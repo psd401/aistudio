@@ -199,6 +199,12 @@ describe("canonical repository item embedding coverage", () => {
       "active_chunk.index_generation_id = ${knowledgeRepositories.activeIndexGenerationId}",
     );
     expect(statusServiceSource).toContain("active_chunk.embedding IS NULL");
+    expect(statusServiceSource).toContain(
+      'eq(repositoryItems.lifecycleStatus, "active")',
+    );
+    expect(statusServiceSource).toContain(
+      'context.lifecycleStatus !== "active"',
+    );
   });
 
   it("exposes a terminal failed embedding generation", () => {

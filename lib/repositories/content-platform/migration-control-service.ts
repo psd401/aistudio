@@ -590,10 +590,19 @@ export async function approveRepositoryMigrationMismatch(input: {
   }, "contentMigration.approveMismatch");
 }
 
+export type RepositoryMigrationExceptionStatus = Extract<
+  RepositoryMigrationItemStatus,
+  "failed" | "unrecoverable" | "mismatch"
+>;
+
 export async function listRepositoryMigrationExceptions(
   limit = 50,
+  status?: RepositoryMigrationExceptionStatus,
 ): Promise<RepositoryMigrationException[]> {
   const safeLimit = Math.min(200, Math.max(1, Math.floor(limit)));
+  const statuses: RepositoryMigrationExceptionStatus[] = status
+    ? [status]
+    : ["failed", "unrecoverable", "mismatch"];
   return executeQuery(
     (db) =>
       db
@@ -612,13 +621,7 @@ export async function listRepositoryMigrationExceptions(
           updatedAt: repositoryMigrationItems.updatedAt,
         })
         .from(repositoryMigrationItems)
-        .where(
-          inArray(repositoryMigrationItems.status, [
-            "failed",
-            "unrecoverable",
-            "mismatch",
-          ]),
-        )
+        .where(inArray(repositoryMigrationItems.status, statuses))
         .orderBy(desc(repositoryMigrationItems.updatedAt))
         .limit(safeLimit),
     "contentMigration.listExceptions",

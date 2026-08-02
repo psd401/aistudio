@@ -145,29 +145,37 @@ describe("repository recovery administrator actions", () => {
     expect(mockRetryFailedRepositoryMigrationItems).not.toHaveBeenCalled();
   });
 
-  it("reprocesses only mismatches and enforces the requested limit", async () => {
+  it("queries only mismatches and reports partial reprocess outcomes", async () => {
     mockListRepositoryMigrationExceptions.mockResolvedValue([
-      { id: "failed-1", status: "failed" },
       { id: "mismatch-1", status: "mismatch" },
       { id: "mismatch-2", status: "mismatch" },
       { id: "mismatch-3", status: "mismatch" },
     ]);
+    mockReprocessRepositoryMigrationItem.mockImplementation(async (...args) => {
+      if (args[0] === "mismatch-2") throw new Error("State changed");
+    });
 
     const result = await reprocessRepositoryMigrationMismatchesAction({
-      limit: 2,
+      limit: 3,
     });
 
     expect(result).toMatchObject({
       isSuccess: true,
       data: {
         reprocessed: 2,
-        migrationItemIds: ["mismatch-1", "mismatch-2"],
+        failed: 1,
+        migrationItemIds: ["mismatch-1", "mismatch-3"],
+        failedMigrationItemIds: ["mismatch-2"],
       },
     });
-    expect(mockListRepositoryMigrationExceptions).toHaveBeenCalledWith(200);
+    expect(mockListRepositoryMigrationExceptions).toHaveBeenCalledWith(
+      3,
+      "mismatch",
+    );
     expect(mockReprocessRepositoryMigrationItem.mock.calls).toEqual([
       ["mismatch-1"],
       ["mismatch-2"],
+      ["mismatch-3"],
     ]);
   });
 
@@ -245,6 +253,7 @@ describe("repository recovery administrator actions", () => {
             totalChunks: 9,
           }),
         ],
+        [7, status(7, { processingStatus: "failed", canRetry: true })],
         [
           6,
           status(6, {
@@ -258,6 +267,7 @@ describe("repository recovery administrator actions", () => {
     );
     mockRetryCanonicalRepositoryItem.mockImplementation(async (...args) => {
       const itemId = args[0] as number;
+      if (itemId === 5) throw new Error("Item state changed");
       return {
         itemVersionId: `version-${itemId}`,
         processingJobId: `job-${itemId}`,
@@ -277,13 +287,16 @@ describe("repository recovery administrator actions", () => {
       isSuccess: true,
       data: {
         retried: 2,
+        failed: 1,
         dispatchDeferred: 1,
-        itemIds: [3, 5],
+        itemIds: [3, 7],
+        failedItemIds: [5],
       },
     });
     expect(mockRetryCanonicalRepositoryItem.mock.calls).toEqual([
       [3, "recovery-test"],
       [5, "recovery-test"],
+      [7, "recovery-test"],
     ]);
     expect(mockRetryCanonicalRepositoryItem).not.toHaveBeenCalledWith(
       6,

@@ -57,4 +57,25 @@ describe("repository migration retry targeting", () => {
     expect(retryOnlyIds).toEqual([2, 1_000_000]);
     expect(retryOnlyIds).toHaveLength(selectedRetryIds.size);
   });
+
+  it("applies an exception-status filter before the bounded query limit", () => {
+    const functionStart = migrationControlService.indexOf(
+      "export async function listRepositoryMigrationExceptions",
+    );
+    const statusFilter = migrationControlService.indexOf(
+      ".where(inArray(repositoryMigrationItems.status, statuses))",
+      functionStart,
+    );
+    const limit = migrationControlService.indexOf(
+      ".limit(safeLimit)",
+      functionStart,
+    );
+
+    expect(functionStart).toBeGreaterThanOrEqual(0);
+    expect(migrationControlService).toContain(
+      "status?: RepositoryMigrationExceptionStatus",
+    );
+    expect(statusFilter).toBeGreaterThan(functionStart);
+    expect(limit).toBeGreaterThan(statusFilter);
+  });
 });

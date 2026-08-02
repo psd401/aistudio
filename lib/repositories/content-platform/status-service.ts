@@ -297,7 +297,12 @@ export async function getCanonicalRepositoryItemStatuses(
             eq(repositoryProcessingJobs.stage, "inspect")
           )
         )
-        .where(eq(repositoryItems.repositoryId, repositoryId)),
+        .where(
+          and(
+            eq(repositoryItems.repositoryId, repositoryId),
+            eq(repositoryItems.lifecycleStatus, "active"),
+          ),
+        ),
     "contentPlatform.getCanonicalRepositoryItemStatuses"
   );
 
@@ -353,6 +358,7 @@ export async function retryCanonicalRepositoryItem(
       const [context] = await tx
         .select({
           itemVersionId: repositoryItemVersions.id,
+          lifecycleStatus: repositoryItems.lifecycleStatus,
           storageStatus: repositoryItemVersions.storageStatus,
           inspectionStatus: repositoryItemVersions.inspectionStatus,
           active: sql<boolean>`EXISTS (
@@ -375,6 +381,9 @@ export async function retryCanonicalRepositoryItem(
         .limit(1)
         .for("update");
       if (!context) throw new Error("The item has no canonical version to retry");
+      if (context.lifecycleStatus !== "active") {
+        throw new Error("Only active repository items can be retried");
+      }
       if (context.storageStatus === "blocked" || context.inspectionStatus === "blocked") {
         throw new Error("Security-blocked content cannot be retried");
       }

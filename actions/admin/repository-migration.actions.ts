@@ -228,7 +228,9 @@ export async function retryFailedRepositoryMigrationItemsAction(input: {
 
 export interface RepositoryMigrationMismatchReprocessResult {
   reprocessed: number;
+  failed: number;
   migrationItemIds: string[];
+  failedMigrationItemIds: string[];
 }
 
 /** Reprocess a bounded set of reconciliation mismatches using the item service. */
@@ -237,21 +239,42 @@ export async function reprocessRepositoryMigrationMismatchesAction(input: {
 }): Promise<ActionState<RepositoryMigrationMismatchReprocessResult>> {
   const requestId = generateRequestId();
   const timer = startTimer("admin.contentMigration.reprocessMismatches");
+  const log = createLogger({
+    requestId,
+    action: "admin.contentMigration.reprocessMismatches",
+  });
   try {
     await requireMigrationAdministrator();
     validateBulkLimit(input.limit, MAX_MIGRATION_MISMATCH_REPROCESSES);
-    const exceptions = await listRepositoryMigrationExceptions(200);
-    const mismatches = exceptions
-      .filter((exception) => exception.status === "mismatch")
-      .slice(0, input.limit);
+    const mismatches = await listRepositoryMigrationExceptions(
+      input.limit,
+      "mismatch",
+    );
+    const migrationItemIds: string[] = [];
+    const failedMigrationItemIds: string[] = [];
     for (const mismatch of mismatches) {
-      await reprocessRepositoryMigrationItem(mismatch.id);
+      try {
+        await reprocessRepositoryMigrationItem(mismatch.id);
+        migrationItemIds.push(mismatch.id);
+      } catch (error) {
+        failedMigrationItemIds.push(mismatch.id);
+        log.warn("Migration mismatch reprocess was skipped", {
+          migrationItemId: mismatch.id,
+          error: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
     }
     const result = {
-      reprocessed: mismatches.length,
-      migrationItemIds: mismatches.map((mismatch) => mismatch.id),
+      reprocessed: migrationItemIds.length,
+      failed: failedMigrationItemIds.length,
+      migrationItemIds,
+      failedMigrationItemIds,
     };
-    timer({ status: "success", reprocessed: result.reprocessed });
+    timer({
+      status: "success",
+      reprocessed: result.reprocessed,
+      failed: result.failed,
+    });
     revalidatePath(ADMIN_REPOSITORIES_PATH);
     return createSuccess(result, "Migration mismatches queued for reprocessing");
   } catch (error) {
@@ -266,8 +289,10 @@ export async function reprocessRepositoryMigrationMismatchesAction(input: {
 
 export interface RepositoryItemsBulkRetryResult {
   retried: number;
+  failed: number;
   dispatchDeferred: number;
   itemIds: number[];
+  failedItemIds: number[];
 }
 
 /** Retry terminal or completed-but-under-embedded canonical repository items. */
@@ -301,11 +326,25 @@ export async function retryRepositoryItemsBulkAction(input: {
       .slice(0, input.limit);
 
     let dispatchDeferred = 0;
+    const itemIds: number[] = [];
+    const failedItemIds: number[] = [];
     for (const candidate of candidates) {
-      const retry = await retryCanonicalRepositoryItem(
-        candidate.itemId,
-        requestId,
-      );
+      let retry: Awaited<ReturnType<typeof retryCanonicalRepositoryItem>>;
+      try {
+        retry = await retryCanonicalRepositoryItem(
+          candidate.itemId,
+          requestId,
+        );
+        itemIds.push(candidate.itemId);
+      } catch (error) {
+        failedItemIds.push(candidate.itemId);
+        log.warn("Bulk retry candidate changed before it could be retried", {
+          repositoryId: input.repositoryId,
+          itemId: candidate.itemId,
+          error: error instanceof Error ? error.message : "Unknown error",
+        });
+        continue;
+      }
       try {
         await dispatchContentProcessingJob({
           jobId: retry.processingJobId,
@@ -323,9 +362,11 @@ export async function retryRepositoryItemsBulkAction(input: {
     }
 
     const result = {
-      retried: candidates.length,
+      retried: itemIds.length,
+      failed: failedItemIds.length,
       dispatchDeferred,
-      itemIds: candidates.map((candidate) => candidate.itemId),
+      itemIds,
+      failedItemIds,
     };
     timer({ status: "success", ...result });
     revalidatePath(ADMIN_REPOSITORIES_PATH);
