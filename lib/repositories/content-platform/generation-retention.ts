@@ -6,8 +6,7 @@ export const SUPERSEDED_GENERATION_KEEP_PER_REPOSITORY = 3;
 export const GENERATION_GC_CHUNK_BATCH = 20_000;
 export const GENERATION_GC_REPOSITORY_BATCH = 200;
 export const GENERATION_GC_GENERATION_BATCH = 200;
-/** Prime stride prevents the minute-based probe window from aligning to ID blocks. */
-const GENERATION_GC_REPOSITORY_PROBE_STRIDE = 104_729n;
+export const GENERATION_GC_PER_REPOSITORY_BATCH = 10;
 
 export interface CollectSupersededRepositoryGenerationsOptions {
   /** Testable clock; production always uses the current time. */
@@ -22,6 +21,8 @@ export interface CollectSupersededRepositoryGenerationsOptions {
   repositoryBatchSize?: number;
   /** Test override; production always uses the exported generation batch size. */
   generationBatchSize?: number;
+  /** Test override; production always uses the per-repository generation cap. */
+  perRepositoryGenerationBatchSize?: number;
 }
 
 export interface SupersededGenerationCollectionResult {
@@ -51,6 +52,7 @@ function eligibleGenerationCtes(params: {
   repositoryProbeAnchor: string;
   repositoryBatchSize: number;
   generationBatchSize: number;
+  perRepositoryGenerationBatchSize: number;
 }): SQL {
   const keepFloorOffset = params.keepPerRepository - 1;
 
@@ -159,7 +161,7 @@ function eligibleGenerationCtes(params: {
                  candidate_generation.created_at,
                  candidate_generation.id
         FOR UPDATE OF candidate_generation SKIP LOCKED
-        LIMIT ${params.generationBatchSize}
+        LIMIT ${params.perRepositoryGenerationBatchSize}
       ) generation
       LIMIT ${params.generationBatchSize}
     )
@@ -176,9 +178,10 @@ function eligibleGenerationCtes(params: {
  * Eligible repositories are ordered by their oldest candidate so sustained
  * work on low repository IDs cannot starve older garbage elsewhere. A rotating
  * keyset window bounds steady-state repository probes even when nothing is
- * eligible. The owner row lock stabilizes every supported pointer update; the
- * global pointer guard additionally fails closed on pre-existing
- * cross-repository pointer skew.
+ * eligible, while a per-repository generation cap prevents one backlog from
+ * consuming the entire global batch. The owner row lock stabilizes every
+ * supported pointer update; the global pointer guard additionally fails closed
+ * on pre-existing cross-repository pointer skew.
  */
 export async function collectSupersededRepositoryGenerations(
   options: CollectSupersededRepositoryGenerationsOptions = {},
@@ -203,14 +206,21 @@ export async function collectSupersededRepositoryGenerations(
     options.generationBatchSize ?? GENERATION_GC_GENERATION_BATCH,
     "generationBatchSize",
   );
+  const perRepositoryGenerationBatchSize = requirePositiveInteger(
+    options.perRepositoryGenerationBatchSize ??
+      GENERATION_GC_PER_REPOSITORY_BATCH,
+    "perRepositoryGenerationBatchSize",
+  );
   const collectionNow = options.now ?? new Date();
   const eligibleBefore = new Date(
     collectionNow.getTime() - retentionHours * 60 * 60_000,
   ).toISOString();
+  // Advance by exactly one window per minute. For any modulus N, every common
+  // divisor of N and the step is no larger than the window, so the B-wide
+  // wraparound keyset windows cover every repository without a coprime guess.
   const repositoryProbeAnchor = (
     BigInt(Math.floor(collectionNow.getTime() / 60_000)) *
-    BigInt(repositoryBatchSize) *
-    GENERATION_GC_REPOSITORY_PROBE_STRIDE
+    BigInt(repositoryBatchSize)
   ).toString();
 
   return executeTransaction(
@@ -222,6 +232,7 @@ export async function collectSupersededRepositoryGenerations(
           repositoryProbeAnchor,
           repositoryBatchSize,
           generationBatchSize,
+          perRepositoryGenerationBatchSize,
         })},
         selected_chunks AS (
           SELECT chunk.ctid AS row_id
@@ -247,6 +258,7 @@ export async function collectSupersededRepositoryGenerations(
           repositoryProbeAnchor,
           repositoryBatchSize,
           generationBatchSize,
+          perRepositoryGenerationBatchSize,
         })},
         deleted_generations AS (
           DELETE FROM repository_index_generations generation

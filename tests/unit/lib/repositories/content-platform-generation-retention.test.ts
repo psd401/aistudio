@@ -14,6 +14,7 @@ import {
   collectSupersededRepositoryGenerations,
   GENERATION_GC_CHUNK_BATCH,
   GENERATION_GC_GENERATION_BATCH,
+  GENERATION_GC_PER_REPOSITORY_BATCH,
   GENERATION_GC_REPOSITORY_BATCH,
   SUPERSEDED_GENERATION_KEEP_PER_REPOSITORY,
   SUPERSEDED_GENERATION_RETENTION_HOURS,
@@ -54,8 +55,7 @@ describe("superseded repository generation retention", () => {
     const repositoryBatchSize = 37;
     const repositoryProbeAnchor = (
       BigInt(Math.floor(now.getTime() / 60_000)) *
-      BigInt(repositoryBatchSize) *
-      104_729n
+      BigInt(repositoryBatchSize)
     ).toString();
     await expect(
       collectSupersededRepositoryGenerations({ now, repositoryBatchSize }),
@@ -122,6 +122,7 @@ describe("superseded repository generation retention", () => {
       expect(compiled.params).toContain(repositoryProbeAnchor);
       expect(compiled.params).toContain(repositoryBatchSize);
       expect(compiled.params).toContain(GENERATION_GC_GENERATION_BATCH);
+      expect(compiled.params).toContain(GENERATION_GC_PER_REPOSITORY_BATCH);
       expect(compiled.sql).not.toMatch(
         /generation\.status\s+(?:=|IN)\s*\(?\s*'(?:active|building)'/i,
       );
@@ -139,6 +140,7 @@ describe("superseded repository generation retention", () => {
     expect(GENERATION_GC_CHUNK_BATCH).toBe(20_000);
     expect(GENERATION_GC_REPOSITORY_BATCH).toBe(200);
     expect(GENERATION_GC_GENERATION_BATCH).toBe(200);
+    expect(GENERATION_GC_PER_REPOSITORY_BATCH).toBe(10);
   });
 
   it.each([
@@ -147,6 +149,10 @@ describe("superseded repository generation retention", () => {
     ["chunkBatchSize", { chunkBatchSize: 0 }],
     ["repositoryBatchSize", { repositoryBatchSize: 0 }],
     ["generationBatchSize", { generationBatchSize: 0 }],
+    [
+      "perRepositoryGenerationBatchSize",
+      { perRepositoryGenerationBatchSize: 0 },
+    ],
   ])("rejects an unsafe %s override", async (name, options) => {
     await expect(
       collectSupersededRepositoryGenerations(options),
