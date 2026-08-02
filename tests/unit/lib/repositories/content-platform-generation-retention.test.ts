@@ -97,6 +97,7 @@ describe("superseded repository generation retention", () => {
 
     for (const compiled of [chunkDeletion!, generationDeletion!]) {
       expect(compiled.sql).toContain("kept_generation.status = 'superseded'");
+      expect(compiled.sql).toContain("kept_generation.superseded_at IS NOT NULL");
       expect(compiled.sql).toContain(
         "candidate_generation.status = 'superseded'",
       );

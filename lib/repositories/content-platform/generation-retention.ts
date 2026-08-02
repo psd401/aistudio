@@ -207,6 +207,7 @@ function eligibleGenerationCtes(params: {
         FROM repository_index_generations kept_generation
         WHERE kept_generation.repository_id = repository.id
           AND kept_generation.status = 'superseded'
+          AND kept_generation.superseded_at IS NOT NULL
         ORDER BY kept_generation.superseded_at DESC,
                  kept_generation.created_at DESC,
                  kept_generation.id DESC

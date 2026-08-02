@@ -32,19 +32,40 @@ const [owner] = await executeQuery(
 );
 assert.ok(owner, "standard local seed is missing e2e-test-user");
 
-const [repository] = await executeQuery(
+const primaryRepositoryName = `Generation retention smoke ${now.getTime()}`;
+const mixedRepositoryName = `Generation retention mixed floor ${now.getTime()}`;
+const decoyRepositoryName = `Generation retention backfill decoy ${now.getTime()}`;
+const createdRepositories = await executeQuery(
   (db) =>
     db
       .insert(knowledgeRepositories)
-      .values({
-        name: `Generation retention smoke ${now.getTime()}`,
-        ownerId: owner.id,
-        repositoryKind: "durable",
-      })
-      .returning({ id: knowledgeRepositories.id }),
-  "smoke.generationRetention.createRepository",
+      .values(
+        [primaryRepositoryName, mixedRepositoryName, decoyRepositoryName].map(
+          (name) => ({
+            name,
+            ownerId: owner.id,
+            repositoryKind: "durable" as const,
+          }),
+        ),
+      )
+      .returning({
+        id: knowledgeRepositories.id,
+        name: knowledgeRepositories.name,
+      }),
+  "smoke.generationRetention.createRepositories",
+);
+const repository = createdRepositories.find(
+  (candidate) => candidate.name === primaryRepositoryName,
+);
+const mixedRepository = createdRepositories.find(
+  (candidate) => candidate.name === mixedRepositoryName,
+);
+const decoyRepository = createdRepositories.find(
+  (candidate) => candidate.name === decoyRepositoryName,
 );
 assert.ok(repository);
+assert.ok(mixedRepository);
+assert.ok(decoyRepository);
 
 try {
   const [item] = await executeQuery(
@@ -244,6 +265,118 @@ try {
   );
   assert.equal(remainingChunks.length, 2);
 
+  const mixedFloorFixture = [
+    { id: "10000000-0000-4000-8000-000000000001", supersededHoursAgo: 1 },
+    { id: "10000000-0000-4000-8000-000000000002", supersededHoursAgo: 2 },
+    { id: "10000000-0000-4000-8000-000000000003", supersededHoursAgo: 48 },
+    { id: "10000000-0000-4000-8000-000000000004", supersededHoursAgo: 72 },
+    { id: "10000000-0000-4000-8000-000000000005", supersededHoursAgo: null },
+  ] as const;
+  await executeQuery(
+    (db) =>
+      db.insert(repositoryIndexGenerations).values(
+        mixedFloorFixture.map((fixture, index) => ({
+          id: fixture.id,
+          repositoryId: mixedRepository.id,
+          status: "superseded" as const,
+          processorVersion: `generation-retention-mixed-floor-${index}`,
+          createdAt: new Date(now.getTime() - (10 - index) * HOUR_MS),
+        })),
+      ),
+    "smoke.generationRetention.createMixedFloorGenerations",
+  );
+  for (const fixture of mixedFloorFixture) {
+    await executeQuery(
+      (db) =>
+        db
+          .update(repositoryIndexGenerations)
+          .set({
+            supersededAt:
+              fixture.supersededHoursAgo === null
+                ? null
+                : new Date(
+                    now.getTime() - fixture.supersededHoursAgo * HOUR_MS,
+                  ),
+          })
+          .where(eq(repositoryIndexGenerations.id, fixture.id)),
+      `smoke.generationRetention.ageMixedFloor.${fixture.id}`,
+    );
+  }
+
+  const decoyGenerationIds = [1, 2, 3, 4].map(
+    (sequence) =>
+      `20000000-0000-4000-8000-${sequence.toString().padStart(12, "0")}`,
+  );
+  await executeQuery(
+    (db) =>
+      db.insert(repositoryIndexGenerations).values(
+        decoyGenerationIds.map((id, index) => ({
+          id,
+          repositoryId: decoyRepository.id,
+          status: "superseded" as const,
+          processorVersion: `generation-retention-backfill-decoy-${index}`,
+          createdAt: new Date(now.getTime() - (500 - index) * HOUR_MS),
+        })),
+      ),
+    "smoke.generationRetention.createBackfillDecoys",
+  );
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryIndexGenerations)
+        .set({ supersededAt: null })
+        .where(inArray(repositoryIndexGenerations.id, decoyGenerationIds)),
+    "smoke.generationRetention.clearBackfillDecoyTimestamps",
+  );
+
+  assert.deepEqual(
+    await collectSupersededRepositoryGenerations({
+      now,
+      generationBatchSize: 4,
+      perRepositoryGenerationBatchSize: 4,
+    }),
+    {
+      generationsTimestamped: 4,
+      chunksDeleted: 0,
+      generationsDeleted: 1,
+    },
+  );
+  const mixedFloorRemaining = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: repositoryIndexGenerations.id,
+          supersededAt: repositoryIndexGenerations.supersededAt,
+        })
+        .from(repositoryIndexGenerations)
+        .where(
+          inArray(
+            repositoryIndexGenerations.id,
+            mixedFloorFixture.map((fixture) => fixture.id),
+          ),
+        ),
+    "smoke.generationRetention.readMixedFloorRemaining",
+  );
+  const mixedFloorRemainingIds = new Set(
+    mixedFloorRemaining.map((generation) => generation.id),
+  );
+  assert.ok(mixedFloorRemainingIds.has(mixedFloorFixture[2].id));
+  assert.equal(mixedFloorRemainingIds.has(mixedFloorFixture[3].id), false);
+  assert.equal(
+    mixedFloorRemaining.find(
+      (generation) => generation.id === mixedFloorFixture[4].id,
+    )?.supersededAt,
+    null,
+  );
+  await executeQuery(
+    (db) =>
+      db
+        .update(repositoryIndexGenerations)
+        .set({ supersededAt: now })
+        .where(eq(repositoryIndexGenerations.id, mixedFloorFixture[4].id)),
+    "smoke.generationRetention.finishMixedFloorBackfill",
+  );
+
   const backlogGenerations = await executeQuery(
     (db) =>
       db
@@ -388,7 +521,13 @@ try {
     (db) =>
       db
         .delete(knowledgeRepositories)
-        .where(eq(knowledgeRepositories.id, repository.id)),
+        .where(
+          inArray(knowledgeRepositories.id, [
+            repository.id,
+            mixedRepository.id,
+            decoyRepository.id,
+          ]),
+        ),
     "smoke.generationRetention.cleanup",
   );
   await closeDatabase();
