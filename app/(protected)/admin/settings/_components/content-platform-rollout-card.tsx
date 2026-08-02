@@ -1,15 +1,23 @@
 "use client"
 
-import { useState } from "react"
+import { useState, type FormEvent } from "react"
 import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react"
+import {
+  recordRepositoryRetrievalShadowSampleAction,
+  type RepositoryRetrievalShadowSampleResult,
+} from "@/actions/admin/repository-migration.actions"
 import type {
   CreateSettingInput,
   Setting,
 } from "@/actions/db/settings-actions"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
+import { Textarea } from "@/components/ui/textarea"
 
 export const CONTENT_ROLLOUT_SETTING_KEYS = [
   "CONTENT_PLATFORM_ENABLED",
@@ -119,6 +127,8 @@ export function ContentPlatformRolloutCard({
           </span>
         </div>
 
+        <RetrievalShadowSampleForm />
+
         <div className="divide-y rounded-md border">
           {STAGES.map(([key, label], index) => {
             const setting = settingsByKey.get(key)
@@ -154,5 +164,128 @@ export function ContentPlatformRolloutCard({
         </div>
       </CardContent>
     </Card>
+  )
+}
+
+function RetrievalShadowSampleForm() {
+  const [repositoryId, setRepositoryId] = useState("")
+  const [queries, setQueries] = useState("")
+  const [isPending, setIsPending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [result, setResult] =
+    useState<RepositoryRetrievalShadowSampleResult | null>(null)
+
+  async function runSample(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setIsPending(true)
+    setError(null)
+    setResult(null)
+    try {
+      const actionResult = await recordRepositoryRetrievalShadowSampleAction({
+        repositoryId: Number(repositoryId),
+        queries: queries.split(/\r?\n/).map(query => query.trim()),
+      })
+      if (!actionResult.isSuccess) {
+        setError(actionResult.message)
+        return
+      }
+      setResult(actionResult.data)
+    } catch {
+      setError("Failed to run the repository retrieval-shadow sample.")
+    } finally {
+      setIsPending(false)
+    }
+  }
+
+  return (
+    <form
+      className="space-y-3 rounded-md border p-4"
+      data-testid="retrieval-shadow-sample-form"
+      onSubmit={event => void runSample(event)}
+    >
+      <div>
+        <p className="font-medium">Record retrieval-shadow sample</p>
+        <p className="text-sm text-muted-foreground">
+          Run up to 25 queries through Repository Manager search without
+          changing rollout settings. Queries run in the order entered.
+        </p>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-[12rem_1fr]">
+        <div className="space-y-2">
+          <Label htmlFor="retrieval-shadow-repository-id">Repository ID</Label>
+          <Input
+            id="retrieval-shadow-repository-id"
+            inputMode="numeric"
+            min={1}
+            onChange={event => setRepositoryId(event.target.value)}
+            placeholder="41"
+            type="number"
+            value={repositoryId}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="retrieval-shadow-queries">
+            Sample queries (one per line)
+          </Label>
+          <Textarea
+            id="retrieval-shadow-queries"
+            onChange={event => setQueries(event.target.value)}
+            placeholder={"student handbook\nemergency closure procedure"}
+            rows={4}
+            value={queries}
+          />
+        </div>
+      </div>
+      <Button disabled={isPending} type="submit">
+        {isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+        Run shadow sample
+      </Button>
+      {error ? (
+        <Alert variant="destructive" aria-live="polite">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertTitle>Sample not run</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      ) : null}
+      {result ? <RetrievalShadowSampleOutcomes result={result} /> : null}
+    </form>
+  )
+}
+
+function RetrievalShadowSampleOutcomes({
+  result,
+}: {
+  result: RepositoryRetrievalShadowSampleResult
+}) {
+  return (
+    <div className="space-y-2 text-sm" aria-live="polite">
+      <p className="font-medium">
+        {result.repositoryName}: {result.recorded} recorded, {result.skipped}{" "}
+        skipped
+      </p>
+      <ul className="space-y-2">
+        {result.outcomes.map((outcome, index) => (
+          <li
+            className="rounded border px-3 py-2"
+            key={`${index}-${outcome.query}`}
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge
+                variant={outcome.status === "recorded" ? "secondary" : "outline"}
+              >
+                {outcome.status}
+              </Badge>
+              <span>{outcome.query}</span>
+              <span className="text-muted-foreground">
+                {outcome.resultCount} legacy results
+              </span>
+            </div>
+            {outcome.reason ? (
+              <p className="mt-1 text-muted-foreground">{outcome.reason}</p>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+    </div>
   )
 }

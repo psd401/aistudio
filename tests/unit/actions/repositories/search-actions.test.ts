@@ -17,6 +17,13 @@ const mockRetrieveV2 = jest.fn<(...a: unknown[]) => Promise<{ results: unknown[]
   () => Promise.resolve({ results: [], diagnostics: {} })
 )
 const mockIsCanonicalRepositoryUploadActive = jest.fn(() => false)
+const mockGetContentPlatformConfig = jest.fn(() => Promise.resolve({
+  enabled: false,
+  readV2Enabled: false,
+  retrievalShadowEnabled: false,
+}))
+const mockRecordRepositoryRetrievalShadow = jest.fn(() => Promise.resolve())
+const mockWarn = jest.fn()
 
 jest.mock('@/lib/auth/server-session', () => ({ getServerSession: mockGetServerSession }))
 jest.mock('@/utils/roles', () => ({ hasCapabilityAccess: mockHasCapabilityAccess }))
@@ -24,8 +31,11 @@ jest.mock('@/lib/repositories/repository-access-guard', () => ({
   assertRepositoryReadAccess: mockAssertRepositoryReadAccess,
 }))
 jest.mock('@/lib/repositories/content-platform/config', () => ({
-  getContentPlatformConfig: jest.fn(async () => ({ enabled: false, readV2Enabled: false })),
+  getContentPlatformConfig: mockGetContentPlatformConfig,
   isCanonicalRepositoryUploadActive: mockIsCanonicalRepositoryUploadActive,
+}))
+jest.mock('@/lib/repositories/content-platform/retrieval-shadow', () => ({
+  recordRepositoryRetrievalShadow: mockRecordRepositoryRetrievalShadow,
 }))
 jest.mock('@/lib/repositories/retrieval-v2/service', () => ({
   retrieveRepositoryContent: mockRetrieveV2,
@@ -34,7 +44,7 @@ jest.mock('@/lib/repositories/search-service', () => ({
   vectorSearch: mockVector, keywordSearch: mockKeyword, hybridSearch: mockHybrid,
 }))
 jest.mock('@/lib/logger', () => ({
-  createLogger: () => ({ info: jest.fn(), debug: jest.fn(), warn: jest.fn(), error: jest.fn() }),
+  createLogger: () => ({ info: jest.fn(), debug: jest.fn(), warn: mockWarn, error: jest.fn() }),
   generateRequestId: () => 't', startTimer: () => jest.fn(), sanitizeForLogging: (x: unknown) => x, getLogContext: () => ({}),
 }))
 
@@ -47,6 +57,12 @@ describe('searchRepository authorization (REV-COR-062 / REV-SEC-081)', () => {
     mockHasCapabilityAccess.mockResolvedValue(true)
     mockAssertRepositoryReadAccess.mockResolvedValue(undefined)
     mockIsCanonicalRepositoryUploadActive.mockReturnValue(false)
+    mockGetContentPlatformConfig.mockResolvedValue({
+      enabled: false,
+      readV2Enabled: false,
+      retrievalShadowEnabled: false,
+    })
+    mockRetrieveV2.mockResolvedValue({ results: [], diagnostics: {} })
   })
 
   it('rejects a caller lacking the knowledge-repositories capability', async () => {
@@ -126,5 +142,56 @@ describe('searchRepository authorization (REV-COR-062 / REV-SEC-081)', () => {
       includeLegacyCompatibility: false,
     })
     expect(mockHybrid).not.toHaveBeenCalled()
+  })
+
+  it('records an enabled shadow observation through the shared executor', async () => {
+    mockGetContentPlatformConfig.mockResolvedValue({
+      enabled: true,
+      readV2Enabled: true,
+      retrievalShadowEnabled: true,
+    })
+    mockHybrid.mockResolvedValue([{ itemId: 11 }])
+    mockRetrieveV2.mockResolvedValue({
+      results: [{ itemId: 11 }],
+      diagnostics: {},
+    })
+
+    const result = await searchRepository({
+      query: 'policy',
+      repositoryId: 5,
+    })
+
+    expect(result.isSuccess).toBe(true)
+    expect(mockRecordRepositoryRetrievalShadow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repositoryId: 5,
+        product: 'repository_manager',
+        searchMode: 'hybrid',
+        legacyItemIds: [11],
+        canonicalItemIds: [11],
+      })
+    )
+  })
+
+  it('keeps legacy search successful when the canonical shadow fails', async () => {
+    mockGetContentPlatformConfig.mockResolvedValue({
+      enabled: true,
+      readV2Enabled: true,
+      retrievalShadowEnabled: true,
+    })
+    mockHybrid.mockResolvedValue([{ itemId: 11 }])
+    mockRetrieveV2.mockRejectedValue(new Error('canonical unavailable'))
+
+    const result = await searchRepository({
+      query: 'policy',
+      repositoryId: 5,
+    })
+
+    expect(result.isSuccess).toBe(true)
+    expect(mockRecordRepositoryRetrievalShadow).not.toHaveBeenCalled()
+    expect(mockWarn).toHaveBeenCalledWith(
+      'Canonical retrieval shadow failed without affecting legacy search',
+      { error: 'canonical unavailable' }
+    )
   })
 })
