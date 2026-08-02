@@ -37,7 +37,8 @@ export interface RepositoryProcessingMetrics {
   postDeployRecovery?:
     | "unified-content-runtime-v2"
     | "unified-content-artifact-v3"
-    | "embedding-concurrency-v1";
+    | "embedding-concurrency-v1"
+    | "content-message-sanitizer-v1";
   /** Current managed-service wait, used to enforce or observe its deadline. */
   waitReason?:
     | "CONTENT_PLATFORM_DISABLED"
@@ -125,6 +126,7 @@ export const repositoryProcessingJobs = pgTable(
       | "unified-content-runtime-v2"
       | "unified-content-artifact-v3"
       | "embedding-concurrency-v1"
+      | "content-message-sanitizer-v1"
     >(),
     metrics: jsonb("metrics")
       .$type<RepositoryProcessingMetrics>()

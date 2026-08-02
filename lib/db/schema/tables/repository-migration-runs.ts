@@ -34,6 +34,7 @@ export interface RepositoryMigrationCursor {
 export interface RepositoryMigrationSnapshot {
   maximumIds?: Partial<Record<RepositoryMigrationSourceKind, number>>;
   counts?: Partial<Record<RepositoryMigrationSourceKind, number>>;
+  retryOnly?: boolean;
   rollbackDrill?: boolean;
   migrationItemId?: string;
   canonicalItemId?: number;

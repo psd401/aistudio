@@ -1,11 +1,21 @@
 /** @jest-environment node */
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "@jest/globals";
 import {
   isRetryableLegacyItemFailure,
   resolveCanonicalItemStatus,
   RETRYABLE_LEGACY_FAILURE_PREFIXES,
 } from "@/lib/repositories/content-platform/status-service";
+
+const statusServiceSource = readFileSync(
+  resolve(
+    process.cwd(),
+    "lib/repositories/content-platform/status-service.ts",
+  ),
+  "utf8",
+);
 
 function statusRow(
   overrides: Partial<Parameters<typeof resolveCanonicalItemStatus>[0]> = {}
@@ -26,6 +36,7 @@ function statusRow(
     generationError: null,
     embeddedChunks: 4,
     totalChunks: 9,
+    activeEmbeddingComplete: false,
     ...overrides,
   };
 }
@@ -49,6 +60,7 @@ describe("canonical repository item status", () => {
       canRetry: false,
       embeddedChunks: 9,
       totalChunks: 9,
+      activeEmbeddingComplete: false,
     });
   });
 
@@ -83,6 +95,7 @@ describe("canonical repository item status", () => {
       canRetry: true,
       embeddedChunks: 4,
       totalChunks: 9,
+      activeEmbeddingComplete: false,
     });
   });
 
@@ -136,6 +149,7 @@ describe("canonical repository item status", () => {
       "unified-content-runtime-v2",
       "unified-content-artifact-v3",
       "embedding-concurrency-v1",
+      "content-message-sanitizer-v1",
     ] as const) {
       expect(
         resolveCanonicalItemStatus(
@@ -153,6 +167,7 @@ describe("canonical repository item status", () => {
         canRetry: false,
         embeddedChunks: 4,
         totalChunks: 9,
+        activeEmbeddingComplete: false,
       });
     }
   });
@@ -176,6 +191,22 @@ describe("canonical repository item status", () => {
 });
 
 describe("canonical repository item embedding coverage", () => {
+  it("checks active-generation embedding completeness independently of newer builds", () => {
+    expect(statusServiceSource).toContain(
+      "activeEmbeddingComplete: sql<boolean>`NOT EXISTS (",
+    );
+    expect(statusServiceSource).toContain(
+      "active_chunk.index_generation_id = ${knowledgeRepositories.activeIndexGenerationId}",
+    );
+    expect(statusServiceSource).toContain("active_chunk.embedding IS NULL");
+    expect(statusServiceSource).toContain(
+      'eq(repositoryItems.lifecycleStatus, "active")',
+    );
+    expect(statusServiceSource).toContain(
+      'context.lifecycleStatus !== "active"',
+    );
+  });
+
   it("exposes a terminal failed embedding generation", () => {
     expect(
       resolveCanonicalItemStatus(
@@ -211,6 +242,7 @@ describe("canonical repository item embedding coverage", () => {
       expect(resolveCanonicalItemStatus(statusRow(overrides))).toMatchObject({
         embeddedChunks: 4,
         totalChunks: 9,
+        activeEmbeddingComplete: false,
       });
     }
   });

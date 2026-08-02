@@ -15,6 +15,8 @@ export const POST_DEPLOY_ARTIFACT_RECOVERY_MARKER =
   "unified-content-artifact-v3" as const;
 export const POST_DEPLOY_EMBEDDING_CONCURRENCY_MARKER =
   "embedding-concurrency-v1" as const;
+export const POST_DEPLOY_CONTENT_MESSAGE_SANITIZER_MARKER =
+  "content-message-sanitizer-v1" as const;
 export const POST_DEPLOY_RECOVERY_BATCH_SIZE = 25;
 export const POST_DEPLOY_EMBEDDING_RECOVERY_BATCH_SIZE = 10;
 /** Let every invocation of the previous 15-minute Lambda runtime drain first. */
@@ -69,7 +71,8 @@ export async function releasePostDeployRecoveryJobs(
             AND job.post_deploy_recovery IN (
               ${POST_DEPLOY_RECOVERY_MARKER},
               ${POST_DEPLOY_ARTIFACT_RECOVERY_MARKER},
-              ${POST_DEPLOY_EMBEDDING_CONCURRENCY_MARKER}
+              ${POST_DEPLOY_EMBEDDING_CONCURRENCY_MARKER},
+              ${POST_DEPLOY_CONTENT_MESSAGE_SANITIZER_MARKER}
             )
             AND job.updated_at <= ${eligibleBefore}::timestamptz
             AND item.lifecycle_status = 'active'

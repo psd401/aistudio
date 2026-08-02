@@ -11,6 +11,8 @@ import {
   approveRepositoryMigrationMismatch,
   getRepositoryMigrationDashboard,
   listRepositoryMigrationExceptions,
+  MAX_FAILED_REPOSITORY_MIGRATION_RETRIES,
+  retryFailedRepositoryMigrationItems,
   retryRepositoryMigrationItem,
   runRepositoryMigrationRollbackDrill,
   startRepositoryMigrationRun,
@@ -19,8 +21,17 @@ import {
   type RepositoryMigrationException,
 } from "@/lib/repositories/content-platform/migration-control-service";
 import { reprocessRepositoryMigrationItem } from "@/lib/repositories/content-platform/migration-runner";
+import { dispatchContentProcessingJob } from "@/lib/repositories/content-platform/dispatch-service";
+import {
+  getCanonicalRepositoryItemStatuses,
+  retryCanonicalRepositoryItem,
+  type CanonicalRepositoryItemStatus,
+} from "@/lib/repositories/content-platform/status-service";
 import { getContentPlatformConfig } from "@/lib/repositories/content-platform/config";
-import { assertRepositoryReadAccess } from "@/lib/repositories/repository-access-guard";
+import {
+  assertNotSystemManagedRepository,
+  assertRepositoryReadAccess,
+} from "@/lib/repositories/repository-access-guard";
 import { executeSearch } from "@/lib/repositories/search-execution";
 import { getRepositoryById } from "@/lib/db/drizzle";
 import { ErrorCode } from "@/types/error-types";
@@ -33,6 +44,8 @@ import type {
 const ADMIN_REPOSITORIES_PATH = "/admin/repositories";
 const ADMIN_SETTINGS_PATH = "/admin/settings";
 const MAX_RETRIEVAL_SHADOW_SAMPLE_QUERIES = 25;
+const MAX_MIGRATION_MISMATCH_REPROCESSES = 50;
+const MAX_REPOSITORY_ITEM_BULK_RETRIES = 100;
 
 interface MigrationAdministrator {
   userId: number;
@@ -49,6 +62,27 @@ async function requireMigrationAdministrator(): Promise<MigrationAdministrator> 
     userId: await getUserIdFromSession(session.sub),
     cognitoSub: session.sub,
   };
+}
+
+function validateBulkLimit(limit: number, maximum: number): void {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > maximum) {
+    throw ErrorFactories.valueOutOfRange("limit", limit, 1, maximum, {
+      userMessage: `Limit must be between 1 and ${maximum}.`,
+    });
+  }
+}
+
+function isRepositoryItemBulkRetryCandidate(
+  status: CanonicalRepositoryItemStatus,
+): boolean {
+  const activeAndUnderEmbedded =
+    status.processingStatus === "embedded" &&
+    !status.activeEmbeddingComplete;
+  const buildingAndUnderEmbedded =
+    status.processingStatus === "processing_embeddings" &&
+    status.totalChunks > 0 &&
+    status.embeddedChunks < status.totalChunks;
+  return status.canRetry || activeAndUnderEmbedded || buildingAndUnderEmbedded;
 }
 
 export async function getRepositoryMigrationDashboardAction(): Promise<
@@ -162,6 +196,189 @@ export async function reprocessRepositoryMigrationItemAction(
       context: "admin.contentMigration.reprocess",
       requestId,
       operation: "reprocessRepositoryMigrationItemAction",
+    });
+  }
+}
+
+/** Queue one bounded set of terminal migration sources behind a single run. */
+export async function retryFailedRepositoryMigrationItemsAction(input: {
+  limit: number;
+}): Promise<ActionState<RepositoryMigrationRunRow>> {
+  const requestId = generateRequestId();
+  const timer = startTimer("admin.contentMigration.retryFailedBulk");
+  try {
+    const { userId: requestedBy } = await requireMigrationAdministrator();
+    validateBulkLimit(input.limit, MAX_FAILED_REPOSITORY_MIGRATION_RETRIES);
+    const run = await retryFailedRepositoryMigrationItems({
+      requestedBy,
+      limit: input.limit,
+    });
+    timer({ status: "success", runId: run.id, limit: input.limit });
+    revalidatePath(ADMIN_REPOSITORIES_PATH);
+    return createSuccess(run, "Failed migration sources queued for retry");
+  } catch (error) {
+    timer({ status: "error" });
+    return handleError(error, "Failed to queue migration retries.", {
+      context: "admin.contentMigration.retryFailedBulk",
+      requestId,
+      operation: "retryFailedRepositoryMigrationItemsAction",
+    });
+  }
+}
+
+export interface RepositoryMigrationMismatchReprocessResult {
+  reprocessed: number;
+  failed: number;
+  migrationItemIds: string[];
+  failedMigrationItemIds: string[];
+}
+
+/** Reprocess a bounded set of reconciliation mismatches using the item service. */
+export async function reprocessRepositoryMigrationMismatchesAction(input: {
+  limit: number;
+}): Promise<ActionState<RepositoryMigrationMismatchReprocessResult>> {
+  const requestId = generateRequestId();
+  const timer = startTimer("admin.contentMigration.reprocessMismatches");
+  const log = createLogger({
+    requestId,
+    action: "admin.contentMigration.reprocessMismatches",
+  });
+  try {
+    await requireMigrationAdministrator();
+    validateBulkLimit(input.limit, MAX_MIGRATION_MISMATCH_REPROCESSES);
+    const mismatches = await listRepositoryMigrationExceptions(
+      input.limit,
+      "mismatch",
+    );
+    const migrationItemIds: string[] = [];
+    const failedMigrationItemIds: string[] = [];
+    for (const mismatch of mismatches) {
+      try {
+        await reprocessRepositoryMigrationItem(mismatch.id);
+        migrationItemIds.push(mismatch.id);
+      } catch (error) {
+        failedMigrationItemIds.push(mismatch.id);
+        log.warn("Migration mismatch reprocess was skipped", {
+          migrationItemId: mismatch.id,
+          error: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    }
+    const result = {
+      reprocessed: migrationItemIds.length,
+      failed: failedMigrationItemIds.length,
+      migrationItemIds,
+      failedMigrationItemIds,
+    };
+    timer({
+      status: "success",
+      reprocessed: result.reprocessed,
+      failed: result.failed,
+    });
+    revalidatePath(ADMIN_REPOSITORIES_PATH);
+    return createSuccess(result, "Migration mismatches queued for reprocessing");
+  } catch (error) {
+    timer({ status: "error" });
+    return handleError(error, "Failed to reprocess migration mismatches.", {
+      context: "admin.contentMigration.reprocessMismatches",
+      requestId,
+      operation: "reprocessRepositoryMigrationMismatchesAction",
+    });
+  }
+}
+
+export interface RepositoryItemsBulkRetryResult {
+  retried: number;
+  failed: number;
+  dispatchDeferred: number;
+  itemIds: number[];
+  failedItemIds: number[];
+}
+
+/** Retry terminal or completed-but-under-embedded canonical repository items. */
+export async function retryRepositoryItemsBulkAction(input: {
+  repositoryId: number;
+  limit: number;
+}): Promise<ActionState<RepositoryItemsBulkRetryResult>> {
+  const requestId = generateRequestId();
+  const timer = startTimer("admin.contentMigration.retryRepositoryItemsBulk");
+  const log = createLogger({
+    requestId,
+    action: "admin.contentMigration.retryRepositoryItemsBulk",
+  });
+  try {
+    await requireMigrationAdministrator();
+    if (!Number.isSafeInteger(input.repositoryId) || input.repositoryId < 1) {
+      throw ErrorFactories.invalidInput(
+        "repositoryId",
+        input.repositoryId,
+        "positive integer",
+      );
+    }
+    validateBulkLimit(input.limit, MAX_REPOSITORY_ITEM_BULK_RETRIES);
+    await assertNotSystemManagedRepository(input.repositoryId);
+    const statuses = await getCanonicalRepositoryItemStatuses(
+      input.repositoryId,
+    );
+    const candidates = [...statuses.values()]
+      .filter(isRepositoryItemBulkRetryCandidate)
+      .sort((left, right) => left.itemId - right.itemId)
+      .slice(0, input.limit);
+
+    let dispatchDeferred = 0;
+    const itemIds: number[] = [];
+    const failedItemIds: number[] = [];
+    for (const candidate of candidates) {
+      let retry: Awaited<ReturnType<typeof retryCanonicalRepositoryItem>>;
+      try {
+        retry = await retryCanonicalRepositoryItem(
+          candidate.itemId,
+          requestId,
+        );
+        itemIds.push(candidate.itemId);
+      } catch (error) {
+        failedItemIds.push(candidate.itemId);
+        log.warn("Bulk retry candidate changed before it could be retried", {
+          repositoryId: input.repositoryId,
+          itemId: candidate.itemId,
+          error: error instanceof Error ? error.message : "Unknown error",
+        });
+        continue;
+      }
+      try {
+        await dispatchContentProcessingJob({
+          jobId: retry.processingJobId,
+          itemVersionId: retry.itemVersionId,
+        });
+      } catch (error) {
+        dispatchDeferred += 1;
+        log.warn("Bulk retry is pending scheduled dispatch", {
+          repositoryId: input.repositoryId,
+          itemId: candidate.itemId,
+          processingJobId: retry.processingJobId,
+          error: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    }
+
+    const result = {
+      retried: itemIds.length,
+      failed: failedItemIds.length,
+      dispatchDeferred,
+      itemIds,
+      failedItemIds,
+    };
+    timer({ status: "success", ...result });
+    revalidatePath(ADMIN_REPOSITORIES_PATH);
+    revalidatePath(`/repositories/${input.repositoryId}`);
+    return createSuccess(result, "Repository item retries queued");
+  } catch (error) {
+    timer({ status: "error" });
+    return handleError(error, "Failed to retry repository items.", {
+      context: "admin.contentMigration.retryRepositoryItemsBulk",
+      requestId,
+      operation: "retryRepositoryItemsBulkAction",
+      metadata: { repositoryId: input.repositoryId },
     });
   }
 }

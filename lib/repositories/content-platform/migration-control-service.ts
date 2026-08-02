@@ -9,6 +9,7 @@ import {
   repositoryMigrationItems,
   repositoryMigrationRuns,
   type RepositoryMigrationItemStatus,
+  type RepositoryMigrationCursor,
   type RepositoryMigrationMetrics,
   type RepositoryMigrationMode,
   type RepositoryMigrationRunRow,
@@ -28,6 +29,7 @@ export const REPOSITORY_MIGRATION_SOURCE_KINDS = [
 ] as const satisfies readonly RepositoryMigrationSourceKind[];
 
 const ACTIVE_RUN_STATUSES = ["queued", "running"] as const;
+export const MAX_FAILED_REPOSITORY_MIGRATION_RETRIES = 250;
 
 export interface RepositoryMigrationInventoryEntry {
   sourceKind: RepositoryMigrationSourceKind;
@@ -416,6 +418,7 @@ export async function retryRepositoryMigrationItem(
     const snapshot: RepositoryMigrationSnapshot = {
       maximumIds: { [item.sourceKind]: item.sourceId },
       counts: { [item.sourceKind]: 1 },
+      retryOnly: true,
     };
     const [run] = await tx
       .insert(repositoryMigrationRuns)
@@ -442,6 +445,106 @@ export async function retryRepositoryMigrationItem(
       .where(eq(repositoryMigrationItems.id, item.id));
     return run;
   }, "contentMigration.retryItem");
+}
+
+/**
+ * Reassign one bounded set of terminal migration items to a single backfill run.
+ * The run-id reassignment is what makes previously attempted sources eligible to
+ * the migration runner again; creating one run per item would serialize recovery.
+ */
+export async function retryFailedRepositoryMigrationItems(input: {
+  requestedBy: number;
+  limit: number;
+}): Promise<RepositoryMigrationRunRow> {
+  if (
+    !Number.isSafeInteger(input.limit) ||
+    input.limit < 1 ||
+    input.limit > MAX_FAILED_REPOSITORY_MIGRATION_RETRIES
+  ) {
+    throw new Error(
+      `Migration retry limit must be between 1 and ${MAX_FAILED_REPOSITORY_MIGRATION_RETRIES}`,
+    );
+  }
+
+  return executeTransaction(async (tx) => {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtext('repository-content-migration'))`,
+    );
+    await assertLegacyRetirementNotFinalized(tx);
+    const [active] = await tx
+      .select({ id: repositoryMigrationRuns.id })
+      .from(repositoryMigrationRuns)
+      .where(inArray(repositoryMigrationRuns.status, [...ACTIVE_RUN_STATUSES]))
+      .limit(1);
+    if (active) throw new Error("Another content migration run is active");
+
+    const items = await tx
+      .select({
+        id: repositoryMigrationItems.id,
+        sourceKind: repositoryMigrationItems.sourceKind,
+        sourceId: repositoryMigrationItems.sourceId,
+      })
+      .from(repositoryMigrationItems)
+      .where(
+        inArray(repositoryMigrationItems.status, ["failed", "unrecoverable"]),
+      )
+      .orderBy(
+        repositoryMigrationItems.sourceKind,
+        repositoryMigrationItems.sourceId,
+      )
+      .limit(input.limit)
+      .for("update");
+    if (items.length === 0) {
+      throw new Error("No failed migration items are available to retry");
+    }
+
+    const sourceKinds = [
+      ...new Set(items.map((item) => item.sourceKind)),
+    ];
+    const cursor: RepositoryMigrationCursor = {};
+    const maximumIds: Partial<
+      Record<RepositoryMigrationSourceKind, number>
+    > = {};
+    const counts: Partial<Record<RepositoryMigrationSourceKind, number>> = {};
+    for (const item of items) {
+      const cursorValue = Math.max(0, item.sourceId - 1);
+      cursor[item.sourceKind] = Math.min(
+        cursor[item.sourceKind] ?? cursorValue,
+        cursorValue,
+      );
+      maximumIds[item.sourceKind] = Math.max(
+        maximumIds[item.sourceKind] ?? item.sourceId,
+        item.sourceId,
+      );
+      counts[item.sourceKind] = (counts[item.sourceKind] ?? 0) + 1;
+    }
+
+    const [run] = await tx
+      .insert(repositoryMigrationRuns)
+      .values({
+        mode: "backfill",
+        status: "queued",
+        requestedBy: input.requestedBy,
+        sourceKinds,
+        cursor,
+        snapshot: { maximumIds, counts, retryOnly: true },
+        metrics: { discovered: items.length },
+      })
+      .returning();
+    if (!run) throw new Error("Failed to create bulk migration retry run");
+
+    await tx
+      .update(repositoryMigrationItems)
+      .set({
+        runId: run.id,
+        status: "pending",
+        lastErrorCode: null,
+        lastErrorMessage: null,
+        updatedAt: new Date(),
+      })
+      .where(inArray(repositoryMigrationItems.id, items.map((item) => item.id)));
+    return run;
+  }, "contentMigration.retryFailedItems");
 }
 
 export async function approveRepositoryMigrationMismatch(input: {
@@ -487,10 +590,19 @@ export async function approveRepositoryMigrationMismatch(input: {
   }, "contentMigration.approveMismatch");
 }
 
+export type RepositoryMigrationExceptionStatus = Extract<
+  RepositoryMigrationItemStatus,
+  "failed" | "unrecoverable" | "mismatch"
+>;
+
 export async function listRepositoryMigrationExceptions(
   limit = 50,
+  status?: RepositoryMigrationExceptionStatus,
 ): Promise<RepositoryMigrationException[]> {
   const safeLimit = Math.min(200, Math.max(1, Math.floor(limit)));
+  const statuses: RepositoryMigrationExceptionStatus[] = status
+    ? [status]
+    : ["failed", "unrecoverable", "mismatch"];
   return executeQuery(
     (db) =>
       db
@@ -509,13 +621,7 @@ export async function listRepositoryMigrationExceptions(
           updatedAt: repositoryMigrationItems.updatedAt,
         })
         .from(repositoryMigrationItems)
-        .where(
-          inArray(repositoryMigrationItems.status, [
-            "failed",
-            "unrecoverable",
-            "mismatch",
-          ]),
-        )
+        .where(inArray(repositoryMigrationItems.status, statuses))
         .orderBy(desc(repositoryMigrationItems.updatedAt))
         .limit(safeLimit),
     "contentMigration.listExceptions",

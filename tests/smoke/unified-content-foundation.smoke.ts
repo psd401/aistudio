@@ -1433,6 +1433,7 @@ try {
     canRetry: true,
     embeddedChunks: 0,
     totalChunks: 0,
+    activeEmbeddingComplete: true,
   });
 
   // Migration 123 must not replay an unrelated terminal user failure merely
@@ -1570,6 +1571,7 @@ try {
     canRetry: false,
     embeddedChunks: 0,
     totalChunks: 0,
+    activeEmbeddingComplete: true,
   });
   await assert.rejects(
     retryCanonicalRepositoryItem(
