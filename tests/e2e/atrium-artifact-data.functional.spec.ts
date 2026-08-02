@@ -165,10 +165,10 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
   test("an authenticated viewer submits and lists a persisted record", async ({
     browser,
   }) => {
+    const marker = `E2E artifact-data-${crypto.randomUUID()}`;
     const context = await browser.newContext();
     let page: import("@playwright/test").Page | undefined;
     let contentId: string | undefined;
-    const marker = `E2E artifact-data-${crypto.randomUUID()}`;
 
     try {
       await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB);
@@ -204,10 +204,10 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
   test("cleared sessions cannot submit or list through the Server Action transport", async ({
     browser,
   }) => {
+    const marker = `E2E artifact-data-unauthenticated-${crypto.randomUUID()}`;
     const context = await browser.newContext();
     let page: import("@playwright/test").Page | undefined;
     let contentId: string | undefined;
-    const marker = `E2E artifact-data-unauthenticated-${crypto.randomUUID()}`;
 
     try {
       await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB);
@@ -272,10 +272,10 @@ test.describe("Atrium Artifact Data Service — real Server Action transport", (
   test("a non-viewer receives the same NotFound mask without record data", async ({
     browser,
   }) => {
+    const title = `E2E artifact-data-private-${crypto.randomUUID()}`;
     const ownerContext = await browser.newContext();
     let ownerPage: import("@playwright/test").Page | undefined;
     let contentId: string | undefined;
-    const title = `E2E artifact-data-private-${crypto.randomUUID()}`;
 
     try {
       await authenticateContext(
