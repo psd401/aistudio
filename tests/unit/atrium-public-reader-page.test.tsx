@@ -78,6 +78,7 @@ jest.mock("@/lib/content/version-service", () => ({
   versionService: {
     getById: (...a: unknown[]) => getByIdMock(...a),
     loadArtifactCode: (...a: unknown[]) => loadArtifactCodeMock(...a),
+    loadArtifactCodeSafe: (...a: unknown[]) => loadArtifactCodeMock(...a),
   },
 }));
 
@@ -205,6 +206,22 @@ describe("Atrium public reader page — anonymous 404 masking", () => {
     expect(mockNotFound).not.toHaveBeenCalled();
     expect(getByIdMock).toHaveBeenCalledWith("obj-1", "ver-1");
     expect(result).toBeTruthy();
+  });
+
+  it("omits the data bridge capability from the anonymous artifact reader wiring", async () => {
+    executeQueryMock.mockResolvedValueOnce([
+      { ...PUBLIC_OBJ, kind: "artifact" },
+    ]);
+    executeQueryMock.mockResolvedValueOnce([PUBLICATION_ROW]);
+    getByIdMock.mockResolvedValue({ objectId: "obj-1", versionNumber: 3 });
+    loadArtifactCodeMock.mockResolvedValue("<p>public artifact</p>");
+
+    const result = await render("public-artifact-slug");
+    const child = (result as { props: { children: React.ReactElement } }).props
+      .children;
+
+    expect(child.props).not.toHaveProperty("dataBridgeEnabled");
+    expect(child.props).not.toHaveProperty("contentId");
   });
 
   it("404s when the published version no longer exists (dangling publication)", async () => {

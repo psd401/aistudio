@@ -34,6 +34,14 @@
  *   message would be silently dropped). Authentication is inverted: the host page
  *   accepts the message only from an allowlisted `event.origin`. The payload is
  *   the untrusted code itself, so `"*"` leaks no app secret. See `postCode` below.
+ * - The reverse-direction artifact data bridge accepts requests only when
+ *   `event.source === iframeRef.current?.contentWindow`. Opaque-origin frames
+ *   report `event.origin === "null"`, so origin is deliberately NOT the bridge
+ *   authenticator. The trusted `contentId` comes only from this component's
+ *   props; any similarly named request field is ignored. Only authenticated
+ *   callers explicitly enable the bridge, work is bounded per frame, and every
+ *   failure returned to artifact code uses the same generic message. Responses
+ *   also require `targetOrigin: "*"` because the receiving frame is opaque-origin.
  *
  * When the sandbox origin is not configured (or, defensively, resolves to the
  * app origin) the component fails CLOSED — it renders an "unavailable" notice
@@ -47,6 +55,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { normalizeOrigin } from "@/lib/content/artifact-sandbox-config";
+import type { ArtifactDataPayload } from "@/lib/db/types/jsonb";
 
 type FrameLoadStatus = "loading" | "loaded" | "error";
 /**
@@ -76,8 +85,18 @@ const RENDER_RETRY_MS = 300;
  * failure notice rather than a perpetual "Waiting for artifact…".
  */
 const RENDER_MAX_ATTEMPTS = 40;
+/** Keep a hostile artifact from queueing unbounded server-action work. */
+const MAX_IN_FLIGHT_DATA_REQUESTS = 8;
+const MAX_DATA_PAYLOAD_BYTES = 8 * 1024;
+const MAX_DATA_PAYLOAD_VALUES = 8_192;
+const MAX_DATA_PAYLOAD_STRING_CODE_UNITS = MAX_DATA_PAYLOAD_BYTES;
+/** One response for every bridge failure; never expose action or database detail. */
+const DATA_BRIDGE_ERROR_MESSAGE = "Artifact data request failed";
+const DATA_NAMESPACE_RE = /^[a-z0-9_-]{1,64}$/;
+const REQUEST_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export interface ArtifactSandboxProps {
+interface ArtifactSandboxBaseProps {
   /**
    * The untrusted artifact code (HTML/JS). It is sent to the cross-origin host
    * via postMessage and never touches the app-origin DOM.
@@ -98,11 +117,55 @@ export interface ArtifactSandboxProps {
   className?: string;
 }
 
+/**
+ * The bridge is absent unless a trusted caller deliberately enables it and
+ * supplies the content identity. The disabled variant cannot carry a contentId,
+ * which keeps anonymous/public-reader wiring fail-closed at the type boundary.
+ */
+export type ArtifactSandboxProps = ArtifactSandboxBaseProps &
+  (
+    | { dataBridgeEnabled: true; contentId: string }
+    | { dataBridgeEnabled?: false; contentId?: never }
+  );
+
 interface RenderAck {
   type: "atrium-artifact-rendered";
   ok: boolean;
   error?: string;
 }
+
+interface SubmitDataRequest {
+  type: "atrium-artifact-data-request";
+  requestId: string;
+  op: "submit";
+  namespace: string;
+  payload: ArtifactDataPayload;
+}
+
+interface ListDataRequest {
+  type: "atrium-artifact-data-request";
+  requestId: string;
+  op: "list";
+  namespace: string;
+  limit?: number;
+  scope?: "all" | "mine";
+}
+
+type ArtifactDataRequest = SubmitDataRequest | ListDataRequest;
+
+type ArtifactDataResponse =
+  | {
+      type: "atrium-artifact-data-response";
+      requestId: string;
+      ok: true;
+      data: unknown;
+    }
+  | {
+      type: "atrium-artifact-data-response";
+      requestId: string;
+      ok: false;
+      error: string;
+    };
 
 /** Narrow an unknown postMessage payload to the host's render acknowledgement. */
 function isRenderAck(data: unknown): data is RenderAck {
@@ -111,6 +174,250 @@ function isRenderAck(data: unknown): data is RenderAck {
     data !== null &&
     (data as { type?: unknown }).type === "atrium-artifact-rendered"
   );
+}
+
+function isSubmitPayload(payload: unknown): payload is ArtifactDataPayload {
+  return typeof payload === "object" && payload !== null && !Array.isArray(payload);
+}
+
+function isPlainJsonObject(value: object): boolean {
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+/**
+ * Bound parent-side work before Next serializes a payload for the Server Action.
+ * The action remains the authority and repeats its full validation; this mirror
+ * prevents an artifact from using the action transport itself as an oversized
+ * allocation/traffic amplifier.
+ */
+function hasBoundedJsonStructure(value: unknown): boolean {
+  type ValidationFrame =
+    | { kind: "value"; value: unknown }
+    | { kind: "leave"; value: object };
+
+  const pending: ValidationFrame[] = [{ kind: "value", value }];
+  const activePath = new WeakSet<object>();
+  let discoveredValues = 1;
+  let discoveredStringCodeUnits = 0;
+
+  const countString = (next: string): void => {
+    discoveredStringCodeUnits += next.length;
+    if (discoveredStringCodeUnits > MAX_DATA_PAYLOAD_STRING_CODE_UNITS) {
+      throw new Error("payload string bound exceeded");
+    }
+  };
+  const enqueue = (next: unknown): void => {
+    discoveredValues += 1;
+    if (discoveredValues > MAX_DATA_PAYLOAD_VALUES) {
+      throw new Error("payload value bound exceeded");
+    }
+    pending.push({ kind: "value", value: next });
+  };
+  const enterContainer = (next: object): void => {
+    if (activePath.has(next)) throw new Error("payload cycle");
+    activePath.add(next);
+    pending.push({ kind: "leave", value: next });
+  };
+
+  try {
+    while (pending.length > 0) {
+      const frame = pending.pop()!;
+      if (frame.kind === "leave") {
+        activePath.delete(frame.value);
+        continue;
+      }
+
+      const current = frame.value;
+      if (current === null || typeof current === "boolean") continue;
+      if (typeof current === "string") {
+        countString(current);
+        continue;
+      }
+      if (typeof current === "number" && Number.isFinite(current)) continue;
+      if (typeof current !== "object") return false;
+
+      if (Array.isArray(current)) {
+        enterContainer(current);
+        for (const item of current) enqueue(item);
+        continue;
+      }
+
+      if (!isPlainJsonObject(current)) return false;
+      enterContainer(current);
+      const record = current as Record<string, unknown>;
+      for (const key in record) {
+        if (Object.prototype.hasOwnProperty.call(record, key)) {
+          countString(key);
+          enqueue(record[key]);
+        }
+      }
+    }
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+function isPayloadWithinBridgeBounds(payload: ArtifactDataPayload): boolean {
+  if (!hasBoundedJsonStructure(payload)) return false;
+  try {
+    const serialized = JSON.stringify(payload);
+    if (!serialized || serialized.length > MAX_DATA_PAYLOAD_BYTES) return false;
+    return new TextEncoder().encode(serialized).byteLength <= MAX_DATA_PAYLOAD_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+function hasValidListOptions(candidate: Record<string, unknown>): boolean {
+  const validLimit =
+    candidate.limit === undefined ||
+    (typeof candidate.limit === "number" && Number.isFinite(candidate.limit));
+  const validScope =
+    candidate.scope === undefined ||
+    candidate.scope === "all" ||
+    candidate.scope === "mine";
+  return validLimit && validScope;
+}
+
+/** Narrow an unknown payload to the two artifact data request operations. */
+function isArtifactDataRequest(data: unknown): data is ArtifactDataRequest {
+  if (typeof data !== "object" || data === null) return false;
+
+  const candidate = data as Record<string, unknown>;
+  if (
+    candidate.type !== "atrium-artifact-data-request" ||
+    typeof candidate.requestId !== "string" ||
+    !REQUEST_ID_RE.test(candidate.requestId) ||
+    typeof candidate.namespace !== "string"
+  ) {
+    return false;
+  }
+
+  if (candidate.op === "submit") {
+    return isSubmitPayload(candidate.payload);
+  }
+
+  if (candidate.op === "list") {
+    return hasValidListOptions(candidate);
+  }
+
+  return false;
+}
+
+function dataBridgeFailure(requestId: string): ArtifactDataResponse {
+  return {
+    type: "atrium-artifact-data-response",
+    requestId,
+    ok: false,
+    error: DATA_BRIDGE_ERROR_MESSAGE,
+  };
+}
+
+interface ArtifactDataBridgeOptions {
+  iframeRef: React.RefObject<HTMLIFrameElement | null>;
+  origin: string | null;
+  dataBridgeEnabled: boolean;
+  contentId?: string;
+}
+
+/** Install the source-authenticated, bounded artifact data request listener. */
+function useArtifactDataBridge({
+  iframeRef,
+  origin,
+  dataBridgeEnabled,
+  contentId,
+}: ArtifactDataBridgeOptions): void {
+  const inFlightDataRequestsRef = useRef(0);
+
+  /**
+   * Execute one source-authenticated bridge request. `contentId` is constructed
+   * exclusively from trusted props; request fields are copied individually, so
+   * an artifact-supplied `contentId` (or any other extra field) cannot override
+   * the authority boundary. Action failures and thrown errors collapse to the
+   * same generic response.
+   */
+  const handleDataRequest = useCallback(
+    async (request: ArtifactDataRequest, frameWindow: Window): Promise<void> => {
+      if (
+        !dataBridgeEnabled ||
+        !contentId ||
+        !DATA_NAMESPACE_RE.test(request.namespace) ||
+        (request.op === "submit" &&
+          !isPayloadWithinBridgeBounds(request.payload)) ||
+        inFlightDataRequestsRef.current >= MAX_IN_FLIGHT_DATA_REQUESTS
+      ) {
+        frameWindow.postMessage(dataBridgeFailure(request.requestId), "*");
+        return;
+      }
+
+      inFlightDataRequestsRef.current += 1;
+      let response: ArtifactDataResponse;
+      try {
+        // Keep the server-only action graph out of fail-closed/preview-only
+        // clients. Next resolves this `use server` module to action references
+        // when an enabled bridge request reaches the authenticated parent.
+        const { listArtifactRecords, submitArtifactRecord } = await import(
+          "@/actions/db/atrium/artifact-data"
+        );
+        if (request.op === "submit") {
+          const result = await submitArtifactRecord({
+            contentId,
+            namespace: request.namespace,
+            payload: request.payload,
+          });
+          response = result.isSuccess
+            ? {
+                type: "atrium-artifact-data-response",
+                requestId: request.requestId,
+                ok: true,
+                data: result.data,
+              }
+            : dataBridgeFailure(request.requestId);
+        } else {
+          const result = await listArtifactRecords({
+            contentId,
+            namespace: request.namespace,
+            limit: request.limit,
+            scope: request.scope,
+          });
+          response = result.isSuccess
+            ? {
+                type: "atrium-artifact-data-response",
+                requestId: request.requestId,
+                ok: true,
+                data: result.data,
+              }
+            : dataBridgeFailure(request.requestId);
+        }
+      } catch {
+        response = dataBridgeFailure(request.requestId);
+      } finally {
+        inFlightDataRequestsRef.current -= 1;
+      }
+
+      // The authenticated receiver is an opaque-origin WindowProxy. As with
+      // postCode, a concrete targetOrigin would silently discard the response.
+      frameWindow.postMessage(response, "*");
+    },
+    [contentId, dataBridgeEnabled]
+  );
+
+  useEffect(() => {
+    if (!origin) return;
+    const onDataMessage = (event: MessageEvent) => {
+      const frameWindow = iframeRef.current?.contentWindow;
+      // This browser-assigned WindowProxy identity is the bridge's sender
+      // authentication. event.origin is intentionally not consulted: a real
+      // `sandbox="allow-scripts"` frame has the opaque serialized origin "null".
+      if (!frameWindow || event.source !== frameWindow) return;
+      if (!isArtifactDataRequest(event.data)) return;
+      void handleDataRequest(event.data, frameWindow);
+    };
+    window.addEventListener("message", onDataMessage);
+    return () => window.removeEventListener("message", onDataMessage);
+  }, [handleDataRequest, iframeRef, origin]);
 }
 
 /** Shared look for the two non-executable notices (unavailable / frame error). */
@@ -132,6 +439,8 @@ export function ArtifactSandbox({
   src = null,
   title = "Artifact preview",
   className,
+  dataBridgeEnabled = false,
+  contentId,
 }: ArtifactSandboxProps) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   // The render URL is resolved server-side and arrives via `src`. Derive the
@@ -155,6 +464,12 @@ export function ArtifactSandbox({
   // being re-created on every render (the setInterval closure would otherwise see
   // a stale `renderStatus`).
   const renderedRef = useRef(false);
+  useArtifactDataBridge({
+    iframeRef,
+    origin,
+    dataBridgeEnabled,
+    contentId,
+  });
 
   /**
    * Post the current code to the framed host. Reads `code` and `origin` via

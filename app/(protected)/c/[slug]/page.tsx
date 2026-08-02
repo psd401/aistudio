@@ -289,6 +289,8 @@ export default async function ReaderPage({
         <ArtifactSandbox
           code={code}
           src={getArtifactSandboxRenderUrl()}
+          dataBridgeEnabled={true}
+          contentId={published.id}
           className="atrium-artifact-reader-frame"
         />
       </ReaderFrame>
