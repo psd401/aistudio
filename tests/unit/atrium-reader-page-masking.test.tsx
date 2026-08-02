@@ -74,6 +74,7 @@ jest.mock("@/lib/content/version-service", () => ({
   versionService: {
     getById: (...a: unknown[]) => getByIdMock(...a),
     loadArtifactCode: (...a: unknown[]) => loadArtifactCodeMock(...a),
+    loadArtifactCodeSafe: (...a: unknown[]) => loadArtifactCodeMock(...a),
   },
 }));
 
@@ -206,6 +207,27 @@ describe("Atrium reader page — 404 existence masking", () => {
     expect(mockNotFound).not.toHaveBeenCalled();
     expect(getByIdMock).toHaveBeenCalledWith("obj-1", "ver-1");
     expect(result).toBeTruthy();
+  });
+
+  it("enables the data bridge with the trusted object id for an authenticated artifact reader", async () => {
+    withLookups({ ...OBJ_ROW, kind: "artifact" }, PUBLICATION_ROW);
+    canViewMock.mockResolvedValue(true);
+    getByIdMock.mockResolvedValue({
+      objectId: "obj-1",
+      versionNumber: 3,
+    });
+    loadArtifactCodeMock.mockResolvedValue("<p>artifact</p>");
+
+    const result = await render("artifact-slug");
+    const child = (result as { props: { children: React.ReactElement } }).props
+      .children;
+
+    expect(child.props).toEqual(
+      expect.objectContaining({
+        dataBridgeEnabled: true,
+        contentId: "obj-1",
+      })
+    );
   });
 
   it("404s when the published version no longer exists (dangling publication)", async () => {
