@@ -767,7 +767,11 @@ export class UnifiedContentProcessing extends Construct {
         evaluationPeriods: 2,
         comparisonOperator:
           cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
-        treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+        // The operational snapshot publishes on a slow cadence, not every period.
+        // BREACHING here made the alarm fire on absent datapoints rather than on a
+        // real zero, so it sat in ALARM permanently and carried no signal. Missing
+        // data now holds the last real state; a genuine 0 still trips the alarm.
+        treatMissingData: cloudwatch.TreatMissingData.MISSING,
       }
     );
     const connectorRevocationAlarm = new cloudwatch.Alarm(

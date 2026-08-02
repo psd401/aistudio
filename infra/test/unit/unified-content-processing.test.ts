@@ -150,7 +150,10 @@ test("alarms on stalled work, failures, migration blockers, and stale indexes", 
     AlarmName: "aistudio-dev-agentic-models-unavailable",
     Threshold: 1,
     EvaluationPeriods: 2,
-    TreatMissingData: "breaching",
+    // The snapshot publishes slower than the evaluation period, so "breaching"
+    // fired on absent datapoints and pinned the alarm to ALARM regardless of the
+    // real value. Missing data must hold the last state instead.
+    TreatMissingData: "missing",
   });
   template.hasResourceProperties("AWS::CloudWatch::Alarm", {
     AlarmName: "aistudio-dev-repository-connector-revocations",
