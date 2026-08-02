@@ -181,10 +181,27 @@ describe("submitArtifactRecord", () => {
 });
 
 describe("submitArtifactRecord validation", () => {
-  it("rejects a payload over 8 KiB before persistence", async () => {
+  it("rejects an oversized ASCII payload before UTF-8 allocation", async () => {
+    const encodeSpy = jest.spyOn(TextEncoder.prototype, "encode");
+    try {
+      const result = await submitArtifactRecord({
+        ...validSubmitInput,
+        payload: { value: "x".repeat(8 * 1024) },
+      });
+
+      expect(result.isSuccess).toBe(false);
+      expect(encodeSpy).not.toHaveBeenCalled();
+      expect(mockContentGet).not.toHaveBeenCalled();
+      expect(mockInsert).not.toHaveBeenCalled();
+    } finally {
+      encodeSpy.mockRestore();
+    }
+  });
+
+  it("still applies the exact UTF-8 limit to multibyte payloads", async () => {
     const result = await submitArtifactRecord({
       ...validSubmitInput,
-      payload: { value: "x".repeat(8 * 1024) },
+      payload: { value: "€".repeat(3_000) },
     });
 
     expect(result.isSuccess).toBe(false);

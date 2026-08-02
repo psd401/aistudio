@@ -146,6 +146,17 @@ function validatePayload(payload: unknown): ValidatedPayload {
     );
   }
 
+  // UTF-8 always uses at least one byte per UTF-16 code unit. Reject by that
+  // allocation-free lower bound first so a huge ASCII payload cannot make
+  // TextEncoder materialize another huge buffer just to discover it is too big.
+  if (serialized.length > MAX_PAYLOAD_BYTES) {
+    throw ErrorFactories.fileTooLarge(
+      "payload",
+      serialized.length,
+      MAX_PAYLOAD_BYTES
+    );
+  }
+
   const bytes = new TextEncoder().encode(serialized).byteLength;
   if (bytes > MAX_PAYLOAD_BYTES) {
     throw ErrorFactories.fileTooLarge(
