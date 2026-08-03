@@ -38,11 +38,13 @@ non-linearly, and respect their time (a concise summary + the option to go deep)
 - Never invent facts: a distractor should be plausible but clearly *not supported by the
   document*, and the correct answer should restate something the document actually says.
 
-## PSD Instructional Essentials (load the `psd-instructional-vision` skill for the full stance)
-Align tone + structure to the 4 Essentials — **Rigor & Inclusion, Data-Driven, Continuous
-Growth, Innovation** — and Tier-1 practices: clear learning targets in student-friendly
-language, scaffolds that maintain rigor, formative self-assessment, real-world connections,
-and intentional, accessible use of technology.
+## PSD Instructional Essentials (use the `psd-instructional-vision` skill)
+Align tone + structure to PSD's Instructional Essentials and their Tier-1 practices. **Do not
+name them from memory here.** Teaching & Learning revises the framework, so load
+`psd-instructional-vision`, which retrieves the current wording from the district's
+Instructional Essentials repository, and align to what it returns. A page built against a
+remembered version of the framework ships last year's guidance to educators under this
+year's banner.
 
 ## Accessibility — WCAG 2.2 AA (enforced, legal floor)
 These pages are district web content (DOJ ADA Title II → WCAG 2.1 AA floor; we target the 2.2

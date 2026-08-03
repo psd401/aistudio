@@ -89,21 +89,22 @@ async function seedDoc(
   return { id: data.id as string, slug: data.slug as string }
 }
 
-/** Pick a destination in the Publish menu and click Publish. */
+/** Open the Share control and publish to one destination. */
 async function openPublishAnd(
   page: import('@playwright/test').Page,
   destination: 'intranet' | 'public_web'
 ) {
-  await page.getByTestId('publish-menu-trigger').click()
-  await page.getByTestId(`destination-${destination}`).click()
-  // The Publish item stays disabled ("Checking visibility…") until the menu has
-  // resolved the object's current visibility — without it the audience check
-  // cannot run. Waiting for the enabled label is the honest readiness signal.
-  const publishItem = page.getByTestId('publish-item')
-  await expect(publishItem).toHaveText(/^(Publish|Republish) to/, {
-    timeout: 60000,
-  })
-  await publishItem.click()
+  // The usability pass replaced the publish menu (one trigger, a destination
+  // radio, then a single Publish item) with a Share dialog that gives each
+  // destination its own row and its own Publish/Unpublish buttons — so there is
+  // no separate destination-selection step any more.
+  await page.getByTestId('share-control').click()
+  // The button stays disabled ("Checking…") until the dialog has resolved the
+  // object's current visibility — without it the audience check cannot run.
+  // Waiting for it to enable is the honest readiness signal.
+  const publishButton = page.getByTestId(`share-publish-${destination}`)
+  await expect(publishButton).toBeEnabled({ timeout: 60000 })
+  await publishButton.click()
 }
 
 function defineAtriumPublishShareAuthenticatedSuite1Part1() {
@@ -134,34 +135,38 @@ function defineAtriumPublishShareAuthenticatedSuite1Part1() {
       const { id, slug } = await seedDoc(page, `Intranet publish ${token}`)
 
       await page.goto(`/atrium/${id}/edit`)
-      await expect(page.getByTestId('publish-menu-trigger')).toBeVisible({
+      await expect(page.getByTestId('share-control')).toBeVisible({
         timeout: 30000,
       })
 
       // The Schoology/Google "coming soon" rows are gone (#1336 C6).
-      await page.getByTestId('publish-menu-trigger').click()
-      await expect(page.getByRole('menuitemradio', { name: /Schoology/ })).toHaveCount(0)
-      await expect(page.getByRole('menuitemradio', { name: /Google/ })).toHaveCount(0)
-      // The Publish item is gated on the visibility read landing.
-      await expect(page.getByTestId('publish-item')).toHaveText(
-        /^Publish to/,
-        { timeout: 60000 }
+      await page.getByTestId('share-control').click()
+      await expect(page.getByText(/Schoology/)).toHaveCount(0)
+      await expect(page.getByText(/Google Classroom/)).toHaveCount(0)
+      // The Publish button is gated on the visibility read landing.
+      await expect(page.getByTestId('share-publish-intranet')).toBeEnabled({
+        timeout: 60000,
+      })
+      // Nothing is live yet, so the destination is not marked live and offers
+      // no Unpublish at all (#1336 B8) — the dialog renders that button only
+      // for a live destination rather than rendering it disabled.
+      await expect(page.getByTestId('share-dest-intranet')).toHaveAttribute(
+        'data-live',
+        'false'
       )
-      // Nothing is live yet, so Unpublish is disabled (#1336 B8).
-      await expect(page.getByTestId('unpublish-item')).toHaveAttribute(
-        'aria-disabled',
-        'true'
-      )
+      await expect(page.getByTestId('share-unpublish-intranet')).toHaveCount(0)
       await page.keyboard.press('Escape')
 
       // Publish to intranet from a PRIVATE doc → the confirm dialog offers the
       // atomic widen to Internal.
       await openPublishAnd(page, 'intranet')
-      const confirm = page.getByTestId('confirm-widen')
+      const confirm = page.getByTestId('share-widen-confirm-button')
       await expect(confirm).toBeVisible({ timeout: 15000 })
+      // The confirm title is a paragraph inside the share dialog, not a
+      // heading element — assert on the panel's own text.
       await expect(
-        page.getByRole('heading', { name: 'Widen who can see this?' })
-      ).toBeVisible()
+        page.getByTestId('share-widen-confirm')
+      ).toContainText('Widen who can see this?')
       await page.screenshot({
         path: `${SHOT_DIR}/atrium-publish-visibility.png`,
         fullPage: false,
@@ -169,7 +174,10 @@ function defineAtriumPublishShareAuthenticatedSuite1Part1() {
       await confirm.click()
 
       // The success caption shows the copyable /c/{slug} reader URL.
-      const readerLink = page.getByTestId('publish-reader-url')
+      // The usability pass moved the canonical URL out of the editor status
+      // caption and into the Share dialog's Link row, which stays open on the
+      // now-live destination after the widen completes.
+      const readerLink = page.getByTestId('share-link-url')
       await expect(readerLink).toBeVisible({ timeout: 30000 })
       expect((await readerLink.textContent())?.trim().endsWith(`/c/${slug}`)).toBe(true)
 
@@ -198,16 +206,17 @@ function defineAtriumPublishShareAuthenticatedSuite1Part1() {
         await otherContext.close()
       }
 
-      // Back in the menu, the destination is now badged LIVE and Unpublish is
-      // enabled (#1336 B8).
-      await page.getByTestId('publish-menu-trigger').click()
+      // Back in the Share dialog, the destination is now badged LIVE and the
+      // Unpublish button is rendered for it (#1336 B8).
+      await page.getByTestId('share-control').click()
       await expect(page.getByTestId('live-intranet')).toBeVisible({
         timeout: 15000,
       })
-      await expect(page.getByTestId('unpublish-item')).not.toHaveAttribute(
-        'aria-disabled',
+      await expect(page.getByTestId('share-dest-intranet')).toHaveAttribute(
+        'data-live',
         'true'
       )
+      await expect(page.getByTestId('share-unpublish-intranet')).toBeEnabled()
 
       await cleanup(page, [id])
     } finally {
@@ -230,12 +239,12 @@ function defineAtriumPublishShareAuthenticatedSuite1Part2() {test('atrium-share-
       const { id, slug } = await seedDoc(page, `Public publish ${token}`)
 
       await page.goto(`/atrium/${id}/edit`)
-      await expect(page.getByTestId('publish-menu-trigger')).toBeVisible({
+      await expect(page.getByTestId('share-control')).toBeVisible({
         timeout: 30000,
       })
 
       await openPublishAnd(page, 'public_web')
-      const confirm = page.getByTestId('confirm-widen')
+      const confirm = page.getByTestId('share-widen-confirm-button')
       await expect(confirm).toBeVisible({ timeout: 15000 })
       // The dialog is explicit that this reaches the open internet.
       await expect(
@@ -245,7 +254,10 @@ function defineAtriumPublishShareAuthenticatedSuite1Part2() {test('atrium-share-
 
       // #1336: no approval gate — the publish completes immediately and the
       // caption carries the public URL.
-      const readerLink = page.getByTestId('publish-reader-url')
+      // The usability pass moved the canonical URL out of the editor status
+      // caption and into the Share dialog's Link row, which stays open on the
+      // now-live destination after the widen completes.
+      const readerLink = page.getByTestId('share-link-url')
       await expect(readerLink).toBeVisible({ timeout: 30000 })
       expect((await readerLink.textContent())?.trim().endsWith(`/p/${slug}`)).toBe(true)
       await page.screenshot({
