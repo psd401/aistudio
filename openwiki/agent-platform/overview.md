@@ -27,7 +27,7 @@ infra/agent-image/skills/{skill-name}/
 ### Skill Categories
 
 **Administrative & District Operations**
-- `psd-atrium` — Read/search/create content in Atrium
+- `psd-atrium` — Read/search/create content in Atrium; artifact data persistence (list-data, submit)
 - `psd-freshservice` — IT service desk integration
 - `psd-email-triage` — Automated email response drafting
 - `psd-schedules` — Schedule management
