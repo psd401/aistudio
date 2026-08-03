@@ -59,6 +59,17 @@ export interface CreateCollectionInput {
 
 export interface UpdateCollectionInput {
   name?: string;
+  /**
+   * Section hero copy (migration 175). `null` clears it.
+   *
+   * Together with `landingObjectId`, this is the ONLY part of a district
+   * collection a non-administrator can change, and only when they hold `create`
+   * access to it — see `assertMayManage`. Describing the section you contribute
+   * to should not require an administrator; restructuring it still does.
+   */
+  description?: string | null;
+  /** Pinned "start here" object for the landing page; `null` unpins. */
+  landingObjectId?: string | null;
   parentId?: string | null;
   position?: number;
   defaultVisibilityLevel?: VisibilityLevel;
@@ -80,6 +91,10 @@ export interface CollectionDTO {
   inheritGrants: boolean;
   position: number;
   archivedAt: string | null;
+  /** Section hero copy (migration 175), or null. */
+  description: string | null;
+  /** Pinned "start here" object for the landing page, or null. */
+  landingObjectId: string | null;
   directContentCount: number;
   subtreeContentCount: number;
   grants: CollectionGrant[];
@@ -191,6 +206,17 @@ export interface UpdatePatch {
 
 export interface ListFilter {
   collectionId?: string;
+  /**
+   * Restrict to objects in ANY of these collections — the section landing
+   * page's "include subsections" mode, where the caller has already resolved the
+   * visible subtree (`collectionService.detail().subtreeIds`).
+   *
+   * This is a convenience over `collectionId`, not a widening: the collection
+   * ACCESS predicate still applies independently, so passing a collection the
+   * caller cannot enter yields nothing rather than its contents. An empty array
+   * matches nothing (never "everything").
+   */
+  collectionIds?: string[];
   kind?: ContentKind;
   tag?: string;
   /** Return objects updated at or after this ISO 8601 timestamp. */
@@ -212,7 +238,22 @@ export interface ListFilter {
    * applies no ownership restriction; a guest (no user id) gets no rows under
    * "shared".
    */
-  owner?: "all" | "shared";
+  owner?: "all" | "shared" | "mine";
+  /**
+   * Whether the object sits in a collection. "unfiled" is `collection_id IS
+   * NULL`; "filed" is its complement. Added for the library home, where an
+   * admin's default view was every filed document in the district at once —
+   * the things already put away are exactly what the home page should not lead
+   * with. Like `owner`, this only ever narrows the authorized set.
+   */
+  filed?: "any" | "filed" | "unfiled";
+  /**
+   * Restrict to objects the CALLING USER has favorited (`content_user_favorites`).
+   * A favorite grants no visibility of its own — this is an AND on top of the
+   * visibility gate, so a favorited object that later became invisible to the
+   * caller drops out. A guest has no favorites and gets no rows.
+   */
+  favorite?: boolean;
   limit?: number;
   offset?: number;
 }
@@ -234,6 +275,19 @@ export interface ContentObjectDTO {
    * authorization input (owner permission is always keyed on `ownerUserId`).
    */
   ownerName: string | null;
+  /**
+   * Whether the CALLING user has starred this object. LIST-ONLY, like
+   * `ownerName`: only `visibilityService.listVisible` computes it; every other
+   * DTO path leaves it `false`. Presentation state — a favorite confers no
+   * access, so this is never an authorization input.
+   */
+  isFavorite: boolean;
+  /**
+   * The head version's summary, used as the one-line excerpt on library cards.
+   * LIST-ONLY, like `ownerName` and `isFavorite`; null everywhere else, and null
+   * for content whose author never wrote one.
+   */
+  summary: string | null;
   createdByActor: "human" | "agent";
   createdByAgentId: string | null;
   collectionId: string | null;

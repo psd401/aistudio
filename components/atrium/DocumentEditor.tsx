@@ -43,7 +43,6 @@ import { ArtifactEmbedPaste } from "./artifact-embed-paste";
 import { makeAuthorTag } from "@/lib/content/collab/provenance";
 import { useUser } from "@/components/auth/user-provider";
 import { EditorToolbar } from "./EditorToolbar";
-import { PublishMenu } from "./PublishMenu";
 import { CopyableLink } from "./CopyableLink";
 import { EditableSheetTitle } from "./EditableSheetTitle";
 import { EditorBubbleMenu } from "./EditorBubbleMenu";
@@ -719,17 +718,17 @@ export function DocumentEditor({
 
   const editor = useAtriumEditor(ydoc, userId, editable);
 
-  // Snapshot / publish / unpublish, with shared busy + success/error feedback.
+  // Snapshot, with shared busy + success/error feedback. Publish/unpublish are
+  // still provided by the hook (the REST/agent surfaces and its own tests use
+  // that contract) but are no longer driven from here — the Share dialog owns
+  // publishing now.
   const {
     message,
     messageUrl,
-    actionSeq,
     actionError,
     pendingApproval,
     busy,
     handleSnapshot,
-    handlePublish,
-    handleUnpublish,
   } = useEditorActions({ editor, idOrSlug, docNameRef });
 
   // Live track-changes toggle state + pending-suggestion count for the toolbar.
@@ -784,15 +783,20 @@ export function DocumentEditor({
       />
     </>
   );
+  // Publishing moved into the Share dialog (see VisibilityChip): the link, who
+  // can open it, and where it is published are one decision and now live in one
+  // place. What is left here is "Save a version" — a versioning action that was
+  // only ever in the Publish menu because that menu happened to exist.
   const publishControl = canEdit ? (
-    <PublishMenu
-      idOrSlug={idOrSlug}
-      busy={busy}
-      refreshKey={actionSeq}
-      onSnapshot={handleSnapshot}
-      onPublish={handlePublish}
-      onUnpublish={handleUnpublish}
-    />
+    <button
+      type="button"
+      className="mer-ectl"
+      disabled={busy}
+      onClick={handleSnapshot}
+      data-testid="save-version"
+    >
+      Save a version
+    </button>
   ) : null;
 
   const statusCaption = (

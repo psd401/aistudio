@@ -45,8 +45,11 @@ export function AtriumShell({
   const branding = useBranding();
   const { user } = useUser();
 
-  // The nav column belongs to the library index only.
-  const isLibrary = pathname === "/atrium";
+  // The nav column belongs to the browsing surfaces: the library index AND the
+  // section landing pages (/atrium/s/[slug]). Dropping it on a section page
+  // would strip the tree exactly where someone is navigating the hierarchy.
+  // The editor (/atrium/[id]/edit) still gets the full width.
+  const isLibrary = pathname === "/atrium" || pathname.startsWith("/atrium/s/");
   const inAtrium = pathname.startsWith("/atrium");
 
   const appInitial = (branding.appName ?? "A").charAt(0).toUpperCase();

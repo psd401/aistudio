@@ -40,6 +40,10 @@ export interface CollectionAccessRow {
   inheritGrants: boolean;
   position: number;
   archivedAt: Date | null;
+  /** Section hero copy (migration 175); null for sections that predate it. */
+  description: string | null;
+  /** Pinned "start here" object for the section landing page, or null. */
+  landingObjectId: string | null;
 }
 
 export interface CollectionAccessSnapshot {
@@ -102,6 +106,8 @@ async function loadRows(): Promise<{
             inheritGrants: contentCollections.inheritGrants,
             position: contentCollections.position,
             archivedAt: contentCollections.archivedAt,
+            description: contentCollections.description,
+            landingObjectId: contentCollections.landingObjectId,
           })
           .from(contentCollections)
           .orderBy(
@@ -163,6 +169,8 @@ async function loadRowsInTx(tx: DbTransaction): Promise<{
       inheritGrants: contentCollections.inheritGrants,
       position: contentCollections.position,
       archivedAt: contentCollections.archivedAt,
+      description: contentCollections.description,
+      landingObjectId: contentCollections.landingObjectId,
     })
     .from(contentCollections)
     .orderBy(

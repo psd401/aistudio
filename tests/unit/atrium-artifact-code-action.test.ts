@@ -179,6 +179,44 @@ describe("getArtifactCodeAction", () => {
     });
   });
 
+  describe("headless artifact (no versions yet)", () => {
+    it("returns an empty-draft success when the artifact has no head version", async () => {
+      // An artifact created without a body has currentVersionId === null. That
+      // is an empty draft, not a missing record — returning an error here made a
+      // freshly created artifact render as broken in the authoring canvas.
+      mockGet.mockResolvedValueOnce(
+        makeArtifactObject({ currentVersionId: null, version: null })
+      );
+
+      const result = await getArtifactCodeAction("obj-artifact-1");
+
+      expect(result.isSuccess).toBe(true);
+      const data = (
+        result as { data: { versionId: string | null; versionNumber: number | null; code: string } }
+      ).data;
+      expect(data.versionId).toBeNull();
+      expect(data.versionNumber).toBeNull();
+      expect(data.code).toBe("");
+      // Nothing to load from S3 when there is no version.
+      expect(mockLoadArtifactCode).not.toHaveBeenCalled();
+      expect(mockGetById).not.toHaveBeenCalled();
+    });
+
+    it("still errors when an EXPLICIT versionId cannot be resolved", async () => {
+      // The empty-draft path must not swallow a genuine not-found: an explicit
+      // version id that does not resolve stays an error (existence is masked).
+      mockGet.mockResolvedValueOnce(
+        makeArtifactObject({ currentVersionId: null, version: null })
+      );
+      mockGetById.mockResolvedValueOnce(null);
+
+      const result = await getArtifactCodeAction("obj-artifact-1", "v-missing");
+
+      expect(result.isSuccess).toBe(false);
+      expect(mockLoadArtifactCode).not.toHaveBeenCalled();
+    });
+  });
+
   describe("happy path", () => {
     it("returns code for a viewable artifact using the head version when no versionId given", async () => {
       const obj = makeArtifactObject();

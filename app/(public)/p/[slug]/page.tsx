@@ -273,35 +273,32 @@ export default async function PublicReaderPage({
     // Missing/unreadable body degrades to an empty preview (never the raw S3
     // error) — the shared loadArtifactCodeSafe contract.
     const code = await versionService.loadArtifactCodeSafe(version);
+    // A publicly shared artifact is just the page itself: no intranet nav, no
+    // title bar, no "UP TO DATE" pill, no provenance footer. Anyone outside the
+    // district following this link should get the artifact and nothing else —
+    // the surrounding chrome advertised an intranet they cannot enter.
+    //
+    // Same shape as /atrium/[id]/view: a fixed, full-viewport container holding
+    // only the cross-origin sandbox. Delivery is unchanged — the untrusted code
+    // still never touches app-origin HTML — and `dataBridgeEnabled` stays unset
+    // so anonymous bridge access remains impossible at the type boundary.
     return (
-      <ReaderFrame
-        title={published.title}
-        // Anonymous: NO avatar / no session read (the public reader consults none).
-        authenticated={false}
-        // A public page is always view-only (renders the "👁 View only" notice).
-        editHref={null}
-        commentHref={null}
-        commentCount={0}
-        publishedAt={published.publishedAt}
-        collectionName={published.collectionName}
-        // Artifact readers skip the TOC (no document headings to walk).
-        headings={[]}
-        // Full-bleed: the interactive artifact fills the viewport instead of the
-        // 720px reading sheet (#1052).
-        fullBleed
-        footer={
-          <ProvenanceFooter
-            objectId={published.id}
-            publishedVersionNumber={version.versionNumber}
-          />
-        }
+      <div
+        data-testid="artifact-viewport"
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 50,
+          background: "#fff",
+        }}
       >
         <ArtifactSandbox
           code={code}
           src={getArtifactSandboxRenderUrl()}
-          className="atrium-artifact-reader-frame"
+          title={published.title}
+          className="atrium-artifact-viewport"
         />
-      </ReaderFrame>
+      </div>
     );
   }
 
@@ -346,6 +343,9 @@ export default async function PublicReaderPage({
       publishedAt={published.publishedAt}
       collectionName={published.collectionName}
       headings={headings}
+      // Anonymous surface: drops the "<Org> Intranet" nav and the view-only
+      // explainer, keeps the reading sheet and the provenance footer.
+      surface="public"
       coverGradient={published.coverGradient}
       icon={published.icon}
       footer={

@@ -14,17 +14,20 @@
  */
 
 import Link from "next/link";
+import { AlertTriangle } from "lucide-react";
 import type { ContentObjectDTO, Requester } from "@/lib/content/types";
 import { versionService } from "@/lib/content/version-service";
 import { listEmbeddingDocuments } from "@/lib/content/embed-backlinks";
 import { getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
 import { ArtifactCanvas } from "./ArtifactCanvas";
-import { ArtifactTopbarActions } from "./ArtifactTopbarActions";
 import { ArtifactMetaRail } from "./ArtifactMetaRail";
 import { ContentSettings } from "./ContentSettings";
 import { VisibilityChip } from "./VisibilityChip";
-import { ArtifactPublishControl } from "./ArtifactPublishControl";
 import { publishService } from "@/lib/content/publish-service";
+import {
+  publicBlockers,
+  PUBLIC_BLOCKER_TEXT,
+} from "@/lib/content/public-reachability";
 
 export interface ArtifactAuthoringViewProps {
   obj: ContentObjectDTO;
@@ -42,22 +45,25 @@ export async function ArtifactAuthoringView({
   userCanEdit,
   collectionName,
 }: ArtifactAuthoringViewProps): Promise<React.JSX.Element> {
-  // Share target resolved from ACTUAL publication state (#1336 C4), not from
-  // visibility alone. `/p/[slug]` requires BOTH `visibility_level = 'public'`
-  // AND a live `public_web` publication, and `/c/[slug]` requires a live
-  // `intranet` one — so the old `visibility === "public" ? /p/ : /c/` rule
-  // handed users a 404 for the exact case they were most likely to share.
-  // Falls back to the chrome-free viewer route, which works for an unpublished
-  // artifact and any viewer who canView.
+  // Publication state, read here only to decide whether the broken-public-link
+  // banner below applies. The Share dialog loads its own copy for the link and
+  // the destination rows.
   const publications = await publishService.listLive(req, obj.id);
   const publicPub = publications.find((p) => p.destination === "public_web");
-  const intranetPub = publications.find((p) => p.destination === "intranet");
-  const readerHref =
-    publicPub && obj.visibilityLevel === "public"
-      ? `/p/${obj.slug}`
-      : intranetPub
-        ? `/c/${obj.slug}`
-        : `/atrium/${obj.id}/view`;
+
+  // A live public_web publication is NOT sufficient for /p/[slug] to render —
+  // the route also requires public visibility AND a section an anonymous
+  // visitor can enter. Without this, an author sees "Public web · LIVE", copies
+  // the URL, and everyone who opens it gets a 404 with nothing anywhere saying
+  // why. Only computed when something is actually published publicly; there is
+  // no broken link to warn about otherwise.
+  const publicIssues = publicPub
+    ? await publicBlockers({
+        hasLivePublicWebPublication: true,
+        visibilityLevel: obj.visibilityLevel,
+        collectionId: obj.collectionId,
+      })
+    : [];
 
   // Rail data (manage-rights only): the current head backs the version number; the
   // backlinks are viewer-filtered documents that embed this artifact.
@@ -70,6 +76,21 @@ export async function ArtifactAuthoringView({
 
   return (
     <div className="mer-artifact">
+      {publicIssues.length > 0 && (
+        <div className="mer-public-warning" role="status" data-testid="public-link-warning">
+          <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
+          <div>
+            <p className="mer-public-warning-title">
+              This page is published publicly, but the public link will not open.
+            </p>
+            <ul className="mer-public-warning-list">
+              {publicIssues.map((issue) => (
+                <li key={issue}>{PUBLIC_BLOCKER_TEXT[issue]}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
       <div className="mer-editor-topbar">
         <nav className="mer-breadcrumb" aria-label="Breadcrumb">
           <Link href="/atrium" className="mer-breadcrumb-crumb">
@@ -101,7 +122,6 @@ export async function ArtifactAuthoringView({
           <a href={`/nexus?workspace=${obj.id}`} className="mer-ectl">
             Open beside chat
           </a>
-          <ArtifactTopbarActions artifactId={obj.id} readerHref={readerHref} />
           {userCanEdit && (
             <ContentSettings
               key={`settings-${obj.id}`}
@@ -112,14 +132,21 @@ export async function ArtifactAuthoringView({
               status={obj.status}
             />
           )}
-          <VisibilityChip key={obj.id} idOrSlug={obj.id} />
-          {/* #1336 C4: artifacts previously had NO publish control at all. */}
-          {userCanEdit && <ArtifactPublishControl artifactId={obj.id} />}
+          {/* ONE share surface. The link, the audience, the destinations, and
+              the embed code all live in this dialog — they used to be three
+              separate controls (a silent copy-link button, this chip, and a
+              Publish ▾ menu) that had to agree for a link to work and never
+              said so. */}
+          <VisibilityChip
+            key={obj.id}
+            idOrSlug={obj.id}
+            share={{ objectId: obj.id, slug: obj.slug, kind: "artifact" }}
+          />
           <Link
             // Full screen opens the chrome-free viewer route (#1052) — it works
             // for UNPUBLISHED artifacts and any viewer who canView, unlike the
-            // /c and /p readers (which require a live publication). The readers
-            // remain the Share targets (ArtifactTopbarActions, via readerHref).
+            // /c and /p readers (which require a live publication). The Share
+            // dialog resolves its own link with the same precedence.
             href={`/atrium/${obj.id}/view`}
             target="_blank"
             rel="noreferrer"

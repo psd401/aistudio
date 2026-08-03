@@ -56,6 +56,51 @@ ON CONFLICT (object_id, destination) DO UPDATE
   SET published_version_id = EXCLUDED.published_version_id, status = 'live',
       external_ref = EXCLUDED.external_ref;
 
+-- (C) Public ARTIFACT published live to public_web ----------------------------
+-- Exercises the no-chrome public artifact render: /p/atrium-public-artifact must
+-- return the sandbox alone — no intranet nav, no title bar, no provenance foot.
+-- The body is INLINE (body_location='inline'), so no S3 object is needed for the
+-- page to render real content.
+INSERT INTO content_objects (
+  id, kind, title, slug, owner_user_id, created_by_actor,
+  visibility_level, status
+)
+SELECT
+  'a7700000-0000-4000-8000-000000000003', 'artifact', 'Public Artifact',
+  'atrium-public-artifact',
+  (SELECT id FROM users WHERE cognito_sub = 'e2e-test-user'),
+  'human', 'public', 'published'
+ON CONFLICT (slug) DO UPDATE
+  SET visibility_level = EXCLUDED.visibility_level, status = EXCLUDED.status;
+
+INSERT INTO content_versions (
+  id, object_id, version_number, author_actor, author_user_id, body_format,
+  body_location, body_inline, summary
+)
+SELECT
+  'a7700000-0000-4000-8000-0000000003a1', 'a7700000-0000-4000-8000-000000000003',
+  1, 'human', (SELECT id FROM users WHERE cognito_sub = 'e2e-test-user'),
+  'html', 'inline',
+  '<!doctype html><html><body><h1 id="artifact-probe">Public artifact body</h1></body></html>',
+  'Public artifact'
+ON CONFLICT (object_id, version_number) DO NOTHING;
+
+UPDATE content_objects
+  SET current_version_id = 'a7700000-0000-4000-8000-0000000003a1'
+  WHERE id = 'a7700000-0000-4000-8000-000000000003';
+
+INSERT INTO content_publications (
+  object_id, destination, published_version_id, status, published_by, external_ref
+)
+SELECT
+  'a7700000-0000-4000-8000-000000000003', 'public_web',
+  'a7700000-0000-4000-8000-0000000003a1', 'live',
+  (SELECT id FROM users WHERE cognito_sub = 'e2e-test-user'),
+  '/p/atrium-public-artifact'
+ON CONFLICT (object_id, destination) DO UPDATE
+  SET published_version_id = EXCLUDED.published_version_id, status = 'live',
+      external_ref = EXCLUDED.external_ref;
+
 -- (B) Internal document, live on public_web but NOT public (strict-gate case) --
 INSERT INTO content_objects (
   id, kind, title, slug, owner_user_id, created_by_actor,

@@ -9,7 +9,7 @@
  * cannot enter is pruned), so this component is presentation only — it never makes
  * an authorization decision and never receives a section the viewer cannot see.
  *
- * Selecting a collection calls `onSelect(collectionId | null)` so a parent
+ * Selecting a collection calls `onSelect(node | null)` so a parent
  * (the library view) can filter its content list to that section. The "All
  * content" row selects `null` (no collection filter).
  *
@@ -19,7 +19,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { ChevronDown, ChevronRight, FolderOpen, Layers } from "lucide-react";
+import { ChevronDown, ChevronRight, FolderOpen, Layers, Lock } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { collectionTreeAction } from "@/actions/db/atrium/collection-tree";
 import type { CollectionTreeNode } from "@/lib/content";
@@ -31,7 +31,12 @@ interface CollectionTreeProps {
   /** Currently selected collection id, or null for "All content". */
   selectedCollectionId: string | null;
   /** Called when a section (or "All content") is chosen. */
-  onSelect: (collectionId: string | null) => void;
+  /**
+   * Receives the whole NODE (not just its id) so callers can route by slug —
+   * the section landing page lives at /atrium/s/[slug], and a readable, stable
+   * URL beats a uuid in the query string. `null` means "All content".
+   */
+  onSelect: (node: CollectionTreeNode | null) => void;
   className?: string;
 }
 
@@ -45,7 +50,12 @@ function TreeRow({
   node: CollectionTreeNode;
   depth: number;
   selectedCollectionId: string | null;
-  onSelect: (collectionId: string | null) => void;
+  /**
+   * Receives the whole NODE (not just its id) so callers can route by slug —
+   * the section landing page lives at /atrium/s/[slug], and a readable, stable
+   * URL beats a uuid in the query string. `null` means "All content".
+   */
+  onSelect: (node: CollectionTreeNode | null) => void;
 }): React.JSX.Element {
   const hasChildren = node.children.length > 0;
   const [expanded, setExpanded] = useState(true);
@@ -96,9 +106,16 @@ function TreeRow({
         <button
           type="button"
           className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-          onClick={() => onSelect(node.id)}
+          onClick={() => onSelect(node)}
         >
-          <FolderOpen className="h-4 w-4 shrink-0 text-muted-foreground" />
+          {/* A lock, not a folder, for an owner-bound private section. `scope`
+              has always been on the node and was simply never read, so every
+              section — yours alone or the whole district's — drew identically. */}
+          {node.scope === "private" ? (
+            <Lock className="h-4 w-4 shrink-0 text-muted-foreground" />
+          ) : (
+            <FolderOpen className="h-4 w-4 shrink-0 text-muted-foreground" />
+          )}
           <span className="truncate">{node.name}</span>
           {node.visibleObjectCount > 0 && (
             <span className="ml-auto shrink-0 rounded-full bg-muted px-1.5 text-xs text-muted-foreground">
@@ -164,6 +181,11 @@ export function CollectionTree({
     return () => window.removeEventListener("atrium:collections-changed", reload);
   }, [load]);
 
+  // Split at the TOP level only: a private section's children are private by
+  // construction, so grouping deeper would just repeat the same label.
+  const districtNodes = tree.filter((n) => n.scope !== "private");
+  const privateNodes = tree.filter((n) => n.scope === "private");
+
   return (
     <nav
       aria-label="Content sections"
@@ -205,9 +227,9 @@ export function CollectionTree({
           No sections you can enter yet.
         </p>
       )}
-      {!loading && tree.length > 0 && (
+      {!loading && districtNodes.length > 0 && (
         <ul>
-          {tree.map((node) => (
+          {districtNodes.map((node) => (
             <TreeRow
               key={node.id}
               node={node}
@@ -217,6 +239,30 @@ export function CollectionTree({
             />
           ))}
         </ul>
+      )}
+
+      {/* Owner-bound private sections get their OWN group. Intermixed with the
+          shared tree there was no way to tell "a section the district can see"
+          from "a folder only I can see" — the two were the same folder icon in
+          one undifferentiated list. */}
+      {!loading && privateNodes.length > 0 && (
+        <>
+          <div className="mt-2 flex items-center gap-1.5 px-2 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            <Lock className="h-3.5 w-3.5" />
+            My collections
+          </div>
+          <ul>
+            {privateNodes.map((node) => (
+              <TreeRow
+                key={node.id}
+                node={node}
+                depth={0}
+                selectedCollectionId={selectedCollectionId}
+                onSelect={onSelect}
+              />
+            ))}
+          </ul>
+        </>
       )}
     </nav>
   );

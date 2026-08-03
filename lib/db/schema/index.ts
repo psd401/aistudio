@@ -206,6 +206,7 @@ export * from "./tables/oauth-consent-decisions";
 export * from "./tables/content-collections";
 export * from "./tables/content-collection-grants";
 export * from "./tables/content-objects";
+export * from "./tables/content-user-favorites";
 export * from "./tables/content-versions";
 export * from "./tables/content-visibility-grants";
 export * from "./tables/content-publications";

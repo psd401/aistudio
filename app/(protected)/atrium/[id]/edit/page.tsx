@@ -115,7 +115,12 @@ export default async function AtriumEditPage({
           status={obj.status}
         />
       )}
-      <VisibilityChip key={obj.id} idOrSlug={obj.id} />
+      {/* ONE share surface: link + audience + destinations in one dialog. */}
+      <VisibilityChip
+        key={obj.id}
+        idOrSlug={obj.id}
+        share={{ objectId: obj.id, slug: obj.slug, kind: "document" }}
+      />
     </div>
   );
 

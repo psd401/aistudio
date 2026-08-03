@@ -193,6 +193,20 @@ jest.mock("@/actions/db/atrium/set-visibility", () => ({
 // are server actions whose real modules drag in the publish/DB graph — including
 // the ESM-only `unified` markdown stack via the OKF publish adapter — so they
 // are mocked here exactly like the other actions in this suite.
+// The Share dialog now owns publishing, so the chip imports these two actions.
+// They are server actions that transitively pull the markdown render pipeline
+// (ESM `unified`), which Jest's transform does not handle — and this suite is
+// about the chip's own behavior, not the publish round-trip.
+jest.mock("@/actions/db/atrium/publish-document", () => ({
+  publishDocumentAction: jest.fn(async () => ({ isSuccess: true, data: {} })),
+}));
+jest.mock("@/actions/db/atrium/unpublish-document", () => ({
+  unpublishDocumentAction: jest.fn(async () => ({
+    isSuccess: true,
+    data: { unpublished: true },
+  })),
+}));
+
 jest.mock("@/actions/db/atrium/list-publications", () => ({
   listPublicationsAction: jest.fn(async () => ({
     isSuccess: true,

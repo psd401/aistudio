@@ -164,6 +164,7 @@
     "171-workspace-upload-zero-byte-files.sql",
     "172-content-data-records.sql",
     "173-repository-index-generation-retention.sql",
-    "174-unified-content-message-sanitizer-recovery.sql"
+    "174-unified-content-message-sanitizer-recovery.sql",
+    "175-atrium-library-usability.sql"
   ]
 }

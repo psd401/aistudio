@@ -116,6 +116,19 @@ html:has(.meridian) body {
   --mer-rail-ink: rgba(235, 241, 245, 0.62);
   --mer-rail-ink-active: #f5f7f9;
 
+  /* ---- Measure ----
+   * The width of a document sheet, in BOTH the editor (.mer-sheet-wrap) and the
+   * reader (.mer-reader-sheet-wrap). These were two unrelated literals (700px
+   * and 720px), which on a 1440px window left a document using barely a third of
+   * the screen with the rest empty.
+   *
+   * Viewport-relative so it tracks the window instead of pinning one laptop
+   * size: the floor keeps a usable sheet on small screens, the ceiling stops a
+   * line from becoming unreadably long on an ultrawide. Every consumer also sets
+   * `max-width: 100%`, so the side rails (nav, comments, TOC) still win — the
+   * sheet gives way to them rather than overflowing. */
+  --mer-measure: clamp(680px, 76vw, 1360px);
+
   /* ---- Radii ---- */
   --mer-r-card: 15px;
   --mer-r-button: 9px;

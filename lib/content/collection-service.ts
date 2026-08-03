@@ -51,6 +51,15 @@ export interface CollectionTreeNode {
   navItemId: number | null;
   position: number;
   selectableForCreate: boolean;
+  /** Section hero copy (migration 175); null when the author has not written one. */
+  description: string | null;
+  /**
+   * The pinned "start here" object for this section (migration 175), or null.
+   * An ID ONLY — carrying it here confers no visibility: the landing page still
+   * finds the object through the normal permission-filtered list, so a pin at an
+   * object the viewer cannot see simply does not render.
+   */
+  landingObjectId: string | null;
   /** Number of objects in THIS collection the requester can view (not subtree). */
   visibleObjectCount: number;
   children: CollectionTreeNode[];
@@ -205,6 +214,62 @@ function computeKeepSet(
 
 export const collectionService = {
   /**
+   * One section, resolved by slug or id, for its landing page — plus the
+   * breadcrumb trail above it and its child sections.
+   *
+   * VISIBILITY: this deliberately resolves the node out of `tree(req)` rather
+   * than reading `content_collections` directly. The tree is already the
+   * requester-filtered, gap-compressed view (ancestors they may not enter are
+   * omitted and descendants re-rooted), so a section the caller cannot enter is
+   * simply absent here and the caller renders a 404. Reading the row directly
+   * would have meant restating every one of those rules — and any drift between
+   * the two would be a silent disclosure of a section's name and contents.
+   *
+   * Returns `null` for an unknown OR non-enterable slug. The caller MUST NOT
+   * distinguish the two (404 both ways) — see the reader pages' existence mask.
+   */
+  async detail(
+    req: Requester,
+    slugOrId: string
+  ): Promise<{
+    node: CollectionTreeNode;
+    /** Ancestors nearest-last, i.e. render order. Excludes `node` itself. */
+    breadcrumb: CollectionTreeNode[];
+    /** Every descendant id including `node` — the subtree listing filter. */
+    subtreeIds: string[];
+  } | null> {
+    const forest = await this.tree(req);
+
+    const trail: CollectionTreeNode[] = [];
+    const find = (
+      nodes: CollectionTreeNode[],
+      path: CollectionTreeNode[]
+    ): CollectionTreeNode | null => {
+      for (const node of nodes) {
+        if (node.slug === slugOrId || node.id === slugOrId) {
+          trail.push(...path);
+          return node;
+        }
+        const hit = find(node.children, [...path, node]);
+        if (hit) return hit;
+      }
+      return null;
+    };
+
+    const node = find(forest, []);
+    if (!node) return null;
+
+    const subtreeIds: string[] = [];
+    const collect = (n: CollectionTreeNode): void => {
+      subtreeIds.push(n.id);
+      for (const child of n.children) collect(child);
+    };
+    collect(node);
+
+    return { node, breadcrumb: trail, subtreeIds };
+  },
+
+  /**
    * The display name of a single collection by id, or `null` if it does not
    * exist. Used for the Meridian editor breadcrumb (Epic #1059 slice C) — a
    * section LABEL, not sensitive content, and only ever shown for an object the
@@ -302,7 +367,10 @@ export const collectionService = {
 
     const build = (parentId: string | null): CollectionTreeNode[] =>
       (visibleChildrenOf.get(parentId) ?? [])
-        .map((c) => ({
+        // The explicit return annotation is load-bearing: chaining `.sort()`
+        // below removes the contextual type the bare `.map()` used to get from
+        // `build`'s return type, which would widen `scope` to `string`.
+        .map((c): CollectionTreeNode => ({
           id: c.id,
           name: c.name,
           slug: c.slug,
@@ -313,9 +381,17 @@ export const collectionService = {
           navItemId: c.navItemId,
           position: c.position,
           selectableForCreate: access.selectableCollectionIds.has(c.id),
+          description: c.description,
+          landingObjectId: c.landingObjectId,
           visibleObjectCount: visibleCountByCollection.get(c.id) ?? 0,
           children: build(c.id),
-        }));
+        }))
+        // `position` is the authored sibling order (set by the reorder controls
+        // in CollectionManagementPanel). Without this sort the tree rendered in
+        // whatever order the access snapshot happened to yield, so reordering a
+        // section had no visible effect anywhere it is actually browsed. Ties
+        // fall back to name, matching CollectionManagementPanel's comparator.
+        .sort((a, b) => a.position - b.position || a.name.localeCompare(b.name));
 
     return build(null);
   },
