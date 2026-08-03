@@ -96,6 +96,24 @@ describe("repository migration retry targeting", () => {
     );
   });
 
+  it("turns unprocessed terminal-run items back into retryable exceptions", () => {
+    expect(migrationRunner).toContain(
+      "contentMigration.failUnprocessedBackfillItems",
+    );
+    expect(migrationRunner).toContain(
+      "contentMigration.recoverTerminalRunOrphans",
+    );
+    expect(migrationRunner.match(/MIGRATION_RUN_SOURCE_UNPROCESSED/g)).toHaveLength(
+      2,
+    );
+    expect(migrationRunner).toContain(
+      "owner_run.status NOT IN ('queued', 'running')",
+    );
+    expect(migrationRunner).toContain(
+      "migration.status IN ('pending', 'migrating')",
+    );
+  });
+
   it("applies an exception-status filter before the bounded query limit", () => {
     const functionStart = migrationControlService.indexOf(
       "export async function listRepositoryMigrationExceptions",

@@ -1301,6 +1301,24 @@ export async function getRepositoryMigrationRunMetrics(
 async function finishBackfillRun(
   run: RepositoryMigrationRunRow,
 ): Promise<void> {
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        UPDATE repository_migration_items
+        SET status = 'unrecoverable',
+            last_error_code = 'MIGRATION_RUN_SOURCE_UNPROCESSED',
+            last_error_message =
+              'Migration run ended without processing this source; retry the source',
+            metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+              'unprocessedRunId', ${run.id}::text
+            ),
+            verified_at = NULL,
+            updated_at = NOW()
+        WHERE run_id = ${run.id}::uuid
+          AND status IN ('pending', 'migrating')
+      `),
+    "contentMigration.failUnprocessedBackfillItems",
+  );
   // A retry preserves origin_run_id for rollback ownership, but its result
   // belongs to the retry run that currently owns the item.
   const metrics = await getRepositoryMigrationRunMetrics(run.id);
@@ -1508,6 +1526,29 @@ async function reconcileMigrationCandidate(
 async function reconcileNextBatch(
   run: RepositoryMigrationRunRow,
 ): Promise<void> {
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        UPDATE repository_migration_items migration
+        SET status = 'unrecoverable',
+            last_error_code = 'MIGRATION_RUN_SOURCE_UNPROCESSED',
+            last_error_message =
+              'Migration run ended without processing this source; retry the source',
+            metadata = COALESCE(migration.metadata, '{}'::jsonb) ||
+              jsonb_build_object(
+                'unprocessedRunId', migration.run_id::text,
+                'lastReconciledRunId', ${run.id}::text
+              ),
+            verified_at = NULL,
+            updated_at = NOW()
+        FROM repository_migration_runs owner_run
+        WHERE owner_run.id = migration.run_id
+          AND owner_run.id <> ${run.id}::uuid
+          AND owner_run.status NOT IN ('queued', 'running')
+          AND migration.status IN ('pending', 'migrating')
+      `),
+    "contentMigration.recoverTerminalRunOrphans",
+  );
   const migrations = await executeQuery(
     (db) =>
       db
