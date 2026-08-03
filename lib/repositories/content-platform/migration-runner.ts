@@ -1385,7 +1385,9 @@ async function reconcileMigrationCandidate(
   tx: DbTransaction,
   candidate: RepositoryMigrationItemRow,
   runId: string,
-): Promise<"skipped" | "pending" | "verified" | "mismatch"> {
+): Promise<
+  "skipped" | "pending" | "verified" | "mismatch" | "unrecoverable"
+> {
   // Serialize reconciliation with administrator approval/reprocess actions.
   // A stale worker observation must never overwrite a freshly approved
   // mismatch or mark a version verified after reprocessing reset it.
@@ -1395,11 +1397,26 @@ async function reconcileMigrationCandidate(
     .where(eq(repositoryMigrationItems.id, candidate.id))
     .limit(1)
     .for("update");
-  if (
-    !migration?.canonicalVersionId ||
-    !["migrated", "mismatch"].includes(migration.status)
-  ) {
+  if (!migration || !["migrated", "mismatch"].includes(migration.status)) {
     return "skipped";
+  }
+  if (!migration.canonicalVersionId) {
+    await tx
+      .update(repositoryMigrationItems)
+      .set({
+        status: "unrecoverable",
+        lastErrorCode: "MIGRATION_CANONICAL_VERSION_MISSING",
+        lastErrorMessage:
+          "Migration is missing canonical version evidence; retry the source to recreate it",
+        verifiedAt: null,
+        metadata: {
+          ...migration.metadata,
+          lastReconciledRunId: runId,
+        },
+        updatedAt: new Date(),
+      })
+      .where(eq(repositoryMigrationItems.id, migration.id));
+    return "unrecoverable";
   }
   const evidence = toPgRows<{
     processing_status: string | null;
@@ -1498,7 +1515,6 @@ async function reconcileNextBatch(
         .where(
           and(
             inArray(repositoryMigrationItems.status, ["migrated", "mismatch"]),
-            sql`${repositoryMigrationItems.canonicalVersionId} IS NOT NULL`,
             sql`COALESCE(
               ${repositoryMigrationItems.metadata} ->> 'lastReconciledRunId',
               ''
@@ -1525,7 +1541,6 @@ async function reconcileNextBatch(
           SELECT COUNT(*)::integer AS count
           FROM repository_migration_items
           WHERE status IN ('migrated', 'mismatch')
-            AND canonical_version_id IS NOT NULL
             AND COALESCE(metadata ->> 'lastReconciledRunId', '') <> ${run.id}
         `),
         "contentMigration.remainingReconciliation",
@@ -1539,6 +1554,8 @@ async function reconcileNextBatch(
           .update(repositoryMigrationRuns)
           .set({
             status:
+              (metrics.failed ?? 0) > 0 ||
+              (metrics.unrecoverable ?? 0) > 0 ||
               (metrics.mismatched ?? 0) > 0
                 ? "completed_with_errors"
                 : "completed",
