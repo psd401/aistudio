@@ -72,6 +72,30 @@ describe("repository migration retry targeting", () => {
     expect(retryOnlyIds).toHaveLength(selectedRetryIds.size);
   });
 
+  it("allows targeted retries to re-register an existing canonical version", () => {
+    const repositoryCandidateStart = migrationRunner.indexOf(
+      "async function loadNextRepositoryCandidate",
+    );
+    const repositoryCandidateEnd = migrationRunner.indexOf(
+      "async function loadNextCandidate",
+      repositoryCandidateStart,
+    );
+    const repositoryCandidate = migrationRunner.slice(
+      repositoryCandidateStart,
+      repositoryCandidateEnd,
+    );
+
+    expect(repositoryCandidate).toMatch(
+      /\$\{discoverUntrackedSources\} = FALSE[\s\S]*?item\.current_version_id IS NULL/,
+    );
+    expect(repositoryCandidate).toContain(
+      "migration.run_id = ${run.id}::uuid",
+    );
+    expect(migrationRunner).toContain(
+      "await registerExistingCanonicalVersion(candidate, reserved, targetKey)",
+    );
+  });
+
   it("applies an exception-status filter before the bounded query limit", () => {
     const functionStart = migrationControlService.indexOf(
       "export async function listRepositoryMigrationExceptions",

@@ -290,7 +290,8 @@ async function loadNextRepositoryCandidate(
                 AND connector_source.status = 'unsupported'
             )
             AND (
-              item.current_version_id IS NULL
+              ${discoverUntrackedSources} = FALSE
+              OR item.current_version_id IS NULL
               OR EXISTS (
                 SELECT 1
                 FROM repository_item_chunks legacy_chunk
