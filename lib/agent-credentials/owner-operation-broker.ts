@@ -681,7 +681,18 @@ export async function executeOpenAiImageOperation(
       },
       body: JSON.stringify(openAiImageRequestBody(validated)),
       redirect: "error",
-      signal: AbortSignal.timeout(120_000),
+      // Image generation is the slowest operation this broker fronts, and 120s
+      // was not enough: gpt-image renders at higher quality/larger sizes ran
+      // past it and aborted, surfacing to the caller as the generic 502
+      // "Credential operation failed" — which reads like a missing credential
+      // rather than a timeout.
+      //
+      // Three timeouts are stacked on this path and must stay ordered:
+      //   this fetch (240s) < psd-image-gen generate.js (250s) < ALB idle (300s)
+      // The innermost one has to fire first, or the caller sees an opaque
+      // connection reset instead of a timeout it can report. Raise them
+      // together, and keep the total under the ALB's 300s idle timeout.
+      signal: AbortSignal.timeout(240_000),
     },
   );
   if (!response.ok) {

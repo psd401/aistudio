@@ -452,7 +452,17 @@ export const s3Store = {
         ChecksumSHA256: input.checksumSha256,
         CacheControl: "private, no-store",
       }),
-      { expiresIn: input.ttlSeconds ?? 900 }
+      {
+        expiresIn: input.ttlSeconds ?? 900,
+        // Without these the presigner hoists x-amz-checksum-sha256 into the
+        // query string instead of leaving it a signed header. The uploader then
+        // sends it as a header, S3 sees a header the signature does not cover,
+        // and every PUT fails 403 AccessDenied / HeadersNotSigned. Same options
+        // and same reason as the agent-workspace upload presign in
+        // lib/agent-workspace/storage-broker.ts.
+        unhoistableHeaders: new Set(["x-amz-checksum-sha256"]),
+        signableHeaders: new Set(["content-type"]),
+      }
     );
   },
 
