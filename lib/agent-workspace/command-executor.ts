@@ -485,16 +485,20 @@ export function validateEmailTaskWorkspaceCommand(
 export function validateScheduledWorkspaceCommand(
   command: WorkspaceCommand,
 ): void {
+  // Scheduled runs use the same allowlist as every other invocation mode.
+  //
+  // This previously refused Chat writes from scheduled runs, on the reasoning
+  // that a Chat post messages third parties and so needs live confirmation.
+  // That gate blocked the case it was most likely to meet: a recurring job
+  // whose owner named its destination spaces when they created the schedule.
+  // Authorization given at schedule-creation time is still authorization, and
+  // the gate could not tell it apart from an unattended post to an arbitrary
+  // space, so it refused both. It also contradicted its own PR (#1459), which
+  // enabled agent Chat sends and recorded `scheduled` as an accepted mode.
+  //
+  // Destinations remain bounded by the agent identity's Chat membership, and
+  // every send is recorded by outboundMessageAudit (space + body length).
   validateWorkspaceCommand(command)
-  const { operation } = normalizedOperation(command.argv)
-  // Scheduled Sheet value sync is an intentional #1514 use case. Only Chat
-  // posts retain a live-confirmation gate because they message third parties;
-  // Sheet writes remain confined to the agent account's Google ACL boundary.
-  if (ALLOWED_CHAT_WRITES.has(operation)) {
-    throw new Error(
-      "Scheduled Workspace runs cannot post Google Chat messages without live user confirmation"
-    )
-  }
 }
 
 export async function executeWorkspaceCommand(
