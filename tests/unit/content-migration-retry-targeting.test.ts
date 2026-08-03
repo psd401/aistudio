@@ -136,4 +136,25 @@ describe("repository migration retry targeting", () => {
     expect(migrationReasonDialog).toContain("minLength={10}");
     expect(migrationReasonDialog).toContain("maxLength={1000}");
   });
+
+  it("turns migrated rows without canonical versions into retryable exceptions", () => {
+    const functionStart = migrationRunner.indexOf(
+      "async function reconcileMigrationCandidate",
+    );
+    const functionEnd = migrationRunner.indexOf(
+      "async function finishPreviouslyPreparedRollback",
+      functionStart,
+    );
+    const reconciliation = migrationRunner.slice(functionStart, functionEnd);
+
+    expect(reconciliation).toContain(
+      'lastErrorCode: "MIGRATION_CANONICAL_VERSION_MISSING"',
+    );
+    expect(reconciliation).toContain('status: "unrecoverable"');
+    expect(reconciliation).toContain('return "unrecoverable"');
+    expect(reconciliation).not.toContain("canonical_version_id IS NOT NULL");
+    expect(reconciliation).not.toContain(
+      "repositoryMigrationItems.canonicalVersionId} IS NOT NULL",
+    );
+  });
 });
