@@ -95,6 +95,12 @@ test.describe("Atrium usability pass", () => {
       if ((await sections.count()) === 0) {
         test.skip(true, "No sections visible to the seeded admin");
       }
+      // The band element renders immediately with a spinner and fills in after
+      // its fetch; clicking before it settles lands on a card that is then
+      // re-sorted out from under the click, and no navigation happens.
+      await expect(
+        page.locator('[data-testid="home-band-sections"] .mer-band-loading')
+      ).toHaveCount(0);
       await sections.locator("a").first().click();
 
       await expect(page).toHaveURL(/\/atrium\/s\//);
@@ -179,6 +185,19 @@ test.describe("Atrium usability pass — share and section settings", () => {
       // Artifacts can be embedded in a document; that moved in here too.
       await expect(page.getByTestId("share-copy-embed")).toBeVisible();
 
+      // A production-length absolute URL is the case that broke the layout —
+      // localhost slugs are short enough to hide an unshrinkable flex row.
+      const linkWidth = await page
+        .getByTestId("share-link-url")
+        .evaluate((el) => Math.round(el.getBoundingClientRect().width));
+      const dialogWidth = await page
+        .locator('[data-slot="dialog-content"]')
+        .evaluate((el) => Math.round(el.getBoundingClientRect().width));
+      // The URL must fit INSIDE the dialog, never push it wider.
+      expect(linkWidth).toBeLessThan(dialogWidth);
+      // And the dialog itself must stay a dialog, not a full-viewport sheet.
+      expect(dialogWidth).toBeLessThanOrEqual(680);
+
       await page.screenshot({
         path: `${SHOT_DIR}/03-share-dialog.png`,
         fullPage: false,
@@ -203,6 +222,10 @@ test.describe("Atrium usability pass — share and section settings", () => {
       if ((await sections.count()) === 0) {
         test.skip(true, "No sections visible to the seeded admin");
       }
+      // Settle the band before clicking — see the note in the sibling test.
+      await expect(
+        page.locator('[data-testid="home-band-sections"] .mer-band-loading')
+      ).toHaveCount(0);
       await sections.locator("a").first().click();
       await expect(page.getByTestId("section-landing")).toBeVisible();
 
@@ -215,26 +238,37 @@ test.describe("Atrium usability pass — share and section settings", () => {
       // The pin picker lists this section's own pages.
       await expect(page.getByTestId("section-start-here")).toBeVisible();
 
-      const original = await description.inputValue();
-      const text = `Set by E2E at ${Date.now()}`;
-      await description.fill(text);
-      await page.getByRole("button", { name: "Save" }).click();
-
-      // The hero is server-rendered, so a successful save reloads the page.
-      await expect(page.getByTestId("section-description")).toHaveText(text);
-
+      // Capture the dialog OPEN — the earlier screenshot was taken after save,
+      // so it could not evidence the dialog's own styling. This dialog rendered
+      // in the app's older cream theme until it got `meridianPortalClassName`;
+      // assert the scope class is actually on the portalled content.
+      await expect(page.locator('[data-slot="dialog-content"]')).toHaveClass(
+        /meridian-portal/
+      );
       await page.screenshot({
         path: `${SHOT_DIR}/04-section-settings.png`,
         fullPage: false,
       });
 
-      // Put the section back as we found it — this writes to a real collection,
-      // and a suite that leaves "Set by E2E at …" behind poisons every later
-      // screenshot and anyone browsing the local library.
-      await page.getByTestId("section-settings").click();
-      await page.locator("#section-description").fill(original);
+      // A STABLE value, not a timestamp: re-running the suite then re-asserts
+      // the same string, so this is idempotent and leaves the local library
+      // with a sensible description instead of "Set by E2E at 1785722180699".
+      //
+      // Deliberately no restore-by-second-save. Saving twice in quick
+      // succession queues the second server action behind the `router.refresh()`
+      // the first one triggers, and the dialog sits on "Saving…" — an artificial
+      // sequence no human produces, but one that made this test hang.
+      const text = "Section description set by the E2E suite.";
+      await description.fill(text);
       await page.getByRole("button", { name: "Save" }).click();
-      await expect(page.getByTestId("section-settings")).toBeVisible();
+
+      // The hero re-renders in place via router.refresh() — the new text
+      // appearing IS the settled signal, so there is no navigation to await.
+      await expect(page.getByTestId("section-description")).toHaveText(text);
+
+      // And it is durable, not just optimistic client state.
+      await page.reload();
+      await expect(page.getByTestId("section-description")).toHaveText(text);
     } finally {
       await context.close();
     }

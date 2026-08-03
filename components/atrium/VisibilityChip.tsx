@@ -511,7 +511,11 @@ function ShareDialogBody({
   onSave: () => void;
 }): React.JSX.Element {
   return (
-    <DialogContent className={meridianPortalClassName}>
+    // `wide` (680px), not the 520px default: this dialog gained two sections
+    // (the link row and the destination rows). At 520px a destination's
+    // one-line description wrapped mid-phrase and collided with its
+    // Publish/Unpublish buttons.
+    <DialogContent className={meridianPortalClassName} data-mer-size="wide">
       <DialogHeader>
         <DialogTitle>Share</DialogTitle>
         <DialogDescription>

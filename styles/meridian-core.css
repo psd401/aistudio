@@ -547,6 +547,10 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  /* A flex container defaults to `min-width: auto`, which refuses to shrink
+     below its content — so a long absolute URL would push the row (and the
+     dialog) wider instead of letting the code element ellipsise. */
+  min-width: 0;
 }
 .mer-share-link-url {
   flex: 1 1 auto;
@@ -622,7 +626,6 @@
 }
 .mer-share-dest-text {
   flex: 1 1 auto;
-  min-width: 0;
 }
 .mer-share-dest-label {
   display: flex;
@@ -642,6 +645,13 @@
   display: flex;
   gap: 6px;
   flex: 0 0 auto;
+  /* Two buttons (Republish + Unpublish) must never overlap the description on a
+     narrow dialog; they stack instead. */
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.mer-share-dest-text {
+  min-width: 0;
 }
 .mer-share-dest-busy {
   display: flex;
