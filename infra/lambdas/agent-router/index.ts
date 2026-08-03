@@ -471,6 +471,11 @@ interface AgentUser {
   //   excluded  — a student (numeric-prefix) username; never provisioned
   agentAccountStatus?: 'none' | 'requested' | 'active' | 'excluded';
   agentAccountCheckedAt?: string;
+  // Resource name of this user's 1:1 DM space with the bot ("spaces/..."),
+  // captured from live DM events. Scheduled runs post their results here, and
+  // the schedules service refuses to create a schedule without it. Absent until
+  // the user has DM'd the agent at least once.
+  dmSpaceName?: string;
 }
 
 /**
@@ -1425,12 +1430,39 @@ async function persistAgentAccountStatus(
 // User management
 // ---------------------------------------------------------------------------
 
+/**
+ * The DM space to record on a user's record for this event, or undefined.
+ *
+ * Only a 1:1 DM identifies an owner's personal delivery space. Scheduled runs
+ * post their results to whatever is stored here, so recording a ROOM would
+ * publish that owner's scheduled output into a space other people can read.
+ * Fail closed on anything that is not explicitly a DM.
+ */
+function dmSpaceForUserRecord(
+  space: GoogleChatEvent['space'],
+  spaceName: string
+): string | undefined {
+  if (space?.type !== 'DM') return undefined;
+  if (typeof spaceName !== 'string' || !/^spaces\/[\w-]{1,256}$/.test(spaceName)) {
+    return undefined;
+  }
+  return spaceName;
+}
+
 async function getOrCreateUser(
   senderName: string,
   senderEmail: string,
   senderDisplayName: string,
+  dmSpaceName: string | undefined,
   log: ReturnType<typeof createLogger>
 ): Promise<AgentUser> {
+  // The DM space resource name is only knowable from a live DM event, and it is
+  // a hard precondition for scheduled delivery: agent-cron posts results to
+  // schedule.dmSpaceName and the schedules service refuses to create a schedule
+  // for an owner whose user record has none. Nothing else writes it here, so
+  // without this a user could DM the agent for months and still be unable to
+  // create a schedule. Persist it whenever a DM tells us what it is.
+  const now = new Date().toISOString();
   // Optimized: single conditional UpdateCommand for existing users instead of
   // Get + Update (saves ~10–30ms per message). Falls back to PutCommand for new users.
   try {
@@ -1438,9 +1470,13 @@ async function getOrCreateUser(
       new UpdateCommand({
         TableName: USERS_TABLE,
         Key: { googleIdentity: senderName },
-        UpdateExpression: 'SET lastActiveAt = :now',
+        UpdateExpression: dmSpaceName
+          ? 'SET lastActiveAt = :now, dmSpaceName = :dm'
+          : 'SET lastActiveAt = :now',
         ConditionExpression: 'attribute_exists(googleIdentity)',
-        ExpressionAttributeValues: { ':now': new Date().toISOString() },
+        ExpressionAttributeValues: dmSpaceName
+          ? { ':now': now, ':dm': dmSpaceName }
+          : { ':now': now },
         ReturnValues: 'ALL_NEW',
       })
     );
@@ -1467,10 +1503,11 @@ async function getOrCreateUser(
     displayName: senderDisplayName,
     department: 'unknown', // Updated by admin later or via directory sync
     workspacePrefix,
-    createdAt: new Date().toISOString(),
-    lastActiveAt: new Date().toISOString(),
+    createdAt: now,
+    lastActiveAt: now,
     sessionCount: 0,
     agentAccountStatus: 'none', // #1233 — provisioned automatically on first messages
+    ...(dmSpaceName ? { dmSpaceName } : {}),
   };
 
   // Conditional put prevents race condition: if two messages arrive simultaneously
@@ -1504,9 +1541,13 @@ async function getOrCreateUser(
       new UpdateCommand({
         TableName: USERS_TABLE,
         Key: { googleIdentity: senderName },
-        UpdateExpression: 'SET lastActiveAt = :now',
+        UpdateExpression: dmSpaceName
+          ? 'SET lastActiveAt = :now, dmSpaceName = :dm'
+          : 'SET lastActiveAt = :now',
         ConditionExpression: 'attribute_exists(googleIdentity)',
-        ExpressionAttributeValues: { ':now': new Date().toISOString() },
+        ExpressionAttributeValues: dmSpaceName
+          ? { ':now': now, ':dm': dmSpaceName }
+          : { ':now': now },
         ReturnValues: 'ALL_NEW',
       })
     );
@@ -4510,6 +4551,7 @@ async function prepareHumanTurn(
     human.senderName,
     human.senderEmail,
     human.senderDisplayName,
+    dmSpaceForUserRecord(human.chatEvent.space, human.spaceName),
     log
   );
   void maybeProvisionAgentAccount(user, human.senderEmail, log);
@@ -5350,6 +5392,7 @@ async function processRecord(
 }
 
 export const agentRouterTestHelpers = {
+  dmSpaceForUserRecord,
   normalizeChatEvent,
   cardClickMessageText,
   parseAgentCoreResult,
