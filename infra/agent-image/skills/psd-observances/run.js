@@ -25,6 +25,7 @@ const PART_II_NOTICE =
   'Part II is not intended to serve as the official or legal listing of holidays for each state.';
 const COVERAGE_NOTICE =
   'Coverage is January 2026 through June 2027, plus the six-year holiday summary through 2031.';
+const NSPRA_REPOSITORY_ID = 36;
 const MONTH_NAMES = Object.freeze([
   'January',
   'February',
@@ -623,40 +624,20 @@ function createRepositoryResolver(callTool) {
   return async function resolveRepository() {
     if (!cachedPromise) {
       cachedPromise = (async () => {
-        const payload = await callTool('repositories_list', {
-          query: 'NSPRA',
-          limit: 50,
+        const payload = await callTool('repositories_describe', {
+          repositoryId: NSPRA_REPOSITORY_ID,
         });
-        if (!payload || !Array.isArray(payload.repositories)) {
+        const repository = repositoryEntry(payload && payload.repository);
+        if (!repository || repository.id !== NSPRA_REPOSITORY_ID) {
           fail(
-            'AI Studio returned a malformed repository list.',
-            'upstream_error',
-            12,
-          );
-        }
-        const matches = payload.repositories
-          .map(repositoryEntry)
-          .filter(Boolean)
-          .filter((repository) => /nspra/i.test(repository.name));
-        if (matches.length === 0) {
-          fail(
-            'The NSPRA repository is not available to your account.',
+            `The definitive NSPRA repository (id ${NSPRA_REPOSITORY_ID}) is not available.`,
             'repository_unavailable',
             1,
           );
         }
-        matches.sort((left, right) => {
-          const leftPreferred = /2026/i.test(left.name) ? 0 : 1;
-          const rightPreferred = /2026/i.test(right.name) ? 0 : 1;
-          return leftPreferred - rightPreferred || left.id - right.id;
-        });
-        const selected = matches[0];
         return {
-          ...selected,
-          selectionNotice:
-            matches.length > 1
-              ? `Multiple NSPRA repositories matched; selected "${selected.name}" (id ${selected.id}).`
-              : undefined,
+          ...repository,
+          selectionNotice: undefined,
         };
       })();
     }
@@ -957,6 +938,7 @@ if (require.main === module) {
 module.exports = {
   ACCURACY_NOTICE,
   COVERAGE_NOTICE,
+  NSPRA_REPOSITORY_ID,
   PART_II_NOTICE,
   USAGE,
   buildCommand,

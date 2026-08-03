@@ -167,7 +167,7 @@ content processing telemetry. Stop on any pending, failed, or partially
 processed item; do not treat partial retrieval as a successful refresh.
 
 Apply the repository-name cutover from step 5, then run a skill lookup. Each
-invocation calls `repositories_list` and reports the selected repository;
+invocation calls `repositories_describe` for definitive repository 36 and reports it;
 record that selection before scoring any lookup. If the replacement is not
 selected, stop and correct the names rather than accepting results from the
 prior edition.

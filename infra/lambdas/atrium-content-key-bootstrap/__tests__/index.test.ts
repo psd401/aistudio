@@ -198,8 +198,13 @@ const defineKEYSCOPESDriftGuardTetheredToLibApiSuite3 = () => {
 describe('KEY_SCOPES drift guard (tethered to lib/api-keys/scopes.ts)', defineKEYSCOPESDriftGuardTetheredToLibApiSuite3);
 
 const defineMCPKEYSCOPESDriftGuardIssue1100TetheredSuite4 = () => {
-  it('is exactly [platform:read]', () => {
-    expect([...MCP_KEY_SCOPES]).toEqual(['platform:read']);
+  it('is exactly the capability and public-repository read scope set', () => {
+    expect([...MCP_KEY_SCOPES]).toEqual([
+      'platform:read',
+      'repositories:list',
+      'repositories:read',
+      'repositories:search',
+    ]);
   });
 
   it('every minted scope is grantable to the staff role (the migration-108 role)', () => {
@@ -453,17 +458,17 @@ describe('ensureContentKey idempotency', defineEnsureContentKeyIdempotencySuite6
 
 // ---------------------------------------------------------------------------
 // MCP profile: the same ensureContentKey idempotency contract, driven with the
-// platform:read scope set + the psd-aistudio service user. Proves the generalized
+// public knowledge read scope set + the psd-aistudio service user. Proves the generalized
 // core is scope-set-agnostic (the atrium content scopes are NOT baked in).
 // ---------------------------------------------------------------------------
-const defineEnsureContentKeyMcpProfilePlatformReadSuite7 = () => {
+const defineEnsureContentKeyMcpProfileReadOnlyKnowledgeSuite7 = () => {
   const MCP_CFG: EnsureConfig = {
     serviceUserCognitoSub: 'service-account:psd-aistudio-agent',
     keyName: MCP_KEY_NAME,
     requiredScopes: [...MCP_KEY_SCOPES],
   };
 
-  it('empty secret -> MINT (platform:read key stored, valid, correctly scoped)', async () => {
+  it('empty secret -> MINT (read-only knowledge key stored and correctly scoped)', async () => {
     const ops = makeOps({ secret: null });
     const outcome = await ensureContentKey(ops, MCP_CFG, noopLog);
 
@@ -476,13 +481,13 @@ const defineEnsureContentKeyMcpProfilePlatformReadSuite7 = () => {
     const row = ops.state.keys.find((k) => k.keyPrefix === keyPrefixOf(stored))!;
     expect(row).toBeDefined();
     expect(row.userId).toBe(SERVICE_USER_ID);
-    expect(row.scopes).toEqual(['platform:read']);
+    expect(row.scopes).toEqual([...MCP_KEY_SCOPES]);
     // The MCP key must never carry a content scope.
     expect(row.scopes.some((s) => s.startsWith('content:'))).toBe(false);
     expect(await verifyKey(stored, row.keyHash)).toBe(true);
   });
 
-  it('valid existing platform:read key -> NO-OP (no mint, no secret write)', async () => {
+  it('valid existing read-only knowledge key -> NO-OP', async () => {
     const raw = generateRawKey();
     const hash = await hashKey(raw);
     const ops = makeOps({
@@ -516,7 +521,7 @@ const defineEnsureContentKeyMcpProfilePlatformReadSuite7 = () => {
     expect(isValidKeyFormat(ops.state.secret!)).toBe(true);
   });
 
-  it('scope drift (a content-scoped row on the MCP secret) -> RE-MINT to exactly platform:read', async () => {
+  it('scope drift -> RE-MINT to the exact read-only knowledge scope set', async () => {
     const raw = generateRawKey();
     const hash = await hashKey(raw);
     const ops = makeOps({
@@ -538,7 +543,7 @@ const defineEnsureContentKeyMcpProfilePlatformReadSuite7 = () => {
     expect(outcome).toBe('minted');
     const stored = ops.state.secret!;
     const row = ops.state.keys.find((k) => k.keyPrefix === keyPrefixOf(stored) && k.isActive)!;
-    expect(row.scopes).toEqual(['platform:read']);
+    expect(row.scopes).toEqual([...MCP_KEY_SCOPES]);
   });
 
   it('minted key uses the MCP key name (distinct from the atrium content key name)', async () => {
@@ -550,7 +555,7 @@ const defineEnsureContentKeyMcpProfilePlatformReadSuite7 = () => {
   });
 };
 
-describe('ensureContentKey — mcp profile (platform:read)', defineEnsureContentKeyMcpProfilePlatformReadSuite7);
+describe('ensureContentKey — mcp profile (read-only knowledge)', defineEnsureContentKeyMcpProfileReadOnlyKnowledgeSuite7);
 
 // ---------------------------------------------------------------------------
 // buildRdsOps — the REAL field parsing, against realistic RDS Data API shapes
@@ -781,7 +786,7 @@ const defineHandlerCloudFormationCustomResourceEntryPointSuite9 = () => {
     expect(isValidKeyFormat(written[0])).toBe(true);
   });
 
-  it('KEY_PROFILE=mcp mints the platform:read key with the MCP key name (env -> profile wiring)', async () => {
+  it('KEY_PROFILE=mcp mints the read-only knowledge key with the MCP key name', async () => {
     process.env.KEY_PROFILE = 'mcp';
     let insertedName: string | undefined;
     let insertedScopes: string | undefined;
@@ -812,7 +817,7 @@ const defineHandlerCloudFormationCustomResourceEntryPointSuite9 = () => {
     const res = await handler({ ...BASE_EVENT, RequestType: 'Create' } as any);
     expect(res.Data?.Outcome).toBe('minted');
     expect(insertedName).toBe('psd-aistudio agent MCP (auto-provisioned)');
-    expect(JSON.parse(insertedScopes ?? '[]')).toEqual(['platform:read']);
+    expect(JSON.parse(insertedScopes ?? '[]')).toEqual([...MCP_KEY_SCOPES]);
   });
 
   it('an unknown KEY_PROFILE THROWS (CFN FAILED — loud deploy-author error)', async () => {

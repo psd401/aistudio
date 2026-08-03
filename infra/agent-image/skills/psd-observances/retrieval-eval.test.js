@@ -283,18 +283,18 @@ describe('decision rule', () => {
   });
 });
 
-test('repository selection follows the runtime NSPRA rule', () => {
+test('repository selection accepts only definitive NSPRA repository 36', () => {
   expect(
     selectRepository({
-      repositories: [
-        { id: 3, name: 'NSPRA archive' },
-        {
-          id: 9,
-          name: 'NSPRA 2026 Calendar',
-          visibility: 'private',
-          itemCount: 1,
-        },
-      ],
+      repository: {
+        id: 36,
+        name: 'NSPRA Observances & School Calendar 2026-27',
+        visibility: 'public',
+        itemCount: 1,
+      },
     }),
-  ).toMatchObject({ id: 9, name: 'NSPRA 2026 Calendar' });
+  ).toMatchObject({ id: 36, name: 'NSPRA Observances & School Calendar 2026-27' });
+  expect(() =>
+    selectRepository({ repository: { id: 99, name: 'NSPRA copy' } }),
+  ).toThrow(/repository 36/);
 });

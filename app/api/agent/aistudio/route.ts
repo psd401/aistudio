@@ -22,6 +22,11 @@ const ALLOWED_METHODS = new Set(["tools/list", "tools/call"]);
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
 const PERSONAL_KEY_NAME = "aistudio_personal_key";
 
+type AistudioCredential = {
+  key: string;
+  source: "oauth" | "personal" | "shared";
+};
+
 type AistudioBrokerBody =
   | { operation: "disconnect" }
   | { method: "tools/list" | "tools/call"; params: Record<string, unknown> };
@@ -155,7 +160,7 @@ async function resolveOAuthToken(ownerEmail: string): Promise<string | null> {
 
 async function resolveCredential(
   ownerEmail: string,
-): Promise<{ key: string; source: "oauth" | "personal" | "shared" } | null> {
+): Promise<AistudioCredential | null> {
   const oauth = await resolveOAuthToken(ownerEmail);
   if (oauth) return { key: oauth, source: "oauth" };
   const personal = await getSecretString(
@@ -166,6 +171,34 @@ async function resolveCredential(
     `psd-agent/${environment()}/aistudio-mcp-api-key`,
   );
   return shared ? { key: shared, source: "shared" } : null;
+}
+
+async function resolveUnauthorizedFallbacks(
+  ownerEmail: string,
+  initialCredential: AistudioCredential,
+): Promise<AistudioCredential[]> {
+  const candidates: AistudioCredential[] = [];
+  if (initialCredential.source === "oauth") {
+    const personal = await getSecretString(
+      `psd-agent-creds/${environment()}/user/${ownerEmail}/${PERSONAL_KEY_NAME}`,
+    );
+    if (personal && personal !== initialCredential.key) {
+      candidates.push({ key: personal, source: "personal" });
+    }
+  }
+  if (initialCredential.source !== "shared") {
+    const shared = await getSecretString(
+      `psd-agent/${environment()}/aistudio-mcp-api-key`,
+    );
+    if (
+      shared &&
+      shared !== initialCredential.key &&
+      !candidates.some((candidate) => candidate.key === shared)
+    ) {
+      candidates.push({ key: shared, source: "shared" });
+    }
+  }
+  return candidates;
 }
 
 async function disconnectOwner(ownerEmail: string): Promise<NextResponse> {
@@ -215,6 +248,94 @@ function aistudioToolTimeout(body: {
   return toolName === "execute_assistant" ? 910_000 : 180_000;
 }
 
+type AistudioMcpBody = Exclude<
+  AistudioBrokerBody,
+  { operation: "disconnect" }
+>;
+
+async function forwardAistudioOperation(input: {
+  body: AistudioMcpBody;
+  credential: AistudioCredential;
+  ownerEmail: string;
+  requestId: string;
+}): Promise<NextResponse> {
+  const { body, credential, ownerEmail, requestId } = input;
+  const rpcBody = {
+    jsonrpc: "2.0",
+    id: crypto.randomUUID(),
+    method: body.method,
+    params: body.params,
+  };
+  try {
+    let activeCredential = credential;
+    let unauthorizedFallbacks: AistudioCredential[] | undefined;
+    while (true) {
+      const upstream = await fetch(mcpUrl(), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${activeCredential.key}`,
+          "mcp-protocol-version": "2024-11-05",
+        },
+        body: JSON.stringify(rpcBody),
+        redirect: "error",
+        signal: AbortSignal.timeout(aistudioToolTimeout(body)),
+      });
+      const text = await upstream.text();
+      let payload: unknown = null;
+      try {
+        payload = text ? JSON.parse(text) : null;
+      } catch {
+        payload = null;
+      }
+      log.info(
+        "Owner-bound AI Studio operation completed",
+        sanitizeForLogging({
+          requestId,
+          ownerEmail,
+          method: body.method,
+          tool:
+            body.method === "tools/call"
+              ? (body.params as { name?: unknown }).name
+              : undefined,
+          status: upstream.status,
+          keySource: activeCredential.source,
+        }),
+      );
+      if (upstream.status === 401 && activeCredential.source !== "shared") {
+        unauthorizedFallbacks ??= await resolveUnauthorizedFallbacks(
+          ownerEmail,
+          credential,
+        );
+        const fallback = unauthorizedFallbacks.shift();
+        if (fallback) {
+          activeCredential = fallback;
+          continue;
+        }
+      }
+      return NextResponse.json({
+        httpStatus: upstream.status,
+        payload,
+        rawText: payload === null ? text.slice(0, 512) : undefined,
+        keySource: activeCredential.source,
+      });
+    }
+  } catch (error) {
+    log.warn(
+      "Owner-bound AI Studio operation failed",
+      sanitizeForLogging({
+        requestId,
+        ownerEmail,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    return NextResponse.json(
+      { error: "AI Studio operation failed" },
+      { status: 502 },
+    );
+  }
+}
+
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId();
   const context = await verifyAgentInvocationContext(request, {
@@ -257,63 +378,10 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const rpcBody = {
-    jsonrpc: "2.0",
-    id: crypto.randomUUID(),
-    method: body.method,
-    params: body.params,
-  };
-  try {
-    const upstream = await fetch(mcpUrl(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${credential.key}`,
-        "mcp-protocol-version": "2024-11-05",
-      },
-      body: JSON.stringify(rpcBody),
-      redirect: "error",
-      signal: AbortSignal.timeout(aistudioToolTimeout(body)),
-    });
-    const text = await upstream.text();
-    let payload: unknown = null;
-    try {
-      payload = text ? JSON.parse(text) : null;
-    } catch {
-      payload = null;
-    }
-    log.info(
-      "Owner-bound AI Studio operation completed",
-      sanitizeForLogging({
-        requestId,
-        ownerEmail: context.ownerEmail,
-        method: body.method,
-        tool:
-          body.method === "tools/call"
-            ? (body.params as { name?: unknown }).name
-            : undefined,
-        status: upstream.status,
-        keySource: credential.source,
-      }),
-    );
-    return NextResponse.json({
-      httpStatus: upstream.status,
-      payload,
-      rawText: payload === null ? text.slice(0, 512) : undefined,
-      keySource: credential.source,
-    });
-  } catch (error) {
-    log.warn(
-      "Owner-bound AI Studio operation failed",
-      sanitizeForLogging({
-        requestId,
-        ownerEmail: context.ownerEmail,
-        error: error instanceof Error ? error.message : String(error),
-      }),
-    );
-    return NextResponse.json(
-      { error: "AI Studio operation failed" },
-      { status: 502 },
-    );
-  }
+  return forwardAistudioOperation({
+    body,
+    credential,
+    ownerEmail: context.ownerEmail,
+    requestId,
+  });
 }

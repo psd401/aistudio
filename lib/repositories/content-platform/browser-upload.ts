@@ -1,7 +1,5 @@
 "use client";
 
-import { REPOSITORY_UPLOAD_TEMPORARY_TAGGING } from "./upload-state";
-
 export interface BrowserRepositoryUpload {
   sessionId: string;
   uploadMethod: "single" | "multipart";
@@ -57,12 +55,19 @@ export async function uploadFileToRepositoryStorage(
       headers: {
         "Content-Type": contentType,
         "If-None-Match": "*",
-        "x-amz-tagging": REPOSITORY_UPLOAD_TEMPORARY_TAGGING,
+        // Do not add x-amz-tagging or x-amz-meta-* here. The AWS SDK moves
+        // those values into the presigned URL query. Re-sending them as
+        // headers makes S3 reject the request as HeadersNotSigned.
       },
       body: file,
     }, "Storage upload");
     if (!response.ok) {
-      throw new Error("Failed to upload file to storage");
+      const responseBody = await response.text().catch(() => "");
+      const storageErrorCode = responseBody.match(/<Code>([^<]+)<\/Code>/)?.[1];
+      const detail = storageErrorCode
+        ? ` (${response.status} ${storageErrorCode})`
+        : ` (${response.status})`;
+      throw new Error(`Failed to upload file to storage${detail}`);
     }
     return undefined;
   }

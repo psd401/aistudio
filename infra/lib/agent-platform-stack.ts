@@ -851,10 +851,10 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(resources.atriumContentApiKeySecret).add('Environment', environment);
     cdk.Tags.of(resources.atriumContentApiKeySecret).add('ManagedBy', 'cdk');
 
-    // AI Studio MCP API key (#1100) for the psd-aistudio skill — a scoped `sk-`
-    // key holding ONLY `platform:read`. The skill POSTs `describe_capabilities`
-    // to `/api/mcp` (AISTUDIO_MCP_URL) with this key to read the live capability
-    // catalog. Created empty, then AUTO-POPULATED on every deploy by the
+    // AI Studio MCP API key (#1100/#1498-#1500) for psd-aistudio — a scoped
+    // read-only `sk-` key for the capability catalog and public knowledge
+    // repositories. Repository ACLs still block private resources. Created
+    // empty, then AUTO-POPULATED on every deploy by the
     // AistudioMcpKeyBootstrapLambda custom resource (section 4h below, KEY_PROFILE
     // =mcp), which mints the key for the migration-108 service user
     // (`service-account:psd-aistudio-agent`) — DO NOT populate it manually.
@@ -866,7 +866,7 @@ export class AgentPlatformStack extends cdk.Stack {
     // The value is a RAW sk- string, NOT JSON (the skill reads SecretString verbatim).
     resources.aistudioMcpApiKeySecret = new secretsmanager.Secret(this, 'AistudioMcpApiKeySecret', {
       secretName: `psd-agent/${environment}/aistudio-mcp-api-key`,
-      description: `Scoped sk- platform:read API key for the psd-aistudio skill (AI Studio /api/mcp capability catalog). AUTO-POPULATED each deploy by AistudioMcpKeyBootstrapLambda — do not set manually. Issue #1100.`,
+      description: `Scoped read-only sk- key for the AI Studio capability catalog and public knowledge repositories. AUTO-POPULATED each deploy by AistudioMcpKeyBootstrapLambda — do not set manually.`,
     });
     cdk.Tags.of(resources.aistudioMcpApiKeySecret).add('Environment', environment);
     cdk.Tags.of(resources.aistudioMcpApiKeySecret).add('ManagedBy', 'cdk');
@@ -1301,7 +1301,7 @@ export class AgentPlatformStack extends cdk.Stack {
     // =====================================================================
     // Second instance of the SAME bootstrap Lambda body (section 4g), run under
     // KEY_PROFILE=mcp: it idempotently ensures `aistudioMcpApiKeySecret` holds a
-    // valid, active `platform:read` key owned by the migration-108 service user
+    // valid, active read-only public-knowledge key owned by migration 108's service user
     // (`service-account:psd-aistudio-agent`). Fixes the psd-aistudio skill exiting
     // 11 ("no credential configured"): AISTUDIO_MCP_URL was wired but the key
     // secret it reads (AISTUDIO_MCP_API_KEY_SECRET_ID) never existed.
@@ -1417,7 +1417,7 @@ export class AgentPlatformStack extends cdk.Stack {
         DB_NAME: props.databaseName ?? 'aistudio',
         CONTENT_KEY_SECRET_ID: resources.aistudioMcpApiKeySecret.secretArn,
         SERVICE_USER_COGNITO_SUB: AISTUDIO_MCP_SERVICE_USER_SUB,
-        // Selects the platform:read profile (key name + scopes) — see index.ts
+        // Selects the read-only knowledge profile (key name + scopes) — see index.ts
         // MCP_KEY_SCOPES, unit-tested against ROLE_SCOPES.staff.
         KEY_PROFILE: 'mcp',
       },

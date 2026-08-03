@@ -1,0 +1,4 @@
+interface:
+  display_name: "PSD Strategic Plan"
+  short_description: "Answer questions about PSD strategic priorities"
+  default_prompt: "Use $psd-strategic-plan to explain a Peninsula School District strategic-plan goal."

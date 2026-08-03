@@ -139,6 +139,12 @@ function defineUnifiedRepositoryUploadContractAuthenticatedSuite1Part2() {test('
     })
     await page.route('**/__e2e-storage/unified-content', async (route) => {
       expect(route.request().method()).toBe('PUT')
+      const storageHeaders = route.request().headers()
+      expect(storageHeaders['content-type']).toBe('application/pdf')
+      expect(storageHeaders['if-none-match']).toBe('*')
+      expect(storageHeaders['x-amz-tagging']).toBeUndefined()
+      expect(storageHeaders['x-amz-meta-repositoryid']).toBeUndefined()
+      expect(storageHeaders['x-amz-meta-uploadsessionid']).toBeUndefined()
       await route.fulfill({ status: 200, headers: { ETag: '"single-etag"' } })
     })
     await page.route(

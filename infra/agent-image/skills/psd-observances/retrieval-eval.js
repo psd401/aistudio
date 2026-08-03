@@ -12,7 +12,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { main: runSkill } = require('./run');
+const { main: runSkill, NSPRA_REPOSITORY_ID } = require('./run');
 const { parseToolEnvelope } = require('./common');
 
 const DEFAULT_FIXTURE = path.join(
@@ -324,23 +324,15 @@ function createLiveMcpClient(baseUrl, apiKey) {
   };
 }
 
-// Keep this rule aligned with run.js:createRepositoryResolver so the
-// preflight and every skill invocation select the same live repository.
 function selectRepository(payload) {
-  const matches = (payload?.repositories ?? [])
-    .filter(
-      (repository) =>
-        isPositiveInteger(repository?.id) &&
-        typeof repository.name === 'string' &&
-        /nspra/i.test(repository.name),
-    )
-    .sort((left, right) => {
-      const leftPreferred = /2026/i.test(left.name) ? 0 : 1;
-      const rightPreferred = /2026/i.test(right.name) ? 0 : 1;
-      return leftPreferred - rightPreferred || left.id - right.id;
-    });
-  if (matches.length === 0) fail('No accessible NSPRA repository was found');
-  const selected = matches[0];
+  const selected = payload?.repository;
+  if (
+    !isPositiveInteger(selected?.id) ||
+    selected.id !== NSPRA_REPOSITORY_ID ||
+    typeof selected.name !== 'string'
+  ) {
+    fail(`Definitive NSPRA repository ${NSPRA_REPOSITORY_ID} was not accessible`);
+  }
   return {
     id: selected.id,
     name: selected.name,
@@ -459,7 +451,9 @@ async function runEvaluation(options, io = process.stderr) {
   const client = createLiveMcpClient(options.baseUrl, apiKey);
   const startedAt = new Date();
   const repository = selectRepository(
-    await client.callTool('repositories_list', { query: 'NSPRA', limit: 50 }),
+    await client.callTool('repositories_describe', {
+      repositoryId: NSPRA_REPOSITORY_ID,
+    }),
   );
   const cases = [];
   for (const question of fixture.questions) {

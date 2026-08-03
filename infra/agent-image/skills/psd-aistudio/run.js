@@ -270,6 +270,13 @@ function scopeHint(keySource, scope) {
       `psd-credentials put --name aistudio_personal_key --value sk-...`
     );
   }
+  if (scope.startsWith("repositories:")) {
+    return (
+      `The shared read-only credential supports public repositories. If this ` +
+      `is a public repository, ${scope} is a platform configuration problem. ` +
+      `For a private repository, connect owner-bound AI Studio OAuth.`
+    );
+  }
   return (
     `You are on the shared, read-only platform:read key, which lacks ${scope}. ` +
     `Store your own AI Studio API key to use this: ` +

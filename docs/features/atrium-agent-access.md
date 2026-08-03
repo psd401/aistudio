@@ -78,7 +78,7 @@ The deployed `psd-aistudio` skill
 after per-user AI Studio OAuth consent, lists, describes, searches, reads exact
 sources from, and polls changes in the repositories that user can access. The
 credential priority is delegated OAuth, the legacy per-user personal API key,
-then the shared `platform:read` discovery key. The shared key remains
+then the shared read-only public-knowledge key. The shared key remains
 **discovery-only** and is zero-touch provisioned exactly like the content key
 (see below); it has its own secret and service user. Repository commands never
 borrow the shared identity's content access and instead prompt the user to run
@@ -122,20 +122,21 @@ Migration 104 and the `AtriumContentKeyProvisioner` may remain for legacy
 service-principal clients, but that shared identity is not an authorization
 conduit for owner-bound workspace operations.
 
-#### The psd-aistudio MCP key (`platform:read`, Issue #1100)
+#### The psd-aistudio MCP key (read-only public knowledge)
 
-The `psd-aistudio` discovery skill's `platform:read` key is provisioned by the
+The `psd-aistudio` skill's read-only key is provisioned by the
 **same bootstrap Lambda body under a second profile** (`KEY_PROFILE=mcp`) — it is
 **not** a reuse of the content key:
 
 1. **Migration `108-aistudio-mcp-service-user.sql`** seeds a *separate* service
    user (`cognito_sub = service-account:psd-aistudio-agent`, email
    `aistudio-mcp-agent-service@psd401.net`, display name **"PSD Agent
-   (aistudio MCP)"**) with the **staff** role (staff grants `platform:read`).
+   (aistudio MCP)"**) with the **staff** role.
 2. **The `AistudioMcpKeyProvisioner` custom resource** — a second instance of the
    bootstrap Lambda (`psd-agent-aistudio-mcp-key-bootstrap-<env>`, `KEY_PROFILE=mcp`)
    — idempotently ensures `psd-agent/{env}/aistudio-mcp-api-key` holds a valid,
-   active `sk-` key scoped to **exactly `platform:read`** (no content scopes)
+   active `sk-` key scoped to `platform:read`, `repositories:list`,
+   `repositories:read`, and `repositories:search` (no content/write scopes)
    owned by that service user. Same idempotency / rotation / skip-on-missing-
    migration / per-deploy-Nonce self-heal contract as the content key.
 3. **Runtime env**: `AISTUDIO_MCP_API_KEY_SECRET_ID` points the skill at that
@@ -203,7 +204,7 @@ Boot-log check: `Local: http://localhost:3000` = healthy;
 |---|---|
 | 401 from `/api/mcp` using `AGENT_INTERNAL_API_KEY` | Wrong credential class — mint an `sk-` key (see gotcha above) |
 | `psd-atrium` exits 11 (unauthorized / not configured) | The signed invocation proof is missing/invalid, or its owner no longer resolves to an active Atrium requester. Check the agent broker proof configuration and the owner's user/capability records. |
-| `psd-aistudio` exits 11 (no credential configured) | The `platform:read` MCP key isn't in the secret. It is auto-provisioned by the `AistudioMcpKeyProvisioner` custom resource on `cdk deploy` — check its CloudWatch logs (`/aws/lambda/psd-agent-aistudio-mcp-key-bootstrap-<env>`); confirm migration 108 applied. A re-deploy re-mints. (`AISTUDIO_MCP_API_KEY` may be set directly for local/dev.) |
+| `psd-aistudio` exits 11 (no credential configured) | The read-only MCP key isn't in the secret. It is auto-provisioned by the `AistudioMcpKeyProvisioner` custom resource on `cdk deploy` — check its CloudWatch logs (`/aws/lambda/psd-agent-aistudio-mcp-key-bootstrap-<env>`); confirm migration 108 applied. A re-deploy re-mints. (`AISTUDIO_MCP_API_KEY` may be set directly for local/dev.) |
 | A `psd-aistudio repositories-*` command reports insufficient scope | Run `psd-aistudio connect --user <email>` and complete the one-time AI Studio consent. The shared discovery key intentionally has no repository scopes. |
 | `psd-atrium publish` returns `approval_required` | Public destination without `content:publish_public` — expected; relay the message so the user knows it's queued |
 | 403 `INSUFFICIENT_SCOPE` on a content tool | Key lacks the scope in the table above |
