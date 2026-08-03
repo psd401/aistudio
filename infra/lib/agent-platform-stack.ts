@@ -925,6 +925,24 @@ export class AgentPlatformStack extends cdk.Stack {
     // create for Router DLQ alerts further down. But we need it early here,
     // so we create it right now if alertEmail is configured; the DLQ block
     // below will reuse it.
+    //
+    // Without alertEmail there is no topic, and every `if (agentAlarmTopic)`
+    // guard below silently skips its addAlarmAction — the stack deploys with
+    // alarms that evaluate correctly and notify nobody, with nothing in the
+    // output to say so. Make that state loud instead of silent.
+    //
+    // Note this warns about a *missing* address only. An SNS email
+    // subscription also has to be confirmed by the recipient: AWS deletes
+    // unconfirmed email subscriptions after 3 days, while CloudFormation keeps
+    // the resource CREATE_COMPLETE forever, so no later deploy restores it.
+    // That failure is invisible to synth — verify delivery out-of-band with
+    // `aws sns get-topic-attributes --topic-arn <arn>` and check that
+    // SubscriptionsConfirmed is non-zero.
+    if (!props.alertEmail) {
+      cdk.Annotations.of(this).addWarning(
+        `No alertEmail context set for ${environment}: the agent alarm topic will not be created and every agent-platform alarm (cron errors, throttles, DLQ, schedule-reference rejections) will fire to nobody. Deploy with --context alertEmail=<address>.`,
+      );
+    }
     if (props.alertEmail) {
       resources.agentAlarmTopic = new sns.Topic(this, 'AgentAlarmTopic', {
         topicName: `psd-agent-alarms-${environment}`,

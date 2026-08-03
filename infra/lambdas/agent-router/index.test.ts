@@ -2025,3 +2025,37 @@ describe("background promotion bounded idempotent retry", () => {
     expect(released).toEqual([])
   })
 })
+
+describe("dmSpaceForUserRecord", () => {
+  const { dmSpaceForUserRecord } = agentRouterTestHelpers
+
+  test("records the space for a 1:1 DM", () => {
+    expect(
+      dmSpaceForUserRecord({ name: "spaces/AAA1", type: "DM" }, "spaces/AAA1"),
+    ).toBe("spaces/AAA1")
+  })
+
+  // Scheduled runs deliver to whatever is stored here. A ROOM is shared, so
+  // recording one would publish an owner's scheduled output to other people.
+  test("never records a shared ROOM", () => {
+    expect(
+      dmSpaceForUserRecord({ name: "spaces/BBB2", type: "ROOM" }, "spaces/BBB2"),
+    ).toBeUndefined()
+  })
+
+  test("fails closed on an unspecified space type", () => {
+    expect(
+      dmSpaceForUserRecord(
+        { name: "spaces/CCC3", type: "TYPE_UNSPECIFIED" },
+        "spaces/CCC3",
+      ),
+    ).toBeUndefined()
+  })
+
+  test("rejects a malformed space resource name", () => {
+    expect(
+      dmSpaceForUserRecord({ name: "DDD4", type: "DM" }, "DDD4"),
+    ).toBeUndefined()
+    expect(dmSpaceForUserRecord({ name: "", type: "DM" }, "")).toBeUndefined()
+  })
+})
