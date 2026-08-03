@@ -6,13 +6,11 @@ import {
   getContentSafetyService,
   type ContentSafetyResult,
 } from "@/lib/safety";
-import type { TokenMappingSink } from "@/lib/safety/token-mapping-sink";
 import { ContentSafetyBlockedError } from "@/lib/streaming/types";
 
 interface CreateNexusAttachmentToolsInput {
   repositoryIds: number[];
   userCognitoSub: string;
-  tokenMappingSink: TokenMappingSink;
 }
 
 interface CreateNexusRepositorySearchToolsInput
@@ -31,7 +29,6 @@ class NexusAttachmentSafetyUnavailableError extends Error {
 async function protectRetrievedChunk(input: {
   content: string;
   sessionId: string;
-  tokenMappingSink: TokenMappingSink;
   log: ReturnType<typeof createLogger>;
 }): Promise<string> {
   let result: ContentSafetyResult;
@@ -59,7 +56,6 @@ async function protectRetrievedChunk(input: {
     );
   }
 
-  input.tokenMappingSink.add(result.tokens || []);
   return result.processedContent;
 }
 
@@ -67,7 +63,7 @@ async function protectRetrievedChunk(input: {
  * Attachment search is a core input tool, not a user-selected capability. The
  * repository IDs come exclusively from owner-validated server bindings and the
  * retrieval service independently revalidates the current principal. Retrieved
- * bytes cross the same safety/PII boundary as prompt text before the external
+ * bytes cross the same guardrail boundary as prompt text before the external
  * model can consume the tool result.
  */
 export function createNexusAttachmentTools(
@@ -122,7 +118,6 @@ export function createNexusRepositorySearchTools(
                   (segment) => segment.chunkId === hit.chunkId
                 )?.content ?? hit.content,
               sessionId: input.userCognitoSub,
-              tokenMappingSink: input.tokenMappingSink,
               log,
             }),
             source: hit.itemName,

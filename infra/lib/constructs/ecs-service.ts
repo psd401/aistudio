@@ -150,11 +150,6 @@ export interface EcsServiceConstructProps {
    */
   guardrailArn?: string;
   /**
-   * K-12 Content Safety: DynamoDB table ARN for PII tokens (from GuardrailsStack)
-   * Required for PII tokenization feature
-   */
-  piiTokenTableArn?: string;
-  /**
    * K-12 Content Safety: SNS topic ARN for violation notifications (from GuardrailsStack)
    * If provided, enables precise IAM scoping with tag conditions
    */
@@ -809,22 +804,6 @@ export class EcsServiceConstruct extends Construct {
         ],
         resources: ['*'], // Comprehend doesn't support resource-level permissions
       }),
-      // K-12 Content Safety: DynamoDB for PII token storage
-      ...(props.piiTokenTableArn ? [new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: [
-          'dynamodb:GetItem',
-          'dynamodb:PutItem',
-          'dynamodb:BatchGetItem',
-        ],
-        resources: [props.piiTokenTableArn],
-        conditions: {
-          StringEquals: {
-            'aws:ResourceTag/Environment': environment,
-            'aws:ResourceTag/ManagedBy': 'cdk',
-          },
-        },
-      })] : []),
       // Cost Explorer — read-only queries for the admin agent dashboard.
       // ce:* APIs do not support resource-level permissions; scope via
       // AWS API-level (dev ECS can only query the dev account's cost data,
@@ -1124,10 +1103,8 @@ export class EcsServiceConstruct extends Construct {
       // K-12 Content Safety - Bedrock Guardrails configuration
       BEDROCK_GUARDRAIL_ID: cdk.Fn.importValue(`${environment}-GuardrailId`),
       BEDROCK_GUARDRAIL_VERSION: 'DRAFT',
-      PII_TOKEN_TABLE_NAME: cdk.Fn.importValue(`${environment}-PIITokenTableName`),
       GUARDRAIL_VIOLATION_TOPIC_ARN: cdk.Fn.importValue(`${environment}-ViolationTopicArn`),
       CONTENT_SAFETY_ENABLED: 'true',
-      PII_TOKENIZATION_ENABLED: 'true',
       // Issue #925: Skill publishing pipeline. The agent workspace bucket
       // (published to SSM by AgentPlatformStack) holds SKILL.md folders, and
       // the skill-builder Lambda scans/promotes drafts. Both are optional at

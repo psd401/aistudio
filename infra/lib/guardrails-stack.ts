@@ -1,6 +1,5 @@
 import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
-import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as bedrock from 'aws-cdk-lib/aws-bedrock';
@@ -19,18 +18,16 @@ export interface GuardrailsStackProps extends cdk.StackProps {
  *
  * Creates:
  * - Amazon Bedrock Guardrail for content safety filtering
- * - DynamoDB table for PII token storage
  * - SNS topic for violation notifications
  * - SSM parameters for service configuration
  *
  * This stack provides the infrastructure needed by the content safety service
- * to protect K-12 students from harmful content and protect their PII.
+ * to protect K-12 students from harmful content. Comprehend-backed detect-only
+ * PII gates run in the application and require no storage resource.
  */
 export class GuardrailsStack extends cdk.Stack {
   /** Bedrock Guardrail for K-12 content filtering */
   public readonly guardrail: bedrock.CfnGuardrail;
-  /** DynamoDB table for PII token storage */
-  public readonly piiTokenTable: dynamodb.Table;
   /** SNS topic for violation notifications */
   public readonly violationTopic: sns.Topic;
 
@@ -81,8 +78,8 @@ export class GuardrailsStack extends cdk.Stack {
       // topic policies. All blocking is delegated to LLM provider built-in safety training
       // (OpenAI, Anthropic, Google all have robust content safety).
 
-      // Note: sensitiveInformationPolicyConfig not configured — we use Amazon Comprehend
-      // for PII detection/tokenization, which gives more flexibility for K-12 use cases.
+      // Note: sensitiveInformationPolicyConfig not configured — the two explicit
+      // PII gates use Amazon Comprehend detect-only checks.
 
       // Topic-based filtering — single consolidated topic
       //
@@ -147,32 +144,7 @@ export class GuardrailsStack extends cdk.Stack {
     });
 
     // =====================================================================
-    // 2. DynamoDB Table for PII Token Storage
-    // =====================================================================
-
-    this.piiTokenTable = new dynamodb.Table(this, 'PIITokenTable', {
-      tableName: `aistudio-${props.environment}-pii-tokens`,
-      partitionKey: { name: 'token', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'sessionId', type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      // Encryption at rest enabled by default (AWS_OWNED)
-      encryption: dynamodb.TableEncryption.AWS_MANAGED,
-      // TTL for automatic token expiration
-      timeToLiveAttribute: 'ttl',
-      // Point-in-time recovery for compliance
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-      // Retain data on stack deletion for production
-      removalPolicy: props.environment === 'prod'
-        ? cdk.RemovalPolicy.RETAIN
-        : cdk.RemovalPolicy.DESTROY,
-    });
-
-    // Add tags for tag-based access control
-    cdk.Tags.of(this.piiTokenTable).add('Environment', props.environment);
-    cdk.Tags.of(this.piiTokenTable).add('ManagedBy', 'cdk');
-
-    // =====================================================================
-    // 3. SNS Topic for Violation Notifications
+    // 2. SNS Topic for Violation Notifications
     // =====================================================================
 
     // Currently no active blocking policies — all topics are detect-only. SNS fires
@@ -217,13 +189,6 @@ export class GuardrailsStack extends cdk.Stack {
       tier: ssm.ParameterTier.STANDARD,
     });
 
-    new ssm.StringParameter(this, 'PIITokenTableParam', {
-      parameterName: `/aistudio/${environment}/pii-token-table-name`,
-      stringValue: this.piiTokenTable.tableName,
-      description: 'DynamoDB table name for PII token storage',
-      tier: ssm.ParameterTier.STANDARD,
-    });
-
     new ssm.StringParameter(this, 'ViolationTopicArnParam', {
       parameterName: `/aistudio/${environment}/guardrail-violation-topic-arn`,
       stringValue: this.violationTopic.topicArn,
@@ -242,18 +207,6 @@ export class GuardrailsStack extends cdk.Stack {
       value: this.guardrail.attrGuardrailArn,
       description: 'Bedrock Guardrail ARN',
       exportName: `${environment}-GuardrailArn`,
-    });
-
-    new cdk.CfnOutput(this, 'PIITokenTableName', {
-      value: this.piiTokenTable.tableName,
-      description: 'DynamoDB table for PII tokens',
-      exportName: `${environment}-PIITokenTableName`,
-    });
-
-    new cdk.CfnOutput(this, 'PIITokenTableArn', {
-      value: this.piiTokenTable.tableArn,
-      description: 'DynamoDB table ARN for PII tokens',
-      exportName: `${environment}-PIITokenTableArn`,
     });
 
     new cdk.CfnOutput(this, 'ViolationTopicArn', {
@@ -298,23 +251,6 @@ export class GuardrailsStack extends cdk.Stack {
             'comprehend:ContainsPiiEntities',
           ],
           resources: ['*'], // Comprehend doesn't support resource-level permissions
-        }),
-        // DynamoDB access for PII tokens (with tag conditions)
-        new iam.PolicyStatement({
-          effect: iam.Effect.ALLOW,
-          actions: [
-            'dynamodb:GetItem',
-            'dynamodb:PutItem',
-            'dynamodb:Query',
-            'dynamodb:BatchGetItem',
-          ],
-          resources: [this.piiTokenTable.tableArn],
-          conditions: {
-            StringEquals: {
-              'aws:ResourceTag/Environment': environment,
-              'aws:ResourceTag/ManagedBy': 'cdk',
-            },
-          },
         }),
         // SNS publish for violations (with tag conditions)
         new iam.PolicyStatement({

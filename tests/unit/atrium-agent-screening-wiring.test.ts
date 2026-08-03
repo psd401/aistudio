@@ -24,7 +24,7 @@ jest.mock("@/lib/safety", () => ({
   getContentSafetyService: () => ({
     checkInputSafety: (...args: unknown[]) => checkInputSafetyMock(...args),
   }),
-  getPIITokenizationService: () => ({
+  getPIIDetectionService: () => ({
     detectPII: jest.fn(async () => []),
   }),
 }));

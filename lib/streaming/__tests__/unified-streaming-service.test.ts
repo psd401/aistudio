@@ -31,8 +31,6 @@ jest.doMock('@/lib/logger', () => ({
 
 const { UnifiedStreamingService } = require('../unified-streaming-service');
 
-const { createTokenMappingSink } = require('../../safety/token-mapping-sink');
-
 let streamingService: any;
 let mockAdapter: any;
 let mockTelemetryConfig: any;
@@ -79,127 +77,44 @@ function defineUnifiedStreamingServiceSuite1Part1() {
 
     }
 
-function defineUnifiedStreamingServiceSuite1Part2() {it('detokenizes assistant output with mappings added by a tool after the response wrapper is created', async () => {
-      const {
-        ReadableStream: NodeReadableStream,
-        TransformStream: NodeTransformStream,
-      } = await import('node:stream/web');
-      const tokenMappingSink = createTokenMappingSink();
-      const namePlaceholder =
-        '[PII:11111111-1111-4111-8111-111111111111]';
-      const emailPlaceholder =
-        '[PII:22222222-2222-4222-8222-222222222222]';
-      const providerBody = [
-        `data: ${JSON.stringify({
-          type: 'text-delta',
-          delta: `Contact ${namePlaceholder} at ${emailPlaceholder}.`,
-        })}`,
-        'data: [DONE]',
-        '',
-      ].join('\n\n');
-      const createProviderResponse = () => {
-        const encoded = new TextEncoder().encode(providerBody);
-        return {
-          body: new NodeReadableStream<Uint8Array>({
-            start(controller) {
-              controller.enqueue(encoded);
-              controller.close();
-            },
-          }),
-          status: 200,
-          statusText: 'OK',
-          headers: new Headers({ 'Content-Type': 'text/event-stream' }),
-        };
-      };
-      const providerResult = {
-        toUIMessageStreamResponse: jest.fn(
-          createProviderResponse
-        ),
-        toDataStreamResponse: jest.fn(createProviderResponse),
-        usage: Promise.resolve({
-          promptTokens: 10,
-          completionTokens: 8,
-          totalTokens: 18,
-        }),
-      };
-      mockAdapter.getCapabilities.mockReturnValue({
-        supportsReasoning: false,
-        supportsThinking: false,
-        maxTimeoutMs: 30000,
-        supportedResponseModes: [],
-        supportsBackgroundMode: false,
-        supportedTools: [],
-        typicalLatencyMs: 10,
-      });
-      mockAdapter.createModel.mockResolvedValue({
-        id: 'gpt-4',
-        provider: 'openai',
-      });
-      mockAdapter.getProviderOptions.mockReturnValue({});
-      mockAdapter.streamWithEnhancements.mockResolvedValue(providerResult);
+function defineUnifiedStreamingServiceSuite1Part2() {
+  it('returns the provider stream result without a response transform', async () => {
+    const providerResult = {
+      toUIMessageStreamResponse: jest.fn(() => new Response('stream')),
+      toDataStreamResponse: jest.fn(() => new Response('stream')),
+      usage: Promise.resolve({ totalTokens: 18 }),
+    };
+    mockAdapter.getCapabilities.mockReturnValue({
+      supportsReasoning: false,
+      supportsThinking: false,
+      maxTimeoutMs: 30000,
+      supportedResponseModes: [],
+      supportsBackgroundMode: false,
+      supportedTools: [],
+      typicalLatencyMs: 10,
+    });
+    mockAdapter.createModel.mockResolvedValue({ id: 'gpt-4', provider: 'openai' });
+    mockAdapter.getProviderOptions.mockReturnValue({});
+    mockAdapter.streamWithEnhancements.mockResolvedValue(providerResult);
 
-      const result = await streamingService.stream({
-        provider: 'openai',
-        modelId: 'gpt-4',
-        messages: [
-          { id: 'user-1', role: 'user', parts: [{ type: 'text', text: 'Who?' }] },
-        ],
-        userId: 'test-user',
-        source: 'nexus',
-        inputTokenMappingSink: tokenMappingSink,
-        contentSafety: {
-          enabled: false,
-          skipInputCheck: true,
-          skipOutputCheck: true,
-        },
-      });
-
-      // Nexus creates the HTTP response before the model executes its retrieval
-      // tool. Add mappings only after the response transform exists to exercise
-      // that ordering and prove the sink is read dynamically.
-      const originalTransformStream = global.TransformStream;
-      let clientResponse: Response;
-      try {
-        global.TransformStream =
-          NodeTransformStream as unknown as typeof TransformStream;
-        clientResponse = result.result.toUIMessageStreamResponse();
-      } finally {
-        global.TransformStream = originalTransformStream;
-      }
-      tokenMappingSink.add([
-        {
-          token: '11111111-1111-4111-8111-111111111111',
-          original: 'Avery Student',
-          type: 'NAME',
-          placeholder: namePlaceholder,
-        },
-        {
-          token: '22222222-2222-4222-8222-222222222222',
-          original: 'avery.student@example.edu',
-          type: 'EMAIL',
-          placeholder: emailPlaceholder,
-        },
-      ]);
-
-      const reader = (
-        clientResponse.body as unknown as ReadableStream<Uint8Array>
-      ).getReader();
-      const decoder = new TextDecoder();
-      let clientBody = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        clientBody += decoder.decode(value, { stream: true });
-      }
-      clientBody += decoder.decode();
-      expect(clientBody).toContain(
-        'Contact Avery Student at avery.student@example.edu.'
-      );
-      expect(clientBody).not.toContain(namePlaceholder);
-      expect(clientBody).not.toContain(emailPlaceholder);
+    const response = await streamingService.stream({
+      provider: 'openai',
+      modelId: 'gpt-4',
+      messages: [
+        { id: 'user-1', role: 'user', parts: [{ type: 'text', text: 'Who?' }] },
+      ],
+      userId: 'test-user',
+      source: 'nexus',
+      contentSafety: {
+        enabled: false,
+        skipInputCheck: true,
+        skipOutputCheck: true,
+      },
     });
 
-    }
+    expect(response.result).toBe(providerResult);
+  });
+}
 
 function defineUnifiedStreamingServiceSuite1Part3() {it('should successfully stream with OpenAI provider', async () => {
       // Arrange

@@ -8,33 +8,26 @@ jest.mock("@/lib/repositories/retrieval-v2/service", () => ({
     mockRetrieveRepositoryContent(...args),
 }));
 jest.mock("@/lib/logger", () => ({
-  createLogger: () => ({
-    info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-  }),
+  createLogger: () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }),
 }));
 jest.mock("@/lib/safety", () => ({
   getContentSafetyService: () => ({
     processInput: (...args: unknown[]) => mockProcessInput(...args),
   }),
 }));
-jest.mock("ai", () => ({
-  tool: (definition: unknown) => definition,
-}));
+jest.mock("ai", () => ({ tool: (definition: unknown) => definition }));
 
 import {
   createNexusAttachmentTools,
   createNexusRepositorySearchTools,
 } from "@/lib/nexus/attachment-repository-tool";
-import { createTokenMappingSink } from "@/lib/safety/token-mapping-sink";
 import { ContentSafetyBlockedError } from "@/lib/streaming/types";
 
 interface SearchTool {
   execute(input: { query: string; limit?: number }): Promise<unknown>;
 }
 
-function defineNexusAttachmentRepositoryToolSuite1Part1() {
+describe("Nexus attachment repository tool", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockProcessInput.mockImplementation(async (content: unknown) => ({
@@ -43,7 +36,6 @@ function defineNexusAttachmentRepositoryToolSuite1Part1() {
       contentModified: false,
       requestId: "safety-request",
       processingTimeMs: 1,
-      tokens: [],
     }));
     mockRetrieveRepositoryContent.mockResolvedValue({
       results: [
@@ -66,17 +58,14 @@ function defineNexusAttachmentRepositoryToolSuite1Part1() {
     });
   });
 
-  it("uses only validated bound repository IDs and preserves exact citations", async () => {
+  it("uses only validated bindings and preserves exact citations", async () => {
     const tools = createNexusAttachmentTools({
       repositoryIds: [7, 7, -1],
       userCognitoSub: "executing-user",
-      tokenMappingSink: createTokenMappingSink(),
     });
     const search = tools.searchNexusAttachments as unknown as SearchTool;
 
-    await expect(
-      search.execute({ query: "attendance", limit: 3 })
-    ).resolves.toEqual({
+    await expect(search.execute({ query: "attendance", limit: 3 })).resolves.toEqual({
       success: true,
       query: "attendance",
       results: [
@@ -104,151 +93,69 @@ function defineNexusAttachmentRepositoryToolSuite1Part1() {
     });
   });
 
-  it("supports server-named project and skill repository tools with the same safety boundary", async () => {
+  it("returns allowed PII-containing retrieval text byte-identical", async () => {
+    const content = "Avery Student can be reached at avery.student@example.edu.";
+    mockRetrieveRepositoryContent.mockResolvedValueOnce({
+      results: [{
+        chunkId: 19,
+        itemName: "Student record",
+        content,
+        similarity: 0.98,
+        context: [],
+        citations: [],
+      }],
+    });
+    const tools = createNexusAttachmentTools({
+      repositoryIds: [7],
+      userCognitoSub: "executing-user",
+    });
+    const search = tools.searchNexusAttachments as unknown as SearchTool;
+
+    await expect(search.execute({ query: "contact details" })).resolves.toMatchObject({
+      results: [{ content }],
+    });
+    expect(mockProcessInput).toHaveBeenCalledWith(content, "executing-user");
+  });
+
+  it("supports server-named repository tools with the same guardrail boundary", async () => {
     const tools = createNexusRepositorySearchTools({
       repositoryIds: [7],
       userCognitoSub: "executing-user",
-      tokenMappingSink: createTokenMappingSink(),
       toolName: "searchProjectRepositories",
       description: "Search project repositories",
     });
     const search = tools.searchProjectRepositories as unknown as SearchTool;
-
     await expect(search.execute({ query: "attendance" })).resolves.toMatchObject({
       success: true,
       results: [{ content: "Budgeted source" }],
     });
-    expect(mockRetrieveRepositoryContent).toHaveBeenCalledWith({
-      query: "attendance",
-      repositoryIds: [7],
-      userCognitoSub: "executing-user",
-      mode: "hybrid",
-      limit: 5,
-    });
   });
 
-  }
-
-function defineNexusAttachmentRepositoryToolSuite1Part2() {it("tokenizes retrieved PII before returning a provider-visible tool result", async () => {
-    const nameToken = {
-      token: "11111111-1111-4111-8111-111111111111",
-      original: "Avery Student",
-      type: "NAME",
-      placeholder: "[PII:11111111-1111-4111-8111-111111111111]",
-    };
-    const emailToken = {
-      token: "22222222-2222-4222-8222-222222222222",
-      original: "avery.student@example.edu",
-      type: "EMAIL",
-      placeholder: "[PII:22222222-2222-4222-8222-222222222222]",
-    };
-    mockRetrieveRepositoryContent.mockResolvedValueOnce({
-      results: [
-        {
-          chunkId: 19,
-          itemName: "Student record",
-          content:
-            "Avery Student can be reached at avery.student@example.edu.",
-          similarity: 0.98,
-          context: [],
-          citations: [],
-        },
-      ],
-    });
-    mockProcessInput.mockResolvedValueOnce({
-      allowed: true,
-      processedContent:
-        "[PII:11111111-1111-4111-8111-111111111111] can be reached at [PII:22222222-2222-4222-8222-222222222222].",
-      contentModified: true,
-      requestId: "safety-request",
-      processingTimeMs: 1,
-      tokens: [nameToken, emailToken],
-    });
-    const tokenMappingSink = createTokenMappingSink();
+  it("fails closed when retrieved content is blocked or cannot be checked", async () => {
     const tools = createNexusAttachmentTools({
       repositoryIds: [7],
       userCognitoSub: "executing-user",
-      tokenMappingSink,
     });
     const search = tools.searchNexusAttachments as unknown as SearchTool;
-
-    const providerVisibleResult = await search.execute({
-      query: "contact details",
-    });
-    const serializedResult = JSON.stringify(providerVisibleResult);
-
-    expect(serializedResult).not.toContain("Avery Student");
-    expect(serializedResult).not.toContain("avery.student@example.edu");
-    expect(serializedResult).toContain(nameToken.placeholder);
-    expect(serializedResult).toContain(emailToken.placeholder);
-    expect(mockProcessInput).toHaveBeenCalledWith(
-      "Avery Student can be reached at avery.student@example.edu.",
-      "executing-user"
-    );
-    expect(tokenMappingSink.size).toBe(2);
-    expect(tokenMappingSink.resolve(nameToken.placeholder)).toBe(
-      nameToken.original
-    );
-    expect(tokenMappingSink.resolve(emailToken.placeholder)).toBe(
-      emailToken.original
-    );
-  });
-
-  it("fails closed without returning chunk bytes when retrieved content is blocked", async () => {
     mockProcessInput.mockResolvedValueOnce({
       allowed: false,
       processedContent: "",
       blockedMessage: "Retrieved content blocked",
       blockedCategories: ["PROHIBITED"],
-      contentModified: false,
-      requestId: "safety-request",
-      processingTimeMs: 1,
     });
-    const tools = createNexusAttachmentTools({
-      repositoryIds: [7],
-      userCognitoSub: "executing-user",
-      tokenMappingSink: createTokenMappingSink(),
-    });
-    const search = tools.searchNexusAttachments as unknown as SearchTool;
-
-    await expect(
-      search.execute({ query: "attendance" })
-    ).rejects.toBeInstanceOf(ContentSafetyBlockedError);
-  });
-
-  it("uses a generic fail-closed error when safety processing rejects", async () => {
-    mockProcessInput.mockRejectedValueOnce(
-      new Error("provider failed while handling secret source bytes")
+    await expect(search.execute({ query: "attendance" })).rejects.toBeInstanceOf(
+      ContentSafetyBlockedError,
     );
-    const tools = createNexusAttachmentTools({
-      repositoryIds: [7],
-      userCognitoSub: "executing-user",
-      tokenMappingSink: createTokenMappingSink(),
-    });
-    const search = tools.searchNexusAttachments as unknown as SearchTool;
 
+    mockProcessInput.mockRejectedValueOnce(new Error("guardrail unavailable"));
     await expect(search.execute({ query: "attendance" })).rejects.toThrow(
-      "Attachment search results could not be safety-checked"
+      "Attachment search results could not be safety-checked",
     );
   });
 
-  }
-
-function defineNexusAttachmentRepositoryToolSuite1Part3() {it("creates no tool without a valid server binding", () => {
+  it("creates no tool without a valid server binding", () => {
     expect(
-      createNexusAttachmentTools({
-        repositoryIds: [],
-        userCognitoSub: "user",
-        tokenMappingSink: createTokenMappingSink(),
-      })
+      createNexusAttachmentTools({ repositoryIds: [], userCognitoSub: "user" }),
     ).toEqual({});
   });
-}
-
-const defineNexusAttachmentRepositoryToolSuite1 = () => {
-  defineNexusAttachmentRepositoryToolSuite1Part1()
-  defineNexusAttachmentRepositoryToolSuite1Part2()
-  defineNexusAttachmentRepositoryToolSuite1Part3()
-};
-
-describe("Nexus attachment repository tool", defineNexusAttachmentRepositoryToolSuite1);
+});

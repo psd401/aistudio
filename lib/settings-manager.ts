@@ -331,25 +331,19 @@ export const Settings = {
     const [
       guardrailId,
       guardrailVersion,
-      piiTokenTableName,
       violationTopicArn,
-      enabled,
-      piiTokenizationEnabled
+      enabled
     ] = await Promise.all([
       getSetting('BEDROCK_GUARDRAIL_ID'),
       getSetting('BEDROCK_GUARDRAIL_VERSION'),
-      getSetting('PII_TOKEN_TABLE_NAME'),
       getSetting('GUARDRAIL_VIOLATION_TOPIC_ARN'),
-      getSetting('CONTENT_SAFETY_ENABLED'),
-      getSetting('PII_TOKENIZATION_ENABLED')
+      getSetting('CONTENT_SAFETY_ENABLED')
     ])
     return {
       guardrailId,
       guardrailVersion: guardrailVersion || 'DRAFT',
-      piiTokenTableName,
       violationTopicArn,
-      enabled: enabled !== 'false', // Default to true if not explicitly disabled
-      piiTokenizationEnabled: piiTokenizationEnabled !== 'false' // Default to true
+      enabled: enabled !== 'false' // Default to true if not explicitly disabled
     }
   },
 

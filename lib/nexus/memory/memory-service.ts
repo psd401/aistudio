@@ -1,4 +1,8 @@
-import { getContentSafetyService } from "@/lib/safety"
+import {
+  getContentSafetyService,
+  getPIIDetectionService,
+  type PIIEntity,
+} from "@/lib/safety"
 import { ContentSafetyBlockedError } from "@/lib/streaming/types"
 import { createLogger } from "@/lib/logger"
 import { getSetting } from "@/lib/settings-manager"
@@ -20,13 +24,9 @@ const DEFAULT_RETRIEVAL_THRESHOLD = 0.3
 const DEFAULT_RETRIEVAL_TOP_K = 6
 const MAX_RETRIEVAL_TOP_K = 20
 export const MAX_PROFILE_MEMORIES_PER_TURN = 20
-const PII_PLACEHOLDER_PATTERN = /\[PII:[^\]\r\n]+\]/i
-
 interface SafetyResult {
   allowed: boolean
   processedContent: string
-  hasPII?: boolean
-  piiScanCompleted?: boolean
   blockedMessage?: string
   blockedCategories?: string[]
 }
@@ -34,6 +34,7 @@ interface SafetyResult {
 interface MemoryServiceDependencies {
   repository: MemoryRepository
   processInput(content: string, sessionId: string): Promise<SafetyResult>
+  detectPII(content: string): Promise<PIIEntity[]>
   generateEmbedding(content: string): Promise<number[]>
   getSetting(key: string): Promise<string | null>
 }
@@ -124,9 +125,12 @@ async function sanitizeMemoryContent(
       "input",
     )
   }
-  if (safety.piiScanCompleted !== true) {
-    // Ordinary chat intentionally degrades gracefully when PII screening is
-    // unavailable. Durable memory cannot persist an indeterminate result.
+  let piiEntities: PIIEntity[]
+  try {
+    piiEntities = await dependencies.detectPII(content)
+  } catch {
+    // Ordinary inference does not run PII detection. Durable memory is one of
+    // the two explicit gates and cannot persist an indeterminate result.
     throw new ContentSafetyBlockedError(
       "Memory is temporarily unavailable because its privacy check could not be completed.",
       ["pii_scan_unavailable"],
@@ -134,12 +138,7 @@ async function sanitizeMemoryContent(
     )
   }
   const sanitized = safety.processedContent.trim()
-  if (
-    safety.hasPII === true ||
-    PII_PLACEHOLDER_PATTERN.test(sanitized)
-  ) {
-    // PII token mappings expire. Persisting a placeholder would later corrupt
-    // the memory, while detokenizing here would store raw PII.
+  if (piiEntities.length > 0) {
     throw new ContentSafetyBlockedError(
       "For privacy, personal information cannot be saved to memory.",
       ["pii"],
@@ -290,6 +289,7 @@ export const memoryService = createMemoryService({
   repository: drizzleMemoryRepository,
   processInput: (content, sessionId) =>
     getContentSafetyService().processInput(content, sessionId),
+  detectPII: (content) => getPIIDetectionService().detectPII(content),
   generateEmbedding: generateMemoryEmbedding,
   getSetting,
 })

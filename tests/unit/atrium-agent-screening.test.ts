@@ -42,7 +42,7 @@ jest.mock("@/lib/safety", () => ({
   getContentSafetyService: () => ({
     checkInputSafety: (...args: unknown[]) => checkInputSafetyMock(...args),
   }),
-  getPIITokenizationService: () => ({
+  getPIIDetectionService: () => ({
     detectPII: (...args: unknown[]) => detectPIIMock(...args),
   }),
 }));
@@ -139,11 +139,23 @@ describe("screenAgentContent", () => {
   });
 
   it("allows clean content and runs PII detection as telemetry", async () => {
-    piiEntities = [{ Type: "NAME" }];
-    const verdict = await screenAgentContent("clean text", "obj-1");
+    const content = "Johnny Smith wrote this unchanged.";
+    piiEntities = [{ type: "NAME" }, { type: "EMAIL" }, { type: "NAME" }];
+    const verdict = await screenAgentContent(content, "obj-1");
     expect(verdict).toEqual({ allowed: true });
-    expect(checkInputSafetyMock).toHaveBeenCalledWith("clean text", "obj-1");
-    expect(detectPIIMock).toHaveBeenCalledWith("clean text");
+    expect(checkInputSafetyMock).toHaveBeenCalledWith(content, "obj-1");
+    expect(detectPIIMock).toHaveBeenCalledWith(content);
+    const screeningLogger = createLoggerMock.mock.results.at(-1)?.value as {
+      warn: jest.Mock;
+    };
+    expect(screeningLogger.warn).toHaveBeenCalledWith(
+      "PII detected in agent content write",
+      {
+        objectId: "obj-1",
+        piiCount: 3,
+        piiTypes: ["NAME", "EMAIL"],
+      },
+    );
   });
 
   it("treats a PII detector failure as non-fatal (content still allowed)", async () => {

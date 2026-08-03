@@ -757,11 +757,12 @@ Structured decision capture and retrieval system for organizational knowledge ma
 - **Search**: Full-text and semantic search across decision history
 
 ### K-12 Content Safety (Guardrails)
-Amazon Bedrock Guardrails integration for content filtering and PII protection.
+Amazon Bedrock Guardrails integration for content filtering, with narrowly scoped
+Comprehend-backed detect-only PII checks for Nexus memory and published content.
 
-- **Stack**: `GuardrailsStack` (Bedrock + DynamoDB + SNS)
-- **Features**: Content filtering, topic blocking, PII tokenization, real-time alerts
-- **Mode**: Detect-only by default to minimize false positives
+- **Stack**: `GuardrailsStack` (Bedrock + SNS)
+- **Features**: Content filtering, topic blocking, detect-only PII gates, real-time alerts
+- **Inference contract**: Allowed request and response text is never rewritten
 
 ## Future Enhancements
 

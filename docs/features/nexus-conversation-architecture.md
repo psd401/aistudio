@@ -432,10 +432,9 @@ newly created empty conversation. The route strips opaque IDs into safe
 attachment labels, resolves all active/unexpired conversation repositories, and
 provides `searchNexusAttachments`. The tool uses Retrieval v2, which rechecks
 the current user at final context disclosure and returns immutable-version
-citations. It runs retrieved chunk text through the configured content-safety
-and PII input transform before returning provider-visible tool output. New token
-mappings flow through a per-request sink to the active stream detokenizer, never
-through shared process state. Raw search chunks are not persisted in
+citations. It runs retrieved chunk text through the configured K-12 guardrail
+before returning provider-visible tool output; allowed text remains byte-identical.
+Raw search chunks are not persisted in
 conversation tool results or replayed on later turns. Missing, foreign, and
 expired references share one non-disclosing 404 response.
 

@@ -98,7 +98,7 @@ describe('BedrockGuardrailsService - core', () => {
       expect(config).toHaveProperty('region');
       expect(config).toHaveProperty('guardrailId');
       expect(config).toHaveProperty('guardrailVersion');
-      expect(config).toHaveProperty('enablePiiTokenization');
+      expect(config).not.toHaveProperty('enablePiiTokenization');
       expect(config).toHaveProperty('enableViolationNotifications');
       expect(config).not.toHaveProperty('violationTopicArn');
     });

@@ -59,8 +59,11 @@ describe("Nexus memory service", () => {
       return {
         allowed: true,
         processedContent: "sanitized content",
-        piiScanCompleted: true,
       }
+    })
+    const detectPII = jest.fn(async () => {
+      events.push("pii")
+      return []
     })
     const generateEmbedding = jest.fn(async () => {
       events.push("embedding")
@@ -69,6 +72,7 @@ describe("Nexus memory service", () => {
     const service = createMemoryService({
       repository,
       processInput,
+      detectPII,
       generateEmbedding,
       getSetting: jest.fn(async () => null),
     })
@@ -82,25 +86,28 @@ describe("Nexus memory service", () => {
       sourceConversationId: "22222222-2222-4222-8222-222222222222",
     })
 
-    expect(events).toEqual(["safety", "ownership", "embedding", "storage"])
+    expect(events).toEqual(["safety", "pii", "ownership", "embedding", "storage"])
     expect(processInput).toHaveBeenCalledWith(
       "raw private content",
       "cognito-sub",
     )
   })
 
-  it("rejects tokenized PII instead of persisting an expiring placeholder", async () => {
+  it("refuses detected PII before embedding or persistence", async () => {
     const repository = createRepository()
     const generateEmbedding = jest.fn()
     const service = createMemoryService({
       repository,
       processInput: jest.fn(async () => ({
         allowed: true,
-        processedContent:
-          "Email [PII:11111111-1111-4111-8111-111111111111]",
-        hasPII: true,
-        piiScanCompleted: true,
+        processedContent: "Email student@example.com",
       })),
+      detectPII: jest.fn(async () => [{
+        type: "EMAIL",
+        beginOffset: 6,
+        endOffset: 25,
+        score: 0.999,
+      }]),
       generateEmbedding,
       getSetting: jest.fn(async () => null),
     })
@@ -133,6 +140,7 @@ describe("Nexus memory service", () => {
         blockedMessage: "Blocked by policy",
         blockedCategories: ["prompt_attack"],
       })),
+      detectPII: jest.fn(async () => []),
       generateEmbedding,
       getSetting: jest.fn(async () => null),
     })
@@ -160,8 +168,8 @@ describe("Nexus memory service", () => {
       processInput: jest.fn(async (content) => ({
         allowed: true,
         processedContent: content,
-        piiScanCompleted: true,
       })),
+      detectPII: jest.fn(async () => []),
       generateEmbedding,
       getSetting: jest.fn(async () => null),
     })
@@ -208,9 +216,9 @@ describe("Nexus memory service edits", () => {
         return {
           allowed: true,
           processedContent: "sanitized edit",
-          piiScanCompleted: true,
         }
       }),
+      detectPII: jest.fn(async () => []),
       generateEmbedding: jest.fn(async () => {
         events.push("embedding")
         return [0.3, 0.7]
@@ -235,41 +243,39 @@ describe("Nexus memory service edits", () => {
 })
 
 describe("Nexus memory privacy scan availability", () => {
-  it.each([false, undefined])(
-    "rejects a durable write when the PII scan attestation is %s",
-    async (piiScanCompleted) => {
-      const repository = createRepository()
-      const generateEmbedding = jest.fn(async () => [0.1])
-      const service = createMemoryService({
-        repository,
-        processInput: jest.fn(async () => ({
-          allowed: true,
-          processedContent: "Looks safe but was not conclusively screened",
-          hasPII: false,
-          piiScanCompleted,
-        })),
-        generateEmbedding,
-        getSetting: jest.fn(async () => null),
-      })
+  it("fails closed when detect-only PII screening errors", async () => {
+    const repository = createRepository()
+    const generateEmbedding = jest.fn(async () => [0.1])
+    const service = createMemoryService({
+      repository,
+      processInput: jest.fn(async () => ({
+        allowed: true,
+        processedContent: "Looks safe but was not conclusively screened",
+      })),
+      detectPII: jest.fn(async () => {
+        throw new Error("Comprehend unavailable")
+      }),
+      generateEmbedding,
+      getSetting: jest.fn(async () => null),
+    })
 
-      await expect(
-        service.save({
-          userId: 7,
-          sessionId: "cognito-sub",
-          content: "Looks safe but was not conclusively screened",
-          category: "context",
-          source: "tool",
-        }),
-      ).rejects.toMatchObject({
-        blockedMessage:
-          "Memory is temporarily unavailable because its privacy check could not be completed.",
-        blockedCategories: ["pii_scan_unavailable"],
-      })
-      expect(repository.conversationIsOwned).not.toHaveBeenCalled()
-      expect(generateEmbedding).not.toHaveBeenCalled()
-      expect(repository.saveWithDedup).not.toHaveBeenCalled()
-    },
-  )
+    await expect(
+      service.save({
+        userId: 7,
+        sessionId: "cognito-sub",
+        content: "Looks safe but was not conclusively screened",
+        category: "context",
+        source: "tool",
+      }),
+    ).rejects.toMatchObject({
+      blockedMessage:
+        "Memory is temporarily unavailable because its privacy check could not be completed.",
+      blockedCategories: ["pii_scan_unavailable"],
+    })
+    expect(repository.conversationIsOwned).not.toHaveBeenCalled()
+    expect(generateEmbedding).not.toHaveBeenCalled()
+    expect(repository.saveWithDedup).not.toHaveBeenCalled()
+  })
 })
 
 describe("Nexus memory service retrieval and deletion", () => {
@@ -294,6 +300,7 @@ describe("Nexus memory service retrieval and deletion", () => {
     const service = createMemoryService({
       repository,
       processInput: jest.fn(),
+      detectPII: jest.fn(),
       generateEmbedding: jest.fn(async () => [0.5, 0.5]),
       getSetting,
     })
@@ -320,6 +327,7 @@ describe("Nexus memory service retrieval and deletion", () => {
     const service = createMemoryService({
       repository,
       processInput: jest.fn(),
+      detectPII: jest.fn(),
       generateEmbedding: jest.fn(async () => {
         throw new Error("Bedrock unavailable")
       }),
@@ -339,6 +347,7 @@ describe("Nexus memory service retrieval and deletion", () => {
     const service = createMemoryService({
       repository,
       processInput: jest.fn(),
+      detectPII: jest.fn(),
       generateEmbedding,
       getSetting: jest.fn(),
     })
@@ -354,6 +363,7 @@ describe("Nexus memory service retrieval and deletion", () => {
     const service = createMemoryService({
       repository,
       processInput: jest.fn(),
+      detectPII: jest.fn(),
       generateEmbedding: jest.fn(),
       getSetting: jest.fn(),
     })

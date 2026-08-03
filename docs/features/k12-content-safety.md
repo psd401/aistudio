@@ -4,10 +4,10 @@
 
 ## Overview
 
-AI Studio includes an enterprise-grade content safety system specifically designed for K-12 educational environments. This system provides two layers of protection:
+AI Studio includes an enterprise-grade content safety system specifically designed for K-12 educational environments. This system provides two complementary protections:
 
 1. **Content Filtering** - Blocks inappropriate content in both user inputs and AI responses
-2. **PII Tokenization** - Protects student personally identifiable information from being sent to AI providers
+2. **Zero-data-retention inference plus detect-only PII gates** - AI providers do not retain inference data, while durable Nexus memory writes refuse detected PII and published agent content records PII telemetry
 
 These features help school districts meet COPPA, FERPA, and CIPA compliance requirements while providing students safe access to frontier AI models.
 
@@ -71,9 +71,16 @@ The content filtering system evaluates all messages against configurable safety 
 
 When content is blocked, users receive an age-appropriate message explaining that their request couldn't be processed, without revealing specific filtering details that could be used for circumvention.
 
-### PII Tokenization (Amazon Comprehend + Custom Patterns)
+### PII Privacy Boundary (ZDR + Detect-Only Gates)
 
-The PII protection system identifies and tokenizes sensitive information before it reaches AI providers. This includes both standard PII detected by Amazon Comprehend and custom patterns for district-specific identifiers:
+AI inference runs under zero-data-retention agreements, so names and other context reach the selected model byte-identical and are not retained by the provider. AI Studio does not replace PII with reversible placeholders. This is important for tool calls such as district-data queries, where the model must be able to use the real name supplied by the authorized user.
+
+Amazon Comprehend detection remains on two durable-content boundaries:
+
+1. **Nexus memory writes** — relevant K-12 PII and district-specific identifiers are refused. Detection errors fail closed, so indeterminate content is never persisted as memory.
+2. **Published agent content screening** — detected entity types are logged as telemetry. Content remains unmodified, and detector errors are non-fatal.
+
+The detection helper applies the existing K-12 type allowlist and confidence floors to standard Comprehend entities, plus custom patterns for district-specific identifiers:
 
 | PII Type | Example | Source |
 |----------|---------|--------|
@@ -86,23 +93,16 @@ The PII protection system identifies and tokenizes sensitive information before 
 | **Student IDs** | "2240393" (7 digits starting with 2) | Custom Pattern |
 | **Custom Identifiers** | Configurable per district | Custom Pattern |
 
-**How Tokenization Works:**
+**How Inference and Durable Gates Work:**
 
 ```
-User Input: "Help me write a letter for John Smith at john@school.edu"
-     ↓
-Tokenized: "Help me write a letter for [PII:abc123] at [PII:def456]"
-     ↓
-Sent to AI Provider (sees only tokens, never actual PII)
-     ↓
-AI Response: "Dear [PII:abc123], I am writing to..."
-     ↓
-Detokenized: "Dear John Smith, I am writing to..."
-     ↓
-User sees original names restored
+Authorized user input with a student's name
+     ├── AI inference → byte-identical input under a ZDR agreement
+     ├── Nexus memory write → Comprehend detect-only check; refuse on PII/error
+     └── Published agent content → Comprehend detect-only telemetry; no rewrite
 ```
 
-The AI provider never sees actual student information, yet the user experience remains seamless with names and details appearing naturally in responses.
+Bedrock Guardrails continue to evaluate both inference input and output independently of these PII gates.
 
 ### Violation Notifications
 
@@ -130,13 +130,7 @@ Administrators can receive real-time notifications when safety violations occur:
 │           │                                                         │
 │           ▼                                                         │
 │  ┌─────────────────┐                                                │
-│  │ PII Tokenizer   │◄─── Amazon Comprehend (PII Detection)          │
-│  │                 │◄─── DynamoDB (Token Storage, 1hr TTL)          │
-│  └────────┬────────┘                                                │
-│           │                                                         │
-│           ▼                                                         │
-│  ┌─────────────────┐                                                │
-│  │   AI Provider   │     (Sees tokenized content only)              │
+│  │   AI Provider   │     (Zero-data-retention inference)            │
 │  │ OpenAI/Claude/  │                                                │
 │  │ Gemini/Bedrock  │                                                │
 │  └────────┬────────┘                                                │
@@ -148,12 +142,11 @@ Administrators can receive real-time notifications when safety violations occur:
 │  └────────┬────────┘                                                │
 │           │                                                         │
 │           ▼                                                         │
-│  ┌─────────────────┐                                                │
-│  │ PII Detokenizer │◄─── Restores original values from DynamoDB     │
-│  └────────┬────────┘                                                │
-│           │                                                         │
-│           ▼                                                         │
 │      User Response                                                  │
+│                                                                     │
+│  Durable side gates:                                                │
+│  Nexus memory ──► Comprehend detect-only ──► refuse PII/errors       │
+│  Agent publish ──► Comprehend detect-only ──► telemetry only         │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -162,14 +155,14 @@ Administrators can receive real-time notifications when safety violations occur:
 
 ### COPPA (Children's Online Privacy Protection Act)
 
-- PII tokenization prevents children's personal information from being transmitted to third-party AI services
-- Token storage with automatic expiration (1-hour TTL) minimizes data retention
-- No persistent storage of children's PII outside your infrastructure
+- Zero-data-retention agreements prevent provider retention of inference data
+- Nexus memory refuses detected personal information and fails closed when detection is unavailable
+- No reversible token mapping store is created
 
 ### FERPA (Family Educational Rights and Privacy Act)
 
-- Student educational records remain within district infrastructure
-- AI providers only see anonymized/tokenized data
+- Provider contracts prohibit retention of inference data
+- Authorized tools can use the exact names and identifiers needed to query district systems
 - Audit trail via CloudWatch logs for compliance reporting
 
 ### CIPA (Children's Internet Protection Act)
@@ -188,18 +181,14 @@ AWS_REGION=us-east-1
 BEDROCK_GUARDRAIL_ID=<guardrail-id>
 BEDROCK_GUARDRAIL_VERSION=DRAFT
 
-# Required for PII tokenization
-PII_TOKEN_TABLE_NAME=<dynamodb-table-name>
-
 # Optional: Violation notifications
 GUARDRAIL_VIOLATION_TOPIC_ARN=<sns-topic-arn>
 
 # Optional: Security
 GUARDRAIL_HASH_SECRET=<random-secret-for-user-id-hashing>
 
-# Feature toggles (both default to true)
+# Feature toggle
 CONTENT_SAFETY_ENABLED=true
-PII_TOKENIZATION_ENABLED=true
 ```
 
 ### CDK Deployment
@@ -208,15 +197,24 @@ The guardrails infrastructure is deployed via the `GuardrailsStack`:
 
 ```bash
 cd infra
-bunx cdk deploy AIStudio-GuardrailsStack-Dev
-bunx cdk deploy AIStudio-GuardrailsStack-Prod
+bunx cdk deploy --exclusively AIStudio-FrontendStack-ECS-Dev
+bunx cdk deploy --exclusively AIStudio-GuardrailsStack-Dev
+bunx cdk deploy --exclusively AIStudio-FrontendStack-ECS-Prod
+bunx cdk deploy --exclusively AIStudio-GuardrailsStack-Prod
 ```
+
+For the PII-tokenization removal rollout, the order above is mandatory: deploy
+each Frontend stack first so CloudFormation removes its `Fn::ImportValue`
+consumers, then deploy the matching Guardrails stack that removes the exports.
+Use `--exclusively` so CDK does not deploy the dependency first. These deploys
+are manual and outside issue #1565. The existing production table
+`aistudio-prod-pii-tokens` has a `RETAIN` removal policy and becomes orphaned;
+do not delete it without separate explicit authorization.
 
 This creates:
 - Bedrock Guardrail with K-12 appropriate content policies
-- DynamoDB table for PII token storage (with encryption at rest)
 - SNS topic for violation notifications
-- Appropriate IAM roles with least-privilege access
+- Least-privilege Bedrock, Comprehend, and SNS permissions
 
 #### Manual Integration Testing After Deployment
 
@@ -231,7 +229,8 @@ Automated unit tests validate graceful degradation but **cannot test actual guar
 **Deploy to Dev:**
 ```bash
 cd infra
-bunx cdk deploy AIStudio-GuardrailsStack-Dev
+bunx cdk deploy --exclusively AIStudio-FrontendStack-ECS-Dev
+bunx cdk deploy --exclusively AIStudio-GuardrailsStack-Dev
 ```
 
 **Manual Test Cases (Dev Environment):**
@@ -315,7 +314,8 @@ fields @timestamp, requestId, sessionId, patterns, contentPreview
 **Promote to Prod (if validation passes):**
 ```bash
 cd infra
-bunx cdk deploy AIStudio-GuardrailsStack-Prod
+bunx cdk deploy --exclusively AIStudio-FrontendStack-ECS-Prod
+bunx cdk deploy --exclusively AIStudio-GuardrailsStack-Prod
 ```
 
 Repeat manual testing in production and monitor for 1 week before considering deployment successful.
@@ -527,7 +527,7 @@ export const CUSTOM_PII_PATTERNS: CustomPIIPattern[] = [
 | Case number (CASE-NNNN) | `/\bCASE-\d{4}\b/i` | CASE-1234 |
 | Custom ID with prefix | `/\bPSD-\d{6}\b/` | PSD-123456 |
 
-Custom patterns are tokenized alongside Comprehend's PII detection, so the AI never sees the actual values.
+Custom patterns participate in the two detect-only gates; they do not rewrite inference content.
 
 ## Local Development
 
@@ -535,7 +535,7 @@ When running AI Studio locally without AWS credentials, the content safety syste
 
 ```
 [WARN] AWS_REGION not configured - BedrockGuardrailsService disabled (local development mode)
-[WARN] AWS_REGION not configured - PIITokenizationService disabled (local development mode)
+[WARN] AWS_REGION not configured - PII detection unavailable (local development mode)
 ```
 
 This allows developers to test locally while ensuring safety features are always active in production (where `AWS_REGION` is automatically set by ECS/Lambda).
@@ -550,8 +550,7 @@ The content safety system logs detailed metrics:
 - `guardrails.input.blocked` - Number of inputs blocked
 - `guardrails.output.checked` - Number of outputs evaluated
 - `guardrails.output.blocked` - Number of outputs blocked
-- `pii.tokens.created` - Number of PII tokens generated
-- `pii.tokens.restored` - Number of tokens successfully detokenized
+- Detect-only PII events are emitted by the Nexus memory and agent-content gate logs
 
 ### Log Analysis
 
@@ -587,7 +586,10 @@ Content filtering adds approximately 50-100ms latency per request. This is imper
 
 ### What happens if the safety service is unavailable?
 
-The system is designed with graceful degradation. If Bedrock Guardrails or Comprehend are temporarily unavailable, content passes through unchanged while errors are logged for investigation. This ensures service continuity while maintaining visibility into any issues.
+Bedrock Guardrails fail open for service continuity and log the degraded
+evaluation. The two Comprehend gates are intentionally different: Nexus memory
+writes fail closed when detection cannot complete, while published agent
+content remains unchanged and logs a non-fatal detector error.
 
 ### Can students bypass the content filtering?
 
@@ -595,19 +597,11 @@ The content filtering includes protection against "prompt injection" and "jailbr
 
 ### Is student data stored anywhere?
 
-PII tokens are stored in DynamoDB with:
-- Automatic expiration after 1 hour (configurable)
-- Encryption at rest using AWS-managed keys
-- Session isolation (tokens only valid within original session)
-- No persistence of actual PII values outside your infrastructure
+AI Studio does not store reversible PII token mappings. Ordinary inference content is governed by provider zero-data-retention agreements. Nexus memory refuses detected PII; published agent content keeps its authored text and emits entity-type telemetry.
 
 ### Can I disable these features?
 
-Yes, via environment variables:
-- `CONTENT_SAFETY_ENABLED=false` - Disables content filtering
-- `PII_TOKENIZATION_ENABLED=false` - Disables PII protection
-
-However, we strongly recommend keeping both enabled for K-12 deployments.
+Bedrock content filtering can be disabled with `CONTENT_SAFETY_ENABLED=false`. The two durable-content detect-only PII gates are explicit application safety boundaries rather than a general inference feature toggle.
 
 ## Related Documentation
 
