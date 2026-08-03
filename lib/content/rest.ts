@@ -143,7 +143,15 @@ export const createCollectionBodySchema = z
 export const updateCollectionBodySchema = createCollectionBodySchema
   .omit({ scope: true })
   .partial()
-  .extend({ archived: z.boolean().optional() })
+  .extend({
+    archived: z.boolean().optional(),
+    // Section landing-page copy (migration 175). These live on UPDATE only —
+    // a section is described after it exists, and adding them to create would
+    // widen the create surface for no benefit. The schema is `.strict()`, so
+    // omitting them here would 400 every legitimate description edit.
+    description: z.string().max(2000).nullable().optional(),
+    landingObjectId: z.string().uuid().nullable().optional(),
+  })
   .strict()
   .refine((value) => Object.keys(value).length > 0, {
     message: "At least one collection field is required",

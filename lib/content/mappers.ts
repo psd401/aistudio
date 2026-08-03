@@ -58,6 +58,16 @@ export interface ObjectRowAsText {
    * optional. `rowToObjectDTO` coalesces a missing value to null.
    */
   ownerName?: string | null;
+  /**
+   * Whether the CALLING user starred this object — like `ownerName`, present
+   * only on the `listVisible` projection, hence optional. Coalesced to false.
+   */
+  isFavorite?: boolean | null;
+  /**
+   * Head-version summary — present only on the `listVisible` projection, hence
+   * optional. Coalesced to null.
+   */
+  summary?: string | null;
   createdByActor: string;
   createdByAgentId: string | null;
   collectionId: string | null;
@@ -86,6 +96,10 @@ export function rowToObjectDTO(row: ObjectRowAsText): ContentObjectDTO {
     ownerUserId: row.ownerUserId,
     // Present only on the list projection; null everywhere else (see ObjectRowAsText).
     ownerName: row.ownerName ?? null,
+    // Present only on the list projection; false everywhere else.
+    isFavorite: row.isFavorite ?? false,
+    // Present only on the list projection; null everywhere else.
+    summary: row.summary ?? null,
     createdByActor: row.createdByActor as "human" | "agent",
     createdByAgentId: row.createdByAgentId,
     collectionId: row.collectionId,

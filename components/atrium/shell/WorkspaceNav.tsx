@@ -12,6 +12,7 @@
 import { useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { CollectionTree } from "@/components/atrium/CollectionTree";
+import type { CollectionTreeNode } from "@/lib/content";
 import { AgentActivityFeed } from "./AgentActivityFeed";
 
 export function WorkspaceNav(): React.JSX.Element {
@@ -20,10 +21,16 @@ export function WorkspaceNav(): React.JSX.Element {
   const selectedCollectionId = searchParams.get("collection");
 
   const onSelectCollection = useCallback(
-    (id: string | null) => {
+    (node: CollectionTreeNode | null) => {
+      // A section now has a real page of its own (hero, subsections, contents)
+      // instead of being a query param that re-filtered the flat grid.
+      if (node) {
+        router.push(`/atrium/s/${node.slug}`);
+        return;
+      }
+      // "All content" clears any section scoping and returns to the library.
       const params = new URLSearchParams(searchParams);
-      if (id) params.set("collection", id);
-      else params.delete("collection");
+      params.delete("collection");
       const qs = params.toString();
       router.push(qs ? `/atrium?${qs}` : "/atrium");
     },

@@ -37,6 +37,8 @@ function row(
     inheritGrants: true,
     position: 0,
     archivedAt: null,
+    description: null,
+    landingObjectId: null,
     ...values,
   };
 }

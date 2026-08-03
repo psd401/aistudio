@@ -26,6 +26,7 @@ import {
   index,
   integer,
   pgTable,
+  text,
   timestamp,
   uuid,
   varchar,
@@ -57,6 +58,26 @@ export const contentCollections = pgTable(
       onDelete: "cascade",
     }),
     inheritGrants: boolean("inherit_grants").default(true).notNull(),
+    /**
+     * Section hero copy (migration 175). Plain text, shown under the section
+     * name on its landing page — what this section is for, in the author's own
+     * words. Null for the many sections that predate the landing page.
+     */
+    description: text("description"),
+    /**
+     * The optional "start here" object pinned to the top of this section's
+     * landing page (migration 175). `ON DELETE SET NULL` — deleting the pinned
+     * object unpins it and never touches the section. The service, not the FK,
+     * enforces that the target actually lives in this collection and is visible
+     * to the reader.
+     *
+     * Declared WITHOUT `.references()` on purpose: `content_objects` already
+     * imports this module for its `collection_id` FK, so pointing back at
+     * `contentObjects` here would make the two table modules circular. The FK
+     * itself is created in migration 175 — same approach `parent_id` takes for
+     * its self-reference.
+     */
+    landingObjectId: uuid("landing_object_id"),
     archivedAt: timestamp("archived_at"),
     navItemId: integer("nav_item_id").references(() => navigationItems.id),
     position: integer("position").default(0).notNull(),
@@ -67,6 +88,7 @@ export const contentCollections = pgTable(
     index("idx_collection_parent").on(t.parentId),
     index("idx_collection_owner").on(t.ownerUserId),
     index("idx_collection_archived").on(t.archivedAt),
+    index("idx_collection_landing_object").on(t.landingObjectId),
     check(
       "ck_collection_private_owner_policy",
       sql`${t.ownerUserId} IS NULL OR (${t.defaultVisibilityLevel} = 'private' AND ${t.inheritGrants} = false)`

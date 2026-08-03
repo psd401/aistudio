@@ -11,7 +11,7 @@
  * visibility widening (`setLevel`) lands with the publish service in Phase 5/7.
  */
 
-import { and, desc, eq, gte, ilike, ne, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, gte, ilike, inArray, ne, sql, type SQL } from "drizzle-orm";
 import {
   executeQuery,
   executeTransaction,
@@ -71,6 +71,64 @@ const MAX_QUERY_LENGTH = 200;
  */
 function escapeLikePattern(text: string): string {
   return text.replace(/[\\%_]/g, (m) => `\\${m}`);
+}
+
+/**
+ * The narrowing filters behind the library HOME views and the section landing
+ * page — `collectionIds`, `owner: "mine"`, `filed`, and `favorite`.
+ *
+ * All three are additive ANDs on top of `buildVisibilitySql`: they can only
+ * shrink the already-authorized set, never widen it, so none of them is a
+ * visibility rule and none needs mirroring in `canView`. A guest (no user id)
+ * owns nothing and has favorited nothing, so those two arms fail closed to
+ * `false` rather than silently matching everything.
+ *
+ * Extracted from `listVisible` purely to keep that method under the complexity
+ * lint; it is a pure function of (filter, principal).
+ */
+function buildNarrowingFilters(filter: ListFilter, principal: Principal): SQL[] {
+  const o = contentObjects;
+  const out: SQL[] = [];
+
+  if (filter.collectionIds) {
+    // An explicitly empty list means "no collections", which must match nothing.
+    // `inArray(col, [])` is a SQL error in some drivers and a silent no-op in
+    // others — neither is the intent, so handle it here.
+    out.push(
+      filter.collectionIds.length > 0
+        ? inArray(o.collectionId, filter.collectionIds)
+        : sql`false`
+    );
+  }
+
+  if (filter.owner === "mine") {
+    out.push(
+      principal.userId != null
+        ? sql`${o.ownerUserId} = ${principal.userId}`
+        : sql`false`
+    );
+  }
+
+  if (filter.filed === "unfiled") {
+    out.push(sql`${o.collectionId} IS NULL`);
+  } else if (filter.filed === "filed") {
+    out.push(sql`${o.collectionId} IS NOT NULL`);
+  }
+
+  if (filter.favorite) {
+    // A correlated EXISTS, deliberately not a join: a join would change the row
+    // shape and put LIMIT/OFFSET at the mercy of the join's cardinality.
+    out.push(
+      principal.userId != null
+        ? sql`EXISTS (
+            SELECT 1 FROM content_user_favorites fav
+            WHERE fav.object_id = ${o.id} AND fav.user_id = ${principal.userId}
+          )`
+        : sql`false`
+    );
+  }
+
+  return out;
 }
 
 /** Upper bound on a grant value, mirroring the `grant_value varchar(255)` column. */
@@ -828,6 +886,7 @@ export const visibilityService = {
         filters.push(sql`false`);
       }
     }
+    filters.push(...buildNarrowingFilters(filter, principal));
     if (filter.tag) {
       // Bound parameter (injection-safe); cap length so an oversized tag string
       // cannot be pushed to the driver on every list call. CASE-INSENSITIVE
@@ -880,9 +939,31 @@ export const visibilityService = {
     // object, so the domain-qualified email stays un-broadcast), else null.
     // Presentation metadata only (the library cards show "who owns this"); owner
     // permission is always keyed on `ownerUserId`, never this string.
+    // Whether the CALLING user has starred each row, so the library cards can
+    // render the star filled without a second round-trip per card. A correlated
+    // EXISTS rather than a join: a join would change the row shape and put the
+    // LIMIT/OFFSET arithmetic at the mercy of the join's cardinality. Always
+    // false for a guest, who has no favorites.
+    const favoriteExpr =
+      principal.userId != null
+        ? sql<boolean>`EXISTS (
+            SELECT 1 FROM content_user_favorites fav
+            WHERE fav.object_id = ${o.id} AND fav.user_id = ${principal.userId}
+          )`
+        : sql<boolean>`false`;
+
     const listSelectFields = {
       ...objectSelectFields,
       ownerName: sql<string | null>`coalesce(nullif(trim(concat_ws(' ', ${users.firstName}, ${users.lastName})), ''), split_part(${users.email}, '@', 1))`,
+      isFavorite: favoriteExpr,
+      // The head version's summary, for the one-line excerpt on library cards.
+      // A correlated subquery rather than another LEFT JOIN: the join to `users`
+      // is already here, and a second join would multiply rows if an object ever
+      // had two rows matching its current_version_id.
+      summary: sql<string | null>`(
+        SELECT v.summary FROM content_versions v
+        WHERE v.id = ${o.currentVersionId}
+      )`,
     };
 
     const rows = await executeQuery(

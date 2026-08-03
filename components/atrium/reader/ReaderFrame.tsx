@@ -62,6 +62,19 @@ export interface ReaderFrameProps {
    * the title/meta/edit chrome into a top bar above the full-width stage.
    */
   fullBleed?: boolean;
+  /**
+   * Which surface this reader is rendering on.
+   *
+   * `"app"` (default) is the signed-in intranet reader (`/c/[slug]`): it shows
+   * the "<Org> Intranet" nav and the view-only explainer.
+   *
+   * `"public"` is the anonymous reader (`/p/[slug]`). It drops BOTH, because
+   * neither is true or useful outside the district: the nav advertises an
+   * intranet the reader cannot enter, and "editing is limited to page owners"
+   * is internal-facing. The document sheet and the provenance footer stay —
+   * a public page still needs a readable measure and attribution.
+   */
+  surface?: "app" | "public";
 }
 
 /** Format a publish timestamp as e.g. "Oct 1, 2026", or null when absent/invalid. */
@@ -227,16 +240,20 @@ export function ReaderFrame({
   children,
   footer,
   fullBleed = false,
+  surface = "app",
 }: ReaderFrameProps): React.JSX.Element {
+  const isPublic = surface === "public";
   const viewOnly = editHref === null;
   const publishedLabel = formatPublished(publishedAt);
   const metaBits = [
     publishedLabel ? `Published ${publishedLabel}` : null,
     collectionName?.trim() || null,
   ].filter((bit): bit is string => bit != null);
+  // The public surface never shows the view-only explainer (see `surface`).
+  const showViewOnlyNotice = viewOnly && !isPublic;
   // The rail carries the TOC and/or the view-only notice; render it only when it
   // would have content (an editor viewing a heading-less doc gets no empty rail).
-  const showRail = headings.length > 0 || viewOnly;
+  const showRail = headings.length > 0 || showViewOnlyNotice;
 
   // Artifact readers render full-bleed (see FullBleedReaderFrame); documents keep
   // the 720px reading sheet below.
@@ -259,13 +276,13 @@ export function ReaderFrame({
 
   return (
     <div className={`meridian ${fontMeridian.variable} mer-reader`}>
-      <AtriumReaderNav authenticated={authenticated} />
+      {!isPublic && <AtriumReaderNav authenticated={authenticated} />}
 
       <div className="mer-reader-body">
         {showRail && (
           <aside className="mer-reader-rail" aria-label="Page contents">
             <ReaderToc headings={headings} />
-            {viewOnly && (
+            {showViewOnlyNotice && (
               <div className="mer-reader-viewonly" data-testid="reader-view-only">
                 <span className="mer-reader-viewonly-strong">👁 View only.</span>{" "}
                 You can read and search; editing is limited to page owners.

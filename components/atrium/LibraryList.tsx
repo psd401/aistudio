@@ -30,6 +30,7 @@ import { timeAgo } from "@/lib/atrium/relative-time";
 import type { ContentObjectDTO } from "@/lib/content";
 import { ArtifactThumbnail } from "./ArtifactThumbnail";
 import { TagPills } from "./TagPills";
+import { FavoriteStar } from "./FavoriteStar";
 
 /** Meridian status pill class for a content object's lifecycle status. */
 function statusBadge(status: ContentObjectDTO["status"]): {
@@ -46,6 +47,23 @@ function statusBadge(status: ContentObjectDTO["status"]): {
   }
 }
 
+/**
+ * Where a card click goes.
+ *
+ * PUBLISHED content opens its READER (`/c/[slug]`), not the editor. Most people
+ * in the district are readers, and dropping every one of them into an editing
+ * surface — cursor in the title, toolbar overhead, an accidental keystroke away
+ * from changing a published page — was the single most disorienting thing about
+ * the library. The reader has an Edit button for the people who need it.
+ *
+ * DRAFTS still open the editor: an unfinished page has nothing to read, and the
+ * person looking at a draft is almost always the person writing it. Archived
+ * content also opens the editor, which is where restore/delete live.
+ */
+function cardHref(it: ContentObjectDTO): string {
+  return it.status === "published" ? `/c/${it.slug}` : `/atrium/${it.id}/edit`;
+}
+
 /** The meta line under a card title (author + edited time). */
 function cardMeta(it: ContentObjectDTO): string {
   const who = it.createdByActor === "agent" ? "Agent" : "Team";
@@ -59,7 +77,7 @@ function DocCard({ it }: { it: ContentObjectDTO }): React.JSX.Element {
   const isArchived = it.status === "archived";
   return (
     <Link
-      href={`/atrium/${it.id}/edit`}
+      href={cardHref(it)}
       className={cn(
         "mer-lib-card",
         isAgent && "mer-card-agent",
@@ -79,6 +97,10 @@ function DocCard({ it }: { it: ContentObjectDTO }): React.JSX.Element {
         <span className={cn("mer-badge", status.cls)}>{status.label}</span>
       </div>
       <p className="mer-lib-card-title">{it.title}</p>
+      {/* The head version's summary. Doc cards were a title and a timestamp in
+          a card sized for a thumbnail, so most of one was empty — and two docs
+          with similar titles were indistinguishable without opening both. */}
+      {it.summary && <p className="mer-lib-card-excerpt">{it.summary}</p>}
       <p className="mer-lib-card-meta">
         {isAgent && (
           <Sparkles
@@ -109,7 +131,7 @@ function ArtifactCard({
   const isArchived = it.status === "archived";
   return (
     <Link
-      href={`/atrium/${it.id}/edit`}
+      href={cardHref(it)}
       className={cn(
         "mer-lib-card mer-lib-card-artifact",
         isAgent && "mer-card-agent",
@@ -159,11 +181,13 @@ function SelectableCard({
   it,
   selected,
   onToggle,
+  onFavoriteChange,
   children,
 }: {
   it: ContentObjectDTO;
   selected: boolean;
   onToggle: (id: string) => void;
+  onFavoriteChange?: (id: string, isFavorite: boolean) => void;
   children: React.ReactNode;
 }): React.JSX.Element {
   return (
@@ -180,7 +204,45 @@ function SelectableCard({
         aria-label={`Select ${it.title}`}
         data-testid={`select-${it.id}`}
       />
+      {/* Same sibling-of-the-link rule as the checkbox above. */}
+      <FavoriteStar
+        objectId={it.id}
+        title={it.title}
+        initial={it.isFavorite}
+        onChange={onFavoriteChange}
+      />
       {children}
+    </div>
+  );
+}
+
+/**
+ * One content card by kind, with no selection chrome — the shape the library
+ * HOME bands render (they are read surfaces; bulk actions live in the full
+ * grid). Exported so the bands do not reimplement card markup and drift from it.
+ */
+export function ContentCard({
+  it,
+  sandboxSrc,
+  onFavoriteChange,
+}: {
+  it: ContentObjectDTO;
+  sandboxSrc: string | null;
+  onFavoriteChange?: (id: string, isFavorite: boolean) => void;
+}): React.JSX.Element {
+  return (
+    <div className="mer-lib-card-wrap" data-testid="library-card-wrap">
+      <FavoriteStar
+        objectId={it.id}
+        title={it.title}
+        initial={it.isFavorite}
+        onChange={onFavoriteChange}
+      />
+      {it.kind === "artifact" ? (
+        <ArtifactCard it={it} sandboxSrc={sandboxSrc} />
+      ) : (
+        <DocCard it={it} />
+      )}
     </div>
   );
 }
@@ -213,9 +275,9 @@ function CreateCard({ onCreate }: { onCreate: () => void }): React.JSX.Element {
   return (
     <button type="button" onClick={onCreate} className="mer-create-card">
       <Sparkles className="h-5 w-5" aria-hidden="true" />
-      <span className="mer-create-card-title">Create with the agent</span>
+      <span className="mer-create-card-title">New interactive page</span>
       <span className="mer-create-card-sub">
-        Describe it — the agent drafts a doc or artifact.
+        Describe it and the agent builds it — or start from a blank page.
       </span>
     </button>
   );

@@ -460,6 +460,34 @@
   border: 0;
   background: #fff;
 }
+/* Empty draft: the artifact exists but nothing has been snapshotted yet. Reads
+   as a deliberate state rather than the blank iframe it replaces. */
+.atrium-artifact-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 32px 24px;
+  text-align: center;
+  border: 1px dashed var(--mer-border, #e4e6e8);
+  border-radius: var(--mer-r-card, 15px);
+  background: var(--mer-canvas-sunken, #eceef0);
+}
+.atrium-artifact-empty-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--mer-ink, #1e4257);
+}
+.atrium-artifact-empty-body {
+  margin: 0;
+  max-width: 34rem;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--mer-ink-muted, #8394a0);
+}
+
 /* Unavailable placeholder (existence mask) + loading state — quiet, no content. */
 .atrium-embed-unavailable,
 .atrium-embed-loading {

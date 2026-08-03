@@ -32,7 +32,12 @@ export function ArtifactAskAgentCard({
 
   const open = (text: string): void => {
     const base = `/nexus?workspace=${encodeURIComponent(artifactId)}`;
-    const href = text.trim() ? `${base}&prompt=${encodeURIComponent(text.trim())}` : base;
+    // `draft` is the ONLY param the Nexus composer prefills from — see
+    // app/(protected)/nexus/_components/prompt-auto-loader.tsx, which reads
+    // `draft` and `promptId` and nothing else. This used to send `prompt`,
+    // which no code path reads, so every chip and every typed change silently
+    // landed in an empty composer.
+    const href = text.trim() ? `${base}&draft=${encodeURIComponent(text.trim())}` : base;
     router.push(href);
   };
 
@@ -45,8 +50,8 @@ export function ArtifactAskAgentCard({
         Ask the agent
       </div>
       <p className="mer-artifact-ask-hint">
-        Describe a change — the agent rebuilds the artifact. You never edit the HTML
-        by hand.
+        Describe a change and the agent rebuilds the page — or edit the HTML
+        yourself in the Code tab.
       </p>
       <div className="mer-artifact-ask-examples">
         {EXAMPLE_PROMPTS.map((ex) => (

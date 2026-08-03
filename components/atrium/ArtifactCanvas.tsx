@@ -254,6 +254,48 @@ export interface ArtifactCanvasProps {
   sandboxSrc?: string | null;
 }
 
+/**
+ * The standing hint under the canvas. Both routes are real — the agent rebuilds
+ * the page from a description, and the Code tab edits it by hand — so this must
+ * stay in step with the "Ask the agent" rail, which used to claim the opposite
+ * ("You never edit the HTML by hand").
+ */
+function CanvasHint(): React.JSX.Element {
+  return (
+    <p className="atrium-artifact-hint">
+      Tweak by asking in chat — or edit the code directly.
+    </p>
+  );
+}
+
+/**
+ * Whether the canvas loaded fine but has no version to show: an artifact created
+ * without a body has `currentVersionId === null`, and `getArtifactCodeAction`
+ * answers with `versionId: null` and empty code. Distinct from the "loading" and
+ * "error" load states, both of which are tracked separately.
+ */
+function isEmptyDraft(selectedVersionId: string | null, code: string): boolean {
+  return selectedVersionId === null && code === "";
+}
+
+/**
+ * An artifact with no snapshotted version yet (created without a body).
+ * Previewing "" would mount a blank iframe that reads as a broken page, so say
+ * what is actually true and point at the two ways forward.
+ */
+function EmptyDraftPanel({ canEdit }: { canEdit: boolean }): React.JSX.Element {
+  return (
+    <div className="atrium-artifact-empty" style={{ minHeight: "75vh" }}>
+      <p className="atrium-artifact-empty-title">Nothing here yet</p>
+      <p className="atrium-artifact-empty-body">
+        {canEdit
+          ? "Ask the agent in chat to build this page, or switch to the Code tab and write it yourself."
+          : "This page has no content yet."}
+      </p>
+    </div>
+  );
+}
+
 export function ArtifactCanvas({ idOrSlug, canEdit = false, sandboxSrc = null }: ArtifactCanvasProps) {
   const [tab, setTab] = useState<Tab>("preview");
   const [state, setState] = useState<LoadState>("loading");
@@ -479,6 +521,8 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false, sandboxSrc = null }:
         // minHeight 75vh matches the loaded preview (.atrium-artifact-preview) so
         // the canvas does not jump when the artifact body arrives.
         <div style={{ minHeight: "75vh" }} aria-busy="true" />
+      ) : isEmptyDraft(selectedVersionId, code) && tab === "preview" ? (
+        <EmptyDraftPanel canEdit={canEdit} />
       ) : tab === "preview" ? (
         // `key={selectedVersionId}` is the intentional version-switch mechanism:
         // it remounts <ArtifactSandbox> on every version change so each version
@@ -497,9 +541,7 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false, sandboxSrc = null }:
         />
       )}
 
-      <p className="atrium-artifact-hint">
-        Tweak by asking in chat — or edit the code directly.
-      </p>
+      <CanvasHint />
     </div>
   );
 }

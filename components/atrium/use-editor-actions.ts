@@ -58,7 +58,8 @@ export interface EditorActions {
    */
   messageUrl: string | null;
   /**
-   * Increments after every completed publish/unpublish. `PublishMenu` watches it
+   * Increments after every completed publish/unpublish. The Share dialog
+   * watches its own equivalent; kept here for the hook's other consumers
    * to re-read live publication state instead of showing what it loaded on mount.
    */
   actionSeq: number;
@@ -161,7 +162,7 @@ export function useEditorActions({
         setMessageUrl(
           outcome.status === "success" ? (outcome.url ?? null) : null,
         );
-        // Publication state changed (or was attempted) — let PublishMenu re-read
+        // Publication state changed (or was attempted) — let watchers re-read
         // it. Bumped even on failure: a partial/idempotent server outcome must
         // not leave the menu asserting stale "Live" badges.
         if (publishy) setActionSeq((n) => n + 1);
@@ -203,7 +204,7 @@ export function useEditorActions({
             // they are only meaningful for `level: "group"`, and the widen targets
             // are always `internal` or `public`.
             // `widenOnly` marks this an OFFER: the server applies it only if it
-            // actually broadens the LOCKED current audience. PublishMenu already
+            // actually broadens the LOCKED current audience. The Share dialog already
             // re-reads visibility before confirming, but a re-read is not a lock —
             // this closes the remaining window in the one place that holds one.
             ...(widenTo

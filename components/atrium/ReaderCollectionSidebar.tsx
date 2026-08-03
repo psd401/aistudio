@@ -18,6 +18,7 @@
 import { useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { CollectionTree } from "@/components/atrium/CollectionTree";
+import type { CollectionTreeNode } from "@/lib/content";
 
 export interface ReaderCollectionSidebarProps {
   /** The collection the object being read belongs to (renders selected). */
@@ -30,11 +31,11 @@ export function ReaderCollectionSidebar({
   const router = useRouter();
 
   const handleSelect = useCallback(
-    (selected: string | null) => {
+    (selected: CollectionTreeNode | null) => {
+      // Sections route to their own landing page (hero + subsections +
+      // contents); "All content" returns to the library home.
       router.push(
-        selected
-          ? `/atrium?collection=${encodeURIComponent(selected)}`
-          : "/atrium"
+        selected ? `/atrium/s/${encodeURIComponent(selected.slug)}` : "/atrium"
       );
     },
     [router]

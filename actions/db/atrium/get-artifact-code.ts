@@ -32,8 +32,16 @@ import { getOptionalRequester } from "./requester";
 
 export interface ArtifactCodeResult {
   objectId: string;
-  versionId: string;
-  versionNumber: number;
+  /**
+   * Null ONLY for an artifact that has no versions at all (`currentVersionId`
+   * is null) and no explicit version was requested. An artifact could reach
+   * that state when it was created without a body — see
+   * `lib/content/artifact-starter.ts`. Callers must treat null as "empty draft,
+   * nothing snapshotted yet", not as an error: `code` is `""` in that case.
+   * An explicit `versionId` that cannot be resolved still throws NotFound.
+   */
+  versionId: string | null;
+  versionNumber: number | null;
   /**
    * The artifact body format. Will be "html" or "jsx" for artifacts (never
    * "markdown" — those are rejected before this result is constructed). Typed as
@@ -76,7 +84,29 @@ export async function getArtifactCodeAction(
       ? await versionService.getById(obj.id, versionId)
       : obj.version;
     if (!version) {
-      throw ErrorFactories.dbRecordNotFound("content_versions", versionId ?? "(head)");
+      if (versionId) {
+        // An explicit version that does not resolve (absent, or belonging to a
+        // different object) is a genuine NotFound — never leak that distinction.
+        throw ErrorFactories.dbRecordNotFound("content_versions", versionId);
+      }
+      // No head: the artifact exists but nothing has been snapshotted yet.
+      // That is an empty draft, not a failure — returning an error here is what
+      // made a freshly created artifact render as broken. Hand back empty code
+      // so the canvas can offer an editable starting point.
+      timer({ status: "success" });
+      log.info("Artifact has no versions yet; returning empty draft", {
+        objectId: obj.id,
+      });
+      return createSuccess(
+        {
+          objectId: obj.id,
+          versionId: null,
+          versionNumber: null,
+          bodyFormat: "html" as BodyFormat,
+          code: "",
+        },
+        "Artifact has no content yet"
+      );
     }
     if (version.bodyFormat === "markdown") {
       throw ErrorFactories.validationFailed([
