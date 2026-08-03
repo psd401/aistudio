@@ -155,9 +155,8 @@ export class FrontendStackEcs extends cdk.Stack {
       // OIDC-only signing key set (#1285, created and bootstrapped above)
       oidcSigningJwksSecretArn: oidcSigningJwksSecret.secretArn,
       // K-12 Content Safety: Guardrails resources from GuardrailsStack
-      // These enable precise IAM scoping and DynamoDB access for PII tokenization
+      // These enable precise IAM scoping for Bedrock and SNS.
       guardrailArn: cdk.Fn.importValue(`${environment}-GuardrailArn`),
-      piiTokenTableArn: cdk.Fn.importValue(`${environment}-PIITokenTableArn`),
       violationTopicArn: cdk.Fn.importValue(`${environment}-ViolationTopicArn`),
     });
     this.ecsService.node.addDependency(oidcKeyBootstrapResource);

@@ -2,7 +2,6 @@ import type { UIMessage } from "ai";
 import { runRequiredSecurityScan } from "@/lib/security/required-security-scan";
 import { ContentSafetyBlockedError } from "@/lib/streaming/types";
 import type { ContentSafetyResult } from "@/lib/safety/content-safety-service";
-import type { TokenMapping } from "@/lib/safety/types";
 
 export const MAX_INLINE_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
@@ -17,7 +16,6 @@ interface MessageLike {
 
 interface InlineAttachmentSafetyProcessor {
   isEnabled(): boolean;
-  isPiiTokenizationEnabled(): boolean;
   processInput(content: string, sessionId: string): Promise<ContentSafetyResult>;
 }
 
@@ -30,7 +28,6 @@ interface CanonicalizationResult<T extends MessageLike> {
 export interface InlineAttachmentSafetyResult {
   messages: UIMessage[];
   processedValues: string[];
-  tokens: TokenMapping[];
 }
 
 export class NexusInlineAttachmentValidationError extends Error {
@@ -306,7 +303,7 @@ function replaceAtLocation(
 }
 
 /**
- * Apply content safety and tokenization to each canonical value separately.
+ * Apply content safety to each canonical value separately.
  * The exact `processedContent` returned by the safety boundary becomes the
  * canonical value used by all downstream copies.
  */
@@ -324,12 +321,10 @@ export async function scanCanonicalInlineAttachments(input: {
     return {
       messages: input.messages,
       processedValues: locations.map(({ text }) => text),
-      tokens: [],
     };
   }
   let messages = input.messages;
   const processedValues: string[] = [];
-  const tokens: TokenMapping[] = [];
   let totalProcessedBytes = 0;
   for (const location of locations) {
     const result = await runRequiredSecurityScan(
@@ -362,9 +357,8 @@ export async function scanCanonicalInlineAttachments(input: {
       result.processedContent
     );
     processedValues.push(result.processedContent);
-    tokens.push(...(result.tokens ?? []));
   }
-  return { messages, processedValues, tokens };
+  return { messages, processedValues };
 }
 
 /**

@@ -265,7 +265,7 @@ There is no way to pin a specific classifier version. The only mitigation is det
 Detection events include an HMAC-SHA256 content hash (16 hex chars) for clustering duplicate triggers across requests. For deeper inspection during time-boxed tuning sprints:
 
 - Set `GUARDRAIL_LOG_SNIPPET=true` to log the first/last 30 chars of detected content
-- **Warning**: Snippets bypass PII tokenization — disable immediately after tuning
+- **Warning**: Snippets contain unmodified content and are not zero-data-retention inference traffic — disable immediately after tuning
 - In production (`NODE_ENV=production`), an error-level log is emitted on startup when snippet logging is active
 
 ## Related Issues

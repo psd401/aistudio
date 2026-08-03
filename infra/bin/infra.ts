@@ -208,7 +208,7 @@ const devAtriumEventsStack = new AtriumEventsStack(app, 'AIStudio-AtriumEventsSt
 cdk.Tags.of(devAtriumEventsStack).add('Environment', 'Dev');
 for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(devAtriumEventsStack).add(key, value);
 
-// K-12 Content Safety: Guardrails Stack - Bedrock Guardrails + PII tokenization
+// K-12 Content Safety: Bedrock Guardrails + detect-only Comprehend PII gates
 const guardrailNotificationEmail = app.node.tryGetContext('guardrailNotificationEmail') || alertEmail;
 const devGuardrailsStack = new GuardrailsStack(app, 'AIStudio-GuardrailsStack-Dev', {
   environment: 'dev',
@@ -345,7 +345,7 @@ const prodAtriumEventsStack = new AtriumEventsStack(app, 'AIStudio-AtriumEventsS
 cdk.Tags.of(prodAtriumEventsStack).add('Environment', 'Prod');
 for (const [key, value] of Object.entries(standardTags)) cdk.Tags.of(prodAtriumEventsStack).add(key, value);
 
-// K-12 Content Safety: Guardrails Stack - Bedrock Guardrails + PII tokenization
+// K-12 Content Safety: Bedrock Guardrails + detect-only Comprehend PII gates
 const prodGuardrailsStack = new GuardrailsStack(app, 'AIStudio-GuardrailsStack-Prod', {
   environment: 'prod',
   notificationEmail: guardrailNotificationEmail,

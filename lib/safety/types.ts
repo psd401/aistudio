@@ -1,7 +1,7 @@
 /**
  * Amazon Bedrock Guardrails - Type Definitions
  *
- * Types for K-12 content safety filtering and PII tokenization services.
+ * Types for K-12 content safety filtering and detect-only PII services.
  */
 
 /**
@@ -10,16 +10,12 @@
 export interface SafetyCheckResult {
   /** Whether the content is allowed */
   allowed: boolean;
-  /** Processed content (may be tokenized) */
+  /** Content after safety evaluation (byte-identical when allowed) */
   processedContent: string;
   /** Reason for blocking (if blocked) */
   blockedReason?: string;
   /** User-friendly message for blocked content */
   blockedMessage?: string;
-  /** Whether PII was detected and tokenized */
-  hasPII?: boolean;
-  /** Token mappings (if PII was tokenized) */
-  tokens?: TokenMapping[];
   /** Categories that triggered blocking */
   blockedCategories?: string[];
   /**
@@ -67,34 +63,6 @@ export interface PIIEntity {
 }
 
 /**
- * Token mapping for PII replacement
- */
-export interface TokenMapping {
-  /** Unique token identifier */
-  token: string;
-  /** Original PII value (encrypted in storage) */
-  original: string;
-  /** Type of PII */
-  type: string;
-  /** Placeholder used in text */
-  placeholder: string;
-}
-
-/**
- * Result of PII tokenization
- */
-export interface TokenizationResult {
-  /** Text with PII replaced by tokens */
-  tokenizedText: string;
-  /** Token mappings for de-tokenization */
-  tokens: TokenMapping[];
-  /** Whether any PII was detected */
-  hasPII: boolean;
-  /** Whether PII detection and any required token storage completed successfully */
-  scanCompleted: boolean;
-}
-
-/**
  * Guardrail violation event for notifications
  */
 export interface GuardrailViolation {
@@ -121,24 +89,6 @@ export interface GuardrailViolation {
 }
 
 /**
- * DynamoDB item for PII token storage
- */
-export interface PIITokenDynamoDBItem {
-  /** Partition key: token UUID */
-  token: string;
-  /** Sort key: session ID for isolation */
-  sessionId: string;
-  /** Original PII value (encrypted at rest) */
-  original: string;
-  /** PII type */
-  type: string;
-  /** Creation timestamp */
-  createdAt: number;
-  /** TTL for automatic expiration */
-  ttl: number;
-}
-
-/**
  * Configuration for guardrails service
  */
 export interface GuardrailsConfig {
@@ -148,14 +98,8 @@ export interface GuardrailsConfig {
   guardrailId: string;
   /** Bedrock guardrail version */
   guardrailVersion: string;
-  /** DynamoDB table name for PII tokens */
-  piiTokenTableName?: string;
   /** SNS topic ARN for violation notifications */
   violationTopicArn?: string;
-  /** Token TTL in seconds (default: 3600 = 1 hour) */
-  tokenTtlSeconds?: number;
-  /** Enable PII tokenization (default: true) */
-  enablePiiTokenization?: boolean;
   /** Enable violation notifications (default: true) */
   enableViolationNotifications?: boolean;
   /** Secret key for HMAC hashing of user IDs in violation reports */
@@ -262,7 +206,7 @@ export type ComprehendPIIType =
   | 'PASSWORD';
 
 /**
- * PII types to tokenize for K-12 safety
+ * PII types to detect for K-12 safety gates
  * (Subset of Comprehend types relevant for student data protection)
  */
 export const K12_PII_TYPES: ComprehendPIIType[] = [
@@ -279,7 +223,7 @@ export const K12_PII_TYPES: ComprehendPIIType[] = [
  * The subset of K12_PII_TYPES where Comprehend commonly produces false positives
  * on technical strings (hardware model numbers, firmware versions, etc.).
  * PII_MIN_CONFIDENCE_SCORE is applied only to these types; high-precision types
- * (EMAIL, PHONE, SSN, ADDRESS) are always tokenized when detected as K-12 PII,
+ * (EMAIL, PHONE, SSN, ADDRESS) are always retained when detected as K-12 PII,
  * regardless of the Comprehend score.
  */
 export const CONFIDENCE_GATED_PII_TYPES: ReadonlySet<ComprehendPIIType> = new Set([
@@ -289,7 +233,7 @@ export const CONFIDENCE_GATED_PII_TYPES: ReadonlySet<ComprehendPIIType> = new Se
 ]);
 
 /**
- * Minimum Comprehend confidence score required to tokenize a detected entity.
+ * Minimum Comprehend confidence score required to retain a detected entity.
  *
  * Comprehend's ML model can misclassify alphanumeric hardware identifiers
  * (e.g., "AP-505", "JW177A") as NAME, and numeric version/revision strings
@@ -302,7 +246,7 @@ export const CONFIDENCE_GATED_PII_TYPES: ReadonlySet<ComprehendPIIType> = new Se
  * This allows threshold tuning without redeployment if AWS retrains the
  * Comprehend model and score distributions shift.
  *
- * See: GitHub issue #972 — PII tokenizer false-positives on hardware part numbers.
+ * See: GitHub issue #972 — PII detector false positives on hardware part numbers.
  */
 const envScore = Number.parseFloat(process.env.PII_MIN_CONFIDENCE_SCORE ?? '');
 export const PII_MIN_CONFIDENCE_SCORE: number =
@@ -317,7 +261,7 @@ export const PII_MIN_CONFIDENCE_SCORE: number =
  * Comprehend confidence anywhere from 0.65 to ~0.93, while real calendar
  * dates and birthdates (FERPA-sensitive) consistently score above 0.97.
  * A flat 0.90 floor would let a 0.91-scored firmware string through as
- * a false-positive PII tokenization. Raising the DATE_TIME floor to
+ * a false-positive PII detection. Raising the DATE_TIME floor to
  * 0.97 eliminates that band without rejecting any real dates.
  *
  * Types in CONFIDENCE_GATED_PII_TYPES not listed here fall back to

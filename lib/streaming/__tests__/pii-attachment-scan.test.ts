@@ -30,8 +30,7 @@ function allowedResult(processedContent: string) {
     processedContent,
     requestId: "request-1",
     processingTimeMs: 1,
-    contentModified: true,
-    tokens: [],
+    contentModified: false,
   }
 }
 
@@ -178,7 +177,6 @@ function defineNexusInlineAttachmentBoundarySuite1Part2() {it("rejects aggregate
         sessionId: "session-1",
         safetyProcessor: {
           isEnabled: () => true,
-          isPiiTokenizationEnabled: () => true,
           processInput,
         },
         onFailure: jest.fn(),
@@ -186,39 +184,28 @@ function defineNexusInlineAttachmentBoundarySuite1Part2() {it("rejects aggregate
     ).rejects.toBeInstanceOf(ContentSafetyBlockedError)
   })
 
-  it("uses exact processedContent for every downstream representation", async () => {
-    const token = {
-      token: "token-id",
-      original: "Ada",
-      type: "PERSON",
-      placeholder: "[PII:token-id]",
-    }
-    const processInput = jest.fn().mockResolvedValue({
-      ...allowedResult("hello [PII:token-id]"),
-      tokens: [token],
-    })
+  it("uses byte-identical allowed content for every downstream representation", async () => {
+    const processInput = jest.fn().mockResolvedValue(allowedResult("hello Ada"))
     const result = await scanCanonicalInlineAttachments({
       messages: [message([{ type: "document", data: "hello Ada" }])],
       sessionId: "session-1",
       safetyProcessor: {
         isEnabled: () => true,
-        isPiiTokenizationEnabled: () => true,
         processInput,
       },
       onFailure: jest.fn(),
     })
     expect(result.messages[0].parts?.[0]).toMatchObject({
-      data: "hello [PII:token-id]",
+      data: "hello Ada",
     })
-    expect(result.processedValues).toEqual(["hello [PII:token-id]"])
-    expect(result.tokens).toEqual([token])
+    expect(result.processedValues).toEqual(["hello Ada"])
 
     const persistence = applyProcessedInlineAttachmentValues(
       [message([{ type: "document", data: "hello Ada" }])],
       result.processedValues
     )
     expect(persistence[0].parts?.[0]).toMatchObject({
-      data: "hello [PII:token-id]",
+      data: "hello Ada",
     })
   })
 
@@ -239,7 +226,6 @@ function defineNexusInlineAttachmentBoundarySuite1Part3() {it("removes raw legac
       sessionId: "session-1",
       safetyProcessor: {
         isEnabled: () => true,
-        isPiiTokenizationEnabled: () => true,
         processInput: jest.fn().mockResolvedValue(
           allowedResult("processed safe value")
         ),
@@ -261,14 +247,13 @@ function defineNexusInlineAttachmentBoundarySuite1Part3() {it("removes raw legac
     expect(JSON.stringify(downstream)).not.toContain("raw legacy secret")
   })
 
-  it("skips scanning only when all configured content safety is disabled", async () => {
+  it("skips scanning when content safety is disabled", async () => {
     const processInput = jest.fn()
     const result = await scanCanonicalInlineAttachments({
       messages: [message([{ type: "document", data: "raw" }])],
       sessionId: "session-1",
       safetyProcessor: {
         isEnabled: () => false,
-        isPiiTokenizationEnabled: () => false,
         processInput,
       },
       onFailure: jest.fn(),
@@ -277,14 +262,13 @@ function defineNexusInlineAttachmentBoundarySuite1Part3() {it("removes raw legac
     expect(result.processedValues).toEqual(["raw"])
   })
 
-  it("enforces a guardrail block when PII tokenization is disabled", async () => {
+  it("enforces a guardrail block", async () => {
     await expect(
       scanCanonicalInlineAttachments({
         messages: [message([{ type: "document", data: "unsafe" }])],
         sessionId: "session-1",
         safetyProcessor: {
           isEnabled: () => true,
-          isPiiTokenizationEnabled: () => false,
           processInput: jest.fn().mockResolvedValue({
             ...allowedResult("unsafe"),
             allowed: false,
@@ -310,7 +294,6 @@ function defineNexusInlineAttachmentBoundarySuite1Part3() {it("removes raw legac
         sessionId: "session-1",
         safetyProcessor: {
           isEnabled: () => true,
-          isPiiTokenizationEnabled: () => true,
           processInput: jest.fn().mockResolvedValue(allowedResult(expanded)),
         },
         onFailure: jest.fn(),

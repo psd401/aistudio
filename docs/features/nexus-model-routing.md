@@ -5,7 +5,7 @@ Nexus defaults to **Standard** mode. Users see one Nexus experience instead of a
 ## Request flow
 
 1. Authenticate the user before classification.
-2. Apply the existing K-12 input guardrail and PII tokenization boundary before classifier traffic.
+2. Apply the existing K-12 input guardrail before classifier traffic without rewriting allowed request text.
 3. Apply deterministic capability rules for image generation, PSD-data, web search/current information, and common instructional requests.
 4. Send ambiguous requests to Amazon Nova Micro on Bedrock for a provider-neutral `intent`, `tier`, `confidence`, and reason codes.
 5. Resolve an accessible, active Nexus model from the configured ordered candidates. If none is configured, use `providerMetadata.nexusRouterTier` or model-name conventions. If no tier match is available, use the closest tier in the requested family. Auto may finally use the existing client model as a safe fallback; an explicit Advanced family never silently crosses into another family.

@@ -77,8 +77,6 @@ export class BedrockGuardrailsService {
       guardrailId: '',
       guardrailVersion: 'DRAFT',
       enableViolationNotifications: false,
-      enablePiiTokenization: false,
-      tokenTtlSeconds: 3600,
     };
   }
 
@@ -97,8 +95,6 @@ export class BedrockGuardrailsService {
       guardrailVersion: BedrockGuardrailsService.firstSet(config?.guardrailVersion, process.env.BEDROCK_GUARDRAIL_VERSION, 'DRAFT'),
       violationTopicArn: BedrockGuardrailsService.firstSet(config?.violationTopicArn, process.env.GUARDRAIL_VIOLATION_TOPIC_ARN) || undefined,
       enableViolationNotifications: config?.enableViolationNotifications ?? true,
-      enablePiiTokenization: config?.enablePiiTokenization ?? true,
-      tokenTtlSeconds: config?.tokenTtlSeconds ?? 3600,
       hashSecret: config?.hashSecret,
     };
   }
@@ -139,8 +135,8 @@ export class BedrockGuardrailsService {
     }
 
     // Issue #929: Warn when content snippet logging is active — snippets contain the
-    // first/last 30 chars of user content and bypass PII tokenization. This should
-    // only be enabled during time-boxed tuning sprints, never left on in production.
+    // first/last 30 chars of unmodified user content. This should only be enabled
+    // during time-boxed tuning sprints, never left on in production.
     if (process.env.GUARDRAIL_LOG_SNIPPET === 'true') {
       const isProduction = process.env.NODE_ENV === 'production';
       const level = isProduction ? 'error' : 'warn';
@@ -777,9 +773,7 @@ export class BedrockGuardrailsService {
       region: this.config.region,
       guardrailId: this.config.guardrailId,
       guardrailVersion: this.config.guardrailVersion,
-      enablePiiTokenization: this.config.enablePiiTokenization,
       enableViolationNotifications: this.config.enableViolationNotifications,
-      tokenTtlSeconds: this.config.tokenTtlSeconds,
     };
   }
 }

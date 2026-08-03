@@ -65,8 +65,11 @@ describe("Nexus automatic memory onFinish integration", () => {
         return {
           allowed: true,
           processedContent: content,
-          piiScanCompleted: true,
         }
+      }),
+      detectPII: jest.fn(async () => {
+        events.push("pii")
+        return []
       }),
       generateEmbedding: jest.fn(async () => {
         events.push("embedding")
@@ -116,7 +119,7 @@ describe("Nexus automatic memory onFinish integration", () => {
       noop: 0,
     })
 
-    expect(events).toEqual(["safety", "embedding", "storage"])
+    expect(events).toEqual(["safety", "pii", "embedding", "storage"])
     expect(info).toHaveBeenCalledWith(
       "Nexus memory auto-extraction completed",
       {
@@ -160,8 +163,11 @@ describe("Nexus automatic memory update integration", () => {
         return {
           allowed: true,
           processedContent: content,
-          piiScanCompleted: true,
         }
+      }),
+      detectPII: jest.fn(async () => {
+        events.push("pii")
+        return []
       }),
       generateEmbedding: jest.fn(async () => {
         events.push("embedding")
@@ -215,6 +221,6 @@ describe("Nexus automatic memory update integration", () => {
       noop: 0,
     })
 
-    expect(events).toEqual(["safety", "embedding", "storage"])
+    expect(events).toEqual(["safety", "pii", "embedding", "storage"])
   })
 })

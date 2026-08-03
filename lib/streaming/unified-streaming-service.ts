@@ -3,219 +3,12 @@ import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { getTelemetryConfig } from './telemetry-service';
 import { getProviderAdapter, type ProviderCapabilities } from './provider-adapters';
 import { CircuitBreaker, CircuitBreakerOpenError } from './circuit-breaker';
-import { getContentSafetyService, type ContentSafetyResult } from '@/lib/safety';
-import {
-  createTokenMappingSink,
-  type TokenMappingSink,
-} from '@/lib/safety/token-mapping-sink';
+import { getContentSafetyService } from '@/lib/safety';
 import type { StreamRequest, StreamResponse, StreamConfig, StreamingProgress, TelemetrySpan, TelemetryConfig, StepCallbackData } from './types';
 import { ContentSafetyBlockedError } from './types';
 
-// Logger for PII transform debugging
-const piiTransformLog = createLogger({ module: 'pii-transform' });
 // Module-level logger for free functions (class methods use per-request loggers)
 const log = createLogger({ module: 'unified-streaming-service' });
-
-// PII token format: [PII:uuid] where uuid is 36 chars = 42 total chars
-const PII_TOKEN_REGEX = /\[PII:[\da-f-]{36}]/g;
-// Simple check for potential partial token at end of string
-// Looks for "[" followed by characters that could be part of "[PII:uuid]"
-function hasPartialPIITokenAtEnd(text: string): { hasPartial: boolean; startIndex: number } {
-  // Look for "[" in the last 42 characters (max PII token length)
-  const searchStart = Math.max(0, text.length - 42);
-  const lastBracket = text.lastIndexOf('[', text.length - 1);
-
-  if (lastBracket < searchStart) {
-    return { hasPartial: false, startIndex: -1 };
-  }
-
-  // Check if it looks like the start of a PII token using simple string checks
-  const suffix = text.slice(lastBracket);
-
-  // Valid partial patterns: "[", "[P", "[PI", "[PII", "[PII:", "[PII:xxx..."
-  if (suffix === '[' ||
-      suffix === '[P' ||
-      suffix === '[PI' ||
-      suffix === '[PII' ||
-      suffix === '[PII:' ||
-      (suffix.startsWith('[PII:') && suffix.length < 42 && !suffix.endsWith(']'))) {
-    return { hasPartial: true, startIndex: lastBracket };
-  }
-
-  return { hasPartial: false, startIndex: -1 };
-}
-
-/**
- * Replace PII tokens in text with original values.
- * Returns { processed: string, remainder: string } where remainder
- * contains any partial token at the end that needs to be buffered.
- */
-function replacePIITokensWithRemainder(
-  text: string,
-  tokenMappingSink: TokenMappingSink
-): { processed: string; remainder: string } {
-  // Replace all complete tokens
-  const processed = text.replace(PII_TOKEN_REGEX, (match) => {
-    const replacement = tokenMappingSink.resolve(match);
-    if (replacement !== undefined) {
-      return replacement;
-    } else {
-      // Log without exposing actual token patterns - just indicate a mismatch occurred
-      piiTransformLog.warn('PII token mismatch during detokenization', {
-        tokenCount: tokenMappingSink.size,
-      });
-      return match;
-    }
-  });
-
-  // Check if there's a partial token at the end that needs buffering
-  const { hasPartial, startIndex } = hasPartialPIITokenAtEnd(processed);
-  if (hasPartial && startIndex >= 0) {
-    return {
-      processed: processed.slice(0, startIndex),
-      remainder: processed.slice(startIndex)
-    };
-  }
-
-  return { processed, remainder: '' };
-}
-
-/**
- * Process a single SSE event and replace PII tokens if present.
- * Uses textBuffer to handle tokens that span multiple events.
- * Returns { output: string, newBuffer: string }
- */
-function processSSEEventWithBuffer(
-  event: string,
-  tokenMappingSink: TokenMappingSink,
-  textBuffer: string,
-  SSE_DATA_PREFIX: string
-): { output: string; newBuffer: string } {
-  // Empty or non-data events pass through unchanged
-  if (!event.trim() || !event.startsWith(SSE_DATA_PREFIX)) {
-    return { output: event, newBuffer: textBuffer };
-  }
-
-  const jsonContent = event.slice(SSE_DATA_PREFIX.length);
-
-  // Handle [DONE] marker - pass through unchanged
-  if (jsonContent === '[DONE]') {
-    return { output: event, newBuffer: textBuffer };
-  }
-
-  try {
-    const parsed = JSON.parse(jsonContent);
-
-    // Handle text-delta events (primary streaming text)
-    if (parsed.type === 'text-delta' && parsed.delta && typeof parsed.delta === 'string') {
-      // Prepend any buffered text from previous chunks
-      const fullText = textBuffer + parsed.delta;
-      const { processed, remainder } = replacePIITokensWithRemainder(
-        fullText,
-        tokenMappingSink
-      );
-
-      // Update the delta with processed text (may be empty if all buffered)
-      parsed.delta = processed;
-
-      // If delta is empty after processing, we might want to skip this event
-      // but that could mess up client state, so we send it anyway
-      return {
-        output: SSE_DATA_PREFIX + JSON.stringify(parsed),
-        newBuffer: remainder
-      };
-    }
-
-    // Handle reasoning-delta events similarly
-    if (parsed.type === 'reasoning-delta' && parsed.delta && typeof parsed.delta === 'string') {
-      const fullText = textBuffer + parsed.delta;
-      const { processed, remainder } = replacePIITokensWithRemainder(
-        fullText,
-        tokenMappingSink
-      );
-      parsed.delta = processed;
-      return {
-        output: SSE_DATA_PREFIX + JSON.stringify(parsed),
-        newBuffer: remainder
-      };
-    }
-
-    // Non-delta events pass through unchanged
-    return { output: SSE_DATA_PREFIX + JSON.stringify(parsed), newBuffer: textBuffer };
-  } catch {
-    // Not valid JSON or parse error, pass through unchanged
-    return { output: event, newBuffer: textBuffer };
-  }
-}
-
-/**
- * Create a TransformStream that replaces PII tokens with original values in real-time.
- * Handles the AI SDK UI Message Stream Protocol format (SSE with data: prefix).
- *
- * AI SDK stream format:
- * - data: {"type":"text-delta","delta":"Hello [PII:uuid]"}\n\n
- * - data: [DONE]\n\n
- *
- * @see https://sdk.vercel.ai/docs/ai-sdk-ui/stream-protocol
- */
-function createPIIDetokenizeTransform(
-  tokenMappingSink: TokenMappingSink
-): TransformStream<Uint8Array, Uint8Array> {
-  const decoder = new TextDecoder();
-  const encoder = new TextEncoder();
-  let sseBuffer = '';      // Buffer for incomplete SSE events
-  let textBuffer = '';     // Buffer for partial PII tokens across text-delta events
-
-  // SSE format constants
-  const SSE_EVENT_SEPARATOR = '\n\n';
-  const SSE_DATA_PREFIX = 'data: ';
-
-  return new TransformStream({
-    transform(chunk, controller) {
-      // Decode chunk and add to SSE buffer
-      const decoded = decoder.decode(chunk, { stream: true });
-      sseBuffer += decoded;
-
-      // Process complete SSE events (terminated by \n\n)
-      let separatorIndex: number;
-      while ((separatorIndex = sseBuffer.indexOf(SSE_EVENT_SEPARATOR)) !== -1) {
-        const event = sseBuffer.slice(0, separatorIndex);
-        sseBuffer = sseBuffer.slice(separatorIndex + SSE_EVENT_SEPARATOR.length);
-
-        // Process event with text buffering for cross-chunk PII tokens
-        const { output, newBuffer } = processSSEEventWithBuffer(
-          event,
-          tokenMappingSink,
-          textBuffer,
-          SSE_DATA_PREFIX
-        );
-        textBuffer = newBuffer;
-
-        controller.enqueue(encoder.encode(output + SSE_EVENT_SEPARATOR));
-      }
-    },
-
-    flush(controller) {
-      // If there's remaining text buffer, output it as a final text-delta event
-      // This handles any partial token that was buffered but never completed
-      if (textBuffer.length > 0) {
-        const finalEvent = { type: 'text-delta', delta: textBuffer, id: 'pii-flush' };
-        controller.enqueue(encoder.encode(SSE_DATA_PREFIX + JSON.stringify(finalEvent) + SSE_EVENT_SEPARATOR));
-      }
-
-      // Output any remaining SSE buffer content (handles incomplete final event)
-      if (sseBuffer.length > 0) {
-        const { output } = processSSEEventWithBuffer(
-          sseBuffer,
-          tokenMappingSink,
-          '',
-          SSE_DATA_PREFIX
-        );
-        controller.enqueue(encoder.encode(output));
-      }
-    }
-  });
-}
 import {
   isTextDeltaEvent,
   isTextStartEvent,
@@ -233,7 +26,6 @@ import {
  * Result of content safety input check
  */
 interface InputSafetyCheckResult {
-  safetyResult?: ContentSafetyResult;
   updatedMessages: StreamRequest['messages'];
 }
 
@@ -312,27 +104,6 @@ function extractTextFromUIMessage(
 }
 
 /**
- * Update text content in a UIMessage (AI SDK v5 format)
- */
-function updateUIMessageText<T extends { parts?: Array<{ type: string; text?: string }> }>(
-  message: T,
-  newText: string
-): T {
-  if (!message.parts || !Array.isArray(message.parts)) {
-    return message;
-  }
-  let textPartFound = false;
-  const updatedParts = message.parts.map((part) => {
-    if (part.type === 'text' && !textPartFound) {
-      textPartFound = true;
-      return { ...part, text: newText };
-    }
-    return part;
-  });
-  return { ...message, parts: updatedParts };
-}
-
-/**
  * Check content safety for user input
  */
 async function checkInputContentSafety(options: InputSafetyCheckOptions): Promise<InputSafetyCheckResult> {
@@ -368,27 +139,7 @@ async function checkInputContentSafety(options: InputSafetyCheckOptions): Promis
     );
   }
 
-  // If PII was tokenized, update the message content
-  if (safetyResult.contentModified && safetyResult.processedContent !== messageContent) {
-    log.info('PII tokenized in user message', {
-      requestId,
-      originalLength: messageContent.length,
-      processedLength: safetyResult.processedContent.length,
-      hasPII: safetyResult.hasPII,
-    });
-
-    const lastIndex = messages.length - 1 - messages.slice().reverse().findIndex(m => m.role === 'user');
-    if (lastIndex >= 0 && lastIndex < messages.length) {
-      const updatedMessages = [
-        ...messages.slice(0, lastIndex),
-        updateUIMessageText(messages[lastIndex], safetyResult.processedContent),
-        ...messages.slice(lastIndex + 1)
-      ];
-      return { safetyResult, updatedMessages };
-    }
-  }
-
-  return { safetyResult, updatedMessages: messages };
+  return { updatedMessages: messages };
 }
 
 /**
@@ -429,59 +180,7 @@ async function checkOutputContentSafety(options: OutputSafetyCheckOptions): Prom
     };
   }
 
-  if (outputSafetyResult.contentModified) {
-    log.info('PII restored in AI output', {
-      requestId,
-      originalLength: data.text.length,
-      processedLength: outputSafetyResult.processedContent.length,
-    });
-    return {
-      processedData: { ...data, text: outputSafetyResult.processedContent },
-      wasBlocked: false
-    };
-  }
-
   return { processedData: data, wasBlocked: false };
-}
-
-/**
- * Wrap stream result with PII detokenization transform
- */
-function wrapStreamWithPIIDetokenization(
-  result: StreamResponse['result'],
-  tokenMappingSink: TokenMappingSink
-): StreamResponse['result'] {
-  return {
-    ...result,
-    toUIMessageStreamResponse: (options?: { headers?: Record<string, string> }) => {
-      const originalResponse = result.toUIMessageStreamResponse(options);
-      if (!originalResponse.body) {
-        return originalResponse;
-      }
-      const transformedStream = originalResponse.body.pipeThrough(
-        createPIIDetokenizeTransform(tokenMappingSink)
-      );
-      return new Response(transformedStream, {
-        status: originalResponse.status,
-        statusText: originalResponse.statusText,
-        headers: originalResponse.headers
-      });
-    },
-    toDataStreamResponse: (options?: { headers?: Record<string, string> }) => {
-      const originalResponse = result.toDataStreamResponse(options);
-      if (!originalResponse.body) {
-        return originalResponse;
-      }
-      const transformedStream = originalResponse.body.pipeThrough(
-        createPIIDetokenizeTransform(tokenMappingSink)
-      );
-      return new Response(transformedStream, {
-        status: originalResponse.status,
-        statusText: originalResponse.statusText,
-        headers: originalResponse.headers
-      });
-    }
-  };
 }
 
 /**
@@ -765,36 +464,15 @@ interface BuildStreamResponseOptions {
   requestId: string;
   capabilities: ProviderCapabilities;
   telemetryConfig: TelemetryConfig;
-  tokenMappingSink: TokenMappingSink;
-  hasDynamicTokenMappings: boolean;
-  log: ReturnType<typeof createLogger>;
 }
 
-/**
- * Build stream response with optional PII wrapping
- */
 function buildStreamResponse(options: BuildStreamResponseOptions): StreamResponse {
   const {
     result,
     requestId,
     capabilities,
     telemetryConfig,
-    tokenMappingSink,
-    hasDynamicTokenMappings,
-    log,
   } = options;
-
-  if (tokenMappingSink.size > 0 || hasDynamicTokenMappings) {
-    log.info('Wrapping stream with PII detokenization transform', {
-      tokenCount: tokenMappingSink.size,
-      dynamic: hasDynamicTokenMappings,
-    });
-    const wrappedResult = wrapStreamWithPIIDetokenization(
-      result,
-      tokenMappingSink
-    );
-    return { result: wrappedResult, requestId, capabilities, telemetryConfig };
-  }
   return { result, requestId, capabilities, telemetryConfig };
 }
 
@@ -806,7 +484,6 @@ async function prepareStreamInput(options: {
 }) {
   const { request, contentSafetyService, log, requestId } = options;
   let messages = validateAndCopyMessages(request, log);
-  let inputSafetyResult: ContentSafetyResult | undefined;
   if (shouldCheckInputSafety(request, contentSafetyService)) {
     const safetyCheck = await checkInputContentSafety({
       messages,
@@ -815,10 +492,9 @@ async function prepareStreamInput(options: {
       log,
       requestId,
     });
-    inputSafetyResult = safetyCheck.safetyResult;
     messages = safetyCheck.updatedMessages;
   }
-  return { messages, inputSafetyResult };
+  return { messages };
 }
 
 function logStreamStart(
@@ -890,7 +566,7 @@ export class UnifiedStreamingService {
         log,
         requestId,
       });
-      const { messages, inputSafetyResult } = preparedInput;
+      const { messages } = preparedInput;
 
       // 6. Convert messages and build config
       const convertedMessages = await convertMessages(messages, log);
@@ -954,21 +630,8 @@ export class UnifiedStreamingService {
           source: request.source
         });
 
-        // Merge inline-scan tokens with mappings pre-computed at the route and
-        // mappings that tools may add later in the same provider loop. A caller-
-        // supplied sink is request scoped; no mapping state is shared globally.
-        const tokenMappingSink =
-          request.inputTokenMappingSink ?? createTokenMappingSink();
-        tokenMappingSink.add([
-          ...(request.precomputedInputTokenMappings || []),
-          ...(inputSafetyResult?.tokens || []),
-        ]);
-
         return buildStreamResponse({
-          result, requestId, capabilities, telemetryConfig,
-          tokenMappingSink,
-          hasDynamicTokenMappings: request.inputTokenMappingSink !== undefined,
-          log
+          result, requestId, capabilities, telemetryConfig
         });
 
       } catch (error) {

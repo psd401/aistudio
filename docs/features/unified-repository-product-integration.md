@@ -111,9 +111,8 @@ repositories, and adds `searchNexusAttachments`. Retrieval v2
 independently reapplies current repository and segment ACLs at final context
 disclosure and returns immutable-version citation locators. Before a retrieved
 chunk can enter the external model's tool loop, the attachment tool applies the
-configured K-12 content-safety and PII input transform. Reversible mappings live
-only in a request-scoped sink shared with that run's stream detokenizer; there is
-no cross-request mapping state. Raw chunk bodies are removed from
+configured K-12 guardrail. Allowed chunk text remains byte-identical. Raw chunk
+bodies are removed from
 persisted/replayed attachment tool results. A forged, foreign, or expired marker
 receives the same non-disclosing not-found response and cannot leave an empty
 first-turn conversation.

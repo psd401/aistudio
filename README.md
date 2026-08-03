@@ -68,7 +68,7 @@ AI Studio eliminates these barriers by:
 
 - 🛡️ **K-12 Content Safety** - Purpose-built for educational environments
   - **Content Filtering**: Blocks inappropriate content (violence, hate speech, sexual content) in both inputs and AI responses using Amazon Bedrock Guardrails
-  - **PII Protection**: Automatically detects and tokenizes student personal information (names, emails, phone numbers) before sending to AI providers
+  - **PII Protection**: Keeps ordinary inference byte-identical under provider zero-data-retention agreements, with detect-only refusal for Nexus memory and telemetry for published agent content
   - **Compliance Ready**: Helps meet COPPA, FERPA, and CIPA requirements
   - **Real-time Alerts**: SNS notifications for safety violations
   - **Zero Configuration**: Works automatically across all AI providers

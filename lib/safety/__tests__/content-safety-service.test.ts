@@ -1,119 +1,107 @@
-/**
- * Tests for ContentSafetyService (unified facade)
- *
- * Tests integration between guardrails and PII tokenization.
- */
+const evaluateInput = jest.fn();
+const evaluateOutput = jest.fn();
+const guardrailsService = {
+  isEnabled: jest.fn(() => true),
+  evaluateInput,
+  evaluateOutput,
+  getConfig: jest.fn(() => ({ guardrailId: "guardrail-1" })),
+};
 
-import { ContentSafetyService } from '../content-safety-service';
+jest.mock("../bedrock-guardrails-service", () => ({
+  BedrockGuardrailsService: jest.fn(),
+  getBedrockGuardrailsService: () => guardrailsService,
+}));
 
-// Mock AWS SDK clients
-jest.mock('@aws-sdk/client-bedrock-runtime');
-jest.mock('@aws-sdk/client-sns');
-jest.mock('@aws-sdk/client-comprehend');
-jest.mock('@aws-sdk/client-dynamodb');
+import { ContentSafetyService } from "../content-safety-service";
 
-describe('ContentSafetyService', () => {
+describe("ContentSafetyService", () => {
   let service: ContentSafetyService;
-  const TEST_REGION = 'us-west-2';
 
   beforeEach(() => {
+    jest.clearAllMocks();
+    guardrailsService.isEnabled.mockReturnValue(true);
+    evaluateInput.mockResolvedValue({
+      allowed: true,
+      processedContent: "ignored guardrail rewrite",
+    });
+    evaluateOutput.mockResolvedValue({
+      allowed: true,
+      processedContent: "ignored guardrail rewrite",
+    });
     service = new ContentSafetyService({
-      region: TEST_REGION,
-      guardrailId: 'test-guardrail',
-      piiTokenTableName: 'test-table',
-      enablePiiTokenization: true,
+      region: "us-west-2",
+      guardrailId: "guardrail-1",
     });
   });
 
-  describe('processInput', () => {
-    it('should handle safety check and tokenization', async () => {
-      const result = await service.processInput(
-        'Hello John at john@example.com',
-        'session-123'
-      );
+  it("passes a person's name through byte-identical on input", async () => {
+    const content = "Write a greeting for Johnny Smith.";
+    const result = await service.processInput(content, "session-123");
 
-      // Should gracefully degrade when AWS services are mocked
-      expect(result).toHaveProperty('allowed');
-      expect(result).toHaveProperty('processedContent');
-      expect(result).toHaveProperty('hasPII');
-      expect(result.piiScanCompleted).toBe(false);
+    expect(result).toMatchObject({
+      allowed: true,
+      processedContent: content,
+      contentModified: false,
     });
+    expect(evaluateInput).toHaveBeenCalledWith(content, "session-123");
+  });
 
-    it('should skip tokenization when disabled', async () => {
-      const disabledService = new ContentSafetyService({
-        region: TEST_REGION,
-        guardrailId: 'test-guardrail',
-        enablePiiTokenization: false,
-      });
+  it("passes output through byte-identical when guardrails allow it", async () => {
+    const content = "Hello, Johnny Smith!";
+    const result = await service.processOutput(
+      content,
+      "gpt-5",
+      "openai",
+      "session-123",
+    );
 
-      const result = await disabledService.processInput(
-        'Hello John',
-        'session-123'
-      );
-
-      expect(result.processedContent).toBe('Hello John');
-      expect(result.hasPII).toBe(false);
-      expect(result.piiScanCompleted).toBe(false);
+    expect(result).toMatchObject({
+      allowed: true,
+      processedContent: content,
+      contentModified: false,
     });
   });
 
-  describe('processOutput', () => {
-    it('should handle safety check and detokenization', async () => {
-      const result = await service.processOutput(
-        '[PII:12345678-1234-1234-1234-123456789012]',
-        'gpt-4',
-        'openai',
-        'session-123'
-      );
-
-      // Should gracefully degrade when AWS services are mocked
-      expect(result).toHaveProperty('allowed');
-      expect(result).toHaveProperty('processedContent');
+  it("preserves the input guardrail block contract", async () => {
+    evaluateInput.mockResolvedValue({
+      allowed: false,
+      processedContent: "",
+      blockedReason: "HATE",
+      blockedMessage: "Blocked input",
+      blockedCategories: ["HATE"],
     });
 
-    it('should skip detokenization when disabled', async () => {
-      const disabledService = new ContentSafetyService({
-        region: TEST_REGION,
-        guardrailId: 'test-guardrail',
-        enablePiiTokenization: false,
-      });
-
-      const result = await disabledService.processOutput(
-        '[PII:test]',
-        'gpt-4',
-        'openai',
-        'session-123'
-      );
-
-      expect(result.processedContent).toBe('[PII:test]');
+    await expect(service.processInput("blocked", "session-123")).resolves.toMatchObject({
+      allowed: false,
+      blockedMessage: "Blocked input",
+      blockedCategories: ["HATE"],
+      contentModified: false,
     });
   });
 
-  describe('isEnabled', () => {
-    it('should return boolean indicating if any service is enabled', () => {
-      const result = service.isEnabled();
-      expect(typeof result).toBe('boolean');
+  it("preserves the output guardrail block contract", async () => {
+    evaluateOutput.mockResolvedValue({
+      allowed: false,
+      processedContent: "",
+      blockedReason: "HATE",
+      blockedMessage: "Blocked output",
+      blockedCategories: ["HATE"],
     });
 
-    it('should return true when guardrails service is configured', () => {
-      const guardrailOnlyService = new ContentSafetyService({
-        region: TEST_REGION,
-        guardrailId: 'test-guardrail',
-        enablePiiTokenization: false,
-      });
-
-      expect(guardrailOnlyService.isEnabled()).toBeTruthy();
+    await expect(
+      service.processOutput("blocked", "gpt-5", "openai", "session-123"),
+    ).resolves.toMatchObject({
+      allowed: false,
+      blockedMessage: "Blocked output",
+      blockedCategories: ["HATE"],
+      contentModified: false,
     });
   });
 
-  describe('getStatus', () => {
-    it('should return service status', () => {
-      const status = service.getStatus();
-
-      expect(status).toHaveProperty('guardrailsEnabled');
-      expect(status).toHaveProperty('piiTokenizationEnabled');
-      expect(status).toHaveProperty('guardrailsConfig');
-      expect(status).toHaveProperty('piiConfig');
+  it("reports guardrails-only status", () => {
+    expect(service.getStatus()).toEqual({
+      guardrailsEnabled: true,
+      guardrailsConfig: { guardrailId: "guardrail-1" },
     });
   });
 });

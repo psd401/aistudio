@@ -24,7 +24,7 @@
  * Safety (spec §28.3): the agent-authored text of EVERY op (markdown / comment body /
  * suggestion text) is screened by Bedrock Guardrails (blocked content is rejected,
  * never persisted) and scanned for PII (logged as telemetry — document content is NOT
- * tokenized, since a published document must keep its real text) BEFORE it touches the
+ * rewritten, since a published document must keep its real text) BEFORE it touches the
  * document. The screening core lives in `lib/content/agent-screening.ts` (shared with
  * `contentService.create` / `versionService.snapshot`); this route only maps its verdict
  * to HTTP.

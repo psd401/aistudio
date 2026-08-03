@@ -86,7 +86,7 @@ export async function screenAgentContent(
   });
   // Lazy import (see module JSDoc): keeps the Bedrock stack out of the static
   // import graph of the content services.
-  const { getContentSafetyService, getPIITokenizationService } = await import(
+  const { getContentSafetyService, getPIIDetectionService } = await import(
     "@/lib/safety"
   );
 
@@ -120,11 +120,12 @@ export async function screenAgentContent(
   }
   // PII: detect + log only. A document keeps its real text; never tokenize-replace.
   try {
-    const entities = await getPIITokenizationService().detectPII(text);
+    const entities = await getPIIDetectionService().detectPII(text);
     if (entities.length > 0) {
       log.warn("PII detected in agent content write", {
         objectId,
         piiCount: entities.length,
+        piiTypes: [...new Set(entities.map((entity) => entity.type))],
       });
     }
   } catch (piiError) {

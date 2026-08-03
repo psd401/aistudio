@@ -1,318 +1,163 @@
 /**
- * Content Safety Service
+ * Guardrails-only content safety boundary for AI inputs and outputs.
  *
- * Unified content safety service that combines:
- * 1. Bedrock Guardrails for content filtering (hate, violence, etc.)
- * 2. PII tokenization for student data protection
- *
- * This is the main integration point for the streaming service.
- *
- * Flow:
- * INPUT: User Message → Content Safety Check → PII Tokenization → AI Provider
- * OUTPUT: AI Response → Content Safety Check → PII Detokenization → User
+ * PII is not rewritten on inference paths. The two durable-content PII gates
+ * use the separate detect-only service in `pii-detection-service.ts`.
  */
 
-import { createLogger, generateRequestId } from '@/lib/logger';
+import { createLogger, generateRequestId } from "@/lib/logger";
 import {
   BedrockGuardrailsService,
   getBedrockGuardrailsService,
-} from './bedrock-guardrails-service';
-import {
-  PIITokenizationService,
-  getPIITokenizationService,
-} from './pii-tokenization-service';
-import type {
-  SafetyCheckResult,
-  GuardrailsConfig,
-  TokenMapping,
-} from './types';
+} from "./bedrock-guardrails-service";
+import type { GuardrailsConfig, SafetyCheckResult } from "./types";
 
-/**
- * Combined result from safety processing
- */
 export interface ContentSafetyResult extends SafetyCheckResult {
-  /** Request ID for tracing */
   requestId: string;
-  /** Time taken for safety check (ms) */
   processingTimeMs: number;
-  /** Whether content was modified (tokenized/detokenized) */
-  contentModified: boolean;
-  /** Whether input PII detection and any required token storage completed */
-  piiScanCompleted: boolean;
+  /** Guardrails never rewrite allowed content. */
+  contentModified: false;
 }
 
-/**
- * ContentSafetyService - Unified K-12 content protection
- *
- * Provides a single interface for all content safety operations:
- * - Input validation (before sending to AI)
- * - Output validation (before returning to user)
- * - Automatic PII protection
- * - SNS notifications for violations
- */
 export class ContentSafetyService {
-  private guardrailsService: BedrockGuardrailsService;
-  private piiService: PIITokenizationService;
-  private log = createLogger({ module: 'ContentSafetyService' });
+  private readonly guardrailsService: BedrockGuardrailsService;
+  private readonly log = createLogger({ module: "ContentSafetyService" });
 
   constructor(config?: Partial<GuardrailsConfig>) {
     this.guardrailsService = getBedrockGuardrailsService(config);
-    this.piiService = getPIITokenizationService(config);
   }
 
-  /**
-   * Check if any safety services are enabled
-   */
   isEnabled(): boolean {
-    return this.guardrailsService.isEnabled() || this.piiService.isEnabled();
+    return this.guardrailsService.isEnabled();
   }
 
-  /**
-   * Check if guardrails (content filtering) is enabled
-   */
   isGuardrailsEnabled(): boolean {
     return this.guardrailsService.isEnabled();
   }
 
-  /**
-   * Check if PII tokenization is enabled
-   */
-  isPiiTokenizationEnabled(): boolean {
-    return this.piiService.isEnabled();
-  }
-
-  /**
-   * Process user input - content safety check + PII tokenization
-   *
-   * This should be called BEFORE sending messages to AI providers.
-   *
-   * @param content - User message content
-   * @param sessionId - Session identifier for PII token scoping
-   * @returns Processed content (may be tokenized) or blocked result
-   */
   async processInput(
     content: string,
-    sessionId: string
+    sessionId: string,
   ): Promise<ContentSafetyResult> {
     const requestId = generateRequestId();
     const startTime = Date.now();
-
-    this.log.info('Processing input content', {
+    this.log.info("Processing input content", {
       requestId,
       contentLength: content.length,
       sessionId,
       guardrailsEnabled: this.guardrailsService.isEnabled(),
-      piiEnabled: this.piiService.isEnabled(),
     });
 
     try {
-      // Step 1: Content safety check (hate, violence, etc.)
       if (this.guardrailsService.isEnabled()) {
         const safetyResult = await this.guardrailsService.evaluateInput(
           content,
-          sessionId
+          sessionId,
         );
-
         if (!safetyResult.allowed) {
-          this.log.warn('Input blocked by guardrails', {
+          this.log.warn("Input blocked by guardrails", {
             requestId,
             reason: safetyResult.blockedReason,
             categories: safetyResult.blockedCategories,
           });
-
           return {
             ...safetyResult,
             requestId,
             processingTimeMs: Date.now() - startTime,
             contentModified: false,
-            piiScanCompleted: false,
           };
         }
       }
 
-      // Step 2: PII tokenization (if enabled and content passed safety check)
-      let processedContent = content;
-      let tokens: TokenMapping[] = [];
-      let hasPII = false;
-      let contentModified = false;
-      let piiScanCompleted = false;
-
-      if (this.piiService.isEnabled()) {
-        const tokenizationResult = await this.piiService.tokenize(
-          content,
-          sessionId
-        );
-        processedContent = tokenizationResult.tokenizedText;
-        tokens = tokenizationResult.tokens;
-        hasPII = tokenizationResult.hasPII;
-        contentModified = hasPII;
-        piiScanCompleted = tokenizationResult.scanCompleted;
-
-        if (hasPII) {
-          this.log.info('PII tokenized in input', {
-            requestId,
-            tokensCreated: tokens.length,
-            piiTypes: tokens.map((t) => t.type),
-          });
-        }
-      }
-
-      const result: ContentSafetyResult = {
-        allowed: true,
-        processedContent,
-        hasPII,
-        tokens,
-        requestId,
-        processingTimeMs: Date.now() - startTime,
-        contentModified,
-        piiScanCompleted,
-      };
-
-      this.log.info('Input processing complete', {
-        requestId,
-        processingTimeMs: result.processingTimeMs,
-        hasPII,
-        contentModified,
-      });
-
-      return result;
-    } catch (error) {
-      this.log.error('Input processing failed', {
-        requestId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-
-      // Graceful degradation - allow content through on error
       return {
         allowed: true,
         processedContent: content,
         requestId,
         processingTimeMs: Date.now() - startTime,
         contentModified: false,
-        piiScanCompleted: false,
+      };
+    } catch (error) {
+      this.log.error("Input processing failed", {
+        requestId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return {
+        allowed: true,
+        processedContent: content,
+        requestId,
+        processingTimeMs: Date.now() - startTime,
+        contentModified: false,
       };
     }
   }
 
-  /**
-   * Process AI output - content safety check + PII detokenization
-   *
-   * This should be called BEFORE returning AI responses to users.
-   *
-   * @param content - AI response content
-   * @param modelId - Model that generated the response
-   * @param provider - AI provider used
-   * @param sessionId - Session identifier for PII token lookup
-   * @returns Processed content (may be detokenized) or blocked result
-   */
   async processOutput(
     content: string,
     modelId: string,
     provider: string,
-    sessionId: string
+    sessionId: string,
   ): Promise<ContentSafetyResult> {
     const requestId = generateRequestId();
     const startTime = Date.now();
-
-    this.log.info('Processing output content', {
+    this.log.info("Processing output content", {
       requestId,
       contentLength: content.length,
       modelId,
       provider,
       sessionId,
       guardrailsEnabled: this.guardrailsService.isEnabled(),
-      piiEnabled: this.piiService.isEnabled(),
     });
 
     try {
-      // Step 1: Content safety check on AI output
       if (this.guardrailsService.isEnabled()) {
         const safetyResult = await this.guardrailsService.evaluateOutput(
           content,
           modelId,
           provider,
-          sessionId
+          sessionId,
         );
-
         if (!safetyResult.allowed) {
-          this.log.warn('Output blocked by guardrails', {
+          this.log.warn("Output blocked by guardrails", {
             requestId,
             reason: safetyResult.blockedReason,
             categories: safetyResult.blockedCategories,
             modelId,
             provider,
           });
-
           return {
             ...safetyResult,
             requestId,
             processingTimeMs: Date.now() - startTime,
             contentModified: false,
-            piiScanCompleted: false,
           };
         }
       }
 
-      // Step 2: PII detokenization (restore original values)
-      let processedContent = content;
-      let contentModified = false;
-
-      if (this.piiService.isEnabled()) {
-        const originalContent = content;
-        processedContent = await this.piiService.detokenize(content, sessionId);
-        contentModified = processedContent !== originalContent;
-
-        if (contentModified) {
-          this.log.info('PII restored in output', {
-            requestId,
-            originalLength: originalContent.length,
-            processedLength: processedContent.length,
-          });
-        }
-      }
-
-      const result: ContentSafetyResult = {
-        allowed: true,
-        processedContent,
-        requestId,
-        processingTimeMs: Date.now() - startTime,
-        contentModified,
-        piiScanCompleted: false,
-      };
-
-      this.log.info('Output processing complete', {
-        requestId,
-        processingTimeMs: result.processingTimeMs,
-        contentModified,
-      });
-
-      return result;
-    } catch (error) {
-      this.log.error('Output processing failed', {
-        requestId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-
-      // Graceful degradation - return content as-is on error
       return {
         allowed: true,
         processedContent: content,
         requestId,
         processingTimeMs: Date.now() - startTime,
         contentModified: false,
-        piiScanCompleted: false,
+      };
+    } catch (error) {
+      this.log.error("Output processing failed", {
+        requestId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return {
+        allowed: true,
+        processedContent: content,
+        requestId,
+        processingTimeMs: Date.now() - startTime,
+        contentModified: false,
       };
     }
   }
 
-  /**
-   * Quick input check (content safety only, no PII tokenization)
-   *
-   * Use this for lightweight validation when PII protection isn't needed.
-   */
   async checkInputSafety(
     content: string,
-    sessionId?: string
+    sessionId?: string,
   ): Promise<SafetyCheckResult> {
     if (!this.guardrailsService.isEnabled()) {
       return { allowed: true, processedContent: content };
@@ -320,49 +165,38 @@ export class ContentSafetyService {
     return this.guardrailsService.evaluateInput(content, sessionId);
   }
 
-  /**
-   * Quick output check (content safety only, no PII detokenization)
-   *
-   * Use this for lightweight validation when PII protection isn't needed.
-   */
   async checkOutputSafety(
     content: string,
     modelId: string,
     provider: string,
-    sessionId?: string
+    sessionId?: string,
   ): Promise<SafetyCheckResult> {
     if (!this.guardrailsService.isEnabled()) {
       return { allowed: true, processedContent: content };
     }
-    return this.guardrailsService.evaluateOutput(content, modelId, provider, sessionId);
+    return this.guardrailsService.evaluateOutput(
+      content,
+      modelId,
+      provider,
+      sessionId,
+    );
   }
 
-  /**
-   * Get service status and configuration
-   */
   getStatus(): {
     guardrailsEnabled: boolean;
-    piiTokenizationEnabled: boolean;
-    guardrailsConfig: ReturnType<BedrockGuardrailsService['getConfig']>;
-    piiConfig: ReturnType<PIITokenizationService['getConfig']>;
+    guardrailsConfig: ReturnType<BedrockGuardrailsService["getConfig"]>;
   } {
     return {
       guardrailsEnabled: this.guardrailsService.isEnabled(),
-      piiTokenizationEnabled: this.piiService.isEnabled(),
       guardrailsConfig: this.guardrailsService.getConfig(),
-      piiConfig: this.piiService.getConfig(),
     };
   }
 }
 
-// Singleton instance
 let contentSafetyServiceInstance: ContentSafetyService | null = null;
 
-/**
- * Get or create the ContentSafetyService singleton
- */
 export function getContentSafetyService(
-  config?: Partial<GuardrailsConfig>
+  config?: Partial<GuardrailsConfig>,
 ): ContentSafetyService {
   if (!contentSafetyServiceInstance) {
     contentSafetyServiceInstance = new ContentSafetyService(config);
@@ -370,9 +204,6 @@ export function getContentSafetyService(
   return contentSafetyServiceInstance;
 }
 
-/**
- * Reset all safety service singletons (for testing)
- */
 export function resetContentSafetyService(): void {
   contentSafetyServiceInstance = null;
 }

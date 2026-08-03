@@ -123,7 +123,7 @@ Substrate      AI Studio: identity/RBAC · S3 · doc pipeline · vectors · MCP 
 | Delegated agent auth | `lib/agent-workspace/consent-token.ts`, `app/agent-connect` | On-behalf-of-user agent authorization |
 | Navigation | `navigation_items` (`type` enum, `requiresRole`) | Extended to surface content as intranet pages |
 | Audit | `content_audit_logs` (migration 090), OpenTelemetry (`instrumentation.ts`) | Logs every agent create/publish |
-| Safety | Bedrock Guardrails, PII tokenization (`lib/safety`) | Applied to agent-generated content paths |
+| Safety | Bedrock Guardrails, detect-only PII telemetry (`lib/safety`) | Applied to agent-generated content paths |
 | Assistant Architect + scheduler | `lib/assistant-architect`, `schedules`, `@aws-sdk/client-scheduler` | Scheduled autonomous content production |
 
 ### 3.2 Stack constraints (build to these)
@@ -1483,7 +1483,7 @@ Artifact code (agent- or human-authored) is **untrusted** and executes only unde
 `retrievalService.search` applies `canView` per requester before returning any chunk (§16.2). A student-facing assistant is **structurally** unable to retrieve staff-only content. This is enforced server-side, never by UI filtering.
 
 ### 28.3 Reuse existing safety
-Run agent content-generation through the existing **Bedrock Guardrails** and **PII tokenization** (`lib/safety`) exactly as nexus does, before persisting a version. Apply on `create_*` and `create_version` when the author is an agent.
+Run agent content-generation through the existing **Bedrock Guardrails** (`lib/safety`) before persisting a version. Apply on `create_*` and `create_version` when the author is an agent. A separate Comprehend check emits only detected entity types as telemetry; authored content remains unmodified.
 
 ### 28.4 Provenance and audit as governance
 Two-grain provenance + `content_audit_logs` + the public-publish human gate give FERPA/COPPA/CIPA-relevant traceability: who authored content, who approved public exposure, and a queryable trail. Reader provenance footers make AI authorship visible to consumers.
@@ -1498,7 +1498,7 @@ Two-grain provenance + `content_audit_logs` + the public-publish human gate give
 | Privilege escalation by delegated agent | Inherits user permissions only; cannot exceed the human's grants |
 | Prompt-injected instructions in source docs | Source content is data; tools require explicit caller scope; no auto-publish-from-content |
 | Stale published content after edits | `published_version_id` tracked separately; re-publish is explicit; events re-index |
-| PII in generated content | Guardrails + PII tokenization on agent write paths |
+| PII in generated content | Guardrails plus Comprehend detect-only entity-type telemetry on agent write paths |
 
 ## 29. Errors, idempotency, rate limiting, observability
 

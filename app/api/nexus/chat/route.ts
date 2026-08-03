@@ -9,11 +9,6 @@ import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-servi
 import type { StreamRequest } from '@/lib/streaming/types';
 import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { getContentSafetyService } from '@/lib/safety';
-import type { TokenMapping } from '@/lib/safety/types';
-import {
-  createTokenMappingSink,
-  type TokenMappingSink,
-} from '@/lib/safety/token-mapping-sink';
 import { getModelConfig } from '@/lib/ai/model-config';
 import { modelSupportsFunctionCalling } from '@/lib/ai/model-router/core';
 import type {
@@ -396,8 +391,6 @@ async function executeStreaming(params: {
   dbModelId: number;
   log: ReturnType<typeof createLogger>;
   timer: (data: Record<string, unknown>) => void;
-  precomputedInputTokenMappings?: TokenMapping[];
-  inputTokenMappingSink?: TokenMappingSink;
   routingMetadata: NexusRoutingMetadata;
 }): Promise<Response> {
   const {
@@ -427,8 +420,6 @@ async function executeStreaming(params: {
     dbModelId,
     log,
     timer,
-    precomputedInputTokenMappings,
-    inputTokenMappingSink,
     routingMetadata,
   } = params;
 
@@ -485,8 +476,6 @@ async function executeStreaming(params: {
     // for a save/forget/read→edit→confirm chain.
     maxSteps: multiStepToolsActive ? 10 : undefined,
     options: { reasoningEffort, responseMode },
-    precomputedInputTokenMappings,
-    inputTokenMappingSink,
     callbacks: {
       onFinish: createOnFinishCallback({
         conversationId,
@@ -1257,27 +1246,6 @@ function validateConversationId(id: string | undefined, requestId: string, log: 
   return null;
 }
 
-function withProtectedLastUserText(
-  messages: z.infer<typeof ChatRequestSchema>['messages'],
-  protectedText: string
-): z.infer<typeof ChatRequestSchema>['messages'] {
-  const lastUserIndex = messages.findLastIndex(message => message.role === 'user');
-  if (lastUserIndex < 0) return messages;
-  return messages.map((message, index) => {
-    if (index !== lastUserIndex) return message;
-    const nonTextParts = (message.parts ?? []).filter(part => {
-      if (!part || typeof part !== 'object') return true;
-      return (part as Record<string, unknown>).type !== 'text';
-    });
-    const updated = {
-      ...message,
-      parts: [{ type: 'text', text: protectedText }, ...nonTextParts],
-    };
-    delete updated.content;
-    return updated;
-  });
-}
-
 /**
  * Authenticate user and return user ID or error response
  */
@@ -1303,16 +1271,11 @@ async function authenticateUser(
 }
 
 /**
- * Protect classifier traffic with the same K-12 guardrail and PII tokenization
- * boundary as response-model traffic. The main stream performs its own pass so
- * it can retain token mappings for output detokenization; this preflight exists
- * specifically to ensure the internal router never receives raw PII.
+ * Protect classifier traffic with the same K-12 guardrail boundary as
+ * response-model traffic without rewriting the routing text.
  */
-async function prepareRoutingText(text: string, sessionId: string): Promise<{
-  text: string;
-  contentModified: boolean;
-}> {
-  if (!text.trim()) return { text, contentModified: false };
+async function prepareRoutingText(text: string, sessionId: string): Promise<string> {
+  if (!text.trim()) return text;
   const result = await getContentSafetyService().processInput(text, sessionId);
   if (!result.allowed) {
     throw new ContentSafetyBlockedError(
@@ -1321,7 +1284,7 @@ async function prepareRoutingText(text: string, sessionId: string): Promise<{
       'input'
     );
   }
-  return { text: result.processedContent, contentModified: result.contentModified };
+  return text;
 }
 
 async function resolveRequestRouting(args: {
@@ -1342,14 +1305,14 @@ async function resolveRequestRouting(args: {
   const rawRoutingText = extractLatestUserText(
     args.messages as UIMessage[],
   );
-  const protectedRoutingInput = await prepareRoutingText(rawRoutingText, args.sessionId);
+  const protectedRoutingText = await prepareRoutingText(rawRoutingText, args.sessionId);
   const imageContext = await getImageRoutingContext({
     messages: args.messages,
     conversationId: args.existingConversationId,
     userId: args.userId,
   });
   const routing = await routeNexusRequest({
-    text: protectedRoutingInput.text,
+    text: protectedRoutingText,
     fallbackModelId: args.fallbackModelId,
     experienceMode: args.nexusMode,
     requestedFamily: args.nexusMode === 'advanced' ? args.modelFamily : 'auto',
@@ -1361,10 +1324,8 @@ async function resolveRequestRouting(args: {
   });
   return {
     routing,
-    protectedLatestUserText: protectedRoutingInput.text,
-    specialRouteMessages: protectedRoutingInput.contentModified
-      ? withProtectedLastUserText(args.messages, protectedRoutingInput.text)
-      : args.messages,
+    protectedLatestUserText: protectedRoutingText,
+    specialRouteMessages: args.messages,
   };
 }
 
@@ -2075,7 +2036,6 @@ interface ResolvedChatRequest {
   dbModelId: number;
   messagesWithParts: UIMessage[];
   persistenceMessagesWithParts: UIMessage[];
-  precomputedInputTokenMappings: TokenMapping[];
   protectedLatestUserText: string;
 }
 
@@ -2085,7 +2045,6 @@ type ResolvedChatResult =
 
 interface ConversationRepositoryContext {
   lightweightMessages: UIMessage[];
-  repositoryTokenMappingSink?: TokenMappingSink;
   attachmentTools: ToolSet;
   projectTools: ToolSet;
   conversationTools: ToolSet;
@@ -2414,13 +2373,11 @@ async function resolveChatModel(params: {
       dbModelId,
       messagesWithParts: inlineSafetyResult.messages,
       persistenceMessagesWithParts,
-      precomputedInputTokenMappings: inlineSafetyResult.tokens,
       protectedLatestUserText,
     },
   };
 }
 
-// eslint-disable-next-line complexity, max-lines-per-function -- One pre-stream boundary materializes and revalidates every attachment and durable binding source.
 async function prepareConversationRepositories(params: {
   prepared: PreparedChatRequest;
   resolved: ResolvedChatRequest;
@@ -2522,24 +2479,17 @@ async function prepareConversationRepositories(params: {
     messages: resolved.persistenceMessagesWithParts as ChatMessages,
     dbModelId: resolved.dbModelId,
   });
-  const repositoryTokenMappingSink =
-    attachmentRepositoryIds.length > 0 ||
-    durableContext.repositoryIds.length > 0
-      ? createTokenMappingSink()
-      : undefined;
-  const attachmentTools = repositoryTokenMappingSink
+  const attachmentTools = attachmentRepositoryIds.length > 0
     ? createNexusAttachmentTools({
         repositoryIds: attachmentRepositoryIds,
         userCognitoSub: prepared.session.sub,
-        tokenMappingSink: repositoryTokenMappingSink,
       })
     : {};
   const projectTools =
-    repositoryTokenMappingSink && prepared.projectBinding
+    prepared.projectBinding
       ? createNexusRepositorySearchTools({
           repositoryIds: prepared.projectBinding.repositoryIds,
           userCognitoSub: prepared.session.sub,
-          tokenMappingSink: repositoryTokenMappingSink,
           toolName: "searchProjectRepositories",
           description:
             `Search the repositories connected to the Nexus project "${prepared.projectBinding.name}". ` +
@@ -2547,11 +2497,10 @@ async function prepareConversationRepositories(params: {
         })
       : {};
   const conversationTools =
-    repositoryTokenMappingSink && durableContext.repositoryIds.length > 0
+    durableContext.repositoryIds.length > 0
       ? createNexusRepositorySearchTools({
           repositoryIds: durableContext.repositoryIds,
           userCognitoSub: prepared.session.sub,
-          tokenMappingSink: repositoryTokenMappingSink,
           toolName: "searchConversationRepositories",
           description:
             "Search every durable repository bound to this Nexus conversation. Use this before making repository-dependent claims and cite the returned sources.",
@@ -2565,7 +2514,6 @@ async function prepareConversationRepositories(params: {
     ok: true,
     context: {
       lightweightMessages,
-      repositoryTokenMappingSink,
       attachmentTools,
       projectTools,
       conversationTools,
@@ -2634,12 +2582,10 @@ async function resolveToolsAndStream(params: {
     skillBinding.scopedEnabledTools,
   );
   const skillRepositoryTools =
-    repositories.repositoryTokenMappingSink &&
     skillBinding.skillRepositoryIds.length > 0
       ? createNexusRepositorySearchTools({
           repositoryIds: skillBinding.skillRepositoryIds,
           userCognitoSub: prepared.session.sub,
-          tokenMappingSink: repositories.repositoryTokenMappingSink,
           toolName: "searchSkillRepositories",
           description:
             "Search the repositories bound to the loaded skill. Use current results before following repository-dependent skill instructions and cite returned sources.",
@@ -2708,8 +2654,6 @@ async function resolveToolsAndStream(params: {
     dbModelId: resolved.dbModelId,
     log,
     timer: params.timer,
-    precomputedInputTokenMappings: resolved.precomputedInputTokenMappings,
-    inputTokenMappingSink: repositories.repositoryTokenMappingSink,
     routingMetadata: resolved.routing.metadata,
   });
 }

@@ -1,76 +1,36 @@
 /**
- * K-12 Content Safety Module
+ * K-12 content safety module.
  *
- * Provides comprehensive content safety for AI interactions in educational environments.
- *
- * Features:
- * - Content filtering (hate speech, violence, self-harm, sexual content)
- * - PII tokenization for student data protection
- * - SNS notifications for safety violations
- * - Graceful degradation when services unavailable
- *
- * Usage:
- * ```typescript
- * import { getContentSafetyService } from '@/lib/safety';
- *
- * const safetySvc = getContentSafetyService();
- *
- * // Process user input before sending to AI
- * const inputResult = await safetySvc.processInput(userMessage, sessionId);
- * if (!inputResult.allowed) {
- *   return { error: inputResult.blockedMessage };
- * }
- *
- * // Send tokenized content to AI
- * const aiResponse = await aiProvider.generate(inputResult.processedContent);
- *
- * // Process AI output before returning to user
- * const outputResult = await safetySvc.processOutput(
- *   aiResponse,
- *   modelId,
- *   provider,
- *   sessionId
- * );
- * if (!outputResult.allowed) {
- *   return { error: outputResult.blockedMessage };
- * }
- *
- * // Return detokenized content to user
- * return { content: outputResult.processedContent };
- * ```
+ * Bedrock Guardrails evaluate inference inputs and outputs without rewriting
+ * allowed content. Amazon Comprehend backs two explicit detect-only PII gates:
+ * fail-closed Nexus memory writes and non-blocking published-agent telemetry.
  */
 
-// Main service
 export {
   ContentSafetyService,
   getContentSafetyService,
   resetContentSafetyService,
   type ContentSafetyResult,
-} from './content-safety-service';
+} from "./content-safety-service";
 
-// Bedrock Guardrails
 export {
   BedrockGuardrailsService,
   getBedrockGuardrailsService,
   resetBedrockGuardrailsService,
-} from './bedrock-guardrails-service';
+} from "./bedrock-guardrails-service";
 
-// PII Tokenization
 export {
-  PIITokenizationService,
-  getPIITokenizationService,
-  resetPIITokenizationService,
-} from './pii-tokenization-service';
+  PIIDetectionService,
+  PIIDetectionUnavailableError,
+  getPIIDetectionService,
+  resetPIIDetectionService,
+} from "./pii-detection-service";
 
-// Types
 export type {
   SafetyCheckResult,
   GuardrailCheckResult,
   PIIEntity,
-  TokenMapping,
-  TokenizationResult,
   GuardrailViolation,
-  PIITokenDynamoDBItem,
   GuardrailsConfig,
   ContentFilterType,
   FilterStrength,
@@ -78,6 +38,6 @@ export type {
   GuardrailAssessment,
   ApplyGuardrailResponse,
   ComprehendPIIType,
-} from './types';
+} from "./types";
 
-export { K12_PII_TYPES } from './types';
+export { K12_PII_TYPES } from "./types";
