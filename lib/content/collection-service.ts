@@ -277,17 +277,40 @@ export const collectionService = {
    * callers can pass `obj.collectionId` straight through.
    */
   async nameById(collectionId: string | null): Promise<string | null> {
+    return (await this.refById(collectionId))?.name ?? null;
+  },
+
+  /**
+   * The display name AND slug of a single collection by id, or `null`.
+   *
+   * The slug is what makes a breadcrumb land on the section's own page
+   * (`/atrium/s/[slug]`) instead of the old `?collection=<uuid>` filter, which
+   * re-rendered the flat library grid with no hero, no subsections, and no
+   * breadcrumb — i.e. clicking the section name from a document dropped you
+   * somewhere that looked nothing like the section you came from.
+   *
+   * Like `nameById`, this is a LABEL lookup, not an authorization step: it is
+   * only ever called for an object the caller has already been cleared to view,
+   * and the section page itself re-gates on its own.
+   */
+  async refById(
+    collectionId: string | null
+  ): Promise<{ name: string; slug: string } | null> {
     if (!collectionId) return null;
     const rows = await executeQuery(
       (db) =>
         db
-          .select({ name: contentCollections.name })
+          .select({
+            name: contentCollections.name,
+            slug: contentCollections.slug,
+          })
           .from(contentCollections)
           .where(eq(contentCollections.id, collectionId))
           .limit(1),
-      "collection.nameById"
+      "collection.refById"
     );
-    return rows[0]?.name ?? null;
+    const row = rows[0];
+    return row ? { name: row.name, slug: row.slug } : null;
   },
 
   /**

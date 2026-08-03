@@ -37,6 +37,8 @@ export interface ArtifactAuthoringViewProps {
   userCanEdit: boolean;
   /** The collection name for the breadcrumb, or null when uncollected. */
   collectionName: string | null;
+  /** The section's slug, so the breadcrumb reaches its landing page. */
+  collectionSlug: string | null;
 }
 
 export async function ArtifactAuthoringView({
@@ -44,6 +46,7 @@ export async function ArtifactAuthoringView({
   req,
   userCanEdit,
   collectionName,
+  collectionSlug,
 }: ArtifactAuthoringViewProps): Promise<React.JSX.Element> {
   // Publication state, read here only to decide whether the broken-public-link
   // banner below applies. The Share dialog loads its own copy for the link and
@@ -96,13 +99,15 @@ export async function ArtifactAuthoringView({
           <Link href="/atrium" className="mer-breadcrumb-crumb">
             Library
           </Link>
-          {collectionName && obj.collectionId && (
+          {collectionName && collectionSlug && (
             <span className="mer-breadcrumb-crumb-group">
               <span className="mer-breadcrumb-sep" aria-hidden="true">
                 /
               </span>{" "}
               <Link
-                href={`/atrium?collection=${obj.collectionId}`}
+                // The section's OWN page, not the old `?collection=<uuid>`
+                // filter — that re-rendered the flat grid with no hero.
+                href={`/atrium/s/${collectionSlug}`}
                 className="mer-breadcrumb-crumb"
               >
                 {collectionName}

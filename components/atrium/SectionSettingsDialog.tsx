@@ -21,6 +21,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Settings2 } from "lucide-react";
 import {
   Dialog,
@@ -37,6 +38,7 @@ import { updateCollectionAction } from "@/actions/db/atrium/collection-managemen
 import { listContentAction } from "@/actions/db/atrium/list-content";
 import type { ContentObjectDTO } from "@/lib/content";
 import { createLogger } from "@/lib/client-logger";
+import { meridianPortalClassName } from "@/lib/meridian/fonts";
 
 const log = createLogger({ component: "SectionSettingsDialog" });
 
@@ -49,12 +51,20 @@ export interface SectionSettingsDialogProps {
   initialLandingObjectId: string | null;
 }
 
+/** Help text under the pin picker, by load state. */
+function pinHelpText(loading: boolean, count: number): string {
+  if (loading) return "Loading this section's pages…";
+  if (count === 0) return "This section has no pages yet.";
+  return "Pinned above everything else, so the page to read first is not buried by whatever changed most recently.";
+}
+
 export function SectionSettingsDialog({
   collectionId,
   sectionName,
   initialDescription,
   initialLandingObjectId,
 }: SectionSettingsDialogProps): React.JSX.Element {
+  const router = useRouter();
   const [open, setOpen] = useState(false);
   const [description, setDescription] = useState(initialDescription ?? "");
   const [landingObjectId, setLandingObjectId] = useState(
@@ -110,10 +120,12 @@ export function SectionSettingsDialog({
         });
         if (res.isSuccess) {
           setOpen(false);
-          // A server component renders the hero, so a client state update cannot
-          // show the new copy. Reload rather than mirror the value locally and
-          // risk the page and the form disagreeing.
-          window.location.reload();
+          // The hero is server-rendered, so a client state update cannot show
+          // the new copy. `router.refresh()` re-runs the server components in
+          // place — unlike `window.location.reload()`, which threw away the
+          // whole document (a visible white flash, scroll position lost, and a
+          // navigation that raced anything still settling on the page).
+          router.refresh();
           return;
         }
         setError(res.message ?? "Could not save these settings");
@@ -126,7 +138,7 @@ export function SectionSettingsDialog({
       }
       setSaving(false);
     })();
-  }, [collectionId, description, landingObjectId]);
+  }, [collectionId, description, landingObjectId, router]);
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -136,7 +148,11 @@ export function SectionSettingsDialog({
           Edit this page
         </button>
       </DialogTrigger>
-      <DialogContent>
+      {/* `meridianPortalClassName` is REQUIRED on every Atrium dialog. Radix
+          portals dialog content to the document body, outside the `.meridian`
+          scope that defines the design tokens — without it the dialog falls back
+          to the app's older cream theme, which is exactly what this one did. */}
+      <DialogContent className={meridianPortalClassName}>
         <DialogHeader>
           <DialogTitle>{sectionName}</DialogTitle>
           <DialogDescription>
@@ -186,11 +202,7 @@ export function SectionSettingsDialog({
               ))}
             </select>
             <p className="text-xs text-muted-foreground">
-              {loadingOptions
-                ? "Loading this section's pages…"
-                : options.length === 0
-                  ? "This section has no pages yet."
-                  : "Pinned above everything else, so the page to read first is not buried by whatever changed most recently."}
+              {pinHelpText(loadingOptions, options.length)}
             </p>
           </div>
 

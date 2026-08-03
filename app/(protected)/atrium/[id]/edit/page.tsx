@@ -35,6 +35,21 @@ import { VersionMenu } from "@/components/atrium/VersionMenu";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * The breadcrumb trail above a document's title: the section it lives in, or
+ * nothing when it is unfiled.
+ *
+ * Links to the section's OWN page (`/atrium/s/[slug]`), not the old
+ * `?collection=<uuid>` filter — that re-rendered the flat library grid with no
+ * hero, no subsections, and no breadcrumb, so clicking a section name from a
+ * document landed somewhere that looked nothing like the section you came from.
+ */
+function sectionCrumb(
+  ref: { name: string; slug: string } | null
+): Array<{ label: string; href: string }> {
+  return ref ? [{ label: ref.name, href: `/atrium/s/${ref.slug}` }] : [];
+}
+
 export default async function AtriumEditPage({
   params,
 }: {
@@ -70,9 +85,11 @@ export default async function AtriumEditPage({
   // to show/hide the Save control; the create-version action re-checks server-side.
   const userCanEdit = canEdit(req, obj.ownerUserId);
 
-  // The collection name for the Meridian breadcrumb + eyebrow (a section label,
-  // not sensitive; the object is already cleared for view above).
-  const collectionName = await collectionService.nameById(obj.collectionId);
+  // The collection name AND slug for the Meridian breadcrumb + eyebrow (a
+  // section label, not sensitive; the object is already cleared for view above).
+  // The slug is what lets the crumb land on the section's own page.
+  const collectionRef = await collectionService.refById(obj.collectionId);
+  const collectionName = collectionRef?.name ?? null;
 
   if (obj.kind === "artifact") {
     // The Meridian artifact chrome (topbar + canvas + manage-rights-only rail) is
@@ -83,6 +100,7 @@ export default async function AtriumEditPage({
         req={req}
         userCanEdit={userCanEdit}
         collectionName={collectionName}
+        collectionSlug={collectionRef?.slug ?? null}
       />
     );
   }
@@ -131,11 +149,7 @@ export default async function AtriumEditPage({
       userId={req.userId}
       title={obj.title}
       eyebrow={collectionName ? `${collectionName} · Document` : "Document"}
-      breadcrumb={
-        collectionName && obj.collectionId
-          ? [{ label: collectionName, href: `/atrium?collection=${obj.collectionId}` }]
-          : []
-      }
+      breadcrumb={sectionCrumb(collectionRef)}
       askAgentHref={`/nexus?workspace=${obj.id}`}
       coverGradient={obj.coverGradient}
       icon={obj.icon}
