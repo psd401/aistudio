@@ -7,7 +7,8 @@
  * The left half of the editor topbar controls: the suggesting (track-changes)
  * toggle + a conditional "Accept all" for pending suggestions, plus a read-only
  * status chip for viewers. The publish cluster (destination / publish / unpublish
- * / snapshot) now lives in `PublishMenu` as the primary "Publish ▾" split control,
+ * / snapshot) now lives in the Share dialog (publishing) and a "Save a version"
+ * control (snapshots),
  * and History / Settings / Visibility are injected by the topbar alongside — so
  * the row reads like the spec: Suggesting ▾ · History · Publish ▾.
  *

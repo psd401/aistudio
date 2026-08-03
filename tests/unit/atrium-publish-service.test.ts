@@ -409,7 +409,7 @@ function definePublishServicePublishSuite1Part1() {
   });
 
   // --- `widenOnly` (#1336, Codex review round 2) -----------------------------
-  // PublishMenu re-reads visibility before confirming a widen, but a re-read is
+  // The Share dialog re-reads visibility before confirming a widen, but a re-read is
   // not a lock. `widenOnly` re-decides the same question INSIDE the transaction,
   // against the FOR-UPDATE-locked level, so no race window remains.
 

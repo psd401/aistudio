@@ -25,6 +25,20 @@ const migrationRunner = readFileSync(
   ),
   "utf8",
 );
+const migrationControlPanel = readFileSync(
+  resolve(
+    process.cwd(),
+    "app/(protected)/admin/repositories/_components/migration-control-panel.tsx",
+  ),
+  "utf8",
+);
+const migrationReasonDialog = readFileSync(
+  resolve(
+    process.cwd(),
+    "app/(protected)/admin/repositories/_components/migration-exception-reason-dialog.tsx",
+  ),
+  "utf8",
+);
 
 describe("repository migration retry targeting", () => {
   it("marks both single and bounded bulk retry runs as retry-only", () => {
@@ -58,6 +72,48 @@ describe("repository migration retry targeting", () => {
     expect(retryOnlyIds).toHaveLength(selectedRetryIds.size);
   });
 
+  it("allows targeted retries to re-register an existing canonical version", () => {
+    const repositoryCandidateStart = migrationRunner.indexOf(
+      "async function loadNextRepositoryCandidate",
+    );
+    const repositoryCandidateEnd = migrationRunner.indexOf(
+      "async function loadNextCandidate",
+      repositoryCandidateStart,
+    );
+    const repositoryCandidate = migrationRunner.slice(
+      repositoryCandidateStart,
+      repositoryCandidateEnd,
+    );
+
+    expect(repositoryCandidate).toMatch(
+      /\$\{discoverUntrackedSources\} = FALSE[\s\S]*?item\.current_version_id IS NULL/,
+    );
+    expect(repositoryCandidate).toContain(
+      "migration.run_id = ${run.id}::uuid",
+    );
+    expect(migrationRunner).toContain(
+      "await registerExistingCanonicalVersion(candidate, reserved, targetKey)",
+    );
+  });
+
+  it("turns unprocessed terminal-run items back into retryable exceptions", () => {
+    expect(migrationRunner).toContain(
+      "contentMigration.failUnprocessedBackfillItems",
+    );
+    expect(migrationRunner).toContain(
+      "contentMigration.recoverTerminalRunOrphans",
+    );
+    expect(migrationRunner.match(/MIGRATION_RUN_SOURCE_UNPROCESSED/g)).toHaveLength(
+      2,
+    );
+    expect(migrationRunner).toContain(
+      "owner_run.status NOT IN ('queued', 'running')",
+    );
+    expect(migrationRunner).toContain(
+      "migration.status IN ('pending', 'migrating')",
+    );
+  });
+
   it("applies an exception-status filter before the bounded query limit", () => {
     const functionStart = migrationControlService.indexOf(
       "export async function listRepositoryMigrationExceptions",
@@ -77,5 +133,70 @@ describe("repository migration retry targeting", () => {
     );
     expect(statusFilter).toBeGreaterThan(functionStart);
     expect(limit).toBeGreaterThan(statusFilter);
+  });
+
+  it("treats audited exclusions as accounted-for migration inventory", () => {
+    expect(
+      migrationControlService.match(
+        /migration\.status IN \('verified', 'excluded'\)/g,
+      ),
+    ).toHaveLength(3);
+    expect(migrationControlService).toContain(
+      "export async function excludeRepositoryMigrationException",
+    );
+    expect(migrationControlService).toContain(
+      'contentMigration.excludeException',
+    );
+  });
+
+  it("records rollback-drill audit evidence in the initial run insert", () => {
+    const functionStart = migrationControlService.indexOf(
+      "export async function runRepositoryMigrationRollbackDrill",
+    );
+    const functionEnd = migrationControlService.indexOf(
+      "function migrationMetricsFromRows",
+      functionStart,
+    );
+    const rollbackDrill = migrationControlService.slice(
+      functionStart,
+      functionEnd,
+    );
+
+    expect(rollbackDrill).toContain("rollbackDrill: true");
+    expect(rollbackDrill).toContain("migrationItemId: sample.migration_id");
+    expect(rollbackDrill).toContain("canonicalItemId: sample.item_id");
+    expect(rollbackDrill).not.toContain("UPDATE repository_migration_runs");
+  });
+
+  it("collects audit reasons in an accessible application dialog", () => {
+    expect(migrationControlPanel).not.toContain("window.prompt");
+    expect(migrationControlPanel).toContain("MigrationExceptionReasonDialog");
+    expect(migrationReasonDialog).toContain("<DialogTitle>");
+    expect(migrationReasonDialog).toContain(
+      'Label htmlFor="migration-exception-reason"',
+    );
+    expect(migrationReasonDialog).toContain("minLength={10}");
+    expect(migrationReasonDialog).toContain("maxLength={1000}");
+  });
+
+  it("turns migrated rows without canonical versions into retryable exceptions", () => {
+    const functionStart = migrationRunner.indexOf(
+      "async function reconcileMigrationCandidate",
+    );
+    const functionEnd = migrationRunner.indexOf(
+      "async function finishPreviouslyPreparedRollback",
+      functionStart,
+    );
+    const reconciliation = migrationRunner.slice(functionStart, functionEnd);
+
+    expect(reconciliation).toContain(
+      'lastErrorCode: "MIGRATION_CANONICAL_VERSION_MISSING"',
+    );
+    expect(reconciliation).toContain('status: "unrecoverable"');
+    expect(reconciliation).toContain('return "unrecoverable"');
+    expect(reconciliation).not.toContain("canonical_version_id IS NOT NULL");
+    expect(reconciliation).not.toContain(
+      "repositoryMigrationItems.canonicalVersionId} IS NOT NULL",
+    );
   });
 });

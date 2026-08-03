@@ -278,7 +278,7 @@ async function readUncoveredCount(
             FROM repository_migration_items migration
             WHERE migration.source_kind = 'repository_item'
               AND migration.source_id = item.id
-              AND migration.status = 'verified'
+              AND migration.status IN ('verified', 'excluded')
           )
       ) + (
         SELECT COUNT(*)::integer
@@ -288,7 +288,7 @@ async function readUncoveredCount(
           FROM repository_migration_items migration
           WHERE migration.source_kind = 'nexus_document'
             AND migration.source_id = document.id
-            AND migration.status = 'verified'
+            AND migration.status IN ('verified', 'excluded')
         )
       ) + (
         SELECT COUNT(*)::integer
@@ -299,7 +299,7 @@ async function readUncoveredCount(
             FROM repository_migration_items migration
             WHERE migration.source_kind = 'assistant_pdf_job'
               AND migration.source_id = job.id
-              AND migration.status = 'verified'
+              AND migration.status IN ('verified', 'excluded')
         )
       ) AS count
     `;

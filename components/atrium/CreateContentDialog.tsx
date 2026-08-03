@@ -40,6 +40,13 @@ interface AgentCreateDialogProps {
    * success (the caller navigates to the new artifact's workspace).
    */
   onSubmit: (prompt: string) => Promise<string | null>;
+  /**
+   * Create an EMPTY interactive page and open it in the editor, skipping the
+   * agent entirely. Optional so surfaces that only offer the agent path can omit
+   * it — but the library passes it, because "describe it to a chatbot" was the
+   * only way in and that is not how everyone wants to start.
+   */
+  onStartBlank?: () => Promise<void>;
 }
 
 /** A few starter prompts, so an empty field is never a blank wall. */
@@ -53,6 +60,7 @@ export function CreateContentDialog({
   open,
   onClose,
   onSubmit,
+  onStartBlank,
 }: AgentCreateDialogProps): React.JSX.Element {
   const [prompt, setPrompt] = useState("");
   const [creating, setCreating] = useState(false);
@@ -92,10 +100,13 @@ export function CreateContentDialog({
     >
       <DialogContent className={meridianPortalClassName}>
         <DialogHeader>
-          <DialogTitle>Create with the agent</DialogTitle>
+          <DialogTitle>New interactive page</DialogTitle>
           <DialogDescription>
-            Describe what you want — the agent drafts the artifact and opens it
-            beside the chat so you can refine it together.
+            An interactive page is a real web page — charts, calculators,
+            dashboards — that lives in your library like a document does.
+            Describe what you want and the agent builds it{" "}
+            <strong>in the chat</strong>, with a live preview beside it. You can
+            also start from an empty page and write the HTML yourself.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
@@ -138,6 +149,16 @@ export function CreateContentDialog({
           >
             Cancel
           </button>
+          {onStartBlank && (
+            <button
+              type="button"
+              className="mer-btn"
+              onClick={() => void onStartBlank()}
+              disabled={creating}
+            >
+              Start blank
+            </button>
+          )}
           <button
             type="button"
             className="mer-btn mer-btn-agent"
@@ -149,7 +170,7 @@ export function CreateContentDialog({
             ) : (
               <Sparkles className="h-4 w-4" aria-hidden="true" />
             )}
-            Create with the agent
+            Build it for me
           </button>
         </DialogFooter>
       </DialogContent>

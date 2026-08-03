@@ -140,7 +140,7 @@ export async function getRepositoryMigrationInventory(): Promise<
               FROM repository_migration_items migration
               WHERE migration.source_kind = 'repository_item'
                 AND migration.source_id = item.id
-                AND migration.status = 'verified'
+                AND migration.status IN ('verified', 'excluded')
             )
           )::integer AS uncovered
         FROM repository_items item
@@ -183,7 +183,7 @@ export async function getRepositoryMigrationInventory(): Promise<
                   FROM repository_migration_items migration
                   WHERE migration.source_kind = 'nexus_document'
                     AND migration.source_id = document.id
-                    AND migration.status = 'verified'
+                    AND migration.status IN ('verified', 'excluded')
                 )
               )::integer AS uncovered
             FROM documents document
@@ -203,7 +203,7 @@ export async function getRepositoryMigrationInventory(): Promise<
               FROM repository_migration_items migration
               WHERE migration.source_kind = 'assistant_pdf_job'
                 AND migration.source_id = job.id
-                AND migration.status = 'verified'
+                AND migration.status IN ('verified', 'excluded')
             )
           )::integer AS uncovered
         FROM jobs job
@@ -590,6 +590,80 @@ export async function approveRepositoryMigrationMismatch(input: {
   }, "contentMigration.approveMismatch");
 }
 
+/**
+ * Classify a terminal legacy source as intentionally excluded from cutover.
+ *
+ * This is deliberately limited to failed and unrecoverable rows. Mismatches
+ * require the separate hash-evidence approval flow, while successful rows are
+ * never eligible for administrative exclusion.
+ */
+export async function excludeRepositoryMigrationException(input: {
+  migrationItemId: string;
+  excludedBy: number;
+  reason: string;
+}): Promise<void> {
+  const reason = input.reason.trim();
+  if (reason.length < 10 || reason.length > 1_000) {
+    throw new Error("A 10-1000 character exclusion reason is required");
+  }
+  if (!Number.isSafeInteger(input.excludedBy) || input.excludedBy < 1) {
+    throw new Error("A valid administrator is required for exclusion");
+  }
+
+  await executeTransaction(async (tx) => {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtext('repository-content-migration'))`,
+    );
+    await assertLegacyRetirementNotFinalized(tx);
+    const [active] = await tx
+      .select({ id: repositoryMigrationRuns.id })
+      .from(repositoryMigrationRuns)
+      .where(inArray(repositoryMigrationRuns.status, [...ACTIVE_RUN_STATUSES]))
+      .limit(1);
+    if (active) throw new Error("Another content migration run is active");
+
+    const [item] = await tx
+      .select()
+      .from(repositoryMigrationItems)
+      .where(eq(repositoryMigrationItems.id, input.migrationItemId))
+      .limit(1)
+      .for("update");
+    if (
+      !item ||
+      (item.status !== "failed" && item.status !== "unrecoverable")
+    ) {
+      throw new Error(
+        "Migration exception no longer exists or is not excludable",
+      );
+    }
+
+    const excludedAt = new Date();
+    await tx
+      .update(repositoryMigrationItems)
+      .set({
+        status: "excluded",
+        lastErrorCode: "MIGRATION_SOURCE_EXCLUDED",
+        lastErrorMessage: reason,
+        verifiedAt: null,
+        metadata: {
+          ...item.metadata,
+          exclusionReason: reason,
+          excludedAt: excludedAt.toISOString(),
+          excludedBy: input.excludedBy,
+          exclusionPreviousStatus: item.status,
+          ...(item.lastErrorCode
+            ? { exclusionPreviousErrorCode: item.lastErrorCode }
+            : {}),
+          ...(item.lastErrorMessage
+            ? { exclusionPreviousErrorMessage: item.lastErrorMessage }
+            : {}),
+        },
+        updatedAt: excludedAt,
+      })
+      .where(eq(repositoryMigrationItems.id, item.id));
+  }, "contentMigration.excludeException");
+}
+
 export type RepositoryMigrationExceptionStatus = Extract<
   RepositoryMigrationItemStatus,
   "failed" | "unrecoverable" | "mismatch"
@@ -711,6 +785,9 @@ export async function runRepositoryMigrationRollbackDrill(
         sourceKinds: ["repository_item"],
         snapshot: {
           counts: { repository_item: 1 },
+          rollbackDrill: true,
+          migrationItemId: sample.migration_id,
+          canonicalItemId: sample.item_id,
         },
         metrics: { rolledBack: 1 },
         startedAt: now,
@@ -718,24 +795,7 @@ export async function runRepositoryMigrationRollbackDrill(
       })
       .returning();
     if (!run) throw new Error("Failed to record rollback drill");
-    await tx.execute(sql`
-      UPDATE repository_migration_runs
-      SET snapshot = snapshot || jsonb_build_object(
-        'rollbackDrill', true,
-        'migrationItemId', ${sample.migration_id},
-        'canonicalItemId', ${sample.item_id}
-      )
-      WHERE id = ${run.id}::uuid
-    `);
-    return {
-      ...run,
-      snapshot: {
-        ...run.snapshot,
-        rollbackDrill: true,
-        migrationItemId: sample.migration_id,
-        canonicalItemId: sample.item_id,
-      } as RepositoryMigrationSnapshot,
-    };
+    return run;
   }, "contentMigration.rollbackDrill");
 }
 

@@ -12,7 +12,7 @@ import { mkdirSync } from "node:fs";
  *    TOC, an explicit "👁 View only" notice, and the "UP TO DATE" pill — and NO Edit
  *    link;
  *  - the SAME page for the OWNER (admin) shows the Edit link and NO view-only notice;
- *  - the anonymous `/p/[slug]` public reader shows the SAME branded nav WITHOUT any
+ *  - the anonymous `/p/[slug]` public reader shows NO intranet nav and no
  *    session-dependent chrome (no avatar) and no Edit link;
  *  - the 404 existence-mask still holds (an out-of-building user 404s, not 403).
  *
@@ -131,7 +131,7 @@ test.describe("Atrium Meridian reader (authenticated)", () => {
     }
   });
 
-  test("public reader — anonymous sees the branded nav WITHOUT user chrome", async ({
+  test("public reader — anonymous sees NO intranet chrome at all", async ({
     browser,
   }) => {
     // No authenticateContext → a truly anonymous context (the public reader must
@@ -144,14 +144,16 @@ test.describe("Atrium Meridian reader (authenticated)", () => {
       const res = await page.goto(`/p/${PUBLIC_SLUG}`);
       expect(res?.status()).toBe(200);
 
-      // Same branded nav…
-      const nav = page.getByRole("navigation", { name: "Intranet" });
-      await expect(nav).toBeVisible();
-      await expect(nav.getByText(/Intranet/)).toBeVisible();
-      // …but NO session-dependent chrome: no avatar, no Edit link.
+      // A public link is the page and nothing else. The intranet nav used to
+      // render here, advertising an intranet an anonymous reader cannot enter.
+      await expect(page.getByRole("navigation", { name: "Intranet" })).toHaveCount(0);
+      // No session-dependent chrome either.
       await expect(page.getByTestId("reader-nav-avatar")).toHaveCount(0);
       await expect(page.getByTestId("reader-edit-link")).toHaveCount(0);
-      await expect(page.getByTestId("reader-uptodate")).toBeVisible();
+      // The internal-facing view-only explainer is gone on the public surface.
+      await expect(page.getByTestId("reader-view-only")).toHaveCount(0);
+      // The document body still renders — stripping chrome must not strip content.
+      await expect(page.locator(".atrium-content")).toBeVisible();
 
       await page.screenshot({
         path: `${SHOT_DIR}/07-reader-public.png`,

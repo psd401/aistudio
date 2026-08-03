@@ -9,6 +9,7 @@ const mockGetServerSession = jest.fn<AsyncMock>();
 const mockGetUserIdFromSession = jest.fn<AsyncMock>();
 const mockHasRole = jest.fn<AsyncMock>();
 const mockRetryFailedRepositoryMigrationItems = jest.fn<AsyncMock>();
+const mockExcludeRepositoryMigrationException = jest.fn<AsyncMock>();
 const mockListRepositoryMigrationExceptions = jest.fn<AsyncMock>();
 const mockReprocessRepositoryMigrationItem = jest.fn<AsyncMock>();
 const mockAssertNotSystemManagedRepository = jest.fn<AsyncMock>();
@@ -30,6 +31,8 @@ jest.mock(
   "@/lib/repositories/content-platform/migration-control-service",
   () => ({
     approveRepositoryMigrationMismatch: jest.fn(),
+    excludeRepositoryMigrationException:
+      mockExcludeRepositoryMigrationException,
     getRepositoryMigrationDashboard: jest.fn(),
     listRepositoryMigrationExceptions: mockListRepositoryMigrationExceptions,
     MAX_FAILED_REPOSITORY_MIGRATION_RETRIES: 250,
@@ -97,12 +100,14 @@ describe("repository recovery administrator actions", () => {
   let retryFailedRepositoryMigrationItemsAction: typeof import("@/actions/admin/repository-migration.actions").retryFailedRepositoryMigrationItemsAction;
   let reprocessRepositoryMigrationMismatchesAction: typeof import("@/actions/admin/repository-migration.actions").reprocessRepositoryMigrationMismatchesAction;
   let retryRepositoryItemsBulkAction: typeof import("@/actions/admin/repository-migration.actions").retryRepositoryItemsBulkAction;
+  let excludeRepositoryMigrationExceptionAction: typeof import("@/actions/admin/repository-migration.actions").excludeRepositoryMigrationExceptionAction;
 
   beforeAll(async () => {
     ({
       retryFailedRepositoryMigrationItemsAction,
       reprocessRepositoryMigrationMismatchesAction,
       retryRepositoryItemsBulkAction,
+      excludeRepositoryMigrationExceptionAction,
     } = await import("@/actions/admin/repository-migration.actions"));
   });
 
@@ -131,6 +136,24 @@ describe("repository recovery administrator actions", () => {
       requestedBy: 7,
       limit: 219,
     });
+  });
+
+  it("records an audited administrator exclusion through the migration service", async () => {
+    mockExcludeRepositoryMigrationException.mockResolvedValue(undefined);
+
+    const result = await excludeRepositoryMigrationExceptionAction({
+      migrationItemId: "migration-failed-1",
+      reason: "The legacy object was intentionally removed after replacement.",
+    });
+
+    expect(result).toMatchObject({ isSuccess: true });
+    expect(mockExcludeRepositoryMigrationException).toHaveBeenCalledWith({
+      migrationItemId: "migration-failed-1",
+      reason: "The legacy object was intentionally removed after replacement.",
+      excludedBy: 7,
+    });
+    expect(mockRevalidatePath).toHaveBeenCalledWith("/admin/repositories");
+    expect(mockRevalidatePath).toHaveBeenCalledWith("/admin/settings");
   });
 
   it("rejects a failed migration retry beyond the 250-item bound", async () => {

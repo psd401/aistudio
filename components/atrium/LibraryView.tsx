@@ -30,8 +30,10 @@ import { Input } from "@/components/ui/input";
 import { listContentAction } from "@/actions/db/atrium/list-content";
 import { createContentAction } from "@/actions/db/atrium/create-content";
 import type { ContentObjectDTO, ContentKind, ListFilter } from "@/lib/content";
+import { ARTIFACT_STARTER_HTML } from "@/lib/content/artifact-starter";
 import { createLogger } from "@/lib/client-logger";
 import { LibraryList } from "./LibraryList";
+import { LibraryHome } from "./LibraryHome";
 import { LibraryBulkBar } from "./LibraryBulkBar";
 import { CreateContentDialog } from "./CreateContentDialog";
 import { PrivateCollectionsDialog } from "./PrivateCollectionsDialog";
@@ -48,12 +50,33 @@ const log = createLogger({ component: "LibraryView" });
  * "Archived" is a distinct lifecycle view showing all archived docs + artifacts.
  */
 const VIEWS = [
-  { value: "all", label: "All" },
+  { value: "home", label: "Home" },
+  { value: "all", label: "All content" },
+  { value: "favorites", label: "Favorites" },
+  { value: "mine", label: "Mine" },
   { value: "document", label: "Docs" },
   { value: "artifact", label: "Artifacts" },
   { value: "shared", label: "Shared with me" },
+  { value: "unfiled", label: "Unfiled" },
   { value: "archived", label: "Archived" },
 ] as const;
+
+/**
+ * The chips shown by DEFAULT. The full `VIEWS` list is every reachable view, but
+ * putting all nine in the bar turned the filter row into a wall of options —
+ * the same "everything at once" problem the home page exists to fix. The rest
+ * stay reachable from the home bands' "see all" links, and a chip for the active
+ * view is added back in `LibraryChips` so the bar always shows where you are.
+ */
+const PRIMARY_VIEWS: readonly LibraryFilterView[] = [
+  "home",
+  "all",
+  "favorites",
+  "document",
+  "artifact",
+  "shared",
+  "archived",
+];
 
 type LibraryFilterView = (typeof VIEWS)[number]["value"];
 
@@ -119,10 +142,16 @@ function useLibraryCreate(collectionId: string | null) {
 
   const handleAgentCreate = useCallback(
     async (promptText: string): Promise<string | null> => {
+      // The starter body is what makes this artifact have a v1. Creating it
+      // bodyless left `currentVersionId` null, and the authoring canvas has
+      // nothing to load — the card in this very grid would open on an error.
+      // The agent replaces this wholesale on its first turn.
       const res = await createContentAction({
         kind: "artifact",
         title: deriveArtifactTitle(promptText),
         collectionId: collectionId ?? undefined,
+        body: ARTIFACT_STARTER_HTML,
+        bodyFormat: "html",
       });
       if (res.isSuccess) {
         router.push(
@@ -136,6 +165,31 @@ function useLibraryCreate(collectionId: string | null) {
     [collectionId, router]
   );
 
+  /**
+   * Create an EMPTY interactive page and go straight to its editor — the
+   * counterpart to "New doc". Before this, the only way to make one was to
+   * describe it to the agent, which navigated out of Atrium into the Nexus chat
+   * with no explanation. The starter body is what gives it a v1 (see
+   * ARTIFACT_STARTER_HTML) so the editor never opens on an error.
+   */
+  const handleBlankArtifact = useCallback(async () => {
+    const res = await createContentAction({
+      kind: "artifact",
+      title: "Untitled page",
+      collectionId: collectionId ?? undefined,
+      body: ARTIFACT_STARTER_HTML,
+      bodyFormat: "html",
+    });
+    if (res.isSuccess) {
+      router.push(`/atrium/${res.data.id}/edit`);
+      return;
+    }
+    setCreateError(res.message ?? "Could not create the page");
+    log.warn("createContentAction (blank artifact) failed", {
+      message: res.message,
+    });
+  }, [collectionId, router]);
+
   return {
     agentPromptOpen,
     setAgentPromptOpen,
@@ -143,6 +197,7 @@ function useLibraryCreate(collectionId: string | null) {
     createError,
     handleNewDoc,
     handleAgentCreate,
+    handleBlankArtifact,
   };
 }
 
@@ -188,7 +243,7 @@ function LibraryHeader({
       <PrivateCollectionsDialog />
       <button type="button" className="mer-btn" onClick={onNewArtifact}>
         <Sparkles className="h-4 w-4" aria-hidden="true" />
-        New artifact
+        New page
       </button>
       <button
         type="button"
@@ -225,7 +280,9 @@ function LibraryChips({
   return (
     <div className="mer-chip-row">
       <div className="mer-chips" role="group" aria-label="Filter content">
-        {VIEWS.map((v) => (
+        {VIEWS.filter(
+          (v) => PRIMARY_VIEWS.includes(v.value) || v.value === view
+        ).map((v) => (
           <button
             key={v.value}
             type="button"
@@ -262,8 +319,10 @@ function LibraryChips({
  */
 function viewToFilter(view: LibraryFilterView): {
   kind?: ContentKind;
-  owner?: "shared";
+  owner?: "shared" | "mine";
   status?: "archived";
+  filed?: "unfiled";
+  favorite?: true;
 } {
   switch (view) {
     case "document":
@@ -272,11 +331,88 @@ function viewToFilter(view: LibraryFilterView): {
       return { kind: "artifact" };
     case "shared":
       return { owner: "shared" };
+    case "mine":
+      return { owner: "mine" };
+    case "favorites":
+      return { favorite: true };
+    case "unfiled":
+      return { filed: "unfiled" };
     case "archived":
       return { status: "archived" };
+    // "home" never reaches the grid (LibraryHome renders instead), and "all"
+    // applies no restriction.
     default:
       return {};
   }
+}
+
+/**
+ * The "Load more" control. Renders nothing once a short page signals the end,
+ * while the first page loads, on error, or when the current filter matched
+ * nothing (a zero-result search must not render a dangling "Load more" —
+ * #1336). Its own component so those four conditions do not count against
+ * `LibraryView`'s complexity budget.
+ */
+function LoadMore({
+  hasMore,
+  loading,
+  loadingMore,
+  error,
+  itemCount,
+  onLoadMore,
+}: {
+  hasMore: boolean;
+  loading: boolean;
+  loadingMore: boolean;
+  error: string | null;
+  itemCount: number;
+  onLoadMore: () => void;
+}): React.JSX.Element | null {
+  if (!hasMore || loading || error || itemCount === 0) return null;
+  return (
+    <div className="mt-5 flex justify-center">
+      <button
+        type="button"
+        className={cn("mer-btn", loadingMore && "opacity-60")}
+        disabled={loadingMore}
+        onClick={onLoadMore}
+      >
+        {loadingMore ? "Loading…" : "Load more"}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Resolve the chip selection into everything the body needs: the view actually
+ * in effect and its server filter.
+ *
+ * Home yields to a search: the bands are fixed, curated queries that ignore the
+ * search and tag boxes, so leaving the viewer on Home while they type would make
+ * those boxes look broken. Derived (not stored), so clearing the search returns
+ * them to Home rather than stranding them in a grid they never chose.
+ */
+function resolveView(
+  view: LibraryFilterView,
+  searching: boolean
+): {
+  effectiveView: LibraryFilterView;
+  kind?: ContentKind;
+  owner?: "shared" | "mine";
+  status?: "archived";
+  filed?: "unfiled";
+  favorite?: true;
+  archivedView: boolean;
+  homeView: boolean;
+} {
+  const effectiveView: LibraryFilterView =
+    view === "home" && searching ? "all" : view;
+  return {
+    effectiveView,
+    ...viewToFilter(effectiveView),
+    archivedView: effectiveView === "archived",
+    homeView: effectiveView === "home",
+  };
 }
 
 /**
@@ -449,7 +585,13 @@ export function LibraryView({
   // state + sync effect) is all that's needed for the shell tree to drive the grid.
   const collectionId = searchParams.get("collection");
 
-  const [view, setView] = useState<LibraryFilterView>("all");
+  // Home is the default — but ONLY at /atrium. Arriving with ?collection= means
+  // the viewer asked for one section's contents, and answering that with the
+  // curated home would ignore the request. (Section links now target
+  // /atrium/s/[slug]; this keeps older ?collection= deep links working.)
+  const [view, setView] = useState<LibraryFilterView>(
+    collectionId ? "all" : "home"
+  );
   const [tag, setTag] = useState("");
   const [search, setSearch] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
@@ -459,6 +601,15 @@ export function LibraryView({
   // that a client-side filter over the already-loaded page could never see).
   const debouncedTag = useDebounced(tag);
   const debouncedSearch = useDebounced(search);
+
+  // Typing in the search or tag box must leave Home: the bands are fixed,
+  // curated queries that ignore both, so staying on Home would make the search
+  // box look broken. DERIVED rather than a setState-in-effect — the effect
+  // version fired a cascading render on every debounce tick, and this also means
+  // clearing the search returns the viewer to Home instead of stranding them in
+  // a filtered grid they never chose.
+  const searching =
+    debouncedSearch.trim().length > 0 || debouncedTag.trim().length > 0;
 
   // ⌘K / Ctrl+K focuses the library search (design "⌘K" hint). Global listener,
   // cleaned up on unmount; ignores the combo when a modifier-less field already
@@ -483,11 +634,12 @@ export function LibraryView({
     createError,
     handleNewDoc,
     handleAgentCreate,
+    handleBlankArtifact,
   } = useLibraryCreate(collectionId);
 
   // Derive the server filter from the active chip.
-  const { kind, owner, status } = viewToFilter(view);
-  const archivedView = view === "archived";
+  const { effectiveView, kind, owner, status, filed, favorite, archivedView, homeView } =
+    resolveView(view, searching);
 
   const {
     items,
@@ -504,6 +656,8 @@ export function LibraryView({
       kind,
       owner,
       status,
+      filed,
+      favorite,
       tag: debouncedTag.trim() || undefined,
       query: debouncedSearch.trim() || undefined,
     });
@@ -555,8 +709,12 @@ export function LibraryView({
           </p>
         )}
 
-        <LibraryChips view={view} onView={setView} tag={tag} onTag={setTag} />
+        <LibraryChips view={effectiveView} onView={setView} tag={tag} onTag={setTag} />
 
+        {homeView ? (
+          <LibraryHome onSeeAll={setView} />
+        ) : (
+          <>
         <LibraryBulkBar
           selectedIds={[...selected]}
           onClear={clearSelection}
@@ -578,20 +736,15 @@ export function LibraryView({
           tagTerm={debouncedTag}
         />
 
-        {/* Pagination: hidden once a short page signals the end, while the first
-            page loads, on error, or when the current filter matched nothing (a
-            zero-result search must not render a dangling "Load more" — #1336). */}
-        {hasMore && !loading && !error && items.length > 0 && (
-          <div className="mt-5 flex justify-center">
-            <button
-              type="button"
-              className={cn("mer-btn", loadingMore && "opacity-60")}
-              disabled={loadingMore}
-              onClick={loadMore}
-            >
-              {loadingMore ? "Loading…" : "Load more"}
-            </button>
-          </div>
+        <LoadMore
+          hasMore={hasMore}
+          loading={loading}
+          loadingMore={loadingMore}
+          error={error}
+          itemCount={items.length}
+          onLoadMore={loadMore}
+        />
+          </>
         )}
       </section>
 
@@ -600,6 +753,7 @@ export function LibraryView({
         open={agentPromptOpen}
         onClose={() => setAgentPromptOpen(false)}
         onSubmit={handleAgentCreate}
+        onStartBlank={handleBlankArtifact}
       />
     </div>
   );

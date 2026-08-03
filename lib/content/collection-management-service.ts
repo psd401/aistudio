@@ -54,6 +54,11 @@ import type {
 } from "./types";
 
 const NAME_MAX_LENGTH = 200;
+/**
+ * Upper bound on a section description. It is hero copy, not a document — the
+ * bound stops an unbounded blob reaching the column and the landing-page hero.
+ */
+const DESCRIPTION_MAX_LENGTH = 2000;
 const GRANT_VALUE_MAX_LENGTH = 255;
 const POSITION_MAX = 2_147_483_647;
 const UUID_RE =
@@ -239,10 +244,40 @@ function scopeOf(row: CollectionAccessRow): CollectionScope {
   return row.ownerUserId == null ? "district" : "private";
 }
 
-function assertMayManage(req: Requester, row: CollectionAccessRow): void {
+/**
+ * The fields a `create`-grant holder may change on a DISTRICT collection without
+ * being an administrator. Strictly the section's landing-page copy: it changes
+ * how the section is described, never who can reach it, where it sits, or what
+ * visibility its contents inherit.
+ *
+ * Keep this list minimal and explicit. Anything added here becomes editable by
+ * every contributor to the section, so a field that influences access,
+ * hierarchy, or lifecycle MUST NOT be added.
+ */
+const SECTION_EDITOR_FIELDS = new Set(["description", "landingObjectId"]);
+
+/**
+ * Whether a patch touches ONLY the landing-page copy. An empty patch returns
+ * false so it can never be treated as a permitted no-op edit.
+ */
+function isSectionCopyOnlyPatch(input: UpdateCollectionInput): boolean {
+  const keys = Object.keys(input);
+  return keys.length > 0 && keys.every((key) => SECTION_EDITOR_FIELDS.has(key));
+}
+
+function assertMayManage(
+  req: Requester,
+  row: CollectionAccessRow,
+  /**
+   * Present only on `update`. When the patch is copy-only AND the caller holds
+   * `create` access to this collection, the administrator requirement for a
+   * district collection is waived — see SECTION_EDITOR_FIELDS.
+   */
+  copyOnlyWithCreateAccess = false
+): void {
   const principal = principalOf(req);
   if (row.ownerUserId == null) {
-    if (!principal.isAdmin) {
+    if (!principal.isAdmin && !copyOnlyWithCreateAccess) {
       throw new ForbiddenError(
         "Administrator authority is required to manage district collections"
       );
@@ -584,6 +619,8 @@ async function managementDTOs(req: Requester): Promise<CollectionDTO[]> {
     inheritGrants: row.inheritGrants,
     position: row.position,
     archivedAt: row.archivedAt?.toISOString() ?? null,
+    description: row.description,
+    landingObjectId: row.landingObjectId,
     directContentCount: directCounts.get(row.id) ?? 0,
     subtreeContentCount: subtreeCount(row.id),
     grants: access.directGrants.get(row.id) ?? [],
@@ -609,6 +646,12 @@ interface CollectionUpdateTxInput {
   input: UpdateCollectionInput;
   normalized: NormalizedCollectionUpdate;
   audit: CollectionUpdateAuditContext;
+  /**
+   * Resolved by `update` BEFORE the transaction (it needs the requester's
+   * collection-access snapshot): the patch is copy-only and the caller holds
+   * `create` access here, so the district-admin requirement is waived.
+   */
+  copyOnlyWithCreateAccess?: boolean;
 }
 
 async function loadCollectionRows(
@@ -625,6 +668,12 @@ async function loadCollectionRows(
       inheritGrants: contentCollections.inheritGrants,
       position: contentCollections.position,
       archivedAt: contentCollections.archivedAt,
+      // Selected even though the in-transaction validators do not read them:
+      // the `as CollectionAccessRow[]` cast below would otherwise assert a
+      // shape these rows do not have, and the next reader of a "row" here would
+      // silently get `undefined` instead of a type error.
+      description: contentCollections.description,
+      landingObjectId: contentCollections.landingObjectId,
     })
     .from(contentCollections)
     // Content create/move holds SHARE locks on these rows while it authorizes
@@ -704,6 +753,17 @@ function collectionUpdateValues(
   if (input.inheritGrants !== undefined) {
     values.inheritGrants = input.inheritGrants;
   }
+  // `?? null` (not the raw value): an explicit `null` from the caller CLEARS the
+  // field. Passing `undefined` into Drizzle's .set() silently drops the column
+  // from the UPDATE, so "clear this description" would look like it worked and
+  // change nothing — see docs/guides/silent-failure-patterns.md.
+  if (input.description !== undefined) {
+    const trimmed = input.description?.trim() ?? "";
+    values.description = trimmed.length > 0 ? trimmed : null;
+  }
+  if (input.landingObjectId !== undefined) {
+    values.landingObjectId = input.landingObjectId ?? null;
+  }
   return values;
 }
 
@@ -735,7 +795,7 @@ async function updateCollectionInTx(
   if (!existing) {
     throw new NotFoundError("Collection not found", { collectionId });
   }
-  assertMayManage(req, existing);
+  assertMayManage(req, existing, update.copyOnlyWithCreateAccess ?? false);
   const scope = scopeOf(existing);
   const parentId =
     input.parentId === undefined ? existing.parentId : input.parentId ?? null;
@@ -894,6 +954,30 @@ export const collectionManagementService = {
     if (Object.keys(input).length === 0) {
       throw new ValidationError("Nothing to update");
     }
+    if (
+      typeof input.description === "string" &&
+      input.description.length > DESCRIPTION_MAX_LENGTH
+    ) {
+      throw new ValidationError(
+        `Description must be ${DESCRIPTION_MAX_LENGTH} characters or fewer`
+      );
+    }
+    if (input.landingObjectId != null) {
+      // Same id shape as any other object reference — validated here so a
+      // malformed value cannot reach the uuid column as a query error.
+      assertCollectionId(input.landingObjectId);
+    }
+    // A copy-only patch from a non-admin is allowed when they may CREATE in this
+    // collection. Resolved here, outside the transaction, because it needs the
+    // requester's collection-access snapshot; the decision is then passed in and
+    // re-asserted against the locked row inside the tx.
+    const principal = principalOf(req);
+    const copyOnlyWithCreateAccess =
+      !principal.isAdmin &&
+      isSectionCopyOnlyPatch(input) &&
+      (await collectionAccessSnapshot(req)).selectableCollectionIds.has(
+        collectionId
+      );
     const name = input.name === undefined ? undefined : normalizedName(input.name);
     const position = normalizedPosition(input.position);
     if (input.defaultVisibilityLevel) {
@@ -921,6 +1005,7 @@ export const collectionManagementService = {
             input,
             normalized: { name, position, grants },
             audit,
+            copyOnlyWithCreateAccess,
           }),
         "collectionManagement.update",
         { isolationLevel: "serializable" }

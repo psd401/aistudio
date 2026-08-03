@@ -290,7 +290,8 @@ async function loadNextRepositoryCandidate(
                 AND connector_source.status = 'unsupported'
             )
             AND (
-              item.current_version_id IS NULL
+              ${discoverUntrackedSources} = FALSE
+              OR item.current_version_id IS NULL
               OR EXISTS (
                 SELECT 1
                 FROM repository_item_chunks legacy_chunk
@@ -1300,6 +1301,24 @@ export async function getRepositoryMigrationRunMetrics(
 async function finishBackfillRun(
   run: RepositoryMigrationRunRow,
 ): Promise<void> {
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        UPDATE repository_migration_items
+        SET status = 'unrecoverable',
+            last_error_code = 'MIGRATION_RUN_SOURCE_UNPROCESSED',
+            last_error_message =
+              'Migration run ended without processing this source; retry the source',
+            metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+              'unprocessedRunId', ${run.id}::text
+            ),
+            verified_at = NULL,
+            updated_at = NOW()
+        WHERE run_id = ${run.id}::uuid
+          AND status IN ('pending', 'migrating')
+      `),
+    "contentMigration.failUnprocessedBackfillItems",
+  );
   // A retry preserves origin_run_id for rollback ownership, but its result
   // belongs to the retry run that currently owns the item.
   const metrics = await getRepositoryMigrationRunMetrics(run.id);
@@ -1385,7 +1404,9 @@ async function reconcileMigrationCandidate(
   tx: DbTransaction,
   candidate: RepositoryMigrationItemRow,
   runId: string,
-): Promise<"skipped" | "pending" | "verified" | "mismatch"> {
+): Promise<
+  "skipped" | "pending" | "verified" | "mismatch" | "unrecoverable"
+> {
   // Serialize reconciliation with administrator approval/reprocess actions.
   // A stale worker observation must never overwrite a freshly approved
   // mismatch or mark a version verified after reprocessing reset it.
@@ -1395,11 +1416,26 @@ async function reconcileMigrationCandidate(
     .where(eq(repositoryMigrationItems.id, candidate.id))
     .limit(1)
     .for("update");
-  if (
-    !migration?.canonicalVersionId ||
-    !["migrated", "mismatch"].includes(migration.status)
-  ) {
+  if (!migration || !["migrated", "mismatch"].includes(migration.status)) {
     return "skipped";
+  }
+  if (!migration.canonicalVersionId) {
+    await tx
+      .update(repositoryMigrationItems)
+      .set({
+        status: "unrecoverable",
+        lastErrorCode: "MIGRATION_CANONICAL_VERSION_MISSING",
+        lastErrorMessage:
+          "Migration is missing canonical version evidence; retry the source to recreate it",
+        verifiedAt: null,
+        metadata: {
+          ...migration.metadata,
+          lastReconciledRunId: runId,
+        },
+        updatedAt: new Date(),
+      })
+      .where(eq(repositoryMigrationItems.id, migration.id));
+    return "unrecoverable";
   }
   const evidence = toPgRows<{
     processing_status: string | null;
@@ -1490,6 +1526,29 @@ async function reconcileMigrationCandidate(
 async function reconcileNextBatch(
   run: RepositoryMigrationRunRow,
 ): Promise<void> {
+  await executeQuery(
+    (db) =>
+      db.execute(sql`
+        UPDATE repository_migration_items migration
+        SET status = 'unrecoverable',
+            last_error_code = 'MIGRATION_RUN_SOURCE_UNPROCESSED',
+            last_error_message =
+              'Migration run ended without processing this source; retry the source',
+            metadata = COALESCE(migration.metadata, '{}'::jsonb) ||
+              jsonb_build_object(
+                'unprocessedRunId', migration.run_id::text,
+                'lastReconciledRunId', ${run.id}::text
+              ),
+            verified_at = NULL,
+            updated_at = NOW()
+        FROM repository_migration_runs owner_run
+        WHERE owner_run.id = migration.run_id
+          AND owner_run.id <> ${run.id}::uuid
+          AND owner_run.status NOT IN ('queued', 'running')
+          AND migration.status IN ('pending', 'migrating')
+      `),
+    "contentMigration.recoverTerminalRunOrphans",
+  );
   const migrations = await executeQuery(
     (db) =>
       db
@@ -1498,7 +1557,6 @@ async function reconcileNextBatch(
         .where(
           and(
             inArray(repositoryMigrationItems.status, ["migrated", "mismatch"]),
-            sql`${repositoryMigrationItems.canonicalVersionId} IS NOT NULL`,
             sql`COALESCE(
               ${repositoryMigrationItems.metadata} ->> 'lastReconciledRunId',
               ''
@@ -1525,7 +1583,6 @@ async function reconcileNextBatch(
           SELECT COUNT(*)::integer AS count
           FROM repository_migration_items
           WHERE status IN ('migrated', 'mismatch')
-            AND canonical_version_id IS NOT NULL
             AND COALESCE(metadata ->> 'lastReconciledRunId', '') <> ${run.id}
         `),
         "contentMigration.remainingReconciliation",
@@ -1539,6 +1596,8 @@ async function reconcileNextBatch(
           .update(repositoryMigrationRuns)
           .set({
             status:
+              (metrics.failed ?? 0) > 0 ||
+              (metrics.unrecoverable ?? 0) > 0 ||
               (metrics.mismatched ?? 0) > 0
                 ? "completed_with_errors"
                 : "completed",

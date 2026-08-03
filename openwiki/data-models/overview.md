@@ -121,6 +121,8 @@ await executeTransaction(
 | `content_versions` | Version history |
 | `content_visibility_grants` | Access permissions |
 | `content_publications` | Published content |
+| `content_user_favorites` | Per-user favorites (stars) for library home personalization |
+| `content_data_records` | Artifact data persistence for sandboxed interactive content |
 | `atrium_doc_state` | Live collaborative state (Yjs CRDT) |
 | `atrium_doc_comments` | Comments and track changes |
 | `content_audit_logs` | Content modification audit |

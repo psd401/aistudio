@@ -9,6 +9,7 @@ import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 import type { ActionState } from "@/types/actions-types";
 import {
   approveRepositoryMigrationMismatch,
+  excludeRepositoryMigrationException,
   getRepositoryMigrationDashboard,
   listRepositoryMigrationExceptions,
   MAX_FAILED_REPOSITORY_MIGRATION_RETRIES,
@@ -405,6 +406,29 @@ export async function approveRepositoryMigrationMismatchAction(input: {
   }
 }
 
+export async function excludeRepositoryMigrationExceptionAction(input: {
+  migrationItemId: string;
+  reason: string;
+}): Promise<ActionState<void>> {
+  const requestId = generateRequestId();
+  const timer = startTimer("admin.contentMigration.excludeException");
+  try {
+    const { userId: excludedBy } = await requireMigrationAdministrator();
+    await excludeRepositoryMigrationException({ ...input, excludedBy });
+    timer({ status: "success" });
+    revalidatePath(ADMIN_REPOSITORIES_PATH);
+    revalidatePath(ADMIN_SETTINGS_PATH);
+    return createSuccess(undefined, "Migration source excluded from cutover");
+  } catch (error) {
+    timer({ status: "error" });
+    return handleError(error, "Failed to exclude migration source.", {
+      context: "admin.contentMigration.excludeException",
+      requestId,
+      operation: "excludeRepositoryMigrationExceptionAction",
+    });
+  }
+}
+
 export async function runRepositoryMigrationRollbackDrillAction(): Promise<
   ActionState<RepositoryMigrationRunRow>
 > {
@@ -559,7 +583,10 @@ export async function recordRepositoryRetrievalShadowSampleAction(input: {
       );
     }
 
-    const contentConfig = await getContentPlatformConfig();
+    // Rollout toggles are operational controls. Read them directly from the
+    // database so a just-enabled shadow cannot be hidden by another bundle or
+    // task's settings cache.
+    const contentConfig = await getContentPlatformConfig({ fresh: true });
     const outcomes: RepositoryRetrievalShadowSampleOutcome[] = [];
     for (const query of queries) {
       const search = await executeSearch({

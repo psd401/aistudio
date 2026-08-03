@@ -135,7 +135,7 @@ export async function upsertSettingAction(input: CreateSettingInput): Promise<Ac
 
     if (isContentRolloutBooleanKey(input.key)) {
       const value = parseContentRolloutBoolean(input.value)
-      const current = await getContentPlatformConfig()
+      const current = await getContentPlatformConfig({ fresh: true })
       const prospective = applyProspectiveRolloutSetting(
         current,
         input.key,
