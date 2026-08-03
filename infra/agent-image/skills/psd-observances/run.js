@@ -52,7 +52,7 @@ Usage:
   node run.js conferences [--year N] [--org <text>] [--limit N] [--full] [--json]
   node run.js holiday-years <name> [--limit N] [--full] [--json]
 
-The skill resolves an accessible repository whose name contains "NSPRA".
+The skill uses definitive AI Studio repository 36 for every lookup.
 Default output returns at most five cited results with 300-character excerpts.`;
 
 const VALUE_FLAGS = new Set(['limit', 'date', 'section', 'year', 'org']);

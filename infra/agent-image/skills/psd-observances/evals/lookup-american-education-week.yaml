@@ -8,6 +8,6 @@ trials: 3
 fixtures:
   - fixtures/lookup-american-education-week.json
 graders:
-  - {"type":"broker_request","route":"/api/agent/aistudio","method":"POST","body":{"method":{"exact":"tools/call"},"params.name":{"exact":"repositories_list"},"params.arguments.query":{"exact":"NSPRA"}}}
-  - {"type":"broker_request","route":"/api/agent/aistudio","method":"POST","body":{"method":{"exact":"tools/call"},"params.name":{"exact":"repositories_search"},"params.arguments.query":{"exact":"American Education Week"},"params.arguments.repositoryIds":{"contains_any":[1476]}}}
+  - {"type":"broker_request","route":"/api/agent/aistudio","method":"POST","body":{"method":{"exact":"tools/call"},"params.name":{"exact":"repositories_describe"},"params.arguments.repositoryId":{"exact":36}}}
+  - {"type":"broker_request","route":"/api/agent/aistudio","method":"POST","body":{"method":{"exact":"tools/call"},"params.name":{"exact":"repositories_search"},"params.arguments.query":{"exact":"American Education Week"},"params.arguments.repositoryIds":{"contains_any":[36]}}}
   - {"type":"output_match","pattern":"(?is)(American Education Week.*November 16-20, 2026.*Page 17|Page 17.*American Education Week.*November 16-20, 2026)"}
