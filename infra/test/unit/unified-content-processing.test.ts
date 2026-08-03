@@ -146,13 +146,24 @@ test("alarms on stalled work, failures, migration blockers, and stale indexes", 
     EvaluationPeriods: 2,
     TreatMissingData: "notBreaching",
   });
+  // A publisher gap and unready models are different failures. "breaching" on
+  // the readiness alarm conflated them, pinning it to ALARM regardless of the
+  // real value, so readiness holds last state on missing data — and the gap
+  // itself is alarmed on here instead. Absent samples must still page someone,
+  // so this one keeps "breaching".
+  template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+    AlarmName: "aistudio-dev-unified-content-metrics-stale",
+    MetricName: "AgenticReadyModels",
+    Statistic: "SampleCount",
+    Threshold: 1,
+    EvaluationPeriods: 2,
+    ComparisonOperator: "LessThanThreshold",
+    TreatMissingData: "breaching",
+  });
   template.hasResourceProperties("AWS::CloudWatch::Alarm", {
     AlarmName: "aistudio-dev-agentic-models-unavailable",
     Threshold: 1,
     EvaluationPeriods: 2,
-    // The snapshot publishes slower than the evaluation period, so "breaching"
-    // fired on absent datapoints and pinned the alarm to ALARM regardless of the
-    // real value. Missing data must hold the last state instead.
     TreatMissingData: "missing",
   });
   template.hasResourceProperties("AWS::CloudWatch::Alarm", {

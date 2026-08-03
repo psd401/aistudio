@@ -355,10 +355,13 @@ function defineTrustedWorkspaceCommandPolicySuite1Part3() {it("rejects Gmail mod
       ],
     ],
     ["raw API", ["chat", "spaces", "messages", "create", "--json", "{}"]],
-  ])("blocks %s Chat sends from scheduled runs", (_name, argv) => {
+  ])("allows %s Chat sends from scheduled runs", (_name, argv) => {
+    // Recurring jobs post to spaces their owner named when creating the
+    // schedule. This previously threw; the gate could not distinguish
+    // pre-authorized destinations from arbitrary ones and refused both.
     expect(() =>
       validateScheduledWorkspaceCommand({ scope: "agent", argv })
-    ).toThrow(/without live user confirmation/)
+    ).not.toThrow()
   })
 
   it("keeps scheduled Workspace reads available", () => {

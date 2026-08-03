@@ -755,6 +755,28 @@ export class UnifiedContentProcessing extends Construct {
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       }
     );
+    // Absent datapoints and a real zero are different failures, and one alarm
+    // cannot report both. The maintenance sweep publishes this snapshot every
+    // minute (`PendingJobSweep` in configureWorkerTriggers) against five-minute
+    // periods, so a healthy publisher supplies several samples per period and a
+    // gap means the publisher itself stopped. This alarm owns that case, which
+    // is what lets the readiness alarm below treat missing data as "hold last
+    // state" without readiness monitoring silently disappearing.
+    const operationalMetricsHeartbeatAlarm = new cloudwatch.Alarm(
+      this,
+      "OperationalMetricsHeartbeatAlarm",
+      {
+        alarmName: `aistudio-${props.environment}-unified-content-metrics-stale`,
+        alarmDescription:
+          "The unified-content maintenance sweep stopped publishing its operational snapshot; every alarm sourced from that snapshot is now blind",
+        metric: operationalMetric("AgenticReadyModels", "SampleCount"),
+        threshold: 1,
+        evaluationPeriods: 2,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+      }
+    );
     const agenticModelReadinessAlarm = new cloudwatch.Alarm(
       this,
       "AgenticModelReadinessAlarm",
@@ -767,10 +789,11 @@ export class UnifiedContentProcessing extends Construct {
         evaluationPeriods: 2,
         comparisonOperator:
           cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
-        // The operational snapshot publishes on a slow cadence, not every period.
-        // BREACHING here made the alarm fire on absent datapoints rather than on a
-        // real zero, so it sat in ALARM permanently and carried no signal. Missing
-        // data now holds the last real state; a genuine 0 still trips the alarm.
+        // A genuine 0 still trips this alarm. Absent datapoints no longer do:
+        // BREACHING conflated a publisher gap with unready models, so any gap
+        // pinned this to ALARM and it carried no signal about readiness. The
+        // gap case is alarmed on directly by the heartbeat above, so nothing
+        // is suppressed here — only attributed to the right alarm.
         treatMissingData: cloudwatch.TreatMissingData.MISSING,
       }
     );
@@ -827,6 +850,7 @@ export class UnifiedContentProcessing extends Construct {
       staleRepositoryAlarm,
       connectorFailureAlarm,
       repositoryReadinessAlarm,
+      operationalMetricsHeartbeatAlarm,
       agenticModelReadinessAlarm,
       connectorRevocationAlarm,
       repositoryBindingRateAlarm,
