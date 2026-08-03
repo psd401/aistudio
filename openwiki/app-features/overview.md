@@ -145,6 +145,21 @@ All surfaces are clients of the content API—there is no UI-only creation path.
 - **Public** — External web with approval queue
 - **Group grants** — Share with specific Google groups
 
+### Library & Favorites
+
+**Library Home** provides a curated landing experience:
+- **Favorites band** — Personal starred content surfaced when user has favorites
+- **Recent activity** — Recently viewed and edited content
+- **Section pages** — Dedicated landing pages for content collections (via `/atrium/s/<slug>`)
+
+**Favorites** let users star content for quick access:
+- Implemented via `content_user_favorites` join table (composite PK: `user_id`, `object_id`)
+- Favorites are visibility-gated — starring does not grant access if visibility changes
+- Toggle via `FavoriteStar` component, backed by `/lib/content/favorites-service.ts`
+- Empty favorites band is suppressed (no empty state shown)
+
+**Section Landing Pages** (`components/atrium/SectionLanding.tsx`) provide collection-specific navigation with settings dialogs for collection owners.
+
 ### MCP Tools
 
 Atrium exposes content tools via `/lib/mcp/content-tools.ts`:
