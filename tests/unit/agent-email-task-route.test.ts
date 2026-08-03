@@ -69,37 +69,58 @@ function request(body: unknown) {
   return { json: async () => body }
 }
 
+const SCHEDULED_CONTEXT = {
+  ownerEmail: "owner@example.com",
+  actorEmail: "owner@example.com",
+  mode: "scheduled" as const,
+  sessionId: "scheduled-session",
+  nonce: "scheduled-nonce",
+}
+
+const CHAT_SEND_ARGV = [
+  "chat",
+  "+send",
+  "--space",
+  "spaces/AAQA13FQZFA",
+  "--text",
+  "Automated update",
+]
+
 function defineScheduledChatConfinementTest(
   workspacePost: () =>
     typeof import("@/app/api/agent/workspace-execute/route").POST,
 ): void {
-  it("blocks scheduled Chat sends before minting an agent token", async () => {
-    verifyContextMock.mockResolvedValue({
-      ownerEmail: "owner@example.com",
-      actorEmail: "owner@example.com",
-      mode: "scheduled",
-      sessionId: "scheduled-session",
-      nonce: "scheduled-nonce",
-    })
+  // A recurring job's owner names its destination spaces when they create the
+  // schedule, so this no longer refuses the send — the route previously
+  // rejected it as unconfirmed, which blocked the exact case it was most
+  // likely to meet.
+  it("delivers scheduled Chat sends through the agent-owned account", async () => {
+    verifyContextMock.mockResolvedValue(SCHEDULED_CONTEXT)
 
     const response = await workspacePost()(
-      request({
-        scope: "agent",
-        argv: [
-          "chat",
-          "+send",
-          "--space",
-          "spaces/AAQA13FQZFA",
-          "--text",
-          "Automated update",
-        ],
-      }) as never,
+      request({ scope: "agent", argv: CHAT_SEND_ARGV }) as never,
+    )
+
+    expect(response.status).toBe(200)
+    expect(mintAgentTokenMock).toHaveBeenCalledTimes(1)
+    expect(executeWorkspaceCommandMock).toHaveBeenCalledTimes(1)
+  })
+
+  // What still bounds a scheduled Chat send: it must go out as the agent
+  // identity, whose Chat membership is the destination boundary. A user-scoped
+  // send would escape that boundary and is still refused before any token.
+  it("still confines scheduled Chat sends to the agent account", async () => {
+    verifyContextMock.mockResolvedValue(SCHEDULED_CONTEXT)
+
+    const response = await workspacePost()(
+      request({ scope: "user", argv: CHAT_SEND_ARGV }) as never,
     )
 
     expect(response.status).toBe(400)
     await expect(response.json()).resolves.toMatchObject({
-      error: expect.stringMatching(/without live user confirmation/),
+      error: expect.stringMatching(/must use the agent-owned Workspace account/),
     })
+    expect(getUserTokenMock).not.toHaveBeenCalled()
     expect(mintAgentTokenMock).not.toHaveBeenCalled()
     expect(executeWorkspaceCommandMock).not.toHaveBeenCalled()
   })
