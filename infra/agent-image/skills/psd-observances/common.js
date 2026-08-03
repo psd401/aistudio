@@ -28,6 +28,7 @@ const { requestAgentBroker: defaultRequestAgentBroker } = loadAgentBroker();
 
 const TOOL_SCOPES = Object.freeze({
   repositories_list: 'repositories:list',
+  repositories_describe: 'repositories:list',
   repositories_search: 'repositories:search',
 });
 
@@ -45,17 +46,29 @@ function fail(message, code = 'bad_args', exitCode = 1, detail = undefined) {
   throw new SkillFailure(message, code, exitCode, detail);
 }
 
-function reauthHint(toolName) {
+function reauthHint(toolName, keySource) {
   const scope = TOOL_SCOPES[toolName] || 'repository access';
+  if (keySource === 'shared') {
+    return (
+      `The platform read-only credential failed to authorize ${scope}. ` +
+      'This is an AI Studio platform configuration problem; do not ask the user to reconnect.'
+    );
+  }
+  if (keySource === 'personal') {
+    return (
+      `The stored personal AI Studio key is invalid or lacks ${scope}. ` +
+      'Public repository access should fall back automatically; replace the personal key only for private resources.'
+    );
+  }
   return (
     `Connect AI Studio access and retry. If it is already connected, reconnect ` +
     `it to authorize ${scope}.`
   );
 }
 
-function authFailure(toolName, detail) {
+function authFailure(toolName, detail, keySource) {
   fail(
-    `AI Studio did not authorize this repository request. ${reauthHint(toolName)}`,
+    `AI Studio did not authorize this repository request. ${reauthHint(toolName, keySource)}`,
     'unauthorized',
     11,
     detail ? String(detail).slice(0, 512) : undefined,
@@ -87,7 +100,11 @@ function looksUnauthorized(value) {
 function assertSuccessfulHttpStatus(brokerResult, toolName) {
   const httpStatus = Number(brokerResult && brokerResult.httpStatus);
   if (httpStatus === 401 || httpStatus === 403) {
-    authFailure(toolName, brokerResult && brokerResult.rawText);
+    authFailure(
+      toolName,
+      brokerResult && brokerResult.rawText,
+      brokerResult && brokerResult.keySource,
+    );
   }
   if (httpStatus === 429) {
     fail(
@@ -113,7 +130,7 @@ function assertSuccessfulHttpStatus(brokerResult, toolName) {
   return httpStatus;
 }
 
-function parseMcpPayload(payload, toolName) {
+function parseMcpPayload(payload, toolName, keySource) {
   if (!payload || typeof payload !== 'object') {
     fail(
       'AI Studio returned a non-JSON repository response.',
@@ -123,7 +140,9 @@ function parseMcpPayload(payload, toolName) {
   }
 
   if (payload.error) {
-    if (looksUnauthorized(payload.error)) authFailure(toolName, payload.error);
+    if (looksUnauthorized(payload.error)) {
+      authFailure(toolName, payload.error, keySource);
+    }
     fail(
       `AI Studio MCP error: ${
         payload.error.message || JSON.stringify(payload.error)
@@ -143,7 +162,7 @@ function parseMcpPayload(payload, toolName) {
   const result = payload.result;
   const data = textFromToolResult(result);
   if (result && result.isError) {
-    if (looksUnauthorized(data)) authFailure(toolName, data);
+    if (looksUnauthorized(data)) authFailure(toolName, data, keySource);
     fail(
       `AI Studio repository tool failed: ${
         typeof data === 'string' ? data : JSON.stringify(data)
@@ -157,7 +176,11 @@ function parseMcpPayload(payload, toolName) {
 
 function parseToolEnvelope(brokerResult, toolName) {
   assertSuccessfulHttpStatus(brokerResult, toolName);
-  return parseMcpPayload(brokerResult && brokerResult.payload, toolName);
+  return parseMcpPayload(
+    brokerResult && brokerResult.payload,
+    toolName,
+    brokerResult && brokerResult.keySource,
+  );
 }
 
 async function callRepositoryTool(

@@ -34,6 +34,7 @@ tasks:
   - ../../skills/psd-schedules/evals/clarify-missing-time.yaml
   - ../../skills/psd-skills-meta/evals/search-summarization.yaml
   - ../../skills/psd-sop-creator/evals/required-interview-fields.yaml
+  - ../../skills/psd-strategic-plan/evals/goal-one-objectives.yaml
   - ../../skills/psd-workflows/evals/list-roster.yaml
   - ../../skills/psd-workflows/evals/confirm-before-submit.yaml
   - ../../skills/psd-workspace/evals/list-unread-mail.yaml

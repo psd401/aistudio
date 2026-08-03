@@ -73,16 +73,15 @@ whole 124-page source into model context.
 
 ## Repository and authorization behavior
 
-The CLI calls `repositories_list` on every invocation and selects an accessible
-repository whose name contains **"NSPRA"** case-insensitively. It never
-hardcodes an environment-specific repository id. If several match, it prefers
-a name containing **"2026"**, then the lowest numeric id, and reports the
-selection.
+The definitive source is the public AI Studio repository
+`https://aistudio.psd401.ai/repositories/36`. The CLI describes repository
+**36** on every invocation and passes only `repositoryIds: [36]` to search.
+Never select an NSPRA source by name or search a different repository.
 
-If no repository matches, say that the NSPRA repository is not available to
-the caller's account. On an unauthorized or insufficient-scope response, tell
-the user to **connect AI Studio access**. If already connected, they should
-reconnect so the current repository scopes are authorized.
+If repository 36 is unavailable, report that the definitive NSPRA source is
+unavailable. Public repository access uses the platform's read-only service
+credential when owner credentials are absent or invalid; do not tell the user
+to reconnect for a failure of that shared credential.
 
 ## Exit codes
 
@@ -91,6 +90,6 @@ reconnect so the current repository scopes are authorized.
 | 0 | Success |
 | 1 | Bad arguments, out-of-range date, or unavailable NSPRA repository |
 | 2 | Unexpected internal error |
-| 11 | Unauthorized or insufficient scope; connect/reconnect AI Studio access |
+| 11 | Unauthorized or insufficient scope; remediation identifies owner auth versus platform configuration |
 | 12 | Upstream MCP, broker, or malformed-response error |
 | 14 | Rate-limited; wait briefly and retry |

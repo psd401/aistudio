@@ -31,8 +31,9 @@ credential path only from that signed context. Credential resolution:
   `disconnect` revokes the current invocation owner's grant.
 - **Compatibility: owner's existing `aistudio_personal_key`.** Used only when
   no usable OAuth connection exists.
-- **Discovery fallback: shared `platform:read` key.** It can discover
-  capabilities but cannot read repositories or perform user actions.
+- **Public-knowledge fallback: shared read-only key.** It can discover
+  capabilities and list/read/search public repositories. It cannot read
+  private repositories or perform user actions; those require owner OAuth.
 
 ```bash
 node /opt/psd-skills/psd-aistudio/run.js connect --user <caller-email>
@@ -51,8 +52,10 @@ node /opt/psd-skills/psd-credentials/put.js \
 The broker returns only which credential class it used (`oauth`, `personal`, or
 `shared`) — never the value. Provider tokens, API keys, Authorization headers,
 and Secrets Manager access remain outside the model-facing skill. If an action
-comes back insufficient-scope on the shared key, tell the user to store their
-own key (above).
+comes back insufficient-scope on the shared key, connect owner OAuth for a
+private repository or user action. Public repository reads should work through
+the shared key; treat a scope failure there as platform configuration, not as a
+reason to ask the user to reconnect.
 
 > This skill is a **thin passthrough**. It does not decide which scopes are
 > admin-only — it hands the resolved key to `/api/mcp` and the server enforces the

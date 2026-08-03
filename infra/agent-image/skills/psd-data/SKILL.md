@@ -1,7 +1,7 @@
 ---
 name: psd-data
-summary: Query the PSD data warehouse via the psd-data-mcp server. Authenticates as the calling user, enforces row-level security, exposes 8 tools (tables, schema, permissions, query, lessons). Also the source for Red Rover employee absence and vacancy data — the retired psd-redrover skill.
-description: Read-only access to PSD's Redshift data warehouse, authenticated with the caller's Cognito identity. Lists tables, inspects schemas, runs RLS-rewritten SELECT queries, and manages cross-session "lessons" learned about the data. This is also where Red Rover absence, vacancy, and substitute-fill data now lives — the standalone psd-redrover skill was retired. The MCP server enforces all access control — the skill simply forwards JSON-RPC calls with the right bearer token.
+summary: Query PSD's data warehouse for PowerSchool and SIS student enrollment, attendance, grades, rosters, operational reporting, morning-brief execution logs, and Red Rover absence or vacancy data. Discover live tables and schemas through psd-data-mcp before deciding district data is unavailable.
+description: Read-only, caller-authenticated access to PSD's Redshift warehouse through psd-data-mcp. Use for PowerSchool or SIS questions, student enrollment and school counts, attendance, grades, rosters, operational and scheduled-agent reporting, morning-brief execution or persistence checks, Red Rover absences and vacancies, table discovery, schema inspection, RLS-rewritten SELECT queries, and cross-session data lessons.
 allowed-tools: Bash(node:*)
 ---
 
@@ -13,6 +13,69 @@ Caller identity comes from the signed invocation context. Never pass `--user`
 or another identity selector; the CLI rejects model-supplied authority. The
 trusted broker uses the signed owner to resolve the caller's stored Cognito
 refresh token, mint a fresh id_token, and authenticate to the MCP server.
+
+## PowerSchool and SIS data lives here
+
+`psd-data` is the agent access path for warehouse data sourced from
+PowerSchool and other student-information-system feeds. Do not report that no
+PowerSchool, SIS, enrollment, attendance, grade, roster, student, or school
+data skill exists. Do not call a PowerSchool API directly. The warehouse table
+names can change, so discover them from their current descriptions instead of
+hardcoding names from memory.
+
+For a PowerSchool or SIS question:
+
+```bash
+# 1. Discover the current, permission-filtered tables and descriptions.
+node /opt/psd-skills/psd-data/run.js tables --detailed
+
+# 2. Inspect the tables whose descriptions match the requested subject.
+node /opt/psd-skills/psd-data/run.js schema \
+  --table '["<student or enrollment table>","<school table if needed>"]'
+
+# 3. Check known joins, filters, and source-specific data behavior.
+node /opt/psd-skills/psd-data/run.js lesson-check \
+  --task "current active enrollment by school" \
+  --tables '["<tables selected above>"]'
+
+# 4. Query only columns and status/date semantics confirmed above.
+node /opt/psd-skills/psd-data/run.js query \
+  --reason "Current active enrollment for the school requested by the user" \
+  --sql "SELECT ..."
+```
+
+For enrollment counts, confirm from the schema or lessons:
+
+- the distinct student identifier;
+- the field or date logic that means currently active;
+- the authoritative school-name or school-id field; and
+- any source snapshot or effective date that should accompany the answer.
+
+Never assume generic column names such as `active`, `exit_date`, or
+`school_name` before inspection. If a plausible query returns zero rows, check
+`permissions` and the exact school value before concluding that data is absent.
+Report the result's as-of date when the source provides one.
+
+## Morning briefs and scheduled-agent operational data
+
+A missing `memory/YYYY-MM-DD.md` entry does not prove that a morning brief or
+scheduled agent run never happened. For "did my brief run?" or "why was there
+no morning update?" investigations:
+
+1. Load `psd-schedules` and inspect the current schedule configuration.
+2. Use `tables --detailed` here to find the current schedule-execution,
+   morning-brief, delivery, and daily-log audit tables available to the caller.
+3. Inspect their schemas and lessons, then query the requested Pacific-time
+   window.
+4. Distinguish among: no configured schedule, no invocation, invocation
+   failure, successful generation with delivery failure, and successful
+   delivery with missing daily-log persistence.
+
+Do not collapse those states into `data_not_found`, and do not claim the brief
+failed solely because its workspace log entry is missing. If the warehouse has
+no relevant operational table after a detailed discovery call, report exactly
+what was checked and then use the schedule's own status/log surface rather than
+inventing a result.
 
 ## Red Rover data lives here now
 
@@ -238,8 +301,9 @@ node /opt/psd-skills/psd-data/run.js lesson-delete \
 
 ## Rules
 
-1. **Pass the caller's email verbatim.** Do not substitute your own agent
-   email. Row-level security depends on it.
+1. **Never supply an identity flag.** The trusted broker derives the caller
+   from signed invocation context. Do not pass `--user`, an email, or another
+   model-selected identity; row-level security depends on the broker's owner.
 2. **Always supply `--reason`** for `query`. Lying or padding will land in
    the audit log; the data team reviews these.
 3. **No mutations.** The server rejects them; do not try.
@@ -247,6 +311,10 @@ node /opt/psd-skills/psd-data/run.js lesson-delete \
    retry, do not improvise an alternative auth flow.
 5. **On `forbidden`, surface the data-team contact pointer.** The skill
    already includes a helpful message — use it.
+6. **Discover before declaring data unavailable.** For PowerSchool/SIS and
+   operational reporting, run `tables --detailed`, inspect matching schemas,
+   and check permissions when appropriate. Never infer a missing capability
+   from an absent local file or from not remembering a table name.
 
 ## Example end-to-end
 

@@ -130,17 +130,23 @@ export const KEY_SCOPES: readonly string[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// MCP profile (Issue #1100) — the psd-aistudio skill's capability-catalog key.
-// A SINGLE low-sensitivity read scope over non-sensitive product metadata; the
-// skill POSTs `describe_capabilities` to /api/mcp with it. MCP_KEY_SCOPES must
-// stay a subset of ROLE_SCOPES.staff (platform:read is granted to student AND
-// staff) — enforced by a unit test against lib/api-keys/scopes.ts. The owning
+// MCP profile (Issues #1100/#1498-#1500) — the psd-aistudio skill's read-only
+// service key. It reads non-sensitive capability metadata and public knowledge
+// repositories. Repository ACL enforcement still limits this service identity
+// to public resources; private/owner-scoped repositories require delegated
+// OAuth. MCP_KEY_SCOPES must stay a subset of ROLE_SCOPES.staff — enforced by a
+// unit test against lib/api-keys/scopes.ts. The owning
 // service user is migration 108's `service-account:psd-aistudio-agent`, which is
 // DELIBERATELY separate from the atrium service user: replaceActiveKey revokes
 // all of a user's active keys, so the two bootstrap runs must not co-tenant.
 // ---------------------------------------------------------------------------
 export const MCP_KEY_NAME = 'psd-aistudio agent MCP (auto-provisioned)';
-export const MCP_KEY_SCOPES: readonly string[] = ['platform:read'];
+export const MCP_KEY_SCOPES: readonly string[] = [
+  'platform:read',
+  'repositories:list',
+  'repositories:read',
+  'repositories:search',
+];
 
 // ---------------------------------------------------------------------------
 // KEY_PROFILE selector — pairs a distinct api_keys.name with a distinct scope

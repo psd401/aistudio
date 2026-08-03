@@ -233,3 +233,119 @@ describe("FileUploadModal", () => {
     })
   })
 })
+
+describe("FileUploadModal storage failure handling", () => {
+  it("shows the S3 rejection, keeps the modal open, and never calls completion", async () => {
+    mockUploadFileToRepositoryStorage.mockRejectedValue(
+      new Error("Failed to upload file to storage (403 AccessDenied)")
+    )
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        mode: "canonical",
+        upload: {
+          sessionId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          uploadMethod: "single",
+          uploadUrl: "https://uploads.example.test/source",
+        },
+      }),
+    })
+
+    const onOpenChange = jest.fn()
+    const onSuccess = jest.fn()
+    const { container } = render(
+      <FileUploadModal
+        repositoryId={7}
+        open
+        onOpenChange={onOpenChange}
+        onSuccess={onSuccess}
+      />
+    )
+
+    fireEvent.change(screen.getByPlaceholderText("e.g., User Manual"), {
+      target: { value: "Rejected upload" },
+    })
+    const fileInput = container.querySelector<HTMLInputElement>(
+      'input[type="file"]'
+    )
+    fireEvent.change(fileInput!, {
+      target: {
+        files: [new File(["notes"], "rejected.txt", { type: "text/plain" })],
+      },
+    })
+    fireEvent.click(screen.getByRole("button", { name: /Upload File/i }))
+
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "Error",
+        description: "Failed to upload file to storage (403 AccessDenied)",
+        variant: "destructive",
+      })
+    )
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+    expect(onSuccess).not.toHaveBeenCalled()
+    expect(onOpenChange).not.toHaveBeenCalledWith(false)
+    expect(screen.getByRole("button", { name: /Upload File/i })).toBeEnabled()
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled()
+  })
+
+  it("can retry in the same modal after a storage rejection", async () => {
+    mockUploadFileToRepositoryStorage
+      .mockRejectedValueOnce(
+        new Error("Failed to upload file to storage (403 AccessDenied)")
+      )
+      .mockResolvedValueOnce(undefined)
+    const initiation = {
+      ok: true,
+      json: async () => ({
+        mode: "canonical",
+        upload: {
+          sessionId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          uploadMethod: "single",
+          uploadUrl: "https://uploads.example.test/source",
+        },
+      }),
+    }
+    mockFetch
+      .mockResolvedValueOnce(initiation)
+      .mockResolvedValueOnce(initiation)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true }) })
+
+    const onOpenChange = jest.fn()
+    const onSuccess = jest.fn()
+    const { container } = render(
+      <FileUploadModal
+        repositoryId={7}
+        open
+        onOpenChange={onOpenChange}
+        onSuccess={onSuccess}
+      />
+    )
+
+    fireEvent.change(screen.getByPlaceholderText("e.g., User Manual"), {
+      target: { value: "Retry upload" },
+    })
+    fireEvent.change(
+      container.querySelector<HTMLInputElement>('input[type="file"]')!,
+      {
+        target: {
+          files: [new File(["notes"], "retry.txt", { type: "text/plain" })],
+        },
+      }
+    )
+
+    fireEvent.click(screen.getByRole("button", { name: /Upload File/i }))
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Upload File/i })).toBeEnabled()
+    )
+    expect(onOpenChange).not.toHaveBeenCalledWith(false)
+
+    fireEvent.click(screen.getByRole("button", { name: /Upload File/i }))
+    await waitFor(() => {
+      expect(onSuccess).toHaveBeenCalledTimes(1)
+      expect(onOpenChange).toHaveBeenCalledWith(false)
+    })
+    expect(mockUploadFileToRepositoryStorage).toHaveBeenCalledTimes(2)
+    expect(mockFetch).toHaveBeenCalledTimes(3)
+  })
+})

@@ -154,6 +154,61 @@ function definePOSTApiAgentAistudioSuite1Part1() {
     )
   })
 
+  it("retries the shared credential when a stored personal key is invalid", async () => {
+    getSecretStringMock
+      .mockResolvedValueOnce("invalid-personal-key")
+      .mockResolvedValueOnce("shared-key")
+    globalThis.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ error: "Unauthorized" }, 401))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          jsonrpc: "2.0",
+          id: "upstream",
+          result: { repositories: [] },
+        })
+      ) as typeof fetch
+
+    const response = await POST(
+      request({
+        method: "tools/call",
+        params: { name: "repositories_list", arguments: {} },
+      })
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual(
+      expect.objectContaining({ keySource: "shared", httpStatus: 200 })
+    )
+    const fetchMock = globalThis.fetch as jest.Mock
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe(
+      "Bearer invalid-personal-key"
+    )
+    expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe(
+      "Bearer shared-key"
+    )
+  })
+
+  it("does not change identities or credentials after a forbidden response", async () => {
+    globalThis.fetch = jest.fn(async () =>
+      jsonResponse({ error: "Forbidden" }, 403)
+    ) as typeof fetch
+
+    const response = await POST(
+      request({
+        method: "tools/call",
+        params: { name: "repositories_list", arguments: {} },
+      })
+    )
+
+    expect(await response.json()).toEqual(
+      expect.objectContaining({ keySource: "personal", httpStatus: 403 })
+    )
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+    expect(getSecretStringMock).toHaveBeenCalledTimes(1)
+  })
+
   it("uses the signed owner's current OAuth access token without exposing it", async () => {
     getSecretJsonMock.mockResolvedValue({
       access_token: "owner-oauth-token",

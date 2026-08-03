@@ -51,10 +51,38 @@ describe("browser canonical repository upload", () => {
         headers: {
           "Content-Type": "text/plain",
           "If-None-Match": "*",
-          "x-amz-tagging": "aistudio-upload-state=temporary",
         },
       })
     );
+    const requestHeaders = fetchMock.mock.calls[0]?.[1]?.headers;
+    expect(requestHeaders).not.toHaveProperty("x-amz-tagging");
+    expect(requestHeaders).not.toHaveProperty("x-amz-meta-repositoryid");
+    expect(requestHeaders).not.toHaveProperty("x-amz-meta-uploadsessionid");
+  });
+
+  it("surfaces the S3 rejection code when a signed upload is rejected", async () => {
+    const response = {
+      ok: false,
+      status: 403,
+      headers: new Headers(),
+      text: jest.fn().mockResolvedValue(
+        "<Error><Code>AccessDenied</Code><Message>Headers were not signed</Message></Error>"
+      ),
+    } as unknown as Response;
+    global.fetch = jest.fn().mockResolvedValue(response) as typeof fetch;
+    const file = new File(["source"], "notes.txt", { type: "text/plain" });
+
+    await expect(
+      uploadFileToRepositoryStorage(
+        file,
+        {
+          sessionId: "session-rejected",
+          uploadMethod: "single",
+          uploadUrl: "https://storage.example/source",
+        },
+        "text/plain"
+      )
+    ).rejects.toThrow("Failed to upload file to storage (403 AccessDenied)");
   });
 
   it("uploads bounded Blob slices and returns ordered multipart ETags", async () => {

@@ -1,0 +1,13 @@
+id: strategic-plan-goal-one-objectives
+skill: psd-strategic-plan
+level: L1
+workspace: pure
+suite: regression
+prompt: 'Use psd-strategic-plan to answer: What are the five objectives under Goal 1, Academic Excellence? Search with the exact query "Goal 1 Academic Excellence objectives" and cite the source.'
+trials: 3
+fixtures:
+  - fixtures/goal-one-objectives.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/aistudio","method":"POST","body":{"method":{"exact":"tools/call"},"params.name":{"exact":"repositories_describe"},"params.arguments.repositoryId":{"exact":166}}}
+  - {"type":"broker_request","route":"/api/agent/aistudio","method":"POST","body":{"method":{"exact":"tools/call"},"params.name":{"exact":"repositories_search"},"params.arguments.query":{"exact":"Goal 1 Academic Excellence objectives"},"params.arguments.repositoryIds":{"contains_any":[166]}}}
+  - {"type":"output_match","pattern":"(?is)Strengthen instructional practices.*Establish growth targets.*Prepare every student.*Multi-Tiered System of Support.*highly effective instructional practices.*Page 3"}

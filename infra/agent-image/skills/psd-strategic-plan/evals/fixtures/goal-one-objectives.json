@@ -7,7 +7,7 @@
       "params": {
         "name": "repositories_describe",
         "arguments": {
-          "repositoryId": 36
+          "repositoryId": 166
         }
       }
     },
@@ -15,15 +15,15 @@
       "status": 200,
       "body": {
         "httpStatus": 200,
-        "keySource": "oauth",
+        "keySource": "shared",
         "payload": {
           "jsonrpc": "2.0",
-          "id": "observances-describe",
+          "id": "strategic-plan-describe",
           "result": {
             "content": [
               {
                 "type": "text",
-                "text": "{\"repository\":{\"id\":36,\"name\":\"NSPRA Observances & School Calendar 2026-27\",\"visibility\":\"public\",\"itemCount\":1}}"
+                "text": "{\"repository\":{\"id\":166,\"name\":\"PSD Strategic Plan 2026-2030\",\"visibility\":\"public\",\"itemCount\":1}}"
               }
             ]
           }
@@ -39,12 +39,12 @@
       "params": {
         "name": "repositories_search",
         "arguments": {
-          "query": "American Education Week",
+          "query": "Goal 1 Academic Excellence objectives",
           "repositoryIds": [
-            36
+            166
           ],
           "mode": "hybrid",
-          "limit": 5
+          "limit": 8
         }
       }
     },
@@ -52,15 +52,15 @@
       "status": 200,
       "body": {
         "httpStatus": 200,
-        "keySource": "oauth",
+        "keySource": "shared",
         "payload": {
           "jsonrpc": "2.0",
-          "id": "observances-search",
+          "id": "strategic-plan-search",
           "result": {
             "content": [
               {
                 "type": "text",
-                "text": "{\"results\":[{\"itemName\":\"NSPRA calendar\",\"content\":\"American Education Week — November 16-20, 2026\",\"sourceLocator\":{\"page\":17},\"citations\":[{\"sourceLocator\":{\"page\":17},\"label\":\"Page 17\"}],\"similarity\":0.91}],\"diagnostics\":{\"returnedResults\":1}}"
+                "text": "{\"results\":[{\"itemName\":\"Peninsula 2030 Strategic Plan\",\"content\":\"Goal 1: Academic Excellence. Objectives: 1. Strengthen instructional practices in literacy and numeracy. 2. Establish growth targets for all students. 3. Prepare every student for post-secondary success. 4. Implement an academic Multi-Tiered System of Support framework. 5. Foster highly effective instructional practices.\",\"sourceLocator\":{\"page\":3},\"citations\":[{\"sourceLocator\":{\"page\":3},\"label\":\"Page 3\"}],\"similarity\":0.94}],\"diagnostics\":{\"returnedResults\":1}}"
               }
             ]
           }

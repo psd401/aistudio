@@ -7,6 +7,7 @@ import {
   S3Client,
   UploadPartCommand,
 } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { createRepositoryUploadStorage } from "@/lib/repositories/content-platform/upload-service";
 
 type SignUrl = typeof import("@aws-sdk/s3-request-presigner").getSignedUrl;
@@ -142,5 +143,46 @@ describe("repository upload presigning", () => {
         ([command]) => command instanceof AbortMultipartUploadCommand
       )
     ).toBe(true);
+  });
+});
+
+describe("repository single-upload signed URL contract", () => {
+  it("encodes upload tags and metadata in the URL, not request headers", async () => {
+    const signingClient = new S3Client({
+      region: "us-east-1",
+      credentials: {
+        accessKeyId: "AKIATESTONLY",
+        secretAccessKey: "test-secret-access-key",
+      },
+    });
+    const storage = await createRepositoryUploadStorage({
+      config: { bucket: "test-bucket", region: "us-east-1" },
+      client: signingClient,
+      signUrl: getSignedUrl,
+    });
+
+    const result = await storage.createSingleUpload({
+      objectKey:
+        "repositories/7/11111111-2222-4333-8444-555555555555/source.pdf",
+      contentType: "application/pdf",
+      byteSize: 1_024,
+      metadata: {
+        repositoryId: "7",
+        uploadSessionId: "11111111-2222-4333-8444-555555555555",
+      },
+    });
+    const signedUrl = new URL(result.uploadUrl);
+    const signedHeaders = signedUrl.searchParams.get("X-Amz-SignedHeaders");
+
+    expect(signedUrl.searchParams.get("x-amz-tagging")).toBe(
+      "aistudio-upload-state=temporary"
+    );
+    expect(signedUrl.searchParams.get("x-amz-meta-repositoryid")).toBe("7");
+    expect(signedUrl.searchParams.get("x-amz-meta-uploadsessionid")).toBe(
+      "11111111-2222-4333-8444-555555555555"
+    );
+    expect(signedHeaders).not.toContain("x-amz-tagging");
+    expect(signedHeaders).not.toContain("x-amz-meta-repositoryid");
+    expect(signedHeaders).not.toContain("x-amz-meta-uploadsessionid");
   });
 });

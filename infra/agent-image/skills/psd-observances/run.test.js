@@ -15,11 +15,12 @@ const {
   createRepositoryResolver,
   excerptAround,
   main,
+  NSPRA_REPOSITORY_ID,
   parseCli,
 } = require('./run');
 
 const DEFAULT_REPOSITORIES = [
-  { id: 1476, name: 'District NSPRA 2026-2027 Calendar' },
+  { id: 36, name: 'NSPRA Observances & School Calendar 2026-27' },
 ];
 
 function toolEnvelope(data, options = {}) {
@@ -76,9 +77,12 @@ function createBroker(options = {}) {
       const response = await options.respond(toolName, body.params.arguments);
       if (response !== undefined) return response;
     }
-    if (toolName === 'repositories_list') {
+    if (toolName === 'repositories_describe') {
+      const repository = (options.repositories ?? DEFAULT_REPOSITORIES).find(
+        (candidate) => candidate.id === body.params.arguments.repositoryId,
+      );
       return toolEnvelope({
-        repositories: options.repositories ?? DEFAULT_REPOSITORIES,
+        repository,
       });
     }
     if (toolName === 'repositories_search') {
@@ -166,8 +170,8 @@ describe('documented command forms', () => {
       expect(calls[0].body).toEqual({
         method: 'tools/call',
         params: {
-          name: 'repositories_list',
-          arguments: { query: 'NSPRA', limit: 50 },
+          name: 'repositories_describe',
+          arguments: { repositoryId: NSPRA_REPOSITORY_ID },
         },
       });
       for (const [index, query] of queries.entries()) {
@@ -177,7 +181,7 @@ describe('documented command forms', () => {
             name: 'repositories_search',
             arguments: {
               query,
-              repositoryIds: [1476],
+              repositoryIds: [NSPRA_REPOSITORY_ID],
               mode: 'hybrid',
               limit: 5,
             },
@@ -342,61 +346,51 @@ test('--full expands the default 300-character excerpt', async () => {
   expect(fullResult.stdout.length).toBeGreaterThan(defaultResult.stdout.length);
 });
 
-test('repository resolution prefers a 2026 name, then the lowest id, and reports it', async () => {
+test('every lookup uses definitive NSPRA repository 36 even when other names exist', async () => {
   const { broker, calls } = createBroker({
     repositories: [
       { id: 2, name: 'NSPRA archive' },
-      { id: 9, name: 'NSPRA 2026 Calendar B' },
-      { id: 4, name: 'NSPRA 2026 Calendar A' },
+      ...DEFAULT_REPOSITORIES,
+      { id: 99, name: 'NSPRA newer-looking copy' },
     ],
   });
   const result = await invoke(['lookup', 'American Education Week'], broker);
   expect(result.exitCode).toBe(0);
-  expect(calls[1].body.params.arguments.repositoryIds).toEqual([4]);
-  expect(result.stdout).toContain('Multiple NSPRA repositories matched');
-  expect(result.stdout).toContain('NSPRA 2026 Calendar A');
-});
-
-test('repository resolution uses the lowest id when no name contains 2026', async () => {
-  const { broker, calls } = createBroker({
-    repositories: [
-      { id: 12, name: 'NSPRA calendar archive' },
-      { id: 3, name: 'NSPRA district reference' },
-    ],
+  expect(calls[0].body.params).toEqual({
+    name: 'repositories_describe',
+    arguments: { repositoryId: 36 },
   });
-  const result = await invoke(['lookup', 'American Education Week'], broker);
-  expect(result.exitCode).toBe(0);
-  expect(calls[1].body.params.arguments.repositoryIds).toEqual([3]);
+  expect(calls[1].body.params.arguments.repositoryIds).toEqual([36]);
+  expect(result.stdout).toContain('NSPRA Observances & School Calendar 2026-27');
+  expect(result.stdout).not.toContain('newer-looking copy');
 });
 
 test('repository resolver caches the id for one invocation', async () => {
   let calls = 0;
   const resolve = createRepositoryResolver(async () => {
     calls += 1;
-    return { repositories: DEFAULT_REPOSITORIES };
+    return { repository: DEFAULT_REPOSITORIES[0] };
   });
   expect(await resolve()).toEqual({
-    id: 1476,
-    name: 'District NSPRA 2026-2027 Calendar',
+    id: 36,
+    name: 'NSPRA Observances & School Calendar 2026-27',
     selectionNotice: undefined,
   });
   expect(await resolve()).toEqual(await resolve());
   expect(calls).toBe(1);
 });
 
-test('no accessible NSPRA repository gives a clear account-specific error', async () => {
+test('an unavailable definitive NSPRA repository names id 36', async () => {
   const { broker } = createBroker({ repositories: [] });
   const result = await invoke(['lookup', 'American Education Week'], broker);
   expect(result.exitCode).toBe(1);
-  expect(result.stdout).toContain(
-    'The NSPRA repository is not available to your account',
-  );
+  expect(result.stdout).toContain('definitive NSPRA repository (id 36)');
 });
 
 test('HTTP unauthorized includes a connect/reconnect hint and exits 11', async () => {
   const { broker } = createBroker({
     respond: (toolName) =>
-      toolName === 'repositories_list'
+      toolName === 'repositories_describe'
         ? toolEnvelope(null, {
             httpStatus: 401,
             payload: { error: 'expired' },
@@ -407,6 +401,23 @@ test('HTTP unauthorized includes a connect/reconnect hint and exits 11', async (
   expect(result.exitCode).toBe(11);
   expect(result.stdout).toMatch(/connect AI Studio access/i);
   expect(result.stdout).toMatch(/reconnect/i);
+});
+
+test('shared credential failure is reported as platform configuration', async () => {
+  const { broker } = createBroker({
+    respond: (toolName) =>
+      toolName === 'repositories_describe'
+        ? toolEnvelope(null, {
+            httpStatus: 401,
+            keySource: 'shared',
+            payload: { error: 'expired' },
+          })
+        : undefined,
+  });
+  const result = await invoke(['lookup', 'American Education Week'], broker);
+  expect(result.exitCode).toBe(11);
+  expect(result.stdout).toMatch(/platform configuration problem/i);
+  expect(result.stdout).toMatch(/do not ask the user to reconnect/i);
 });
 
 test('an unconfigured AI Studio credential is a re-auth error with exit 11', async () => {
@@ -427,14 +438,14 @@ test('an unconfigured AI Studio credential is a re-auth error with exit 11', asy
 test('insufficient-scope JSON-RPC errors include a re-auth hint and exit 11', async () => {
   const { broker } = createBroker({
     respond: (toolName) =>
-      toolName === 'repositories_list'
+      toolName === 'repositories_describe'
         ? toolEnvelope(null, {
             payload: {
               jsonrpc: '2.0',
               id: 'test',
               error: {
                 code: -32602,
-                message: 'Insufficient scope for repositories_list',
+                message: 'Insufficient scope for repositories_describe',
               },
             },
           })
@@ -692,7 +703,7 @@ describe('skill registration and policy', () => {
     expect(normalizedSkill).toContain(
       'not intended to serve as the official or legal listing of holidays for each state',
     );
-    expect(skill).toMatch(/connect AI Studio access/i);
+    expect(skill).toContain('do not tell the user');
     for (const command of [
       'lookup',
       'search',
