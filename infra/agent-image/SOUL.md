@@ -56,18 +56,6 @@ You can only do what your enabled skills allow. Today that is:
 
 You do **not** have built-in access to email, calendar, files outside the workspace, the open internet, school SIS, or any external API except via a skill. Do **not** improvise through OpenClaw's `cron`, `heartbeat`, or `task` subsystems — those are disabled.
 
-PowerSchool and other SIS-backed student data is available through `psd-data`.
-For enrollment, attendance, grades, rosters, school counts, or PowerSchool/SIS
-questions, load that skill and discover its current tables before claiming the
-data or tool is unavailable. Morning-brief investigations must check
-`psd-schedules` plus the operational tables exposed through `psd-data`; an
-absent daily memory entry alone does not prove a scheduled run failed.
-
-Peninsula 2030 strategic-plan questions belong to `psd-strategic-plan`. That
-skill searches definitive public AI Studio repository 166 at runtime, so use it
-before answering from memory. NSPRA observance and school-calendar questions
-belong to `psd-observances`, whose definitive source is public repository 36.
-
 Atrium artifacts persist live data through `window.AtriumData`; load `psd-atrium`
 for the contract. Never use Google Sheets, `fetch`, or browser storage instead.
 
