@@ -176,10 +176,22 @@ function defineAtriumPublishShareAuthenticatedSuite1Part1() {
       // The success caption shows the copyable /c/{slug} reader URL.
       // The usability pass moved the canonical URL out of the editor status
       // caption and into the Share dialog's Link row, which stays open on the
-      // now-live destination after the widen completes.
+      // now-live destination after the widen completes. The Link row is also
+      // present before publishing with the private in-app viewer URL, so wait
+      // for the live destination before asserting that it has switched to /c.
+      await expect(page.getByTestId('share-dest-intranet')).toHaveAttribute(
+        'data-live',
+        'true',
+        { timeout: 60000 }
+      )
       const readerLink = page.getByTestId('share-link-url')
-      await expect(readerLink).toBeVisible({ timeout: 30000 })
-      expect((await readerLink.textContent())?.trim().endsWith(`/c/${slug}`)).toBe(true)
+      await expect
+        .poll(
+          async () =>
+            (await readerLink.textContent())?.trim().endsWith(`/c/${slug}`),
+          { timeout: 60000 }
+        )
+        .toBe(true)
 
       // The widen actually took effect: a SECOND seeded user (no grant, no
       // ownership) loads the intranet reader and gets 200 with the body.
@@ -206,9 +218,8 @@ function defineAtriumPublishShareAuthenticatedSuite1Part1() {
         await otherContext.close()
       }
 
-      // Back in the Share dialog, the destination is now badged LIVE and the
-      // Unpublish button is rendered for it (#1336 B8).
-      await page.getByTestId('share-control').click()
+      // The Share dialog stays open after publishing. The destination is now
+      // badged LIVE and the Unpublish button is rendered for it (#1336 B8).
       await expect(page.getByTestId('live-intranet')).toBeVisible({
         timeout: 15000,
       })
@@ -256,21 +267,29 @@ function defineAtriumPublishShareAuthenticatedSuite1Part2() {test('atrium-share-
       // caption carries the public URL.
       // The usability pass moved the canonical URL out of the editor status
       // caption and into the Share dialog's Link row, which stays open on the
-      // now-live destination after the widen completes.
+      // now-live destination after the widen completes. Wait for the live row
+      // because the same Link element initially contains the private viewer URL.
+      await expect(page.getByTestId('share-dest-public_web')).toHaveAttribute(
+        'data-live',
+        'true',
+        { timeout: 60000 }
+      )
       const readerLink = page.getByTestId('share-link-url')
-      await expect(readerLink).toBeVisible({ timeout: 30000 })
-      expect((await readerLink.textContent())?.trim().endsWith(`/p/${slug}`)).toBe(true)
+      await expect
+        .poll(
+          async () =>
+            (await readerLink.textContent())?.trim().endsWith(`/p/${slug}`),
+          { timeout: 60000 }
+        )
+        .toBe(true)
       await page.screenshot({
         path: `${SHOT_DIR}/atrium-share-url.png`,
         fullPage: false,
       })
 
-      // The Share dialog also surfaces the public link now that it is live.
-      await page.getByTestId('share-control').click()
-      await expect(page.getByTestId('visibility-public-url')).toBeVisible({
-        timeout: 60000,
-      })
-      await expect(page.getByTestId('public-not-published')).toHaveCount(0)
+      // The still-open Share dialog shows the destination as live alongside
+      // the public Link row asserted above.
+      await expect(page.getByTestId('live-public_web')).toBeVisible()
       await page.keyboard.press('Escape')
 
       // An ANONYMOUS context (no session at all) can read it.
