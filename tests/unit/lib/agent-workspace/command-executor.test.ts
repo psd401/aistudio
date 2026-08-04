@@ -253,10 +253,13 @@ function defineTrustedWorkspaceCommandPolicySuite1Part3() {it("rejects Gmail mod
     ["slides", "presentations", "batchUpdate"],
     ["tasks", "tasks", "patch"],
     ["tasks", "tasks", "update"],
-  ])("denies %s %s %s without server-recorded provenance", (...argv) => {
+  ])("allows %s %s %s on the agent slot", (...argv) => {
+    // These were refused by a provenance gate that nothing could satisfy, so an
+    // agent could create a Doc and never write to or share it (agent_failures
+    // 798). They are ordinary agent-slot writes now.
     expect(() =>
       validateWorkspaceCommand({ scope: "agent", argv })
-    ).toThrow(/server-recorded agent-created provenance/)
+    ).not.toThrow()
   })
 
   it.each([
@@ -383,10 +386,30 @@ function defineTrustedWorkspaceCommandPolicySuite1Part3() {it("rejects Gmail mod
   })
 }
 
+function defineTrustedWorkspaceCommandPolicySuite1Part4() {
+  it.each([
+    ["calendar", "events", "patch"],
+    ["calendar", "events", "update"],
+    ["docs", "documents", "batchUpdate"],
+    ["drive", "permissions", "create"],
+    ["sheets", "spreadsheets", "batchUpdate"],
+    ["slides", "presentations", "batchUpdate"],
+    ["tasks", "tasks", "patch"],
+    ["tasks", "tasks", "update"],
+  ])("still refuses %s %s %s on the user slot", (...argv) => {
+    // The impersonation boundary is what survives removing the gate: the same
+    // call on the user slot would restructure the user's own Workspace as them.
+    expect(() =>
+      validateWorkspaceCommand({ scope: "user", argv })
+    ).toThrow(/must use the agent-owned Workspace account/)
+  })
+}
+
 const defineTrustedWorkspaceCommandPolicySuite1 = () => {
   defineTrustedWorkspaceCommandPolicySuite1Part1()
   defineTrustedWorkspaceCommandPolicySuite1Part2()
   defineTrustedWorkspaceCommandPolicySuite1Part3()
+  defineTrustedWorkspaceCommandPolicySuite1Part4()
 };
 
 describe("trusted Workspace command policy", defineTrustedWorkspaceCommandPolicySuite1)

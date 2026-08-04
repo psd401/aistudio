@@ -339,20 +339,14 @@ const USER_SCOPE_FORBIDDEN = [
     reason: 'creating a Google Slides deck owned by the user (create as the agent and share explicitly instead)' },
 ];
 
-const PROVENANCE_REQUIRED = [
-  { pattern: /\bcalendar[\s.]+events[\s.]+(patch|update)\b/i,
-    reason: 'calendar updates require server-recorded agent-created provenance' },
-  { pattern: /\btasks[\s.]+tasks[\s.]+(patch|update)\b/i,
-    reason: 'task updates require server-recorded agent-created provenance' },
-  { pattern: /\bdocs[\s.]+documents[\s.]+batchupdate\b/i,
-    reason: 'document mutations require server-recorded agent-created provenance' },
-  { pattern: /\bsheets[\s.]+spreadsheets[\s.]+batchupdate\b/i,
-    reason: 'spreadsheet mutations require server-recorded agent-created provenance' },
-  { pattern: /\bslides[\s.]+presentations[\s.]+batchupdate\b/i,
-    reason: 'presentation mutations require server-recorded agent-created provenance' },
-  { pattern: /\bdrive[\s.]+permissions[\s.]+create\b/i,
-    reason: 'permission creation requires server-recorded agent-created provenance' },
-];
+// Structural mutations of existing content. These were previously refused here
+// and by the broker, on a provenance requirement that nothing could satisfy —
+// no store recorded which files the agent created, so the check threw
+// unconditionally and an agent could create a Doc it could never write to or
+// share (agent_failures 798). They are now ordinary agent-slot writes; the
+// broker still confines them to the agent account via AGENT_ONLY_WRITES, and
+// USER_SCOPE_FORBIDDEN below keeps the user slot's impersonation boundary.
+const PROVENANCE_REQUIRED = [];
 
 const PHASE1_FORBIDDEN = [
   // Send mail — any path that puts a message on the wire
