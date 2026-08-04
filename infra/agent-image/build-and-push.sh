@@ -671,6 +671,15 @@ echo ""
 echo "Pushing ${ECR_URI}:${TAG}..."
 docker push "${ECR_URI}:${TAG}"
 
+# Second, machine-readable tag recording the exact commit this image was built
+# from. The next build reads it back off the *deployed* image to decide whether
+# a workspace cutover is genuinely required, instead of warning on every push.
+# Tag names cannot hold all of a 40-char sha plus a prefix comfortably, and 12
+# hex is unambiguous at this repository's size.
+COMMIT_TAG="commit-${SOURCE_COMMIT:0:12}"
+docker tag "${ECR_URI}:${TAG}" "${ECR_URI}:${COMMIT_TAG}"
+docker push "${ECR_URI}:${COMMIT_TAG}"
+
 # Resolve the immutable digest so the caller can pin AgentCore by digest.
 # Tag-based pinning has produced stale image serving in AgentCore — see PR #902.
 echo ""
@@ -698,18 +707,93 @@ echo ""
 echo "Image:  ${ECR_URI}:${TAG}"
 echo "Digest: ${DIGEST}"
 echo ""
-if [ "${ENVIRONMENT}" = "dev" ]; then
-  echo "NEXT STEP REQUIRES A PAUSED, SAME-COMMIT WORKSPACE CUTOVER."
-  echo "DO NOT deploy AgentPlatform directly or mix this image with the old broker."
-  echo "Follow all steps under 'Dev workspace-generation cutover' in:"
-  echo "  docs/operations/agent-platform-setup.md"
-  echo "The sequence pauses ingress, drains writers, deploys Frontend first,"
-  echo "then deploys AgentPlatform pinned to the digest above, and resumes ingress."
+# Only a release that changes how workspaces are read or written needs the
+# paused cutover. AgentCore pins a session to the image its microVM was created
+# with, so a mixed-version fleet can put two incompatible writers on the same
+# workspace bucket at once; the drain exists to guarantee zero old writers
+# before the new format goes live. Nothing else does.
+#
+# This used to print unconditionally on every push. That made the one build
+# where it mattered indistinguishable from the twenty where it did not, so it
+# stopped being read. Decide from the actual diff instead, and fail closed (warn)
+# whenever the comparison cannot be made.
+CUTOVER_PATHS=(
+  "lib/agent-workspace/storage-broker.ts"
+  "infra/agent-image/workspace_sync.py"
+  "infra/database/schema/171"*
+)
+
+deployed_commit() {
+  # Deployed image -> digest -> its commit- tag. Older images predate that tag
+  # but follow a <name>-<sha12> convention, so fall back to the trailing field.
+  local runtime_id digest tags t sha
+  runtime_id="$(aws cloudformation describe-stacks \
+    --region "${REGION}" --stack-name "${STACK_NAME}" \
+    --query 'Stacks[0].Outputs[?OutputKey==`AgentCoreRuntimeId`].OutputValue | [0]' \
+    --output text 2>/dev/null)" || return 1
+  [ -n "${runtime_id}" ] && [ "${runtime_id}" != "None" ] || return 1
+  digest="$(aws bedrock-agentcore-control get-agent-runtime \
+    --region "${REGION}" --agent-runtime-id "${runtime_id}" \
+    --query 'agentRuntimeArtifact.containerConfiguration.containerUri' \
+    --output text 2>/dev/null)" || return 1
+  digest="${digest##*@}"
+  [ -n "${digest}" ] && [ "${digest}" != "None" ] || return 1
+  tags="$(aws ecr describe-images --region "${REGION}" \
+    --repository-name "${ECR_URI##*/}" --image-ids "imageDigest=${digest}" \
+    --query 'imageDetails[0].imageTags' --output text 2>/dev/null)" || return 1
+  for t in ${tags}; do
+    case "${t}" in
+      commit-*) sha="${t#commit-}"; break ;;
+    esac
+  done
+  if [ -z "${sha:-}" ]; then
+    for t in ${tags}; do
+      case "${t##*-}" in
+        [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) sha="${t##*-}"; break ;;
+      esac
+    done
+  fi
+  [ -n "${sha:-}" ] || return 1
+  git -C "${REPO_ROOT}" cat-file -e "${sha}^{commit}" 2>/dev/null || return 1
+  printf '%s' "${sha}"
+}
+
+CUTOVER_REASON=""
+if DEPLOYED_COMMIT="$(deployed_commit)"; then
+  CHANGED="$(git -C "${REPO_ROOT}" diff --name-only \
+    "${DEPLOYED_COMMIT}..${SOURCE_COMMIT}" -- "${CUTOVER_PATHS[@]}" 2>/dev/null || true)"
+  if [ -n "${CHANGED}" ]; then
+    CUTOVER_REASON="changed since the deployed image (${DEPLOYED_COMMIT:0:12}):
+$(printf '  - %s\n' ${CHANGED})"
+  fi
 else
-  echo "NEXT STEP REQUIRES AN ENVIRONMENT-SPECIFIC PAUSED, SAME-COMMIT CUTOVER."
-  echo "DO NOT substitute Dev resource names or deploy AgentPlatform directly."
-  echo "Stop until the ${ENVIRONMENT} pause/drain, post-drain inventory audit,"
-  echo "Frontend-first deploy, AgentPlatform deploy, and resume steps are validated."
+  CUTOVER_REASON="could not determine the deployed image's commit, so this
+  cannot be ruled out. Failing closed."
+fi
+
+if [ -n "${CUTOVER_REASON}" ]; then
+  echo "WORKSPACE CUTOVER REQUIRED — ${CUTOVER_REASON}"
+  echo ""
+  if [ "${ENVIRONMENT}" = "dev" ]; then
+    echo "DO NOT deploy AgentPlatform directly or mix this image with the old broker."
+    echo "Follow all steps under 'Dev workspace-generation cutover' in:"
+    echo "  docs/operations/agent-platform-setup.md"
+    echo "The sequence pauses ingress, drains writers, deploys Frontend first,"
+    echo "then deploys AgentPlatform pinned to the digest above, and resumes ingress."
+  else
+    echo "DO NOT substitute Dev resource names or deploy AgentPlatform directly."
+    echo "Stop until the ${ENVIRONMENT} pause/drain, post-drain inventory audit,"
+    echo "Frontend-first deploy, AgentPlatform deploy, and resume steps are validated."
+  fi
+else
+  echo "Ordinary deploy — no workspace cutover needed."
+  echo "Nothing under the workspace read/write contract changed since the"
+  echo "deployed image (${DEPLOYED_COMMIT:0:12}), so there is no mixed-writer"
+  echo "hazard to drain for:"
+  printf '  - %s\n' "${CUTOVER_PATHS[@]}"
+  echo ""
+  echo "Deploy Frontend BEFORE AgentPlatform, from this same commit, and pin"
+  echo "AgentPlatform to the digest above."
 fi
 echo ""
 echo "After deploy, confirm the running build via CloudWatch:"
