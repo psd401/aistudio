@@ -10,10 +10,9 @@ import { authenticateContext } from "./helpers/session-auth";
  *  - "New doc" opens a BLANK sheet immediately — no create modal — and navigates
  *    straight to the editor, where the sheet title is inline-editable (the rename
  *    persists and lifts to the topbar breadcrumb).
- *  - "New artifact" opens a single agent-PROMPT field (not the old title form).
- *  - the primary "Publish ▾" split control houses destination + publish +
- *    unpublish + snapshot (replacing the old naked native select + separate
- *    Publish / Unpublish / Snapshot buttons).
+ *  - "New page" opens a single agent-PROMPT field (not the old title form).
+ *  - the unified Share control houses destination-specific publish and
+ *    unpublish actions (replacing the old Publish ▾ split control).
  *
  * Gated behind PLAYWRIGHT_AUTH_ENABLED — see docs/guides/e2e-authenticated-
  * testing.md for the :3100 host-server prereqs.
@@ -62,7 +61,7 @@ test.describe("Atrium Meridian creation flow (authenticated)", () => {
     }
   });
 
-  test("New artifact opens the single agent-prompt field", async ({ browser }) => {
+  test("New page opens the single agent-prompt field", async ({ browser }) => {
     const context = await browser.newContext({
       viewport: { width: 1440, height: 960 },
     });
@@ -74,13 +73,13 @@ test.describe("Atrium Meridian creation flow (authenticated)", () => {
         page.getByRole("heading", { name: "Content library" })
       ).toBeVisible({ timeout: 60000 });
 
-      await page.getByRole("button", { name: "New artifact" }).click();
+      await page.getByRole("button", { name: "New page" }).click();
       // A single free-text prompt surface, not a title form.
       const dialog = page.getByRole("dialog");
       await expect(dialog).toBeVisible();
       await expect(
         dialog.locator('[data-slot="dialog-title"]')
-      ).toHaveText("Create with the agent");
+      ).toHaveText("New interactive page");
       await expect(
         dialog.getByRole("textbox", {
           name: "Describe the artifact for the agent to build",
@@ -93,7 +92,7 @@ test.describe("Atrium Meridian creation flow (authenticated)", () => {
     }
   });
 
-  test("editor Publish ▾ consolidates destination + publish + unpublish", async ({
+  test("editor Share consolidates destination + publish + unpublish", async ({
     browser,
   }) => {
     const context = await browser.newContext({
