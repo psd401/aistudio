@@ -3,20 +3,26 @@ skill: psd-instructional-vision
 level: L1
 workspace: pure
 suite: regression
-prompt: "Using PSD's instructional vision, name the four Instructional Essentials and cite where they come from."
+prompt: "Using PSD's instructional vision, name all four Instructional Essentials, distinguish them from the Tier 1 practices, and cite where they come from."
 trials: 3
 graders:
-  # The point of this skill is that it retrieves rather than recalls. These two
-  # graders are the regression that matters: the framework text is no longer
-  # bundled, so an answer produced without these calls came from model memory —
-  # exactly the stale-content failure the skill now exists to prevent.
+  # Retrieval is the behaviour under test. The framework text is no longer
+  # bundled in the image, so an answer produced without these calls came from
+  # model memory — the exact staleness this skill was rewritten to prevent.
   - {"type":"broker_request","route":"/api/agent/aistudio","method":"POST","body":{"method":{"exact":"tools/call"},"params.name":{"exact":"repositories_list"}}}
   - {"type":"broker_request","route":"/api/agent/aistudio","method":"POST","body":{"method":{"exact":"tools/call"},"params.name":{"exact":"repositories_search"}}}
-  # Structural assertions only. Deliberately NOT asserting the individual
-  # essential names or the "eight Tier 1 practices" count: Teaching & Learning
-  # revises them (the Playbook is on V2 as of 2026-08-03), and pinning last
-  # year's wording here would reintroduce the staleness this change removed.
-  # The count of focus areas and the presence of a citation are the stable
-  # contract; the wording lives in the repository.
+  # Content assertions: retrieving is necessary but not sufficient — the answer
+  # still has to carry the district's own terms. Verified against repository 265
+  # (Playbook V2, 2026-08-03): all four names are unchanged in V2, so these stay
+  # accurate rather than pinning superseded wording.
+  #
+  # The hyphen and space classes are deliberate. test_eval_runner asserts these
+  # patterns match "Data‑Driven Decisions" (U+2011) and "Tier␟1" (U+202F), so a
+  # plain "-" or " " here would pass locally and fail the contract test.
   - {"type":"output_match","pattern":"(?:four|4)","ignore_case":true}
   - {"type":"output_match","pattern":"instructional essentials","ignore_case":true}
+  - {"type":"output_match","pattern":"rigor\\s*(?:&|and)\\s*inclusion","ignore_case":true}
+  - {"type":"output_match","pattern":"data[-\\u2010-\\u2015 ]driven decisions","ignore_case":true}
+  - {"type":"output_match","pattern":"continuous growth","ignore_case":true}
+  - {"type":"output_match","pattern":"innovation","ignore_case":true}
+  - {"type":"output_match","pattern":"tier\\s*1","ignore_case":true}
