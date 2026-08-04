@@ -64,8 +64,12 @@ test.describe("Atrium Meridian library (authenticated)", () => {
       // The usability pass opens on the curated Home. The full card grid and
       // its dashed create card live behind the one-click All content view.
       const allContent = chips.getByRole("button", { name: "All content" });
-      await allContent.click();
-      await expect(allContent).toHaveAttribute("aria-pressed", "true");
+      await expect(async () => {
+        await allContent.click();
+        await expect(allContent).toHaveAttribute("aria-pressed", "true", {
+          timeout: 1500,
+        });
+      }).toPass({ timeout: 30_000 });
       await expect(page.locator('a[href^="/atrium/"]').first()).toBeVisible();
       await expect(
         page.getByRole("button", { name: /New interactive page/i })

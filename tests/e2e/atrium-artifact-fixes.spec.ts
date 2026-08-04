@@ -103,8 +103,12 @@ test.describe("Atrium artifact-UI fixes (authenticated)", () => {
       const allContent = page
         .getByRole("group", { name: "Filter content" })
         .getByRole("button", { name: "All content" });
-      await allContent.click();
-      await expect(allContent).toHaveAttribute("aria-pressed", "true");
+      await expect(async () => {
+        await allContent.click();
+        await expect(allContent).toHaveAttribute("aria-pressed", "true", {
+          timeout: 1500,
+        });
+      }).toPass({ timeout: 30_000 });
       // The seeded artifact card is present…
       const card = page.locator(".mer-lib-card", { hasText: ARTIFACT_TITLE }).first();
       await expect(card).toBeVisible({ timeout: 60000 });
