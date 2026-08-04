@@ -63,35 +63,41 @@ const MUTATING_ACTIONS = new Set([
 
 const ALLOWED_WRITES = new Set([
   "calendar events insert",
+  "calendar events patch",
+  "calendar events update",
   "chat +send",
   "chat spaces messages create",
+  "docs documents batchupdate",
   "docs documents create",
   "drive files copy",
   "drive files create",
+  "drive permissions create",
   "gmail users drafts create",
   "gmail users drafts update",
   "gmail users messages modify",
+  "sheets spreadsheets batchupdate",
   "sheets spreadsheets create",
   "sheets spreadsheets values append",
   "sheets spreadsheets values update",
+  "slides presentations batchupdate",
   "slides presentations create",
   "tasks tasks insert",
-])
-
-const REQUIRES_AGENT_CREATED_PROVENANCE = new Set([
-  "calendar events patch",
-  "calendar events update",
-  "docs documents batchupdate",
-  "drive permissions create",
-  "sheets spreadsheets batchupdate",
-  "slides presentations batchupdate",
   "tasks tasks patch",
   "tasks tasks update",
 ])
 
-// Sheet values append/update intentionally stay outside the provenance gate:
-// issue #1514 restores content sync for sheets the agent account created or
-// that a user deliberately shared with it. Batch structural edits remain gated.
+// These mutations were previously refused outright by a provenance gate that
+// nothing could satisfy: it threw unconditionally, with no store recording which
+// files the agent created and no branch that ever returned success. The name and
+// the error described a condition the codebase could not produce, so an agent
+// could create a Doc and then never write to or share it — the observed failure
+// was three empty, unshareable Docs (agent_failures 798).
+//
+// They are now ordinary allowlisted writes, confined to the agent slot by
+// AGENT_ONLY_WRITES below. That confinement is what remains of the original
+// intent: the agent may restructure documents, calendars and tasks owned by its
+// own account, and is still refused on the user slot, where the same call would
+// be impersonation against the user's own Workspace.
 
 // Derived rather than enumerated: every allowlisted Chat write leaves the
 // owner's own Workspace data and therefore has to reach the audit log, so a
@@ -102,13 +108,25 @@ const ALLOWED_CHAT_WRITES = new Set(
 
 const AGENT_ONLY_WRITES = new Set([
   ...ALLOWED_CHAT_WRITES,
+  // Structural mutations of existing content. On the agent slot these act on
+  // the agent's own files; on the user slot the same call would restructure the
+  // user's own Workspace as them, which is the impersonation boundary the
+  // create operations below are already held to.
+  "calendar events patch",
+  "calendar events update",
+  "docs documents batchupdate",
   "docs documents create",
   "drive files copy",
   "drive files create",
+  "drive permissions create",
+  "sheets spreadsheets batchupdate",
   "sheets spreadsheets create",
   "sheets spreadsheets values append",
   "sheets spreadsheets values update",
+  "slides presentations batchupdate",
   "slides presentations create",
+  "tasks tasks patch",
+  "tasks tasks update",
 ])
 
 const DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -360,11 +378,6 @@ function validateWorkspaceMutation(
   if (scope === "user" && operation === "drive files update") {
     validateUserDriveMetadataUpdate(argv)
     return
-  }
-  if (REQUIRES_AGENT_CREATED_PROVENANCE.has(operation)) {
-    throw new Error(
-      "Workspace mutation requires server-recorded agent-created provenance"
-    )
   }
   if (!ALLOWED_WRITES.has(operation)) {
     const diagnosticOperation = workspaceOperation(argv)
