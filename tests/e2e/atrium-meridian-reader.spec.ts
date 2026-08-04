@@ -152,8 +152,10 @@ test.describe("Atrium Meridian reader (authenticated)", () => {
       await expect(page.getByTestId("reader-edit-link")).toHaveCount(0);
       // The internal-facing view-only explainer is gone on the public surface.
       await expect(page.getByTestId("reader-view-only")).toHaveCount(0);
-      // The document body still renders — stripping chrome must not strip content.
-      await expect(page.locator(".atrium-content")).toBeVisible();
+      // The document body sink still renders — stripping chrome must not strip
+      // the reader surface. This committed fixture deliberately has no S3 blob,
+      // so its article is empty (and therefore has no visible box) in local E2E.
+      await expect(page.getByTestId("reader-body")).toBeAttached();
 
       await page.screenshot({
         path: `${SHOT_DIR}/07-reader-public.png`,

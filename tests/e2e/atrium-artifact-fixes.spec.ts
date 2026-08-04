@@ -97,6 +97,14 @@ test.describe("Atrium artifact-UI fixes (authenticated)", () => {
     try {
       const page = await context.newPage();
       await page.goto("/atrium");
+      // The usability pass opens on a curated, bounded home. The seeded
+      // artifact is not guaranteed to land in one of its first six cards, so
+      // enter the complete grid before asserting the specific card.
+      const allContent = page
+        .getByRole("group", { name: "Filter content" })
+        .getByRole("button", { name: "All content" });
+      await allContent.click();
+      await expect(allContent).toHaveAttribute("aria-pressed", "true");
       // The seeded artifact card is present…
       const card = page.locator(".mer-lib-card", { hasText: ARTIFACT_TITLE }).first();
       await expect(card).toBeVisible({ timeout: 60000 });

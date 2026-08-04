@@ -51,20 +51,24 @@ test.describe("Atrium Meridian library (authenticated)", () => {
 
       // Search field (⌘K hint) + create affordances.
       const search = page.getByRole("textbox", {
-        name: "Search content by title",
+        name: "Search content by title or tag",
       });
       await expect(search).toBeVisible();
       await expect(
         page.getByRole("button", { name: "New doc" })
       ).toBeVisible();
       await expect(
-        page.getByRole("button", { name: "New artifact" })
+        page.getByRole("button", { name: "New page" })
       ).toBeVisible();
 
-      // The card grid rendered content links + the dashed create card.
+      // The usability pass opens on the curated Home. The full card grid and
+      // its dashed create card live behind the one-click All content view.
+      const allContent = chips.getByRole("button", { name: "All content" });
+      await allContent.click();
+      await expect(allContent).toHaveAttribute("aria-pressed", "true");
       await expect(page.locator('a[href^="/atrium/"]').first()).toBeVisible();
       await expect(
-        page.getByRole("button", { name: /Create with the agent/i })
+        page.getByRole("button", { name: /New interactive page/i })
       ).toBeVisible();
 
       await page.screenshot({
@@ -83,7 +87,7 @@ test.describe("Atrium Meridian library (authenticated)", () => {
       // The grid re-queries; the create card is always present (proves no crash /
       // no error state after the owner-scoped reload).
       await expect(
-        page.getByRole("button", { name: /Create with the agent/i })
+        page.getByRole("button", { name: /New interactive page/i })
       ).toBeVisible();
     } finally {
       await context.close();

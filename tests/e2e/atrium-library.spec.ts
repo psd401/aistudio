@@ -58,12 +58,12 @@ test.describe("Atrium content library (authenticated)", () => {
       // Create affordances for an authoring-capable user.
       await expect(page.getByRole("button", { name: "New doc" })).toBeVisible();
       await expect(
-        page.getByRole("button", { name: "New artifact" })
+        page.getByRole("button", { name: "New page" })
       ).toBeVisible();
 
-      // The filter controls render (title search + tag filter inputs).
+      // The filter controls render (combined title/tag search + tag filter).
       await expect(
-        page.getByRole("textbox", { name: "Search content by title" })
+        page.getByRole("textbox", { name: "Search content by title or tag" })
       ).toBeVisible();
       await expect(
         page.getByRole("textbox", { name: "Filter by tag" })
