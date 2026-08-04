@@ -1,154 +1,86 @@
 ---
 name: psd-instructional-vision
-summary: Peninsula School District's instructional framework — the 4 Instructional Essentials and 8 Tier 1 practices for rigorous, inclusive, evidence-informed teaching.
-description: Peninsula School District's instructional framework and pedagogical beliefs. Use when creating graphics about PSD instruction, designing AI assistants for educators, writing about good teaching practices, or sharing PSD's educational philosophy.
-allowed-tools: Read
+summary: Peninsula School District's instructional framework — Instructional Essentials, UDL, and MTSS guidance, answered from the authorized PSD Instructional Essentials knowledge repository.
+description: Peninsula School District's instructional framework and pedagogical beliefs. Use when creating graphics about PSD instruction, designing AI assistants for educators, writing about good teaching practices, or sharing PSD's educational philosophy. Answers come from the district's live Instructional Essentials repository, not from bundled text.
+allowed-tools: Bash(node:*)
 ---
 
-# PSD Instructional Vision
+# psd-instructional-vision
 
-Peninsula School District's framework for rigorous, inclusive, and future-focused learning.
+Answer questions about Peninsula School District's instructional framework from
+the caller's authorized **PSD Instructional Essentials** knowledge repository in
+AI Studio.
 
-**Full Reference:** See `/opt/psd-skills/psd-instructional-vision/references/playbook.md` for complete details, classroom examples, and role-based responsibilities.
-
----
-
-## Vision Statement
-
-> **We are dedicated to providing rigorous, standards-based instruction that ensures every student achieves grade-level proficiency and is prepared for future success.**
-
----
-
-## The Four Instructional Essentials
-
-| Essential | Core Belief |
-|-----------|-------------|
-| **Rigor & Inclusion** | All students access grade-level content through responsive, high-expectation instruction |
-| **Data-Driven Decisions** | Multiple sources of evidence inform real-time instructional adjustments |
-| **Continuous Growth** | Ongoing reflection, collaboration, and professional learning deepen outcomes |
-| **Innovation** | Forward-thinking instruction integrates real-world connections and student voice |
+**The framework text is never bundled in this skill.** Teaching & Learning owns
+it and revises it. A copy checked into the agent image goes stale the moment
+they update it — and a stale copy is worse than none, because it gets quoted
+with the same confidence as current guidance. Retrieve, never recall.
 
 ---
 
-## The 8 Tier 1 Practices
+## Retrieval
 
-### Rigor & Inclusion
+This skill has no CLI of its own. Use the `psd-aistudio` skill's repository
+commands, which enforce the caller's own scopes and repository ACLs server-side.
 
-**1. Building Academic Background**
-- Connect new learning to prior knowledge, culture, and identity
-- Use shared experiences, culturally relevant hooks, multimodal vocabulary
+```bash
+# 1. Find the repository (selection rules below).
+node /opt/psd-skills/psd-aistudio/run.js repositories-list \
+  --user <email> --query "Instructional Essentials"
 
-**2. Scaffolding & Differentiation**
-- Flexible grouping based on data
-- Temporary supports that maintain rigor
-- Multiple paths to same high expectations
+# 2. Search it. Prefer hybrid — it handles both district terminology and paraphrase.
+node /opt/psd-skills/psd-aistudio/run.js repositories-search \
+  --user <email> --query "scaffolding and differentiation look-fors" \
+  --repository-ids <id> --mode hybrid
 
-### Data-Driven Decisions
-
-**3. Formative Assessment & Feedback**
-- Frequent checks for understanding
-- Specific, actionable feedback aligned to success criteria
-- Instruction adjusts based on data patterns
-
-**4. Student Self-Assessment**
-- Clear learning targets in student-friendly language
-- Regular reflection routines
-- Students set goals and track progress
-
-### Continuous Growth
-
-**5. Collaborative Professional Learning**
-- Student work anchors PLC discussions
-- Reflective practice individually and collectively
-- New learning applied and reported back
-
-**6. Actionable Observation & Feedback Cycles**
-- Evidence-based, non-evaluative feedback
-- Short-cycle model with timely response
-- Two-way dialogue and goal setting
-
-### Innovation
-
-**7. Real-World Connections**
-- Authentic problems and contexts
-- Student voice and choice
-- Community, career, and cultural connections
-
-**8. Intentional Use of Technology**
-- Tech personalizes learning paths
-- Tools enable collaboration and creation
-- Accessibility features ensure universal access
-
----
-
-## Quick Reference for Graphics & Communications
-
-When creating visuals about PSD instruction, include:
-
-**Key Terms:**
-- Instructional Essentials (the framework)
-- Tier 1 Practices (the 8 strategies)
-- Grade-level rigor with appropriate scaffolds
-- Evidence-informed instruction
-- Student agency and voice
-
-**Core Messages:**
-- Every student deserves engaging, rigorous, inclusive learning every day
-- High expectations WITH high support
-- Data informs—not just documents—instruction
-- Innovation serves learning, not the other way around
-
-**Visual Framework:**
-The four essentials form a cycle around the PSD logo:
-- Rigor & Inclusion (top-left, green)
-- Data-Driven Decisions (top-right, blue-gray)
-- Continuous Growth (bottom-right, light blue)
-- Innovation (bottom-left, dark green)
-
----
-
-## For AI Assistants & External Systems
-
-When building an AI assistant that should embody PSD's instructional philosophy, inject these beliefs:
-
-### System Prompt Injection
-
-```
-You are aligned with Peninsula School District's Instructional Essentials:
-
-CORE BELIEF: Every student deserves engaging, rigorous, and inclusive learning every day.
-
-INSTRUCTIONAL PRINCIPLES:
-1. RIGOR & INCLUSION: Maintain grade-level expectations while providing scaffolds. Never lower the bar—build the ladder.
-2. DATA-DRIVEN: Recommendations should be based on evidence. Suggest formative checks and adjustment strategies.
-3. CONTINUOUS GROWTH: Model reflection. Ask "What worked? What could improve?" Frame feedback constructively.
-4. INNOVATION: Connect to real-world contexts. Encourage student voice and choice. Technology serves learning.
-
-PEDAGOGICAL STANCE:
-- Scaffolds are temporary supports, not permanent crutches
-- Differentiation means different paths to the SAME high standard
-- Feedback should be specific, actionable, and tied to success criteria
-- Student self-assessment builds agency and metacognition
-- Collaboration among educators improves outcomes for ALL students
+# 3. Pull fuller context for one hit, only when its excerpt is too thin.
+node /opt/psd-skills/psd-aistudio/run.js repositories-source \
+  --user <email> --repository-id <id> --item-id <itemId>
 ```
 
-### Key Practices to Reference
+Search first and answer from what comes back. Reach for `repositories-source`
+only when an excerpt is genuinely insufficient — do not pull whole documents
+into context by default.
 
-| If the assistant is about... | Emphasize these practices |
-|------------------------------|---------------------------|
-| Lesson planning | Building academic background, scaffolding, formative assessment |
-| Assessment | Formative feedback, student self-assessment, data patterns |
-| Coaching/PD | Collaborative learning, observation cycles, reflective practice |
-| Student engagement | Real-world connections, technology, student voice |
-| Differentiation | Flexible grouping, scaffolding, multiple paths to standards |
+## Repository selection
 
----
+Select an accessible repository whose name contains **"Instructional
+Essentials"**, case-insensitively. If several match, prefer the lowest numeric
+id, and say which one you used.
 
-## When to Load Full Playbook
+**Never hardcode a repository id.** The id differs per environment, so a
+hardcoded value silently reads the wrong repository — or nothing at all.
 
-Read `/opt/psd-skills/psd-instructional-vision/references/playbook.md` when you need:
-- Specific classroom examples for a practice
-- Role-based responsibilities (teachers, principals, central office)
-- Indicators of success for a practice
-- Educator reflection questions
-- Implementation guidance
+If no repository matches, say plainly that the PSD Instructional Essentials
+repository is not available to the caller's account, and do **not** fall back on
+remembered framework content. On an unauthorized or insufficient-scope response,
+tell the user to **connect AI Studio access**; if they are already connected,
+they should reconnect so current repository scopes are authorized.
+
+## What the repository covers
+
+Ask it rather than assuming — Teaching & Learning maintains the item set and it
+changes. At time of writing it holds the Instructional Essentials Playbook, the
+PSD UDL Big 6, the MTSS Blueprint, Novak's UDL look-fors, the Danielson/UDL
+alignment, and the curriculum framework rationale.
+
+## Answering well
+
+- **Cite the source item** for any specific claim, so the reader can go to the
+  document Teaching & Learning maintains.
+- **Use the district's own language** for framework terms rather than
+  paraphrasing them into generic instructional-coach vocabulary.
+- **Say when something is not in the repository.** Do not fill the gap from
+  general pedagogical knowledge and present it as PSD's position — that is the
+  exact failure this skill exists to prevent.
+- Building a graphic, slide, or assistant prompt about PSD instruction? Retrieve
+  the current framing first. Visual assets and system prompts outlive the text
+  they were built from, so an un-retrieved one quietly ships last year's
+  framework.
+
+## Exit codes
+
+Surfaced by `psd-aistudio`; see that skill for the full table. The two that
+matter here: a non-zero exit with an authorization message means connect or
+reconnect AI Studio access, and an empty result set means the repository is
+reachable but has nothing matching — report that rather than inventing content.

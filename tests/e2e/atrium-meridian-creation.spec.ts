@@ -110,22 +110,18 @@ test.describe("Atrium Meridian creation flow (authenticated)", () => {
         timeout: 60000,
       });
 
-      // The primary Publish ▾ split control opens a Meridian dropdown that houses
-      // the destination + publish + unpublish actions (no naked native <select>).
-      await page.getByTestId("publish-menu-trigger").click();
-      await expect(
-        page.getByRole("menuitem", { name: /Publish to intranet/i })
-      ).toBeVisible();
-      await expect(
-        page.getByRole("menuitem", { name: /Unpublish from intranet/i })
-      ).toBeVisible();
-      await expect(
-        page.getByRole("menuitem", { name: /Save a version/i })
-      ).toBeVisible();
-      // The old naked native destination select is gone.
+      // The single Share control opens a dialog that houses every destination
+      // with its own publish/unpublish actions. The usability pass replaced the
+      // Publish ▾ split control and its dropdown with this one entry point.
+      await page.getByTestId("share-control").click();
+      await expect(page.getByTestId("share-dest-intranet")).toBeVisible();
+      await expect(page.getByTestId("share-publish-intranet")).toBeVisible();
+      // Both the old naked native destination select and the Publish ▾ trigger
+      // it lived behind are gone.
       await expect(
         page.getByTestId("publish-destination-select")
       ).toHaveCount(0);
+      await expect(page.getByTestId("publish-menu-trigger")).toHaveCount(0);
     } finally {
       await context.close();
     }

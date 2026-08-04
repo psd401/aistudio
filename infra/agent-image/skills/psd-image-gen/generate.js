@@ -203,7 +203,11 @@ async function requestImage(params, referenceDataUrl) {
       ...params,
       referenceDataUrl,
     },
-    { timeoutMs: 130_000 },
+    // Must stay above the broker's own 240s fetch timeout on the OpenAI image
+    // call (lib/agent-credentials/owner-operation-broker.ts) so the server-side
+    // timeout fires first and returns a reportable error, and below the ALB's
+    // 300s idle timeout so the connection is not cut from underneath us.
+    { timeoutMs: 250_000 },
   );
   if (
     typeof result.imageBase64 !== 'string' ||

@@ -203,6 +203,20 @@ export async function POST(request: NextRequest) {
       requestId,
       error: error instanceof Error ? error.message : String(error),
     })
+    // An upstream timeout is not a credential problem, but it used to land in
+    // the generic branch below and reach the caller as "Credential operation
+    // failed" — which reads as a missing or misconfigured credential and sent
+    // at least one investigation down the wrong path. Report it as what it is.
+    if (error instanceof Error && error.name === "TimeoutError") {
+      return NextResponse.json(
+        {
+          error:
+            "Credential operation timed out waiting for the upstream provider",
+          code: "upstream_timeout",
+        },
+        { status: 504 }
+      )
+    }
     return NextResponse.json(
       { error: "Credential operation failed" },
       { status: 502 }

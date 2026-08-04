@@ -362,3 +362,37 @@ describe("POST /api/agent/credentials Freshservice errors", () => {
     })
   })
 })
+
+describe("POST /api/agent/credentials upstream timeouts", () => {
+  // agent_failures 534: the OpenAI image fetch aborted at its 120s timeout, but
+  // the route reported the generic 502 "Credential operation failed", which
+  // reads as a missing/misconfigured credential and misdirected the triage.
+  it("reports an upstream timeout as a timeout, not a credential failure", async () => {
+    const timeout = new Error("The operation was aborted due to timeout")
+    timeout.name = "TimeoutError"
+    executeOpenAiImageOperationMock.mockRejectedValueOnce(timeout)
+
+    const response = await POST(
+      request({ operation: "openai-image", prompt: "a chart" })
+    )
+
+    expect(response.status).toBe(504)
+    expect(await response.json()).toEqual({
+      error: "Credential operation timed out waiting for the upstream provider",
+      code: "upstream_timeout",
+    })
+  })
+
+  it("still reports non-timeout failures as a credential failure", async () => {
+    executeOpenAiImageOperationMock.mockRejectedValueOnce(new Error("boom"))
+
+    const response = await POST(
+      request({ operation: "openai-image", prompt: "a chart" })
+    )
+
+    expect(response.status).toBe(502)
+    expect(await response.json()).toEqual({
+      error: "Credential operation failed",
+    })
+  })
+})
