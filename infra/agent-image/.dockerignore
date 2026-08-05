@@ -9,6 +9,10 @@
 # ("Failed to mount overlay: No such file or directory") and every microVM
 # boot failed. Ignoring these patterns at build time keeps the image
 # byte-clean regardless of what the developer did locally.
+#
+# render_local.py itself is gone (issue #1596 replaced it with a pure-Node
+# renderer), but these patterns stay: other skills ship Python, and the
+# failure mode is a property of the build context, not of one file.
 
 # Python bytecode caches
 __pycache__/

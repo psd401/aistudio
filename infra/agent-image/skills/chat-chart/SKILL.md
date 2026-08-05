@@ -19,7 +19,7 @@ Other good triggers:
 
 Don't use this for:
 - A single number or short list — a sentence is better.
-- Massive datasets (≥ 100 series points): the chart will be unreadable in Chat.
+- Massive datasets: 50 series points is a hard ceiling (the skill exits 3 above it), and much past ~25 the bars are thinner than their labels. Aggregate first.
 
 ## Combining chat-chart with chat-card (recommended pattern)
 
@@ -35,19 +35,39 @@ Do NOT pick one or the other when the user wants a chart with surrounding contex
 
 | Engine     | Speed | Data leaves AWS? | When |
 |------------|-------|------------------|------|
-| `quickchart` | <1s   | YES (quickchart.io) | Aggregated, clearly-public data — no PII, no student data, no internal IDs. |
-| `local`    | 2–4s  | No (stays in PSD AWS) | Anything sensitive, anything with student IDs, or when you're not 100% sure it's public. |
-| `auto` (default) | varies | varies | Picks `local` if `--sensitive` is set OR if data contains things matching email/phone/SSN/PSD student-ID patterns; else `quickchart`. |
+| `auto` (default) | <1s | No (stays in PSD AWS) | Everything. Renders on-host — same engine as `local`. |
+| `local`    | <1s   | No (stays in PSD AWS) | Same as `auto`; name it when you want the choice to be explicit in the transcript. |
+| `quickchart` | <1s   | YES (quickchart.io) | Only for data you have verified is public. Refused outright for `--sensitive` or PII-matching data. |
 
-**The safety knob is `--sensitive`.** When you're handling anything that's even arguably internal — names, attendance, grades, salaries, FreshService tickets that reference people — pass `--sensitive`. The inline regex is a backstop, not a substitute for judgment.
+**You do not need to reason about sensitivity to get a chart.** The default
+engine rasterises the PNG inside the agent container and uploads it to the PSD
+workspace bucket, so student, staff, achievement, attendance and HR data all
+chart normally. `--sensitive` is still worth passing — it documents intent and
+hard-blocks an accidental `--engine quickchart` — but it is no longer the
+difference between a chart and a refusal.
+
+**What "on-host" does and does not mean.** The *values* never leave PSD AWS:
+no third party ever sees the numbers, the labels, or the chart spec. The
+finished PNG is a different matter — Google Chat has to fetch it, so it is
+published to an unauthenticated (unguessable, ~30-day) workspace URL, exactly
+like `psd-image-gen` output. Anyone holding that URL, Google included, can
+fetch the image. Treat a chart of student data the way you would treat any
+other image you post into a Chat space: fine for the audience in the space,
+not a place for anything you would not put in the message body.
+
+**Never pass `--engine quickchart` for district data.** It encodes the values
+into a quickchart.io URL, so the numbers land in a third party's logs. The skill
+refuses that combination when `--sensitive` is set or the data trips the inline
+email/phone/SSN/student-ID regex, but the regex is a backstop, not a substitute
+for judgment.
 
 ## Usage
 
 ```bash
 node /opt/psd-skills/chat-chart/run.js \
-  --user <email> \
   --type bar|line|pie|scatter \
   --data-json '[{"label":"Mon","value":12},{"label":"Tue","value":8},...]' \
+  [--user <email>] \
   [--title "Chart title"] \
   [--engine auto|quickchart|local] \
   [--sensitive] \
@@ -60,7 +80,9 @@ node /opt/psd-skills/chat-chart/run.js \
 
 Multi-series and custom colors aren't supported in v1 — keep it to one series for now.
 
-`--user` is required for the `local` engine (used as the S3 key prefix so the chart lives under the calling user's path). Pass the email verbatim from the `[caller: Name <email>]` header of the user turn.
+`--user` is optional. The workspace broker derives the storage path from the calling agent's identity, so the email is provenance only — pass it verbatim from the `[caller: Name <email>]` header of the user turn when you have it.
+
+**Rendering limits.** Up to 50 points per chart; one series; labels are drawn with a built-in 5x7 ASCII font, so non-ASCII characters (accents, em dashes, curly quotes) render as `?` and long category labels are truncated to fit their slot. Prefer short, ASCII labels.
 
 ## Output
 
@@ -73,7 +95,7 @@ Prints two things to stdout in order:
 
 ## Examples
 
-### Public dashboard data — QuickChart
+### Any district data — the default (on-host) engine
 
 ```bash
 node /opt/psd-skills/chat-chart/run.js \
@@ -84,7 +106,7 @@ node /opt/psd-skills/chat-chart/run.js \
   --text-fallback "Daily message volume chart"
 ```
 
-### Student attendance — force local
+### Student attendance — flagged sensitive (still the local engine)
 
 ```bash
 node /opt/psd-skills/chat-chart/run.js \
@@ -114,6 +136,7 @@ The chart-card combo is the standard pattern for richer dashboards — `chat-cha
 
 ## Failure behavior
 
-- Missing `--user` (when `local` engine selected): exits non-zero with a clear error on stderr.
-- QuickChart returns non-200: skill exits non-zero; agent sees the error in the tool result and should surface it as plain text instead of retrying silently.
-- Local matplotlib import fails: skill exits non-zero with a hint to verify the agent image was rebuilt after this skill was added.
+- Malformed `--user`: exits non-zero with a clear error on stderr.
+- `--engine quickchart` combined with `--sensitive` or PII-matching data: exits 3 without rendering and without building a quickchart.io URL. Drop the `--engine` flag and re-run — the same chart renders on-host.
+- Local render fails (unsupported type, non-numeric values, more than 50 points): exits 3 with the reason on stderr. Fix the payload; do not fall back to QuickChart.
+- Artifact upload fails: exits non-zero. Surface the error as plain text instead of retrying silently.

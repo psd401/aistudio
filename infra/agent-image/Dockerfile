@@ -182,14 +182,13 @@ RUN python3 -m venv /opt/agentcore-venv && \
     /opt/agentcore-venv/bin/pip install --no-cache-dir --require-hashes \
       -r /tmp/requirements-agentcore.txt && \
     rm -f /tmp/requirements-agentcore.txt
-# matplotlib was added here for chat-chart's local engine, but it triggers
-# AgentCore's overlay-mount snapshotter to fail at microVM boot
-# (2026-05-18 — every microVM dies with "Failed to mount overlay: No such
-# file or directory"). Until we find a chart renderer that doesn't trip
-# the snapshotter, chat-chart runs in QuickChart-only mode (no local
-# engine). Re-add matplotlib here AND the chat-chart npm install below
-# AND remove the lazy require + engine-auto override in
-# skills/chat-chart/run.js to bring local back.
+# matplotlib is deliberately NOT installed here. It was added once for
+# chat-chart's local engine and triggered AgentCore's overlay-mount
+# snapshotter to fail at microVM boot (2026-05-18 — every microVM dies with
+# "Failed to mount overlay: No such file or directory"). chat-chart's local
+# engine now rasterises PNGs in pure Node (skills/chat-chart/render_local.js,
+# issue #1596) with no pip and no npm dependency, so there is no reason to
+# reintroduce matplotlib — do not add it back for charting.
 
 # Add venv to PATH so python3 uses the venv by default
 ENV PATH="/opt/agentcore-venv/bin:$PATH"
@@ -420,11 +419,12 @@ RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-f
     node -e 'const fs=require("fs");const text=fs.readFileSync(process.argv[1],"utf8");const start=text.indexOf("{");const payload=JSON.parse(text.slice(start));const plugin=payload.plugin||{};const expected=process.argv[2];if(plugin.status!=="loaded"||plugin.version!==expected){console.error(`parallel runtime registration failed: status=${plugin.status||"missing"} version=${plugin.version||"missing"} error=${plugin.error||"none"}`);process.exit(1)}' \
       /tmp/parallel.inspect.json "${PARALLEL_PLUGIN_VERSION}" && \
     rm -f /tmp/amazon-bedrock.inspect.json /tmp/parallel.inspect.json
-# chat-card has zero npm deps. chat-chart's npm install is paired with the
-# matplotlib install above — both stay disabled until we figure out the
-# AgentCore overlay-mount failure. With both off the image boots cleanly
-# and chat-chart works in QuickChart mode (lazy require in run.js skips
-# the AWS SDK load).
+# chat-card and chat-chart both have zero npm deps. chat-chart's local
+# engine (issue #1596) renders PNGs with node:zlib and uploads them through
+# the agent broker over plain fetch — no @aws-sdk, no matplotlib, no npm
+# install, NO new RUN and NO new Docker layer. It is installed solely by
+# `COPY skills` above, which keeps this stage under the Firecracker
+# overlay-mount 54-layer ceiling from the 2026-05-18 incident.
 # psd-email-triage (Phase 1 email triage) has three @aws-sdk/* deps for
 # DynamoDB + EventBridge Scheduler; the npm install adds one layer (we
 # were at 49, target 50 — well under the 54-layer Firecracker ceiling
