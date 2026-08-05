@@ -67,9 +67,15 @@ test('broker errors fail closed and preserve no secret response text', async () 
       headers: { 'Content-Type': 'application/json' },
     }));
   const common = require('./common');
-  await expect(
-    common.requestCredentialOperation({ operation: 'list' }),
-  ).rejects.toThrow('Agent broker rejected the request: Forbidden');
+  // The broker now reports the HTTP status alongside the reason, so a masked
+  // 403 is diagnosable. The reason still comes from the body's `error` field
+  // only — the sibling `secret` must never reach the message.
+  const error = await common
+    .requestCredentialOperation({ operation: 'list' })
+    .catch((e) => e);
+  expect(error.message).toContain('Forbidden');
+  expect(error.message).toContain('HTTP 403');
+  expect(error.message).not.toContain('do-not-echo');
 });
 
 const CLIS = [

@@ -59,6 +59,23 @@ test('a structured JSON error still surfaces its reason', async () => {
   expect(err.message).toContain('forbidden_capability');
 });
 
+// A parsed JSON body may carry secret fields beside the status, so it is never
+// echoed — only the broker's own `error` string or the status itself.
+// psd-credentials guards the same boundary from the caller side.
+test('a JSON error body without an `error` field is not echoed', async () => {
+  globalThis.fetch = mock(async () =>
+    new Response(JSON.stringify({ secret: 'do-not-echo', token: 'sk-live-abc' }), {
+      status: 403,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+  const { requestAgentBroker } = require('./agent-broker');
+  const err = await requestAgentBroker('/api/agent/consent-link', {}).catch((e) => e);
+  expect(err.status).toBe(403);
+  expect(err.message).toContain('HTTP 403');
+  expect(err.message).not.toContain('do-not-echo');
+  expect(err.message).not.toContain('sk-live-abc');
+});
+
 test('an empty error body still identifies the status', async () => {
   globalThis.fetch = mock(async () => new Response('', { status: 502 }));
   const { requestAgentBroker } = require('./agent-broker');

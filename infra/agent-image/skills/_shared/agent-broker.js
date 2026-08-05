@@ -60,10 +60,21 @@ async function requestAgentBroker(route, payload, options = {}) {
   }
 
   if (!response.ok) {
+    // Reason precedence, tightest first:
+    //   1. the broker's own `error` string — structured and safe to surface;
+    //   2. a snippet, but ONLY when the body did not parse as JSON. A
+    //      non-JSON body is a proxy/WAF page, which is exactly the case that
+    //      used to be swallowed. A body that DID parse is one of our own
+    //      structured responses and may carry secret fields alongside the
+    //      status (psd-credentials exercises precisely this), so it is
+    //      reported by status alone and never echoed.
+    //   3. the status on its own.
     const reason =
       body && typeof body.error === 'string'
         ? body.error
-        : bodySnippet(raw) || `HTTP ${response.status}`;
+        : parseFailed
+          ? bodySnippet(raw)
+          : `HTTP ${response.status}`;
     const error = new Error(
       `Agent broker rejected the request (HTTP ${response.status}): ${reason}`
     );
