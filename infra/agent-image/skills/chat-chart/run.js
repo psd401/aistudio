@@ -40,10 +40,10 @@ const RICH_ENVELOPE_CLOSE = '<<<END_PSD_AGENT_RICH_V1>>>';
 const ALLOWED_TYPES = new Set(['bar', 'line', 'pie', 'scatter']);
 const ALLOWED_ENGINES = new Set(['auto', 'quickchart', 'local']);
 
-// Backstop detectors for the auto-engine decision. These are intentionally
+// Backstop detectors for the QuickChart gate. These are intentionally
 // narrow: false negatives are acceptable (the agent's --sensitive flag is
-// the real safety knob), but false positives waste 2-3s routing through
-// matplotlib for clearly-public data.
+// the real safety knob), and a false positive costs nothing worse than
+// rendering on-host, which is where charts go by default anyway.
 const PII_PATTERNS = [
   { name: 'email', re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/ },
   { name: 'ssn', re: /\b\d{3}-\d{2}-\d{4}\b/ },
@@ -148,8 +148,8 @@ function chooseEngine(args, dataText) {
 
 /**
  * Build a minimal Chart.js v4 config from our normalised (type, data)
- * shape. Chart.js is what QuickChart speaks natively; matplotlib reads
- * the same input shape too so the two engines stay symmetric.
+ * shape. Chart.js is what QuickChart speaks natively; render_local.js
+ * reads the same shape so the two engines stay symmetric.
  */
 function buildChartJsConfig(type, data, title) {
   if (!Array.isArray(data) || data.length === 0) {
