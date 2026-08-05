@@ -403,9 +403,16 @@ const PHASE1_FORBIDDEN = [
   { pattern: /\bdrive[\s.]+files[\s.]+untrash\b/i,
     reason: 'untrashing a Drive file (Phase 1: the agent does not manage the trash)' },
 
-  // Sharing externally / changing permissions on user data
+  // Sharing externally / changing permissions on user data.
+  //
+  // `create` carries the narrow in-district exception documented in SKILL.md
+  // ("Exception — explicit in-district shares of YOUR OWN files"):
+  // isPermittedInDistrictShare proves the call is an agent-slot share of an
+  // agent-owned file in one of exactly two shapes. `update` and `delete` stay
+  // absolute — the exception function refuses them outright.
   { pattern: /\bdrive[\s.]+permissions[\s.]+(create|update|delete)\b/i,
-    reason: 'modifying Drive sharing permissions (Phase 1: no permission changes)' },
+    reason: 'modifying Drive sharing permissions (Phase 1: no permission changes)',
+    exception: isPermittedInDistrictShare },
 ];
 
 // ============================================================================
@@ -436,6 +443,18 @@ const DRIVE_METADATA_FIELDS = new Set([
   'foldercolorrgb',
   'properties',
   'appproperties',
+]);
+
+// Query parameters permitted alongside a metadata-only `files update`. These
+// select the target and shape the response; none can write content. Parent
+// changes (a move) live here rather than in the body. `uploadType` is absent by
+// design — carriesDriveContent refuses it outright.
+const DRIVE_PARAM_FIELDS = new Set([
+  'fileid',
+  'addparents',
+  'removeparents',
+  'supportsalldrives',
+  'fields',
 ]);
 
 // Flags that would attach a body/media stream to a Drive call. `--json` and
@@ -533,11 +552,145 @@ function isMetadataOnlyDriveUpdate(commandString, tokens) {
   if (!updateRe.test(spaceJoined) && !updateRe.test(dotJoined)) return false;
   if (carriesDriveContent(tokens)) return false;
 
+  // A MOVE lives entirely in --params (addParents/removeParents) and carries no
+  // request body at all. extractDriveResource only ever sees --json (findJsonSpan
+  // anchors on that flag), so before 2026-08-05 a pure move produced a null
+  // resource and was refused — even though SKILL.md lists move as allowed and
+  // this function's contract names it. Symptom: a plain rename succeeded while
+  // the same file's move was blocked, silently wedging the Purdy Drive
+  // auto-sort schedule on every run.
+  const params = extractParamsResource(tokens);
+  if (params) {
+    const paramKeys = Object.keys(params);
+    if (!paramKeys.every((key) => DRIVE_PARAM_FIELDS.has(key.toLowerCase()))) {
+      return false;
+    }
+  }
+  const movesParents =
+    !!params &&
+    Object.keys(params).some((key) => /^(add|remove)parents$/i.test(key));
+
+  const resource = extractDriveResource(commandString, tokens);
+  if (resource) {
+    const keys = Object.keys(resource);
+    if (keys.length === 0) return false;
+    return keys.every((key) => DRIVE_METADATA_FIELDS.has(key.toLowerCase()));
+  }
+  // No body at all: allowed ONLY when --params proves this is a parent move.
+  // A bare `drive files update` with nothing to inspect stays refused —
+  // absence of proof is not proof of absence.
+  return movesParents;
+}
+
+/**
+ * Parse the `--params` query-parameter object, or null when absent/unparseable.
+ * Separate from extractDriveResource, which reads the `--json` request BODY.
+ */
+function extractParamsResource(tokens) {
+  for (let i = 0; i < tokens.length - 1; i++) {
+    if (tokens[i] !== '--params') continue;
+    try {
+      const parsed = JSON.parse(tokens[i + 1]);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? parsed
+        : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * ALLOW `drive permissions create` for the two in-district share shapes
+ * documented in SKILL.md ("Exception — explicit in-district shares of YOUR OWN
+ * files"):
+ *
+ *   1. Named person in the district — type "user", role reader/commenter/writer,
+ *      emailAddress ending @psd401.net.
+ *   2. Whole district, read-only — type "domain", domain "psd401.net",
+ *      role "reader".
+ *
+ * Everything else stays blocked by PHASE1_FORBIDDEN: `update`/`delete`, type
+ * "anyone"/"group", external addresses or domains, domain-wide `writer`, and
+ * ownership transfer.
+ *
+ * Only valid on the AGENT slot. The documented exception is scoped to files the
+ * agent owns, and the agent slot is the only one that can create them — a share
+ * on the user slot is a permission change on the user's own Drive and stays
+ * refused.
+ *
+ * This is an ALLOWLIST and fails closed: an unparseable payload, a missing
+ * field, or any key outside PERMISSION_FIELDS refuses the whole call, so a
+ * payload shape we did not anticipate is blocked rather than permitted.
+ *
+ * Before this existed the gate blanket-blocked every `permissions` verb, so the
+ * documented exception was unreachable — the agent could create a doc for
+ * someone and then never hand it over (2026-08-05: 12 refusals across 10 staff
+ * in one day).
+ */
+const PERMISSION_ROLES_NAMED = new Set(['reader', 'commenter', 'writer']);
+
+// Keys we can positively reason about. `transferOwnership` and
+// `moveToNewOwnersRoot` are deliberately absent — an ownership transfer is
+// never one of the documented shapes, so its presence refuses the call.
+const PERMISSION_FIELDS = new Set([
+  'fileid',
+  'type',
+  'role',
+  'emailaddress',
+  'domain',
+  'sendnotificationemail',
+  'emailmessage',
+  'supportsalldrives',
+]);
+
+const PSD_DOMAIN = 'psd401.net';
+// Local part per RFC-ish practicality: no whitespace, no '@', at least one char.
+const PSD_EMAIL = /^[^\s@]+@psd401\.net$/i;
+
+function isPermittedInDistrictShare(commandString, tokens, context) {
+  // Agent slot only. Fail closed when scope is missing/unknown.
+  if (!context || context.scope !== 'agent_account') return false;
+
+  const spaceJoined = tokens.join(' ').toLowerCase();
+  const dotJoined = tokens.join('.').toLowerCase();
+  // `create` ONLY — update/delete have no exception.
+  const createRe = /\bdrive[\s.]+permissions[\s.]+create\b/i;
+  if (!createRe.test(spaceJoined) && !createRe.test(dotJoined)) return false;
+  if (carriesDriveContent(tokens)) return false;
+
   const resource = extractDriveResource(commandString, tokens);
   if (!resource) return false;
+  return isDocumentedShareShape(resource);
+}
+
+/**
+ * True only for the two share shapes SKILL.md documents. Every other payload —
+ * including one carrying a key we have not reasoned about — is refused.
+ */
+function isDocumentedShareShape(resource) {
   const keys = Object.keys(resource);
   if (keys.length === 0) return false;
-  return keys.every((key) => DRIVE_METADATA_FIELDS.has(key.toLowerCase()));
+  if (!keys.every((key) => PERMISSION_FIELDS.has(key.toLowerCase()))) return false;
+
+  const type = typeof resource.type === 'string' ? resource.type.toLowerCase() : null;
+  const role = typeof resource.role === 'string' ? resource.role.toLowerCase() : null;
+  if (!type || !role) return false;
+
+  if (type === 'user') {
+    if (!PERMISSION_ROLES_NAMED.has(role)) return false;
+    const email = resource.emailAddress;
+    return typeof email === 'string' && PSD_EMAIL.test(email.trim());
+  }
+  if (type === 'domain') {
+    // Domain-wide is read-only, and only our own domain.
+    if (role !== 'reader') return false;
+    const domain = resource.domain;
+    return typeof domain === 'string' && domain.trim().toLowerCase() === PSD_DOMAIN;
+  }
+  // 'anyone', 'group', or anything new: refused.
+  return false;
 }
 
 /**
@@ -688,6 +841,24 @@ function missingScopesForCommand(commandString, grantedScopeString) {
 }
 
 /**
+ * Walk PHASE1_FORBIDDEN and return the refusal for the first rule that matches
+ * without a satisfied exception, or null when nothing blocks.
+ *
+ * Same allowlist contract as USER_SCOPE_FORBIDDEN: an entry without an
+ * `exception` is absolute, and an exception that cannot positively prove the
+ * call is one of the documented safe shapes falls through to the block.
+ * `context` is threaded in because the Drive share exception is agent-slot only.
+ */
+function firstPhase1Refusal(commandString, tokens, context, hits) {
+  for (const { pattern, reason, exception } of PHASE1_FORBIDDEN) {
+    if (!hits(pattern)) continue;
+    if (exception && exception(commandString, tokens, context)) continue;
+    return { allowed: false, reason };
+  }
+  return null;
+}
+
+/**
  * Test the gws command against Phase 1 forbidden patterns. Returns
  * `{allowed: true}` if the command can proceed, or
  * `{allowed: false, reason: '<short description>'}` if it must be refused.
@@ -735,11 +906,8 @@ function enforcePhase1Gates(commandString, context) {
       }
     }
   }
-  for (const { pattern, reason } of PHASE1_FORBIDDEN) {
-    if (hits(pattern)) {
-      return { allowed: false, reason };
-    }
-  }
+  const phase1Refusal = firstPhase1Refusal(commandString, tokens, context, hits);
+  if (phase1Refusal) return phase1Refusal;
 
   // Trash travels as a body field, and the raw-string pattern above can be
   // dodged with a JSON escape in the key — judge the DECODED payload too,
@@ -988,6 +1156,7 @@ module.exports = {
   missingScopesForCommand,
   isPermittedFolderCreate,
   isMetadataOnlyDriveUpdate,
+  isPermittedInDistrictShare,
   PHASE1_FORBIDDEN,
   PROVENANCE_REQUIRED,
   USER_SCOPE_FORBIDDEN,

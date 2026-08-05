@@ -56,6 +56,24 @@ check("ids match the rendered DOM ids (incl. duplicate de-dup)", () => {
   assert.deepEqual(toc.map((h) => h.id), domHeadingIds(md));
 });
 
+check("strips collab authored-span markup from label AND id", () => {
+  // Live 2026-08-05: published Atrium docs rendered their body correctly but the
+  // reader rail printed `<span data-atrium-authored="">District Data</span>`
+  // literally — mdast-util-to-string returns an inline `html` node's raw source.
+  // The ids were slugged from that same markup, so every anchor missed too.
+  const md =
+    '## <span data-atrium-authored="">District Data</span>\n\n' +
+    "text\n\n" +
+    '## Scheduling <span data-atrium-authored="">& Reminders</span>\n\ntext\n';
+  const toc = extractDocumentHeadings(md);
+  assert.deepEqual(toc.map((h) => h.text), [
+    "District Data",
+    "Scheduling & Reminders",
+  ]);
+  // The real invariant: ids still agree with the rendered DOM.
+  assert.deepEqual(toc.map((h) => h.id), domHeadingIds(md));
+});
+
 check("excludes h4–h6 but still advances the slugger for them", () => {
   // The h4 "Schedule" consumes the base slug, so the later h2 "Schedule" is
   // de-duped to `schedule-1` — matching rehype-slug, which slugs every heading.

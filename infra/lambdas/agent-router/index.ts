@@ -3314,6 +3314,19 @@ function isChatPostPermissionDenied(error: unknown): boolean {
   return errorStatusCode(error) === 403;
 }
 
+/**
+ * A reply whose target THREAD no longer resolves. Google answers
+ * `REPLY_MESSAGE_OR_FAIL` against a deleted/unreachable thread with 404
+ * "Requested entity was not found."
+ *
+ * The space itself is usually still fine, so this is recoverable by posting to
+ * the space instead of the thread — see the rebind in
+ * sendGoogleChatResponseWithDependencies.
+ */
+function isChatThreadNotFound(error: unknown): boolean {
+  return errorStatusCode(error) === 404;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -3363,8 +3376,13 @@ async function recordInPlaceChatDeliveryFailure(
   input: ChatResponseInput,
   error: unknown,
   log: ReturnType<typeof createLogger>,
-  dependencies: ChatResponseDependencies
+  dependencies: ChatResponseDependencies,
+  options: { attemptedRebind?: boolean } = {}
 ): Promise<void> {
+  // `channelRebound` reports whether we actually fell back to the space. It was
+  // hardcoded false while no rebind existed; it is now the real outcome, so a
+  // row that still says false means the thread was never the problem.
+  const channelRebound = options.attemptedRebind === true;
   const permissionDenied = isChatPostPermissionDenied(error);
   const completedResponse =
     typeof input.deliveryContext.deliveryRequestId === 'string';
@@ -3383,7 +3401,7 @@ async function recordInPlaceChatDeliveryFailure(
     ...(input.threadName ? { thread: input.threadName } : {}),
     errorClass,
     retryInPlace: completedResponse,
-    channelRebound: false,
+    channelRebound,
     }
   );
   await dependencies.recordFailure(
@@ -3400,7 +3418,7 @@ async function recordInPlaceChatDeliveryFailure(
         spaceName: input.spaceName,
         ...(input.threadName ? { threadName: input.threadName } : {}),
         retryInPlace: completedResponse,
-        channelRebound: false,
+        channelRebound,
       },
     },
     log
@@ -3430,16 +3448,47 @@ async function sendGoogleChatResponseWithDependencies(
         }
       : {}),
   };
+  let channelRebound = false;
   try {
     await dependencies.createMessage(createRequest);
   } catch (error) {
-    await recordInPlaceChatDeliveryFailure(
-      input,
-      error,
-      log,
-      dependencies
-    );
-    return 'failed';
+    // The thread is gone but the space is not. Retrying the same threadName can
+    // only fail the same way, so before 2026-08-05 a dead thread turned into a
+    // redelivery storm — one thread produced 8 identical failures in 4 minutes
+    // and the user never received the reply at all.
+    //
+    // Rebind to the space: drop the thread binding (and REPLY_MESSAGE_OR_FAIL
+    // with it) so the answer lands as a new thread rather than being lost. Only
+    // for a 404 on a threaded reply; an unthreaded post has nothing to rebind
+    // to, and a 403 is a permission problem that reposting cannot fix.
+    if (!threadName || !isChatThreadNotFound(error)) {
+      await recordInPlaceChatDeliveryFailure(input, error, log, dependencies);
+      return 'failed';
+    }
+    log.warn('Chat thread no longer resolves — rebinding to the space', {
+      space: spaceName,
+      thread: threadName,
+    });
+    const { thread: _thread, ...bodyWithoutThread } = messageBody;
+    try {
+      await dependencies.createMessage({
+        parent: spaceName,
+        requestBody: bodyWithoutThread,
+        ...(deliveryContext.deliveryRequestId
+          ? { requestId: deliveryContext.deliveryRequestId }
+          : {}),
+      });
+      channelRebound = true;
+    } catch (reboundError) {
+      await recordInPlaceChatDeliveryFailure(
+        input,
+        reboundError,
+        log,
+        dependencies,
+        { attemptedRebind: true }
+      );
+      return 'failed';
+    }
   }
 
   log.info('Response sent to Google Chat', {
@@ -3447,6 +3496,7 @@ async function sendGoogleChatResponseWithDependencies(
     responseLength: text.length,
     hasCards: prepared.hasCards,
     hasAccessoryWidgets: prepared.hasAccessoryWidgets,
+    ...(channelRebound ? { channelRebound: true } : {}),
   });
   return 'delivered';
 }

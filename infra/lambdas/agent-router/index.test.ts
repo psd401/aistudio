@@ -524,6 +524,123 @@ describe("Google Chat response delivery", () => {
   })
 })
 
+describe("Google Chat delivery thread rebinding", () => {
+  // A dead thread used to fail permanently and be redelivered: one thread
+  // produced 8 identical ChatResponseDeliveryFailed rows in 4 minutes and the
+  // user never got the reply. The space is still fine, so rebind to it.
+  test("rebinds to the space when the thread no longer resolves", async () => {
+    const requests: Array<
+      Parameters<ChatResponseDependencies["createMessage"]>[0]
+    > = []
+    const failures: Array<
+      Parameters<ChatResponseDependencies["recordFailure"]>[0]
+    > = []
+    const outcome = await sendGoogleChatResponseWithDependencies(
+      {
+        spaceName: "spaces/room",
+        threadName: "spaces/room/threads/gone",
+        text: "Completed answer",
+        deliveryContext: {
+          isSharedSpace: true,
+          userId: "owner@psd401.net",
+          deliveryRequestId: "11111111-2222-4333-8444-555555555555",
+        },
+      },
+      TEST_LOG,
+      chatResponseDependencies({
+        createMessage: async request => {
+          requests.push(request)
+          if (request.requestBody.thread) {
+            throw Object.assign(new Error("Requested entity was not found."), {
+              code: 404,
+            })
+          }
+        },
+        recordFailure: async params => {
+          failures.push(params)
+        },
+      })
+    )
+
+    expect(outcome).toBe("delivered")
+    expect(requests).toHaveLength(2)
+    // The retry drops the thread binding AND REPLY_MESSAGE_OR_FAIL, so it
+    // lands in the space as a new thread instead of failing the same way.
+    expect(requests[1]).toEqual({
+      parent: "spaces/room",
+      requestBody: { text: "Completed answer" },
+      requestId: "11111111-2222-4333-8444-555555555555",
+    })
+    // Delivered, so nothing goes in the operator failure feed.
+    expect(failures).toHaveLength(0)
+  })
+
+  test("records the failure when the rebind also fails", async () => {
+    const failures: Array<
+      Parameters<ChatResponseDependencies["recordFailure"]>[0]
+    > = []
+    const outcome = await sendGoogleChatResponseWithDependencies(
+      {
+        spaceName: "spaces/room",
+        threadName: "spaces/room/threads/gone",
+        text: "Completed answer",
+        deliveryContext: {
+          isSharedSpace: true,
+          userId: "owner@psd401.net",
+          deliveryRequestId: "11111111-2222-4333-8444-555555555555",
+        },
+      },
+      TEST_LOG,
+      chatResponseDependencies({
+        createMessage: async () => {
+          throw Object.assign(new Error("Requested entity was not found."), {
+            code: 404,
+          })
+        },
+        recordFailure: async params => {
+          failures.push(params)
+        },
+      })
+    )
+
+    expect(outcome).toBe("failed")
+    expect(failures).toHaveLength(1)
+    // channelRebound now reports what actually happened.
+    expect(failures[0]).toMatchObject({
+      context: { channelRebound: true },
+    })
+  })
+
+  test("does not rebind a 403 — reposting cannot fix a permission problem", async () => {
+    const requests: Array<
+      Parameters<ChatResponseDependencies["createMessage"]>[0]
+    > = []
+    const outcome = await sendGoogleChatResponseWithDependencies(
+      {
+        spaceName: "spaces/room",
+        threadName: "spaces/room/threads/thread-1",
+        text: "Completed answer",
+        deliveryContext: {
+          isSharedSpace: true,
+          userId: "owner@psd401.net",
+          deliveryRequestId: "11111111-2222-4333-8444-555555555555",
+        },
+      },
+      TEST_LOG,
+      chatResponseDependencies({
+        createMessage: async request => {
+          requests.push(request)
+          throw Object.assign(new Error("denied"), { code: 403 })
+        },
+        recordFailure: async () => {},
+      })
+    )
+
+    expect(outcome).toBe("failed")
+    expect(requests).toHaveLength(1)
+  })
+})
+
 describe("durable Chat delivery envelope parsing", () => {
   test("strictly parses a bounded Chat delivery outbox envelope", () => {
     const valid = JSON.stringify({

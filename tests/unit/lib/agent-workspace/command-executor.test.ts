@@ -94,6 +94,31 @@ function defineTrustedWorkspaceCommandPolicySuite1Part1() {
     ).toThrow(/not allowed/)
   })
 
+  // Regression: `gmail +draft` is the form SKILL.md documents for composing a
+  // draft, but only the canonical `gmail users drafts create` was allowlisted,
+  // so every documented invocation was refused (agent_failures 1953) and the
+  // agent had no way to draft mail at all.
+  it("allows the documented gmail +draft helper on the user slot", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: ["gmail", "+draft", "--to", "bill@psd401.net", "--subject", "Hi"],
+      })
+    ).not.toThrow()
+  })
+
+  it.each([["+send"], ["+reply"], ["+reply-all"], ["+forward"]])(
+    "still refuses the mail-sending helper %s",
+    (verb) => {
+      expect(() =>
+        validateWorkspaceCommand({
+          scope: "user",
+          argv: ["gmail", verb, "--to", "bill@psd401.net"],
+        })
+      ).toThrow(/not allowed/)
+    }
+  )
+
   it("requires agent ownership for file creation", () => {
     expect(() =>
       validateWorkspaceCommand({

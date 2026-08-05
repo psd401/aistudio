@@ -72,6 +72,15 @@ const ALLOWED_WRITES = new Set([
   "drive files copy",
   "drive files create",
   "drive permissions create",
+  // The `+draft` helper is the form psd-workspace/SKILL.md actually documents
+  // for composing a draft (it is the worked example in two places), and it is
+  // how the model reaches drafting in practice. Only the canonical
+  // `gmail users drafts create` was allowlisted, so every documented invocation
+  // was refused with operation_not_allowed — leaving the agent no way to draft
+  // mail at all. `chat +send` above establishes that helper verbs belong here.
+  // Still a draft-only path: `+send`, `+reply`, `+reply-all` and `+forward`
+  // remain absent, and the skill-side Phase 1 gate blocks them independently.
+  "gmail +draft",
   "gmail users drafts create",
   "gmail users drafts update",
   "gmail users messages modify",

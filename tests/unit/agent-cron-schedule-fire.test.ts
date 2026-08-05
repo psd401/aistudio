@@ -425,7 +425,11 @@ describe("agent-cron daily-session contention policy", () => {
     })
   })
 
-  it("retries when the contended session lock belongs to the same fire", () => {
+  // A fire finding its OWN lock is a duplicate delivery that the retry
+  // resolves by itself, so it is warn-level. Recording it as `error` put a
+  // self-healing idempotency artifact in the operator failure feed next to
+  // real outages.
+  it("retries at warn severity when the session lock belongs to the same fire", () => {
     expect(
       resolveScheduleLockContention(
         { ...contention, ownerFireKey: identity.key },
@@ -437,7 +441,7 @@ describe("agent-cron daily-session contention policy", () => {
       failure: {
         ...contention,
         ownerFireKey: identity.key,
-        severity: "error",
+        severity: "warn",
         errorMessage:
           "Scheduled fire session lock is owned by the same fire; retrying",
       },

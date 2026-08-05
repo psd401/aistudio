@@ -40,23 +40,60 @@ async function requestAgentBroker(route, payload, options = {}) {
     redirect: 'error',
     signal: AbortSignal.timeout(timeoutMs),
   });
-  let body;
+  // Read as text and check `response.ok` BEFORE blaming the JSON.
+  //
+  // This previously called response.json() first, so any error response with a
+  // non-JSON body (a proxy/WAF HTML page, an empty 403) surfaced as
+  // "Agent broker returned invalid JSON (HTTP 403)" and the real reason was
+  // discarded. That is the anti-pattern called out in CLAUDE.md, and it cost us
+  // real diagnosis: on 2026-08-04 an agent hit a masked 403 on
+  // docs.documents.batchUpdate, concluded that straight double-quote characters
+  // break the payload, and adopted a curly-quote "workaround" for a cause that
+  // was never established.
+  const raw = await response.text();
+  let body = null;
+  let parseFailed = false;
   try {
-    body = await response.json();
+    body = raw ? JSON.parse(raw) : null;
   } catch {
-    throw new Error(`Agent broker returned invalid JSON (HTTP ${response.status})`);
+    parseFailed = true;
   }
+
   if (!response.ok) {
     const reason =
       body && typeof body.error === 'string'
         ? body.error
-        : `HTTP ${response.status}`;
-    const error = new Error(`Agent broker rejected the request: ${reason}`);
+        : bodySnippet(raw) || `HTTP ${response.status}`;
+    const error = new Error(
+      `Agent broker rejected the request (HTTP ${response.status}): ${reason}`
+    );
     error.status = response.status;
-    error.responseBody = body;
+    error.responseBody = body ?? raw;
+    throw error;
+  }
+
+  // A 2xx that is not JSON is a genuine contract violation — still report the
+  // status and a snippet so the shape is identifiable.
+  if (parseFailed) {
+    const error = new Error(
+      `Agent broker returned invalid JSON (HTTP ${response.status}): ${bodySnippet(raw)}`
+    );
+    error.status = response.status;
+    error.responseBody = raw;
     throw error;
   }
   return body;
+}
+
+/**
+ * Collapse a response body to a single bounded line for an error message.
+ * Bounded because the body may be an entire HTML error page.
+ */
+function bodySnippet(raw) {
+  if (typeof raw !== 'string') return '';
+  const flat = raw.replace(/\s+/g, ' ').trim();
+  if (!flat) return '(empty body)';
+  return flat.length > 200 ? `${flat.slice(0, 200)}…` : flat;
 }
 
 module.exports = {

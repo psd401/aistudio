@@ -30,6 +30,43 @@ test('uses the fixed local relay without exposing signing authority', async () =
   expect(init.redirect).toBe('error');
 });
 
+// Regression: an error response with a non-JSON body must report its STATUS,
+// not be misreported as a JSON problem. Masking the 403 here sent a live agent
+// chasing a phantom "straight quotes break batchUpdate" theory (2026-08-04).
+test('a non-JSON error response reports the HTTP status, not "invalid JSON"', async () => {
+  globalThis.fetch = mock(async () =>
+    new Response('<html><body>403 Forbidden — request blocked</body></html>', {
+      status: 403,
+      headers: { 'Content-Type': 'text/html' },
+    }));
+  const { requestAgentBroker } = require('./agent-broker');
+  const err = await requestAgentBroker('/api/agent/consent-link', {}).catch((e) => e);
+  expect(err.status).toBe(403);
+  expect(err.message).toContain('HTTP 403');
+  expect(err.message).toContain('403 Forbidden');
+  expect(err.message).not.toContain('invalid JSON');
+});
+
+test('a structured JSON error still surfaces its reason', async () => {
+  globalThis.fetch = mock(async () =>
+    new Response(JSON.stringify({ error: 'forbidden_capability' }), {
+      status: 403,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+  const { requestAgentBroker } = require('./agent-broker');
+  const err = await requestAgentBroker('/api/agent/consent-link', {}).catch((e) => e);
+  expect(err.status).toBe(403);
+  expect(err.message).toContain('forbidden_capability');
+});
+
+test('an empty error body still identifies the status', async () => {
+  globalThis.fetch = mock(async () => new Response('', { status: 502 }));
+  const { requestAgentBroker } = require('./agent-broker');
+  const err = await requestAgentBroker('/api/agent/consent-link', {}).catch((e) => e);
+  expect(err.status).toBe(502);
+  expect(err.message).toContain('HTTP 502');
+});
+
 test('rejects non-allowlisted paths before network access', async () => {
   globalThis.fetch = mock(async () => new Response('{}'));
   const { requestAgentBroker } = require('./agent-broker');
