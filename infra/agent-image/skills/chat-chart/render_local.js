@@ -460,21 +460,44 @@ function drawValueAxis(canvas, area, ticks) {
   return toY;
 }
 
-/** Pick the largest label scale whose truncated labels fit their slot. */
-function categoryLabelScale(labels, slotWidth) {
-  for (const scale of [LABEL_SCALE, TICK_SCALE, 2]) {
+// Thinning below this many categories reads as "the renderer lost a label",
+// so few-category charts truncate instead.
+const MIN_THINNED_CATEGORIES = 7;
+// Beyond this, a label is too long to be worth widening the stride for.
+const MAX_LABEL_CHARS = 12;
+
+/**
+ * Decide how to letter the category axis: which font scale, how many
+ * characters each label gets, and whether to label every Nth category.
+ *
+ * Preference order matters more than it looks. Truncation destroys exactly
+ * the part of a label that distinguishes it ("2026-05-01" and "2026-05-14"
+ * both truncate to "202."), so a dense axis keeps WHOLE labels and shows
+ * fewer of them — the way a printed axis does — rather than a row of stubs.
+ */
+function categoryLabelPlan(labels, slotWidth) {
+  const longest = Math.max(...labels.map(label => label.length));
+  for (const scale of [LABEL_SCALE, TICK_SCALE]) {
     const maxChars = Math.floor(slotWidth / (FONT_ADVANCE * scale));
-    if (maxChars >= 4 || maxChars >= Math.max(...labels.map(l => l.length))) {
-      return { scale, maxChars };
-    }
+    if (maxChars >= longest) return { scale, maxChars, stride: 1 };
   }
-  const scale = 2;
-  return { scale, maxChars: Math.floor(slotWidth / (FONT_ADVANCE * scale)) };
+  const scale = TICK_SCALE;
+  if (labels.length < MIN_THINNED_CATEGORIES) {
+    return { scale, maxChars: Math.floor(slotWidth / (FONT_ADVANCE * scale)), stride: 1 };
+  }
+  const wanted = Math.min(longest, MAX_LABEL_CHARS) + 1;
+  const stride = Math.max(2, Math.ceil((FONT_ADVANCE * scale * wanted) / slotWidth));
+  const maxChars = Math.max(
+    1,
+    Math.floor((slotWidth * stride) / (FONT_ADVANCE * scale)) - 1,
+  );
+  return { scale, maxChars, stride };
 }
 
 function drawCategoryLabels(canvas, labels, area, slotWidth, centres) {
-  const { scale, maxChars } = categoryLabelScale(labels, slotWidth);
+  const { scale, maxChars, stride } = categoryLabelPlan(labels, slotWidth);
   for (const [index, label] of labels.entries()) {
+    if (index % stride !== 0) continue;
     drawText(canvas, truncateLabel(label, maxChars), {
       x: centres[index],
       y: area.bottom + 24,
@@ -510,12 +533,16 @@ function drawBarChart(canvas, labels, values, area) {
     const height = Math.max(Math.abs(y - zeroY), 2);
     const colour = PALETTE[index % PALETTE.length];
     fillRect(canvas, centres[index] - barWidth / 2, top, barWidth, height, colour);
-    drawText(canvas, formatNumber(value), {
-      x: centres[index],
-      y: top - FONT_HEIGHT * TICK_SCALE - 10,
-      scale: TICK_SCALE,
-      align: 'center',
-    }, TEXT);
+    // Value labels are a bonus, not the chart. Drop them rather than let
+    // neighbouring bars' numbers overprint each other.
+    if (textWidth(formatNumber(value), TICK_SCALE) <= slot) {
+      drawText(canvas, formatNumber(value), {
+        x: centres[index],
+        y: top - FONT_HEIGHT * TICK_SCALE - 10,
+        scale: TICK_SCALE,
+        align: 'center',
+      }, TEXT);
+    }
   }
   drawCategoryLabels(canvas, labels, area, slot, centres);
 }
@@ -699,6 +726,7 @@ function renderChartPng(config) {
 module.exports = {
   renderChartPng,
   // Exported for unit tests.
+  categoryLabelPlan,
   encodePng,
   formatNumber,
   niceTicks,

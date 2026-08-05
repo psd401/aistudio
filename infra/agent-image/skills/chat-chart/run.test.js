@@ -18,6 +18,7 @@ const zlib = require('node:zlib');
 const { chooseEngine, buildChartJsConfig } = require('./run.js');
 const {
   renderChartPng,
+  categoryLabelPlan,
   formatNumber,
   niceTicks,
   toAsciiLabel,
@@ -309,6 +310,33 @@ test('labels truncate with a trailing dot and never exceed the budget', () => {
   assert.strictEqual(truncateLabel('American Indian', 9), 'American.');
   assert.strictEqual(truncateLabel('Asian', 9), 'Asian');
   assert.strictEqual(truncateLabel('Asian', 0), '');
+});
+
+test('dense category axes thin whole labels instead of printing stubs', () => {
+  // Plot width is DEVICE_WIDTH - margins; slot = plotWidth / categories.
+  const PLOT_WIDTH = OUT_WIDTH * 2 - 190 - 60;
+  const plan = (labels) => categoryLabelPlan(labels, PLOT_WIDTH / labels.length);
+
+  const short = plan(['Mon', 'Tue', 'Wed']);
+  assert.strictEqual(short.stride, 1);
+  assert.ok(short.maxChars >= 3, 'short labels are never truncated');
+
+  const wide = plan(['Am. Indian', 'Asian', 'Black', 'Hispanic', '2+ Races', 'White']);
+  assert.strictEqual(wide.stride, 1);
+  assert.ok(wide.maxChars >= 10, 'a 6-category axis still fits whole labels');
+
+  const dates = plan(Array.from({ length: 14 }, (_, i) => `2026-05-${10 + i}`));
+  assert.ok(dates.stride > 1, '14 dates cannot all be lettered side by side');
+  assert.ok(dates.maxChars >= 10, 'thinned dates stay whole, not "202."');
+
+  const weeks = plan(Array.from({ length: 50 }, (_, i) => `Week ${i + 1}`));
+  assert.ok(weeks.stride >= 2);
+  assert.ok(weeks.maxChars >= 7, 'thinned weeks keep their distinguishing number');
+});
+
+test('few categories truncate rather than dropping a label entirely', () => {
+  const plan = categoryLabelPlan(['A'.repeat(60), 'B'.repeat(60)], 200);
+  assert.strictEqual(plan.stride, 1);
 });
 
 test('axis numbers stay short and readable', () => {
