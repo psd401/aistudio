@@ -19,7 +19,7 @@ Other good triggers:
 
 Don't use this for:
 - A single number or short list — a sentence is better.
-- Massive datasets: 50 series points is a hard ceiling (the skill exits 3 above it), and much past ~25 the bars are thinner than their labels. Aggregate first.
+- Massive datasets: on the default engine 50 series points is a hard ceiling (the skill exits 3 above it), and much past ~25 the bars are thinner than their labels. Aggregate first.
 
 ## Combining chat-chart with chat-card (recommended pattern)
 
@@ -83,6 +83,8 @@ Multi-series and custom colors aren't supported in v1 — keep it to one series 
 `--user` is optional. The workspace broker derives the storage path from the calling agent's identity, so the email is provenance only — pass it verbatim from the `[caller: Name <email>]` header of the user turn when you have it.
 
 **Rendering limits.** Up to 50 points per chart; one series; labels are drawn with a built-in 5x7 ASCII font, so non-ASCII characters (accents, em dashes, curly quotes) render as `?` and long category labels are truncated to fit their slot. Prefer short, ASCII labels.
+
+The 50-point cap is enforced by the local renderer, so it binds on `auto` and `local` — i.e. every chart unless you explicitly ask for `--engine quickchart`. That path has no point-count check of its own and is bounded only by argv size and the ~16KB practical spec-URL ceiling noted above; a large explicit-quickchart payload fails as a broken URL rather than a clean exit 3. Not a reason to send one — it's a reason not to reach for `--engine quickchart` to escape the cap.
 
 ## Output
 
