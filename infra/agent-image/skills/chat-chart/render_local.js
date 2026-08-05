@@ -262,11 +262,11 @@ function setPixel(canvas, x, y, colour) {
   canvas.data[offset + 2] = colour[2];
 }
 
-function fillRect(canvas, x, y, width, height, colour) {
-  const x0 = Math.max(0, Math.round(x));
-  const y0 = Math.max(0, Math.round(y));
-  const x1 = Math.min(canvas.width, Math.round(x + width));
-  const y1 = Math.min(canvas.height, Math.round(y + height));
+function fillRect(canvas, rect, colour) {
+  const x0 = Math.max(0, Math.round(rect.x));
+  const y0 = Math.max(0, Math.round(rect.y));
+  const x1 = Math.min(canvas.width, Math.round(rect.x + rect.width));
+  const y1 = Math.min(canvas.height, Math.round(rect.y + rect.height));
   for (let py = y0; py < y1; py++) {
     for (let px = x0; px < x1; px++) {
       setPixel(canvas, px, py, colour);
@@ -274,14 +274,18 @@ function fillRect(canvas, x, y, width, height, colour) {
   }
 }
 
-function drawLineSegment(canvas, x0, y0, x1, y1, colour, thickness = 2) {
-  const steps = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), 1);
+function drawLineSegment(canvas, from, to, colour, thickness = 2) {
+  const steps = Math.max(Math.abs(to.x - from.x), Math.abs(to.y - from.y), 1);
   const half = Math.floor(thickness / 2);
   for (let step = 0; step <= steps; step++) {
     const t = step / steps;
-    const px = Math.round(x0 + (x1 - x0) * t);
-    const py = Math.round(y0 + (y1 - y0) * t);
-    fillRect(canvas, px - half, py - half, thickness, thickness, colour);
+    const px = Math.round(from.x + (to.x - from.x) * t);
+    const py = Math.round(from.y + (to.y - from.y) * t);
+    fillRect(
+      canvas,
+      { x: px - half, y: py - half, width: thickness, height: thickness },
+      colour,
+    );
   }
 }
 
@@ -307,12 +311,17 @@ function glyphColumns(codePoint) {
   return columns;
 }
 
-function drawGlyph(canvas, codePoint, x, y, scale, colour) {
+function drawGlyph(canvas, codePoint, position, colour) {
+  const { x, y, scale } = position;
   const columns = glyphColumns(codePoint);
   for (const [col, bits] of columns.entries()) {
     for (let row = 0; row < FONT_HEIGHT; row++) {
       if ((bits >> row) & 1) {
-        fillRect(canvas, x + col * scale, y + row * scale, scale, scale, colour);
+        fillRect(
+          canvas,
+          { x: x + col * scale, y: y + row * scale, width: scale, height: scale },
+          colour,
+        );
       }
     }
   }
@@ -332,7 +341,7 @@ function drawText(canvas, text, position, colour) {
   if (align === 'center') cursor = x - textWidth(text, scale) / 2;
   if (align === 'right') cursor = x - textWidth(text, scale);
   for (const char of text) {
-    drawGlyph(canvas, char.codePointAt(0), Math.round(cursor), y, scale, colour);
+    drawGlyph(canvas, char.codePointAt(0), { x: Math.round(cursor), y, scale }, colour);
     cursor += FONT_ADVANCE * scale;
   }
 }
@@ -447,7 +456,7 @@ function drawValueAxis(canvas, area, ticks) {
   const toY = value => area.bottom - ((value - min) / (max - min || 1)) * area.height;
   for (const tick of ticks) {
     const y = toY(tick);
-    fillRect(canvas, area.left, y, area.width, 2, GRID);
+    fillRect(canvas, { x: area.left, y, width: area.width, height: 2 }, GRID);
     drawText(canvas, formatNumber(tick), {
       x: area.left - 20,
       y: y - (FONT_HEIGHT * TICK_SCALE) / 2,
@@ -455,8 +464,8 @@ function drawValueAxis(canvas, area, ticks) {
       align: 'right',
     }, TEXT);
   }
-  fillRect(canvas, area.left, area.top, 2, area.height, AXIS);
-  fillRect(canvas, area.left, area.bottom, area.width, 2, AXIS);
+  fillRect(canvas, { x: area.left, y: area.top, width: 2, height: area.height }, AXIS);
+  fillRect(canvas, { x: area.left, y: area.bottom, width: area.width, height: 2 }, AXIS);
   return toY;
 }
 
@@ -532,13 +541,18 @@ function drawBarChart(canvas, labels, values, area) {
     const top = Math.min(y, zeroY);
     const height = Math.max(Math.abs(y - zeroY), 2);
     const colour = PALETTE[index % PALETTE.length];
-    fillRect(canvas, centres[index] - barWidth / 2, top, barWidth, height, colour);
+    fillRect(
+      canvas,
+      { x: centres[index] - barWidth / 2, y: top, width: barWidth, height },
+      colour,
+    );
     // Value labels are a bonus, not the chart. Drop them rather than let
-    // neighbouring bars' numbers overprint each other.
+    // neighbouring bars' numbers overprint each other, and put a negative
+    // bar's label under it so the text never sits on top of the bar.
     if (textWidth(formatNumber(value), TICK_SCALE) <= slot) {
       drawText(canvas, formatNumber(value), {
         x: centres[index],
-        y: top - FONT_HEIGHT * TICK_SCALE - 10,
+        y: value < 0 ? top + height + 10 : top - FONT_HEIGHT * TICK_SCALE - 10,
         scale: TICK_SCALE,
         align: 'center',
       }, TEXT);
@@ -558,10 +572,8 @@ function drawLineChart(canvas, labels, values, area) {
     if (index > 0) {
       drawLineSegment(
         canvas,
-        centres[index - 1],
-        toY(values[index - 1]),
-        centres[index],
-        toY(value),
+        { x: centres[index - 1], y: toY(values[index - 1]) },
+        { x: centres[index], y: toY(value) },
         colour,
         6,
       );
@@ -584,7 +596,7 @@ function drawScatterChart(canvas, points, area) {
   const toX = value => area.left + ((value - xMin) / (xMax - xMin || 1)) * area.width;
   for (const tick of xTicks) {
     const x = toX(tick);
-    fillRect(canvas, x, area.top, 2, area.height, GRID);
+    fillRect(canvas, { x, y: area.top, width: 2, height: area.height }, GRID);
     drawText(canvas, formatNumber(tick), {
       x,
       y: area.bottom + 24,
@@ -592,7 +604,7 @@ function drawScatterChart(canvas, points, area) {
       align: 'center',
     }, TEXT);
   }
-  fillRect(canvas, area.left, area.bottom, area.width, 2, AXIS);
+  fillRect(canvas, { x: area.left, y: area.bottom, width: area.width, height: 2 }, AXIS);
   for (const point of points) {
     fillCircle(canvas, toX(point.x), toY(point.y), 9, PALETTE[0]);
   }
@@ -626,7 +638,7 @@ function drawPieLegend(canvas, labels, bounds, x, top) {
   const rowHeight = 46;
   for (const [index, label] of labels.entries()) {
     const y = top + index * rowHeight;
-    fillRect(canvas, x, y, 28, 28, bounds[index].colour);
+    fillRect(canvas, { x, y, width: 28, height: 28 }, bounds[index].colour);
     const percent = `${Math.round(bounds[index].share * 100)}%`;
     drawText(canvas, `${truncateLabel(label, 20)} ${percent}`, {
       x: x + 44,
@@ -716,7 +728,7 @@ function drawChart(canvas, config, area) {
 function renderChartPng(config) {
   const title = config?.options?.plugins?.title?.text;
   const canvas = createCanvas(DEVICE_WIDTH, DEVICE_HEIGHT);
-  fillRect(canvas, 0, 0, DEVICE_WIDTH, DEVICE_HEIGHT, WHITE);
+  fillRect(canvas, { x: 0, y: 0, width: DEVICE_WIDTH, height: DEVICE_HEIGHT }, WHITE);
   drawTitle(canvas, title);
   drawChart(canvas, config, plotArea(Boolean(title)));
   const out = downsample(canvas, SUPERSAMPLE);
