@@ -19,7 +19,7 @@ Other good triggers:
 
 Don't use this for:
 - A single number or short list — a sentence is better.
-- Massive datasets (≥ 100 series points): the chart will be unreadable in Chat.
+- Massive datasets: 50 series points is a hard ceiling (the skill exits 3 above it), and much past ~25 the bars are thinner than their labels. Aggregate first.
 
 ## Combining chat-chart with chat-card (recommended pattern)
 

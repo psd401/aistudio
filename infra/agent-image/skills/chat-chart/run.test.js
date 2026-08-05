@@ -279,6 +279,30 @@ test('the renderer throws (never exits) on unusable input', () => {
   }
 });
 
+test('a value range too large to plot is reported, not silently blank', () => {
+  // 1e308 - (-1e308) overflows to Infinity, which would make every tick NaN
+  // and paint nothing at all.
+  assert.throws(
+    () =>
+      renderChartPng(
+        buildChartJsConfig(
+          'bar',
+          [
+            { label: 'max', value: 1e308 },
+            { label: 'min', value: -1e308 },
+          ],
+          'overflow',
+        ),
+      ),
+    /too large to plot/,
+  );
+});
+
+test('non-finite values are named in the error, not stringified to null', () => {
+  const config = { type: 'bar', data: { labels: ['a'], datasets: [{ data: [Number.NaN] }] } };
+  assert.throws(() => renderChartPng(config), /non-numeric data point: NaN/);
+});
+
 test('more points than the documented ceiling is rejected, not truncated', () => {
   const data = Array.from({ length: 51 }, (_, i) => ({ label: `L${i}`, value: i }));
   assert.throws(

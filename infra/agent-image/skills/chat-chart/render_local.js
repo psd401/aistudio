@@ -194,10 +194,14 @@ const FIRST_GLYPH = 32;
 const LAST_GLYPH = 126;
 const FALLBACK_GLYPH = '?'.codePointAt(0);
 
-let crcTable = null;
-
-function getCrcTable() {
-  if (crcTable) return crcTable;
+/**
+ * PNG chunk CRC32. Deliberately hand-rolled rather than `zlib.crc32`: that
+ * built-in landed in Node 22.2, and this skill runs on whatever Node the
+ * OpenClaw base image ships (unpinned — see the Dockerfile's FROM). A
+ * missing built-in would break every chart at render time; 20 lines of
+ * table lookup cannot.
+ */
+function buildCrcTable() {
   const table = new Int32Array(256);
   for (let n = 0; n < 256; n++) {
     let c = n;
@@ -206,15 +210,15 @@ function getCrcTable() {
     }
     table[n] = c;
   }
-  crcTable = table;
-  return crcTable;
+  return table;
 }
 
+const CRC_TABLE = buildCrcTable();
+
 function crc32(buffer) {
-  const table = getCrcTable();
   let crc = -1;
   for (const byte of buffer) {
-    crc = table[(crc ^ byte) & 0xFF] ^ (crc >>> 8);
+    crc = CRC_TABLE[(crc ^ byte) & 0xFF] ^ (crc >>> 8);
   }
   return (crc ^ -1) >>> 0;
 }
@@ -409,6 +413,12 @@ function truncateLabel(label, maxChars) {
 /** 1/2/5 x 10^k tick steps covering [min, max] in ~`target` divisions. */
 function niceTicks(min, max, target = 5) {
   const span = max - min || Math.abs(max) || 1;
+  // A span that overflows to Infinity (1e308 next to -1e308 — both finite,
+  // their difference is not) would make every tick NaN and silently paint an
+  // empty plot. Say so instead of shipping a blank chart.
+  if (!Number.isFinite(span)) {
+    throw new RangeError('data range is too large to plot');
+  }
   const rawStep = span / target;
   const magnitude = 10 ** Math.floor(Math.log10(rawStep));
   const normalised = rawStep / magnitude;
@@ -486,13 +496,13 @@ const MAX_LABEL_CHARS = 12;
  */
 function categoryLabelPlan(labels, slotWidth) {
   const longest = Math.max(...labels.map(label => label.length));
+  const charsAt = scale => Math.floor(slotWidth / (FONT_ADVANCE * scale));
   for (const scale of [LABEL_SCALE, TICK_SCALE]) {
-    const maxChars = Math.floor(slotWidth / (FONT_ADVANCE * scale));
-    if (maxChars >= longest) return { scale, maxChars, stride: 1 };
+    if (charsAt(scale) >= longest) return { scale, maxChars: charsAt(scale), stride: 1 };
   }
   const scale = TICK_SCALE;
   if (labels.length < MIN_THINNED_CATEGORIES) {
-    return { scale, maxChars: Math.floor(slotWidth / (FONT_ADVANCE * scale)), stride: 1 };
+    return { scale, maxChars: charsAt(scale), stride: 1 };
   }
   const wanted = Math.min(longest, MAX_LABEL_CHARS) + 1;
   const stride = Math.max(2, Math.ceil((FONT_ADVANCE * scale * wanted) / slotWidth));
@@ -528,14 +538,22 @@ function valueRange(values, { includeZero }) {
   return min === max ? { min, max: max + 1 } : { min, max };
 }
 
+/** Even category slots; bar and line must agree on these x-positions. */
+function categorySlots(area, count) {
+  const slot = area.width / count;
+  return {
+    slot,
+    centres: Array.from({ length: count }, (_, index) => area.left + slot * (index + 0.5)),
+  };
+}
+
 function drawBarChart(canvas, labels, values, area) {
   const { min, max } = valueRange(values, { includeZero: true });
   const ticks = niceTicks(min, max);
   const toY = drawValueAxis(canvas, area, ticks);
-  const slot = area.width / values.length;
+  const { slot, centres } = categorySlots(area, values.length);
   const barWidth = slot * 0.62;
   const zeroY = toY(0);
-  const centres = values.map((_, index) => area.left + slot * (index + 0.5));
   for (const [index, value] of values.entries()) {
     const y = toY(value);
     const top = Math.min(y, zeroY);
@@ -565,8 +583,7 @@ function drawLineChart(canvas, labels, values, area) {
   const { min, max } = valueRange(values, { includeZero: false });
   const ticks = niceTicks(min, max);
   const toY = drawValueAxis(canvas, area, ticks);
-  const slot = area.width / values.length;
-  const centres = values.map((_, index) => area.left + slot * (index + 0.5));
+  const { slot, centres } = categorySlots(area, values.length);
   const colour = PALETTE[0];
   for (const [index, value] of values.entries()) {
     if (index > 0) {
@@ -618,8 +635,7 @@ function wedgeColour(dx, dy, radius, bounds) {
   return found ? found.colour : null;
 }
 
-function wedgeBounds(values) {
-  const total = values.reduce((sum, value) => sum + value, 0);
+function wedgeBounds(values, total) {
   let cursor = 0;
   return values.map((value, index) => {
     const sweep = (value / total) * 2 * Math.PI;
@@ -652,10 +668,11 @@ function drawPieChart(canvas, labels, values, area) {
   if (values.some(value => value < 0)) {
     throw new Error('pie charts need non-negative values');
   }
-  if (values.reduce((sum, value) => sum + value, 0) <= 0) {
+  const total = values.reduce((sum, value) => sum + value, 0);
+  if (total <= 0) {
     throw new Error('pie chart values must sum to a positive number');
   }
-  const bounds = wedgeBounds(values);
+  const bounds = wedgeBounds(values, total);
   const radius = Math.floor(Math.min(area.height, area.width * 0.5) / 2);
   const cx = area.left + radius + 20;
   const cy = area.top + area.height / 2;
@@ -688,10 +705,16 @@ function readLabels(data, count) {
   );
 }
 
+function describeValue(value) {
+  // JSON.stringify renders NaN and Infinity as "null", which makes for a
+  // baffling error message; String() keeps them recognisable.
+  return typeof value === 'number' ? String(value) : JSON.stringify(value);
+}
+
 function readNumbers(series) {
   return series.map(value => {
     if (!Number.isFinite(value)) {
-      throw new TypeError(`non-numeric data point: ${JSON.stringify(value)}`);
+      throw new TypeError(`non-numeric data point: ${describeValue(value)}`);
     }
     return value;
   });
@@ -700,7 +723,7 @@ function readNumbers(series) {
 function readPoints(series) {
   return series.map(point => {
     if (!Number.isFinite(point?.x) || !Number.isFinite(point?.y)) {
-      throw new TypeError(`scatter points need numeric x/y: ${JSON.stringify(point)}`);
+      throw new TypeError(`scatter points need numeric x/y: ${describeValue(point)}`);
     }
     return { x: point.x, y: point.y };
   });
@@ -739,7 +762,6 @@ module.exports = {
   renderChartPng,
   // Exported for unit tests.
   categoryLabelPlan,
-  encodePng,
   formatNumber,
   niceTicks,
   toAsciiLabel,
