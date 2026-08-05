@@ -46,6 +46,15 @@ chart normally. `--sensitive` is still worth passing — it documents intent and
 hard-blocks an accidental `--engine quickchart` — but it is no longer the
 difference between a chart and a refusal.
 
+**What "on-host" does and does not mean.** The *values* never leave PSD AWS:
+no third party ever sees the numbers, the labels, or the chart spec. The
+finished PNG is a different matter — Google Chat has to fetch it, so it is
+published to an unauthenticated (unguessable, ~30-day) workspace URL, exactly
+like `psd-image-gen` output. Anyone holding that URL, Google included, can
+fetch the image. Treat a chart of student data the way you would treat any
+other image you post into a Chat space: fine for the audience in the space,
+not a place for anything you would not put in the message body.
+
 **Never pass `--engine quickchart` for district data.** It encodes the values
 into a quickchart.io URL, so the numbers land in a third party's logs. The skill
 refuses that combination when `--sensitive` is set or the data trips the inline

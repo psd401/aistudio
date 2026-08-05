@@ -44,8 +44,12 @@ const ALLOWED_ENGINES = new Set(['auto', 'quickchart', 'local']);
 // narrow: false negatives are acceptable (the agent's --sensitive flag is
 // the real safety knob), and a false positive costs nothing worse than
 // rendering on-host, which is where charts go by default anyway.
+//
+// Every quantifier is bounded. The email pattern's two character classes
+// both contain `.`, so unbounded `+`s backtrack quadratically: a single
+// 60KB label took 5s of CPU to reject, and argv allows twice that.
 const PII_PATTERNS = [
-  { name: 'email', re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/ },
+  { name: 'email', re: /[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,4}\.[A-Za-z]{2,24}/ },
   { name: 'ssn', re: /\b\d{3}-\d{2}-\d{4}\b/ },
   { name: 'us-phone', re: /\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b/ },
   { name: 'us-phone', re: /\(\d{3}\)\s\d{3}-\d{4}\b/ },
@@ -171,9 +175,12 @@ function buildChartJsConfig(type, data, title) {
     : {};
 
   if (type === 'scatter') {
+    // Number.isFinite, not typeof: JSON.parse turns 1e999 into Infinity,
+    // which is typeof 'number' and would serialise into the QuickChart URL
+    // as `null`.
     for (const point of data) {
-      if (typeof point.x !== 'number' || typeof point.y !== 'number') {
-        fail('scatter data points need numeric `x` and `y` fields');
+      if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+        fail('scatter data points need finite numeric `x` and `y` fields');
       }
     }
     return {
@@ -187,8 +194,8 @@ function buildChartJsConfig(type, data, title) {
 
   // bar / line / pie
   for (const point of data) {
-    if (typeof point.label !== 'string' || typeof point.value !== 'number') {
-      fail(`${type} data points need string \`label\` and numeric \`value\` fields`);
+    if (typeof point.label !== 'string' || !Number.isFinite(point.value)) {
+      fail(`${type} data points need string \`label\` and finite numeric \`value\` fields`);
     }
   }
   const labels = data.map(p => p.label);
@@ -211,14 +218,10 @@ function renderQuickChart(config) {
   return `https://quickchart.io/chart?c=${encoded}&format=png&backgroundColor=white`;
 }
 
-async function renderLocal(config, userEmail) {
-  // `--user` is accepted for call-site compatibility and provenance only:
-  // the broker derives the storage path from the calling agent's identity,
-  // so the email is not used to build a key. Reject an obviously malformed
-  // value rather than silently ignoring a typo'd flag.
-  if (userEmail !== undefined && !validateEmail(userEmail)) {
-    fail('--user must be a valid email address');
-  }
+async function renderLocal(config) {
+  // `--user` is accepted for call-site compatibility and provenance only
+  // (main() validates it): the broker derives the storage path from the
+  // calling agent's identity, so the email is not used to build a key.
   // Rasterised in-process — no subprocess, no temp file, no dependency.
   let bytes;
   try {
@@ -265,6 +268,13 @@ async function main() {
     fail(`--type must be one of ${[...ALLOWED_TYPES].join(', ')}`);
   }
 
+  // Validated for every engine, not just the one that consumes it: SKILL.md
+  // promises a malformed --user is an error, and silently accepting a typo on
+  // the quickchart path would make that promise engine-dependent.
+  if (args['--user'] !== undefined && !validateEmail(args['--user'])) {
+    fail('--user must be a valid email address');
+  }
+
   const dataJson = args['--data-json'];
   if (!dataJson) fail('--data-json is required');
   let data;
@@ -274,7 +284,15 @@ async function main() {
     fail(`--data-json is not valid JSON: ${err.message}`);
   }
 
-  const { engine, reason } = chooseEngine(args, dataJson);
+  // Build the config BEFORE choosing an engine, and scan the config rather
+  // than the raw argv. The serialised config is what QuickChart would
+  // actually receive, so it is the only text worth gating on: raw argv can
+  // hide `jsmith@psd401.net` from the regex until JSON.parse restores
+  // it, and it omits --title entirely even though the title is embedded in
+  // the QuickChart URL twice.
+  const config = buildChartJsConfig(type, data, args['--title']);
+
+  const { engine, reason } = chooseEngine(args, JSON.stringify(config));
   if (engine === 'refuse') {
     // Fail closed: an explicit --engine quickchart never carries sensitive or
     // PII data off-district (REV-INFRA-002), and we do not silently downgrade
@@ -284,13 +302,11 @@ async function main() {
   }
   process.stderr.write(`chat-chart: engine=${engine} (${reason})\n`);
 
-  const config = buildChartJsConfig(type, data, args['--title']);
-
   let imageUrl;
   if (engine === 'quickchart') {
     imageUrl = renderQuickChart(config);
   } else {
-    imageUrl = await renderLocal(config, args['--user']);
+    imageUrl = await renderLocal(config);
   }
 
   // First line of stdout: the URL alone, useful if the agent wants to

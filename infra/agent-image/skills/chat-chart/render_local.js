@@ -83,6 +83,13 @@ const PALETTE = [
 ];
 
 const MAX_POINTS = 50;
+// Pie legend rows: preferred height, and the floor we shrink to before
+// falling back to a "+N more" row.
+const PIE_LEGEND_ROW = 46;
+const PIE_LEGEND_MIN_ROW = 26;
+// The 1/2/5 step rule yields 5-10 divisions; this is a safety net, not a
+// design parameter.
+const MAX_TICKS = 24;
 
 /**
  * 5x7 bitmap font, ASCII 32..126. Each glyph is five columns; each column
@@ -382,14 +389,35 @@ function downsample(canvas, factor) {
   return { width, height, data: out };
 }
 
+// Suffix thresholds, largest first. Past 1e15 the suffixes run out and the
+// label would grow wide enough to run off the left margin, so switch to
+// exponent form.
+const MAGNITUDE_SUFFIXES = [
+  { at: 1e12, divisor: 1e12, suffix: 'T' },
+  { at: 1e9, divisor: 1e9, suffix: 'B' },
+  { at: 1e6, divisor: 1e6, suffix: 'M' },
+  { at: 1e4, divisor: 1e3, suffix: 'k' },
+];
+
+/**
+ * Axis and value labels. Suffixed forms keep two decimals with trailing
+ * zeros trimmed: one decimal is coarser than the tick steps the axis
+ * actually uses, so 1.00M / 1.02M / 1.04M all printed as "1.0M" — an axis
+ * whose labels claim the data is flat.
+ */
 function formatNumber(value) {
   if (!Number.isFinite(value)) return '';
   const magnitude = Math.abs(value);
-  if (magnitude >= 1e6) return `${(value / 1e6).toFixed(1)}M`;
-  if (magnitude >= 1e4) return `${(value / 1e3).toFixed(1)}k`;
+  if (magnitude >= 1e15) return value.toExponential(1);
+  const scale = MAGNITUDE_SUFFIXES.find(entry => magnitude >= entry.at);
+  if (scale) {
+    const scaled = Number.parseFloat((value / scale.divisor).toFixed(2));
+    return `${scaled}${scale.suffix}`;
+  }
   if (Number.isInteger(value)) return String(value);
-  if (magnitude >= 10) return value.toFixed(1);
-  if (magnitude >= 1) return value.toFixed(2);
+  // Trailing zeros are trimmed so one axis does not mix "1.50" with "0.5".
+  if (magnitude >= 10) return String(Number.parseFloat(value.toFixed(1)));
+  if (magnitude >= 1) return String(Number.parseFloat(value.toFixed(2)));
   return String(Number.parseFloat(value.toFixed(4)));
 }
 
@@ -407,7 +435,10 @@ function toAsciiLabel(value) {
 function truncateLabel(label, maxChars) {
   if (maxChars < 1) return '';
   if (label.length <= maxChars) return label;
-  return `${label.slice(0, Math.max(1, maxChars - 1))}.`;
+  // Below two characters there is no room for the trailing dot, and adding
+  // one anyway would return a string LONGER than the budget.
+  if (maxChars < 2) return label.slice(0, maxChars);
+  return `${label.slice(0, maxChars - 1)}.`;
 }
 
 /** 1/2/5 x 10^k tick steps covering [min, max] in ~`target` divisions. */
@@ -427,14 +458,28 @@ function niceTicks(min, max, target = 5) {
   else if (normalised > 2) step = 5 * magnitude;
   else if (normalised > 1) step = 2 * magnitude;
   const start = Math.floor(min / step) * step;
+  // When the step is smaller than an ULP of `start`, `start + step === start`:
+  // the axis cannot be subdivided at this magnitude. Two nanosecond-epoch
+  // timestamps 300ns apart do this. Accumulating `value += step` would then
+  // never advance — an unbounded push loop that ends in an OOM abort — so
+  // refuse instead. (The tick loop below is indexed rather than accumulated
+  // for the same reason: no drift, no runaway.)
+  if (start + step === start) {
+    throw new RangeError('data range is too narrow relative to its magnitude to plot');
+  }
   // A flat series (min === max) lands start on end, which would yield a
   // single tick and a zero-height axis. Always leave at least one division.
   const end = Math.max(Math.ceil(max / step) * step, start + step);
-  const ticks = [];
-  for (let value = start; value <= end + step / 2; value += step) {
-    ticks.push(Number.parseFloat(value.toFixed(10)));
+  const count = Math.round((end - start) / step);
+  if (!Number.isFinite(count) || count > MAX_TICKS) {
+    throw new RangeError('data range cannot be divided into readable ticks');
   }
-  return ticks;
+  // toPrecision, not toFixed: toFixed(10) rounds anything below ~1e-6 to the
+  // same value, which collapsed every tick of a small-magnitude axis onto one
+  // number and left the range no longer covering the data.
+  return Array.from({ length: count + 1 }, (_, index) =>
+    Number.parseFloat((start + index * step).toPrecision(12)),
+  );
 }
 
 function plotArea(hasTitle) {
@@ -451,7 +496,13 @@ function plotArea(hasTitle) {
 
 function drawTitle(canvas, title) {
   if (!title) return;
-  drawText(canvas, truncateLabel(toAsciiLabel(title), 52), {
+  // Derived, not guessed: a fixed 52-char budget overflowed the canvas at
+  // TITLE_SCALE, and because the title is centred it lost characters off
+  // BOTH ends — a 55-char title rendered with ~4 chars sliced from each side.
+  const maxChars = Math.floor(
+    (DEVICE_WIDTH - 2 * MARGIN.right) / (FONT_ADVANCE * TITLE_SCALE),
+  );
+  drawText(canvas, truncateLabel(toAsciiLabel(title), maxChars), {
     x: DEVICE_WIDTH / 2,
     y: MARGIN.top,
     scale: TITLE_SCALE,
@@ -650,15 +701,40 @@ function wedgeBounds(values, total) {
   });
 }
 
-function drawPieLegend(canvas, labels, bounds, x, top) {
-  const rowHeight = 46;
-  for (const [index, label] of labels.entries()) {
+/**
+ * Legend geometry. A wedge carries no label of its own, so a row that falls
+ * off the canvas takes its slice's identity with it — silently. Shrink the
+ * rows to fit, and when even that is not enough, spend the last row saying
+ * how many slices are unlabelled instead of dropping them without a word.
+ */
+function pieLegendPlan(count, area) {
+  const available = area.bottom - area.top;
+  const rowHeight = Math.max(
+    PIE_LEGEND_MIN_ROW,
+    Math.min(PIE_LEGEND_ROW, Math.floor(available / Math.max(count, 1))),
+  );
+  const fits = Math.max(1, Math.floor(available / rowHeight));
+  const shown = count <= fits ? count : Math.max(1, fits - 1);
+  return { rowHeight, shown, hidden: count - shown };
+}
+
+function drawPieLegend(canvas, labels, bounds, x, area) {
+  const { rowHeight, shown, hidden } = pieLegendPlan(labels.length, area);
+  const top = Math.max(area.top, area.top + (area.height - (shown + (hidden > 0 ? 1 : 0)) * rowHeight) / 2);
+  for (const [index, label] of labels.slice(0, shown).entries()) {
     const y = top + index * rowHeight;
     fillRect(canvas, { x, y, width: 28, height: 28 }, bounds[index].colour);
     const percent = `${Math.round(bounds[index].share * 100)}%`;
     drawText(canvas, `${truncateLabel(label, 20)} ${percent}`, {
       x: x + 44,
       y: y + 2,
+      scale: TICK_SCALE,
+    }, TEXT);
+  }
+  if (hidden > 0) {
+    drawText(canvas, `+${hidden} more`, {
+      x: x + 44,
+      y: top + shown * rowHeight + 2,
       scale: TICK_SCALE,
     }, TEXT);
   }
@@ -682,8 +758,7 @@ function drawPieChart(canvas, labels, values, area) {
       if (colour) setPixel(canvas, Math.round(cx + dx), Math.round(cy + dy), colour);
     }
   }
-  const legendTop = Math.max(area.top, cy - (labels.length * 46) / 2);
-  drawPieLegend(canvas, labels, bounds, cx + radius + 60, legendTop);
+  drawPieLegend(canvas, labels, bounds, cx + radius + 60, area);
 }
 
 function readSeries(config) {
@@ -762,6 +837,7 @@ module.exports = {
   renderChartPng,
   // Exported for unit tests.
   categoryLabelPlan,
+  pieLegendPlan,
   formatNumber,
   niceTicks,
   toAsciiLabel,

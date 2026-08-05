@@ -13,12 +13,15 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert');
+const path = require('node:path');
 const zlib = require('node:zlib');
+const { spawnSync } = require('node:child_process');
 
 const { chooseEngine, buildChartJsConfig } = require('./run.js');
 const {
   renderChartPng,
   categoryLabelPlan,
+  pieLegendPlan,
   formatNumber,
   niceTicks,
   toAsciiLabel,
@@ -95,6 +98,89 @@ test('a refusal reason embeds no URL and names the way forward', () => {
   const r = chooseEngine({ '--engine': 'quickchart', '--sensitive': true }, 'anything');
   assert.doesNotMatch(String(r.reason), /https?:\/\//);
   assert.match(String(r.reason), /on-host/);
+});
+
+// ---------------------------------------------------------------------------
+// The gate as the CLI actually applies it
+//
+// chooseEngine() only sees the text main() hands it. These drive the real
+// binary so the gate is tested against what QuickChart would receive, not
+// against a string a test author chose.
+// ---------------------------------------------------------------------------
+
+function runCli(argv) {
+  return spawnSync(process.execPath, [path.join(__dirname, 'run.js'), ...argv], {
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+}
+
+test('JSON-escaped PII cannot slip past the quickchart gate', () => {
+  // The raw argv holds no "@" and no literal student-ID digits — only
+  // \u-escapes that JSON.parse restores. Gating on argv missed this.
+  const result = runCli([
+    '--engine', 'quickchart',
+    '--type', 'bar',
+    '--data-json', '[{"label":"jsmith\\u0040psd401.net","value":3},{"label":"sid \\u0032123456","value":4}]',
+  ]);
+  assert.strictEqual(result.status, 3, result.stderr);
+  assert.match(result.stderr, /email|psd-student-id/);
+  assert.doesNotMatch(result.stdout, /quickchart/);
+});
+
+test('PII in --title refuses an explicit quickchart render', () => {
+  // The title is embedded in the QuickChart URL twice (chart title + series
+  // label), so it has to be inside the gate's field of view.
+  const result = runCli([
+    '--engine', 'quickchart',
+    '--type', 'bar',
+    '--data-json', '[{"label":"a","value":1}]',
+    '--title', 'SSN 123-45-6789 for jsmith@psd401.net',
+  ]);
+  assert.strictEqual(result.status, 3, result.stderr);
+  assert.doesNotMatch(result.stdout, /quickchart/);
+});
+
+test('genuinely public data still reaches quickchart when asked for by name', () => {
+  const result = runCli([
+    '--engine', 'quickchart',
+    '--type', 'bar',
+    '--data-json', '[{"label":"Mon","value":5}]',
+    '--title', 'Public volume',
+  ]);
+  assert.strictEqual(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^https:\/\/quickchart\.io\/chart\?/m);
+  assert.match(result.stdout, /PSD_AGENT_RICH_V1/);
+});
+
+test('Infinity is rejected at the CLI boundary, whatever the engine', () => {
+  // JSON.parse('1e999') is Infinity, which is typeof 'number' — it used to
+  // pass validation and serialise into the QuickChart URL as `null`.
+  const result = runCli(['--type', 'bar', '--data-json', '[{"label":"A","value":1e999}]']);
+  assert.notStrictEqual(result.status, 0);
+  assert.match(result.stderr, /finite/);
+});
+
+test('a malformed --user is rejected on every engine, as documented', () => {
+  const result = runCli([
+    '--type', 'bar',
+    '--engine', 'quickchart',
+    '--data-json', '[{"label":"A","value":1}]',
+    '--user', 'not an email',
+  ]);
+  assert.notStrictEqual(result.status, 0);
+  assert.match(result.stderr, /--user/);
+});
+
+test('the PII scan is linear enough to survive a 120KB payload', () => {
+  // Unbounded quantifiers in the email pattern took ~5s on 60KB and ~25s on
+  // 120KB (argv allows it), which is a free CPU burn on the agent container.
+  const payload = JSON.stringify([{ label: 'a'.repeat(120_000), value: 1 }]);
+  const started = process.hrtime.bigint();
+  const result = runCli(['--engine', 'quickchart', '--type', 'bar', '--data-json', payload]);
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.strictEqual(result.status, 0, result.stderr);
+  assert.ok(elapsedMs < 5000, `PII scan + render took ${Math.round(elapsedMs)}ms`);
 });
 
 // ---------------------------------------------------------------------------
@@ -186,41 +272,265 @@ function countNonWhite(pixels) {
   return count;
 }
 
-const INK_SAMPLES = {
-  bar: [
-    { label: 'Mon', value: 12 },
-    { label: 'Tue', value: 8 },
-  ],
-  line: [
-    { label: '2026-05-12', value: 0.94 },
-    { label: '2026-05-13', value: 0.95 },
-  ],
-  pie: [
-    { label: 'Meets', value: 38 },
-    { label: 'Below', value: 62 },
-  ],
-  scatter: [
-    { x: 1, y: 2 },
-    { x: 3, y: 9 },
-  ],
-};
+const PALETTE_BLUE = [31, 119, 180];
+const PALETTE_RED = [214, 39, 40];
+const NAMED_COLOURS = [
+  [255, 255, 255], PALETTE_BLUE, PALETTE_RED,
+  [44, 160, 44], [255, 127, 14], [148, 103, 189], [23, 190, 207],
+  [227, 119, 194], [140, 86, 75], [127, 127, 127], [188, 189, 34],
+  [33, 33, 33], [90, 90, 90], [219, 219, 219],
+];
 
-for (const [type, data] of Object.entries(INK_SAMPLES)) {
-  test(`${type} charts render ink on the canvas`, () => {
-    const png = renderChartPng(buildChartJsConfig(type, data, `${type} title`));
-    const inked = countNonWhite(decodePixels(png));
-    assert.ok(inked > 2000, `${type} chart only inked ${inked} pixels`);
-  });
+// Bands in OUTPUT pixel space, expressed loosely enough to survive small
+// layout tweaks: the title sits above the plot, y tick labels left of it,
+// category labels below it.
+const TITLE_BAND = { x0: 0, y0: 0, x1: OUT_WIDTH, y1: 60 };
+const Y_LABEL_BAND = { x0: 0, y0: 60, x1: 85, y1: OUT_HEIGHT - 80 };
+const X_LABEL_BAND = { x0: 0, y0: 432, x1: OUT_WIDTH, y1: OUT_HEIGHT };
+const PLOT_BAND = { x0: 100, y0: 60, x1: 765, y1: 420 };
+const LEFT_EDGE = { x0: 0, y0: 0, x1: 3, y1: 60 };
+const RIGHT_EDGE = { x0: OUT_WIDTH - 3, y0: 0, x1: OUT_WIDTH, y1: 60 };
+
+function pixelAt(pixels, x, y) {
+  const offset = (y * OUT_WIDTH + x) * 3;
+  return [pixels[offset], pixels[offset + 1], pixels[offset + 2]];
 }
 
-test('bar charts paint the series colour, not just axis furniture', () => {
-  const png = renderChartPng(buildChartJsConfig('bar', [{ label: 'A', value: 10 }], null));
-  const pixels = decodePixels(png);
-  let seriesBlue = 0;
-  for (let i = 0; i < pixels.length; i += 3) {
-    if (pixels[i] === 31 && pixels[i + 1] === 119 && pixels[i + 2] === 180) seriesBlue++;
+function sameColour(a, b) {
+  return a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+}
+
+function isWhite(px) {
+  return px[0] === 255 && px[1] === 255 && px[2] === 255;
+}
+
+/**
+ * Dark pixels — lettering and its anti-aliased edges. Every series colour,
+ * the gridlines and the axis rules are lighter than this, so inside the plot
+ * a dark pixel can only be a glyph. (Exact-colour matching undercounts badly:
+ * at tick scale most glyph pixels survive downsampling as blends.)
+ */
+function textInk(pixels, band) {
+  let count = 0;
+  for (let y = band.y0; y < band.y1; y++) {
+    for (let x = band.x0; x < band.x1; x++) {
+      const px = pixelAt(pixels, x, y);
+      if (px[0] < 120 && px[1] < 120 && px[2] < 120) count++;
+    }
   }
-  assert.ok(seriesBlue > 1000, `expected a filled bar, saw ${seriesBlue} px`);
+  return count;
+}
+
+function countNonWhite(pixels, band) {
+  const region = band ?? { x0: 0, y0: 0, x1: OUT_WIDTH, y1: OUT_HEIGHT };
+  let count = 0;
+  for (let y = region.y0; y < region.y1; y++) {
+    for (let x = region.x0; x < region.x1; x++) {
+      if (!isWhite(pixelAt(pixels, x, y))) count++;
+    }
+  }
+  return count;
+}
+
+/** Rows/columns covered by an exact colour, plus its pixel count. */
+function extent(pixels, colour) {
+  let count = 0;
+  let minX = OUT_WIDTH;
+  let maxX = -1;
+  let minY = OUT_HEIGHT;
+  let maxY = -1;
+  let leftmostY = -1;
+  let rightmostY = -1;
+  for (let y = 0; y < OUT_HEIGHT; y++) {
+    for (let x = 0; x < OUT_WIDTH; x++) {
+      if (!sameColour(pixelAt(pixels, x, y), colour)) continue;
+      count++;
+      if (x < minX) { minX = x; leftmostY = y; }
+      if (x > maxX) { maxX = x; rightmostY = y; }
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+  return { count, minX, maxX, minY, maxY, leftmostY, rightmostY };
+}
+
+function render(type, data, title) {
+  return decodePixels(renderChartPng(buildChartJsConfig(type, data, title)));
+}
+
+test('bars hang from a shared zero baseline, in proportion to their values', () => {
+  // Catches drawing bars from the axis floor instead of the zero line: the
+  // bars still "render ink" and can still touch at a shared row, but their
+  // heights stop matching 6:4.
+  const pixels = render('bar', [{ label: 'Up', value: 6 }, { label: 'Down', value: -4 }], 'Change');
+  const positive = extent(pixels, PALETTE_BLUE);
+  const negative = extent(pixels, PALETTE_RED);
+  assert.ok(positive.count > 500 && negative.count > 500, 'both bars are painted');
+  assert.ok(
+    Math.abs(negative.minY - positive.maxY) <= 3,
+    `bars should meet at one baseline: positive ends y=${positive.maxY}, negative starts y=${negative.minY}`,
+  );
+  assert.ok(negative.maxY > positive.maxY, 'the negative bar extends below the baseline');
+  const posHeight = positive.maxY - positive.minY;
+  const negHeight = negative.maxY - negative.minY;
+  const ratio = posHeight / negHeight;
+  assert.ok(
+    ratio > 1.2 && ratio < 1.8,
+    `6 and -4 should render 1.5:1, got ${posHeight}:${negHeight}`,
+  );
+});
+
+test('pie slices are painted in series colours', () => {
+  const pixels = render('pie', [{ label: 'Meets', value: 38 }, { label: 'Below', value: 62 }], 'Levels');
+  const first = extent(pixels, PALETTE_BLUE);
+  const second = extent(pixels, PALETTE_RED);
+  assert.ok(first.count > 5000, `first wedge only ${first.count} px`);
+  assert.ok(second.count > 5000, `second wedge only ${second.count} px`);
+  assert.ok(second.count > first.count, '62% should out-paint 38%');
+});
+
+test('scatter markers land on the right axes, not transposed', () => {
+  // (1,2) and (3,9): the rightmost marker must also be the higher one. A
+  // swapped toX/toY mapping breaks that relationship.
+  const pixels = render('scatter', [{ x: 1, y: 2 }, { x: 3, y: 9 }], 'Correlation');
+  const marks = extent(pixels, PALETTE_BLUE);
+  assert.ok(marks.count > 80, `markers only ${marks.count} px`);
+  assert.ok(
+    marks.rightmostY < marks.leftmostY - 50,
+    `rightmost marker (y=${marks.rightmostY}) should sit well above the leftmost (y=${marks.leftmostY})`,
+  );
+});
+
+test('line charts connect their markers', () => {
+  // Three markers alone are ~150px; the connecting segments dominate. This
+  // fails if drawLineSegment is skipped.
+  const pixels = render(
+    'line',
+    [
+      { label: 'a', value: 1 },
+      { label: 'b', value: 9 },
+      { label: 'c', value: 2 },
+    ],
+    'Trend',
+  );
+  const ink = extent(pixels, PALETTE_BLUE);
+  assert.ok(ink.count > 900, `line ink was ${ink.count} px — markers without segments?`);
+  assert.ok(ink.maxY - ink.minY > 200, 'the series should span most of the plot height');
+});
+
+test('every chart type letters its axes and title', () => {
+  for (const [type, data] of Object.entries({
+    bar: [{ label: 'Mon', value: 12 }, { label: 'Tue', value: 8 }],
+    line: [{ label: 'Mon', value: 12 }, { label: 'Tue', value: 8 }],
+    scatter: [{ x: 1, y: 2 }, { x: 3, y: 9 }],
+  })) {
+    const pixels = render(type, data, 'A title');
+    assert.ok(countNonWhite(pixels, TITLE_BAND) > 100, `${type}: title band is blank`);
+    assert.ok(
+      countNonWhite(pixels, Y_LABEL_BAND) > 50,
+      `${type}: y tick labels are missing`,
+    );
+    assert.ok(
+      countNonWhite(pixels, X_LABEL_BAND) > 50,
+      `${type}: x axis labels are missing`,
+    );
+  }
+});
+
+test('the title is lettered when given, and the band is reclaimed when not', () => {
+  // Counting *text-coloured* pixels, not any ink: an untitled chart grows the
+  // plot into that band, so total ink there goes UP without a title.
+  const titled = render('bar', [{ label: 'A', value: 1 }], 'Titled');
+  const bare = render('bar', [{ label: 'A', value: 1 }], null);
+  assert.ok(textInk(titled, TITLE_BAND) > 300, 'title glyphs are missing');
+  assert.ok(textInk(bare, TITLE_BAND) < 100, 'untitled charts letter nothing there');
+  assert.ok(extent(bare, PALETTE_BLUE).count > 1000, 'the bar still renders');
+});
+
+test('missing labels fall back to ordinal positions', () => {
+  const pixels = decodePixels(
+    renderChartPng({ type: 'bar', data: { datasets: [{ data: [1, 2, 3] }] }, options: {} }),
+  );
+  assert.ok(
+    countNonWhite(pixels, X_LABEL_BAND) > 50,
+    'ordinal labels should still be lettered under the axis',
+  );
+});
+
+test('dense axes drop whole labels rather than crowding the band', () => {
+  const sparse = render(
+    'bar',
+    Array.from({ length: 6 }, (_, i) => ({ label: `Week ${i + 1}`, value: i + 1 })),
+    'Six',
+  );
+  const dense = render(
+    'bar',
+    Array.from({ length: 50 }, (_, i) => ({ label: `Week ${i + 1}`, value: i + 1 })),
+    'Fifty',
+  );
+  const sparseInk = countNonWhite(sparse, X_LABEL_BAND);
+  const denseInk = countNonWhite(dense, X_LABEL_BAND);
+  assert.ok(denseInk > 50, 'a dense axis still gets labels');
+  assert.ok(
+    denseInk < sparseInk * 2.5,
+    `50 categories inked ${denseInk} px vs ${sparseInk} for 6 — labels were not thinned`,
+  );
+});
+
+test('downsampling averages rather than picking a nearest pixel', () => {
+  // Averaged 2x supersampling leaves blended edge pixels. Nearest-neighbour
+  // downsampling would leave only exact palette colours.
+  const pixels = render('pie', [{ label: 'A', value: 1 }, { label: 'B', value: 2 }], 'Blend');
+  let blended = 0;
+  for (let y = 0; y < OUT_HEIGHT; y++) {
+    for (let x = 0; x < OUT_WIDTH; x++) {
+      const px = pixelAt(pixels, x, y);
+      if (!NAMED_COLOURS.some(colour => sameColour(px, colour))) blended++;
+    }
+  }
+  assert.ok(blended > 200, `only ${blended} blended pixels — anti-aliasing lost?`);
+});
+
+test('bar value labels are drawn when they fit and dropped when they do not', () => {
+  // Inside the plot, text-coloured pixels can only be per-bar value labels:
+  // gridlines and bars use their own colours.
+  const sparse = render('bar', [{ label: 'Mon', value: 12 }, { label: 'Tue', value: 8 }], 'Two');
+  const dense = render(
+    'bar',
+    Array.from({ length: 50 }, (_, i) => ({ label: `W${i + 1}`, value: 40 + (i % 7) })),
+    'Fifty',
+  );
+  assert.ok(textInk(sparse, PLOT_BAND) > 30, 'two bars should carry value labels');
+  assert.strictEqual(
+    textInk(dense, PLOT_BAND),
+    0,
+    '50 bars have no room for value labels; they must be dropped, not overprinted',
+  );
+});
+
+test('a long title is truncated to fit, never clipped at the canvas edges', () => {
+  // Centred text overruns BOTH edges when the budget is too generous, so a
+  // too-long title used to lose characters from each end.
+  const pixels = render('bar', [{ label: 'A', value: 1 }], 'C'.repeat(80));
+  assert.strictEqual(countNonWhite(pixels, LEFT_EDGE), 0, 'title ran off the left edge');
+  assert.strictEqual(countNonWhite(pixels, RIGHT_EDGE), 0, 'title ran off the right edge');
+  assert.ok(textInk(pixels, TITLE_BAND) > 300, 'the title is still drawn');
+});
+
+test('the pie legend never plans more rows than the canvas holds', () => {
+  const area = { top: 150, bottom: 850, height: 700 };
+  for (const count of [2, 10, 19, 25, 50]) {
+    const plan = pieLegendPlan(count, area);
+    assert.ok(plan.shown >= 1, `${count} slices: nothing shown`);
+    assert.strictEqual(plan.shown + plan.hidden, count, `${count} slices: rows lost`);
+    const rows = plan.shown + (plan.hidden > 0 ? 1 : 0);
+    assert.ok(
+      rows * plan.rowHeight <= area.height,
+      `${count} slices: ${rows} rows of ${plan.rowHeight} overflow ${area.height}`,
+    );
+  }
+  assert.strictEqual(pieLegendPlan(10, area).hidden, 0, '10 slices all fit');
+  assert.ok(pieLegendPlan(50, area).hidden > 0, '50 slices cannot all fit');
 });
 
 test('rendering is deterministic for identical input', () => {
@@ -229,23 +539,14 @@ test('rendering is deterministic for identical input', () => {
   assert.ok(a.equals(b));
 });
 
-test('a chart with no title still renders', () => {
-  const png = renderChartPng(buildChartJsConfig('bar', [{ label: 'A', value: 1 }], null));
-  assert.strictEqual(parsePngChunks(png)[0].data.readUInt32BE(4), OUT_HEIGHT);
-});
-
-test('negative bar values render against a zero baseline', () => {
-  const png = renderChartPng(
-    buildChartJsConfig(
-      'bar',
-      [
-        { label: 'Down', value: -4 },
-        { label: 'Up', value: 6 },
-      ],
-      'Change',
-    ),
-  );
-  assert.ok(countNonWhite(decodePixels(png)) > 2000);
+test('a crowded pie legend stops at the canvas instead of running off it', () => {
+  // A wedge carries no label of its own, so a legend row that runs off the
+  // bottom takes its slice's identity with it, silently.
+  const many = Array.from({ length: 50 }, (_, i) => ({ label: `School ${i + 1}`, value: 4 }));
+  const pixels = render('pie', many, '50 schools');
+  const legendFoot = { x0: 470, y0: 440, x1: OUT_WIDTH, y1: OUT_HEIGHT };
+  assert.strictEqual(countNonWhite(pixels, legendFoot), 0, 'legend ran off the canvas');
+  assert.ok(extent(pixels, PALETTE_BLUE).count > 1000, 'wedges still painted');
 });
 
 // ---------------------------------------------------------------------------
@@ -277,6 +578,39 @@ test('the renderer throws (never exits) on unusable input', () => {
   for (const [config, pattern] of cases) {
     assert.throws(() => renderChartPng(config), pattern, JSON.stringify(config));
   }
+});
+
+test('a range too narrow for its magnitude is refused, not looped over', () => {
+  // Accumulating `value += step` when step is below an ULP of the start never
+  // advances: the tick array grows until the process dies of heap exhaustion.
+  // Two nanosecond-epoch timestamps 300ns apart do exactly this, on the
+  // DEFAULT engine with no flags.
+  assert.throws(() => niceTicks(1, 1.0000000000000002), /too narrow/);
+  assert.throws(
+    () =>
+      renderChartPng(
+        buildChartJsConfig(
+          'scatter',
+          [
+            { x: 1_700_000_000_000_000_000, y: 1 },
+            { x: 1_700_000_000_000_000_300, y: 2 },
+          ],
+          'nanoseconds',
+        ),
+      ),
+    /too narrow/,
+  );
+});
+
+test('small-magnitude axes keep distinct ticks that still cover the data', () => {
+  // Rounding ticks with toFixed(10) collapsed everything below ~1e-6 onto one
+  // number, leaving an axis that no longer spanned its own data.
+  const min = 4.231635042520979e-7;
+  const max = 4.231910318490414e-7;
+  const ticks = niceTicks(min, max);
+  assert.strictEqual(new Set(ticks).size, ticks.length, `duplicate ticks: ${ticks}`);
+  assert.ok(ticks[0] <= min, `first tick ${ticks[0]} is above the data`);
+  assert.ok(ticks.at(-1) >= max, `last tick ${ticks.at(-1)} is below the data`);
 });
 
 test('a value range too large to plot is reported, not silently blank', () => {
@@ -334,6 +668,15 @@ test('labels truncate with a trailing dot and never exceed the budget', () => {
   assert.strictEqual(truncateLabel('American Indian', 9), 'American.');
   assert.strictEqual(truncateLabel('Asian', 9), 'Asian');
   assert.strictEqual(truncateLabel('Asian', 0), '');
+  // At a 1-char budget there is no room for the dot, and adding one anyway
+  // returns a string LONGER than the budget it was asked to fit.
+  assert.strictEqual(truncateLabel('Asian', 1), 'A');
+  for (let budget = 0; budget <= 8; budget++) {
+    assert.ok(
+      truncateLabel('American Indian', budget).length <= budget,
+      `budget ${budget} produced "${truncateLabel('American Indian', budget)}"`,
+    );
+  }
 });
 
 test('dense category axes thin whole labels instead of printing stubs', () => {
@@ -367,9 +710,26 @@ test('axis numbers stay short and readable', () => {
   assert.strictEqual(formatNumber(12), '12');
   assert.strictEqual(formatNumber(0.94), '0.94');
   assert.strictEqual(formatNumber(1234.5), '1234.5');
-  assert.strictEqual(formatNumber(25_000), '25.0k');
+  assert.strictEqual(formatNumber(25_000), '25k');
   assert.strictEqual(formatNumber(3_400_000), '3.4M');
   assert.strictEqual(formatNumber(Number.NaN), '');
+  // One decimal place is coarser than the steps these axes actually use:
+  // 1.00M / 1.02M / 1.04M all printed "1.0M", an axis that claimed the data
+  // was flat. Adjacent ticks must stay distinguishable.
+  assert.notStrictEqual(formatNumber(1_020_000), formatNumber(1_040_000));
+  assert.strictEqual(formatNumber(1_020_000), '1.02M');
+  assert.notStrictEqual(formatNumber(10_000), formatNumber(10_010));
+  // Suffixes continue past M, and the widest label still fits the margin.
+  assert.strictEqual(formatNumber(5e9), '5B');
+  assert.strictEqual(formatNumber(5e12), '5T');
+  assert.strictEqual(formatNumber(1e16), '1.0e+16');
+  // One axis must not mix "1.50" with "0.5".
+  assert.strictEqual(formatNumber(1.5), '1.5');
+});
+
+test('the axis actually labels distinct ticks at million scale', () => {
+  const labels = niceTicks(1_000_000, 1_100_000).map(tick => formatNumber(tick));
+  assert.strictEqual(new Set(labels).size, labels.length, labels.join(','));
 });
 
 test('tick steps are evenly spaced and span the data', () => {

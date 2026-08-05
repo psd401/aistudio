@@ -1057,9 +1057,13 @@ Router and Cron Lambdas detect it and lift the payload into the
 - `infra/agent-image/skills/chat-chart` — chart renderer. `--engine auto`
   (the default) rasterises the PNG on-host in pure Node
   (`render_local.js`) and uploads it through the workspace broker, so
-  chart data never leaves PSD AWS. QuickChart.io is used only when
+  the chart's values never leave PSD AWS. QuickChart.io is used only when
   `--engine quickchart` is named explicitly, and that combination is
-  refused for `--sensitive` or PII-matching data (REV-INFRA-002).
+  refused for `--sensitive` or PII-matching data (REV-INFRA-002). Note the
+  rendered PNG itself is published to an unauthenticated workspace URL —
+  Google Chat has to fetch it — so it carries the same exposure as any
+  `psd-image-gen` output: unguessable, ~30-day retention, readable by
+  anyone holding the link.
 
 ### Button click contract (CARD_CLICKED)
 
