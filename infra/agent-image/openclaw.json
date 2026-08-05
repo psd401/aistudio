@@ -11,7 +11,7 @@
             "id": "us.anthropic.claude-sonnet-5",
             "name": "Claude Sonnet 5 (Bedrock, SigV4 via execution role)",
             "reasoning": false,
-            "input": ["text"],
+            "input": ["text", "image"],
             "contextWindow": 200000,
             "maxTokens": 32768,
             "cost": { "input": 3, "output": 15, "cacheRead": 0.3, "cacheWrite": 6 }
