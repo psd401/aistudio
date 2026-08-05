@@ -45,11 +45,23 @@ const ALLOWED_ENGINES = new Set(['auto', 'quickchart', 'local']);
 // the real safety knob), and a false positive costs nothing worse than
 // rendering on-host, which is where charts go by default anyway.
 //
-// Every quantifier is bounded. The email pattern's two character classes
-// both contain `.`, so unbounded `+`s backtrack quadratically: a single
-// 60KB label took 5s of CPU to reject, and argv allows twice that.
+// Every quantifier is bounded AND flat — no quantifier encloses another,
+// and no two adjacent quantified classes overlap, so each pattern matches in
+// linear time with no backtracking to explore.
+//
+// The email pattern earned both rules the hard way. Unbounded `+`s over two
+// classes that both contain `.` backtracked quadratically: one 60KB label
+// took 5s of CPU to reject, and argv allows twice that. Bounding the
+// quantifiers fixed the runtime but needed a nested `(?:\.[…]{1,63}){0,4}`
+// to keep matching multi-label domains — star height 2, which
+// `security/detect-unsafe-regex` rejects, and whose trailing group overlaps
+// the TLD it precedes (polynomial ReDoS). The domain is now one flat class
+// that simply runs to the end of the match: nothing follows it to backtrack
+// against. It accepts a slightly wider shape than a strict address grammar
+// (a 1-character TLD, a trailing dot), which is the right direction for a
+// gate whose false positives cost nothing worse than an on-host render.
 const PII_PATTERNS = [
-  { name: 'email', re: /[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,4}\.[A-Za-z]{2,24}/ },
+  { name: 'email', re: /[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}\.[A-Za-z0-9.-]{1,251}/ },
   { name: 'ssn', re: /\b\d{3}-\d{2}-\d{4}\b/ },
   { name: 'us-phone', re: /\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b/ },
   { name: 'us-phone', re: /\(\d{3}\)\s\d{3}-\d{4}\b/ },
