@@ -149,6 +149,18 @@ const DRIVE_METADATA_FIELDS = new Set([
   "properties",
   "appproperties",
 ])
+// Query parameters permitted alongside a metadata-only `files update`. These
+// select the target and shape the response; none can write content. Parent
+// changes (a move) live here rather than in the body. Mirrors
+// DRIVE_PARAM_FIELDS in the psd-workspace skill. `uploadType` is absent by
+// design — carriesDriveContent refuses it outright.
+const DRIVE_PARAM_FIELDS = new Set([
+  "fileid",
+  "addparents",
+  "removeparents",
+  "supportsalldrives",
+  "fields",
+])
 const DRIVE_CONTENT_FLAG =
   /^--(media|media-file|media-body|upload|upload-file|upload-type|content|content-file|data|data-file|body|body-file|text|text-file|file|source|source-file)$/i
 
@@ -282,14 +294,46 @@ function validateUserDriveFolderCreate(argv: readonly string[]): void {
 }
 
 function validateUserDriveMetadataUpdate(argv: readonly string[]): void {
+  if (carriesDriveContent(argv)) {
+    throw new Error(
+      "Drive user-owned updates are limited to approved metadata fields"
+    )
+  }
+
+  // A MOVE carries no request body at all — addParents/removeParents are query
+  // parameters. Requiring a `--json` resource therefore refused every move,
+  // which is why the Purdy Drive auto-sort schedule failed on each run even
+  // though SKILL.md lists move as allowed. This mirrors isMetadataOnlyDriveUpdate
+  // in the psd-workspace skill; the two gates must agree or a command passes the
+  // skill and then dies here with operation_not_allowed.
+  const params = parseObjectArgument(argv, "--params")
+  if (params) {
+    const paramKeys = Object.keys(params)
+    if (!paramKeys.every((key) => DRIVE_PARAM_FIELDS.has(key.toLowerCase()))) {
+      throw new Error(
+        "Drive user-owned updates are limited to approved query parameters"
+      )
+    }
+  }
+  const movesParents =
+    !!params &&
+    Object.keys(params).some((key) => /^(add|remove)parents$/i.test(key))
+
   const resource = jsonResource(argv)
-  const keys = Object.keys(resource ?? {})
-  if (
-    !resource ||
-    keys.length === 0 ||
-    carriesDriveContent(argv) ||
-    !keys.every((key) => DRIVE_METADATA_FIELDS.has(key.toLowerCase()))
-  ) {
+  if (resource) {
+    const keys = Object.keys(resource)
+    if (
+      keys.length === 0 ||
+      !keys.every((key) => DRIVE_METADATA_FIELDS.has(key.toLowerCase()))
+    ) {
+      throw new Error(
+        "Drive user-owned updates are limited to approved metadata fields"
+      )
+    }
+    return
+  }
+  // No body: allowed only when --params proves this is a parent move.
+  if (!movesParents) {
     throw new Error(
       "Drive user-owned updates are limited to approved metadata fields"
     )
@@ -523,11 +567,94 @@ export function validateScheduledWorkspaceCommand(
   validateWorkspaceCommand(command)
 }
 
+/**
+ * Refuse `drive permissions create` on a file the agent slot does not OWN.
+ *
+ * The static gates prove the caller is on the agent slot and that the permission
+ * body has an in-district shape, but neither can prove whose file it is — that
+ * needs Drive. The agent slot is a broad Drive credential and users can share
+ * their own files INTO the agnt_ account, so without this a user-owned file
+ * shared to the agent with sharing rights could be re-shared to another person
+ * or domain-wide, straight past the "your own files" boundary the exception is
+ * written around.
+ *
+ * `ownedByMe` is evaluated by Drive against the authenticated identity, which on
+ * this path is the agent account, so it answers exactly the right question
+ * without plumbing the agent's address through. Shared-drive files report false
+ * (the drive owns them, not the agent) and are refused — conservative, and
+ * consistent with the documented boundary.
+ *
+ * Fails CLOSED: a missing fileId, a non-OK response, or a network error refuses
+ * the share rather than assuming ownership.
+ */
+async function assertAgentOwnsSharedFile(
+  command: WorkspaceCommand,
+  accessToken: string
+): Promise<void> {
+  const { operation } = normalizedOperation(command.argv)
+  if (operation !== "drive permissions create") return
+
+  const fileId = shareTargetFileId(command.argv)
+  if (!fileId) {
+    throw new Error("Drive share requires a fileId so ownership can be verified")
+  }
+
+  if ((await fetchDriveOwnedByMe(fileId, accessToken)) !== true) {
+    throw new Error(
+      "Drive shares are limited to files the agent owns; ask the file's owner to share it"
+    )
+  }
+}
+
+/** The fileId a share targets, from either the body or the query parameters. */
+function shareTargetFileId(argv: readonly string[]): string {
+  const resource = jsonResource(argv)
+  const params = parseObjectArgument(argv, "--params")
+  const raw =
+    resource?.fileId ?? resource?.fileID ?? params?.fileId ?? params?.fileID
+  return typeof raw === "string" ? raw.trim() : ""
+}
+
+/** Ask Drive whether the authenticated identity owns the file. Fails closed. */
+async function fetchDriveOwnedByMe(
+  fileId: string,
+  accessToken: string
+): Promise<boolean> {
+  const url = new URL(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`
+  )
+  url.searchParams.set("fields", "ownedByMe")
+  url.searchParams.set("supportsAllDrives", "true")
+  try {
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!response.ok) {
+      throw new Error(`Drive responded HTTP ${response.status}`)
+    }
+    const body: unknown = await response.json()
+    return (
+      typeof body === "object" &&
+      body !== null &&
+      (body as Record<string, unknown>).ownedByMe === true
+    )
+  } catch (error) {
+    throw new Error(
+      `Drive ownership could not be verified for this share: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      { cause: error }
+    )
+  }
+}
+
 export async function executeWorkspaceCommand(
   command: WorkspaceCommand,
   accessToken: string
 ): Promise<WorkspaceCommandResult> {
   validateWorkspaceCommand(command)
+  await assertAgentOwnsSharedFile(command, accessToken)
   const binary = process.env.GWS_EXECUTABLE || "/usr/local/bin/gws"
   // The pinned gws binary writes non-JSON responses to `download.<ext>` even
   // when the caller does not pass --output. Execute it in an empty, private

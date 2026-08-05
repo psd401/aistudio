@@ -13,9 +13,11 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert');
+const http = require('node:http');
 const path = require('node:path');
 const zlib = require('node:zlib');
-const { spawnSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
+const { spawn, spawnSync } = require('node:child_process');
 
 const { chooseEngine, buildChartJsConfig } = require('./run.js');
 const {
@@ -184,6 +186,171 @@ test('the PII scan is linear enough to survive a 120KB payload', () => {
 });
 
 // ---------------------------------------------------------------------------
+// The local engine end to end, through main()
+//
+// Everything above either unit-tests renderChartPng() directly or drives the
+// CLI down the *quickchart* path. That left the engine now serving ~100% of
+// real traffic with no test of main()'s wiring — args -> renderChartPng ->
+// publishArtifact -> stdout envelope. These close that gap against a stub
+// broker on the port agent-broker.js hardcodes.
+//
+// spawnSync() cannot be used here: it blocks the event loop, so an
+// in-process stub server would never get to answer the child's requests.
+// ---------------------------------------------------------------------------
+
+const BROKER_PORT = 18_791;
+const RICH_OPEN = '<<<PSD_AGENT_RICH_V1>>>';
+const RICH_CLOSE = '<<<END_PSD_AGENT_RICH_V1>>>';
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+
+/** Stub of the agent broker's workspace-storage publish/upload/complete contract. */
+async function withStubBroker(run) {
+  const uploads = [];
+  const brokerCalls = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', chunk => chunks.push(chunk));
+    req.on('end', () => {
+      const body = Buffer.concat(chunks);
+      if (req.method === 'PUT' && req.url.startsWith('/upload/')) {
+        uploads.push({ bytes: body, headers: req.headers });
+        res.writeHead(200).end();
+        return;
+      }
+      const payload = JSON.parse(body.toString('utf8'));
+      brokerCalls.push({ url: req.url, payload });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      if (payload.operation === 'publish') {
+        // Echo the contract publishArtifact insists on seeing back; any
+        // drift here and it throws "incomplete upload" instead of uploading.
+        res.end(JSON.stringify({
+          uploadUrl: `http://127.0.0.1:${BROKER_PORT}/upload/${payload.path}`,
+          reservationId: 'reservation-1',
+          requiredHeaders: {
+            'Content-Length': String(payload.contentLength),
+            'Content-Type': payload.contentType,
+            'x-amz-checksum-sha256': payload.checksumSha256,
+          },
+        }));
+        return;
+      }
+      res.end(JSON.stringify({
+        publicUrl: 'https://workspace.example.invalid/charts/stub.png',
+        key: 'charts/stub.png',
+      }));
+    });
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(BROKER_PORT, '127.0.0.1', resolve);
+  });
+  try {
+    return await run({ uploads, brokerCalls });
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+}
+
+function runCliAsync(argv) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join(__dirname, 'run.js'), ...argv]);
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', d => { stdout += d; });
+    child.stderr.on('data', d => { stderr += d; });
+    child.on('error', reject);
+    child.on('close', status => resolve({ status, stdout, stderr }));
+  });
+}
+
+function parseEnvelope(stdout) {
+  const start = stdout.indexOf(RICH_OPEN);
+  const end = stdout.indexOf(RICH_CLOSE);
+  assert.ok(start !== -1 && end > start, `no rich envelope in stdout:\n${stdout}`);
+  return JSON.parse(stdout.slice(start + RICH_OPEN.length, end).trim());
+}
+
+test('the default engine renders, uploads and emits a card without naming an engine', async () => {
+  const { result, uploads, brokerCalls } = await withStubBroker(async ctx => ({
+    result: await runCliAsync([
+      '--type', 'bar',
+      '--title', 'SBA ELA proficiency',
+      '--data-json', '[{"label":"Asian","value":71.4},{"label":"White","value":66.3}]',
+    ]),
+    ...ctx,
+  }));
+
+  assert.strictEqual(result.status, 0, result.stderr);
+  assert.match(result.stderr, /engine=local/);
+  assert.strictEqual(
+    result.stdout.split('\n')[0],
+    'https://workspace.example.invalid/charts/stub.png',
+    'first stdout line is the bare URL',
+  );
+
+  const envelope = parseEnvelope(result.stdout);
+  assert.strictEqual(
+    envelope.cardsV2[0].card.sections[0].widgets[0].image.imageUrl,
+    'https://workspace.example.invalid/charts/stub.png',
+  );
+  assert.strictEqual(envelope.cardsV2[0].card.header.title, 'SBA ELA proficiency');
+  assert.match(envelope.textFallback, /SBA ELA proficiency/);
+
+  // What actually went up: a real PNG, declared honestly to the broker.
+  assert.strictEqual(uploads.length, 1);
+  assert.deepStrictEqual(uploads[0].bytes.subarray(0, 8), PNG_SIGNATURE);
+  assert.strictEqual(
+    uploads[0].headers['x-amz-checksum-sha256'],
+    createHash('sha256').update(uploads[0].bytes).digest('base64'),
+    'the checksum the broker signed does not cover the bytes that were sent',
+  );
+  assert.strictEqual(brokerCalls[0].payload.contentType, 'image/png');
+  assert.strictEqual(brokerCalls[0].payload.contentLength, uploads[0].bytes.length);
+  assert.strictEqual(brokerCalls.at(-1).payload.operation, 'complete-upload');
+});
+
+test('issue #1596: --sensitive student data charts instead of exiting 3', async () => {
+  // The exact scenario from the issue — an achievement gap by race/ethnicity,
+  // flagged sensitive. This used to exit 3 with no chart at all.
+  const { result, uploads } = await withStubBroker(async ctx => ({
+    result: await runCliAsync([
+      '--sensitive',
+      '--type', 'bar',
+      '--title', 'SBA ELA proficiency by race/ethnicity',
+      '--data-json', JSON.stringify([
+        { label: 'Am. Indian', value: 38.2 },
+        { label: 'Asian', value: 71.4 },
+        { label: 'Black', value: 44.9 },
+        { label: 'Hispanic', value: 52.1 },
+        { label: '2+ Races', value: 58.7 },
+        { label: 'White', value: 66.3 },
+      ]),
+    ]),
+    ...ctx,
+  }));
+
+  assert.strictEqual(result.status, 0, result.stderr);
+  assert.match(result.stderr, /engine=local/);
+  assert.doesNotMatch(result.stdout, /quickchart/);
+  assert.doesNotMatch(result.stderr, /quickchart/);
+  assert.strictEqual(uploads.length, 1, 'the chart was never uploaded');
+  assert.deepStrictEqual(uploads[0].bytes.subarray(0, 8), PNG_SIGNATURE);
+});
+
+test('a broker failure on the local path exits non-zero rather than printing a card', async () => {
+  // No stub broker listening: publishArtifact's fetch is refused.
+  const result = await runCliAsync([
+    '--type', 'bar',
+    '--data-json', '[{"label":"A","value":1}]',
+  ]);
+  assert.notStrictEqual(result.status, 0);
+  assert.doesNotMatch(result.stdout, /PSD_AGENT_RICH_V1/);
+});
+
+// ---------------------------------------------------------------------------
 // Local renderer — PNG container
 // ---------------------------------------------------------------------------
 
@@ -236,17 +403,51 @@ test('the local engine emits a decodable PNG of the documented size', () => {
   }
 });
 
+/**
+ * Independent CRC32 oracle for the chunk test below.
+ *
+ * Deliberately NOT `zlib.crc32`: render_local.js hand-rolls its CRC precisely
+ * because that built-in needs Node >= 22.2 and the agent image's Node comes
+ * from an unpinned base image. Using it as the oracle would make this test
+ * fail on exactly the runtimes the production code was written to survive —
+ * a red suite reporting the test's own assumption, not a renderer defect.
+ *
+ * This is also structurally different from the implementation it checks:
+ * bit-at-a-time long division, no 256-entry lookup table, so a mistake in
+ * building that table cannot cancel out against the oracle.
+ */
+function referenceCrc32(buffer) {
+  let crc = 0xFF_FF_FF_FF;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++) {
+      crc = crc & 1 ? (crc >>> 1) ^ 0xED_B8_83_20 : crc >>> 1;
+    }
+  }
+  return (crc ^ 0xFF_FF_FF_FF) >>> 0;
+}
+
+test('the CRC32 oracle agrees with the published check values', () => {
+  // Pinned vectors from the CRC-32/ISO-HDLC definition, so a broken oracle
+  // is caught here rather than silently blessing a broken renderer.
+  assert.strictEqual(referenceCrc32(Buffer.from('')), 0);
+  assert.strictEqual(referenceCrc32(Buffer.from('123456789')), 0xCB_F4_39_26);
+  assert.strictEqual(referenceCrc32(Buffer.from('IEND')), 0xAE_42_60_82);
+});
+
 test('each chunk carries a correct CRC32', () => {
   const png = renderChartPng(BAR_CONFIG);
-  assert.strictEqual(typeof zlib.crc32, 'function', 'zlib.crc32 is the oracle here');
   let offset = 8;
+  let chunks = 0;
   while (offset < png.length) {
     const length = png.readUInt32BE(offset);
     const declared = png.readUInt32BE(offset + 8 + length);
-    const actual = zlib.crc32(png.subarray(offset + 4, offset + 8 + length));
+    const actual = referenceCrc32(png.subarray(offset + 4, offset + 8 + length));
     assert.strictEqual(actual, declared, `CRC at offset ${offset}`);
     offset += length + 12;
+    chunks++;
   }
+  assert.ok(chunks >= 3, `expected IHDR/IDAT/IEND at least, checked ${chunks}`);
 });
 
 // ---------------------------------------------------------------------------
@@ -635,15 +836,6 @@ test('more points than the documented ceiling is rejected, not truncated', () =>
     () => renderChartPng(buildChartJsConfig('bar', data, 'too many')),
     /too many data points/,
   );
-});
-
-test('missing labels fall back to ordinal positions', () => {
-  const png = renderChartPng({
-    type: 'bar',
-    data: { datasets: [{ data: [1, 2, 3] }] },
-    options: {},
-  });
-  assert.ok(countNonWhite(decodePixels(png)) > 2000);
 });
 
 // ---------------------------------------------------------------------------

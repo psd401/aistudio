@@ -1,4 +1,5 @@
 import {
+  executeWorkspaceCommand,
   outboundMessageAudit,
   requiredWorkspaceScopeGap,
   validateEmailTaskWorkspaceCommand,
@@ -119,6 +120,27 @@ function defineTrustedWorkspaceCommandPolicySuite1Part1() {
     }
   )
 
+  // A move carries no --json body — addParents/removeParents are query params.
+  // The skill gate allows it; this validator must agree, or the command passes
+  // the skill and then dies here with operation_not_allowed.
+  it("allows a params-only Drive parent move on the user slot", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: [
+          "drive", "files", "update",
+          "--params", '{"fileId":"f1","addParents":"folder2","removeParents":"folder1"}',
+        ],
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: ["drive", "files", "update", "--params", '{"fileId":"f1","addParents":"f2"}'],
+      })
+    ).not.toThrow()
+  })
+
   it("requires agent ownership for file creation", () => {
     expect(() =>
       validateWorkspaceCommand({
@@ -148,7 +170,24 @@ function defineTrustedWorkspaceCommandPolicySuite1Part1() {
 
   }
 
-function defineTrustedWorkspaceCommandPolicySuite1Part2() {it.each([
+function defineTrustedWorkspaceCommandPolicySuite1Part2() {
+  it("still refuses a move that smuggles content or unknown query params", () => {
+    const move = (params: string, extra: string[] = []) =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: ["drive", "files", "update", "--params", params, ...extra],
+      })
+    expect(() => move('{"fileId":"f1","addParents":"f2","uploadType":"media"}')).toThrow()
+    expect(() => move('{"fileId":"f1","addParents":"f2","unexpected":"x"}')).toThrow()
+    // No parents and no body — nothing to inspect, so still refused.
+    expect(() => move('{"fileId":"f1"}')).toThrow()
+    // Parents plus a non-metadata body is still judged on the body.
+    expect(() => move('{"fileId":"f1","addParents":"f2"}', ["--json", '{"trashed":true}'])).toThrow()
+    // Parents plus a metadata body is a rename+move.
+    expect(() => move('{"fileId":"f1","addParents":"f2"}', ["--json", '{"name":"Q3"}'])).not.toThrow()
+  })
+
+  it.each([
     {
       name: "non-folder",
       argv: [
@@ -659,3 +698,78 @@ const defineEmailTaskChatRejectionSuite5 = () => {
 };
 
 describe("Email-task mode excludes Chat sends", defineEmailTaskChatRejectionSuite5)
+
+// The static gates prove the agent SLOT and the permission SHAPE, but not whose
+// file it is. Users can share their own files into the agnt_ account, so
+// without a Drive check a user-owned file could be re-shared onward past the
+// "your own files" boundary the exception is written around.
+describe("Drive share ownership verification", () => {
+  const share = {
+    scope: "agent" as const,
+    argv: [
+      "drive", "permissions", "create",
+      "--json",
+      '{"fileId":"f1","type":"user","role":"writer","emailAddress":"hagelk@psd401.net"}',
+    ],
+  }
+  const originalFetch = globalThis.fetch
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it("refuses a share of a file the agent does not own", async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ownedByMe: false }), { status: 200 })
+    ) as unknown as typeof fetch
+    await expect(executeWorkspaceCommand(share, "token")).rejects.toThrow(
+      /files the agent owns/
+    )
+  })
+
+  it("fails closed when ownership cannot be determined", async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(
+      new Response("", { status: 404 })
+    ) as unknown as typeof fetch
+    await expect(executeWorkspaceCommand(share, "token")).rejects.toThrow(
+      /ownership could not be verified/
+    )
+  })
+
+  it("fails closed when the ownership check errors", async () => {
+    globalThis.fetch = jest.fn().mockRejectedValue(new Error("network down")) as unknown as typeof fetch
+    await expect(executeWorkspaceCommand(share, "token")).rejects.toThrow(
+      /ownership could not be verified/
+    )
+  })
+
+  it("refuses a share with no fileId to verify", async () => {
+    globalThis.fetch = jest.fn() as unknown as typeof fetch
+    await expect(
+      executeWorkspaceCommand(
+        {
+          scope: "agent",
+          argv: [
+            "drive", "permissions", "create",
+            "--json", '{"type":"domain","role":"reader","domain":"psd401.net"}',
+          ],
+        },
+        "token"
+      )
+    ).rejects.toThrow(/requires a fileId/)
+    expect(globalThis.fetch).not.toHaveBeenCalled()
+  })
+
+  it("does not run an ownership check for non-share operations", async () => {
+    globalThis.fetch = jest.fn() as unknown as typeof fetch
+    // Reaches the CLI (which is absent here), proving the guard was skipped
+    // rather than short-circuiting on ownership.
+    await expect(
+      executeWorkspaceCommand(
+        { scope: "agent", argv: ["drive", "files", "list"] },
+        "token"
+      )
+    ).rejects.not.toThrow(/ownership/)
+    expect(globalThis.fetch).not.toHaveBeenCalled()
+  })
+})
