@@ -264,14 +264,6 @@ function decodePixels(png) {
   return pixels;
 }
 
-function countNonWhite(pixels) {
-  let count = 0;
-  for (let i = 0; i < pixels.length; i += 3) {
-    if (pixels[i] !== 255 || pixels[i + 1] !== 255 || pixels[i + 2] !== 255) count++;
-  }
-  return count;
-}
-
 const PALETTE_BLUE = [31, 119, 180];
 const PALETTE_RED = [214, 39, 40];
 const NAMED_COLOURS = [

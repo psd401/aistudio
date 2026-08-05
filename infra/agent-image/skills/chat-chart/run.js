@@ -48,8 +48,20 @@ const ALLOWED_ENGINES = new Set(['auto', 'quickchart', 'local']);
 // Every quantifier is bounded. The email pattern's two character classes
 // both contain `.`, so unbounded `+`s backtrack quadratically: a single
 // 60KB label took 5s of CPU to reject, and argv allows twice that.
+//
+// Bounding alone was not enough. Written as `<label>(?:\.<label>){0,4}\.<tld>`
+// the domain was both ambiguous (the trailing `\.[A-Za-z]{2,24}` can equally be
+// matched by an iteration of the group, since the label class is a superset of
+// the TLD class) and star-height 2 — a quantifier nested inside a quantified
+// group, which `security/detect-unsafe-regex` rejects however tight the bounds.
+//
+// Flattened to a single level: one dot-free label, a literal dot, then the rest
+// of the domain. The first class excludes `.`, so the literal dot can only land
+// at that run's boundary — one split, no nested repetition, nothing to
+// backtrack over. Subdomains still match because the tail class allows dots.
+// A backstop is allowed to be coarse; `--sensitive` is the real safety knob.
 const PII_PATTERNS = [
-  { name: 'email', re: /[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,4}\.[A-Za-z]{2,24}/ },
+  { name: 'email', re: /[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}\.[A-Za-z0-9.-]{1,63}/ },
   { name: 'ssn', re: /\b\d{3}-\d{2}-\d{4}\b/ },
   { name: 'us-phone', re: /\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b/ },
   { name: 'us-phone', re: /\(\d{3}\)\s\d{3}-\d{4}\b/ },
