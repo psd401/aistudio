@@ -24,9 +24,15 @@ async function main() {
   }
   rejectLegacyAuthorityArgs(args);
 
+  const scheduleId = args['schedule-id'];
+  if (scheduleId === true) fail('--schedule-id requires a value');
+
   const limitArg = args.limit;
   let limit;
   if (limitArg !== undefined) {
+    // A valueless --limit parses as `true`, and Number(true) is 1 — without this
+    // guard a malformed invocation silently becomes `--limit 1`.
+    if (limitArg === true) fail('--limit requires a value');
     limit = Number(limitArg);
     if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
       fail('--limit must be an integer between 1 and 50');
@@ -35,7 +41,7 @@ async function main() {
 
   const result = await requestScheduleOperation({
     operation: 'runs',
-    ...(args['schedule-id'] ? { scheduleId: args['schedule-id'] } : {}),
+    ...(scheduleId ? { scheduleId } : {}),
     ...(limit === undefined ? {} : { limit }),
   });
   emit(result);
