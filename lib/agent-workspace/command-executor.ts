@@ -72,6 +72,12 @@ const ALLOWED_WRITES = new Set([
   "drive files copy",
   "drive files create",
   "drive permissions create",
+  // Resolving a Drive access request is the same act as a share, reached from
+  // the other direction: the USER asked for access to an agent-owned file and
+  // the agent grants it. It was absent from this list, so the one path a user
+  // had to recover from the sharing outage was refused too
+  // (agent_failures 1986). Held to the same in-district shape rules below.
+  "drive accessproposals resolve",
   // The `+draft` helper is the form psd-workspace/SKILL.md actually documents
   // for composing a draft (it is the worked example in two places), and it is
   // how the model reaches drafting in practice. Only the canonical
@@ -128,6 +134,7 @@ const AGENT_ONLY_WRITES = new Set([
   "drive files copy",
   "drive files create",
   "drive permissions create",
+  "drive accessproposals resolve",
   "sheets spreadsheets batchupdate",
   "sheets spreadsheets create",
   "sheets spreadsheets values append",
@@ -452,6 +459,46 @@ function isDocumentedShareShape(
   return false
 }
 
+// Fields on a Drive accessProposals.resolve call. The proposal itself carries
+// the requester and the file, so the only things we choose here are whether to
+// accept and at what role.
+const ACCESS_PROPOSAL_FIELDS = new Set([
+  "fileid",
+  "proposalid",
+  "action",
+  "role",
+  "view",
+  "sendnotification",
+])
+const ACCESS_PROPOSAL_ACTIONS = new Set(["accept", "deny"])
+
+/**
+ * Resolving an access proposal grants the REQUESTER access, so it is held to
+ * the same role ceiling as a named-person share: reader, commenter or writer,
+ * never owner. `deny` needs no role at all.
+ *
+ * Allowlist, fails closed — an unparseable payload or an unrecognized key
+ * refuses the call.
+ */
+function validateAccessProposalResolve(argv: readonly string[]): void {
+  const refuse = "Access proposals resolve to reader, commenter or writer only"
+  const resource = jsonResource(argv) ?? parseObjectArgument(argv, "--params")
+  if (!resource) throw new Error(refuse)
+  const keys = Object.keys(resource)
+  if (keys.length === 0) throw new Error(refuse)
+  if (!keys.every((key) => ACCESS_PROPOSAL_FIELDS.has(key.toLowerCase()))) {
+    throw new Error(refuse)
+  }
+  const action =
+    typeof resource.action === "string" ? resource.action.toLowerCase() : null
+  if (!action || !ACCESS_PROPOSAL_ACTIONS.has(action)) throw new Error(refuse)
+  if (action === "deny") return
+  // Drive takes the accepted role as either a string or a single-element list.
+  const rawRole = Array.isArray(resource.role) ? resource.role[0] : resource.role
+  const role = typeof rawRole === "string" ? rawRole.toLowerCase() : null
+  if (!role || !PERMISSION_ROLES_NAMED.has(role)) throw new Error(refuse)
+}
+
 function validateGmailModify(argv: readonly string[]): void {
   const payload = parseObjectArgument(argv, "--json")
   if (!payload) throw new Error("Gmail modify requires a valid --json object")
@@ -551,6 +598,9 @@ function validateWorkspaceMutation(
   if (operation === "gmail users messages modify") validateGmailModify(argv)
   if (operation === "drive permissions create") {
     validateDriveShareShape(argv, ownerEmail)
+  }
+  if (operation === "drive accessproposals resolve") {
+    validateAccessProposalResolve(argv)
   }
 }
 

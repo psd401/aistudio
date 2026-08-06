@@ -899,3 +899,64 @@ describe("Drive shares back to the requesting user", () => {
     ).toThrow(/limited to/)
   })
 })
+
+// Resolving an access request is a share reached from the other direction: the
+// user asked, the agent grants. It was missing from the allowlist entirely, so
+// the one recovery path users had during the sharing outage was refused too
+// (agent_failures 1986).
+describe("Drive access proposals", () => {
+  const resolve = (resource: Record<string, unknown>) =>
+    validateWorkspaceCommand({
+      scope: "agent",
+      argv: ["drive", "accessproposals", "resolve", "--json", JSON.stringify(resource)],
+    })
+
+  it.each([["reader"], ["commenter"], ["writer"]])("accepts at role %s", (role) => {
+    expect(() =>
+      resolve({ fileId: "f", proposalId: "p", action: "accept", role })
+    ).not.toThrow()
+  })
+
+  it("accepts a role passed as a single-element list", () => {
+    expect(() =>
+      resolve({ fileId: "f", proposalId: "p", action: "accept", role: ["writer"] })
+    ).not.toThrow()
+  })
+
+  it("allows a denial without a role", () => {
+    expect(() =>
+      resolve({ fileId: "f", proposalId: "p", action: "deny" })
+    ).not.toThrow()
+  })
+
+  it.each([
+    ["owner role", { fileId: "f", proposalId: "p", action: "accept", role: "owner" }],
+    ["organizer role", { fileId: "f", proposalId: "p", action: "accept", role: "organizer" }],
+    ["accept with no role", { fileId: "f", proposalId: "p", action: "accept" }],
+    ["unknown action", { fileId: "f", proposalId: "p", action: "escalate", role: "writer" }],
+    ["unknown key", { fileId: "f", proposalId: "p", action: "accept", role: "writer", extra: 1 }],
+  ])("refuses %s", (_name, resource) => {
+    expect(() => resolve(resource)).toThrow(/reader, commenter or writer/)
+  })
+
+  it("refuses an unparseable payload", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "agent",
+        argv: ["drive", "accessproposals", "resolve"],
+      })
+    ).toThrow(/reader, commenter or writer/)
+  })
+
+  it("stays off the user slot", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: [
+          "drive", "accessproposals", "resolve",
+          "--json", '{"fileId":"f","proposalId":"p","action":"accept","role":"writer"}',
+        ],
+      })
+    ).toThrow(/agent-owned/)
+  })
+})

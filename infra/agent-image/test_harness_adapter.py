@@ -1453,3 +1453,54 @@ class ChatErrorClassificationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFailedPartialNamesSideEffects(unittest.TestCase):
+    """"Some steps may have already run" is unactionable — name them.
+
+    A principal told only that something *may* have happened cannot tell whether
+    a doc was created, an event booked, or nothing at all. The harness records
+    every completed tool call, so it can say which (agent_failures: 11 rows /
+    7 users got the vague form).
+    """
+
+    def test_names_the_tools_that_completed(self):
+        text = harness_adapter._frame_failed_partial(
+            "",
+            [
+                {"name": "docs.create", "status": "success"},
+                {"name": "drive.share", "status": "error"},
+            ],
+        )
+        self.assertIn("docs.create", text)
+        self.assertIn("drive.share", text)
+        self.assertIn("check those before retrying", text)
+
+    def test_says_retry_is_safe_when_nothing_ran(self):
+        text = harness_adapter._frame_failed_partial("", [])
+        self.assertIn("safe to retry", text)
+
+    def test_ignores_tools_still_in_flight(self):
+        # A started-but-unfinished call is not a known side effect.
+        text = harness_adapter._frame_failed_partial(
+            "", [{"name": "docs.create", "status": "running"}]
+        )
+        self.assertIn("safe to retry", text)
+
+    def test_dedupes_and_caps_a_long_tool_list(self):
+        calls = [{"name": f"tool{i}", "status": "success"} for i in range(9)]
+        calls += [{"name": "tool0", "status": "success"}]  # duplicate
+        text = harness_adapter._frame_failed_partial("", calls)
+        self.assertIn("+4 more", text)
+        self.assertEqual(text.count("tool0"), 1)
+
+    def test_preserves_the_partial_answer(self):
+        text = harness_adapter._frame_failed_partial(
+            "Here is what I found", [{"name": "psd-data.query", "status": "success"}]
+        )
+        self.assertIn("Here is what I found", text)
+        self.assertIn("psd-data.query", text)
+
+    def test_unknown_shape_keeps_the_conservative_warning(self):
+        text = harness_adapter._frame_failed_partial("", None)
+        self.assertIn("may have already run", text)

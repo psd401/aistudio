@@ -243,7 +243,7 @@ def _classify_chat_error(error_message: str) -> str:
     return "OpenClawChatError"
 
 
-def _frame_failed_partial(partial: str) -> str:
+def _frame_failed_partial(partial: str, completed_tools=None) -> str:
     """Wrap a failed/degraded turn so it is never presented as a clean answer.
 
     When a turn dies mid-task the model has usually emitted some scratchpad
@@ -254,18 +254,50 @@ def _frame_failed_partial(partial: str) -> str:
     is no partial, return a standalone error.
 
     `partial` must already be chat-formatted (the frame text is plain).
+
+    `completed_tools` names the tool calls that finished before the turn died.
+    "Some steps may have already run" is unactionable on its own — a principal
+    told that has no way to know whether a doc was created, an event booked, or
+    nothing at all happened. We KNOW which tools completed, so say so.
     """
     partial = (partial or "").strip()
+    ran = _describe_completed_tools(completed_tools)
     if partial:
         return (
             "⚠️ I couldn't finish that — I hit a problem partway "
-            "through and some steps may have already run. Here's how far I "
-            "got:\n\n" + partial
+            f"through.{ran} Here's how far I got:\n\n" + partial
         )
     return (
         "⚠️ I couldn't complete that — I hit a problem partway "
-        "through. Some steps may have already run, so please check before "
-        "retrying."
+        f"through.{ran} Please check before retrying."
+    )
+
+
+def _describe_completed_tools(tool_calls) -> str:
+    """Render the finished tool calls as a short clause, or '' when none ran.
+
+    Deduplicated and capped: a turn that looped over 40 files should not paste
+    40 identical names into a Chat message. When nothing completed we say so
+    outright, because "nothing ran" is the single most useful thing a user can
+    be told here — it means retrying is safe.
+    """
+    if not isinstance(tool_calls, list):
+        return " Some steps may have already run, so please check before retrying."
+    names = []
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        if call.get("status") not in ("success", "error"):
+            continue
+        name = call.get("name")
+        if isinstance(name, str) and name and name != "unknown" and name not in names:
+            names.append(name)
+    if not names:
+        return " No actions had run yet, so it's safe to retry."
+    shown = ", ".join(names[:5])
+    more = f" (+{len(names) - 5} more)" if len(names) > 5 else ""
+    return (
+        f" I had already run: {shown}{more} — please check those before retrying."
     )
 
 
@@ -1252,7 +1284,8 @@ class OpenClawAdapter(HarnessAdapter):
                             err_text = _frame_failed_partial(
                                 _format_for_chat(visible_response)
                                 if visible_response
-                                else ""
+                                else "",
+                                tool_calls,
                             )
                             # An errored turn can still have burned tokens
                             # before it failed — bill them rather than
@@ -1531,7 +1564,9 @@ class OpenClawAdapter(HarnessAdapter):
                 },
             )
             return _result(
-                _frame_failed_partial(_format_for_chat(response_text.strip())),
+                _frame_failed_partial(
+                    _format_for_chat(response_text.strip()), tool_calls
+                ),
                 failed=True,
                 error_class=error_class,
             )
@@ -1575,7 +1610,9 @@ class OpenClawAdapter(HarnessAdapter):
                 # failed turn — frame it so it doesn't read as a finished
                 # answer (issue #1138 F4).
                 return _result(
-                    _frame_failed_partial(_format_for_chat(response_text.strip())),
+                    _frame_failed_partial(
+                        _format_for_chat(response_text.strip()), tool_calls
+                    ),
                     failed=True,
                     error_class="ChatDeadlineExpiredPartial",
                 )
