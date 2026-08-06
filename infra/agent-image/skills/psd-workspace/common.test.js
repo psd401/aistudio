@@ -225,10 +225,36 @@ describe('permission mutation provenance gate', () => {
     expect(share({ fileId: 'f', type: 'domain', role: 'writer', domain: 'psd401.net' })).toBe(false);
     expect(share({ fileId: 'f', type: 'domain', role: 'reader', domain: 'gmail.com' })).toBe(false);
     expect(share({ fileId: 'f', type: 'user', role: 'writer', emailAddress: 'evil@outside.com' })).toBe(false);
-    expect(share({ fileId: 'f', type: 'user', role: 'owner', emailAddress: 'hagelk@psd401.net' })).toBe(false);
+    // Third party, not the caller — the caller exemption must not reach here.
+    expect(share({ fileId: 'f', type: 'user', role: 'owner', emailAddress: 'songstadw@psd401.net' })).toBe(false);
     expect(share({ fileId: 'f', type: 'user', role: 'reader', emailAddress: 'evil@outside.com' })).toBe(false);
     expect(share({ fileId: 'f', type: 'anyone', role: 'reader' })).toBe(false);
     expect(share({ fileId: 'f', type: 'group', role: 'reader', emailAddress: 'staff@psd401.net' })).toBe(false);
+  });
+
+  // The agent works for one person, and that person may receive anything it
+  // produces or touches — any role, ownership transfer included. The rest of
+  // this gate exists to stop the agent handing data to THIRD parties.
+  test('shares back to the caller are unrestricted', () => {
+    for (const role of ['reader', 'commenter', 'writer', 'owner', 'fileOrganizer']) {
+      expect(share({ fileId: 'f', type: 'user', role, emailAddress: 'hagelk@psd401.net' })).toBe(true);
+    }
+    expect(share({
+      fileId: 'f', type: 'user', role: 'owner',
+      emailAddress: 'hagelk@psd401.net', transferOwnership: true, moveToNewOwnersRoot: true,
+    })).toBe(true);
+    // Case and surrounding space do not matter.
+    expect(share({ fileId: 'f', type: 'user', role: 'owner', emailAddress: '  HagelK@PSD401.net ' })).toBe(true);
+  });
+
+  test('the caller exemption does not extend to a third party', () => {
+    // Pinned to the resolved caller (CTX.ownerEmail), so naming someone else
+    // falls back to the ordinary allowlist.
+    expect(share({
+      fileId: 'f', type: 'user', role: 'owner',
+      emailAddress: 'someone.else@psd401.net', transferOwnership: true,
+    })).toBe(false);
+    expect(share({ fileId: 'f', type: 'user', role: 'owner', emailAddress: 'songstadw@psd401.net' })).toBe(false);
   });
 
   test('allowlist fails closed on unknown keys and missing fields', () => {
@@ -236,15 +262,15 @@ describe('permission mutation provenance gate', () => {
     // allowlist, so its presence refuses the whole call.
     expect(share({
       fileId: 'f', type: 'user', role: 'writer',
-      emailAddress: 'hagelk@psd401.net', transferOwnership: true,
+      emailAddress: 'songstadw@psd401.net', transferOwnership: true,
     })).toBe(false);
     // A key we have not reasoned about poisons the payload, same all-or-nothing
     // contract as the metadata-update allowlist.
     expect(share({
       fileId: 'f', type: 'user', role: 'reader',
-      emailAddress: 'hagelk@psd401.net', unexpectedField: 'x',
+      emailAddress: 'songstadw@psd401.net', unexpectedField: 'x',
     })).toBe(false);
-    expect(share({ fileId: 'f', type: 'user', emailAddress: 'hagelk@psd401.net' })).toBe(false);
+    expect(share({ fileId: 'f', type: 'user', emailAddress: 'songstadw@psd401.net' })).toBe(false);
     expect(share({ fileId: 'f', type: 'user', role: 'reader' })).toBe(false);
     expect(share({ fileId: 'f', type: 'domain', role: 'reader' })).toBe(false);
     // No parseable payload at all — we cannot prove the shape, so refuse.

@@ -831,3 +831,71 @@ describe("Drive share shape at the broker boundary", () => {
     ).toThrow(/in-district/)
   })
 })
+
+// The agent works for exactly one person, and that person may receive anything
+// it produces or touches — any role, ownership transfer included. The other
+// share rules exist to stop the agent handing data to THIRD parties.
+describe("Drive shares back to the requesting user", () => {
+  const CALLER = "hagelk@psd401.net"
+  const share = (resource: Record<string, unknown>, owner = CALLER) =>
+    validateWorkspaceCommand(
+      {
+        scope: "agent",
+        argv: ["drive", "permissions", "create", "--json", JSON.stringify(resource)],
+      },
+      owner
+    )
+
+  it.each([["reader"], ["commenter"], ["writer"], ["owner"], ["fileOrganizer"]])(
+    "allows role %s to the caller",
+    (role) => {
+      expect(() =>
+        share({ fileId: "f", type: "user", role, emailAddress: CALLER })
+      ).not.toThrow()
+    }
+  )
+
+  it("allows an ownership transfer to the caller", () => {
+    expect(() =>
+      share({
+        fileId: "f", type: "user", role: "owner",
+        emailAddress: CALLER, transferOwnership: true, moveToNewOwnersRoot: true,
+      })
+    ).not.toThrow()
+  })
+
+  it("matches the caller case-insensitively and ignores surrounding space", () => {
+    expect(() =>
+      share({ fileId: "f", type: "user", role: "owner", emailAddress: "  HagelK@PSD401.net " })
+    ).not.toThrow()
+  })
+
+  // The exemption is pinned to the SERVER-KNOWN caller, so a model naming a
+  // different person falls back to the ordinary allowlist.
+  it("does not extend to a third party", () => {
+    expect(() =>
+      share({
+        fileId: "f", type: "user", role: "owner",
+        emailAddress: "someone.else@psd401.net", transferOwnership: true,
+      })
+    ).toThrow(/limited to/)
+    expect(() =>
+      share({ fileId: "f", type: "user", role: "reader", emailAddress: "evil@outside.com" })
+    ).toThrow(/limited to/)
+  })
+
+  it("falls back to the allowlist when the caller is unknown", () => {
+    // No ownerEmail argument at all — the exemption cannot apply, so an owner
+    // role is judged by the ordinary allowlist and refused.
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "agent",
+        argv: [
+          "drive", "permissions", "create",
+          "--json",
+          JSON.stringify({ fileId: "f", type: "user", role: "owner", emailAddress: CALLER }),
+        ],
+      })
+    ).toThrow(/limited to/)
+  })
+})

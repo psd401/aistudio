@@ -204,7 +204,11 @@ export async function POST(request: NextRequest) {
   try {
     const token = await workspaceAccessToken(body, context.ownerEmail)
     if (!token.ok) return token.response
-    const result = await executeWorkspaceCommand(body, token.accessToken)
+    const result = await executeWorkspaceCommand(
+      body,
+      token.accessToken,
+      context.ownerEmail
+    )
     const outbound = outboundMessageAudit(body.argv)
     log.info(
       "Workspace command completed",

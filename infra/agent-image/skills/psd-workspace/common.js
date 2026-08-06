@@ -662,7 +662,22 @@ function isPermittedInDistrictShare(commandString, tokens, context) {
 
   const resource = extractDriveResource(commandString, tokens);
   if (!resource) return false;
+  // Handing work back to the person who asked for it is unrestricted: any role,
+  // ownership transfer included. The other rules here exist to stop the agent
+  // giving data to THIRD parties, not to stand between it and its own owner.
+  // `context.ownerEmail` is the resolved caller, not a model-supplied address.
+  if (isShareToCaller(resource, context.ownerEmail)) return true;
   return isDocumentedShareShape(resource);
+}
+
+/** True when the recipient IS the caller who owns this agent. */
+function isShareToCaller(resource, ownerEmail) {
+  if (!resource || typeof ownerEmail !== 'string' || !ownerEmail) return false;
+  const type = typeof resource.type === 'string' ? resource.type.toLowerCase() : null;
+  if (type !== 'user') return false;
+  const email = resource.emailAddress;
+  if (typeof email !== 'string') return false;
+  return email.trim().toLowerCase() === ownerEmail.trim().toLowerCase();
 }
 
 /**

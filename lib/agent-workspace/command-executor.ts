@@ -382,12 +382,46 @@ const PSD_EMAIL = /^[^\s@]+@psd401\.net$/i
  * ownership could be handed away entirely — all past the in-district boundary
  * the exception is written around. This is an ALLOWLIST and fails closed.
  */
-function validateDriveShareShape(argv: readonly string[]): void {
-  if (!isDocumentedShareShape(jsonResource(argv))) {
+function validateDriveShareShape(
+  argv: readonly string[],
+  ownerEmail?: string
+): void {
+  const resource = jsonResource(argv)
+  // Handing work back to the person who asked for it is unrestricted: any role,
+  // ownership transfer included, on anything the agent can reach. `ownerEmail`
+  // is the SERVER-KNOWN caller from the signed invocation context, never an
+  // address out of the model's payload, so this cannot be widened by asking.
+  if (isShareToCaller(resource, ownerEmail)) return
+  if (!isDocumentedShareShape(resource)) {
     throw new Error(
-      "Drive shares are limited to an in-district named person (reader/commenter/writer) or a domain-wide reader"
+      "Drive shares are limited to the requesting user, an in-district named person (reader/commenter/writer), or a domain-wide reader"
     )
   }
+}
+
+/**
+ * True when the share's recipient IS the caller — the human who owns this agent.
+ *
+ * The agent exists to do work for one person, and that person may receive
+ * anything it produces or touches, in any role, including having ownership of a
+ * Doc transferred to their account. The restrictions elsewhere in this file
+ * exist to stop the agent handing data to THIRD parties; they were never meant
+ * to stand between the agent and its own owner.
+ *
+ * Matching is against the server-resolved caller, so a model that writes someone
+ * else's address into the payload simply falls through to the normal allowlist.
+ */
+function isShareToCaller(
+  resource: Record<string, unknown> | null,
+  ownerEmail?: string
+): boolean {
+  if (!resource || !ownerEmail) return false
+  const type =
+    typeof resource.type === "string" ? resource.type.toLowerCase() : null
+  if (type !== "user") return false
+  const email = resource.emailAddress
+  if (typeof email !== "string") return false
+  return email.trim().toLowerCase() === ownerEmail.trim().toLowerCase()
 }
 
 /** True only for the two documented shapes. Anything else — including an
@@ -461,13 +495,19 @@ function validateWorkspaceArguments(argv: readonly string[]): void {
   }
 }
 
+interface MutationContext {
+  operation: string
+  action: string
+  tokens: string[]
+  ownerEmail?: string
+}
+
 function validateWorkspaceMutation(
   argv: readonly string[],
   scope: WorkspaceCommand["scope"],
-  operation: string,
-  action: string,
-  tokens: string[]
+  context: MutationContext
 ): void {
+  const { operation, action, tokens, ownerEmail } = context
   const helperVerb = tokens.find((token) => token.startsWith("+"))
   if (helperVerb === "+read") {
     throw new Error(
@@ -509,7 +549,9 @@ function validateWorkspaceMutation(
     throw new Error("This operation must use the agent-owned Workspace account")
   }
   if (operation === "gmail users messages modify") validateGmailModify(argv)
-  if (operation === "drive permissions create") validateDriveShareShape(argv)
+  if (operation === "drive permissions create") {
+    validateDriveShareShape(argv, ownerEmail)
+  }
 }
 
 /**
@@ -517,14 +559,17 @@ function validateWorkspaceMutation(
  * runtime has no Google credential and no gws binary; only commands accepted
  * here are executed with an owner-derived token.
  */
-export function validateWorkspaceCommand(command: WorkspaceCommand): void {
+export function validateWorkspaceCommand(
+  command: WorkspaceCommand,
+  ownerEmail?: string
+): void {
   const { argv, scope } = command
   if (scope !== "agent" && scope !== "user") {
     throw new Error("Workspace scope must be agent or user")
   }
   validateWorkspaceArguments(argv)
   const { operation, action, tokens } = normalizedOperation(argv)
-  validateWorkspaceMutation(argv, scope, operation, action, tokens)
+  validateWorkspaceMutation(argv, scope, { operation, action, tokens, ownerEmail })
 }
 
 export interface WorkspaceOutboundAudit {
@@ -655,10 +700,15 @@ export function validateScheduledWorkspaceCommand(
  */
 async function assertAgentOwnsSharedFile(
   command: WorkspaceCommand,
-  accessToken: string
+  accessToken: string,
+  ownerEmail?: string
 ): Promise<void> {
   const { operation } = normalizedOperation(command.argv)
   if (operation !== "drive permissions create") return
+  // Ownership only gates shares to THIRD parties. The caller may receive
+  // anything the agent can reach, so a share back to them skips the lookup —
+  // and skips a Drive round-trip on the most common share by far.
+  if (isShareToCaller(jsonResource(command.argv), ownerEmail)) return
 
   const fileId = shareTargetFileId(command.argv)
   if (!fileId) {
@@ -717,10 +767,11 @@ async function fetchDriveOwnedByMe(
 
 export async function executeWorkspaceCommand(
   command: WorkspaceCommand,
-  accessToken: string
+  accessToken: string,
+  ownerEmail?: string
 ): Promise<WorkspaceCommandResult> {
-  validateWorkspaceCommand(command)
-  await assertAgentOwnsSharedFile(command, accessToken)
+  validateWorkspaceCommand(command, ownerEmail)
+  await assertAgentOwnsSharedFile(command, accessToken, ownerEmail)
   const binary = process.env.GWS_EXECUTABLE || "/usr/local/bin/gws"
   // The pinned gws binary writes non-JSON responses to `download.<ext>` even
   // when the caller does not pass --output. Execute it in an empty, private
