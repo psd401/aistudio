@@ -7,7 +7,7 @@
 AI Studio includes an enterprise-grade content safety system specifically designed for K-12 educational environments. This system provides two complementary protections:
 
 1. **Content Filtering** - Blocks inappropriate content in both user inputs and AI responses
-2. **Zero-data-retention inference plus detect-only PII gates** - AI providers do not retain inference data, while durable Nexus memory writes refuse detected PII and published agent content records PII telemetry
+2. **Zero-data-retention inference plus detect-only PII telemetry** - AI providers do not retain inference data, while durable Nexus memory writes and published agent content both record PII telemetry without refusing on a detection
 
 These features help school districts meet COPPA, FERPA, and CIPA compliance requirements while providing students safe access to frontier AI models.
 
@@ -71,7 +71,7 @@ The content filtering system evaluates all messages against configurable safety 
 
 When content is blocked, users receive an age-appropriate message explaining that their request couldn't be processed, without revealing specific filtering details that could be used for circumvention.
 
-### PII Privacy Boundary (ZDR + Detect-Only Gates)
+### PII Privacy Boundary (ZDR + Detect-Only Telemetry)
 
 AI inference runs under zero-data-retention agreements, so names and other context reach the selected model byte-identical and are not retained by the provider. AI Studio does not replace PII with reversible placeholders. This is important for tool calls such as district-data queries, where the model must be able to use the real name supplied by the authorized user.
 
@@ -95,16 +95,16 @@ The detection helper applies the existing K-12 type allowlist and confidence flo
 | **Student IDs** | "2240393" (7 digits starting with 2) | Custom Pattern |
 | **Custom Identifiers** | Configurable per district | Custom Pattern |
 
-**How Inference and Durable Gates Work:**
+**How Inference and Durable Detection Work:**
 
 ```
 Authorized user input with a student's name
      ├── AI inference → byte-identical input under a ZDR agreement
-     ├── Nexus memory write → Comprehend detect-only check; refuse on PII/error
+     ├── Nexus memory write → Comprehend detect-only telemetry; no rewrite
      └── Published agent content → Comprehend detect-only telemetry; no rewrite
 ```
 
-Bedrock Guardrails continue to evaluate both inference input and output independently of these PII gates.
+Bedrock Guardrails continue to evaluate both inference input and output independently of this PII detection.
 
 ### Violation Notifications
 
@@ -146,8 +146,8 @@ Administrators can receive real-time notifications when safety violations occur:
 │           ▼                                                         │
 │      User Response                                                  │
 │                                                                     │
-│  Durable side gates:                                                │
-│  Nexus memory ──► Comprehend detect-only ──► refuse PII/errors       │
+│  Durable side telemetry:                                            │
+│  Nexus memory ──► Comprehend detect-only ──► telemetry only          │
 │  Agent publish ──► Comprehend detect-only ──► telemetry only         │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -530,7 +530,7 @@ export const CUSTOM_PII_PATTERNS: CustomPIIPattern[] = [
 | Case number (CASE-NNNN) | `/\bCASE-\d{4}\b/i` | CASE-1234 |
 | Custom ID with prefix | `/\bPSD-\d{6}\b/` | PSD-123456 |
 
-Custom patterns participate in the two detect-only gates; they do not rewrite inference content.
+Custom patterns participate in the two detect-only telemetry points; they do not rewrite inference content and do not refuse a write.
 
 ## Local Development
 
@@ -553,7 +553,7 @@ The content safety system logs detailed metrics:
 - `guardrails.input.blocked` - Number of inputs blocked
 - `guardrails.output.checked` - Number of outputs evaluated
 - `guardrails.output.blocked` - Number of outputs blocked
-- Detect-only PII events are emitted by the Nexus memory and agent-content gate logs
+- Detect-only PII events are emitted by the Nexus memory and agent-content telemetry logs (the memory event carries the write's `source`, so unattended auto-extraction can be queried on its own)
 
 ### Log Analysis
 
@@ -589,10 +589,13 @@ Content filtering adds approximately 50-100ms latency per request. This is imper
 
 ### What happens if the safety service is unavailable?
 
-Bedrock Guardrails fail open for service continuity and log the degraded
-evaluation. The two Comprehend gates are intentionally different: Nexus memory
-writes fail closed when detection cannot complete, while published agent
-content remains unchanged and logs a non-fatal detector error.
+Everything fails open for service continuity and logs the degraded evaluation.
+Bedrock Guardrails, Nexus memory writes, and published agent content all
+proceed when Comprehend cannot complete a detection; the detector error is
+recorded as a non-fatal warning rather than costing the user their write.
+
+Content safety (`processInput`) is the exception and the one hard gate: a
+memory write it blocks is refused, before embedding or any database access.
 
 ### Can students bypass the content filtering?
 
@@ -604,7 +607,7 @@ AI Studio does not store reversible PII token mappings. Ordinary inference conte
 
 ### Can I disable these features?
 
-Bedrock content filtering can be disabled with `CONTENT_SAFETY_ENABLED=false`. The two durable-content detect-only PII gates are explicit application safety boundaries rather than a general inference feature toggle.
+Bedrock content filtering can be disabled with `CONTENT_SAFETY_ENABLED=false`. The two durable-content PII detection points are observability, not boundaries: they never refuse a write, so there is nothing to toggle off. The content-safety gate (`processInput`) remains the boundary for durable writes.
 
 ## Related Documentation
 
