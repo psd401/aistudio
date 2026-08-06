@@ -96,6 +96,9 @@ const LEGEND_SWATCH_GAP = 10;
 const LEGEND_ENTRY_SPACING = 34;
 const LEGEND_ROW_GAP = 8;
 const LEGEND_MAX_ROWS = 2;
+// Shortest label worth drawing a legend entry for. Below this an entry is a
+// swatch and noise, and the row no longer fits regardless.
+const LEGEND_MIN_CHARS = 4;
 // A label short enough to fit but long enough to tell two series apart.
 const LEGEND_READABLE_CHARS = 16;
 
@@ -620,6 +623,9 @@ function categorySlots(area, count) {
  * Exported for tests. One row is preferred; with many series a single row
  * forces every label down to the same truncated stub ("Very Long." six times
  * identifies nothing), so entries wrap and each row's share of the width grows.
+ *
+ * `maxChars: 0` means the legend does NOT fit at any label length the rows
+ * allow — the caller must refuse rather than draw. See seriesLegendFits.
  */
 function seriesLegendPlan(labelCount, areaWidth, scale) {
   const swatch = FONT_HEIGHT * scale;
@@ -627,12 +633,17 @@ function seriesLegendPlan(labelCount, areaWidth, scale) {
   // estimated — an arithmetic approximation overflowed the right edge, the
   // same way the pie legend used to.
   const widestThatFits = (perRow) => {
-    for (let chars = 40; chars >= 4; chars--) {
+    for (let chars = 40; chars >= LEGEND_MIN_CHARS; chars--) {
       const entry = swatch + LEGEND_SWATCH_GAP + textWidth('M'.repeat(chars), scale);
       const total = entry * perRow + LEGEND_ENTRY_SPACING * (perRow - 1);
       if (total <= areaWidth) return chars;
     }
-    return 4;
+    // 0, not LEGEND_MIN_CHARS. Returning the minimum as though it fit is what
+    // let an over-full row run past the right edge: at 21 series the plan
+    // claimed 11 four-character entries per row, which measures 1440px in a
+    // 1350px plot, so the last series was drawn off-canvas and could not be
+    // identified at all.
+    return 0;
   };
   for (let rows = 1; rows <= LEGEND_MAX_ROWS; rows++) {
     const perRow = Math.ceil(labelCount / rows);
@@ -644,7 +655,12 @@ function seriesLegendPlan(labelCount, areaWidth, scale) {
       return { rows, perRow, maxChars };
     }
   }
-  return { rows: 1, perRow: labelCount, maxChars: 4 };
+  return { rows: 1, perRow: labelCount, maxChars: 0 };
+}
+
+/** Whether a series legend of this size can be drawn inside the plot width. */
+function seriesLegendFits(labelCount, areaWidth, scale) {
+  return seriesLegendPlan(labelCount, areaWidth, scale).maxChars > 0;
 }
 
 function drawSeriesLegend(canvas, seriesList, area) {
@@ -959,6 +975,18 @@ function drawChart(canvas, config, area) {
     const values = readNumbers(seriesList[0].data);
     drawPieChart(canvas, readLabels(config.data, values.length), values, area);
     return;
+  }
+  // A series the legend cannot name is an unidentifiable colour on the canvas,
+  // which is the same class of problem as drawing only datasets[0]: the chart
+  // looks complete and isn't. Refuse instead, before anything is drawn, and say
+  // how many series would fit.
+  if (seriesList.length > 1 && !seriesLegendFits(seriesList.length, area.width, TICK_SCALE)) {
+    let fits = seriesList.length - 1;
+    while (fits > 1 && !seriesLegendFits(fits, area.width, TICK_SCALE)) fits--;
+    throw new Error(
+      `too many series to label (${seriesList.length}); the legend holds at most ` +
+      `${fits} — chart fewer series, or split them across charts`,
+    );
   }
   const drawn = seriesList.map(entry => ({
     label: entry.label,

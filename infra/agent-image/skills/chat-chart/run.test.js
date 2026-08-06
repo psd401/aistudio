@@ -1013,6 +1013,30 @@ test('a series missing a value at one point is rejected, not silently zeroed', (
   assert.match(result.stderr, /Reading/);
 });
 
+test('a legend that cannot fit is refused, not clipped off the canvas', () => {
+  // widestThatFits used to bottom out at 4 characters and report that as a
+  // valid plan even when it did not fit: 21 series became 11 entries per row,
+  // measuring 1440px inside a 1350px plot, so the last series was drawn past
+  // the right edge and could not be identified.
+  const series = (n) => ({
+    type: 'bar',
+    data: {
+      labels: ['A', 'B'],
+      datasets: Array.from({ length: n }, (_, i) => ({ label: `Srs${i}`, data: [i + 1, i + 2] })),
+    },
+    options: {},
+  });
+
+  assert.strictEqual(seriesLegendPlan(21, 1350, 3).maxChars, 0, 'an unfittable plan must not claim a width');
+  assert.ok(seriesLegendPlan(20, 1350, 3).maxChars > 0);
+
+  assert.throws(() => renderChartPng(series(21)), /too many series to label \(21\)/);
+  // The refusal names a number the caller can act on rather than just refusing.
+  assert.throws(() => renderChartPng(series(21)), /at most 20/);
+  // And the boundary still renders — the guard must not cost a legal chart.
+  assert.ok(renderChartPng(series(20)).length > 0);
+});
+
 test('a renderer failure is reported, not just exited on', () => {
   // renderLocal used to call the synchronous fail(), which process.exit()s
   // before main()'s rejection handler can run — so the one failure class this
