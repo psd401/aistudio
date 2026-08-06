@@ -456,6 +456,8 @@ function defineTrustedWorkspaceCommandPolicySuite1Part4() {
     ["calendar", "events", "update"],
     ["docs", "documents", "batchUpdate"],
     ["drive", "permissions", "create"],
+    ["forms", "forms", "create"],
+    ["forms", "forms", "batchUpdate"],
     ["sheets", "spreadsheets", "batchUpdate"],
     ["slides", "presentations", "batchUpdate"],
     ["tasks", "tasks", "patch"],
@@ -466,6 +468,17 @@ function defineTrustedWorkspaceCommandPolicySuite1Part4() {
     expect(() =>
       validateWorkspaceCommand({ scope: "user", argv })
     ).toThrow(/must use the agent-owned Workspace account/)
+  })
+
+  it.each([
+    ["forms", "forms", "create"],
+    ["forms", "forms", "batchUpdate"],
+  ])("still allows %s %s %s on the agent slot", (...argv) => {
+    // The slot restriction above must not have made the operation unreachable:
+    // the agent slot is the one psd-workspace/SKILL.md documents for Forms.
+    expect(() =>
+      validateWorkspaceCommand({ scope: "agent", argv })
+    ).not.toThrow()
   })
 }
 

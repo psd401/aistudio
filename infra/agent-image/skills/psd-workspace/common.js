@@ -337,6 +337,14 @@ const USER_SCOPE_FORBIDDEN = [
     reason: 'creating a Google Sheet owned by the user (create as the agent and share explicitly instead)' },
   { pattern: /\bslides[\s.]+presentations[\s.]+create\b/i,
     reason: 'creating a Google Slides deck owned by the user (create as the agent and share explicitly instead)' },
+  // A Form is authored content like the three above, and its questions are
+  // written by a SEPARATE call (`forms.forms.batchUpdate`) rather than in the
+  // create body — so unlike Docs/Sheets/Slides the mutation needs its own entry
+  // here, or an agent-created Form could still be populated as the user.
+  { pattern: /\bforms[\s.]+forms[\s.]+create\b/i,
+    reason: 'creating a Google Form owned by the user (create as the agent and hand it over instead)' },
+  { pattern: /\bforms[\s.]+forms[\s.]+batchUpdate\b/i,
+    reason: 'writing questions into a Form as the user (build the Form as the agent and hand it over instead)' },
 ];
 
 // Structural mutations of existing content. These were previously refused here
