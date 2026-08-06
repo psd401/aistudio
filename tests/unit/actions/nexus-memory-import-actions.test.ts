@@ -61,6 +61,7 @@ import {
   extractImportCandidates,
   saveImportedMemories,
 } from "@/actions/nexus/memory-import.actions"
+import { ContentSafetyBlockedError } from "@/lib/streaming/types"
 import {
   MAX_MEMORY_IMPORT_CHARS,
   MAX_MEMORY_IMPORT_SAVE_BATCH_CANDIDATES,
@@ -262,6 +263,48 @@ describe("Nexus memory import save actions", () => {
       },
     })
     expect(mockSave).toHaveBeenCalledTimes(3)
+  })
+
+  it("returns a user-safe reason for every rejected candidate", async () => {
+    mockSave
+      .mockRejectedValueOnce(
+        new ContentSafetyBlockedError(
+          "Blocked by policy",
+          ["guardrail"],
+          "input",
+        ),
+      )
+      .mockRejectedValueOnce(
+        new Error("connect ECONNREFUSED 10.0.0.5:5432"),
+      )
+
+    const result = await saveImportedMemories({
+      vendor: "chatgpt",
+      candidates: [
+        { content: "Blocked fact", category: "profile" },
+        { content: "Infrastructure failure", category: "context" },
+      ],
+    })
+
+    expect(result).toMatchObject({
+      isSuccess: true,
+      data: {
+        total: 2,
+        successful: 0,
+        failed: 2,
+        results: [
+          { index: 0, status: "failed", reason: "Blocked by policy" },
+          {
+            index: 1,
+            status: "failed",
+            reason: "This memory could not be saved. Try again in a moment.",
+          },
+        ],
+      },
+    })
+    // Provider, database, and network internals must not reach the browser.
+    expect(JSON.stringify(result)).not.toContain("ECONNREFUSED")
+    expect(mockRevalidatePath).not.toHaveBeenCalled()
   })
 
   it("blocks extraction and writes while account memory is disabled", async () => {

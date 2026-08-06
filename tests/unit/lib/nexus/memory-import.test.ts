@@ -1,29 +1,58 @@
+/* eslint-disable no-var */
+var mockLogWarn = jest.fn()
+/* eslint-enable no-var */
+
+// The module under test calls createLogger at import time, which is hoisted
+// above the mock-variable assignment — so the methods must dereference lazily.
+jest.mock("@/lib/logger", () => ({
+  createLogger: () => ({
+    info: jest.fn(),
+    warn: (...args: unknown[]) => mockLogWarn(...args),
+    error: jest.fn(),
+    debug: jest.fn(),
+  }),
+  generateRequestId: () => "request-1",
+  startTimer: () => jest.fn(),
+  sanitizeForLogging: (value: unknown) => value,
+  getLogContext: () => ({}),
+}))
+
 import type { LanguageModel } from "ai"
 import {
   createMemoryImportExtractor,
   DEFAULT_MEMORY_EXTRACTION_MODEL_ID,
   parseMemoryImportCandidates,
+  splitExtractionChunks,
 } from "@/lib/nexus/memory/memory-import"
+import { MAX_MEMORY_IMPORT_CANDIDATES } from "@/lib/nexus/memory/memory-constants"
+
+function toolResult(candidates: unknown[]) {
+  return {
+    text: "",
+    toolCalls: [
+      {
+        toolName: "submit_memory_candidates",
+        input: { candidates },
+      },
+    ],
+  }
+}
+
+beforeEach(() => {
+  jest.clearAllMocks()
+})
 
 describe("Nexus memory import extraction", () => {
   it("parses the forced extraction tool response", () => {
     expect(
-      parseMemoryImportCandidates({
-        text: "",
-        toolCalls: [
+      parseMemoryImportCandidates(
+        toolResult([
           {
-            toolName: "submit_memory_candidates",
-            input: {
-              candidates: [
-                {
-                  content: "Prefers concise answers",
-                  category: "preference",
-                },
-              ],
-            },
+            content: "Prefers concise answers",
+            category: "preference",
           },
-        ],
-      }),
+        ]),
+      ),
     ).toEqual([
       {
         content: "Prefers concise answers",
@@ -57,15 +86,7 @@ describe("Nexus memory import extraction", () => {
   it("uses the configured Bedrock model and treats pasted text as JSON data", async () => {
     const model = {} as LanguageModel
     const createModel = jest.fn().mockResolvedValue(model)
-    const runExtraction = jest.fn().mockResolvedValue({
-      text: "",
-      toolCalls: [
-        {
-          toolName: "submit_memory_candidates",
-          input: { candidates: [] },
-        },
-      ],
-    })
+    const runExtraction = jest.fn().mockResolvedValue(toolResult([]))
     const extract = createMemoryImportExtractor({
       getSetting: jest.fn().mockResolvedValue("custom-memory-model"),
       createModel,
@@ -104,5 +125,190 @@ describe("Nexus memory import extraction", () => {
       "amazon-bedrock",
       DEFAULT_MEMORY_EXTRACTION_MODEL_ID,
     )
+  })
+})
+
+describe("Nexus memory import candidate salvage", () => {
+  it("keeps the valid candidates when the batch holds an invalid entry", () => {
+    expect(
+      parseMemoryImportCandidates(
+        toolResult([
+          { content: "Works in education", category: "profile" },
+          { content: "Missing a category" },
+          { content: "", category: "context" },
+          { content: "Prefers concise answers", category: "preference" },
+        ]),
+      ),
+    ).toEqual([
+      { content: "Works in education", category: "profile" },
+      { content: "Prefers concise answers", category: "preference" },
+    ])
+  })
+
+  it("caps a salvaged batch at the import maximum", () => {
+    const candidates = Array.from(
+      { length: MAX_MEMORY_IMPORT_CANDIDATES + 10 },
+      (_value, index) => ({
+        content: `Fact ${index + 1}`,
+        category: "context",
+      }),
+    )
+
+    expect(parseMemoryImportCandidates(toolResult(candidates))).toHaveLength(
+      MAX_MEMORY_IMPORT_CANDIDATES,
+    )
+  })
+})
+
+describe("Nexus memory import chunking", () => {
+  it("keeps a paste inside the budget as a single chunk", () => {
+    expect(splitExtractionChunks("- One fact\n- Another fact")).toEqual([
+      "- One fact\n- Another fact",
+    ])
+    expect(splitExtractionChunks("   ")).toEqual([])
+  })
+
+  it("splits on line boundaries without losing content", () => {
+    const line = `- ${"x".repeat(60)}`
+    const text = Array.from({ length: 20 }, () => line).join("\n")
+
+    const chunks = splitExtractionChunks(text, 200)
+
+    expect(chunks.length).toBeGreaterThan(1)
+    for (const chunk of chunks) {
+      expect(chunk.length).toBeLessThanOrEqual(200)
+    }
+    expect(chunks.join("\n")).toBe(text)
+  })
+
+  it("splits a single oversized line on characters", () => {
+    expect(splitExtractionChunks("y".repeat(500), 200)).toEqual([
+      "y".repeat(200),
+      "y".repeat(200),
+      "y".repeat(100),
+    ])
+  })
+
+  it("extracts every chunk of a large paste and merges duplicates", async () => {
+    const pastedText = `- ${"a".repeat(8_000)}\n- ${"b".repeat(8_000)}`
+    const runExtraction = jest.fn(async (_model, prompt: string) =>
+      prompt.includes("aaaa")
+        ? toolResult([{ content: "Shared fact", category: "profile" }])
+        : toolResult([
+            { content: "Shared fact", category: "profile" },
+            { content: "Second fact", category: "context" },
+          ]),
+    )
+    const extract = createMemoryImportExtractor({
+      getSetting: jest.fn().mockResolvedValue(null),
+      createModel: jest.fn().mockResolvedValue({} as LanguageModel),
+      runExtraction,
+    })
+
+    await expect(
+      extract({ vendor: "chatgpt", pastedText }),
+    ).resolves.toEqual([
+      { content: "Shared fact", category: "profile" },
+      { content: "Second fact", category: "context" },
+    ])
+    expect(runExtraction).toHaveBeenCalledTimes(2)
+  })
+
+  it("returns the chunks that parsed when another chunk fails outright", async () => {
+    const pastedText = `- ${"a".repeat(8_000)}\n- ${"b".repeat(8_000)}`
+    const runExtraction = jest.fn(async (_model, prompt: string) =>
+      prompt.includes("aaaa")
+        ? { text: "not json", toolCalls: [] }
+        : toolResult([{ content: "Second fact", category: "context" }]),
+    )
+    const extract = createMemoryImportExtractor({
+      getSetting: jest.fn().mockResolvedValue(null),
+      createModel: jest.fn().mockResolvedValue({} as LanguageModel),
+      runExtraction,
+    })
+
+    await expect(
+      extract({ vendor: "chatgpt", pastedText }),
+    ).resolves.toEqual([{ content: "Second fact", category: "context" }])
+    expect(runExtraction).toHaveBeenCalledTimes(3)
+  })
+})
+
+describe("Nexus memory import extraction retries and diagnostics", () => {
+  it("retries once when the response cannot be parsed", async () => {
+    const runExtraction = jest
+      .fn()
+      .mockResolvedValueOnce({ text: "not json", toolCalls: [] })
+      .mockResolvedValueOnce(
+        toolResult([{ content: "Recovered fact", category: "context" }]),
+      )
+    const extract = createMemoryImportExtractor({
+      getSetting: jest.fn().mockResolvedValue(null),
+      createModel: jest.fn().mockResolvedValue({} as LanguageModel),
+      runExtraction,
+    })
+
+    await expect(
+      extract({ vendor: "claude", pastedText: "- One fact" }),
+    ).resolves.toEqual([
+      { content: "Recovered fact", category: "context" },
+    ])
+    expect(runExtraction).toHaveBeenCalledTimes(2)
+  })
+
+  it("logs response shape and fails after the retry is exhausted", async () => {
+    const runExtraction = jest.fn().mockResolvedValue({
+      text: "truncated {",
+      toolCalls: [],
+      finishReason: "length",
+      usage: { inputTokens: 4_000, outputTokens: 8_192 },
+    })
+    const extract = createMemoryImportExtractor({
+      getSetting: jest.fn().mockResolvedValue(null),
+      createModel: jest.fn().mockResolvedValue({} as LanguageModel),
+      runExtraction,
+    })
+
+    await expect(
+      extract({ vendor: "claude", pastedText: "- One fact" }),
+    ).rejects.toThrow("invalid response")
+    expect(runExtraction).toHaveBeenCalledTimes(2)
+    expect(mockLogWarn).toHaveBeenCalledWith(
+      "Nexus memory extraction returned an unparseable response",
+      expect.objectContaining({
+        vendor: "claude",
+        attempt: 1,
+        chunkIndex: 0,
+        chunkCount: 1,
+        finishReason: "length",
+        outputTextChars: "truncated {".length,
+        toolCallCount: 0,
+        inputTokens: 4_000,
+        outputTokens: 8_192,
+      }),
+    )
+  })
+
+  it("never logs the model output or the pasted source", async () => {
+    const runExtraction = jest.fn().mockResolvedValue({
+      text: "Sarah Hagel lives at 12 Harbor Ridge",
+      toolCalls: [],
+      finishReason: "stop",
+    })
+    const extract = createMemoryImportExtractor({
+      getSetting: jest.fn().mockResolvedValue(null),
+      createModel: jest.fn().mockResolvedValue({} as LanguageModel),
+      runExtraction,
+    })
+
+    await expect(
+      extract({
+        vendor: "chatgpt",
+        pastedText: "- Sarah Hagel lives at 12 Harbor Ridge",
+      }),
+    ).rejects.toThrow("invalid response")
+    const logged = JSON.stringify(mockLogWarn.mock.calls)
+    expect(logged).not.toContain("Sarah Hagel")
+    expect(logged).not.toContain("Harbor Ridge")
   })
 })

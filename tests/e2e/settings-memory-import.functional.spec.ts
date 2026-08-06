@@ -6,6 +6,13 @@ import {
   SEEDED_ADMIN_SUB,
 } from "./helpers/session-auth"
 
+const PII_CANDIDATE_TEXT = [
+  "My wife Sarah teaches third grade at Harbor Ridge.",
+  "My daughter Ellie is 8 years old.",
+  "I started as CIO on July 1, 2019.",
+  "My work email is hagelk@psd401.net.",
+] as const
+
 interface ImportedMemoryRow {
   content: string
   source: string
@@ -97,6 +104,79 @@ test.describe("Settings memory import (authenticated)", () => {
       expect(
         rows.some((row) => row.content.includes("concise answers")),
       ).toBe(false)
+    } finally {
+      await database`
+        DELETE FROM nexus_user_memories AS memory
+        USING users AS owner
+        WHERE owner.id = memory.user_id
+          AND owner.email = ${SEEDED_ADMIN_EMAIL}
+          AND memory.content LIKE ${`%${marker}%`}
+      `
+      await database.end()
+    }
+  })
+
+  test("imports memories that contain names, dates, and ages", async ({
+    page,
+  }) => {
+    await authenticateContext(
+      page.context(),
+      SEEDED_ADMIN_EMAIL,
+      SEEDED_ADMIN_SUB,
+    )
+    const database = createDatabase()
+    const marker = `settings-memory-import-pii-${Date.now()}`
+    // Every one of these trips Comprehend (NAME, DATE_TIME, AGE, EMAIL). Before
+    // the 2026-08-05 fix the save gate refused all four and the user was told
+    // only that they "need attention".
+    const pastedText = [
+      "- My wife Sarah teaches third grade at Harbor Ridge.",
+      "- My daughter Ellie is 8 years old.",
+      "- I started as CIO on July 1, 2019.",
+      "- My work email is hagelk@psd401.net.",
+    ].join("\n")
+
+    try {
+      await page.goto("/settings")
+      await page.getByRole("tab", { name: "Memory" }).click()
+      await page.getByTestId("memory-import-open").click()
+      await page.getByTestId("memory-import-paste").fill(pastedText)
+      await page.getByTestId("memory-import-extract").click()
+
+      const candidates = page.getByTestId("memory-import-candidate")
+      await expect(candidates).toHaveCount(4, { timeout: 90_000 })
+
+      for (let index = 0; index < 4; index += 1) {
+        await page
+          .getByTestId(`memory-import-candidate-content-${index}`)
+          .fill(`${marker}-${index}: ${PII_CANDIDATE_TEXT[index]}`)
+      }
+      await page.getByTestId("memory-import-save").click()
+
+      const importedRows = page
+        .getByTestId("memory-row")
+        .filter({ hasText: marker })
+      await expect(importedRows).toHaveCount(4, { timeout: 90_000 })
+      // No candidate is left behind explaining itself.
+      await expect(
+        page.getByTestId("memory-import-candidate-reason-0"),
+      ).toHaveCount(0)
+
+      const rows = await database<ImportedMemoryRow[]>`
+        SELECT memory.content, memory.source, memory.deleted_at
+        FROM nexus_user_memories memory
+        JOIN users owner ON owner.id = memory.user_id
+        WHERE owner.email = ${SEEDED_ADMIN_EMAIL}
+          AND memory.content LIKE ${`%${marker}%`}
+      `
+      expect(rows).toHaveLength(4)
+      expect(rows.some((row) => row.content.includes("Sarah"))).toBe(true)
+      expect(rows.some((row) => row.content.includes("8 years old"))).toBe(
+        true,
+      )
+      expect(
+        rows.some((row) => row.content.includes("hagelk@psd401.net")),
+      ).toBe(true)
     } finally {
       await database`
         DELETE FROM nexus_user_memories AS memory

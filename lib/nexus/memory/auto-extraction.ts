@@ -212,7 +212,9 @@ Return only facts useful across future conversations:
 - preference: durable communication, formatting, workflow, or learning preferences
 - context: ongoing projects, goals, constraints, or working context
 
-Exclude secrets, credentials, contact details, sensitive identifiers, transient requests, facts only about the assistant, guesses, and duplicates. Each candidate must be a concise standalone statement. Returning no candidates is normal.`
+Keep the personal detail that makes a memory worth having. Names of the user and of the people they live and work with, relationships, ages, locations, dates, and contact details belong in a candidate whenever the exchange states them. Do not generalize, redact, or de-identify them.
+
+Exclude passwords, API keys, access tokens, and other credentials, along with transient requests, facts only about the assistant, guesses, and duplicates. Each candidate must be a concise standalone statement. Returning no candidates is normal.`
 
 const AUTO_CONSOLIDATION_SYSTEM_PROMPT = `You consolidate one proposed user memory against owner-scoped existing memories.
 

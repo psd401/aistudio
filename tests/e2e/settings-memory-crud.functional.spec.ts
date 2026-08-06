@@ -62,11 +62,18 @@ test.describe("Settings memory CRUD (authenticated)", () => {
       await expect(firstRow.getByText("Manual")).toBeVisible()
       await expect(firstRow.getByText("context")).toBeVisible()
 
+      // Pin the row by id before editing: filling the edit textarea replaces
+      // the row's rendered text, so a hasText filter on the original content
+      // stops matching and every later control inside it becomes unreachable.
+      const firstRowId = await firstRow.getAttribute("data-memory-id")
+      expect(firstRowId).toBeTruthy()
+      const editingRow = page.locator(`[data-memory-id="${firstRowId}"]`)
+
       await firstRow
         .getByRole("button", { name: `Edit memory: ${firstContent}` })
         .click()
-      await firstRow.getByTestId("memory-edit-content").fill(editedContent)
-      await firstRow.getByTestId("memory-edit-save").click()
+      await editingRow.getByTestId("memory-edit-content").fill(editedContent)
+      await editingRow.getByTestId("memory-edit-save").click()
 
       const editedRow = page
         .getByTestId("memory-row")

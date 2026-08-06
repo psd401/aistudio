@@ -93,42 +93,6 @@ describe("Nexus memory service", () => {
     )
   })
 
-  it("refuses detected PII before embedding or persistence", async () => {
-    const repository = createRepository()
-    const generateEmbedding = jest.fn()
-    const service = createMemoryService({
-      repository,
-      processInput: jest.fn(async () => ({
-        allowed: true,
-        processedContent: "Email student@example.com",
-      })),
-      detectPII: jest.fn(async () => [{
-        type: "EMAIL",
-        beginOffset: 6,
-        endOffset: 25,
-        score: 0.999,
-      }]),
-      generateEmbedding,
-      getSetting: jest.fn(async () => null),
-    })
-
-    await expect(
-      service.save({
-        userId: 7,
-        sessionId: "cognito-sub",
-        content: "Email student@example.com",
-        category: "profile",
-        source: "tool",
-      }),
-    ).rejects.toMatchObject({
-      blockedMessage:
-        "For privacy, personal information cannot be saved to memory.",
-      blockedCategories: ["pii"],
-    })
-    expect(generateEmbedding).not.toHaveBeenCalled()
-    expect(repository.saveWithDedup).not.toHaveBeenCalled()
-  })
-
   it("does not perform database or embedding work when safety blocks a write", async () => {
     const repository = createRepository()
     const generateEmbedding = jest.fn(async () => [0.1])
@@ -242,15 +206,63 @@ describe("Nexus memory service edits", () => {
   })
 })
 
-describe("Nexus memory privacy scan availability", () => {
-  it("fails closed when detect-only PII screening errors", async () => {
+describe("Nexus memory personal information handling", () => {
+  // A memory is the user's own record of their own life. Detection is
+  // telemetry; it must never cost the user the write.
+  it("stores personal information instead of refusing it", async () => {
+    const content = "Wife Sarah teaches third grade at Harbor Ridge"
     const repository = createRepository()
+    repository.saveWithDedup.mockResolvedValue({
+      memory: storedMemory({ content, category: "profile" }),
+      action: "inserted",
+    })
+    const generateEmbedding = jest.fn(async () => [0.1])
+    const detectPII = jest.fn(async () => [
+      { type: "NAME", beginOffset: 5, endOffset: 10, score: 0.999 },
+      { type: "ADDRESS", beginOffset: 31, endOffset: 44, score: 0.98 },
+    ])
+    const service = createMemoryService({
+      repository,
+      processInput: jest.fn(async (raw: string) => ({
+        allowed: true,
+        processedContent: raw,
+      })),
+      detectPII,
+      generateEmbedding,
+      getSetting: jest.fn(async () => null),
+    })
+
+    await expect(
+      service.save({
+        userId: 7,
+        sessionId: "cognito-sub",
+        content,
+        category: "profile",
+        source: "import:chatgpt",
+      }),
+    ).resolves.toMatchObject({ action: "inserted" })
+    expect(detectPII).toHaveBeenCalledTimes(1)
+    expect(generateEmbedding).toHaveBeenCalledWith(content)
+    expect(repository.saveWithDedup).toHaveBeenCalledWith(
+      expect.objectContaining({ content }),
+      MEMORY_DEDUP_THRESHOLD,
+    )
+  })
+})
+
+describe("Nexus memory privacy scan availability", () => {
+  it("saves when the detect-only privacy scan is unavailable", async () => {
+    const repository = createRepository()
+    repository.saveWithDedup.mockResolvedValue({
+      memory: storedMemory({ content: "Was not conclusively screened" }),
+      action: "inserted",
+    })
     const generateEmbedding = jest.fn(async () => [0.1])
     const service = createMemoryService({
       repository,
-      processInput: jest.fn(async () => ({
+      processInput: jest.fn(async (content: string) => ({
         allowed: true,
-        processedContent: "Looks safe but was not conclusively screened",
+        processedContent: content,
       })),
       detectPII: jest.fn(async () => {
         throw new Error("Comprehend unavailable")
@@ -263,17 +275,39 @@ describe("Nexus memory privacy scan availability", () => {
       service.save({
         userId: 7,
         sessionId: "cognito-sub",
-        content: "Looks safe but was not conclusively screened",
+        content: "Was not conclusively screened",
         category: "context",
         source: "tool",
       }),
-    ).rejects.toMatchObject({
-      blockedMessage:
-        "Memory is temporarily unavailable because its privacy check could not be completed.",
-      blockedCategories: ["pii_scan_unavailable"],
+    ).resolves.toMatchObject({ action: "inserted" })
+    expect(generateEmbedding).toHaveBeenCalledTimes(1)
+    expect(repository.saveWithDedup).toHaveBeenCalledTimes(1)
+  })
+
+  it("still refuses content the safety gate blocks", async () => {
+    const repository = createRepository()
+    const service = createMemoryService({
+      repository,
+      processInput: jest.fn(async () => ({
+        allowed: false,
+        processedContent: "",
+        blockedMessage: "Blocked by policy",
+        blockedCategories: ["prompt_attack"],
+      })),
+      detectPII: jest.fn(async () => []),
+      generateEmbedding: jest.fn(async () => [0.1]),
+      getSetting: jest.fn(async () => null),
     })
-    expect(repository.conversationIsOwned).not.toHaveBeenCalled()
-    expect(generateEmbedding).not.toHaveBeenCalled()
+
+    await expect(
+      service.save({
+        userId: 7,
+        sessionId: "cognito-sub",
+        content: "unsafe",
+        category: "context",
+        source: "import:claude",
+      }),
+    ).rejects.toBeInstanceOf(ContentSafetyBlockedError)
     expect(repository.saveWithDedup).not.toHaveBeenCalled()
   })
 })

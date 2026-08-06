@@ -51,7 +51,9 @@ Return only facts that would be useful across future conversations:
 - preference: durable communication, formatting, workflow, or learning preferences
 - context: ongoing projects, goals, constraints, or working context
 
-Exclude secrets, credentials, contact details, sensitive identifiers, transient tasks, assistant commentary, uncertainty, and duplicates. Preserve the user's meaning. Make each candidate a concise, standalone statement of at most 500 characters. An empty candidate list is correct when no durable fact is present.`
+Keep the personal detail that makes a memory worth having. Names of the user and of the people they live and work with, relationships, ages, locations, dates, and contact details belong in a candidate whenever the source states them. Do not generalize, redact, or de-identify them.
+
+Exclude passwords, API keys, access tokens, and other credentials, along with transient tasks, assistant commentary, uncertainty, and duplicates. Preserve the user's meaning. Make each candidate a concise, standalone statement of at most 500 characters. An empty candidate list is correct when no durable fact is present.`
 
 export function buildMemoryImportExtractionPrompt(
   vendor: MemoryImportVendor,

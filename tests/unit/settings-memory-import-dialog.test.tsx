@@ -208,6 +208,86 @@ describe("Settings memory import dialog review", () => {
   })
 })
 
+describe("Settings memory import dialog failure reasons", () => {
+  async function renderPartialFailure() {
+    jest.mocked(extractImportCandidates).mockResolvedValueOnce({
+      isSuccess: true,
+      message: "2 memory candidates ready to review",
+      data: {
+        candidates: [
+          { content: "Saved fact", category: "profile" },
+          { content: "Rejected fact", category: "context" },
+        ],
+      },
+    })
+    jest.mocked(saveImportedMemories).mockResolvedValueOnce({
+      isSuccess: true,
+      message: "1 of 2 memories imported",
+      data: {
+        total: 2,
+        successful: 1,
+        failed: 1,
+        results: [
+          {
+            index: 0,
+            status: "saved",
+            memoryId: "11111111-1111-4111-8111-111111111111",
+            action: "inserted",
+          },
+          {
+            index: 1,
+            status: "failed",
+            reason: "Blocked by policy",
+          },
+        ],
+      },
+    })
+
+    render(
+      <MemoryImportDialog
+        open
+        onOpenChange={jest.fn()}
+        onImported={jest.fn().mockResolvedValue(undefined)}
+      />,
+    )
+    fireEvent.change(screen.getByTestId("memory-import-paste"), {
+      target: { value: "- Two facts" },
+    })
+    fireEvent.click(screen.getByTestId("memory-import-extract"))
+    await waitFor(() =>
+      expect(screen.getAllByTestId("memory-import-candidate")).toHaveLength(2),
+    )
+    fireEvent.click(screen.getByTestId("memory-import-save"))
+    await waitFor(() =>
+      expect(screen.getAllByTestId("memory-import-candidate")).toHaveLength(1),
+    )
+  }
+
+  it("shows the rejection reason on the candidate that failed", async () => {
+    await renderPartialFailure()
+
+    expect(
+      screen.getByTestId("memory-import-candidate-reason-0"),
+    ).toHaveTextContent("Blocked by policy")
+    expect(
+      screen.getByTestId("memory-import-candidate-content-0"),
+    ).toHaveValue("Rejected fact")
+  })
+
+  it("clears the reason once the candidate text is edited", async () => {
+    await renderPartialFailure()
+
+    fireEvent.change(
+      screen.getByTestId("memory-import-candidate-content-0"),
+      { target: { value: "Reworded fact" } },
+    )
+
+    expect(
+      screen.queryByTestId("memory-import-candidate-reason-0"),
+    ).not.toBeInTheDocument()
+  })
+})
+
 describe("Settings memory import dialog batching", () => {
   it("chunks large reviewed imports into bounded save actions", async () => {
     jest.mocked(extractImportCandidates).mockResolvedValueOnce({
