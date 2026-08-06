@@ -710,40 +710,40 @@ function drawBarChart(canvas, labels, seriesList, area) {
   const barWidth = multi ? groupWidth / seriesList.length : groupWidth;
   const zeroY = toY(0);
   for (const [seriesIndex, entry] of seriesList.entries()) {
-  for (const [index, value] of entry.data.entries()) {
-    const y = toY(value);
-    const top = Math.min(y, zeroY);
-    const height = Math.max(Math.abs(y - zeroY), 2);
-    const colour = multi
-      ? PALETTE[seriesIndex % PALETTE.length]
-      : PALETTE[index % PALETTE.length];
-    const x = multi
-      ? centres[index] - groupWidth / 2 + barWidth * (seriesIndex + 0.5)
-      : centres[index];
-    fillRect(
-      canvas,
-      { x: x - barWidth / 2, y: top, width: barWidth, height },
-      colour,
-    );
-    // Value labels are a bonus, not the chart. Drop them rather than let
-    // neighbouring bars' numbers overprint each other, and put a negative
-    // bar's label under it so the text never sits on top of the bar.
-    //
-    // What counts as room depends on what the neighbour is. A single series
-    // owns its whole category slot — the next bar is a slot away, so a label
-    // wider than the bar still has nowhere to collide, which is why this has
-    // always been measured against `slot`. Grouped bars sit shoulder to
-    // shoulder inside one slot, so there a label may only claim its own bar.
-    const labelBudget = multi ? barWidth : slot;
-    if (textWidth(formatNumber(value), TICK_SCALE) <= labelBudget) {
-      drawText(canvas, formatNumber(value), {
-        x,
-        y: value < 0 ? top + height + 10 : top - FONT_HEIGHT * TICK_SCALE - 10,
-        scale: TICK_SCALE,
-        align: 'center',
-      }, TEXT);
+    for (const [index, value] of entry.data.entries()) {
+      const y = toY(value);
+      const top = Math.min(y, zeroY);
+      const height = Math.max(Math.abs(y - zeroY), 2);
+      const colour = multi
+        ? PALETTE[seriesIndex % PALETTE.length]
+        : PALETTE[index % PALETTE.length];
+      const x = multi
+        ? centres[index] - groupWidth / 2 + barWidth * (seriesIndex + 0.5)
+        : centres[index];
+      fillRect(
+        canvas,
+        { x: x - barWidth / 2, y: top, width: barWidth, height },
+        colour,
+      );
+      // Value labels are a bonus, not the chart. Drop them rather than let
+      // neighbouring bars' numbers overprint each other, and put a negative
+      // bar's label under it so the text never sits on top of the bar.
+      //
+      // What counts as room depends on what the neighbour is. A single series
+      // owns its whole category slot — the next bar is a slot away, so a label
+      // wider than the bar still has nowhere to collide, which is why this has
+      // always been measured against `slot`. Grouped bars sit shoulder to
+      // shoulder inside one slot, so there a label may only claim its own bar.
+      const labelBudget = multi ? barWidth : slot;
+      if (textWidth(formatNumber(value), TICK_SCALE) <= labelBudget) {
+        drawText(canvas, formatNumber(value), {
+          x,
+          y: value < 0 ? top + height + 10 : top - FONT_HEIGHT * TICK_SCALE - 10,
+          scale: TICK_SCALE,
+          align: 'center',
+        }, TEXT);
+      }
     }
-  }
   }
   drawCategoryLabels(canvas, labels, area, slot, centres);
   if (multi) drawSeriesLegend(canvas, seriesList, area);
@@ -935,6 +935,24 @@ function readSeriesList(config) {
   const longest = Math.max(...list.map(entry => entry.data.length));
   if (longest > MAX_POINTS) {
     throw new Error(`too many data points (${longest} > ${MAX_POINTS})`);
+  }
+  // On a CATEGORY chart every series must span the same categories. Those draw
+  // functions zip each series against one `centres` array sized to the longest,
+  // so a short series lands against the wrong labels — Reading's Grade 3 number
+  // sitting under Grade 4 — with no gap to see that it happened. Same "looks
+  // complete, isn't" failure as drawing datasets[0] alone, which is what this
+  // renderer was just fixed for. run.js refuses a gap before it reaches here;
+  // this guards the other callers of the exported drawChart/renderChartPng.
+  //
+  // Scatter is exempt and must stay so: its series are independent x/y point
+  // sets sharing only the axes, so 12 points against 30 is an ordinary chart,
+  // not a misalignment.
+  const shortest = Math.min(...list.map(entry => entry.data.length));
+  if (config?.type !== 'scatter' && shortest !== longest) {
+    throw new Error(
+      `series lengths differ (${list.map(entry => entry.data.length).join(', ')}) — ` +
+        'every series needs a value at every category',
+    );
   }
   return list;
 }

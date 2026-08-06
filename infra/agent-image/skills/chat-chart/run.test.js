@@ -1291,3 +1291,52 @@ test('a policy refusal is NOT reported as a chart failure', () => {
   assert.doesNotMatch(result.stderr, /AGENT_FAILURE_RECORD/);
   assert.doesNotMatch(result.stderr, /unexpected error/);
 });
+
+test('category series of unequal length are refused, not misaligned', () => {
+  // The draw functions zip every series against one `centres` array sized to
+  // the longest, so a short series silently lands under the wrong labels.
+  // run.js refuses a gap upstream; this guards the exported renderer, which is
+  // called directly here and is the reusable entry point.
+  assert.throws(
+    () =>
+      renderChartPng({
+        type: 'bar',
+        data: {
+          labels: ['A', 'B', 'C'],
+          datasets: [
+            { label: 'Math', data: [1, 2, 3] },
+            { label: 'Reading', data: [4, 5] },
+          ],
+        },
+      }),
+    /series lengths differ \(3, 2\)/,
+  );
+  // Equal lengths still render — the guard must not cost a legal chart.
+  assert.ok(
+    renderChartPng({
+      type: 'bar',
+      data: {
+        labels: ['A', 'B'],
+        datasets: [
+          { label: 'Math', data: [1, 2] },
+          { label: 'Reading', data: [3, 4] },
+        ],
+      },
+    }).length > 0,
+  );
+});
+
+test('scatter series of unequal length are legal and stay legal', () => {
+  // Scatter series share only the axes, so 3 points against 2 is an ordinary
+  // chart. The category guard above must not reach it.
+  const png = renderChartPng({
+    type: 'scatter',
+    data: {
+      datasets: [
+        { label: 'Fall', data: [{ x: 1, y: 1 }, { x: 2, y: 2 }, { x: 3, y: 3 }] },
+        { label: 'Spring', data: [{ x: 1, y: 4 }, { x: 2, y: 5 }] },
+      ],
+    },
+  });
+  assert.ok(png.length > 0);
+});
