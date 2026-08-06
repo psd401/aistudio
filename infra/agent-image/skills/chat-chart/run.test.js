@@ -1013,6 +1013,30 @@ test('a series missing a value at one point is rejected, not silently zeroed', (
   assert.match(result.stderr, /Reading/);
 });
 
+test('a renderer failure is reported, not just exited on', () => {
+  // renderLocal used to call the synchronous fail(), which process.exit()s
+  // before main()'s rejection handler can run — so the one failure class this
+  // skill's telemetry was added for emitted no AGENT_FAILURE_RECORD at all.
+  const oversized = JSON.stringify(
+    Array.from({ length: 51 }, (_, i) => ({ label: `L${i}`, value: i })),
+  );
+  const result = runCli(['--type', 'bar', '--data-json', oversized]);
+
+  assert.match(result.stderr, /AGENT_FAILURE_RECORD/);
+  const record = JSON.parse(
+    result.stderr.slice(result.stderr.indexOf('AGENT_FAILURE_RECORD ') + 'AGENT_FAILURE_RECORD '.length)
+      .split('\n')[0],
+  );
+  assert.strictEqual(record.error_class, 'ChartRenderFailed');
+  assert.strictEqual(record.context.user_facing, true);
+  assert.match(record.error_message, /too many data points/);
+  // Diagnosed failure: the original wording and exit code both survive the
+  // move off fail(), so it is not relabelled as an unexpected error.
+  assert.strictEqual(result.status, 3, result.stderr);
+  assert.match(result.stderr, /chat-chart: local renderer failed:/);
+  assert.doesNotMatch(result.stderr, /unexpected error/);
+});
+
 test('every dataset is drawn, not just the first', () => {
   // Same categories, wildly different values: if only datasets[0] were drawn
   // the axis could not span the second series' range.

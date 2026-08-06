@@ -77,6 +77,24 @@ function fail(message, code = 2) {
   process.exit(code);
 }
 
+/**
+ * A failure that has to reach reportChartFailure before the process ends.
+ *
+ * `fail()` calls process.exit synchronously, so anything raised through it is
+ * dead before main()'s rejection handler can record a thing — which is how a
+ * renderer failure, the exact class this skill's new telemetry exists to
+ * capture, emitted neither AGENT_FAILURE_RECORD nor the broker write. Failures
+ * worth recording travel as a rejection instead; `exitCode` preserves the
+ * process contract that the direct `fail()` call had.
+ */
+class ChartFailure extends Error {
+  constructor(message, exitCode = 3) {
+    super(message);
+    this.name = 'ChartFailure';
+    this.exitCode = exitCode;
+  }
+}
+
 function parseArgs(argv) {
   const known = new Set([
     '--user',
@@ -293,7 +311,9 @@ async function renderLocal(config) {
   try {
     bytes = renderChartPng(config);
   } catch (err) {
-    fail(`local renderer failed: ${err && err.message ? err.message : err}`, 3);
+    // Thrown, not `fail()`ed: this is the failure the reporting path below was
+    // added for, and exiting here would skip it.
+    throw new ChartFailure(`local renderer failed: ${err && err.message ? err.message : err}`);
   }
   const published = await publishArtifact(bytes, '.png', 'image/png');
   return published.url;
@@ -433,9 +453,13 @@ if (require.main === module) {
     try { return parseArgs(process.argv); } catch { return {}; }
   })();
   main().catch(async err => {
-    process.stderr.write(`chat-chart: unexpected error: ${err && err.message ? err.message : err}\n`);
+    // A ChartFailure is a diagnosed failure with its own wording and exit code;
+    // anything else genuinely is unexpected. Both get recorded.
+    const expected = err instanceof ChartFailure;
+    const detail = err && err.message ? err.message : err;
+    process.stderr.write(`chat-chart: ${expected ? '' : 'unexpected error: '}${detail}\n`);
     await reportChartFailure(err, argsForReport);
-    process.exit(1);
+    process.exit(expected ? err.exitCode : 1);
   });
 }
 
