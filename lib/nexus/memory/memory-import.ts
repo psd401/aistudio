@@ -290,18 +290,22 @@ export function createMemoryImportExtractor(
       chunkChars: chunk.length,
       halves: halves.length,
     })
-    const settled = await Promise.allSettled(
-      halves.map((half) => extractChunk(context, half, splitDepth + 1)),
-    )
-    const fulfilled = settled.filter(
-      (
-        outcome,
-      ): outcome is PromiseFulfilledResult<MemoryImportCandidate[]> =>
-        outcome.status === "fulfilled",
-    )
-    // Half the chunk landing is still better than losing all of it.
-    if (fulfilled.length === 0) return null
-    return fulfilled.flatMap((outcome) => outcome.value)
+    // Sequential on purpose. Fanning the halves out concurrently would escape
+    // MEMORY_EXTRACTION_MAX_CONCURRENCY: recursion is per worker slot, so
+    // parallel halves at depth 3 could put ~8 calls in flight per slot and
+    // ~24 overall — the exact pile-up the retry jitter exists to avoid. One
+    // call per slot keeps the declared bound true.
+    const recovered: MemoryImportCandidate[] = []
+    let anyHalfSucceeded = false
+    for (const half of halves) {
+      try {
+        recovered.push(...(await extractChunk(context, half, splitDepth + 1)))
+        anyHalfSucceeded = true
+      } catch {
+        // Half the chunk landing is still better than losing all of it.
+      }
+    }
+    return anyHalfSucceeded ? recovered : null
   }
 
   async function extractChunk(
@@ -369,6 +373,9 @@ export function createMemoryImportExtractor(
 
     const collected: MemoryImportCandidate[][] = chunks.map(() => [])
     const failures: Error[] = []
+    // Race-free without a lock: each worker runs synchronously up to its first
+    // await, so `nextChunk++` claims an index before any other worker can be
+    // scheduled. No two workers can ever read the same value.
     let nextChunk = 0
     const workers = Array.from(
       { length: Math.min(MEMORY_EXTRACTION_MAX_CONCURRENCY, chunks.length) },
