@@ -205,21 +205,75 @@ function buildChartJsConfig(type, data, title) {
   }
 
   // bar / line / pie
-  for (const point of data) {
-    if (typeof point.label !== 'string' || !Number.isFinite(point.value)) {
-      fail(`${type} data points need string \`label\` and finite numeric \`value\` fields`);
+  //
+  // Two accepted shapes. The flat one is unchanged:
+  //     [{"label":"Grade 1","value":412}, …]
+  // The multi-series one carries a value PER SERIES, so "Reading and Math by
+  // grade" is one chart rather than two:
+  //     [{"label":"Grade 1","values":{"Math":412,"Reading":398}}, …]
+  // Before 2026-08-06 only the flat shape existed and the renderer drew only
+  // datasets[0], so a combined chart silently showed half its data.
+  const multi = data.some(point => point && typeof point.values === 'object' && point.values !== null);
+  if (!multi) {
+    for (const point of data) {
+      if (typeof point.label !== 'string' || !Number.isFinite(point.value)) {
+        fail(`${type} data points need string \`label\` and finite numeric \`value\` fields`);
+      }
     }
+    return {
+      type,
+      data: {
+        labels: data.map(p => p.label),
+        datasets: [{ label: seriesLabel, data: data.map(p => p.value) }],
+      },
+      options,
+    };
   }
-  const labels = data.map(p => p.label);
-  const values = data.map(p => p.value);
+
+  if (type === 'pie') {
+    fail('a pie chart shows one series; use --type bar to compare several', 2);
+  }
   return {
     type,
-    data: {
-      labels,
-      datasets: [{ label: seriesLabel, data: values }],
-    },
+    data: { labels: data.map(p => p.label), datasets: buildSeriesDatasets(data) },
     options,
   };
+}
+
+/**
+ * Turn `[{label, values:{Math, Reading}}, …]` into one dataset per series.
+ *
+ * Series order follows the first point that names them, so the legend reads in
+ * the order the caller wrote rather than by object-key chance. Every series
+ * must supply a finite value at every label — a gap is refused rather than
+ * drawn as zero, which would understate a grade with no data as a grade
+ * scoring nothing.
+ */
+function buildSeriesDatasets(data) {
+  const seriesNames = [];
+  for (const point of data) {
+    if (typeof point.label !== 'string') {
+      fail('data points need a string `label` field');
+    }
+    if (!point.values || typeof point.values !== 'object') {
+      fail('every point needs a `values` object when any point uses one');
+    }
+    for (const name of Object.keys(point.values)) {
+      if (!seriesNames.includes(name)) seriesNames.push(name);
+    }
+  }
+  if (seriesNames.length === 0) fail('`values` objects are empty — nothing to chart');
+  for (const point of data) {
+    for (const name of seriesNames) {
+      if (!Number.isFinite(point.values[name])) {
+        fail(`series "${name}" is missing a finite value at "${point.label}"`);
+      }
+    }
+  }
+  return seriesNames.map(name => ({
+    label: name,
+    data: data.map(p => p.values[name]),
+  }));
 }
 
 function renderQuickChart(config) {
@@ -328,9 +382,59 @@ async function main() {
   process.stdout.write(emitEnvelope(imageUrl, args['--title'], args['--text-fallback'], type));
 }
 
+/**
+ * Record a chart that could not be produced.
+ *
+ * A chart is the whole deliverable — when it fails the user gets nothing, but
+ * until 2026-08-06 this skill had no failure-reporting path at all, so those
+ * turns were invisible in agent_failures. The one that prompted this was found
+ * only because a human was watching the Chat window.
+ *
+ * Best-effort by design: the CloudWatch line is written first so the failure
+ * survives even when the broker write does not, and any error here is swallowed
+ * so telemetry can never turn a chart failure into a worse one.
+ */
+async function reportChartFailure(err, args) {
+  const errorMessage = `chat-chart failed: ${err && err.message ? err.message : String(err)}`;
+  const context = {
+    tool: 'chat-chart',
+    type: args?.['--type'] ?? null,
+    engine: args?.['--engine'] ?? 'auto',
+    sensitive: Boolean(args?.['--sensitive']),
+    user_facing: true,
+  };
+  process.stderr.write(
+    'AGENT_FAILURE_RECORD ' +
+      JSON.stringify({
+        source: 'tool',
+        severity: 'error',
+        error_class: 'ChartRenderFailed',
+        error_message: errorMessage,
+        context,
+      }) +
+      '\n',
+  );
+  try {
+    const { requestAgentBroker } = require('../_shared/agent-broker');
+    await requestAgentBroker('/api/agent/failures', {
+      source: 'tool',
+      severity: 'error',
+      errorClass: 'ChartRenderFailed',
+      errorMessage,
+      context,
+    });
+  } catch {
+    // Best-effort: the CloudWatch line above is the durable record.
+  }
+}
+
 if (require.main === module) {
-  main().catch(err => {
+  const argsForReport = (() => {
+    try { return parseArgs(process.argv); } catch { return {}; }
+  })();
+  main().catch(async err => {
     process.stderr.write(`chat-chart: unexpected error: ${err && err.message ? err.message : err}\n`);
+    await reportChartFailure(err, argsForReport);
     process.exit(1);
   });
 }

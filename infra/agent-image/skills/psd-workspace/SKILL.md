@@ -246,6 +246,33 @@ gws drive.permissions.create --scope agent --user hagelk@psd401.net \
   --json '{"fileId":"<id>","type":"domain","role":"reader","domain":"psd401.net"}'
 ```
 
+**Google Forms.** Create and populate a Form on the agent slot, then hand it
+over — transfer ownership to the caller, or share it, exactly as with a Doc:
+
+```bash
+gws forms.forms.create --scope agent --user hagelk@psd401.net \
+  --json '{"info":{"title":"TPEP Self-Assessment"}}'
+gws forms.forms.batchUpdate --scope agent --user hagelk@psd401.net \
+  --params '{"formId":"<id>"}' --json '{"requests":[…]}'
+```
+
+**Commenting on someone else's file.** Phase 1 blocks editing a doc the agent
+does not own, but a COMMENT is additive and attributed, so it is allowed on the
+agent slot — use it instead of asking the user to paste content:
+
+```bash
+gws drive.comments.create --scope agent --user hagelk@psd401.net \
+  --params '{"fileId":"<id>"}' --json '{"content":"Suggested reordering: …"}'
+```
+
+**Gmail labels.** Creating a label in the user's own mailbox is organizing, not
+authoring, so it stays on the user slot (`gmail.modify` covers it):
+
+```bash
+gws gmail.users.labels.create --scope user --user hagelk@psd401.net \
+  --json '{"name":"Digested"}'
+```
+
 **Granting a request someone already made.** When a user hits "request access" on an
 agent-owned file, Drive records an access proposal. List them with
 `drive accessproposals list` and grant one with `drive accessproposals resolve`

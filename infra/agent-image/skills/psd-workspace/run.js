@@ -84,10 +84,19 @@ function emitForbiddenGate(gateCheck) {
   emit({
     status: 'phase1-forbidden',
     reason: gateCheck.reason,
+    // Do NOT point at a "confirmation flow" here. There isn't one, and saying
+    // so sent agents hunting for a tool that does not exist — observed live
+    // 2026-08-05 (agent_failures 2118), where the agent reported being told to
+    // route via a confirmation flow "but no such confirmation flow tool is
+    // exposed". Same failure shape as the provenance gate removed in 9c7ec8c5e:
+    // a refusal describing a remedy the codebase cannot provide wastes the turn
+    // and buries the real answer, which is that the user has to do this part.
     message:
       `Phase 1 forbids this operation: ${gateCheck.reason}. ` +
-      `If the user explicitly approved, route via the appropriate ` +
-      `confirmation flow rather than calling this skill directly.`,
+      `There is no override and no approval flow — user approval does not ` +
+      `unlock it. Tell the user plainly that you cannot do this, say what you ` +
+      `did instead (a draft, a link, the content in chat), and let them take ` +
+      `the final step themselves. Do not retry with a different shape.`,
   });
   process.exit(13);
 }

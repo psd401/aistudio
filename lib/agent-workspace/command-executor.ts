@@ -69,6 +69,7 @@ const ALLOWED_WRITES = new Set([
   "chat spaces messages create",
   "docs documents batchupdate",
   "docs documents create",
+  "drive comments create",
   "drive files copy",
   "drive files create",
   "drive permissions create",
@@ -86,9 +87,12 @@ const ALLOWED_WRITES = new Set([
   // mail at all. `chat +send` above establishes that helper verbs belong here.
   // Still a draft-only path: `+send`, `+reply`, `+reply-all` and `+forward`
   // remain absent, and the skill-side Phase 1 gate blocks them independently.
+  "forms forms batchupdate",
+  "forms forms create",
   "gmail +draft",
   "gmail users drafts create",
   "gmail users drafts update",
+  "gmail users labels create",
   "gmail users messages modify",
   "sheets spreadsheets batchupdate",
   "sheets spreadsheets create",
@@ -131,6 +135,7 @@ const AGENT_ONLY_WRITES = new Set([
   "calendar events update",
   "docs documents batchupdate",
   "docs documents create",
+  "drive comments create",
   "drive files copy",
   "drive files create",
   "drive permissions create",

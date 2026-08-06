@@ -26,6 +26,7 @@ const {
   pieLegendPlan,
   formatNumber,
   niceTicks,
+  seriesLegendPlan,
   toAsciiLabel,
   truncateLabel,
   OUT_WIDTH,
@@ -203,11 +204,36 @@ const RICH_OPEN = '<<<PSD_AGENT_RICH_V1>>>';
 const RICH_CLOSE = '<<<END_PSD_AGENT_RICH_V1>>>';
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
 
+// The broker port is fixed in agent-broker.js, so only ONE stub can be bound
+// at a time. `node --test` runs this file's tests sequentially and never
+// noticed; `bun test` runs async tests concurrently, so two of them raced to
+// listen and the loser died with EADDRINUSE. That surfaced the moment the file
+// grew more broker-using tests — it was latent, not new. Serialise on a promise
+// chain so every stub gets the port to itself regardless of runner.
+let brokerLock = Promise.resolve();
+
 /** Stub of the agent broker's workspace-storage publish/upload/complete contract. */
-async function withStubBroker(run) {
+function withStubBroker(run, options = {}) {
+  const result = brokerLock.then(() => withStubBrokerExclusive(run, options));
+  // Keep the chain alive even when a test fails, or one rejection wedges the
+  // rest of the file behind it.
+  brokerLock = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+async function withStubBrokerExclusive(run, { failPublish = false } = {}) {
   const uploads = [];
   const brokerCalls = [];
   const server = http.createServer((req, res) => {
+    if (failPublish) {
+      // Simulate a broker that is up but refuses. Asserting on the ABSENCE of
+      // a listener instead was racy: bun runs this file's async tests
+      // concurrently, so a neighbouring test's stub was often already bound to
+      // the fixed port and the publish succeeded.
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'broker unavailable' }));
+      return;
+    }
     const chunks = [];
     req.on('data', chunk => chunks.push(chunk));
     req.on('end', () => {
@@ -272,6 +298,21 @@ function parseEnvelope(stdout) {
   assert.ok(start !== -1 && end > start, `no rich envelope in stdout:\n${stdout}`);
   return JSON.parse(stdout.slice(start + RICH_OPEN.length, end).trim());
 }
+
+test('a broker failure on the local path exits non-zero rather than printing a card', async () => {
+  // The broker is UP and refusing, rather than absent. Testing absence meant
+  // testing that no other test happened to be holding the fixed port, which
+  // bun's concurrent scheduling made a coin flip.
+  const result = await withStubBroker(
+    async () => runCliAsync([
+      '--type', 'bar',
+      '--data-json', '[{"label":"A","value":1}]',
+    ]),
+    { failPublish: true },
+  );
+  assert.notStrictEqual(result.status, 0);
+  assert.doesNotMatch(result.stdout, /PSD_AGENT_RICH_V1/);
+});
 
 test('the default engine renders, uploads and emits a card without naming an engine', async () => {
   const { result, uploads, brokerCalls } = await withStubBroker(async ctx => ({
@@ -338,16 +379,6 @@ test('issue #1596: --sensitive student data charts instead of exiting 3', async 
   assert.doesNotMatch(result.stderr, /quickchart/);
   assert.strictEqual(uploads.length, 1, 'the chart was never uploaded');
   assert.deepStrictEqual(uploads[0].bytes.subarray(0, 8), PNG_SIGNATURE);
-});
-
-test('a broker failure on the local path exits non-zero rather than printing a card', async () => {
-  // No stub broker listening: publishArtifact's fetch is refused.
-  const result = await runCliAsync([
-    '--type', 'bar',
-    '--data-json', '[{"label":"A","value":1}]',
-  ]);
-  assert.notStrictEqual(result.status, 0);
-  assert.doesNotMatch(result.stdout, /PSD_AGENT_RICH_V1/);
 });
 
 // ---------------------------------------------------------------------------
@@ -946,4 +977,115 @@ test('a flat series still produces a usable axis', () => {
   const ticks = niceTicks(5, 5);
   assert.ok(ticks.length >= 2);
   assert.ok(ticks.at(-1) > ticks[0]);
+});
+
+// ---------------------------------------------------------------------------
+// Multi-series (2026-08-06)
+//
+// The renderer read only datasets[0], so "chart Reading and Math by grade"
+// drew Math alone with a plausible axis and no sign a series was missing.
+// Half the data presented as all of it is worse than a refusal.
+// ---------------------------------------------------------------------------
+
+test('the CLI builds one dataset per named series, in the order given', () => {
+  const cfg = buildChartJsConfig('bar', [
+    { label: 'Grade 1', values: { Math: 412, Reading: 398 } },
+    { label: 'Grade 2', values: { Math: 441, Reading: 430 } },
+  ], 'i-Ready');
+  assert.deepEqual(cfg.data.datasets.map(d => d.label), ['Math', 'Reading']);
+  assert.deepEqual(cfg.data.datasets[0].data, [412, 441]);
+  assert.deepEqual(cfg.data.datasets[1].data, [398, 430]);
+  assert.deepEqual(cfg.data.labels, ['Grade 1', 'Grade 2']);
+});
+
+test('the single-series shape is unchanged', () => {
+  const cfg = buildChartJsConfig('bar', [{ label: 'A', value: 1 }], 't');
+  assert.strictEqual(cfg.data.datasets.length, 1);
+  assert.deepEqual(cfg.data.datasets[0].data, [1]);
+});
+
+test('a series missing a value at one point is rejected, not silently zeroed', () => {
+  const result = runCli([
+    '--type', 'bar',
+    '--data-json', '[{"label":"G1","values":{"Math":1,"Reading":2}},{"label":"G2","values":{"Math":3}}]',
+  ]);
+  assert.notStrictEqual(result.status, 0);
+  assert.match(result.stderr, /Reading/);
+});
+
+test('every dataset is drawn, not just the first', () => {
+  // Same categories, wildly different values: if only datasets[0] were drawn
+  // the axis could not span the second series' range.
+  const png = renderChartPng({
+    type: 'bar',
+    data: {
+      labels: ['A', 'B'],
+      datasets: [{ label: 'Low', data: [1, 2] }, { label: 'High', data: [900, 950] }],
+    },
+    options: {},
+  });
+  const pixels = decodePixels(png);
+  // The second series' palette colour must actually appear on the canvas.
+  assert.ok(extent(pixels, PALETTE_RED).count > 200, 'second series was not drawn');
+  assert.ok(countNonWhite(pixels) > 2000);
+});
+
+test('a multi-series line draws one line per dataset', () => {
+  const png = renderChartPng({
+    type: 'line',
+    data: {
+      labels: ['x', 'y', 'z'],
+      datasets: [{ label: 'One', data: [1, 2, 3] }, { label: 'Two', data: [3, 2, 1] }],
+    },
+    options: {},
+  });
+  const pixels = decodePixels(png);
+  assert.ok(extent(pixels, PALETTE_BLUE).count > 100, 'first line missing');
+  assert.ok(extent(pixels, PALETTE_RED).count > 100, 'second line missing');
+});
+
+test('a pie refuses a second dataset rather than drawing only the first', () => {
+  assert.throws(
+    () => renderChartPng({
+      type: 'pie',
+      data: { labels: ['a', 'b'], datasets: [{ data: [1, 2] }, { data: [3, 4] }] },
+      options: {},
+    }),
+    /exactly one dataset/,
+  );
+});
+
+test('the legend never runs off the canvas', () => {
+  // A legend that overflows takes those series' identities with it — the same
+  // failure the pie legend had. Asserted on PIXELS rather than by recomputing
+  // the layout arithmetic, so the test cannot drift from the renderer.
+  const EDGE = 6;
+  for (const count of [2, 3, 6, 10]) {
+    const png = renderChartPng({
+      type: 'bar',
+      data: {
+        labels: ['A', 'B'],
+        datasets: Array.from({ length: count }, (_, i) => ({
+          label: `Very Long Series Name Number ${i + 1}`,
+          data: [10 + i, 20 + i],
+        })),
+      },
+      options: {},
+    });
+    const pixels = decodePixels(png);
+    const left = { x0: 0, y0: 0, x1: EDGE, y1: OUT_HEIGHT };
+    const right = { x0: OUT_WIDTH - EDGE, y0: 0, x1: OUT_WIDTH, y1: OUT_HEIGHT };
+    assert.strictEqual(countNonWhite(pixels, left), 0, `${count} series: ran off the left`);
+    assert.strictEqual(countNonWhite(pixels, right), 0, `${count} series: ran off the right`);
+  }
+});
+
+test('the legend wraps rather than truncating every label to the same stub', () => {
+  // Six series on one row all render as "Very Long." — identical, identifying
+  // nothing. Wrapping buys each label real width.
+  const one = seriesLegendPlan(2, 1350, 3);
+  const many = seriesLegendPlan(6, 1350, 3);
+  assert.strictEqual(one.rows, 1);
+  assert.strictEqual(many.rows, 2);
+  assert.ok(many.maxChars >= 16, `wrapped labels still only ${many.maxChars} chars`);
 });
