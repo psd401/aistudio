@@ -100,13 +100,15 @@ node /opt/psd-skills/chat-chart/run.js \
 
 **Data shape.**
 - `bar`, `line`, `pie`: `[{ "label": string, "value": number }, ...]`
+- `bar`, `line` (multi-series): `[{ "label": string, "values": { "<series>": number, ... } }, ...]`
 - `scatter`: `[{ "x": number, "y": number }, ...]`
 
-Multi-series and custom colors aren't supported in v1 — keep it to one series for now.
+Multiple series are supported — see "Comparing several series in one chart"
+above. Custom colours are not; the palette is assigned per series.
 
 `--user` is optional. The workspace broker derives the storage path from the calling agent's identity, so the email is provenance only — pass it verbatim from the `[caller: Name <email>]` header of the user turn when you have it.
 
-**Rendering limits.** Up to 50 points per chart; one series; labels are drawn with a built-in 5x7 ASCII font, so non-ASCII characters (accents, em dashes, curly quotes) render as `?` and long category labels are truncated to fit their slot. Prefer short, ASCII labels.
+**Rendering limits.** Up to 50 points per series; labels are drawn with a built-in 5x7 ASCII font, so non-ASCII characters (accents, em dashes, curly quotes) render as `?` and long category labels are truncated to fit their slot. Prefer short, ASCII labels.
 
 The 50-point cap is enforced by the local renderer, so it binds on `auto` and `local` — i.e. every chart unless you explicitly ask for `--engine quickchart`. That path has no point-count check of its own and is bounded only by argv size and the ~16KB practical spec-URL ceiling noted above; a large explicit-quickchart payload fails as a broken URL rather than a clean exit 3. Not a reason to send one — it's a reason not to reach for `--engine quickchart` to escape the cap.
 
