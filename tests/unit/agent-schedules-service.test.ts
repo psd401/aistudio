@@ -100,13 +100,14 @@ function harness(
   const dynamoSend = jest.fn()
   const schedulerSend = jest.fn()
   const latestBySchedule = jest.fn().mockResolvedValue(latestRuns)
+  const recentForOwner = jest.fn().mockResolvedValue([])
   const service = new AgentScheduleService(
     config,
     { send: dynamoSend } as unknown as AgentScheduleDynamoClient,
     { send: schedulerSend } as unknown as SchedulerClient,
-    { latestBySchedule } as AgentScheduleRunReader,
+    { latestBySchedule, recentForOwner } as AgentScheduleRunReader,
   )
-  return { service, dynamoSend, schedulerSend, latestBySchedule }
+  return { service, dynamoSend, schedulerSend, latestBySchedule, recentForOwner }
 }
 
 function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
@@ -517,6 +518,7 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part3() {it("repairs a
       { send: dynamoSend } as unknown as AgentScheduleDynamoClient,
       { send: schedulerSend } as unknown as SchedulerClient,
       {
+        recentForOwner: jest.fn().mockResolvedValue([]),
         latestBySchedule: jest.fn().mockResolvedValue(new Map()),
       },
     )
@@ -643,3 +645,65 @@ const defineScheduleExpressionResourceGuardsSuite2 = () => {
 };
 
 describe("schedule expression resource guards", defineScheduleExpressionResourceGuardsSuite2)
+
+// `list` reports a status but never a reason, so an agent asked "why did my
+// nightly job fail" had nothing to answer with and told the user it could not
+// see that job's logs (prod 2026-08-06, agent_failures 2580).
+describe("schedule run history", () => {
+  it("returns the owner's recent runs, error messages included", async () => {
+    const { service, recentForOwner } = harness()
+    recentForOwner.mockResolvedValue([
+      {
+        scheduleId: "s1",
+        scheduleName: "Nightly inbox filing",
+        createdAt: new Date("2026-08-06T05:01:00Z"),
+        status: "error",
+        errorMessage: "exec was still running",
+        latencyMs: 1200,
+      },
+    ])
+    const runs = await service.runs("Owner@PSD401.net")
+    expect(runs).toHaveLength(1)
+    expect(runs[0].errorMessage).toBe("exec was still running")
+    // Owner is normalised before it reaches the reader, so a caller cannot
+    // reach another owner's rows by varying case.
+    expect(recentForOwner).toHaveBeenCalledWith("owner@psd401.net", {
+      scheduleId: undefined,
+      limit: undefined,
+    })
+  })
+
+  it("passes a narrowing scheduleId and limit through", async () => {
+    const { service, recentForOwner } = harness()
+    recentForOwner.mockResolvedValue([])
+    await service.runs("owner@psd401.net", { scheduleId: " s1 ", limit: 5 })
+    expect(recentForOwner).toHaveBeenCalledWith("owner@psd401.net", {
+      scheduleId: "s1",
+      limit: 5,
+    })
+  })
+
+  it("ignores non-string scheduleId and non-numeric limit", async () => {
+    const { service, recentForOwner } = harness()
+    recentForOwner.mockResolvedValue([])
+    await service.runs("owner@psd401.net", { scheduleId: 42, limit: "many" })
+    expect(recentForOwner).toHaveBeenCalledWith("owner@psd401.net", {
+      scheduleId: undefined,
+      limit: undefined,
+    })
+  })
+
+  it("ignores a fractional limit rather than forwarding it to the database", async () => {
+    // 1.5 survives a finite-only check and the reader's clamp, reaching Drizzle's
+    // .limit() as a fraction — a runtime error, not a smaller page.
+    const { service, recentForOwner } = harness()
+    recentForOwner.mockResolvedValue([])
+    for (const bad of [1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await service.runs("owner@psd401.net", { limit: bad })
+      expect(recentForOwner).toHaveBeenLastCalledWith("owner@psd401.net", {
+        scheduleId: undefined,
+        limit: undefined,
+      })
+    }
+  })
+})

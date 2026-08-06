@@ -32,6 +32,7 @@ import {
 import {
   DrizzleAgentScheduleRunReader,
   type AgentScheduleLastRun,
+  type AgentScheduleRun,
   type AgentScheduleRunReader,
 } from "@/lib/agent-schedules/run-reader";
 import {
@@ -854,6 +855,33 @@ export class AgentScheduleService {
             runEnrichmentAvailable,
           ),
     );
+  }
+
+  /**
+   * Recent runs for this owner, so the agent can answer "why did my scheduled
+   * job fail" instead of reporting that it cannot see its own history.
+   *
+   * Owner-scoped at the query, like every other operation here — a caller
+   * cannot read another owner's runs by passing their scheduleId.
+   */
+  async runs(
+    owner: string,
+    input: { scheduleId?: unknown; limit?: unknown } = {},
+  ): Promise<AgentScheduleRun[]> {
+    const ownerEmail = normalizeOwnerEmail(owner);
+    const scheduleId =
+      typeof input.scheduleId === "string" && input.scheduleId.trim()
+        ? input.scheduleId.trim()
+        : undefined;
+    // Integer, not merely finite: a fractional `limit` such as 1.5 survives the
+    // reader's clamp and reaches Drizzle's `.limit()` as a fraction. The skill
+    // validates this too, but the broker route is reachable owner-mode without
+    // it, so the boundary that talks to the database enforces it as well.
+    const limit =
+      typeof input.limit === "number" && Number.isInteger(input.limit)
+        ? input.limit
+        : undefined;
+    return this.runReader.recentForOwner(ownerEmail, { scheduleId, limit });
   }
 
   async create(

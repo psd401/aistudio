@@ -7,7 +7,7 @@ const path = require('node:path');
 const skillDir = __dirname;
 
 describe('psd-schedules authority selectors', () => {
-  for (const script of ['create.js', 'list.js', 'update.js', 'delete.js']) {
+  for (const script of ['create.js', 'list.js', 'update.js', 'delete.js', 'runs.js']) {
     it(`${script} rejects the legacy --user selector before network access`, () => {
       const result = spawnSync(
         process.execPath,

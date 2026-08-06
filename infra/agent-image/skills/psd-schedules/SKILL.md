@@ -165,3 +165,23 @@ and confirm. Run `create`. Tell the user when the first fire will be.
   do not try to "fix" unrelated infrastructure (gateway pairing, device
   approval, etc.) — those are signs of a wrong tool choice, not a real
   problem to solve.
+
+## Diagnosing a failed run
+
+`list` reports each schedule's last status but never the reason. When a user
+asks why a scheduled job failed, read the run history — it carries the error
+message:
+
+```bash
+node /opt/psd-skills/psd-schedules/runs.js
+node /opt/psd-skills/psd-schedules/runs.js --schedule-id <id> --limit 10
+```
+
+Newest first, up to 50, scoped to the caller's own schedules. Each run reports
+`status`, `errorMessage`, `latencyMs` and `createdAt`.
+
+Do NOT tell the user you have no access to the scheduled job's logs — you do.
+Read the runs, quote the error, and say what you will change. Observed
+2026-08-06: a nightly filing job failed, the user asked how to fix it, and the
+agent replied that it had no way to see that job's run logs.
+

@@ -172,7 +172,12 @@ export function resolveScheduleLockContention(
       fireClaim,
       failure: {
         ...failure,
-        severity: 'error',
+        // `warn`, for the same reason as the same-fire case above: every
+        // schedule for one owner shares the workspace lock, so two schedules
+        // firing close together contend BY DESIGN and the retry resolves it.
+        // Recording it at error severity put routine, self-healing contention
+        // in the operator feed next to real outages (prod 2026-08-06).
+        severity: 'warn',
         errorMessage:
           'Owner workspace is active for another schedule; retrying this fire',
       },

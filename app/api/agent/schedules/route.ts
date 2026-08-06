@@ -76,13 +76,20 @@ async function executeScheduleOperation(
           enabled: body.enabled,
         }),
       })
+    case "runs":
+      return NextResponse.json({
+        runs: await service.runs(ownerEmail, {
+          scheduleId: body.scheduleId,
+          limit: body.limit,
+        }),
+      })
     case "delete":
       return NextResponse.json({
         deleted: await service.delete(ownerEmail, body.scheduleId),
       })
     default:
       return NextResponse.json(
-        { error: "operation must be create, list, update, or delete" },
+        { error: "operation must be create, list, runs, update, or delete" },
         { status: 400 }
       )
   }
