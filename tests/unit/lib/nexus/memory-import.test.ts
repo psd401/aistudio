@@ -257,11 +257,13 @@ describe("Nexus memory import extraction retries and diagnostics", () => {
   })
 
   it("logs response shape and fails after the retry is exhausted", async () => {
+    // Not an output-budget overrun — that path breaks out to a split instead
+    // of retrying, so it would never exhaust the attempts.
     const runExtraction = jest.fn().mockResolvedValue({
-      text: "truncated {",
+      text: "not json {",
       toolCalls: [],
-      finishReason: "length",
-      usage: { inputTokens: 4_000, outputTokens: 8_192 },
+      finishReason: "stop",
+      usage: { inputTokens: 4_000, outputTokens: 1_200 },
     })
     const extract = createMemoryImportExtractor({
       getSetting: jest.fn().mockResolvedValue(null),
@@ -280,11 +282,11 @@ describe("Nexus memory import extraction retries and diagnostics", () => {
         attempt: 1,
         chunkIndex: 0,
         chunkCount: 1,
-        finishReason: "length",
-        outputTextChars: "truncated {".length,
+        finishReason: "stop",
+        outputTextChars: "not json {".length,
         toolCallCount: 0,
         inputTokens: 4_000,
-        outputTokens: 8_192,
+        outputTokens: 1_200,
       }),
     )
   })
@@ -393,6 +395,31 @@ describe("Nexus memory import output-budget overruns", () => {
       "Splitting a Nexus memory extraction chunk that overran",
       expect.objectContaining({ vendor: "chatgpt", splitDepth: 0 }),
     )
+    // One overrun, then straight to the two halves. An overrun must not spend
+    // a second identical call first — at temperature 0 it truncates the same
+    // way, and the waste compounds at every split depth.
+    expect(runExtraction).toHaveBeenCalledTimes(3)
+  })
+
+  it("does not retry an overrun before splitting it", async () => {
+    // A chunk too small to split: the overrun is detected, the attempt loop
+    // breaks immediately, and splitting is refused, so exactly one call runs.
+    const runExtraction = jest.fn().mockResolvedValue({
+      text: "truncated {",
+      toolCalls: [],
+      finishReason: "length",
+      usage: { inputTokens: 40, outputTokens: 8_192 },
+    })
+    const extract = createMemoryImportExtractor({
+      getSetting: jest.fn().mockResolvedValue(null),
+      createModel: jest.fn().mockResolvedValue({} as LanguageModel),
+      runExtraction,
+    })
+
+    await expect(
+      extract({ vendor: "claude", pastedText: "- One fact" }),
+    ).rejects.toThrow("invalid response")
+    expect(runExtraction).toHaveBeenCalledTimes(1)
   })
 
   it("does not split when the failure is not an output-budget overrun", async () => {

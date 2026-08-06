@@ -331,10 +331,11 @@ export function createMemoryImportExtractor(
           result,
           error,
         })
-        // No point pausing before a retry that will not happen, and none
-        // before a split — a smaller chunk is not competing for the same
-        // throttle window.
-        if (attempt < MEMORY_EXTRACTION_ATTEMPTS && !ranOutOfBudget) {
+        // An overrun cannot be retried out of — the identical prompt at
+        // temperature 0 truncates identically. Stop burning calls and go
+        // straight to splitting.
+        if (ranOutOfBudget) break
+        if (attempt < MEMORY_EXTRACTION_ATTEMPTS) {
           await delayBeforeRetry(attempt)
         }
       }
