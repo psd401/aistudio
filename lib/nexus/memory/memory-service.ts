@@ -19,6 +19,8 @@ import {
   type StoredNexusMemory,
 } from "./memory-repository"
 
+const log = createLogger({ module: "nexus-memory-service" })
+
 export const MEMORY_DEDUP_THRESHOLD = 0.9
 const DEFAULT_RETRIEVAL_THRESHOLD = 0.3
 const DEFAULT_RETRIEVAL_TOP_K = 6
@@ -104,12 +106,65 @@ function validateInput(input: {
   return content
 }
 
+function piiTypeCounts(
+  entities: readonly PIIEntity[],
+): Record<string, number> {
+  const counts: Record<string, number> = Object.create(null)
+  for (const entity of entities) {
+    counts[entity.type] = (counts[entity.type] ?? 0) + 1
+  }
+  return counts
+}
+
+/**
+ * Detect-only telemetry. A memory is the user's own record of their own life,
+ * so names, relationships, dates, ages, and contact details are exactly what
+ * it is for: refusing them made the feature useless. This records what was
+ * detected — types and counts only, never offsets or values — and always
+ * lets the write proceed. Do not restore blocking here without Hagel's
+ * explicit approval.
+ */
+async function recordPIITelemetry(
+  dependencies: MemoryServiceDependencies,
+  input: { userId: number; content: string; source?: NexusMemorySource },
+): Promise<void> {
+  let entities: PIIEntity[]
+  try {
+    // Scans the submitted content, not safety.processedContent. Every return
+    // in ContentSafetyService.processInput passes content through unchanged,
+    // so the two are identical today; if that ever stops being true, what the
+    // user actually submitted is the more faithful thing to report.
+    entities = await dependencies.detectPII(input.content)
+  } catch (error) {
+    // Fails open: an unavailable scan is an observability gap, not a reason
+    // to lose the user's memory.
+    log.warn("Nexus memory PII screening unavailable; saving anyway", {
+      userId: input.userId,
+      source: input.source,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return
+  }
+  if (entities.length === 0) return
+  // `source` makes the unattended path queryable on its own. Auto-extraction
+  // is prompted not to capture third-party identifiers, and that prompt is now
+  // the only control on it — so a source:"auto" line here is the signal that
+  // the prompt did not hold, and the thing to alert on.
+  log.info("Nexus memory contains detected personal information", {
+    userId: input.userId,
+    source: input.source,
+    piiEntityCount: entities.length,
+    piiTypes: piiTypeCounts(entities),
+  })
+}
+
 async function sanitizeMemoryContent(
   dependencies: MemoryServiceDependencies,
   input: {
     userId: number
     sessionId: string
     content: string
+    source?: NexusMemorySource
   },
 ): Promise<string> {
   const content = validateInput(input)
@@ -125,26 +180,12 @@ async function sanitizeMemoryContent(
       "input",
     )
   }
-  let piiEntities: PIIEntity[]
-  try {
-    piiEntities = await dependencies.detectPII(content)
-  } catch {
-    // Ordinary inference does not run PII detection. Durable memory is one of
-    // the two explicit gates and cannot persist an indeterminate result.
-    throw new ContentSafetyBlockedError(
-      "Memory is temporarily unavailable because its privacy check could not be completed.",
-      ["pii_scan_unavailable"],
-      "input",
-    )
-  }
+  await recordPIITelemetry(dependencies, {
+    userId: input.userId,
+    source: input.source,
+    content,
+  })
   const sanitized = safety.processedContent.trim()
-  if (piiEntities.length > 0) {
-    throw new ContentSafetyBlockedError(
-      "For privacy, personal information cannot be saved to memory.",
-      ["pii"],
-      "input",
-    )
-  }
   if (!sanitized) {
     throw new Error("Memory content is empty after safety processing")
   }
@@ -154,8 +195,6 @@ async function sanitizeMemoryContent(
 export function createMemoryService(
   dependencies: MemoryServiceDependencies,
 ): NexusMemoryService {
-  const log = createLogger({ module: "nexus-memory-service" })
-
   return {
     async save(input) {
       const sanitized = await sanitizeMemoryContent(dependencies, input)

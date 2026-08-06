@@ -31,6 +31,7 @@ import {
   MEMORY_IMPORT_VENDOR_GUIDES,
 } from "@/lib/nexus/memory/import-prompts"
 import {
+  GENERIC_MEMORY_IMPORT_FAILURE_REASON,
   MAX_MEMORY_IMPORT_CHARS,
   MAX_MEMORY_IMPORT_SAVE_BATCH_CANDIDATES,
   MAX_NEXUS_MEMORY_CONTENT_CHARS,
@@ -56,6 +57,8 @@ const MEMORY_CATEGORIES: ReadonlyArray<{
 interface CandidateDraft extends MemoryImportCandidate {
   id: string
   selected: boolean
+  /** Why the last save attempt rejected this candidate, if it did. */
+  failureReason?: string
 }
 
 interface SaveProgress {
@@ -70,7 +73,8 @@ interface SelectedCandidate {
 
 interface BatchedSaveOutcome {
   successful: number
-  failedDraftIndexes: Set<number>
+  /** Draft index -> user-safe reason, so each failed row can explain itself. */
+  failureReasons: Map<number, string>
   requestFailureMessage: string | null
 }
 
@@ -91,7 +95,7 @@ async function saveCandidateBatches(
 ): Promise<BatchedSaveOutcome> {
   let successful = 0
   let requestFailureMessage: string | null = null
-  const failedDraftIndexes = new Set<number>()
+  const failureReasons = new Map<number, string>()
 
   for (
     let offset = 0;
@@ -112,7 +116,7 @@ async function saveCandidateBatches(
     if (!result.isSuccess) {
       requestFailureMessage = result.message
       for (const { draftIndex } of selected.slice(offset)) {
-        failedDraftIndexes.add(draftIndex)
+        failureReasons.set(draftIndex, result.message)
       }
       break
     }
@@ -122,7 +126,10 @@ async function saveCandidateBatches(
       if (item.status !== "failed") continue
       const draftIndex = batch[item.index]?.draftIndex
       if (draftIndex !== undefined) {
-        failedDraftIndexes.add(draftIndex)
+        failureReasons.set(
+          draftIndex,
+          item.reason ?? GENERIC_MEMORY_IMPORT_FAILURE_REASON,
+        )
       }
     }
     onProgress({
@@ -133,7 +140,7 @@ async function saveCandidateBatches(
 
   return {
     successful,
-    failedDraftIndexes,
+    failureReasons,
     requestFailureMessage,
   }
 }
@@ -275,6 +282,87 @@ function ImportSourceStep({
   )
 }
 
+type CandidateUpdate = Partial<
+  Pick<CandidateDraft, "selected" | "content" | "category">
+>
+
+function ImportCandidateRow({
+  candidate,
+  index,
+  isSaving,
+  onUpdate,
+}: {
+  candidate: CandidateDraft
+  index: number
+  isSaving: boolean
+  onUpdate: (id: string, update: CandidateUpdate) => void
+}) {
+  return (
+    <div
+      data-testid="memory-import-candidate"
+      className={`space-y-3 rounded-md border p-3 ${
+        candidate.failureReason ? "border-destructive/50" : ""
+      }`}
+    >
+      {candidate.failureReason && (
+        <p
+          role="alert"
+          data-testid={`memory-import-candidate-reason-${index}`}
+          className="text-sm text-destructive"
+        >
+          {candidate.failureReason}
+        </p>
+      )}
+      <div className="flex items-start gap-3">
+        <Checkbox
+          checked={candidate.selected}
+          disabled={isSaving}
+          data-testid={`memory-import-candidate-select-${index}`}
+          aria-label={`Import candidate ${index + 1}`}
+          className="mt-2"
+          onCheckedChange={(checked) =>
+            onUpdate(candidate.id, { selected: checked === true })
+          }
+        />
+        <Textarea
+          value={candidate.content}
+          maxLength={MAX_NEXUS_MEMORY_CONTENT_CHARS}
+          disabled={isSaving}
+          data-testid={`memory-import-candidate-content-${index}`}
+          aria-label={`Memory candidate ${index + 1} content`}
+          onChange={(event) =>
+            onUpdate(candidate.id, { content: event.target.value })
+          }
+        />
+      </div>
+      <Select
+        value={candidate.category}
+        disabled={isSaving}
+        onValueChange={(value) =>
+          onUpdate(candidate.id, {
+            category: value as NexusMemoryCategory,
+          })
+        }
+      >
+        <SelectTrigger
+          className="w-full sm:w-44"
+          data-testid={`memory-import-candidate-category-${index}`}
+          aria-label={`Memory candidate ${index + 1} category`}
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent className={meridianPortalClassName}>
+          {MEMORY_CATEGORIES.map((category) => (
+            <SelectItem key={category.value} value={category.value}>
+              {category.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  )
+}
+
 function ImportReviewStep({
   candidates,
   isSaving,
@@ -293,15 +381,21 @@ function ImportReviewStep({
   const selectedCount = candidates.filter(
     (candidate) => candidate.selected,
   ).length
-  const updateCandidate = (
-    id: string,
-    update: Partial<
-      Pick<CandidateDraft, "selected" | "content" | "category">
-    >,
-  ) => {
+  const updateCandidate = (id: string, update: CandidateUpdate) => {
     onCandidatesChange(
       candidates.map((candidate) =>
-        candidate.id === id ? { ...candidate, ...update } : candidate,
+        candidate.id === id
+          ? {
+              ...candidate,
+              ...update,
+              // An edit answers the rejection, so the old reason no longer
+              // describes the text on screen.
+              failureReason:
+                update.content === undefined
+                  ? candidate.failureReason
+                  : undefined,
+            }
+          : candidate,
       ),
     )
   }
@@ -322,65 +416,13 @@ function ImportReviewStep({
       ) : (
         <div className="max-h-[50vh] space-y-3 overflow-y-auto pr-1">
           {candidates.map((candidate, index) => (
-            <div
+            <ImportCandidateRow
               key={candidate.id}
-              data-testid="memory-import-candidate"
-              className="space-y-3 rounded-md border p-3"
-            >
-              <div className="flex items-start gap-3">
-                <Checkbox
-                  checked={candidate.selected}
-                  disabled={isSaving}
-                  data-testid={`memory-import-candidate-select-${index}`}
-                  aria-label={`Import candidate ${index + 1}`}
-                  className="mt-2"
-                  onCheckedChange={(checked) =>
-                    updateCandidate(candidate.id, {
-                      selected: checked === true,
-                    })
-                  }
-                />
-                <Textarea
-                  value={candidate.content}
-                  maxLength={MAX_NEXUS_MEMORY_CONTENT_CHARS}
-                  disabled={isSaving}
-                  data-testid={`memory-import-candidate-content-${index}`}
-                  aria-label={`Memory candidate ${index + 1} content`}
-                  onChange={(event) =>
-                    updateCandidate(candidate.id, {
-                      content: event.target.value,
-                    })
-                  }
-                />
-              </div>
-              <Select
-                value={candidate.category}
-                disabled={isSaving}
-                onValueChange={(value) =>
-                  updateCandidate(candidate.id, {
-                    category: value as NexusMemoryCategory,
-                  })
-                }
-              >
-                <SelectTrigger
-                  className="w-full sm:w-44"
-                  data-testid={`memory-import-candidate-category-${index}`}
-                  aria-label={`Memory candidate ${index + 1} category`}
-                >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent className={meridianPortalClassName}>
-                  {MEMORY_CATEGORIES.map((category) => (
-                    <SelectItem
-                      key={category.value}
-                      value={category.value}
-                    >
-                      {category.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+              candidate={candidate}
+              index={index}
+              isSaving={isSaving}
+              onUpdate={updateCandidate}
+            />
           ))}
         </div>
       )}
@@ -500,7 +542,7 @@ function useMemoryImportDialog({
     try {
       const {
         successful,
-        failedDraftIndexes,
+        failureReasons,
         requestFailureMessage,
       } = await saveCandidateBatches(vendor, selected, setSaveProgress)
 
@@ -520,7 +562,7 @@ function useMemoryImportDialog({
         }
       }
 
-      if (failedDraftIndexes.size === 0) {
+      if (failureReasons.size === 0) {
         toast.success(
           `${successful} ${
             successful === 1 ? "memory" : "memories"
@@ -531,16 +573,22 @@ function useMemoryImportDialog({
         return
       }
 
+      // Reasons are keyed by index into the pre-filter list, so attach them
+      // before narrowing to the failures.
       setCandidates((current) =>
         current
-          .filter((_candidate, index) => failedDraftIndexes.has(index))
-          .map((candidate) => ({ ...candidate, selected: true })),
+          .map((candidate, index) => ({
+            ...candidate,
+            selected: true,
+            failureReason: failureReasons.get(index),
+          }))
+          .filter((candidate) => candidate.failureReason !== undefined),
       )
       if (successful === 0 && requestFailureMessage) {
         toast.error(requestFailureMessage)
       } else {
         toast.warning(
-          `${successful} imported; ${failedDraftIndexes.size} need attention`,
+          `${successful} imported; ${failureReasons.size} need attention`,
         )
       }
     } catch (saveError) {

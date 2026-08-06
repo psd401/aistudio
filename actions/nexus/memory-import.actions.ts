@@ -30,6 +30,8 @@ import {
   type SaveImportedMemoriesInput,
 } from "@/lib/nexus/memory/memory-import-schemas"
 import { memoryService } from "@/lib/nexus/memory/memory-service"
+import { ContentSafetyBlockedError } from "@/lib/streaming/types"
+import { GENERIC_MEMORY_IMPORT_FAILURE_REASON } from "@/lib/nexus/memory/memory-constants"
 import { hasCapabilityAccess } from "@/utils/roles"
 
 interface MemoryImportRequester {
@@ -46,6 +48,23 @@ export interface ImportedMemoryItemResult {
   status: "saved" | "failed"
   memoryId?: string
   action?: "inserted" | "updated"
+  /** Present on failures only. Safe to render to the user. */
+  reason?: string
+}
+
+/**
+ * A user-safe explanation for one rejected candidate. Blocked-content messages
+ * are already written for users; every other failure stays generic so provider,
+ * database, and embedding internals never reach the browser.
+ *
+ * Without this the dialog showed only "N need attention", and a prod user
+ * retried the same deterministically rejected batch eight times in an hour.
+ */
+function candidateFailureReason(error: unknown): string {
+  if (error instanceof ContentSafetyBlockedError) {
+    return error.blockedMessage
+  }
+  return GENERIC_MEMORY_IMPORT_FAILURE_REASON
 }
 
 export interface SaveImportedMemoriesResult {
@@ -199,7 +218,11 @@ export async function saveImportedMemories(
             error instanceof Error ? error.message : String(error),
           ),
         })
-        results.push({ index, status: "failed" })
+        results.push({
+          index,
+          status: "failed",
+          reason: candidateFailureReason(error),
+        })
       }
     }
 
