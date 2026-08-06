@@ -31,10 +31,8 @@ import {
 } from "@/lib/nexus/memory/memory-import-schemas"
 import { memoryService } from "@/lib/nexus/memory/memory-service"
 import { ContentSafetyBlockedError } from "@/lib/streaming/types"
+import { GENERIC_MEMORY_IMPORT_FAILURE_REASON } from "@/lib/nexus/memory/memory-constants"
 import { hasCapabilityAccess } from "@/utils/roles"
-
-const GENERIC_CANDIDATE_FAILURE_REASON =
-  "This memory could not be saved. Try again in a moment."
 
 interface MemoryImportRequester {
   userId: number
@@ -66,7 +64,7 @@ function candidateFailureReason(error: unknown): string {
   if (error instanceof ContentSafetyBlockedError) {
     return error.blockedMessage
   }
-  return GENERIC_CANDIDATE_FAILURE_REASON
+  return GENERIC_MEMORY_IMPORT_FAILURE_REASON
 }
 
 export interface SaveImportedMemoriesResult {

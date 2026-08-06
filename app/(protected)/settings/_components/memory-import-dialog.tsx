@@ -31,6 +31,7 @@ import {
   MEMORY_IMPORT_VENDOR_GUIDES,
 } from "@/lib/nexus/memory/import-prompts"
 import {
+  GENERIC_MEMORY_IMPORT_FAILURE_REASON,
   MAX_MEMORY_IMPORT_CHARS,
   MAX_MEMORY_IMPORT_SAVE_BATCH_CANDIDATES,
   MAX_NEXUS_MEMORY_CONTENT_CHARS,
@@ -52,9 +53,6 @@ const MEMORY_CATEGORIES: ReadonlyArray<{
   { value: "preference", label: "Preference" },
   { value: "context", label: "Context" },
 ]
-
-const GENERIC_CANDIDATE_FAILURE_REASON =
-  "This memory could not be saved. Try again in a moment."
 
 interface CandidateDraft extends MemoryImportCandidate {
   id: string
@@ -130,7 +128,7 @@ async function saveCandidateBatches(
       if (draftIndex !== undefined) {
         failureReasons.set(
           draftIndex,
-          item.reason ?? GENERIC_CANDIDATE_FAILURE_REASON,
+          item.reason ?? GENERIC_MEMORY_IMPORT_FAILURE_REASON,
         )
       }
     }

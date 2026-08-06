@@ -1,3 +1,4 @@
+import type { Page } from "@playwright/test"
 import postgres from "postgres"
 import { test, expect } from "./fixtures"
 import {
@@ -27,6 +28,31 @@ function createDatabase() {
   )
 }
 
+async function openMemoryImport(page: Page): Promise<void> {
+  await authenticateContext(
+    page.context(),
+    SEEDED_ADMIN_EMAIL,
+    SEEDED_ADMIN_SUB,
+  )
+  await page.goto("/settings")
+  await page.getByRole("tab", { name: "Memory" }).click()
+  await page.getByTestId("memory-import-open").click()
+}
+
+async function deleteMarkedMemories(
+  database: ReturnType<typeof createDatabase>,
+  marker: string,
+): Promise<void> {
+  await database`
+    DELETE FROM nexus_user_memories AS memory
+    USING users AS owner
+    WHERE owner.id = memory.user_id
+      AND owner.email = ${SEEDED_ADMIN_EMAIL}
+      AND memory.content LIKE ${`%${marker}%`}
+  `
+  await database.end()
+}
+
 test.describe("Settings memory import (authenticated)", () => {
   test.describe.configure({ timeout: 240_000 })
   test.skip(
@@ -38,11 +64,6 @@ test.describe("Settings memory import (authenticated)", () => {
   test("extracts a paste for review, omits a deselected candidate, and saves edited candidates", async ({
     page,
   }) => {
-    await authenticateContext(
-      page.context(),
-      SEEDED_ADMIN_EMAIL,
-      SEEDED_ADMIN_SUB,
-    )
     const database = createDatabase()
     const marker = `settings-memory-import-${Date.now()}`
     const pastedText = [
@@ -52,9 +73,7 @@ test.describe("Settings memory import (authenticated)", () => {
     ].join("\n")
 
     try {
-      await page.goto("/settings")
-      await page.getByRole("tab", { name: "Memory" }).click()
-      await page.getByTestId("memory-import-open").click()
+      await openMemoryImport(page)
 
       await expect(page.getByTestId("memory-import-extract")).toBeDisabled()
       await page.getByTestId("memory-import-paste").fill(pastedText)
@@ -105,25 +124,13 @@ test.describe("Settings memory import (authenticated)", () => {
         rows.some((row) => row.content.includes("concise answers")),
       ).toBe(false)
     } finally {
-      await database`
-        DELETE FROM nexus_user_memories AS memory
-        USING users AS owner
-        WHERE owner.id = memory.user_id
-          AND owner.email = ${SEEDED_ADMIN_EMAIL}
-          AND memory.content LIKE ${`%${marker}%`}
-      `
-      await database.end()
+      await deleteMarkedMemories(database, marker)
     }
   })
 
   test("imports memories that contain names, dates, and ages", async ({
     page,
   }) => {
-    await authenticateContext(
-      page.context(),
-      SEEDED_ADMIN_EMAIL,
-      SEEDED_ADMIN_SUB,
-    )
     const database = createDatabase()
     const marker = `settings-memory-import-pii-${Date.now()}`
     // Every one of these trips Comprehend (NAME, DATE_TIME, AGE, EMAIL). Before
@@ -137,19 +144,33 @@ test.describe("Settings memory import (authenticated)", () => {
     ].join("\n")
 
     try {
-      await page.goto("/settings")
-      await page.getByRole("tab", { name: "Memory" }).click()
-      await page.getByTestId("memory-import-open").click()
+      await openMemoryImport(page)
       await page.getByTestId("memory-import-paste").fill(pastedText)
       await page.getByTestId("memory-import-extract").click()
 
+      // How many candidates the model returns is its own call, so this asserts
+      // a floor and then pins the saved set itself: the first four rows are
+      // overwritten with the PII under test and everything after is deselected.
       const candidates = page.getByTestId("memory-import-candidate")
-      await expect(candidates).toHaveCount(4, { timeout: 90_000 })
+      await expect(candidates.first()).toBeVisible({ timeout: 90_000 })
+      await expect
+        .poll(() => candidates.count(), { timeout: 30_000 })
+        .toBeGreaterThanOrEqual(PII_CANDIDATE_TEXT.length)
 
-      for (let index = 0; index < 4; index += 1) {
+      const extracted = await candidates.count()
+      const surplus = Array.from(
+        { length: Math.max(0, extracted - PII_CANDIDATE_TEXT.length) },
+        (_value, offset) => PII_CANDIDATE_TEXT.length + offset,
+      )
+      for (const index of surplus) {
+        await page
+          .getByTestId(`memory-import-candidate-select-${index}`)
+          .click()
+      }
+      for (const [index, text] of PII_CANDIDATE_TEXT.entries()) {
         await page
           .getByTestId(`memory-import-candidate-content-${index}`)
-          .fill(`${marker}-${index}: ${PII_CANDIDATE_TEXT[index]}`)
+          .fill(`${marker}-${index}: ${text}`)
       }
       await page.getByTestId("memory-import-save").click()
 
@@ -178,14 +199,7 @@ test.describe("Settings memory import (authenticated)", () => {
         rows.some((row) => row.content.includes("hagelk@psd401.net")),
       ).toBe(true)
     } finally {
-      await database`
-        DELETE FROM nexus_user_memories AS memory
-        USING users AS owner
-        WHERE owner.id = memory.user_id
-          AND owner.email = ${SEEDED_ADMIN_EMAIL}
-          AND memory.content LIKE ${`%${marker}%`}
-      `
-      await database.end()
+      await deleteMarkedMemories(database, marker)
     }
   })
 })

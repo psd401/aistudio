@@ -35,6 +35,14 @@ const EXTRACTION_TOOL_NAME = "submit_memory_candidates"
 export const MEMORY_EXTRACTION_CHUNK_CHARS = 12_000
 const MEMORY_EXTRACTION_MAX_CONCURRENCY = 3
 const MEMORY_EXTRACTION_ATTEMPTS = 2
+/**
+ * How many times a chunk that ran out of output budget may be halved.
+ * Retrying the same prompt at temperature 0 cannot fix a response the model
+ * had no room to finish — only a smaller chunk can. Bounded so a chunk that
+ * fails for some other reason cannot fan out indefinitely.
+ */
+const MEMORY_EXTRACTION_MAX_SPLIT_DEPTH = 3
+const MEMORY_EXTRACTION_MIN_CHUNK_CHARS = 500
 
 const INVALID_EXTRACTION_RESPONSE =
   "The memory extraction model returned an invalid response"
@@ -83,10 +91,22 @@ function salvageCandidates(value: unknown): MemoryImportCandidate[] | null {
   const candidates = (value as { candidates?: unknown }).candidates
   if (!Array.isArray(candidates)) return null
   const salvaged: MemoryImportCandidate[] = []
+  let capped = 0
   for (const entry of candidates) {
-    if (salvaged.length >= MAX_MEMORY_IMPORT_CANDIDATES) break
+    if (salvaged.length >= MAX_MEMORY_IMPORT_CANDIDATES) {
+      capped += 1
+      continue
+    }
     const parsed = MemoryImportCandidateSchema.safeParse(entry)
     if (parsed.success) salvaged.push(parsed.data)
+  }
+  if (capped > 0) {
+    // Never truncate silently: "why did my import stop at 100" has to be
+    // answerable from the logs.
+    log.warn("Nexus memory extraction batch exceeded the candidate cap", {
+      cap: MAX_MEMORY_IMPORT_CANDIDATES,
+      droppedCandidates: capped,
+    })
   }
   return salvaged.length > 0 ? salvaged : null
 }
@@ -167,12 +187,22 @@ function dedupeCandidates(
 ): MemoryImportCandidate[] {
   const seen = new Set<string>()
   const unique: MemoryImportCandidate[] = []
+  let capped = 0
   for (const candidate of candidates) {
-    if (unique.length >= MAX_MEMORY_IMPORT_CANDIDATES) break
+    if (unique.length >= MAX_MEMORY_IMPORT_CANDIDATES) {
+      capped += 1
+      continue
+    }
     const key = candidate.content.trim().toLowerCase()
     if (seen.has(key)) continue
     seen.add(key)
     unique.push(candidate)
+  }
+  if (capped > 0) {
+    log.warn("Nexus memory import exceeded the candidate cap", {
+      cap: MAX_MEMORY_IMPORT_CANDIDATES,
+      droppedCandidates: capped,
+    })
   }
   return unique
 }
@@ -181,44 +211,119 @@ function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
 }
 
+interface ChunkExtractionContext {
+  model: LanguageModel
+  vendor: MemoryImportVendor
+  chunkIndex: number
+  chunkCount: number
+}
+
+// Never logs the model output or the pasted source; the shape of the response
+// is what makes a failure diagnosable.
+function logChunkFailure(
+  context: ChunkExtractionContext,
+  failure: {
+    chunk: string
+    splitDepth: number
+    attempt: number
+    result?: ModelExtractionResult
+    error: unknown
+  },
+): void {
+  const { result } = failure
+  log.warn("Nexus memory extraction returned an unparseable response", {
+    vendor: context.vendor,
+    chunkIndex: context.chunkIndex,
+    chunkCount: context.chunkCount,
+    attempt: failure.attempt,
+    splitDepth: failure.splitDepth,
+    chunkChars: failure.chunk.length,
+    finishReason: result?.finishReason,
+    outputTextChars: result?.text.length ?? 0,
+    toolCallCount:
+      result && Array.isArray(result.toolCalls)
+        ? result.toolCalls.length
+        : 0,
+    inputTokens: result?.usage?.inputTokens,
+    outputTokens: result?.usage?.outputTokens,
+    error: toError(failure.error).message,
+  })
+}
+
 export function createMemoryImportExtractor(
   dependencies: MemoryImportExtractorDependencies,
 ) {
-  async function extractChunk(
-    model: LanguageModel,
-    vendor: MemoryImportVendor,
+  /**
+   * Halve a chunk the model had no output budget to finish, and extract the
+   * halves. Returns null when splitting is not possible or nothing recovered.
+   */
+  async function extractSplitHalves(
+    context: ChunkExtractionContext,
     chunk: string,
-    chunkIndex: number,
-    chunkCount: number,
+    splitDepth: number,
+  ): Promise<MemoryImportCandidate[] | null> {
+    if (splitDepth >= MEMORY_EXTRACTION_MAX_SPLIT_DEPTH) return null
+    if (chunk.length <= MEMORY_EXTRACTION_MIN_CHUNK_CHARS) return null
+    const halves = splitExtractionChunks(chunk, Math.ceil(chunk.length / 2))
+    if (halves.length < 2) return null
+
+    log.warn("Splitting a Nexus memory extraction chunk that overran", {
+      vendor: context.vendor,
+      chunkIndex: context.chunkIndex,
+      splitDepth,
+      chunkChars: chunk.length,
+      halves: halves.length,
+    })
+    const settled = await Promise.allSettled(
+      halves.map((half) => extractChunk(context, half, splitDepth + 1)),
+    )
+    const fulfilled = settled.filter(
+      (
+        outcome,
+      ): outcome is PromiseFulfilledResult<MemoryImportCandidate[]> =>
+        outcome.status === "fulfilled",
+    )
+    // Half the chunk landing is still better than losing all of it.
+    if (fulfilled.length === 0) return null
+    return fulfilled.flatMap((outcome) => outcome.value)
+  }
+
+  async function extractChunk(
+    context: ChunkExtractionContext,
+    chunk: string,
+    splitDepth = 0,
   ): Promise<MemoryImportCandidate[]> {
-    const prompt = buildMemoryImportExtractionPrompt(vendor, chunk)
+    const prompt = buildMemoryImportExtractionPrompt(context.vendor, chunk)
+    let ranOutOfBudget = false
     for (
       let attempt = 1;
       attempt <= MEMORY_EXTRACTION_ATTEMPTS;
       attempt += 1
     ) {
-      const result = await dependencies.runExtraction(model, prompt)
+      // runExtraction is inside the try so a throttled or dropped Bedrock call
+      // gets the retry too, not just an unparseable response.
+      let result: ModelExtractionResult | undefined
       try {
+        result = await dependencies.runExtraction(context.model, prompt)
         return parseMemoryImportCandidates(result)
       } catch (error) {
-        // Never log the model output or the pasted source; the shape of the
-        // response is what makes this diagnosable.
-        log.warn("Nexus memory extraction returned an unparseable response", {
-          vendor,
-          chunkIndex,
-          chunkCount,
+        ranOutOfBudget = result?.finishReason === "length"
+        logChunkFailure(context, {
+          chunk,
+          splitDepth,
           attempt,
-          chunkChars: chunk.length,
-          finishReason: result.finishReason,
-          outputTextChars: result.text.length,
-          toolCallCount: Array.isArray(result.toolCalls)
-            ? result.toolCalls.length
-            : 0,
-          inputTokens: result.usage?.inputTokens,
-          outputTokens: result.usage?.outputTokens,
-          error: toError(error).message,
+          result,
+          error,
         })
       }
+    }
+
+    // A chunk that ran out of output budget truncates identically on every
+    // identical retry. Splitting it — not retrying it — is what actually
+    // clears the failure mode the 2026-08-05 incident hit.
+    if (ranOutOfBudget) {
+      const recovered = await extractSplitHalves(context, chunk, splitDepth)
+      if (recovered) return recovered
     }
     throw new Error(INVALID_EXTRACTION_RESPONSE)
   }
@@ -252,11 +357,13 @@ export function createMemoryImportExtractor(
         ) {
           try {
             collected[index] = await extractChunk(
-              model,
-              input.vendor,
+              {
+                model,
+                vendor: input.vendor,
+                chunkIndex: index,
+                chunkCount: chunks.length,
+              },
               chunks[index],
-              index,
-              chunks.length,
             )
           } catch (error) {
             failures.push(toError(error))

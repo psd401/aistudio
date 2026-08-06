@@ -77,8 +77,10 @@ AI inference runs under zero-data-retention agreements, so names and other conte
 
 Amazon Comprehend detection remains on two durable-content boundaries:
 
-1. **Nexus memory writes** — relevant K-12 PII and district-specific identifiers are refused. Detection errors fail closed, so indeterminate content is never persisted as memory.
+1. **Nexus memory writes** — detected entity types and counts are logged as telemetry (never offsets or values). The write proceeds, and detector errors are non-fatal. A memory is the user's own record of their own life, so names, relationships, dates, ages, and contact details are the substance of the feature rather than a leak; refusing them made memory unusable and produced no user-visible reason (see the 2026-08-05 import incident, issue #1610). Content safety (`processInput`) still gates every memory write and still blocks.
 2. **Published agent content screening** — detected entity types are logged as telemetry. Content remains unmodified, and detector errors are non-fatal.
+
+Automatic memory extraction is the one place third-party identifiers are still held back, and it is held back at the *prompt*, not by a refusal: it runs unattended after every persisted Nexus turn, so its extraction prompt continues to exclude contact details and sensitive identifiers. Memory import does not, because the user pastes their own export and approves each candidate before it is saved.
 
 The detection helper applies the existing K-12 type allowlist and confidence floors to standard Comprehend entities, plus custom patterns for district-specific identifiers:
 
@@ -156,7 +158,8 @@ Administrators can receive real-time notifications when safety violations occur:
 ### COPPA (Children's Online Privacy Protection Act)
 
 - Zero-data-retention agreements prevent provider retention of inference data
-- Nexus memory refuses detected personal information and fails closed when detection is unavailable
+- Nexus memory is per-user, owner-scoped, and user-controlled: a user reviews every imported candidate before it is saved, and can read, edit, and delete their own memories at any time from Settings → Memory
+- Automatic memory extraction is prompted to exclude contact details and sensitive identifiers, so unattended capture does not turn a third party mentioned in a chat into a durable row
 - No reversible token mapping store is created
 
 ### FERPA (Family Educational Rights and Privacy Act)
@@ -597,7 +600,7 @@ The content filtering includes protection against "prompt injection" and "jailbr
 
 ### Is student data stored anywhere?
 
-AI Studio does not store reversible PII token mappings. Ordinary inference content is governed by provider zero-data-retention agreements. Nexus memory refuses detected PII; published agent content keeps its authored text and emits entity-type telemetry.
+AI Studio does not store reversible PII token mappings. Ordinary inference content is governed by provider zero-data-retention agreements. Nexus memory and published agent content both keep their text and emit entity-type telemetry; neither refuses on a PII detection.
 
 ### Can I disable these features?
 

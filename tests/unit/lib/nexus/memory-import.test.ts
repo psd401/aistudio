@@ -289,6 +289,47 @@ describe("Nexus memory import extraction retries and diagnostics", () => {
     )
   })
 
+  it("retries a transient extraction call failure", async () => {
+    const runExtraction = jest
+      .fn()
+      .mockRejectedValueOnce(new Error("ThrottlingException"))
+      .mockResolvedValueOnce(
+        toolResult([{ content: "Recovered fact", category: "context" }]),
+      )
+    const extract = createMemoryImportExtractor({
+      getSetting: jest.fn().mockResolvedValue(null),
+      createModel: jest.fn().mockResolvedValue({} as LanguageModel),
+      runExtraction,
+    })
+
+    await expect(
+      extract({ vendor: "claude", pastedText: "- One fact" }),
+    ).resolves.toEqual([
+      { content: "Recovered fact", category: "context" },
+    ])
+    expect(runExtraction).toHaveBeenCalledTimes(2)
+  })
+
+  it("logs how many candidates the cap dropped", () => {
+    const candidates = Array.from(
+      { length: MAX_MEMORY_IMPORT_CANDIDATES + 7 },
+      (_value, index) => ({
+        content: `Fact ${index + 1}`,
+        category: "context",
+      }),
+    )
+
+    parseMemoryImportCandidates(toolResult(candidates))
+
+    expect(mockLogWarn).toHaveBeenCalledWith(
+      "Nexus memory extraction batch exceeded the candidate cap",
+      expect.objectContaining({
+        cap: MAX_MEMORY_IMPORT_CANDIDATES,
+        droppedCandidates: 7,
+      }),
+    )
+  })
+
   it("never logs the model output or the pasted source", async () => {
     const runExtraction = jest.fn().mockResolvedValue({
       text: "Sarah Hagel lives at 12 Harbor Ridge",
@@ -310,5 +351,67 @@ describe("Nexus memory import extraction retries and diagnostics", () => {
     const logged = JSON.stringify(mockLogWarn.mock.calls)
     expect(logged).not.toContain("Sarah Hagel")
     expect(logged).not.toContain("Harbor Ridge")
+  })
+})
+
+describe("Nexus memory import output-budget overruns", () => {
+  it("splits an over-budget chunk instead of retrying it identically", async () => {
+    // Two lines, each half of an over-budget chunk. The full chunk always
+    // overruns; either half parses. An identical retry could never recover it.
+    const pastedText = `- ${"a".repeat(3_000)}\n- ${"b".repeat(3_000)}`
+    const runExtraction = jest.fn(async (_model, prompt: string) => {
+      const overBudget =
+        prompt.includes("aaaa") && prompt.includes("bbbb")
+      if (overBudget) {
+        return {
+          text: "truncated {",
+          toolCalls: [],
+          finishReason: "length",
+          usage: { inputTokens: 2_000, outputTokens: 8_192 },
+        }
+      }
+      return toolResult([
+        {
+          content: prompt.includes("aaaa") ? "First half" : "Second half",
+          category: "context",
+        },
+      ])
+    })
+    const extract = createMemoryImportExtractor({
+      getSetting: jest.fn().mockResolvedValue(null),
+      createModel: jest.fn().mockResolvedValue({} as LanguageModel),
+      runExtraction,
+    })
+
+    await expect(
+      extract({ vendor: "chatgpt", pastedText }),
+    ).resolves.toEqual([
+      { content: "First half", category: "context" },
+      { content: "Second half", category: "context" },
+    ])
+    expect(mockLogWarn).toHaveBeenCalledWith(
+      "Splitting a Nexus memory extraction chunk that overran",
+      expect.objectContaining({ vendor: "chatgpt", splitDepth: 0 }),
+    )
+  })
+
+  it("does not split when the failure is not an output-budget overrun", async () => {
+    const pastedText = `- ${"a".repeat(3_000)}\n- ${"b".repeat(3_000)}`
+    const runExtraction = jest.fn().mockResolvedValue({
+      text: "not json",
+      toolCalls: [],
+      finishReason: "stop",
+    })
+    const extract = createMemoryImportExtractor({
+      getSetting: jest.fn().mockResolvedValue(null),
+      createModel: jest.fn().mockResolvedValue({} as LanguageModel),
+      runExtraction,
+    })
+
+    await expect(
+      extract({ vendor: "chatgpt", pastedText }),
+    ).rejects.toThrow("invalid response")
+    // Two attempts on the one chunk, and no split fan-out.
+    expect(runExtraction).toHaveBeenCalledTimes(2)
   })
 })
