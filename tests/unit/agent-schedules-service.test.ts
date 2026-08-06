@@ -519,7 +519,7 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part3() {it("repairs a
       { send: schedulerSend } as unknown as SchedulerClient,
       {
         recentForOwner: jest.fn().mockResolvedValue([]),
-      latestBySchedule: jest.fn().mockResolvedValue(new Map()),
+        latestBySchedule: jest.fn().mockResolvedValue(new Map()),
       },
     )
     await expect(service.delete(OWNER, SCHEDULE_ID)).resolves.toBe(SCHEDULE_ID)
@@ -692,18 +692,18 @@ describe("schedule run history", () => {
       limit: undefined,
     })
   })
-})
 
-it("ignores a fractional limit rather than forwarding it to the database", async () => {
-  // 1.5 survives a finite-only check and the reader's clamp, reaching Drizzle's
-  // .limit() as a fraction — a runtime error, not a smaller page.
-  const { service, recentForOwner } = harness()
-  recentForOwner.mockResolvedValue([])
-  for (const bad of [1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
-    await service.runs("owner@psd401.net", { limit: bad })
-    expect(recentForOwner).toHaveBeenLastCalledWith("owner@psd401.net", {
-      scheduleId: undefined,
-      limit: undefined,
-    })
-  }
+  it("ignores a fractional limit rather than forwarding it to the database", async () => {
+    // 1.5 survives a finite-only check and the reader's clamp, reaching Drizzle's
+    // .limit() as a fraction — a runtime error, not a smaller page.
+    const { service, recentForOwner } = harness()
+    recentForOwner.mockResolvedValue([])
+    for (const bad of [1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await service.runs("owner@psd401.net", { limit: bad })
+      expect(recentForOwner).toHaveBeenLastCalledWith("owner@psd401.net", {
+        scheduleId: undefined,
+        limit: undefined,
+      })
+    }
+  })
 })
