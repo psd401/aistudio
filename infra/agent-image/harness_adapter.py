@@ -243,7 +243,11 @@ def _classify_chat_error(error_message: str) -> str:
     return "OpenClawChatError"
 
 
-def _frame_failed_partial(partial: str) -> str:
+def _frame_failed_partial(
+    partial: str,
+    completed_tools: Optional[List[Dict[str, Any]]] = None,
+    in_flight_tools: Optional[Dict[str, Any]] = None,
+) -> str:
     """Wrap a failed/degraded turn so it is never presented as a clean answer.
 
     When a turn dies mid-task the model has usually emitted some scratchpad
@@ -254,19 +258,138 @@ def _frame_failed_partial(partial: str) -> str:
     is no partial, return a standalone error.
 
     `partial` must already be chat-formatted (the frame text is plain).
+
+    `completed_tools` names the tool calls that finished before the turn died.
+    "Some steps may have already run" is unactionable on its own — a principal
+    told that has no way to know whether a doc was created, an event booked, or
+    nothing at all happened. We KNOW which tools completed, so say so.
     """
     partial = (partial or "").strip()
+    ran = _describe_completed_tools(completed_tools, in_flight_tools)
     if partial:
         return (
             "⚠️ I couldn't finish that — I hit a problem partway "
-            "through and some steps may have already run. Here's how far I "
-            "got:\n\n" + partial
+            f"through.{ran} Here's how far I got:\n\n" + partial
         )
     return (
         "⚠️ I couldn't complete that — I hit a problem partway "
-        "through. Some steps may have already run, so please check before "
-        "retrying."
+        f"through.{ran}"
     )
+
+
+def _describe_completed_tools(
+    tool_calls: Optional[List[Dict[str, Any]]],
+    in_flight: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Render the finished tool calls as a short clause, or '' when none ran.
+
+    Deduplicated and capped: a turn that looped over 40 files should not paste
+    40 identical names into a Chat message. When nothing completed we say so
+    outright, because "nothing ran" is the single most useful thing a user can
+    be told here — it means retrying is safe.
+    """
+    if not isinstance(tool_calls, list):
+        return " Some steps may have already run, so please check before retrying."
+    names = []
+    # A record we cannot read is NOT evidence that nothing ran. Two ingestion
+    # paths feed tool_calls and only the newer one normalizes `status`, so the
+    # legacy tool_result stream can carry a terminal status we do not recognise
+    # ("completed", "ok", …) or a missing name. Counting those as "nothing
+    # happened" would tell the user a retry is safe when a Doc had already been
+    # created — precisely the failure this function exists to prevent. So an
+    # unreadable terminal record suppresses the safe-to-retry claim.
+    unnamed_terminal = False
+    # A tool that STARTED and never reported back is the most dangerous case,
+    # not the safest: the request may have reached the broker and created the
+    # Doc before the turn died, and its result event simply never arrived.
+    # Started calls live in `tool_starts` and are removed from it when they
+    # complete, so anything still there is genuinely in flight — and it never
+    # appears in `tool_calls` at all, which is how an interrupted side effect
+    # could leave that list empty and produce a "safe to retry".
+    started_names = []
+    if isinstance(in_flight, dict):
+        for start in in_flight.values():
+            if not isinstance(start, dict):
+                unnamed_terminal = True
+                continue
+            name = start.get("name")
+            if isinstance(name, str) and name and name != "unknown":
+                if name not in started_names:
+                    started_names.append(name)
+            else:
+                unnamed_terminal = True
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            unnamed_terminal = True
+            continue
+        if _tool_call_is_pending(call):
+            continue
+        name = call.get("name")
+        if isinstance(name, str) and name and name != "unknown":
+            if name not in names:
+                names.append(name)
+        else:
+            unnamed_terminal = True
+    # An in-flight call is reported as uncertain rather than as completed: we
+    # know it was requested, not whether it landed.
+    if started_names:
+        started_shown = ", ".join(started_names[:3])
+        started_more = (
+            f" (+{len(started_names) - 3} more)" if len(started_names) > 3 else ""
+        )
+        started_note = (
+            f" {started_shown}{started_more} was still running and may or may not "
+            "have completed."
+        )
+    else:
+        started_note = ""
+
+    if not names:
+        if started_names or unnamed_terminal:
+            return (
+                f"{started_note} Some steps may have already run, so please check "
+                "before retrying."
+            ).lstrip()
+        return " Nothing had run yet, so it's safe to retry."
+    shown = ", ".join(names[:5])
+    more = f" (+{len(names) - 5} more)" if len(names) > 5 else ""
+    unknown_note = " (and possibly others)" if unnamed_terminal else ""
+    return (
+        f" I had already run: {shown}{more}{unknown_note} — "
+        f"please check those before retrying.{started_note}"
+    )
+
+
+# Statuses that mean a call had NOT finished when the turn died. Anything else
+# terminal — including a status this build does not know — counts as completed,
+# because assuming an unknown status means "did not run" is the unsafe
+# direction.
+_PENDING_TOOL_STATUSES = frozenset({"running", "pending", "started", "in_progress"})
+
+
+def _normalize_tool_status(raw: Any, error: Any) -> str:
+    """Collapse a wire status into "success" / "error" / a pending status.
+
+    The item path already does this inline; the legacy tool_result path did not,
+    so a completion could reach telemetry as "completed" or "ok".
+    """
+    if isinstance(raw, str) and raw.strip():
+        lowered = raw.strip().lower()
+        if lowered in _PENDING_TOOL_STATUSES:
+            return lowered
+        if lowered in ("error", "failed"):
+            return "error"
+        return "error" if error else "success"
+    return "error" if error else "success"
+
+
+def _tool_call_is_pending(call: dict) -> bool:
+    status = call.get("status")
+    if status is None:
+        return False
+    if not isinstance(status, str):
+        return False
+    return status.strip().lower() in _PENDING_TOOL_STATUSES
 
 
 class HarnessAdapter(abc.ABC):
@@ -1130,8 +1253,14 @@ class OpenClawAdapter(HarnessAdapter):
                                 "result": data.get("result")
                                 or data.get("output")
                                 or data.get("content"),
-                                "status": data.get("status")
-                                or ("error" if data.get("error") else "success"),
+                                # Normalized to the same success/error vocabulary
+                                # the item path uses: a raw wire status like
+                                # "completed" would otherwise flow straight into
+                                # telemetry and the failed-turn summary, which
+                                # gate on these exact values.
+                                "status": _normalize_tool_status(
+                                    data.get("status"), data.get("error")
+                                ),
                                 "error_text": (
                                     str(data.get("error"))[:2000]
                                     if data.get("error") else None
@@ -1252,7 +1381,9 @@ class OpenClawAdapter(HarnessAdapter):
                             err_text = _frame_failed_partial(
                                 _format_for_chat(visible_response)
                                 if visible_response
-                                else ""
+                                else "",
+                                tool_calls,
+                                tool_starts,
                             )
                             # An errored turn can still have burned tokens
                             # before it failed — bill them rather than
@@ -1531,7 +1662,9 @@ class OpenClawAdapter(HarnessAdapter):
                 },
             )
             return _result(
-                _frame_failed_partial(_format_for_chat(response_text.strip())),
+                _frame_failed_partial(
+                    _format_for_chat(response_text.strip()), tool_calls, tool_starts
+                ),
                 failed=True,
                 error_class=error_class,
             )
@@ -1575,7 +1708,11 @@ class OpenClawAdapter(HarnessAdapter):
                 # failed turn — frame it so it doesn't read as a finished
                 # answer (issue #1138 F4).
                 return _result(
-                    _frame_failed_partial(_format_for_chat(response_text.strip())),
+                    _frame_failed_partial(
+                        _format_for_chat(response_text.strip()),
+                        tool_calls,
+                        tool_starts,
+                    ),
                     failed=True,
                     error_class="ChatDeadlineExpiredPartial",
                 )

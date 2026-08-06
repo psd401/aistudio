@@ -1451,5 +1451,116 @@ class ChatErrorClassificationTests(unittest.TestCase):
         )
 
 
+class TestFailedPartialNamesSideEffects(unittest.TestCase):
+    """Name the side effects instead of the vague "some steps may have run".
+
+    A principal told only that something *may* have happened cannot tell whether
+    a doc was created, an event booked, or nothing at all. The harness records
+    every completed tool call, so it can say which (agent_failures: 11 rows /
+    7 users got the vague form).
+    """
+
+    def test_names_the_tools_that_completed(self):
+        text = harness_adapter._frame_failed_partial(
+            "",
+            [
+                {"name": "docs.create", "status": "success"},
+                {"name": "drive.share", "status": "error"},
+            ],
+        )
+        self.assertIn("docs.create", text)
+        self.assertIn("drive.share", text)
+        self.assertIn("check those before retrying", text)
+
+    def test_says_retry_is_safe_when_nothing_ran(self):
+        text = harness_adapter._frame_failed_partial("", [])
+        self.assertIn("safe to retry", text)
+        # Must not also tell them to go check — that was contradictory.
+        self.assertNotIn("check before retrying", text)
+
+    def test_a_tool_still_in_flight_is_never_safe_to_retry(self):
+        # The dangerous case, not the safe one: the request may have reached the
+        # broker and created the Doc before the turn died, with its result event
+        # simply never arriving. Started calls live in tool_starts and never
+        # appear in tool_calls, so this is exactly how an interrupted side effect
+        # could otherwise leave the list empty and claim a safe retry.
+        text = harness_adapter._frame_failed_partial(
+            "", [], {"t1": {"name": "docs.create", "started_at": 0}}
+        )
+        self.assertNotIn("safe to retry", text)
+        self.assertIn("docs.create", text)
+        self.assertIn("may or may not have completed", text)
+
+    def test_in_flight_reported_alongside_completed_tools(self):
+        text = harness_adapter._frame_failed_partial(
+            "",
+            [{"name": "psd-data.query", "status": "success"}],
+            {"t1": {"name": "drive.share", "started_at": 0}},
+        )
+        self.assertIn("psd-data.query", text)
+        self.assertIn("drive.share", text)
+        self.assertNotIn("safe to retry", text)
+
+    def test_an_unnamed_in_flight_call_still_blocks_the_safe_claim(self):
+        text = harness_adapter._frame_failed_partial(
+            "", [], {"t1": {"started_at": 0}}
+        )
+        self.assertNotIn("safe to retry", text)
+        self.assertIn("may have already run", text)
+
+    def test_safe_to_retry_needs_both_lists_empty(self):
+        text = harness_adapter._frame_failed_partial("", [], {})
+        self.assertIn("safe to retry", text)
+
+    def test_an_unrecognized_terminal_status_still_counts_as_run(self):
+        # The legacy tool_result stream does not normalize `status`, so a real
+        # completion can arrive as "completed"/"ok". Treating that as "did not
+        # run" would claim a safe retry after a Doc was already created.
+        text = harness_adapter._frame_failed_partial(
+            "", [{"name": "docs.create", "status": "completed"}]
+        )
+        self.assertIn("docs.create", text)
+        self.assertNotIn("safe to retry", text)
+
+    def test_an_unreadable_record_suppresses_the_safe_retry_claim(self):
+        for calls in (
+            [{"status": "success"}],           # terminal, but no usable name
+            [{"name": "unknown", "status": "success"}],
+            ["not-a-dict"],
+        ):
+            text = harness_adapter._frame_failed_partial("", calls)
+            self.assertNotIn("safe to retry", text, calls)
+            self.assertIn("may have already run", text, calls)
+
+    def test_named_and_unreadable_together_flags_the_uncertainty(self):
+        text = harness_adapter._frame_failed_partial(
+            "",
+            [
+                {"name": "docs.create", "status": "success"},
+                {"status": "success"},
+            ],
+        )
+        self.assertIn("docs.create", text)
+        self.assertIn("possibly others", text)
+
+    def test_dedupes_and_caps_a_long_tool_list(self):
+        calls = [{"name": f"tool{i}", "status": "success"} for i in range(9)]
+        calls += [{"name": "tool0", "status": "success"}]  # duplicate
+        text = harness_adapter._frame_failed_partial("", calls)
+        self.assertIn("+4 more", text)
+        self.assertEqual(text.count("tool0"), 1)
+
+    def test_preserves_the_partial_answer(self):
+        text = harness_adapter._frame_failed_partial(
+            "Here is what I found", [{"name": "psd-data.query", "status": "success"}]
+        )
+        self.assertIn("Here is what I found", text)
+        self.assertIn("psd-data.query", text)
+
+    def test_unknown_shape_keeps_the_conservative_warning(self):
+        text = harness_adapter._frame_failed_partial("", None)
+        self.assertIn("may have already run", text)
+
+
 if __name__ == "__main__":
     unittest.main()

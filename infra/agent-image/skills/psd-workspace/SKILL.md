@@ -246,6 +246,23 @@ gws drive.permissions.create --scope agent --user hagelk@psd401.net \
   --json '{"fileId":"<id>","type":"domain","role":"reader","domain":"psd401.net"}'
 ```
 
+**Granting a request someone already made.** When a user hits "request access" on an
+agent-owned file, Drive records an access proposal. List them with
+`drive accessproposals list` and grant one with `drive accessproposals resolve`
+— the same reader/commenter/writer ceiling as a named share, never `owner`:
+
+```bash
+gws drive.accessproposals.resolve --scope agent --user hagelk@psd401.net \
+  --params '{"fileId":"<id>","proposalId":"<id>"}' \
+  --json '{"action":"accept","role":"writer"}'
+```
+
+The two IDs address the endpoint, so they ride `--params`; `action` and `role`
+are the request body and ride `--json` — the same split as every other command
+in this skill.
+
+Use `"action":"deny"` to decline; a denial needs no role.
+
 When you post a doc link into a shared Chat space, share it district-wide (domain/reader) FIRST — otherwise members hit "request access". Anything outside these shapes is still blocked.
 
 If a user explicitly asks the agent to send something, post the draft + a clear "I drafted it; reply 'send' if it's right" in Chat instead. The user clicks send themselves.

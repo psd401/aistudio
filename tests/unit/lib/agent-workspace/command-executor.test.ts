@@ -899,3 +899,110 @@ describe("Drive shares back to the requesting user", () => {
     ).toThrow(/limited to/)
   })
 })
+
+// Resolving an access request is a share reached from the other direction: the
+// user asked, the agent grants. It was missing from the allowlist entirely, so
+// the one recovery path users had during the sharing outage was refused too
+// (agent_failures 1986).
+describe("Drive access proposals", () => {
+  const resolve = (resource: Record<string, unknown>) =>
+    validateWorkspaceCommand({
+      scope: "agent",
+      argv: ["drive", "accessproposals", "resolve", "--json", JSON.stringify(resource)],
+    })
+
+  it.each([["reader"], ["commenter"], ["writer"]])("accepts at role %s", (role) => {
+    expect(() =>
+      resolve({ fileId: "f", proposalId: "p", action: "accept", role })
+    ).not.toThrow()
+  })
+
+  it("accepts a role passed as a single-element list", () => {
+    expect(() =>
+      resolve({ fileId: "f", proposalId: "p", action: "accept", role: ["writer"] })
+    ).not.toThrow()
+  })
+
+  it("allows a denial without a role", () => {
+    expect(() =>
+      resolve({ fileId: "f", proposalId: "p", action: "deny" })
+    ).not.toThrow()
+  })
+
+  it.each([
+    ["owner role", { fileId: "f", proposalId: "p", action: "accept", role: "owner" }],
+    ["organizer role", { fileId: "f", proposalId: "p", action: "accept", role: "organizer" }],
+    ["accept with no role", { fileId: "f", proposalId: "p", action: "accept" }],
+    ["unknown action", { fileId: "f", proposalId: "p", action: "escalate", role: "writer" }],
+    ["unknown key", { fileId: "f", proposalId: "p", action: "accept", role: "writer", extra: 1 }],
+    // Only role[0] used to be validated, so a list smuggled a second role past
+    // the ceiling — and executeWorkspaceCommand forwards the original argv to
+    // gws verbatim, so nothing downstream re-reads the array.
+    ["multi-element role list", { fileId: "f", proposalId: "p", action: "accept", role: ["reader", "owner"] }],
+    ["empty role list", { fileId: "f", proposalId: "p", action: "accept", role: [] }],
+    ["non-string role element", { fileId: "f", proposalId: "p", action: "accept", role: [{ role: "writer" }] }],
+  ])("refuses %s", (_name, resource) => {
+    expect(() => resolve(resource)).toThrow(/reader, commenter or writer/)
+  })
+
+  // The documented shape splits IDs into --params and the body into --json;
+  // that exact argv must validate, or the SKILL.md example is broken.
+  it("accepts the documented --params/--json split", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "agent",
+        argv: [
+          "drive", "accessproposals", "resolve",
+          "--params", '{"fileId":"f","proposalId":"p"}',
+          "--json", '{"action":"accept","role":"writer"}',
+        ],
+      })
+    ).not.toThrow()
+  })
+
+  it("judges the union of --params and --json", () => {
+    // An unrecognized key is caught wherever it was placed.
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "agent",
+        argv: [
+          "drive", "accessproposals", "resolve",
+          "--params", '{"fileId":"f","proposalId":"p","sneaky":1}',
+          "--json", '{"action":"accept","role":"writer"}',
+        ],
+      })
+    ).toThrow(/reader, commenter or writer/)
+    // And a bad role in the body is still caught with IDs in params.
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "agent",
+        argv: [
+          "drive", "accessproposals", "resolve",
+          "--params", '{"fileId":"f","proposalId":"p"}',
+          "--json", '{"action":"accept","role":["reader","owner"]}',
+        ],
+      })
+    ).toThrow(/reader, commenter or writer/)
+  })
+
+  it("refuses an unparseable payload", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "agent",
+        argv: ["drive", "accessproposals", "resolve"],
+      })
+    ).toThrow(/reader, commenter or writer/)
+  })
+
+  it("stays off the user slot", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: [
+          "drive", "accessproposals", "resolve",
+          "--json", '{"fileId":"f","proposalId":"p","action":"accept","role":"writer"}',
+        ],
+      })
+    ).toThrow(/agent-owned/)
+  })
+})
