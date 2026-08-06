@@ -126,7 +126,7 @@ function piiTypeCounts(
  */
 async function recordPIITelemetry(
   dependencies: MemoryServiceDependencies,
-  input: { userId: number; content: string },
+  input: { userId: number; content: string; source?: NexusMemorySource },
 ): Promise<void> {
   let entities: PIIEntity[]
   try {
@@ -140,13 +140,19 @@ async function recordPIITelemetry(
     // to lose the user's memory.
     log.warn("Nexus memory PII screening unavailable; saving anyway", {
       userId: input.userId,
+      source: input.source,
       error: error instanceof Error ? error.message : String(error),
     })
     return
   }
   if (entities.length === 0) return
+  // `source` makes the unattended path queryable on its own. Auto-extraction
+  // is prompted not to capture third-party identifiers, and that prompt is now
+  // the only control on it — so a source:"auto" line here is the signal that
+  // the prompt did not hold, and the thing to alert on.
   log.info("Nexus memory contains detected personal information", {
     userId: input.userId,
+    source: input.source,
     piiEntityCount: entities.length,
     piiTypes: piiTypeCounts(entities),
   })
@@ -158,6 +164,7 @@ async function sanitizeMemoryContent(
     userId: number
     sessionId: string
     content: string
+    source?: NexusMemorySource
   },
 ): Promise<string> {
   const content = validateInput(input)
@@ -175,6 +182,7 @@ async function sanitizeMemoryContent(
   }
   await recordPIITelemetry(dependencies, {
     userId: input.userId,
+    source: input.source,
     content,
   })
   const sanitized = safety.processedContent.trim()

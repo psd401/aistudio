@@ -1,3 +1,22 @@
+/* eslint-disable no-var */
+var mockLogInfo = jest.fn()
+/* eslint-enable no-var */
+
+// createLogger runs at module load, which is hoisted above this assignment,
+// so the methods must dereference lazily.
+jest.mock("@/lib/logger", () => ({
+  createLogger: () => ({
+    info: (...args: unknown[]) => mockLogInfo(...args),
+    warn: jest.fn(),
+    error: jest.fn(),
+    debug: jest.fn(),
+  }),
+  generateRequestId: () => "request-1",
+  startTimer: () => jest.fn(),
+  sanitizeForLogging: (value: unknown) => value,
+  getLogContext: () => ({}),
+}))
+
 import { ContentSafetyBlockedError } from "@/lib/streaming/types"
 import {
   createMemoryService,
@@ -246,6 +265,47 @@ describe("Nexus memory personal information handling", () => {
     expect(repository.saveWithDedup).toHaveBeenCalledWith(
       expect.objectContaining({ content }),
       MEMORY_DEDUP_THRESHOLD,
+    )
+  })
+
+  // Auto-extraction runs unattended, and its prompt is the only thing keeping
+  // third-party identifiers out of it. Tagging the telemetry with the source
+  // is what makes "the prompt did not hold" a query rather than a guess.
+  it("tags the detection telemetry with the write's source", async () => {
+    const repository = createRepository()
+    repository.saveWithDedup.mockResolvedValue({
+      memory: storedMemory({ content: "Student Ellie is 8", source: "auto" }),
+      action: "inserted",
+    })
+    const service = createMemoryService({
+      repository,
+      processInput: jest.fn(async (raw: string) => ({
+        allowed: true,
+        processedContent: raw,
+      })),
+      detectPII: jest.fn(async () => [
+        { type: "AGE", beginOffset: 16, endOffset: 17, score: 0.99 },
+      ]),
+      generateEmbedding: jest.fn(async () => [0.1]),
+      getSetting: jest.fn(async () => null),
+    })
+
+    await service.save({
+      userId: 7,
+      sessionId: "cognito-sub",
+      content: "Student Ellie is 8",
+      category: "context",
+      source: "auto",
+    })
+
+    expect(mockLogInfo).toHaveBeenCalledWith(
+      "Nexus memory contains detected personal information",
+      expect.objectContaining({
+        userId: 7,
+        source: "auto",
+        piiEntityCount: 1,
+        piiTypes: { AGE: 1 },
+      }),
     )
   })
 })

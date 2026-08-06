@@ -7,11 +7,14 @@ import {
   SEEDED_ADMIN_SUB,
 } from "./helpers/session-auth"
 
+// Synthetic throughout. These strings are sent to live Comprehend and appear
+// in test source and CI output, so no real person's contact details belong in
+// them — a fabricated address trips EMAIL detection just as well.
 const PII_CANDIDATE_TEXT = [
   "My wife Sarah teaches third grade at Harbor Ridge.",
   "My daughter Ellie is 8 years old.",
   "I started as CIO on July 1, 2019.",
-  "My work email is hagelk@psd401.net.",
+  "My work email is jordan.rivera@example.com.",
 ] as const
 
 interface ImportedMemoryRow {
@@ -140,7 +143,7 @@ test.describe("Settings memory import (authenticated)", () => {
       "- My wife Sarah teaches third grade at Harbor Ridge.",
       "- My daughter Ellie is 8 years old.",
       "- I started as CIO on July 1, 2019.",
-      "- My work email is hagelk@psd401.net.",
+      "- My work email is jordan.rivera@example.com.",
     ].join("\n")
 
     try {
@@ -196,7 +199,7 @@ test.describe("Settings memory import (authenticated)", () => {
         true,
       )
       expect(
-        rows.some((row) => row.content.includes("hagelk@psd401.net")),
+        rows.some((row) => row.content.includes("jordan.rivera@example.com")),
       ).toBe(true)
     } finally {
       await deleteMarkedMemories(database, marker)
