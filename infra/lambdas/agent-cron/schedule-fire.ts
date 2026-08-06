@@ -140,7 +140,12 @@ export function resolveScheduleLockContention(
       fireClaim,
       failure: {
         ...failure,
-        severity: 'error',
+        // `warn`, not `error`: this is the SAME fire finding its own lock — a
+        // duplicate delivery of one fire, which the retry below resolves on its
+        // own. Recording it at error severity put a self-healing idempotency
+        // artifact into the operator failure feed alongside real outages
+        // (4 rows in the 2026-08-03..05 window, all from healthy schedules).
+        severity: 'warn',
         errorMessage:
           'Scheduled fire session lock is owned by the same fire; retrying',
       },

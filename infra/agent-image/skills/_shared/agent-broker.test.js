@@ -30,6 +30,74 @@ test('uses the fixed local relay without exposing signing authority', async () =
   expect(init.redirect).toBe('error');
 });
 
+// Regression: an error response with a non-JSON body must report its STATUS,
+// not be misreported as a JSON problem. Masking the 403 here sent a live agent
+// chasing a phantom "straight quotes break batchUpdate" theory (2026-08-04).
+test('a non-JSON error response reports the HTTP status, not "invalid JSON"', async () => {
+  globalThis.fetch = mock(async () =>
+    new Response('<html><body>403 Forbidden — request blocked</body></html>', {
+      status: 403,
+      headers: { 'Content-Type': 'text/html' },
+    }));
+  const { requestAgentBroker } = require('./agent-broker');
+  const err = await requestAgentBroker('/api/agent/consent-link', {}).catch((e) => e);
+  expect(err.status).toBe(403);
+  expect(err.message).toContain('HTTP 403');
+  expect(err.message).toContain('403 Forbidden');
+  expect(err.message).not.toContain('invalid JSON');
+});
+
+test('a structured JSON error still surfaces its reason', async () => {
+  globalThis.fetch = mock(async () =>
+    new Response(JSON.stringify({ error: 'forbidden_capability' }), {
+      status: 403,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+  const { requestAgentBroker } = require('./agent-broker');
+  const err = await requestAgentBroker('/api/agent/consent-link', {}).catch((e) => e);
+  expect(err.status).toBe(403);
+  expect(err.message).toContain('forbidden_capability');
+});
+
+// A parsed JSON body may carry secret fields beside the status, so it is never
+// echoed — only the broker's own `error` string or the status itself.
+// psd-credentials guards the same boundary from the caller side.
+test('a JSON error body without an `error` field is not echoed', async () => {
+  globalThis.fetch = mock(async () =>
+    new Response(JSON.stringify({ secret: 'do-not-echo', token: 'sk-live-abc' }), {
+      status: 403,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+  const { requestAgentBroker } = require('./agent-broker');
+  const err = await requestAgentBroker('/api/agent/consent-link', {}).catch((e) => e);
+  expect(err.status).toBe(403);
+  expect(err.message).toContain('HTTP 403');
+  expect(err.message).not.toContain('do-not-echo');
+  expect(err.message).not.toContain('sk-live-abc');
+});
+
+test('an empty error body still identifies the status', async () => {
+  globalThis.fetch = mock(async () => new Response('', { status: 502 }));
+  const { requestAgentBroker } = require('./agent-broker');
+  const err = await requestAgentBroker('/api/agent/consent-link', {}).catch((e) => e);
+  expect(err.status).toBe(502);
+  expect(err.message).toContain('HTTP 502');
+});
+
+// Regression: an empty SUCCESS body is a contract violation, not a result.
+// `raw ? JSON.parse(raw) : null` returned null without flagging a parse
+// failure, so a 204 (or an empty 200) handed callers a non-result that only
+// failed later as an unrelated null-access, with the status already discarded.
+test('an empty successful body is a contract violation, not a null result', async () => {
+  globalThis.fetch = mock(async () => new Response('', { status: 204 }));
+  const { requestAgentBroker } = require('./agent-broker');
+  const err = await requestAgentBroker('/api/agent/consent-link', {}).catch((e) => e);
+  expect(err).toBeInstanceOf(Error);
+  expect(err.status).toBe(204);
+  expect(err.message).toContain('HTTP 204');
+  expect(err.message).toContain('(empty body)');
+});
+
 test('rejects non-allowlisted paths before network access', async () => {
   globalThis.fetch = mock(async () => new Response('{}'));
   const { requestAgentBroker } = require('./agent-broker');

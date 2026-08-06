@@ -958,6 +958,112 @@ class TestIncompleteToolTurnTelemetry(unittest.TestCase):
         self.assertIn("event:agent", context["first_events"])
 
 
+class TestQuestionEventEndsTurn(unittest.TestCase):
+    """A clarifying question must end the turn, not hang it to the deadline.
+
+    Google Chat is turn-based, so a question asked mid-turn can never be
+    answered within that turn. Until 2026-08-05 the harness counted
+    `event:question.requested` and dropped it, so the gateway blocked until the
+    550s deadline — 25 dead turns across 15 users in three days, and 100% of
+    ChatDeadlineExpired* rows carried this event.
+    """
+
+    @staticmethod
+    def _message(**fields):
+        return json.dumps(fields)
+
+    def _run_with_question_event(self, question_payload):
+        chat_id = None
+
+        class FakeWebSocket:
+            def __init__(self, messages):
+                self.messages = list(messages)
+                self.sent = []
+
+            def send(self, payload):
+                nonlocal chat_id
+                parsed = json.loads(payload)
+                self.sent.append(parsed)
+                if parsed.get("method") == "chat.send":
+                    chat_id = parsed["id"]
+
+            def recv(self):
+                message = self.messages.pop(0)
+                return message() if callable(message) else message
+
+            def settimeout(self, _timeout):
+                return None
+
+            def close(self):
+                return None
+
+        messages = [
+            self._message(type="event", event="connect.challenge", payload={}),
+            lambda: self._message(type="res", id=socket.sent[-1]["id"], ok=True, payload={}),
+            lambda: self._message(type="res", id=socket.sent[-1]["id"], ok=True, payload={"tools": []}),
+            lambda: self._message(type="res", id=socket.sent[-1]["id"], ok=True, payload={}),
+            lambda: self._message(
+                type="res", id=chat_id, ok=True,
+                payload={"runId": chat_id, "status": "started"},
+            ),
+            lambda: self._message(
+                type="event", event="agent",
+                payload={
+                    "runId": chat_id,
+                    "stream": "assistant",
+                    "data": {"delta": "Checking the roster."},
+                },
+            ),
+            lambda: self._message(
+                type="event", event="question.requested",
+                payload={"runId": chat_id, **question_payload},
+            ),
+        ]
+        socket = FakeWebSocket(messages)
+        fake_websocket_module = mock.Mock()
+        fake_websocket_module.create_connection.return_value = socket
+        fake_websocket_module.WebSocketTimeoutException = TimeoutError
+        empty_usage = {
+            "input": 0, "output": 0, "cache_read": 0,
+            "cache_write": 0, "model_calls": 0,
+        }
+        adapter = OpenClawAdapter()
+        adapter._ready = True
+
+        with (
+            mock.patch.dict(sys.modules, {"websocket": fake_websocket_module}),
+            mock.patch.object(adapter, "_read_turn_usage", return_value=empty_usage),
+            mock.patch("harness_adapter.record_failure") as record_failure,
+            mock.patch("harness_adapter.time.time", return_value=100.0),
+        ):
+            result = adapter.process("Which school?", "session-q", deadline_s=550)
+        return result, record_failure
+
+    def test_question_is_delivered_and_records_no_failure(self):
+        result, record_failure = self._run_with_question_event(
+            {"data": {"question": "Which school should I pull attendance for?"}}
+        )
+        self.assertFalse(result.failed)
+        self.assertIn("Which school should I pull attendance for?", result.text)
+        # The partial answer streamed before the question is preserved.
+        self.assertIn("Checking the roster.", result.text)
+        record_failure.assert_not_called()
+
+    def test_question_text_found_at_payload_top_level(self):
+        result, _ = self._run_with_question_event(
+            {"question": "Confirm the school year?"}
+        )
+        self.assertFalse(result.failed)
+        self.assertIn("Confirm the school year?", result.text)
+
+    def test_unrecognized_question_shape_still_ends_the_turn(self):
+        # Fail useful, not silent: an unknown schema must not resurrect the hang.
+        result, record_failure = self._run_with_question_event({"someNewField": {}})
+        self.assertFalse(result.failed)
+        self.assertIn("clarify", result.text.lower())
+        record_failure.assert_not_called()
+
+
 class TestRecordItemToolEvent(unittest.TestCase):
     """Native-mode tool items must land in tool_calls telemetry (#1138 r12)."""
 

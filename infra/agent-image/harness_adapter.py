@@ -1291,6 +1291,73 @@ class OpenClawAdapter(HarnessAdapter):
                             logger.warning("chat aborted: payload=%s", json.dumps(payload)[:500])
                             break
 
+                    elif mtype == "event" and isinstance(mevent, str) and mevent.startswith("question."):
+                        # The agent asked the user a clarifying question.
+                        #
+                        # Our transport is Google Chat, which is strictly
+                        # turn-based: there is no channel to answer a question
+                        # WITHIN the turn that asked it. Before 2026-08-05 this
+                        # event was counted and then dropped on the floor, so
+                        # the gateway blocked waiting for an answer that could
+                        # never arrive and the loop spun to the full deadline.
+                        # That was the single largest failure source in prod —
+                        # 25 turns across 15 users in three days, every one
+                        # burning ~9.5 minutes of compute to deliver nothing
+                        # (100% of ChatDeadlineExpired* rows carried this event;
+                        # no other failure class did).
+                        #
+                        # Treat it as terminal: surface the question as the
+                        # turn's reply so the user can simply answer in their
+                        # next message. Matched on the `question.` prefix rather
+                        # than the exact `question.requested` so a renamed or
+                        # additional question event cannot silently reintroduce
+                        # the hang.
+                        q_payload = msg.get("payload", {}) or {}
+                        q_data = q_payload.get("data")
+                        if not isinstance(q_data, dict):
+                            q_data = {}
+                        question_text = None
+                        # The gateway's exact field name is not pinned by any
+                        # contract we own, so probe the plausible carriers and
+                        # fall back to a generic prompt rather than returning
+                        # an empty turn.
+                        for source in (q_payload, q_data):
+                            for key in ("question", "text", "prompt", "message", "content"):
+                                candidate = self._extract_text(source.get(key))
+                                if candidate:
+                                    question_text = candidate
+                                    break
+                            if question_text:
+                                break
+                        if not question_text:
+                            question_text = (
+                                "I need a bit more information to continue — "
+                                "could you clarify what you'd like me to do?"
+                            )
+                            logger.warning(
+                                "question event carried no recognizable text: "
+                                "event=%s payload_keys=%s",
+                                mevent,
+                                sorted(q_payload.keys()),
+                            )
+                        # Keep any partial answer the agent already streamed, so
+                        # work done before the question is not thrown away.
+                        prefix = response_text or agent_assistant_accum or ""
+                        response_text = (
+                            f"{prefix}\n\n{question_text}".strip()
+                            if prefix
+                            else question_text
+                        )
+                        logger.info(
+                            "question event resolved to a turn reply: event=%s "
+                            "elapsed_s=%d had_partial=%s",
+                            mevent,
+                            max(0, int(time.time() - chat_send_at)),
+                            bool(prefix),
+                        )
+                        got_final = True
+                        break
+
                     elif mtype == "res" and msg.get("id") == chat_id:
                         # DIAGNOSTIC (remove after schema discovery): dump
                         # the final res payload so we can see if usage /

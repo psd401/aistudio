@@ -1055,8 +1055,15 @@ Router and Cron Lambdas detect it and lift the payload into the
   `--paragraph`, `--kv`, `--button`, `--image`, `--divider`) plus a
   `--card-json` escape hatch for widget types not exposed by flags.
 - `infra/agent-image/skills/chat-chart` — chart renderer. `--engine auto`
-  routes sensitive data (or anything that trips the inline PII regex) to
-  the local matplotlib path; everything else goes to QuickChart.io.
+  (the default) rasterises the PNG on-host in pure Node
+  (`render_local.js`) and uploads it through the workspace broker, so
+  the chart's values never leave PSD AWS. QuickChart.io is used only when
+  `--engine quickchart` is named explicitly, and that combination is
+  refused for `--sensitive` or PII-matching data (REV-INFRA-002). Note the
+  rendered PNG itself is published to an unauthenticated workspace URL —
+  Google Chat has to fetch it — so it carries the same exposure as any
+  `psd-image-gen` output: unguessable, ~30-day retention, readable by
+  anyone holding the link.
 
 ### Button click contract (CARD_CLICKED)
 
@@ -1088,7 +1095,8 @@ intent text.
 | Card looks like plain text in Chat | Envelope reached Lambda but malformed | Search CloudWatch for `rich_envelope_malformed`; preview field shows the first 200 chars |
 | Chart is the wrong type | Agent passed wrong `--type` | Re-read chat-chart SKILL.md; only bar/line/pie/scatter supported in v1 |
 | QuickChart image is broken | Spec URL > ~16KB | Cut data points (≤ 50 series points is the design target) |
-| Local engine "renderer claimed success but produced no file" | matplotlib install missing from agent image | Rebuild image — matplotlib goes into `/opt/agentcore-venv` |
+| `chat-chart: local renderer failed: …` | Payload the renderer can't draw (unsupported type, non-numeric values, >50 points) | Fix the `--data-json` payload; the renderer has no image-level dependency to reinstall |
+| `--engine quickchart` exits 3 without a chart | Data is `--sensitive` or trips the PII regex | Intended (REV-INFRA-002). Drop `--engine quickchart` — the default engine renders the same chart on-host |
 | Buttons do nothing | CARD_CLICKED event not arriving at Router | Verify `chat.buttonClickedPayload` is in the Pub/Sub event — check Bridge Lambda logs |
 
 ## Troubleshooting

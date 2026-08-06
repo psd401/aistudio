@@ -8,46 +8,31 @@
  * detects the envelope in the agent's reply and posts the card to Chat.
  *
  * Two engines:
+ *   - `local` (default) — rasterise the chart in-process with
+ *     render_local.js and upload the PNG through the agent broker. The
+ *     data never leaves PSD AWS. Zero npm/pip dependencies, so it adds no
+ *     Docker layer (issue #1596 — see render_local.js for why the previous
+ *     matplotlib implementation had to go).
  *   - `quickchart` — encode a Chart.js spec into a quickchart.io URL.
  *     No bytes leave the agent container here; the URL is what travels.
  *     But: Chat will fetch the URL on render → the chart spec (including
- *     the user's data) lives on quickchart.io's logs. Hence the PII gate.
- *   - `local` — invoke render_local.py (matplotlib via the agentcore venv)
- *     to write a PNG to a temp file, then upload to the workspace S3 bucket
- *     under `public-images/<email>/<uuid>.png` (same pattern as
- *     psd-image-gen). The unsigned URL is the image widget src.
+ *     the user's data) lives on quickchart.io's logs. Hence the PII gate:
+ *     this engine only runs when it is asked for BY NAME and the data is
+ *     neither flagged --sensitive nor matching a PII pattern.
  *
  * The inline PII regexes are intentionally narrow — they catch the
  * obvious cases (emails, US phone numbers, SSNs, PSD-format student IDs)
- * and fail safe by routing to `local`. The agent's `--sensitive` flag is
- * the load-bearing knob; the regex is backup, not policy enforcement.
+ * and fail safe by refusing to hand the data to QuickChart. The agent's
+ * `--sensitive` flag is the load-bearing knob; the regex is backup, not
+ * policy enforcement. Neither is needed for the default path: `auto`
+ * renders locally regardless of what the data contains.
  */
 
 'use strict';
-const { validatedFs } = require("../../../validated-fs.cjs");
 
-
-const { spawnSync } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
 const { publishArtifact } = require('../_shared/artifact-publisher');
-
-// NOTE: @aws-sdk/client-s3 is imported lazily inside renderLocal() because:
-//   1. The local-engine path was disabled when matplotlib was removed from
-//      the agent image (it tripped AgentCore's overlay snapshotter — see
-//      2026-05-18 incident). Until we find a chart renderer that doesn't
-//      break the snapshotter, the local engine is unreachable.
-//   2. With the local path gone, the chat-chart skill no longer needs an
-//      `npm install` step in the Dockerfile — and that npm install is one
-//      of the things the bisect implicated. Loading the SDK only when
-//      really needed lets the QuickChart path work even with no
-//      node_modules present.
-// When the local engine is reinstated, the require + path inside
-// renderLocal() can stay exactly as-is; just put matplotlib + the chat-chart
-// npm install back in the Dockerfile.
-
+const { renderChartPng } = require('./render_local');
 
 const RICH_ENVELOPE_OPEN = '<<<PSD_AGENT_RICH_V1>>>';
 const RICH_ENVELOPE_CLOSE = '<<<END_PSD_AGENT_RICH_V1>>>';
@@ -55,12 +40,28 @@ const RICH_ENVELOPE_CLOSE = '<<<END_PSD_AGENT_RICH_V1>>>';
 const ALLOWED_TYPES = new Set(['bar', 'line', 'pie', 'scatter']);
 const ALLOWED_ENGINES = new Set(['auto', 'quickchart', 'local']);
 
-// Backstop detectors for the auto-engine decision. These are intentionally
+// Backstop detectors for the QuickChart gate. These are intentionally
 // narrow: false negatives are acceptable (the agent's --sensitive flag is
-// the real safety knob), but false positives waste 2-3s routing through
-// matplotlib for clearly-public data.
+// the real safety knob), and a false positive costs nothing worse than
+// rendering on-host, which is where charts go by default anyway.
+//
+// Every quantifier is bounded. The email pattern's two character classes
+// both contain `.`, so unbounded `+`s backtrack quadratically: a single
+// 60KB label took 5s of CPU to reject, and argv allows twice that.
+//
+// Bounding alone was not enough. Written as `<label>(?:\.<label>){0,4}\.<tld>`
+// the domain was both ambiguous (the trailing `\.[A-Za-z]{2,24}` can equally be
+// matched by an iteration of the group, since the label class is a superset of
+// the TLD class) and star-height 2 — a quantifier nested inside a quantified
+// group, which `security/detect-unsafe-regex` rejects however tight the bounds.
+//
+// Flattened to a single level: one dot-free label, a literal dot, then the rest
+// of the domain. The first class excludes `.`, so the literal dot can only land
+// at that run's boundary — one split, no nested repetition, nothing to
+// backtrack over. Subdomains still match because the tail class allows dots.
+// A backstop is allowed to be coarse; `--sensitive` is the real safety knob.
 const PII_PATTERNS = [
-  { name: 'email', re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/ },
+  { name: 'email', re: /[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}\.[A-Za-z0-9.-]{1,63}/ },
   { name: 'ssn', re: /\b\d{3}-\d{2}-\d{4}\b/ },
   { name: 'us-phone', re: /\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b/ },
   { name: 'us-phone', re: /\(\d{3}\)\s\d{3}-\d{4}\b/ },
@@ -127,52 +128,44 @@ function chooseEngine(args, dataText) {
   if (!ALLOWED_ENGINES.has(requested)) {
     fail(`--engine must be one of ${[...ALLOWED_ENGINES].join(', ')}`);
   }
-  // `local` never leaves the district, so an explicit request bypasses the
-  // sensitivity gate below outright — it's also currently unreachable since
-  // the local engine is disabled in this build (see comment below).
+  // The on-host engine never leaves the district and costs ~100ms, so it is
+  // both the explicit choice and the default: `auto` no longer weighs the
+  // data's sensitivity at all, because there is nothing to weigh it against.
+  // That is the fix for #1596 — sensitive/student data charts normally
+  // instead of hitting a hard refusal.
   if (requested === 'local') return { engine: 'local', reason: 'explicit' };
-  // Local (on-host, matplotlib) engine is currently disabled in this build
-  // (matplotlib + the chat-chart npm install were removed because they tripped
-  // AgentCore's overlay snapshotter — see 2026-05-18 incident). QuickChart is
-  // therefore the only reachable engine, and it transmits the chart data
-  // (including the user's values) to the third-party quickchart.io. So both
-  // `auto` and explicit `--engine quickchart` FAIL CLOSED here: refuse to
-  // render anything flagged --sensitive or matching a PII pattern rather than
-  // silently leaking it off-district (REV-INFRA-002). An explicit
-  // `--engine quickchart` must not be usable to route around this check —
-  // `local` isn't reachable anyway, so there's no legitimate reason to prefer
-  // quickchart over auto for sensitive data. Genuinely public data still
-  // renders via QuickChart either way. When the local engine is reinstated,
-  // restore the prior routing: route to `local` if --sensitive set OR if data
-  // trips detectPII(), else QuickChart.
+  if (requested === 'auto') {
+    return { engine: 'local', reason: 'auto: on-host engine, data stays in PSD AWS' };
+  }
+  // QuickChart transmits the chart spec (including the user's values) to
+  // third-party quickchart.io, so it stays FAIL CLOSED (REV-INFRA-002):
+  // asking for it by name is not a way around the sensitivity gate. Rerun
+  // without `--engine quickchart` to render the same chart locally.
   if (args['--sensitive']) {
     return {
       engine: 'refuse',
-      reason: '--sensitive is set and the local on-host engine is disabled in ' +
-              'this build, so the only available engine (QuickChart) would ' +
-              'transmit the data to third-party quickchart.io. Refusing to ' +
-              'render sensitive data off-district — restore the local engine ' +
-              'to chart sensitive data.',
+      reason: '--sensitive is set and --engine quickchart would transmit the ' +
+              'data to third-party quickchart.io. Refusing to render sensitive ' +
+              'data off-district — drop --engine quickchart to render it on-host.',
     };
   }
   const hit = detectPII(dataText);
   if (hit) {
     return {
       engine: 'refuse',
-      reason: `data matched the ${hit} pattern and the local on-host engine is ` +
-              'disabled in this build, so the only available engine (QuickChart) ' +
-              'would transmit it to third-party quickchart.io. Refusing to render ' +
-              'likely-PII off-district — pass verified-public data or restore the ' +
-              'local engine.',
+      reason: `data matched the ${hit} pattern and --engine quickchart would ` +
+              'transmit it to third-party quickchart.io. Refusing to render ' +
+              'likely-PII off-district — drop --engine quickchart to render it ' +
+              'on-host.',
     };
   }
-  return { engine: 'quickchart', reason: requested === 'quickchart' ? 'explicit' : 'auto: data looks public' };
+  return { engine: 'quickchart', reason: 'explicit' };
 }
 
 /**
  * Build a minimal Chart.js v4 config from our normalised (type, data)
- * shape. Chart.js is what QuickChart speaks natively; matplotlib reads
- * the same input shape too so the two engines stay symmetric.
+ * shape. Chart.js is what QuickChart speaks natively; render_local.js
+ * reads the same shape so the two engines stay symmetric.
  */
 function buildChartJsConfig(type, data, title) {
   if (!Array.isArray(data) || data.length === 0) {
@@ -194,9 +187,12 @@ function buildChartJsConfig(type, data, title) {
     : {};
 
   if (type === 'scatter') {
+    // Number.isFinite, not typeof: JSON.parse turns 1e999 into Infinity,
+    // which is typeof 'number' and would serialise into the QuickChart URL
+    // as `null`.
     for (const point of data) {
-      if (typeof point.x !== 'number' || typeof point.y !== 'number') {
-        fail('scatter data points need numeric `x` and `y` fields');
+      if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+        fail('scatter data points need finite numeric `x` and `y` fields');
       }
     }
     return {
@@ -210,8 +206,8 @@ function buildChartJsConfig(type, data, title) {
 
   // bar / line / pie
   for (const point of data) {
-    if (typeof point.label !== 'string' || typeof point.value !== 'number') {
-      fail(`${type} data points need string \`label\` and numeric \`value\` fields`);
+    if (typeof point.label !== 'string' || !Number.isFinite(point.value)) {
+      fail(`${type} data points need string \`label\` and finite numeric \`value\` fields`);
     }
   }
   const labels = data.map(p => p.label);
@@ -234,40 +230,17 @@ function renderQuickChart(config) {
   return `https://quickchart.io/chart?c=${encoded}&format=png&backgroundColor=white`;
 }
 
-async function renderLocal(config, userEmail) {
-  if (!validateEmail(userEmail)) {
-    fail('--user is required (valid email) when using the local engine');
-  }
-  // Hand the Chart.js config off to matplotlib via stdin. render_local.py
-  // converts the (type, data) shape to a matplotlib plot and writes the
-  // PNG to the path we provide.
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chat-chart-'));
-  const outPath = path.join(tmpDir, 'chart.png');
-  const scriptPath = path.join(__dirname, 'render_local.py');
-
-  const py = spawnSync('python3', [scriptPath, '--out', outPath], {
-    input: JSON.stringify(config),
-    encoding: 'utf8',
-    timeout: 30000,
-  });
-  if (py.status !== 0) {
-    const stderr = (py.stderr || '').slice(0, 1000);
-    fail(`local renderer failed (exit ${py.status}): ${stderr}`, 3);
-  }
-  if (!validatedFs.existsSync(outPath)) {
-    fail(`local renderer claimed success but produced no file at ${outPath}`, 3);
-  }
-
-  const bytes = validatedFs.readFileSync(outPath);
-  // Best-effort cleanup; the temp dir lives under /tmp which is also wiped
-  // on container restart.
+async function renderLocal(config) {
+  // `--user` is accepted for call-site compatibility and provenance only
+  // (main() validates it): the broker derives the storage path from the
+  // calling agent's identity, so the email is not used to build a key.
+  // Rasterised in-process — no subprocess, no temp file, no dependency.
+  let bytes;
   try {
-    validatedFs.unlinkSync(outPath);
-    validatedFs.rmdirSync(tmpDir);
-  } catch {
-    // The renderer result is already in memory; /tmp cleanup is best-effort.
+    bytes = renderChartPng(config);
+  } catch (err) {
+    fail(`local renderer failed: ${err && err.message ? err.message : err}`, 3);
   }
-
   const published = await publishArtifact(bytes, '.png', 'image/png');
   return published.url;
 }
@@ -294,9 +267,10 @@ async function main() {
   const args = parseArgs(process.argv);
   if (args['--help'] || args['-h']) {
     process.stdout.write(
-      'Usage: chat-chart --user <email> --type bar|line|pie|scatter ' +
-        '--data-json <json-array> [--title T] [--engine auto|quickchart|local] ' +
-        '[--sensitive] [--text-fallback F]\n',
+      'Usage: chat-chart --type bar|line|pie|scatter --data-json <json-array> ' +
+        '[--user <email>] [--title T] [--engine auto|quickchart|local] ' +
+        '[--sensitive] [--text-fallback F]\n' +
+        'Default engine: local (renders on-host; data stays in PSD AWS).\n',
     );
     process.exit(0);
   }
@@ -304,6 +278,13 @@ async function main() {
   const type = args['--type'];
   if (!ALLOWED_TYPES.has(type)) {
     fail(`--type must be one of ${[...ALLOWED_TYPES].join(', ')}`);
+  }
+
+  // Validated for every engine, not just the one that consumes it: SKILL.md
+  // promises a malformed --user is an error, and silently accepting a typo on
+  // the quickchart path would make that promise engine-dependent.
+  if (args['--user'] !== undefined && !validateEmail(args['--user'])) {
+    fail('--user must be a valid email address');
   }
 
   const dataJson = args['--data-json'];
@@ -315,21 +296,29 @@ async function main() {
     fail(`--data-json is not valid JSON: ${err.message}`);
   }
 
-  const { engine, reason } = chooseEngine(args, dataJson);
+  // Build the config BEFORE choosing an engine, and scan the config rather
+  // than the raw argv. The serialised config is what QuickChart would
+  // actually receive, so it is the only text worth gating on: raw argv can
+  // hide `jsmith@psd401.net` from the regex until JSON.parse restores
+  // it, and it omits --title entirely even though the title is embedded in
+  // the QuickChart URL twice.
+  const config = buildChartJsConfig(type, data, args['--title']);
+
+  const { engine, reason } = chooseEngine(args, JSON.stringify(config));
   if (engine === 'refuse') {
-    // Fail closed: never fall through to QuickChart for sensitive/PII data
-    // (REV-INFRA-002). Non-zero exit so the agent sees the chart was not made.
+    // Fail closed: an explicit --engine quickchart never carries sensitive or
+    // PII data off-district (REV-INFRA-002), and we do not silently downgrade
+    // to the local engine either — the caller named an engine, so tell them
+    // why it was not used. Non-zero exit so the agent sees no chart was made.
     fail(reason, 3);
   }
   process.stderr.write(`chat-chart: engine=${engine} (${reason})\n`);
-
-  const config = buildChartJsConfig(type, data, args['--title']);
 
   let imageUrl;
   if (engine === 'quickchart') {
     imageUrl = renderQuickChart(config);
   } else {
-    imageUrl = await renderLocal(config, args['--user']);
+    imageUrl = await renderLocal(config);
   }
 
   // First line of stdout: the URL alone, useful if the agent wants to

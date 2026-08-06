@@ -114,8 +114,9 @@ describe('resolvePayloadFiles', () => {
   });
 
   test('gates see the real payload through the synthetic command', () => {
-    // Permission mutation via --json-file remains provenance-gated through
-    // the file indirection, even when the requested grant was formerly valid.
+    // The gate must judge the RESOLVED payload, not the file path — proven in
+    // both directions. A documented in-district shape is allowed through the
+    // file indirection exactly as it is inline...
     const p = tmpFile(JSON.stringify({
       fileId: 'f1', type: 'user', role: 'reader', emailAddress: 'hagelk@psd401.net',
     }));
@@ -126,7 +127,7 @@ describe('resolvePayloadFiles', () => {
       scope: 'agent_account',
       ownerEmail: 'hagelk@psd401.net',
     });
-    expect(gate.allowed).toBe(false);
+    expect(gate.allowed).toBe(true);
     // External recipients must stay blocked even through a file payload.
     const p2 = tmpFile(JSON.stringify({
       fileId: 'f1', type: 'user', role: 'reader', emailAddress: 'evil@outside.com',
@@ -207,19 +208,81 @@ describe('permission mutation provenance gate', () => {
       CTX
     ).allowed;
 
-  test('all permission creates fail closed without server-recorded provenance', () => {
-    expect(share({ fileId: 'f', type: 'user', role: 'reader', emailAddress: 'songstadw@psd401.net' })).toBe(false);
-    expect(share({ fileId: 'f', type: 'user', role: 'commenter', emailAddress: 'colleague@psd401.net' })).toBe(false);
-    expect(share({ fileId: 'f', type: 'user', role: 'writer', emailAddress: 'hagelk@psd401.net' })).toBe(false);
-    expect(share({ fileId: 'f', type: 'domain', role: 'reader', domain: 'psd401.net' })).toBe(false);
+  // The two shapes SKILL.md documents as allowed ("Exception — explicit
+  // in-district shares of YOUR OWN files"). Before 2026-08-05 the gate
+  // blanket-blocked every permissions verb, so the documented exception was
+  // unreachable and the agent could build a doc for someone but never hand it
+  // over — 12 refusals across 10 staff in a single day.
+  test('documented in-district share shapes are allowed on the agent slot', () => {
+    expect(share({ fileId: 'f', type: 'user', role: 'reader', emailAddress: 'songstadw@psd401.net' })).toBe(true);
+    expect(share({ fileId: 'f', type: 'user', role: 'commenter', emailAddress: 'colleague@psd401.net' })).toBe(true);
+    expect(share({ fileId: 'f', type: 'user', role: 'writer', emailAddress: 'hagelk@psd401.net' })).toBe(true);
+    expect(share({ fileId: 'f', type: 'domain', role: 'reader', domain: 'psd401.net' })).toBe(true);
+  });
+
+  test('everything outside the documented shapes stays blocked', () => {
     expect(share({ fileId: 'f', type: 'domain', role: 'commenter', domain: 'psd401.net' })).toBe(false);
     expect(share({ fileId: 'f', type: 'domain', role: 'writer', domain: 'psd401.net' })).toBe(false);
     expect(share({ fileId: 'f', type: 'domain', role: 'reader', domain: 'gmail.com' })).toBe(false);
     expect(share({ fileId: 'f', type: 'user', role: 'writer', emailAddress: 'evil@outside.com' })).toBe(false);
-    expect(share({ fileId: 'f', type: 'user', role: 'owner', emailAddress: 'hagelk@psd401.net' })).toBe(false);
+    // Third party, not the caller — the caller exemption must not reach here.
+    expect(share({ fileId: 'f', type: 'user', role: 'owner', emailAddress: 'songstadw@psd401.net' })).toBe(false);
     expect(share({ fileId: 'f', type: 'user', role: 'reader', emailAddress: 'evil@outside.com' })).toBe(false);
     expect(share({ fileId: 'f', type: 'anyone', role: 'reader' })).toBe(false);
     expect(share({ fileId: 'f', type: 'group', role: 'reader', emailAddress: 'staff@psd401.net' })).toBe(false);
+  });
+
+  // The agent works for one person, and that person may receive anything it
+  // produces or touches — any role, ownership transfer included. The rest of
+  // this gate exists to stop the agent handing data to THIRD parties.
+  test('shares back to the caller are unrestricted', () => {
+    for (const role of ['reader', 'commenter', 'writer', 'owner', 'fileOrganizer']) {
+      expect(share({ fileId: 'f', type: 'user', role, emailAddress: 'hagelk@psd401.net' })).toBe(true);
+    }
+    expect(share({
+      fileId: 'f', type: 'user', role: 'owner',
+      emailAddress: 'hagelk@psd401.net', transferOwnership: true, moveToNewOwnersRoot: true,
+    })).toBe(true);
+    // Case and surrounding space do not matter.
+    expect(share({ fileId: 'f', type: 'user', role: 'owner', emailAddress: '  HagelK@PSD401.net ' })).toBe(true);
+  });
+
+  test('the caller exemption does not extend to a third party', () => {
+    // Pinned to the resolved caller (CTX.ownerEmail), so naming someone else
+    // falls back to the ordinary allowlist.
+    expect(share({
+      fileId: 'f', type: 'user', role: 'owner',
+      emailAddress: 'someone.else@psd401.net', transferOwnership: true,
+    })).toBe(false);
+    expect(share({ fileId: 'f', type: 'user', role: 'owner', emailAddress: 'songstadw@psd401.net' })).toBe(false);
+  });
+
+  test('allowlist fails closed on unknown keys and missing fields', () => {
+    // Ownership transfer is never a documented shape — its key is not in the
+    // allowlist, so its presence refuses the whole call.
+    expect(share({
+      fileId: 'f', type: 'user', role: 'writer',
+      emailAddress: 'songstadw@psd401.net', transferOwnership: true,
+    })).toBe(false);
+    // A key we have not reasoned about poisons the payload, same all-or-nothing
+    // contract as the metadata-update allowlist.
+    expect(share({
+      fileId: 'f', type: 'user', role: 'reader',
+      emailAddress: 'songstadw@psd401.net', unexpectedField: 'x',
+    })).toBe(false);
+    expect(share({ fileId: 'f', type: 'user', emailAddress: 'songstadw@psd401.net' })).toBe(false);
+    expect(share({ fileId: 'f', type: 'user', role: 'reader' })).toBe(false);
+    expect(share({ fileId: 'f', type: 'domain', role: 'reader' })).toBe(false);
+    // No parseable payload at all — we cannot prove the shape, so refuse.
+    expect(enforcePhase1Gates('drive permissions create', CTX).allowed).toBe(false);
+  });
+
+  test('scope is fail-closed: a share needs a proven agent slot', () => {
+    const cmd = `drive permissions create --json '{"fileId":"f","type":"user","role":"reader","emailAddress":"hagelk@psd401.net"}'`;
+    expect(enforcePhase1Gates(cmd, undefined).allowed).toBe(false);
+    expect(enforcePhase1Gates(cmd, {}).allowed).toBe(false);
+    expect(enforcePhase1Gates(cmd, { scope: 'user_account' }).allowed).toBe(false);
+    expect(enforcePhase1Gates(cmd, CTX).allowed).toBe(true);
   });
 
   test('user scope and update/delete remain fully blocked', () => {
@@ -596,6 +659,35 @@ describe('#1305 user-slot Drive: files.update is metadata-only', () => {
         USER_CTX
       ).allowed
     ).toBe(false);
+  });
+
+  // A pure move carries NO request body — addParents/removeParents ride
+  // --params. Until 2026-08-05 the gate only ever read --json, so a move was
+  // refused while a rename on the same file succeeded, wedging the Purdy Drive
+  // auto-sort schedule on every run.
+  test('a params-only parent move is allowed', () => {
+    const move = (params) =>
+      enforcePhase1Gates(`drive files update --params '${JSON.stringify(params)}'`, USER_CTX).allowed;
+    expect(move({ fileId: 'f1', addParents: 'folder2', removeParents: 'folder1' })).toBe(true);
+    expect(move({ fileId: 'f1', addParents: 'folder2' })).toBe(true);
+    expect(move({ fileId: 'f1', removeParents: 'folder1' })).toBe(true);
+    expect(move({ fileId: 'f1', addParents: 'f2', supportsAllDrives: true })).toBe(true);
+  });
+
+  test('a move cannot smuggle content or unknown query params', () => {
+    const move = (params, extra = '') =>
+      enforcePhase1Gates(
+        `drive files update --params '${JSON.stringify(params)}'${extra}`,
+        USER_CTX
+      ).allowed;
+    // uploadType is an upload in query-parameter clothing.
+    expect(move({ fileId: 'f1', addParents: 'f2', uploadType: 'media' })).toBe(false);
+    // A param we have not reasoned about poisons the call.
+    expect(move({ fileId: 'f1', addParents: 'f2', unexpected: 'x' })).toBe(false);
+    // Parents plus a non-metadata body is still judged on the body.
+    expect(move({ fileId: 'f1', addParents: 'f2' }, ` --json '{"trashed":true}'`)).toBe(false);
+    // Parents plus a metadata body is a rename+move, which is fine.
+    expect(move({ fileId: 'f1', addParents: 'f2' }, ` --json '{"name":"Q3"}'`)).toBe(true);
   });
 
   test('permanent delete and emptyTrash remain blocked', () => {

@@ -40,23 +40,80 @@ async function requestAgentBroker(route, payload, options = {}) {
     redirect: 'error',
     signal: AbortSignal.timeout(timeoutMs),
   });
-  let body;
+  // Read as text and check `response.ok` BEFORE blaming the JSON.
+  //
+  // This previously called response.json() first, so any error response with a
+  // non-JSON body (a proxy/WAF HTML page, an empty 403) surfaced as
+  // "Agent broker returned invalid JSON (HTTP 403)" and the real reason was
+  // discarded. That is the anti-pattern called out in CLAUDE.md, and it cost us
+  // real diagnosis: on 2026-08-04 an agent hit a masked 403 on
+  // docs.documents.batchUpdate, concluded that straight double-quote characters
+  // break the payload, and adopted a curly-quote "workaround" for a cause that
+  // was never established.
+  const raw = await response.text();
+  // An empty body is tracked apart from a parse failure because the two paths
+  // below want different things from it: an error with an empty body keeps
+  // reporting the status alone (that is the masked-proxy case above), while a
+  // SUCCESS with an empty body is a contract violation in its own right.
+  const emptyBody = raw.trim() === '';
+  let body = null;
+  let parseFailed = false;
   try {
-    body = await response.json();
+    body = emptyBody ? null : JSON.parse(raw);
   } catch {
-    throw new Error(`Agent broker returned invalid JSON (HTTP ${response.status})`);
+    parseFailed = true;
   }
+
   if (!response.ok) {
+    // Reason precedence, tightest first:
+    //   1. the broker's own `error` string — structured and safe to surface;
+    //   2. a snippet, but ONLY when the body did not parse as JSON. A
+    //      non-JSON body is a proxy/WAF page, which is exactly the case that
+    //      used to be swallowed. A body that DID parse is one of our own
+    //      structured responses and may carry secret fields alongside the
+    //      status (psd-credentials exercises precisely this), so it is
+    //      reported by status alone and never echoed.
+    //   3. the status on its own.
     const reason =
       body && typeof body.error === 'string'
         ? body.error
-        : `HTTP ${response.status}`;
-    const error = new Error(`Agent broker rejected the request: ${reason}`);
+        : parseFailed
+          ? bodySnippet(raw)
+          : `HTTP ${response.status}`;
+    const error = new Error(
+      `Agent broker rejected the request (HTTP ${response.status}): ${reason}`
+    );
     error.status = response.status;
-    error.responseBody = body;
+    error.responseBody = body ?? raw;
+    throw error;
+  }
+
+  // A 2xx that is not JSON is a genuine contract violation — still report the
+  // status and a snippet so the shape is identifiable. An empty 200/204 is the
+  // same violation and must be raised here rather than returned: response.json()
+  // used to reject it, every caller of this function goes on to read fields off
+  // the result, and handing them `null` only defers the failure to an unrelated
+  // null-access somewhere downstream with the status already thrown away.
+  if (parseFailed || emptyBody) {
+    const error = new Error(
+      `Agent broker returned invalid JSON (HTTP ${response.status}): ${bodySnippet(raw)}`
+    );
+    error.status = response.status;
+    error.responseBody = raw;
     throw error;
   }
   return body;
+}
+
+/**
+ * Collapse a response body to a single bounded line for an error message.
+ * Bounded because the body may be an entire HTML error page.
+ */
+function bodySnippet(raw) {
+  if (typeof raw !== 'string') return '';
+  const flat = raw.replace(/\s+/g, ' ').trim();
+  if (!flat) return '(empty body)';
+  return flat.length > 200 ? `${flat.slice(0, 200)}…` : flat;
 }
 
 module.exports = {

@@ -72,6 +72,15 @@ const ALLOWED_WRITES = new Set([
   "drive files copy",
   "drive files create",
   "drive permissions create",
+  // The `+draft` helper is the form psd-workspace/SKILL.md actually documents
+  // for composing a draft (it is the worked example in two places), and it is
+  // how the model reaches drafting in practice. Only the canonical
+  // `gmail users drafts create` was allowlisted, so every documented invocation
+  // was refused with operation_not_allowed — leaving the agent no way to draft
+  // mail at all. `chat +send` above establishes that helper verbs belong here.
+  // Still a draft-only path: `+send`, `+reply`, `+reply-all` and `+forward`
+  // remain absent, and the skill-side Phase 1 gate blocks them independently.
+  "gmail +draft",
   "gmail users drafts create",
   "gmail users drafts update",
   "gmail users messages modify",
@@ -139,6 +148,18 @@ const DRIVE_METADATA_FIELDS = new Set([
   "foldercolorrgb",
   "properties",
   "appproperties",
+])
+// Query parameters permitted alongside a metadata-only `files update`. These
+// select the target and shape the response; none can write content. Parent
+// changes (a move) live here rather than in the body. Mirrors
+// DRIVE_PARAM_FIELDS in the psd-workspace skill. `uploadType` is absent by
+// design — carriesDriveContent refuses it outright.
+const DRIVE_PARAM_FIELDS = new Set([
+  "fileid",
+  "addparents",
+  "removeparents",
+  "supportsalldrives",
+  "fields",
 ])
 const DRIVE_CONTENT_FLAG =
   /^--(media|media-file|media-body|upload|upload-file|upload-type|content|content-file|data|data-file|body|body-file|text|text-file|file|source|source-file)$/i
@@ -273,14 +294,46 @@ function validateUserDriveFolderCreate(argv: readonly string[]): void {
 }
 
 function validateUserDriveMetadataUpdate(argv: readonly string[]): void {
+  if (carriesDriveContent(argv)) {
+    throw new Error(
+      "Drive user-owned updates are limited to approved metadata fields"
+    )
+  }
+
+  // A MOVE carries no request body at all — addParents/removeParents are query
+  // parameters. Requiring a `--json` resource therefore refused every move,
+  // which is why the Purdy Drive auto-sort schedule failed on each run even
+  // though SKILL.md lists move as allowed. This mirrors isMetadataOnlyDriveUpdate
+  // in the psd-workspace skill; the two gates must agree or a command passes the
+  // skill and then dies here with operation_not_allowed.
+  const params = parseObjectArgument(argv, "--params")
+  if (params) {
+    const paramKeys = Object.keys(params)
+    if (!paramKeys.every((key) => DRIVE_PARAM_FIELDS.has(key.toLowerCase()))) {
+      throw new Error(
+        "Drive user-owned updates are limited to approved query parameters"
+      )
+    }
+  }
+  const movesParents =
+    !!params &&
+    Object.keys(params).some((key) => /^(add|remove)parents$/i.test(key))
+
   const resource = jsonResource(argv)
-  const keys = Object.keys(resource ?? {})
-  if (
-    !resource ||
-    keys.length === 0 ||
-    carriesDriveContent(argv) ||
-    !keys.every((key) => DRIVE_METADATA_FIELDS.has(key.toLowerCase()))
-  ) {
+  if (resource) {
+    const keys = Object.keys(resource)
+    if (
+      keys.length === 0 ||
+      !keys.every((key) => DRIVE_METADATA_FIELDS.has(key.toLowerCase()))
+    ) {
+      throw new Error(
+        "Drive user-owned updates are limited to approved metadata fields"
+      )
+    }
+    return
+  }
+  // No body: allowed only when --params proves this is a parent move.
+  if (!movesParents) {
     throw new Error(
       "Drive user-owned updates are limited to approved metadata fields"
     )
@@ -298,6 +351,105 @@ function normalizedOperation(argv: readonly string[]): {
   }
   const action = tokens[tokens.length - 1]
   return { operation: tokens.join(" "), action, tokens }
+}
+
+// The two in-district share shapes psd-workspace/SKILL.md documents. Mirrors
+// isDocumentedShareShape in the skill — the skill-side gate is a fast, local
+// refusal, but a request can reach this executor without passing through it, so
+// the shape has to be re-proved here or the policy is advisory only.
+// `transferOwnership` and `moveToNewOwnersRoot` are deliberately absent: an
+// ownership transfer is never one of the documented shapes, so their presence
+// refuses the call.
+const PERMISSION_FIELDS = new Set([
+  "fileid",
+  "type",
+  "role",
+  "emailaddress",
+  "domain",
+  "sendnotificationemail",
+  "emailmessage",
+  "supportsalldrives",
+])
+const PERMISSION_ROLES_NAMED = new Set(["reader", "commenter", "writer"])
+const PSD_DOMAIN = "psd401.net"
+const PSD_EMAIL = /^[^\s@]+@psd401\.net$/i
+
+/**
+ * Refuse a Drive share that is not one of the documented in-district shapes.
+ *
+ * Ownership alone is not sufficient: an agent-OWNED file could otherwise be
+ * shared to `type: "anyone"`, an external address, or domain-wide `writer`, and
+ * ownership could be handed away entirely — all past the in-district boundary
+ * the exception is written around. This is an ALLOWLIST and fails closed.
+ */
+function validateDriveShareShape(
+  argv: readonly string[],
+  ownerEmail?: string
+): void {
+  const resource = jsonResource(argv)
+  // Handing work back to the person who asked for it is unrestricted: any role,
+  // ownership transfer included, on anything the agent can reach. `ownerEmail`
+  // is the SERVER-KNOWN caller from the signed invocation context, never an
+  // address out of the model's payload, so this cannot be widened by asking.
+  if (isShareToCaller(resource, ownerEmail)) return
+  if (!isDocumentedShareShape(resource)) {
+    throw new Error(
+      "Drive shares are limited to the requesting user, an in-district named person (reader/commenter/writer), or a domain-wide reader"
+    )
+  }
+}
+
+/**
+ * True when the share's recipient IS the caller — the human who owns this agent.
+ *
+ * The agent exists to do work for one person, and that person may receive
+ * anything it produces or touches, in any role, including having ownership of a
+ * Doc transferred to their account. The restrictions elsewhere in this file
+ * exist to stop the agent handing data to THIRD parties; they were never meant
+ * to stand between the agent and its own owner.
+ *
+ * Matching is against the server-resolved caller, so a model that writes someone
+ * else's address into the payload simply falls through to the normal allowlist.
+ */
+function isShareToCaller(
+  resource: Record<string, unknown> | null,
+  ownerEmail?: string
+): boolean {
+  if (!resource || !ownerEmail) return false
+  const type =
+    typeof resource.type === "string" ? resource.type.toLowerCase() : null
+  if (type !== "user") return false
+  const email = resource.emailAddress
+  if (typeof email !== "string") return false
+  return email.trim().toLowerCase() === ownerEmail.trim().toLowerCase()
+}
+
+/** True only for the two documented shapes. Anything else — including an
+ *  unrecognized key — is refused. */
+function isDocumentedShareShape(
+  resource: Record<string, unknown> | null
+): boolean {
+  if (!resource) return false
+  const keys = Object.keys(resource)
+  if (keys.length === 0) return false
+  if (!keys.every((key) => PERMISSION_FIELDS.has(key.toLowerCase()))) return false
+
+  const type = typeof resource.type === "string" ? resource.type.toLowerCase() : null
+  const role = typeof resource.role === "string" ? resource.role.toLowerCase() : null
+  if (!type || !role) return false
+
+  if (type === "user") {
+    if (!PERMISSION_ROLES_NAMED.has(role)) return false
+    const email = resource.emailAddress
+    return typeof email === "string" && PSD_EMAIL.test(email.trim())
+  }
+  if (type === "domain") {
+    if (role !== "reader") return false
+    const domain = resource.domain
+    return typeof domain === "string" && domain.trim().toLowerCase() === PSD_DOMAIN
+  }
+  // 'anyone', 'group', or anything new: refused.
+  return false
 }
 
 function validateGmailModify(argv: readonly string[]): void {
@@ -343,13 +495,19 @@ function validateWorkspaceArguments(argv: readonly string[]): void {
   }
 }
 
+interface MutationContext {
+  operation: string
+  action: string
+  tokens: string[]
+  ownerEmail?: string
+}
+
 function validateWorkspaceMutation(
   argv: readonly string[],
   scope: WorkspaceCommand["scope"],
-  operation: string,
-  action: string,
-  tokens: string[]
+  context: MutationContext
 ): void {
+  const { operation, action, tokens, ownerEmail } = context
   const helperVerb = tokens.find((token) => token.startsWith("+"))
   if (helperVerb === "+read") {
     throw new Error(
@@ -391,6 +549,9 @@ function validateWorkspaceMutation(
     throw new Error("This operation must use the agent-owned Workspace account")
   }
   if (operation === "gmail users messages modify") validateGmailModify(argv)
+  if (operation === "drive permissions create") {
+    validateDriveShareShape(argv, ownerEmail)
+  }
 }
 
 /**
@@ -398,14 +559,17 @@ function validateWorkspaceMutation(
  * runtime has no Google credential and no gws binary; only commands accepted
  * here are executed with an owner-derived token.
  */
-export function validateWorkspaceCommand(command: WorkspaceCommand): void {
+export function validateWorkspaceCommand(
+  command: WorkspaceCommand,
+  ownerEmail?: string
+): void {
   const { argv, scope } = command
   if (scope !== "agent" && scope !== "user") {
     throw new Error("Workspace scope must be agent or user")
   }
   validateWorkspaceArguments(argv)
   const { operation, action, tokens } = normalizedOperation(argv)
-  validateWorkspaceMutation(argv, scope, operation, action, tokens)
+  validateWorkspaceMutation(argv, scope, { operation, action, tokens, ownerEmail })
 }
 
 export interface WorkspaceOutboundAudit {
@@ -514,11 +678,100 @@ export function validateScheduledWorkspaceCommand(
   validateWorkspaceCommand(command)
 }
 
+/**
+ * Refuse `drive permissions create` on a file the agent slot does not OWN.
+ *
+ * The static gates prove the caller is on the agent slot and that the permission
+ * body has an in-district shape, but neither can prove whose file it is — that
+ * needs Drive. The agent slot is a broad Drive credential and users can share
+ * their own files INTO the agnt_ account, so without this a user-owned file
+ * shared to the agent with sharing rights could be re-shared to another person
+ * or domain-wide, straight past the "your own files" boundary the exception is
+ * written around.
+ *
+ * `ownedByMe` is evaluated by Drive against the authenticated identity, which on
+ * this path is the agent account, so it answers exactly the right question
+ * without plumbing the agent's address through. Shared-drive files report false
+ * (the drive owns them, not the agent) and are refused — conservative, and
+ * consistent with the documented boundary.
+ *
+ * Fails CLOSED: a missing fileId, a non-OK response, or a network error refuses
+ * the share rather than assuming ownership.
+ */
+async function assertAgentOwnsSharedFile(
+  command: WorkspaceCommand,
+  accessToken: string,
+  ownerEmail?: string
+): Promise<void> {
+  const { operation } = normalizedOperation(command.argv)
+  if (operation !== "drive permissions create") return
+  // Ownership only gates shares to THIRD parties. The caller may receive
+  // anything the agent can reach, so a share back to them skips the lookup —
+  // and skips a Drive round-trip on the most common share by far.
+  if (isShareToCaller(jsonResource(command.argv), ownerEmail)) return
+
+  const fileId = shareTargetFileId(command.argv)
+  if (!fileId) {
+    throw new Error("Drive share requires a fileId so ownership can be verified")
+  }
+
+  if ((await fetchDriveOwnedByMe(fileId, accessToken)) !== true) {
+    throw new Error(
+      "Drive shares are limited to files the agent owns; ask the file's owner to share it"
+    )
+  }
+}
+
+/** The fileId a share targets, from either the body or the query parameters. */
+function shareTargetFileId(argv: readonly string[]): string {
+  const resource = jsonResource(argv)
+  const params = parseObjectArgument(argv, "--params")
+  const raw =
+    resource?.fileId ?? resource?.fileID ?? params?.fileId ?? params?.fileID
+  return typeof raw === "string" ? raw.trim() : ""
+}
+
+/** Ask Drive whether the authenticated identity owns the file. Fails closed. */
+async function fetchDriveOwnedByMe(
+  fileId: string,
+  accessToken: string
+): Promise<boolean> {
+  const url = new URL(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`
+  )
+  url.searchParams.set("fields", "ownedByMe")
+  url.searchParams.set("supportsAllDrives", "true")
+  try {
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!response.ok) {
+      throw new Error(`Drive responded HTTP ${response.status}`)
+    }
+    const body: unknown = await response.json()
+    return (
+      typeof body === "object" &&
+      body !== null &&
+      (body as Record<string, unknown>).ownedByMe === true
+    )
+  } catch (error) {
+    throw new Error(
+      `Drive ownership could not be verified for this share: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      { cause: error }
+    )
+  }
+}
+
 export async function executeWorkspaceCommand(
   command: WorkspaceCommand,
-  accessToken: string
+  accessToken: string,
+  ownerEmail?: string
 ): Promise<WorkspaceCommandResult> {
-  validateWorkspaceCommand(command)
+  validateWorkspaceCommand(command, ownerEmail)
+  await assertAgentOwnsSharedFile(command, accessToken, ownerEmail)
   const binary = process.env.GWS_EXECUTABLE || "/usr/local/bin/gws"
   // The pinned gws binary writes non-JSON responses to `download.<ext>` even
   // when the caller does not pass --output. Execute it in an empty, private

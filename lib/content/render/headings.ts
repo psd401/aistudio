@@ -61,12 +61,43 @@ const parser = unified().use(remarkParse).use(remarkGfm).freeze();
  * Extract the h1–h3 headings from a single non-embed markdown run with a fresh
  * slugger (mirrors one `renderMarkdownToHtml` call, so ids align with the DOM).
  */
+/**
+ * Concatenate a heading's visible text, skipping inline `html` nodes.
+ *
+ * `mdast-util-to-string` returns the LITERAL source of an `html` node, so a
+ * heading authored through the collab editor — which wraps runs in
+ * `<span data-atrium-authored>` (see `lib/content/collab/authored-mark.ts`) —
+ * produced `<span data-atrium-authored="">District Data</span>` as its "text".
+ * That broke the reader rail two ways: it printed raw markup as the label, AND
+ * it slugged the markup, so every TOC anchor missed its heading.
+ *
+ * The rendered DOM does not have this problem: rehype's `toString` over the
+ * hast tree yields only the element's text children, never the tag source. So
+ * skipping `html` nodes here is also what re-aligns our ids with rehype-slug's.
+ */
+function headingVisibleText(node: Heading): string {
+  const parts: string[] = [];
+  const walk = (child: unknown): void => {
+    if (!child || typeof child !== "object") return;
+    const n = child as { type?: string; children?: unknown[] };
+    if (n.type === "html") return;
+    if (Array.isArray(n.children) && n.children.length > 0) {
+      for (const grandchild of n.children) walk(grandchild);
+      return;
+    }
+    // Leaf: `mdastToString` gives text/inlineCode values and image alt text.
+    parts.push(mdastToString(child as Parameters<typeof mdastToString>[0]));
+  };
+  for (const child of node.children ?? []) walk(child);
+  return parts.join("");
+}
+
 function headingsForRun(run: string): DocumentHeading[] {
   const tree = parser.parse(run) as Root;
   const slugger = new GithubSlugger();
   const out: DocumentHeading[] = [];
   visit(tree, "heading", (node: Heading) => {
-    const text = mdastToString(node).trim();
+    const text = headingVisibleText(node).trim();
     // Slug EVERY heading (even depths > 3, even empty ones would consume a slug)
     // so de-duplication tracks rehype-slug exactly; only push the TOC-visible ones.
     const id = slugger.slug(text);
