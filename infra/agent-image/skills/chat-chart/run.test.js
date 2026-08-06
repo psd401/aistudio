@@ -773,6 +773,20 @@ test('the renderer throws (never exits) on unusable input', () => {
   }
 });
 
+test('a pie whose total overflows is refused, not painted as one slice', () => {
+  // Each value is finite, so per-value validation passes, but the sum is
+  // Infinity — which clears `total <= 0`. Every share then computes as
+  // value/Infinity === 0, so the legend reads 0% for both slices while the
+  // forced final wedge bound paints the entire circle as the last category.
+  // That is a wrong chart returned as a success, which is the failure worth
+  // guarding against.
+  const config = {
+    type: 'pie',
+    data: { labels: ['a', 'b'], datasets: [{ data: [1e308, 1e308] }] },
+  };
+  assert.throws(() => renderChartPng(config), /cannot be divided into shares/);
+});
+
 test('a range too narrow for its magnitude is refused, not looped over', () => {
   // Accumulating `value += step` when step is below an ULP of the start never
   // advances: the tick array grows until the process dies of heap exhaustion.

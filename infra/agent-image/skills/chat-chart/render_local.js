@@ -748,6 +748,17 @@ function drawPieChart(canvas, labels, values, area) {
   if (total <= 0) {
     throw new Error('pie chart values must sum to a positive number');
   }
+  // Individually finite values can still sum past Number.MAX_VALUE — [1e308,
+  // 1e308] is the short case. An Infinite total clears `total <= 0`, and then
+  // every share is value/Infinity === 0: the legend reads 0% for every slice
+  // while the forced final bound paints the whole pie as the last category. A
+  // materially false chart returned as a success is worse than a refusal, so
+  // refuse. Same guard catches a NaN total, which `total <= 0` also lets past.
+  if (!Number.isFinite(total)) {
+    throw new Error(
+      `pie chart values sum to ${total}, which cannot be divided into shares`,
+    );
+  }
   const bounds = wedgeBounds(values, total);
   const radius = Math.floor(Math.min(area.height, area.width * 0.5) / 2);
   const cx = area.left + radius + 20;
