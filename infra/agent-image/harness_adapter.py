@@ -202,6 +202,14 @@ def _format_for_chat(text: str) -> str:
 CONTEXT_OVERFLOW_ERROR_CLASS = "ContextOverflow"
 INCOMPLETE_TOOL_TURN_ERROR_CLASS = "OpenClawIncompleteToolTurn"
 
+# Upstream-failure retry (2026-08-06 Bedrock 5xx incident). One retry only:
+# the point is to absorb a transient fault, not to hammer a provider that is
+# already unwell. The latency bound keeps the retry to turns that failed at
+# the model call — the incident's turns died in ~6s — rather than something
+# that collapsed late in real work.
+UPSTREAM_RETRY_DELAY_S = 2.0
+UPSTREAM_RETRY_MAX_LATENCY_MS = 30_000
+
 
 def _classify_chat_error(error_message: str) -> str:
     """Name the chat-error class from OpenClaw's message.
@@ -771,6 +779,75 @@ class OpenClawAdapter(HarnessAdapter):
         return {**totals, "capture_complete": False}
 
     def process(
+        self,
+        message: str,
+        session_id: str,
+        model_override: Optional[str] = None,
+        deadline_s: Optional[int] = None,
+        _is_nudge: bool = False,
+    ) -> TurnResult:
+        """Run one turn, retrying once when the UPSTREAM model call fails
+        before any work happened.
+
+        On 2026-08-06 Bedrock returned 5xx for ~25 minutes (CloudWatch
+        InvocationServerErrors peaked at 26/5min, InvocationThrottles stayed
+        at zero — a server fault, not our quota). It cost 27 turns across 9
+        users. Every one of them died in ~6 seconds having executed NOTHING:
+        no tool calls, no output. A transient upstream fault at that point is
+        the one failure a turn can safely repeat, because there is nothing to
+        repeat.
+
+        Deliberately narrow. `_should_retry_upstream` demands the turn be
+        provably side-effect-free, so this never re-runs work: a turn that
+        already created a Doc is not retried, whatever it failed with.
+        """
+        attempt = self._process_once(
+            message, session_id, model_override, deadline_s, _is_nudge
+        )
+        if not self._should_retry_upstream(attempt):
+            return attempt
+        logger.warning(
+            "retrying turn after a clean upstream failure: error_class=%s "
+            "latency_ms=%d",
+            attempt.error_class,
+            attempt.latency_ms,
+        )
+        time.sleep(UPSTREAM_RETRY_DELAY_S)
+        retried = self._process_once(
+            message, session_id, model_override, deadline_s, _is_nudge
+        )
+        if retried.failed:
+            # Keep the retry's result — it is the more recent evidence — but
+            # say plainly that a retry happened, so a two-failure turn is not
+            # read as a single blip.
+            logger.error(
+                "upstream retry also failed: first=%s second=%s",
+                attempt.error_class,
+                retried.error_class,
+            )
+            return retried
+        logger.info("upstream retry recovered the turn")
+        return retried
+
+    @staticmethod
+    def _should_retry_upstream(result: TurnResult) -> bool:
+        """True only when replaying the turn cannot repeat a side effect.
+
+        ALL must hold: the turn failed; it failed as a generic upstream chat
+        error (not a deadline, overflow, or the incomplete-tool-turn class,
+        each of which OpenClaw already handles its own way); no tool call was
+        recorded; and it died fast enough that the failure was the model call
+        itself rather than something that happened mid-work.
+        """
+        if not result.failed:
+            return False
+        if result.error_class != "OpenClawChatError":
+            return False
+        if result.tool_calls:
+            return False
+        return result.latency_ms <= UPSTREAM_RETRY_MAX_LATENCY_MS
+
+    def _process_once(
         self,
         message: str,
         session_id: str,

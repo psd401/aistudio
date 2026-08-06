@@ -383,6 +383,27 @@ COPY skills /opt/psd-skills
 # user invokes web_search.
 ARG BEDROCK_PLUGIN_VERSION=2026.7.2-beta.5
 ARG BEDROCK_PLUGIN_ASSERTION=claude-sonnet-5
+# UPSTREAM-BUG CANARY (2026-08-06) — this asserts a bug is STILL PRESENT.
+#
+# convertToolConfig returns undefined when tools are empty or toolChoice is
+# "none", so OpenClaw's tools-disabled "settled post-tool turn" finalization
+# sends a Converse request with no toolConfig while the message history still
+# carries toolUse/toolResult blocks. Bedrock rejects that combination
+# ("The toolConfig field must be defined when using toolUse and toolResult
+# content blocks"), so the recovery call cannot succeed and a turn that had
+# already run 1-2 tools fails outright. 9 occurrences across 8 users,
+# 2026-08-04..06, with an identical signature (response_chars=0, seq=19 at one
+# tool / seq=25 at two).
+#
+# It is NOT fixed upstream: 2026.7.2-beta.7's dist is byte-identical to
+# beta.5's. We chose to live with it rather than patch a vendored dependency
+# that runs on every turn.
+#
+# This canary is how we find out when that changes. The build FAILS the moment
+# upstream edits this line — which is the signal to re-test the finalization
+# path and delete this ARG. Without it we would carry a known-broken recovery
+# path indefinitely and never notice the fix landing.
+ARG BEDROCK_TOOLCONFIG_CANARY='if (!tools?.length || toolChoice === "none") return;'
 ARG PARALLEL_PLUGIN_VERSION=2026.7.2-beta.5
 ARG PARALLEL_PLUGIN_ENDPOINT=https://search.parallel.ai/mcp
 RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-fund && \
@@ -401,6 +422,8 @@ RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-f
     test -f /opt/openclaw-plugins/amazon-bedrock/openclaw.plugin.json && \
     grep -Fq -- "${BEDROCK_PLUGIN_ASSERTION}" \
       /opt/openclaw-plugins/amazon-bedrock/dist/bedrock-options.js && \
+    grep -Fq -- "${BEDROCK_TOOLCONFIG_CANARY}" \
+      /opt/openclaw-plugins/amazon-bedrock/dist/stream.runtime.js && \
     cd /opt/openclaw-plugins && \
     npm pack "@openclaw/parallel-plugin@${PARALLEL_PLUGIN_VERSION}" && \
     tar -xzf "openclaw-parallel-plugin-${PARALLEL_PLUGIN_VERSION}.tgz" && \

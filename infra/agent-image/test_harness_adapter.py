@@ -1064,6 +1064,111 @@ class TestQuestionEventEndsTurn(unittest.TestCase):
         record_failure.assert_not_called()
 
 
+class TestUpstreamRetry(unittest.TestCase):
+    """A clean upstream failure is the one thing a turn can safely repeat.
+
+    2026-08-06: Bedrock returned 5xx for ~25 minutes and cost 27 turns across
+    9 users. Every one died in ~6s having executed nothing — no tool calls, no
+    output. CloudWatch showed InvocationServerErrors peaking at 26/5min with
+    InvocationThrottles flat at zero, so it was a server fault, not our quota.
+    """
+
+    @staticmethod
+    def _result(**kw):
+        defaults = dict(text="", failed=True, error_class="OpenClawChatError",
+                        latency_ms=6000)
+        defaults.update(kw)
+        return harness_adapter.TurnResult(**defaults)
+
+    def test_retries_a_clean_upstream_failure(self):
+        self.assertTrue(
+            OpenClawAdapter._should_retry_upstream(self._result())
+        )
+
+    def test_never_retries_a_turn_that_ran_tools(self):
+        # The whole safety argument. A turn that created a Doc must not repeat.
+        self.assertFalse(
+            OpenClawAdapter._should_retry_upstream(
+                self._result(tool_calls=[{"name": "docs.create"}])
+            )
+        )
+
+    def test_never_retries_a_successful_turn(self):
+        self.assertFalse(
+            OpenClawAdapter._should_retry_upstream(
+                self._result(failed=False, error_class=None)
+            )
+        )
+
+    def test_leaves_classes_openclaw_already_handles_alone(self):
+        # Deadlines promote to the job path, overflow restarts fresh, and an
+        # incomplete tool turn is explicitly replay-unsafe.
+        for cls in (
+            "ChatDeadlineExpired",
+            "ChatDeadlineExpiredPartial",
+            "ContextOverflow",
+            harness_adapter.INCOMPLETE_TOOL_TURN_ERROR_CLASS,
+        ):
+            self.assertFalse(
+                OpenClawAdapter._should_retry_upstream(
+                    self._result(error_class=cls)
+                ),
+                cls,
+            )
+
+    def test_does_not_retry_a_turn_that_died_late(self):
+        # A late collapse is not "the model call failed" — something happened
+        # during real work, so replay is not provably safe.
+        self.assertFalse(
+            OpenClawAdapter._should_retry_upstream(
+                self._result(latency_ms=120_000)
+            )
+        )
+
+    def test_process_retries_once_and_returns_the_recovery(self):
+        adapter = OpenClawAdapter()
+        calls = []
+
+        def fake_once(message, session_id, model_override=None,
+                      deadline_s=None, _is_nudge=False):
+            calls.append(message)
+            if len(calls) == 1:
+                return self._result()
+            return harness_adapter.TurnResult(text="recovered", failed=False)
+
+        with mock.patch.object(adapter, "_process_once", side_effect=fake_once), \
+                mock.patch.object(harness_adapter.time, "sleep"):
+            result = adapter.process("chart attendance", "s1")
+
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(result.failed)
+        self.assertEqual(result.text, "recovered")
+
+    def test_process_does_not_retry_when_unsafe(self):
+        adapter = OpenClawAdapter()
+        calls = []
+
+        def fake_once(*_a, **_kw):
+            calls.append(1)
+            return self._result(tool_calls=[{"name": "write"}])
+
+        with mock.patch.object(adapter, "_process_once", side_effect=fake_once), \
+                mock.patch.object(harness_adapter.time, "sleep"):
+            result = adapter.process("do work", "s1")
+
+        self.assertEqual(len(calls), 1, "a tool-running turn must not repeat")
+        self.assertTrue(result.failed)
+
+    def test_a_second_failure_returns_the_retry_result(self):
+        adapter = OpenClawAdapter()
+        with mock.patch.object(
+            adapter, "_process_once", side_effect=lambda *a, **k: self._result()
+        ), mock.patch.object(harness_adapter.time, "sleep"):
+            result = adapter.process("x", "s1")
+        self.assertTrue(result.failed)
+        self.assertEqual(result.error_class, "OpenClawChatError")
+
+
 class TestRecordItemToolEvent(unittest.TestCase):
     """Native-mode tool items must land in tool_calls telemetry (#1138 r12)."""
 
