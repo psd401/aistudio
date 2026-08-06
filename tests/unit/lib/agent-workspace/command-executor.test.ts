@@ -312,7 +312,6 @@ function defineTrustedWorkspaceCommandPolicySuite1Part3() {it("rejects Gmail mod
     ["calendar", "events", "patch"],
     ["calendar", "events", "update"],
     ["docs", "documents", "batchUpdate"],
-    ["drive", "permissions", "create"],
     ["sheets", "spreadsheets", "batchUpdate"],
     ["slides", "presentations", "batchUpdate"],
     ["tasks", "tasks", "patch"],
@@ -325,6 +324,7 @@ function defineTrustedWorkspaceCommandPolicySuite1Part3() {it("rejects Gmail mod
       validateWorkspaceCommand({ scope: "agent", argv })
     ).not.toThrow()
   })
+
 
   it.each([
     ["calendar", "events", "insert"],
@@ -771,5 +771,63 @@ describe("Drive share ownership verification", () => {
       )
     ).rejects.not.toThrow(/ownership/)
     expect(globalThis.fetch).not.toHaveBeenCalled()
+  })
+})
+
+// Ownership alone is not enough: an agent-OWNED file could otherwise be shared
+// to anyone, to an external address, or domain-wide as writer. The skill-side
+// allowlist can be bypassed by calling the broker directly, so the shape has to
+// be re-proved at this boundary or the documented policy is advisory only.
+describe("Drive share shape at the broker boundary", () => {
+  const share = (resource: Record<string, unknown>) =>
+    validateWorkspaceCommand({
+      scope: "agent",
+      argv: ["drive", "permissions", "create", "--json", JSON.stringify(resource)],
+    })
+
+  // `drive permissions create` is an ordinary agent-slot write, but unlike the
+  // other agent-slot operations it must additionally prove an in-district share
+  // shape, so it is asserted with a payload rather than bare.
+  it("allows the two documented in-district shapes", () => {
+    expect(() =>
+      share({ fileId: "f", type: "user", role: "writer", emailAddress: "hagelk@psd401.net" })
+    ).not.toThrow()
+    expect(() =>
+      share({ fileId: "f", type: "user", role: "reader", emailAddress: "colleague@psd401.net" })
+    ).not.toThrow()
+    expect(() =>
+      share({ fileId: "f", type: "domain", role: "reader", domain: "psd401.net" })
+    ).not.toThrow()
+  })
+
+  it.each([
+    ["public link", { fileId: "f", type: "anyone", role: "reader" }],
+    ["group", { fileId: "f", type: "group", role: "reader", emailAddress: "staff@psd401.net" }],
+    ["external address", { fileId: "f", type: "user", role: "reader", emailAddress: "evil@outside.com" }],
+    ["lookalike domain", { fileId: "f", type: "user", role: "reader", emailAddress: "x@psd401.net.evil.com" }],
+    ["external domain", { fileId: "f", type: "domain", role: "reader", domain: "gmail.com" }],
+    ["domain-wide writer", { fileId: "f", type: "domain", role: "writer", domain: "psd401.net" }],
+    ["ownership transfer", {
+      fileId: "f", type: "user", role: "writer",
+      emailAddress: "hagelk@psd401.net", transferOwnership: true,
+    }],
+    ["owner role", { fileId: "f", type: "user", role: "owner", emailAddress: "hagelk@psd401.net" }],
+    ["unknown key", {
+      fileId: "f", type: "user", role: "reader",
+      emailAddress: "hagelk@psd401.net", unexpected: "x",
+    }],
+    ["missing role", { fileId: "f", type: "user", emailAddress: "hagelk@psd401.net" }],
+    ["missing recipient", { fileId: "f", type: "user", role: "reader" }],
+  ])("refuses %s", (_name, resource) => {
+    expect(() => share(resource)).toThrow(/in-district/)
+  })
+
+  it("refuses a share with no parseable payload", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "agent",
+        argv: ["drive", "permissions", "create"],
+      })
+    ).toThrow(/in-district/)
   })
 })

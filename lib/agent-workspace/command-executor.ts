@@ -353,6 +353,71 @@ function normalizedOperation(argv: readonly string[]): {
   return { operation: tokens.join(" "), action, tokens }
 }
 
+// The two in-district share shapes psd-workspace/SKILL.md documents. Mirrors
+// isDocumentedShareShape in the skill — the skill-side gate is a fast, local
+// refusal, but a request can reach this executor without passing through it, so
+// the shape has to be re-proved here or the policy is advisory only.
+// `transferOwnership` and `moveToNewOwnersRoot` are deliberately absent: an
+// ownership transfer is never one of the documented shapes, so their presence
+// refuses the call.
+const PERMISSION_FIELDS = new Set([
+  "fileid",
+  "type",
+  "role",
+  "emailaddress",
+  "domain",
+  "sendnotificationemail",
+  "emailmessage",
+  "supportsalldrives",
+])
+const PERMISSION_ROLES_NAMED = new Set(["reader", "commenter", "writer"])
+const PSD_DOMAIN = "psd401.net"
+const PSD_EMAIL = /^[^\s@]+@psd401\.net$/i
+
+/**
+ * Refuse a Drive share that is not one of the documented in-district shapes.
+ *
+ * Ownership alone is not sufficient: an agent-OWNED file could otherwise be
+ * shared to `type: "anyone"`, an external address, or domain-wide `writer`, and
+ * ownership could be handed away entirely — all past the in-district boundary
+ * the exception is written around. This is an ALLOWLIST and fails closed.
+ */
+function validateDriveShareShape(argv: readonly string[]): void {
+  if (!isDocumentedShareShape(jsonResource(argv))) {
+    throw new Error(
+      "Drive shares are limited to an in-district named person (reader/commenter/writer) or a domain-wide reader"
+    )
+  }
+}
+
+/** True only for the two documented shapes. Anything else — including an
+ *  unrecognized key — is refused. */
+function isDocumentedShareShape(
+  resource: Record<string, unknown> | null
+): boolean {
+  if (!resource) return false
+  const keys = Object.keys(resource)
+  if (keys.length === 0) return false
+  if (!keys.every((key) => PERMISSION_FIELDS.has(key.toLowerCase()))) return false
+
+  const type = typeof resource.type === "string" ? resource.type.toLowerCase() : null
+  const role = typeof resource.role === "string" ? resource.role.toLowerCase() : null
+  if (!type || !role) return false
+
+  if (type === "user") {
+    if (!PERMISSION_ROLES_NAMED.has(role)) return false
+    const email = resource.emailAddress
+    return typeof email === "string" && PSD_EMAIL.test(email.trim())
+  }
+  if (type === "domain") {
+    if (role !== "reader") return false
+    const domain = resource.domain
+    return typeof domain === "string" && domain.trim().toLowerCase() === PSD_DOMAIN
+  }
+  // 'anyone', 'group', or anything new: refused.
+  return false
+}
+
 function validateGmailModify(argv: readonly string[]): void {
   const payload = parseObjectArgument(argv, "--json")
   if (!payload) throw new Error("Gmail modify requires a valid --json object")
@@ -444,6 +509,7 @@ function validateWorkspaceMutation(
     throw new Error("This operation must use the agent-owned Workspace account")
   }
   if (operation === "gmail users messages modify") validateGmailModify(argv)
+  if (operation === "drive permissions create") validateDriveShareShape(argv)
 }
 
 /**
