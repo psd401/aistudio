@@ -72,26 +72,51 @@ const PII_PATTERNS = [
   { name: 'psd-student-id', re: /\b2\d{6}\b/ },
 ];
 
+/**
+ * A caller mistake: a bad flag, a malformed --data-json, a series missing a
+ * value at one label.
+ *
+ * Raised rather than exited. `process.exit()` is synchronous, so a direct exit
+ * here outran main()'s handler and recorded nothing — and an authoring mistake
+ * is the *likelier* way an agent ends a turn with no chart than a renderer bug
+ * is, so leaving this class unreported left the bigger half of "the user asked
+ * for a chart and got nothing" invisible in `agent_failures`. Exit code and
+ * stderr wording are unchanged; only the reporting differs.
+ */
 function fail(message, code = 2) {
-  process.stderr.write(`chat-chart: ${message}\n`);
-  process.exit(code);
+  throw new ChartFailure(message, code, { errorClass: 'ChartInputInvalid' });
+}
+
+/**
+ * A refusal: the policy gate declining to render, not a failure to render.
+ *
+ * Deliberately NOT reported. `--engine quickchart` over PII or `--sensitive`
+ * data is REV-INFRA-002 working exactly as designed, and filing it as a chart
+ * failure would misclassify a correct refusal as a defect — noise in the one
+ * table someone reads to find real breakage. If these ever do want recording
+ * they want their own `error_class`, not this one.
+ */
+function refuse(reason) {
+  throw new ChartFailure(reason, 3, { report: false });
 }
 
 /**
  * A failure that has to reach reportChartFailure before the process ends.
  *
- * `fail()` calls process.exit synchronously, so anything raised through it is
- * dead before main()'s rejection handler can record a thing — which is how a
- * renderer failure, the exact class this skill's new telemetry exists to
- * capture, emitted neither AGENT_FAILURE_RECORD nor the broker write. Failures
- * worth recording travel as a rejection instead; `exitCode` preserves the
- * process contract that the direct `fail()` call had.
+ * Everything that ends a chart travels as a rejection so a single handler owns
+ * the stderr line, the telemetry, and the exit code. `exitCode` preserves the
+ * process contract each call site had; `errorClass` keeps an authoring mistake
+ * (`ChartInputInvalid`) distinguishable from a renderer bug
+ * (`ChartRenderFailed`) in `agent_failures`, since they need different fixes;
+ * `report: false` marks the paths that are working as intended.
  */
 class ChartFailure extends Error {
-  constructor(message, exitCode = 3) {
+  constructor(message, exitCode = 3, { errorClass = 'ChartRenderFailed', report = true } = {}) {
     super(message);
     this.name = 'ChartFailure';
     this.exitCode = exitCode;
+    this.errorClass = errorClass;
+    this.report = report;
   }
 }
 
@@ -384,7 +409,7 @@ async function main() {
     // PII data off-district (REV-INFRA-002), and we do not silently downgrade
     // to the local engine either — the caller named an engine, so tell them
     // why it was not used. Non-zero exit so the agent sees no chart was made.
-    fail(reason, 3);
+    refuse(reason);
   }
   process.stderr.write(`chat-chart: engine=${engine} (${reason})\n`);
 
@@ -410,12 +435,17 @@ async function main() {
  * turns were invisible in agent_failures. The one that prompted this was found
  * only because a human was watching the Chat window.
  *
+ * Covers every way a chart ends without an image: `ChartInputInvalid` for a
+ * caller mistake, `ChartRenderFailed` for a renderer fault or an unexpected
+ * rejection. Policy refusals are the one deliberate exclusion — see refuse().
+ *
  * Best-effort by design: the CloudWatch line is written first so the failure
  * survives even when the broker write does not, and any error here is swallowed
  * so telemetry can never turn a chart failure into a worse one.
  */
 async function reportChartFailure(err, args) {
   const errorMessage = `chat-chart failed: ${err && err.message ? err.message : String(err)}`;
+  const errorClass = err?.errorClass ?? 'ChartRenderFailed';
   const context = {
     tool: 'chat-chart',
     type: args?.['--type'] ?? null,
@@ -428,7 +458,7 @@ async function reportChartFailure(err, args) {
       JSON.stringify({
         source: 'tool',
         severity: 'error',
-        error_class: 'ChartRenderFailed',
+        error_class: errorClass,
         error_message: errorMessage,
         context,
       }) +
@@ -439,7 +469,7 @@ async function reportChartFailure(err, args) {
     await requestAgentBroker('/api/agent/failures', {
       source: 'tool',
       severity: 'error',
-      errorClass: 'ChartRenderFailed',
+      errorClass,
       errorMessage,
       context,
     });
@@ -449,16 +479,21 @@ async function reportChartFailure(err, args) {
 }
 
 if (require.main === module) {
+  // Parsed up front purely to give the failure report its context. A parse
+  // that throws leaves nothing to describe the run with, so the report goes out
+  // with an empty context rather than not at all — main() raises the same
+  // failure a moment later and that is what gets recorded.
   const argsForReport = (() => {
     try { return parseArgs(process.argv); } catch { return {}; }
   })();
   main().catch(async err => {
     // A ChartFailure is a diagnosed failure with its own wording and exit code;
-    // anything else genuinely is unexpected. Both get recorded.
+    // anything else genuinely is unexpected. Everything is recorded except the
+    // paths that opt out by design (refusals).
     const expected = err instanceof ChartFailure;
     const detail = err && err.message ? err.message : err;
     process.stderr.write(`chat-chart: ${expected ? '' : 'unexpected error: '}${detail}\n`);
-    await reportChartFailure(err, argsForReport);
+    if (!expected || err.report) await reportChartFailure(err, argsForReport);
     process.exit(expected ? err.exitCode : 1);
   });
 }

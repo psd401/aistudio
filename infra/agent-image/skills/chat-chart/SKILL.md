@@ -134,6 +134,15 @@ Resend the envelope exactly as `run.js` emitted it, and log it with
 `psd-failure-report` — a chart the user cannot see is a failure whatever the
 cause.
 
+**What already reports itself.** A non-zero exit files its own `agent_failures`
+row: `ChartInputInvalid` for a bad flag, malformed `--data-json` or a series
+missing a value, `ChartRenderFailed` for a renderer fault. Do not also call
+`psd-failure-report` for those — it would file the same failure twice. The one
+exception is the `--engine quickchart` sensitivity refusal (exit 3), which is
+the gate working as designed and is deliberately not recorded. The case above —
+the command *succeeded* and the user still saw no image — is the one that needs
+reporting by hand, because `run.js` has no way to know.
+
 ## Examples
 
 ### Any district data — the default (on-host) engine

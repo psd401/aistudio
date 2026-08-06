@@ -1231,3 +1231,63 @@ test('the legend wraps rather than truncating every label to the same stub', () 
   assert.strictEqual(many.rows, 2);
   assert.ok(many.maxChars >= 16, `wrapped labels still only ${many.maxChars} chars`);
 });
+
+test('an authoring mistake is reported, not just exited on', () => {
+  // The likelier way an agent ends a turn with no chart: asking for Math and
+  // Reading by grade and forgetting one grade's Reading score. Every fail()
+  // call site used to process.exit() straight past the reporter, so this whole
+  // class — bad flags, malformed --data-json, a gap in a series — left nothing
+  // in agent_failures however many times a user said the chart never arrived.
+  const gap = JSON.stringify([
+    { label: 'Grade 3', values: { Math: 412, Reading: 398 } },
+    { label: 'Grade 4', values: { Math: 430 } },
+  ]);
+  const result = runCli(['--type', 'bar', '--data-json', gap]);
+
+  assert.match(result.stderr, /AGENT_FAILURE_RECORD/);
+  const record = JSON.parse(
+    result.stderr.slice(result.stderr.indexOf('AGENT_FAILURE_RECORD ') + 'AGENT_FAILURE_RECORD '.length)
+      .split('\n')[0],
+  );
+  // A distinct class from ChartRenderFailed: a caller mistake and a renderer
+  // bug want different fixes, so they must be told apart in agent_failures.
+  assert.strictEqual(record.error_class, 'ChartInputInvalid');
+  assert.match(record.error_message, /series "Reading" is missing a finite value at "Grade 4"/);
+  assert.strictEqual(record.context.type, 'bar');
+  assert.strictEqual(record.context.user_facing, true);
+  // Exit code and wording are the contract fail() already had.
+  assert.strictEqual(result.status, 2, result.stderr);
+  assert.doesNotMatch(result.stderr, /unexpected error/);
+});
+
+test('an unparseable argv is still reported, with an empty context', () => {
+  // parseArgs runs before there is anything to describe the run with. The
+  // report goes out with a bare context rather than not at all.
+  const result = runCli(['--type', 'bar', '--data-json', '[{"label":"A"']);
+
+  assert.strictEqual(result.status, 2, result.stderr);
+  assert.match(result.stderr, /AGENT_FAILURE_RECORD/);
+  const record = JSON.parse(
+    result.stderr.slice(result.stderr.indexOf('AGENT_FAILURE_RECORD ') + 'AGENT_FAILURE_RECORD '.length)
+      .split('\n')[0],
+  );
+  assert.strictEqual(record.error_class, 'ChartInputInvalid');
+  assert.match(record.error_message, /not valid JSON/);
+});
+
+test('a policy refusal is NOT reported as a chart failure', () => {
+  // REV-INFRA-002 declining to ship PII to quickchart.io is the gate working,
+  // not a defect. Filing it in agent_failures would put correct refusals in the
+  // one table read to find real breakage. If these ever want recording they
+  // want their own error_class, so this exclusion is asserted rather than left
+  // to be re-derived from the absence of a test.
+  const result = runCli([
+    '--engine', 'quickchart',
+    '--type', 'bar',
+    '--data-json', '[{"label":"jsmith@psd401.net","value":1}]',
+  ]);
+
+  assert.strictEqual(result.status, 3, result.stderr);
+  assert.doesNotMatch(result.stderr, /AGENT_FAILURE_RECORD/);
+  assert.doesNotMatch(result.stderr, /unexpected error/);
+});
