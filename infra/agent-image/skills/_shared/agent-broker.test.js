@@ -84,6 +84,20 @@ test('an empty error body still identifies the status', async () => {
   expect(err.message).toContain('HTTP 502');
 });
 
+// Regression: an empty SUCCESS body is a contract violation, not a result.
+// `raw ? JSON.parse(raw) : null` returned null without flagging a parse
+// failure, so a 204 (or an empty 200) handed callers a non-result that only
+// failed later as an unrelated null-access, with the status already discarded.
+test('an empty successful body is a contract violation, not a null result', async () => {
+  globalThis.fetch = mock(async () => new Response('', { status: 204 }));
+  const { requestAgentBroker } = require('./agent-broker');
+  const err = await requestAgentBroker('/api/agent/consent-link', {}).catch((e) => e);
+  expect(err).toBeInstanceOf(Error);
+  expect(err.status).toBe(204);
+  expect(err.message).toContain('HTTP 204');
+  expect(err.message).toContain('(empty body)');
+});
+
 test('rejects non-allowlisted paths before network access', async () => {
   globalThis.fetch = mock(async () => new Response('{}'));
   const { requestAgentBroker } = require('./agent-broker');

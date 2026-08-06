@@ -51,10 +51,15 @@ async function requestAgentBroker(route, payload, options = {}) {
   // break the payload, and adopted a curly-quote "workaround" for a cause that
   // was never established.
   const raw = await response.text();
+  // An empty body is tracked apart from a parse failure because the two paths
+  // below want different things from it: an error with an empty body keeps
+  // reporting the status alone (that is the masked-proxy case above), while a
+  // SUCCESS with an empty body is a contract violation in its own right.
+  const emptyBody = raw.trim() === '';
   let body = null;
   let parseFailed = false;
   try {
-    body = raw ? JSON.parse(raw) : null;
+    body = emptyBody ? null : JSON.parse(raw);
   } catch {
     parseFailed = true;
   }
@@ -84,8 +89,12 @@ async function requestAgentBroker(route, payload, options = {}) {
   }
 
   // A 2xx that is not JSON is a genuine contract violation — still report the
-  // status and a snippet so the shape is identifiable.
-  if (parseFailed) {
+  // status and a snippet so the shape is identifiable. An empty 200/204 is the
+  // same violation and must be raised here rather than returned: response.json()
+  // used to reject it, every caller of this function goes on to read fields off
+  // the result, and handing them `null` only defers the failure to an unrelated
+  // null-access somewhere downstream with the status already thrown away.
+  if (parseFailed || emptyBody) {
     const error = new Error(
       `Agent broker returned invalid JSON (HTTP ${response.status}): ${bodySnippet(raw)}`
     );
