@@ -455,6 +455,12 @@ function defineTrustedWorkspaceCommandPolicySuite1Part4() {
     ["calendar", "events", "patch"],
     ["calendar", "events", "update"],
     ["docs", "documents", "batchUpdate"],
+    // drive comments create was added to AGENT_ONLY_WRITES alongside the Forms
+    // operations but was the one addition with no user-slot case, so nothing
+    // would have gone red if it drifted back out — the exact failure mode
+    // allowlist-doc-drift.test.ts exists to prevent, since that test only
+    // asserts the agent slot is allowed.
+    ["drive", "comments", "create"],
     ["drive", "permissions", "create"],
     ["forms", "forms", "create"],
     ["forms", "forms", "batchUpdate"],
