@@ -183,6 +183,25 @@ describe('user-scope file creation is impersonation — hard blocked (2026-07-07
     }
   });
 
+  test('Form authoring is blocked on the user slot but allowed on the agent slot', () => {
+    // A Form's questions are written by a separate batchUpdate rather than in
+    // the create body, so both calls have to be held to the slot boundary —
+    // otherwise an agent-created Form could still be populated as the user.
+    for (const cmd of [
+      `forms forms create --json '{"info":{"title":"TPEP Self-Assessment"}}'`,
+      `forms forms batchUpdate --params '{"formId":"f1"}' --json '{"requests":[]}'`,
+      'forms.forms.create --json \'{"info":{"title":"x"}}\'',
+    ]) {
+      expect(enforcePhase1Gates(cmd, USER_CTX).allowed).toBe(false);
+    }
+    for (const cmd of [
+      `forms forms create --json '{"info":{"title":"TPEP Self-Assessment"}}'`,
+      `forms forms batchUpdate --params '{"formId":"f1"}' --json '{"requests":[]}'`,
+    ]) {
+      expect(enforcePhase1Gates(cmd, AGENT_CTX).allowed).toBe(true);
+    }
+  });
+
   test('missing/unknown scope fails closed to the user-slot rules', () => {
     expect(enforcePhase1Gates(`docs documents create --json '{"title":"x"}'`, undefined).allowed).toBe(false);
     expect(enforcePhase1Gates(`docs documents create --json '{"title":"x"}'`, { scope: 'weird' }).allowed).toBe(false);

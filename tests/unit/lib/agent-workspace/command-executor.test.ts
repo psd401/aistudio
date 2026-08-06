@@ -455,7 +455,15 @@ function defineTrustedWorkspaceCommandPolicySuite1Part4() {
     ["calendar", "events", "patch"],
     ["calendar", "events", "update"],
     ["docs", "documents", "batchUpdate"],
+    // drive comments create was added to AGENT_ONLY_WRITES alongside the Forms
+    // operations but was the one addition with no user-slot case, so nothing
+    // would have gone red if it drifted back out — the exact failure mode
+    // allowlist-doc-drift.test.ts exists to prevent, since that test only
+    // asserts the agent slot is allowed.
+    ["drive", "comments", "create"],
     ["drive", "permissions", "create"],
+    ["forms", "forms", "create"],
+    ["forms", "forms", "batchUpdate"],
     ["sheets", "spreadsheets", "batchUpdate"],
     ["slides", "presentations", "batchUpdate"],
     ["tasks", "tasks", "patch"],
@@ -466,6 +474,17 @@ function defineTrustedWorkspaceCommandPolicySuite1Part4() {
     expect(() =>
       validateWorkspaceCommand({ scope: "user", argv })
     ).toThrow(/must use the agent-owned Workspace account/)
+  })
+
+  it.each([
+    ["forms", "forms", "create"],
+    ["forms", "forms", "batchUpdate"],
+  ])("still allows %s %s %s on the agent slot", (...argv) => {
+    // The slot restriction above must not have made the operation unreachable:
+    // the agent slot is the one psd-workspace/SKILL.md documents for Forms.
+    expect(() =>
+      validateWorkspaceCommand({ scope: "agent", argv })
+    ).not.toThrow()
   })
 }
 

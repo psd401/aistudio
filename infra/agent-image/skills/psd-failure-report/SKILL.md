@@ -20,6 +20,22 @@ Call `report` when ANY of the following is true:
 - The user's instruction was ambiguous and you had to guess (`reason: ambiguous_request`).
 - You started a task and did not finish it (`reason: task_incomplete`).
 - Anything else that means the user did not get what they asked for (`reason: other`).
+- **The user tells you something you produced did not work** — a chart with no
+  image, a document they cannot open, a link that 404s, an empty or truncated
+  reply, a file that never arrived (`reason: tool_error`, or `other` if no tool
+  is implicated). Report it even when every tool you called returned success.
+
+That last one is not optional, and it is the one most easily missed. Every
+trigger above it describes a failure *you* observed; this one describes a
+failure only the USER can observe. When a tool exits 0 and emits something
+malformed — a card whose image never loads, a URL that resolves to nothing —
+you have no way to detect it, so from your side the turn looks clean and no
+report gets written. The user telling you is the ONLY signal that exists.
+
+**Their report is the evidence. Your exit codes are not.** Do not argue that the
+tool succeeded, do not ask them to refresh first, and do not wait to reproduce
+it. Log it, then help them. If they mention it again, that is a second
+occurrence — log it again rather than assuming the first report covered it.
 
 If in doubt: **call it**. False positives are cheap; silent failures are expensive.
 

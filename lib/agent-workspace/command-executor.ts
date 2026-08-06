@@ -69,6 +69,7 @@ const ALLOWED_WRITES = new Set([
   "chat spaces messages create",
   "docs documents batchupdate",
   "docs documents create",
+  "drive comments create",
   "drive files copy",
   "drive files create",
   "drive permissions create",
@@ -86,9 +87,12 @@ const ALLOWED_WRITES = new Set([
   // mail at all. `chat +send` above establishes that helper verbs belong here.
   // Still a draft-only path: `+send`, `+reply`, `+reply-all` and `+forward`
   // remain absent, and the skill-side Phase 1 gate blocks them independently.
+  "forms forms batchupdate",
+  "forms forms create",
   "gmail +draft",
   "gmail users drafts create",
   "gmail users drafts update",
+  "gmail users labels create",
   "gmail users messages modify",
   "sheets spreadsheets batchupdate",
   "sheets spreadsheets create",
@@ -131,10 +135,19 @@ const AGENT_ONLY_WRITES = new Set([
   "calendar events update",
   "docs documents batchupdate",
   "docs documents create",
+  "drive comments create",
   "drive files copy",
   "drive files create",
   "drive permissions create",
   "drive accessproposals resolve",
+  // A Form is authored content in exactly the sense a Doc, Sheet or Slides deck
+  // is, and psd-workspace/SKILL.md documents only the agent slot for it ("Create
+  // and populate a Form on the agent slot, then hand it over"). Allowlisting the
+  // two operations without this entry left `--scope user` — the default when the
+  // flag is omitted — authoring a Form under the caller's own identity, which is
+  // the impersonation boundary the create operations above are held to.
+  "forms forms batchupdate",
+  "forms forms create",
   "sheets spreadsheets batchupdate",
   "sheets spreadsheets create",
   "sheets spreadsheets values append",

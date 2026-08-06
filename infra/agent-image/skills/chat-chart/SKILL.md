@@ -31,6 +31,30 @@ For "chart this data for me" style requests:
 
 Do NOT pick one or the other when the user wants a chart with surrounding context — pair them.
 
+## Comparing several series in one chart
+
+Give each point a `values` object instead of a single `value`, and every named
+series becomes its own dataset — grouped bars for `bar`, one line each for
+`line`, with a legend naming them:
+
+```bash
+node /opt/psd-skills/chat-chart/run.js \
+  --user hagelk@psd401.net --type bar \
+  --title 'DES i-Ready by grade - Spring 2026' \
+  --data-json '[
+    {"label":"Grade 1","values":{"Math":412,"Reading":398}},
+    {"label":"Grade 2","values":{"Math":441,"Reading":430}}
+  ]'
+```
+
+Prefer this over emitting two separate charts when the user asks to compare
+subjects, years, or schools — one chart is what they asked for. Every series
+must supply a value at every label; a gap is refused rather than drawn as zero.
+`pie` takes a single series only (a pie divides one whole), so use `bar` to
+compare.
+
+The flat `{"label":…,"value":…}` shape is unchanged for single-series charts.
+
 ## Engine selection
 
 | Engine     | Speed | Data leaves AWS? | When |
@@ -76,13 +100,15 @@ node /opt/psd-skills/chat-chart/run.js \
 
 **Data shape.**
 - `bar`, `line`, `pie`: `[{ "label": string, "value": number }, ...]`
+- `bar`, `line` (multi-series): `[{ "label": string, "values": { "<series>": number, ... } }, ...]`
 - `scatter`: `[{ "x": number, "y": number }, ...]`
 
-Multi-series and custom colors aren't supported in v1 — keep it to one series for now.
+Multiple series are supported — see "Comparing several series in one chart"
+above. Custom colours are not; the palette is assigned per series.
 
 `--user` is optional. The workspace broker derives the storage path from the calling agent's identity, so the email is provenance only — pass it verbatim from the `[caller: Name <email>]` header of the user turn when you have it.
 
-**Rendering limits.** Up to 50 points per chart; one series; labels are drawn with a built-in 5x7 ASCII font, so non-ASCII characters (accents, em dashes, curly quotes) render as `?` and long category labels are truncated to fit their slot. Prefer short, ASCII labels.
+**Rendering limits.** Up to 50 points per series; labels are drawn with a built-in 5x7 ASCII font, so non-ASCII characters (accents, em dashes, curly quotes) render as `?` and long category labels are truncated to fit their slot. Prefer short, ASCII labels.
 
 The 50-point cap is enforced by the local renderer, so it binds on `auto` and `local` — i.e. every chart unless you explicitly ask for `--engine quickchart`. That path has no point-count check of its own and is bounded only by argv size and the ~16KB practical spec-URL ceiling noted above; a large explicit-quickchart payload fails as a broken URL rather than a clean exit 3. Not a reason to send one — it's a reason not to reach for `--engine quickchart` to escape the cap.
 
@@ -94,6 +120,30 @@ Prints two things to stdout in order:
 2. A `PSD_AGENT_RICH_V1` envelope wrapping a cardsV2 entry whose section contains an `image` widget pointing at the chart.
 
 **Include the envelope verbatim in your reply** so the Router renders the card. Add a sentence of prose above or below it if the chart needs context — that text becomes the fallback `text` of the message.
+
+**Every delivery surface renders this envelope — Google Chat and the AI Studio
+web chat alike.** The Router owns rendering, not the client, so there is no
+surface where emitting the envelope is wrong. Never strip it, summarise the
+chart in prose instead of showing it, or withhold the image because you think
+the caller's client cannot display a card. Observed 2026-08-06: an agent assumed
+web chat could not render the envelope, sent a title-only card with no image,
+and repeated that across several turns while the user told it the chart was
+missing — the assumption was invented, not read anywhere, and it took a
+screenshot of a working chart to dislodge it.
+
+If a user says the image did not appear, do NOT theorise about their client.
+Resend the envelope exactly as `run.js` emitted it, and log it with
+`psd-failure-report` — a chart the user cannot see is a failure whatever the
+cause.
+
+**What already reports itself.** A non-zero exit files its own `agent_failures`
+row: `ChartInputInvalid` for a bad flag, malformed `--data-json` or a series
+missing a value, `ChartRenderFailed` for a renderer fault. Do not also call
+`psd-failure-report` for those — it would file the same failure twice. The one
+exception is the `--engine quickchart` sensitivity refusal (exit 3), which is
+the gate working as designed and is deliberately not recorded. The case above —
+the command *succeeded* and the user still saw no image — is the one that needs
+reporting by hand, because `run.js` has no way to know.
 
 ## Examples
 

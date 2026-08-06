@@ -72,9 +72,52 @@ const PII_PATTERNS = [
   { name: 'psd-student-id', re: /\b2\d{6}\b/ },
 ];
 
+/**
+ * A caller mistake: a bad flag, a malformed --data-json, a series missing a
+ * value at one label.
+ *
+ * Raised rather than exited. `process.exit()` is synchronous, so a direct exit
+ * here outran main()'s handler and recorded nothing — and an authoring mistake
+ * is the *likelier* way an agent ends a turn with no chart than a renderer bug
+ * is, so leaving this class unreported left the bigger half of "the user asked
+ * for a chart and got nothing" invisible in `agent_failures`. Exit code and
+ * stderr wording are unchanged; only the reporting differs.
+ */
 function fail(message, code = 2) {
-  process.stderr.write(`chat-chart: ${message}\n`);
-  process.exit(code);
+  throw new ChartFailure(message, code, { errorClass: 'ChartInputInvalid' });
+}
+
+/**
+ * A refusal: the policy gate declining to render, not a failure to render.
+ *
+ * Deliberately NOT reported. `--engine quickchart` over PII or `--sensitive`
+ * data is REV-INFRA-002 working exactly as designed, and filing it as a chart
+ * failure would misclassify a correct refusal as a defect — noise in the one
+ * table someone reads to find real breakage. If these ever do want recording
+ * they want their own `error_class`, not this one.
+ */
+function refuse(reason) {
+  throw new ChartFailure(reason, 3, { report: false });
+}
+
+/**
+ * A failure that has to reach reportChartFailure before the process ends.
+ *
+ * Everything that ends a chart travels as a rejection so a single handler owns
+ * the stderr line, the telemetry, and the exit code. `exitCode` preserves the
+ * process contract each call site had; `errorClass` keeps an authoring mistake
+ * (`ChartInputInvalid`) distinguishable from a renderer bug
+ * (`ChartRenderFailed`) in `agent_failures`, since they need different fixes;
+ * `report: false` marks the paths that are working as intended.
+ */
+class ChartFailure extends Error {
+  constructor(message, exitCode = 3, { errorClass = 'ChartRenderFailed', report = true } = {}) {
+    super(message);
+    this.name = 'ChartFailure';
+    this.exitCode = exitCode;
+    this.errorClass = errorClass;
+    this.report = report;
+  }
 }
 
 function parseArgs(argv) {
@@ -205,21 +248,75 @@ function buildChartJsConfig(type, data, title) {
   }
 
   // bar / line / pie
-  for (const point of data) {
-    if (typeof point.label !== 'string' || !Number.isFinite(point.value)) {
-      fail(`${type} data points need string \`label\` and finite numeric \`value\` fields`);
+  //
+  // Two accepted shapes. The flat one is unchanged:
+  //     [{"label":"Grade 1","value":412}, …]
+  // The multi-series one carries a value PER SERIES, so "Reading and Math by
+  // grade" is one chart rather than two:
+  //     [{"label":"Grade 1","values":{"Math":412,"Reading":398}}, …]
+  // Before 2026-08-06 only the flat shape existed and the renderer drew only
+  // datasets[0], so a combined chart silently showed half its data.
+  const multi = data.some(point => point && typeof point.values === 'object' && point.values !== null);
+  if (!multi) {
+    for (const point of data) {
+      if (typeof point.label !== 'string' || !Number.isFinite(point.value)) {
+        fail(`${type} data points need string \`label\` and finite numeric \`value\` fields`);
+      }
     }
+    return {
+      type,
+      data: {
+        labels: data.map(p => p.label),
+        datasets: [{ label: seriesLabel, data: data.map(p => p.value) }],
+      },
+      options,
+    };
   }
-  const labels = data.map(p => p.label);
-  const values = data.map(p => p.value);
+
+  if (type === 'pie') {
+    fail('a pie chart shows one series; use --type bar to compare several', 2);
+  }
   return {
     type,
-    data: {
-      labels,
-      datasets: [{ label: seriesLabel, data: values }],
-    },
+    data: { labels: data.map(p => p.label), datasets: buildSeriesDatasets(data) },
     options,
   };
+}
+
+/**
+ * Turn `[{label, values:{Math, Reading}}, …]` into one dataset per series.
+ *
+ * Series order follows the first point that names them, so the legend reads in
+ * the order the caller wrote rather than by object-key chance. Every series
+ * must supply a finite value at every label — a gap is refused rather than
+ * drawn as zero, which would understate a grade with no data as a grade
+ * scoring nothing.
+ */
+function buildSeriesDatasets(data) {
+  const seriesNames = [];
+  for (const point of data) {
+    if (typeof point.label !== 'string') {
+      fail('data points need a string `label` field');
+    }
+    if (!point.values || typeof point.values !== 'object') {
+      fail('every point needs a `values` object when any point uses one');
+    }
+    for (const name of Object.keys(point.values)) {
+      if (!seriesNames.includes(name)) seriesNames.push(name);
+    }
+  }
+  if (seriesNames.length === 0) fail('`values` objects are empty — nothing to chart');
+  for (const point of data) {
+    for (const name of seriesNames) {
+      if (!Number.isFinite(point.values[name])) {
+        fail(`series "${name}" is missing a finite value at "${point.label}"`);
+      }
+    }
+  }
+  return seriesNames.map(name => ({
+    label: name,
+    data: data.map(p => p.values[name]),
+  }));
 }
 
 function renderQuickChart(config) {
@@ -239,7 +336,9 @@ async function renderLocal(config) {
   try {
     bytes = renderChartPng(config);
   } catch (err) {
-    fail(`local renderer failed: ${err && err.message ? err.message : err}`, 3);
+    // Thrown, not `fail()`ed: this is the failure the reporting path below was
+    // added for, and exiting here would skip it.
+    throw new ChartFailure(`local renderer failed: ${err && err.message ? err.message : err}`);
   }
   const published = await publishArtifact(bytes, '.png', 'image/png');
   return published.url;
@@ -310,7 +409,7 @@ async function main() {
     // PII data off-district (REV-INFRA-002), and we do not silently downgrade
     // to the local engine either — the caller named an engine, so tell them
     // why it was not used. Non-zero exit so the agent sees no chart was made.
-    fail(reason, 3);
+    refuse(reason);
   }
   process.stderr.write(`chat-chart: engine=${engine} (${reason})\n`);
 
@@ -328,10 +427,74 @@ async function main() {
   process.stdout.write(emitEnvelope(imageUrl, args['--title'], args['--text-fallback'], type));
 }
 
+/**
+ * Record a chart that could not be produced.
+ *
+ * A chart is the whole deliverable — when it fails the user gets nothing, but
+ * until 2026-08-06 this skill had no failure-reporting path at all, so those
+ * turns were invisible in agent_failures. The one that prompted this was found
+ * only because a human was watching the Chat window.
+ *
+ * Covers every way a chart ends without an image: `ChartInputInvalid` for a
+ * caller mistake, `ChartRenderFailed` for a renderer fault or an unexpected
+ * rejection. Policy refusals are the one deliberate exclusion — see refuse().
+ *
+ * Best-effort by design: the CloudWatch line is written first so the failure
+ * survives even when the broker write does not, and any error here is swallowed
+ * so telemetry can never turn a chart failure into a worse one.
+ */
+async function reportChartFailure(err, args) {
+  const errorMessage = `chat-chart failed: ${err && err.message ? err.message : String(err)}`;
+  const errorClass = err?.errorClass ?? 'ChartRenderFailed';
+  const context = {
+    tool: 'chat-chart',
+    type: args?.['--type'] ?? null,
+    engine: args?.['--engine'] ?? 'auto',
+    sensitive: Boolean(args?.['--sensitive']),
+    user_facing: true,
+  };
+  process.stderr.write(
+    'AGENT_FAILURE_RECORD ' +
+      JSON.stringify({
+        source: 'tool',
+        severity: 'error',
+        error_class: errorClass,
+        error_message: errorMessage,
+        context,
+      }) +
+      '\n',
+  );
+  try {
+    const { requestAgentBroker } = require('../_shared/agent-broker');
+    await requestAgentBroker('/api/agent/failures', {
+      source: 'tool',
+      severity: 'error',
+      errorClass,
+      errorMessage,
+      context,
+    });
+  } catch {
+    // Best-effort: the CloudWatch line above is the durable record.
+  }
+}
+
 if (require.main === module) {
-  main().catch(err => {
-    process.stderr.write(`chat-chart: unexpected error: ${err && err.message ? err.message : err}\n`);
-    process.exit(1);
+  // Parsed up front purely to give the failure report its context. A parse
+  // that throws leaves nothing to describe the run with, so the report goes out
+  // with an empty context rather than not at all — main() raises the same
+  // failure a moment later and that is what gets recorded.
+  const argsForReport = (() => {
+    try { return parseArgs(process.argv); } catch { return {}; }
+  })();
+  main().catch(async err => {
+    // A ChartFailure is a diagnosed failure with its own wording and exit code;
+    // anything else genuinely is unexpected. Everything is recorded except the
+    // paths that opt out by design (refusals).
+    const expected = err instanceof ChartFailure;
+    const detail = err && err.message ? err.message : err;
+    process.stderr.write(`chat-chart: ${expected ? '' : 'unexpected error: '}${detail}\n`);
+    if (!expected || err.report) await reportChartFailure(err, argsForReport);
+    process.exit(expected ? err.exitCode : 1);
   });
 }
 

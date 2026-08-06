@@ -26,6 +26,7 @@ const {
   pieLegendPlan,
   formatNumber,
   niceTicks,
+  seriesLegendPlan,
   toAsciiLabel,
   truncateLabel,
   OUT_WIDTH,
@@ -155,21 +156,25 @@ test('genuinely public data still reaches quickchart when asked for by name', ()
   assert.match(result.stdout, /PSD_AGENT_RICH_V1/);
 });
 
-test('Infinity is rejected at the CLI boundary, whatever the engine', () => {
+test('Infinity is rejected at the CLI boundary, whatever the engine', async () => {
   // JSON.parse('1e999') is Infinity, which is typeof 'number' — it used to
   // pass validation and serialise into the QuickChart URL as `null`.
-  const result = runCli(['--type', 'bar', '--data-json', '[{"label":"A","value":1e999}]']);
+  const { result } = await withStubBroker(async () => ({
+    result: await runCliAsync(['--type', 'bar', '--data-json', '[{"label":"A","value":1e999}]']),
+  }));
   assert.notStrictEqual(result.status, 0);
   assert.match(result.stderr, /finite/);
 });
 
-test('a malformed --user is rejected on every engine, as documented', () => {
-  const result = runCli([
-    '--type', 'bar',
-    '--engine', 'quickchart',
-    '--data-json', '[{"label":"A","value":1}]',
-    '--user', 'not an email',
-  ]);
+test('a malformed --user is rejected on every engine, as documented', async () => {
+  const { result } = await withStubBroker(async () => ({
+    result: await runCliAsync([
+      '--type', 'bar',
+      '--engine', 'quickchart',
+      '--data-json', '[{"label":"A","value":1}]',
+      '--user', 'not an email',
+    ]),
+  }));
   assert.notStrictEqual(result.status, 0);
   assert.match(result.stderr, /--user/);
 });
@@ -203,11 +208,36 @@ const RICH_OPEN = '<<<PSD_AGENT_RICH_V1>>>';
 const RICH_CLOSE = '<<<END_PSD_AGENT_RICH_V1>>>';
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
 
+// The broker port is fixed in agent-broker.js, so only ONE stub can be bound
+// at a time. `node --test` runs this file's tests sequentially and never
+// noticed; `bun test` runs async tests concurrently, so two of them raced to
+// listen and the loser died with EADDRINUSE. That surfaced the moment the file
+// grew more broker-using tests — it was latent, not new. Serialise on a promise
+// chain so every stub gets the port to itself regardless of runner.
+let brokerLock = Promise.resolve();
+
 /** Stub of the agent broker's workspace-storage publish/upload/complete contract. */
-async function withStubBroker(run) {
+function withStubBroker(run, options = {}) {
+  const result = brokerLock.then(() => withStubBrokerExclusive(run, options));
+  // Keep the chain alive even when a test fails, or one rejection wedges the
+  // rest of the file behind it.
+  brokerLock = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+async function withStubBrokerExclusive(run, { failPublish = false } = {}) {
   const uploads = [];
   const brokerCalls = [];
   const server = http.createServer((req, res) => {
+    if (failPublish) {
+      // Simulate a broker that is up but refuses. Asserting on the ABSENCE of
+      // a listener instead was racy: bun runs this file's async tests
+      // concurrently, so a neighbouring test's stub was often already bound to
+      // the fixed port and the publish succeeded.
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'broker unavailable' }));
+      return;
+    }
     const chunks = [];
     req.on('data', chunk => chunks.push(chunk));
     req.on('end', () => {
@@ -272,6 +302,21 @@ function parseEnvelope(stdout) {
   assert.ok(start !== -1 && end > start, `no rich envelope in stdout:\n${stdout}`);
   return JSON.parse(stdout.slice(start + RICH_OPEN.length, end).trim());
 }
+
+test('a broker failure on the local path exits non-zero rather than printing a card', async () => {
+  // The broker is UP and refusing, rather than absent. Testing absence meant
+  // testing that no other test happened to be holding the fixed port, which
+  // bun's concurrent scheduling made a coin flip.
+  const result = await withStubBroker(
+    async () => runCliAsync([
+      '--type', 'bar',
+      '--data-json', '[{"label":"A","value":1}]',
+    ]),
+    { failPublish: true },
+  );
+  assert.notStrictEqual(result.status, 0);
+  assert.doesNotMatch(result.stdout, /PSD_AGENT_RICH_V1/);
+});
 
 test('the default engine renders, uploads and emits a card without naming an engine', async () => {
   const { result, uploads, brokerCalls } = await withStubBroker(async ctx => ({
@@ -338,16 +383,6 @@ test('issue #1596: --sensitive student data charts instead of exiting 3', async 
   assert.doesNotMatch(result.stderr, /quickchart/);
   assert.strictEqual(uploads.length, 1, 'the chart was never uploaded');
   assert.deepStrictEqual(uploads[0].bytes.subarray(0, 8), PNG_SIGNATURE);
-});
-
-test('a broker failure on the local path exits non-zero rather than printing a card', async () => {
-  // No stub broker listening: publishArtifact's fetch is refused.
-  const result = await runCliAsync([
-    '--type', 'bar',
-    '--data-json', '[{"label":"A","value":1}]',
-  ]);
-  assert.notStrictEqual(result.status, 0);
-  assert.doesNotMatch(result.stdout, /PSD_AGENT_RICH_V1/);
 });
 
 // ---------------------------------------------------------------------------
@@ -946,4 +981,403 @@ test('a flat series still produces a usable axis', () => {
   const ticks = niceTicks(5, 5);
   assert.ok(ticks.length >= 2);
   assert.ok(ticks.at(-1) > ticks[0]);
+});
+
+// ---------------------------------------------------------------------------
+// Multi-series (2026-08-06)
+//
+// The renderer read only datasets[0], so "chart Reading and Math by grade"
+// drew Math alone with a plausible axis and no sign a series was missing.
+// Half the data presented as all of it is worse than a refusal.
+// ---------------------------------------------------------------------------
+
+test('the CLI builds one dataset per named series, in the order given', () => {
+  const cfg = buildChartJsConfig('bar', [
+    { label: 'Grade 1', values: { Math: 412, Reading: 398 } },
+    { label: 'Grade 2', values: { Math: 441, Reading: 430 } },
+  ], 'i-Ready');
+  assert.deepEqual(cfg.data.datasets.map(d => d.label), ['Math', 'Reading']);
+  assert.deepEqual(cfg.data.datasets[0].data, [412, 441]);
+  assert.deepEqual(cfg.data.datasets[1].data, [398, 430]);
+  assert.deepEqual(cfg.data.labels, ['Grade 1', 'Grade 2']);
+});
+
+test('the single-series shape is unchanged', () => {
+  const cfg = buildChartJsConfig('bar', [{ label: 'A', value: 1 }], 't');
+  assert.strictEqual(cfg.data.datasets.length, 1);
+  assert.deepEqual(cfg.data.datasets[0].data, [1]);
+});
+
+test('a series missing a value at one point is rejected, not silently zeroed', async () => {
+  const { result } = await withStubBroker(async () => ({
+    result: await runCliAsync([
+      '--type', 'bar',
+      '--data-json', '[{"label":"G1","values":{"Math":1,"Reading":2}},{"label":"G2","values":{"Math":3}}]',
+    ]),
+  }));
+  assert.notStrictEqual(result.status, 0);
+  assert.match(result.stderr, /Reading/);
+});
+
+test('a legend that cannot fit is refused, not clipped off the canvas', () => {
+  // widestThatFits used to bottom out at 4 characters and report that as a
+  // valid plan even when it did not fit: 21 series became 11 entries per row,
+  // measuring 1440px inside a 1350px plot, so the last series was drawn past
+  // the right edge and could not be identified.
+  const series = (n) => ({
+    type: 'bar',
+    data: {
+      labels: ['A', 'B'],
+      datasets: Array.from({ length: n }, (_, i) => ({ label: `Srs${i}`, data: [i + 1, i + 2] })),
+    },
+    options: {},
+  });
+
+  assert.strictEqual(seriesLegendPlan(21, 1350, 3).maxChars, 0, 'an unfittable plan must not claim a width');
+  assert.ok(seriesLegendPlan(20, 1350, 3).maxChars > 0);
+
+  assert.throws(() => renderChartPng(series(21)), /too many series to label \(21\)/);
+  // The refusal names a number the caller can act on rather than just refusing.
+  assert.throws(() => renderChartPng(series(21)), /at most 20/);
+  // And the boundary still renders — the guard must not cost a legal chart.
+  assert.ok(renderChartPng(series(20)).length > 0);
+});
+
+test('a renderer failure is reported, not just exited on', async () => {
+  // renderLocal used to call the synchronous fail(), which process.exit()s
+  // before main()'s rejection handler can run — so the one failure class this
+  // skill's telemetry was added for emitted no AGENT_FAILURE_RECORD at all.
+  //
+  // Runs under the stub even though only stderr is asserted: this spawn files a
+  // failure report, and the broker port is fixed, so left unserialised it posts
+  // into a concurrently-bound neighbour's brokerCalls and breaks that test by
+  // index instead of this one.
+  const oversized = JSON.stringify(
+    Array.from({ length: 51 }, (_, i) => ({ label: `L${i}`, value: i })),
+  );
+  const { result } = await withStubBroker(async () => ({
+    result: await runCliAsync(['--type', 'bar', '--data-json', oversized]),
+  }));
+
+  assert.match(result.stderr, /AGENT_FAILURE_RECORD/);
+  const record = JSON.parse(
+    result.stderr.slice(result.stderr.indexOf('AGENT_FAILURE_RECORD ') + 'AGENT_FAILURE_RECORD '.length)
+      .split('\n')[0],
+  );
+  assert.strictEqual(record.error_class, 'ChartRenderFailed');
+  assert.strictEqual(record.context.user_facing, true);
+  assert.match(record.error_message, /too many data points/);
+  // Diagnosed failure: the original wording and exit code both survive the
+  // move off fail(), so it is not relabelled as an unexpected error.
+  assert.strictEqual(result.status, 3, result.stderr);
+  assert.match(result.stderr, /chat-chart: local renderer failed:/);
+  assert.doesNotMatch(result.stderr, /unexpected error/);
+});
+
+test('a renderer failure reaches the broker, not just stderr', async () => {
+  // reportChartFailure swallows every error from the broker call by design, so
+  // a wrong route or payload shape would fail silently and the stderr-only
+  // assertions above would still pass. That is the exact invisibility this
+  // reporting path exists to end, so the POST itself is asserted.
+  const oversized = JSON.stringify(
+    Array.from({ length: 51 }, (_, i) => ({ label: `L${i}`, value: i })),
+  );
+  const { result, brokerCalls } = await withStubBroker(async ctx => ({
+    result: await runCliAsync(['--type', 'bar', '--data-json', oversized]),
+    brokerCalls: ctx.brokerCalls,
+  }));
+
+  assert.strictEqual(result.status, 3, result.stderr);
+  // The render fails before publishArtifact, so the failure report is the only
+  // call the broker should see.
+  assert.strictEqual(brokerCalls.length, 1, `unexpected broker traffic: ${JSON.stringify(brokerCalls)}`);
+  const [failure] = brokerCalls;
+  assert.strictEqual(failure.url, '/agent-broker/api/agent/failures');
+  // camelCase on the wire, snake_case in the CloudWatch line — the split is the
+  // existing convention (psd-failure-report/report.js), and unverified until now.
+  assert.strictEqual(failure.payload.source, 'tool');
+  assert.strictEqual(failure.payload.severity, 'error');
+  assert.strictEqual(failure.payload.errorClass, 'ChartRenderFailed');
+  assert.match(failure.payload.errorMessage, /too many data points/);
+  assert.strictEqual(failure.payload.context.tool, 'chat-chart');
+  assert.strictEqual(failure.payload.context.type, 'bar');
+  assert.strictEqual(failure.payload.context.user_facing, true);
+});
+
+test('every dataset is drawn, not just the first', () => {
+  // Same categories, wildly different values: if only datasets[0] were drawn
+  // the axis could not span the second series' range.
+  const png = renderChartPng({
+    type: 'bar',
+    data: {
+      labels: ['A', 'B'],
+      datasets: [{ label: 'Low', data: [1, 2] }, { label: 'High', data: [900, 950] }],
+    },
+    options: {},
+  });
+  const pixels = decodePixels(png);
+  // The second series' palette colour must actually appear on the canvas.
+  assert.ok(extent(pixels, PALETTE_RED).count > 200, 'second series was not drawn');
+  assert.ok(countNonWhite(pixels) > 2000);
+});
+
+test('a multi-series line draws one line per dataset', () => {
+  const png = renderChartPng({
+    type: 'line',
+    data: {
+      labels: ['x', 'y', 'z'],
+      datasets: [{ label: 'One', data: [1, 2, 3] }, { label: 'Two', data: [3, 2, 1] }],
+    },
+    options: {},
+  });
+  const pixels = decodePixels(png);
+  assert.ok(extent(pixels, PALETTE_BLUE).count > 100, 'first line missing');
+  assert.ok(extent(pixels, PALETTE_RED).count > 100, 'second line missing');
+});
+
+test('a multi-series scatter draws every point set, not just the first', () => {
+  // drawScatterChart took a flat point array and painted PALETTE[0], while
+  // drawChart handed it seriesList[0] only — so a second point set vanished
+  // with no error, under a comment claiming each series got its own colour.
+  const png = renderChartPng({
+    type: 'scatter',
+    data: {
+      datasets: [
+        { label: 'Fall', data: [{ x: 1, y: 1 }, { x: 2, y: 2 }] },
+        { label: 'Spring', data: [{ x: 3, y: 30 }, { x: 4, y: 40 }] },
+      ],
+    },
+    options: {},
+  });
+  const pixels = decodePixels(png);
+  const first = extent(pixels, PALETTE_BLUE);
+  const second = extent(pixels, PALETTE_RED);
+  assert.ok(first.count > 80, `first series only ${first.count} px`);
+  assert.ok(second.count > 80, `second series missing (${second.count} px)`);
+  // Both axes span both series. Drawing series 0 alone and scaling to it would
+  // put Spring's y=30..40 far off the top of a 1..2 axis.
+  assert.ok(second.minY < first.minY, 'the second series is not plotted above the first');
+  assert.ok(second.minX > first.maxX, 'the second series is not plotted to the right');
+});
+
+test('a scatter refuses a legend it cannot fit, like bar and line', () => {
+  // The refusal used to sit after scatter's early return, so scatter alone
+  // could draw unnameable series past the canvas edge.
+  const datasets = Array.from({ length: 21 }, (_, i) => ({
+    label: `S${i + 1}`,
+    data: [{ x: i, y: i }],
+  }));
+  assert.throws(
+    () => renderChartPng({ type: 'scatter', data: { datasets }, options: {} }),
+    /too many series to label \(21\)/,
+  );
+  assert.ok(renderChartPng({ type: 'scatter', data: { datasets: datasets.slice(0, 20) }, options: {} }).length > 0);
+});
+
+test('a single series keeps the full-slot value-label budget it always had', () => {
+  // Grouped bars must measure a label against their own bar, but applying that
+  // to the single-series path silently dropped every label between 62% and
+  // 100% of the slot — a behaviour change the PR did not intend. 16 four-digit
+  // bars sit squarely in that band: the label measures 69px against a 52px bar
+  // in an 84px slot, so it is drawn under the historical rule and dropped under
+  // the grouped one.
+  const pixels = render(
+    'bar',
+    Array.from({ length: 16 }, (_, i) => ({ label: `W${i + 1}`, value: 1000 + i })),
+    'Wide',
+  );
+  assert.ok(
+    textInk(pixels, PLOT_BAND) > 30,
+    'single-series value labels that fit their slot must still be drawn',
+  );
+});
+
+test('a pie refuses a second dataset rather than drawing only the first', () => {
+  assert.throws(
+    () => renderChartPng({
+      type: 'pie',
+      data: { labels: ['a', 'b'], datasets: [{ data: [1, 2] }, { data: [3, 4] }] },
+      options: {},
+    }),
+    /exactly one dataset/,
+  );
+});
+
+test('the legend never runs off the canvas', () => {
+  // A legend that overflows takes those series' identities with it — the same
+  // failure the pie legend had. Asserted on PIXELS rather than by recomputing
+  // the layout arithmetic, so the test cannot drift from the renderer.
+  const EDGE = 6;
+  for (const count of [2, 3, 6, 10]) {
+    const png = renderChartPng({
+      type: 'bar',
+      data: {
+        labels: ['A', 'B'],
+        datasets: Array.from({ length: count }, (_, i) => ({
+          label: `Very Long Series Name Number ${i + 1}`,
+          data: [10 + i, 20 + i],
+        })),
+      },
+      options: {},
+    });
+    const pixels = decodePixels(png);
+    const left = { x0: 0, y0: 0, x1: EDGE, y1: OUT_HEIGHT };
+    const right = { x0: OUT_WIDTH - EDGE, y0: 0, x1: OUT_WIDTH, y1: OUT_HEIGHT };
+    // The vertical direction is the one the horizontal fix did not cover. The
+    // legend wraps to LEGEND_MAX_ROWS *below* the axis, and "two rows is what
+    // fits at MARGIN.bottom" is an arithmetic claim about the same layout that
+    // already overflowed once sideways. 6 and 10 series wrap; 2 and 3 do not,
+    // so the loop covers both row counts.
+    const bottom = { x0: 0, y0: OUT_HEIGHT - EDGE, x1: OUT_WIDTH, y1: OUT_HEIGHT };
+    assert.strictEqual(countNonWhite(pixels, left), 0, `${count} series: ran off the left`);
+    assert.strictEqual(countNonWhite(pixels, right), 0, `${count} series: ran off the right`);
+    assert.strictEqual(countNonWhite(pixels, bottom), 0, `${count} series: ran off the bottom`);
+  }
+});
+
+test('the legend wraps rather than truncating every label to the same stub', () => {
+  // Six series on one row all render as "Very Long." — identical, identifying
+  // nothing. Wrapping buys each label real width.
+  const one = seriesLegendPlan(2, 1350, 3);
+  const many = seriesLegendPlan(6, 1350, 3);
+  assert.strictEqual(one.rows, 1);
+  assert.strictEqual(many.rows, 2);
+  assert.ok(many.maxChars >= 16, `wrapped labels still only ${many.maxChars} chars`);
+});
+
+// Every test below runs its CLI under withStubBroker even where the broker
+// response is irrelevant. The broker port is fixed, so a subprocess that files
+// a failure report posts into whatever stub is currently bound — and bun runs
+// this file's async tests concurrently. Before reporting reached fail(), these
+// argv/validation failures made no broker call at all and were safe to spawn
+// synchronously; now they do, and an unserialised one lands in a neighbouring
+// test's brokerCalls ahead of that test's own traffic, breaking it by index.
+// Same fixed-port hazard as the EADDRINUSE race above, arriving from the other
+// direction: not two stubs racing to bind, but one stub receiving traffic from
+// a test that never meant to talk to it.
+
+test('an authoring mistake is reported, not just exited on', async () => {
+  // The likelier way an agent ends a turn with no chart: asking for Math and
+  // Reading by grade and forgetting one grade's Reading score. Every fail()
+  // call site used to process.exit() straight past the reporter, so this whole
+  // class — bad flags, malformed --data-json, a gap in a series — left nothing
+  // in agent_failures however many times a user said the chart never arrived.
+  const gap = JSON.stringify([
+    { label: 'Grade 3', values: { Math: 412, Reading: 398 } },
+    { label: 'Grade 4', values: { Math: 430 } },
+  ]);
+  const { result, brokerCalls } = await withStubBroker(async ctx => ({
+    result: await runCliAsync(['--type', 'bar', '--data-json', gap]),
+    brokerCalls: ctx.brokerCalls,
+  }));
+
+  assert.match(result.stderr, /AGENT_FAILURE_RECORD/);
+  const record = JSON.parse(
+    result.stderr.slice(result.stderr.indexOf('AGENT_FAILURE_RECORD ') + 'AGENT_FAILURE_RECORD '.length)
+      .split('\n')[0],
+  );
+  // A distinct class from ChartRenderFailed: a caller mistake and a renderer
+  // bug want different fixes, so they must be told apart in agent_failures.
+  assert.strictEqual(record.error_class, 'ChartInputInvalid');
+  assert.match(record.error_message, /series "Reading" is missing a finite value at "Grade 4"/);
+  assert.strictEqual(record.context.type, 'bar');
+  assert.strictEqual(record.context.user_facing, true);
+  // The POST too, not just the stderr line — the broker call is swallowed by
+  // design, so a wrong route or class would otherwise fail silently. The chart
+  // is refused before any upload, so this is the only traffic expected.
+  assert.strictEqual(brokerCalls.length, 1, `unexpected broker traffic: ${JSON.stringify(brokerCalls)}`);
+  assert.strictEqual(brokerCalls[0].url, '/agent-broker/api/agent/failures');
+  assert.strictEqual(brokerCalls[0].payload.errorClass, 'ChartInputInvalid');
+  // Exit code and wording are the contract fail() already had.
+  assert.strictEqual(result.status, 2, result.stderr);
+  assert.doesNotMatch(result.stderr, /unexpected error/);
+});
+
+test('an unparseable argv is still reported, with an empty context', async () => {
+  // parseArgs runs before there is anything to describe the run with. The
+  // report goes out with a bare context rather than not at all.
+  const { result, brokerCalls } = await withStubBroker(async ctx => ({
+    result: await runCliAsync(['--type', 'bar', '--data-json', '[{"label":"A"']),
+    brokerCalls: ctx.brokerCalls,
+  }));
+
+  assert.strictEqual(result.status, 2, result.stderr);
+  assert.strictEqual(brokerCalls.length, 1, `unexpected broker traffic: ${JSON.stringify(brokerCalls)}`);
+  assert.strictEqual(brokerCalls[0].payload.errorClass, 'ChartInputInvalid');
+  assert.match(brokerCalls[0].payload.errorMessage, /not valid JSON/);
+  // --type parsed fine, so context still carries it; a flag-level parse failure
+  // is the case that reports with nothing.
+  assert.strictEqual(brokerCalls[0].payload.context.type, 'bar');
+});
+
+test('a policy refusal is NOT reported as a chart failure', async () => {
+  // REV-INFRA-002 declining to ship PII to quickchart.io is the gate working,
+  // not a defect. Filing it in agent_failures would put correct refusals in the
+  // one table read to find real breakage. If these ever want recording they
+  // want their own error_class, so this exclusion is asserted rather than left
+  // to be re-derived from the absence of a test.
+  const { result, brokerCalls } = await withStubBroker(async ctx => ({
+    result: await runCliAsync([
+      '--engine', 'quickchart',
+      '--type', 'bar',
+      '--data-json', '[{"label":"jsmith@psd401.net","value":1}]',
+    ]),
+    brokerCalls: ctx.brokerCalls,
+  }));
+
+  assert.strictEqual(result.status, 3, result.stderr);
+  assert.doesNotMatch(result.stderr, /AGENT_FAILURE_RECORD/);
+  assert.doesNotMatch(result.stderr, /unexpected error/);
+  // Nothing filed anywhere — a stronger claim than the stderr line's absence,
+  // since it covers the broker path the stderr assertion cannot see.
+  assert.strictEqual(brokerCalls.length, 0, `a refusal filed: ${JSON.stringify(brokerCalls)}`);
+});
+
+test('category series of unequal length are refused, not misaligned', () => {
+  // The draw functions zip every series against one `centres` array sized to
+  // the longest, so a short series silently lands under the wrong labels.
+  // run.js refuses a gap upstream; this guards the exported renderer, which is
+  // called directly here and is the reusable entry point.
+  assert.throws(
+    () =>
+      renderChartPng({
+        type: 'bar',
+        data: {
+          labels: ['A', 'B', 'C'],
+          datasets: [
+            { label: 'Math', data: [1, 2, 3] },
+            { label: 'Reading', data: [4, 5] },
+          ],
+        },
+      }),
+    /series lengths differ \(3, 2\)/,
+  );
+  // Equal lengths still render — the guard must not cost a legal chart.
+  assert.ok(
+    renderChartPng({
+      type: 'bar',
+      data: {
+        labels: ['A', 'B'],
+        datasets: [
+          { label: 'Math', data: [1, 2] },
+          { label: 'Reading', data: [3, 4] },
+        ],
+      },
+    }).length > 0,
+  );
+});
+
+test('scatter series of unequal length are legal and stay legal', () => {
+  // Scatter series share only the axes, so 3 points against 2 is an ordinary
+  // chart. The category guard above must not reach it.
+  const png = renderChartPng({
+    type: 'scatter',
+    data: {
+      datasets: [
+        { label: 'Fall', data: [{ x: 1, y: 1 }, { x: 2, y: 2 }, { x: 3, y: 3 }] },
+        { label: 'Spring', data: [{ x: 1, y: 4 }, { x: 2, y: 5 }] },
+      ],
+    },
+  });
+  assert.ok(png.length > 0);
 });
