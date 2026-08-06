@@ -253,8 +253,13 @@ agent-owned file, Drive records an access proposal. List them with
 
 ```bash
 gws drive.accessproposals.resolve --scope agent --user hagelk@psd401.net \
-  --json '{"fileId":"<id>","proposalId":"<id>","action":"accept","role":"writer"}'
+  --params '{"fileId":"<id>","proposalId":"<id>"}' \
+  --json '{"action":"accept","role":"writer"}'
 ```
+
+The two IDs address the endpoint, so they ride `--params`; `action` and `role`
+are the request body and ride `--json` — the same split as every other command
+in this skill.
 
 Use `"action":"deny"` to decline; a denial needs no role.
 

@@ -1478,11 +1478,38 @@ class TestFailedPartialNamesSideEffects(unittest.TestCase):
         # Must not also tell them to go check — that was contradictory.
         self.assertNotIn("check before retrying", text)
 
-    def test_ignores_tools_still_in_flight(self):
-        # A started-but-unfinished call is not a known side effect.
+    def test_a_tool_still_in_flight_is_never_safe_to_retry(self):
+        # The dangerous case, not the safe one: the request may have reached the
+        # broker and created the Doc before the turn died, with its result event
+        # simply never arriving. Started calls live in tool_starts and never
+        # appear in tool_calls, so this is exactly how an interrupted side effect
+        # could otherwise leave the list empty and claim a safe retry.
         text = harness_adapter._frame_failed_partial(
-            "", [{"name": "docs.create", "status": "running"}]
+            "", [], {"t1": {"name": "docs.create", "started_at": 0}}
         )
+        self.assertNotIn("safe to retry", text)
+        self.assertIn("docs.create", text)
+        self.assertIn("may or may not have completed", text)
+
+    def test_in_flight_reported_alongside_completed_tools(self):
+        text = harness_adapter._frame_failed_partial(
+            "",
+            [{"name": "psd-data.query", "status": "success"}],
+            {"t1": {"name": "drive.share", "started_at": 0}},
+        )
+        self.assertIn("psd-data.query", text)
+        self.assertIn("drive.share", text)
+        self.assertNotIn("safe to retry", text)
+
+    def test_an_unnamed_in_flight_call_still_blocks_the_safe_claim(self):
+        text = harness_adapter._frame_failed_partial(
+            "", [], {"t1": {"started_at": 0}}
+        )
+        self.assertNotIn("safe to retry", text)
+        self.assertIn("may have already run", text)
+
+    def test_safe_to_retry_needs_both_lists_empty(self):
+        text = harness_adapter._frame_failed_partial("", [], {})
         self.assertIn("safe to retry", text)
 
     def test_an_unrecognized_terminal_status_still_counts_as_run(self):

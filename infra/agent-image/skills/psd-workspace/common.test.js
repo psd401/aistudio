@@ -849,7 +849,8 @@ describe('drive accessproposals reach the broker', () => {
   const USER = { scope: 'user_account', ownerEmail: 'hagelk@psd401.net' };
 
   test('resolve passes the skill gate on the agent slot', () => {
-    const cmd = `drive accessproposals resolve --json '{"fileId":"f","proposalId":"p","action":"accept","role":"writer"}'`;
+    // The documented shape: IDs in --params, body in --json.
+    const cmd = `drive accessproposals resolve --params '{"fileId":"f","proposalId":"p"}' --json '{"action":"accept","role":"writer"}'`;
     expect(enforcePhase1Gates(cmd, AGENT).allowed).toBe(true);
     expect(enforcePhase1Gates(cmd.replace(/ /g, '.').replace(/\.--json.*/, '') , AGENT).allowed).toBe(true);
   });

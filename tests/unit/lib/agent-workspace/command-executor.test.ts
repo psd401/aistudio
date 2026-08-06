@@ -945,6 +945,46 @@ describe("Drive access proposals", () => {
     expect(() => resolve(resource)).toThrow(/reader, commenter or writer/)
   })
 
+  // The documented shape splits IDs into --params and the body into --json;
+  // that exact argv must validate, or the SKILL.md example is broken.
+  it("accepts the documented --params/--json split", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "agent",
+        argv: [
+          "drive", "accessproposals", "resolve",
+          "--params", '{"fileId":"f","proposalId":"p"}',
+          "--json", '{"action":"accept","role":"writer"}',
+        ],
+      })
+    ).not.toThrow()
+  })
+
+  it("judges the union of --params and --json", () => {
+    // An unrecognized key is caught wherever it was placed.
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "agent",
+        argv: [
+          "drive", "accessproposals", "resolve",
+          "--params", '{"fileId":"f","proposalId":"p","sneaky":1}',
+          "--json", '{"action":"accept","role":"writer"}',
+        ],
+      })
+    ).toThrow(/reader, commenter or writer/)
+    // And a bad role in the body is still caught with IDs in params.
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "agent",
+        argv: [
+          "drive", "accessproposals", "resolve",
+          "--params", '{"fileId":"f","proposalId":"p"}',
+          "--json", '{"action":"accept","role":["reader","owner"]}',
+        ],
+      })
+    ).toThrow(/reader, commenter or writer/)
+  })
+
   it("refuses an unparseable payload", () => {
     expect(() =>
       validateWorkspaceCommand({

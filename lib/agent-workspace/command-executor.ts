@@ -482,8 +482,17 @@ const ACCESS_PROPOSAL_ACTIONS = new Set(["accept", "deny"])
  */
 function validateAccessProposalResolve(argv: readonly string[]): void {
   const refuse = "Access proposals resolve to reader, commenter or writer only"
-  const resource = jsonResource(argv) ?? parseObjectArgument(argv, "--params")
-  if (!resource) throw new Error(refuse)
+  // The IDs address the endpoint and ride --params; action/role are the body
+  // and ride --json. Validate the UNION so neither flag can carry a field the
+  // other is being judged on, and so an unrecognized key is caught wherever it
+  // was placed.
+  const resource = {
+    ...(parseObjectArgument(argv, "--params") ?? {}),
+    ...(jsonResource(argv) ?? {}),
+  }
+  if (!jsonResource(argv) && !parseObjectArgument(argv, "--params")) {
+    throw new Error(refuse)
+  }
   const keys = Object.keys(resource)
   if (keys.length === 0) throw new Error(refuse)
   if (!keys.every((key) => ACCESS_PROPOSAL_FIELDS.has(key.toLowerCase()))) {
@@ -493,17 +502,22 @@ function validateAccessProposalResolve(argv: readonly string[]): void {
     typeof resource.action === "string" ? resource.action.toLowerCase() : null
   if (!action || !ACCESS_PROPOSAL_ACTIONS.has(action)) throw new Error(refuse)
   if (action === "deny") return
-  // Drive takes the accepted role as either a string or a single-element list.
-  // Validate the WHOLE list, not just index 0: `["reader","owner"]` would
-  // otherwise pass on its first element while `executeWorkspaceCommand` forwards
-  // the original argv — the full, unvalidated JSON — to `gws` verbatim, so
-  // nothing downstream re-reads the array. That is exactly the ceiling this
-  // check exists to hold.
-  const rawRole = resource.role
+  if (!isSingleNamedRole(resource.role)) throw new Error(refuse)
+}
+
+/**
+ * Drive takes the accepted role as either a string or a single-element list.
+ * Validate the WHOLE list, not just index 0: `["reader","owner"]` would
+ * otherwise pass on its first element while `executeWorkspaceCommand` forwards
+ * the original argv — the full, unvalidated JSON — to `gws` verbatim, so
+ * nothing downstream re-reads the array. That is exactly the ceiling this
+ * check exists to hold.
+ */
+function isSingleNamedRole(rawRole: unknown): boolean {
   const roles = Array.isArray(rawRole) ? rawRole : [rawRole]
-  if (roles.length !== 1) throw new Error(refuse)
+  if (roles.length !== 1) return false
   const role = typeof roles[0] === "string" ? roles[0].toLowerCase() : null
-  if (!role || !PERMISSION_ROLES_NAMED.has(role)) throw new Error(refuse)
+  return !!role && PERMISSION_ROLES_NAMED.has(role)
 }
 
 function validateGmailModify(argv: readonly string[]): void {

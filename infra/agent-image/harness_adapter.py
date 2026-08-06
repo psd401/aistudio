@@ -246,6 +246,7 @@ def _classify_chat_error(error_message: str) -> str:
 def _frame_failed_partial(
     partial: str,
     completed_tools: Optional[List[Dict[str, Any]]] = None,
+    in_flight_tools: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Wrap a failed/degraded turn so it is never presented as a clean answer.
 
@@ -264,7 +265,7 @@ def _frame_failed_partial(
     nothing at all happened. We KNOW which tools completed, so say so.
     """
     partial = (partial or "").strip()
-    ran = _describe_completed_tools(completed_tools)
+    ran = _describe_completed_tools(completed_tools, in_flight_tools)
     if partial:
         return (
             "⚠️ I couldn't finish that — I hit a problem partway "
@@ -278,6 +279,7 @@ def _frame_failed_partial(
 
 def _describe_completed_tools(
     tool_calls: Optional[List[Dict[str, Any]]],
+    in_flight: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Render the finished tool calls as a short clause, or '' when none ran.
 
@@ -297,6 +299,25 @@ def _describe_completed_tools(
     # created — precisely the failure this function exists to prevent. So an
     # unreadable terminal record suppresses the safe-to-retry claim.
     unnamed_terminal = False
+    # A tool that STARTED and never reported back is the most dangerous case,
+    # not the safest: the request may have reached the broker and created the
+    # Doc before the turn died, and its result event simply never arrived.
+    # Started calls live in `tool_starts` and are removed from it when they
+    # complete, so anything still there is genuinely in flight — and it never
+    # appears in `tool_calls` at all, which is how an interrupted side effect
+    # could leave that list empty and produce a "safe to retry".
+    started_names = []
+    if isinstance(in_flight, dict):
+        for start in in_flight.values():
+            if not isinstance(start, dict):
+                unnamed_terminal = True
+                continue
+            name = start.get("name")
+            if isinstance(name, str) and name and name != "unknown":
+                if name not in started_names:
+                    started_names.append(name)
+            else:
+                unnamed_terminal = True
     for call in tool_calls:
         if not isinstance(call, dict):
             unnamed_terminal = True
@@ -309,18 +330,33 @@ def _describe_completed_tools(
                 names.append(name)
         else:
             unnamed_terminal = True
+    # An in-flight call is reported as uncertain rather than as completed: we
+    # know it was requested, not whether it landed.
+    if started_names:
+        started_shown = ", ".join(started_names[:3])
+        started_more = (
+            f" (+{len(started_names) - 3} more)" if len(started_names) > 3 else ""
+        )
+        started_note = (
+            f" {started_shown}{started_more} was still running and may or may not "
+            "have completed."
+        )
+    else:
+        started_note = ""
+
     if not names:
-        if unnamed_terminal:
+        if started_names or unnamed_terminal:
             return (
-                " Some steps may have already run, so please check before retrying."
-            )
+                f"{started_note} Some steps may have already run, so please check "
+                "before retrying."
+            ).lstrip()
         return " Nothing had run yet, so it's safe to retry."
     shown = ", ".join(names[:5])
     more = f" (+{len(names) - 5} more)" if len(names) > 5 else ""
     unknown_note = " (and possibly others)" if unnamed_terminal else ""
     return (
         f" I had already run: {shown}{more}{unknown_note} — "
-        "please check those before retrying."
+        f"please check those before retrying.{started_note}"
     )
 
 
@@ -1347,6 +1383,7 @@ class OpenClawAdapter(HarnessAdapter):
                                 if visible_response
                                 else "",
                                 tool_calls,
+                                tool_starts,
                             )
                             # An errored turn can still have burned tokens
                             # before it failed — bill them rather than
@@ -1626,7 +1663,7 @@ class OpenClawAdapter(HarnessAdapter):
             )
             return _result(
                 _frame_failed_partial(
-                    _format_for_chat(response_text.strip()), tool_calls
+                    _format_for_chat(response_text.strip()), tool_calls, tool_starts
                 ),
                 failed=True,
                 error_class=error_class,
@@ -1672,7 +1709,9 @@ class OpenClawAdapter(HarnessAdapter):
                 # answer (issue #1138 F4).
                 return _result(
                     _frame_failed_partial(
-                        _format_for_chat(response_text.strip()), tool_calls
+                        _format_for_chat(response_text.strip()),
+                        tool_calls,
+                        tool_starts,
                     ),
                     failed=True,
                     error_class="ChatDeadlineExpiredPartial",
