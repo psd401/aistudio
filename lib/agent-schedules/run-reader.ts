@@ -86,7 +86,10 @@ export class DrizzleAgentScheduleRunReader
   ): Promise<AgentScheduleRun[]> {
     // Bounded: this lands in an agent's context window, and an owner with a
     // five-minute schedule accumulates thousands of rows.
-    const limit = Math.min(Math.max(1, options.limit ?? 20), 50);
+    // Floored as well as clamped: this is the last hop before Drizzle's
+    // `.limit()`, and a fraction reaching Postgres is a runtime error rather
+    // than a smaller page.
+    const limit = Math.floor(Math.min(Math.max(1, options.limit ?? 20), 50));
     const conditions = [eq(agentScheduledRuns.userId, ownerEmail)];
     if (options.scheduleId) {
       conditions.push(eq(agentScheduledRuns.scheduleId, options.scheduleId));

@@ -873,8 +873,12 @@ export class AgentScheduleService {
       typeof input.scheduleId === "string" && input.scheduleId.trim()
         ? input.scheduleId.trim()
         : undefined;
+    // Integer, not merely finite: a fractional `limit` such as 1.5 survives the
+    // reader's clamp and reaches Drizzle's `.limit()` as a fraction. The skill
+    // validates this too, but the broker route is reachable owner-mode without
+    // it, so the boundary that talks to the database enforces it as well.
     const limit =
-      typeof input.limit === "number" && Number.isFinite(input.limit)
+      typeof input.limit === "number" && Number.isInteger(input.limit)
         ? input.limit
         : undefined;
     return this.runReader.recentForOwner(ownerEmail, { scheduleId, limit });
