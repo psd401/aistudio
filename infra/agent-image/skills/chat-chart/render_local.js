@@ -754,8 +754,11 @@ function drawPieChart(canvas, labels, values, area) {
   // while the forced final bound paints the whole pie as the last category. A
   // materially false chart returned as a success is worse than a refusal, so
   // refuse. Same guard catches a NaN total, which `total <= 0` also lets past.
+  //
+  // RangeError, not Error: this is a magnitude the format cannot represent, and
+  // it matches the two niceTicks overflow guards, which are the same shape.
   if (!Number.isFinite(total)) {
-    throw new Error(
+    throw new RangeError(
       `pie chart values sum to ${total}, which cannot be divided into shares`,
     );
   }
