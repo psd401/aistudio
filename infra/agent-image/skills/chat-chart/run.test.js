@@ -156,21 +156,25 @@ test('genuinely public data still reaches quickchart when asked for by name', ()
   assert.match(result.stdout, /PSD_AGENT_RICH_V1/);
 });
 
-test('Infinity is rejected at the CLI boundary, whatever the engine', () => {
+test('Infinity is rejected at the CLI boundary, whatever the engine', async () => {
   // JSON.parse('1e999') is Infinity, which is typeof 'number' — it used to
   // pass validation and serialise into the QuickChart URL as `null`.
-  const result = runCli(['--type', 'bar', '--data-json', '[{"label":"A","value":1e999}]']);
+  const { result } = await withStubBroker(async () => ({
+    result: await runCliAsync(['--type', 'bar', '--data-json', '[{"label":"A","value":1e999}]']),
+  }));
   assert.notStrictEqual(result.status, 0);
   assert.match(result.stderr, /finite/);
 });
 
-test('a malformed --user is rejected on every engine, as documented', () => {
-  const result = runCli([
-    '--type', 'bar',
-    '--engine', 'quickchart',
-    '--data-json', '[{"label":"A","value":1}]',
-    '--user', 'not an email',
-  ]);
+test('a malformed --user is rejected on every engine, as documented', async () => {
+  const { result } = await withStubBroker(async () => ({
+    result: await runCliAsync([
+      '--type', 'bar',
+      '--engine', 'quickchart',
+      '--data-json', '[{"label":"A","value":1}]',
+      '--user', 'not an email',
+    ]),
+  }));
   assert.notStrictEqual(result.status, 0);
   assert.match(result.stderr, /--user/);
 });
@@ -1004,11 +1008,13 @@ test('the single-series shape is unchanged', () => {
   assert.deepEqual(cfg.data.datasets[0].data, [1]);
 });
 
-test('a series missing a value at one point is rejected, not silently zeroed', () => {
-  const result = runCli([
-    '--type', 'bar',
-    '--data-json', '[{"label":"G1","values":{"Math":1,"Reading":2}},{"label":"G2","values":{"Math":3}}]',
-  ]);
+test('a series missing a value at one point is rejected, not silently zeroed', async () => {
+  const { result } = await withStubBroker(async () => ({
+    result: await runCliAsync([
+      '--type', 'bar',
+      '--data-json', '[{"label":"G1","values":{"Math":1,"Reading":2}},{"label":"G2","values":{"Math":3}}]',
+    ]),
+  }));
   assert.notStrictEqual(result.status, 0);
   assert.match(result.stderr, /Reading/);
 });
@@ -1037,14 +1043,21 @@ test('a legend that cannot fit is refused, not clipped off the canvas', () => {
   assert.ok(renderChartPng(series(20)).length > 0);
 });
 
-test('a renderer failure is reported, not just exited on', () => {
+test('a renderer failure is reported, not just exited on', async () => {
   // renderLocal used to call the synchronous fail(), which process.exit()s
   // before main()'s rejection handler can run — so the one failure class this
   // skill's telemetry was added for emitted no AGENT_FAILURE_RECORD at all.
+  //
+  // Runs under the stub even though only stderr is asserted: this spawn files a
+  // failure report, and the broker port is fixed, so left unserialised it posts
+  // into a concurrently-bound neighbour's brokerCalls and breaks that test by
+  // index instead of this one.
   const oversized = JSON.stringify(
     Array.from({ length: 51 }, (_, i) => ({ label: `L${i}`, value: i })),
   );
-  const result = runCli(['--type', 'bar', '--data-json', oversized]);
+  const { result } = await withStubBroker(async () => ({
+    result: await runCliAsync(['--type', 'bar', '--data-json', oversized]),
+  }));
 
   assert.match(result.stderr, /AGENT_FAILURE_RECORD/);
   const record = JSON.parse(
@@ -1232,7 +1245,18 @@ test('the legend wraps rather than truncating every label to the same stub', () 
   assert.ok(many.maxChars >= 16, `wrapped labels still only ${many.maxChars} chars`);
 });
 
-test('an authoring mistake is reported, not just exited on', () => {
+// Every test below runs its CLI under withStubBroker even where the broker
+// response is irrelevant. The broker port is fixed, so a subprocess that files
+// a failure report posts into whatever stub is currently bound — and bun runs
+// this file's async tests concurrently. Before reporting reached fail(), these
+// argv/validation failures made no broker call at all and were safe to spawn
+// synchronously; now they do, and an unserialised one lands in a neighbouring
+// test's brokerCalls ahead of that test's own traffic, breaking it by index.
+// Same fixed-port hazard as the EADDRINUSE race above, arriving from the other
+// direction: not two stubs racing to bind, but one stub receiving traffic from
+// a test that never meant to talk to it.
+
+test('an authoring mistake is reported, not just exited on', async () => {
   // The likelier way an agent ends a turn with no chart: asking for Math and
   // Reading by grade and forgetting one grade's Reading score. Every fail()
   // call site used to process.exit() straight past the reporter, so this whole
@@ -1242,7 +1266,10 @@ test('an authoring mistake is reported, not just exited on', () => {
     { label: 'Grade 3', values: { Math: 412, Reading: 398 } },
     { label: 'Grade 4', values: { Math: 430 } },
   ]);
-  const result = runCli(['--type', 'bar', '--data-json', gap]);
+  const { result, brokerCalls } = await withStubBroker(async ctx => ({
+    result: await runCliAsync(['--type', 'bar', '--data-json', gap]),
+    brokerCalls: ctx.brokerCalls,
+  }));
 
   assert.match(result.stderr, /AGENT_FAILURE_RECORD/);
   const record = JSON.parse(
@@ -1255,41 +1282,55 @@ test('an authoring mistake is reported, not just exited on', () => {
   assert.match(record.error_message, /series "Reading" is missing a finite value at "Grade 4"/);
   assert.strictEqual(record.context.type, 'bar');
   assert.strictEqual(record.context.user_facing, true);
+  // The POST too, not just the stderr line — the broker call is swallowed by
+  // design, so a wrong route or class would otherwise fail silently. The chart
+  // is refused before any upload, so this is the only traffic expected.
+  assert.strictEqual(brokerCalls.length, 1, `unexpected broker traffic: ${JSON.stringify(brokerCalls)}`);
+  assert.strictEqual(brokerCalls[0].url, '/agent-broker/api/agent/failures');
+  assert.strictEqual(brokerCalls[0].payload.errorClass, 'ChartInputInvalid');
   // Exit code and wording are the contract fail() already had.
   assert.strictEqual(result.status, 2, result.stderr);
   assert.doesNotMatch(result.stderr, /unexpected error/);
 });
 
-test('an unparseable argv is still reported, with an empty context', () => {
+test('an unparseable argv is still reported, with an empty context', async () => {
   // parseArgs runs before there is anything to describe the run with. The
   // report goes out with a bare context rather than not at all.
-  const result = runCli(['--type', 'bar', '--data-json', '[{"label":"A"']);
+  const { result, brokerCalls } = await withStubBroker(async ctx => ({
+    result: await runCliAsync(['--type', 'bar', '--data-json', '[{"label":"A"']),
+    brokerCalls: ctx.brokerCalls,
+  }));
 
   assert.strictEqual(result.status, 2, result.stderr);
-  assert.match(result.stderr, /AGENT_FAILURE_RECORD/);
-  const record = JSON.parse(
-    result.stderr.slice(result.stderr.indexOf('AGENT_FAILURE_RECORD ') + 'AGENT_FAILURE_RECORD '.length)
-      .split('\n')[0],
-  );
-  assert.strictEqual(record.error_class, 'ChartInputInvalid');
-  assert.match(record.error_message, /not valid JSON/);
+  assert.strictEqual(brokerCalls.length, 1, `unexpected broker traffic: ${JSON.stringify(brokerCalls)}`);
+  assert.strictEqual(brokerCalls[0].payload.errorClass, 'ChartInputInvalid');
+  assert.match(brokerCalls[0].payload.errorMessage, /not valid JSON/);
+  // --type parsed fine, so context still carries it; a flag-level parse failure
+  // is the case that reports with nothing.
+  assert.strictEqual(brokerCalls[0].payload.context.type, 'bar');
 });
 
-test('a policy refusal is NOT reported as a chart failure', () => {
+test('a policy refusal is NOT reported as a chart failure', async () => {
   // REV-INFRA-002 declining to ship PII to quickchart.io is the gate working,
   // not a defect. Filing it in agent_failures would put correct refusals in the
   // one table read to find real breakage. If these ever want recording they
   // want their own error_class, so this exclusion is asserted rather than left
   // to be re-derived from the absence of a test.
-  const result = runCli([
-    '--engine', 'quickchart',
-    '--type', 'bar',
-    '--data-json', '[{"label":"jsmith@psd401.net","value":1}]',
-  ]);
+  const { result, brokerCalls } = await withStubBroker(async ctx => ({
+    result: await runCliAsync([
+      '--engine', 'quickchart',
+      '--type', 'bar',
+      '--data-json', '[{"label":"jsmith@psd401.net","value":1}]',
+    ]),
+    brokerCalls: ctx.brokerCalls,
+  }));
 
   assert.strictEqual(result.status, 3, result.stderr);
   assert.doesNotMatch(result.stderr, /AGENT_FAILURE_RECORD/);
   assert.doesNotMatch(result.stderr, /unexpected error/);
+  // Nothing filed anywhere — a stronger claim than the stderr line's absence,
+  // since it covers the broker path the stderr assertion cannot see.
+  assert.strictEqual(brokerCalls.length, 0, `a refusal filed: ${JSON.stringify(brokerCalls)}`);
 });
 
 test('category series of unequal length are refused, not misaligned', () => {
