@@ -227,11 +227,18 @@ function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
 }
 
+/** Per-invocation counters, so one import's model spend is one log line. */
+interface ExtractionStats {
+  modelCalls: number
+  splitEvents: number
+}
+
 interface ChunkExtractionContext {
   model: LanguageModel
   vendor: MemoryImportVendor
   chunkIndex: number
   chunkCount: number
+  stats: ExtractionStats
 }
 
 // Never logs the model output or the pasted source; the shape of the response
@@ -283,6 +290,7 @@ export function createMemoryImportExtractor(
     const halves = splitExtractionChunks(chunk, Math.ceil(chunk.length / 2))
     if (halves.length < 2) return null
 
+    context.stats.splitEvents += 1
     log.warn("Splitting a Nexus memory extraction chunk that overran", {
       vendor: context.vendor,
       chunkIndex: context.chunkIndex,
@@ -324,6 +332,7 @@ export function createMemoryImportExtractor(
       // gets the retry too, not just an unparseable response.
       let result: ModelExtractionResult | undefined
       try {
+        context.stats.modelCalls += 1
         result = await dependencies.runExtraction(context.model, prompt)
         return parseMemoryImportCandidates(result)
       } catch (error) {
@@ -373,6 +382,7 @@ export function createMemoryImportExtractor(
 
     const collected: MemoryImportCandidate[][] = chunks.map(() => [])
     const failures: Error[] = []
+    const stats: ExtractionStats = { modelCalls: 0, splitEvents: 0 }
     // Race-free without a lock: each worker runs synchronously up to its first
     // await, so `nextChunk++` claims an index before any other worker can be
     // scheduled. No two workers can ever read the same value.
@@ -392,6 +402,7 @@ export function createMemoryImportExtractor(
                 vendor: input.vendor,
                 chunkIndex: index,
                 chunkCount: chunks.length,
+                stats,
               },
               chunks[index],
             )
@@ -417,6 +428,18 @@ export function createMemoryImportExtractor(
         candidateCount: candidates.length,
       })
     }
+    // One line per import carrying the whole model spend, so cost and split
+    // churn are alertable on a single number instead of reassembled from
+    // per-chunk warnings.
+    log.info("Nexus memory extraction completed", {
+      vendor: input.vendor,
+      pastedChars: input.pastedText.length,
+      chunkCount: chunks.length,
+      modelCalls: stats.modelCalls,
+      splitEvents: stats.splitEvents,
+      failedChunkCount: failures.length,
+      candidateCount: candidates.length,
+    })
     return candidates
   }
 }

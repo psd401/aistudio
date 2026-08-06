@@ -1,12 +1,13 @@
 /* eslint-disable no-var */
 var mockLogWarn = jest.fn()
+var mockLogInfo = jest.fn()
 /* eslint-enable no-var */
 
 // The module under test calls createLogger at import time, which is hoisted
 // above the mock-variable assignment — so the methods must dereference lazily.
 jest.mock("@/lib/logger", () => ({
   createLogger: () => ({
-    info: jest.fn(),
+    info: (...args: unknown[]) => mockLogInfo(...args),
     warn: (...args: unknown[]) => mockLogWarn(...args),
     error: jest.fn(),
     debug: jest.fn(),
@@ -399,6 +400,17 @@ describe("Nexus memory import output-budget overruns", () => {
     // a second identical call first — at temperature 0 it truncates the same
     // way, and the waste compounds at every split depth.
     expect(runExtraction).toHaveBeenCalledTimes(3)
+    // The whole import's model spend on one alertable line.
+    expect(mockLogInfo).toHaveBeenCalledWith(
+      "Nexus memory extraction completed",
+      expect.objectContaining({
+        vendor: "chatgpt",
+        chunkCount: 1,
+        modelCalls: 3,
+        splitEvents: 1,
+        candidateCount: 2,
+      }),
+    )
   })
 
   it("does not retry an overrun before splitting it", async () => {

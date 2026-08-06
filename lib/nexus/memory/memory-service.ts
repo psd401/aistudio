@@ -130,6 +130,10 @@ async function recordPIITelemetry(
 ): Promise<void> {
   let entities: PIIEntity[]
   try {
+    // Scans the submitted content, not safety.processedContent. Every return
+    // in ContentSafetyService.processInput passes content through unchanged,
+    // so the two are identical today; if that ever stops being true, what the
+    // user actually submitted is the more faithful thing to report.
     entities = await dependencies.detectPII(input.content)
   } catch (error) {
     // Fails open: an unavailable scan is an observability gap, not a reason
