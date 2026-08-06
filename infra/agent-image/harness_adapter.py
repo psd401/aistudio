@@ -243,7 +243,10 @@ def _classify_chat_error(error_message: str) -> str:
     return "OpenClawChatError"
 
 
-def _frame_failed_partial(partial: str, completed_tools=None) -> str:
+def _frame_failed_partial(
+    partial: str,
+    completed_tools: Optional[List[Dict[str, Any]]] = None,
+) -> str:
     """Wrap a failed/degraded turn so it is never presented as a clean answer.
 
     When a turn dies mid-task the model has usually emitted some scratchpad
@@ -269,11 +272,13 @@ def _frame_failed_partial(partial: str, completed_tools=None) -> str:
         )
     return (
         "⚠️ I couldn't complete that — I hit a problem partway "
-        f"through.{ran} Please check before retrying."
+        f"through.{ran}"
     )
 
 
-def _describe_completed_tools(tool_calls) -> str:
+def _describe_completed_tools(
+    tool_calls: Optional[List[Dict[str, Any]]],
+) -> str:
     """Render the finished tool calls as a short clause, or '' when none ran.
 
     Deduplicated and capped: a turn that looped over 40 files should not paste
@@ -284,21 +289,71 @@ def _describe_completed_tools(tool_calls) -> str:
     if not isinstance(tool_calls, list):
         return " Some steps may have already run, so please check before retrying."
     names = []
+    # A record we cannot read is NOT evidence that nothing ran. Two ingestion
+    # paths feed tool_calls and only the newer one normalizes `status`, so the
+    # legacy tool_result stream can carry a terminal status we do not recognise
+    # ("completed", "ok", …) or a missing name. Counting those as "nothing
+    # happened" would tell the user a retry is safe when a Doc had already been
+    # created — precisely the failure this function exists to prevent. So an
+    # unreadable terminal record suppresses the safe-to-retry claim.
+    unnamed_terminal = False
     for call in tool_calls:
         if not isinstance(call, dict):
+            unnamed_terminal = True
             continue
-        if call.get("status") not in ("success", "error"):
+        if _tool_call_is_pending(call):
             continue
         name = call.get("name")
-        if isinstance(name, str) and name and name != "unknown" and name not in names:
-            names.append(name)
+        if isinstance(name, str) and name and name != "unknown":
+            if name not in names:
+                names.append(name)
+        else:
+            unnamed_terminal = True
     if not names:
-        return " No actions had run yet, so it's safe to retry."
+        if unnamed_terminal:
+            return (
+                " Some steps may have already run, so please check before retrying."
+            )
+        return " Nothing had run yet, so it's safe to retry."
     shown = ", ".join(names[:5])
     more = f" (+{len(names) - 5} more)" if len(names) > 5 else ""
+    unknown_note = " (and possibly others)" if unnamed_terminal else ""
     return (
-        f" I had already run: {shown}{more} — please check those before retrying."
+        f" I had already run: {shown}{more}{unknown_note} — "
+        "please check those before retrying."
     )
+
+
+# Statuses that mean a call had NOT finished when the turn died. Anything else
+# terminal — including a status this build does not know — counts as completed,
+# because assuming an unknown status means "did not run" is the unsafe
+# direction.
+_PENDING_TOOL_STATUSES = frozenset({"running", "pending", "started", "in_progress"})
+
+
+def _normalize_tool_status(raw: Any, error: Any) -> str:
+    """Collapse a wire status into "success" / "error" / a pending status.
+
+    The item path already does this inline; the legacy tool_result path did not,
+    so a completion could reach telemetry as "completed" or "ok".
+    """
+    if isinstance(raw, str) and raw.strip():
+        lowered = raw.strip().lower()
+        if lowered in _PENDING_TOOL_STATUSES:
+            return lowered
+        if lowered in ("error", "failed"):
+            return "error"
+        return "error" if error else "success"
+    return "error" if error else "success"
+
+
+def _tool_call_is_pending(call: dict) -> bool:
+    status = call.get("status")
+    if status is None:
+        return False
+    if not isinstance(status, str):
+        return False
+    return status.strip().lower() in _PENDING_TOOL_STATUSES
 
 
 class HarnessAdapter(abc.ABC):
@@ -1162,8 +1217,14 @@ class OpenClawAdapter(HarnessAdapter):
                                 "result": data.get("result")
                                 or data.get("output")
                                 or data.get("content"),
-                                "status": data.get("status")
-                                or ("error" if data.get("error") else "success"),
+                                # Normalized to the same success/error vocabulary
+                                # the item path uses: a raw wire status like
+                                # "completed" would otherwise flow straight into
+                                # telemetry and the failed-turn summary, which
+                                # gate on these exact values.
+                                "status": _normalize_tool_status(
+                                    data.get("status"), data.get("error")
+                                ),
                                 "error_text": (
                                     str(data.get("error"))[:2000]
                                     if data.get("error") else None

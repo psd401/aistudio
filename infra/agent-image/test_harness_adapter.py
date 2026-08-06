@@ -1451,12 +1451,8 @@ class ChatErrorClassificationTests(unittest.TestCase):
         )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestFailedPartialNamesSideEffects(unittest.TestCase):
-    """"Some steps may have already run" is unactionable — name them.
+    """Name the side effects instead of the vague "some steps may have run".
 
     A principal told only that something *may* have happened cannot tell whether
     a doc was created, an event booked, or nothing at all. The harness records
@@ -1479,6 +1475,8 @@ class TestFailedPartialNamesSideEffects(unittest.TestCase):
     def test_says_retry_is_safe_when_nothing_ran(self):
         text = harness_adapter._frame_failed_partial("", [])
         self.assertIn("safe to retry", text)
+        # Must not also tell them to go check — that was contradictory.
+        self.assertNotIn("check before retrying", text)
 
     def test_ignores_tools_still_in_flight(self):
         # A started-but-unfinished call is not a known side effect.
@@ -1486,6 +1484,37 @@ class TestFailedPartialNamesSideEffects(unittest.TestCase):
             "", [{"name": "docs.create", "status": "running"}]
         )
         self.assertIn("safe to retry", text)
+
+    def test_an_unrecognized_terminal_status_still_counts_as_run(self):
+        # The legacy tool_result stream does not normalize `status`, so a real
+        # completion can arrive as "completed"/"ok". Treating that as "did not
+        # run" would claim a safe retry after a Doc was already created.
+        text = harness_adapter._frame_failed_partial(
+            "", [{"name": "docs.create", "status": "completed"}]
+        )
+        self.assertIn("docs.create", text)
+        self.assertNotIn("safe to retry", text)
+
+    def test_an_unreadable_record_suppresses_the_safe_retry_claim(self):
+        for calls in (
+            [{"status": "success"}],           # terminal, but no usable name
+            [{"name": "unknown", "status": "success"}],
+            ["not-a-dict"],
+        ):
+            text = harness_adapter._frame_failed_partial("", calls)
+            self.assertNotIn("safe to retry", text, calls)
+            self.assertIn("may have already run", text, calls)
+
+    def test_named_and_unreadable_together_flags_the_uncertainty(self):
+        text = harness_adapter._frame_failed_partial(
+            "",
+            [
+                {"name": "docs.create", "status": "success"},
+                {"status": "success"},
+            ],
+        )
+        self.assertIn("docs.create", text)
+        self.assertIn("possibly others", text)
 
     def test_dedupes_and_caps_a_long_tool_list(self):
         calls = [{"name": f"tool{i}", "status": "success"} for i in range(9)]
@@ -1504,3 +1533,7 @@ class TestFailedPartialNamesSideEffects(unittest.TestCase):
     def test_unknown_shape_keeps_the_conservative_warning(self):
         text = harness_adapter._frame_failed_partial("", None)
         self.assertIn("may have already run", text)
+
+
+if __name__ == "__main__":
+    unittest.main()

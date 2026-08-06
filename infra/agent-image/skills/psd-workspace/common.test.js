@@ -840,3 +840,32 @@ describe('#1305 marker injection marks the nested resource, not the envelope', (
     });
   }
 });
+
+// Codex asked for coverage beyond the broker validator: the skill layer must
+// also let the documented accessproposals shape through, or the operation is
+// allowlisted server-side and still unreachable from the agent.
+describe('drive accessproposals reach the broker', () => {
+  const AGENT = { scope: 'agent_account', ownerEmail: 'hagelk@psd401.net' };
+  const USER = { scope: 'user_account', ownerEmail: 'hagelk@psd401.net' };
+
+  test('resolve passes the skill gate on the agent slot', () => {
+    const cmd = `drive accessproposals resolve --json '{"fileId":"f","proposalId":"p","action":"accept","role":"writer"}'`;
+    expect(enforcePhase1Gates(cmd, AGENT).allowed).toBe(true);
+    expect(enforcePhase1Gates(cmd.replace(/ /g, '.').replace(/\.--json.*/, '') , AGENT).allowed).toBe(true);
+  });
+
+  test('list is an ordinary read on either slot', () => {
+    const cmd = `drive accessproposals list --params '{"fileId":"f"}'`;
+    expect(enforcePhase1Gates(cmd, AGENT).allowed).toBe(true);
+    expect(enforcePhase1Gates(cmd, USER).allowed).toBe(true);
+  });
+
+  test('the permissions denylist does not accidentally catch it', () => {
+    // `permissions create|update|delete` must not match `accessproposals`.
+    const gate = enforcePhase1Gates(
+      `drive accessproposals resolve --json '{"fileId":"f","proposalId":"p","action":"deny"}'`,
+      AGENT,
+    );
+    expect(gate.allowed).toBe(true);
+  });
+});

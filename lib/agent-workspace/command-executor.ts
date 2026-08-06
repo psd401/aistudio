@@ -494,8 +494,15 @@ function validateAccessProposalResolve(argv: readonly string[]): void {
   if (!action || !ACCESS_PROPOSAL_ACTIONS.has(action)) throw new Error(refuse)
   if (action === "deny") return
   // Drive takes the accepted role as either a string or a single-element list.
-  const rawRole = Array.isArray(resource.role) ? resource.role[0] : resource.role
-  const role = typeof rawRole === "string" ? rawRole.toLowerCase() : null
+  // Validate the WHOLE list, not just index 0: `["reader","owner"]` would
+  // otherwise pass on its first element while `executeWorkspaceCommand` forwards
+  // the original argv — the full, unvalidated JSON — to `gws` verbatim, so
+  // nothing downstream re-reads the array. That is exactly the ceiling this
+  // check exists to hold.
+  const rawRole = resource.role
+  const roles = Array.isArray(rawRole) ? rawRole : [rawRole]
+  if (roles.length !== 1) throw new Error(refuse)
+  const role = typeof roles[0] === "string" ? roles[0].toLowerCase() : null
   if (!role || !PERMISSION_ROLES_NAMED.has(role)) throw new Error(refuse)
 }
 

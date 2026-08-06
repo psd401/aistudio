@@ -935,6 +935,12 @@ describe("Drive access proposals", () => {
     ["accept with no role", { fileId: "f", proposalId: "p", action: "accept" }],
     ["unknown action", { fileId: "f", proposalId: "p", action: "escalate", role: "writer" }],
     ["unknown key", { fileId: "f", proposalId: "p", action: "accept", role: "writer", extra: 1 }],
+    // Only role[0] used to be validated, so a list smuggled a second role past
+    // the ceiling — and executeWorkspaceCommand forwards the original argv to
+    // gws verbatim, so nothing downstream re-reads the array.
+    ["multi-element role list", { fileId: "f", proposalId: "p", action: "accept", role: ["reader", "owner"] }],
+    ["empty role list", { fileId: "f", proposalId: "p", action: "accept", role: [] }],
+    ["non-string role element", { fileId: "f", proposalId: "p", action: "accept", role: [{ role: "writer" }] }],
   ])("refuses %s", (_name, resource) => {
     expect(() => resolve(resource)).toThrow(/reader, commenter or writer/)
   })
