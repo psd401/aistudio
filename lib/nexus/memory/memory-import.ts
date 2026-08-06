@@ -305,12 +305,22 @@ export function createMemoryImportExtractor(
     // call per slot keeps the declared bound true.
     const recovered: MemoryImportCandidate[] = []
     let anyHalfSucceeded = false
-    for (const half of halves) {
+    for (const [halfIndex, half] of halves.entries()) {
       try {
         recovered.push(...(await extractChunk(context, half, splitDepth + 1)))
         anyHalfSucceeded = true
-      } catch {
-        // Half the chunk landing is still better than losing all of it.
+      } catch (error) {
+        // Half the chunk landing is still better than losing all of it, but
+        // say which half went missing — otherwise the only trace is a smaller
+        // candidateCount in the summary line.
+        log.warn("A Nexus memory extraction half was lost", {
+          vendor: context.vendor,
+          chunkIndex: context.chunkIndex,
+          splitDepth,
+          halfIndex,
+          halfChars: half.length,
+          error: toError(error).message,
+        })
       }
     }
     return anyHalfSucceeded ? recovered : null

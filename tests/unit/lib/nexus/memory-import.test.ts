@@ -413,6 +413,41 @@ describe("Nexus memory import output-budget overruns", () => {
     )
   })
 
+  it("keeps one half's candidates when the other half fails entirely", async () => {
+    // The partial-recovery guarantee: losing half a chunk must not cost the
+    // half that parsed.
+    const pastedText = `- ${"a".repeat(3_000)}\n- ${"b".repeat(3_000)}`
+    const runExtraction = jest.fn(async (_model, prompt: string) => {
+      const hasA = prompt.includes("aaaa")
+      const hasB = prompt.includes("bbbb")
+      if (hasA && hasB) {
+        return {
+          text: "truncated {",
+          toolCalls: [],
+          finishReason: "length",
+          usage: { inputTokens: 2_000, outputTokens: 8_192 },
+        }
+      }
+      if (hasA) return { text: "not json", toolCalls: [], finishReason: "stop" }
+      return toolResult([{ content: "Second half", category: "context" }])
+    })
+    const extract = createMemoryImportExtractor({
+      getSetting: jest.fn().mockResolvedValue(null),
+      createModel: jest.fn().mockResolvedValue({} as LanguageModel),
+      runExtraction,
+    })
+
+    await expect(
+      extract({ vendor: "chatgpt", pastedText }),
+    ).resolves.toEqual([{ content: "Second half", category: "context" }])
+    // One overrun, two attempts on the doomed half, one on the good half.
+    expect(runExtraction).toHaveBeenCalledTimes(4)
+    expect(mockLogWarn).toHaveBeenCalledWith(
+      "A Nexus memory extraction half was lost",
+      expect.objectContaining({ vendor: "chatgpt", halfIndex: 0 }),
+    )
+  })
+
   it("does not retry an overrun before splitting it", async () => {
     // A chunk too small to split: the overrun is detected, the attempt loop
     // breaks immediately, and splitting is refused, so exactly one call runs.
