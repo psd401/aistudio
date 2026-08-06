@@ -411,6 +411,8 @@ describe("agent-cron daily-session contention policy", () => {
         "schedule-fire#another-schedule#2026-07-28T14:55:00.000Z",
     }
 
+    // warn, not error: every schedule for one owner shares the workspace lock,
+    // so two firing close together contend by design and the retry resolves it.
     expect(
       resolveScheduleLockContention(otherScheduleContention, fireClaim),
     ).toEqual({
@@ -418,7 +420,7 @@ describe("agent-cron daily-session contention policy", () => {
       fireClaim,
       failure: {
         ...otherScheduleContention,
-        severity: "error",
+        severity: "warn",
         errorMessage:
           "Owner workspace is active for another schedule; retrying this fire",
       },

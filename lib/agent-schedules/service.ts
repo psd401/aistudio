@@ -32,6 +32,7 @@ import {
 import {
   DrizzleAgentScheduleRunReader,
   type AgentScheduleLastRun,
+  type AgentScheduleRun,
   type AgentScheduleRunReader,
 } from "@/lib/agent-schedules/run-reader";
 import {
@@ -854,6 +855,29 @@ export class AgentScheduleService {
             runEnrichmentAvailable,
           ),
     );
+  }
+
+  /**
+   * Recent runs for this owner, so the agent can answer "why did my scheduled
+   * job fail" instead of reporting that it cannot see its own history.
+   *
+   * Owner-scoped at the query, like every other operation here — a caller
+   * cannot read another owner's runs by passing their scheduleId.
+   */
+  async runs(
+    owner: string,
+    input: { scheduleId?: unknown; limit?: unknown } = {},
+  ): Promise<AgentScheduleRun[]> {
+    const ownerEmail = normalizeOwnerEmail(owner);
+    const scheduleId =
+      typeof input.scheduleId === "string" && input.scheduleId.trim()
+        ? input.scheduleId.trim()
+        : undefined;
+    const limit =
+      typeof input.limit === "number" && Number.isFinite(input.limit)
+        ? input.limit
+        : undefined;
+    return this.runReader.recentForOwner(ownerEmail, { scheduleId, limit });
   }
 
   async create(
