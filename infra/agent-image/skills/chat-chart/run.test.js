@@ -1061,6 +1061,36 @@ test('a renderer failure is reported, not just exited on', () => {
   assert.doesNotMatch(result.stderr, /unexpected error/);
 });
 
+test('a renderer failure reaches the broker, not just stderr', async () => {
+  // reportChartFailure swallows every error from the broker call by design, so
+  // a wrong route or payload shape would fail silently and the stderr-only
+  // assertions above would still pass. That is the exact invisibility this
+  // reporting path exists to end, so the POST itself is asserted.
+  const oversized = JSON.stringify(
+    Array.from({ length: 51 }, (_, i) => ({ label: `L${i}`, value: i })),
+  );
+  const { result, brokerCalls } = await withStubBroker(async ctx => ({
+    result: await runCliAsync(['--type', 'bar', '--data-json', oversized]),
+    brokerCalls: ctx.brokerCalls,
+  }));
+
+  assert.strictEqual(result.status, 3, result.stderr);
+  // The render fails before publishArtifact, so the failure report is the only
+  // call the broker should see.
+  assert.strictEqual(brokerCalls.length, 1, `unexpected broker traffic: ${JSON.stringify(brokerCalls)}`);
+  const [failure] = brokerCalls;
+  assert.strictEqual(failure.url, '/agent-broker/api/agent/failures');
+  // camelCase on the wire, snake_case in the CloudWatch line — the split is the
+  // existing convention (psd-failure-report/report.js), and unverified until now.
+  assert.strictEqual(failure.payload.source, 'tool');
+  assert.strictEqual(failure.payload.severity, 'error');
+  assert.strictEqual(failure.payload.errorClass, 'ChartRenderFailed');
+  assert.match(failure.payload.errorMessage, /too many data points/);
+  assert.strictEqual(failure.payload.context.tool, 'chat-chart');
+  assert.strictEqual(failure.payload.context.type, 'bar');
+  assert.strictEqual(failure.payload.context.user_facing, true);
+});
+
 test('every dataset is drawn, not just the first', () => {
   // Same categories, wildly different values: if only datasets[0] were drawn
   // the axis could not span the second series' range.
@@ -1090,6 +1120,63 @@ test('a multi-series line draws one line per dataset', () => {
   const pixels = decodePixels(png);
   assert.ok(extent(pixels, PALETTE_BLUE).count > 100, 'first line missing');
   assert.ok(extent(pixels, PALETTE_RED).count > 100, 'second line missing');
+});
+
+test('a multi-series scatter draws every point set, not just the first', () => {
+  // drawScatterChart took a flat point array and painted PALETTE[0], while
+  // drawChart handed it seriesList[0] only — so a second point set vanished
+  // with no error, under a comment claiming each series got its own colour.
+  const png = renderChartPng({
+    type: 'scatter',
+    data: {
+      datasets: [
+        { label: 'Fall', data: [{ x: 1, y: 1 }, { x: 2, y: 2 }] },
+        { label: 'Spring', data: [{ x: 3, y: 30 }, { x: 4, y: 40 }] },
+      ],
+    },
+    options: {},
+  });
+  const pixels = decodePixels(png);
+  const first = extent(pixels, PALETTE_BLUE);
+  const second = extent(pixels, PALETTE_RED);
+  assert.ok(first.count > 80, `first series only ${first.count} px`);
+  assert.ok(second.count > 80, `second series missing (${second.count} px)`);
+  // Both axes span both series. Drawing series 0 alone and scaling to it would
+  // put Spring's y=30..40 far off the top of a 1..2 axis.
+  assert.ok(second.minY < first.minY, 'the second series is not plotted above the first');
+  assert.ok(second.minX > first.maxX, 'the second series is not plotted to the right');
+});
+
+test('a scatter refuses a legend it cannot fit, like bar and line', () => {
+  // The refusal used to sit after scatter's early return, so scatter alone
+  // could draw unnameable series past the canvas edge.
+  const datasets = Array.from({ length: 21 }, (_, i) => ({
+    label: `S${i + 1}`,
+    data: [{ x: i, y: i }],
+  }));
+  assert.throws(
+    () => renderChartPng({ type: 'scatter', data: { datasets }, options: {} }),
+    /too many series to label \(21\)/,
+  );
+  assert.ok(renderChartPng({ type: 'scatter', data: { datasets: datasets.slice(0, 20) }, options: {} }).length > 0);
+});
+
+test('a single series keeps the full-slot value-label budget it always had', () => {
+  // Grouped bars must measure a label against their own bar, but applying that
+  // to the single-series path silently dropped every label between 62% and
+  // 100% of the slot — a behaviour change the PR did not intend. 16 four-digit
+  // bars sit squarely in that band: the label measures 69px against a 52px bar
+  // in an 84px slot, so it is drawn under the historical rule and dropped under
+  // the grouped one.
+  const pixels = render(
+    'bar',
+    Array.from({ length: 16 }, (_, i) => ({ label: `W${i + 1}`, value: 1000 + i })),
+    'Wide',
+  );
+  assert.ok(
+    textInk(pixels, PLOT_BAND) > 30,
+    'single-series value labels that fit their slot must still be drawn',
+  );
 });
 
 test('a pie refuses a second dataset rather than drawing only the first', () => {
@@ -1123,8 +1210,15 @@ test('the legend never runs off the canvas', () => {
     const pixels = decodePixels(png);
     const left = { x0: 0, y0: 0, x1: EDGE, y1: OUT_HEIGHT };
     const right = { x0: OUT_WIDTH - EDGE, y0: 0, x1: OUT_WIDTH, y1: OUT_HEIGHT };
+    // The vertical direction is the one the horizontal fix did not cover. The
+    // legend wraps to LEGEND_MAX_ROWS *below* the axis, and "two rows is what
+    // fits at MARGIN.bottom" is an arithmetic claim about the same layout that
+    // already overflowed once sideways. 6 and 10 series wrap; 2 and 3 do not,
+    // so the loop covers both row counts.
+    const bottom = { x0: 0, y0: OUT_HEIGHT - EDGE, x1: OUT_WIDTH, y1: OUT_HEIGHT };
     assert.strictEqual(countNonWhite(pixels, left), 0, `${count} series: ran off the left`);
     assert.strictEqual(countNonWhite(pixels, right), 0, `${count} series: ran off the right`);
+    assert.strictEqual(countNonWhite(pixels, bottom), 0, `${count} series: ran off the bottom`);
   }
 });
 

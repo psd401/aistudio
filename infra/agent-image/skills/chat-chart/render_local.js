@@ -67,8 +67,10 @@ const TEXT = [33, 33, 33];
 const AXIS = [90, 90, 90];
 const GRID = [219, 219, 219];
 
-// Categorical palette (tab10-derived). Series colour cycles through it for
-// bar/pie; line/scatter use the first entry.
+// Categorical palette (tab10-derived). Colour encodes SERIES on every
+// multi-series chart (grouped bar, line, scatter), so it matches the legend
+// entry. A single-series bar or a pie has no legend, so there colour cycles
+// per category/slice instead.
 const PALETTE = [
   [31, 119, 180],
   [214, 39, 40],
@@ -610,15 +612,13 @@ function categorySlots(area, count) {
 }
 
 /**
- * Series legend for multi-dataset charts. Without it a grouped bar or a
- * second line is an unlabelled colour, which is why single-series charts do
- * not get one — the title already says what the data is.
- *
- * Drawn inside the plot area's top-right. Long labels are truncated rather
- * than allowed to run off the canvas (the same failure the pie legend had).
- */
-/**
  * Lay the series legend out into rows that fit the plot width.
+ *
+ * The legend exists for multi-dataset charts only: without it a grouped bar or
+ * a second line is an unlabelled colour, while on a single-series chart the
+ * title already says what the data is. For where it is drawn and why, see
+ * drawSeriesLegend below — an earlier design put it in the plot's top-right,
+ * which collided with value labels.
  *
  * Exported for tests. One row is preferred; with many series a single row
  * forces every label down to the same truncated stub ("Very Long." six times
@@ -728,7 +728,14 @@ function drawBarChart(canvas, labels, seriesList, area) {
     // Value labels are a bonus, not the chart. Drop them rather than let
     // neighbouring bars' numbers overprint each other, and put a negative
     // bar's label under it so the text never sits on top of the bar.
-    if (textWidth(formatNumber(value), TICK_SCALE) <= barWidth) {
+    //
+    // What counts as room depends on what the neighbour is. A single series
+    // owns its whole category slot — the next bar is a slot away, so a label
+    // wider than the bar still has nowhere to collide, which is why this has
+    // always been measured against `slot`. Grouped bars sit shoulder to
+    // shoulder inside one slot, so there a label may only claim its own bar.
+    const labelBudget = multi ? barWidth : slot;
+    if (textWidth(formatNumber(value), TICK_SCALE) <= labelBudget) {
       drawText(canvas, formatNumber(value), {
         x,
         y: value < 0 ? top + height + 10 : top - FONT_HEIGHT * TICK_SCALE - 10,
@@ -771,9 +778,14 @@ function drawLineChart(canvas, labels, seriesList, area) {
   if (seriesList.length > 1) drawSeriesLegend(canvas, seriesList, area);
 }
 
-function drawScatterChart(canvas, points, area) {
-  const xs = points.map(p => p.x);
-  const ys = points.map(p => p.y);
+function drawScatterChart(canvas, seriesList, area) {
+  // Every series shares one pair of axes, so the ranges are taken across all
+  // of them. Reading only the first series' extent would push later points off
+  // the plot — the same "looks complete, isn't" failure as drawing datasets[0]
+  // alone, just expressed as clipping instead of omission.
+  const all = seriesList.flatMap(entry => entry.data);
+  const xs = all.map(p => p.x);
+  const ys = all.map(p => p.y);
   const yTicks = niceTicks(Math.min(...ys), Math.max(...ys));
   const toY = drawValueAxis(canvas, area, yTicks);
   const xTicks = niceTicks(Math.min(...xs), Math.max(...xs));
@@ -791,9 +803,13 @@ function drawScatterChart(canvas, points, area) {
     }, TEXT);
   }
   fillRect(canvas, { x: area.left, y: area.bottom, width: area.width, height: 2 }, AXIS);
-  for (const point of points) {
-    fillCircle(canvas, toX(point.x), toY(point.y), 9, PALETTE[0]);
+  for (const [seriesIndex, entry] of seriesList.entries()) {
+    const colour = PALETTE[seriesIndex % PALETTE.length];
+    for (const point of entry.data) {
+      fillCircle(canvas, toX(point.x), toY(point.y), 9, colour);
+    }
   }
+  if (seriesList.length > 1) drawSeriesLegend(canvas, seriesList, area);
 }
 
 function wedgeColour(dx, dy, radius, bounds) {
@@ -957,12 +973,6 @@ function readPoints(series) {
 function drawChart(canvas, config, area) {
   const seriesList = readSeriesList(config);
   const type = config?.type;
-  if (type === 'scatter') {
-    // Scatter keeps its own x/y reading; multiple point series are drawn in
-    // sequence so each gets its own colour.
-    drawScatterChart(canvas, readPoints(seriesList[0].data), area);
-    return;
-  }
   if (type === 'pie') {
     // A pie shows one whole divided into parts, so a second dataset has no
     // meaning — say that instead of silently drawing only the first.
@@ -987,6 +997,18 @@ function drawChart(canvas, config, area) {
       `too many series to label (${seriesList.length}); the legend holds at most ` +
       `${fits} — chart fewer series, or split them across charts`,
     );
+  }
+  if (type === 'scatter') {
+    // Scatter reads x/y pairs rather than category values, but is otherwise a
+    // multi-series chart like the rest: one point set per dataset, coloured and
+    // named by the same legend. It used to draw seriesList[0] alone under a
+    // comment claiming otherwise, so a second point set vanished silently.
+    drawScatterChart(
+      canvas,
+      seriesList.map(entry => ({ label: entry.label, data: readPoints(entry.data) })),
+      area,
+    );
+    return;
   }
   const drawn = seriesList.map(entry => ({
     label: entry.label,
