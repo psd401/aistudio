@@ -43,6 +43,19 @@ const MEMORY_EXTRACTION_ATTEMPTS = 2
  */
 const MEMORY_EXTRACTION_MAX_SPLIT_DEPTH = 3
 const MEMORY_EXTRACTION_MIN_CHUNK_CHARS = 500
+const MEMORY_EXTRACTION_RETRY_BASE_MS = 250
+
+/**
+ * Jittered so several chunks that hit the same Bedrock throttle window do not
+ * retry in lockstep — at concurrency 3 an immediate retry tends to land in the
+ * window that just rejected it.
+ */
+function delayBeforeRetry(attempt: number): Promise<void> {
+  const base = MEMORY_EXTRACTION_RETRY_BASE_MS * attempt
+  return new Promise((resolve) => {
+    setTimeout(resolve, base + Math.random() * base)
+  })
+}
 
 const INVALID_EXTRACTION_RESPONSE =
   "The memory extraction model returned an invalid response"
@@ -93,12 +106,15 @@ function salvageCandidates(value: unknown): MemoryImportCandidate[] | null {
   const salvaged: MemoryImportCandidate[] = []
   let capped = 0
   for (const entry of candidates) {
+    // Validate before counting, so droppedCandidates reports what the cap
+    // actually cost rather than including entries that were invalid anyway.
+    const parsed = MemoryImportCandidateSchema.safeParse(entry)
+    if (!parsed.success) continue
     if (salvaged.length >= MAX_MEMORY_IMPORT_CANDIDATES) {
       capped += 1
       continue
     }
-    const parsed = MemoryImportCandidateSchema.safeParse(entry)
-    if (parsed.success) salvaged.push(parsed.data)
+    salvaged.push(parsed.data)
   }
   if (capped > 0) {
     // Never truncate silently: "why did my import stop at 100" has to be
@@ -315,6 +331,12 @@ export function createMemoryImportExtractor(
           result,
           error,
         })
+        // No point pausing before a retry that will not happen, and none
+        // before a split — a smaller chunk is not competing for the same
+        // throttle window.
+        if (attempt < MEMORY_EXTRACTION_ATTEMPTS && !ranOutOfBudget) {
+          await delayBeforeRetry(attempt)
+        }
       }
     }
 
