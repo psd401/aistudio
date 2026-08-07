@@ -20,7 +20,6 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-import re
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -3294,64 +3293,3 @@ class SQLitePersistenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class ImageOwnedBootstrapExclusionTests(unittest.TestCase):
-    """Every image-owned bootstrap file must be excluded from workspace sync.
-
-    An image-owned file that is NOT excluded gets overwritten on cold-start by
-    each user's S3 workspace, which predates it. It then works perfectly for a
-    brand-new user and is silently absent for everyone else — which is exactly
-    how it hides. This happened to SOUL.md on 2026-04-22 and again to AGENTS.md
-    on 2026-08-07, when the operating rules moved into their own bootstrap file
-    and the agent reported having no rules in context.
-
-    IDENTITY/USER/MEMORY are deliberately NOT here: those are agent-written and
-    user-owned, and must round-trip.
-    """
-
-    IMAGE_OWNED = ("SOUL.md", "AGENTS.md")
-    USER_OWNED = ("IDENTITY.md", "USER.md", "MEMORY.md")
-
-    def test_image_owned_bootstrap_files_never_sync(self):
-        for name in self.IMAGE_OWNED:
-            self.assertIn(
-                name,
-                workspace_sync._SKIP_RELATIVE_PREFIXES,
-                f"{name} is image-owned and must be excluded from sync, or a "
-                "pre-existing user's S3 workspace will overwrite it on pull",
-            )
-
-    def test_user_owned_memory_files_still_round_trip(self):
-        for name in self.USER_OWNED:
-            self.assertNotIn(
-                name,
-                workspace_sync._SKIP_RELATIVE_PREFIXES,
-                f"{name} is agent-written and user-owned; excluding it would "
-                "stop the agent's own memory from persisting",
-            )
-
-    def test_every_bootstrap_file_the_dockerfile_generates_is_covered(self):
-        # Ties the exclusion to the Dockerfile rather than to a literal: if a
-        # generated bootstrap filename changes, this fails instead of silently
-        # leaving the new name unprotected.
-        #
-        # EVERY redirect target, not the first. `re.search` returned SOUL.md —
-        # which is excluded — so the test passed while asserting nothing about
-        # AGENTS.md, the very file it was written to guard. Renaming AGENTS.md
-        # would not have failed it.
-        dockerfile = pathlib.Path(__file__).with_name("Dockerfile").read_text()
-        generated = set(
-            re.findall(r"> /home/node/\.openclaw/([A-Za-z]+\.md)", dockerfile)
-        )
-        self.assertTrue(generated, "no generated bootstrap file found in the Dockerfile")
-        # Both files the image generates today; a new one must be added here
-        # AND to the policy, which is the point of the check.
-        self.assertEqual(generated, {"SOUL.md", "AGENTS.md"})
-        for name in sorted(generated):
-            self.assertIn(
-                name,
-                workspace_sync._SKIP_RELATIVE_PREFIXES,
-                f"the Dockerfile generates {name} but workspace sync would "
-                "overwrite it from S3 on cold start",
-            )

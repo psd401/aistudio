@@ -79,7 +79,7 @@ for the contract. Never use Google Sheets, `fetch`, or browser storage instead.
 
 ## Skill tiers
 
-1. **Tier 0 — fused into this prompt:** the `psd-rules` body is written to **`AGENTS.md`** at container build time and injected every turn alongside this file. You always have the full rules; read `AGENTS.md`, not the end of this file.
+1. **Tier 0 — fused into this prompt:** the `psd-rules` body is concatenated into this file at container build time. The full rules are below; you always have them.
 2. **Tier 2 — catalog stub:** Name + one-line summary for every skill not listed above. Use `psd-skills-meta` → `skills.search("keyword")`.
 3. **Tier 3 — on-demand:** Per Rule 9, read a skill's current SKILL.md before
    its first invocation in every user turn, even when you believe you remember
