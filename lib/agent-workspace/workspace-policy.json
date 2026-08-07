@@ -5,14 +5,38 @@
     "maxSegmentUtf8Bytes": 255,
     "maxDepth": 64,
     "rejectedCodePointRanges": [
-      [0, 31],
-      [92, 92],
-      [127, 159],
-      [1564, 1564],
-      [8206, 8207],
-      [8232, 8238],
-      [8294, 8297],
-      [55296, 57343]
+      [
+        0,
+        31
+      ],
+      [
+        92,
+        92
+      ],
+      [
+        127,
+        159
+      ],
+      [
+        1564,
+        1564
+      ],
+      [
+        8206,
+        8207
+      ],
+      [
+        8232,
+        8238
+      ],
+      [
+        8294,
+        8297
+      ],
+      [
+        55296,
+        57343
+      ]
     ]
   },
   "checkpointExclusions": {
@@ -27,6 +51,7 @@
       "logs/",
       "update-check.json",
       ".openclaw/",
+      "AGENTS.md",
       "SOUL.md",
       "skills/gws-",
       "skills/psd-brand-guidelines/",
