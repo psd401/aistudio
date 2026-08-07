@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import tempfile
+import pathlib
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -74,10 +75,7 @@ class StripFrontmatterTests(unittest.TestCase):
 
 
 class EffectiveSizesTests(unittest.TestCase):
-    def test_rules_body_becomes_agents_not_soul(self):
-        # 2026-08-06: the rules moved out of SOUL.md into AGENTS.md. Budgets are
-        # per file as well as total, so appending ~22k of rules to SOUL.md spent
-        # one file's whole allowance while 45k of the total went unused.
+    def test_soul_includes_psd_rules_body(self):
         d = tempfile.mkdtemp()
         _write(os.path.join(d, "SOUL.md"), "SOUL")
         os.makedirs(os.path.join(d, "skills", "psd-rules"))
@@ -86,17 +84,9 @@ class EffectiveSizesTests(unittest.TestCase):
             "---\nname: x\n---\nRULES BODY",
         )
         sizes = cbb.effective_bootstrap_sizes(d)
-        self.assertEqual(sizes["SOUL.md"], len("SOUL"))
-        self.assertEqual(
-            sizes["AGENTS.md"],
-            len(cbb._PSD_RULES_HEADER) + len("RULES BODY"),
-        )
-
-    def test_agents_is_absent_without_a_rules_skill(self):
-        d = tempfile.mkdtemp()
-        _write(os.path.join(d, "SOUL.md"), "SOUL")
-        sizes = cbb.effective_bootstrap_sizes(d)
-        self.assertNotIn("AGENTS.md", sizes)
+        # SOUL.md effective = "SOUL" + separator + "RULES BODY" (frontmatter stripped)
+        expected = len("SOUL") + len(cbb._PSD_RULES_SEPARATOR) + len("RULES BODY")
+        self.assertEqual(sizes["SOUL.md"], expected)
 
     def test_omits_absent_files(self):
         d = tempfile.mkdtemp()
@@ -158,3 +148,52 @@ class MainCliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InjectedBootstrapSetTests(unittest.TestCase):
+    """The budget gate must model the files the host actually injects.
+
+    2026-08-07: operating rules were moved into AGENTS.md on the belief that it
+    was a bootstrap file. It is not, in the host we pin. `openclaw config
+    schema` enumerates the optional bootstrap files as SOUL/USER/IDENTITY/
+    HEARTBEAT, and this host uses AGENTS.md for post-compaction re-injection of
+    named sections instead. The rules were never injected, and the sync
+    exclusion added to "fix" it retired a path already in S3, which broke every
+    workspace restore on dev.
+
+    These assert the gate keeps measuring SOUL.md as the file that carries the
+    rules, so a future move cannot silently pass the budget check while the
+    prompt loses its rules.
+    """
+
+    def test_rules_are_measured_as_part_of_soul(self):
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "SOUL.md"), "SOUL")
+        os.makedirs(os.path.join(d, "skills", "psd-rules"))
+        _write(
+            os.path.join(d, "skills", "psd-rules", "SKILL.md"),
+            "---\nname: x\n---\nRULES BODY",
+        )
+        sizes = cbb.effective_bootstrap_sizes(d)
+        self.assertGreater(
+            sizes["SOUL.md"],
+            len("SOUL") + len("RULES BODY"),
+            "the rules body must be measured inside SOUL.md",
+        )
+        self.assertNotIn(
+            "AGENTS.md",
+            sizes,
+            "AGENTS.md is not injected by this host — it must not be treated "
+            "as a bootstrap file",
+        )
+
+    def test_the_dockerfile_writes_the_rules_into_soul(self):
+        # Tied to the Dockerfile so moving the rules elsewhere fails here
+        # rather than silently removing them from the prompt.
+        dockerfile = pathlib.Path(__file__).with_name("Dockerfile").read_text()
+        self.assertRegex(
+            dockerfile,
+            r"psd-rules\.body\.md >> /home/node/\.openclaw/SOUL\.md",
+            "the psd-rules body must be appended to SOUL.md — the only file "
+            "this host injects that can carry it",
+        )

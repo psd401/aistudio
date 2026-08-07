@@ -25,7 +25,7 @@
       "model": {
         "primary": "amazon-bedrock/us.anthropic.claude-sonnet-5"
       },
-      "bootstrapMaxChars": 32000,
+      "bootstrapMaxChars": 64000,
       "bootstrapTotalMaxChars": 80000,
       "params": {
         "cacheRetention": "long"
