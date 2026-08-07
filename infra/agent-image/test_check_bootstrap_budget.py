@@ -166,6 +166,33 @@ class InjectedBootstrapSetTests(unittest.TestCase):
     prompt loses its rules.
     """
 
+    def test_a_stale_agents_md_is_ignored_at_runtime(self):
+        # The 2026-08-07 image pushed AGENTS.md into every user's S3 workspace.
+        # Un-excluding the path means it gets pulled back down, so the RUNTIME
+        # check will see it on disk. It must not be charged to the prompt
+        # budget: this host never injects it, and ~22k of dead weight would
+        # emit BootTruncationWarn/BOOT_TRUNCATION for no reason.
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "SOUL.md"), "SOUL")
+        _write(os.path.join(d, "AGENTS.md"), "X" * 22_000)
+        sizes = cbb.runtime_bootstrap_sizes(d)
+        self.assertIn("SOUL.md", sizes)
+        self.assertNotIn(
+            "AGENTS.md",
+            sizes,
+            "a stale AGENTS.md must not count against the prompt budget",
+        )
+        self.assertEqual(sum(sizes.values()), len("SOUL"))
+
+    def test_runtime_set_matches_the_hosts_injected_files(self):
+        # Guards against re-adding a file on documentation alone. Verified via
+        # `openclaw config schema` (skipOptionalBootstrapFiles) and the
+        # injected-file arrays in /app/dist.
+        self.assertEqual(
+            set(cbb.BOOTSTRAP_FILES),
+            {"SOUL.md", "IDENTITY.md", "USER.md", "MEMORY.md", "HEARTBEAT.md"},
+        )
+
     def test_rules_are_measured_as_part_of_soul(self):
         d = tempfile.mkdtemp()
         _write(os.path.join(d, "SOUL.md"), "SOUL")

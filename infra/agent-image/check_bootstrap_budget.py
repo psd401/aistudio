@@ -39,18 +39,30 @@ import sys
 from typing import Dict, List, Optional, Tuple
 
 # The bootstrap files OpenClaw auto-loads when present (Dockerfile lines ~326-354
-# document SOUL/IDENTITY/USER/MEMORY as seeded, and AGENTS/TOOLS/HEARTBEAT/
-# BOOTSTRAP as also-auto-loaded when present). SOUL.md is the only one the image
-# builds by concatenation; the rest are copied/seeded as-is.
+# The files THIS host actually injects into the system prompt, verified against
+# `openclaw config schema` rather than documentation: skipOptionalBootstrapFiles
+# enumerates SOUL/USER/IDENTITY/HEARTBEAT, and the injected-file arrays in
+# /app/dist are ["SOUL.md"] and ["IDENTITY.md","USER.md","SOUL.md"]. SOUL.md is
+# the only one the image builds by concatenation; the rest are seeded as-is.
+#
+# AGENTS.md is deliberately ABSENT (2026-08-07). This host uses it for
+# post-compaction re-injection of named sections
+# (DEFAULT_POST_COMPACTION_SECTIONS = ["Session Startup", "Red Lines"]), not as
+# a per-turn bootstrap file. Counting it here charged the prompt budget for
+# something never injected — and because a stale AGENTS.md now exists in the S3
+# workspace of every user who ran the 2026-08-07 image, the runtime check would
+# have pulled ~22k of dead weight into the total and emitted BootTruncationWarn
+# and BOOT_TRUNCATION for a file with no effect on the prompt.
+#
+# TOOLS.md/BOOTSTRAP.md are listed by upstream docs but are not in this host's
+# injected set either; keep them out until `openclaw config schema` says
+# otherwise.
 BOOTSTRAP_FILES: Tuple[str, ...] = (
     "SOUL.md",
     "IDENTITY.md",
     "USER.md",
     "MEMORY.md",
-    "AGENTS.md",
-    "TOOLS.md",
     "HEARTBEAT.md",
-    "BOOTSTRAP.md",
 )
 
 # Separator the Dockerfile prints between SOUL.md and the psd-rules body. Kept
