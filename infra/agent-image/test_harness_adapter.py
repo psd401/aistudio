@@ -1168,6 +1168,161 @@ class TestUpstreamRetry(unittest.TestCase):
         self.assertTrue(result.failed)
         self.assertEqual(result.error_class, "OpenClawChatError")
 
+    def test_never_retries_a_turn_with_a_tool_still_in_flight(self):
+        # The dangerous case tool_calls alone cannot see: the call STARTED,
+        # may already have created the Doc, and its result event never
+        # arrived — so it never landed in tool_calls at all.
+        self.assertFalse(
+            OpenClawAdapter._should_retry_upstream(
+                self._result(tool_calls=[], tools_in_flight=1)
+            )
+        )
+
+    def test_a_started_tool_with_no_result_blocks_the_retry_end_to_end(self):
+        # The gate above is only real if _process_once actually populates the
+        # field, so drive a real turn: a tool STARTS, never reports back, and
+        # the turn then dies as a generic upstream error inside the latency
+        # bound. tool_calls is empty — the old predicate would have replayed
+        # it and asked the broker to run `edit` a second time.
+        chat_id = None
+
+        class FakeWebSocket:
+            def __init__(self, messages):
+                self.messages = list(messages)
+                self.sent = []
+
+            def send(self, payload):
+                nonlocal chat_id
+                parsed = json.loads(payload)
+                self.sent.append(parsed)
+                if parsed.get("method") == "chat.send":
+                    chat_id = parsed["id"]
+
+            def recv(self):
+                message = self.messages.pop(0)
+                return message() if callable(message) else message
+
+            def settimeout(self, _timeout):
+                return None
+
+            def close(self):
+                return None
+
+        def envelope(**fields):
+            return json.dumps(fields)
+
+        def current_run_event(event, payload):
+            return envelope(
+                type="event",
+                event=event,
+                payload={"runId": chat_id, **payload},
+            )
+
+        messages = [
+            envelope(type="event", event="connect.challenge", payload={}),
+            lambda: envelope(type="res", id=socket.sent[-1]["id"], ok=True,
+                             payload={}),
+            lambda: envelope(type="res", id=socket.sent[-1]["id"], ok=True,
+                             payload={"tools": []}),
+            lambda: envelope(type="res", id=socket.sent[-1]["id"], ok=True,
+                             payload={}),
+            lambda: envelope(type="res", id=chat_id, ok=True,
+                             payload={"runId": chat_id, "status": "started"}),
+            # Starts, and never reports a terminal result.
+            lambda: current_run_event(
+                "agent",
+                {
+                    "stream": "item",
+                    "data": {
+                        "itemId": "tool-901",
+                        "phase": "start",
+                        "kind": "tool",
+                        "name": "edit",
+                    },
+                },
+            ),
+            lambda: current_run_event(
+                "chat",
+                {"seq": 7, "state": "error", "errorMessage": "upstream boom"},
+            ),
+        ]
+        socket = FakeWebSocket(messages)
+        fake_websocket_module = mock.Mock()
+        fake_websocket_module.create_connection.return_value = socket
+        fake_websocket_module.WebSocketTimeoutException = TimeoutError
+        empty_usage = {
+            "input": 0,
+            "output": 0,
+            "cache_read": 0,
+            "cache_write": 0,
+            "model_calls": 0,
+            "capture_complete": False,
+        }
+        adapter = OpenClawAdapter()
+        adapter._ready = True
+
+        with (
+            mock.patch.dict(sys.modules, {"websocket": fake_websocket_module}),
+            mock.patch.object(adapter, "_read_turn_usage",
+                              return_value=empty_usage),
+            mock.patch("harness_adapter.record_failure"),
+            mock.patch("harness_adapter.time.time", return_value=100.0),
+        ):
+            result = adapter._process_once("edit the doc", "s1", deadline_s=600)
+
+        self.assertEqual(result.error_class, "OpenClawChatError")
+        self.assertEqual(result.tool_calls, [], "the start never completed")
+        self.assertEqual(result.tools_in_flight, 1)
+        self.assertFalse(OpenClawAdapter._should_retry_upstream(result))
+
+    def test_retry_runs_inside_the_remaining_turn_budget(self):
+        # A second FULL deadline would blow through the 550s ceiling that
+        # reserves the rest of the Router invocation for flush + delivery.
+        adapter = OpenClawAdapter()
+        deadlines = []
+
+        def fake_once(message, session_id, model_override=None,
+                      deadline_s=None, _is_nudge=False):
+            deadlines.append(deadline_s)
+            if len(deadlines) == 1:
+                return self._result()
+            return harness_adapter.TurnResult(text="recovered", failed=False)
+
+        clock = iter([0.0, 25.0])
+        with mock.patch.object(adapter, "_process_once", side_effect=fake_once), \
+                mock.patch.object(harness_adapter.time, "sleep"), \
+                mock.patch.object(
+                    harness_adapter.time, "monotonic", side_effect=lambda: next(clock)
+                ):
+            adapter.process("x", "s1", deadline_s=550)
+
+        self.assertEqual(deadlines[0], 550)
+        # 550 budget - 25s spent - 2s backoff.
+        self.assertEqual(deadlines[1], 523)
+        self.assertLess(deadlines[1], deadlines[0])
+
+    def test_skips_the_retry_when_too_little_budget_remains(self):
+        # Below the floor there is not enough turn left to be worth it — and
+        # _resolve_deadline_s would clamp a smaller remainder back UP to 60,
+        # turning the guard into the very overshoot it exists to prevent.
+        adapter = OpenClawAdapter()
+        calls = []
+
+        def fake_once(*_a, **_kw):
+            calls.append(1)
+            return self._result()
+
+        clock = iter([0.0, 45.0])
+        with mock.patch.object(adapter, "_process_once", side_effect=fake_once), \
+                mock.patch.object(harness_adapter.time, "sleep"), \
+                mock.patch.object(
+                    harness_adapter.time, "monotonic", side_effect=lambda: next(clock)
+                ):
+            result = adapter.process("x", "s1", deadline_s=60)
+
+        self.assertEqual(len(calls), 1, "no budget left — must not retry")
+        self.assertTrue(result.failed)
+
 
 class TestRecordItemToolEvent(unittest.TestCase):
     """Native-mode tool items must land in tool_calls telemetry (#1138 r12)."""
