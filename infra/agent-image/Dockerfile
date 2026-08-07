@@ -294,22 +294,31 @@ COPY ${OPENCLAW_CONFIG} /home/node/.openclaw/openclaw.json
 # visible to the LLM. Keep roadmap notes here in the Dockerfile instead.
 # TODO(phase-2): Add Google Calendar and Gmail read-only tool access to the agent.
 #
-# Tier-1 enforcement: SOUL.md alone is auto-loaded, but the rules in
-# psd-rules SKILL.md are NOT auto-injected by OpenClaw — the model only
-# sees a Tier-2 catalog stub for any skill it has not explicitly loaded.
-# That meant the "non-negotiable" rules were never actually present in
-# the system prompt and the agent ignored them (observed 2026-05-03).
-# At build time we strip psd-rules' YAML frontmatter and append the body
-# to SOUL.md so the rules ARE in the system prompt every turn. The
-# canonical edit point stays `skills/psd-rules/SKILL.md`.
+# Tier-1 enforcement: the rules in psd-rules SKILL.md are NOT auto-injected by
+# OpenClaw — the model only sees a Tier-2 catalog stub for any skill it has not
+# explicitly loaded. That meant the "non-negotiable" rules were never actually
+# present in the system prompt and the agent ignored them (observed 2026-05-03).
+# At build time we strip psd-rules' YAML frontmatter and write the body into a
+# bootstrap file so the rules ARE in the system prompt every turn. The canonical
+# edit point stays `skills/psd-rules/SKILL.md`.
+#
+# The rules go in AGENTS.md, NOT appended to SOUL.md (changed 2026-08-06).
+# OpenClaw budgets bootstrap files PER FILE (bootstrapMaxChars) as well as in
+# total (bootstrapTotalMaxChars), and it loads AGENTS.md, TOOLS.md, HEARTBEAT.md
+# and BOOTSTRAP.md alongside SOUL.md whenever they exist. Concatenating the
+# ~22k-char rules body onto SOUL.md spent one file's entire 32k budget while the
+# combined total sat at 35k of 80k — so we were out of room in one file while
+# 45k went unused, and every rule addition had to be paid for by deleting
+# another. Splitting also matches the documented roles: AGENTS.md is operational
+# rules and routing, SOUL.md is identity and voice.
 ARG SOUL_PREAMBLE=SOUL.md
 ARG PSD_RULES_SKILL=skills/psd-rules/SKILL.md
 COPY ${SOUL_PREAMBLE} /tmp/SOUL.preamble.md
 COPY ${PSD_RULES_SKILL} /tmp/psd-rules.SKILL.md
 RUN awk 'BEGIN{f=0} /^---[[:space:]]*$/{f++; next} f>=2{print}' /tmp/psd-rules.SKILL.md > /tmp/psd-rules.body.md && \
     cat /tmp/SOUL.preamble.md > /home/node/.openclaw/SOUL.md && \
-    printf '\n\n---\n\n# Operating Rules (from psd-rules)\n\n_The following rules are concatenated from `skills/psd-rules/SKILL.md` at container build time so they are guaranteed to appear in every turn\xe2\x80\x99s system prompt. Edit them in that file, not here._\n\n' >> /home/node/.openclaw/SOUL.md && \
-    cat /tmp/psd-rules.body.md >> /home/node/.openclaw/SOUL.md && \
+    printf '# Operating Rules (from psd-rules)\n\n_Concatenated from `skills/psd-rules/SKILL.md` at container build time so these rules appear in every turn\xe2\x80\x99s system prompt. Edit them in that file, not here._\n\n' > /home/node/.openclaw/AGENTS.md && \
+    cat /tmp/psd-rules.body.md >> /home/node/.openclaw/AGENTS.md && \
     rm -f /tmp/SOUL.preamble.md /tmp/psd-rules.SKILL.md /tmp/psd-rules.body.md
 # OpenClaw also auto-loads IDENTITY.md, USER.md, MEMORY.md (and AGENTS.md,
 # TOOLS.md, HEARTBEAT.md, BOOTSTRAP.md) when present. We seed empty stubs so
@@ -383,6 +392,27 @@ COPY skills /opt/psd-skills
 # user invokes web_search.
 ARG BEDROCK_PLUGIN_VERSION=2026.7.2-beta.5
 ARG BEDROCK_PLUGIN_ASSERTION=claude-sonnet-5
+# UPSTREAM-BUG CANARY (2026-08-06) — this asserts a bug is STILL PRESENT.
+#
+# convertToolConfig returns undefined when tools are empty or toolChoice is
+# "none", so OpenClaw's tools-disabled "settled post-tool turn" finalization
+# sends a Converse request with no toolConfig while the message history still
+# carries toolUse/toolResult blocks. Bedrock rejects that combination
+# ("The toolConfig field must be defined when using toolUse and toolResult
+# content blocks"), so the recovery call cannot succeed and a turn that had
+# already run 1-2 tools fails outright. 9 occurrences across 8 users,
+# 2026-08-04..06, with an identical signature (response_chars=0, seq=19 at one
+# tool / seq=25 at two).
+#
+# It is NOT fixed upstream: 2026.7.2-beta.7's dist is byte-identical to
+# beta.5's. We chose to live with it rather than patch a vendored dependency
+# that runs on every turn.
+#
+# This canary is how we find out when that changes. The build FAILS the moment
+# upstream edits this line — which is the signal to re-test the finalization
+# path and delete this ARG. Without it we would carry a known-broken recovery
+# path indefinitely and never notice the fix landing.
+ARG BEDROCK_TOOLCONFIG_CANARY='if (!tools?.length || toolChoice === "none") return;'
 ARG PARALLEL_PLUGIN_VERSION=2026.7.2-beta.5
 ARG PARALLEL_PLUGIN_ENDPOINT=https://search.parallel.ai/mcp
 RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-fund && \
@@ -401,6 +431,8 @@ RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-f
     test -f /opt/openclaw-plugins/amazon-bedrock/openclaw.plugin.json && \
     grep -Fq -- "${BEDROCK_PLUGIN_ASSERTION}" \
       /opt/openclaw-plugins/amazon-bedrock/dist/bedrock-options.js && \
+    grep -Fq -- "${BEDROCK_TOOLCONFIG_CANARY}" \
+      /opt/openclaw-plugins/amazon-bedrock/dist/stream.runtime.js && \
     cd /opt/openclaw-plugins && \
     npm pack "@openclaw/parallel-plugin@${PARALLEL_PLUGIN_VERSION}" && \
     tar -xzf "openclaw-parallel-plugin-${PARALLEL_PLUGIN_VERSION}.tgz" && \

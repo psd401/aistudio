@@ -165,6 +165,15 @@ class TurnResult:
     latency_ms: int = 0
     messages: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
     tool_calls: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
+    # Tools that STARTED and never reported a terminal result — i.e. what was
+    # still in `tool_starts` when the turn ended. A started-but-unfinished call
+    # never lands in `tool_calls`, so without this an interrupted side effect
+    # (the request reached the broker and created the Doc, its result event
+    # simply never arrived) looks identical to a turn that ran nothing. It is
+    # the most dangerous case, not the safest: `_should_retry_upstream` treats
+    # a nonzero value as replay-UNSAFE, and `_frame_failed_partial` already
+    # tells the user the same thing in prose.
+    tools_in_flight: int = 0
     # Set True when this turn is an error/degraded return (session conflict,
     # deadline, empty response, WS failure) rather than a real answer. The
     # wrapper forwards this to the router (metadata.failed) so a 0-token error
@@ -201,6 +210,23 @@ def _format_for_chat(text: str) -> str:
 
 CONTEXT_OVERFLOW_ERROR_CLASS = "ContextOverflow"
 INCOMPLETE_TOOL_TURN_ERROR_CLASS = "OpenClawIncompleteToolTurn"
+
+# Upstream-failure retry (2026-08-06 Bedrock 5xx incident). One retry only:
+# the point is to absorb a transient fault, not to hammer a provider that is
+# already unwell. The latency bound keeps the retry to turns that failed at
+# the model call — the incident's turns died in ~6s — rather than something
+# that collapsed late in real work.
+UPSTREAM_RETRY_DELAY_S = 2.0
+UPSTREAM_RETRY_MAX_LATENCY_MS = 30_000
+# The retry runs inside the ORIGINAL turn's budget, not on a fresh one: the
+# 550s interactive deadline exists to reserve the rest of the Router Lambda's
+# 15-minute ceiling for workspace flushing and delivery, and a second full
+# deadline would blow straight through it. The second attempt therefore gets
+# only what is left after the first attempt and the backoff. Below this floor
+# there is not enough turn left to be worth the attempt — and it is also
+# `_resolve_deadline_s`'s own lower clamp, so a smaller remainder would be
+# silently rounded back UP into an overshoot.
+UPSTREAM_RETRY_MIN_REMAINING_S = 60
 
 
 def _classify_chat_error(error_message: str) -> str:
@@ -771,6 +797,99 @@ class OpenClawAdapter(HarnessAdapter):
         return {**totals, "capture_complete": False}
 
     def process(
+        self,
+        message: str,
+        session_id: str,
+        model_override: Optional[str] = None,
+        deadline_s: Optional[int] = None,
+        _is_nudge: bool = False,
+    ) -> TurnResult:
+        """Run one turn, retrying once when the UPSTREAM model call fails
+        before any work happened.
+
+        On 2026-08-06 Bedrock returned 5xx for ~25 minutes (CloudWatch
+        InvocationServerErrors peaked at 26/5min, InvocationThrottles stayed
+        at zero — a server fault, not our quota). It cost 27 turns across 9
+        users. Every one of them died in ~6 seconds having executed NOTHING:
+        no tool calls, no output. A transient upstream fault at that point is
+        the one failure a turn can safely repeat, because there is nothing to
+        repeat.
+
+        Deliberately narrow. `_should_retry_upstream` demands the turn be
+        provably side-effect-free, so this never re-runs work: a turn that
+        already created a Doc is not retried, whatever it failed with.
+        """
+        started_at = time.monotonic()
+        attempt = self._process_once(
+            message, session_id, model_override, deadline_s, _is_nudge
+        )
+        if not self._should_retry_upstream(attempt):
+            return attempt
+        # Wall clock, not attempt.latency_ms: latency is measured from
+        # chat.send and so misses connection setup, which the retry must also
+        # pay for a second time.
+        elapsed_s = time.monotonic() - started_at
+        remaining_s = int(
+            self._resolve_deadline_s(deadline_s) - elapsed_s - UPSTREAM_RETRY_DELAY_S
+        )
+        if remaining_s < UPSTREAM_RETRY_MIN_REMAINING_S:
+            logger.warning(
+                "skipping upstream retry — only %ds of the turn budget left: "
+                "error_class=%s",
+                remaining_s,
+                attempt.error_class,
+            )
+            return attempt
+        logger.warning(
+            "retrying turn after a clean upstream failure: error_class=%s "
+            "latency_ms=%d retry_deadline_s=%d",
+            attempt.error_class,
+            attempt.latency_ms,
+            remaining_s,
+        )
+        time.sleep(UPSTREAM_RETRY_DELAY_S)
+        retried = self._process_once(
+            message, session_id, model_override, remaining_s, _is_nudge
+        )
+        if retried.failed:
+            # Keep the retry's result — it is the more recent evidence — but
+            # say plainly that a retry happened, so a two-failure turn is not
+            # read as a single blip.
+            logger.error(
+                "upstream retry also failed: first=%s second=%s",
+                attempt.error_class,
+                retried.error_class,
+            )
+            return retried
+        logger.info("upstream retry recovered the turn")
+        return retried
+
+    @staticmethod
+    def _should_retry_upstream(result: TurnResult) -> bool:
+        """True only when replaying the turn cannot repeat a side effect.
+
+        ALL must hold: the turn failed; it failed as a generic upstream chat
+        error (not a deadline, overflow, or the incomplete-tool-turn class,
+        each of which OpenClaw already handles its own way); no tool call was
+        recorded AND none was still in flight; and it died fast enough that the
+        failure was the model call itself rather than something that happened
+        mid-work.
+
+        `tools_in_flight` is not redundant with `tool_calls`. A tool that
+        started and never reported a terminal result is dropped from
+        `tool_calls` entirely, so a turn that had already asked the broker to
+        create a Doc can present an EMPTY tool_calls list. Retrying that would
+        create the Doc twice.
+        """
+        if not result.failed:
+            return False
+        if result.error_class != "OpenClawChatError":
+            return False
+        if result.tool_calls or result.tools_in_flight:
+            return False
+        return result.latency_ms <= UPSTREAM_RETRY_MAX_LATENCY_MS
+
+    def _process_once(
         self,
         message: str,
         session_id: str,
@@ -1410,6 +1529,7 @@ class OpenClawAdapter(HarnessAdapter):
                                 latency_ms=int((time.time() - chat_send_at) * 1000),
                                 messages=messages_log,
                                 tool_calls=tool_calls,
+                                tools_in_flight=len(tool_starts),
                                 failed=True,
                                 error_class=err_class,
                             )
@@ -1518,6 +1638,7 @@ class OpenClawAdapter(HarnessAdapter):
                                 latency_ms=int((time.time() - chat_send_at) * 1000),
                                 messages=messages_log,
                                 tool_calls=tool_calls,
+                                tools_in_flight=len(tool_starts),
                                 failed=True,
                                 error_class="OpenClawChatSendError",
                             )
@@ -1565,6 +1686,7 @@ class OpenClawAdapter(HarnessAdapter):
                 model=observed_model,
                 messages=messages_log,
                 tool_calls=tool_calls,
+                tools_in_flight=len(tool_starts),
                 failed=True,
                 error_class="WebSocketError",
             )
@@ -1610,6 +1732,7 @@ class OpenClawAdapter(HarnessAdapter):
                 latency_ms=latency_ms,
                 messages=log,
                 tool_calls=tool_calls,
+                tools_in_flight=len(tool_starts),
                 failed=failed,
                 error_class=error_class,
                 nudged=nudged,
@@ -1806,6 +1929,7 @@ class OpenClawAdapter(HarnessAdapter):
                     latency_ms=int((time.time() - chat_send_at) * 1000),
                     messages=messages_log + nudged.messages,
                     tool_calls=merged_tools,
+                    tools_in_flight=len(tool_starts) + nudged.tools_in_flight,
                     failed=nudged.failed,
                     error_class=nudged.error_class,
                     # The nudge fired and recovered a reply — record it so the

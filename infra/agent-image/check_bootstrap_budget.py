@@ -18,9 +18,10 @@ tracks the real runtime limits (32k / 80k today) automatically when they change.
 Two entry modes (one source of truth for the file set + budgets):
 
   * --source-dir DIR  (build gate, host-side, no Docker/creds needed)
-      Reconstructs the EFFECTIVE SOUL.md the Dockerfile builds
-      (SOUL.md + the psd-rules SKILL.md body) and checks it alongside the other
-      repo-provided bootstrap files. This is what runs in build-and-push.sh.
+      Reconstructs the EFFECTIVE bootstrap set the Dockerfile builds — SOUL.md
+      as-is, plus an AGENTS.md synthesised from the psd-rules SKILL.md body —
+      and checks them alongside the other repo-provided files. This is what
+      runs in build-and-push.sh.
 
   * --runtime-dir DIR (in-container / runtime)
       Checks the already-built files as they sit in /home/node/.openclaw. The
@@ -53,14 +54,14 @@ BOOTSTRAP_FILES: Tuple[str, ...] = (
     "BOOTSTRAP.md",
 )
 
-# Separator the Dockerfile prints between SOUL.md and the psd-rules body. Kept
+# Header the Dockerfile prints at the top of the generated AGENTS.md. Kept
 # byte-identical (including the U+2019 right single quote in "turn's") so the
 # reconstructed effective size matches the built file. If the Dockerfile's
 # printf changes, change it here too.
-_PSD_RULES_SEPARATOR = (
-    "\n\n---\n\n# Operating Rules (from psd-rules)\n\n"
-    "_The following rules are concatenated from `skills/psd-rules/SKILL.md` at "
-    "container build time so they are guaranteed to appear in every turn’s "
+_PSD_RULES_HEADER = (
+    "# Operating Rules (from psd-rules)\n\n"
+    "_Concatenated from `skills/psd-rules/SKILL.md` at "
+    "container build time so these rules appear in every turn’s "
     "system prompt. Edit them in that file, not here._\n\n"
 )
 
@@ -132,9 +133,11 @@ def _read(path: str) -> str:
 def effective_bootstrap_sizes(source_dir: str) -> Dict[str, int]:
     """Reconstruct the EFFECTIVE bootstrap file sizes the image builds.
 
-    SOUL.md is rebuilt as `SOUL.md + separator + psd-rules body` exactly like the
-    Dockerfile does; the other repo-provided files are measured as-is. Files not
-    present in the repo (runtime-seeded empty stubs) contribute 0 and are
+    The psd-rules body becomes AGENTS.md, not a suffix on SOUL.md (2026-08-06).
+    Budgets are enforced per file as well as in total, so appending ~22k chars
+    of rules to SOUL.md consumed one file's entire allowance while the combined
+    total sat at 35k of 80k — out of room in one file with 45k unused. Files
+    not present in the repo (runtime-seeded empty stubs) contribute 0 and are
     omitted from the report.
     """
     sizes: Dict[str, int] = {}
@@ -142,10 +145,11 @@ def effective_bootstrap_sizes(source_dir: str) -> Dict[str, int]:
     soul_path = os.path.join(source_dir, "SOUL.md")
     rules_path = os.path.join(source_dir, "skills", "psd-rules", "SKILL.md")
     if os.path.isfile(soul_path):
-        soul = _read(soul_path)
-        if os.path.isfile(rules_path):
-            soul = soul + _PSD_RULES_SEPARATOR + _strip_frontmatter(_read(rules_path))
-        sizes["SOUL.md"] = len(soul)
+        sizes["SOUL.md"] = len(_read(soul_path))
+    if os.path.isfile(rules_path):
+        sizes["AGENTS.md"] = len(
+            _PSD_RULES_HEADER + _strip_frontmatter(_read(rules_path))
+        )
 
     for name in BOOTSTRAP_FILES:
         if name == "SOUL.md":
