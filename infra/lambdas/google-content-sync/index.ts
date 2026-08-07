@@ -1353,8 +1353,12 @@ async function reconcileInitial(
     context.connector.sharedDriveId,
   );
   const complete = await reconcileSelectionSnapshot(context, client, counters);
-  // A full rebuild discharges any obligation an earlier run left behind.
-  if (complete && isSelectionSnapshotPending(context.connector.metadata)) {
+  // A full rebuild discharges any outstanding obligation. Cleared
+  // unconditionally rather than gated on the connector row loaded at the start
+  // of the run: this path is also reached after a 410 cursor expiry, by which
+  // point the in-memory copy can be stale. Removing an absent jsonb key is a
+  // no-op, and an initial rebuild is rare.
+  if (complete) {
     await setSelectionSnapshotPending(context, false);
   }
   return startPageToken;
