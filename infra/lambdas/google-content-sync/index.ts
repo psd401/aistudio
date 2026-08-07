@@ -76,6 +76,7 @@ import {
 } from "../../../lib/repositories/google-drive/formats";
 import { refreshGoogleAccessToken } from "../../../lib/repositories/google-drive/oauth";
 import { getGoogleContentWifAccessToken } from "../../../lib/repositories/google-drive/wif";
+import { isFileScopedDriveChange } from "./changes";
 import {
   assertGoogleSourceMetadataSize,
   assertGoogleSourceResponseSize,
@@ -1332,12 +1333,49 @@ type GoogleDriveChange = Awaited<
   ReturnType<GoogleDriveClient["listChanges"]>
 >["values"][number];
 
+/**
+ * Records the outcome of a failed file-scoped change. Connector lifecycle
+ * errors are fatal to the whole run and are rethrown; a Drive 403/404 means the
+ * file was deleted or access was lost, which is the markSourceMissing path.
+ * Anything else is rethrown so the caller can fail the record.
+ */
+async function recordDriveChangeFailure(
+  context: ConnectorContext,
+  fileId: string,
+  error: unknown,
+  counters: SyncCounters,
+): Promise<void> {
+  if (
+    error instanceof ConnectorRevokedError ||
+    error instanceof ConnectorPausedError ||
+    error instanceof ConnectorSelectionChangedError
+  ) {
+    throw error;
+  }
+  if (!isGoogleDriveMissingError(error)) throw error;
+  if (await markSourceMissing(context, fileId)) {
+    counters.missing += 1;
+  } else {
+    counters.failed += 1;
+  }
+}
+
 async function processGoogleDriveChange(
   context: ConnectorContext,
   client: GoogleDriveClient,
   change: GoogleDriveChange,
   counters: SyncCounters,
 ): Promise<boolean> {
+  // Shared Drive-scoped entries (rename, membership, restriction changes) have
+  // no fileId. Nothing below can act on them, and they must not stall the
+  // cursor: skip without side effects so the loop keeps advancing.
+  if (!isFileScopedDriveChange(change)) {
+    log.info("Skipped non-file Google Drive change entry", {
+      connectorId: context.connector.id,
+      changeType: change.changeType ?? null,
+    });
+    return false;
+  }
   if (change.removed || !change.file || change.file.trashed) {
     if (await markSourceMissing(context, change.fileId)) {
       counters.missing += 1;
@@ -1363,21 +1401,7 @@ async function processGoogleDriveChange(
     );
     return false;
   } catch (error) {
-    if (
-      error instanceof ConnectorRevokedError ||
-      error instanceof ConnectorPausedError ||
-      error instanceof ConnectorSelectionChangedError
-    ) {
-      throw error;
-    }
-    if (!isGoogleDriveMissingError(error)) throw error;
-    if (
-      await markSourceMissing(context, change.fileId)
-    ) {
-      counters.missing += 1;
-    } else {
-      counters.failed += 1;
-    }
+    await recordDriveChangeFailure(context, change.fileId, error, counters);
     return false;
   }
 }
