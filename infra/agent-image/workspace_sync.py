@@ -684,6 +684,16 @@ def _materialize_empty_workspace_file(
 # intentionally NOT on this list — those are agent-written, user-owned,
 # and must round-trip.
 #
+# AGENTS.md joined this list on 2026-08-07 after the identical failure
+# recurred: the operating rules moved out of SOUL.md into their own bootstrap
+# file, every existing user's S3 workspace predated that file, and the
+# cold-start pull overwrote the workspace without it. The image wrote AGENTS.md
+# correctly and the host supports it — it simply was not present by the time the
+# prompt was built, so the agent reported having no rules in context. It worked
+# for a brand-new user and failed for everyone else, which is what made it look
+# like the split itself had failed. ANY image-owned bootstrap file has to be
+# added here the moment it is introduced.
+#
 # Exact paths and prefix paths are separate so retiring one generated control
 # file can never hide similarly named user content. The values live in
 # workspace_policy.json so the web checkpoint and image runtime cannot
