@@ -24,36 +24,97 @@ const FILE_FIELDS = [
   "shortcutDetails(targetId,targetMimeType,targetResourceKey)",
 ].join(",");
 
-const driveUserSchema = z.object({ displayName: z.string().optional() });
+/**
+ * Google omits absent fields far more often than it nulls them, but an
+ * explicit `null` must never fail a whole page. `nullish` + a normalizing
+ * transform keeps the parsed shape identical to the previous `optional()`
+ * output while tolerating both encodings.
+ */
+const optionalString = z
+  .string()
+  .nullish()
+  .transform((value) => value ?? undefined)
+  .optional();
+
+/**
+ * Link fields are stored as source metadata and are candidates for rendering
+ * as an href. They are deliberately NOT validated with a strict URL parser —
+ * a link Google formats unexpectedly must not stall the connector — but a
+ * non-http(s) scheme (`javascript:`, `data:`) is dropped rather than
+ * persisted, so loosening the validator cannot open an injection path.
+ */
+const optionalWebUrl = z
+  .string()
+  .nullish()
+  .transform((value) =>
+    value && /^https?:\/\//i.test(value) ? value : undefined,
+  )
+  .optional();
+
+const optionalBoolean = (fallback: boolean) =>
+  z
+    .boolean()
+    .nullish()
+    .transform((value) => value ?? fallback);
+
+const driveUserSchema = z.object({ displayName: optionalString });
+
+/**
+ * Only `targetId` is consumed (`resolveShortcut` dereferences it and raises a
+ * graceful "no target" error when it is absent). `targetMimeType` has no
+ * reader anywhere in the codebase, so requiring it could only ever turn a
+ * complete page into a poison message — it is optional and unused.
+ */
 const shortcutDetailsSchema = z.object({
-  targetId: z.string(),
-  targetMimeType: z.string(),
-  targetResourceKey: z.string().optional(),
+  targetId: optionalString,
+  targetMimeType: optionalString,
+  targetResourceKey: optionalString,
 });
 
 export const googleDriveFileSchema = z.object({
   id: z.string(),
   name: z.string(),
   mimeType: z.string(),
-  parents: z.array(z.string()).optional().default([]),
-  driveId: z.string().optional(),
-  modifiedTime: z.string().datetime({ offset: true }).optional(),
-  md5Checksum: z.string().optional(),
-  version: z.string().optional(),
-  headRevisionId: z.string().optional(),
-  size: z.string().regex(/^\d+$/).optional(),
-  trashed: z.boolean().optional().default(false),
-  webViewLink: z.string().url().optional(),
-  iconLink: z.string().url().optional(),
-  owners: z.array(driveUserSchema).optional().default([]),
-  shortcutDetails: shortcutDetailsSchema.optional(),
+  parents: z
+    .array(z.string())
+    .nullish()
+    .transform((value) => value ?? []),
+  driveId: optionalString,
+  // Plain string, not `.datetime()`: the only consumers are `new Date(...)`
+  // and a revision string. Callers guard invalid dates themselves.
+  modifiedTime: optionalString,
+  md5Checksum: optionalString,
+  version: optionalString,
+  headRevisionId: optionalString,
+  // The numeric shape is re-checked by `assertGoogleSourceMetadataSize`, and
+  // the streaming byte bound is authoritative regardless of what Drive
+  // reports here.
+  size: optionalString,
+  trashed: optionalBoolean(false),
+  webViewLink: optionalWebUrl,
+  iconLink: optionalWebUrl,
+  owners: z
+    .array(driveUserSchema)
+    .nullish()
+    .transform((value) => value ?? []),
+  shortcutDetails: shortcutDetailsSchema.nullish(),
 });
 
 export type GoogleDriveFile = z.infer<typeof googleDriveFileSchema>;
 
+/**
+ * List envelopes are parsed with UNVALIDATED entries so a single malformed
+ * member cannot reject the page. Each entry is validated on its own by
+ * {@link parseDriveEntries}.
+ */
+const rawEntriesSchema = z
+  .array(z.unknown())
+  .nullish()
+  .transform((value) => value ?? []);
+
 const filesListSchema = z.object({
-  nextPageToken: z.string().optional(),
-  files: z.array(googleDriveFileSchema).default([]),
+  nextPageToken: optionalString,
+  files: rawEntriesSchema,
 });
 
 /**
@@ -67,18 +128,18 @@ const filesListSchema = z.object({
  * value Google adds later must not re-poison the queue.
  */
 const driveChangeSchema = z.object({
-  changeType: z.string().optional(),
-  fileId: z.string().optional(),
-  removed: z.boolean().optional().default(false),
-  time: z.string().datetime({ offset: true }).optional(),
-  driveId: z.string().optional(),
-  file: googleDriveFileSchema.optional(),
+  changeType: optionalString,
+  fileId: optionalString,
+  removed: optionalBoolean(false),
+  time: optionalString,
+  driveId: optionalString,
+  file: googleDriveFileSchema.nullish(),
 });
 
 const changesListSchema = z.object({
-  nextPageToken: z.string().optional(),
-  newStartPageToken: z.string().optional(),
-  changes: z.array(driveChangeSchema).default([]),
+  nextPageToken: optionalString,
+  newStartPageToken: optionalString,
+  changes: rawEntriesSchema,
 });
 
 const startPageTokenSchema = z.object({ startPageToken: z.string() });
@@ -106,13 +167,74 @@ const downloadOperationSchema = z.object({
 
 export type GoogleDriveChange = z.infer<typeof driveChangeSchema>;
 
+/**
+ * A single list entry Google returned that this client could not validate.
+ *
+ * The entry is DROPPED, never reinterpreted: a parse failure says nothing
+ * about whether the underlying Drive file still exists, so treating it as a
+ * removal would trade a stalled connector for silent data loss. The cost of
+ * dropping it is that the file's latest change is missed until it changes
+ * again (or a selection snapshot re-enumerates it) — which is why every
+ * skipped entry is reported to the caller for logging.
+ */
+export interface GoogleDriveSkippedEntry {
+  /** Position within the page, so repeat offenders are identifiable. */
+  index: number;
+  /** `id` / `fileId` / `file.id` when one of them was extractable. */
+  id: string | null;
+  issues: Array<{ path: string; message: string }>;
+}
+
 export interface GoogleDriveListPage<T> {
   values: T[];
   nextPageToken: string | null;
+  /** Entries dropped by per-entry validation. Empty on a healthy page. */
+  skippedEntries: GoogleDriveSkippedEntry[];
 }
 
 export interface GoogleDriveChangesPage extends GoogleDriveListPage<GoogleDriveChange> {
   newStartPageToken: string | null;
+}
+
+function extractEntryId(entry: unknown): string | null {
+  if (typeof entry !== "object" || entry === null) return null;
+  const record = entry as Record<string, unknown>;
+  if (typeof record.id === "string") return record.id;
+  if (typeof record.fileId === "string") return record.fileId;
+  const file = record.file;
+  if (typeof file === "object" && file !== null) {
+    const nested = (file as Record<string, unknown>).id;
+    if (typeof nested === "string") return nested;
+  }
+  return null;
+}
+
+/**
+ * Validate list entries one at a time. One malformed member of a 1000-entry
+ * page costs that one entry, not the page — and therefore not the cursor.
+ */
+function parseDriveEntries<T>(
+  schema: z.ZodType<T>,
+  entries: readonly unknown[],
+): { values: T[]; skippedEntries: GoogleDriveSkippedEntry[] } {
+  const values: T[] = [];
+  const skippedEntries: GoogleDriveSkippedEntry[] = [];
+  for (const [index, entry] of entries.entries()) {
+    const result = schema.safeParse(entry);
+    if (result.success) {
+      values.push(result.data);
+      continue;
+    }
+    skippedEntries.push({
+      index,
+      id: extractEntryId(entry),
+      issues: result.error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        message: issue.message,
+      })),
+    });
+  }
+  return { values, skippedEntries };
 }
 
 export interface GoogleDriveWatch {
@@ -232,9 +354,11 @@ export class GoogleDriveClient {
     if (pageToken) url.searchParams.set("pageToken", pageToken);
     const response = await this.request(url);
     const page = filesListSchema.parse(await response.json());
+    const parsed = parseDriveEntries(googleDriveFileSchema, page.files);
     return {
-      values: page.files,
+      values: parsed.values,
       nextPageToken: page.nextPageToken ?? null,
+      skippedEntries: parsed.skippedEntries,
     };
   }
 
@@ -253,9 +377,11 @@ export class GoogleDriveClient {
     if (pageToken) url.searchParams.set("pageToken", pageToken);
     const response = await this.request(url);
     const page = filesListSchema.parse(await response.json());
+    const parsed = parseDriveEntries(googleDriveFileSchema, page.files);
     return {
-      values: page.files,
+      values: parsed.values,
       nextPageToken: page.nextPageToken ?? null,
+      skippedEntries: parsed.skippedEntries,
     };
   }
 
@@ -286,10 +412,12 @@ export class GoogleDriveClient {
     }
     const response = await this.request(url);
     const page = changesListSchema.parse(await response.json());
+    const parsed = parseDriveEntries(driveChangeSchema, page.changes);
     return {
-      values: page.changes,
+      values: parsed.values,
       nextPageToken: page.nextPageToken ?? null,
       newStartPageToken: page.newStartPageToken ?? null,
+      skippedEntries: parsed.skippedEntries,
     };
   }
 

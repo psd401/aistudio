@@ -66,7 +66,9 @@ import {
   GoogleDriveApiError,
   GoogleDriveClient,
   GoogleDriveDownloadPendingError,
+  type GoogleDriveChange,
   type GoogleDriveFile,
+  type GoogleDriveSkippedEntry,
 } from "../../../lib/repositories/google-drive/drive-client";
 import {
   exportedGoogleDriveFileName,
@@ -77,6 +79,13 @@ import {
 import { refreshGoogleAccessToken } from "../../../lib/repositories/google-drive/oauth";
 import { getGoogleContentWifAccessToken } from "../../../lib/repositories/google-drive/wif";
 import { isDriveRemovalChange, isFileScopedDriveChange } from "./changes";
+import {
+  isSelectionSnapshotPending,
+  reconcileChangePages,
+  resumePendingSelectionSnapshot,
+  SELECTION_SNAPSHOT_PENDING_KEY,
+  shouldRetireUnseenSources,
+} from "./reconcile";
 import {
   assertGoogleSourceMetadataSize,
   assertGoogleSourceResponseSize,
@@ -865,16 +874,29 @@ type AddDiscoveredFile = (
   selectedVia: string,
 ) => Promise<void>;
 
+/** Reports entries Google returned that failed per-entry validation. */
+type RecordSkippedEntries = (
+  operation: string,
+  scopeId: string,
+  skipped: GoogleDriveSkippedEntry[],
+) => void;
+
 async function enumerateSharedDriveSelection(
   client: GoogleDriveClient,
   selection: RepositoryConnectorSelectionRow,
   add: AddDiscoveredFile,
+  recordSkipped: RecordSkippedEntries,
 ): Promise<void> {
   let pageToken: string | null = null;
   do {
     const page = await client.listSharedDriveFiles(
       selection.externalId,
       pageToken,
+    );
+    recordSkipped(
+      "listSharedDriveFiles",
+      selection.externalId,
+      page.skippedEntries,
     );
     for (const file of page.values) {
       await add(file, selection.externalId);
@@ -903,6 +925,7 @@ async function enumerateFileSelection(
   selection: RepositoryConnectorSelectionRow,
   budget: GoogleDriveSnapshotBudget,
   add: AddDiscoveredFile,
+  recordSkipped: RecordSkippedEntries,
 ): Promise<void> {
   const selected = await client.getFile(selection.externalId);
   if (
@@ -923,6 +946,7 @@ async function enumerateFileSelection(
     let pageToken: string | null = null;
     do {
       const page = await client.listChildren(folderId, pageToken);
+      recordSkipped("listChildren", folderId, page.skippedEntries);
       await collectFolderChildren(
         page.values,
         selection.externalId,
@@ -940,6 +964,7 @@ async function enumerateInitialFiles(
 ): Promise<{
   files: Array<{ file: GoogleDriveFile; selectedVia: string[] }>;
   inaccessibleSelectionCount: number;
+  skippedEntryCount: number;
 }> {
   const discovered = new Map<
     string,
@@ -947,6 +972,25 @@ async function enumerateInitialFiles(
   >();
   const budget = new GoogleDriveSnapshotBudget();
   let inaccessibleSelectionCount = 0;
+  let skippedEntryCount = 0;
+  const recordSkipped: RecordSkippedEntries = (
+    operation,
+    scopeId,
+    skipped,
+  ) => {
+    if (skipped.length === 0) return;
+    skippedEntryCount += skipped.length;
+    log.error("Google Drive returned unparseable list entries", {
+      connectorId: context.connector.id,
+      operation,
+      scopeId,
+      skippedCount: skipped.length,
+      // The entries are dropped, never reinterpreted as removals. The
+      // enumeration is therefore incomplete, which suppresses
+      // markUnseenSourcesMissing for this snapshot.
+      entries: skipped,
+    });
+  };
   const add = async (candidate: GoogleDriveFile, selectedVia: string) => {
     const file = await resolveShortcut(client, candidate);
     if (file.trashed || file.mimeType === GOOGLE_FOLDER_MIME_TYPE) return;
@@ -965,10 +1009,21 @@ async function enumerateInitialFiles(
   for (const selection of context.selections) {
     try {
       if (selection.selectionKind === "drive") {
-        await enumerateSharedDriveSelection(client, selection, add);
+        await enumerateSharedDriveSelection(
+          client,
+          selection,
+          add,
+          recordSkipped,
+        );
         continue;
       }
-      await enumerateFileSelection(client, selection, budget, add);
+      await enumerateFileSelection(
+        client,
+        selection,
+        budget,
+        add,
+        recordSkipped,
+      );
     } catch (error) {
       if (
         selection.selectionKind !== "drive" &&
@@ -992,6 +1047,7 @@ async function enumerateInitialFiles(
       selectedVia: [...selectedVia],
     })),
     inaccessibleSelectionCount,
+    skippedEntryCount,
   };
 }
 
@@ -1254,21 +1310,38 @@ async function importFileIsolated(
   }
 }
 
+/**
+ * Re-enumerate every selection. Resolves false when the enumeration was
+ * incomplete — the caller must not treat a snapshot obligation as discharged.
+ */
 async function reconcileSelectionSnapshot(
   context: ConnectorContext,
   client: GoogleDriveClient,
   counters: SyncCounters,
-): Promise<void> {
+): Promise<boolean> {
   const snapshot = await enumerateInitialFiles(context, client);
   counters.discovered += snapshot.files.length;
   counters.failed += snapshot.inaccessibleSelectionCount;
   for (const { file, selectedVia } of snapshot.files) {
     await importFileIsolated(context, client, file, selectedVia, counters);
   }
+  if (!shouldRetireUnseenSources(snapshot)) {
+    counters.failed += snapshot.skippedEntryCount;
+    log.error(
+      "Skipped the unseen-source sweep after an incomplete Google Drive enumeration",
+      {
+        connectorId: context.connector.id,
+        skippedEntryCount: snapshot.skippedEntryCount,
+        discovered: snapshot.files.length,
+      },
+    );
+    return false;
+  }
   counters.missing += await markUnseenSourcesMissing(
     context,
     snapshot.files.map(({ file }) => file.id),
   );
+  return true;
 }
 
 async function reconcileInitial(
@@ -1279,7 +1352,11 @@ async function reconcileInitial(
   const startPageToken = await client.getStartPageToken(
     context.connector.sharedDriveId,
   );
-  await reconcileSelectionSnapshot(context, client, counters);
+  const complete = await reconcileSelectionSnapshot(context, client, counters);
+  // A full rebuild discharges any obligation an earlier run left behind.
+  if (complete && isSelectionSnapshotPending(context.connector.metadata)) {
+    await setSelectionSnapshotPending(context, false);
+  }
   return startPageToken;
 }
 
@@ -1328,10 +1405,6 @@ async function retryDeferredDownloads(
     }
   }
 }
-
-type GoogleDriveChange = Awaited<
-  ReturnType<GoogleDriveClient["listChanges"]>
->["values"][number];
 
 /**
  * Records the outcome of a failed file-scoped change. Connector lifecycle
@@ -1447,48 +1520,87 @@ async function persistSyncCursor(
   }
 }
 
+/**
+ * Write (or clear) the durable "a selection snapshot is owed" flag on the
+ * connector.
+ *
+ * The write is a jsonb merge rather than a read-modify-write of the loaded
+ * row: the webhook path also writes connector metadata, and replaying a stale
+ * in-memory copy would clobber it.
+ */
+async function setSelectionSnapshotPending(
+  context: ConnectorContext,
+  pending: boolean,
+): Promise<void> {
+  const persisted = await executeQuery(
+    (db) =>
+      db
+        .update(repositoryConnectors)
+        .set({
+          metadata: pending
+            ? sql`${repositoryConnectors.metadata} || ${JSON.stringify({
+                [SELECTION_SNAPSHOT_PENDING_KEY]: new Date().toISOString(),
+              })}::jsonb`
+            : sql`${repositoryConnectors.metadata} - ${SELECTION_SNAPSHOT_PENDING_KEY}`,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(repositoryConnectors.id, context.connector.id),
+            eq(
+              repositoryConnectors.selectionRevision,
+              context.connector.selectionRevision,
+            ),
+            ne(repositoryConnectors.status, "revoked"),
+          ),
+        )
+        .returning({ id: repositoryConnectors.id }),
+    pending
+      ? "googleContent.markSnapshotPending"
+      : "googleContent.clearSnapshotPending",
+  );
+  if (persisted.length === 0) {
+    throw new ConnectorSelectionChangedError();
+  }
+}
+
 async function reconcileChanges(
   context: ConnectorContext,
   client: GoogleDriveClient,
   initialCursor: string,
   counters: SyncCounters,
 ): Promise<string> {
-  let cursor = initialCursor;
-  let requiresSelectionSnapshot = false;
-  for (;;) {
-    const page = await client.listChanges(
-      cursor,
-      context.connector.sharedDriveId,
-    );
-    for (const change of page.values) {
-      counters.discovered += 1;
-      requiresSelectionSnapshot =
-        (await processGoogleDriveChange(
-          context,
-          client,
-          change,
-          counters,
-        )) || requiresSelectionSnapshot;
-    }
-    cursor = page.nextPageToken ?? page.newStartPageToken ?? cursor;
-    if (!requiresSelectionSnapshot) {
-      await persistSyncCursor(
-        context,
+  return reconcileChangePages<GoogleDriveChange>(initialCursor, {
+    listChanges: async (cursor) => {
+      const page = await client.listChanges(
         cursor,
-        "googleContent.persistCursor",
+        context.connector.sharedDriveId,
       );
-    }
-    if (!page.nextPageToken) break;
-  }
-  if (requiresSelectionSnapshot) {
-    await reconcileSelectionSnapshot(context, client, counters);
-    await persistSyncCursor(
-      context,
-      cursor,
-      "googleContent.persistSnapshotCursor",
-    );
-  }
-  return cursor;
+      if (page.skippedEntries.length > 0) {
+        // Dropped, never reinterpreted: a change entry that fails validation
+        // says nothing about whether its file still exists, so no source is
+        // marked missing here. The cost is a missed update until that file
+        // changes again — visible in this line.
+        log.error("Skipped unparseable Google Drive change entries", {
+          connectorId: context.connector.id,
+          skippedCount: page.skippedEntries.length,
+          entries: page.skippedEntries,
+        });
+        counters.failed += page.skippedEntries.length;
+      }
+      return page;
+    },
+    processChange: async (change) => {
+      counters.discovered += 1;
+      return processGoogleDriveChange(context, client, change, counters);
+    },
+    persistCursor: (cursor) =>
+      persistSyncCursor(context, cursor, "googleContent.persistCursor"),
+    markSnapshotPending: () => setSelectionSnapshotPending(context, true),
+    runSelectionSnapshot: () =>
+      reconcileSelectionSnapshot(context, client, counters),
+    clearSnapshotPending: () => setSelectionSnapshotPending(context, false),
+  });
 }
 
 async function markConnectorAccessLost(connectorId: string): Promise<void> {
@@ -1739,6 +1851,23 @@ async function resolveSyncCursor(
 ): Promise<string> {
   if (!context.connector.cursor) {
     return reconcileInitial(context, client, counters);
+  }
+  // An earlier run advanced its cursor past a page that obligated a selection
+  // snapshot but did not finish (or even reach) that snapshot. Discharge the
+  // obligation before consuming anything new — the cursor no longer carries
+  // that information.
+  if (isSelectionSnapshotPending(context.connector.metadata)) {
+    log.info("Resuming a pending Google Drive selection snapshot", {
+      connectorId: context.connector.id,
+      runId,
+      pendingSince:
+        context.connector.metadata.selectionSnapshotPendingAt ?? null,
+    });
+    await resumePendingSelectionSnapshot({
+      runSelectionSnapshot: () =>
+        reconcileSelectionSnapshot(context, client, counters),
+      clearSnapshotPending: () => setSelectionSnapshotPending(context, false),
+    });
   }
   try {
     return await reconcileChanges(

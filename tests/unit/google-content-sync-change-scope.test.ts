@@ -151,18 +151,17 @@ describe("processGoogleDriveChange guard wiring", () => {
     expect(body).toContain("return driveRemoved;");
   });
 
-  test("the reconcile loop persists the cursor on both skip and removal", () => {
+  test("the reconcile loop is the shared, behaviorally tested one", () => {
+    // The cursor/obligation ordering itself is proven in
+    // google-content-sync-reconcile.test.ts against the real loop. All this
+    // asserts is that index.ts still delegates to it rather than growing a
+    // second copy.
     const loop = source.slice(
       source.indexOf("async function reconcileChanges("),
       source.indexOf("async function markConnectorAccessLost("),
     );
-    // Skipped entry: returns false, requiresSelectionSnapshot stays false, so
-    // the per-page persist runs.
-    expect(loop).toContain("if (!requiresSelectionSnapshot) {");
-    // Removal: returns true, so the cursor is persisted after the snapshot.
-    expect(loop).toContain("if (requiresSelectionSnapshot) {");
-    expect(loop).toContain("await reconcileSelectionSnapshot(");
-    // Either way the cursor advances — that is the invariant the outage broke.
-    expect(loop.match(/await persistSyncCursor\(/g)).toHaveLength(2);
+    expect(loop).toContain("return reconcileChangePages<GoogleDriveChange>(");
+    expect(loop).toContain("runSelectionSnapshot:");
+    expect(loop).toContain("markSnapshotPending:");
   });
 });

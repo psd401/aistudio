@@ -5,13 +5,14 @@
     "infra": "bin/infra.js"
   },
   "scripts": {
-    "build": "tsc && bun run typecheck:unified-content && bun run test:lambdas",
+    "build": "tsc && bun run typecheck:unified-content && bun run typecheck:google-content-sync && bun run test:lambdas",
     "build:lambdas": "./build-lambdas.sh",
     "build:all": "bun run build && bun run build:lambdas",
     "watch": "tsc -w",
     "test": "jest",
     "test:lambdas": "bun test lambdas/embedding-generator/__tests__ && cd lambdas/agent-skill-builder && bun install && bun run test",
     "typecheck:unified-content": "tsc --project lambdas/unified-content-processor/tsconfig.json",
+    "typecheck:google-content-sync": "tsc --project lambdas/google-content-sync/tsconfig.json",
     "cdk": "cdk"
   },
   "devDependencies": {
