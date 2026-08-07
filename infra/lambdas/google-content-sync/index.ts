@@ -1541,7 +1541,10 @@ async function setSelectionSnapshotPending(
             ? sql`${repositoryConnectors.metadata} || ${JSON.stringify({
                 [SELECTION_SNAPSHOT_PENDING_KEY]: new Date().toISOString(),
               })}::jsonb`
-            : sql`${repositoryConnectors.metadata} - ${SELECTION_SNAPSHOT_PENDING_KEY}`,
+            : // The ::text cast pins the `jsonb - text` overload explicitly;
+              // `jsonb -` is also defined for integer and text[], and the key
+              // arrives as an untyped bind parameter.
+              sql`${repositoryConnectors.metadata} - ${SELECTION_SNAPSHOT_PENDING_KEY}::text`,
           updatedAt: new Date(),
         })
         .where(
