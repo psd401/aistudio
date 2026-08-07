@@ -294,22 +294,31 @@ COPY ${OPENCLAW_CONFIG} /home/node/.openclaw/openclaw.json
 # visible to the LLM. Keep roadmap notes here in the Dockerfile instead.
 # TODO(phase-2): Add Google Calendar and Gmail read-only tool access to the agent.
 #
-# Tier-1 enforcement: SOUL.md alone is auto-loaded, but the rules in
-# psd-rules SKILL.md are NOT auto-injected by OpenClaw — the model only
-# sees a Tier-2 catalog stub for any skill it has not explicitly loaded.
-# That meant the "non-negotiable" rules were never actually present in
-# the system prompt and the agent ignored them (observed 2026-05-03).
-# At build time we strip psd-rules' YAML frontmatter and append the body
-# to SOUL.md so the rules ARE in the system prompt every turn. The
-# canonical edit point stays `skills/psd-rules/SKILL.md`.
+# Tier-1 enforcement: the rules in psd-rules SKILL.md are NOT auto-injected by
+# OpenClaw — the model only sees a Tier-2 catalog stub for any skill it has not
+# explicitly loaded. That meant the "non-negotiable" rules were never actually
+# present in the system prompt and the agent ignored them (observed 2026-05-03).
+# At build time we strip psd-rules' YAML frontmatter and write the body into a
+# bootstrap file so the rules ARE in the system prompt every turn. The canonical
+# edit point stays `skills/psd-rules/SKILL.md`.
+#
+# The rules go in AGENTS.md, NOT appended to SOUL.md (changed 2026-08-06).
+# OpenClaw budgets bootstrap files PER FILE (bootstrapMaxChars) as well as in
+# total (bootstrapTotalMaxChars), and it loads AGENTS.md, TOOLS.md, HEARTBEAT.md
+# and BOOTSTRAP.md alongside SOUL.md whenever they exist. Concatenating the
+# ~22k-char rules body onto SOUL.md spent one file's entire 32k budget while the
+# combined total sat at 35k of 80k — so we were out of room in one file while
+# 45k went unused, and every rule addition had to be paid for by deleting
+# another. Splitting also matches the documented roles: AGENTS.md is operational
+# rules and routing, SOUL.md is identity and voice.
 ARG SOUL_PREAMBLE=SOUL.md
 ARG PSD_RULES_SKILL=skills/psd-rules/SKILL.md
 COPY ${SOUL_PREAMBLE} /tmp/SOUL.preamble.md
 COPY ${PSD_RULES_SKILL} /tmp/psd-rules.SKILL.md
 RUN awk 'BEGIN{f=0} /^---[[:space:]]*$/{f++; next} f>=2{print}' /tmp/psd-rules.SKILL.md > /tmp/psd-rules.body.md && \
     cat /tmp/SOUL.preamble.md > /home/node/.openclaw/SOUL.md && \
-    printf '\n\n---\n\n# Operating Rules (from psd-rules)\n\n_The following rules are concatenated from `skills/psd-rules/SKILL.md` at container build time so they are guaranteed to appear in every turn\xe2\x80\x99s system prompt. Edit them in that file, not here._\n\n' >> /home/node/.openclaw/SOUL.md && \
-    cat /tmp/psd-rules.body.md >> /home/node/.openclaw/SOUL.md && \
+    printf '# Operating Rules (from psd-rules)\n\n_Concatenated from `skills/psd-rules/SKILL.md` at container build time so these rules appear in every turn\xe2\x80\x99s system prompt. Edit them in that file, not here._\n\n' > /home/node/.openclaw/AGENTS.md && \
+    cat /tmp/psd-rules.body.md >> /home/node/.openclaw/AGENTS.md && \
     rm -f /tmp/SOUL.preamble.md /tmp/psd-rules.SKILL.md /tmp/psd-rules.body.md
 # OpenClaw also auto-loads IDENTITY.md, USER.md, MEMORY.md (and AGENTS.md,
 # TOOLS.md, HEARTBEAT.md, BOOTSTRAP.md) when present. We seed empty stubs so

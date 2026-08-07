@@ -74,7 +74,10 @@ class StripFrontmatterTests(unittest.TestCase):
 
 
 class EffectiveSizesTests(unittest.TestCase):
-    def test_soul_includes_psd_rules_body(self):
+    def test_rules_body_becomes_agents_not_soul(self):
+        # 2026-08-06: the rules moved out of SOUL.md into AGENTS.md. Budgets are
+        # per file as well as total, so appending ~22k of rules to SOUL.md spent
+        # one file's whole allowance while 45k of the total went unused.
         d = tempfile.mkdtemp()
         _write(os.path.join(d, "SOUL.md"), "SOUL")
         os.makedirs(os.path.join(d, "skills", "psd-rules"))
@@ -83,9 +86,17 @@ class EffectiveSizesTests(unittest.TestCase):
             "---\nname: x\n---\nRULES BODY",
         )
         sizes = cbb.effective_bootstrap_sizes(d)
-        # SOUL.md effective = "SOUL" + separator + "RULES BODY" (frontmatter stripped)
-        expected = len("SOUL") + len(cbb._PSD_RULES_SEPARATOR) + len("RULES BODY")
-        self.assertEqual(sizes["SOUL.md"], expected)
+        self.assertEqual(sizes["SOUL.md"], len("SOUL"))
+        self.assertEqual(
+            sizes["AGENTS.md"],
+            len(cbb._PSD_RULES_HEADER) + len("RULES BODY"),
+        )
+
+    def test_agents_is_absent_without_a_rules_skill(self):
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "SOUL.md"), "SOUL")
+        sizes = cbb.effective_bootstrap_sizes(d)
+        self.assertNotIn("AGENTS.md", sizes)
 
     def test_omits_absent_files(self):
         d = tempfile.mkdtemp()

@@ -160,16 +160,33 @@ is no way to fix it with more quoting. **Never inline document/email/event
 body text in `--json` or `--body`.** Instead, write the payload to a file
 first and reference it:
 
+**Write the payload file with the `write` tool, not a shell heredoc.** `write`
+takes the content as a parameter, so quotes, newlines and emoji never touch the
+shell. A `cat <<'PAYLOAD'` heredoc has to survive `exec`'s quoting, and an
+unterminated one leaves the shell sitting at a `>` continuation prompt with the
+call never issued — observed 2026-08-06, where a Slides build was abandoned
+after repeated attempts to generate the payload through `python3` + heredoc and
+the batchUpdate was never sent at all.
+
 ```bash
-# 1. Write the payload to a file (any quotes/newlines/emoji are fine here)
-cat > /tmp/doc-payload.json <<'PAYLOAD'
-{"requests":[{"insertText":{"location":{"index":1},"text":"It's fine to use \"both\" quote kinds.\n\nNew paragraphs too."}}]}
-PAYLOAD
+# 1. write  →  /tmp/doc-payload.json
+#    {"requests":[{"insertText":{"location":{"index":1},
+#     "text":"It's fine to use \"both\" quote kinds.\n\nNew paragraphs too."}}]}
+#    (use the `write` TOOL for this step — do not cat/heredoc it)
 
 # 2. Reference it with --json-file (replaces --json)
 node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
   --command "docs documents batchUpdate --params '{\"documentId\":\"<id>\"}' --json-file /tmp/doc-payload.json"
+
+# Slides and Sheets take the SAME shape — the rule is not Docs-specific.
+node /opt/psd-skills/psd-workspace/run.js \
+  --user hagelk@psd401.net \
+  --command "slides presentations batchUpdate --params '{\"presentationId\":\"<id>\"}' --json-file /tmp/slides-payload.json"
+
+node /opt/psd-skills/psd-workspace/run.js \
+  --user hagelk@psd401.net \
+  --command "sheets spreadsheets batchUpdate --params '{\"spreadsheetId\":\"<id>\"}' --json-file /tmp/sheet-payload.json"
 
 # Plain-text bodies (e.g. +draft) use --body-file (replaces --body)
 node /opt/psd-skills/psd-workspace/run.js \

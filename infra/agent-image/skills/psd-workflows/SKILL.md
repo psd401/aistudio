@@ -1,7 +1,7 @@
 ---
 name: psd-workflows
-summary: Discover and conduct PSD gateway workflows conversationally, including evaluations, requests, and timesheets, with verified caller binding and explicit confirmation before submission.
-description: Use the live PSD Agent Gateway roster to conduct a supported workflow in chat. Discover tools, load the selected family's schema, follow its categories and validation guidance, confirm a complete summary, submit only after explicit approval, and return any signing or completion link.
+summary: Discover and conduct PSD gateway workflows conversationally — classified and certificated staff evaluations, requests, and timesheets — with verified caller binding and explicit confirmation before submission.
+description: Use the live PSD Agent Gateway roster to conduct a supported workflow in chat. Covers classified staff evaluation, certificated evaluation, and any other evaluation family the gateway exposes — check the roster before telling a user no evaluation tool exists. Discover tools, load the selected family's schema, follow its categories and validation guidance, confirm a complete summary, submit only after explicit approval, and return any signing or completion link.
 allowed-tools: Bash(node:*)
 ---
 
