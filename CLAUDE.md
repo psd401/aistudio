@@ -9,7 +9,10 @@ AI Studio codebase guidance for Claude Code. Optimized for token efficiency and 
 # install fails typecheck (20 errors) and 1 test:ci suite, because
 # infra/lambdas/agent-router/ resolves its AWS SDK deps from its OWN package.json)
 bun install
-(cd infra/lambdas/agent-router && bun install)
+(cd infra/lambdas/agent-router && bun install --frozen-lockfile)
+# ^ keep --frozen-lockfile: no lockfile is committed there, so it resolves fresh
+#   WITHOUT writing one — a plain install writes a local bun.lock that silently
+#   pins your installs while CI floats
 
 # Local Development (Issue #607)
 bun run db:up              # Start local PostgreSQL (Docker)
