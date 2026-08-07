@@ -76,7 +76,7 @@ import {
 } from "../../../lib/repositories/google-drive/formats";
 import { refreshGoogleAccessToken } from "../../../lib/repositories/google-drive/oauth";
 import { getGoogleContentWifAccessToken } from "../../../lib/repositories/google-drive/wif";
-import { isFileScopedDriveChange } from "./changes";
+import { isDriveRemovalChange, isFileScopedDriveChange } from "./changes";
 import {
   assertGoogleSourceMetadataSize,
   assertGoogleSourceResponseSize,
@@ -1367,14 +1367,27 @@ async function processGoogleDriveChange(
   counters: SyncCounters,
 ): Promise<boolean> {
   // Shared Drive-scoped entries (rename, membership, restriction changes) have
-  // no fileId. Nothing below can act on them, and they must not stall the
-  // cursor: skip without side effects so the loop keeps advancing.
+  // no fileId, so nothing on the file path below can act on them.
   if (!isFileScopedDriveChange(change)) {
-    log.info("Skipped non-file Google Drive change entry", {
-      connectorId: context.connector.id,
-      changeType: change.changeType ?? null,
-    });
-    return false;
+    // A removal, though, is not noise: the Shared Drive was deleted or this
+    // account lost access, so sources imported from it are now unreachable.
+    // Requesting a selection snapshot lets markUnseenSourcesMissing retire
+    // them; a hard access loss still surfaces through the existing 403/404
+    // path. Anything else is metadata noise and is skipped without side
+    // effects so the cursor keeps advancing.
+    const driveRemoved = isDriveRemovalChange(change);
+    log.info(
+      driveRemoved
+        ? "Shared Drive removed from the change feed"
+        : "Skipped non-file Google Drive change entry",
+      {
+        connectorId: context.connector.id,
+        changeType: change.changeType ?? null,
+        driveId: change.driveId ?? null,
+        time: change.time ?? null,
+      },
+    );
+    return driveRemoved;
   }
   if (change.removed || !change.file || change.file.trashed) {
     if (await markSourceMissing(context, change.fileId)) {

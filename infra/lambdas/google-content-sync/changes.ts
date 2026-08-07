@@ -20,6 +20,7 @@ export const DRIVE_SCOPED_CHANGE_TYPE = "drive";
 export interface DriveChangeIdentity {
   changeType?: string | undefined;
   fileId?: string | undefined;
+  removed?: boolean | undefined;
 }
 
 /**
@@ -32,4 +33,25 @@ export function isFileScopedDriveChange<T extends DriveChangeIdentity>(
 ): change is T & { fileId: string } {
   if (change.changeType === DRIVE_SCOPED_CHANGE_TYPE) return false;
   return typeof change.fileId === "string" && change.fileId.length > 0;
+}
+
+/**
+ * True when a non-file-scoped entry reports that the Shared Drive itself went
+ * away — deleted, or this account lost access to it.
+ *
+ * These entries must NOT be skipped like the other drive-scoped noise. Sources
+ * already imported from that drive are now unreachable, and a connector
+ * reading the global changes feed gets no other signal: its subsequent
+ * `listChanges` and watch calls keep succeeding, so the stale content would
+ * stay active indefinitely. The caller answers this by requesting a selection
+ * snapshot, which retires whatever is no longer reachable.
+ *
+ * Deliberately not keyed on `changeType === "drive"`: the legacy "teamDrive"
+ * value and any future scope Google introduces must take this path too. What
+ * identifies the case is "removed, and not about a specific file" — which is
+ * exactly the state the caller has already established.
+ */
+export function isDriveRemovalChange(change: DriveChangeIdentity): boolean {
+  if (isFileScopedDriveChange(change)) return false;
+  return change.removed === true;
 }

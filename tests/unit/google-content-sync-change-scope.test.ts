@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   DRIVE_SCOPED_CHANGE_TYPE,
+  isDriveRemovalChange,
   isFileScopedDriveChange,
 } from "../../infra/lambdas/google-content-sync/changes";
 import { stripComments } from "../helpers/strip-ts-comments";
@@ -60,6 +61,63 @@ describe("Google Drive change scope classification", () => {
   });
 });
 
+describe("Shared Drive removal detection", () => {
+  test("flags a drive-scoped removal so the caller rebuilds the selection", () => {
+    // The Shared Drive was deleted or access was lost. Sources imported from
+    // it are unreachable, and a connector reading the global changes feed gets
+    // no other signal — its later listChanges calls keep succeeding.
+    expect(
+      isDriveRemovalChange({
+        changeType: DRIVE_SCOPED_CHANGE_TYPE,
+        removed: true,
+      }),
+    ).toBe(true);
+  });
+
+  test("covers legacy and future drive-like scopes, not just \"drive\"", () => {
+    expect(
+      isDriveRemovalChange({ changeType: "teamDrive", removed: true }),
+    ).toBe(true);
+    expect(
+      isDriveRemovalChange({ changeType: "someFutureScope", removed: true }),
+    ).toBe(true);
+    expect(isDriveRemovalChange({ removed: true })).toBe(true);
+  });
+
+  test("ignores drive-scoped metadata noise", () => {
+    // Rename, membership and restriction changes carry removed: false.
+    expect(
+      isDriveRemovalChange({
+        changeType: DRIVE_SCOPED_CHANGE_TYPE,
+        removed: false,
+      }),
+    ).toBe(false);
+    expect(
+      isDriveRemovalChange({ changeType: DRIVE_SCOPED_CHANGE_TYPE }),
+    ).toBe(false);
+  });
+
+  test("never claims a file-scoped removal — that is the file path's job", () => {
+    expect(
+      isDriveRemovalChange({
+        changeType: "file",
+        fileId: "file-1",
+        removed: true,
+      }),
+    ).toBe(false);
+  });
+
+  test("treats a drive-scoped entry that also carries a fileId as drive-scoped", () => {
+    expect(
+      isDriveRemovalChange({
+        changeType: DRIVE_SCOPED_CHANGE_TYPE,
+        fileId: "file-1",
+        removed: true,
+      }),
+    ).toBe(true);
+  });
+});
+
 describe("processGoogleDriveChange guard wiring", () => {
   const source = stripComments(
     fs.readFileSync(
@@ -82,13 +140,29 @@ describe("processGoogleDriveChange guard wiring", () => {
     expect(guardIndex).toBeLessThan(firstSideEffect);
   });
 
-  test("the reconcile loop persists the cursor for skipped entries", () => {
+  test("propagates the removal signal instead of swallowing it", () => {
+    const body = source.slice(
+      source.indexOf("async function processGoogleDriveChange("),
+    );
+    // A drive removal must return true so reconcileChanges rebuilds the
+    // selection snapshot; returning a bare false here would strand every
+    // source imported from the drive that went away.
+    expect(body).toContain("isDriveRemovalChange(change)");
+    expect(body).toContain("return driveRemoved;");
+  });
+
+  test("the reconcile loop persists the cursor on both skip and removal", () => {
     const loop = source.slice(
       source.indexOf("async function reconcileChanges("),
+      source.indexOf("async function markConnectorAccessLost("),
     );
-    // processGoogleDriveChange returns false for a skipped entry, which leaves
-    // requiresSelectionSnapshot false, so persistSyncCursor runs each page.
+    // Skipped entry: returns false, requiresSelectionSnapshot stays false, so
+    // the per-page persist runs.
     expect(loop).toContain("if (!requiresSelectionSnapshot) {");
-    expect(loop).toContain("await persistSyncCursor(");
+    // Removal: returns true, so the cursor is persisted after the snapshot.
+    expect(loop).toContain("if (requiresSelectionSnapshot) {");
+    expect(loop).toContain("await reconcileSelectionSnapshot(");
+    // Either way the cursor advances — that is the invariant the outage broke.
+    expect(loop.match(/await persistSyncCursor\(/g)).toHaveLength(2);
   });
 });
