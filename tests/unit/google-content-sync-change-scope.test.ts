@@ -164,4 +164,35 @@ describe("processGoogleDriveChange guard wiring", () => {
     expect(loop).toContain("runSelectionSnapshot:");
     expect(loop).toContain("markSnapshotPending:");
   });
+
+  test("an unreadable file record fails the one change, never the page", () => {
+    const body = source.slice(
+      source.indexOf("async function recordDriveChangeFailure("),
+      source.indexOf("async function processGoogleDriveChange("),
+    );
+    const unreadable = body.indexOf("GoogleDriveUnreadableFileError");
+    const rethrow = body.indexOf(
+      "if (!isGoogleDriveMissingError(error)) throw error;",
+    );
+
+    // The unreadable branch must be classified before the catch-all rethrow —
+    // a ZodError from getFile that escapes this function replays the page
+    // until the DLQ, the poison pattern this Lambda exists to avoid — and it
+    // must fail the record, never reinterpret it as a removal.
+    expect(unreadable).toBeGreaterThan(-1);
+    expect(rethrow).toBeGreaterThan(-1);
+    expect(unreadable).toBeLessThan(rethrow);
+    expect(body).toContain("recordSourceFailure(context, fileId, error)");
+  });
+
+  test("an incomplete initial rebuild leaves a durable snapshot obligation", () => {
+    const body = source.slice(
+      source.indexOf("async function reconcileInitial("),
+      source.indexOf("async function retryDeferredDownloads("),
+    );
+    // Without this, files hidden behind a dropped entry during the very first
+    // enumeration (or a 410 rebuild) are only recovered if they happen to
+    // change again — the changes-loop path already retries its obligation.
+    expect(body).toContain("setSelectionSnapshotPending(context, !complete)");
+  });
 });

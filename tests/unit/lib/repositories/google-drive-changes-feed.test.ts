@@ -1,6 +1,9 @@
 /** @jest-environment node */
 
-import { GoogleDriveClient } from "@/lib/repositories/google-drive/drive-client";
+import {
+  GoogleDriveClient,
+  GoogleDriveUnreadableFileError,
+} from "@/lib/repositories/google-drive/drive-client";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return {
@@ -308,5 +311,43 @@ describe("GoogleDriveClient file entry tolerance", () => {
     expect(page.skippedEntries).toEqual([
       expect.objectContaining({ index: 0, id: null }),
     ]);
+  });
+});
+
+describe("GoogleDriveClient getFile", () => {
+  test("throws the typed unreadable-file error, not a raw ZodError", async () => {
+    // getFile backs shortcut resolution and the parent-selection walk during
+    // change processing. A ZodError escaping here is unclassifiable to the
+    // caller and would fail the whole run — replaying the page until the DLQ,
+    // the same poison pattern the per-entry list parsing eliminates.
+    const fetchMock = jest
+      .fn<ReturnType<typeof fetch>, Parameters<typeof fetch>>()
+      .mockResolvedValue(
+        jsonResponse({ id: "file-1", name: 42, mimeType: "application/pdf" }),
+      );
+
+    const pending = new GoogleDriveClient("token", {
+      fetch: fetchMock,
+    }).getFile("file-1");
+
+    await expect(pending).rejects.toBeInstanceOf(
+      GoogleDriveUnreadableFileError,
+    );
+    await expect(pending).rejects.toMatchObject({
+      fileId: "file-1",
+      issues: [expect.objectContaining({ path: "name" })],
+    });
+  });
+
+  test("returns a healthy file record", async () => {
+    const fetchMock = jest
+      .fn<ReturnType<typeof fetch>, Parameters<typeof fetch>>()
+      .mockResolvedValue(jsonResponse(fileEntry("file-1")));
+
+    const file = await new GoogleDriveClient("token", {
+      fetch: fetchMock,
+    }).getFile("file-1");
+
+    expect(file.id).toBe("file-1");
   });
 });

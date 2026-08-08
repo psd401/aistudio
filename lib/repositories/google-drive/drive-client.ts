@@ -209,6 +209,15 @@ function extractEntryId(entry: unknown): string | null {
   return null;
 }
 
+function formatEntryIssues(
+  error: z.ZodError,
+): Array<{ path: string; message: string }> {
+  return error.issues.map((issue) => ({
+    path: issue.path.join("."),
+    message: issue.message,
+  }));
+}
+
 /**
  * Validate list entries one at a time. One malformed member of a 1000-entry
  * page costs that one entry, not the page — and therefore not the cursor.
@@ -228,10 +237,7 @@ function parseDriveEntries<T>(
     skippedEntries.push({
       index,
       id: extractEntryId(entry),
-      issues: result.error.issues.map((issue) => ({
-        path: issue.path.join("."),
-        message: issue.message,
-      })),
+      issues: formatEntryIssues(result.error),
     });
   }
   return { values, skippedEntries };
@@ -263,6 +269,25 @@ export class GoogleDriveDownloadPendingError extends Error {
   constructor(public readonly operationName: string) {
     super("Google Drive download is still preparing");
     this.name = "GoogleDriveDownloadPendingError";
+  }
+}
+
+/**
+ * `getFile` returned 200 but the body failed validation — the single-entity
+ * sibling of a dropped list entry.
+ *
+ * Distinct from {@link GoogleDriveApiError} because the correct handling is
+ * the opposite of a 403/404: the file very likely still exists, so callers
+ * must fail or skip the one record — never mark its source missing, and never
+ * let the error escape far enough to stall a change page's cursor.
+ */
+export class GoogleDriveUnreadableFileError extends Error {
+  constructor(
+    public readonly fileId: string,
+    public readonly issues: Array<{ path: string; message: string }>,
+  ) {
+    super(`Google Drive returned an unreadable record for file ${fileId}`);
+    this.name = "GoogleDriveUnreadableFileError";
   }
 }
 
@@ -335,7 +360,14 @@ export class GoogleDriveClient {
           }
         : undefined,
     );
-    return googleDriveFileSchema.parse(await response.json());
+    const parsed = googleDriveFileSchema.safeParse(await response.json());
+    if (!parsed.success) {
+      throw new GoogleDriveUnreadableFileError(
+        fileId,
+        formatEntryIssues(parsed.error),
+      );
+    }
+    return parsed.data;
   }
 
   async listChildren(

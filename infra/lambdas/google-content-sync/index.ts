@@ -66,6 +66,7 @@ import {
   GoogleDriveApiError,
   GoogleDriveClient,
   GoogleDriveDownloadPendingError,
+  GoogleDriveUnreadableFileError,
   type GoogleDriveChange,
   type GoogleDriveFile,
   type GoogleDriveSkippedEntry,
@@ -991,8 +992,34 @@ async function enumerateInitialFiles(
       entries: skipped,
     });
   };
+  const recordUnreadable = (
+    operation: string,
+    scopeId: string,
+    error: GoogleDriveUnreadableFileError,
+  ) => {
+    // Same disposition as a dropped list entry: the record says nothing about
+    // the file's existence, so it is skipped and counted, which marks the
+    // enumeration incomplete and suppresses markUnseenSourcesMissing.
+    skippedEntryCount += 1;
+    log.error("Google Drive returned an unreadable file record", {
+      connectorId: context.connector.id,
+      operation,
+      scopeId,
+      fileId: error.fileId,
+      issues: error.issues,
+    });
+  };
   const add = async (candidate: GoogleDriveFile, selectedVia: string) => {
-    const file = await resolveShortcut(client, candidate);
+    let file: GoogleDriveFile;
+    try {
+      file = await resolveShortcut(client, candidate);
+    } catch (error) {
+      if (error instanceof GoogleDriveUnreadableFileError) {
+        recordUnreadable("resolveShortcut", candidate.id, error);
+        return;
+      }
+      throw error;
+    }
     if (file.trashed || file.mimeType === GOOGLE_FOLDER_MIME_TYPE) return;
     const existing = discovered.get(file.id);
     if (existing) {
@@ -1025,6 +1052,13 @@ async function enumerateInitialFiles(
         recordSkipped,
       );
     } catch (error) {
+      if (error instanceof GoogleDriveUnreadableFileError) {
+        // An unreadable selection root cannot be enumerated, which says
+        // nothing about its files' existence — unlike the 403/404 branch
+        // below, where the selection itself is gone.
+        recordUnreadable("enumerateSelection", selection.externalId, error);
+        continue;
+      }
       if (
         selection.selectionKind !== "drive" &&
         isGoogleDriveMissingError(error)
@@ -1353,14 +1387,15 @@ async function reconcileInitial(
     context.connector.sharedDriveId,
   );
   const complete = await reconcileSelectionSnapshot(context, client, counters);
-  // A full rebuild discharges any outstanding obligation. Cleared
-  // unconditionally rather than gated on the connector row loaded at the start
-  // of the run: this path is also reached after a 410 cursor expiry, by which
-  // point the in-memory copy can be stale. Removing an absent jsonb key is a
-  // no-op, and an initial rebuild is rare.
-  if (complete) {
-    await setSelectionSnapshotPending(context, false);
-  }
+  // A complete rebuild discharges any outstanding obligation; an incomplete
+  // one records the obligation durably, so the next run repeats the snapshot
+  // instead of leaving the files behind a dropped entry unrecovered until
+  // each happens to change again. Written unconditionally rather than gated
+  // on the connector row loaded at the start of the run: this path is also
+  // reached after a 410 cursor expiry, by which point the in-memory copy can
+  // be stale. Removing an absent jsonb key is a no-op, and an initial rebuild
+  // is rare.
+  await setSelectionSnapshotPending(context, !complete);
   return startPageToken;
 }
 
@@ -1413,8 +1448,11 @@ async function retryDeferredDownloads(
 /**
  * Records the outcome of a failed file-scoped change. Connector lifecycle
  * errors are fatal to the whole run and are rethrown; a Drive 403/404 means the
- * file was deleted or access was lost, which is the markSourceMissing path.
- * Anything else is rethrown so the caller can fail the record.
+ * file was deleted or access was lost, which is the markSourceMissing path; an
+ * unreadable record (from `getFile` on the file itself, its shortcut target,
+ * or a parent during the selection walk) fails the one record so the page's
+ * cursor still advances. Anything else is rethrown so the caller can fail the
+ * record.
  */
 async function recordDriveChangeFailure(
   context: ConnectorContext,
@@ -1428,6 +1466,14 @@ async function recordDriveChangeFailure(
     error instanceof ConnectorSelectionChangedError
   ) {
     throw error;
+  }
+  if (error instanceof GoogleDriveUnreadableFileError) {
+    // The file very likely still exists — its record just could not be read.
+    // Never markSourceMissing here, and never rethrow: a deterministic parse
+    // failure that escaped this function would replay the page until the DLQ.
+    counters.failed += 1;
+    await recordSourceFailure(context, fileId, error);
+    return;
   }
   if (!isGoogleDriveMissingError(error)) throw error;
   if (await markSourceMissing(context, fileId)) {
