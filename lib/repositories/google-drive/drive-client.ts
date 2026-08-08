@@ -51,6 +51,26 @@ const optionalWebUrl = z
   )
   .optional();
 
+/**
+ * Timestamps are consumed with `new Date(...)` and land in a `timestamp`
+ * column. Neither extreme is safe on its own: a strict `.datetime()` would
+ * turn one malformed value into a rejected entry (the poison-page class this
+ * client exists to prevent), while passing an unparseable string straight
+ * through is worse than dropping it — `new Date("not-a-date")` is an Invalid
+ * Date, the import transaction fails on the timestamp column, and because the
+ * entry *validated* the snapshot never counts it as skipped. The cursor
+ * advances, the unseen-source sweep is not suppressed, and the file stays
+ * unimported indefinitely. So: accept anything Google sends, keep only what
+ * actually parses, and let the field fall back to its absent behaviour.
+ */
+const optionalTimestamp = z
+  .string()
+  .nullish()
+  .transform((value) =>
+    value && !Number.isNaN(Date.parse(value)) ? value : undefined,
+  )
+  .optional();
+
 const optionalBoolean = (fallback: boolean) =>
   z
     .boolean()
@@ -80,9 +100,10 @@ export const googleDriveFileSchema = z.object({
     .nullish()
     .transform((value) => value ?? []),
   driveId: optionalString,
-  // Plain string, not `.datetime()`: the only consumers are `new Date(...)`
-  // and a revision string. Callers guard invalid dates themselves.
-  modifiedTime: optionalString,
+  // Lenient, but not blindly so: an unparseable value is dropped rather than
+  // handed to `new Date(...)` on the way into a timestamp column. See
+  // `optionalTimestamp`.
+  modifiedTime: optionalTimestamp,
   md5Checksum: optionalString,
   version: optionalString,
   headRevisionId: optionalString,

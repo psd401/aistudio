@@ -202,6 +202,20 @@ describe("GoogleDriveClient file entry tolerance", () => {
     expect(page.values[0]?.modifiedTime).toBe("2026-08-06T12:00:00Z");
   });
 
+  test("drops an unparseable timestamp instead of importing an Invalid Date", async () => {
+    // Accepting the entry is right — rejecting it would be the poison-page
+    // class. Carrying the raw string through is not: `sourceIdentityFields`
+    // feeds modifiedTime to `new Date(...)` and a timestamp column, so an
+    // Invalid Date fails the import transaction. And because the entry
+    // validated, it is not counted as a skipped entry, so the cursor advances
+    // and the unseen-source sweep is not suppressed — the file would stay
+    // unimported indefinitely rather than being retried.
+    const page = await listOneFile({ modifiedTime: "not-a-timestamp" });
+    expect(page.skippedEntries).toEqual([]);
+    expect(page.values[0]?.id).toBe("file-1");
+    expect(page.values[0]?.modifiedTime).toBeUndefined();
+  });
+
   test("accepts a non-numeric size instead of rejecting the entry", async () => {
     // The streaming byte bound is authoritative, so a surprising size string
     // must not cost us the file.
