@@ -264,7 +264,8 @@ describe("GoogleDriveClient file entry tolerance", () => {
 
   test("accepts a shortcut that omits targetMimeType", async () => {
     // targetMimeType has no reader; only targetId is dereferenced, and its
-    // absence already has a graceful "no target" path.
+    // absence raises a typed GoogleDriveUnreadableFileError that both
+    // resolveShortcut call sites classify as a per-entry skip.
     const page = await listOneFile({
       mimeType: "application/vnd.google-apps.shortcut",
       shortcutDetails: { targetId: "target-1" },

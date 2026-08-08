@@ -80,8 +80,10 @@ const optionalBoolean = (fallback: boolean) =>
 const driveUserSchema = z.object({ displayName: optionalString });
 
 /**
- * Only `targetId` is consumed (`resolveShortcut` dereferences it and raises a
- * graceful "no target" error when it is absent). `targetMimeType` has no
+ * Only `targetId` is consumed. `resolveShortcut` dereferences it and, when it
+ * is absent, throws a typed {@link GoogleDriveUnreadableFileError} that both
+ * of its call sites already classify as a per-entry skip — making the field
+ * optional here therefore costs one entry, never the page. `targetMimeType` has no
  * reader anywhere in the codebase, so requiring it could only ever turn a
  * complete page into a poison message — it is optional and unused.
  */

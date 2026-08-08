@@ -866,7 +866,25 @@ async function resolveShortcut(
 ): Promise<GoogleDriveFile> {
   if (file.mimeType !== GOOGLE_SHORTCUT_MIME_TYPE) return file;
   const targetId = file.shortcutDetails?.targetId;
-  if (!targetId) throw new Error(`Drive shortcut ${file.id} has no target`);
+  if (!targetId) {
+    // Typed, not a bare `Error`. `targetId` is optional in the schema (a
+    // shortcut whose target was deleted is a real Drive state, and Drive does
+    // not retroactively clean up `shortcutDetails`), so this branch is
+    // reachable on a well-formed page. A plain `Error` falls through every
+    // classification branch: `add()` rethrows it and aborts the entire
+    // selection snapshot, and `recordDriveChangeFailure` rethrows it before
+    // `reconcileChangePages` persists the page cursor — the poison-page
+    // failure this Lambda exists to prevent, relocated from Zod validation to
+    // shortcut resolution. Reusing the unreadable-record type makes both call
+    // sites treat it the way they already treat a record they cannot read:
+    // skip/fail this one entry and keep moving.
+    throw new GoogleDriveUnreadableFileError(file.id, [
+      {
+        path: "shortcutDetails.targetId",
+        message: "Drive shortcut has no target",
+      },
+    ]);
+  }
   return client.getFile(targetId);
 }
 

@@ -185,6 +185,24 @@ describe("processGoogleDriveChange guard wiring", () => {
     expect(body).toContain("recordSourceFailure(context, fileId, error)");
   });
 
+  test("a shortcut with no target fails typed, so it cannot poison a page", () => {
+    const body = source.slice(
+      source.indexOf("async function resolveShortcut("),
+      source.indexOf("type AddDiscoveredFile ="),
+    );
+
+    // `shortcutDetails.targetId` is optional in the schema — a shortcut whose
+    // target was deleted is a real Drive state — so this branch is reachable
+    // on a well-formed page. A bare `Error` here falls through every
+    // classification branch: `add()` rethrows it and aborts the whole
+    // selection snapshot, and `recordDriveChangeFailure` rethrows it before
+    // reconcileChangePages persists the page cursor. That is the poison-page
+    // failure this Lambda exists to prevent, relocated from Zod validation to
+    // shortcut resolution.
+    expect(body).toContain("new GoogleDriveUnreadableFileError(");
+    expect(body).not.toContain("throw new Error(");
+  });
+
   test("a removed drive selection is retired scoped, not connector-wide", () => {
     const body = source.slice(
       source.indexOf("async function enumerateInitialFiles("),
