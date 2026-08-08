@@ -185,6 +185,24 @@ describe("processGoogleDriveChange guard wiring", () => {
     expect(body).toContain("recordSourceFailure(context, fileId, error)");
   });
 
+  test("a removed drive selection is retired scoped, not connector-wide", () => {
+    const body = source.slice(
+      source.indexOf("async function enumerateInitialFiles("),
+      source.indexOf("async function selectedViaForFile("),
+    );
+    const missingBranch = body.indexOf("isGoogleDriveMissingError(error)");
+
+    expect(missingBranch).toBeGreaterThan(-1);
+    expect(body).toContain("inaccessibleSelectionCount += 1");
+    // The branch must NOT be gated on selectionKind. Rethrowing for `drive`
+    // selections escalated one removed Shared Drive into
+    // markConnectorAccessLost, which marks every source on the connector —
+    // including still-readable file and folder selections — and the deletion
+    // grace period then removes their content. Continuing lets
+    // markUnseenSourcesMissing retire only what this enumeration did not see.
+    expect(body).not.toContain('selection.selectionKind !== "drive"');
+  });
+
   test("an incomplete initial rebuild leaves a durable snapshot obligation", () => {
     const body = source.slice(
       source.indexOf("async function reconcileInitial("),

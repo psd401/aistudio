@@ -1059,14 +1059,28 @@ async function enumerateInitialFiles(
         recordUnreadable("enumerateSelection", selection.externalId, error);
         continue;
       }
-      if (
-        selection.selectionKind !== "drive" &&
-        isGoogleDriveMissingError(error)
-      ) {
+      if (isGoogleDriveMissingError(error)) {
+        // Scoped to the selection that is gone, INCLUDING a `drive` selection.
+        // Rethrowing for drives used to escalate one removed Shared Drive into
+        // connector-wide access loss: `handleSyncFailure` calls
+        // `markConnectorAccessLost`, which marks every source on the connector
+        // — file and folder selections that are still perfectly readable
+        // included — and the deletion grace period then removes their content.
+        // Continuing instead lets the snapshot finish and hands retirement to
+        // `markUnseenSourcesMissing`, which only retires what this enumeration
+        // did not see. That is what the drive-removal change handler already
+        // documents as the recovery path, and it keeps an individually shared
+        // file that happens to live in the removed drive alive as long as some
+        // other selection still reaches it.
+        //
+        // A total loss of access still converges: every selection lands here,
+        // the seen set is empty, and the sweep retires all sources into the
+        // same grace period `markConnectorAccessLost` would have used.
         inaccessibleSelectionCount += 1;
         log.error("Google Drive selection is no longer accessible", {
           connectorId: context.connector.id,
           selectionId: selection.id,
+          selectionKind: selection.selectionKind,
           errorCode: sourceFailureCode(error),
         });
         continue;
@@ -1495,9 +1509,10 @@ async function processGoogleDriveChange(
     // A removal, though, is not noise: the Shared Drive was deleted or this
     // account lost access, so sources imported from it are now unreachable.
     // Requesting a selection snapshot lets markUnseenSourcesMissing retire
-    // them; a hard access loss still surfaces through the existing 403/404
-    // path. Anything else is metadata noise and is skipped without side
-    // effects so the cursor keeps advancing.
+    // them, scoped to that drive: enumerateInitialFiles treats the now-403/404
+    // drive selection as inaccessible and carries on, so sources reached by
+    // other selections stay untouched. Anything else is metadata noise and is
+    // skipped without side effects so the cursor keeps advancing.
     const driveRemoved = isDriveRemovalChange(change);
     log.info(
       driveRemoved
