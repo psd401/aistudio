@@ -13,7 +13,7 @@ tasks:
   - ../../skills/psd-image-gen/evals/capability-denied.yaml
   - ../../skills/psd-last30days/evals/keyless-eval-reliability-brief.yaml
   - ../../skills/psd-learning-page/evals/accessibility-contract.yaml
-  - ../../skills/psd-open-adaptive-district/evals/decommission-vs-continuation.yaml
+  - ../../skills/psd-open-adaptive-district/evals/stop-vs-run-again.yaml
   - ../../skills/psd-skills-meta/evals/search-without-author.yaml
   - ../../skills/psd-summarize/evals/records-safe-projector-summary.yaml
   - ../../skills/psd-tts/evals/synthetic-short-audio.yaml

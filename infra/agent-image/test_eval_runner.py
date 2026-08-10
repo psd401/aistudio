@@ -429,27 +429,90 @@ class SuiteLoadingTests(unittest.TestCase):
                 valid_self_check,
             )
 
-        open_adaptive_decision = next(
+        open_adaptive_check_in = next(
             str(grader.get("pattern"))
             for grader in tasks_by_id[
-                "open-adaptive-decommission-vs-continuation"
+                "open-adaptive-weekly-check-in-fields"
             ].graders
             if grader.get("type") == "output_match"
         )
-        for valid_decision in (
-            "Continuation is warranted by the revised hypothesis.",
-            "Continue only if the revised hypothesis is testable.",
-        ):
-            self.assertIsNotNone(
-                re.search(open_adaptive_decision, valid_decision),
-                valid_decision,
-            )
-        self.assertIsNone(
+        self.assertIsNotNone(
             re.search(
-                open_adaptive_decision,
-                "Decommission because the original hypothesis failed.",
+                open_adaptive_check_in,
+                "Tried, Learned, Stuck, Needs.",
             )
         )
+        # The four headings are a fixed, ordered template, so a reordered or
+        # renamed set must not grade as a pass.
+        for wrong_check_in in (
+            "Needs, Stuck, Learned, Tried.",
+            "Tried, Learned, Blocked, Asks.",
+        ):
+            self.assertIsNone(
+                re.search(open_adaptive_check_in, wrong_check_in),
+                wrong_check_in,
+            )
+
+        # The task grades on every grader, so the contract is the conjunction,
+        # not any single pattern: a response passes only when all of them match.
+        open_adaptive_decision = [
+            str(grader.get("pattern"))
+            for grader in tasks_by_id[
+                "open-adaptive-stop-vs-run-again"
+            ].graders
+            if grader.get("type") == "output_match"
+        ]
+
+        def graded_run_it_again(response: str) -> bool:
+            return all(
+                re.search(pattern, response) is not None
+                for pattern in open_adaptive_decision
+            )
+
+        for valid_decision in (
+            "Run it again: the team has a sharper question.",
+            # Leading with the deciding condition is equally correct, so the
+            # grader must not depend on the order of the two phrases.
+            "Because a sharper question survived the cycle, the call is "
+            "Run it again.",
+            # A negation may sit in the same sentence as the call while still
+            # affirming it -- the guards must not over-reach and fail this.
+            "The build did not hit its signs of success, so the call is "
+            "Run it again: the team has a sharper question.",
+            # Naming Stop it in order to rule it out is correct, too.
+            "This isn't a Stop it. The team has a sharper question, so "
+            "Run it again.",
+            # The gerund describes the call the team is NOT making, so the
+            # Stop guard must not fire on it.
+            "Stopping the build would normally be right, but the sharper "
+            "question makes the call Run it again.",
+        ):
+            self.assertTrue(
+                graded_run_it_again(valid_decision),
+                valid_decision,
+            )
+        for wrong_decision in (
+            "Stop it, because the build missed every sign of success.",
+            # Names both required phrases while making the opposite call, so
+            # the presence check alone would score this a pass.
+            "Stop it; do not Run it again because there is no sharper "
+            "question.",
+            "The call is Stop it -- there was no sharper question, so do not "
+            "Run it again.",
+            "They should Stop it. A sharper question alone does not justify "
+            "Run it again.",
+            # A selection verb between the negation and the call, and a Stop
+            # phrased without the literal call name -- both still the opposite
+            # decision.
+            "We should stop the build rather than choose Run it again, even "
+            "though there is a sharper question.",
+            "The decision is to stop, not Run it again, even with a sharper "
+            "question.",
+        ):
+            self.assertFalse(
+                graded_run_it_again(wrong_decision),
+                wrong_decision,
+            )
 
         chart_probe = next(
             grader
