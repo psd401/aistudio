@@ -482,6 +482,10 @@ class SuiteLoadingTests(unittest.TestCase):
             # Naming Stop it in order to rule it out is correct, too.
             "This isn't a Stop it. The team has a sharper question, so "
             "Run it again.",
+            # The gerund describes the call the team is NOT making, so the
+            # Stop guard must not fire on it.
+            "Stopping the build would normally be right, but the sharper "
+            "question makes the call Run it again.",
         ):
             self.assertTrue(
                 graded_run_it_again(valid_decision),
@@ -497,6 +501,13 @@ class SuiteLoadingTests(unittest.TestCase):
             "Run it again.",
             "They should Stop it. A sharper question alone does not justify "
             "Run it again.",
+            # A selection verb between the negation and the call, and a Stop
+            # phrased without the literal call name -- both still the opposite
+            # decision.
+            "We should stop the build rather than choose Run it again, even "
+            "though there is a sharper question.",
+            "The decision is to stop, not Run it again, even with a sharper "
+            "question.",
         ):
             self.assertFalse(
                 graded_run_it_again(wrong_decision),

@@ -20,10 +20,14 @@ trials: 3
 # same sentence while affirming it.
 graders:
   - {"type":"output_match","pattern":"(?is)\\A(?=.*Run it again)(?=.*sharper question)"}
-  # Reject a directly negated call: "do not / don't / never / rather than /
-  # instead of" immediately before "Run it again".
-  - {"type":"output_match","pattern":"(?is)\\A(?!.*(?:\\bnot|n't|\\bnever\\b|rather than|instead of)\\s+(?:to\\s+|simply\\s+|just\\s+)*run it again)"}
-  # Reject "Stop it" asserted as the call -- either opening the response or
-  # named as the decision. A correct answer may still mention Stop it while
-  # ruling it out ("this isn't a Stop it"), so only assertive forms match.
-  - {"type":"output_match","pattern":"(?is)\\A(?!\\s*(?:\\*\\*)?stop it(?:\\*\\*)?\\s*[.,;:)\\u2014\\u2013-])(?!.*(?:call|answer|decision|verdict)\\s*(?:is|:|=)\\s*(?:\\*\\*)?stop it)(?!.*(?:should|must|would)\\s+(?:be\\s+)?(?:\\*\\*)?stop it\\b)"}
+  # Reject a negated call: "do not / don't / never / rather than / instead of"
+  # before "Run it again", allowing the selection verb that usually sits
+  # between them ("rather than choose Run it again").
+  - {"type":"output_match","pattern":"(?is)\\A(?!.*(?:\\bnot|n't|\\bnever\\b|rather than|instead of)\\s+(?:to\\s+|simply\\s+|just\\s+|choos\\w+\\s+|pick\\w*\\s+|select\\w*\\s+|opt\\w*\\s+(?:for\\s+)?|go\\w*\\s+(?:with\\s+)?|call\\s+it\\s+|mak\\w+\\s+(?:the\\s+)?(?:call\\s+)?)*run it again)"}
+  # Reject a Stop call asserted as the decision -- opening the response, or
+  # named after a decision noun or a modal. Covers the phrasings that stand in
+  # for the literal call ("stop the build"). A correct answer may still mention
+  # Stop it while ruling it out ("this isn't a Stop it"), so only assertive
+  # forms match; the gerund ("stopping the build would normally be right") is
+  # deliberately not one of them.
+  - {"type":"output_match","pattern":"(?is)\\A(?!\\s*(?:\\*\\*)?stop it(?:\\*\\*)?\\s*[.,;:)\\u2014\\u2013-])(?!.*(?:call|answer|decision|verdict)\\s*(?:is|:|=)\\s*(?:to\\s+)?(?:\\*\\*)?stop\\b)(?!.*(?:should|must|would|will|'d)\\s+(?:be\\s+)?(?:\\*\\*)?stop\\s+(?:it|the build|this build)\\b)"}
