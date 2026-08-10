@@ -1964,10 +1964,18 @@ class OpenClawAdapter(HarnessAdapter):
             # outer failure row entirely. Check the error class too, so a nudge
             # that did not actually recover falls through to be recorded once,
             # by this leg, with accurate nudge_* telemetry.
-            nudge_recovered = bool(nudged.text.strip()) and (
+            #
+            # Named for what it literally tests, not "recovered": a nudge leg
+            # that failed some OTHER way (a ChatDeadlineExpired partial, say)
+            # still returns text and still takes this branch. That is correct
+            # — the nested leg already recorded its own failure, and
+            # failed/error_class propagate through the TurnResult below — but
+            # only because this is a "did it come back with something to show
+            # the user" test, not a success test.
+            nudge_returned_text = bool(nudged.text.strip()) and (
                 nudged.error_class != "EmptyAgentResponse"
             )
-            if nudge_recovered:
+            if nudge_returned_text:
                 merged_tools = tool_calls + nudged.tool_calls
                 return TurnResult(
                     text=nudged.text,

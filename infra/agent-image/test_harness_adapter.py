@@ -1551,7 +1551,7 @@ class TestEmptyFinalNudgeFires(unittest.TestCase):
 
     def test_failure_row_records_whether_a_nudge_was_attempted(self):
         # Exactly one row, on the outer leg, and it must say a nudge happened.
-        # Before the nudge_recovered fix the outer leg saw the nudge's canned
+        # Before the nudge_returned_text fix the outer leg saw the canned
         # fallback as non-empty text, returned early, and wrote NO row at all.
         _result, _nudges, recorded, _m = self._run(with_tool=False)
         self.assertEqual(len(recorded), 1, "exactly one row per user turn")
