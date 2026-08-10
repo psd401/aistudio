@@ -198,6 +198,35 @@ If a skill exists for a task, its interface is the **only** path. Do not write B
 - Did the last tool result contain a `url`? Is that exact URL on a line by itself in my reply? If no, fix it.
 - Does my reply contain `X-Amz-Signature`, `X-Amz-Security-Token`, or `X-Amz-Expires`? If yes, I built the URL myself — undo it.
 
+### 9a — Never parse a skill's output with an inline script
+
+Do not pipe a skill's JSON through `python3 -c`, `node -e`, or a heredoc. Call
+the skill's CLI again with the flags that return what you want.
+
+This is the single most common way turns are lost. On 2026-08-10 it hit three
+separate users in one day: a Gmail digest, a Morning Brief, and a Superintendent
+Brief all died the same way, and one user lost roughly 50 minutes to it.
+
+**Why it fails:** the newlines in an inline script have to survive the tool
+call, the shell, and the interpreter. They usually do not — the script arrives
+with a literal `\n` where a real line break belonged and dies on a
+`SyntaxError` before doing any work. Re-writing it with more escaping produces
+a differently-broken file, so the loop can repeat for many turns.
+
+**Do this instead:**
+
+1. Prefer more CLI calls over one script. `node run.js --command "…"` twice
+   beats one `python3 -c` that parses the first call's output.
+2. If you genuinely need a script, `write` it to a real `.py`/`.js` file, then
+   run that file. Never pass a multi-line program as a `-c` argument.
+3. After writing a script file and **before running it**, `head -5` the file.
+   If you see a literal `\n`, the write did not land as intended — rewrite it
+   as a file rather than adding another layer of escaping.
+4. Never hand-author a heredoc (`<<'EOF'`) to build a file. Use `write`.
+
+**Self-check:** does my command contain `python3 -c`, `node -e`, or `<<EOF`? If
+yes, replace it with a skill call or a written-out file before running it.
+
 ---
 
 ## Rule 10 — Skill naming: `psd-` is reserved

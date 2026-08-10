@@ -129,6 +129,24 @@ node /opt/psd-skills/psd-workspace/run.js \
 
 # Create a draft on the user's account (lands in their Drafts folder, marker
 # is auto-appended to the body — they review and send themselves)
+#
+# CREATING DRAFTS IS SUPPORTED AND ALLOWED. If you conclude otherwise, you
+# have the command wrong — re-read this block instead of giving up or
+# hand-rolling a MIME payload.
+#
+#   ✅ RIGHT:  --command "gmail +draft --to … --subject … --body …"
+#   ❌ WRONG:  --command "gws +draft …"        -> "unrecognized subcommand"
+#              `gws` is implied inside --command; naming it makes `gws` the
+#              subcommand. Never write `gws` inside --command.
+#   ❌ WRONG:  bare `gws …` as a shell command -> the image's gws is a wrapper
+#              that refuses direct calls. Always go through run.js.
+#   ❌ WRONG:  --command "gmail +send --draft" -> Phase-1 forbidden. `+send`
+#              is blocked whatever flags follow it. `+draft` is a DIFFERENT
+#              verb and is NOT blocked.
+#
+# "Unrecognized subcommand" means you typed the wrong verb, NOT that drafting
+# is unavailable. On 2026-08-10 an agent hit that error, reported drafts as
+# impossible, and burned the turn writing a raw RFC5322 MIME script instead.
 node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
   --command "gmail +draft --to principal@psd401.net --subject 'Follow up' --body 'Hi Bill,...'"
@@ -192,6 +210,21 @@ node /opt/psd-skills/psd-workspace/run.js \
 node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
   --command "gmail +draft --to bill@psd401.net --subject 'Follow up' --body-file /tmp/draft-body.txt"
+
+# NO BINARY EMAIL ATTACHMENTS. There is no supported way to attach a file to a
+# draft through this transport. A base64 audio/image part inside a raw
+# multipart/mixed MIME payload is rejected by the broker with
+# `workspace-command-rejected` / "Workspace command contains an invalid
+# argument" — that rejection is the transport refusing binary content, not a
+# malformed payload, so re-encoding it will not help.
+#
+# Deliver the file as a LINK instead, and say so plainly in the same turn:
+#   - audio from psd-tts, video from psd-hyperframes, images from psd-image-gen
+#     already return a public HTTPS URL — paste that URL in the draft body
+#   - anything else: upload to Drive with --scope agent, share it, link it
+#
+# Do not attempt the MIME route first to "see if it works". It does not, and
+# on 2026-08-10 a user lost a turn to it before falling back to a link.
 
 # Chat message text (+send) uses --text-file (replaces --text)
 # Only send after the user explicitly confirms the message. Chat writes must
