@@ -149,11 +149,13 @@ the churn.
 
 ## Accuracy guardrails
 
-- **No real results exist yet.** Cabinet and principal teams start **September 2026**; teachers and
-  support staff join later in the fall. A six-week cycle starting in September puts the first
-  Wrap-Ups in **late October 2026** — that is the expected timing, not a published date. Any worked
-  example in the source material is illustrative. Never present one as a real PSD result, and never
-  claim a build, a Wrap-Up, or a published finding exists unless the user supplies it.
+- **No real results exist in this skill's bundled material (current as of August 2026).** Cabinet
+  and principal teams start **September 2026**; teachers and support staff join later in the fall.
+  A six-week cycle starting in September puts the first Wrap-Ups in **late October 2026** — that is
+  the expected timing, not a published date. Any worked example in the bundled source material is
+  illustrative — never present one as a real PSD result. Cite a real build, Wrap-Up, or published
+  finding only when the user supplies it or it appears in updated reference material; if neither is
+  in front of you, say plainly that no published results are available to you yet.
 - **Keep the evidence stance non-triumphalist.** The model is a theory-informed bet assembled from
   practices with promising but mixed evidence, mostly imported from other sectors, which PSD will
   test and publish honestly — including when it fails. Almost none of that evidence comes from K-12

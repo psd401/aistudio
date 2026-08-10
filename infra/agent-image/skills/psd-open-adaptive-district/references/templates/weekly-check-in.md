@@ -14,7 +14,7 @@
 
 ## Cadence
 
-- **When:** Same day every week, every week of the cycle. Friday is the suggested default; what matters is picking one day and holding it.
+- **When:** Same day every week — the first one posts in week 1 with the locked Build Plan, then weekly through week 5. In week 6 the check-ins become the raw material for the Wrap-Up. Friday is the suggested default; what matters is picking one day and holding it.
 - **Where:** The team's chat space. That's where the PSD AI Agent reads from.
 - **Who:** The scribe posts it; the team weighs in first.
 - **How long:** Two or three sentences per field. Essays mean you're trying too hard.
