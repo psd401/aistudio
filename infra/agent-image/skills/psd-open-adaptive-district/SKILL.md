@@ -1,7 +1,7 @@
 ---
 name: psd-open-adaptive-district
-summary: Peninsula School District's Open Adaptive District operating model — the six-week build cycle (Plan, Do, Study, Share), the Build Plan, Weekly Check-In and Wrap-Up papers, and the Quarterly Focus; also translates the retired first-draft vocabulary (SHIP cycle, bet, Bet Brief, Adoption, Decommission and Continuation briefs, Quarterly Intent) into the current terms.
-description: Everything about Peninsula School District's Open Adaptive District — the six-week build cycle, one build per team, Keep it / Stop it / Run it again, and the Quarterly Focus. Use to explain the model, coach a team, or draft a Build Plan, Weekly Check-In, Wrap-Up, or Quarterly Focus. Also covers the retired first-draft vocabulary (SHIP cycles — Sense, Hypothesize, Implement, Publish; bets and Bet Briefs; Adoption, Decommission and Continuation briefs; Quarterly Intent) and translates it into the current terms.
+summary: Peninsula School District's Open Adaptive District operating model — the six-week build cycle (Plan, Do, Study, Share), the Build Plan, Weekly Check-In and Wrap-Up papers, the Keep it / Stop it / Run it again call, and the Quarterly Focus.
+description: Everything about Peninsula School District's Open Adaptive District — the six-week build cycle, one build per team, Keep it / Stop it / Run it again, and the Quarterly Focus. Use to explain the model, coach a team, or draft a Build Plan, Weekly Check-In, Wrap-Up, or Quarterly Focus.
 allowed-tools: Read
 ---
 
@@ -156,10 +156,10 @@ the churn.
   illustrative — never present one as a real PSD result. Cite a real build, Wrap-Up, or published
   finding only when the user supplies it or it appears in updated reference material; if neither is
   in front of you, say plainly that no published results are available to you yet.
-- **Keep the evidence stance non-triumphalist.** The model is a theory-informed bet assembled from
-  practices with promising but mixed evidence, mostly imported from other sectors, which PSD will
-  test and publish honestly — including when it fails. Almost none of that evidence comes from K-12
-  district operations. See `references/evidence.md`.
+- **Keep the evidence stance non-triumphalist.** The model is assembled from practices with
+  promising but mixed evidence, mostly imported from other sectors, which PSD will test and
+  publish honestly — including when it fails. Almost none of that evidence comes from K-12
+  district operations.
 - **Attribution.** The Open Adaptive District was built as part of Superintendent **Krestin Bahr's
   Google GSV Ed Leader Fellowship (2026–27)** and published openly so other districts can adopt or
   adapt it. The fellowship's submitted action plan — commitments, metrics, timeline — is the **one
@@ -174,31 +174,6 @@ the churn.
 
 ---
 
-## Retired vocabulary (first-draft terms → current terms)
-
-The model's first draft used a different vocabulary. If someone asks in the old terms, answer in
-the new ones and note the change in a sentence — don't lecture.
-
-| Retired term | Current term |
-|--------------|--------------|
-| SHIP cycle | The six-week build cycle |
-| **S**ense · **H**ypothesize · **I**mplement · **P**ublish | **Plan** (wk 1) · **Do** (wks 2–5) · **Study** (wk 6) · **Share** |
-| Bet | Build |
-| Bet Brief | Build Plan |
-| Hypothesis | "Our build" (the *we're going to build ___, because we think it will ___* sentence) |
-| Success criteria | How we'll know (signs of success) |
-| What We're Not Doing | Not this cycle |
-| Adoption Brief | Wrap-Up with the call **Keep it** |
-| Decommission Brief | Wrap-Up with the call **Stop it** |
-| Continuation Brief | Wrap-Up with the call **Run it again** |
-| Quarterly Intent | Quarterly Focus |
-| Plan gap | Between-cycle weeks (weeks 7–8) |
-| Builders | Doers |
-| Chief / sponsor chief | Sponsor from cabinet |
-
-The retired end-of-cycle briefs were three separate documents; there is now **one** Wrap-Up whose
-last field is the call.
-
 ## Reference map
 
 | File | What it is |
@@ -208,8 +183,3 @@ last field is the call.
 | `references/playbook.md` | Everything a team touches: the cycle table, the roles, and all three papers |
 | `references/deep-dive.md` | The reasoning and research behind the design (Senge, Bungay, McChrystal, Snowden, Teece) and the stated guardrails |
 | `references/templates/*.md` | The four artifacts: Build Plan, Weekly Check-In, Wrap-Up, Quarterly Focus |
-| `references/evidence.md` | The 128-study scoping review behind the model's borrowed methods |
-| `references/fellowship-action-plan.md` | The GSV Fellowship submission — the one locked artifact |
-
-The last two files are **historical artifacts kept verbatim** and are written in the retired
-vocabulary. Read them for their content; use the current terms above when you answer.

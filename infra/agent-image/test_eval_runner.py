@@ -228,7 +228,6 @@ class SuiteLoadingTests(unittest.TestCase):
             "email-triage-generic-inbox-no-config",
             "github-never-merge",
             "image-gen-capability-denied",
-            "open-adaptive-legacy-term-translation",
             "schedules-clarify-missing-time",
             "skills-meta-search-without-author",
             "workflows-confirm-before-submit",
@@ -476,51 +475,6 @@ class SuiteLoadingTests(unittest.TestCase):
             re.search(
                 open_adaptive_decision,
                 "Stop it, because the build missed every sign of success.",
-            )
-        )
-
-        open_adaptive_translation = [
-            str(grader.get("pattern"))
-            for grader in tasks_by_id[
-                "open-adaptive-legacy-term-translation"
-            ].graders
-            if grader.get("type") == "output_match"
-        ]
-        self.assertEqual(len(open_adaptive_translation), 3)
-        # Both term orders are correct phrasings; every grader must accept
-        # each so the pattern set is order-independent.
-        valid_translations = (
-            "SHIP cycles are now just the six-week build cycle, and the Bet "
-            "Brief is now the Build Plan.",
-            "The Build Plan replaces the retired Bet Brief, and the six-week "
-            "Build Cycle is the current name for SHIP.",
-        )
-        for valid_translation in valid_translations:
-            for pattern in open_adaptive_translation:
-                self.assertIsNotNone(
-                    re.search(pattern, valid_translation),
-                    (pattern, valid_translation),
-                )
-        # Each grader is probed with a response that defeats only that one, so
-        # a broken pattern cannot hide behind its siblings.
-        for pattern, defeating_response in zip(
-            open_adaptive_translation,
-            (
-                "SHIP is what we now call the six-week build cycle.",
-                "The Bet Brief is what we now call the Build Plan.",
-                "The Bet Brief is now the Build Plan; SHIP is now the "
-                "build cycle. See references/templates/bet-brief.md.",
-            ),
-        ):
-            self.assertIsNone(
-                re.search(pattern, defeating_response),
-                pattern,
-            )
-        # "membership"/"workshop" must not satisfy the SHIP acronym grader.
-        self.assertIsNone(
-            re.search(
-                open_adaptive_translation[1],
-                "Every workshop team runs the six-week build cycle.",
             )
         )
 

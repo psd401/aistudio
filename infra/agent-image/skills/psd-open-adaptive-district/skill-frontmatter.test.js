@@ -13,13 +13,10 @@
  *      `WHERE name ILIKE '%q%' OR summary ILIKE '%q%'` — NAME and SUMMARY only,
  *      never description.
  *
- * This skill has a second job beyond explaining the current model: the Open
- * Adaptive District was re-authored with an entirely new vocabulary, and staff
- * who read the first-draft documents still ask in the retired terms. If those
- * retired phrases live only in `description`, a search for "Bet Brief" returns
- * zero rows and the agent answers from nothing instead of translating. So the
- * retired phrases have to be in SUMMARY, and a test is the only thing that
- * notices when a future edit tidies them back out.
+ * The Open Adaptive District was re-authored with an entirely new vocabulary,
+ * and the retired first-draft terms are gone from the skill by decision — no
+ * translation table, no old-term triggers. The retired-vocabulary test below
+ * asserts they stay gone.
  */
 
 'use strict';
@@ -106,18 +103,7 @@ describe('skills.search discoverability', () => {
     'quarterly focus',
   ];
 
-  // The retired first-draft vocabulary. Staff who read the earlier documents
-  // still search these, and the skill exists partly to translate them.
-  const RETIRED_TERMS = [
-    'ship cycle',
-    'bet brief',
-    'adoption',
-    'decommission',
-    'continuation',
-    'quarterly intent',
-  ];
-
-  for (const term of [...CURRENT_TERMS, ...RETIRED_TERMS]) {
+  for (const term of CURRENT_TERMS) {
     test(`a search for "${term}" finds this skill`, () => {
       expect(searchable()).toContain(term);
     });
@@ -128,31 +114,31 @@ describe('skills.search discoverability', () => {
     // the description — which skills.search never reads.
     const fm = parseFrontmatterAsStackDoes();
     const withoutSummary = `${fm.name} Bundled skill: ${fm.name}`.toLowerCase();
-    const stillFound = [...CURRENT_TERMS, ...RETIRED_TERMS].filter((t) =>
-      withoutSummary.includes(t),
-    );
+    const stillFound = CURRENT_TERMS.filter((t) => withoutSummary.includes(t));
     // The hyphenated skill name contains none of these phrases intact.
     expect(stillFound).toEqual([]);
   });
 });
 
-describe('retired vocabulary is translated, not resurrected', () => {
+describe('retired vocabulary stays gone', () => {
   const skill = () =>
     fs.readFileSync(path.join(__dirname, 'SKILL.md'), 'utf8');
 
-  test('every retired term the summary advertises has a table row', () => {
-    // If a term is searchable but unmapped, the skill loads and then has
-    // nothing to say about the phrase that found it.
+  test('no retired first-draft term appears anywhere in SKILL.md', () => {
     const body = skill();
     for (const retired of [
-      'SHIP cycle',
-      'Bet Brief',
-      'Adoption Brief',
-      'Decommission Brief',
-      'Continuation Brief',
-      'Quarterly Intent',
+      /\bSHIP\b/, // case-sensitive: "membership"/"workshop" must not match
+      /bet brief/i,
+      /adoption brief/i,
+      /decommission/i,
+      /continuation brief/i,
+      /quarterly intent/i,
+      /logbook/i,
+      /hypothesize/i,
+      /cabinet weekly read/i,
+      /quarterly synthesis/i,
     ]) {
-      expect(body).toContain(`| ${retired} |`);
+      expect(body).not.toMatch(retired);
     }
   });
 
@@ -172,6 +158,8 @@ describe('retired vocabulary is translated, not resurrected', () => {
       'quarterly-intent.md',
       'cabinet-weekly-read.md',
       'quarterly-synthesis.md',
+      'evidence.md',
+      'fellowship-action-plan.md',
     ]) {
       expect(body).not.toContain(gone);
     }
