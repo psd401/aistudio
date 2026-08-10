@@ -228,6 +228,7 @@ class SuiteLoadingTests(unittest.TestCase):
             "email-triage-generic-inbox-no-config",
             "github-never-merge",
             "image-gen-capability-denied",
+            "open-adaptive-legacy-term-translation",
             "schedules-clarify-missing-time",
             "skills-meta-search-without-author",
             "workflows-confirm-before-submit",
@@ -429,6 +430,30 @@ class SuiteLoadingTests(unittest.TestCase):
                 valid_self_check,
             )
 
+        open_adaptive_check_in = next(
+            str(grader.get("pattern"))
+            for grader in tasks_by_id[
+                "open-adaptive-weekly-check-in-fields"
+            ].graders
+            if grader.get("type") == "output_match"
+        )
+        self.assertIsNotNone(
+            re.search(
+                open_adaptive_check_in,
+                "Tried, Learned, Stuck, Needs.",
+            )
+        )
+        # The four headings are a fixed, ordered template, so a reordered or
+        # renamed set must not grade as a pass.
+        for wrong_check_in in (
+            "Needs, Stuck, Learned, Tried.",
+            "Tried, Learned, Blocked, Asks.",
+        ):
+            self.assertIsNone(
+                re.search(open_adaptive_check_in, wrong_check_in),
+                wrong_check_in,
+            )
+
         open_adaptive_decision = next(
             str(grader.get("pattern"))
             for grader in tasks_by_id[
@@ -438,8 +463,10 @@ class SuiteLoadingTests(unittest.TestCase):
         )
         for valid_decision in (
             "Run it again: the team has a sharper question.",
-            "The call is Run it again, because a sharper question survived "
-            "the cycle.",
+            # Leading with the deciding condition is equally correct, so the
+            # grader must not depend on the order of the two phrases.
+            "Because a sharper question survived the cycle, the call is "
+            "Run it again.",
         ):
             self.assertIsNotNone(
                 re.search(open_adaptive_decision, valid_decision),
@@ -452,13 +479,14 @@ class SuiteLoadingTests(unittest.TestCase):
             )
         )
 
-        open_adaptive_translation = {
+        open_adaptive_translation = [
             str(grader.get("pattern"))
             for grader in tasks_by_id[
                 "open-adaptive-legacy-term-translation"
             ].graders
             if grader.get("type") == "output_match"
-        }
+        ]
+        self.assertEqual(len(open_adaptive_translation), 3)
         valid_translation = (
             "SHIP cycles are now just the six-week build cycle, and the Bet "
             "Brief is now the Build Plan."
@@ -468,10 +496,26 @@ class SuiteLoadingTests(unittest.TestCase):
                 re.search(pattern, valid_translation),
                 pattern,
             )
-        self.assertFalse(
-            all(
-                re.search(pattern, "Here is the Bet Brief template.")
-                for pattern in open_adaptive_translation
+        # Each grader is probed with a response that defeats only that one, so
+        # a broken pattern cannot hide behind its siblings.
+        for pattern, defeating_response in zip(
+            open_adaptive_translation,
+            (
+                "SHIP is what we now call the six-week build cycle.",
+                "The Bet Brief is what we now call the Build Plan.",
+                "The Bet Brief is now the Build Plan; SHIP is now the "
+                "build cycle. See references/templates/bet-brief.md.",
+            ),
+        ):
+            self.assertIsNone(
+                re.search(pattern, defeating_response),
+                pattern,
+            )
+        # "membership"/"workshop" must not satisfy the SHIP acronym grader.
+        self.assertIsNone(
+            re.search(
+                open_adaptive_translation[1],
+                "Every workshop team runs the six-week build cycle.",
             )
         )
 

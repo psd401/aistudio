@@ -51,6 +51,7 @@
     "test:skill:atrium": "cd infra/agent-image/skills/psd-atrium && bun test",
     "test:skill:sop-creator": "cd infra/agent-image/skills/psd-sop-creator && bun test",
     "test:skill:conversation-coach": "cd infra/agent-image/skills/psd-conversation-coach && bun test",
+    "test:skill:open-adaptive-district": "cd infra/agent-image/skills/psd-open-adaptive-district && bun test",
     "test:skill:morning-brief": "cd infra/agent-image/skills/psd-morning-brief && bun test",
     "test:skill:psd-observances": "cd infra/agent-image/skills/psd-observances && bun test",
     "test:tool:psd-observances-extraction": "uv run --python 3.12 --no-project -m unittest infra/agent-image/skills/psd-observances/tools/test_nspra_markdown.py",

@@ -5,5 +5,8 @@ workspace: pure
 suite: capability
 prompt: "An Open Adaptive District build missed every sign of success in its Build Plan, but the team came out of the cycle with a materially sharper question worth testing. Use PSD's Open Adaptive District guidance to decide which Wrap-Up call the team should make and explain the deciding condition."
 trials: 3
+# Order-agnostic: a correct answer may lead with the deciding condition
+# ("Because the team has a sharper question, the call is Run it again") just as
+# easily as with the call itself.
 graders:
-  - {"type":"output_match","pattern":"(?is)Run it again.*sharper question"}
+  - {"type":"output_match","pattern":"(?is)\\A(?=.*Run it again)(?=.*sharper question)"}

@@ -180,6 +180,17 @@ jobs:
       env:
         CI: true
 
+    # psd-open-adaptive-district. Another knowledge skill outside Jest's roots.
+    # Its Bun suite guards the single-line frontmatter the deploy-time parser
+    # reads, and — because skills.search only ever matches name and summary —
+    # that the retired OAD vocabulary (SHIP cycle, Bet Brief, Quarterly Intent)
+    # stays in the SUMMARY. If those phrases drift into description only, a
+    # staff member asking in the old terms silently finds nothing.
+    - name: Run psd-open-adaptive-district skill tests (Bun)
+      run: bun run test:skill:open-adaptive-district
+      env:
+        CI: true
+
     # psd-morning-brief (#1413). The three-stage CLI is plain CJS outside
     # Jest's roots. This suite pins signed-owner authority boundaries, modular
     # source omission, custom desks, private Atrium-only delivery, podcast

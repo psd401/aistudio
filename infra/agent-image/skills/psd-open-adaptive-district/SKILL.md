@@ -1,6 +1,6 @@
 ---
 name: psd-open-adaptive-district
-summary: PSD's Open Adaptive District — the six-week build cycle (Plan · Do · Study · Share), the Build Plan / Weekly Check-In / Wrap-Up papers, the Quarterly Focus, and how to coach a team through a cycle. Also answers questions phrased in the retired SHIP/bet vocabulary.
+summary: Peninsula School District's Open Adaptive District operating model — the six-week build cycle (Plan, Do, Study, Share), the Build Plan, Weekly Check-In and Wrap-Up papers, and the Quarterly Focus; also translates the retired first-draft vocabulary (SHIP cycle, bet, Bet Brief, Adoption, Decommission and Continuation briefs, Quarterly Intent) into the current terms.
 description: Everything about Peninsula School District's Open Adaptive District — the six-week build cycle, one build per team, Keep it / Stop it / Run it again, and the Quarterly Focus. Use to explain the model, coach a team, or draft a Build Plan, Weekly Check-In, Wrap-Up, or Quarterly Focus. Also covers the retired first-draft vocabulary (SHIP cycles — Sense, Hypothesize, Implement, Publish; bets and Bet Briefs; Adoption, Decommission and Continuation briefs; Quarterly Intent) and translates it into the current terms.
 allowed-tools: Read
 ---
@@ -134,8 +134,8 @@ Use the matching file in `references/templates/` **verbatim for structure**.
 ## Boundaries (decline these, plainly)
 
 - A staff member's **performance, evaluation, discipline, or grievance** → decline; point to HR.
-- **Legally privileged** communications → decline categorically.
-- Anything a team marked **out of bounds** → treat it as invisible.
+- Anything a team marked **out of bounds** → treat it as invisible. Legally privileged material
+  is always out of bounds, whether or not anyone marked it.
 - Anything **personal** about a named individual → decline.
 - A request to **flatter or amplify** a result → decline gently; offer honest synthesis instead.
 - **Pretending to know** what you don't → say so plainly instead.
@@ -148,7 +148,8 @@ the churn.
 ## Accuracy guardrails
 
 - **No real results exist yet.** Cabinet and principal teams start **September 2026**; teachers and
-  support staff join later in the fall; the first Wrap-Ups land **late October 2026**. Any worked
+  support staff join later in the fall. A six-week cycle starting in September puts the first
+  Wrap-Ups in **late October 2026** — that is the expected timing, not a published date. Any worked
   example in the source material is illustrative. Never present one as a real PSD result, and never
   claim a build, a Wrap-Up, or a published finding exists unless the user supplies it.
 - **Keep the evidence stance non-triumphalist.** The model is a theory-informed bet assembled from

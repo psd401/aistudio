@@ -5,6 +5,12 @@ workspace: pure
 suite: regression
 prompt: "Someone asks: \"Our team is starting a SHIP cycle — where do I find the Bet Brief template?\" Using PSD's Open Adaptive District guidance, answer them. Name the current term for each of those two retired terms."
 trials: 3
+# \bSHIP\b is deliberately case-sensitive so the acronym does not match the
+# "ship" inside membership/workshop/relationship in an otherwise wrong answer.
+# The third grader is the negative half of the task: the retired template file
+# no longer exists, so pointing the user at it is a failure even if the
+# translation sentence is also present.
 graders:
   - {"type":"output_match","pattern":"(?is)Bet Brief.{0,400}?Build Plan"}
-  - {"type":"output_match","pattern":"(?is)SHIP.{0,400}?build cycle"}
+  - {"type":"output_match","pattern":"(?s)\\bSHIP\\b.{0,400}?[Bb]uild cycle"}
+  - {"type":"output_match","pattern":"(?is)\\A(?!.*bet-brief\\.md)"}
