@@ -1888,23 +1888,43 @@ class OpenClawAdapter(HarnessAdapter):
 
         if response_text.strip():
             return _result(_format_for_chat(response_text.strip()))
-        if not _is_nudge and tool_calls:
-            # The turn DID work (tool calls ran) but produced no reply —
-            # nudge once for the user-facing summary instead of sending the
-            # canned fallback (#1138, observed live on r12). Recursive call
-            # is bounded by _is_nudge; a short deadline is plenty at direct-
-            # Mantle serving speeds.
+        if not _is_nudge:
+            # The turn produced no user-visible reply — nudge once instead of
+            # sending the canned fallback (#1138, observed live on r12).
+            # Recursion is bounded by _is_nudge; a short deadline is plenty at
+            # direct-Mantle serving speeds.
+            #
+            # This fired only when tool_calls ran until 2026-08-09, on the
+            # theory that a turn with no tool work had nothing to summarize.
+            # Prod disagrees: of the EmptyAgentResponse rows since 2026-08-01,
+            # every one reached last_state=final, and half of those recorded
+            # first_events=["event:chat"] with no res/usage/lifecycle events at
+            # all. Those turns never had a tool call, so they never got a
+            # nudge — the user just got the canned fallback. They deserve the
+            # same one-shot recovery, with wording that does not assert tool
+            # work that did not happen (that would invite a SOUL rule 4
+            # violation: never fabricate outcomes).
+            has_tools = bool(tool_calls)
             logger.warning(
-                "empty final after %d tool calls — sending one nudge",
+                "empty final after %d tool calls — sending one nudge "
+                "(variant=%s)",
                 len(tool_calls),
+                "tools" if has_tools else "no-tools",
             )
             # Iteration telemetry (issue #1161): a nudge fired this turn.
             # Emit a CloudWatch metric (best-effort) so nudge-fire rate is
             # trendable in the AgentCore container log group, which has a
             # runtime-generated suffix a MetricFilter can't attach to.
+            # Deliberately the same metric name for both variants so the
+            # existing nudge-fire trend stays comparable across this change.
             emit_agent_metric("AgentNudgeFired")
+            nudge_prompt = (
+                self.EMPTY_TURN_NUDGE
+                if has_tools
+                else self.EMPTY_TURN_NUDGE_NO_TOOLS
+            )
             nudged = self.process(
-                self.EMPTY_TURN_NUDGE,
+                nudge_prompt,
                 session_id,
                 model_override,
                 deadline_s=180,
@@ -1950,16 +1970,27 @@ class OpenClawAdapter(HarnessAdapter):
                 "last_state": last_state,
                 "event_counts": event_counts,
                 "first_events": first_event_types,
+                # Reaching here means the nudge did not rescue the turn. Record
+                # whether one was even attempted, and which wording — without
+                # this, a row that never got a nudge is indistinguishable from
+                # one where the nudge fired and the model stayed silent, which
+                # is exactly the ambiguity that made these rows hard to read.
+                "nudge_attempted": not _is_nudge,
+                "nudge_variant": (
+                    None
+                    if _is_nudge
+                    else ("tools" if tool_calls else "no-tools")
+                ),
             },
         )
-        # nudged reflects whether the one nudge fired this turn: it did iff this
-        # is not itself a nudge leg AND there were tool calls to summarize (the
-        # exact condition guarding the self.process() nudge call above).
+        # nudged reflects whether the one nudge fired this turn: it did iff
+        # this is not itself a nudge leg — the exact condition guarding the
+        # self.process() call above, no longer also gated on tool_calls.
         return _result(
             "I processed your message but had no response.",
             failed=True,
             error_class="EmptyAgentResponse",
-            nudged=(not _is_nudge and bool(tool_calls)),
+            nudged=not _is_nudge,
         )
 
     @staticmethod
@@ -2008,6 +2039,17 @@ class OpenClawAdapter(HarnessAdapter):
         "user NO reply — they saw nothing. Send the user-facing summary of "
         "what you just did (and its outcome) now, as plain text. Do not "
         "re-run any tools unless something genuinely failed."
+    )
+
+    # Same one-shot recovery for a turn that ended empty having run NO tools.
+    # Worded so it cannot be read as "summarize your work": there was none, and
+    # inviting a summary here would be inviting fabrication (SOUL rule 4).
+    EMPTY_TURN_NUDGE_NO_TOOLS = (
+        "[system-nudge] Your previous turn ended without sending the user any "
+        "reply — they saw nothing at all. Answer their most recent message "
+        "now, as plain text. If you cannot answer it, say so plainly and say "
+        "what you need in order to. Do not describe any work or tool call you "
+        "did not actually perform."
     )
 
     @staticmethod

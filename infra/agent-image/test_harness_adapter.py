@@ -1370,6 +1370,155 @@ class TestEmptyTurnNudge(unittest.TestCase):
         self.assertIn("NO reply", n)
         self.assertIn("Do not", n)
 
+    def test_no_tools_nudge_never_claims_tool_work_happened(self):
+        # The tools variant opens with "finished tool work". Reusing it on a
+        # turn that ran no tools would assert work that never happened and
+        # invite the model to invent it (SOUL rule 4).
+        n = OpenClawAdapter.EMPTY_TURN_NUDGE_NO_TOOLS
+        self.assertIn("[system-nudge]", n)
+        self.assertNotIn("tool work", n)
+        self.assertNotIn("summary of", n)
+        self.assertIn("did not actually perform", n)
+
+
+class TestEmptyFinalNudgeFires(unittest.TestCase):
+    """An empty final turn gets one nudge whether or not tools ran.
+
+    Until 2026-08-09 the nudge was gated on tool_calls, so a turn that
+    reached last_state=final having run nothing at all skipped straight to the
+    canned fallback. Half the EmptyAgentResponse rows in prod since
+    2026-08-01 are that shape (first_events=["event:chat"], no res/usage/
+    lifecycle events), so they never got the recovery the tool case got.
+    """
+
+    def _drive_empty_final(self, adapter, *, with_tool):
+        """Run one turn that reaches state=final with no assistant text."""
+        chat_id = None
+
+        class FakeWebSocket:
+            def __init__(self, messages):
+                self.messages = list(messages)
+                self.sent = []
+
+            def send(self, payload):
+                nonlocal chat_id
+                parsed = json.loads(payload)
+                self.sent.append(parsed)
+                if parsed.get("method") == "chat.send":
+                    chat_id = parsed["id"]
+
+            def recv(self):
+                message = self.messages.pop(0)
+                return message() if callable(message) else message
+
+            def settimeout(self, _timeout):
+                return None
+
+            def close(self):
+                return None
+
+        def envelope(**fields):
+            return json.dumps(fields)
+
+        def current_run_event(event, payload):
+            return envelope(
+                type="event", event=event,
+                payload={"runId": chat_id, **payload},
+            )
+
+        messages = [
+            envelope(type="event", event="connect.challenge", payload={}),
+            lambda: envelope(type="res", id=socket.sent[-1]["id"], ok=True,
+                             payload={}),
+            lambda: envelope(type="res", id=socket.sent[-1]["id"], ok=True,
+                             payload={"tools": []}),
+            lambda: envelope(type="res", id=socket.sent[-1]["id"], ok=True,
+                             payload={}),
+            lambda: envelope(type="res", id=chat_id, ok=True,
+                             payload={"runId": chat_id, "status": "started"}),
+        ]
+        if with_tool:
+            messages += [
+                lambda: current_run_event("agent", {
+                    "stream": "item",
+                    "data": {"itemId": "t-1", "phase": "start",
+                             "kind": "tool", "name": "read"},
+                }),
+                lambda: current_run_event("agent", {
+                    "stream": "item",
+                    "data": {"itemId": "t-1", "phase": "end",
+                             "kind": "tool", "name": "read",
+                             "status": "ok"},
+                }),
+            ]
+        # Final with no assistant text at all — the empty-turn shape.
+        messages.append(lambda: current_run_event("chat", {"state": "final"}))
+
+        socket = FakeWebSocket(messages)
+        fake_websocket_module = mock.Mock()
+        fake_websocket_module.create_connection.return_value = socket
+        fake_websocket_module.WebSocketTimeoutException = TimeoutError
+        adapter._ready = True
+        return fake_websocket_module
+
+    def _run(self, *, with_tool, is_nudge=False):
+        adapter = OpenClawAdapter()
+        ws = self._drive_empty_final(adapter, with_tool=with_tool)
+        nudges = []
+        recorded = []
+
+        def fake_process(message, *_a, **_kw):
+            nudges.append(message)
+            return harness_adapter.TurnResult(text="", failed=False)
+
+        with (
+            mock.patch.dict(sys.modules, {"websocket": ws}),
+            mock.patch.object(adapter, "_read_turn_usage", return_value={
+                "input": 0, "output": 0, "cache_read": 0,
+                "cache_write": 0, "model_calls": 0,
+                "capture_complete": False,
+            }),
+            mock.patch.object(adapter, "process", side_effect=fake_process),
+            mock.patch("harness_adapter.record_failure",
+                       side_effect=lambda **kw: recorded.append(kw)),
+            mock.patch("harness_adapter.emit_agent_metric"),
+        ):
+            result = adapter._process_once(
+                "hello", "s1", deadline_s=600, _is_nudge=is_nudge
+            )
+        return result, nudges, recorded
+
+    def test_empty_final_without_tools_fires_the_no_tools_nudge(self):
+        _result, nudges, _rec = self._run(with_tool=False)
+        self.assertEqual(len(nudges), 1, "a no-tool empty turn must nudge")
+        self.assertEqual(nudges[0], OpenClawAdapter.EMPTY_TURN_NUDGE_NO_TOOLS)
+
+    def test_empty_final_with_tools_still_fires_the_tools_nudge(self):
+        _result, nudges, _rec = self._run(with_tool=True)
+        self.assertEqual(len(nudges), 1)
+        self.assertEqual(nudges[0], OpenClawAdapter.EMPTY_TURN_NUDGE)
+
+    def test_a_nudge_leg_does_not_nudge_again(self):
+        # Recursion stays bounded by _is_nudge — this is the only thing
+        # standing between one recovery attempt and an unbounded loop.
+        _result, nudges, _rec = self._run(with_tool=False, is_nudge=True)
+        self.assertEqual(nudges, [])
+
+    def test_failure_row_records_whether_a_nudge_was_attempted(self):
+        # Without this a row that never got a nudge is indistinguishable from
+        # one where the nudge fired and the model stayed silent anyway.
+        _result, _nudges, recorded = self._run(with_tool=False)
+        self.assertEqual(len(recorded), 1)
+        ctx = recorded[0]["context"]
+        self.assertTrue(ctx["nudge_attempted"])
+        self.assertEqual(ctx["nudge_variant"], "no-tools")
+
+    def test_nudge_leg_failure_row_marks_no_attempt(self):
+        _result, _nudges, recorded = self._run(with_tool=False, is_nudge=True)
+        ctx = recorded[0]["context"]
+        self.assertFalse(ctx["nudge_attempted"])
+        self.assertIsNone(ctx["nudge_variant"])
+
 
 def _assistant(ts_ms, *, inp=0, out=0, cr=0, cw=0, stop="stop"):
     """One assistant transcript record in OpenClaw's on-disk JSONL shape."""
