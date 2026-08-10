@@ -56,8 +56,19 @@ const filesListSchema = z.object({
   files: z.array(googleDriveFileSchema).default([]),
 });
 
+/**
+ * Google's Changes feed is not exclusively file-scoped. Entries with
+ * `changeType: "drive"` describe the Shared Drive itself (rename, membership,
+ * restriction changes) and carry NO `fileId`. Requiring `fileId` here made
+ * every such entry a poison message: `listChanges` threw before the cursor
+ * advanced, so the Lambda retried the same page forever.
+ *
+ * `changeType` is deliberately a plain string rather than an enum — a new
+ * value Google adds later must not re-poison the queue.
+ */
 const driveChangeSchema = z.object({
-  fileId: z.string(),
+  changeType: z.string().optional(),
+  fileId: z.string().optional(),
   removed: z.boolean().optional().default(false),
   time: z.string().datetime({ offset: true }).optional(),
   driveId: z.string().optional(),
@@ -267,7 +278,7 @@ export class GoogleDriveClient {
     url.searchParams.set("includeItemsFromAllDrives", "true");
     url.searchParams.set(
       "fields",
-      `nextPageToken,newStartPageToken,changes(fileId,removed,time,driveId,file(${FILE_FIELDS}))`,
+      `nextPageToken,newStartPageToken,changes(changeType,fileId,removed,time,driveId,file(${FILE_FIELDS}))`,
     );
     if (driveId) {
       url.searchParams.set("driveId", driveId);
