@@ -151,18 +151,84 @@ describe("processGoogleDriveChange guard wiring", () => {
     expect(body).toContain("return driveRemoved;");
   });
 
-  test("the reconcile loop persists the cursor on both skip and removal", () => {
+  test("the reconcile loop is the shared, behaviorally tested one", () => {
+    // The cursor/obligation ordering itself is proven in
+    // google-content-sync-reconcile.test.ts against the real loop. All this
+    // asserts is that index.ts still delegates to it rather than growing a
+    // second copy.
     const loop = source.slice(
       source.indexOf("async function reconcileChanges("),
       source.indexOf("async function markConnectorAccessLost("),
     );
-    // Skipped entry: returns false, requiresSelectionSnapshot stays false, so
-    // the per-page persist runs.
-    expect(loop).toContain("if (!requiresSelectionSnapshot) {");
-    // Removal: returns true, so the cursor is persisted after the snapshot.
-    expect(loop).toContain("if (requiresSelectionSnapshot) {");
-    expect(loop).toContain("await reconcileSelectionSnapshot(");
-    // Either way the cursor advances — that is the invariant the outage broke.
-    expect(loop.match(/await persistSyncCursor\(/g)).toHaveLength(2);
+    expect(loop).toContain("return reconcileChangePages<GoogleDriveChange>(");
+    expect(loop).toContain("runSelectionSnapshot:");
+    expect(loop).toContain("markSnapshotPending:");
+  });
+
+  test("an unreadable file record fails the one change, never the page", () => {
+    const body = source.slice(
+      source.indexOf("async function recordDriveChangeFailure("),
+      source.indexOf("async function processGoogleDriveChange("),
+    );
+    const unreadable = body.indexOf("GoogleDriveUnreadableFileError");
+    const rethrow = body.indexOf(
+      "if (!isGoogleDriveMissingError(error)) throw error;",
+    );
+
+    // The unreadable branch must be classified before the catch-all rethrow —
+    // a ZodError from getFile that escapes this function replays the page
+    // until the DLQ, the poison pattern this Lambda exists to avoid — and it
+    // must fail the record, never reinterpret it as a removal.
+    expect(unreadable).toBeGreaterThan(-1);
+    expect(rethrow).toBeGreaterThan(-1);
+    expect(unreadable).toBeLessThan(rethrow);
+    expect(body).toContain("recordSourceFailure(context, fileId, error)");
+  });
+
+  test("a shortcut with no target fails typed, so it cannot poison a page", () => {
+    const body = source.slice(
+      source.indexOf("async function resolveShortcut("),
+      source.indexOf("type AddDiscoveredFile ="),
+    );
+
+    // `shortcutDetails.targetId` is optional in the schema — a shortcut whose
+    // target was deleted is a real Drive state — so this branch is reachable
+    // on a well-formed page. A bare `Error` here falls through every
+    // classification branch: `add()` rethrows it and aborts the whole
+    // selection snapshot, and `recordDriveChangeFailure` rethrows it before
+    // reconcileChangePages persists the page cursor. That is the poison-page
+    // failure this Lambda exists to prevent, relocated from Zod validation to
+    // shortcut resolution.
+    expect(body).toContain("new GoogleDriveUnreadableFileError(");
+    expect(body).not.toContain("throw new Error(");
+  });
+
+  test("a removed drive selection is retired scoped, not connector-wide", () => {
+    const body = source.slice(
+      source.indexOf("async function enumerateInitialFiles("),
+      source.indexOf("async function selectedViaForFile("),
+    );
+    const missingBranch = body.indexOf("isGoogleDriveMissingError(error)");
+
+    expect(missingBranch).toBeGreaterThan(-1);
+    expect(body).toContain("inaccessibleSelectionCount += 1");
+    // The branch must NOT be gated on selectionKind. Rethrowing for `drive`
+    // selections escalated one removed Shared Drive into
+    // markConnectorAccessLost, which marks every source on the connector —
+    // including still-readable file and folder selections — and the deletion
+    // grace period then removes their content. Continuing lets
+    // markUnseenSourcesMissing retire only what this enumeration did not see.
+    expect(body).not.toContain('selection.selectionKind !== "drive"');
+  });
+
+  test("an incomplete initial rebuild leaves a durable snapshot obligation", () => {
+    const body = source.slice(
+      source.indexOf("async function reconcileInitial("),
+      source.indexOf("async function retryDeferredDownloads("),
+    );
+    // Without this, files hidden behind a dropped entry during the very first
+    // enumeration (or a 410 rebuild) are only recovered if they happen to
+    // change again — the changes-loop path already retries its obligation.
+    expect(body).toContain("setSelectionSnapshotPending(context, !complete)");
   });
 });

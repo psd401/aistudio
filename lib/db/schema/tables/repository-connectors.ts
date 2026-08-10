@@ -42,6 +42,16 @@ export interface RepositoryConnectorMetadata {
   oauthEmail?: string;
   googleDriveName?: string;
   lastNotificationState?: string;
+  /**
+   * ISO timestamp set when a change page has obligated the connector to
+   * rebuild its selection snapshot, and cleared once that snapshot completes.
+   *
+   * The obligation must outlive the process: without it, the only record that
+   * a snapshot was owed was the un-advanced cursor, so a Lambda timeout or a
+   * snapshot budget failure forced every already-processed change page to be
+   * re-fetched and re-processed on the next attempt.
+   */
+  selectionSnapshotPendingAt?: string;
 }
 
 export interface RepositoryConnectorSourceMetadata {
