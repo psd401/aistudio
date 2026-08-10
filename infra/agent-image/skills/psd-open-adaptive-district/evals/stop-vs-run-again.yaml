@@ -1,0 +1,9 @@
+id: open-adaptive-stop-vs-run-again
+skill: psd-open-adaptive-district
+level: L0
+workspace: pure
+suite: capability
+prompt: "An Open Adaptive District build missed every sign of success in its Build Plan, but the team came out of the cycle with a materially sharper question worth testing. Use PSD's Open Adaptive District guidance to decide which Wrap-Up call the team should make and explain the deciding condition."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"(?is)Run it again.*sharper question"}

@@ -432,13 +432,14 @@ class SuiteLoadingTests(unittest.TestCase):
         open_adaptive_decision = next(
             str(grader.get("pattern"))
             for grader in tasks_by_id[
-                "open-adaptive-decommission-vs-continuation"
+                "open-adaptive-stop-vs-run-again"
             ].graders
             if grader.get("type") == "output_match"
         )
         for valid_decision in (
-            "Continuation is warranted by the revised hypothesis.",
-            "Continue only if the revised hypothesis is testable.",
+            "Run it again: the team has a sharper question.",
+            "The call is Run it again, because a sharper question survived "
+            "the cycle.",
         ):
             self.assertIsNotNone(
                 re.search(open_adaptive_decision, valid_decision),
@@ -447,7 +448,30 @@ class SuiteLoadingTests(unittest.TestCase):
         self.assertIsNone(
             re.search(
                 open_adaptive_decision,
-                "Decommission because the original hypothesis failed.",
+                "Stop it, because the build missed every sign of success.",
+            )
+        )
+
+        open_adaptive_translation = {
+            str(grader.get("pattern"))
+            for grader in tasks_by_id[
+                "open-adaptive-legacy-term-translation"
+            ].graders
+            if grader.get("type") == "output_match"
+        }
+        valid_translation = (
+            "SHIP cycles are now just the six-week build cycle, and the Bet "
+            "Brief is now the Build Plan."
+        )
+        for pattern in open_adaptive_translation:
+            self.assertIsNotNone(
+                re.search(pattern, valid_translation),
+                pattern,
+            )
+        self.assertFalse(
+            all(
+                re.search(pattern, "Here is the Bet Brief template.")
+                for pattern in open_adaptive_translation
             )
         )
 

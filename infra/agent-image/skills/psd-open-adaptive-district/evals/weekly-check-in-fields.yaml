@@ -3,7 +3,7 @@ skill: psd-open-adaptive-district
 level: L0
 workspace: pure
 suite: regression
-prompt: "Use the Open Adaptive District guidance to give the exact four headings for a SHIP Weekly Check-In. Keep it concise."
+prompt: "Use the Open Adaptive District guidance to give the exact four headings a team uses for its Weekly Check-In during a six-week build cycle. Keep it concise."
 trials: 3
 graders:
   - {"type":"output_match","pattern":"(?is)Tried.*Learned.*Stuck.*Needs"}

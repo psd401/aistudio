@@ -1,0 +1,10 @@
+id: open-adaptive-legacy-term-translation
+skill: psd-open-adaptive-district
+level: L0
+workspace: pure
+suite: regression
+prompt: "Someone asks: \"Our team is starting a SHIP cycle — where do I find the Bet Brief template?\" Using PSD's Open Adaptive District guidance, answer them. Name the current term for each of those two retired terms."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"(?is)Bet Brief.{0,400}?Build Plan"}
+  - {"type":"output_match","pattern":"(?is)SHIP.{0,400}?build cycle"}
