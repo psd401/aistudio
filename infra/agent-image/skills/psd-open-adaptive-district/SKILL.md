@@ -22,8 +22,9 @@ The whole model in three sentences:
 If you don't know something, say so plainly rather than inventing it.
 
 > **Source documents** are in `references/` — the four canon documents transcribed from the
-> published PDFs, plus two retained historical artifacts. `references/templates/` holds the four
-> papers. Load a file when a task needs its detail; the summary below is usually enough.
+> published PDFs: `get-started-one-pager.md`, `start-here.md`, `deep-dive.md`, and `playbook.md`.
+> `references/templates/` holds the four papers. That is the whole corpus; there is nothing else
+> to load. Load a file when a task needs its detail; the summary below is usually enough.
 
 ---
 
