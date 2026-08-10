@@ -447,10 +447,28 @@ class DrizzleAdapter implements Adapter {
       !client.requirePkce ||
       (publicApplication && authMethod !== "none")
     ) {
+      // Log WHICH redirect URI failed and why, not just how many did.
+      //
+      // Validation is all-or-nothing: one bad URI makes loadClient return
+      // undefined, so oidc-provider answers `invalid_client` and every
+      // otherwise-valid URI on the client stops working too. A count alone
+      // cannot distinguish that from a missing or disabled client, and the
+      // caller only ever sees the generic `invalid_client`.
+      //
+      // 2026-08-10: the prod `PSD OpenClaw` client carried a dev-only
+      // `http://localhost:3000/...` redirect, which the native policy rejects
+      // (RFC 8252 wants literal 127.0.0.1 / [::1], not `localhost`). That one
+      // entry disabled agent-connect for every user, and `redirectErrorCount: 1`
+      // was the only clue in the log group. redirectValidation.errors already
+      // held the exact message — it just was not being written down.
+      //
+      // Redirect URIs are registration metadata, not credentials; the errors
+      // carry no token, code, or secret.
       this.log.error("OAuth client registration failed security validation", {
         clientId,
         applicationType: client.applicationType,
         redirectErrorCount: redirectValidation.errors.length,
+        redirectErrors: redirectValidation.errors,
         authMethodValid,
         secretInvariantValid,
         requirePkce: client.requirePkce,
