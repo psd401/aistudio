@@ -63,10 +63,10 @@ teams from the same dead end is a win.
 
 | Artifact | When | Template |
 |----------|------|----------|
-| **Build Plan** | Week 1 | `templates/build-plan.md` |
-| **Weekly Check-In** | Every week | `templates/weekly-check-in.md` |
-| **Wrap-Up** | Week 6 | `templates/wrap-up.md` |
-| **Quarterly Focus** | Between cycles, by the superintendent | `templates/quarterly-focus.md` |
+| **Build Plan** | Week 1 | `references/templates/build-plan.md` |
+| **Weekly Check-In** | Every week | `references/templates/weekly-check-in.md` |
+| **Wrap-Up** | Week 6 | `references/templates/wrap-up.md` |
+| **Quarterly Focus** | Between cycles, by the superintendent | `references/templates/quarterly-focus.md` |
 
 - **Build Plan** — seven fields: Team/Cycle/Date · The problem · Our build · How we'll know ·
   Week-one plan · Not this cycle · What it could become.

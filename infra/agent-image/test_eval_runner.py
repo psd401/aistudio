@@ -493,7 +493,7 @@ class SuiteLoadingTests(unittest.TestCase):
             "SHIP cycles are now just the six-week build cycle, and the Bet "
             "Brief is now the Build Plan.",
             "The Build Plan replaces the retired Bet Brief, and the six-week "
-            "build cycle is the current name for SHIP.",
+            "Build Cycle is the current name for SHIP.",
         )
         for valid_translation in valid_translations:
             for pattern in open_adaptive_translation:

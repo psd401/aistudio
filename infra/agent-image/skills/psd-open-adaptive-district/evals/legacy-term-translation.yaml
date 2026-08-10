@@ -10,11 +10,12 @@ trials: 3
 # "the Bet Brief is now the Build Plan" — while the {0,400} window keeps the
 # pairing local so the terms cannot match from unrelated paragraphs.
 # \bSHIP\b is deliberately case-sensitive so the acronym does not match the
-# "ship" inside membership/workshop/relationship in an otherwise wrong answer.
+# "ship" inside membership/workshop/relationship in an otherwise wrong answer;
+# "build cycle" itself accepts any title casing ("Build Cycle" is ordinary).
 # The third grader is the negative half of the task: the retired template file
 # no longer exists, so pointing the user at it is a failure even if the
 # translation sentence is also present.
 graders:
   - {"type":"output_match","pattern":"(?is)(Bet Brief.{0,400}?Build Plan|Build Plan.{0,400}?Bet Brief)"}
-  - {"type":"output_match","pattern":"(?s)(\\bSHIP\\b.{0,400}?[Bb]uild cycle|[Bb]uild cycle.{0,400}?\\bSHIP\\b)"}
+  - {"type":"output_match","pattern":"(?s)(\\bSHIP\\b.{0,400}?[Bb]uild [Cc]ycle|[Bb]uild [Cc]ycle.{0,400}?\\bSHIP\\b)"}
   - {"type":"output_match","pattern":"(?is)\\A(?!.*bet-brief\\.md)"}

@@ -179,17 +179,21 @@ describe('retired vocabulary is translated, not resurrected', () => {
 
   // Directories are listed once from all-literal paths rather than probed per
   // candidate, so the check never builds an fs path out of file content.
-  test('every templates/ path SKILL.md cites exists on disk', () => {
+  test('every template path SKILL.md cites exists on disk', () => {
     const onDisk = new Set(
       fs.readdirSync(path.join(__dirname, 'references', 'templates')),
     );
-    const cited = [...skill().matchAll(/`templates\/([a-z0-9-]+\.md)`/g)].map(
-      (m) => m[1],
-    );
+    const cited = [
+      ...skill().matchAll(/`references\/templates\/([a-z0-9-]+\.md)`/g),
+    ].map((m) => m[1]);
     expect(cited.length).toBeGreaterThan(0);
     for (const file of new Set(cited)) {
       expect(onDisk).toContain(file);
     }
+    // Templates live under references/templates/. A bare `templates/...`
+    // citation names a real file but does not resolve from the skill root,
+    // so a Read that follows it fails before drafting.
+    expect(skill()).not.toMatch(/`templates\//);
   });
 
   test('every references/ path SKILL.md cites exists on disk', () => {
