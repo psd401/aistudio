@@ -84,4 +84,9 @@ Your AI Agent drafts this from your own check-ins. Your team edits it in about t
 - Coordinate with other teams. The agent digest surfaces overlaps for you.
 - Make anything pretty. Substance over polish, every time.
 
+> **Editor's note — the overlap digest.** The digest and automatic overlap alerts are a planned
+> next build, not v1 behaviour. Until they ship, nothing tells two teams they are working the same
+> problem — so treat "you do not have to coordinate" as the intended future state and check with
+> your sponsor or the other team directly in the meantime.
+
 *Treat the cycle seriously — and lightly. The point is to learn, not to perform.*
