@@ -1888,7 +1888,20 @@ class OpenClawAdapter(HarnessAdapter):
 
         if response_text.strip():
             return _result(_format_for_chat(response_text.strip()))
-        if not _is_nudge:
+        # A start with no terminal event is replay-unsafe: the call may have
+        # already created the Doc, and tool_starts is emptied by pop() the
+        # moment a terminal event lands, so a non-empty tool_starts means
+        # genuinely in flight. The no-tools wording does not forbid re-running
+        # tools, so nudging here could execute the side effect twice — the same
+        # hazard _should_retry_upstream refuses on tools_in_flight. Before
+        # 2026-08-09 this case got no nudge either (tool_calls was empty), so
+        # skipping preserves the old behavior exactly rather than adding a new
+        # risk. Tool work that DID complete keeps its original nudge, whose
+        # wording already forbids re-running tools.
+        has_tools = bool(tool_calls)
+        tools_in_flight_now = bool(tool_starts)
+        should_nudge = has_tools or not tools_in_flight_now
+        if not _is_nudge and should_nudge:
             # The turn produced no user-visible reply — nudge once instead of
             # sending the canned fallback (#1138, observed live on r12).
             # Recursion is bounded by _is_nudge; a short deadline is plenty at
@@ -1904,7 +1917,6 @@ class OpenClawAdapter(HarnessAdapter):
             # same one-shot recovery, with wording that does not assert tool
             # work that did not happen (that would invite a SOUL rule 4
             # violation: never fabricate outcomes).
-            has_tools = bool(tool_calls)
             logger.warning(
                 "empty final after %d tool calls — sending one nudge "
                 "(variant=%s)",
@@ -1930,7 +1942,17 @@ class OpenClawAdapter(HarnessAdapter):
                 deadline_s=180,
                 _is_nudge=True,
             )
-            if nudged.text.strip():
+            # A nudge leg that ALSO ends empty does not come back with empty
+            # text — it falls through to the canned fallback below and returns
+            # that, which is non-empty. Testing text alone therefore treats
+            # every failed nudge as a success, returns early, and skips the
+            # outer failure row entirely. Check the error class too, so a nudge
+            # that did not actually recover falls through to be recorded once,
+            # by this leg, with accurate nudge_* telemetry.
+            nudge_recovered = bool(nudged.text.strip()) and (
+                nudged.error_class != "EmptyAgentResponse"
+            )
+            if nudge_recovered:
                 merged_tools = tool_calls + nudged.tool_calls
                 return TurnResult(
                     text=nudged.text,
@@ -1957,6 +1979,18 @@ class OpenClawAdapter(HarnessAdapter):
                     # though it wrote no agent_failures row.
                     nudged=True,
                 )
+        if _is_nudge:
+            # The nudge leg is an internal recovery attempt, not a user turn.
+            # Recording here would write a SECOND row for the same turn, and it
+            # would be the misleading one: _is_nudge makes nudge_attempted read
+            # false on the very row that proves a nudge happened. Stay silent
+            # and let the outer leg record the single accurate row.
+            return _result(
+                "I processed your message but had no response.",
+                failed=True,
+                error_class="EmptyAgentResponse",
+                nudged=False,
+            )
         record_failure(
             source="harness",
             severity="empty_response",
@@ -1970,27 +2004,32 @@ class OpenClawAdapter(HarnessAdapter):
                 "last_state": last_state,
                 "event_counts": event_counts,
                 "first_events": first_event_types,
-                # Reaching here means the nudge did not rescue the turn. Record
-                # whether one was even attempted, and which wording — without
-                # this, a row that never got a nudge is indistinguishable from
-                # one where the nudge fired and the model stayed silent, which
-                # is exactly the ambiguity that made these rows hard to read.
-                "nudge_attempted": not _is_nudge,
+                # Reaching here means no nudge rescued the turn. Record whether
+                # one was even attempted, and which wording — without this, a
+                # row that never got a nudge is indistinguishable from one
+                # where the nudge fired and the model stayed silent — exactly
+                # the ambiguity that made these rows hard to read.
+                "nudge_attempted": should_nudge,
                 "nudge_variant": (
-                    None
-                    if _is_nudge
-                    else ("tools" if tool_calls else "no-tools")
+                    ("tools" if has_tools else "no-tools")
+                    if should_nudge
+                    else None
+                ),
+                # Set when the nudge was skipped because a tool call was still
+                # in flight and replaying it could double a side effect.
+                "nudge_skipped_tools_in_flight": (
+                    tools_in_flight_now and not should_nudge
                 ),
             },
         )
-        # nudged reflects whether the one nudge fired this turn: it did iff
-        # this is not itself a nudge leg — the exact condition guarding the
-        # self.process() call above, no longer also gated on tool_calls.
+        # Only reachable on the outer leg (the _is_nudge branch returned
+        # above), so nudged mirrors should_nudge: a nudge fired unless it was
+        # skipped for a tool still in flight.
         return _result(
             "I processed your message but had no response.",
             failed=True,
             error_class="EmptyAgentResponse",
-            nudged=not _is_nudge,
+            nudged=should_nudge,
         )
 
     @staticmethod
