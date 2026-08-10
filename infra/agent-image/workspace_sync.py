@@ -684,31 +684,40 @@ def _materialize_empty_workspace_file(
 # intentionally NOT on this list — those are agent-written, user-owned,
 # and must round-trip.
 #
-# AGENTS.md is deliberately NOT on this list, and must not be added without
-# reading the next paragraph (2026-08-07).
+# AGENTS.md is NOT on this list today, but only because we are not currently
+# writing it — NOT because the host ignores it (2026-08-09).
 #
-# It was added here, then removed the same day. The reasoning that put it here
-# was wrong at the root: AGENTS.md is not a bootstrap file in the OpenClaw host
-# we pin. The injected set is IDENTITY.md / USER.md / SOUL.md (+ MEMORY.md) —
-# confirmed by `openclaw config schema`, whose `skipOptionalBootstrapFiles`
-# enumerates only SOUL/USER/IDENTITY/HEARTBEAT, and by the injected-file arrays
-# in /app/dist. This host uses AGENTS.md for POST-COMPACTION re-injection of
-# named sections (DEFAULT_POST_COMPACTION_SECTIONS = ["Session Startup",
-# "Red Lines"]), not as a per-turn system prompt.
+# AGENTS.md IS injected into the system prompt by the host we pin. Verified at
+# runtime, not inferred: boot the image with a distinct sentinel in AGENTS.md
+# and another in SOUL.md, point a stub `openai-completions` provider at a local
+# capture server, run one turn, and read the request body. Both sentinels appear
+# in the role=system message, AGENTS.md under its own
+# `## /home/node/.openclaw/AGENTS.md` header.
 #
-# So operating rules placed in AGENTS.md were never injected at all, and
-# excluding it from sync fixed nothing while creating a retired-but-present
-# path — the broker then refused every restore with "Retired workspace host
-# state requires controlled migration" and dev could not start a turn.
+# An earlier version of this comment claimed the opposite, citing
+# `skipOptionalBootstrapFiles` from `openclaw config schema`. That was wrong:
+# the key enumerates only the OPTIONAL bootstrap files, not the complete
+# injected set. The injected-file arrays in /app/dist are likewise
+# reduced-context allowlists, not the main-session loader. Static reading of a
+# minified bundle cannot settle this question — run the capture instead. Use the
+# SOUL.md sentinel as the positive control: it is definitively injected, so if
+# it does not appear, the method is broken and the result proves nothing.
 #
-# Two rules follow from this:
-#   1. Verify a file is actually injected (`openclaw config schema`) BEFORE
-#      building anything on it. A grep count in /app/dist proves the host
-#      mentions the name, not that it loads the file.
-#   2. Add the sync exclusion in the SAME release that first writes an
-#      image-owned file, never after. Excluding a path that is already in S3
-#      is a retired path and needs a controlled migration; excluding one that
-#      was never pushed is free.
+# So the original 2026-08-07 diagnosis was right — sync WAS overwriting
+# AGENTS.md and clobbering the rules. Excluding it was the correct fix. It
+# failed only on ordering: the first image pushed AGENTS.md to S3 before the
+# exclusion existed, which made it a retired-but-present path, and the broker
+# then refused every restore with "Retired workspace host state requires
+# controlled migration" until the exclusion was reverted.
+#
+# The rule that follows:
+#   Add the sync exclusion in the SAME release that first writes an image-owned
+#   file, never after. Excluding a path already in S3 creates a retired path and
+#   needs a controlled migration; excluding one that was never pushed is free.
+#
+# Operating rules currently live appended to SOUL.md, which is on this list and
+# works. Moving them into AGENTS.md is a viable optimization, not a fix — doing
+# it safely from here costs a workspace cutover, so it stays parked.
 #
 # Exact paths and prefix paths are separate so retiring one generated control
 # file can never hide similarly named user content. The values live in
