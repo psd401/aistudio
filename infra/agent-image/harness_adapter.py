@@ -1888,29 +1888,94 @@ class OpenClawAdapter(HarnessAdapter):
 
         if response_text.strip():
             return _result(_format_for_chat(response_text.strip()))
-        if not _is_nudge and tool_calls:
-            # The turn DID work (tool calls ran) but produced no reply —
-            # nudge once for the user-facing summary instead of sending the
-            # canned fallback (#1138, observed live on r12). Recursive call
-            # is bounded by _is_nudge; a short deadline is plenty at direct-
-            # Mantle serving speeds.
+        # A start with no terminal event is replay-unsafe: the call may have
+        # already created the Doc, and tool_starts is emptied by pop() the
+        # moment a terminal event lands, so a non-empty tool_starts means
+        # genuinely in flight. The no-tools wording does not forbid re-running
+        # tools, so nudging here could execute the side effect twice — the same
+        # hazard _should_retry_upstream refuses on tools_in_flight. Before
+        # 2026-08-09 this case got no nudge either (tool_calls was empty), so
+        # skipping preserves the old behavior exactly rather than adding a new
+        # risk. Tool work that DID complete keeps its original nudge, whose
+        # wording already forbids re-running tools.
+        #
+        # The `has_tools or` short-circuit is deliberate, and asymmetric with
+        # _should_retry_upstream on purpose. A turn can hold BOTH a completed
+        # tool call and a second one still in flight; that shape takes the
+        # tools branch and nudges, guarded by EMPTY_TURN_NUDGE's "Do not
+        # re-run any tools" wording rather than by this gate.
+        # _should_retry_upstream is stricter because it replays the USER's
+        # original message verbatim — it has no wording of its own to lean
+        # on. The nudge sends a prompt this file controls, so the wording IS
+        # the guard, and only the no-tools variant (which cannot carry that
+        # sentence without asserting work that never happened) needs the hard
+        # gate. Tightening this to `not tools_in_flight_now` would also
+        # withdraw the nudge from mixed-shape turns that have had it since
+        # long before 2026-08-09 — out of scope for this fix. Pinned by
+        # test_completed_tool_plus_in_flight_still_gets_tools_nudge.
+        has_tools = bool(tool_calls)
+        tools_in_flight_now = bool(tool_starts)
+        should_nudge = has_tools or not tools_in_flight_now
+        if not _is_nudge and should_nudge:
+            # The turn produced no user-visible reply — nudge once instead of
+            # sending the canned fallback (#1138, observed live on r12).
+            # Recursion is bounded by _is_nudge; a short deadline is plenty at
+            # direct-Mantle serving speeds.
+            #
+            # This fired only when tool_calls ran until 2026-08-09, on the
+            # theory that a turn with no tool work had nothing to summarize.
+            # Prod disagrees: of the EmptyAgentResponse rows since 2026-08-01,
+            # every one reached last_state=final, and half of those recorded
+            # first_events=["event:chat"] with no res/usage/lifecycle events at
+            # all. Those turns never had a tool call, so they never got a
+            # nudge — the user just got the canned fallback. They deserve the
+            # same one-shot recovery, with wording that does not assert tool
+            # work that did not happen (that would invite a SOUL rule 4
+            # violation: never fabricate outcomes).
             logger.warning(
-                "empty final after %d tool calls — sending one nudge",
+                "empty final after %d tool calls — sending one nudge "
+                "(variant=%s)",
                 len(tool_calls),
+                "tools" if has_tools else "no-tools",
             )
             # Iteration telemetry (issue #1161): a nudge fired this turn.
             # Emit a CloudWatch metric (best-effort) so nudge-fire rate is
             # trendable in the AgentCore container log group, which has a
             # runtime-generated suffix a MetricFilter can't attach to.
+            # Deliberately the same metric name for both variants so the
+            # existing nudge-fire trend stays comparable across this change.
             emit_agent_metric("AgentNudgeFired")
+            nudge_prompt = (
+                self.EMPTY_TURN_NUDGE
+                if has_tools
+                else self.EMPTY_TURN_NUDGE_NO_TOOLS
+            )
             nudged = self.process(
-                self.EMPTY_TURN_NUDGE,
+                nudge_prompt,
                 session_id,
                 model_override,
                 deadline_s=180,
                 _is_nudge=True,
             )
-            if nudged.text.strip():
+            # A nudge leg that ALSO ends empty does not come back with empty
+            # text — it falls through to the canned fallback below and returns
+            # that, which is non-empty. Testing text alone therefore treats
+            # every failed nudge as a success, returns early, and skips the
+            # outer failure row entirely. Check the error class too, so a nudge
+            # that did not actually recover falls through to be recorded once,
+            # by this leg, with accurate nudge_* telemetry.
+            #
+            # Named for what it literally tests, not "recovered": a nudge leg
+            # that failed some OTHER way (a ChatDeadlineExpired partial, say)
+            # still returns text and still takes this branch. That is correct
+            # — the nested leg already recorded its own failure, and
+            # failed/error_class propagate through the TurnResult below — but
+            # only because this is a "did it come back with something to show
+            # the user" test, not a success test.
+            nudge_returned_text = bool(nudged.text.strip()) and (
+                nudged.error_class != "EmptyAgentResponse"
+            )
+            if nudge_returned_text:
                 merged_tools = tool_calls + nudged.tool_calls
                 return TurnResult(
                     text=nudged.text,
@@ -1937,6 +2002,18 @@ class OpenClawAdapter(HarnessAdapter):
                     # though it wrote no agent_failures row.
                     nudged=True,
                 )
+        if _is_nudge:
+            # The nudge leg is an internal recovery attempt, not a user turn.
+            # Recording here would write a SECOND row for the same turn, and it
+            # would be the misleading one: _is_nudge makes nudge_attempted read
+            # false on the very row that proves a nudge happened. Stay silent
+            # and let the outer leg record the single accurate row.
+            return _result(
+                "I processed your message but had no response.",
+                failed=True,
+                error_class="EmptyAgentResponse",
+                nudged=False,
+            )
         record_failure(
             source="harness",
             severity="empty_response",
@@ -1950,16 +2027,32 @@ class OpenClawAdapter(HarnessAdapter):
                 "last_state": last_state,
                 "event_counts": event_counts,
                 "first_events": first_event_types,
+                # Reaching here means no nudge rescued the turn. Record whether
+                # one was even attempted, and which wording — without this, a
+                # row that never got a nudge is indistinguishable from one
+                # where the nudge fired and the model stayed silent — exactly
+                # the ambiguity that made these rows hard to read.
+                "nudge_attempted": should_nudge,
+                "nudge_variant": (
+                    ("tools" if has_tools else "no-tools")
+                    if should_nudge
+                    else None
+                ),
+                # Set when the nudge was skipped because a tool call was still
+                # in flight and replaying it could double a side effect.
+                "nudge_skipped_tools_in_flight": (
+                    tools_in_flight_now and not should_nudge
+                ),
             },
         )
-        # nudged reflects whether the one nudge fired this turn: it did iff this
-        # is not itself a nudge leg AND there were tool calls to summarize (the
-        # exact condition guarding the self.process() nudge call above).
+        # Only reachable on the outer leg (the _is_nudge branch returned
+        # above), so nudged mirrors should_nudge: a nudge fired unless it was
+        # skipped for a tool still in flight.
         return _result(
             "I processed your message but had no response.",
             failed=True,
             error_class="EmptyAgentResponse",
-            nudged=(not _is_nudge and bool(tool_calls)),
+            nudged=should_nudge,
         )
 
     @staticmethod
@@ -2008,6 +2101,17 @@ class OpenClawAdapter(HarnessAdapter):
         "user NO reply — they saw nothing. Send the user-facing summary of "
         "what you just did (and its outcome) now, as plain text. Do not "
         "re-run any tools unless something genuinely failed."
+    )
+
+    # Same one-shot recovery for a turn that ended empty having run NO tools.
+    # Worded so it cannot be read as "summarize your work": there was none, and
+    # inviting a summary here would be inviting fabrication (SOUL rule 4).
+    EMPTY_TURN_NUDGE_NO_TOOLS = (
+        "[system-nudge] Your previous turn ended without sending the user any "
+        "reply — they saw nothing at all. Answer their most recent message "
+        "now, as plain text. If you cannot answer it, say so plainly and say "
+        "what you need in order to. Do not describe any work or tool call you "
+        "did not actually perform."
     )
 
     @staticmethod
