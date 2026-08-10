@@ -8,5 +8,22 @@ trials: 3
 # Order-agnostic: a correct answer may lead with the deciding condition
 # ("Because the team has a sharper question, the call is Run it again") just as
 # easily as with the call itself.
+#
+# All three graders must pass. The first is the permissive presence check; the
+# other two subtract responses that name both phrases while making the OPPOSITE
+# call ("Stop it; do not Run it again because there is no sharper question"),
+# which the presence check alone would score as a pass.
+#
+# Both guards deliberately match only tight, unambiguous phrasings. A wide
+# window would falsely fail correct answers -- "the build did not hit its signs
+# of success, so the call is Run it again" puts a negation and the call in the
+# same sentence while affirming it.
 graders:
   - {"type":"output_match","pattern":"(?is)\\A(?=.*Run it again)(?=.*sharper question)"}
+  # Reject a directly negated call: "do not / don't / never / rather than /
+  # instead of" immediately before "Run it again".
+  - {"type":"output_match","pattern":"(?is)\\A(?!.*(?:\\bnot|n't|\\bnever\\b|rather than|instead of)\\s+(?:to\\s+|simply\\s+|just\\s+)*run it again)"}
+  # Reject "Stop it" asserted as the call -- either opening the response or
+  # named as the decision. A correct answer may still mention Stop it while
+  # ruling it out ("this isn't a Stop it"), so only assertive forms match.
+  - {"type":"output_match","pattern":"(?is)\\A(?!\\s*(?:\\*\\*)?stop it(?:\\*\\*)?\\s*[.,;:)\\u2014\\u2013-])(?!.*(?:call|answer|decision|verdict)\\s*(?:is|:|=)\\s*(?:\\*\\*)?stop it)(?!.*(?:should|must|would)\\s+(?:be\\s+)?(?:\\*\\*)?stop it\\b)"}

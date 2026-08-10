@@ -453,30 +453,55 @@ class SuiteLoadingTests(unittest.TestCase):
                 wrong_check_in,
             )
 
-        open_adaptive_decision = next(
+        # The task grades on every grader, so the contract is the conjunction,
+        # not any single pattern: a response passes only when all of them match.
+        open_adaptive_decision = [
             str(grader.get("pattern"))
             for grader in tasks_by_id[
                 "open-adaptive-stop-vs-run-again"
             ].graders
             if grader.get("type") == "output_match"
-        )
+        ]
+
+        def graded_run_it_again(response: str) -> bool:
+            return all(
+                re.search(pattern, response) is not None
+                for pattern in open_adaptive_decision
+            )
+
         for valid_decision in (
             "Run it again: the team has a sharper question.",
             # Leading with the deciding condition is equally correct, so the
             # grader must not depend on the order of the two phrases.
             "Because a sharper question survived the cycle, the call is "
             "Run it again.",
+            # A negation may sit in the same sentence as the call while still
+            # affirming it -- the guards must not over-reach and fail this.
+            "The build did not hit its signs of success, so the call is "
+            "Run it again: the team has a sharper question.",
+            # Naming Stop it in order to rule it out is correct, too.
+            "This isn't a Stop it. The team has a sharper question, so "
+            "Run it again.",
         ):
-            self.assertIsNotNone(
-                re.search(open_adaptive_decision, valid_decision),
+            self.assertTrue(
+                graded_run_it_again(valid_decision),
                 valid_decision,
             )
-        self.assertIsNone(
-            re.search(
-                open_adaptive_decision,
-                "Stop it, because the build missed every sign of success.",
+        for wrong_decision in (
+            "Stop it, because the build missed every sign of success.",
+            # Names both required phrases while making the opposite call, so
+            # the presence check alone would score this a pass.
+            "Stop it; do not Run it again because there is no sharper "
+            "question.",
+            "The call is Stop it -- there was no sharper question, so do not "
+            "Run it again.",
+            "They should Stop it. A sharper question alone does not justify "
+            "Run it again.",
+        ):
+            self.assertFalse(
+                graded_run_it_again(wrong_decision),
+                wrong_decision,
             )
-        )
 
         chart_probe = next(
             grader
