@@ -289,3 +289,55 @@ describe("OAuth client redirect diagnostics", () => {
     )
   })
 })
+
+describe("redactUrisForLog", () => {
+  const { redactUrisForLog } = require("@/lib/oauth/drizzle-adapter")
+
+  it("strips userinfo from a rejected redirect URI", () => {
+    // validateCommon rejects userinfo, so this exact shape reaches the error
+    // array — the password must never reach CloudWatch.
+    const out = redactUrisForLog(
+      "https://alice:hunter2@example.com/callback: must not contain userinfo"
+    )
+    expect(out).not.toContain("hunter2")
+    expect(out).not.toContain("alice")
+    expect(out).toContain("https://example.com/callback")
+    expect(out).toContain("must not contain userinfo")
+  })
+
+  it("strips query and fragment while keeping the identifying origin+path", () => {
+    const out = redactUrisForLog(
+      "https://example.com/cb?access_token=secret#frag: must not contain a fragment"
+    )
+    expect(out).not.toContain("secret")
+    expect(out).not.toContain("access_token")
+    expect(out).toContain("https://example.com/cb")
+  })
+
+  it("handles the 'Invalid redirect URI: <uri>' shape too", () => {
+    const out = redactUrisForLog(
+      "Invalid redirect URI: https://bob:pw@host.example/cb"
+    )
+    expect(out).not.toContain("pw@")
+    expect(out).toContain("https://host.example/cb")
+  })
+
+  it("does not echo an unparseable URI, even with a malformed scheme", () => {
+    // A bad scheme must not be an escape hatch: this still carries userinfo.
+    const out = redactUrisForLog("ht!tp://alice:hunter2@%%%bad: malformed")
+    expect(out).not.toContain("hunter2")
+    expect(out).not.toContain("%%%bad")
+    expect(out).toContain("<unparseable redirect URI>")
+  })
+
+  it("leaves ordinary prose and the real localhost case readable", () => {
+    expect(redactUrisForLog("At least one redirect URI is required")).toBe(
+      "At least one redirect URI is required"
+    )
+    const out = redactUrisForLog(
+      "http://localhost:3000/agent-connect-aistudio/callback: native HTTP redirect URIs must use literal 127.0.0.1 or [::1]"
+    )
+    expect(out).toContain("http://localhost:3000/agent-connect-aistudio/callback")
+    expect(out).toContain("literal 127.0.0.1")
+  })
+})
