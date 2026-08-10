@@ -89,6 +89,38 @@ its path with `--file`. Small scenes can be passed inline with `--html`.
 
 ## Usage
 
+> **Rendering takes MINUTES, not seconds. Run it in the background.**
+>
+> Observed in production: 180–430 seconds per render, for scenes only a few
+> seconds long. The render seeks every frame in headless Chromium and then
+> encodes with FFmpeg, so wall time scales with `fps × duration`, not with how
+> short the video is.
+>
+> A foreground call will be killed by the tool timeout long before the render
+> finishes. The Lambda keeps running and still bills, you get an error, and
+> retrying just starts another multi-minute render — on 2026-08-10 a user
+> burned six attempts and ~28 minutes this way and never got a video.
+>
+> **Start it in the background, then poll:**
+>
+> ```bash
+> # 1. Start it — returns immediately with a handle.
+> node /opt/psd-skills/psd-hyperframes/render.js --file scene.html --duration 3 \
+>   > /tmp/hyperframes-out.json 2>/tmp/hyperframes-err.log &
+>
+> # 2. Poll every ~30s until the JSON lands. Budget 3-7 minutes.
+> #    Tell the user it is rendering BEFORE you start waiting.
+> cat /tmp/hyperframes-out.json
+> ```
+>
+> Say "this takes a few minutes, I'll post the link when it's done" in the turn
+> you start the render. Do not go silent, and do not start a second render
+> because the first looks stuck — it is not stuck, it is encoding.
+>
+> Lower `--fps` (24, or 15 for static title cards) to cut render time roughly
+> proportionally. `--fps 15` on a 6-second card is about a quarter the work of
+> `--fps 60`.
+
 ```bash
 node /opt/psd-skills/psd-hyperframes/render.js \
   --file scene.html \

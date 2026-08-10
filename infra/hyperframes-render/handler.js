@@ -485,14 +485,32 @@ async function handler(event, deps = {}) {
  * environment, so a regression is diagnosable from logs rather than only the
  * caller's error string. Non-blocking (async execFile) — never affects a render.
  */
+// 30s, not 8s. The check competes with the render it shares a cold start with:
+// on 2026-08-10 one invocation logged FAILED … signal=SIGTERM killed=true
+// after=8218ms while sibling invocations minutes apart ran the same binary in
+// 154ms and 338ms. Nothing was wrong with ffmpeg — the self-check was simply
+// starved of CPU during concurrent init and hit its own timeout. Because this
+// is a diagnostic, a false FAILED is worse than a slow OK: it is the loudest
+// line in the log group and it sends whoever is triaging a real user-facing
+// problem after a broken binary that is not broken.
+const FFMPEG_SELFCHECK_TIMEOUT_MS = 30_000;
+
 function logFfmpegSelfCheck() {
   const bin = process.env.HYPERFRAMES_FFMPEG_PATH || 'ffmpeg';
   const started = Date.now();
-  execFile(bin, ['-version'], { timeout: 8000 }, (err, stdout) => {
+  execFile(bin, ['-version'], { timeout: FFMPEG_SELFCHECK_TIMEOUT_MS }, (err, stdout) => {
     const ms = Date.now() - started;
     if (err) {
-      console.error(
-        `[ffmpeg-selfcheck] FAILED bin=${bin} code=${err.code} signal=${err.signal} killed=${err.killed} after=${ms}ms: ${String(err.message).slice(0, 200)}`,
+      // A timeout kill means "too slow to answer under load", which is NOT
+      // evidence the binary is unusable — say so on the line itself, and use
+      // warn so it cannot be mistaken for a failed render. A real missing or
+      // unrunnable binary still surfaces as an error (ENOENT, non-zero exit).
+      const starved = err.killed === true && err.signal === 'SIGTERM';
+      const level = starved ? console.warn : console.error;
+      level(
+        `[ffmpeg-selfcheck] ${starved ? 'INCONCLUSIVE (timed out under load; NOT a render failure)' : 'FAILED'} ` +
+          `bin=${bin} code=${err.code} signal=${err.signal} killed=${err.killed} after=${ms}ms: ` +
+          `${String(err.message).slice(0, 200)}`,
       );
     } else {
       console.log(`[ffmpeg-selfcheck] OK bin=${bin} after=${ms}ms — ${String(stdout).split('\n')[0]}`);
