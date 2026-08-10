@@ -1898,6 +1898,21 @@ class OpenClawAdapter(HarnessAdapter):
         # skipping preserves the old behavior exactly rather than adding a new
         # risk. Tool work that DID complete keeps its original nudge, whose
         # wording already forbids re-running tools.
+        #
+        # The `has_tools or` short-circuit is deliberate, and asymmetric with
+        # _should_retry_upstream on purpose. A turn can hold BOTH a completed
+        # tool call and a second one still in flight; that shape takes the
+        # tools branch and nudges, guarded by EMPTY_TURN_NUDGE's "Do not
+        # re-run any tools" wording rather than by this gate.
+        # _should_retry_upstream is stricter because it replays the USER's
+        # original message verbatim — it has no wording of its own to lean
+        # on. The nudge sends a prompt this file controls, so the wording IS
+        # the guard, and only the no-tools variant (which cannot carry that
+        # sentence without asserting work that never happened) needs the hard
+        # gate. Tightening this to `not tools_in_flight_now` would also
+        # withdraw the nudge from mixed-shape turns that have had it since
+        # long before 2026-08-09 — out of scope for this fix. Pinned by
+        # test_completed_tool_plus_in_flight_still_gets_tools_nudge.
         has_tools = bool(tool_calls)
         tools_in_flight_now = bool(tool_starts)
         should_nudge = has_tools or not tools_in_flight_now

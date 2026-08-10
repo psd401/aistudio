@@ -1391,12 +1391,18 @@ class TestEmptyFinalNudgeFires(unittest.TestCase):
     lifecycle events), so they never got the recovery the tool case got.
     """
 
-    def _drive_empty_final(self, adapter, *, with_tool, leave_in_flight=False):
+    def _drive_empty_final(self, adapter, *, with_tool, leave_in_flight=False,
+                           second_tool_in_flight=False):
         """Run one turn that reaches state=final with no assistant text.
 
         leave_in_flight emits the tool start WITHOUT its terminal event, the
         shape where the side effect may already have happened but never got
         reported — tool_calls stays empty while tool_starts does not.
+
+        second_tool_in_flight adds a SECOND tool (distinct itemId) that starts
+        and never reports, on top of a first that completed. Both lists are
+        then non-empty at once — the mixed shape neither flag alone builds,
+        since they share the single "t-1" itemId.
         """
         chat_id = None
 
@@ -1455,6 +1461,14 @@ class TestEmptyFinalNudgeFires(unittest.TestCase):
                          "kind": "tool", "name": "write",
                          "status": "ok"},
             }))
+        if second_tool_in_flight:
+            # Starts after t-1 already reported, so t-1 has been popped off
+            # tool_starts and only t-2 is left dangling at final.
+            messages.append(lambda: current_run_event("agent", {
+                "stream": "item",
+                "data": {"itemId": "t-2", "phase": "start",
+                         "kind": "tool", "name": "write"},
+            }))
         # Final with no assistant text at all — the empty-turn shape.
         messages.append(lambda: current_run_event("chat", {"state": "final"}))
 
@@ -1466,13 +1480,15 @@ class TestEmptyFinalNudgeFires(unittest.TestCase):
         return fake_websocket_module
 
     def _run(self, *, with_tool, is_nudge=False, nudge_reply=None,
-             leave_in_flight=False):
+             leave_in_flight=False, second_tool_in_flight=False):
         adapter = OpenClawAdapter()
         ws = self._drive_empty_final(
-            adapter, with_tool=with_tool, leave_in_flight=leave_in_flight
+            adapter, with_tool=with_tool, leave_in_flight=leave_in_flight,
+            second_tool_in_flight=second_tool_in_flight,
         )
         nudges = []
         recorded = []
+        metrics = []
 
         def fake_process(message, *_a, **_kw):
             nudges.append(message)
@@ -1501,34 +1517,43 @@ class TestEmptyFinalNudgeFires(unittest.TestCase):
             mock.patch.object(adapter, "process", side_effect=fake_process),
             mock.patch("harness_adapter.record_failure",
                        side_effect=lambda **kw: recorded.append(kw)),
-            mock.patch("harness_adapter.emit_agent_metric"),
+            mock.patch("harness_adapter.emit_agent_metric",
+                       side_effect=lambda n, *a, **kw: metrics.append(n)),
         ):
             result = adapter._process_once(
                 "hello", "s1", deadline_s=600, _is_nudge=is_nudge
             )
-        return result, nudges, recorded
+        return result, nudges, recorded, metrics
 
     def test_empty_final_without_tools_fires_the_no_tools_nudge(self):
-        _result, nudges, _rec = self._run(with_tool=False)
+        _result, nudges, _rec, metrics = self._run(with_tool=False)
         self.assertEqual(len(nudges), 1, "a no-tool empty turn must nudge")
         self.assertEqual(nudges[0], OpenClawAdapter.EMPTY_TURN_NUDGE_NO_TOOLS)
+        # One metric per nudge, under the SAME name as the tools variant, so
+        # the pre-2026-08-09 nudge-fire trend stays comparable across the
+        # change instead of silently splitting into two series.
+        self.assertEqual(metrics.count("AgentNudgeFired"), 1)
 
     def test_empty_final_with_tools_still_fires_the_tools_nudge(self):
-        _result, nudges, _rec = self._run(with_tool=True)
+        _result, nudges, _rec, metrics = self._run(with_tool=True)
         self.assertEqual(len(nudges), 1)
         self.assertEqual(nudges[0], OpenClawAdapter.EMPTY_TURN_NUDGE)
+        self.assertEqual(metrics.count("AgentNudgeFired"), 1)
 
     def test_a_nudge_leg_does_not_nudge_again(self):
         # Recursion stays bounded by _is_nudge — this is the only thing
         # standing between one recovery attempt and an unbounded loop.
-        _result, nudges, _rec = self._run(with_tool=False, is_nudge=True)
+        _result, nudges, _rec, metrics = self._run(
+            with_tool=False, is_nudge=True
+        )
         self.assertEqual(nudges, [])
+        self.assertEqual(metrics.count("AgentNudgeFired"), 0)
 
     def test_failure_row_records_whether_a_nudge_was_attempted(self):
         # Exactly one row, on the outer leg, and it must say a nudge happened.
         # Before the nudge_recovered fix the outer leg saw the nudge's canned
         # fallback as non-empty text, returned early, and wrote NO row at all.
-        _result, _nudges, recorded = self._run(with_tool=False)
+        _result, _nudges, recorded, _m = self._run(with_tool=False)
         self.assertEqual(len(recorded), 1, "exactly one row per user turn")
         ctx = recorded[0]["context"]
         self.assertTrue(ctx["nudge_attempted"])
@@ -1538,7 +1563,9 @@ class TestEmptyFinalNudgeFires(unittest.TestCase):
         # The nudge leg is an internal recovery attempt. If it recorded, the
         # turn would get two rows and the _is_nudge one would misleadingly read
         # nudge_attempted=false on the very row proving a nudge happened.
-        _result, _nudges, recorded = self._run(with_tool=False, is_nudge=True)
+        _result, _nudges, recorded, _m = self._run(
+            with_tool=False, is_nudge=True
+        )
         self.assertEqual(recorded, [])
 
     def test_never_nudges_while_a_tool_is_still_in_flight(self):
@@ -1548,24 +1575,57 @@ class TestEmptyFinalNudgeFires(unittest.TestCase):
         # whose wording does not forbid re-running tools — creating the file a
         # second time. Same replay-unsafety _should_retry_upstream refuses on
         # tools_in_flight. Before 2026-08-09 this case got no nudge either.
-        _result, nudges, recorded = self._run(
+        _result, nudges, recorded, metrics = self._run(
             with_tool=False, leave_in_flight=True
         )
         self.assertEqual(nudges, [], "an in-flight tool must not be replayed")
+        self.assertEqual(metrics.count("AgentNudgeFired"), 0)
         self.assertEqual(len(recorded), 1)
         ctx = recorded[0]["context"]
         self.assertFalse(ctx["nudge_attempted"])
         self.assertIsNone(ctx["nudge_variant"])
         self.assertTrue(ctx["nudge_skipped_tools_in_flight"])
 
-    def test_completed_tool_work_still_nudges_past_the_guard(self):
-        # The guard must not silence the case the nudge was built for: tools
-        # that finished get the tools wording, which forbids re-running.
-        _result, nudges, _rec = self._run(with_tool=True)
+    def test_completed_tool_plus_in_flight_still_gets_tools_nudge(self):
+        # The mixed shape: t-1 completed, t-2 started and never reported. Both
+        # tool_calls and tool_starts are non-empty, and the has_tools
+        # short-circuit deliberately wins — this turn keeps the tools wording
+        # rather than being silenced like the no-tools in-flight case above.
+        #
+        # Pinned as a DECISION, not an accident. Protection here is the
+        # EMPTY_TURN_NUDGE wording ("Do not re-run any tools"), which the
+        # no-tools variant cannot offer, which is why only that branch needs a
+        # hard gate. Tightening this to skip on any in-flight tool would also
+        # withdraw the nudge from turns that have had it since well before
+        # 2026-08-09 — a behavior change beyond this fix's scope. If the
+        # wording ever proves insufficient, flip the short-circuit here and
+        # this test is the one that should change with it.
+        _result, nudges, _rec, metrics = self._run(
+            with_tool=True, second_tool_in_flight=True
+        )
+        # Prove the shape really is mixed before asserting on it — with_tool
+        # alone lands tools_in_flight=0, so without this the test would just
+        # restate test_empty_final_with_tools_still_fires_the_tools_nudge.
+        self.assertEqual(len(_result.tool_calls), 1)
+        self.assertEqual(_result.tools_in_flight, 1)
         self.assertEqual(nudges, [OpenClawAdapter.EMPTY_TURN_NUDGE])
+        self.assertEqual(metrics.count("AgentNudgeFired"), 1)
+
+    def test_mixed_shape_records_the_variant_that_actually_fired(self):
+        # The telemetry must not report this as skipped-for-in-flight just
+        # because tool_starts was non-empty; the row has to say a tools nudge
+        # really went out, or the mixed shape is unreadable in prod.
+        _result, _nudges, recorded, _m = self._run(
+            with_tool=True, second_tool_in_flight=True
+        )
+        self.assertEqual(len(recorded), 1)
+        ctx = recorded[0]["context"]
+        self.assertTrue(ctx["nudge_attempted"])
+        self.assertEqual(ctx["nudge_variant"], "tools")
+        self.assertFalse(ctx["nudge_skipped_tools_in_flight"])
 
     def test_a_recovered_nudge_writes_no_failure_row(self):
-        _result, nudges, recorded = self._run(
+        _result, nudges, recorded, _m = self._run(
             with_tool=False, nudge_reply="here is the answer"
         )
         self.assertEqual(len(nudges), 1)
