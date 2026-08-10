@@ -34,6 +34,11 @@
 
 **11. Ask your Agent:** *"Draft our Wrap-Up from this space."* Edit it as a team — about twenty minutes.
 
+> **Editor's note — drafting the Wrap-Up.** The v1 Agent cannot read a Google Chat space on its own,
+> so this step does not work as written yet. Paste or export the Build Plan and the cycle's
+> check-ins into the conversation, then ask for the draft. Live space-watching is the planned next
+> build.
+
 **12. Make the call and post it. Keep it** (it works — it becomes a tool everyone gets), **Stop it** (say why — you just saved every other team a dead end), or **Run it again** (one more cycle, sharper question).
 
 ---
