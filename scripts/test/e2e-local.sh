@@ -302,6 +302,40 @@ else
   fi
 fi
 
+# --- Verify the dev router resolved the deepest app route ---------------------------
+# `next dev` builds its route table from a watchpack scan of app/; under a loaded
+# cold boot the first scan aggregation can fire before the deepest files have been
+# discovered/stat'ed (next@16.2.12 setup-dev-bundler skips any file whose watch
+# metadata is incomplete). Routes missed by that scan are silently DROPPED from the
+# table — requests 404 without ever reaching the handler (guard specs expecting 401
+# see 404) — and NOTHING rebuilds the table until another file event lands under
+# app/. Observed 2026-08-10: app/api/v1/repositories/[id]/items/uploads/[sessionId]/
+# complete (the deepest route) 404'd persistently on a fresh boot and healed the
+# moment its file was touched. Deepest files are enumerated last, so the current
+# deepest route.ts is the canary: probe it; on 404, force a table rebuild with a
+# throwaway (non-page) file event in app/ and re-probe. Reused servers are checked
+# too — one may have booted with the same drop and never received a healing event.
+# Any non-404 status proves the ROUTER resolved the route (405/401 are fine — the
+# canary is probed with GET and without auth on purpose).
+CANARY_FILE="$(find app -name 'route.ts' | awk -F/ '{ print NF, $0 }' | sort -rn | head -1 | cut -d' ' -f2-)"
+CANARY_URL="$(printf '%s' "$CANARY_FILE" | sed -E -e 's|^app||' -e 's|/route\.ts$||' -e 's|/\([^/)]*\)||g' -e 's|\[+[^]/]*\]+|1|g')"
+ROUTER_OK=0
+for attempt in $(seq 1 10); do
+  canary_status="$(curl -s -o /dev/null --max-time 15 -w '%{http_code}' "$BASE$CANARY_URL")"
+  if [ "$canary_status" != "404" ] && [ "$canary_status" != "000" ] && [ -n "$canary_status" ]; then ROUTER_OK=1; break; fi
+  echo "e2e-local: dev router has not resolved $CANARY_URL (HTTP ${canary_status:-none}) — kicking the route-table scan (attempt $attempt)…"
+  touch app/.e2e-router-kick.tmp
+  sleep 1
+  rm -f app/.e2e-router-kick.tmp
+  sleep 2
+done
+if [ "$ROUTER_OK" != "1" ]; then
+  echo "❌ e2e-local: dev router never resolved the deepest app route ($CANARY_URL after 10 kicks)."
+  echo "   The suite would 404-flake on real routes. Restart the server on :$E2E_PORT and rerun."
+  exit 1
+fi
+echo "e2e-local: dev router canary $CANARY_URL resolved (HTTP $canary_status)"
+
 # --- Apply pending migrations to the LOCAL database --------------------------------
 # A migration merged to dev but never applied locally silently breaks every route
 # that touches the new table — e.g. the durable API rate limiter (migration 146)
