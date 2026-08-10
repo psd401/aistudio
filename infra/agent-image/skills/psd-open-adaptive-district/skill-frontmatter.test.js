@@ -1,7 +1,7 @@
 /**
  * psd-open-adaptive-district SKILL.md registration tests.
  *
- * Run: bun test skill-frontmatter.test.js  (or `bun run test:skill:oad`)
+ * Run: bun test skill-frontmatter.test.js  (or `bun run test:skill:open-adaptive-district`)
  *
  * These guard DISCOVERABILITY, which for this skill is correctness, not polish.
  * Two mechanisms have to line up:

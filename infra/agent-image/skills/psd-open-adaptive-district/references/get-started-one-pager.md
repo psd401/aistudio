@@ -20,6 +20,8 @@
 
 **7. Post it in your space by Friday.** Done. Your plan is locked — and it doesn't need to be pretty.
 
+> **Editor's note — first check-in.** The Playbook adds one thing this page leaves out: post your **first Weekly Check-In** alongside the locked Build Plan in week 1. Follow the Playbook — otherwise the missed-check-in count starts a week early.
+
 ## Weeks 2–5 — Do
 
 **8. Build it and use it.** Ask your Agent for help constantly — that's what it's for. Adjust as you learn.

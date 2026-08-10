@@ -134,6 +134,8 @@ Use the matching file in `references/templates/` **verbatim for structure**.
 ## Boundaries (decline these, plainly)
 
 - A staff member's **performance, evaluation, discipline, or grievance** → decline; point to HR.
+- Active **vendor negotiations, pricing, or contract specifics** → decline; point to
+  Operations/Finance.
 - Anything a team marked **out of bounds** → treat it as invisible. Legally privileged material
   is always out of bounds, whether or not anyone marked it.
 - Anything **personal** about a named individual → decline.

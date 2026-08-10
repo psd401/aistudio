@@ -487,15 +487,20 @@ class SuiteLoadingTests(unittest.TestCase):
             if grader.get("type") == "output_match"
         ]
         self.assertEqual(len(open_adaptive_translation), 3)
-        valid_translation = (
+        # Both term orders are correct phrasings; every grader must accept
+        # each so the pattern set is order-independent.
+        valid_translations = (
             "SHIP cycles are now just the six-week build cycle, and the Bet "
-            "Brief is now the Build Plan."
+            "Brief is now the Build Plan.",
+            "The Build Plan replaces the retired Bet Brief, and the six-week "
+            "build cycle is the current name for SHIP.",
         )
-        for pattern in open_adaptive_translation:
-            self.assertIsNotNone(
-                re.search(pattern, valid_translation),
-                pattern,
-            )
+        for valid_translation in valid_translations:
+            for pattern in open_adaptive_translation:
+                self.assertIsNotNone(
+                    re.search(pattern, valid_translation),
+                    (pattern, valid_translation),
+                )
         # Each grader is probed with a response that defeats only that one, so
         # a broken pattern cannot hide behind its siblings.
         for pattern, defeating_response in zip(
