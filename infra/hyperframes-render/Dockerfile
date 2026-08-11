@@ -87,6 +87,14 @@ RUN npm install -g hyperframes@${HYPERFRAMES_VERSION} && hyperframes --version
 # patch step back from BtbN's n7.1.5 build. Deliberate — staying on the ffmpeg 7
 # line that hyperframes was validated against is lower risk than jumping to 8.x
 # or 9.x for a deploy fix. Bump with the same digest-pinned form.
+#
+# Trust note for a future audit: mwader/static-ffmpeg is a third-party,
+# single-maintainer image, not an official publisher. The digest pin is what makes
+# that acceptable — the exact bytes verified here are the only bytes any later
+# build can copy, so the content cannot drift under us even if the tag moves.
+# This adds no new availability domain either: the base image above already comes
+# from Docker Hub, so a Hub outage or an unauthenticated pull-rate limit would
+# have failed this build before this change too.
 COPY --from=mwader/static-ffmpeg:7.1.1-amd64@sha256:6769881cc02c80d33e387750a8e144d162adfab2775e934dd97899261dda3a0c \
     /ffmpeg /ffprobe /opt/ffmpeg/
 # Prove both binaries actually execute in this base image rather than trusting
