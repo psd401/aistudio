@@ -2046,6 +2046,56 @@ class SqliteTranscriptUsageTests(unittest.TestCase):
             self.adapter._read_turn_usage("s1", "main", 0)["output"], 0,
         )
 
+    def test_a_database_without_transcript_events_falls_back_to_jsonl(self):
+        # An OpenClaw host older than 2026.7.2-beta.5 HAS openclaw-agent.sqlite
+        # (it holds other state) but no transcript_events table — transcripts are
+        # still per-session JSONL. Keying the fallback on the FILE's existence
+        # instead of the TABLE's would report zeros on every such host: the exact
+        # silent-zero regression this module exists to prevent, in reverse.
+        connection = sqlite3.connect(str(self.db_path))
+        connection.execute("CREATE TABLE session_nodes (session_key TEXT)")
+        connection.commit()
+        connection.close()
+
+        sessions = pathlib.Path(self.tmp.name) / "agents" / "main" / "sessions"
+        sessions.mkdir(parents=True)
+        (sessions / "s1.jsonl").write_text(
+            json.dumps(_assistant(5_000, inp=31, out=7)) + "\n", encoding="utf-8",
+        )
+
+        usage = self.adapter._read_turn_usage("s1", "main", 0)
+        self.assertTrue(usage["capture_complete"])
+        self.assertEqual(usage["input"], 31)
+        self.assertEqual(usage["output"], 7)
+
+    def test_a_database_without_transcript_events_and_no_jsonl_settles_fast(self):
+        # Nothing to read from either source: report zeros immediately rather
+        # than paying the full bounded retry on every turn for a table that will
+        # never appear.
+        connection = sqlite3.connect(str(self.db_path))
+        connection.execute("CREATE TABLE session_nodes (session_key TEXT)")
+        connection.commit()
+        connection.close()
+
+        self.adapter.USAGE_SETTLE_INTERVAL_S = 0.05
+        started = time.monotonic()
+        usage = self.adapter._read_turn_usage("s1", "main", 0)
+        self.assertFalse(usage["capture_complete"])
+        self.assertEqual(usage["model_calls"], 0)
+        self.assertLess(time.monotonic() - started, 0.05)
+
+    def test_missing_table_is_not_confused_with_a_locked_database(self):
+        # Both surface as OperationalError from a plain SELECT, but only a lock
+        # is worth retrying. The schema probe is what separates them.
+        connection = sqlite3.connect(str(self.db_path))
+        connection.execute("CREATE TABLE session_nodes (session_key TEXT)")
+        connection.commit()
+        connection.close()
+        with self.assertRaises(harness_adapter.TranscriptTableMissing):
+            self.adapter._sum_sqlite_transcript_usage(
+                str(self.db_path), "s1", 0,
+            )
+
     def test_the_database_wins_when_a_legacy_jsonl_also_exists(self):
         # A host migrated in place can have both. The database is authoritative;
         # the archived JSONL would double-bill the same model calls.

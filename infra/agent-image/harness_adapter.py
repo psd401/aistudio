@@ -93,6 +93,18 @@ _SAFE_PATH_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 TERMINAL_USAGE_STOP_REASONS = frozenset({"stop", "end_turn"})
 
 
+class TranscriptTableMissing(Exception):
+    """The transcript database exists but predates the `transcript_events` table.
+
+    Distinguished from a locked/busy database because the remedies are opposite:
+    a lock clears on retry, a missing table never will. This one means the host
+    is older than 2026.7.2-beta.5, so the per-session JSONL transcripts are still
+    the real source and the reader must fall back to them rather than settle
+    through six retries and report zeros — the exact silent-zero failure this
+    module exists to prevent.
+    """
+
+
 def _is_safe_path_component(value: str) -> bool:
     """True when `value` is safe to interpolate as a single path segment.
 
@@ -736,8 +748,10 @@ class OpenClawAdapter(HarnessAdapter):
         lower `seq`). `complete` depends on which record is LAST, so ordering by
         the wrong column would mis-read turn completeness.
 
-        Propagates `sqlite3.OperationalError` (locked/busy DB, or a host whose
-        schema predates `transcript_events`) to the caller.
+        Raises `TranscriptTableMissing` when the database predates the
+        `transcript_events` table, and propagates `sqlite3.OperationalError` for
+        a locked/busy database. The caller must treat these differently: the
+        first means fall back to JSONL, the second means retry.
         """
         # `timeout` bounds the wait for a writer's exclusive lock. WAL readers
         # do not block on ordinary writes, so this is effectively only paid
@@ -752,6 +766,15 @@ class OpenClawAdapter(HarnessAdapter):
             timeout=self.USAGE_SQLITE_TIMEOUT_S,
         )
         try:
+            # Probe the schema first so "this host has no transcript_events"
+            # cannot be confused with "the table is momentarily locked" — both
+            # surface as OperationalError from a plain SELECT, but only one is
+            # worth retrying.
+            if not connection.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'transcript_events'",
+            ).fetchone():
+                raise TranscriptTableMissing(db_path)
             cursor = connection.execute(
                 "SELECT event_json FROM transcript_events "
                 "WHERE session_id = ? AND created_at >= ? "
@@ -875,15 +898,23 @@ class OpenClawAdapter(HarnessAdapter):
             db_dir, self.TRANSCRIPT_DB_FILENAME,
         )
         if db_path is not None:
-            return self._settle_usage(
-                lambda: self._sum_sqlite_transcript_usage(
-                    db_path, session_uuid, since_ms,
-                ),
-                session_uuid,
-            )
+            try:
+                return self._settle_usage(
+                    lambda: self._sum_sqlite_transcript_usage(
+                        db_path, session_uuid, since_ms,
+                    ),
+                    session_uuid,
+                )
+            except TranscriptTableMissing:
+                # Pre-2026.7.2-beta.5 host: the database exists for other state
+                # but transcripts are still per-session JSONL. Fall through
+                # rather than report zeros.
+                logger.info(
+                    "transcript database has no transcript_events — falling "
+                    "back to the JSONL transcript",
+                )
 
         sessions_dir = os.path.join(agent_dir, "sessions")
-        path = os.path.join(sessions_dir, f"{session_uuid}.jsonl")
         jsonl_path = self._contained_transcript_path(
             sessions_dir, f"{session_uuid}.jsonl",
         )
@@ -945,7 +976,9 @@ class OpenClawAdapter(HarnessAdapter):
         pays the full bounded wait before returning its honest zeros.
 
         Telemetry must never break a chat turn, so an unreadable store degrades
-        to partial totals rather than propagating.
+        to partial totals rather than propagating. The one exception is
+        `TranscriptTableMissing`, which is allowed through: it is not a read
+        failure but a signal that the caller should try the other store.
         """
         totals: Dict[str, int] = {
             "input": 0, "output": 0, "cache_read": 0,
