@@ -102,3 +102,8 @@ infra/agent-image/.candidate-staging.*/
 infra/agent-image/skills/validated-fs.cjs
 # Staged from lib/agent-workspace/workspace-policy.json for the image build.
 infra/agent-image/workspace_policy.json
+
+# Throwaway watcher-event file created by scripts/test/e2e-local.sh to force a
+# Next dev route-table rebuild. Its exit trap removes it; this is the backstop
+# for a SIGKILL or host crash inside the ~1s window it exists.
+app/.e2e-router-kick.tmp
