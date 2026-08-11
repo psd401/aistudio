@@ -41,6 +41,15 @@ jest.mock(
     ClientFormSheet: () => null,
   })
 )
+// Stubbed for the same reason as ClientFormSheet: this suite asserts trust and
+// status rendering, not the edit dialog's internals. Its own behaviour is
+// covered by tests/unit/oauth-edit-redirect-uris-dialog.test.tsx.
+jest.mock(
+  "@/app/(protected)/admin/oauth-clients/_components/edit-redirect-uris-dialog",
+  () => ({
+    EditRedirectUrisDialog: () => null,
+  })
+)
 jest.mock("@/components/ui/sheet", () => {
   const Wrapper = ({ children }: { children: ReactNode }) => (
     <div>{children}</div>
