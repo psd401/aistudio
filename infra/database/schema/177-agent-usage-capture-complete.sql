@@ -1,4 +1,4 @@
--- Migration 176: persist the agent turn's usage-capture completeness flag
+-- Migration 177: persist the agent turn's usage-capture completeness flag
 --
 -- WHY THIS EXISTS
 -- OpenClaw 2026.7.2-beta.5 moved per-session transcripts out of JSONL files

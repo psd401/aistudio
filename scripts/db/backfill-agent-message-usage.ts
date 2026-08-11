@@ -450,7 +450,7 @@ function reportPlan(plan: BackfillPlan, workspacesWithTranscripts: number): void
 }
 
 /**
- * Fail fast when migration 176 has not been applied.
+ * Fail fast when migration 177 has not been applied.
  *
  * Without it the per-workspace query dies on a missing column, which would
  * otherwise surface as one opaque SQL error per workspace — up to a hundred
@@ -464,7 +464,7 @@ async function requireMigration176(): Promise<void> {
   );
   if (rows.length === 0) {
     log.fail(
-      "agent_messages.usage_capture_complete is missing — migration 176 has " +
+      "agent_messages.usage_capture_complete is missing — migration 177 has " +
         "not been applied to this database. Deploy it first; nothing was read " +
         "or written."
     );

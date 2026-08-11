@@ -46,7 +46,7 @@ export const agentMessages = pgTable("agent_messages", {
   modelCallCount: integer("model_call_count").notNull().default(0),
   durationMs: integer("duration_ms").notNull().default(0),
   nudged: boolean("nudged").notNull().default(false),
-  // Usage-capture completeness (migration 176). NULLABLE on purpose — this is
+  // Usage-capture completeness (migration 177). NULLABLE on purpose — this is
   // NOT "false when absent":
   //   true  = usage was positively measured for this turn.
   //   false = the usage read did not complete, so the token columns above are a

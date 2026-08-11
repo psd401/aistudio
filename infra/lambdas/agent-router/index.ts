@@ -1965,7 +1965,7 @@ interface AgentCoreResult {
   model: string | null;
   latencyMs: number;
   // null = the agent image reported no completeness flag (older image), which
-  // is NOT the same as reporting an incomplete capture. See migration 176.
+  // is NOT the same as reporting an incomplete capture. See migration 177.
   usageCaptureComplete: boolean | null;
   modelCallCount: number;
   durationMs: number;
@@ -2024,7 +2024,7 @@ function failedAgentCoreResult(
     latencyMs: 0,
     // The turn never produced a usage read at all, so completeness is unknown
     // rather than false — a router-side failure must not look like the
-    // transcript-read regression migration 176 exists to surface.
+    // transcript-read regression migration 177 exists to surface.
     usageCaptureComplete: null,
     modelCallCount: 0,
     durationMs: 0,

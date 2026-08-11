@@ -41,7 +41,7 @@ read per turn. Only the telemetry regressed.
 |---|---|
 | Read path | `harness_adapter` reads `transcript_events` (read-only URI, bound `session_id`, `created_at >= since_ms` prefilter, `ORDER BY seq`). JSONL remains a fallback for older hosts. |
 | Model id | `AGENT_MODEL_ID` corrected to `us.anthropic.claude-sonnet-5`, the id actually recorded since 2026-07-31. |
-| Observability | `agent_messages.usage_capture_complete` (migration 176) + the `UsageCaptureZero` metric and alarm. |
+| Observability | `agent_messages.usage_capture_complete` (migration 177) + the `UsageCaptureZero` metric and alarm. |
 | History | The backfill below. |
 
 ### Why `ORDER BY seq`, not `created_at`
@@ -76,7 +76,7 @@ bun run db:backfill-agent-usage -- --since=2026-07-30
 Flags: `--prefix=<workspace>` limits to one workspace; `--since=<ISO date>`
 bounds which `agent_messages` rows are considered.
 
-> **Prerequisite:** migration 176 must be applied first — the script reads and
+> **Prerequisite:** migration 177 must be applied first — the script reads and
 > writes `usage_capture_complete`.
 
 ### Turn attribution
