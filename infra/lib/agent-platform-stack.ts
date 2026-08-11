@@ -4210,6 +4210,35 @@ export class AgentPlatformStack extends cdk.Stack {
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       }),
     );
+    // Zero-usage capture: a SUCCESSFUL turn that made model calls but reported
+    // no tokens at all. That is arithmetically impossible for a real turn, so it
+    // means the usage-capture path is broken rather than the numbers being
+    // small. This is the alarm that was missing on 2026-07-31, when OpenClaw
+    // moved transcripts from JSONL into SQLite: the adapter kept reading the
+    // deleted path and every turn recorded zeros for TEN DAYS with no error
+    // anywhere, because a zero read is indistinguishable from an honest zero
+    // once it lands in agent_messages. The wrapper emits UsageCaptureZero
+    // (see agentcore_wrapper.usage_capture_looks_broken).
+    //
+    // Threshold 5-in-5-min rather than 1: a rare edge turn can legitimately
+    // trip the heuristic, but a BROKEN capture path trips it on every single
+    // turn, so a real regression clears this in one period while noise does not.
+    iterationAlarms.push(
+      new cloudwatch.Alarm(this, 'UsageCaptureZeroAlarm', {
+        alarmName: `psd-agent-usage-capture-zero-${environment}`,
+        alarmDescription:
+          'Successful agent turns are reporting ZERO tokens (>= 5 in 5 min) — ' +
+          'token/cache telemetry capture is broken, not merely low. Cost and ' +
+          'usage reporting is silently wrong while this fires. Most likely a ' +
+          'pinned-host upgrade moved the transcript store again: check ' +
+          'harness_adapter._read_turn_usage against the live OpenClaw layout.',
+        metric: sumMetric('UsageCaptureZero'),
+        threshold: 5,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }),
+    );
     // Dead-boot detector (the r10 signature): a microVM logged BUILD_MARKER but
     // never reached BOOT_OK. BuildMarkerBoot counts starts, BootOk counts
     // serving-ready boots; a positive difference over the window means a boot

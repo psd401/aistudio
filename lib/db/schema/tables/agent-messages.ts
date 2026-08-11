@@ -46,6 +46,18 @@ export const agentMessages = pgTable("agent_messages", {
   modelCallCount: integer("model_call_count").notNull().default(0),
   durationMs: integer("duration_ms").notNull().default(0),
   nudged: boolean("nudged").notNull().default(false),
+  // Usage-capture completeness (migration 176). NULLABLE on purpose — this is
+  // NOT "false when absent":
+  //   true  = usage was positively measured for this turn.
+  //   false = the usage read did not complete, so the token columns above are a
+  //           FLOOR, not a total. This is the signature of the 2026-07-31
+  //           JSONL-to-SQLite transcript regression, which zeroed every token
+  //           column for ten days without surfacing a single error.
+  //   null  = unknown; the row predates the column, or the reporting agent
+  //           image does.
+  // Treating null as either extreme would assert something untrue about ten
+  // days of history, so consumers must handle three states.
+  usageCaptureComplete: boolean("usage_capture_complete"),
   guardrailBlocked: boolean("guardrail_blocked").notNull().default(false),
   spaceName: varchar("space_name", { length: 512 }),
   // Cross-user invocation (migration 068). NULL = owner's own invocation.

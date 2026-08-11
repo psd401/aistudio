@@ -238,6 +238,93 @@ class TurnResultNudgedTests(unittest.TestCase):
         self.assertTrue(TurnResult(text="hi", nudged=True).nudged)
 
 
+class UsageCaptureLooksBrokenTests(unittest.TestCase):
+    """The zero-usage detector behind the UsageCaptureZero alarm.
+
+    The 2026-07-31 regression (transcripts moved JSONL -> SQLite, adapter kept
+    reading the deleted path) recorded model_call_count=10 alongside
+    tokens_in=0 on every turn for ten days with no error anywhere. This
+    predicate is the signal that would have caught it on day one, so it has to
+    fire on that exact shape and stay quiet on the honest zeros.
+    """
+
+    @staticmethod
+    def _metadata(**overrides):
+        base = {
+            "failed": False,
+            "model_call_count": 10,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+        }
+        base.update(overrides)
+        return base
+
+    def test_fires_on_the_exact_outage_shape(self):
+        # Verbatim from a real dev agent_messages row during the outage.
+        self.assertTrue(
+            agentcore_wrapper.usage_capture_looks_broken(self._metadata())
+        )
+
+    def test_quiet_when_any_counter_is_populated(self):
+        for field in (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_write_input_tokens",
+        ):
+            with self.subTest(field=field):
+                self.assertFalse(
+                    agentcore_wrapper.usage_capture_looks_broken(
+                        self._metadata(**{field: 1})
+                    )
+                )
+
+    def test_quiet_on_a_cache_only_turn(self):
+        # The healthy steady state: ~2 billable input tokens against a 65k
+        # cache read. Must never be mistaken for a broken capture.
+        self.assertFalse(
+            agentcore_wrapper.usage_capture_looks_broken(
+                self._metadata(input_tokens=2, cache_read_input_tokens=65_301)
+            )
+        )
+
+    def test_quiet_on_a_failed_turn(self):
+        # A 0-token error turn is expected, and already has an agent_failures row.
+        self.assertFalse(
+            agentcore_wrapper.usage_capture_looks_broken(
+                self._metadata(failed=True)
+            )
+        )
+
+    def test_quiet_when_no_model_call_happened(self):
+        # Nothing ran, so zero is honest rather than impossible.
+        for calls in (0, None, "", "not-a-number"):
+            with self.subTest(model_call_count=calls):
+                self.assertFalse(
+                    agentcore_wrapper.usage_capture_looks_broken(
+                        self._metadata(model_call_count=calls)
+                    )
+                )
+
+    def test_an_unparseable_counter_counts_as_broken(self):
+        # A non-numeric counter is a capture problem in its own right; treating
+        # it as zero would hide it.
+        self.assertTrue(
+            agentcore_wrapper.usage_capture_looks_broken(
+                self._metadata(input_tokens="lots")
+            )
+        )
+
+    def test_missing_counters_are_treated_as_zero(self):
+        self.assertTrue(
+            agentcore_wrapper.usage_capture_looks_broken(
+                {"failed": False, "model_call_count": 3}
+            )
+        )
+
+
 class EmitAgentMetricTests(unittest.TestCase):
     def test_put_metric_data_shape(self):
         from agent_failures import emit_agent_metric

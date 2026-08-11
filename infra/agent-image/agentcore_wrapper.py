@@ -34,6 +34,7 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 # Configure structured logging for CloudWatch
@@ -977,6 +978,47 @@ def usage_capture_is_complete(
     return bool(proxy_measured or harness_capture_complete)
 
 
+def usage_capture_looks_broken(metadata: Mapping[str, Any]) -> bool:
+    """Whether this turn's usage telemetry is impossible rather than merely zero.
+
+    A turn that SUCCEEDED and made at least one model call must have consumed
+    tokens. All four token counters reading zero is therefore not a small number
+    — it is a broken capture path, and the only reason it can happen silently is
+    that every consumer treats a zero read as an honest zero.
+
+    This is the exact signature of the 2026-07-31 regression: OpenClaw moved
+    transcripts from JSONL into SQLite, the adapter kept reading the old path,
+    and every turn logged model_call_count=10 alongside tokens_in=0 for ten days
+    without one error. Alarming on this pairing is what makes the next such
+    move loud instead of invisible.
+
+    Deliberately narrow, so it stays actionable:
+      - failed turns are excluded (a 0-token error turn is expected),
+      - turns with no model calls are excluded (nothing ran; zero is honest).
+    """
+    if metadata.get("failed"):
+        return False
+    try:
+        model_calls = int(metadata.get("model_call_count") or 0)
+    except (TypeError, ValueError):
+        return False
+    if model_calls <= 0:
+        return False
+    total = 0
+    for field in (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_write_input_tokens",
+    ):
+        try:
+            total += int(metadata.get(field) or 0)
+        except (TypeError, ValueError):
+            # An unparseable counter is itself a capture problem, not a zero.
+            return True
+    return total == 0
+
+
 def read_proxy_usage() -> dict:
     """Read cumulative token usage from the Mantle proxy's /usage endpoint
     (issue #1083). Returns a dict with input_tokens / output_tokens / model and
@@ -1899,6 +1941,22 @@ def main():
                 "failed": result.failed,
                 "error_class": result.error_class,
             }
+
+        # Zero-usage successful turn: emit the metric the AgentPlatform stack
+        # alarms on (UsageCaptureZero). The container log group has a
+        # runtime-generated suffix, so a CDK MetricFilter cannot attach to it —
+        # container-origin signals put_metric_data directly. Never raises.
+        if usage_capture_looks_broken(metadata):
+            logger.warning(
+                "USAGE_CAPTURE_ZERO session=%s model=%s model_calls=%s "
+                "usage_complete=%s — a successful turn reported no tokens; the "
+                "usage read is broken, not the turn",
+                session_id,
+                metadata.get("model"),
+                metadata.get("model_call_count"),
+                metadata.get("usage_capture_complete"),
+            )
+            emit_agent_metric("UsageCaptureZero")
 
         logger.info(
             "Invocation complete: session=%s response_length=%d elapsed_s=%d "
