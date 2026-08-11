@@ -93,21 +93,40 @@ Up to **8 rows (turns)** share one sessionKey, and the transcript is append-only
 across all of them — so summing a session into one row would inflate it by the
 entire session history.
 
-Each turn's window is reconstructed from the row timestamps:
+**Row timestamps cannot be used as turn boundaries.** The obvious model — turn
+*k* covers `(created_at[k-1], created_at[k]]` — is wrong. The router releases the
+session lock in the `finally` of its invocation wrapper but does not insert the
+telemetry row until after the Google Chat response is sent, so the next turn can
+begin and write transcript records *before* the previous turn's row is stamped.
+The windows overlap and calls get billed to the wrong row.
 
-```
-turn k  =  ( created_at[k-1],  created_at[k] ]
-turn 1  =  ( session start,    created_at[1] ]
-```
+So the **transcript** is segmented by its own turn structure, and the rows supply
+only order and count:
 
-Sound because turns within a session are strictly serial: the router inserts a
-row only after the wrapper finishes the turn, and turn *k* cannot begin until
-turn *k-1* ends. Windows are half-open at the start, so a record on a boundary is
-billed to exactly one turn.
+1. Walk the session's records in append order, cutting a segment after each
+   record whose `stopReason` is terminal (`stop` / `end_turn`). OpenClaw writes
+   `toolUse` on every call that hands off to a tool, so a terminal reason is
+   exactly the end-of-turn marker.
+2. Drop a trailing segment with no terminal reason — an in-flight or aborted
+   turn, which has no row yet.
+3. Pair segment *k* with row *k*, rows ordered by `created_at`.
+4. **If the counts disagree, attribute nothing and report it.** A mismatch means
+   the model of the session is wrong, and guessing would silently misprice turns.
 
-A sessionKey with several windows (rollover, compaction, fork) has all its
-windows merged before attribution, so a mid-session rollover cannot drop the
-pre-rollover calls.
+Two consequences worth knowing:
+
+- The plan needs **every** row of a session, including already-populated ones. A
+  populated row still consumes a segment; loading only the zero rows would slide
+  every later segment onto the wrong row.
+- `--since` is applied to the resulting **updates**, never to the query. Removing
+  a session's earlier rows would delete the anchors that establish its turn
+  order.
+
+Step 4 is also what contains the two things that could otherwise corrupt
+attribution: a duplicate `agent_messages` row (the router's insert carries no
+idempotency key), and a terminal record that carries no `usage` object (dropped
+at parse time, so its segment never gets cut). Both surface as a reported count
+mismatch rather than a mispriced turn.
 
 ### Safety properties
 
@@ -133,7 +152,8 @@ most recent uncheckpointed turns, which under-counts rather than corrupting.
 |---|---|---|
 | `rows to update` | Recoverable rows | The backfill's value |
 | `rows with NO transcript coverage (unrecoverable)` | No covering record, **or** covering records that carry no usage themselves | Expected for pre-2026-07-29 rows; nothing to recover |
-| `unattributed model calls` | Records outside every turn window | **Non-zero means the plan under-counts — investigate before executing** |
+| `unattributed model calls` | Records no paired segment claimed — a trailing in-flight turn, or every record of a session that was skipped | **Non-zero means the plan under-counts — investigate before executing** |
+| `turn count mismatches` | Sessions whose completed-turn count ≠ row count, so nothing was attributed | **Investigate before executing: recoverable in principle, but the session model is wrong** |
 
 Rows before ~2026-07-29 are unrecoverable *by design of the data*: the
 transcripts of that era carry the model calls but no usage numbers on them, so

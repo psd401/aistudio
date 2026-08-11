@@ -21,13 +21,32 @@
  * events into one row would inflate it by the entire session history — the exact
  * mistake the live adapter's `since_ms` window exists to avoid.
  *
- * We reconstruct each turn's window from the row timestamps instead, which is
- * sound because turns within a session are strictly serial: turn k's window is
- * (created_at of row k-1, created_at of row k]. The router inserts a row only
- * after the wrapper finishes the turn, so every model call of turn k is stamped
- * at or before row k's created_at; and turn k cannot begin until turn k-1 has
- * ended, so none of its calls precede row k-1's created_at. The first turn's
- * window opens at the session's own start.
+ * ROW TIMESTAMPS CANNOT BE USED AS TURN BOUNDARIES. The obvious model — turn k
+ * covers (created_at[k-1], created_at[k]] — is WRONG, and a reviewer caught it:
+ * the router releases the session lock in the `finally` of its invocation
+ * wrapper (agent-router invokeWithSessionLockLease) but does not insert the
+ * telemetry row until after the Google Chat response is sent
+ * (recordOwnerResult). The next turn can therefore begin — and write transcript
+ * records — BEFORE the previous turn's row is stamped, so the windows overlap
+ * and calls get billed to the wrong row. Writing confidently wrong cost numbers
+ * is worse than writing none.
+ *
+ * So we segment the TRANSCRIPT by its own turn structure instead, and use the
+ * rows only for ORDER and count:
+ *   1. Walk the session's records in append order, cutting a segment after each
+ *      record whose stopReason is terminal ("stop"/"end_turn"). OpenClaw writes
+ *      "toolUse" on every call that hands off to a tool, so a terminal reason is
+ *      exactly the end-of-turn marker.
+ *   2. Drop a trailing segment with no terminal reason — that is an in-flight or
+ *      aborted turn, which has no row yet.
+ *   3. Pair segment k with row k, rows ordered by created_at.
+ *   4. If the counts DISAGREE, attribute nothing and report it. A count mismatch
+ *      means our model of the session is wrong, and guessing would silently
+ *      misprice turns.
+ *
+ * This needs EVERY row of the session, not just the zero ones — a populated row
+ * still consumes a segment. Loading only candidates would shift every later
+ * segment onto the wrong row (the second half of the same review finding).
  */
 
 /** One assistant model call's token usage, as stored in a transcript record. */
@@ -64,9 +83,13 @@ export interface CandidateRow {
 export interface PlannedUpdate {
   id: number
   sessionId: string
-  /** Inclusive-exclusive window actually used, for the dry-run report. */
-  windowStartMs: number
-  windowEndMs: number
+  /** 0-based position of this turn within the session, for the dry-run report. */
+  turnIndex: number
+  /** The row's own created_at, so callers can apply a date filter AFTER pairing. */
+  rowCreatedAtMs: number
+  /** Timestamps of the paired segment's first and last model call. */
+  firstRecordMs: number
+  lastRecordMs: number
   before: TranscriptUsage & { usageCaptureComplete: boolean | null }
   after: TranscriptUsage & { usageCaptureComplete: boolean }
   modelCalls: number
@@ -81,11 +104,18 @@ export interface BackfillPlan {
    */
   unmatchedRowIds: number[]
   /**
-   * Model calls present in the transcript that fell outside every turn window.
-   * Must be reported: a non-zero value means attribution dropped real usage and
-   * the plan under-counts.
+   * Model calls present in the transcript that no paired segment claimed —
+   * an in-flight trailing turn, or every record of a session we refused to
+   * attribute. Must be reported: a non-zero value means the plan under-counts.
    */
   unattributedModelCalls: number
+  /**
+   * Sessions where the number of completed turns in the transcript did not match
+   * the number of `agent_messages` rows, so nothing was attributed. Non-zero
+   * means real usage is recoverable in principle but our session model is wrong
+   * — investigate before trusting the rest of the run.
+   */
+  turnCountMismatches: number
   /** Sum of every model call in the transcript, attributed or not. */
   transcriptTotals: TranscriptUsage
   /** Sum of what the plan would write. */
@@ -180,78 +210,100 @@ function recordTimestampMs(
 }
 
 /**
- * Per-turn windows for one session's rows.
+ * Split a session's records into one segment per completed turn.
  *
- * Rows are sorted by created_at ascending. Turn k covers
- * (created_at[k-1], created_at[k]]; the first turn opens at `sessionStartMs`.
- * Windows are half-open at the start so a record on a boundary is billed to
- * exactly one turn — never both.
+ * Records must arrive in append order. A segment ends at each record whose
+ * stopReason is terminal; OpenClaw writes "toolUse" on every call that hands off
+ * to a tool, so a terminal reason is precisely the end-of-turn marker and a
+ * novel/absent value can never be mistaken for one.
+ *
+ * A trailing run of records with no terminal reason is DROPPED — that is an
+ * in-flight or aborted turn, which has no `agent_messages` row to receive it.
+ * Returning it would shift the pairing and misprice every turn in the session.
  */
-export function assignTurnWindows(
-  rows: readonly CandidateRow[],
-  sessionStartMs: number
-): Array<{ row: CandidateRow; startMs: number; endMs: number }> {
-  const sorted = [...rows].sort((a, b) => a.createdAtMs - b.createdAtMs)
-  return sorted.map((row, index) => ({
-    row,
-    startMs: index === 0 ? sessionStartMs : sorted[index - 1].createdAtMs,
-    endMs: row.createdAtMs,
-  }))
+export function segmentTurns(
+  records: readonly TranscriptRecord[]
+): TranscriptRecord[][] {
+  const segments: TranscriptRecord[][] = []
+  let current: TranscriptRecord[] = []
+  for (const record of records) {
+    current.push(record)
+    if (
+      record.stopReason !== null &&
+      TERMINAL_STOP_REASONS.includes(record.stopReason)
+    ) {
+      segments.push(current)
+      current = []
+    }
+  }
+  // `current` is deliberately discarded: no terminal reason means no finished
+  // turn.
+  return segments
+}
+
+function foldSegment(segment: readonly TranscriptRecord[]): TranscriptUsage {
+  return segment.reduce<TranscriptUsage>(
+    (totals, record) => addUsage(totals, record.usage),
+    ZERO
+  )
 }
 
 /**
  * Build the backfill plan for ONE session.
  *
- * `sessionStartMs` bounds the first turn. Records outside every window are
- * counted into `unattributedModelCalls` rather than forced into the nearest
- * turn: inventing attribution would corrupt per-turn cost, and the caller needs
- * to see that the reconciliation does not balance.
+ * `rows` must be EVERY `agent_messages` row for the session — including already
+ * populated ones — ordered arbitrarily; they are sorted here. A populated row
+ * still consumes a turn segment, so filtering to zero rows before this point
+ * would shift every later segment onto the wrong row.
  */
 export function planSessionBackfill(
   rows: readonly CandidateRow[],
-  records: readonly TranscriptRecord[],
-  sessionStartMs: number
+  records: readonly TranscriptRecord[]
 ): BackfillPlan {
-  const windows = assignTurnWindows(rows, sessionStartMs)
-  const updates: PlannedUpdate[] = []
-  const unmatchedRowIds: number[] = []
+  const ordered = [...rows].sort((a, b) => a.createdAtMs - b.createdAtMs)
+  const segments = segmentTurns(records)
 
-  let transcriptTotals = ZERO
-  for (const record of records) {
-    transcriptTotals = addUsage(transcriptTotals, record.usage)
+  const transcriptTotals = records.reduce<TranscriptUsage>(
+    (totals, record) => addUsage(totals, record.usage),
+    ZERO
+  )
+
+  // A count mismatch means our model of this session is wrong — a turn we
+  // cannot see, a row written by something else, an aborted turn that still
+  // produced a row. Attribute NOTHING rather than pair the wrong segment with
+  // the wrong row: silently mispriced turns are worse than a reported gap.
+  if (segments.length !== ordered.length) {
+    return {
+      updates: [],
+      unmatchedRowIds: ordered.filter(isBackfillCandidate).map((r) => r.id),
+      unattributedModelCalls: records.length,
+      turnCountMismatches: ordered.length === 0 && segments.length === 0 ? 0 : 1,
+      transcriptTotals,
+      plannedTotals: ZERO,
+    }
   }
 
-  const attributed = new Set<TranscriptRecord>()
+  const updates: PlannedUpdate[] = []
+  const unmatchedRowIds: number[] = []
   let plannedTotals = ZERO
+  let unattributed = records.length
 
-  for (const { row, startMs, endMs } of windows) {
-    let totals = ZERO
-    let modelCalls = 0
-    let complete = false
-    // Ascending timestamp so the LAST in-window record decides completeness,
-    // matching the live adapter: an earlier terminal reason followed by more
-    // model calls (a nudge leg) must not latch it true.
-    const inWindow = records
-      .filter((r) => r.timestampMs > startMs && r.timestampMs <= endMs)
-      .sort((a, b) => a.timestampMs - b.timestampMs)
-    for (const record of inWindow) {
-      totals = addUsage(totals, record.usage)
-      modelCalls += 1
-      complete =
-        record.stopReason !== null &&
-        TERMINAL_STOP_REASONS.includes(record.stopReason)
-      attributed.add(record)
-    }
+  for (const [index, row] of ordered.entries()) {
+    const segment = segments[index]
+    unattributed -= segment.length
 
+    // A populated row is left strictly alone; it only existed here to keep the
+    // pairing aligned.
+    if (!isBackfillCandidate(row)) continue
+
+    const totals = foldSegment(segment)
     const recovered =
       totals.input + totals.output + totals.cacheRead + totals.cacheWrite
-    if (modelCalls === 0 || recovered === 0) {
-      // Either no transcript record covers this turn, or the records that do
-      // carry zero usage themselves — which is what the pre-2026-07-29 rows
-      // look like, when the transcript was not recording usage either. Both are
-      // UNRECOVERABLE, not a zero-value update: writing zeros over zeros
-      // recovers nothing while reporting a success, and would let the run claim
-      // it fixed rows it did not.
+    if (recovered === 0) {
+      // The records covering this turn carry no usage themselves — what the
+      // pre-2026-07-29 transcripts look like. UNRECOVERABLE, not a zero-value
+      // update: writing zeros over zeros recovers nothing while reporting a
+      // success.
       unmatchedRowIds.push(row.id)
       continue
     }
@@ -260,8 +312,10 @@ export function planSessionBackfill(
     updates.push({
       id: row.id,
       sessionId: row.sessionId,
-      windowStartMs: startMs,
-      windowEndMs: endMs,
+      turnIndex: index,
+      rowCreatedAtMs: row.createdAtMs,
+      firstRecordMs: segment[0].timestampMs,
+      lastRecordMs: segment[segment.length - 1].timestampMs,
       before: {
         input: row.inputTokens,
         output: row.outputTokens,
@@ -269,17 +323,44 @@ export function planSessionBackfill(
         cacheWrite: row.cacheWriteInputTokens,
         usageCaptureComplete: row.usageCaptureComplete,
       },
-      after: { ...totals, usageCaptureComplete: complete },
-      modelCalls,
+      // Every segment ends on a terminal stopReason by construction, so a
+      // paired turn is by definition completely captured.
+      after: { ...totals, usageCaptureComplete: true },
+      modelCalls: segment.length,
     })
   }
 
   return {
     updates,
     unmatchedRowIds,
-    unattributedModelCalls: records.length - attributed.size,
+    unattributedModelCalls: unattributed,
+    turnCountMismatches: 0,
     transcriptTotals,
     plannedTotals,
+  }
+}
+
+/**
+ * Drop updates for rows older than `sinceMs`, recomputing `plannedTotals`.
+ *
+ * Applied AFTER pairing, never before. Filtering rows out of the query would
+ * remove the anchors that establish a session's turn ordering and shift every
+ * later segment onto the wrong row; restricting the resulting updates is safe
+ * because pairing has already happened.
+ */
+export function restrictPlanToRowsSince(
+  plan: BackfillPlan,
+  sinceMs: number | null
+): BackfillPlan {
+  if (sinceMs === null) return plan
+  const updates = plan.updates.filter((u) => u.rowCreatedAtMs >= sinceMs)
+  return {
+    ...plan,
+    updates,
+    plannedTotals: updates.reduce<TranscriptUsage>(
+      (totals, update) => addUsage(totals, update.after),
+      ZERO
+    ),
   }
 }
 
@@ -291,6 +372,8 @@ export function mergePlans(plans: readonly BackfillPlan[]): BackfillPlan {
       unmatchedRowIds: [...acc.unmatchedRowIds, ...plan.unmatchedRowIds],
       unattributedModelCalls:
         acc.unattributedModelCalls + plan.unattributedModelCalls,
+      turnCountMismatches:
+        acc.turnCountMismatches + plan.turnCountMismatches,
       transcriptTotals: addUsage(acc.transcriptTotals, plan.transcriptTotals),
       plannedTotals: addUsage(acc.plannedTotals, plan.plannedTotals),
     }),
@@ -298,6 +381,7 @@ export function mergePlans(plans: readonly BackfillPlan[]): BackfillPlan {
       updates: [],
       unmatchedRowIds: [],
       unattributedModelCalls: 0,
+      turnCountMismatches: 0,
       transcriptTotals: ZERO,
       plannedTotals: ZERO,
     }
@@ -351,18 +435,30 @@ export interface BackfillArguments {
   prefix: string | null
   /** Ignore agent_messages rows created before this epoch-ms, if given. */
   sinceMs: number | null
+  /**
+   * Fatal argument errors. Non-empty means the caller must abort — never
+   * proceed with a partially understood invocation.
+   */
+  errors: string[]
 }
 
 /**
  * Parse argv. Dry-run is the default and requires no flags; writing needs BOTH
  * --execute and the exact confirmation token, so no single typo can mutate
  * production telemetry.
+ *
+ * A malformed `--since` is an ERROR, not an omission. Silently falling back to
+ * "no filter" would widen a production run from the outage window to ALL
+ * history — and the documented execute command relies on that filter to stay
+ * narrow, so a mistyped date is exactly when the blast radius must not grow
+ * (review finding).
  */
 export function parseBackfillArguments(argv: readonly string[]): BackfillArguments {
   let execute = false
   let confirmed = false
   let prefix: string | null = null
   let sinceMs: number | null = null
+  const errors: string[] = []
 
   for (const arg of argv) {
     if (arg === "--execute") {
@@ -371,12 +467,26 @@ export function parseBackfillArguments(argv: readonly string[]): BackfillArgumen
       confirmed = arg.slice("--confirmation=".length) === BACKFILL_CONFIRMATION
     } else if (arg.startsWith("--prefix=")) {
       const value = arg.slice("--prefix=".length).trim()
-      prefix = value.length > 0 ? value : null
+      if (value.length === 0) {
+        errors.push("--prefix was given but empty")
+      } else {
+        prefix = value
+      }
     } else if (arg.startsWith("--since=")) {
-      const parsed = Date.parse(arg.slice("--since=".length))
-      sinceMs = Number.isNaN(parsed) ? null : parsed
+      const raw = arg.slice("--since=".length).trim()
+      const parsed = Date.parse(raw)
+      if (raw.length === 0 || Number.isNaN(parsed)) {
+        errors.push(
+          `--since=${raw || "(empty)"} is not a valid date — refusing to run ` +
+            "without the date filter it was meant to apply"
+        )
+      } else {
+        sinceMs = parsed
+      }
+    } else {
+      errors.push(`unrecognized argument: ${arg}`)
     }
   }
 
-  return { execute, confirmed, prefix, sinceMs }
+  return { execute, confirmed, prefix, sinceMs, errors }
 }

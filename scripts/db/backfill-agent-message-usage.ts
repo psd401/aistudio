@@ -53,12 +53,13 @@ import {
 import { validatedFs } from "../../lib/filesystem/validated-fs";
 import {
   BACKFILL_CONFIRMATION,
-  isBackfillCandidate,
   mergePlans,
   parseBackfillArguments,
   parseTranscriptRecord,
   planSessionBackfill,
+  restrictPlanToRowsSince,
   sessionIdFromTranscriptKey,
+  type BackfillArguments,
   type BackfillPlan,
   type CandidateRow,
   type TranscriptRecord,
@@ -284,17 +285,14 @@ function toCandidateRow(row: Field[]): CandidateRow {
 
 /** One chunk's SELECT. Split out so the caller stays a simple loop. */
 async function loadCandidateChunk(
-  sessionIds: readonly string[],
-  sinceMs: number | null
+  sessionIds: readonly string[]
 ): Promise<CandidateRow[]> {
   const placeholders = sessionIds.map((_, i) => `:s${i}`).join(", ");
   const parameters = sessionIds.map((value, i) => text(`s${i}`, value));
-  let sinceClause = "";
-  if (sinceMs !== null) {
-    sinceClause =
-      " AND created_at >= to_timestamp((:since_ms)::bigint / 1000.0)";
-    parameters.push(text("since_ms", sinceMs));
-  }
+  // NO date predicate here on purpose. --since must not remove rows before
+  // pairing: dropping a session's earlier turns would shift every later segment
+  // onto the wrong row. The filter is applied to the resulting UPDATES instead.
+  //
   // `placeholders` is built from the chunk INDEX (:s0, :s1, ...), never from
   // session-id content, so this template carries no caller data. Every value is
   // a bound parameter.
@@ -304,18 +302,19 @@ async function loadCandidateChunk(
     "input_tokens, output_tokens, cache_read_input_tokens, " +
     "cache_write_input_tokens, usage_capture_complete " +
     `FROM agent_messages WHERE session_id IN (${placeholders})` +
-    sinceClause +
     " ORDER BY session_id, created_at";
 
+  // EVERY row is returned, populated ones included. A populated row still
+  // consumes a turn segment, so filtering here would shift each later segment
+  // onto the wrong row and misprice the session (review finding). Only
+  // planSessionBackfill decides which rows are writable.
   const rows = await query(sql, parameters);
-  // Only zero rows are candidates; a populated row must never be touched.
-  return rows.map(toCandidateRow).filter(isBackfillCandidate);
+  return rows.map(toCandidateRow);
 }
 
-/** Load the zero-usage agent_messages rows for the given session ids. */
+/** Load ALL agent_messages rows for the given session ids. */
 async function loadCandidateRows(
-  sessionIds: readonly string[],
-  sinceMs: number | null
+  sessionIds: readonly string[]
 ): Promise<Map<string, CandidateRow[]>> {
   const bySession = new Map<string, CandidateRow[]>();
   // Chunked so a workspace with many sessions cannot exceed the statement's
@@ -323,8 +322,7 @@ async function loadCandidateRows(
   const CHUNK = 50;
   for (let index = 0; index < sessionIds.length; index += CHUNK) {
     const candidates = await loadCandidateChunk(
-      sessionIds.slice(index, index + CHUNK),
-      sinceMs
+      sessionIds.slice(index, index + CHUNK)
     );
     for (const candidate of candidates) {
       const list = bySession.get(candidate.sessionId) ?? [];
@@ -396,15 +394,20 @@ async function planWorkspace(
 
     const transcripts = readSessionTranscripts(databasePath);
     const rowsBySession = await loadCandidateRows(
-      transcripts.map((t) => t.sessionId),
-      sinceMs
+      transcripts.map((t) => t.sessionId)
     );
     const plans: BackfillPlan[] = [];
     for (const transcript of transcripts) {
       const rows = rowsBySession.get(transcript.sessionId) ?? [];
       if (rows.length === 0) continue;
+      // --since is applied AFTER pairing, never before: it selects which rows
+      // may be written, and must not remove the rows that establish the
+      // session's turn ordering.
       plans.push(
-        planSessionBackfill(rows, transcript.records, transcript.sessionStartMs)
+        restrictPlanToRowsSince(
+          planSessionBackfill(rows, transcript.records),
+          sinceMs
+        )
       );
     }
     return { plans, hadTranscript: true };
@@ -418,8 +421,9 @@ function reportPlan(plan: BackfillPlan, workspacesWithTranscripts: number): void
   for (const update of plan.updates) {
     log.info(`row ${update.id}`, {
       session: update.sessionId,
-      window: `${new Date(update.windowStartMs).toISOString()} .. ${new Date(
-        update.windowEndMs
+      turn: update.turnIndex,
+      calls: `${new Date(update.firstRecordMs).toISOString()} .. ${new Date(
+        update.lastRecordMs
       ).toISOString()}`,
       modelCalls: update.modelCalls,
       before: `in=${update.before.input} out=${update.before.output} cr=${update.before.cacheRead} cw=${update.before.cacheWrite} complete=${update.before.usageCaptureComplete}`,
@@ -440,10 +444,19 @@ function reportPlan(plan: BackfillPlan, workspacesWithTranscripts: number): void
     ...plan.transcriptTotals,
   });
   log.info("Planned totals (what would be written)", { ...plan.plannedTotals });
+  if (plan.turnCountMismatches > 0) {
+    log.warn(
+      "Sessions where the transcript's completed-turn count did not match the " +
+        "agent_messages row count — NOTHING was attributed for these, because " +
+        "pairing the wrong segment to the wrong row would silently misprice " +
+        "turns. Investigate before executing.",
+      { sessions: plan.turnCountMismatches }
+    );
+  }
   if (plan.unattributedModelCalls > 0) {
     log.warn(
-      "Model calls fell OUTSIDE every turn window — the plan under-counts. " +
-        "Investigate before executing.",
+      "Model calls no paired turn claimed (an in-flight trailing turn, or a " +
+        "skipped mismatched session) — the plan under-counts by this much.",
       { unattributedModelCalls: plan.unattributedModelCalls }
     );
   }
@@ -456,7 +469,7 @@ function reportPlan(plan: BackfillPlan, workspacesWithTranscripts: number): void
  * otherwise surface as one opaque SQL error per workspace — up to a hundred
  * lines that never name the actual prerequisite.
  */
-async function requireMigration176(): Promise<void> {
+async function requireMigration177(): Promise<void> {
   const rows = await query(
     "SELECT 1 FROM information_schema.columns " +
       "WHERE table_name = 'agent_messages' " +
@@ -472,11 +485,34 @@ async function requireMigration176(): Promise<void> {
   }
 }
 
+/**
+ * Abort unless the whole invocation was understood, BEFORE anything is read.
+ *
+ * Every unparsed argument is fatal. A mistyped `--since` that degraded to "no
+ * filter" would widen the run from the outage window to ALL history — the
+ * opposite of what the operator asked for — and `--execute` without the exact
+ * token is the same mistake pointing the other way. Both are checked ahead of
+ * the environment and migration probes so a malformed command never even
+ * connects.
+ */
+function requireUsableArguments(args: BackfillArguments): void {
+  const failures = [...args.errors];
+  if (args.execute && !args.confirmed) {
+    failures.push(
+      `--execute requires --confirmation=${BACKFILL_CONFIRMATION}; nothing was changed.`
+    );
+  }
+  if (failures.length === 0) return;
+  for (const failure of failures) log.fail(failure);
+  process.exit(1);
+}
+
 async function main(): Promise<void> {
   const args = parseBackfillArguments(process.argv.slice(2));
   log.section("agent_messages usage backfill (JSONL -> SQLite transcript move)");
+  requireUsableArguments(args);
   requireEnvironment();
-  await requireMigration176();
+  await requireMigration177();
   const willWrite = args.execute && args.confirmed;
   log.info("Target", { bucket: BUCKET, database: DATABASE });
   log.info("Mode", {
@@ -485,13 +521,6 @@ async function main(): Promise<void> {
     prefix: args.prefix ?? "(all)",
     since: args.sinceMs ? new Date(args.sinceMs).toISOString() : "(none)",
   });
-
-  if (args.execute && !args.confirmed) {
-    log.fail(
-      `--execute requires --confirmation=${BACKFILL_CONFIRMATION}; nothing was changed.`
-    );
-    process.exit(1);
-  }
 
   const prefixes = args.prefix ? [args.prefix] : await listWorkspacePrefixes();
   log.info("Workspaces to scan", { count: prefixes.length });
