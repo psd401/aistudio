@@ -721,6 +721,15 @@ class OpenClawAdapter(HarnessAdapter):
         in-window test stays on the record timestamp in `_fold_usage_records`,
         exactly as the JSONL path did.
 
+        The obvious way that invariant could break is the 2026.7.2-beta.5 import
+        stamping migrated JSONL records with the MIGRATION time instead of the
+        original. It does not: the same database holds events from 2026-07-27
+        (before its 2026-07-30 import) and not one row has a skew above 60s.
+        Even if a future migration did stamp import time, a too-LARGE created_at
+        only widens the prefilter, so the record-timestamp filter still decides
+        and the result stays correct — which is precisely why the authoritative
+        test was left on the record timestamp rather than moved into SQL.
+
         Ordering is `seq`, the append order — NOT `created_at`, which is only
         weakly ordered with respect to it (28 of 32 sessions in the same real
         database contain at least one row whose `created_at` precedes that of a
