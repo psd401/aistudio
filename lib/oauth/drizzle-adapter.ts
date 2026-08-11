@@ -447,10 +447,33 @@ class DrizzleAdapter implements Adapter {
       !client.requirePkce ||
       (publicApplication && authMethod !== "none")
     ) {
+      // Log WHICH redirect URI failed and why, not just how many did.
+      //
+      // Validation is all-or-nothing: one bad URI makes loadClient return
+      // undefined, so oidc-provider answers `invalid_client` and every
+      // otherwise-valid URI on the client stops working too. A count alone
+      // cannot distinguish that from a missing or disabled client, and the
+      // caller only ever sees the generic `invalid_client`.
+      //
+      // 2026-08-10: the prod `PSD OpenClaw` client carried a dev-only
+      // `http://localhost:3000/...` redirect, which the native policy rejects
+      // (RFC 8252 wants literal 127.0.0.1 / [::1], not `localhost`). That one
+      // entry disabled agent-connect for every user, and `redirectErrorCount: 1`
+      // was the only clue in the log group. redirectValidation.errors already
+      // held the exact message — it just was not being written down.
+      //
+      // Redacted before logging: a rejected URI is UNTRUSTED, and two of the
+      // rejection reasons exist precisely because the URI carried something it
+      // should not have. `validateCommon` rejects userinfo, so a stored
+      // `https://user:password@host/callback` reaches this array verbatim, and
+      // an invalid-policy or malformed URI may carry sensitive query values.
+      // The generic log filter does not recognise URL userinfo. Scheme, host,
+      // port and path are enough to identify the offending entry.
       this.log.error("OAuth client registration failed security validation", {
         clientId,
         applicationType: client.applicationType,
         redirectErrorCount: redirectValidation.errors.length,
+        redirectErrors: redirectValidation.errors.map(redactUrisForLog),
         authMethodValid,
         secretInvariantValid,
         requirePkce: client.requirePkce,
@@ -711,6 +734,51 @@ class DrizzleAdapter implements Adapter {
 // ============================================
 // Export Factory (required by oidc-provider)
 // ============================================
+
+/**
+ * Strip credentials and query data from any URI embedded in a validation
+ * message, so a rejected redirect URI can be logged without leaking what got it
+ * rejected.
+ *
+ * Redirect-URI errors come in two shapes — `"<uri>: <reason>"` and
+ * `"Invalid redirect URI: <uri>"` — so this rewrites URI-looking tokens
+ * wherever they appear rather than assuming a position. Userinfo, query and
+ * fragment are dropped; scheme, host, port and path survive, which is all that
+ * is needed to identify the entry in the client's stored list.
+ *
+ * Exported for tests.
+ */
+export function redactUrisForLog(message: string): string {
+  return message.replace(/\S+/g, (token) => {
+    // Consider anything URI-shaped, plus anything carrying an authority,
+    // userinfo or query marker even when its scheme is malformed — a rejected
+    // URI is untrusted input and "ht!tp://user:pw@host" must not slip through
+    // just because `ht!tp` is not a legal scheme. Ordinary prose (including
+    // "URI:" and bare IPs like 127.0.0.1) matches neither test and is left
+    // alone.
+    const uriShaped = /^[a-z][a-z0-9+.-]*:/i.test(token)
+    const carriesSensitiveMarkers = /:\/\/|@|\?/.test(token)
+    if (!uriShaped && !carriesSensitiveMarkers) return token
+    // A trailing separator belongs to the sentence, not the URI.
+    const trailing = token.match(/[:,.]+$/)?.[0] ?? ""
+    const candidate = trailing ? token.slice(0, -trailing.length) : token
+    let parsed: URL
+    try {
+      parsed = new URL(candidate)
+    } catch {
+      // Unparseable is exactly the case that may be carrying junk — say the
+      // entry was rejected without echoing whatever it contained.
+      return "<unparseable redirect URI>" + trailing
+    }
+    // A bare scheme with no target is not a URI worth rewriting.
+    if (!parsed.host && !parsed.pathname.replace(/^\/+/, "")) return token
+    parsed.username = ""
+    parsed.password = ""
+    parsed.search = ""
+    parsed.hash = ""
+    return parsed.href + trailing
+  })
+}
 
 export function DrizzleOidcAdapter(model: string): Adapter {
   return new DrizzleAdapter(model)
