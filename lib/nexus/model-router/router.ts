@@ -5,6 +5,7 @@ import { nexusMcpServers } from "@/lib/db/schema"
 import { filterAccessibleResourceIds } from "@/lib/db/drizzle/resource-access"
 import { createLogger } from "@/lib/logger"
 import { hasCapability } from "@/lib/ai/capability-utils"
+import { getConfiguredChatProviders } from "@/lib/ai/provider-credentials"
 import {
   inferModelFamily,
   inferModelTier,
@@ -422,17 +423,37 @@ export async function routeNexusRequest(
     "model",
     models.map(model => model.id)
   ))
+  // The fallback (the model the client explicitly selected) is looked up in
+  // the unfiltered list on purpose: an explicit selection keeps its honest
+  // provider-configuration error instead of being silently rerouted.
   const fallback = models.find(model =>
     model.modelId === args.fallbackModelId
     || String(model.id) === args.fallbackModelId
   )
   if (!fallback) throw new Error("The fallback Nexus model is unavailable")
+  // Routed selection must never pick a model whose provider credential is not
+  // configured — provider creation would throw at stream time and fail the
+  // whole request, which the router's fallback cannot catch.
+  const configuredProviders = await getConfiguredChatProviders()
+  const routableModels = models.filter(model =>
+    configuredProviders.has(model.provider.toLowerCase())
+  )
+  if (routableModels.length < models.length) {
+    const excludedProviders = [...new Set(
+      models
+        .filter(model => !configuredProviders.has(model.provider.toLowerCase()))
+        .map(model => model.provider)
+    )]
+    log.info("Excluding models from routing; provider credentials not configured", {
+      excludedProviders,
+    })
+  }
   const requiredTools = [...new Set(args.enabledToolNames ?? [])]
   if (mode === "off") {
     return buildRouterOffResult({
       args,
       config,
-      models,
+      models: routableModels,
       fallback,
       accessibleIds,
       requiredTools,
@@ -442,7 +463,7 @@ export async function routeNexusRequest(
     args,
     config,
     mode,
-    models,
+    models: routableModels,
     fallback,
     accessibleIds,
     requiredTools,
