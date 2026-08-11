@@ -5,8 +5,12 @@ const mockFilterAccessibleResourceIds = jest.fn()
 const mockGetConfig = jest.fn()
 const mockClassify = jest.fn()
 const mockExecuteQuery = jest.fn()
+const mockGetConfiguredChatProviders = jest.fn()
 
 jest.mock("@/lib/db/drizzle", () => ({ getNexusEnabledModels: () => mockGetNexusEnabledModels() }))
+jest.mock("@/lib/ai/provider-credentials", () => ({
+  getConfiguredChatProviders: () => mockGetConfiguredChatProviders(),
+}))
 jest.mock("@/lib/db/drizzle/resource-access", () => ({
   filterAccessibleResourceIds: (...args: unknown[]) => mockFilterAccessibleResourceIds(...args),
 }))
@@ -51,6 +55,9 @@ function defineNexusModelRouterSuite1Part1() {
     mockGetNexusEnabledModels.mockResolvedValue(models)
     mockFilterAccessibleResourceIds.mockResolvedValue(models.map(model => String(model.id)))
     mockGetConfig.mockResolvedValue({ config, mode: "active" })
+    mockGetConfiguredChatProviders.mockResolvedValue(
+      new Set(["openai", "google", "amazon-bedrock", "azure", "latimer"])
+    )
     mockClassify.mockResolvedValue({
       intent: "general", tier: "medium", confidence: 0.9,
       reasonCodes: ["normal_request"], source: "classifier",
@@ -343,3 +350,66 @@ const defineNexusModelRouterSuite1 = () => {
 };
 
 describe("Nexus model router", defineNexusModelRouterSuite1)
+
+describe("Nexus model router credential filtering", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockGetNexusEnabledModels.mockResolvedValue(models)
+    mockFilterAccessibleResourceIds.mockResolvedValue(models.map(model => String(model.id)))
+    mockGetConfig.mockResolvedValue({ config, mode: "active" })
+    mockClassify.mockResolvedValue({
+      intent: "general", tier: "medium", confidence: 0.9,
+      reasonCodes: ["normal_request"], source: "classifier",
+    })
+  })
+
+  it("routes AUTO past a candidate whose provider credential is not configured", async () => {
+    const autoConfig = nexusRouterConfigSchema.parse({
+      auto: { light: [], medium: ["gpt-terra", "us.anthropic.claude-sonnet"], high: [] },
+    })
+    mockGetConfig.mockResolvedValue({ config: autoConfig, mode: "active" })
+    mockGetConfiguredChatProviders.mockResolvedValue(new Set(["amazon-bedrock", "google"]))
+
+    const result = await routeNexusRequest({
+      text: "Help", fallbackModelId: "gpt-terra", experienceMode: "standard",
+      requestedFamily: "auto", enabledConnectorIds: [], userId: 7,
+    })
+
+    expect(result.modelId).toBe("us.anthropic.claude-sonnet")
+    expect(result.metadata.selectedFamily).toBe("anthropic")
+  })
+
+  it("keeps the explicitly selected model when routing is off, even without its provider key", async () => {
+    mockGetConfig.mockResolvedValue({ config, mode: "off" })
+    mockGetConfiguredChatProviders.mockResolvedValue(new Set(["amazon-bedrock", "google"]))
+
+    const result = await routeNexusRequest({
+      text: "Help", fallbackModelId: "gpt-terra", experienceMode: "standard",
+      requestedFamily: "auto", enabledConnectorIds: [], userId: 7,
+    })
+
+    expect(result.modelId).toBe("gpt-terra")
+  })
+
+  it("fails clearly when the requested Advanced family's provider is not configured", async () => {
+    mockGetConfiguredChatProviders.mockResolvedValue(new Set(["amazon-bedrock", "google"]))
+
+    await expect(routeNexusRequest({
+      text: "Help", fallbackModelId: "us.anthropic.claude-sonnet", experienceMode: "advanced",
+      requestedFamily: "openai", enabledConnectorIds: [], userId: 7,
+    })).rejects.toThrow("openai family")
+  })
+
+  it("does not offer image generation through an unconfigured provider", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "image", tier: "medium", confidence: 0.99,
+      reasonCodes: ["explicit_image_request"], source: "deterministic",
+    })
+    mockGetConfiguredChatProviders.mockResolvedValue(new Set(["amazon-bedrock", "openai"]))
+
+    await expect(routeNexusRequest({
+      text: "Create an image", fallbackModelId: "gpt-terra", experienceMode: "standard",
+      requestedFamily: "auto", enabledConnectorIds: [], userId: 7,
+    })).rejects.toThrow("Image generation is not available")
+  })
+})
