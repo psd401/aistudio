@@ -1753,6 +1753,73 @@ class SqliteTranscriptUsageTests(unittest.TestCase):
         self.assertEqual(usage["cache_write"], 40)
         self.assertEqual(usage["model_calls"], 2)
 
+    def test_a_terminal_record_without_usage_still_completes_the_turn(self):
+        # Completeness must be decided by the last record carrying a stopReason,
+        # NOT the last record carrying usage. When the turn-ending record has no
+        # usage object, deciding from the latter lets the preceding "toolUse"
+        # win, so a finished turn reports incomplete: it burns the whole settle
+        # budget and then writes usage_capture_complete=FALSE, which downstream
+        # reads as "these token columns are a floor" — the same signature as a
+        # genuinely broken capture path.
+        terminal = _assistant(6_000)
+        del terminal["message"]["usage"]
+        self._write("s1", [
+            _assistant(5_000, inp=10, out=1, cr=30, stop="toolUse"),
+            terminal,
+        ])
+        usage = self.adapter._read_turn_usage("s1", "main", 5_000)
+        self.assertTrue(usage["capture_complete"])
+        # The usage-less record is not a model call and adds no tokens.
+        self.assertEqual(usage["model_calls"], 1)
+        self.assertEqual(usage["input"], 10)
+        self.assertEqual(usage["cache_read"], 30)
+
+    def test_a_record_with_no_stop_reason_does_not_unfinish_the_turn(self):
+        # The converse risk of the fix above: a trailing record that carries no
+        # stopReason at all is not a turn boundary, so it must leave the verdict
+        # alone rather than clear it.
+        self._write("s1", [
+            _assistant(5_000, inp=10, out=1),
+            _assistant(6_000, inp=5, out=2, stop=None),
+        ])
+        usage = self.adapter._read_turn_usage("s1", "main", 5_000)
+        self.assertTrue(usage["capture_complete"])
+        self.assertEqual(usage["model_calls"], 2)
+        self.assertEqual(usage["input"], 15)
+
+    def test_a_previous_turns_terminal_record_cannot_complete_this_turn(self):
+        # The in-window test runs BEFORE the completeness update, so an earlier
+        # turn's "stop" is invisible here. Reversing that order would report an
+        # unfinished turn as fully captured.
+        self._write("s1", [
+            _assistant(1_000, inp=999, out=999, stop="stop"),   # previous turn
+            _assistant(5_000, inp=10, out=1, stop="toolUse"),   # still running
+        ])
+        usage = self.adapter._read_turn_usage("s1", "main", 5_000)
+        self.assertFalse(usage["capture_complete"])
+        self.assertEqual(usage["input"], 10)
+        self.assertEqual(usage["model_calls"], 1)
+
+    def test_an_unexpected_exception_degrades_to_zeros_not_a_broken_turn(self):
+        # The success-path caller runs after the WebSocket try/except has closed,
+        # so anything escaping this read would discard a reply the model already
+        # produced — and its tool calls have already run, so a higher-level retry
+        # would re-run their side effects. Only sqlite3 errors are handled
+        # inside; the guard is what covers everything else.
+        self._write("s1", [_assistant(5_000, inp=10, out=1)])
+
+        def _boom(*_args, **_kwargs):
+            raise OverflowError("timestamp out of range")
+
+        self.adapter._fold_usage_records = _boom
+        usage = self.adapter._read_turn_usage("s1", "main", 5_000)
+        self.assertFalse(usage["capture_complete"])
+        self.assertEqual(usage["input"], 0)
+        self.assertEqual(usage["output"], 0)
+        self.assertEqual(usage["cache_read"], 0)
+        self.assertEqual(usage["cache_write"], 0)
+        self.assertEqual(usage["model_calls"], 0)
+
     def test_another_sessions_rows_are_never_billed_to_this_turn(self):
         # Session isolation used to be the FILENAME; it is now a WHERE clause.
         # A missing/broken session_id predicate would bill every concurrent

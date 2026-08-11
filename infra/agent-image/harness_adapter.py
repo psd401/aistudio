@@ -657,11 +657,24 @@ class OpenClawAdapter(HarnessAdapter):
         checkpointed 2026.7.2-beta.5 database).
 
         Returns `(totals, complete)`. `complete` is True only when the newest
-        in-window assistant record carries an explicitly allowlisted terminal
-        stopReason. OpenClaw writes `stopReason: "toolUse"` on every model call
-        that hands off to a tool and "stop"/"end_turn" only on the call that
-        ends the turn, so missing or novel values cannot accidentally become a
-        "no more model calls coming" signal.
+        in-window assistant record THAT CARRIES A stopReason carries an
+        explicitly allowlisted terminal one. OpenClaw writes
+        `stopReason: "toolUse"` on every model call that hands off to a tool and
+        "stop"/"end_turn" only on the call that ends the turn, so a novel value
+        cannot accidentally become a "no more model calls coming" signal.
+
+        Completeness is deliberately decided independently of whether the record
+        also carries `usage`. Deciding it from the last record WITH usage — the
+        obvious reading, and what this did first — silently mis-reports any turn
+        whose terminal record has no usage object: the preceding `toolUse` call
+        wins and the turn reports incomplete despite having finished. That both
+        pays the full settle budget on a turn that was already done and writes a
+        FALSE into `agent_messages.usage_capture_complete`, which per migration
+        177 means "these token columns are a floor, not a total" — manufacturing
+        the exact broken-capture signature the alarm exists to catch. Records
+        with NO stopReason at all leave completeness untouched rather than
+        clearing it, so a trailing non-model-call record cannot un-finish a
+        finished turn either.
 
         Raises nothing of its own; errors from the underlying store surface as
         exceptions from `raw_records` and are handled by the callers.
@@ -689,29 +702,35 @@ class OpenClawAdapter(HarnessAdapter):
             msg = record.get("message")
             if not isinstance(msg, dict) or msg.get("role") != "assistant":
                 continue
-            usage = msg.get("usage")
-            if not isinstance(usage, dict):
-                continue
+            # The in-window test comes BEFORE the usage test so an out-of-window
+            # record can never reach the completeness update below and report a
+            # previous turn's ending as this turn's.
             ts_ms = self._record_timestamp_ms(record, msg)
             if ts_ms is None or ts_ms < since_ms:
                 continue
-            totals["model_calls"] += 1
-            for key, field in (
-                ("input", "input"),
-                ("output", "output"),
-                ("cache_read", "cacheRead"),
-                ("cache_write", "cacheWrite"),
-            ):
-                value = usage.get(field)
-                # bool is an int subclass; a JSON `true` must not add 1 token.
-                if isinstance(value, int) and not isinstance(value, bool) \
-                        and value > 0:
-                    totals[key] += value
+            usage = msg.get("usage")
+            if isinstance(usage, dict):
+                totals["model_calls"] += 1
+                for key, field in (
+                    ("input", "input"),
+                    ("output", "output"),
+                    ("cache_read", "cacheRead"),
+                    ("cache_write", "cacheWrite"),
+                ):
+                    value = usage.get(field)
+                    # bool is an int subclass; a JSON `true` must not add 1
+                    # token.
+                    if isinstance(value, int) and not isinstance(value, bool) \
+                            and value > 0:
+                        totals[key] += value
             stop_reason = msg.get("stopReason")
-            # Recomputed per record so the LAST in-window record wins:
-            # an earlier terminal reason followed by more model calls
-            # (nudge/compaction legs) must not latch `complete` True.
-            complete = stop_reason in TERMINAL_USAGE_STOP_REASONS
+            if stop_reason is not None:
+                # Recomputed per stopReason-bearing record so the LAST one wins:
+                # an earlier terminal reason followed by more model calls
+                # (nudge/compaction legs) must not latch `complete` True. A
+                # record without a stopReason is not a turn-boundary signal at
+                # all, so it leaves the verdict alone.
+                complete = stop_reason in TERMINAL_USAGE_STOP_REASONS
         return totals, complete
 
     def _sum_sqlite_transcript_usage(
@@ -827,6 +846,37 @@ class OpenClawAdapter(HarnessAdapter):
         return None
 
     def _read_turn_usage(
+        self,
+        session_uuid: Optional[str],
+        agent_id: Optional[str],
+        since_ms: int,
+    ) -> Dict[str, object]:
+        """Read this turn's usage, guaranteeing that no exception escapes.
+
+        The implementation below degrades every failure mode it ANTICIPATES to
+        zeros. This wrapper is what makes the promise hold for the ones it does
+        not, and it belongs on the callee rather than at each call site: the
+        success-path caller runs after the WebSocket try/except has already
+        closed, so an escaping exception there would throw away a reply the model
+        had already produced. Worse, that turn's tool calls have run, so any
+        higher-level retry would re-run their side effects — the precise outcome
+        `_should_retry_upstream` is written to avoid. An unforeseen error (an
+        OverflowError out of an absurd ISO timestamp, a future non-defensive
+        edit to the fold) must cost the telemetry, never the turn.
+        """
+        try:
+            return self._read_turn_usage_unguarded(
+                session_uuid, agent_id, since_ms,
+            )
+        except Exception as exc:  # noqa: BLE001 - telemetry must never break a turn
+            logger.warning(
+                "transcript usage read raised unexpectedly: %s", str(exc)[:200],
+            )
+            return {"input": 0, "output": 0, "cache_read": 0,
+                    "cache_write": 0, "model_calls": 0,
+                    "capture_complete": False}
+
+    def _read_turn_usage_unguarded(
         self,
         session_uuid: Optional[str],
         agent_id: Optional[str],

@@ -28,6 +28,13 @@ const WRITE_METHODS = new Set([
   "chmodSync",
   "mkdir",
   "mkdirSync",
+  // mkdtemp creates a directory from its FIRST argument used as a path prefix,
+  // so it is a write whose target this facade must confine like any other. It
+  // was previously absent, which meant the proxy passed it straight through
+  // unchecked — safe only for as long as every call site happened to hardcode
+  // its prefix.
+  "mkdtemp",
+  "mkdtempSync",
   "rename",
   "rm",
   "rmSync",
