@@ -65,24 +65,42 @@ RUN npm install -g hyperframes@${HYPERFRAMES_VERSION} && hyperframes --version
 # run /usr/bin/ffmpeg -version" (confirmed live on psd-hyperframes-render-dev,
 # #1175 follow-up). The Debian build dynamically loads 40+ shared libraries
 # (libplacebo, libvulkan, sdl2, GPU/desktop libs, …); that lib-loading is the one
-# thing that differs between working emulation and the failing Lambda. This BtbN
-# build statically bundles all codec libs into the binary (only glibc is dynamic,
-# which the base image provides and Node itself uses here), so it starts cleanly.
+# thing that differs between working emulation and the failing Lambda. A fully
+# static build has no such lib-loading step, so it starts cleanly.
 # hyperframes uses it via HYPERFRAMES_FFMPEG_PATH / HYPERFRAMES_FFPROBE_PATH below.
-# Pinned to an immutable BtbN autobuild tag + verified against BtbN's published
-# SHA256 (matches the bun/uv/gh pin+checksum pattern above). xz-utils extracts it.
-ARG FFMPEG_BUILD=autobuild-2026-07-15-14-01
-ARG FFMPEG_ASSET=ffmpeg-n7.1.5-2-g998de74adf-linux64-gpl-7.1
-ARG FFMPEG_SHA256=ccd7b81376598a8730ee4ef1e78716f73308ede970e2e9234f790f799c1d6bf5
-RUN mkdir -p /opt/ffmpeg && cd /tmp && \
-    curl -fsSL -o ffmpeg.tar.xz \
-      "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD}/${FFMPEG_ASSET}.tar.xz" && \
-    echo "${FFMPEG_SHA256}  ffmpeg.tar.xz" | sha256sum -c - && \
-    tar -xJf ffmpeg.tar.xz -C /opt/ffmpeg --strip-components=2 \
-      "${FFMPEG_ASSET}/bin/ffmpeg" "${FFMPEG_ASSET}/bin/ffprobe" && \
-    rm -f ffmpeg.tar.xz && \
-    chmod +x /opt/ffmpeg/ffmpeg /opt/ffmpeg/ffprobe && \
-    /opt/ffmpeg/ffmpeg -version | head -1 && /opt/ffmpeg/ffprobe -version | head -1
+#
+# Copied from a registry image pinned BY DIGEST, not downloaded from a release
+# asset. The previous pin (BtbN autobuild-2026-07-15-14-01) started returning 404
+# and broke the deploy: the comment here claimed that tag was immutable, and it is
+# not. BtbN keeps only ~2-3 weeks of autobuild releases and publishes NO permanent
+# version tags — verified against the GitHub releases API, which lists `latest`
+# plus rolling `autobuild-*` and nothing else. Any autobuild pin therefore rots on
+# a timer. A registry digest cannot, so this replaces the download + checksum with
+# an equivalent-strength content-address that does not expire.
+#
+# This build also suits the requirement better than BtbN's did. It is configured
+# --disable-shared --enable-static with libx264/libx265, so NOTHING is
+# dynamically loaded — not even glibc, which was BtbN's one remaining runtime
+# dependency. That closes the failure mode this whole block exists for.
+#
+# Version note: 7.1.1 is the newest 7.1.x this publisher ships, so it is a small
+# patch step back from BtbN's n7.1.5 build. Deliberate — staying on the ffmpeg 7
+# line that hyperframes was validated against is lower risk than jumping to 8.x
+# or 9.x for a deploy fix. Bump with the same digest-pinned form.
+#
+# Trust note for a future audit: mwader/static-ffmpeg is a third-party,
+# single-maintainer image, not an official publisher. The digest pin is what makes
+# that acceptable — the exact bytes verified here are the only bytes any later
+# build can copy, so the content cannot drift under us even if the tag moves.
+# This adds no new availability domain either: the base image above already comes
+# from Docker Hub, so a Hub outage or an unauthenticated pull-rate limit would
+# have failed this build before this change too.
+COPY --from=mwader/static-ffmpeg:7.1.1-amd64@sha256:6769881cc02c80d33e387750a8e144d162adfab2775e934dd97899261dda3a0c \
+    /ffmpeg /ffprobe /opt/ffmpeg/
+# Prove both binaries actually execute in this base image rather than trusting
+# the copy — a static binary from a musl image running on Debian is exactly the
+# combination worth verifying at build time.
+RUN /opt/ffmpeg/ffmpeg -version | head -1 && /opt/ffmpeg/ffprobe -version | head -1
 ENV HYPERFRAMES_FFMPEG_PATH=/opt/ffmpeg/ffmpeg
 ENV HYPERFRAMES_FFPROBE_PATH=/opt/ffmpeg/ffprobe
 
