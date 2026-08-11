@@ -72,8 +72,9 @@ LOCK_DIR="/tmp/aistudio-e2e-local.lock"
 # Throwaway file used to force a watchpack route-table rebuild (see the router
 # canary block below). It MUST live under app/ for Next's watcher to see it, so
 # it cannot go in /tmp — which means an interrupt during its ~1s lifetime would
-# otherwise strand it in the worktree (the path is not gitignored). Declared here
-# so on_exit can remove it unconditionally.
+# otherwise strand it in the worktree. Declared here so on_exit can remove it
+# unconditionally; .gitignore lists it too, as the backstop for the one case the
+# trap cannot cover (SIGKILL or a host crash inside that window).
 ROUTER_KICK_FILE="app/.e2e-router-kick.tmp"
 
 # Evidence-screenshot paths the specs write into. These are TRACKED files (they
@@ -342,15 +343,39 @@ ROUTER_OK=0
 for attempt in $(seq 1 10); do
   canary_status="$(curl -s -o /dev/null --max-time 15 -w '%{http_code}' "$BASE$CANARY_URL")"
   if [ "$canary_status" != "404" ] && [ "$canary_status" != "000" ] && [ -n "$canary_status" ]; then ROUTER_OK=1; break; fi
-  echo "e2e-local: dev router has not resolved $CANARY_URL (HTTP ${canary_status:-none}) — kicking the route-table scan (attempt $attempt)…"
+  # 404 and "no response at all" are DIFFERENT failures and worth separating in
+  # the log: a 404 is the watchpack route-table drop this block exists to fix
+  # (kicking helps), while 000/empty means curl never got a response — the
+  # server is unreachable, wedged, or slower than --max-time, which kicking
+  # will not fix. Kick either way (cheap, and a wedged server may still recover),
+  # but say which one is happening so the operator reads the right runbook.
+  if [ "$canary_status" = "404" ]; then
+    echo "e2e-local: dev router has not resolved $CANARY_URL (HTTP 404 — route dropped from the table) — kicking the route-table scan (attempt $attempt)…"
+  else
+    echo "e2e-local: no response from $BASE$CANARY_URL (curl status ${canary_status:-none} — server unreachable or timed out, NOT a route-table drop) — retrying (attempt $attempt)…"
+  fi
   touch "$ROUTER_KICK_FILE"
   sleep 1
   rm -f "$ROUTER_KICK_FILE"
   sleep 2
 done
 if [ "$ROUTER_OK" != "1" ]; then
-  echo "❌ e2e-local: dev router never resolved the deepest app route ($CANARY_URL after 10 kicks)."
-  echo "   The suite would 404-flake on real routes. Restart the server on :$E2E_PORT and rerun."
+  # Name the failure mode the LAST probe actually saw — they need different fixes.
+  if [ "$canary_status" = "404" ]; then
+    echo "❌ e2e-local: dev router never resolved the deepest app route ($CANARY_URL still 404 after 10 kicks)."
+    echo "   The route is missing from the table, so the suite would 404-flake on real routes."
+    echo "   Restart the server on :$E2E_PORT and rerun."
+  else
+    echo "❌ e2e-local: dev server on :$E2E_PORT never answered the canary probe ($CANARY_URL, curl status ${canary_status:-none} after 10 attempts)."
+    echo "   This is a server health problem, not a route-table drop."
+    if [ "$REUSE" = "1" ]; then
+      # A reused server was started elsewhere, so SERVER_LOG is not its log.
+      echo "   The server on :$E2E_PORT was reused, not started here — check the terminal that owns it."
+    else
+      echo "   Last log lines ($SERVER_LOG):"; tail -20 "$SERVER_LOG" 2>/dev/null
+    fi
+    echo "   Confirm nothing else owns :$E2E_PORT, then restart and rerun."
+  fi
   exit 1
 fi
 echo "e2e-local: dev router canary $CANARY_URL resolved (HTTP $canary_status)"
