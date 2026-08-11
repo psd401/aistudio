@@ -53,11 +53,13 @@ import {
 import { validatedFs } from "../../lib/filesystem/validated-fs";
 import {
   BACKFILL_CONFIRMATION,
+  isBackfillCandidate,
   mergePlans,
   parseBackfillArguments,
   parseTranscriptRecord,
   planSessionBackfill,
   restrictPlanToRowsSince,
+  segmentTurns,
   sessionIdFromTranscriptKey,
   type BackfillArguments,
   type BackfillPlan,
@@ -403,12 +405,23 @@ async function planWorkspace(
       // --since is applied AFTER pairing, never before: it selects which rows
       // may be written, and must not remove the rows that establish the
       // session's turn ordering.
-      plans.push(
-        restrictPlanToRowsSince(
-          planSessionBackfill(rows, transcript.records),
-          sinceMs
-        )
+      const plan = restrictPlanToRowsSince(
+        planSessionBackfill(rows, transcript.records),
+        sinceMs
       );
+      if (plan.turnCountMismatches > 0) {
+        // Name the session and both counts. The summary warning tells the
+        // operator to investigate before executing, which is not actionable
+        // without knowing WHICH session disagreed and by how much.
+        log.warn("Turn-count mismatch — nothing attributed for this session", {
+          session: transcript.sessionId,
+          completedTurnsInTranscript: segmentTurns(transcript.records).length,
+          agentMessagesRows: rows.length,
+          zeroRows: rows.filter(isBackfillCandidate).length,
+          transcriptRecords: transcript.records.length,
+        });
+      }
+      plans.push(plan);
     }
     return { plans, hadTranscript: true };
   } finally {
