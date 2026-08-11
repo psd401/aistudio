@@ -20,6 +20,7 @@ plain attributes.
 import json
 import os
 import pathlib
+import sqlite3
 import sys
 import time
 import unittest
@@ -1651,12 +1652,420 @@ def _assistant(ts_ms, *, inp=0, out=0, cr=0, cw=0, stop="stop"):
     }
 
 
-class TranscriptUsageTests(unittest.TestCase):
-    """Per-turn token usage read back from the OpenClaw session transcript.
+def _transcript_db(path, rows):
+    """Build a transcript database in the pinned host's real shape.
+
+    DDL copied from a checkpointed 2026.7.2-beta.5 `openclaw-agent.sqlite`
+    (`SELECT sql FROM sqlite_master WHERE name='transcript_events'`), minus the
+    FK to `session_windows` so a fixture needs only the one table. STRICT and
+    the composite primary key are preserved because both constrain what the
+    reader may assume.
+
+    `rows` is an iterable of `(session_id, seq, event_json, created_at)`.
+    """
+    connection = sqlite3.connect(path)
+    try:
+        # The runtime keeps this DB in WAL mode; readers must cope with it.
+        connection.execute("PRAGMA journal_mode=wal")
+        connection.execute(
+            "CREATE TABLE transcript_events ("
+            "  session_id TEXT NOT NULL,"
+            "  seq INTEGER NOT NULL,"
+            "  event_json TEXT NOT NULL,"
+            "  created_at INTEGER NOT NULL,"
+            "  PRIMARY KEY (session_id, seq)"
+            ") STRICT"
+        )
+        connection.executemany(
+            "INSERT INTO transcript_events "
+            "(session_id, seq, event_json, created_at) VALUES (?, ?, ?, ?)",
+            rows,
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _rows(session_id, records, *, created_at_skew_ms=0, start_seq=1):
+    """Turn transcript records into `transcript_events` rows.
+
+    `created_at` is the row's INSERT time, so it is at or after the record's own
+    `message.timestamp` — verified across a real database (488 records, zero
+    inversions). `created_at_skew_ms` models that lag.
+    """
+    rows = []
+    for offset, record in enumerate(records):
+        message = record.get("message") or {}
+        timestamp = message.get("timestamp")
+        if not isinstance(timestamp, int):
+            # Undatable/ISO-only records still get a plausible insert time so
+            # the created_at prefilter cannot be what excludes them.
+            timestamp = 0
+        rows.append((
+            session_id,
+            start_seq + offset,
+            json.dumps(record),
+            timestamp + created_at_skew_ms,
+        ))
+    return rows
+
+
+class SqliteTranscriptUsageTests(unittest.TestCase):
+    """Per-turn token usage read from `transcript_events` (2026.7.2-beta.5+).
 
     This is the only usage source on the post-#1384 SigV4 path: the gateway's
-    WS event stream carries none, so before this the wrapper logged
-    tokens_in=0 tokens_out=0 on every single invocation.
+    WS event stream carries none. OpenClaw 2026.7.2-beta.5 migrated the
+    per-session JSONL transcripts into this per-agent SQLite database and
+    DELETED them, which silently zeroed input/output/cache telemetry on every
+    invocation until the reader followed.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.adapter = OpenClawAdapter()
+        self.adapter.WORKSPACE_DIR = self.tmp.name
+        # Keep the settle loop from adding real seconds to the suite.
+        self.adapter.USAGE_SETTLE_INTERVAL_S = 0
+        self.agent_dir = pathlib.Path(self.tmp.name) / "agents" / "main" / "agent"
+        self.agent_dir.mkdir(parents=True)
+        self.db_path = self.agent_dir / "openclaw-agent.sqlite"
+
+    def _write(self, session_uuid, records, **kwargs):
+        _transcript_db(str(self.db_path), _rows(session_uuid, records, **kwargs))
+        return self.db_path
+
+    def test_sums_only_records_inside_the_turn_window(self):
+        # transcript_events is append-only across the whole session, so a prior
+        # turn's model calls sit in the same table. Billing them again would
+        # inflate every turn by the entire session history.
+        self._write("s1", [
+            _assistant(1_000, inp=999, out=999),          # previous turn
+            _assistant(5_000, inp=10, out=1, stop="toolUse"),
+            _assistant(6_000, inp=20, out=2, cr=30, cw=40),
+        ])
+        usage = self.adapter._read_turn_usage("s1", "main", 5_000)
+        self.assertTrue(usage["capture_complete"])
+        self.assertEqual(usage["input"], 30)
+        self.assertEqual(usage["output"], 3)
+        self.assertEqual(usage["cache_read"], 30)
+        self.assertEqual(usage["cache_write"], 40)
+        self.assertEqual(usage["model_calls"], 2)
+
+    def test_another_sessions_rows_are_never_billed_to_this_turn(self):
+        # Session isolation used to be the FILENAME; it is now a WHERE clause.
+        # A missing/broken session_id predicate would bill every concurrent
+        # session's model calls to whichever turn read the table.
+        rows = _rows("s1", [_assistant(5_000, inp=10, out=1)])
+        rows += _rows("other", [_assistant(5_000, inp=7777, out=7777)])
+        _transcript_db(str(self.db_path), rows)
+        usage = self.adapter._read_turn_usage("s1", "main", 0)
+        self.assertEqual(usage["input"], 10)
+        self.assertEqual(usage["output"], 1)
+        self.assertEqual(usage["model_calls"], 1)
+
+    def test_boundary_record_at_since_ms_is_included(self):
+        self._write("s1", [_assistant(5_000, inp=7, out=3)])
+        self.assertEqual(
+            self.adapter._read_turn_usage("s1", "main", 5_000)["input"], 7,
+        )
+
+    def test_created_at_lag_does_not_hide_an_in_window_record(self):
+        # created_at is the row's INSERT time and runs AHEAD of the record's own
+        # timestamp (up to ~20s observed). Because the prefilter is
+        # `created_at >= since_ms` and created_at >= message.timestamp, it can
+        # only ever be a superset of the real window — never narrower.
+        self._write(
+            "s1", [_assistant(5_000, inp=42, out=1)], created_at_skew_ms=19_941,
+        )
+        usage = self.adapter._read_turn_usage("s1", "main", 5_000)
+        self.assertEqual(usage["input"], 42)
+        self.assertEqual(usage["model_calls"], 1)
+
+    def test_completeness_follows_seq_not_created_at(self):
+        # created_at is only weakly ordered against seq (28 of 32 sessions in a
+        # real database contain an inversion). `complete` is decided by the LAST
+        # record, so ordering the scan by created_at would read the wrong one —
+        # here it would see `toolUse` last and wrongly report the turn partial.
+        rows = [
+            (
+                "s1", 1,
+                json.dumps(_assistant(5_000, inp=10, stop="toolUse")),
+                9_000,  # inserted LATE despite the lower seq
+            ),
+            (
+                "s1", 2,
+                json.dumps(_assistant(6_000, inp=20, stop="stop")),
+                6_100,
+            ),
+        ]
+        _transcript_db(str(self.db_path), rows)
+        usage = self.adapter._read_turn_usage("s1", "main", 0)
+        self.assertTrue(usage["capture_complete"])
+        self.assertEqual(usage["input"], 30)
+
+    def test_tool_use_stop_reason_means_the_turn_is_still_running(self):
+        # `toolUse` is OpenClaw's "another model call is coming" marker; a read
+        # that stops there would drop the turn's final (largest) model call.
+        self._write("s1", [_assistant(5_000, inp=10, stop="toolUse")])
+        _, complete = self.adapter._sum_sqlite_transcript_usage(
+            str(self.db_path), "s1", 0,
+        )
+        self.assertFalse(complete)
+
+        self.db_path.unlink()
+        self._write("s2", [
+            _assistant(5_000, inp=10, stop="toolUse"),
+            _assistant(6_000, inp=20, stop="stop"),
+        ])
+        totals, complete = self.adapter._sum_sqlite_transcript_usage(
+            str(self.db_path), "s2", 0,
+        )
+        self.assertTrue(complete)
+        self.assertEqual(totals["input"], 30)
+
+    def test_only_allowlisted_terminal_stop_reasons_complete_capture(self):
+        cases = (
+            (None, False),
+            ("", False),
+            ("toolUse", False),
+            ("novel-terminal", False),
+            ("stop", True),
+            ("end_turn", True),
+        )
+        rows = []
+        for index, (stop_reason, _expected) in enumerate(cases, start=1):
+            rows += _rows(
+                f"terminal-{index}",
+                [_assistant(5_000, inp=10, stop=stop_reason)],
+            )
+        _transcript_db(str(self.db_path), rows)
+        for index, (stop_reason, expected) in enumerate(cases, start=1):
+            with self.subTest(stop_reason=stop_reason):
+                _, complete = self.adapter._sum_sqlite_transcript_usage(
+                    str(self.db_path), f"terminal-{index}", 0,
+                )
+                self.assertIs(complete, expected)
+
+    def test_missing_database_and_transcript_returns_zeros_without_settling(self):
+        started = time.monotonic()
+        # Non-zero interval so a wrongly-taken settle path would be visible.
+        self.adapter.USAGE_SETTLE_INTERVAL_S = 0.05
+        usage = self.adapter._read_turn_usage("nope", "main", 0)
+        self.assertFalse(usage["capture_complete"])
+        self.assertEqual(usage["model_calls"], 0)
+        self.assertLess(time.monotonic() - started, 0.05)
+
+    def test_unknown_session_in_an_existing_database_reports_honest_zeros(self):
+        self._write("s1", [_assistant(5_000, inp=10)])
+        usage = self.adapter._read_turn_usage("absent-session", "main", 0)
+        self.assertFalse(usage["capture_complete"])
+        self.assertEqual(usage["model_calls"], 0)
+        self.assertEqual(usage["input"], 0)
+
+    def test_malformed_event_json_is_skipped_not_fatal(self):
+        # event_json is TEXT, not JSON-validated by SQLite. A corrupt or
+        # unrecognized row must not lose the records around it, and must clear
+        # completeness so the settle loop re-reads.
+        rows = _rows("s1", [_assistant(5_000, inp=11, out=2)])
+        rows.append(("s1", 2, '{"message": {"rol', 5_100))
+        _transcript_db(str(self.db_path), rows)
+        usage = self.adapter._read_turn_usage("s1", "main", 0)
+        self.assertFalse(usage["capture_complete"])
+        self.assertEqual(usage["input"], 11)
+        self.assertEqual(usage["model_calls"], 1)
+
+    def test_non_json_and_non_object_event_json_are_ignored(self):
+        rows = [
+            ("s1", 1, "not json at all", 5_000),
+            ("s1", 2, '"a bare string"', 5_050),
+            ("s1", 3, "[1, 2, 3]", 5_060),
+            ("s1", 4, "null", 5_070),
+        ]
+        rows += _rows("s1", [_assistant(5_100, inp=4, out=1)], start_seq=5)
+        _transcript_db(str(self.db_path), rows)
+        usage = self.adapter._read_turn_usage("s1", "main", 0)
+        self.assertEqual(usage["model_calls"], 1)
+        self.assertEqual(usage["input"], 4)
+
+    def test_a_busy_database_degrades_to_zeros_without_raising(self):
+        # A telemetry read must never break a chat turn. Hold the write lock
+        # from another connection so the reader gets OperationalError, and
+        # confirm the settle loop absorbs it.
+        self._write("s1", [_assistant(5_000, inp=10, out=2)])
+        blocker = sqlite3.connect(str(self.db_path))
+        self.addCleanup(blocker.close)
+        blocker.execute("PRAGMA journal_mode=delete")
+        blocker.execute("BEGIN EXCLUSIVE")
+        blocker.execute(
+            "INSERT INTO transcript_events VALUES ('s1', 99, '{}', 1)",
+        )
+        usage = self.adapter._read_turn_usage("s1", "main", 0)
+        self.assertFalse(usage["capture_complete"])
+        self.assertEqual(usage["model_calls"], 0)
+
+    def test_a_corrupt_database_file_does_not_retry_or_raise(self):
+        # Retrying a non-SQLite file cannot help, so it must break out of the
+        # settle loop rather than pay the full bounded wait on every turn.
+        self.db_path.write_bytes(b"this is not a sqlite database" * 64)
+        self.adapter.USAGE_SETTLE_INTERVAL_S = 0.05
+        started = time.monotonic()
+        usage = self.adapter._read_turn_usage("s1", "main", 0)
+        self.assertFalse(usage["capture_complete"])
+        self.assertEqual(usage["model_calls"], 0)
+        self.assertLess(time.monotonic() - started, 0.05)
+
+    def test_the_read_never_creates_or_writes_the_database(self):
+        # mode=ro must be what opens the DB: a telemetry read may not create,
+        # migrate, or mutate the runtime's own state.
+        self._write("s1", [_assistant(5_000, inp=10)])
+        before = self.db_path.stat().st_mtime_ns
+        digest_before = self.db_path.read_bytes()
+        self.adapter._read_turn_usage("s1", "main", 0)
+        self.assertEqual(self.db_path.stat().st_mtime_ns, before)
+        self.assertEqual(self.db_path.read_bytes(), digest_before)
+
+    def test_a_missing_database_is_not_created_by_the_read(self):
+        self.adapter._read_turn_usage("s1", "main", 0)
+        self.assertFalse(self.db_path.exists())
+
+    def test_non_assistant_and_usageless_records_ignored(self):
+        self._write("s1", [
+            {"type": "session", "timestamp": "2026-07-27T14:18:48.704Z"},
+            {"type": "message", "message": {"role": "user", "timestamp": 5_000}},
+            {"type": "message", "message": {"role": "toolResult", "timestamp": 5_100}},
+            {"type": "message", "message": {"role": "assistant", "timestamp": 5_200}},
+            _assistant(5_300, inp=4, out=1),
+        ])
+        usage = self.adapter._read_turn_usage("s1", "main", 0)
+        self.assertEqual(usage["model_calls"], 1)
+        self.assertEqual(usage["input"], 4)
+
+    def test_iso_timestamp_used_when_message_timestamp_absent(self):
+        record = _assistant(0, inp=5)
+        del record["message"]["timestamp"]
+        record["timestamp"] = "2026-07-27T14:20:19.758Z"
+        since = int(
+            datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc).timestamp() * 1000
+        )
+        # created_at must not be what admits the row — set it at the window edge.
+        _transcript_db(
+            str(self.db_path), [("s1", 1, json.dumps(record), since)],
+        )
+        self.assertEqual(
+            self.adapter._read_turn_usage("s1", "main", since)["input"], 5,
+        )
+
+    def test_undatable_record_is_not_attributed_to_this_turn(self):
+        record = _assistant(0, inp=5)
+        del record["message"]["timestamp"]
+        del record["timestamp"]
+        _transcript_db(str(self.db_path), [("s1", 1, json.dumps(record), 5_000)])
+        self.assertEqual(
+            self.adapter._read_turn_usage("s1", "main", 0)["model_calls"], 0,
+        )
+
+    def test_session_and_agent_ids_are_path_constrained(self):
+        # agentId is still a path component, and sessionId is still a path
+        # component on the JSONL fallback, so both stay untrusted input.
+        outside_dir = pathlib.Path(self.tmp.name) / "agent"
+        outside_dir.mkdir(parents=True, exist_ok=True)
+        _transcript_db(
+            str(outside_dir / "openclaw-agent.sqlite"),
+            _rows("s1", [_assistant(5_000, inp=123)]),
+        )
+        for sid, aid in (
+            ("../../escaped", "main"),
+            ("s1", "../.."),
+            ("s1/../../escaped", "main"),
+        ):
+            self.assertEqual(
+                self.adapter._read_turn_usage(sid, aid, 0)["input"], 0,
+                f"unsafe ids must not read a database: {sid!r} {aid!r}",
+            )
+
+    def test_dot_dot_agent_id_cannot_climb_out_of_the_agent_directory(self):
+        # `.` is a legal id character, so ".." satisfies the charset regex —
+        # the one traversal a slash-free component can still perform. Plant a
+        # READABLE database at exactly the path it would reach
+        # (<workspace>/agents/../agent/ == <workspace>/agent/) so this fails
+        # loudly if the guard regresses, instead of passing because the file
+        # merely happened not to exist.
+        sibling = pathlib.Path(self.tmp.name) / "agent"
+        sibling.mkdir(parents=True, exist_ok=True)
+        _transcript_db(
+            str(sibling / "openclaw-agent.sqlite"),
+            _rows("s1", [_assistant(5_000, inp=4242)]),
+        )
+        for aid in ("..", "."):
+            usage = self.adapter._read_turn_usage("s1", aid, 0)
+            self.assertEqual(
+                usage["input"], 0, f"agentId={aid!r} must not read a database",
+            )
+            self.assertEqual(usage["model_calls"], 0)
+
+    def test_symlinked_database_is_rejected_by_containment(self):
+        # realpath containment also covers a database symlinked in from
+        # elsewhere in the workspace.
+        outside = pathlib.Path(self.tmp.name) / "elsewhere.sqlite"
+        _transcript_db(str(outside), _rows("s1", [_assistant(5_000, inp=99)]))
+        self.db_path.symlink_to(outside)
+        self.assertEqual(
+            self.adapter._read_turn_usage("s1", "main", 0)["input"], 0,
+        )
+
+    def test_agent_id_defaults_to_main(self):
+        self._write("s1", [_assistant(5_000, inp=9)])
+        self.assertEqual(
+            self.adapter._read_turn_usage("s1", None, 0)["input"], 9,
+        )
+
+    def test_missing_session_id_is_a_no_op(self):
+        self._write("s1", [_assistant(5_000, inp=9)])
+        self.assertEqual(
+            self.adapter._read_turn_usage(None, "main", 0)["model_calls"], 0,
+        )
+
+    def test_negative_and_non_int_usage_values_ignored(self):
+        record = _assistant(5_000, inp=10, out=5)
+        record["message"]["usage"]["cacheRead"] = -100
+        record["message"]["usage"]["cacheWrite"] = "lots"
+        self._write("s1", [record])
+        usage = self.adapter._read_turn_usage("s1", "main", 0)
+        self.assertEqual(usage["cache_read"], 0)
+        self.assertEqual(usage["cache_write"], 0)
+        self.assertEqual(usage["input"], 10)
+
+    def test_boolean_usage_values_are_not_counted_as_tokens(self):
+        # bool is an int subclass in Python; a JSON `true` must not add 1 token.
+        record = _assistant(5_000, inp=10)
+        record["message"]["usage"]["output"] = True
+        self._write("s1", [record])
+        self.assertEqual(
+            self.adapter._read_turn_usage("s1", "main", 0)["output"], 0,
+        )
+
+    def test_the_database_wins_when_a_legacy_jsonl_also_exists(self):
+        # A host migrated in place can have both. The database is authoritative;
+        # the archived JSONL would double-bill the same model calls.
+        sessions = pathlib.Path(self.tmp.name) / "agents" / "main" / "sessions"
+        sessions.mkdir(parents=True)
+        (sessions / "s1.jsonl").write_text(
+            json.dumps(_assistant(5_000, inp=5555)) + "\n", encoding="utf-8",
+        )
+        self._write("s1", [_assistant(5_000, inp=10, out=2)])
+        usage = self.adapter._read_turn_usage("s1", "main", 0)
+        self.assertEqual(usage["input"], 10)
+        self.assertEqual(usage["model_calls"], 1)
+
+
+class TranscriptUsageJsonlFallbackTests(unittest.TestCase):
+    """Legacy per-session JSONL transcripts (hosts before 2026.7.2-beta.5).
+
+    Read only when the per-agent SQLite database is absent, so an older pinned
+    host — or a candidate image on an older base — still reports real usage
+    instead of silently regressing to zeros.
     """
 
     def setUp(self):

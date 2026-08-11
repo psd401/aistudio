@@ -10,15 +10,19 @@ import dataclasses
 import json
 import logging
 import os
+import pathlib
 import re
 import secrets
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import (
+    Any, Callable, Dict, Iterable, List, Optional, Tuple, Union,
+)
 
 from agent_failures import emit_agent_metric, record_failure
 from chat_format import markdown_to_chat
@@ -462,14 +466,31 @@ class OpenClawAdapter(HarnessAdapter):
     """
 
     DEFAULT_CONFIG_PATH = "/home/node/.openclaw/openclaw.json"
-    # Root of the OpenClaw workspace in this container. Per-session transcripts
-    # (the token-usage ground truth — see _read_turn_usage) live under
-    # <WORKSPACE_DIR>/agents/<agentId>/sessions/<sessionId>.jsonl.
+    # Root of the OpenClaw workspace in this container. Transcripts (the
+    # token-usage ground truth — see _read_turn_usage) live in the per-agent
+    # SQLite database at
+    # <WORKSPACE_DIR>/agents/<agentId>/agent/openclaw-agent.sqlite, table
+    # transcript_events. Hosts before 2026.7.2-beta.5 instead appended one JSONL
+    # file per session at <WORKSPACE_DIR>/agents/<agentId>/sessions/<id>.jsonl;
+    # that path is still read as a fallback when the SQLite DB is absent.
     WORKSPACE_DIR = "/home/node/.openclaw"
+    # Filename of the per-agent transcript database, relative to
+    # <WORKSPACE_DIR>/agents/<agentId>/agent/. A CONSTANT, not derived from the
+    # gateway event stream — only the agentId directory component is untrusted
+    # input, and the sessionId is a bound SQL parameter rather than a path
+    # component (a strict improvement on the JSONL layout, where it was both).
+    TRANSCRIPT_DB_SUBDIR = "agent"
+    TRANSCRIPT_DB_FILENAME = "openclaw-agent.sqlite"
     # Bounded settle for the transcript read: 6 x 200ms = 1.0s worst case, paid
     # only when the turn-ending assistant record hasn't landed yet.
     USAGE_SETTLE_ATTEMPTS = 6
     USAGE_SETTLE_INTERVAL_S = 0.2
+    # Per-connection busy timeout for the transcript read. The runtime writes
+    # this DB in WAL mode, so a reader does not block on a concurrent writer;
+    # this only bounds the rare case of a writer holding the exclusive lock for
+    # a checkpoint. Kept well under one settle interval so a busy DB retries via
+    # the settle loop rather than stalling the turn.
+    USAGE_SQLITE_TIMEOUT_S = 0.1
     # Gateway auth token is generated per container at startup (see __init__),
     # never hardcoded. It is passed to the gateway via the --token CLI flag and
     # reused by this adapter's connect envelope, so launcher and client always
@@ -612,68 +633,149 @@ class OpenClawAdapter(HarnessAdapter):
             suppress_origin=True,
         )
 
-    def _sum_transcript_usage(
-        self, path: str, since_ms: int,
+    def _fold_usage_records(
+        self, raw_records: Iterable[str], since_ms: int,
     ) -> Tuple[Dict[str, int], bool]:
-        """Sum assistant-message usage in `path` for records at/after `since_ms`.
+        """Fold serialized transcript records into this turn's usage totals.
+
+        `raw_records` yields the JSON text of each transcript record in APPEND
+        order (JSONL line order, or `transcript_events` ordered by `seq`). The
+        record shape is identical in both stores — the SQLite migration moved
+        the same objects verbatim into `event_json` (verified against a
+        checkpointed 2026.7.2-beta.5 database).
 
         Returns `(totals, complete)`. `complete` is True only when the newest
         in-window assistant record carries an explicitly allowlisted terminal
         stopReason. OpenClaw writes `stopReason: "toolUse"` on every model call
         that hands off to a tool and "stop"/"end_turn" only on the call that
         ends the turn, so missing or novel values cannot accidentally become a
-        "no more model calls coming" signal. Never raises.
+        "no more model calls coming" signal.
+
+        Raises nothing of its own; errors from the underlying store surface as
+        exceptions from `raw_records` and are handled by the callers.
         """
         totals = {"input": 0, "output": 0, "cache_read": 0,
                   "cache_write": 0, "model_calls": 0}
         complete = False
+        for raw in raw_records:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                record = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                # A torn final JSONL line is expected when we read while the
+                # runtime is mid-append; a malformed `event_json` is a
+                # corrupt/unknown row. Either way clear completeness in case a
+                # prior terminal record was followed by a new partial
+                # model-call record; the settle loop will re-read once it
+                # lands whole.
+                complete = False
+                continue
+            if not isinstance(record, dict):
+                continue
+            msg = record.get("message")
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            usage = msg.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            ts_ms = self._record_timestamp_ms(record, msg)
+            if ts_ms is None or ts_ms < since_ms:
+                continue
+            totals["model_calls"] += 1
+            for key, field in (
+                ("input", "input"),
+                ("output", "output"),
+                ("cache_read", "cacheRead"),
+                ("cache_write", "cacheWrite"),
+            ):
+                value = usage.get(field)
+                # bool is an int subclass; a JSON `true` must not add 1 token.
+                if isinstance(value, int) and not isinstance(value, bool) \
+                        and value > 0:
+                    totals[key] += value
+            stop_reason = msg.get("stopReason")
+            # Recomputed per record so the LAST in-window record wins:
+            # an earlier terminal reason followed by more model calls
+            # (nudge/compaction legs) must not latch `complete` True.
+            complete = stop_reason in TERMINAL_USAGE_STOP_REASONS
+        return totals, complete
+
+    def _sum_sqlite_transcript_usage(
+        self, db_path: str, session_uuid: str, since_ms: int,
+    ) -> Tuple[Dict[str, int], bool]:
+        """Sum this turn's usage from the `transcript_events` table.
+
+        Opened through a read-only `file:` URI so a telemetry read can never
+        create, migrate, or write the runtime's database — SQLite refuses any
+        mutation on an `mode=ro` connection, and `mode=ro` (unlike the default)
+        also refuses to CREATE the file if it is missing.
+
+        `session_id` is a bound parameter, never interpolated. `created_at` is
+        an epoch-ms INTEGER written when the row is inserted, which is always
+        at or after the record's own `message.timestamp` (verified across a
+        real database: 488 records, 0 inversions, skew 0..20s). That makes
+        `created_at >= since_ms` a safe SUPERSET prefilter — it narrows the scan
+        without ever hiding an in-window record, and the authoritative
+        in-window test stays on the record timestamp in `_fold_usage_records`,
+        exactly as the JSONL path did.
+
+        Ordering is `seq`, the append order — NOT `created_at`, which is only
+        weakly ordered with respect to it (28 of 32 sessions in the same real
+        database contain at least one row whose `created_at` precedes that of a
+        lower `seq`). `complete` depends on which record is LAST, so ordering by
+        the wrong column would mis-read turn completeness.
+
+        Propagates `sqlite3.OperationalError` (locked/busy DB, or a host whose
+        schema predates `transcript_events`) to the caller.
+        """
+        # `timeout` bounds the wait for a writer's exclusive lock. WAL readers
+        # do not block on ordinary writes, so this is effectively only paid
+        # during a checkpoint.
+        # as_uri() percent-encodes characters that are structural in a URI
+        # (notably `?` and `#`), so a workspace path containing one cannot be
+        # read as a query parameter. Requires an absolute path — callers pass a
+        # realpath.
+        connection = sqlite3.connect(
+            f"{pathlib.Path(db_path).as_uri()}?mode=ro",
+            uri=True,
+            timeout=self.USAGE_SQLITE_TIMEOUT_S,
+        )
+        try:
+            cursor = connection.execute(
+                "SELECT event_json FROM transcript_events "
+                "WHERE session_id = ? AND created_at >= ? "
+                "ORDER BY seq",
+                (session_uuid, since_ms),
+            )
+            return self._fold_usage_records(
+                (row[0] for row in cursor if isinstance(row[0], str)),
+                since_ms,
+            )
+        finally:
+            connection.close()
+
+    def _sum_transcript_usage(
+        self, path: str, since_ms: int,
+    ) -> Tuple[Dict[str, int], bool]:
+        """Sum assistant-message usage in the JSONL transcript at `path`.
+
+        Legacy path, retained for hosts older than 2026.7.2-beta.5 (which moved
+        transcripts into SQLite). Never raises.
+        """
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                    except (json.JSONDecodeError, ValueError):
-                        # A torn final line is expected when we read while the
-                        # runtime is mid-append. Clear completeness in case a
-                        # prior terminal record was followed by a new partial
-                        # model-call record; the settle loop will re-read once
-                        # it lands whole.
-                        complete = False
-                        continue
-                    if not isinstance(record, dict):
-                        continue
-                    msg = record.get("message")
-                    if not isinstance(msg, dict) or msg.get("role") != "assistant":
-                        continue
-                    usage = msg.get("usage")
-                    if not isinstance(usage, dict):
-                        continue
-                    ts_ms = self._record_timestamp_ms(record, msg)
-                    if ts_ms is None or ts_ms < since_ms:
-                        continue
-                    totals["model_calls"] += 1
-                    for key, field in (
-                        ("input", "input"),
-                        ("output", "output"),
-                        ("cache_read", "cacheRead"),
-                        ("cache_write", "cacheWrite"),
-                    ):
-                        value = usage.get(field)
-                        if isinstance(value, int) and value > 0:
-                            totals[key] += value
-                    stop_reason = msg.get("stopReason")
-                    # Recomputed per record so the LAST in-window record wins:
-                    # an earlier terminal reason followed by more model calls
-                    # (nudge/compaction legs) must not latch `complete` True.
-                    complete = stop_reason in TERMINAL_USAGE_STOP_REASONS
+                return self._fold_usage_records(fh, since_ms)
         except OSError as exc:
             logger.warning(
                 "transcript usage read failed: %s", str(exc)[:200],
             )
-        return totals, complete
+        return (
+            {"input": 0, "output": 0, "cache_read": 0,
+             "cache_write": 0, "model_calls": 0},
+            False,
+        )
 
     @staticmethod
     def _record_timestamp_ms(record: dict, msg: dict) -> Optional[int]:
@@ -711,6 +813,14 @@ class OpenClawAdapter(HarnessAdapter):
         local to this container and written with plain appends (no userspace
         buffering), so it is readable the moment the runtime writes it.
 
+        As of OpenClaw 2026.7.2-beta.5 those records live in the per-agent
+        SQLite database `<workspace>/agents/<agentId>/agent/openclaw-agent.sqlite`
+        (table `transcript_events`, one row per record with the SAME JSON object
+        the JSONL file used to hold). The per-session JSONL files were migrated
+        into it and REMOVED, which silently zeroed this telemetry until this
+        read followed them. Older hosts are still supported via the JSONL
+        fallback below.
+
         The turn window is `[since_ms, now]` — the caller passes the chat.send
         wall clock, and every model call this turn is stamped after it. The
         wrapper reads this BEFORE any nudge leg is sent, so the nudge's own
@@ -745,44 +855,109 @@ class OpenClawAdapter(HarnessAdapter):
             logger.warning("transcript usage skipped — unsafe session/agent id")
             return empty
 
-        sessions_dir = os.path.join(
-            self.WORKSPACE_DIR, "agents", agent_id or "main", "sessions",
+        agent_dir = os.path.join(self.WORKSPACE_DIR, "agents", agent_id or "main")
+
+        # Preferred source: the per-agent transcript database. Contained the
+        # same way as the JSONL path below — the resolved file must sit directly
+        # beneath the resolved `agent/` directory, which rejects a SYMLINKED
+        # database pointing out of the workspace.
+        db_dir = os.path.join(agent_dir, self.TRANSCRIPT_DB_SUBDIR)
+        db_path = self._contained_transcript_path(
+            db_dir, self.TRANSCRIPT_DB_FILENAME,
         )
+        if db_path is not None:
+            return self._settle_usage(
+                lambda: self._sum_sqlite_transcript_usage(
+                    db_path, session_uuid, since_ms,
+                ),
+                session_uuid,
+            )
+
+        sessions_dir = os.path.join(agent_dir, "sessions")
         path = os.path.join(sessions_dir, f"{session_uuid}.jsonl")
-        # Containment: the resolved file must sit directly beneath the resolved
-        # sessions directory. Mirrors the Zip-Slip containment workspace_sync.py
-        # applies to restore paths, and catches a SYMLINKED transcript.
-        #
-        # It does NOT substitute for the dot-name rejection above. `sessions_dir`
-        # is built from the same untrusted agent_id, so an agent_id of ".."
-        # moves BOTH sides of this comparison to the escaped directory and they
-        # match — the check would pass on a path that already climbed out. The
-        # component check is what stops that vector; this is defence against a
-        # different one. (test_dot_dot_agent_id_cannot_climb_out_of_the_agent_
-        # directory fails if the dot-name rejection is removed, even with this
-        # check in place — verified, not assumed.)
-        resolved = os.path.realpath(path)
-        resolved_dir = os.path.realpath(sessions_dir)
-        if os.path.dirname(resolved) != resolved_dir:
+        jsonl_path = self._contained_transcript_path(
+            sessions_dir, f"{session_uuid}.jsonl",
+        )
+        if jsonl_path is None:
             logger.warning(
-                "transcript usage skipped — resolved path escapes the sessions "
-                "directory",
+                "transcript usage skipped — no transcript database at %s and no "
+                "JSONL transcript for session %s",
+                db_dir, session_uuid,
             )
             return empty
-        if not os.path.exists(resolved):
-            logger.warning("transcript usage skipped — no transcript at %s", path)
-            return empty
-        path = resolved
 
-        # OpenClaw creates the transcript at session start and appends the
-        # turn-ending assistant record before it emits the chat `final` event
-        # we broke out on, so the first read almost always lands complete. The
-        # settle loop only covers the append/emit race; a turn that made no
-        # model calls at all (aborted pre-inference) never goes `complete` and
-        # pays the full bounded wait before returning its honest zeros.
-        totals = empty
+        return self._settle_usage(
+            lambda: self._sum_transcript_usage(jsonl_path, since_ms),
+            session_uuid,
+        )
+
+    @staticmethod
+    def _contained_transcript_path(
+        directory: str, filename: str,
+    ) -> Optional[str]:
+        """Resolve `directory/filename`, or None if missing or uncontained.
+
+        Containment: the resolved file must sit directly beneath the resolved
+        directory. Mirrors the Zip-Slip containment workspace_sync.py applies to
+        restore paths, and catches a SYMLINKED transcript.
+
+        It does NOT substitute for the dot-name rejection in the caller.
+        `directory` is built from the same untrusted agent_id, so an agent_id of
+        ".." moves BOTH sides of this comparison to the escaped directory and
+        they match — the check would pass on a path that already climbed out.
+        The component check is what stops that vector; this is defence against a
+        different one. (test_dot_dot_agent_id_cannot_climb_out_of_the_agent_
+        directory fails if the dot-name rejection is removed, even with this
+        check in place — verified, not assumed.)
+        """
+        path = os.path.join(directory, filename)
+        resolved = os.path.realpath(path)
+        if os.path.dirname(resolved) != os.path.realpath(directory):
+            logger.warning(
+                "transcript usage skipped — resolved path escapes %s", directory,
+            )
+            return None
+        if not os.path.exists(resolved):
+            return None
+        return resolved
+
+    def _settle_usage(
+        self,
+        read: "Callable[[], Tuple[Dict[str, int], bool]]",
+        session_uuid: str,
+    ) -> Dict[str, object]:
+        """Retry `read` on a bounded schedule until the turn reads complete.
+
+        OpenClaw appends the turn-ending assistant record before it emits the
+        chat `final` event we broke out on, so the first read almost always
+        lands complete. The settle loop only covers the append/emit race (and,
+        on the SQLite path, a momentarily locked database); a turn that made no
+        model calls at all (aborted pre-inference) never goes `complete` and
+        pays the full bounded wait before returning its honest zeros.
+
+        Telemetry must never break a chat turn, so an unreadable store degrades
+        to partial totals rather than propagating.
+        """
+        totals: Dict[str, int] = {
+            "input": 0, "output": 0, "cache_read": 0,
+            "cache_write": 0, "model_calls": 0,
+        }
         for attempt in range(self.USAGE_SETTLE_ATTEMPTS):
-            totals, complete = self._sum_transcript_usage(path, since_ms)
+            try:
+                totals, complete = read()
+            except sqlite3.OperationalError as exc:
+                # Locked/busy database, or a host whose schema predates
+                # `transcript_events`. Retry — a checkpoint clears in ms.
+                logger.warning(
+                    "transcript usage read unavailable: %s", str(exc)[:200],
+                )
+                complete = False
+            except sqlite3.DatabaseError as exc:
+                # Corrupt or non-SQLite file: retrying cannot help.
+                logger.warning(
+                    "transcript usage read failed: %s", str(exc)[:200],
+                )
+                break
             if complete:
                 return {**totals, "capture_complete": True}
             if attempt < self.USAGE_SETTLE_ATTEMPTS - 1:
