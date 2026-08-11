@@ -323,3 +323,132 @@ export async function revokeOAuthClient(
     })
   }
 }
+
+const updateOAuthClientRedirectUrisInputSchema = z.object({
+  clientId: z.string().trim().min(1).max(255),
+  redirectUris: z.array(z.string()).min(1),
+  // Reactivating is part of the same edit: a client is often revoked precisely
+  // because its redirect list was wrong and revoke was the only control that
+  // existed. Omitted leaves the current state alone.
+  isActive: z.boolean().optional(),
+})
+
+export type UpdateOAuthClientRedirectUrisInput = z.infer<
+  typeof updateOAuthClientRedirectUrisInputSchema
+>
+
+/**
+ * Update a registered client's redirect URIs (and optionally reactivate it).
+ *
+ * Deliberately narrow. Before this existed the admin surface was
+ * create/list/revoke only, so a client with one bad redirect URI could not be
+ * corrected at all — on 2026-08-10 that took out agent-connect for every user,
+ * and revoking was the only button available (see migration 176). Redirect
+ * URIs are the field that actually rots: hosts move, dev callbacks get left
+ * behind, extension ids change.
+ *
+ * NOT editable here, on purpose. `applicationType`, `tokenEndpointAuthMethod`,
+ * `requirePkce`, the secret and the scopes all define the client's security
+ * profile, and changing them on a live registration silently alters what an
+ * already-issued grant means. Those still require creating a new client.
+ *
+ * The new URIs are validated against the STORED application type, never a
+ * caller-supplied one, so a native client cannot be relaxed into web rules by
+ * passing a different type alongside the URIs.
+ */
+export async function updateOAuthClientRedirectUris(
+  input: UpdateOAuthClientRedirectUrisInput
+): Promise<ActionState<{ clientId: string; redirectUris: string[] }>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("updateOAuthClientRedirectUris")
+  const log = createLogger({
+    requestId,
+    action: "updateOAuthClientRedirectUris",
+  })
+
+  try {
+    await requireRole("administrator")
+
+    const validated = updateOAuthClientRedirectUrisInputSchema.parse(input)
+
+    const [existing] = await executeQuery(
+      (db) =>
+        db
+          .select({
+            applicationType: oauthClients.applicationType,
+          })
+          .from(oauthClients)
+          .where(eq(oauthClients.clientId, validated.clientId))
+          .limit(1),
+      "updateOAuthClientRedirectUris.load"
+    )
+
+    if (!existing) {
+      throw ErrorFactories.dbRecordNotFound("oauth_clients", validated.clientId)
+    }
+
+    const applicationType = existing.applicationType as OAuthApplicationType
+    const uriValidation = validateOAuthRedirectUris(
+      applicationType,
+      validated.redirectUris
+    )
+    if (!uriValidation.valid) {
+      // Surfaced to the admin editing the form, who typed these and needs the
+      // full string to correct them. The adapter redacts before LOGGING; this
+      // path returns them to the authenticated administrator instead.
+      log.warn("Rejected redirect URI update", {
+        clientId: validated.clientId,
+        errorCount: uriValidation.errors.length,
+      })
+      throw ErrorFactories.invalidInput(
+        "redirectUris",
+        validated.redirectUris,
+        uriValidation.errors.join("; ")
+      )
+    }
+
+    const updated = await executeQuery(
+      (db) =>
+        db
+          .update(oauthClients)
+          .set({
+            redirectUris: uriValidation.normalizedUris,
+            ...(validated.isActive === undefined
+              ? {}
+              : { isActive: validated.isActive }),
+            updatedAt: new Date(),
+          })
+          .where(eq(oauthClients.clientId, validated.clientId))
+          .returning({ id: oauthClients.id }),
+      "updateOAuthClientRedirectUris"
+    )
+
+    if (updated.length === 0) {
+      // Same reasoning as revokeOAuthClient: never report a successful edit for
+      // a row that did not change, or an admin believes a broken client is fixed.
+      throw ErrorFactories.dbRecordNotFound("oauth_clients", validated.clientId)
+    }
+
+    timer({ status: "success" })
+    log.info("OAuth client redirect URIs updated", {
+      clientId: validated.clientId,
+      uriCount: uriValidation.normalizedUris.length,
+      isActive: validated.isActive,
+    })
+
+    return createSuccess(
+      {
+        clientId: validated.clientId,
+        redirectUris: uriValidation.normalizedUris,
+      },
+      "OAuth client updated"
+    )
+  } catch (error) {
+    timer({ status: "error" })
+    return handleError(error, "Failed to update OAuth client", {
+      context: "updateOAuthClientRedirectUris",
+      requestId,
+      operation: "updateOAuthClientRedirectUris",
+    })
+  }
+}

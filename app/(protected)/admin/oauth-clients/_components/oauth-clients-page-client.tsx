@@ -39,6 +39,7 @@ import {
 import { ClientFormSheet } from "./client-form-sheet"
 import type { OAuthClientRow } from "@/actions/oauth/oauth-client.actions"
 import { revokeOAuthClient, listOAuthClients } from "@/actions/oauth/oauth-client.actions"
+import { EditRedirectUrisDialog } from "./edit-redirect-uris-dialog"
 import { Plus, Ban } from "lucide-react"
 import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
@@ -60,9 +61,11 @@ function applicationTypeLabel(client: OAuthClientRow): string {
 function OAuthClientTableRow({
   client,
   onRevoke,
+  onSaved,
 }: {
   client: OAuthClientRow
   onRevoke: (clientId: string) => void
+  onSaved: () => void
 }) {
   return (
     <TableRow>
@@ -97,7 +100,11 @@ function OAuthClientTableRow({
           {client.allowedScopes.length} scope(s)
         </span>
       </TableCell>
-      <TableCell>
+      <TableCell className="flex items-center gap-1">
+        {/* Editing stays available on a REVOKED client. This column used to
+            render nothing once isActive went false, which left a client that
+            was revoked because its redirect list was wrong with no way back. */}
+        <EditRedirectUrisDialog client={client} onSaved={onSaved} />
         {client.isActive && (
           <AlertDialog>
             <AlertDialogTrigger asChild>
@@ -213,6 +220,7 @@ export function OAuthClientsPageClient({ initialClients }: Props) {
                   key={client.id}
                   client={client}
                   onRevoke={handleRevoke}
+                  onSaved={() => void refresh()}
                 />
               ))}
             </TableBody>

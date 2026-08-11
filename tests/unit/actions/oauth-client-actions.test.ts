@@ -217,3 +217,72 @@ const defineRevokeOAuthClientREVCOR055Suite1 = () => {
 };
 
 describe('revokeOAuthClient (REV-COR-055)', defineRevokeOAuthClientREVCOR055Suite1)
+
+describe('updateOAuthClientRedirectUris', () => {
+  let updateOAuthClientRedirectUris: typeof import('@/actions/oauth/oauth-client.actions').updateOAuthClientRedirectUris
+
+  beforeAll(async () => {
+    const actions = await import('@/actions/oauth/oauth-client.actions')
+    updateOAuthClientRedirectUris = actions.updateOAuthClientRedirectUris
+  })
+  beforeEach(() => { jest.clearAllMocks(); mockRequireRole.mockResolvedValue(undefined) })
+
+  it('requires the administrator role', async () => {
+    mockRequireRole.mockRejectedValueOnce(new Error('forbidden'))
+    const result = await updateOAuthClientRedirectUris({
+      clientId: 'c1', redirectUris: ['https://example.com/cb'],
+    })
+    expect(result.isSuccess).toBe(false)
+    expect(mockExecuteQuery).not.toHaveBeenCalled()
+  })
+
+  it('repairs the real localhost case and can reactivate in the same edit', async () => {
+    // The migration-176 scenario, done through the UI instead.
+    mockExecuteQuery
+      .mockResolvedValueOnce([{ applicationType: 'native' }])
+      .mockResolvedValueOnce([{ id: 1 }])
+    const result = await updateOAuthClientRedirectUris({
+      clientId: '7e8646f4-4091-4a34-a6b9-0d3721e8a126',
+      redirectUris: [
+        'http://127.0.0.1:3000/agent-connect-aistudio/callback',
+        'https://aistudio.psd401.ai/agent-connect-aistudio/callback',
+      ],
+      isActive: true,
+    })
+    expect(result.isSuccess).toBe(true)
+  })
+
+  it('rejects a URI the stored application type forbids', async () => {
+    // `localhost` over HTTP is exactly what broke agent-connect; a native
+    // client must not be able to store it again through this path.
+    mockExecuteQuery.mockResolvedValueOnce([{ applicationType: 'native' }])
+    const result = await updateOAuthClientRedirectUris({
+      clientId: 'c1',
+      redirectUris: ['http://localhost:3000/agent-connect-aistudio/callback'],
+    })
+    expect(result.isSuccess).toBe(false)
+    // Load happened; the UPDATE must not have.
+    expect(mockExecuteQuery).toHaveBeenCalledTimes(1)
+  })
+
+  it('validates against the STORED type, ignoring any caller-supplied type', async () => {
+    // A web-only HTTPS host URI is invalid for a native client. Passing
+    // applicationType alongside it must not relax the rules.
+    mockExecuteQuery.mockResolvedValueOnce([{ applicationType: 'native' }])
+    const result = await updateOAuthClientRedirectUris({
+      clientId: 'c1',
+      redirectUris: ['https://example.com:8443/cb'],
+      ...({ applicationType: 'web' } as Record<string, unknown>),
+    })
+    expect(result.isSuccess).toBe(false)
+    expect(mockExecuteQuery).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails when no row matched instead of reporting a false success', async () => {
+    mockExecuteQuery.mockResolvedValueOnce([])
+    const result = await updateOAuthClientRedirectUris({
+      clientId: 'missing', redirectUris: ['https://example.com/cb'],
+    })
+    expect(result.isSuccess).toBe(false)
+  })
+})
