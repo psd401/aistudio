@@ -58,7 +58,12 @@ OPENCLAW_DATABASE_MIGRATOR = "/app/openclaw_agent_db_migrate.mjs"
 # Emergency fallback only. Candidate images read their actual primary model
 # from openclaw.json so a GLM/Kimi/Qwen/OpenAI turn is never mislabeled Claude
 # merely because neither the proxy nor transcript returned a model id.
-DEFAULT_AGENT_MODEL_ID = "claude-sonnet-5"
+#
+# Must stay equal to lib/agents/platform-model.ts AGENT_MODEL_ID — the id that
+# `agent_messages.model` is priced against. A mismatch does not fail loudly; the
+# rows simply stop joining `ai_models` and the cost UI reads $0 (bug #1083).
+# lib/agents/__tests__/platform-model.test.ts fails CI if these drift.
+DEFAULT_AGENT_MODEL_ID = "us.anthropic.claude-sonnet-5"
 BEDROCK_BEARER_ENV = "AWS_BEARER_TOKEN_BEDROCK"
 CANDIDATE_MANTLE_RELAY_BASE_URL = (
     "http://127.0.0.1:18791/candidate-mantle"
