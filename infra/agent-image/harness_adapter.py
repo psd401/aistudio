@@ -1034,12 +1034,20 @@ class OpenClawAdapter(HarnessAdapter):
             "input": 0, "output": 0, "cache_read": 0,
             "cache_write": 0, "model_calls": 0,
         }
+        # Seeded alongside `totals` so the corrupt-database fast-break below is
+        # self-contained. Nothing after the loop reads it today, but a future
+        # edit returning `complete` instead of a literal would otherwise raise
+        # UnboundLocalError on exactly the path that is hardest to reach.
+        complete = False
         for attempt in range(self.USAGE_SETTLE_ATTEMPTS):
             try:
                 totals, complete = read()
             except sqlite3.OperationalError as exc:
-                # Locked/busy database, or a host whose schema predates
-                # `transcript_events`. Retry — a checkpoint clears in ms.
+                # Locked or busy database — retry, since a checkpoint clears in
+                # ms. A host whose schema predates `transcript_events` does NOT
+                # arrive here: the sqlite_master probe raises
+                # TranscriptTableMissing for that, precisely so the retryable
+                # and fall-back-to-JSONL cases stay distinguishable.
                 logger.warning(
                     "transcript usage read unavailable: %s", str(exc)[:200],
                 )
