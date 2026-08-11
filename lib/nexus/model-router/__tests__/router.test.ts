@@ -400,6 +400,32 @@ describe("Nexus model router credential filtering", () => {
     })).rejects.toThrow("openai family")
   })
 
+  it("re-routes required tools to a configured provider when routing is off and the explicit model's provider is not", async () => {
+    mockGetConfig.mockResolvedValue({ config, mode: "off" })
+    mockGetConfiguredChatProviders.mockResolvedValue(new Set(["amazon-bedrock", "google"]))
+
+    const result = await routeNexusRequest({
+      text: "Summarize my attachment", fallbackModelId: "gpt-terra", experienceMode: "standard",
+      requestedFamily: "auto", enabledConnectorIds: [],
+      enabledToolNames: ["searchNexusAttachments"], userId: 7,
+    })
+
+    expect(result.modelId).toBe("us.anthropic.claude-sonnet")
+    expect(result.metadata.reasonCodes).toContain("required_tools_enforced")
+  })
+
+  it("fails fast before provider creation when no configured provider has an accessible model", async () => {
+    // The explicitly selected model's provider being unconfigured must NOT be
+    // executed as a last resort here — that is the stream-time missing-key 500
+    // this filter exists to prevent. Exhaustion fails fast with a clear error.
+    mockGetConfiguredChatProviders.mockResolvedValue(new Set(["azure"]))
+
+    await expect(routeNexusRequest({
+      text: "Help", fallbackModelId: "gpt-terra", experienceMode: "standard",
+      requestedFamily: "auto", enabledConnectorIds: [], userId: 7,
+    })).rejects.toThrow("No accessible Nexus model is available")
+  })
+
   it("does not offer image generation through an unconfigured provider", async () => {
     mockClassify.mockResolvedValue({
       intent: "image", tier: "medium", confidence: 0.99,
