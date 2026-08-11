@@ -34,11 +34,19 @@ import { handleError, createSuccess } from "@/lib/error-utils"
 import type { ActionState } from "@/types"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { executeQuery } from "@/lib/db/drizzle-client"
-import { sql, gte, inArray, eq, and, isNotNull, ne } from "drizzle-orm"
+import {
+  sql,
+  gte,
+  inArray,
+  notInArray,
+  eq,
+  and,
+  isNotNull,
+} from "drizzle-orm"
 import { agentMessages } from "@/lib/db/schema/tables/agent-messages"
 import { aiModels } from "@/lib/db/schema/tables/ai-models"
 import { getDateThreshold } from "@/lib/date-utils"
-import { AGENT_MODEL_ID } from "@/lib/agents/platform-model"
+import { AGENT_MODEL_ID_ALIASES } from "@/lib/agents/platform-model"
 import { exactTokenCostUsd } from "@/lib/costs/token-cost"
 import type { TelemetryDateRange } from "@/actions/admin/agent-telemetry.actions"
 
@@ -422,12 +430,15 @@ export async function getAgentCostProjection(
 /**
  * List models that have pricing and can be used as projection candidates.
  *
- * Excludes the agent's own model (AGENT_MODEL_ID, anthropic.claude-sonnet-5) —
- * projecting the harness model onto itself is meaningless. Returns ACTIVE models
- * with both input and output prices set, sorted by blended cost so the cheapest
- * alternatives surface first. Inactive models are excluded so a retired model
- * with stale pricing can't be projected (the harness Sonnet 5 row is inactive,
- * so it's excluded here too).
+ * Excludes EVERY id form the harness model has been recorded under
+ * (AGENT_MODEL_ID_ALIASES) — projecting the harness model onto itself is
+ * meaningless, and excluding only the current id would let a re-activated
+ * historical alias (`claude-sonnet-5`, `anthropic.claude-sonnet-5`) slip back
+ * into the candidate list. Returns ACTIVE models with both input and output
+ * prices set, sorted by blended cost so the cheapest alternatives surface first.
+ * Inactive models are excluded so a retired model with stale pricing can't be
+ * projected (all three harness Sonnet 5 rows are inactive today, so the alias
+ * filter is defence in depth rather than the only thing excluding them).
  */
 export async function getPricableModels(): Promise<
   ActionState<PricableModel[]>
@@ -458,8 +469,11 @@ export async function getPricableModels(): Promise<
               eq(aiModels.active, true),
               isNotNull(aiModels.inputCostPer1kTokens),
               isNotNull(aiModels.outputCostPer1kTokens),
-              // Exclude the agent's own model from the candidate list.
-              ne(aiModels.modelId, AGENT_MODEL_ID)
+              // Exclude the agent's own model — every id form it has been
+              // recorded under, not just the current one.
+              // Spread: the exported list is readonly (it is a constant), but
+              // Drizzle's notInArray takes a mutable array.
+              notInArray(aiModels.modelId, [...AGENT_MODEL_ID_ALIASES])
             )
           )
           .orderBy(

@@ -1964,6 +1964,9 @@ interface AgentCoreResult {
   cacheWriteInputTokens: number;
   model: string | null;
   latencyMs: number;
+  // null = the agent image reported no completeness flag (older image), which
+  // is NOT the same as reporting an incomplete capture. See migration 177.
+  usageCaptureComplete: boolean | null;
   modelCallCount: number;
   durationMs: number;
   nudged: boolean;
@@ -2019,6 +2022,10 @@ function failedAgentCoreResult(
     cacheWriteInputTokens: 0,
     model: null,
     latencyMs: 0,
+    // The turn never produced a usage read at all, so completeness is unknown
+    // rather than false — a router-side failure must not look like the
+    // transcript-read regression migration 177 exists to surface.
+    usageCaptureComplete: null,
     modelCallCount: 0,
     durationMs: 0,
     nudged: false,
@@ -2345,6 +2352,13 @@ function parseAgentCoreResult(
     cacheWriteInputTokens: (metadata.cache_write_input_tokens as number) || 0,
     model: (metadata.model as string) || 'unknown',
     latencyMs: (metadata.latency_ms as number) || 0,
+    // Deliberately NOT `=== true`: an image that omits the field is unknown,
+    // not incomplete. Collapsing absent to false would brand every turn from an
+    // older image as a capture failure and drown the real signal.
+    usageCaptureComplete:
+      typeof metadata.usage_capture_complete === 'boolean'
+        ? metadata.usage_capture_complete
+        : null,
     modelCallCount: (metadata.model_call_count as number) || 0,
     durationMs: (metadata.duration_ms as number) || 0,
     nudged: metadata.nudged === true,
@@ -3554,6 +3568,7 @@ interface TelemetryParams {
   inputTokens: number;
   outputTokens: number;
   cacheReadInputTokens?: number;
+  usageCaptureComplete?: boolean | null;
   cacheWriteInputTokens?: number;
   latencyMs: number;
   modelCallCount?: number;
@@ -3574,6 +3589,7 @@ interface TelemetryDefaults {
   topic: Topic | null;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  usageCaptureComplete: boolean | null;
   modelCallCount: number;
   durationMs: number;
   nudged: boolean;
@@ -3592,6 +3608,8 @@ function normalizeTelemetryParams(params: TelemetryParams): TelemetryDefaults {
     topic: params.topic ?? null,
     cacheReadTokens,
     cacheWriteTokens,
+    // `??` not `||`: false is a meaningful value here and must survive.
+    usageCaptureComplete: params.usageCaptureComplete ?? null,
     modelCallCount: params.modelCallCount ?? 0,
     durationMs: params.durationMs ?? 0,
     nudged: params.nudged ?? false,
@@ -3612,12 +3630,13 @@ async function insertTelemetrySummary(
     sql<{ id: number }[]>`INSERT INTO agent_messages
         (user_id, session_id, model, input_tokens, output_tokens,
          cache_read_input_tokens, cache_write_input_tokens,
-         latency_ms, model_call_count, duration_ms, nudged,
+         latency_ms, usage_capture_complete, model_call_count, duration_ms, nudged,
          guardrail_blocked, space_name, invoked_by, agent_owner_id, topic, created_at)
         VALUES (${params.userId}, ${params.sessionId}, ${params.model},
                 ${params.inputTokens}, ${params.outputTokens},
                 ${defaults.cacheReadTokens}, ${defaults.cacheWriteTokens},
-                ${params.latencyMs}, ${defaults.modelCallCount}, ${defaults.durationMs}, ${defaults.nudged},
+                ${params.latencyMs}, ${defaults.usageCaptureComplete},
+                ${defaults.modelCallCount}, ${defaults.durationMs}, ${defaults.nudged},
                 ${params.guardrailBlocked},
                 ${params.spaceName}, ${defaults.invokedBy}, ${defaults.agentOwnerId}, ${defaults.topic}, NOW())
         RETURNING id`,
@@ -4624,6 +4643,7 @@ function agentResultTelemetry(
   | 'outputTokens'
   | 'cacheReadInputTokens'
   | 'cacheWriteInputTokens'
+  | 'usageCaptureComplete'
   | 'modelCallCount'
   | 'durationMs'
   | 'nudged'
@@ -4636,6 +4656,7 @@ function agentResultTelemetry(
     outputTokens: result.outputTokens,
     cacheReadInputTokens: result.cacheReadInputTokens,
     cacheWriteInputTokens: result.cacheWriteInputTokens,
+    usageCaptureComplete: result.usageCaptureComplete,
     modelCallCount: result.modelCallCount,
     durationMs: result.durationMs,
     nudged: result.nudged,

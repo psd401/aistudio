@@ -338,6 +338,24 @@ describe('Agent schedule reliability infrastructure', () => {
     }
   });
 
+  it('alarms successful turns that report zero tokens', () => {
+    // Regression guard for the 2026-07-31 telemetry outage: OpenClaw moved
+    // transcripts from JSONL into SQLite, the harness adapter kept reading the
+    // deleted path, and every turn recorded zero tokens for ten days without
+    // surfacing one error — because no alarm existed for "capture returned
+    // nothing". The wrapper now emits UsageCaptureZero for a SUCCESSFUL turn
+    // that made model calls but reported no tokens; this asserts the alarm on
+    // it ships, wired to the agent alarm topic.
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: `psd-agent-usage-capture-zero-${ENV}`,
+      Namespace: `PSD/AgentPlatform/${ENV}`,
+      MetricName: 'UsageCaptureZero',
+      Threshold: 5,
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      AlarmActions: Match.anyValue(),
+    });
+  });
+
   it('alarms schedule-reference rejections before invocation', () => {
     template.hasResourceProperties('AWS::Logs::MetricFilter', {
       MetricTransformations: Match.arrayWith([

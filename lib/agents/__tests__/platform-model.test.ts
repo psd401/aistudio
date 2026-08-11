@@ -1,6 +1,10 @@
 
 import { join, resolve } from "node:path"
-import { AGENT_MODEL_ID, AGENT_REQUEST_MODEL_ID } from "@/lib/agents/platform-model"
+import {
+  AGENT_MODEL_ID,
+  AGENT_MODEL_ID_ALIASES,
+  AGENT_REQUEST_MODEL_ID,
+} from "@/lib/agents/platform-model"
 import { validatedFs } from "@/lib/filesystem/validated-fs";
 
 /**
@@ -75,6 +79,24 @@ const defineAgentPlatformModelIdConsistency108310874Suite1 = () => {
     expect(sql).toContain(`'${AGENT_MODEL_ID}'`)
     // Request id seeded as an alias too (defensive, in case Mantle ever echoes it).
     expect(sql).toContain(`'${AGENT_REQUEST_MODEL_ID}'`)
+  })
+
+  it("every harness alias is priced, so no historical id reads as $0", () => {
+    // agent_messages still holds rows under the OLD ids (dev: `claude-sonnet-5`
+    // up to 2026-07-29, `us.anthropic.claude-sonnet-5` from 2026-07-31). The
+    // cost UI aggregates across the whole range, so an unpriced alias silently
+    // drops those rows to $0 rather than failing.
+    const sql = read("infra/database/schema/092-agent-cache-tokens.sql")
+    for (const alias of AGENT_MODEL_ID_ALIASES) {
+      expect(sql).toContain(`'${alias}'`)
+    }
+  })
+
+  it("the alias list covers both the recorded and request ids", () => {
+    // The projection filter excludes by this list; a current id missing from it
+    // would offer the harness model as a projection candidate against itself.
+    expect(AGENT_MODEL_ID_ALIASES).toContain(AGENT_MODEL_ID)
+    expect(AGENT_MODEL_ID_ALIASES).toContain(AGENT_REQUEST_MODEL_ID)
   })
 };
 

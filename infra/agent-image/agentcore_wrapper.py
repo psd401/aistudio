@@ -34,6 +34,7 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 # Configure structured logging for CloudWatch
@@ -58,7 +59,12 @@ OPENCLAW_DATABASE_MIGRATOR = "/app/openclaw_agent_db_migrate.mjs"
 # Emergency fallback only. Candidate images read their actual primary model
 # from openclaw.json so a GLM/Kimi/Qwen/OpenAI turn is never mislabeled Claude
 # merely because neither the proxy nor transcript returned a model id.
-DEFAULT_AGENT_MODEL_ID = "claude-sonnet-5"
+#
+# Must stay equal to lib/agents/platform-model.ts AGENT_MODEL_ID — the id that
+# `agent_messages.model` is priced against. A mismatch does not fail loudly; the
+# rows simply stop joining `ai_models` and the cost UI reads $0 (bug #1083).
+# lib/agents/__tests__/platform-model.test.ts fails CI if these drift.
+DEFAULT_AGENT_MODEL_ID = "us.anthropic.claude-sonnet-5"
 BEDROCK_BEARER_ENV = "AWS_BEARER_TOKEN_BEDROCK"
 CANDIDATE_MANTLE_RELAY_BASE_URL = (
     "http://127.0.0.1:18791/candidate-mantle"
@@ -970,6 +976,47 @@ def usage_capture_is_complete(
 ) -> bool:
     """Whether the selected token/cache telemetry source was fully captured."""
     return bool(proxy_measured or harness_capture_complete)
+
+
+def usage_capture_looks_broken(metadata: Mapping[str, Any]) -> bool:
+    """Whether this turn's usage telemetry is impossible rather than merely zero.
+
+    A turn that SUCCEEDED and made at least one model call must have consumed
+    tokens. All four token counters reading zero is therefore not a small number
+    — it is a broken capture path, and the only reason it can happen silently is
+    that every consumer treats a zero read as an honest zero.
+
+    This is the exact signature of the 2026-07-31 regression: OpenClaw moved
+    transcripts from JSONL into SQLite, the adapter kept reading the old path,
+    and every turn logged model_call_count=10 alongside tokens_in=0 for ten days
+    without one error. Alarming on this pairing is what makes the next such
+    move loud instead of invisible.
+
+    Deliberately narrow, so it stays actionable:
+      - failed turns are excluded (a 0-token error turn is expected),
+      - turns with no model calls are excluded (nothing ran; zero is honest).
+    """
+    if metadata.get("failed"):
+        return False
+    try:
+        model_calls = int(metadata.get("model_call_count") or 0)
+    except (TypeError, ValueError):
+        return False
+    if model_calls <= 0:
+        return False
+    total = 0
+    for field in (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_write_input_tokens",
+    ):
+        try:
+            total += int(metadata.get(field) or 0)
+        except (TypeError, ValueError):
+            # An unparseable counter is itself a capture problem, not a zero.
+            return True
+    return total == 0
 
 
 def read_proxy_usage() -> dict:
@@ -1894,6 +1941,22 @@ def main():
                 "failed": result.failed,
                 "error_class": result.error_class,
             }
+
+        # Zero-usage successful turn: emit the metric the AgentPlatform stack
+        # alarms on (UsageCaptureZero). The container log group has a
+        # runtime-generated suffix, so a CDK MetricFilter cannot attach to it —
+        # container-origin signals put_metric_data directly. Never raises.
+        if usage_capture_looks_broken(metadata):
+            logger.warning(
+                "USAGE_CAPTURE_ZERO session=%s model=%s model_calls=%s "
+                "usage_complete=%s — a successful turn reported no tokens; the "
+                "usage read is broken, not the turn",
+                session_id,
+                metadata.get("model"),
+                metadata.get("model_call_count"),
+                metadata.get("usage_capture_complete"),
+            )
+            emit_agent_metric("UsageCaptureZero")
 
         logger.info(
             "Invocation complete: session=%s response_length=%d elapsed_s=%d "

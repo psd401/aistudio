@@ -4086,7 +4086,6 @@ export class AgentPlatformStack extends cdk.Stack {
     const alarmPeriod = cdk.Duration.minutes(5);
     const iterationAlarms: cloudwatch.Alarm[] = [];
 
-    const routerLog = resources.routerLambda.logGroup;
     const sumMetric = (metricName: string) =>
       new cloudwatch.Metric({
         namespace: resources.failureMetricNamespace,
@@ -4095,52 +4094,9 @@ export class AgentPlatformStack extends cdk.Stack {
         statistic: 'Sum',
       });
 
-    // -- Router-log metric filters (marker-keyed) --
-    new logs.MetricFilter(this, 'GuardrailDenialMetric', {
-      logGroup: routerLog,
-      metricNamespace: resources.failureMetricNamespace,
-      metricName: 'GuardrailDenials',
-      filterPattern: logs.FilterPattern.literal('GUARDRAIL_DENIAL'),
-      metricValue: '1',
-      defaultValue: 0,
-    });
-    new logs.MetricFilter(this, 'ErrorTurnMetric', {
-      logGroup: routerLog,
-      metricNamespace: resources.failureMetricNamespace,
-      metricName: 'ErrorTurns',
-      filterPattern: logs.FilterPattern.literal('AGENT_ERROR_TURN'),
-      metricValue: '1',
-      defaultValue: 0,
-    });
-    new logs.MetricFilter(this, 'EmptyAgentResponseMetric', {
-      logGroup: routerLog,
-      metricNamespace: resources.failureMetricNamespace,
-      metricName: 'EmptyAgentResponses',
-      filterPattern: logs.FilterPattern.literal('EmptyAgentResponse'),
-      metricValue: '1',
-      defaultValue: 0,
-    });
-    // Background-promotion counter — a metric WITHOUT an alarm (the platform
-    // compensating for model behavior; its trend feeds Loop-2 tuning, #1161).
-    new logs.MetricFilter(this, 'BackgroundPromotionMetric', {
-      logGroup: routerLog,
-      metricNamespace: resources.failureMetricNamespace,
-      metricName: 'BackgroundPromotions',
-      filterPattern: logs.FilterPattern.literal('BACKGROUND_PROMOTION'),
-      metricValue: '1',
-      defaultValue: 0,
-    });
-    // -- Job-runner (ECS) task-failure filter --
-    new logs.MetricFilter(this, 'JobRunnerFailureMetric', {
-      logGroup: resources.jobLogGroup,
-      metricNamespace: resources.failureMetricNamespace,
-      metricName: 'JobRunnerFailures',
-      filterPattern: logs.FilterPattern.literal('JOB_RUNNER_FAILED_TURN'),
-      metricValue: '1',
-      defaultValue: 0,
-    });
+    this.createIterationMetricFilters(resources);
 
-    // -- Alarms (6). Thresholds mirror the existing operational style
+    // -- Alarms (7). Thresholds mirror the existing operational style
     //    (DLQ >= 1, errors >= 5, failures >= 10). --
     iterationAlarms.push(
       new cloudwatch.Alarm(this, 'GuardrailDenialRateAlarm', {
@@ -4210,6 +4166,35 @@ export class AgentPlatformStack extends cdk.Stack {
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       }),
     );
+    // Zero-usage capture: a SUCCESSFUL turn that made model calls but reported
+    // no tokens at all. That is arithmetically impossible for a real turn, so it
+    // means the usage-capture path is broken rather than the numbers being
+    // small. This is the alarm that was missing on 2026-07-31, when OpenClaw
+    // moved transcripts from JSONL into SQLite: the adapter kept reading the
+    // deleted path and every turn recorded zeros for TEN DAYS with no error
+    // anywhere, because a zero read is indistinguishable from an honest zero
+    // once it lands in agent_messages. The wrapper emits UsageCaptureZero
+    // (see agentcore_wrapper.usage_capture_looks_broken).
+    //
+    // Threshold 5-in-5-min rather than 1: a rare edge turn can legitimately
+    // trip the heuristic, but a BROKEN capture path trips it on every single
+    // turn, so a real regression clears this in one period while noise does not.
+    iterationAlarms.push(
+      new cloudwatch.Alarm(this, 'UsageCaptureZeroAlarm', {
+        alarmName: `psd-agent-usage-capture-zero-${environment}`,
+        alarmDescription:
+          'Successful agent turns are reporting ZERO tokens (>= 5 in 5 min) — ' +
+          'token/cache telemetry capture is broken, not merely low. Cost and ' +
+          'usage reporting is silently wrong while this fires. Most likely a ' +
+          'pinned-host upgrade moved the transcript store again: check ' +
+          'harness_adapter._read_turn_usage against the live OpenClaw layout.',
+        metric: sumMetric('UsageCaptureZero'),
+        threshold: 5,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }),
+    );
     // Dead-boot detector (the r10 signature): a microVM logged BUILD_MARKER but
     // never reached BOOT_OK. BuildMarkerBoot counts starts, BootOk counts
     // serving-ready boots; a positive difference over the window means a boot
@@ -4244,6 +4229,74 @@ export class AgentPlatformStack extends cdk.Stack {
         a.addAlarmAction(iterationSnsAction);
       }
     }
+  }
+
+  /**
+   * Log-derived metrics for the degradation alarms (issue #1161).
+   *
+   * Split out of createIterationMonitoring purely to keep that method within the
+   * max-lines-per-function budget; the filters and the alarms that consume them
+   * are one logical unit and must stay in sync.
+   *
+   * Marker-keyed on purpose: each filter counts a literal marker the router or
+   * job runner writes, so the alarm threshold is a count of real events rather
+   * than a log-volume proxy. Container-origin signals (BootOk, BootTruncationWarn,
+   * UsageCaptureZero) cannot be filtered this way — the AgentCore log group name
+   * carries a runtime-generated suffix — so those are emitted directly via
+   * put_metric_data and only alarmed on here.
+   */
+  private createIterationMetricFilters(
+    resources: AgentPlatformBuildResources,
+  ): void {
+    const routerLog = resources.routerLambda.logGroup;
+    const routerFilters: Array<{
+      id: string;
+      metricName: string;
+      marker: string;
+    }> = [
+      {
+        id: 'GuardrailDenialMetric',
+        metricName: 'GuardrailDenials',
+        marker: 'GUARDRAIL_DENIAL',
+      },
+      {
+        id: 'ErrorTurnMetric',
+        metricName: 'ErrorTurns',
+        marker: 'AGENT_ERROR_TURN',
+      },
+      {
+        id: 'EmptyAgentResponseMetric',
+        metricName: 'EmptyAgentResponses',
+        marker: 'EmptyAgentResponse',
+      },
+      // Background-promotion counter — a metric WITHOUT an alarm (the platform
+      // compensating for model behavior; its trend feeds Loop-2 tuning, #1161).
+      {
+        id: 'BackgroundPromotionMetric',
+        metricName: 'BackgroundPromotions',
+        marker: 'BACKGROUND_PROMOTION',
+      },
+    ];
+    for (const { id, metricName, marker } of routerFilters) {
+      new logs.MetricFilter(this, id, {
+        logGroup: routerLog,
+        metricNamespace: resources.failureMetricNamespace,
+        metricName,
+        filterPattern: logs.FilterPattern.literal(marker),
+        metricValue: '1',
+        defaultValue: 0,
+      });
+    }
+
+    // -- Job-runner (ECS) task-failure filter (different log group) --
+    new logs.MetricFilter(this, 'JobRunnerFailureMetric', {
+      logGroup: resources.jobLogGroup,
+      metricNamespace: resources.failureMetricNamespace,
+      metricName: 'JobRunnerFailures',
+      filterPattern: logs.FilterPattern.literal('JOB_RUNNER_FAILED_TURN'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
   }
 
   private createHealthMonitor(
