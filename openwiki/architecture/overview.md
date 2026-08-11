@@ -147,17 +147,30 @@ See [api-integration/overview.md](../api-integration/overview.md) for authentica
 
 Amazon Bedrock Guardrails wraps all AI interactions:
 - Blocks violence, hate speech, sexual content
-- Input and output filtering
-- PII detection and tokenization before provider requests
+- Input and output filtering with configurable thresholds
+- Topic-based detection (drugs, weapons, self-harm) with telemetry-only mode
 
-### PII Protection
+### Zero-Data-Retention Inference
 
-Automatically detects and tokenizes:
-- Student names, emails, phone numbers
-- Location data
-- Identifiable information
+AI providers do not retain inference data. Student names, emails, and other context reach the selected model byte-identical and are not stored by the provider. This is critical for tool calls such as district-data queries where the model must use real identifiers supplied by authorized users.
 
-See `/docs/features/k12-content-safety.md` for implementation details.
+### PII Detection Gates
+
+Amazon Comprehend detection runs at two durable-content boundaries:
+
+1. **Nexus memory writes** — Detected entity types logged as telemetry (never values). Writes proceed; detector errors are non-fatal.
+2. **Published agent content** — Detected entity types logged as telemetry. Content remains unmodified.
+
+Automatic memory extraction excludes third-party identifiers at the prompt level, not via refusal, because it runs unattended after each persisted Nexus turn.
+
+| PII Type | Source |
+|----------|--------|
+| Names, emails, phone numbers, addresses | Amazon Comprehend |
+| SSN, dates, ages | Amazon Comprehend |
+| Student IDs (7-digit patterns) | Custom patterns |
+| District-specific identifiers | Custom patterns |
+
+See `/docs/features/k12-content-safety.md` for implementation details and filtering configuration.
 
 ## Request Flow Example
 
