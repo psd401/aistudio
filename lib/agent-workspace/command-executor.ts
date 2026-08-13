@@ -94,6 +94,21 @@ const ALLOWED_WRITES = new Set([
   "gmail users drafts update",
   "gmail users labels create",
   "gmail users messages modify",
+  // Helper forms of writes already permitted in canonical form. Verified
+  // against the pinned gws v0.22.5 binary: `sheets +append` and `drive
+  // +upload` are real helpers, not model inventions. Each was refused with
+  // operation_not_allowed while its canonical twin was allowed, so the
+  // capability existed and only the documented spelling of it did not
+  // (agent_failures 5979, 7728). `sheets +append` is
+  // `sheets spreadsheets values append`; `drive +upload` is a
+  // `drive files create` carrying media, and is held to the same agent-only
+  // boundary below so it cannot author a file owned by the user.
+  "sheets +append",
+  "drive +upload",
+  // `tasks tasks insert` was allowed but creating the LIST to put tasks in was
+  // not, so a request for one list per person failed on all five calls
+  // (agent_failures 7134). Same resource family, same slot rules.
+  "tasks tasklists insert",
   "sheets spreadsheets batchupdate",
   "sheets spreadsheets create",
   "sheets spreadsheets values append",
@@ -138,6 +153,11 @@ const AGENT_ONLY_WRITES = new Set([
   "drive comments create",
   "drive files copy",
   "drive files create",
+  // The helper form of `drive files create` with media attached. It authors
+  // file CONTENT, so it sits on the same side of the impersonation boundary as
+  // the canonical create: on the user slot the file would be owned by the
+  // user, which is the thing that boundary exists to prevent.
+  "drive +upload",
   "drive permissions create",
   "drive accessproposals resolve",
   // A Form is authored content in exactly the sense a Doc, Sheet or Slides deck
@@ -151,6 +171,11 @@ const AGENT_ONLY_WRITES = new Set([
   "sheets spreadsheets batchupdate",
   "sheets spreadsheets create",
   "sheets spreadsheets values append",
+  // Helper spelling of `sheets spreadsheets values append`, which is agent-only
+  // directly above. Allowlisting the helper without this entry would have made
+  // the two spellings of one operation disagree about the impersonation
+  // boundary, and the helper is the spelling the model actually reaches for.
+  "sheets +append",
   "sheets spreadsheets values update",
   "slides presentations batchupdate",
   "slides presentations create",
@@ -256,6 +281,94 @@ function argumentValue(argv: readonly string[], flag: string): string | null {
   const index = argv.indexOf(flag)
   if (index === -1 || index === argv.length - 1) return null
   return argv[index + 1]
+}
+
+/**
+ * Expand the documented `gmail +draft` helper into the canonical
+ * `gmail users drafts create` call that the CLI actually implements.
+ *
+ * `+draft` does not exist in gws. Verified against the pinned v0.22.5 binary:
+ * the gmail helpers are `+send +triage +reply +reply-all +forward +read
+ * +watch`, and none of them accepts a `--draft` flag. The CLI answers
+ * `unrecognized subcommand +draft, tip: a similar subcommand exists: +read`.
+ *
+ * That left drafting working only by accident. `gmail users drafts create` is
+ * real and allowlisted, so an agent that happened to reach for the canonical
+ * form succeeded, while an agent following psd-workspace/SKILL.md — where
+ * `+draft` is the worked example in two places — always failed. Same request,
+ * different user, different outcome (agent_failures 1112, 1953, 5187, 6078
+ * across four users).
+ *
+ * Phase 1 permits drafting and forbids sending, so drafting must actually
+ * work. Building the RFC 5322 message here rather than in the model keeps
+ * Rule 9 intact: the agent calls the documented helper and never hand-rolls
+ * MIME, which is what it kept failing at when it tried.
+ *
+ * Only `+draft` is expanded. `+send`, `+reply`, `+reply-all` and `+forward`
+ * stay unimplemented and unallowlisted — this opens no path to putting mail on
+ * the wire.
+ */
+const DRAFT_ADDRESS_FLAGS = ["--to", "--cc", "--bcc"] as const
+
+function encodeHeaderValue(value: string): string {
+  // RFC 2047 for anything outside ASCII so a subject with an em dash or an
+  // accented name does not corrupt the header.
+  if (/^[\x20-\x7E]*$/.test(value)) return value
+  return `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`
+}
+
+function assertNoHeaderInjection(flag: string, value: string): void {
+  // A CR or LF in a header value would let model-authored text open a new
+  // header (Bcc:, Content-Type:) or end the header block entirely.
+  if (/[\r\n]/.test(value)) {
+    throw new Error(
+      `Workspace draft ${flag} must not contain a line break`
+    )
+  }
+}
+
+export function expandGmailDraftHelper(argv: readonly string[]): string[] {
+  if (argv[0] !== "gmail" || argv[1] !== "+draft") return [...argv]
+
+  const headers: string[] = []
+  for (const flag of DRAFT_ADDRESS_FLAGS) {
+    const value = argumentValue(argv, flag)
+    if (value === null) continue
+    assertNoHeaderInjection(flag, value)
+    headers.push(`${flag === "--to" ? "To" : flag === "--cc" ? "Cc" : "Bcc"}: ${value}`)
+  }
+  if (!headers.some((header) => header.startsWith("To: "))) {
+    throw new Error("Workspace draft requires --to")
+  }
+
+  const subject = argumentValue(argv, "--subject")
+  if (subject !== null) {
+    assertNoHeaderInjection("--subject", subject)
+    headers.push(`Subject: ${encodeHeaderValue(subject)}`)
+  }
+
+  const body = argumentValue(argv, "--body") ?? ""
+  const isHtml = argv.includes("--html")
+  headers.push("MIME-Version: 1.0")
+  headers.push(
+    `Content-Type: text/${isHtml ? "html" : "plain"}; charset="UTF-8"`
+  )
+
+  // CRLF per RFC 5322, and base64url because that is what the Gmail API's
+  // `message.raw` field expects.
+  const mime = `${headers.join("\r\n")}\r\n\r\n${body}`
+  const raw = Buffer.from(mime, "utf8").toString("base64url")
+
+  return [
+    "gmail",
+    "users",
+    "drafts",
+    "create",
+    "--params",
+    JSON.stringify({ userId: "me" }),
+    "--json",
+    JSON.stringify({ message: { raw } }),
+  ]
 }
 
 function parseObjectArgument(argv: readonly string[], flag: string): Record<string, unknown> | null {
@@ -890,7 +1003,11 @@ export async function executeWorkspaceCommand(
     try {
       execFile(
         binary,
-        command.argv,
+        // Expanded AFTER validation, so the allowlist and every scope gate
+        // still judge the operation the model actually asked for
+        // (`gmail +draft`), while gws receives the canonical call it
+        // implements. A non-draft argv passes through untouched.
+        expandGmailDraftHelper(command.argv),
         {
           cwd: commandDirectory,
           env: {
