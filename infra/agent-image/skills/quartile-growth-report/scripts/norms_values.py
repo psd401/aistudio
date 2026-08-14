@@ -27,6 +27,26 @@ NORMS = os.path.join(
 )
 
 
+def normalize_grade(value: str) -> str:
+    """Accept `K` as well as `0`.
+
+    SKILL.md describes the report as covering grades K-5 and the tabs are
+    labeled that way, so `--grade K` is the natural thing for an agent to pass.
+    The norms file stores kindergarten as grade 0. Without this the script died
+    on a bare ValueError traceback, which is exactly the silent-looking failure
+    the rest of this file goes out of its way to avoid.
+    """
+    text = str(value).strip()
+    if text.upper() == "K":
+        return "0"
+    try:
+        return str(int(float(text)))
+    except ValueError:
+        raise ValueError(
+            f"--grade must be K or a number, got {value!r}"
+        ) from None
+
+
 def sql_literal(value: str, flag: str) -> str:
     """Quote a value for a SQL string literal.
 
@@ -89,7 +109,11 @@ def main() -> int:
         return 2
     labels = dict(zip(args.measure, args.label)) if args.label else {}
 
-    grade = str(int(float(args.grade)))
+    try:
+        grade = normalize_grade(args.grade)
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 2
     wanted = {(m, p) for m in args.measure for p in args.period}
     buckets = {key: [] for key in wanted}
 

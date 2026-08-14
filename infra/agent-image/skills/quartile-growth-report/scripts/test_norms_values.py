@@ -120,6 +120,20 @@ class NormsValuesTest(unittest.TestCase):
             self.assertEqual(result.returncode, 2, result.stdout)
             self.assertIn("must not contain", result.stderr)
 
+    def test_grade_K_is_accepted_as_kindergarten(self):
+        # SKILL.md describes the report as K-5 and labels the tabs that way, so
+        # `--grade K` is the natural token. The norms file stores K as 0.
+        k = run("--grade", "K", "--period", "Fall", "--measure", "LNF")
+        zero = run("--grade", "0", "--period", "Fall", "--measure", "LNF")
+        self.assertEqual(k.returncode, 0, k.stderr)
+        self.assertEqual(k.stdout, zero.stdout)
+
+    def test_unparseable_grade_fails_with_a_message_not_a_traceback(self):
+        result = run("--grade", "banana", "--period", "Fall", "--measure", "LNF")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--grade must be K or a number", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_mismatched_as_count_is_rejected(self):
         result = run(
             "--grade", "3", "--period", "Fall",
