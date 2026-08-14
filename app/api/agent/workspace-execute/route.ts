@@ -62,17 +62,25 @@ async function readWorkspaceCommand(
       }
 }
 
+/**
+ * `ownerEmail` is not optional in practice: several gates are written around
+ * "is this the person who asked?", and a validator that was not told the caller
+ * answers no to all of them. This pre-check ran without it while
+ * `executeWorkspaceCommand` below ran with it, so the stricter of the two
+ * decided every request and the caller exemptions were unreachable.
+ */
 function validateCommandForMode(
   command: WorkspaceCommand,
-  mode: string
+  mode: string,
+  ownerEmail: string
 ): NextResponse | null {
   try {
     if (mode === "email-task") {
-      validateEmailTaskWorkspaceCommand(command)
+      validateEmailTaskWorkspaceCommand(command, ownerEmail)
     } else if (mode === "scheduled") {
-      validateScheduledWorkspaceCommand(command)
+      validateScheduledWorkspaceCommand(command, ownerEmail)
     } else {
-      validateWorkspaceCommand(command)
+      validateWorkspaceCommand(command, ownerEmail)
     }
     return null
   } catch (error) {
@@ -198,7 +206,11 @@ export async function POST(request: NextRequest) {
   const parsed = await readWorkspaceCommand(request)
   if (!parsed.ok) return parsed.response
   const body = parsed.command
-  const validationError = validateCommandForMode(body, context.mode)
+  const validationError = validateCommandForMode(
+    body,
+    context.mode,
+    context.ownerEmail
+  )
   if (validationError) return validationError
 
   try {

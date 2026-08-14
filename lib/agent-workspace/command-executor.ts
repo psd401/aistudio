@@ -993,6 +993,15 @@ function validateWorkspaceMutation(
  * Validate the complete argv at the trusted web boundary. The model-facing
  * runtime has no Google credential and no gws binary; only commands accepted
  * here are executed with an owner-derived token.
+ *
+ * ALWAYS pass `ownerEmail` when the caller is known. It is optional only
+ * because a few call sites predate it, and omitting it does not merely skip a
+ * check — it silently makes the gate STRICTER, because `isShareToCaller`
+ * cannot match a caller it was not told about and the request falls through to
+ * the third-party allowlist. That is how the Drive ownership transfer shipped
+ * in #1636 failed in production while all four of its unit tests passed: the
+ * tests passed the caller, the route's own pre-check did not, and the
+ * exemption was dead on every live path (dev agent_failures 496).
  */
 export function validateWorkspaceCommand(
   command: WorkspaceCommand,
@@ -1086,8 +1095,9 @@ export function requiredWorkspaceScopeGap(
 
 export function validateEmailTaskWorkspaceCommand(
   command: WorkspaceCommand,
+  ownerEmail?: string,
 ): void {
-  validateWorkspaceCommand(command)
+  validateWorkspaceCommand(command, ownerEmail)
   const { operation } = normalizedOperation(command.argv)
   if (command.scope !== "user" || operation !== "tasks tasks insert") {
     throw new Error("Email tasks may only insert a user-owned Google task")
@@ -1096,6 +1106,7 @@ export function validateEmailTaskWorkspaceCommand(
 
 export function validateScheduledWorkspaceCommand(
   command: WorkspaceCommand,
+  ownerEmail?: string,
 ): void {
   // Scheduled runs use the same allowlist as every other invocation mode.
   //
@@ -1110,7 +1121,7 @@ export function validateScheduledWorkspaceCommand(
   //
   // Destinations remain bounded by the agent identity's Chat membership, and
   // every send is recorded by outboundMessageAudit (space + body length).
-  validateWorkspaceCommand(command)
+  validateWorkspaceCommand(command, ownerEmail)
 }
 
 /**
