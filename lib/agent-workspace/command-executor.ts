@@ -1,7 +1,11 @@
 import { execFile } from "node:child_process"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import {
+  createWorkspaceDownloadUrl,
+  putWorkspaceObject,
+} from "@/lib/agent-workspace/storage-broker"
 
 export type WorkspaceExecutionScope = "agent" | "user"
 
@@ -13,6 +17,31 @@ export interface WorkspaceCommand {
 export interface WorkspaceCommandResult {
   stdout: string
   stderr: string
+  /** Present only when the command downloaded binary content. */
+  media?: WorkspaceMediaHandoff
+  /**
+   * Set when bytes were downloaded but could not be handed off. The gws call
+   * itself succeeded, so stdout is still valid — this tells the agent why the
+   * file is not reachable instead of leaving it to infer that from silence.
+   */
+  mediaError?: string
+}
+
+/**
+ * Where a downloaded file was put, and how to fetch it.
+ *
+ * `workspacePath` is inside the caller's own PRIVATE workspace prefix, never
+ * `public-images/` — that prefix is unsigned and public-by-link, so a Drive
+ * attachment routed through it would be readable by anyone with the URL.
+ * `downloadUrl` is a short-lived presigned GET for the same object, so the
+ * agent can read the bytes in the turn that asked for them instead of waiting
+ * for the next workspace sync.
+ */
+export interface WorkspaceMediaHandoff {
+  workspacePath: string
+  downloadUrl: string
+  bytes: number
+  contentType?: string
 }
 
 export type WorkspaceCommandRejectionReason = "operation_not_allowed"
@@ -801,6 +830,79 @@ function validateWorkspaceArguments(argv: readonly string[]): void {
   }
 }
 
+
+/** Extensions gws may write a binary response to, mapped to a content type. */
+const DOWNLOAD_CONTENT_TYPES: Record<string, string> = {
+  pdf: "application/pdf",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  csv: "text/csv",
+  txt: "text/plain",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  zip: "application/zip",
+}
+
+/** Cap on a rescued download, well under the workspace object limit. */
+const MAX_HANDOFF_BYTES = 64 * 1024 * 1024
+
+/**
+ * Move a `download.<ext>` gws just wrote into the caller's private workspace
+ * and return a short-lived presigned URL for it.
+ *
+ * The destination is deliberately a fixed, self-describing relative path rather
+ * than anything model-supplied: the agent never chooses where these bytes land,
+ * so this cannot be steered into overwriting memory files. Each call overwrites
+ * the previous download, which keeps the workspace from accruing copies of
+ * every attachment ever read.
+ */
+async function handOffDownloadedMedia(
+  commandDirectory: string,
+  signedWorkspacePrefix: string
+): Promise<WorkspaceMediaHandoff | undefined> {
+  /* eslint-disable security/detect-non-literal-fs-filename --
+   * `commandDirectory` is a broker-created mkdtemp path, never model input,
+   * and the filename is matched against a `download.` prefix rather than taken
+   * from the command. Nothing here is caller-steerable.
+   */
+  const entries = await readdir(commandDirectory)
+  const downloaded = entries.find((name) => name.startsWith("download."))
+  if (!downloaded) return undefined
+
+  const body = await readFile(join(commandDirectory, downloaded))
+  /* eslint-enable security/detect-non-literal-fs-filename */
+  if (body.byteLength === 0) return undefined
+  if (body.byteLength > MAX_HANDOFF_BYTES) {
+    throw new Error(
+      `Downloaded file is ${body.byteLength} bytes, over the ${MAX_HANDOFF_BYTES}-byte hand-off limit`
+    )
+  }
+
+  const extension = downloaded.slice("download.".length).toLowerCase()
+  const contentType = DOWNLOAD_CONTENT_TYPES[extension]
+  const relativePath = `downloads/${downloaded}`
+  await putWorkspaceObject({
+    signedWorkspacePrefix,
+    relativePath,
+    body,
+    ...(contentType ? { contentType } : {}),
+  })
+  const { downloadUrl } = await createWorkspaceDownloadUrl(
+    signedWorkspacePrefix,
+    relativePath
+  )
+  return {
+    workspacePath: relativePath,
+    downloadUrl,
+    bytes: body.byteLength,
+    ...(contentType ? { contentType } : {}),
+  }
+}
+
 interface MutationContext {
   operation: string
   action: string
@@ -1077,7 +1179,10 @@ async function fetchDriveOwnedByMe(
 export async function executeWorkspaceCommand(
   command: WorkspaceCommand,
   accessToken: string,
-  ownerEmail?: string
+  ownerEmail?: string,
+  // Optional so every existing caller and test keeps working: without it the
+  // media hand-off is simply skipped and behaviour is exactly as before.
+  workspacePrefix?: string
 ): Promise<WorkspaceCommandResult> {
   validateWorkspaceCommand(command, ownerEmail)
   await assertAgentOwnsSharedFile(command, accessToken, ownerEmail)
@@ -1089,12 +1194,34 @@ export async function executeWorkspaceCommand(
   const commandDirectory = await mkdtemp(
     join(tmpdir(), "aistudio-workspace-cli-"),
   )
+  // Surfaced on the result rather than thrown: a hand-off problem must not
+  // turn a successful Workspace read into a failure.
+  let mediaHandoffFailure: unknown
   return new Promise((resolve, reject) => {
     const finish = async (
       error: Error | null,
       stdout: string,
       stderr: string,
     ): Promise<void> => {
+      // Rescue any downloaded media BEFORE the directory is destroyed. gws
+      // writes a binary response to `download.<ext>` in its cwd, and this
+      // directory is deleted on every path, so those bytes used to be
+      // unreachable: the caller got {bytes, mimeType, saved_file} describing a
+      // file that no longer existed anywhere it could read. Every documented
+      // exit was closed — `-o` is refused by design, `files.download` errors,
+      // and pdf-to-markdown needs a URL/key/path — so a Drive PDF simply could
+      // not be read (agent_failures 7926, 7992).
+      let media: WorkspaceMediaHandoff | undefined
+      if (!error && workspacePrefix) {
+        try {
+          media = await handOffDownloadedMedia(commandDirectory, workspacePrefix)
+        } catch (mediaError) {
+          // A failed hand-off must not fail the command itself: the gws call
+          // already succeeded and its stdout is still useful.
+          media = undefined
+          mediaHandoffFailure = mediaError
+        }
+      }
       try {
         await rm(commandDirectory, { recursive: true, force: true })
       } catch {
@@ -1109,7 +1236,19 @@ export async function executeWorkspaceCommand(
         )
         return
       }
-      resolve({ stdout, stderr })
+      resolve({
+        stdout,
+        stderr,
+        ...(media ? { media } : {}),
+        ...(mediaHandoffFailure
+          ? {
+              mediaError:
+                mediaHandoffFailure instanceof Error
+                  ? mediaHandoffFailure.message
+                  : "Downloaded file could not be saved to the workspace",
+            }
+          : {}),
+      })
     }
 
     try {

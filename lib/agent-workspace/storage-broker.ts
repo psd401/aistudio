@@ -2192,6 +2192,40 @@ export async function deleteWorkspacePath(
   )
 }
 
+/**
+ * Server-side write of a file INTO the caller's private workspace prefix.
+ *
+ * The presigned helpers above hand a URL to the agent so it can upload its own
+ * bytes. This is the other direction: the trusted web tier already holds bytes
+ * (a Drive download the broker performed on the caller's behalf) and needs to
+ * put them somewhere the agent can reach.
+ *
+ * It must be the PRIVATE workspace prefix, never `public-images/`. That prefix
+ * is unsigned and public-by-link, so routing a user's Drive file through it
+ * would publish board agendas, IEP forms and anything else a caller attaches to
+ * anyone holding the URL. `ownerWorkspaceKey` scopes the key to the caller's
+ * signed prefix and rejects traversal.
+ */
+export async function putWorkspaceObject(params: {
+  signedWorkspacePrefix: string
+  relativePath: string
+  body: Uint8Array
+  contentType?: string
+}): Promise<{ key: string; bytes: number }> {
+  const key = ownerWorkspaceKey(params.signedWorkspacePrefix, params.relativePath)
+  const bytes = params.body.byteLength
+  expectedLength(bytes, MAX_PRIVATE_UPLOAD_BYTES)
+  await s3Client().send(
+    new PutObjectCommand({
+      Bucket: bucketName(),
+      Key: key,
+      Body: params.body,
+      ...(params.contentType ? { ContentType: params.contentType } : {}),
+    }),
+  )
+  return { key, bytes }
+}
+
 export async function createWorkspaceDownloadUrl(
   signedWorkspacePrefix: string,
   relativePath: string

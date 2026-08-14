@@ -85,6 +85,46 @@ with your file tools; no Drive access is involved. If the header instead marks
 the upload `download failed`, the fetch didn't work this time — tell the user
 and ask them to re-attach the file (or share it via Drive as a fallback).
 
+### Reading a Drive file's BYTES (PDF, .docx, .pptx, images)
+
+`drive files get --params '{"fileId":"…","alt":"media"}'` downloads the file in
+the trusted broker. The JSON you get back describes it — `{bytes, mimeType,
+saved_file}` — and now also carries a `media` object telling you where the bytes
+actually are:
+
+```json
+{"media": {"workspacePath": "downloads/download.pdf",
+           "downloadUrl": "https://…", "bytes": 481920,
+           "contentType": "application/pdf"}}
+```
+
+- **`media.workspacePath`** — the file inside YOUR private workspace. It is not
+  public: nothing here is ever written to the public `public-images/` prefix,
+  because a board agenda or IEP form must not become readable by anyone holding
+  a URL.
+- **`media.downloadUrl`** — a short-lived (about 2 minutes) presigned link to
+  the same object, so you can use it in THIS turn rather than waiting for the
+  next workspace sync. Fetch it and work on the local copy. Treat it as a
+  credential: never paste it into chat or into a document.
+
+To get text out of a PDF, hand the local copy to pdf-to-markdown:
+
+```bash
+node /opt/psd-skills/psd-workspace/run.js --user <caller> \
+  --command "drive files get --params '{\"fileId\":\"<id>\",\"alt\":\"media\"}'"
+# then fetch media.downloadUrl to a local path and:
+/opt/agentcore-venv/bin/python3 /opt/psd-skills/psd-pdf-to-markdown/scripts/convert.py \
+  --path /home/node/.openclaw/downloads/download.pdf
+```
+
+Each download overwrites the previous one, so process a file before fetching the
+next. If `mediaError` is present the bytes could not be saved — say so and stop;
+do not try to re-download by another route.
+
+**Do not pass `-o`/`--output`.** It is refused by design (the broker will not
+write response data to a caller-named path), and it is not the way to get the
+file — `media` is.
+
 ## Invocation
 
 ### `--params` and `--json` are not interchangeable

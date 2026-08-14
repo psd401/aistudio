@@ -207,7 +207,11 @@ export async function POST(request: NextRequest) {
     const result = await executeWorkspaceCommand(
       body,
       token.accessToken,
-      context.ownerEmail
+      context.ownerEmail,
+      // Lets a binary response be saved into the caller's own private
+      // workspace and returned as a short-lived presigned URL, instead of
+      // being deleted with the broker's temp directory.
+      context.workspacePrefix
     )
     const outbound = outboundMessageAudit(body.argv)
     log.info(
