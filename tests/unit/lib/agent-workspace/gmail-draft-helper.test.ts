@@ -88,4 +88,53 @@ describe("expandGmailDraftHelper", () => {
     expect(mime).toContain("Bcc: f@g.h")
     expect(mime).toContain('Content-Type: text/html; charset="UTF-8"')
   })
+
+  it("rejects a repeated flag instead of dropping every value but the first", () => {
+    // `--to a --to b` is a plausible model habit, and the old first-match
+    // lookup silently addressed one recipient and lost the rest.
+    expect(() =>
+      expandGmailDraftHelper([
+        "gmail", "+draft", "--to", "a@b.c", "--to", "d@e.f", "--body", "x",
+      ])
+    ).toThrow(/--to was given more than once/)
+    expect(() =>
+      expandGmailDraftHelper([
+        "gmail", "+draft", "--to", "a@b.c",
+        "--subject", "one", "--subject", "two",
+      ])
+    ).toThrow(/--subject was given more than once/)
+  })
+
+  it("does not mistake body text for a flag", () => {
+    // Scanning flag-by-flag, not searching the whole argv: a body that talks
+    // about `--to` is body text, not a second recipient flag.
+    const out = expandGmailDraftHelper([
+      "gmail", "+draft", "--to", "a@b.c", "--body", "--to",
+    ])
+    expect(decode(out)).toContain("To: a@b.c")
+    expect(decodeBody(out)).toBe("--to")
+  })
+
+  it("encodes only the display name of a non-ASCII address", () => {
+    const out = expandGmailDraftHelper([
+      "gmail", "+draft", "--to", "José Ruiz <jose@psd401.net>", "--body", "x",
+    ])
+    const mime = decode(out)
+    // The addr-spec has to stay machine-readable — encoding the whole header
+    // would leave Gmail nothing to deliver to.
+    expect(mime).toContain("<jose@psd401.net>")
+    expect(mime).toContain("To: =?UTF-8?B?")
+    expect(mime).not.toContain("José")
+  })
+
+  it("leaves an all-ASCII address header byte-for-byte alone", () => {
+    const out = expandGmailDraftHelper([
+      "gmail", "+draft",
+      "--to", '"Doe, John" <john@psd401.net>, jane@psd401.net',
+      "--body", "x",
+    ])
+    expect(decode(out)).toContain(
+      'To: "Doe, John" <john@psd401.net>, jane@psd401.net'
+    )
+  })
 })

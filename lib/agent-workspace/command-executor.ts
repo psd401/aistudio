@@ -309,12 +309,109 @@ function argumentValue(argv: readonly string[], flag: string): string | null {
  * the wire.
  */
 const DRAFT_ADDRESS_FLAGS = ["--to", "--cc", "--bcc"] as const
+const DRAFT_VALUE_FLAGS = [...DRAFT_ADDRESS_FLAGS, "--subject", "--body"] as const
+
+function isPrintableAscii(value: string): boolean {
+  return /^[\x20-\x7E]*$/.test(value)
+}
 
 function encodeHeaderValue(value: string): string {
   // RFC 2047 for anything outside ASCII so a subject with an em dash or an
   // accented name does not corrupt the header.
-  if (/^[\x20-\x7E]*$/.test(value)) return value
+  if (isPrintableAscii(value)) return value
   return `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`
+}
+
+/** Split an address list on the commas that actually separate addresses. */
+function splitAddressList(value: string): string[] {
+  const addresses: string[] = []
+  let current = ""
+  let quoted = false
+  for (const character of value) {
+    if (character === '"') quoted = !quoted
+    if (character === "," && !quoted) {
+      addresses.push(current)
+      current = ""
+      continue
+    }
+    current += character
+  }
+  addresses.push(current)
+  return addresses.filter((address) => address.trim() !== "")
+}
+
+/**
+ * RFC 2047-encode the display-name half of an address header.
+ *
+ * `encodeHeaderValue` cannot be applied to an address header wholesale the way
+ * it is to a subject: the addr-spec has to stay machine-readable, and
+ * `=?UTF-8?B?...?=` wrapping `José <jose@psd401.net>` would leave Gmail
+ * nothing to deliver to. Only the display name is encodable, so only the
+ * display name is encoded — otherwise it ships as raw UTF-8 bytes, which is
+ * what the subject was already fixed not to do.
+ *
+ * A wholly-ASCII header is returned byte-for-byte, quoting and spacing intact
+ * — that is every realistic address this sees, and reformatting it would be
+ * all risk and no benefit. A bare non-ASCII addr-spec with no display name
+ * (the SMTPUTF8 case) is also left alone: encoding it would break it, and
+ * refusing it would reject an address Gmail itself accepts.
+ */
+function encodeAddressHeader(value: string): string {
+  if (isPrintableAscii(value)) return value
+  return splitAddressList(value)
+    .map((address) => {
+      const trimmed = address.trim()
+      if (isPrintableAscii(trimmed)) return trimmed
+      const angleAddress = /^(.*?)\s*(<[^>]*>)$/.exec(trimmed)
+      if (!angleAddress) return trimmed
+      const displayName = angleAddress[1].replace(/^"(.*)"$/, "$1")
+      const addrSpec = angleAddress[2]
+      if (displayName === "") return addrSpec
+      return `${encodeHeaderValue(displayName)} ${addrSpec}`
+    })
+    .join(", ")
+}
+
+/**
+ * Read the draft helper's own flags, rejecting a repeated flag rather than
+ * keeping the first occurrence and silently dropping the rest.
+ *
+ * `argumentValue` returns the first match, so `--to a@x --to b@y` — passing
+ * recipients as repeated flags instead of one comma-separated list, a
+ * plausible model habit — addressed only the first and lost the others with no
+ * error. That is the same silent-wrong-result shape the rest of this change
+ * set exists to remove.
+ *
+ * Scanning flag-by-flag rather than searching the whole argv also means a
+ * `--body` whose text happens to contain `--to` cannot be mistaken for one.
+ */
+function parseDraftFlags(argv: readonly string[]): {
+  values: Map<string, string>
+  html: boolean
+} {
+  const values = new Map<string, string>()
+  let html = false
+  for (let index = 2; index < argv.length; index += 1) {
+    const token = argv[index]
+    if (token === "--html") {
+      html = true
+      continue
+    }
+    if (!(DRAFT_VALUE_FLAGS as readonly string[]).includes(token)) continue
+    if (values.has(token)) {
+      throw new Error(
+        `Workspace draft ${token} was given more than once; ` +
+          "pass a single comma-separated value"
+      )
+    }
+    const value = argv[index + 1]
+    if (value === undefined) {
+      throw new Error(`Workspace draft ${token} requires a value`)
+    }
+    values.set(token, value)
+    index += 1
+  }
+  return { values, html }
 }
 
 function assertNoHeaderInjection(flag: string, value: string): void {
@@ -330,25 +427,27 @@ function assertNoHeaderInjection(flag: string, value: string): void {
 export function expandGmailDraftHelper(argv: readonly string[]): string[] {
   if (argv[0] !== "gmail" || argv[1] !== "+draft") return [...argv]
 
+  const { values, html: isHtml } = parseDraftFlags(argv)
+
   const headers: string[] = []
   for (const flag of DRAFT_ADDRESS_FLAGS) {
-    const value = argumentValue(argv, flag)
-    if (value === null) continue
+    const value = values.get(flag)
+    if (value === undefined) continue
     assertNoHeaderInjection(flag, value)
-    headers.push(`${flag === "--to" ? "To" : flag === "--cc" ? "Cc" : "Bcc"}: ${value}`)
+    const name = flag === "--to" ? "To" : flag === "--cc" ? "Cc" : "Bcc"
+    headers.push(`${name}: ${encodeAddressHeader(value)}`)
   }
   if (!headers.some((header) => header.startsWith("To: "))) {
     throw new Error("Workspace draft requires --to")
   }
 
-  const subject = argumentValue(argv, "--subject")
-  if (subject !== null) {
+  const subject = values.get("--subject")
+  if (subject !== undefined) {
     assertNoHeaderInjection("--subject", subject)
     headers.push(`Subject: ${encodeHeaderValue(subject)}`)
   }
 
-  const body = argumentValue(argv, "--body") ?? ""
-  const isHtml = argv.includes("--html")
+  const body = values.get("--body") ?? ""
   headers.push("MIME-Version: 1.0")
   headers.push(
     `Content-Type: text/${isHtml ? "html" : "plain"}; charset="UTF-8"`
