@@ -63,11 +63,13 @@ async function readWorkspaceCommand(
 }
 
 /**
- * `ownerEmail` is not optional in practice: several gates are written around
- * "is this the person who asked?", and a validator that was not told the caller
- * answers no to all of them. This pre-check ran without it while
- * `executeWorkspaceCommand` below ran with it, so the stricter of the two
- * decided every request and the caller exemptions were unreachable.
+ * `ownerEmail` is required so a new mode cannot be added that drops it.
+ *
+ * Several gates are written around "is this the person who asked?", and a
+ * validator that was not told the caller answers no to all of them. This
+ * pre-check ran without it while `executeWorkspaceCommand` below ran with it,
+ * so the stricter of the two decided every request and the caller exemptions
+ * were unreachable in production.
  */
 function validateCommandForMode(
   command: WorkspaceCommand,
