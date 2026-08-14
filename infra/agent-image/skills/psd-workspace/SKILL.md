@@ -451,11 +451,39 @@ health), not runtime availability.
 - **Success (exit 0):** stdout is whatever `gws` produced (usually JSON). Pass through.
 - **Needs auth (exit 10):** stdout is a single JSON line `{"status":"needs-auth","consent_url":"...","consent_chat_hyperlink":"<url|label>","kind":"user_account|agent_account","message":"..."}`. **Paste `consent_chat_hyperlink` exactly, on a line by itself** — no `**`, no `[]()`, no parentheses, no period, no surrounding text on the same line. Then on a *separate* line explain what it is (use the `kind` field — "I need permission to read your inbox" vs "I need to connect my agent account"). Do not retry. **Why this matters:** wrapping the URL in markdown breaks Google Chat's URL parsing and corrupts the JWT signature in transit (incident 2026-04-27). The `<url|label>` form is Chat's native hyperlink syntax — Chat renders it as a clickable link without ambiguity.
 - **Token revoked (exit 11):** stdout is `{"status":"token-revoked","consent_url":"...","consent_chat_hyperlink":"<url|label>","kind":"...","message":"..."}`. Same rule: paste `consent_chat_hyperlink` on its own line, no surrounding markdown, then ask the user to re-authorize on a separate line.
-- **Broker rejection or transport error (exit 12):** trusted command-validator failures emit stdout JSON `{"status":"workspace-command-rejected","error":"...","reason":"operation_not_allowed|workspace_command_rejected","operation":"..."}`. Use `reason` and `operation` directly; do not parse `error`. Other exit-12 failures remain `gws`-style stderr because the skill couldn't reach the broker or Google (network/5xx); those are transient, so tell the user Workspace access is temporarily unavailable and to try again shortly. Do not paste a consent link (there isn't one).
+- **Broker rejection or transport error (exit 12):** trusted command-validator failures emit stdout JSON `{"status":"workspace-command-rejected","error":"...","reason":"operation_not_allowed|workspace_command_rejected","operation":"..."}`. Use `reason` and `operation` directly; do not parse `error`. Other exit-12 failures remain `gws`-style stderr because the skill couldn't reach the broker or Google (network/5xx); those are transient, so tell the user Workspace access is temporarily unavailable and to try again shortly. Do not paste a consent link (there isn't one). **`error[api]: File not found: <id>` is NOT one of the transient ones — never retry it.** See *When Drive says a file does not exist* below.
 - **Phase 1 forbidden (exit 13):** stdout is `{"status":"phase1-forbidden","reason":"<short>","message":"<longer>"}`. The user asked you to do something Phase 1 disallows (send mail, delete, etc.). Tell them what you can do instead — usually "I'll draft it; reply 'send' if it's right." Do **not** retry with a workaround.
 - **Account provisioning (exit 14):** stdout is `{"status":"account-provisioning","kind":"agent_account","message":"..."}`. Only the **agent slot** produces this: your `agnt_` Workspace account is being created automatically. Tell the user their agent account is being set up and to try again in about 30 minutes. There is **NOTHING to click** — do not show a consent link, do not retry in the same turn.
 - **Scope upgrade required (exit 15):** stdout is `{"status":"scope-upgrade-required","consent_url":"...","consent_chat_hyperlink":"<url|label>","kind":"user_account","missing_scopes":[...],"message":"..."}`. Only the **user slot** produces this, and only for the Drive read/organize operations added in #1305: the user authorized you *before* that feature existed, so their stored token predates the scope. Same rule as exits 10/11 — paste `consent_chat_hyperlink` on its own line, no surrounding markdown, then on a separate line say *"I need one more permission to read your Drive — click the link to grant it."* Frame it as **one more permission**, not as "you never authorized me" (exit 10) or "your access was revoked" (exit 11). Do not retry until the user confirms they clicked it.
 - **gws failure (exit 2+):** `gws` stderr is surfaced. Report the error to the user; do not invent workarounds.
+
+### When Drive says a file does not exist
+
+`error[api]: File not found: <id>` does **not** mean the file is missing, and
+retrying will never change it. Drive returns 404 rather than 403 for a file you
+cannot currently see, so "does not exist" and "exists, not visible to me" are
+the same message.
+
+The broker now sets `supportsAllDrives` on every Drive call, which removes the
+most common cause — a file living in a **Shared Drive**, which Drive hides
+entirely from clients that do not declare shared-drive support even when the
+file has been shared with you directly. You do not need to pass it yourself.
+
+If you still get a 404 after one attempt, stop and work the two real causes:
+
+1. **The share landed on the wrong account.** You are two identities. On
+   `--scope agent` you are `agnt_<user>@psd401.net`; on `--scope user` you are
+   the caller. Sharing with the caller does not grant the agent slot access, and
+   vice versa. Tell the user the **exact address** to share with — say
+   `agnt_<their-uniqname>@psd401.net` in full, don't say "the agent account".
+2. **Retry once on the other scope.** If `--scope user` 404s, try
+   `--scope agent` and the reverse; that identifies which identity is missing
+   the share without guessing.
+
+Then report it under Rule 11 with the fileId and both scopes you tried. Do not
+loop. On 2026-08-14 a supervision schedule was retried nine times across eight
+minutes, re-shared as a different file type, and still abandoned — the user had
+shared it correctly the whole time (agent_failures 8289, 8322).
 
 ## My inbox vs your inbox
 

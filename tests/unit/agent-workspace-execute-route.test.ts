@@ -133,3 +133,75 @@ describe("POST /api/agent/workspace-execute validator errors", () => {
     })
   })
 })
+
+/**
+ * The gate exemptions that ask "is the recipient the person who asked?" are
+ * only reachable if the validator is told who asked.
+ *
+ * #1636 shipped the Drive ownership transfer with four unit tests that called
+ * the validator directly and passed the caller. The ROUTE did not: it ran a
+ * pre-check with `ownerEmail` undefined, so `isShareToCaller` could not match,
+ * the request fell through to the third-party allowlist, and `role: "owner"`
+ * was refused with 400 before `executeWorkspaceCommand` — which does pass the
+ * caller — was ever reached. The capability was documented as working and was
+ * dead on every live path (dev agent_failures 496).
+ *
+ * These assert through POST, so they fail if the wiring regresses even while
+ * the validator's own tests still pass.
+ */
+describe("POST /api/agent/workspace-execute forwards the caller to the gate", () => {
+  const SHARE_REFUSAL =
+    "Drive shares are limited to the requesting user, an in-district named person (reader/commenter/writer), or a domain-wide reader"
+
+  it("does not refuse an ownership transfer to the caller", async () => {
+    const response = await POST(
+      request({
+        scope: "agent",
+        argv: [
+          "drive",
+          "permissions",
+          "create",
+          "--params",
+          JSON.stringify({ fileId: "FILE123", transferOwnership: true }),
+          "--json",
+          JSON.stringify({
+            type: "user",
+            role: "owner",
+            emailAddress: "owner@psd401.net",
+          }),
+        ],
+      })
+    )
+
+    // Downstream token minting is mocked and will fail; all this pins is that
+    // the command got PAST validation, which is where it used to die.
+    const body = (await response.json()) as { error?: string }
+    expect(body.error).not.toBe(SHARE_REFUSAL)
+  })
+
+  it("still refuses an ownership transfer to a third party", async () => {
+    const response = await POST(
+      request({
+        scope: "agent",
+        argv: [
+          "drive",
+          "permissions",
+          "create",
+          "--json",
+          JSON.stringify({
+            fileId: "FILE123",
+            type: "user",
+            role: "owner",
+            emailAddress: "someone.else@psd401.net",
+            transferOwnership: true,
+          }),
+        ],
+      })
+    )
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toMatchObject({
+      error: SHARE_REFUSAL,
+    })
+  })
+})

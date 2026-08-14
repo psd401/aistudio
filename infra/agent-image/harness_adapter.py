@@ -1460,6 +1460,15 @@ class OpenClawAdapter(HarnessAdapter):
                 # terminal segment is returned to Chat (the transcript keeps
                 # both messages). This prevents a toolUse assistant block and
                 # the final stop block being concatenated into one reply.
+                #
+                # EVERY path that promotes the accumulator into the reply must
+                # check this, not just the success path. While it is set, the
+                # accumulator holds text the model wrote BEFORE a tool call —
+                # scratchpad by definition, never an answer. The abort and
+                # deadline fallbacks below promoted it unconditionally, so a
+                # turn that died on a tool shipped exactly the narration the
+                # final-event handler suppresses ("Here's how far I got: Now
+                # run the batchUpdate."). Covered by test_reply_replay.py.
                 assistant_boundary_pending: bool = False
                 # Allow recv() to sit idle for up to 60s between events
                 # without raising — long tool calls (web_fetch, model
@@ -2018,7 +2027,11 @@ class OpenClawAdapter(HarnessAdapter):
         # preserve the real cause even if that channel event never arrives and
         # the receive loop instead runs to its deadline.
         if chat_aborted or (not got_final and last_lifecycle_error):
-            if not response_text and agent_assistant_accum:
+            if (
+                not response_text
+                and agent_assistant_accum
+                and not assistant_boundary_pending
+            ):
                 response_text = agent_assistant_accum
             error_message = (
                 last_lifecycle_error
@@ -2068,7 +2081,11 @@ class OpenClawAdapter(HarnessAdapter):
             )
 
         if not got_final:
-            if not response_text and agent_assistant_accum:
+            if (
+                not response_text
+                and agent_assistant_accum
+                and not assistant_boundary_pending
+            ):
                 response_text = agent_assistant_accum
             logger.error(
                 "chat deadline expired: partial_len=%d accum_len=%d "

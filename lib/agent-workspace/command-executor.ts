@@ -463,6 +463,70 @@ function assertNoHeaderInjection(flag: string, value: string): void {
   }
 }
 
+/**
+ * Set `supportsAllDrives` on every Drive call, and `includeItemsFromAllDrives`
+ * on listings.
+ *
+ * Drive v3 hides shared-drive items from clients that do not declare support
+ * for them, and it hides them as **404 File not found** — not 403. So a file
+ * the caller genuinely has access to, individually shared with them, reads as
+ * if it does not exist. The message is indistinguishable from a wrong file id
+ * or a share that never landed, which is why it burns a whole turn: there is
+ * nothing in it to act on.
+ *
+ * That is exactly how it failed. A user shared a supervision schedule with
+ * their agent account, confirmed the share twice, and `drive files get`
+ * answered `error[api]: File not found` on BOTH `--scope agent` and
+ * `--scope user`. They re-shared as a native Google Doc; same 404. Nine
+ * attempts across eight minutes, then the turn was abandoned
+ * (agent_failures 8289 + 8322, prod broker logs 2026-08-14T19:52-20:00).
+ *
+ * Applied here rather than documented in the skill because the model cannot
+ * pass a parameter whose absence produces no hint that it is missing — and
+ * because a 404 gives it every reason to conclude the file is gone and stop.
+ * Google's own guidance is that clients should always set this.
+ *
+ * This CANNOT widen access. It declares that the client understands
+ * shared-drive semantics; Drive still enforces the file's ACL against the
+ * authenticated identity, so a caller with no permission still gets 404. An
+ * explicit value from the model is left alone.
+ */
+export function withSharedDriveSupport(argv: readonly string[]): string[] {
+  const tokens = operationTokens(argv)
+  // Drive-only: `supportsAllDrives` is a Drive v3 parameter. The Sheets, Docs
+  // and Slides APIs reject unknown query parameters, so a Sheet living in a
+  // shared drive is reached through `drive files get` and this stays scoped to
+  // the Drive surface.
+  if (tokens[0] !== "drive") return [...argv]
+
+  const additions: Record<string, boolean> = { supportsAllDrives: true }
+  // `supportsAllDrives` alone still omits shared-drive items from a listing;
+  // Drive requires both flags before it will return them.
+  if (tokens[tokens.length - 1] === "list") {
+    additions.includeItemsFromAllDrives = true
+  }
+
+  const existing = parseObjectArgument(argv, "--params") ?? {}
+  const present = new Set(Object.keys(existing).map((key) => key.toLowerCase()))
+  const merged = { ...existing }
+  let changed = false
+  for (const [key, value] of Object.entries(additions)) {
+    if (present.has(key.toLowerCase())) continue
+    merged[key] = value
+    changed = true
+  }
+  if (!changed) return [...argv]
+
+  const serialized = JSON.stringify(merged)
+  const index = argv.indexOf("--params")
+  if (index === -1 || index === argv.length - 1) {
+    return [...argv, "--params", serialized]
+  }
+  const next = [...argv]
+  next[index + 1] = serialized
+  return next
+}
+
 export function expandGmailDraftHelper(argv: readonly string[]): string[] {
   if (argv[0] !== "gmail" || argv[1] !== "+draft") return [...argv]
 
@@ -993,6 +1057,15 @@ function validateWorkspaceMutation(
  * Validate the complete argv at the trusted web boundary. The model-facing
  * runtime has no Google credential and no gws binary; only commands accepted
  * here are executed with an owner-derived token.
+ *
+ * ALWAYS pass `ownerEmail` when the caller is known. It is optional only
+ * because a few call sites predate it, and omitting it does not merely skip a
+ * check — it silently makes the gate STRICTER, because `isShareToCaller`
+ * cannot match a caller it was not told about and the request falls through to
+ * the third-party allowlist. That is how the Drive ownership transfer shipped
+ * in #1636 failed in production while all four of its unit tests passed: the
+ * tests passed the caller, the route's own pre-check did not, and the
+ * exemption was dead on every live path (dev agent_failures 496).
  */
 export function validateWorkspaceCommand(
   command: WorkspaceCommand,
@@ -1086,8 +1159,9 @@ export function requiredWorkspaceScopeGap(
 
 export function validateEmailTaskWorkspaceCommand(
   command: WorkspaceCommand,
+  ownerEmail?: string,
 ): void {
-  validateWorkspaceCommand(command)
+  validateWorkspaceCommand(command, ownerEmail)
   const { operation } = normalizedOperation(command.argv)
   if (command.scope !== "user" || operation !== "tasks tasks insert") {
     throw new Error("Email tasks may only insert a user-owned Google task")
@@ -1096,6 +1170,7 @@ export function validateEmailTaskWorkspaceCommand(
 
 export function validateScheduledWorkspaceCommand(
   command: WorkspaceCommand,
+  ownerEmail?: string,
 ): void {
   // Scheduled runs use the same allowlist as every other invocation mode.
   //
@@ -1110,7 +1185,7 @@ export function validateScheduledWorkspaceCommand(
   //
   // Destinations remain bounded by the agent identity's Chat membership, and
   // every send is recorded by outboundMessageAudit (space + body length).
-  validateWorkspaceCommand(command)
+  validateWorkspaceCommand(command, ownerEmail)
 }
 
 /**
@@ -1278,11 +1353,13 @@ export async function executeWorkspaceCommand(
     try {
       execFile(
         binary,
-        // Expanded AFTER validation, so the allowlist and every scope gate
-        // still judge the operation the model actually asked for
+        // Both transforms run AFTER validation, so the allowlist and every
+        // scope gate still judge the operation the model actually asked for
         // (`gmail +draft`), while gws receives the canonical call it
-        // implements. A non-draft argv passes through untouched.
-        expandGmailDraftHelper(command.argv),
+        // implements. A non-draft argv passes through untouched, and
+        // withSharedDriveSupport only ever adds Drive query parameters that
+        // the validator already permits (DRIVE_PARAM_FIELDS).
+        withSharedDriveSupport(expandGmailDraftHelper(command.argv)),
         {
           cwd: commandDirectory,
           env: {
