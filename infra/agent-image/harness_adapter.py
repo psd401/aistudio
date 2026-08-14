@@ -205,6 +205,44 @@ class TurnResult:
     nudged: bool = False
 
 
+def _shape_of(value: object) -> str:
+    """Field names and types of a payload — never its values.
+
+    Schema discovery needs to know which fields a frame carries. The values
+    can be spreadsheet cells, document text or tool arguments, so they must
+    not reach the logs to establish a key list.
+    """
+    if isinstance(value, dict):
+        return json.dumps(
+            {key: type(item).__name__ for key, item in sorted(value.items())}
+        )[:600]
+    if isinstance(value, list):
+        return f"list[{len(value)}]"
+    return type(value).__name__ if value is not None else "none"
+
+
+# The only fields echoed by value. Each is a closed-vocabulary discriminator
+# the adapter already branches on, so none of them carries user content.
+_STRUCTURAL_MARK_FIELDS = ("stream", "phase", "kind", "status", "state")
+
+
+def _structural_marks(payload: object) -> str:
+    """Echo only closed-vocabulary discriminators, and only short ones."""
+    if not isinstance(payload, dict):
+        return "{}"
+    marks: dict = {}
+    for source in (payload, payload.get("data")):
+        if not isinstance(source, dict):
+            continue
+        for field in _STRUCTURAL_MARK_FIELDS:
+            candidate = source.get(field)
+            # Bounded: a discriminator is a short token. Anything longer is
+            # not one, and is not worth risking.
+            if isinstance(candidate, str) and 0 < len(candidate) <= 32:
+                marks.setdefault(field, candidate)
+    return json.dumps(marks)[:300]
+
+
 def _format_for_chat(text: str) -> str:
     """Final transform applied to every outbound message before it leaves
     the adapter. Converts model-emitted Markdown into Google Chat's
@@ -1538,13 +1576,26 @@ class OpenClawAdapter(HarnessAdapter):
                     # could truncate real answers if they are progress ticks
                     # inside one segment, so capture the shape first and change
                     # behaviour second.
+                    # Logs the SHAPE, never the values. What is needed here is
+                    # which fields a task/tick frame carries, not what the user
+                    # was working on — and these payloads can hold spreadsheet
+                    # cells, document text and tool arguments. Field names plus
+                    # types answer the question; a raw dump would put user
+                    # content in CloudWatch to establish a key list.
+                    # Only the structural discriminators are echoed by value.
                     _kind_key = f"_seen_kind::{key}"
                     if _kind_key not in event_counts:
                         event_counts[_kind_key] = 1
                         logger.info(
-                            "openclaw_kind_sample kind=%s payload=%s",
+                            "openclaw_kind_shape kind=%s payload=%s data=%s marks=%s",
                             key,
-                            json.dumps(msg.get("payload", {}))[:1200],
+                            _shape_of(msg.get("payload")),
+                            _shape_of(
+                                (msg.get("payload") or {}).get("data")
+                                if isinstance(msg.get("payload"), dict)
+                                else None
+                            ),
+                            _structural_marks(msg.get("payload")),
                         )
 
                     if mtype == "event" and mevent == "agent":
