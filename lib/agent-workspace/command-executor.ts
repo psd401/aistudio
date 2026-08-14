@@ -353,10 +353,20 @@ export function expandGmailDraftHelper(argv: readonly string[]): string[] {
   headers.push(
     `Content-Type: text/${isHtml ? "html" : "plain"}; charset="UTF-8"`
   )
+  // Without this the body goes out as raw UTF-8 bytes under an implied `7bit`,
+  // which is off-spec the moment a brief contains an em dash, an accented name
+  // or an emoji — all routine in this district's mail. base64 keeps the message
+  // 7-bit clean whatever the body holds.
+  headers.push("Content-Transfer-Encoding: base64")
 
   // CRLF per RFC 5322, and base64url because that is what the Gmail API's
   // `message.raw` field expects.
-  const mime = `${headers.join("\r\n")}\r\n\r\n${body}`
+  // The body is base64 because the header above declares it so; the whole
+  // message is then base64url because that is what the Gmail API's
+  // `message.raw` field takes. Two different encodings, two different reasons —
+  // line-wrapped at 76 chars per RFC 2045 so long bodies stay conformant.
+  const encodedBody = (Buffer.from(body, "utf8").toString("base64").match(/.{1,76}/g) ?? []).join("\r\n")
+  const mime = `${headers.join("\r\n")}\r\n\r\n${encodedBody}`
   const raw = Buffer.from(mime, "utf8").toString("base64url")
 
   return [

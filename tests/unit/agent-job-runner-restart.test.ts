@@ -110,7 +110,11 @@ describe("job runner restart handling", () => {
 
   it("exits nonzero when both room and DM delivery fail", () => {
     expect(source).toContain(
-      "return deliveryOutcome === 'failed' ? 3 : agentResult.failed ? 2 : 0",
+      // Any outcome that is not 'delivered' exits 3, so the exit code and the
+      // scheduled-run row agree about a deferred post (both say "not
+      // delivered"). Previously the row said error while the exit code said
+      // clean for the same job.
+      "return deliveryOutcome !== 'delivered' ? 3 : agentResult.failed ? 2 : 0",
     )
     const deliveryFailureBranch = source.slice(
       source.indexOf("if (deliveryIncomplete)"),

@@ -408,7 +408,13 @@ async function main(): Promise<number> {
     // The ECS STOPPED-state supervisor uses the process exit code as its
     // authoritative terminal signal. A delivered agent failure is not a clean
     // job even though Chat delivery itself succeeded.
-    return deliveryOutcome === 'failed' ? 3 : agentResult.failed ? 2 : 0;
+    //
+    // `deferred` counts here for the same reason it counts in the DB row above:
+    // the user has nothing. Testing only 'failed' left the exit code saying
+    // clean while the row for that same run said error — one signal
+    // contradicting the other for one job, which is worse than either being
+    // wrong on its own.
+    return deliveryOutcome !== 'delivered' ? 3 : agentResult.failed ? 2 : 0;
   } catch (error) {
     const exitCode = await handleJobRunnerError(job, error, startTime, log);
     return exitCode;

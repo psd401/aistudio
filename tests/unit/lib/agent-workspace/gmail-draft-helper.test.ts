@@ -5,6 +5,13 @@ function decode(argv: string[]) {
   return Buffer.from(raw, "base64url").toString("utf8")
 }
 
+/** Headers + decoded body, mirroring what a mail client renders. */
+function decodeBody(argv: string[]) {
+  const mime = decode(argv)
+  const body = mime.split("\r\n\r\n").slice(1).join("\r\n\r\n")
+  return Buffer.from(body.replace(/\r\n/g, ""), "base64").toString("utf8")
+}
+
 describe("expandGmailDraftHelper", () => {
   it("expands +draft into the canonical drafts create call", () => {
     const out = expandGmailDraftHelper([
@@ -17,7 +24,30 @@ describe("expandGmailDraftHelper", () => {
     expect(mime).toContain("To: bill@psd401.net")
     expect(mime).toContain("Subject: Follow up")
     expect(mime).toContain('Content-Type: text/plain; charset="UTF-8"')
-    expect(mime.endsWith("Hi Bill,\nthanks.")).toBe(true)
+    expect(mime).toContain("Content-Transfer-Encoding: base64")
+    expect(decodeBody(out)).toBe("Hi Bill,\nthanks.")
+  })
+
+  it("round-trips a non-ASCII body through the declared encoding", () => {
+    // Raw UTF-8 under an implied 7bit is off-spec; an em dash, an accented
+    // name or an emoji is routine in district mail.
+    const body = "Budget — Renée ✅\nsecond line"
+    const out = expandGmailDraftHelper([
+      "gmail", "+draft", "--to", "a@b.c", "--subject", "s", "--body", body,
+    ])
+    expect(decode(out)).toContain("Content-Transfer-Encoding: base64")
+    expect(decodeBody(out)).toBe(body)
+  })
+
+  it("wraps a long encoded body at 76 chars per RFC 2045", () => {
+    const out = expandGmailDraftHelper([
+      "gmail", "+draft", "--to", "a@b.c", "--body", "x".repeat(500),
+    ])
+    const mime = decode(out)
+    const bodyLines = mime.split("\r\n\r\n").slice(1).join("\r\n\r\n").split("\r\n")
+    expect(bodyLines.length).toBeGreaterThan(1)
+    for (const line of bodyLines) expect(line.length).toBeLessThanOrEqual(76)
+    expect(decodeBody(out)).toBe("x".repeat(500))
   })
 
   it("leaves every non-draft command untouched", () => {
