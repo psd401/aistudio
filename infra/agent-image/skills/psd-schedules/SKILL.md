@@ -75,6 +75,23 @@ Cron is **5 fields**: `minute hour day-of-month month day-of-week`. The skill
 expands to EventBridge Scheduler's 6-field format and handles the DoM/DoW
 mutual-exclusion rule for you.
 
+**Always NAME the days — `MON-FRI`, never `1-5`.** Numeric day-of-week is
+rejected, because the two cron dialects disagree about it and nothing downstream
+notices: ordinary cron counts `0=SUN` (so `1-5` is Mon-Fri), EventBridge counts
+`1=SUN` (so `1-5` is Sun-Thu). A weekday brief written `30 6 * * 1-5` ran
+Sunday through Thursday for a week — an unwanted Sunday edition, no Friday one,
+and no error anywhere. Names mean the same thing in both dialects.
+
+Two more shapes that are accepted and then behave wrongly, so do not hand-write
+them:
+
+- **Never prepend a seconds field.** `cron(0 45 6 * ? MON-FRI)` is Quartz shape;
+  EventBridge has no seconds field, so every field shifts and the expression
+  either errors or silently runs at the wrong time. Write the 5-field form and
+  let the skill expand it.
+- **Never wrap it yourself.** Pass `45 6 * * MON-FRI`, not `cron(...)`. The
+  5-field path is the one that sets `?` correctly for you.
+
 | Request | Cron |
 |---|---|
 | every weekday at 9am | `0 9 * * MON-FRI` |

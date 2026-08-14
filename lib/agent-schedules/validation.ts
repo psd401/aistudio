@@ -190,6 +190,29 @@ function validateCronFieldDomains(fields: string[]): void {
   if (numericValuesOutOfRange(fields[3], 1, 12)) {
     throw new AgentScheduleInputError("cron month field must be 1-12");
   }
+  // Day-of-week must be named, never numeric.
+  //
+  // EventBridge numbers day-of-week 1=SUN..7=SAT. Standard cron (and Quartz,
+  // and every cheat sheet on the internet) numbers it 0=SUN..6=SAT, so `1-5`
+  // means MON-FRI there and SUN-THU here. Nothing rejects the wrong one: it is
+  // a valid expression that silently runs on the wrong days.
+  //
+  // A daily brief written as `30 6 ? * 1-5 *` fired Sunday through Thursday for
+  // a week — the user got an unwanted Sunday brief and no Friday one, and only
+  // noticed on the Friday it did not arrive (agent_failures 8157; run history
+  // confirms fires on Sun/Mon/Tue/Wed/Thu and none on Fri).
+  //
+  // Names have the same meaning in both dialects, so requiring them removes the
+  // ambiguity rather than guessing which dialect was intended — the skill's own
+  // cheat sheet already uses MON-FRI.
+  if (/\d/.test(fields[4]) && fields[4] !== "?" && fields[4] !== "*") {
+    throw new AgentScheduleInputError(
+      "cron day-of-week must use names (SUN,MON,TUE,WED,THU,FRI,SAT), not " +
+        "numbers. EventBridge counts 1=SUN, while ordinary cron counts " +
+        "0=SUN, so a numeric range runs a day off without failing. " +
+        "Weekdays are MON-FRI.",
+    );
+  }
   // EventBridge requires `?` in exactly one of day-of-month / day-of-week; the
   // two cannot both be concrete, and cannot both be `*`.
   //

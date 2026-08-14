@@ -54,3 +54,36 @@ describe("cron field domain validation", () => {
     expect(() => toSchedulerExpression("cron(0 6 ? 13 * *)")).toThrow(/month/)
   })
 })
+
+describe("day-of-week must be named, not numeric", () => {
+  it("rejects the numeric range that ran Sun-Thu instead of Mon-Fri", () => {
+    // agent_failures 8157: `30 6 * * 1-5` became cron(30 6 ? * 1-5 *), which
+    // EventBridge reads as SUN-THU (1=SUN). Run history shows fires on
+    // Sun/Mon/Tue/Wed/Thu and none on Friday — a valid expression running on
+    // the wrong days, which nothing else catches.
+    expect(() => toSchedulerExpression("30 6 * * 1-5")).toThrow(/names/)
+    expect(() => toSchedulerExpression("cron(30 6 ? * 1-5 *)")).toThrow(/names/)
+  })
+
+  it("explains the off-by-one so the fix is obvious", () => {
+    let message = ""
+    try {
+      toSchedulerExpression("30 6 * * 1-5")
+    } catch (error) {
+      message = (error as Error).message
+    }
+    expect(message).toContain("1=SUN")
+    expect(message).toContain("MON-FRI")
+  })
+
+  it("accepts named days, which mean the same in both cron dialects", () => {
+    expect(toSchedulerExpression("30 6 * * MON-FRI")).toBe("cron(30 6 ? * MON-FRI *)")
+    expect(toSchedulerExpression("0 12 * * TUE,THU")).toBe("cron(0 12 ? * TUE,THU *)")
+  })
+
+  it("leaves ? and * alone, and does not touch numeric day-of-MONTH", () => {
+    expect(toSchedulerExpression("0 18 * * *")).toBe("cron(0 18 * * ? *)")
+    // 1,15 here is day-of-month, which IS numeric and unambiguous.
+    expect(toSchedulerExpression("0 8 1,15 * *")).toBe("cron(0 8 1,15 * ? *)")
+  })
+})
