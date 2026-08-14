@@ -58,7 +58,27 @@ function isWithin(candidate, root) {
 function validatePath(candidate, access) {
   const normalized = normalizePath(candidate);
   if (normalized === null) return;
-  const roots = [resolve(process.cwd()), resolve(tmpdir())];
+  // The agent's own OpenClaw workspace is always in scope, not just whichever
+  // directory a skill happened to be launched from.
+  //
+  // Skills read and write the workspace by absolute path — psd-morning-brief
+  // takes --config/--data_file/--synthesis_file under ~/.openclaw — so with
+  // only cwd on this list the exact same command succeeded when the process
+  // was started inside the workspace and failed with "Refusing read outside
+  // the working directory and temporary roots" when it was not. That is how
+  // two users lost their morning brief on consecutive days with an identical
+  // message and no other difference (agent_failures: hellwichj 2026-08-12,
+  // yellowleesj 2026-08-13).
+  //
+  // This widens the guard by exactly the directory the agent already owns and
+  // is expected to persist its memory in; everything outside workspace, cwd,
+  // temp and /opt stays refused.
+  const workspace = process.env.OPENCLAW_HOME || "/home/node/.openclaw";
+  const roots = [
+    resolve(process.cwd()),
+    resolve(tmpdir()),
+    resolve(workspace),
+  ];
   if (access === "read") roots.push("/opt");
   if (!roots.some((root) => isWithin(normalized, root))) {
     throw new Error(

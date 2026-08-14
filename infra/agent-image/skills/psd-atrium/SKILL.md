@@ -1,7 +1,7 @@
 ---
 name: psd-atrium
 summary: Read and write AI Studio Atrium content — PSD's collaborative document + live-artifact workspace with an intranet publishing flow. Find/read/create/edit/archive/delete documents and artifacts, embed images, add first-party artifact persistence with AtriumData, and publish them. Artifacts fully support HTML/CSS/JavaScript (including <script>/<style>).
-description: Use this to work with Atrium, PSD's collaborative content workspace in AI Studio (documents + interactive artifacts, with an internal "intranet" publishing flow). Find and read Atrium documents/artifacts, create new ones, edit them (append or replace), add live artifact persistence with window.AtriumData, archive them, hard-delete ones you own, and publish/unpublish to a destination. Interactive artifacts fully support real HTML, CSS, and JavaScript — including <script>, <style>, and inline style="…" — pass raw code; the skill base64-encodes it automatically so nothing is stripped or blocked (do NOT work around with legacy attributes like bgcolor/width). Atrium is REAL and live — never say the district has no content workspace. Version-based: reads return the last saved version and edits create a new version; the real-time collaborative editor rail is not reachable from here.
+description: Use this to work with Atrium, PSD's collaborative content workspace in AI Studio (documents + interactive artifacts, with an internal "intranet" publishing flow). Find and read Atrium documents/artifacts, create new ones, edit them (append or replace), add live artifact persistence with window.AtriumData, archive them, hard-delete ones you own, and publish/unpublish to a destination. Interactive artifacts fully support real HTML, CSS, and JavaScript — including <script>, <style>, and inline style="…" — pass raw code; the skill base64-encodes it in transit so AI Studio cannot mangle it (do NOT work around with legacy attributes like bgcolor/width). That protects the write, NOT the render: `data:` URIs are still stripped when the page is served, so images must be uploaded with upload-asset or referenced by public https URL. Atrium is REAL and live — never say the district has no content workspace. Version-based: reads return the last saved version and edits create a new version; the real-time collaborative editor rail is not reachable from here.
 allowed-tools: Bash(node:*)
 ---
 
@@ -113,6 +113,24 @@ node run.js restore-collection --id <uuid>
   moving a collection below itself or a descendant is rejected.
 
 ### Images (authored assets)
+
+> **A `data:` URI is NOT a way to put an image in Atrium.** Every `data:` URL
+> is stripped from both markdown and artifact HTML before serving — the
+> sanitizer's scheme allowlist is `https:`/`mailto:`/`tel:`/anchors/relative
+> only. The write survives, the version saves, a read-back looks correct, and
+> the served page shows nothing. Because nothing errors, the failure only
+> surfaces when a human opens the page: one artifact reached a user with all
+> **11** of its images blank this way (agent_failures 6408).
+>
+> This is a deliberate XSS/exfiltration boundary and will not be relaxed. Use
+> `upload-asset` below, or reference an image already hosted at a public
+> `https:` URL — `psd-image-gen`, `psd-tts` and `psd-hyperframes` all return
+> exactly that kind of URL.
+>
+> The note in this skill's description that the body is base64-encoded "so
+> nothing is stripped or blocked" is about the WRITE TRANSPORT — it stops AI
+> Studio mangling your HTML in transit. It does not exempt the content from
+> sanitization on the way out, and it is not a licence to inline base64 images.
 
 An image belongs to **one object**. Embedding it is a three-step flow, and the
 order matters: the object must exist before an asset can be attached to it, and
@@ -413,6 +431,25 @@ directly returns a structured **approval_required** result (HTTP 202) — this i
 SUCCESS, not an error. **Relay its `message` verbatim** so the user knows the
 request was queued for a human/admin to approve. A completed publish includes
 `readerUrl` when the destination has a reader link.
+
+**Paste every Atrium URL BARE — no backticks, no `[label](url)`, no bold, no
+trailing period.** Put it on its own line.
+
+A code-span is the trap here, not just a style nit: the trailing `` ` `` gets
+carried into the click/copy, percent-encodes to `%60`, and the reader answers a
+genuine 404. That cost a real diagnosis — server-side checks all passed
+(`visibilityLevel=public`, `status=published`, a raw fetch returned HTTP 200)
+while the user saw 404 on both `/c/` and `/p/`, because the URL being clicked
+was not the URL that was published (agent_failures 7167, 7299).
+
+Same rule already applies to Workspace consent links, for the same mechanical
+reason. If a URL needs explaining, put the sentence on a SEPARATE line.
+
+**Do not hand out a `/c/` link for an object that is still private.** Create
+starts private+draft, so a link shared before `publish` or `set-visibility`
+404s for the recipient even though the object exists and reads back fine
+(agent_failures 5946, 7233). Either publish first, or say plainly that it is
+still private and not yet viewable.
 
 ### Change who can view it
 

@@ -36,6 +36,26 @@ text.
 
 **Edge case:** state the *fact*, not the *process*. ✅ "The skill was using the wrong env var. Fixed in commit X." ❌ "Let me check common.js… line 200… found it…"
 
+**A delivered artifact does not exempt the message.** When a turn produces a
+document, brief, chart or artifact, the chat reply is still subject to this
+rule: send the link and a sentence, not the running commentary that produced
+it. On 2026-08-12 two scheduled briefs shipped scratchpad instead of the brief
+— one Chat delivery was nothing but "Found the data file. Let me get the
+synthesis shape…", and another carried lines like "Now let's…", "Use canonical
+gmail messages get…", "Confirmed the literal \n didn't render as real
+newlines. Rewriting properly." (agent_failures 6243, 6540). Both were
+scheduled runs, so no human was watching to catch it, and both reported
+success.
+
+That second example is also the tell for a **Rule 9a** breach upstream: if your
+narration is describing escaping problems in an inline script, the artifact you
+are about to deliver is probably broken too. Fix the script the documented way
+before sending, rather than narrating the struggle.
+
+**Self-check:** does my reply contain "Let me", "Now let's", "Found the", or a
+sentence about a file/tool/step? If yes, strike it and re-read what remains. If
+what remains is empty and I owe the user an artifact, the turn is not finished.
+
 ---
 
 ## Rule 2 — Never fabricate URLs, IDs, tokens, or API parameters

@@ -92,6 +92,21 @@ function scheduledFailureContext(job: JobPayload) {
   };
 }
 
+/** Row message for a run whose Chat post never reached the user. */
+function incompleteDeliveryMessage(
+  agentResult: AgentResult,
+  deferred: boolean
+): string {
+  const cause = deferred
+    ? 'Google Chat delivery was deferred to the retry queue and had not ' +
+      'reached the originating space/thread when the run ended; it may ' +
+      'still arrive'
+    : 'Google Chat delivery failed in the originating space/thread';
+  return agentResult.failed
+    ? `${cause} after agent error: ${agentResult.response}`
+    : cause;
+}
+
 async function recordCompletedJobResult(
   job: JobPayload,
   agentResult: AgentResult,
@@ -100,6 +115,24 @@ async function recordCompletedJobResult(
   log: JobLogger
 ): Promise<void> {
   const deliveryFailed = deliveryOutcome === 'failed';
+  // `deferred` means the Chat post did NOT happen and was queued for a later
+  // retry. It is not a delivered outcome, and nothing ever revisits this row:
+  // recordScheduledJobTerminal is only reached from this terminal path, so
+  // whatever is written here is final regardless of what the retry does.
+  //
+  // Counting it as success is how a schedule reported lastRunStatus=success
+  // while the user's brief never arrived — the agent read the run history,
+  // saw green, and told her it had been delivered (agent_failures 7233, and
+  // the same shape in 6243/7332). A run that produced no message the user can
+  // see must not claim success.
+  //
+  // Recorded as an error rather than a third status because the column is
+  // success|error and a migration is not warranted for this: the tradeoff is
+  // that a deferred delivery which later succeeds stays marked failed, which
+  // is a visible over-report. That is the safe direction — it prompts someone
+  // to look, where a false green guarantees nobody does.
+  const deliveryDeferred = deliveryOutcome === 'deferred';
+  const deliveryIncomplete = deliveryFailed || deliveryDeferred;
   await logTelemetry(
     {
       userId: job.userEmail,
@@ -139,18 +172,12 @@ async function recordCompletedJobResult(
   await recordScheduledJobTerminal(
     job,
     {
-      status: agentResult.failed || deliveryFailed ? 'error' : 'success',
+      status: agentResult.failed || deliveryIncomplete ? 'error' : 'success',
       inputTokens: agentResult.inputTokens,
       outputTokens: agentResult.outputTokens,
       latencyMs,
-      ...(deliveryFailed
-        ? {
-            errorMessage:
-              'Google Chat delivery failed in the originating space/thread' +
-              (agentResult.failed
-                ? ` after agent error: ${agentResult.response}`
-                : ''),
-          }
+      ...(deliveryIncomplete
+        ? { errorMessage: incompleteDeliveryMessage(agentResult, deliveryDeferred) }
         : agentResult.failed
           ? { errorMessage: agentResult.response }
         : {}),
@@ -159,13 +186,17 @@ async function recordCompletedJobResult(
     log
   );
 
-  if (deliveryFailed) {
+  if (deliveryIncomplete) {
     log.warn('Background job completed but no Chat response was delivered', {
       // Keep this on the monitored job-runner failure marker so interactive
       // promotions page through the existing JobRunnerFailures alarm too.
       marker: 'JOB_RUNNER_FAILED_TURN',
       failureKind: 'delivery',
       deliveryMarker: 'JOB_RUNNER_DELIVERY_FAILED',
+      // Distinguish the two in the log group: a deferred post may still land
+      // via the retry queue, a failed one will not. Both leave the user with
+      // nothing at the moment the run ends, which is why they share a marker.
+      deliveryOutcome,
       sessionId: job.sessionId,
       latencyMs,
     });
@@ -377,7 +408,13 @@ async function main(): Promise<number> {
     // The ECS STOPPED-state supervisor uses the process exit code as its
     // authoritative terminal signal. A delivered agent failure is not a clean
     // job even though Chat delivery itself succeeded.
-    return deliveryOutcome === 'failed' ? 3 : agentResult.failed ? 2 : 0;
+    //
+    // `deferred` counts here for the same reason it counts in the DB row above:
+    // the user has nothing. Testing only 'failed' left the exit code saying
+    // clean while the row for that same run said error — one signal
+    // contradicting the other for one job, which is worse than either being
+    // wrong on its own.
+    return deliveryOutcome !== 'delivered' ? 3 : agentResult.failed ? 2 : 0;
   } catch (error) {
     const exitCode = await handleJobRunnerError(job, error, startTime, log);
     return exitCode;

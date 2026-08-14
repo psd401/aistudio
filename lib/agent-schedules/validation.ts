@@ -132,6 +132,87 @@ function validateCronFields(fields: string[]): void {
       "cron cannot specify both day-of-month and day-of-week",
     );
   }
+  validateCronFieldDomains(fields);
+}
+
+/** Numeric bound for a cron field, ignoring `*`, `?`, names, and step syntax. */
+function numericValuesOutOfRange(
+  field: string,
+  min: number,
+  max: number,
+): boolean {
+  if (!/^[\d*/,-]+$/.test(field)) return false;
+  for (const token of field.split(/[,/-]/)) {
+    if (token === "" || token === "*") continue;
+    const value = Number.parseInt(token, 10);
+    if (!Number.isInteger(value)) continue;
+    if (value < min || value > max) return true;
+  }
+  return false;
+}
+
+const DAY_OF_WEEK_NAME = /^(SUN|MON|TUE|WED|THU|FRI|SAT)/i;
+
+/**
+ * Reject an expression whose field COUNT is right but whose field VALUES are
+ * not EventBridge's.
+ *
+ * A 6-field count check alone accepts Quartz-style input, which carries a
+ * leading seconds field and so shifts every later field by one. That is how
+ * `cron(0 45 6 * ? MON-FRI)` — an agent's attempt at "6:45am on weekdays" —
+ * passed validation and reached EventBridge, which rejected it with
+ * `Invalid Schedule Expression` behind an opaque HTTP 502. One user retried it
+ * five times over two days (agent_failures 6507, 7053; broker logs
+ * 2026-08-12T19:10:58, 19:11:05, 19:11:12, 2026-08-13T14:53:27). The correct
+ * expression is `cron(45 6 ? * MON-FRI *)`.
+ *
+ * Checking the two fields that make the shift unmistakable — an hour above 23,
+ * and a day name where the year belongs — turns that into an actionable local
+ * error naming the likely cause, instead of a 502 from AWS.
+ */
+function validateCronFieldDomains(fields: string[]): void {
+  if (numericValuesOutOfRange(fields[0], 0, 59)) {
+    throw new AgentScheduleInputError("cron minute field must be 0-59");
+  }
+  if (
+    numericValuesOutOfRange(fields[1], 0, 23) ||
+    DAY_OF_WEEK_NAME.test(fields[5])
+  ) {
+    throw new AgentScheduleInputError(
+      "cron fields look shifted by one — EventBridge takes " +
+        "minute hour day-of-month month day-of-week year (6 fields, no " +
+        "seconds). For 6:45am on weekdays use cron(45 6 ? * MON-FRI *).",
+    );
+  }
+  if (numericValuesOutOfRange(fields[2], 1, 31)) {
+    throw new AgentScheduleInputError("cron day-of-month field must be 1-31");
+  }
+  if (numericValuesOutOfRange(fields[3], 1, 12)) {
+    throw new AgentScheduleInputError("cron month field must be 1-12");
+  }
+  // EventBridge requires `?` in exactly one of day-of-month / day-of-week; the
+  // two cannot both be concrete, and cannot both be `*`.
+  //
+  // This is the check that catches a shifted expression whose every value
+  // still happens to be in range, which the bounds above cannot. `cron(0 15 18
+  // * * *)` — an agent's "6:15pm daily" with a Quartz seconds field in front —
+  // reads to EventBridge as 15:00 on the 18th of the month. It was ACCEPTED,
+  // scheduled, and simply never fired at 6:15pm; the user was told the
+  // schedule existed and then got nothing, with lastRunStatus stuck at
+  // "never run" (agent_failures 7101). Silent wrong-time is worse than a
+  // rejection, because nobody looks for it.
+  //
+  // The 5-field path already sets `?` itself before reaching here, so this
+  // only ever fires on a pre-wrapped `cron(...)` the model built by hand.
+  if (fields[2] !== "?" && fields[4] !== "?") {
+    throw new AgentScheduleInputError(
+      "cron must use ? in exactly one of day-of-month / day-of-week. " +
+        "If you meant a daily time, the 5-field form is safer (e.g. " +
+        "`15 18 * * *` for 6:15pm daily) — the skill expands it correctly. " +
+        "A leading seconds field shifts everything by one: EventBridge takes " +
+        "minute hour day-of-month month day-of-week year.",
+    );
+  }
 }
 
 function normalizeWrappedScheduleExpression(expression: string): string | null {

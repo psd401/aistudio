@@ -94,6 +94,21 @@ const ALLOWED_WRITES = new Set([
   "gmail users drafts update",
   "gmail users labels create",
   "gmail users messages modify",
+  // Helper forms of writes already permitted in canonical form. Verified
+  // against the pinned gws v0.22.5 binary: `sheets +append` and `drive
+  // +upload` are real helpers, not model inventions. Each was refused with
+  // operation_not_allowed while its canonical twin was allowed, so the
+  // capability existed and only the documented spelling of it did not
+  // (agent_failures 5979, 7728). `sheets +append` is
+  // `sheets spreadsheets values append`; `drive +upload` is a
+  // `drive files create` carrying media, and is held to the same agent-only
+  // boundary below so it cannot author a file owned by the user.
+  "sheets +append",
+  "drive +upload",
+  // `tasks tasks insert` was allowed but creating the LIST to put tasks in was
+  // not, so a request for one list per person failed on all five calls
+  // (agent_failures 7134). Same resource family, same slot rules.
+  "tasks tasklists insert",
   "sheets spreadsheets batchupdate",
   "sheets spreadsheets create",
   "sheets spreadsheets values append",
@@ -138,6 +153,11 @@ const AGENT_ONLY_WRITES = new Set([
   "drive comments create",
   "drive files copy",
   "drive files create",
+  // The helper form of `drive files create` with media attached. It authors
+  // file CONTENT, so it sits on the same side of the impersonation boundary as
+  // the canonical create: on the user slot the file would be owned by the
+  // user, which is the thing that boundary exists to prevent.
+  "drive +upload",
   "drive permissions create",
   "drive accessproposals resolve",
   // A Form is authored content in exactly the sense a Doc, Sheet or Slides deck
@@ -151,6 +171,11 @@ const AGENT_ONLY_WRITES = new Set([
   "sheets spreadsheets batchupdate",
   "sheets spreadsheets create",
   "sheets spreadsheets values append",
+  // Helper spelling of `sheets spreadsheets values append`, which is agent-only
+  // directly above. Allowlisting the helper without this entry would have made
+  // the two spellings of one operation disagree about the impersonation
+  // boundary, and the helper is the spelling the model actually reaches for.
+  "sheets +append",
   "sheets spreadsheets values update",
   "slides presentations batchupdate",
   "slides presentations create",
@@ -256,6 +281,206 @@ function argumentValue(argv: readonly string[], flag: string): string | null {
   const index = argv.indexOf(flag)
   if (index === -1 || index === argv.length - 1) return null
   return argv[index + 1]
+}
+
+/**
+ * Expand the documented `gmail +draft` helper into the canonical
+ * `gmail users drafts create` call that the CLI actually implements.
+ *
+ * `+draft` does not exist in gws. Verified against the pinned v0.22.5 binary:
+ * the gmail helpers are `+send +triage +reply +reply-all +forward +read
+ * +watch`, and none of them accepts a `--draft` flag. The CLI answers
+ * `unrecognized subcommand +draft, tip: a similar subcommand exists: +read`.
+ *
+ * That left drafting working only by accident. `gmail users drafts create` is
+ * real and allowlisted, so an agent that happened to reach for the canonical
+ * form succeeded, while an agent following psd-workspace/SKILL.md — where
+ * `+draft` is the worked example in two places — always failed. Same request,
+ * different user, different outcome (agent_failures 1112, 1953, 5187, 6078
+ * across four users).
+ *
+ * Phase 1 permits drafting and forbids sending, so drafting must actually
+ * work. Building the RFC 5322 message here rather than in the model keeps
+ * Rule 9 intact: the agent calls the documented helper and never hand-rolls
+ * MIME, which is what it kept failing at when it tried.
+ *
+ * Only `+draft` is expanded. `+send`, `+reply`, `+reply-all` and `+forward`
+ * stay unimplemented and unallowlisted — this opens no path to putting mail on
+ * the wire.
+ */
+const DRAFT_ADDRESS_FLAGS = ["--to", "--cc", "--bcc"] as const
+const DRAFT_VALUE_FLAGS = [...DRAFT_ADDRESS_FLAGS, "--subject", "--body"] as const
+
+function isPrintableAscii(value: string): boolean {
+  return /^[\x20-\x7E]*$/.test(value)
+}
+
+function encodeHeaderValue(value: string): string {
+  // RFC 2047 for anything outside ASCII so a subject with an em dash or an
+  // accented name does not corrupt the header.
+  if (isPrintableAscii(value)) return value
+  return `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`
+}
+
+/** Split an address list on the commas that actually separate addresses. */
+function splitAddressList(value: string): string[] {
+  const addresses: string[] = []
+  let current = ""
+  let quoted = false
+  for (const character of value) {
+    if (character === '"') quoted = !quoted
+    if (character === "," && !quoted) {
+      addresses.push(current)
+      current = ""
+      continue
+    }
+    current += character
+  }
+  addresses.push(current)
+  return addresses.filter((address) => address.trim() !== "")
+}
+
+/**
+ * RFC 2047-encode the display-name half of an address header.
+ *
+ * `encodeHeaderValue` cannot be applied to an address header wholesale the way
+ * it is to a subject: the addr-spec has to stay machine-readable, and
+ * `=?UTF-8?B?...?=` wrapping `José <jose@psd401.net>` would leave Gmail
+ * nothing to deliver to. Only the display name is encodable, so only the
+ * display name is encoded — otherwise it ships as raw UTF-8 bytes, which is
+ * what the subject was already fixed not to do.
+ *
+ * A wholly-ASCII header is returned byte-for-byte, quoting and spacing intact
+ * — that is every realistic address this sees, and reformatting it would be
+ * all risk and no benefit. A bare non-ASCII addr-spec with no display name
+ * (the SMTPUTF8 case) is also left alone: encoding it would break it, and
+ * refusing it would reject an address Gmail itself accepts.
+ */
+function encodeAddressHeader(value: string): string {
+  if (isPrintableAscii(value)) return value
+  return splitAddressList(value)
+    .map((address) => {
+      const trimmed = address.trim()
+      if (isPrintableAscii(trimmed)) return trimmed
+      const angleAddress = /^(.*?)\s*(<[^>]*>)$/.exec(trimmed)
+      if (!angleAddress) return trimmed
+      const displayName = angleAddress[1].replace(/^"(.*)"$/, "$1")
+      const addrSpec = angleAddress[2]
+      if (displayName === "") return addrSpec
+      return `${encodeHeaderValue(displayName)} ${addrSpec}`
+    })
+    .join(", ")
+}
+
+/**
+ * Read the draft helper's own flags, rejecting a repeated flag rather than
+ * keeping the first occurrence and silently dropping the rest.
+ *
+ * `argumentValue` returns the first match, so `--to a@x --to b@y` — passing
+ * recipients as repeated flags instead of one comma-separated list, a
+ * plausible model habit — addressed only the first and lost the others with no
+ * error. That is the same silent-wrong-result shape the rest of this change
+ * set exists to remove.
+ *
+ * Scanning flag-by-flag rather than searching the whole argv also means a
+ * `--body` whose text happens to contain `--to` cannot be mistaken for one.
+ */
+function parseDraftFlags(argv: readonly string[]): {
+  values: Map<string, string>
+  html: boolean
+} {
+  const values = new Map<string, string>()
+  let html = false
+  for (let index = 2; index < argv.length; index += 1) {
+    // Named `argument`, not `token`: security/detect-possible-timing-attacks
+    // matches any identifier called token in an equality comparison, and this
+    // one is a command-line flag, not a credential.
+    const argument = argv[index]
+    if (argument === "--html") {
+      html = true
+      continue
+    }
+    if (!(DRAFT_VALUE_FLAGS as readonly string[]).includes(argument)) continue
+    if (values.has(argument)) {
+      throw new Error(
+        `Workspace draft ${argument} was given more than once; ` +
+          "pass a single comma-separated value"
+      )
+    }
+    const value = argv[index + 1]
+    if (value === undefined) {
+      throw new Error(`Workspace draft ${argument} requires a value`)
+    }
+    values.set(argument, value)
+    index += 1
+  }
+  return { values, html }
+}
+
+function assertNoHeaderInjection(flag: string, value: string): void {
+  // A CR or LF in a header value would let model-authored text open a new
+  // header (Bcc:, Content-Type:) or end the header block entirely.
+  if (/[\r\n]/.test(value)) {
+    throw new Error(
+      `Workspace draft ${flag} must not contain a line break`
+    )
+  }
+}
+
+export function expandGmailDraftHelper(argv: readonly string[]): string[] {
+  if (argv[0] !== "gmail" || argv[1] !== "+draft") return [...argv]
+
+  const { values, html: isHtml } = parseDraftFlags(argv)
+
+  const headers: string[] = []
+  for (const flag of DRAFT_ADDRESS_FLAGS) {
+    const value = values.get(flag)
+    if (value === undefined) continue
+    assertNoHeaderInjection(flag, value)
+    const name = flag === "--to" ? "To" : flag === "--cc" ? "Cc" : "Bcc"
+    headers.push(`${name}: ${encodeAddressHeader(value)}`)
+  }
+  if (!headers.some((header) => header.startsWith("To: "))) {
+    throw new Error("Workspace draft requires --to")
+  }
+
+  const subject = values.get("--subject")
+  if (subject !== undefined) {
+    assertNoHeaderInjection("--subject", subject)
+    headers.push(`Subject: ${encodeHeaderValue(subject)}`)
+  }
+
+  const body = values.get("--body") ?? ""
+  headers.push("MIME-Version: 1.0")
+  headers.push(
+    `Content-Type: text/${isHtml ? "html" : "plain"}; charset="UTF-8"`
+  )
+  // Without this the body goes out as raw UTF-8 bytes under an implied `7bit`,
+  // which is off-spec the moment a brief contains an em dash, an accented name
+  // or an emoji — all routine in this district's mail. base64 keeps the message
+  // 7-bit clean whatever the body holds.
+  headers.push("Content-Transfer-Encoding: base64")
+
+  // CRLF per RFC 5322, and base64url because that is what the Gmail API's
+  // `message.raw` field expects.
+  // The body is base64 because the header above declares it so; the whole
+  // message is then base64url because that is what the Gmail API's
+  // `message.raw` field takes. Two different encodings, two different reasons —
+  // line-wrapped at 76 chars per RFC 2045 so long bodies stay conformant.
+  const encodedBody = (Buffer.from(body, "utf8").toString("base64").match(/.{1,76}/g) ?? []).join("\r\n")
+  const mime = `${headers.join("\r\n")}\r\n\r\n${encodedBody}`
+  const raw = Buffer.from(mime, "utf8").toString("base64url")
+
+  return [
+    "gmail",
+    "users",
+    "drafts",
+    "create",
+    "--params",
+    JSON.stringify({ userId: "me" }),
+    "--json",
+    JSON.stringify({ message: { raw } }),
+  ]
 }
 
 function parseObjectArgument(argv: readonly string[], flag: string): Record<string, unknown> | null {
@@ -890,7 +1115,11 @@ export async function executeWorkspaceCommand(
     try {
       execFile(
         binary,
-        command.argv,
+        // Expanded AFTER validation, so the allowlist and every scope gate
+        // still judge the operation the model actually asked for
+        // (`gmail +draft`), while gws receives the canonical call it
+        // implements. A non-draft argv passes through untouched.
+        expandGmailDraftHelper(command.argv),
         {
           cwd: commandDirectory,
           env: {

@@ -130,23 +130,33 @@ node /opt/psd-skills/psd-workspace/run.js \
 # Create a draft on the user's account (lands in their Drafts folder, marker
 # is auto-appended to the body — they review and send themselves)
 #
-# CREATING DRAFTS IS SUPPORTED AND ALLOWED. If you conclude otherwise, you
-# have the command wrong — re-read this block instead of giving up or
-# hand-rolling a MIME payload.
+# CREATING DRAFTS IS SUPPORTED. Use exactly this form:
 #
-#   ✅ RIGHT:  --command "gmail +draft --to … --subject … --body …"
-#   ❌ WRONG:  --command "gws +draft …"        -> "unrecognized subcommand"
-#              `gws` is implied inside --command; naming it makes `gws` the
-#              subcommand. Never write `gws` inside --command.
-#   ❌ WRONG:  bare `gws …` as a shell command -> the image's gws is a wrapper
-#              that refuses direct calls. Always go through run.js.
-#   ❌ WRONG:  --command "gmail +send --draft" -> Phase-1 forbidden. `+send`
-#              is blocked whatever flags follow it. `+draft` is a DIFFERENT
-#              verb and is NOT blocked.
+#   ✅ --command "gmail +draft --to … --subject … --body …"
+#      Optional: --cc, --bcc, --html (body is HTML), or --body-file <abs-path>
+#      in place of --body.
 #
-# "Unrecognized subcommand" means you typed the wrong verb, NOT that drafting
-# is unavailable. On 2026-08-10 an agent hit that error, reported drafts as
-# impossible, and burned the turn writing a raw RFC5322 MIME script instead.
+# `+draft` is a PSD helper, not a gws one: the trusted broker expands it into
+# `gmail users drafts create` and builds the RFC 5322 message for you. Do not
+# hand-build a MIME/base64 payload — that is the broker's job, and Rule 9 says
+# not to replicate it. If you ever see "unrecognized subcommand +draft", the
+# expansion did not run: report it and stop rather than working around it.
+#
+#   ❌ --command "gws +draft …"   `gws` is implied inside --command; naming it
+#                                 makes `gws` the subcommand.
+#   ❌ bare `gws …` as a shell command — the image's gws is a wrapper that
+#      refuses direct calls. Always go through run.js.
+#   ❌ --command "gmail +send --draft"  `+send` is Phase-1 forbidden whatever
+#      flags follow, and no gws helper has a --draft flag. `+draft` is a
+#      different verb and is not blocked.
+#
+# History, so nobody re-derives it: gws itself has NO draft verb — its gmail
+# helpers are +send, +triage, +reply, +reply-all, +forward, +read, +watch, and
+# none takes --draft. Before 2026-08-13 this line documented `gmail +draft`
+# anyway, so drafting worked only for an agent that happened to use the
+# canonical `gmail users drafts create` instead, and failed for everyone who
+# followed this file (agent_failures 1112, 1953, 5187, 6078). The broker-side
+# expansion is what makes the documented command real.
 node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
   --command "gmail +draft --to principal@psd401.net --subject 'Follow up' --body 'Hi Bill,...'"
@@ -211,20 +221,21 @@ node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
   --command "gmail +draft --to bill@psd401.net --subject 'Follow up' --body-file /tmp/draft-body.txt"
 
-# NO BINARY EMAIL ATTACHMENTS. There is no supported way to attach a file to a
-# draft through this transport. A base64 audio/image part inside a raw
-# multipart/mixed MIME payload is rejected by the broker with
-# `workspace-command-rejected` / "Workspace command contains an invalid
-# argument" — that rejection is the transport refusing binary content, not a
-# malformed payload, so re-encoding it will not help.
+# NO BINARY EMAIL ATTACHMENTS on a draft. `+draft` builds a single-part text
+# (or --html) message; it takes no attachment flag. gws's own attachment
+# support (`-a/--attach`) exists only on +send/+reply/+forward, and all of
+# those are Phase-1 forbidden, so there is no reachable path that attaches a
+# file to mail.
 #
 # Deliver the file as a LINK instead, and say so plainly in the same turn:
 #   - audio from psd-tts, video from psd-hyperframes, images from psd-image-gen
 #     already return a public HTTPS URL — paste that URL in the draft body
-#   - anything else: upload to Drive with --scope agent, share it, link it
+#   - anything else: upload to Drive with `drive +upload --scope agent`, share
+#     it, and link it
 #
-# Do not attempt the MIME route first to "see if it works". It does not, and
-# on 2026-08-10 a user lost a turn to it before falling back to a link.
+# Do not hand-build a multipart/mixed MIME payload to get around this. It is
+# not a transport limitation you can re-encode past, and on 2026-08-10 a user
+# lost a turn to that attempt before falling back to a link.
 
 # Chat message text (+send) uses --text-file (replaces --text)
 # Only send after the user explicitly confirms the message. Chat writes must
