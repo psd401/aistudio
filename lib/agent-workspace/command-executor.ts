@@ -392,23 +392,26 @@ function parseDraftFlags(argv: readonly string[]): {
   const values = new Map<string, string>()
   let html = false
   for (let index = 2; index < argv.length; index += 1) {
-    const token = argv[index]
-    if (token === "--html") {
+    // Named `argument`, not `token`: security/detect-possible-timing-attacks
+    // matches any identifier called token in an equality comparison, and this
+    // one is a command-line flag, not a credential.
+    const argument = argv[index]
+    if (argument === "--html") {
       html = true
       continue
     }
-    if (!(DRAFT_VALUE_FLAGS as readonly string[]).includes(token)) continue
-    if (values.has(token)) {
+    if (!(DRAFT_VALUE_FLAGS as readonly string[]).includes(argument)) continue
+    if (values.has(argument)) {
       throw new Error(
-        `Workspace draft ${token} was given more than once; ` +
+        `Workspace draft ${argument} was given more than once; ` +
           "pass a single comma-separated value"
       )
     }
     const value = argv[index + 1]
     if (value === undefined) {
-      throw new Error(`Workspace draft ${token} requires a value`)
+      throw new Error(`Workspace draft ${argument} requires a value`)
     }
-    values.set(token, value)
+    values.set(argument, value)
     index += 1
   }
   return { values, html }
