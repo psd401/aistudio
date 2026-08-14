@@ -4,32 +4,103 @@
 # set by the package.json "prepare" script on `bun install`).
 #
 # Runs the authenticated Playwright E2E suite locally before every push (except
-# delete-only pushes — see below) — this replaces the GitHub E2E job, which a
-# clean CI runner cannot run without seeded data, provider keys, and a committed
-# AUTH_SECRET. See scripts/test/e2e-local.sh.
+# the skips below) — this replaces the GitHub E2E job, which a clean CI runner
+# cannot run without seeded data, provider keys, and a committed AUTH_SECRET.
+# See scripts/test/e2e-local.sh.
 #
 # Bypass one push intentionally: SKIP_E2E=1 git push
 set -uo pipefail
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 
-# Skip the suite when this push ONLY deletes refs — a deletion has nothing to
-# test, yet `git push origin --delete <branch>` would otherwise run the whole
-# E2E suite (a multi-minute hang for a no-op). Git feeds the pre-push hook one
-# line per ref on stdin: "<local ref> <local sha> <remote ref> <remote sha>".
-# A deletion sends an all-zero <local sha>. If every ref on stdin is all-zero,
-# this is a delete-only push, so skip. (No refs on stdin -> fall through and run,
-# the safe default.)
+# Git feeds the pre-push hook one line per ref on stdin:
+#   "<local ref> <local sha> <remote ref> <remote sha>"
+# Collect them all first; the checks below need more than one pass.
+refs=()
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  refs+=("$local_sha $remote_sha")
+done
+
+# No refs on stdin -> fall through and run, the safe default.
+if [ "${#refs[@]}" -eq 0 ]; then
+  exec bash "$ROOT/scripts/test/e2e-local.sh"
+fi
+
+# Skip when this push ONLY deletes refs — a deletion has nothing to test, yet
+# `git push origin --delete <branch>` would otherwise run the whole E2E suite
+# (a multi-minute hang for a no-op). A deletion sends an all-zero <local sha>.
 only_deletes=1
-saw_ref=0
-while read -r _local_ref local_sha _remote_ref _remote_sha; do
-  saw_ref=1
-  case "$local_sha" in
+for pair in "${refs[@]}"; do
+  case "${pair%% *}" in
     *[!0]*) only_deletes=0 ;; # any non-zero char => a real update; must test
   esac
 done
-if [ "$saw_ref" = 1 ] && [ "$only_deletes" = 1 ]; then
+if [ "$only_deletes" = 1 ]; then
   echo "pre-push: delete-only push — skipping E2E suite"
+  exit 0
+fi
+
+# Skip when nothing being pushed can affect the app the suite drives.
+#
+# The suite exercises the Next.js application. A push that only touches the
+# agent container, CDK, or documentation cannot change its behaviour, so
+# running it is the same multi-minute no-op the delete-only skip exists to
+# avoid — a push fixing a SKILL.md typo waited on the full authenticated suite.
+#
+# Deliberately conservative: this skips ONLY when EVERY changed file is in the
+# set below. A mixed push — say a skill plus a lib/ change — still runs the
+# suite, because the app file is what matters and majority-vote would have let
+# it through.
+#
+# Fails OPEN. Anything unexpected (a new branch with no remote counterpart, a
+# missing object after a rebase, a failed diff) runs the suite rather than
+# assuming it is safe to skip. A gate that silently stops running is worse than
+# a slow one.
+skippable_path() {
+  case "$1" in
+    infra/*|docs/*|openwiki/*|*.md) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+changed_files() {
+  local local_sha="$1" remote_sha="$2"
+  # New branch (all-zero remote sha): there is no remote counterpart to diff
+  # against, and guessing a base is how a skip goes wrong. Run the suite.
+  case "$remote_sha" in
+    *[!0]*) ;;
+    *) return 1 ;;
+  esac
+  git diff --name-only "$remote_sha" "$local_sha" 2>/dev/null || return 1
+}
+
+all_skippable=1
+for pair in "${refs[@]}"; do
+  local_sha="${pair%% *}"
+  remote_sha="${pair##* }"
+  # A deleted ref inside a mixed push carries no files to inspect.
+  case "$local_sha" in
+    *[!0]*) ;;
+    *) continue ;;
+  esac
+
+  files="$(changed_files "$local_sha" "$remote_sha")" || { all_skippable=0; break; }
+  # An empty diff means this ref pushes no file changes (e.g. an already-merged
+  # commit); there is nothing for the suite to exercise from it.
+  [ -z "$files" ] && continue
+
+  while IFS= read -r file; do
+    [ -z "$file" ] && continue
+    if ! skippable_path "$file"; then
+      all_skippable=0
+      break
+    fi
+  done <<< "$files"
+  [ "$all_skippable" = 0 ] && break
+done
+
+if [ "$all_skippable" = 1 ]; then
+  echo "pre-push: no application files changed (agent-image/infra/docs only) — skipping E2E suite"
   exit 0
 fi
 
