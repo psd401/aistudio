@@ -68,6 +68,19 @@ describe("expandGmailDraftHelper", () => {
         "gmail", "+draft", "--to", "a@b.c", "--subject", "hi\nBcc: evil@x.y",
       ])
     ).toThrow(/line break/)
+    // --cc and --bcc share the guard with --to, but "shares the code path" is
+    // an inference until it is asserted — and this is the check standing
+    // between model-authored text and a forged header.
+    expect(() =>
+      expandGmailDraftHelper([
+        "gmail", "+draft", "--to", "a@b.c", "--cc", "c@d.e\r\nBcc: evil@x.y",
+      ])
+    ).toThrow(/line break/)
+    expect(() =>
+      expandGmailDraftHelper([
+        "gmail", "+draft", "--to", "a@b.c", "--bcc", "f@g.h\nTo: evil@x.y",
+      ])
+    ).toThrow(/line break/)
   })
 
   it("requires --to", () => {
