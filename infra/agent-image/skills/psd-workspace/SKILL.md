@@ -85,6 +85,54 @@ with your file tools; no Drive access is involved. If the header instead marks
 the upload `download failed`, the fetch didn't work this time — tell the user
 and ask them to re-attach the file (or share it via Drive as a fallback).
 
+### Reading a Drive file's BYTES (PDF, .docx, .pptx, images)
+
+`drive files get --params '{"fileId":"…","alt":"media"}'` downloads the file in
+the trusted broker. The JSON you get back describes it — `{bytes, mimeType,
+saved_file}` — and now also carries a `media` object telling you where the bytes
+actually are:
+
+```json
+{"media": {"workspacePath": "downloads/download.pdf",
+           "downloadUrl": "https://…",
+           "requiredHeaders": {"Range": "bytes=0-481919"},
+           "bytes": 481920, "contentType": "application/pdf"}}
+```
+
+- **`media.workspacePath`** — the file inside YOUR private workspace. It is not
+  public: nothing here is ever written to the public `public-images/` prefix,
+  because a board agenda or IEP form must not become readable by anyone holding
+  a URL.
+- **`media.downloadUrl`** — a short-lived (about 2 minutes) presigned link to
+  the same object, so you can use it in THIS turn rather than waiting for the
+  next workspace sync. Treat it as a credential: never paste it into chat or
+  into a document.
+- **`media.requiredHeaders` is not optional.** The URL is signed for a bounded
+  request with `Range` in the signature, so a plain fetch fails on a
+  signature/range mismatch. Send the header exactly as given.
+
+To get text out of a PDF, hand the local copy to pdf-to-markdown:
+
+```bash
+node /opt/psd-skills/psd-workspace/run.js --user <caller> \
+  --command "drive files get --params '{\"fileId\":\"<id>\",\"alt\":\"media\"}'"
+# then fetch it WITH the required Range header, and convert the local copy:
+curl -fsS -H "Range: $(…media.requiredHeaders.Range…)" "$(…media.downloadUrl…)" \
+  -o /home/node/.openclaw/downloads/download.pdf
+/opt/agentcore-venv/bin/python3 /opt/psd-skills/psd-pdf-to-markdown/scripts/convert.py \
+  --path /home/node/.openclaw/downloads/download.pdf
+```
+
+A download replaces the previous one of the SAME type; a different type lands
+beside it (`download.pdf` and `download.png` can coexist). Process a file before
+fetching the next of that type, and use `media.workspacePath` rather than
+assuming a name. If `mediaError` is present the bytes could not be saved — say so and stop;
+do not try to re-download by another route.
+
+**Do not pass `-o`/`--output`.** It is refused by design (the broker will not
+write response data to a caller-named path), and it is not the way to get the
+file — `media` is.
+
 ## Invocation
 
 ### `--params` and `--json` are not interchangeable
@@ -293,7 +341,20 @@ These cannot be bypassed by phrasing. The skill returns exit code 13 with `statu
 - **Named person in the district:** `type: "user"`, `role: "reader"`, `"commenter"`, or `"writer"`, `emailAddress` ending `@psd401.net` — the caller or any district colleague. Writer is for explicitly named individuals only (e.g. each member of a team space, enumerated by name) — when a group needs to edit, grant each person, never the domain.
 - **Whole district, read-only:** `type: "domain"`, `domain: "psd401.net"`, `role: "reader"` — use when a doc's link is going into a shared Chat space so every member can open it.
 
-Never allowed: `type: "anyone"` or `"group"`, external addresses/domains, domain-wide `writer`, `owner` transfer, or any permission change on user-owned files.
+**Giving a file to the CALLER is unrestricted — including ownership.** The two
+shapes above bound what the agent may hand to *third parties*; they do not stand
+between it and its own owner. A share whose `emailAddress` is the caller is
+permitted in any role, `owner` included, with `transferOwnership: true`.
+
+Do that whenever a user asks to own, move, organize or delete something you
+made. Files you create are owned by your agent account, and Drive only lets an
+**owner** trash a file — so without the transfer the user cannot delete their own
+document and has to open an IT ticket (issue #1636, reported 2026-08-12).
+Offer the transfer when you hand over anything they will keep.
+
+Never allowed: `type: "anyone"` or `"group"`, external addresses/domains,
+domain-wide `writer`, `owner` transfer **to anyone other than the caller**, or
+any permission change on user-owned files.
 
 Examples:
 
@@ -301,6 +362,12 @@ Examples:
 # Hand an artifact back to the caller
 gws drive.permissions.create --scope agent --user hagelk@psd401.net \
   --json '{"fileId":"<id>","type":"user","role":"reader","emailAddress":"hagelk@psd401.net"}'
+
+# Give the caller OWNERSHIP, so they can organize and delete it themselves.
+# transferOwnership is a QUERY parameter, so it goes in --params, not --json.
+gws drive.permissions.create --scope agent --user hagelk@psd401.net \
+  --params '{"fileId":"<id>","transferOwnership":true}' \
+  --json '{"type":"user","role":"owner","emailAddress":"hagelk@psd401.net"}'
 
 # Make a doc readable district-wide before posting its link in a Chat space
 gws drive.permissions.create --scope agent --user hagelk@psd401.net \

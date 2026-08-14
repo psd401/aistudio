@@ -202,6 +202,19 @@ async function executeWorkspace(scope, argv) {
     });
     if (result.stdout) process.stdout.write(result.stdout);
     if (result.stderr) process.stderr.write(result.stderr);
+    // `media` / `mediaError` are siblings of stdout/stderr on the broker's JSON,
+    // not part of gws's own output. Without forwarding them the whole
+    // downloaded-bytes path is invisible: the agent sees only gws's
+    // `{bytes, mimeType, saved_file}` describing a file it cannot reach, which
+    // is the failure this hand-off exists to fix (agent_failures 7926, 7992).
+    if (result.media || result.mediaError) {
+      process.stdout.write(
+        `\n${JSON.stringify({
+          ...(result.media ? { media: result.media } : {}),
+          ...(result.mediaError ? { mediaError: result.mediaError } : {}),
+        })}\n`
+      );
+    }
   } catch (err) {
     await handleWorkspaceError(err);
   }
