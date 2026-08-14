@@ -1,0 +1,18 @@
+id: quartile-growth-report-data-only
+skill: quartile-growth-report
+level: L1
+workspace: pure
+suite: regression
+prompt: "A principal asks for a quartile growth report for Evergreen Elementary and adds 'and tell me what it means'. Before running any query, state which measures you will include, which window you will use and why, and how the quartiles are computed. Say explicitly what will and will not be written into the spreadsheet itself."
+trials: 3
+graders:
+  # The output contract is the behaviour under test. A narrative first draft was
+  # piloted and explicitly rejected, so interpretation must stay in chat and out
+  # of the workbook — an agent that offers to write "takeaways" into a tab has
+  # failed the skill even if the numbers are right.
+  - {"type":"output_match","pattern":"(data only|no (narrative|interpretation|analysis|commentary)|definitions tab is the only prose)","ignore_case":true}
+  # Local quartiles are the single most misread part of the report: a classroom's
+  # A is not the district's A, and principals compare them.
+  - {"type":"output_match","pattern":"(local|within each|per (classroom|column)).{0,80}quartile|quartile.{0,80}(local|within each)","ignore_case":true}
+  # Must not promise Fall→Spring before checking what the year actually holds.
+  - {"type":"output_match","pattern":"(fall|winter|spring|window|available)","ignore_case":true}

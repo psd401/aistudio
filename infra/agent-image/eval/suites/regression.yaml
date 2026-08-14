@@ -39,3 +39,4 @@ tasks:
   - ../../skills/psd-workflows/evals/confirm-before-submit.yaml
   - ../../skills/psd-workspace/evals/list-unread-mail.yaml
   - ../../skills/psd-workspace/evals/draft-email-not-send.yaml
+  - ../../skills/quartile-growth-report/evals/quartile-growth-report.yaml
