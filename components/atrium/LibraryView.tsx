@@ -54,11 +54,8 @@ const VIEWS = [
   { value: "home", label: "Home" },
   { value: "all", label: "All content" },
   { value: "favorites", label: "Favorites" },
-  { value: "mine", label: "Mine" },
-  { value: "others", label: "Everyone else" },
   { value: "document", label: "Docs" },
   { value: "artifact", label: "Artifacts" },
-  { value: "shared", label: "Shared with me" },
   { value: "unfiled", label: "Unfiled" },
   { value: "archived", label: "Archived" },
 ] as const;
@@ -70,26 +67,38 @@ const VIEWS = [
  * stay reachable from the home bands' "see all" links, and a chip for the active
  * view is added back in `LibraryChips` so the bar always shows where you are.
  *
- * "Mine" and "Everyone else" are primary despite that budget. An administrator
- * sees the whole district here, so the unfiltered library is mostly other
- * people's work and the first question on opening it is always "which of this
- * is mine?". Leaving the answer off the bar (it was reachable only from a home
- * band) made the one view that makes the library usable at admin scale the one
- * view nobody could find.
- *
- * Status and creator are deliberately NOT chips — see `LibraryChips`.
+ * Ownership is deliberately NOT here — see `OWNER_FILTERS`.
  */
 const PRIMARY_VIEWS: readonly LibraryFilterView[] = [
   "home",
   "all",
-  "mine",
-  "others",
   "favorites",
   "document",
   "artifact",
-  "shared",
   "archived",
 ];
+
+/**
+ * Ownership filter, applied ORTHOGONALLY to the view chips.
+ *
+ * These began life as chips, which was wrong: chips are single-select, so
+ * picking "Mine" meant giving up "Docs", and "show me MY docs" — the single
+ * most common question an administrator asks of a district-wide library — was
+ * the one combination the bar could not express. Same mistake, and same fix, as
+ * status and creator below.
+ *
+ * "Everyone else" is broader than "Shared with me" and they are not
+ * complements: shared additionally requires group/private visibility, so
+ * "others" is a superset of it.
+ */
+const OWNER_FILTERS = [
+  { value: "any", label: "Anyone" },
+  { value: "mine", label: "Mine" },
+  { value: "others", label: "Everyone else" },
+  { value: "shared", label: "Shared with me" },
+] as const;
+
+type LibraryOwnerFilter = (typeof OWNER_FILTERS)[number]["value"];
 
 /**
  * Lifecycle filter, applied ORTHOGONALLY to the view chips.
@@ -371,6 +380,8 @@ function LibraryChips({
   tag,
   onTag,
   tagSuggestions,
+  owner,
+  onOwner,
   status,
   onStatus,
   actor,
@@ -382,6 +393,8 @@ function LibraryChips({
   tag: string;
   onTag: (v: string) => void;
   tagSuggestions: string[];
+  owner: LibraryOwnerFilter;
+  onOwner: (v: LibraryOwnerFilter) => void;
   status: LibraryStatusFilter;
   onStatus: (v: LibraryStatusFilter) => void;
   actor: LibraryActorFilter;
@@ -413,6 +426,19 @@ function LibraryChips({
           chip row's overflow scrolling on narrow screens. Two fixed, tiny
           option lists need no combobox.
         */}
+        <select
+          aria-label="Filter by owner"
+          className="mer-chip-select"
+          value={owner}
+          onChange={(e) => onOwner(e.target.value as LibraryOwnerFilter)}
+          data-testid="library-owner-filter"
+        >
+          {OWNER_FILTERS.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
         <select
           aria-label="Filter by status"
           className="mer-chip-select"
@@ -482,7 +508,6 @@ function LibraryChips({
  */
 function viewToFilter(view: LibraryFilterView): {
   kind?: ContentKind;
-  owner?: "shared" | "mine" | "others";
   status?: "archived";
   filed?: "unfiled";
   favorite?: true;
@@ -492,12 +517,6 @@ function viewToFilter(view: LibraryFilterView): {
       return { kind: "document" };
     case "artifact":
       return { kind: "artifact" };
-    case "shared":
-      return { owner: "shared" };
-    case "mine":
-      return { owner: "mine" };
-    case "others":
-      return { owner: "others" };
     case "favorites":
       return { favorite: true };
     case "unfiled":
@@ -563,7 +582,6 @@ function resolveView(
 ): {
   effectiveView: LibraryFilterView;
   kind?: ContentKind;
-  owner?: "shared" | "mine" | "others";
   status?: "archived";
   filed?: "unfiled";
   favorite?: true;
@@ -749,6 +767,32 @@ function useLibrarySelection() {
   return { selected, clearSelection, toggleSelect, removeFromSelection };
 }
 
+/**
+ * Translate a home band's "see all" target into filter state.
+ *
+ * "mine" is no longer a VIEW — ownership became an orthogonal select so it can
+ * combine with Docs/Artifacts — so the band's intent is expressed as the pair
+ * it always meant: the full grid, filtered to this person's content.
+ *
+ * Extracted from `LibraryView` to keep it under the max-lines lint.
+ */
+function useSeeAllHandler(
+  setView: (v: LibraryFilterView) => void,
+  setOwnerFilter: (v: LibraryOwnerFilter) => void
+): (target: "all" | "mine" | "unfiled" | "favorites") => void {
+  return useCallback(
+    (target) => {
+      if (target === "mine") {
+        setView("all");
+        setOwnerFilter("mine");
+        return;
+      }
+      setView(target);
+    },
+    [setView, setOwnerFilter]
+  );
+}
+
 export interface LibraryViewProps {
   /**
    * The cross-origin sandbox render URL, resolved SERVER-SIDE
@@ -781,6 +825,7 @@ export function LibraryView({
   const [tag, setTag] = useState("");
   const [search, setSearch] = useState("");
   // Orthogonal to the view chips — see STATUS_FILTERS / ACTOR_FILTERS.
+  const [ownerFilter, setOwnerFilter] = useState<LibraryOwnerFilter>("any");
   const [statusFilter, setStatusFilter] = useState<LibraryStatusFilter>("any");
   const [actorFilter, setActorFilter] = useState<LibraryActorFilter>("any");
   const searchRef = useRef<HTMLInputElement>(null);
@@ -815,7 +860,7 @@ export function LibraryView({
   } = useLibraryCreate(collectionId);
 
   // Derive the server filter from the active chip.
-  const { effectiveView, kind, owner, status, filed, favorite, archivedView, homeView } =
+  const { effectiveView, kind, status, filed, favorite, archivedView, homeView } =
     resolveView(view, searching);
 
   // The Archived VIEW wins over the status SELECT: it is itself a status
@@ -826,6 +871,8 @@ export function LibraryView({
     : statusFilter === "any"
       ? undefined
       : statusFilter;
+
+  const handleSeeAll = useSeeAllHandler(setView, setOwnerFilter);
 
   const tagSuggestions = useTagSuggestions(debouncedTag);
 
@@ -842,7 +889,7 @@ export function LibraryView({
   } = useLibraryPage({
       collectionId: collectionId ?? undefined,
       kind,
-      owner,
+      owner: ownerFilter === "any" ? undefined : ownerFilter,
       status: effectiveStatus,
       filed,
       favorite,
@@ -907,6 +954,8 @@ export function LibraryView({
           tag={tag}
           onTag={setTag}
           tagSuggestions={tagSuggestions}
+          owner={ownerFilter}
+          onOwner={setOwnerFilter}
           status={statusFilter}
           onStatus={setStatusFilter}
           actor={actorFilter}
@@ -915,7 +964,7 @@ export function LibraryView({
         />
 
         {homeView ? (
-          <LibraryHome onSeeAll={setView} />
+          <LibraryHome onSeeAll={handleSeeAll} />
         ) : (
           <>
         <LibraryBulkBar
