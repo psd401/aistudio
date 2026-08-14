@@ -102,17 +102,20 @@ async function approvableCollectionIds(
 }
 
 /**
- * Resolve the session into someone allowed to DECIDE this specific request:
- * a district administrator, or an approver of the collection the request's
- * object lives in.
+ * Coarse eligibility, checked BEFORE any request row is loaded.
  *
- * Also enforces segregation of duties — nobody decides their own request, not
- * even an administrator. This cannot strand a request: the person who raised it
- * was, by definition, not an approver at raise time (an approver's publish is
- * never queued), so someone else always exists who can act on it.
+ * Migration 178 made the per-request decider set depend on the request's
+ * collection, which means the row has to be read before the precise check can
+ * run. Done naively that hands an unauthorized caller an existence oracle: a
+ * bad id 404s while a real id they cannot decide returns "forbidden", so they
+ * can enumerate valid request ids. This restores the old uniform rejection for
+ * anyone who cannot decide ANYTHING, without giving up the per-collection
+ * roster.
+ *
+ * Callers who clear this still cannot learn about requests outside their own
+ * sections — `assertMayDecide` folds that case into the not-found response.
  */
-async function requireDeciderFor(
-  request: ContentPublishRequestRow,
+async function requireEligibleDecider(
   requestId: string,
   operation: string
 ): Promise<AdminRequester> {
@@ -120,7 +123,34 @@ async function requireDeciderFor(
   if (requester.kind !== "user") {
     throw ErrorFactories.authzAdminRequired(operation);
   }
+  const approvable = await approvableCollectionIds(requester);
+  // `null` = administrator (decides anything). An empty set = approves nothing.
+  if (approvable != null && approvable.size === 0) {
+    throw ErrorFactories.authzAdminRequired(operation);
+  }
+  return requester;
+}
 
+/**
+ * The precise per-request check, run once the row is loaded.
+ *
+ * An eligible caller who may not decide THIS request is answered exactly like
+ * one asking about a request that does not exist — same error, same shape — so
+ * clearing the coarse gate does not turn into an oracle for other sections'
+ * queues.
+ *
+ * Self-approval is the one deliberate exception to that masking: the requester
+ * obviously knows their own request exists, so a specific message costs nothing
+ * and a generic "not found" would just be baffling. It enforces segregation of
+ * duties and cannot strand anything — whoever raised a request was by
+ * definition not an approver at raise time, since an approver's publish is
+ * never queued.
+ */
+async function assertMayDecide(
+  requester: AdminRequester,
+  request: ContentPublishRequestRow,
+  id: string
+): Promise<void> {
   if (
     request.requestedByUserId != null &&
     request.requestedByUserId === requester.userId
@@ -130,31 +160,29 @@ async function requireDeciderFor(
     );
   }
 
-  if (requester.isAdmin) return requester;
+  if (requester.isAdmin) return;
 
-  // Non-admin: must be an approver of THIS request's collection. An
+  // Non-admin: must approve the collection THIS request's object lives in. An
   // object-less request (`export`) has no collection to derive a roster from,
   // so it stays administrator-only.
   const objectId = request.objectId;
-  if (!objectId) throw ErrorFactories.authzAdminRequired(operation);
-  const [obj] = await executeQuery(
-    (db) =>
-      db
-        .select({ collectionId: contentObjects.collectionId })
-        .from(contentObjects)
-        .where(eq(contentObjects.id, objectId))
-        .limit(1),
-    "atrium.approvals.loadRequestCollection"
-  );
+  const [obj] = objectId
+    ? await executeQuery(
+        (db) =>
+          db
+            .select({ collectionId: contentObjects.collectionId })
+            .from(contentObjects)
+            .where(eq(contentObjects.id, objectId))
+            .limit(1),
+        "atrium.approvals.loadRequestCollection"
+      )
+    : [undefined];
+
   const allowed = await approvableCollectionIds(requester);
-  if (
-    allowed == null ||
-    !obj?.collectionId ||
-    !allowed.has(obj.collectionId)
-  ) {
-    throw ErrorFactories.authzAdminRequired(operation);
+  if (allowed == null || !obj?.collectionId || !allowed.has(obj.collectionId)) {
+    // Deliberately the NOT-FOUND error, not a forbidden one — see the docblock.
+    throw ErrorFactories.dbRecordNotFound("content_publish_requests", id);
   }
-  return requester;
 }
 
 /**
@@ -436,15 +464,18 @@ export async function approvePublishRequestAction(
       id,
       hasNote: Boolean(note),
     });
-    // Load BEFORE the authorization check: who may decide depends on which
-    // collection the request's object sits in, so the row is an input to the
-    // gate rather than something read after passing it.
-    const request = await loadRequest(id);
-    const requester = await requireDeciderFor(
-      request,
+    // Coarse gate FIRST, so a caller who can decide nothing is rejected without
+    // the row load ever happening — otherwise "bad id" and "real id I may not
+    // touch" answer differently and become an enumeration oracle.
+    const requester = await requireEligibleDecider(
       requestId,
       "approvePublishRequest"
     );
+    // Then the row, then the precise per-request check: who may decide depends
+    // on which collection the object sits in, so the row is an INPUT to that
+    // gate rather than something read after passing it.
+    const request = await loadRequest(id);
+    await assertMayDecide(requester, request, id);
 
     if (request.status !== "pending") {
       throw ErrorFactories.invalidInput(
@@ -551,14 +582,13 @@ export async function denyPublishRequestAction(
 
   try {
     log.info("Action started: deny publish request", { id });
-    // Loaded before the gate for the same reason as approve: the decider set
-    // is derived from the request's collection.
-    const request = await loadRequest(id);
-    const requester = await requireDeciderFor(
-      request,
+    // Same ordering as approve, for the same reason — see there.
+    const requester = await requireEligibleDecider(
       requestId,
       "denyPublishRequest"
     );
+    const request = await loadRequest(id);
+    await assertMayDecide(requester, request, id);
 
     if (!note?.trim()) {
       throw ErrorFactories.missingRequiredField("note");

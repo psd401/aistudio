@@ -182,6 +182,51 @@ describe("authorization gating", () => {
     expect(labelCalls("atrium.approvals.markDenied")).toBe(0);
   });
 
+  it("does not load the request at all for a caller who can decide nothing", async () => {
+    // Existence masking. The per-request decider set depends on the request's
+    // collection, so the row has to be read before the precise check — done
+    // naively that lets an unauthorized caller tell "bad id" (not found) from
+    // "real id I may not touch" (forbidden) and enumerate valid request ids.
+    // A caller who approves nothing must be turned away before the read.
+    getUserRequesterMock.mockResolvedValue(NON_ADMIN);
+
+    const result = await approvePublishRequestAction("req-1");
+    expect(result.isSuccess).toBe(false);
+    expect(labelCalls("atrium.approvals.load")).toBe(0);
+  });
+
+  it("answers an eligible approver the same way for a foreign request and a missing one", async () => {
+    // This caller approves SOMETHING (so they clear the coarse gate) but not
+    // the collection this request belongs to. They must not be able to tell it
+    // apart from a request id that does not exist.
+    getUserRequesterMock.mockResolvedValue(NON_ADMIN);
+    collectionAccessSnapshotMock.mockResolvedValue({
+      collections: [{ id: "col-other", requiresApproval: true }],
+      byId: new Map(),
+      directGrants: new Map(),
+      effectiveGrants: () => [],
+      allowedCollectionIds: new Set(),
+      selectableCollectionIds: new Set(),
+    });
+    isCollectionApproverMock.mockReturnValue(true);
+    // The request's object lives in a DIFFERENT collection.
+    queryResults.set("atrium.approvals.loadRequestCollection", [
+      { collectionId: "col-not-mine" },
+    ]);
+
+    const foreign = await approvePublishRequestAction("req-1");
+    expect(foreign.isSuccess).toBe(false);
+
+    // Same shape as a genuinely absent row.
+    queryResults.set("atrium.approvals.load", []);
+    const missing = await approvePublishRequestAction("req-1");
+    expect(missing.isSuccess).toBe(false);
+    expect(foreign.message).toBe(missing.message);
+
+    expect(publishMock).not.toHaveBeenCalled();
+    expect(labelCalls("atrium.approvals.claimApprove")).toBe(0);
+  });
+
   it("lets a non-admin approver of the request's collection decide it", async () => {
     getUserRequesterMock.mockResolvedValue(NON_ADMIN);
     // This caller approves the collection the request's object lives in.

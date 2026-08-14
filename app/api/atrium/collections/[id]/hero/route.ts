@@ -17,12 +17,9 @@
  */
 
 import { NextRequest } from "next/server";
-import { eq } from "drizzle-orm";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
-import { executeQuery } from "@/lib/db/drizzle-client";
-import { contentCollections } from "@/lib/db/schema";
 import { s3Store } from "@/lib/content/storage/s3-store";
-import { requesterMayViewCollection } from "@/lib/content/collection-access";
+import { collectionAccessSnapshot } from "@/lib/content/collection-access";
 import { getOptionalRequester } from "@/actions/db/atrium/requester";
 import { MAX_HERO_IMAGE_BYTES } from "@/lib/content/collection-hero-service";
 
@@ -50,36 +47,37 @@ export async function GET(
   try {
     const requester = await getOptionalRequester(requestId);
 
+    // ONE snapshot answers both questions. It already carries every collection
+    // row (including `heroImageKey`), so the access check and the key lookup
+    // come from the same read rather than a permission call followed by a
+    // second query for a column we were already holding — this is the hot path
+    // for every section landing page.
+    //
+    // Taking the key from the snapshot rather than the request is also what
+    // keeps this route from being an arbitrary S3 read primitive.
+    const access = await collectionAccessSnapshot(requester);
+    const collection = access.byId.get(id);
+
     // Existence masking: a collection the caller may not enter is reported the
     // same as one that does not exist, matching every other Atrium read path.
-    if (!(await requesterMayViewCollection(requester, id))) {
+    if (!collection || !access.allowedCollectionIds.has(id)) {
       timer({ status: "error", reason: "forbidden" });
       return new Response("Not Found", { status: 404 });
     }
-
-    const [row] = await executeQuery(
-      (db) =>
-        db
-          .select({ heroImageKey: contentCollections.heroImageKey })
-          .from(contentCollections)
-          .where(eq(contentCollections.id, id))
-          .limit(1),
-      "atrium.collectionHero.loadKey"
-    );
-    if (!row?.heroImageKey) {
+    if (!collection.heroImageKey) {
       timer({ status: "success", reason: "no-image" });
       return new Response("Not Found", { status: 404 });
     }
 
     const bytes = await s3Store.getBytesBounded(
-      row.heroImageKey,
+      collection.heroImageKey,
       MAX_HERO_IMAGE_BYTES
     );
 
     timer({ status: "success" });
     return new Response(Buffer.from(bytes), {
       headers: {
-        "Content-Type": contentTypeFor(row.heroImageKey),
+        "Content-Type": contentTypeFor(collection.heroImageKey),
         "Content-Length": String(bytes.byteLength),
         // PRIVATE, not public: a personal collection's artwork must never be
         // cached by a shared proxy where the next viewer's access check is

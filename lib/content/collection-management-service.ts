@@ -934,8 +934,28 @@ async function updateCollectionInTx(
     .update(contentCollections)
     .set(collectionUpdateValues(input, normalized, parentId))
     .where(eq(contentCollections.id, collectionId));
+  // Un-sharing a personal collection CLEARS its grants, even when the caller
+  // sent only `defaultVisibilityLevel`.
+  //
+  // `updateCollectionBodySchema` is `.partial()`, so `{"defaultVisibilityLevel":
+  // "private"}` is a legal patch on its own, and `replaceGrants` below runs
+  // only when grants were explicitly supplied. Without this the rows would
+  // survive the transition — and a later flip back to `group` would silently
+  // resurrect a roster the owner believed they had dismantled. (The UI already
+  // clears them client-side; this covers REST/MCP and anything added later.)
+  //
+  // `personalCollectionAccess` independently refuses to honour grants on a
+  // `private` collection, so access is already revoked at the read path — this
+  // keeps the DATA honest rather than leaving invisible rows behind.
+  const unsharingPersonal =
+    scope === "private" &&
+    input.defaultVisibilityLevel === "private" &&
+    existing.defaultVisibilityLevel === "group";
+
   if (normalized.grants !== undefined) {
     await replaceGrants(tx, collectionId, normalized.grants);
+  } else if (unsharingPersonal) {
+    await replaceGrants(tx, collectionId, []);
   }
   await applyArchiveState(tx, rows, collectionId, input.archived);
 }

@@ -124,6 +124,36 @@ describe("personal collection access (migration 178)", () => {
     expect(snapshot.selectableCollectionIds.has("mine")).toBe(false);
   });
 
+  it("revokes a shared collection the moment its level returns to private", () => {
+    // The grant rows still exist — a level-only PATCH (updateCollectionBodySchema
+    // is .partial(), so {"defaultVisibilityLevel":"private"} is legal on its
+    // own) would not have touched them. Access must be gone anyway: the owner
+    // believes the collection is locked down and it reads as private in the UI,
+    // so honouring stale rows here would be a silent failure.
+    //
+    // The service also clears grants on that transition; this proves the READ
+    // path holds the line independently of any write path.
+    const rows = [personal("mine", { defaultVisibilityLevel: "private" })];
+    const grants = new Map<string, CollectionGrant[]>([
+      ["mine", [{ access: "view", kind: "user", value: "8" }]],
+    ]);
+
+    expect(snapshotFor(grantee, rows, grants).allowedCollectionIds.has("mine")).toBe(false);
+    // …and the owner is of course unaffected.
+    expect(snapshotFor(owner, rows, grants).allowedCollectionIds.has("mine")).toBe(true);
+  });
+
+  it("ignores a stale create grant on a private-level personal collection", () => {
+    const rows = [personal("mine", { defaultVisibilityLevel: "private" })];
+    const grants = new Map<string, CollectionGrant[]>([
+      ["mine", [{ access: "create", kind: "user", value: "8" }]],
+    ]);
+    const snapshot = snapshotFor(grantee, rows, grants);
+
+    expect(snapshot.allowedCollectionIds.has("mine")).toBe(false);
+    expect(snapshot.selectableCollectionIds.has("mine")).toBe(false);
+  });
+
   it("never inherits grants into a personal tree from a district ancestor", () => {
     // Cross-scope parents are rejected at write time, but the resolver must not
     // rely on that: a legacy or hand-edited row must still not inherit.

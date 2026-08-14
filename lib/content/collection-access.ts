@@ -364,6 +364,22 @@ function personalCollectionAccess(
   if (ownerUserId != null && collection.ownerUserId === ownerUserId) {
     return { mayView: true, mayCreate: true };
   }
+
+  // A personal collection at `private` is OWNER-ONLY, whatever grant rows
+  // happen to exist. `private` is the level's plain meaning, and this is the
+  // single read path every surface goes through — so an owner who locks their
+  // collection back down has revoked access the moment the level changes, and
+  // no write path (REST, MCP, a future caller) can leave someone in by
+  // omitting `grants` from the patch.
+  //
+  // The service ALSO clears grants on that transition, so there is normally
+  // nothing here to ignore. This is the invariant; that is data hygiene. Both
+  // exist because the failure mode is silent: the owner believes the
+  // collection is private and it reads as private everywhere in the UI.
+  if (collection.defaultVisibilityLevel !== "group") {
+    return { mayView: false, mayCreate: false };
+  }
+
   const own = directGrants.get(collection.id) ?? [];
   const matches = (access: CollectionGrantAccess): boolean =>
     own.some(

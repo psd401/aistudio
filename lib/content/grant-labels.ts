@@ -25,9 +25,17 @@ import { executeQuery, type DrizzleDB } from "@/lib/db/drizzle-client";
 import { users } from "@/lib/db/schema";
 import type { VisibilityGrant } from "./types";
 
-/** The key a label is filed under: `${kind}:${value}`. */
-export function grantLabelKey(grant: VisibilityGrant): string {
-  return `${grant.kind}:${grant.value}`;
+/**
+ * The key a label is filed under: `${kind}:${value}`.
+ *
+ * NOT exported. The client components that also build this key
+ * (`VisibilityChip`'s `addGrant` and `grantDisplay`) cannot import from this
+ * module — it pulls in Drizzle and the DB client — so exporting it would
+ * advertise a shared contract that only one side can actually use. The format
+ * is two segments and stable; both sides document it.
+ */
+function grantLabelKey(kind: string, value: string): string {
+  return `${kind}:${value}`;
 }
 
 /**
@@ -84,7 +92,9 @@ export async function resolveGrantLabels(
     // A row with neither a name nor an email contributes NO entry, so the UI
     // falls through to its own fallback copy rather than showing a blank chip.
     const label = name.length > 0 ? name : (row.email ?? "");
-    if (label.length > 0) labels[`user:${row.id}`] = label;
+    if (label.length > 0) {
+      labels[grantLabelKey("user", String(row.id))] = label;
+    }
   }
   return labels;
 }
