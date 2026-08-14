@@ -35,37 +35,17 @@ import collections
 import json
 import os
 import sys
-import types
 import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-# `_process_once` does `import websocket` at call time and references
-# `websocket.WebSocketTimeoutException`. The package is not a test dependency
-# (the container installs it), so stand in a module exposing just that name.
-# create_connection is never reached — `_open_gateway_socket` is patched — but
-# it raises rather than returning a mock so a patching mistake fails loudly
-# instead of silently opening nothing.
-_websocket_stub = types.ModuleType("websocket")
+import harness_adapter  # noqa: E402
+from harness_adapter import OpenClawAdapter  # noqa: E402
 
 
 class _FakeTimeout(Exception):
     """Stands in for websocket.WebSocketTimeoutException (an idle gap)."""
-
-
-def _refuse_connect(*_args, **_kwargs):
-    raise AssertionError(
-        "create_connection reached — _open_gateway_socket was not patched"
-    )
-
-
-_websocket_stub.WebSocketTimeoutException = _FakeTimeout
-_websocket_stub.create_connection = _refuse_connect
-sys.modules.setdefault("websocket", _websocket_stub)
-
-import harness_adapter  # noqa: E402
-from harness_adapter import OpenClawAdapter  # noqa: E402
 
 
 def agent_event(stream, data):
@@ -194,9 +174,18 @@ def replay(agent_events):
         "cache_write": 0,
     }
 
-    with mock.patch.object(
-        OpenClawAdapter, "_open_gateway_socket", staticmethod(lambda *_: gateway)
-    ), mock.patch.object(
+    # `_process_once` does `import websocket` at call time and references
+    # `websocket.WebSocketTimeoutException`. The package is not a test
+    # dependency (only the container installs it), so inject a module for the
+    # duration of the call — scoped, so it neither depends on nor disturbs
+    # whatever else is in sys.modules. Handing the socket back through
+    # create_connection means `_open_gateway_socket` runs for real rather than
+    # being patched out.
+    fake_websocket = mock.Mock()
+    fake_websocket.create_connection.return_value = gateway
+    fake_websocket.WebSocketTimeoutException = _FakeTimeout
+
+    with mock.patch.dict(sys.modules, {"websocket": fake_websocket}), mock.patch.object(
         OpenClawAdapter, "_read_turn_usage", return_value=zero_usage
     ), mock.patch.object(
         # Failure paths POST telemetry to the broker; without this the abort
