@@ -26,8 +26,19 @@
  * ## Content safety
  *
  * Generated hero images are NOT guardrail-screened (Hagel, 2026-08-14: authors
- * self-discern). Generation is limited to people who can already edit the
- * section, and every image is attributable through the audit log.
+ * self-discern), and every image is attributable through the audit log.
+ *
+ * ## Neither function here authorizes anything
+ *
+ * Both take a `collectionId` and act on it. The permission check lives in
+ * `setCollectionHeroImageAction`, which calls
+ * `collectionManagementService.assertMaySetSectionCopy` BEFORE either of them —
+ * deliberately before, because both spend real resources (an S3 write, a paid
+ * model call) and a check that runs afterwards cannot prevent the cost.
+ *
+ * Any NEW caller must do the same. Reaching these functions without that check
+ * hands every signed-in account a storage- and spend-abuse vector against
+ * arbitrary collection ids.
  */
 
 import { randomUUID } from "node:crypto";

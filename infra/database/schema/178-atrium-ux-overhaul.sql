@@ -39,8 +39,10 @@
 -- 1. Section hero art
 -- ---------------------------------------------------------------------------
 -- The S3 object key, not a URL: presigned URLs expire and CDN hosts move, so
--- the durable identifier is the key and the read path resolves it through the
--- existing /api/images/[...key] route. Length 512 matches the key ceiling used
+-- the durable identifier is the key. It is resolved by a DEDICATED route,
+-- GET /api/atrium/collections/{id}/hero, which re-checks collection access and
+-- reads this column itself — NOT by /api/images/[...key], which authorizes by
+-- conversation ownership and would 404 every hero. Length 512 matches the key ceiling used
 -- by the other S3-backed columns in this schema.
 ALTER TABLE content_collections
   ADD COLUMN IF NOT EXISTS hero_image_key varchar(512);

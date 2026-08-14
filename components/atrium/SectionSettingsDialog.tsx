@@ -339,7 +339,6 @@ export function SectionSettingsDialog({
     })();
   }, [collectionId, description, landingObjectId, router]);
 
-
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>

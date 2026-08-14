@@ -10,11 +10,17 @@
  * a section they contribute to — the same rule that already governs the
  * section description. A personal collection's owner may set them on their own.
  *
- * The image bytes are stored BEFORE the update call, so a rejected update
- * leaves an orphaned object rather than a collection row pointing at bytes that
- * were never written. Orphans are inert (nothing serves a key no row
- * references) and are reaped by the bucket lifecycle rule; the inverse — a row
- * pointing at a missing key — would render a broken hero on a live page.
+ * Ordering, which matters twice over:
+ *
+ *  1. AUTHORIZE, then spend. `assertMaySetSectionCopy` runs before any S3 write
+ *     or image-generation call. Relying on `update`'s own check afterwards let
+ *     any signed-in account burn storage and paid generation against any
+ *     collectionId; the rejection arrived after the cost.
+ *  2. WRITE the row, then delete the old object. Each hero write uses a new
+ *     key, so the previous object is the live image until the row points at
+ *     its replacement — deleting first would break a live section if the
+ *     update then failed. The reverse leak (a row pointing at bytes that were
+ *     never written) cannot happen, because the store completes first.
  */
 
 import {
@@ -24,6 +30,7 @@ import {
 } from "@/lib/logger";
 import { createSuccess, handleError } from "@/lib/error-utils";
 import { collectionManagementService } from "@/lib/content/collection-management-service";
+import { s3Store } from "@/lib/content/storage/s3-store";
 import {
   generateHeroImage,
   storeHeroImageFromDataUrl,
@@ -67,6 +74,36 @@ function requesterUserId(req: Requester): number {
   );
 }
 
+/**
+ * Delete the hero image a change just superseded.
+ *
+ * Called only AFTER the collection row has been updated, never before. Every
+ * hero write stores a NEW key rather than overwriting, so until the row points
+ * at the replacement the old object is still the live image — deleting first
+ * would leave a broken hero on a live section if the update then failed.
+ *
+ * Best-effort: a failed delete leaks one S3 object, which is strictly better
+ * than failing a change the user already sees as applied. The bucket's
+ * lifecycle rules are storage-class TRANSITIONS and multi-year retention, not
+ * orphan cleanup, so without this every replace and clear would leak
+ * indefinitely.
+ */
+async function deleteSupersededHero(
+  key: string | null,
+  collectionId: string,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  if (!key) return;
+  try {
+    await s3Store.deleteKey(key);
+  } catch (error) {
+    log.warn("Could not delete the superseded hero image", {
+      collectionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 export async function setCollectionHeroImageAction(
   collectionId: string,
   input: {
@@ -95,12 +132,18 @@ export async function setCollectionHeroImageAction(
     const requester = await getUserRequester(requestId);
 
     if (parsed.clear) {
+      const { previousHeroImageKey } =
+        await collectionManagementService.assertMaySetSectionCopy(
+          requester,
+          collectionId
+        );
       // Clearing the key also clears the alt text — see `collectionUpdateValues`.
       const cleared = await collectionManagementService.update(
         requester,
         collectionId,
         { heroImageKey: null }
       );
+      await deleteSupersededHero(previousHeroImageKey, collectionId, log);
       timer({ status: "success" });
       return createSuccess(cleared, "Header image removed");
     }
@@ -113,6 +156,24 @@ export async function setCollectionHeroImageAction(
         "Describe the image for people using a screen reader."
       );
     }
+
+    // AUTHORIZE BEFORE SPENDING ANYTHING.
+    //
+    // The store/generate below writes up to 8MB to S3 or calls a paid image
+    // model. `collectionManagementService.update` further down does enforce
+    // permission — but only AFTER that work has happened, which left any
+    // signed-in account able to burn storage and generation spend against any
+    // collectionId at all, including ones they cannot edit and ones that do not
+    // exist. The rejection came too late to prevent the cost.
+    //
+    // This is a pre-flight, not the authority: `update` still re-asserts
+    // against the FOR-UPDATE-locked row, so a permission revoked in between
+    // still blocks the write.
+    const { previousHeroImageKey } =
+      await collectionManagementService.assertMaySetSectionCopy(
+        requester,
+        collectionId
+      );
 
     const stored = parsed.dataUrl
       ? await storeHeroImageFromDataUrl(collectionId, parsed.dataUrl)
@@ -132,6 +193,7 @@ export async function setCollectionHeroImageAction(
       collectionId,
       { heroImageKey: stored.key, heroImageAlt: alt }
     );
+    await deleteSupersededHero(previousHeroImageKey, collectionId, log);
 
     timer({ status: "success" });
     log.info("Collection hero image set", {

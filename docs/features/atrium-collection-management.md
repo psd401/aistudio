@@ -130,9 +130,16 @@ service Nexus chat uses) and stored under `atrium/collections/{id}/hero/{uuid}`.
 They are served ONLY by `GET /api/atrium/collections/{id}/hero`, which re-checks
 collection access and reads the key from the row — the key is never accepted
 from the caller. Replacing an image writes a new key rather than overwriting, so
-a cached hero can never outlive its replacement. Generated images are not
-guardrail-screened (Hagel, 2026-08-14); generation is limited to people who can
-already edit the section, and every change is attributable through the audit log.
+a cached hero can never outlive its replacement — and the superseded object is
+deleted once the row points at the new one (the bucket's lifecycle rules are
+storage-class transitions and multi-year retention, not orphan cleanup, so
+without that every replace would leak indefinitely).
+
+Authorization runs BEFORE the store or the generation call, not after: both
+spend real resources, so a check that rejected afterwards would still let any
+signed-in account burn storage and paid model calls against any collection id.
+Generated images are not guardrail-screened (Hagel, 2026-08-14); every change is
+attributable through the audit log.
 
 ## Surfaces
 

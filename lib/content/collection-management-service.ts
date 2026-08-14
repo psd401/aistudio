@@ -1073,6 +1073,46 @@ export const collectionManagementService = {
     }
   },
 
+  /**
+   * Cheap "may I edit this section's copy?" pre-flight, for callers that must
+   * do expensive work BEFORE they can call `update`.
+   *
+   * The hero-image action is the motivating case: it has to store bytes (an S3
+   * write) or call a paid image model to obtain the key it then patches in.
+   * Doing that first and relying on `update`'s own `assertMayManage` to reject
+   * afterwards means an unauthorized caller still burns the storage and the
+   * generation spend — an authenticated cost-abuse vector against ANY
+   * collectionId, including ones that do not exist.
+   *
+   * Applies the SAME rule as the copy-only carve-out inside `update`
+   * (`assertMayManage` + `SECTION_EDITOR_FIELDS`): administrators and district
+   * collections, a personal collection's owner, or a non-admin holding `create`
+   * access to the section. It is a pre-flight, NOT the authority — `update`
+   * re-asserts against the FOR-UPDATE-locked row, so a revocation landing
+   * between the two still wins.
+   *
+   * Returns the collection's CURRENT hero-image key so the caller can delete
+   * the superseded object after its replacement is live — see the action.
+   */
+  async assertMaySetSectionCopy(
+    req: Requester,
+    collectionId: string
+  ): Promise<{ previousHeroImageKey: string | null }> {
+    assertCollectionId(collectionId);
+    const access = await collectionAccessSnapshot(req);
+    const row = access.byId.get(collectionId);
+    // Unknown id is a NotFoundError, not a permission error — the same
+    // existence-masking `assertMayManage` applies, and it means a caller cannot
+    // use this to probe which collection ids exist.
+    if (!row) throw new NotFoundError("Collection not found", { collectionId });
+    assertMayManage(
+      req,
+      row,
+      access.selectableCollectionIds.has(collectionId)
+    );
+    return { previousHeroImageKey: row.heroImageKey };
+  },
+
   async update(
     req: Requester,
     collectionId: string,
