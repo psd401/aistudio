@@ -6,6 +6,7 @@ rather than yield silently-NULL PR columns.
 """
 import bisect
 import csv
+import re
 import os
 import subprocess
 import sys
@@ -75,6 +76,49 @@ class NormsValuesTest(unittest.TestCase):
         result = run("--grade", "3", "--period", "Fall", "--measure", "NOT-A-MEASURE")
         self.assertEqual(result.returncode, 1)
         self.assertIn("no norms for", result.stderr)
+
+    def test_single_quote_in_a_label_is_escaped_not_injected(self):
+        # `--as` carries a warehouse assessment_group the agent read back from
+        # psd-data, so it is model-influenced input landing in a SQL literal.
+        result = run(
+            "--grade", "3", "--period", "Fall", "--measure", "ORF-WRC",
+            "--as", "O'Brien Reading",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("('O''Brien Reading','Fall'", result.stdout)
+        # No bare quote survives that could close the literal early.
+        for line in result.stdout.strip().split("\n"):
+            body = line.strip().rstrip(",")
+            self.assertTrue(body.startswith("('") and body.endswith(")"), body)
+
+    def test_injection_attempt_stays_inside_the_literal(self):
+        payload = "x'),(SELECT 1)--"
+        result = run(
+            "--grade", "3", "--period", "Fall", "--measure", "ORF-WRC",
+            "--as", payload,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The payload survives as DATA: its quote is doubled, so SQL reads the
+        # whole thing as one string literal rather than a closed literal
+        # followed by new syntax.
+        self.assertIn("'" + payload.replace("'", "''") + "'", result.stdout)
+        # Every emitted row is still exactly one 4-field tuple. Parsing back the
+        # doubled quotes is what proves the statement was never closed early.
+        for line in result.stdout.strip().split("\n"):
+            body = line.strip().rstrip(",")
+            self.assertTrue(body.startswith("(") and body.endswith(")"), body)
+            # Outside the quoted label there must be exactly 3 commas.
+            unquoted = re.sub(r"'(?:[^']|'')*'", "S", body[1:-1])
+            self.assertEqual(unquoted.count(","), 3, body)
+
+    def test_control_characters_and_backslashes_are_refused(self):
+        for bad in ["line\nbreak", "back\\slash"]:
+            result = run(
+                "--grade", "3", "--period", "Fall", "--measure", "ORF-WRC",
+                "--as", bad,
+            )
+            self.assertEqual(result.returncode, 2, result.stdout)
+            self.assertIn("must not contain", result.stderr)
 
     def test_mismatched_as_count_is_rejected(self):
         result = run(

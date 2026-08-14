@@ -847,7 +847,15 @@ const DOWNLOAD_CONTENT_TYPES: Record<string, string> = {
   zip: "application/zip",
 }
 
-/** Cap on a rescued download, well under the workspace object limit. */
+/**
+ * Cap on a rescued download.
+ *
+ * Deliberately tighter than storage-broker's MAX_PRIVATE_UPLOAD_BYTES (256 MB),
+ * which bounds what an agent may deliberately upload. This bounds a file the
+ * agent did NOT choose the size of — whatever a caller happened to attach in
+ * Drive — and the whole thing is buffered in the web tier's memory on its way
+ * through. Both limits still apply; this is not a duplicate of that one.
+ */
 const MAX_HANDOFF_BYTES = 64 * 1024 * 1024
 
 /**

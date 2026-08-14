@@ -27,6 +27,25 @@ NORMS = os.path.join(
 )
 
 
+def sql_literal(value: str, flag: str) -> str:
+    """Quote a value for a SQL string literal.
+
+    These rows are pasted into a query, and `--as` carries a warehouse
+    `assessment_group` the agent just read back from psd-data rather than a
+    value a human typed — so it is model-influenced input reaching SQL. A
+    single quote alone would break the generated statement; deliberately
+    crafted, it could close the literal and continue the query it lands in.
+
+    Doubling is the SQL-standard escape. Control characters and backslashes are
+    refused outright rather than escaped: nothing legitimate in a measure name
+    or window contains them, and refusing is easier to reason about than
+    getting every dialect's escape rules right.
+    """
+    if any(ord(char) < 32 for char in value) or "\\" in value:
+        raise ValueError(f"{flag} must not contain control characters or backslashes")
+    return value.replace("'", "''")
+
+
 def load(path):
     with open(path, newline="") as handle:
         for row in csv.DictReader(handle):
@@ -55,6 +74,15 @@ def main() -> int:
     parser.add_argument("--as", dest="label", action="append", default=[])
     parser.add_argument("--norms", default=NORMS)
     args = parser.parse_args()
+
+    try:
+        for period in args.period:
+            sql_literal(period, "--period")
+        for label in args.label:
+            sql_literal(label, "--as")
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 2
 
     if args.label and len(args.label) != len(args.measure):
         print("--as must be given once per --measure, in the same order", file=sys.stderr)
@@ -86,10 +114,14 @@ def main() -> int:
 
     lines = []
     for (measure, period), points in sorted(buckets.items()):
-        name = labels.get(measure, measure)
+        name = sql_literal(labels.get(measure, measure), "--as/--measure")
+        safe_period = sql_literal(period, "--period")
         for raw, pr in compress(points):
+            # raw and pr come from the bundled CSV and are numeric by
+            # construction, so they are emitted unquoted; only the two
+            # caller-supplied strings need quoting.
             value = int(raw) if float(raw).is_integer() else raw
-            lines.append(f"('{name}','{period}',{value},{pr})")
+            lines.append(f"('{name}','{safe_period}',{value},{pr})")
     print(",\n".join(lines))
     return 0
 
