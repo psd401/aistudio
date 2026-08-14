@@ -183,3 +183,41 @@ describe("promoted scheduled-run terminal telemetry", () => {
     )
   })
 })
+
+const jobMainSource = fs.readFileSync(
+  path.join(process.cwd(), "infra/lambdas/agent-router/job-main.ts"),
+  "utf8",
+)
+
+describe("a deferred Chat delivery is not a successful run", () => {
+  // agent_failures 7233: a schedule reported lastRunStatus=success while the
+  // user's brief never reached her Chat space. `deferred` means the post did
+  // not happen and was queued for retry, and nothing ever revisits the row —
+  // recordScheduledJobTerminal is only reached from the terminal path — so a
+  // success written here is permanent regardless of what the retry does.
+  it("treats deferred as an incomplete delivery", () => {
+    expect(jobMainSource).toContain("deliveryOutcome === 'deferred'")
+    expect(jobMainSource).toContain(
+      "const deliveryIncomplete = deliveryFailed || deliveryDeferred"
+    )
+  })
+
+  it("records error, not success, when delivery did not complete", () => {
+    expect(jobMainSource).toContain(
+      "status: agentResult.failed || deliveryIncomplete ? 'error' : 'success'"
+    )
+    // The old form counted a deferred post as delivered.
+    expect(jobMainSource).not.toContain(
+      "status: agentResult.failed || deliveryFailed ? 'error' : 'success'"
+    )
+  })
+
+  it("says on the row that a deferred post may still arrive", () => {
+    expect(jobMainSource).toContain("deferred to the retry queue")
+  })
+
+  it("still emits the monitored failure marker for a deferred delivery", () => {
+    expect(jobMainSource).toContain("if (deliveryIncomplete) {")
+    expect(jobMainSource).toContain("deliveryMarker: 'JOB_RUNNER_DELIVERY_FAILED'")
+  })
+})

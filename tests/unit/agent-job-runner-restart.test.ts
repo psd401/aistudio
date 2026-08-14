@@ -102,7 +102,9 @@ describe("job runner restart handling", () => {
     expect(source).toContain("recordScheduledJobTerminal(")
     expect(source).toContain("writeScheduledRun,")
     expect(source).toContain(
-      "status: agentResult.failed || deliveryFailed ? 'error' : 'success'",
+      // Covers a deferred delivery too: queued-for-retry is not delivered,
+      // and nothing revisits this row afterwards (agent_failures 7233).
+      "status: agentResult.failed || deliveryIncomplete ? 'error' : 'success'",
     )
   })
 
@@ -111,7 +113,7 @@ describe("job runner restart handling", () => {
       "return deliveryOutcome === 'failed' ? 3 : agentResult.failed ? 2 : 0",
     )
     const deliveryFailureBranch = source.slice(
-      source.indexOf("if (deliveryFailed)"),
+      source.indexOf("if (deliveryIncomplete)"),
       source.indexOf("if (!agentResult.failed)"),
     )
     expect(deliveryFailureBranch).toContain(
@@ -125,7 +127,7 @@ describe("job runner restart handling", () => {
     const invocationFailure = source.indexOf(
       "if (agentResult.failed && agentResult.errorSource === 'router')",
     )
-    const deliveryFailure = source.indexOf("if (deliveryFailed)")
+    const deliveryFailure = source.indexOf("if (deliveryIncomplete)")
     expect(invocationFailure).toBeGreaterThan(-1)
     expect(deliveryFailure).toBeGreaterThan(invocationFailure)
   })

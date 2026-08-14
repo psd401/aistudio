@@ -190,6 +190,29 @@ function validateCronFieldDomains(fields: string[]): void {
   if (numericValuesOutOfRange(fields[3], 1, 12)) {
     throw new AgentScheduleInputError("cron month field must be 1-12");
   }
+  // EventBridge requires `?` in exactly one of day-of-month / day-of-week; the
+  // two cannot both be concrete, and cannot both be `*`.
+  //
+  // This is the check that catches a shifted expression whose every value
+  // still happens to be in range, which the bounds above cannot. `cron(0 15 18
+  // * * *)` — an agent's "6:15pm daily" with a Quartz seconds field in front —
+  // reads to EventBridge as 15:00 on the 18th of the month. It was ACCEPTED,
+  // scheduled, and simply never fired at 6:15pm; the user was told the
+  // schedule existed and then got nothing, with lastRunStatus stuck at
+  // "never run" (agent_failures 7101). Silent wrong-time is worse than a
+  // rejection, because nobody looks for it.
+  //
+  // The 5-field path already sets `?` itself before reaching here, so this
+  // only ever fires on a pre-wrapped `cron(...)` the model built by hand.
+  if (fields[2] !== "?" && fields[4] !== "?") {
+    throw new AgentScheduleInputError(
+      "cron must use ? in exactly one of day-of-month / day-of-week. " +
+        "If you meant a daily time, the 5-field form is safer (e.g. " +
+        "`15 18 * * *` for 6:15pm daily) — the skill expands it correctly. " +
+        "A leading seconds field shifts everything by one: EventBridge takes " +
+        "minute hour day-of-month month day-of-week year.",
+    );
+  }
 }
 
 function normalizeWrappedScheduleExpression(expression: string): string | null {

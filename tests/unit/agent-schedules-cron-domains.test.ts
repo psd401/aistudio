@@ -35,6 +35,18 @@ describe("cron field domain validation", () => {
     expect(toSchedulerExpression("0 18 * * *")).toBe("cron(0 18 * * ? *)")
   })
 
+  it("rejects the in-range shifted expression that silently never fired", () => {
+    // agent_failures 7101: intended 6:15pm daily, became 15:00 on the 18th.
+    // Every field is in range, so only the ?-rule catches it. The schedule was
+    // created, reported healthy, and never fired.
+    expect(() => toSchedulerExpression("cron(0 15 18 * * *)")).toThrow(/\? in exactly one/)
+  })
+
+  it("accepts the correct daily form and the 5-field equivalent", () => {
+    expect(toSchedulerExpression("cron(15 18 * * ? *)")).toBe("cron(15 18 * * ? *)")
+    expect(toSchedulerExpression("15 18 * * *")).toBe("cron(15 18 * * ? *)")
+  })
+
   it("rejects out-of-range values in each field", () => {
     expect(() => toSchedulerExpression("cron(75 6 ? * MON-FRI *)")).toThrow(/minute/)
     expect(() => toSchedulerExpression("cron(0 26 ? * MON-FRI *)")).toThrow(/shifted|hour/)
