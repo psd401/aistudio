@@ -48,13 +48,18 @@ class _FakeTimeout(Exception):
     """Stands in for websocket.WebSocketTimeoutException (an idle gap)."""
 
 
-def agent_event(stream, data):
+# The run FakeGateway reports for this turn via the chat.send res. Events
+# carrying a different runId belong to somebody else's run.
+TURN_RUN_ID = "run-replay"
+
+
+def agent_event(stream, data, run_id=TURN_RUN_ID):
     """One `event:agent` frame, matching the captured envelope."""
     return {
         "type": "event",
         "event": "agent",
         "payload": {
-            "runId": "run-replay",
+            "runId": run_id,
             "stream": stream,
             "data": data,
             "sessionKey": "agent:main:replay",
@@ -62,6 +67,11 @@ def agent_event(stream, data):
             "isHeartbeat": False,
         },
     }
+
+
+def foreign_says(text, run_id="run-somebody-else"):
+    """An assistant delta from a run this turn did not start."""
+    return agent_event("assistant", {"text": text, "delta": text}, run_id=run_id)
 
 
 def says(text):
@@ -132,6 +142,11 @@ class FakeGateway:
         elif method == "chat.abort":
             self._reply(request_id, {})
         elif method == "chat.send":
+            # The gateway names this turn's run before streaming anything —
+            # `{"runId": ..., "status": "started"}` — then closes with a final
+            # res. Both are replayed so the runId fence sees what it sees in
+            # production.
+            self._reply(request_id, {"status": "started", "runId": TURN_RUN_ID})
             for event in self._agent_events:
                 self._outbox.append(json.dumps(event))
             self._reply(request_id, {"status": "final"})
@@ -154,6 +169,19 @@ def aborts(stop_reason="cancelled"):
         "type": "event",
         "event": "chat",
         "payload": {"state": "aborted", "stopReason": stop_reason},
+    }
+
+
+def foreign_error(run_id="announce:v1:agent:main:subagent:4a5a5b24:7c6a718d"):
+    """A chat error belonging to a subagent run, not to this turn."""
+    return {
+        "type": "event",
+        "event": "chat",
+        "payload": {
+            "state": "error",
+            "runId": run_id,
+            "errorMessage": "LLM request failed.",
+        },
     }
 
 
@@ -300,6 +328,98 @@ class AbortedTurnDoesNotShipScratchpad(unittest.TestCase):
             ]
         )
         self.assertIn("The Q3 doc lists four owners.", text)
+
+
+class ForeignRunsCannotAnswerThisTurn(unittest.TestCase):
+    """The reply must be built only from the run this turn started.
+
+    The adapter's socket is not private to the turn: it connects as
+    `role: operator` with operator.admin/read/write, so the gateway delivers
+    agent events for runs this turn did not start — other sessions included.
+    Assistant text was accumulated from all of them.
+
+    On 2026-08-14 a Docs turn failed at the harness (subagent Bedrock error),
+    kept running, and finished two minutes later. The next turn — a different
+    request in a DIFFERENT session (6ef59dd1 -> 0093fbb5) — was answered with
+    that stale run's text, and the user's real request was never processed.
+    """
+
+    def test_a_stale_runs_answer_is_not_returned(self):
+        text = replay(
+            [
+                foreign_says("Done. Doc created and ownership transferred."),
+                says("Updated the cell to 253.590.6433."),
+            ]
+        )
+        self.assertEqual(text, "Updated the cell to 253.590.6433.")
+
+    def test_a_foreign_run_cannot_supply_the_whole_reply(self):
+        # The turn produced nothing of its own. Answering with someone else's
+        # text is the exact failure; an empty reply is the honest outcome.
+        text = replay([foreign_says("Done. Doc created and ownership transferred.")])
+        self.assertNotIn("Doc created", text)
+
+    def test_a_foreign_run_cannot_split_this_turns_answer(self):
+        # Interleaving must not corrupt the real reply either.
+        text = replay(
+            [
+                says("The sheet has "),
+                foreign_says("Done. Doc created."),
+                says("20 entries."),
+            ]
+        )
+        self.assertEqual(text, "The sheet has 20 entries.")
+
+    def test_a_subagents_failure_does_not_abort_the_parent_turn(self):
+        # A chat event with state:"error" aborts the turn. A subagent's failure
+        # arrives on that channel under its own announce: run id, so one
+        # failing subagent killed a parent turn that went on to finish the
+        # work — the user got "I couldn't complete that" for a doc that was
+        # created and handed over two minutes later.
+        text = replay(
+            [
+                says("Working on it."),
+                foreign_error(),
+                *uses_tool("exec"),
+                says("Created the doc and transferred ownership to you."),
+            ]
+        )
+        self.assertEqual(text, "Created the doc and transferred ownership to you.")
+
+    def test_an_error_on_this_turns_own_run_still_fails_it(self):
+        # The fence must not swallow a real failure of our own run.
+        text = replay(
+            [
+                says("Working on it."),
+                {
+                    "type": "event",
+                    "event": "chat",
+                    "payload": {
+                        "state": "error",
+                        "runId": TURN_RUN_ID,
+                        "errorMessage": "LLM request failed.",
+                    },
+                },
+            ]
+        )
+        self.assertIn("couldn't", text.lower())
+
+    def test_events_without_a_run_id_are_still_accepted(self):
+        # Fails open: a gateway that does not name the run must behave exactly
+        # as before rather than silently muting every reply.
+        text = replay(
+            [
+                {
+                    "type": "event",
+                    "event": "agent",
+                    "payload": {
+                        "stream": "assistant",
+                        "data": {"text": "No runId here.", "delta": "No runId here."},
+                    },
+                }
+            ]
+        )
+        self.assertEqual(text, "No runId here.")
 
 
 if __name__ == "__main__":

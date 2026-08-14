@@ -1470,6 +1470,31 @@ class OpenClawAdapter(HarnessAdapter):
                 # final-event handler suppresses ("Here's how far I got: Now
                 # run the batchUpdate."). Covered by test_reply_replay.py.
                 assistant_boundary_pending: bool = False
+                # The run THIS turn started, learned from the chat.send res
+                # (`{"runId": ..., "status": "started"}`). Everything the reply
+                # is built from must belong to it.
+                #
+                # This socket is not private to this turn. The adapter connects
+                # as `role: operator` with operator.admin/read/write, so the
+                # gateway delivers agent events for runs this turn did not
+                # start — including runs in OTHER sessions, and subagent
+                # `announce:` runs. Assistant text was accumulated from all of
+                # them, so a run that outlived the turn which launched it had
+                # its answer returned to whatever turn happened to be listening
+                # when it finished.
+                #
+                # That is not hypothetical. On 2026-08-14 a Docs turn failed at
+                # the harness (subagent Bedrock error), kept running, and
+                # completed two minutes later; the next turn — a different
+                # request, in a DIFFERENT session (6ef59dd1 -> 0093fbb5) — was
+                # answered with that stale run's text, and the user's actual
+                # request was never processed. A confidently wrong answer is a
+                # worse failure than an error, so this fences by run id.
+                turn_run_id: Optional[str] = None
+                # Counted, not silent: if this is ever large the gateway is
+                # delivering someone else's traffic and we want that visible in
+                # the turn log rather than inferred from a wrong answer.
+                foreign_run_events: int = 0
                 # Allow recv() to sit idle for up to 60s between events
                 # without raising — long tool calls (web_fetch, model
                 # inference on a big prompt) produce gaps with no stream
@@ -1495,6 +1520,32 @@ class OpenClawAdapter(HarnessAdapter):
                         first_event_types.append(key)
                     if len(raw_event_samples) < 3:
                         raw_event_samples.append(raw[:600] if isinstance(raw, str) else str(raw)[:600])
+
+                    # DIAGNOSTIC: sample the first frame of every message KIND,
+                    # not just `event:agent`.
+                    #
+                    # The agent-only sampler below is why the adapter's picture
+                    # of the protocol has a hole in it. A turn on 2026-08-14
+                    # carried 69 `event:task` frames and 1 `event:tick`, none of
+                    # which had ever been sampled, so nothing is known about
+                    # what they mean. That matters because assistant segments
+                    # fused in that same turn ("Now read values." + "It's a
+                    # single-column staff directory" -> "values.It's"), and the
+                    # task lane is the obvious suspect for the tool activity
+                    # that should have separated them.
+                    #
+                    # Treating those frames as segment boundaries on a guess
+                    # could truncate real answers if they are progress ticks
+                    # inside one segment, so capture the shape first and change
+                    # behaviour second.
+                    _kind_key = f"_seen_kind::{key}"
+                    if _kind_key not in event_counts:
+                        event_counts[_kind_key] = 1
+                        logger.info(
+                            "openclaw_kind_sample kind=%s payload=%s",
+                            key,
+                            json.dumps(msg.get("payload", {}))[:1200],
+                        )
 
                     if mtype == "event" and mevent == "agent":
                         # DIAGNOSTIC (remove after schema discovery): log the
@@ -1531,6 +1582,21 @@ class OpenClawAdapter(HarnessAdapter):
                         agent_payload = msg.get("payload", {})
                         stream = agent_payload.get("stream")
                         data = agent_payload.get("data", {})
+                        # Drop events belonging to a run this turn did not
+                        # start. Deliberately conservative: it discards only
+                        # when BOTH ids are known and they disagree, so an
+                        # event without a runId, or a gateway that never names
+                        # the run, behaves exactly as before rather than
+                        # silently muting the reply.
+                        event_run_id = agent_payload.get("runId")
+                        if (
+                            isinstance(event_run_id, str)
+                            and event_run_id
+                            and turn_run_id
+                            and event_run_id != turn_run_id
+                        ):
+                            foreign_run_events += 1
+                            continue
                         # Lifecycle events carry sessionId/agentId at the
                         # payload top level (streaming events don't) — capture
                         # them wherever they appear so the post-turn transcript
@@ -1680,6 +1746,29 @@ class OpenClawAdapter(HarnessAdapter):
 
                     elif mtype == "event" and mevent == "chat":
                         payload = msg.get("payload", {})
+                        # Same fence as the agent stream, and for a sharper
+                        # reason: a chat event carrying `state: "error"` ABORTS
+                        # the turn. A subagent's failure arrives on this
+                        # channel under its own `announce:v1:...subagent:...`
+                        # run id, so one failing subagent killed the parent
+                        # turn even though the parent went on to finish the
+                        # work. That is what returned "I couldn't complete
+                        # that" for a Docs task whose doc was created, and
+                        # ownership transferred, two minutes later
+                        # (2026-08-14, run 63282254).
+                        #
+                        # A foreign run's outcome is not this turn's outcome.
+                        # If the turn's own run then never reaches final, the
+                        # deadline still governs — nothing hangs forever.
+                        chat_run_id = payload.get("runId")
+                        if (
+                            isinstance(chat_run_id, str)
+                            and chat_run_id
+                            and turn_run_id
+                            and chat_run_id != turn_run_id
+                        ):
+                            foreign_run_events += 1
+                            continue
                         state = payload.get("state")
                         last_state = state
                         event_message = payload.get("message")
@@ -1941,6 +2030,12 @@ class OpenClawAdapter(HarnessAdapter):
                             observed_model = model_field
                         status = res_payload.get("status")
                         if status in {"started", "accepted"}:
+                            # The gateway names THIS turn's run here. Capture it
+                            # so foreign runs on this socket cannot contribute
+                            # to the reply — see turn_run_id below.
+                            started_run = res_payload.get("runId")
+                            if isinstance(started_run, str) and started_run:
+                                turn_run_id = started_run
                             continue
                         if status in {"final", "done"}:
                             if (
@@ -2158,11 +2253,14 @@ class OpenClawAdapter(HarnessAdapter):
             )
 
         logger.info(
-            "chat turn ok: resp_len=%d last_state=%s event_counts=%s "
+            "chat turn ok: resp_len=%d last_state=%s run_id=%s "
+            "foreign_run_events=%d event_counts=%s "
             "model=%s tokens_in=%d tokens_out=%d cache_read=%d cache_write=%d "
             "latency_ms=%d tool_calls=%d transcript_model_calls=%d",
             len(response_text),
             last_state,
+            turn_run_id or "unknown",
+            foreign_run_events,
             json.dumps(event_counts),
             observed_model or "unknown",
             tokens_in,
