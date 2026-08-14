@@ -333,7 +333,20 @@ These cannot be bypassed by phrasing. The skill returns exit code 13 with `statu
 - **Named person in the district:** `type: "user"`, `role: "reader"`, `"commenter"`, or `"writer"`, `emailAddress` ending `@psd401.net` — the caller or any district colleague. Writer is for explicitly named individuals only (e.g. each member of a team space, enumerated by name) — when a group needs to edit, grant each person, never the domain.
 - **Whole district, read-only:** `type: "domain"`, `domain: "psd401.net"`, `role: "reader"` — use when a doc's link is going into a shared Chat space so every member can open it.
 
-Never allowed: `type: "anyone"` or `"group"`, external addresses/domains, domain-wide `writer`, `owner` transfer, or any permission change on user-owned files.
+**Giving a file to the CALLER is unrestricted — including ownership.** The two
+shapes above bound what the agent may hand to *third parties*; they do not stand
+between it and its own owner. A share whose `emailAddress` is the caller is
+permitted in any role, `owner` included, with `transferOwnership: true`.
+
+Do that whenever a user asks to own, move, organize or delete something you
+made. Files you create are owned by your agent account, and Drive only lets an
+**owner** trash a file — so without the transfer the user cannot delete their own
+document and has to open an IT ticket (issue #1636, reported 2026-08-12).
+Offer the transfer when you hand over anything they will keep.
+
+Never allowed: `type: "anyone"` or `"group"`, external addresses/domains,
+domain-wide `writer`, `owner` transfer **to anyone other than the caller**, or
+any permission change on user-owned files.
 
 Examples:
 
@@ -341,6 +354,12 @@ Examples:
 # Hand an artifact back to the caller
 gws drive.permissions.create --scope agent --user hagelk@psd401.net \
   --json '{"fileId":"<id>","type":"user","role":"reader","emailAddress":"hagelk@psd401.net"}'
+
+# Give the caller OWNERSHIP, so they can organize and delete it themselves.
+# transferOwnership is a QUERY parameter, so it goes in --params, not --json.
+gws drive.permissions.create --scope agent --user hagelk@psd401.net \
+  --params '{"fileId":"<id>","transferOwnership":true}' \
+  --json '{"type":"user","role":"owner","emailAddress":"hagelk@psd401.net"}'
 
 # Make a doc readable district-wide before posting its link in a Chat space
 gws drive.permissions.create --scope agent --user hagelk@psd401.net \
