@@ -28,6 +28,7 @@ import { Search, Plus, Sparkles, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { listContentAction } from "@/actions/db/atrium/list-content";
+import { listContentTagsAction } from "@/actions/db/atrium/list-tags";
 import { createContentAction } from "@/actions/db/atrium/create-content";
 import type { ContentObjectDTO, ContentKind, ListFilter } from "@/lib/content";
 import { ARTIFACT_STARTER_HTML } from "@/lib/content/artifact-starter";
@@ -54,6 +55,7 @@ const VIEWS = [
   { value: "all", label: "All content" },
   { value: "favorites", label: "Favorites" },
   { value: "mine", label: "Mine" },
+  { value: "others", label: "Everyone else" },
   { value: "document", label: "Docs" },
   { value: "artifact", label: "Artifacts" },
   { value: "shared", label: "Shared with me" },
@@ -63,20 +65,64 @@ const VIEWS = [
 
 /**
  * The chips shown by DEFAULT. The full `VIEWS` list is every reachable view, but
- * putting all nine in the bar turned the filter row into a wall of options —
+ * putting all of them in the bar turned the filter row into a wall of options —
  * the same "everything at once" problem the home page exists to fix. The rest
  * stay reachable from the home bands' "see all" links, and a chip for the active
  * view is added back in `LibraryChips` so the bar always shows where you are.
+ *
+ * "Mine" and "Everyone else" are primary despite that budget. An administrator
+ * sees the whole district here, so the unfiltered library is mostly other
+ * people's work and the first question on opening it is always "which of this
+ * is mine?". Leaving the answer off the bar (it was reachable only from a home
+ * band) made the one view that makes the library usable at admin scale the one
+ * view nobody could find.
+ *
+ * Status and creator are deliberately NOT chips — see `LibraryChips`.
  */
 const PRIMARY_VIEWS: readonly LibraryFilterView[] = [
   "home",
   "all",
+  "mine",
+  "others",
   "favorites",
   "document",
   "artifact",
   "shared",
   "archived",
 ];
+
+/**
+ * Lifecycle filter, applied ORTHOGONALLY to the view chips.
+ *
+ * Not a chip: chips are single-select, so a "Published" chip would mean giving
+ * up "Docs" to ask "which docs are published?" — which is the actual question,
+ * and the one the chip row could never answer. "Archived" stays a view chip
+ * rather than joining this control because it is a lifecycle DESTINATION (with
+ * its own restore/delete affordances and its own empty state), not a lens on
+ * the working set.
+ */
+const STATUS_FILTERS = [
+  { value: "any", label: "Any status" },
+  { value: "published", label: "Published" },
+  { value: "draft", label: "Draft" },
+] as const;
+
+type LibraryStatusFilter = (typeof STATUS_FILTERS)[number]["value"];
+
+/**
+ * Creator filter (`content_objects.created_by_actor`), also orthogonal.
+ *
+ * Object-grain, matching the card badge: an agent-created doc later edited by a
+ * human still reads as agent-created. Per-version authorship is a different
+ * question and lives in the provenance footer.
+ */
+const ACTOR_FILTERS = [
+  { value: "any", label: "Anyone" },
+  { value: "human", label: "People" },
+  { value: "agent", label: "Agents" },
+] as const;
+
+type LibraryActorFilter = (typeof ACTOR_FILTERS)[number]["value"];
 
 type LibraryFilterView = (typeof VIEWS)[number]["value"];
 
@@ -263,19 +309,84 @@ function LibraryHeader({
 }
 
 /**
- * The filter chip row: view chips + a debounced tag filter + a "sorted by
- * recent" affordance. Presentational — all state lives in the parent.
+ * Tag suggestions for the tag box's typeahead.
+ *
+ * Server-backed rather than derived from the loaded page: the grid holds only
+ * the current 50-row page, so a client-side distinct would suggest whichever
+ * tags happen to be on screen and silently omit the rest. The action applies
+ * the same visibility predicates as the listing, so a suggestion can never
+ * reveal a tag from content the caller cannot see.
+ *
+ * Failures are swallowed to an empty list on purpose — the typeahead is an
+ * accelerator, and the tag box stays fully usable by typing.
+ */
+function useTagSuggestions(prefix: string): string[] {
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const reqSeqRef = useRef(0);
+
+  useEffect(() => {
+    const reqSeq = ++reqSeqRef.current;
+    let cancelled = false;
+    void (async () => {
+      // Nothing typed yet → no request. The alternative (fetch the first page
+      // of tags on mount so the box has something to show on focus) would put
+      // a query on EVERY library load to serve a control most visits never
+      // touch. One typed character is signal enough, and it is also the point
+      // at which the suggestions get specific enough to be worth reading.
+      //
+      // Inside the IIFE, not synchronously in the effect body: a synchronous
+      // setState in an effect triggers a cascading render (and the lint that
+      // guards against it).
+      if (prefix.trim().length === 0) {
+        if (!cancelled && reqSeq === reqSeqRef.current) setSuggestions([]);
+        return;
+      }
+      try {
+        const res = await listContentTagsAction({ prefix });
+        // Both guards: `cancelled` covers unmount, the sequence check covers a
+        // slow earlier response landing after a newer one (last-request-wins).
+        if (cancelled || reqSeq !== reqSeqRef.current) return;
+        setSuggestions(res.isSuccess ? res.data : []);
+      } catch {
+        if (cancelled || reqSeq !== reqSeqRef.current) return;
+        setSuggestions([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [prefix]);
+
+  return suggestions;
+}
+
+/**
+ * The filter chip row: view chips, the orthogonal status/creator selects, a
+ * debounced tag filter with typeahead, and a "sorted by recent" affordance.
+ * Presentational — all state lives in the parent.
  */
 function LibraryChips({
   view,
   onView,
   tag,
   onTag,
+  tagSuggestions,
+  status,
+  onStatus,
+  actor,
+  onActor,
+  statusDisabled,
 }: {
   view: LibraryFilterView;
   onView: (v: LibraryFilterView) => void;
   tag: string;
   onTag: (v: string) => void;
+  tagSuggestions: string[];
+  status: LibraryStatusFilter;
+  onStatus: (v: LibraryStatusFilter) => void;
+  actor: LibraryActorFilter;
+  onActor: (v: LibraryActorFilter) => void;
+  statusDisabled: boolean;
 }): React.JSX.Element {
   return (
     <div className="mer-chip-row">
@@ -296,6 +407,47 @@ function LibraryChips({
         ))}
       </div>
       <div className="mer-chip-row-end">
+        {/*
+          Native selects, not the Radix `Select`: these sit in a dense toolbar
+          beside a text input, and the portal-based popover version fights the
+          chip row's overflow scrolling on narrow screens. Two fixed, tiny
+          option lists need no combobox.
+        */}
+        <select
+          aria-label="Filter by status"
+          className="mer-chip-select"
+          value={statusDisabled ? "any" : status}
+          disabled={statusDisabled}
+          // The Archived view IS a status filter, so offering a second one
+          // would let the user ask for "archived AND published" — an empty set
+          // by construction, indistinguishable from a broken filter.
+          title={
+            statusDisabled
+              ? "The Archived view already filters by status"
+              : undefined
+          }
+          onChange={(e) => onStatus(e.target.value as LibraryStatusFilter)}
+          data-testid="library-status-filter"
+        >
+          {STATUS_FILTERS.map((s) => (
+            <option key={s.value} value={s.value}>
+              {s.label}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Filter by creator"
+          className="mer-chip-select"
+          value={actor}
+          onChange={(e) => onActor(e.target.value as LibraryActorFilter)}
+          data-testid="library-actor-filter"
+        >
+          {ACTOR_FILTERS.map((a) => (
+            <option key={a.value} value={a.value}>
+              {a.label}
+            </option>
+          ))}
+        </select>
         <Input
           aria-label="Filter by tag"
           placeholder="Tag…"
@@ -303,7 +455,18 @@ function LibraryChips({
           onChange={(e) => onTag(e.target.value)}
           maxLength={100}
           className="h-9 w-28"
+          // A native datalist rather than a custom popover: it is keyboard- and
+          // screen-reader-accessible for free, and it does not capture typing —
+          // the filter still applies as a prefix while you type, so a tag that
+          // is not in the suggestion list is never unreachable.
+          list="atrium-tag-suggestions"
+          data-testid="library-tag-filter"
         />
+        <datalist id="atrium-tag-suggestions">
+          {tagSuggestions.map((t) => (
+            <option key={t} value={t} />
+          ))}
+        </datalist>
         <span className="mer-sorted-label">Sorted by recent</span>
       </div>
     </div>
@@ -319,7 +482,7 @@ function LibraryChips({
  */
 function viewToFilter(view: LibraryFilterView): {
   kind?: ContentKind;
-  owner?: "shared" | "mine";
+  owner?: "shared" | "mine" | "others";
   status?: "archived";
   filed?: "unfiled";
   favorite?: true;
@@ -333,6 +496,8 @@ function viewToFilter(view: LibraryFilterView): {
       return { owner: "shared" };
     case "mine":
       return { owner: "mine" };
+    case "others":
+      return { owner: "others" };
     case "favorites":
       return { favorite: true };
     case "unfiled":
@@ -398,7 +563,7 @@ function resolveView(
 ): {
   effectiveView: LibraryFilterView;
   kind?: ContentKind;
-  owner?: "shared" | "mine";
+  owner?: "shared" | "mine" | "others";
   status?: "archived";
   filed?: "unfiled";
   favorite?: true;
@@ -430,6 +595,24 @@ function useDebounced(value: string, delayMs = 300): string {
 }
 
 /**
+ * ⌘K / Ctrl+K focuses the library search (the design's "⌘K" hint). Global
+ * listener, cleaned up on unmount. No "is a text field already focused?" guard
+ * is needed — ⌘/Ctrl+K is not a text-entry combo.
+ */
+function useSearchHotkey(ref: React.RefObject<HTMLInputElement | null>): void {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        ref.current?.focus();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [ref]);
+}
+
+/**
  * The library's paged fetch (extracted from `LibraryView` so its body stays
  * under the max-lines lint). `fetchPage(0)` REPLACES the list for the current
  * filters; a non-zero offset APPENDS (the "Load more" path). A monotonic
@@ -455,7 +638,8 @@ function useLibraryPage(filter: ListFilter) {
   const [settledStatus, setSettledStatus] = useState<string | undefined>(undefined);
   const reqSeqRef = useRef(0);
 
-  const { collectionId, kind, owner, status, tag, query } = filter;
+  const { collectionId, kind, owner, status, tag, tagMatch, actor, query } =
+    filter;
 
   const fetchPage = useCallback(
     async (offset: number) => {
@@ -471,6 +655,8 @@ function useLibraryPage(filter: ListFilter) {
           owner,
           status,
           tag,
+          tagMatch,
+          actor,
           query,
           limit: PAGE_SIZE,
           offset,
@@ -498,7 +684,7 @@ function useLibraryPage(filter: ListFilter) {
         }
       }
     },
-    [collectionId, kind, owner, status, tag, query]
+    [collectionId, kind, owner, status, tag, tagMatch, actor, query]
   );
 
   // A STABLE re-fetch handle that always runs the CURRENT `fetchPage`.
@@ -594,6 +780,9 @@ export function LibraryView({
   );
   const [tag, setTag] = useState("");
   const [search, setSearch] = useState("");
+  // Orthogonal to the view chips — see STATUS_FILTERS / ACTOR_FILTERS.
+  const [statusFilter, setStatusFilter] = useState<LibraryStatusFilter>("any");
+  const [actorFilter, setActorFilter] = useState<LibraryActorFilter>("any");
   const searchRef = useRef<HTMLInputElement>(null);
 
   // BOTH free-text filters are SERVER round-trips (#1336 moved the title search
@@ -611,19 +800,7 @@ export function LibraryView({
   const searching =
     debouncedSearch.trim().length > 0 || debouncedTag.trim().length > 0;
 
-  // ⌘K / Ctrl+K focuses the library search (design "⌘K" hint). Global listener,
-  // cleaned up on unmount; ignores the combo when a modifier-less field already
-  // has focus is unnecessary — ⌘/Ctrl+K is not a text-entry combo.
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        searchRef.current?.focus();
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  useSearchHotkey(searchRef);
 
   // The Meridian creation flow (New doc → blank sheet; New artifact / create card
   // → agent-prompt dialog). Extracted to a hook to keep this body under the lint.
@@ -641,6 +818,17 @@ export function LibraryView({
   const { effectiveView, kind, owner, status, filed, favorite, archivedView, homeView } =
     resolveView(view, searching);
 
+  // The Archived VIEW wins over the status SELECT: it is itself a status
+  // filter, and the select is disabled while it is active, so there is exactly
+  // one status in play at a time.
+  const effectiveStatus = archivedView
+    ? status
+    : statusFilter === "any"
+      ? undefined
+      : statusFilter;
+
+  const tagSuggestions = useTagSuggestions(debouncedTag);
+
   const {
     items,
     loading,
@@ -655,10 +843,14 @@ export function LibraryView({
       collectionId: collectionId ?? undefined,
       kind,
       owner,
-      status,
+      status: effectiveStatus,
       filed,
       favorite,
+      actor: actorFilter === "any" ? undefined : actorFilter,
       tag: debouncedTag.trim() || undefined,
+      // Prefix, not whole-tag: typing toward a tag must narrow progressively
+      // instead of emptying the grid until the final character.
+      tagMatch: "prefix",
       query: debouncedSearch.trim() || undefined,
     });
 
@@ -709,7 +901,18 @@ export function LibraryView({
           </p>
         )}
 
-        <LibraryChips view={effectiveView} onView={setView} tag={tag} onTag={setTag} />
+        <LibraryChips
+          view={effectiveView}
+          onView={setView}
+          tag={tag}
+          onTag={setTag}
+          tagSuggestions={tagSuggestions}
+          status={statusFilter}
+          onStatus={setStatusFilter}
+          actor={actorFilter}
+          onActor={setActorFilter}
+          statusDisabled={archivedView}
+        />
 
         {homeView ? (
           <LibraryHome onSeeAll={setView} />

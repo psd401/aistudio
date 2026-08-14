@@ -41,6 +41,7 @@ interface EditorState {
   defaultVisibilityLevel: VisibilityLevel;
   inheritGrants: boolean;
   grants: CollectionGrant[];
+  requiresApproval: boolean;
 }
 
 const EMPTY_EDITOR: EditorState = {
@@ -51,6 +52,7 @@ const EMPTY_EDITOR: EditorState = {
   defaultVisibilityLevel: "internal",
   inheritGrants: true,
   grants: [],
+  requiresApproval: false,
 };
 
 function editorFor(row: CollectionDTO): EditorState {
@@ -62,6 +64,7 @@ function editorFor(row: CollectionDTO): EditorState {
     defaultVisibilityLevel: row.defaultVisibilityLevel,
     inheritGrants: row.inheritGrants,
     grants: row.grants,
+    requiresApproval: row.requiresApproval,
   };
 }
 
@@ -159,6 +162,11 @@ function GrantEditor({
             >
               <option value="view">View</option>
               <option value="create">Create</option>
+              {/* Only meaningful on a collection with "Require approval"
+                  switched on; harmless (and forward-looking) elsewhere, since
+                  an `approve` grant confers no view or create access on its
+                  own — `effectiveGrantResolver` matches on exact access. */}
+              <option value="approve">Approve</option>
             </select>
             <select
               aria-label={`Grant ${index + 1} kind`}
@@ -407,6 +415,93 @@ function DistrictCollectionOptions({
         disabled={readOnly}
         onChange={(grants) => onChange({ ...editor, grants })}
       />
+      {/*
+        Per-collection publish review (migration 178). Deliberately a
+        per-section OPT-IN, not a policy change: publishing stays immediate
+        everywhere it is today, and only the sections where review is the point
+        — the staff intranet, SOPs — route through the approval queue.
+
+        Approvers are the collection owner, district admins, and anyone holding
+        an `approve` grant above, so a gated section can never end up with
+        nobody able to clear its queue.
+      */}
+      <div className="flex items-center gap-2">
+        <Checkbox
+          id="district-requires-approval"
+          checked={editor.requiresApproval}
+          disabled={readOnly}
+          onCheckedChange={(checked) =>
+            onChange({ ...editor, requiresApproval: checked === true })
+          }
+        />
+        <Label htmlFor="district-requires-approval">
+          Require approval before publishing from this collection
+        </Label>
+      </div>
+    </>
+  );
+}
+
+/**
+ * Sharing controls for a PERSONAL collection (migration 178).
+ *
+ * Personal collections could always be created and nested, but never shared —
+ * so "here is the collection I built for this project, have a look" was not
+ * expressible, and the workaround was to re-share every document in it one at
+ * a time.
+ *
+ * Only two levels are offered. `internal`/`public` are absent by construction
+ * rather than disabled: a collection meant for everyone is a district section,
+ * which belongs in the governed hierarchy. The service and a DB CHECK both
+ * refuse the wider values regardless of what this form sends.
+ */
+function PrivateCollectionOptions({
+  editor,
+  grantOptions,
+  onChange,
+}: {
+  editor: EditorState;
+  grantOptions: GrantOptions;
+  onChange: (editor: EditorState) => void;
+}): React.JSX.Element {
+  const shared = editor.defaultVisibilityLevel === "group";
+  return (
+    <>
+      <div className="flex items-center gap-2">
+        <Checkbox
+          id="private-shared"
+          checked={shared}
+          onCheckedChange={(checked) =>
+            onChange({
+              ...editor,
+              defaultVisibilityLevel: checked === true ? "group" : "private",
+              // Dropping back to private discards the roster rather than
+              // keeping invisible grants that would silently reactivate if the
+              // box were ticked again.
+              grants: checked === true ? editor.grants : [],
+            })
+          }
+        />
+        <Label htmlFor="private-shared">Share this collection with specific people</Label>
+      </div>
+      {shared ? (
+        <>
+          <p className="text-xs text-muted-foreground">
+            Only the people you add below can open this collection. They cannot
+            re-share it — you stay the only person who can change this list.
+          </p>
+          <GrantEditor
+            grants={editor.grants}
+            options={grantOptions}
+            disabled={false}
+            onChange={(grants) => onChange({ ...editor, grants })}
+          />
+        </>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          This collection and its contents are visible only to you.
+        </p>
+      )}
     </>
   );
 }
@@ -465,9 +560,11 @@ function CollectionEditor({
           onChange={onChange}
         />
       ) : (
-        <p className="text-xs text-muted-foreground">
-          Private collections and their contents are visible only to you.
-        </p>
+        <PrivateCollectionOptions
+          editor={editor}
+          grantOptions={grantOptions}
+          onChange={onChange}
+        />
       )}
       {error ? (
         <p className="text-sm text-destructive" role="alert">
@@ -508,6 +605,36 @@ function CollectionEditor({
   );
 }
 
+/**
+ * The role/group options the grant editor offers.
+ *
+ * Loaded in BOTH modes. It used to be admin-only, which was correct while
+ * grants existed only on district collections — but migration 178 let an owner
+ * share a personal collection, so the private-mode grant editor needs the same
+ * options. Without them its role and group pickers render empty and sharing
+ * silently cannot be configured.
+ *
+ * The action is itself capability-gated, so a caller who may not enumerate
+ * options gets an empty list rather than a widened one.
+ */
+function useGrantOptions(): GrantOptions {
+  const [options, setOptions] = useState<GrantOptions>({
+    roles: [],
+    groups: [],
+  });
+  useEffect(() => {
+    let cancelled = false;
+    void listGrantOptionsAction().then((result) => {
+      if (cancelled) return;
+      if (result.isSuccess && result.data) setOptions(result.data);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return options;
+}
+
 export function CollectionManagementPanel({
   mode,
   initialCollections = [],
@@ -515,10 +642,7 @@ export function CollectionManagementPanel({
 }: CollectionManagementPanelProps): React.JSX.Element {
   const [collections, setCollections] = useState(initialCollections);
   const [editor, setEditor] = useState<EditorState>(EMPTY_EDITOR);
-  const [grantOptions, setGrantOptions] = useState<GrantOptions>({
-    roles: [],
-    groups: [],
-  });
+  const grantOptions = useGrantOptions();
   const [error, setError] = useState<string | null>(initialError);
   const [notice, setNotice] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -588,11 +712,6 @@ export function CollectionManagementPanel({
 
   useEffect(() => {
     if (initialCollections.length === 0) refresh();
-    if (mode === "admin") {
-      void listGrantOptionsAction().then((result) => {
-        if (result.isSuccess && result.data) setGrantOptions(result.data);
-      });
-    }
     // Initial props are deliberately a one-time server snapshot.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
@@ -618,7 +737,14 @@ export function CollectionManagementPanel({
                   defaultVisibilityLevel: editor.defaultVisibilityLevel,
                   inheritGrants: editor.inheritGrants,
                   grants: editor.grants,
+                  requiresApproval: editor.requiresApproval,
                 }
+              : {}),
+            // A personal collection's owner sets its sharing. `inheritGrants` is
+            // never sent — pinned false for private trees by both the service
+            // and the DB check, so sending it only invites a violation.
+            ...(mode === "private"
+              ? { defaultVisibilityLevel: editor.defaultVisibilityLevel, grants: editor.grants }
               : {}),
           })
         : await createCollectionAction({
@@ -632,7 +758,18 @@ export function CollectionManagementPanel({
                   inheritGrants: editor.inheritGrants,
                   grants: editor.grants,
                 }
-              : {}),
+              : {
+                  // A personal collection may be created already shared, but
+                  // never wider than `group`. `EMPTY_EDITOR` seeds the
+                  // district default of `internal`, which the service would
+                  // (correctly) refuse for this scope — so normalize here
+                  // rather than sending a value that can only fail.
+                  defaultVisibilityLevel:
+                    editor.defaultVisibilityLevel === "group"
+                      ? "group"
+                      : "private",
+                  grants: editor.grants,
+                }),
           });
       if (!result.isSuccess || !result.data) {
         setError(result.message ?? "Failed to save collection");

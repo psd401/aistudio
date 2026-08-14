@@ -110,6 +110,18 @@ html:has(.meridian) body {
   --mer-danger: #b32227;
   --mer-danger-tint: #ffedeb; /* error panel fill */
 
+  /* ---- Draft / in-review ----
+   * Draft used to render in the same recessed grey as Archived, so the two
+   * most operationally different states in the library — "still being written"
+   * and "put away" — were visually identical and told apart only by reading
+   * the label. Amber gives "in progress" its own hue while staying inside the
+   * restrained palette; grey keeps its real meaning of "inactive".
+   *
+   * #8a5a00 on the tint is 5.7:1, so the pill text passes AA. Colour is never
+   * the ONLY signal — every pill also carries its word. */
+  --mer-draft: #8a5a00;
+  --mer-draft-tint: #fdf3e0;
+
   /* ---- Icon rail ---- */
   --mer-rail-bg: #003049;
   --mer-rail-active: rgba(235, 241, 245, 0.16);

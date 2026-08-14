@@ -39,6 +39,9 @@ function row(
     archivedAt: null,
     description: null,
     landingObjectId: null,
+    heroImageKey: null,
+    heroImageAlt: null,
+    requiresApproval: false,
     ...values,
   };
 }

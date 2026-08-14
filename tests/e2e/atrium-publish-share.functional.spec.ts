@@ -381,7 +381,18 @@ function defineAtriumPublishShareAuthenticatedSuite1Part3() {test('atrium-share-
       await results.getByRole('button').first().click()
 
       // The grant chip appears, then save.
-      await expect(page.getByText('user', { exact: true })).toBeVisible()
+      //
+      // It reads "person <Name>", not "user <id>". A `user` grant stores the
+      // numeric users.id, and the chip used to render that verbatim — correct
+      // and unusable, since nobody can confirm they shared a page with the
+      // right colleague by reading a primary key. The kind now matches the
+      // picker's own "Person" label and the value is the resolved name.
+      await expect(page.getByText('person', { exact: true })).toBeVisible()
+      // The name itself, not just the kind: this is the assertion that would
+      // catch a regression back to rendering the raw id.
+      await expect(
+        page.locator('span', { hasText: /^Student/ }).first()
+      ).toBeVisible()
       await page.getByRole('button', { name: 'Save', exact: true }).click()
 
       // The granted user can now read the intranet reader.

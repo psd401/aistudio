@@ -60,6 +60,16 @@ export interface CollectionTreeNode {
    * object the viewer cannot see simply does not render.
    */
   landingObjectId: string | null;
+  /**
+   * Whether this section has a hero image (migration 178). A BOOLEAN, not the
+   * S3 key: the key is an internal storage detail and the image is fetched
+   * through `/api/atrium/collections/{id}/hero`, which re-checks access and
+   * reads the key itself. Shipping the key to the client would leak the bucket
+   * layout for no gain.
+   */
+  hasHeroImage: boolean;
+  /** Alt text for the hero image; null when there is none. */
+  heroImageAlt: string | null;
   /** Number of objects in THIS collection the requester can view (not subtree). */
   visibleObjectCount: number;
   children: CollectionTreeNode[];
@@ -406,6 +416,8 @@ export const collectionService = {
           selectableForCreate: access.selectableCollectionIds.has(c.id),
           description: c.description,
           landingObjectId: c.landingObjectId,
+          hasHeroImage: Boolean(c.heroImageKey),
+          heroImageAlt: c.heroImageAlt,
           visibleObjectCount: visibleCountByCollection.get(c.id) ?? 0,
           children: build(c.id),
         }))

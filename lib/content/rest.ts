@@ -123,7 +123,12 @@ export const restGrantSchema = z.object({
 });
 
 export const restCollectionGrantSchema = restGrantSchema.extend({
-  access: z.enum(["view", "create"]),
+  // `approve` (migration 178) must be accepted here even though the approver
+  // roster is configured from the admin UI. The collection DTO RETURNS approve
+  // grants, this schema is `.strict()`, and grants are replaced wholesale — so
+  // without it any REST client doing a read-modify-write on a gated collection
+  // would 400 on a value we had just handed it.
+  access: z.enum(["view", "create", "approve"]),
 });
 
 export const createCollectionBodySchema = z
@@ -151,6 +156,19 @@ export const updateCollectionBodySchema = createCollectionBodySchema
     // omitting them here would 400 every legitimate description edit.
     description: z.string().max(2000).nullable().optional(),
     landingObjectId: z.string().uuid().nullable().optional(),
+    // Per-collection publish review (migration 178). Update-only, like the
+    // fields above, and for the same reason: review is turned on for a section
+    // that already exists.
+    requiresApproval: z.boolean().optional(),
+    // `heroImageKey` / `heroImageAlt` are deliberately ABSENT.
+    //
+    // The key is an S3 storage detail, and `/api/atrium/collections/{id}/hero`
+    // serves whatever key the row holds. Letting a client set it would turn
+    // that route into an arbitrary read primitive for anything in the bucket —
+    // point the row at another object's key and the access check passes while
+    // the wrong bytes are served. The key is only ever written by
+    // `setCollectionHeroImageAction`, immediately after that code stored the
+    // bytes itself.
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, {

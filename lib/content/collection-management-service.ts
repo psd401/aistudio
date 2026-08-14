@@ -254,7 +254,16 @@ function scopeOf(row: CollectionAccessRow): CollectionScope {
  * every contributor to the section, so a field that influences access,
  * hierarchy, or lifecycle MUST NOT be added.
  */
-const SECTION_EDITOR_FIELDS = new Set(["description", "landingObjectId"]);
+const SECTION_EDITOR_FIELDS = new Set([
+  "description",
+  "landingObjectId",
+  // Migration 178. The hero image is section COPY in the same sense the
+  // description is — it says what this section is, and the person who
+  // contributes to a section is the one who knows. Restructuring the hierarchy
+  // still requires an administrator; illustrating your own section does not.
+  "heroImageKey",
+  "heroImageAlt",
+]);
 
 /**
  * Whether a patch touches ONLY the landing-page copy. An empty patch returns
@@ -621,6 +630,9 @@ async function managementDTOs(req: Requester): Promise<CollectionDTO[]> {
     archivedAt: row.archivedAt?.toISOString() ?? null,
     description: row.description,
     landingObjectId: row.landingObjectId,
+    heroImageKey: row.heroImageKey,
+    heroImageAlt: row.heroImageAlt,
+    requiresApproval: row.requiresApproval,
     directContentCount: directCounts.get(row.id) ?? 0,
     subtreeContentCount: subtreeCount(row.id),
     grants: access.directGrants.get(row.id) ?? [],
@@ -674,6 +686,9 @@ async function loadCollectionRows(
       // silently get `undefined` instead of a type error.
       description: contentCollections.description,
       landingObjectId: contentCollections.landingObjectId,
+      heroImageKey: contentCollections.heroImageKey,
+      heroImageAlt: contentCollections.heroImageAlt,
+      requiresApproval: contentCollections.requiresApproval,
     })
     .from(contentCollections)
     // Content create/move holds SHARE locks on these rows while it authorizes
@@ -718,20 +733,63 @@ function assertRestorableBelowParent(
   }
 }
 
+/**
+ * The two invariants a personal collection keeps after migration 178 made it
+ * shareable.
+ *
+ * What CHANGED: an owner may now raise their own tree to `group` and attach
+ * grants to it. Before, both were rejected here, which is why "share the
+ * collection I built" was impossible even though the grants table could
+ * express it.
+ *
+ * What did NOT change:
+ *  - It can never default to `internal` or `public`. Those levels mean
+ *    "everyone with an account", which is a district collection — if that is
+ *    what someone wants, an admin should make one, so it appears in the
+ *    district hierarchy and is governed like the rest of it.
+ *  - It can never inherit grants. A personal tree's access is exactly what its
+ *    owner granted, never something absorbed from an ancestor.
+ *
+ * The database backstops both (`ck_collection_private_owner_policy`); this is
+ * the layer that produces an intelligible message instead of a constraint
+ * violation.
+ *
+ * Note that only the OWNER reaches this code at all — `assertMayManage` throws
+ * for everyone else — so a grantee cannot re-share a collection shared with
+ * them.
+ */
+/**
+ * The default visibility a personal collection is created at. `private` unless
+ * the owner explicitly asked for `group`; anything wider is a hard error, not a
+ * silent clamp.
+ */
+function privateCollectionLevel(
+  requested: VisibilityLevel | undefined
+): VisibilityLevel {
+  if (requested === undefined || requested === "private") return "private";
+  if (requested === "group") return "group";
+  throw new ValidationError(
+    "A personal collection can be private or shared with specific people, but not internal or public"
+  );
+}
+
 function assertPrivateUpdate(
   scope: CollectionScope,
-  input: UpdateCollectionInput,
-  grants: CollectionGrant[] | undefined
+  input: UpdateCollectionInput
 ): void {
+  if (scope !== "private") return;
   if (
-    scope === "private" &&
-    ((input.defaultVisibilityLevel !== undefined &&
-      input.defaultVisibilityLevel !== "private") ||
-      input.inheritGrants === true ||
-      (grants !== undefined && grants.length > 0))
+    input.defaultVisibilityLevel !== undefined &&
+    input.defaultVisibilityLevel !== "private" &&
+    input.defaultVisibilityLevel !== "group"
   ) {
     throw new ValidationError(
-      "Private collections must remain private and cannot inherit or carry grants"
+      "A personal collection can be private or shared with specific people, but not internal or public"
+    );
+  }
+  if (input.inheritGrants === true) {
+    throw new ValidationError(
+      "Personal collections cannot inherit grants from a parent"
     );
   }
 }
@@ -753,10 +811,29 @@ function collectionUpdateValues(
   if (input.inheritGrants !== undefined) {
     values.inheritGrants = input.inheritGrants;
   }
-  // `?? null` (not the raw value): an explicit `null` from the caller CLEARS the
-  // field. Passing `undefined` into Drizzle's .set() silently drops the column
-  // from the UPDATE, so "clear this description" would look like it worked and
-  // change nothing — see docs/guides/silent-failure-patterns.md.
+  if (input.requiresApproval !== undefined) {
+    values.requiresApproval = input.requiresApproval;
+  }
+  applySectionCopyValues(input, values);
+  return values;
+}
+
+/**
+ * The section-editor fields (`SECTION_EDITOR_FIELDS`) — description, pinned
+ * page, and hero art. Split out of `collectionUpdateValues` so that function
+ * stays under the complexity lint; they also happen to be exactly the set a
+ * non-admin section editor may patch, so keeping them together is not merely
+ * cosmetic.
+ *
+ * Every one uses `?? null` CLEAR semantics: an explicit `null` from the caller
+ * must persist as a cleared column. Passing `undefined` into Drizzle's `.set()`
+ * silently drops the column from the UPDATE, so "clear this description" would
+ * appear to work and change nothing — see docs/guides/silent-failure-patterns.md.
+ */
+function applySectionCopyValues(
+  input: UpdateCollectionInput,
+  values: Partial<typeof contentCollections.$inferInsert>
+): void {
   if (input.description !== undefined) {
     const trimmed = input.description?.trim() ?? "";
     values.description = trimmed.length > 0 ? trimmed : null;
@@ -764,7 +841,36 @@ function collectionUpdateValues(
   if (input.landingObjectId !== undefined) {
     values.landingObjectId = input.landingObjectId ?? null;
   }
-  return values;
+  applyHeroImageValues(input, values);
+}
+
+/**
+ * The hero-image pair (migration 178), split from `applySectionCopyValues` to
+ * keep it under the complexity lint.
+ *
+ * The two columns are coupled: clearing the KEY must also clear the ALT. Alt
+ * text describing an image that is no longer there is worse than none, and
+ * leaving it behind would let the next uploaded image silently inherit a
+ * description of a completely different picture.
+ */
+function applyHeroImageValues(
+  input: UpdateCollectionInput,
+  values: Partial<typeof contentCollections.$inferInsert>
+): void {
+  const key = input.heroImageKey?.trim() ?? "";
+  const clearing = input.heroImageKey !== undefined && key.length === 0;
+
+  if (input.heroImageKey !== undefined) {
+    values.heroImageKey = key.length > 0 ? key : null;
+  }
+  if (clearing) {
+    values.heroImageAlt = null;
+    return;
+  }
+  if (input.heroImageAlt !== undefined) {
+    const alt = input.heroImageAlt?.trim() ?? "";
+    values.heroImageAlt = alt.length > 0 ? alt : null;
+  }
 }
 
 async function applyArchiveState(
@@ -813,7 +919,7 @@ async function updateCollectionInTx(
     collectionId
   );
   assertRestorableBelowParent(input, parentId, byId);
-  assertPrivateUpdate(scope, input, normalized.grants);
+  assertPrivateUpdate(scope, input);
   assertUpdatedSubtreeGroupDefaults({
     rows,
     collectionId,
@@ -828,8 +934,28 @@ async function updateCollectionInTx(
     .update(contentCollections)
     .set(collectionUpdateValues(input, normalized, parentId))
     .where(eq(contentCollections.id, collectionId));
+  // Un-sharing a personal collection CLEARS its grants, even when the caller
+  // sent only `defaultVisibilityLevel`.
+  //
+  // `updateCollectionBodySchema` is `.partial()`, so `{"defaultVisibilityLevel":
+  // "private"}` is a legal patch on its own, and `replaceGrants` below runs
+  // only when grants were explicitly supplied. Without this the rows would
+  // survive the transition — and a later flip back to `group` would silently
+  // resurrect a roster the owner believed they had dismantled. (The UI already
+  // clears them client-side; this covers REST/MCP and anything added later.)
+  //
+  // `personalCollectionAccess` independently refuses to honour grants on a
+  // `private` collection, so access is already revoked at the read path — this
+  // keeps the DATA honest rather than leaving invisible rows behind.
+  const unsharingPersonal =
+    scope === "private" &&
+    input.defaultVisibilityLevel === "private" &&
+    existing.defaultVisibilityLevel === "group";
+
   if (normalized.grants !== undefined) {
     await replaceGrants(tx, collectionId, normalized.grants);
+  } else if (unsharingPersonal) {
+    await replaceGrants(tx, collectionId, []);
   }
   await applyArchiveState(tx, rows, collectionId, input.archived);
 }
@@ -866,17 +992,20 @@ export const collectionManagementService = {
     const name = normalizedName(input.name);
     const position = normalizedPosition(input.position);
     const ownerUserId = assertMayCreateScope(req, input.scope);
+    // A personal collection defaults to `private` but may be created already
+    // shared at `group` (migration 178). Any wider level is refused rather than
+    // silently downgraded, so "make my collection internal" fails loudly
+    // instead of appearing to work — see `assertPrivateUpdate` for why that
+    // ceiling exists.
     const level =
       input.scope === "private"
-        ? "private"
+        ? privateCollectionLevel(input.defaultVisibilityLevel)
         : input.defaultVisibilityLevel ?? "internal";
     assertVisibilityLevel(level);
+    // Never inherited for a personal tree, regardless of what was asked for.
     const inheritGrants =
       input.scope === "private" ? false : input.inheritGrants ?? true;
     const grants = normalizeGrants(input.grants ?? []);
-    if (input.scope === "private" && grants.length > 0) {
-      throw new ValidationError("Private collections cannot carry access grants");
-    }
 
     let createdId: string | undefined;
     try {
@@ -942,6 +1071,46 @@ export const collectionManagementService = {
       });
       throw error;
     }
+  },
+
+  /**
+   * Cheap "may I edit this section's copy?" pre-flight, for callers that must
+   * do expensive work BEFORE they can call `update`.
+   *
+   * The hero-image action is the motivating case: it has to store bytes (an S3
+   * write) or call a paid image model to obtain the key it then patches in.
+   * Doing that first and relying on `update`'s own `assertMayManage` to reject
+   * afterwards means an unauthorized caller still burns the storage and the
+   * generation spend — an authenticated cost-abuse vector against ANY
+   * collectionId, including ones that do not exist.
+   *
+   * Applies the SAME rule as the copy-only carve-out inside `update`
+   * (`assertMayManage` + `SECTION_EDITOR_FIELDS`): administrators and district
+   * collections, a personal collection's owner, or a non-admin holding `create`
+   * access to the section. It is a pre-flight, NOT the authority — `update`
+   * re-asserts against the FOR-UPDATE-locked row, so a revocation landing
+   * between the two still wins.
+   *
+   * Returns the collection's CURRENT hero-image key so the caller can delete
+   * the superseded object after its replacement is live — see the action.
+   */
+  async assertMaySetSectionCopy(
+    req: Requester,
+    collectionId: string
+  ): Promise<{ previousHeroImageKey: string | null }> {
+    assertCollectionId(collectionId);
+    const access = await collectionAccessSnapshot(req);
+    const row = access.byId.get(collectionId);
+    // Unknown id is a NotFoundError, not a permission error — the same
+    // existence-masking `assertMayManage` applies, and it means a caller cannot
+    // use this to probe which collection ids exist.
+    if (!row) throw new NotFoundError("Collection not found", { collectionId });
+    assertMayManage(
+      req,
+      row,
+      access.selectableCollectionIds.has(collectionId)
+    );
+    return { previousHeroImageKey: row.heroImageKey };
   },
 
   async update(

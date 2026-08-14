@@ -234,6 +234,21 @@ export const s3Store = {
   },
 
   /**
+   * Build the S3 key for a collection's hero image (migration 178).
+   *
+   * Collection-scoped rather than object-scoped, so a personal collection's
+   * artwork lives under a key that can never be confused with (or reached
+   * through) an object asset path. `imageId` makes each upload a NEW key rather
+   * than overwriting: a replaced hero would otherwise keep serving the old
+   * bytes from any CDN or browser cache that had already fetched the key.
+   */
+  collectionHeroKey(collectionId: string, imageId: string): string {
+    assertSafeSegment(collectionId, "collectionId");
+    assertSafeSegment(imageId, "imageId");
+    return `${ATRIUM_PREFIX}/collections/${collectionId}/hero/${imageId}`;
+  },
+
+  /**
    * Build the S3 key for an exported OKF bundle (Phase 8, §36.5). Bundles live
    * under `atrium/okf/{collectionId}/{exportId}.json` — collection-scoped rather
    * than object-scoped (a bundle is a collection subtree, not a single object).

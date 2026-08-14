@@ -49,8 +49,10 @@ export const contentCollections = pgTable(
       .notNull(),
     /**
      * NULL = district/shared collection. A user id = owner-bound private
-     * collection. Private collections are forced to private/no-inheritance by
-     * both the service and the database check below.
+     * collection. Private collections never inherit grants (enforced by both
+     * the service and the database check below) and may default only to
+     * `private` or, once their owner shares them, `group` — never `internal`
+     * or `public`.
      */
     ownerUserId: integer("owner_user_id").references(() => users.id, {
       // Empty private trees are organizational metadata and follow their owner
@@ -78,6 +80,27 @@ export const contentCollections = pgTable(
      * its self-reference.
      */
     landingObjectId: uuid("landing_object_id"),
+    /**
+     * Section hero art (migration 178) — the S3 object KEY, not a URL, because
+     * presigned URLs expire and CDN hosts move. Resolved for display through
+     * the existing `/api/images/[...key]` route.
+     *
+     * Deliberately raster, unlike the object-level `cover_gradient`, which is
+     * an allowlisted CSS gradient preset key with "no raster assets" as an
+     * explicit design rule. Sections carry real photography and generated
+     * header images; documents carry a tint.
+     */
+    heroImageKey: varchar("hero_image_key", { length: 512 }),
+    /** Alt text for `heroImageKey`. Required whenever a hero image is set. */
+    heroImageAlt: varchar("hero_image_alt", { length: 300 }),
+    /**
+     * Per-collection publish review (migration 178). Default false: the
+     * district-wide policy stays allow-then-notify (Hagel, 2026-07-25) and
+     * authors publish freely everywhere else. Switching this on for a
+     * collection — the staff intranet, SOPs — routes publishes out of it
+     * through the existing `content_publish_requests` queue instead.
+     */
+    requiresApproval: boolean("requires_approval").default(false).notNull(),
     archivedAt: timestamp("archived_at"),
     navItemId: integer("nav_item_id").references(() => navigationItems.id),
     position: integer("position").default(0).notNull(),
@@ -89,9 +112,12 @@ export const contentCollections = pgTable(
     index("idx_collection_owner").on(t.ownerUserId),
     index("idx_collection_archived").on(t.archivedAt),
     index("idx_collection_landing_object").on(t.landingObjectId),
+    index("idx_collection_requires_approval")
+      .on(t.id)
+      .where(sql`${t.requiresApproval} = true`),
     check(
       "ck_collection_private_owner_policy",
-      sql`${t.ownerUserId} IS NULL OR (${t.defaultVisibilityLevel} = 'private' AND ${t.inheritGrants} = false)`
+      sql`${t.ownerUserId} IS NULL OR (${t.defaultVisibilityLevel} IN ('private', 'group') AND ${t.inheritGrants} = false)`
     ),
     foreignKey({
       columns: [t.parentId],

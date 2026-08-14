@@ -35,6 +35,7 @@ import {
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { updateCollectionAction } from "@/actions/db/atrium/collection-management";
+import { setCollectionHeroImageAction } from "@/actions/db/atrium/collection-hero";
 import { listContentAction } from "@/actions/db/atrium/list-content";
 import type { ContentObjectDTO } from "@/lib/content";
 import { createLogger } from "@/lib/client-logger";
@@ -49,35 +50,205 @@ export interface SectionSettingsDialogProps {
   sectionName: string;
   initialDescription: string | null;
   initialLandingObjectId: string | null;
+  /** Whether the section currently has hero art (migration 178). */
+  hasHeroImage?: boolean;
+  /** Existing alt text, pre-filled when replacing an image. */
+  initialHeroImageAlt?: string | null;
 }
 
-/** Help text under the pin picker, by load state. */
-function pinHelpText(loading: boolean, count: number): string {
-  if (loading) return "Loading this section's pages…";
-  if (count === 0) return "This section has no pages yet.";
-  return "Pinned above everything else, so the page to read first is not buried by whatever changed most recently.";
+/** Mirrors `MAX_HERO_IMAGE_BYTES` — checked client-side to fail fast, and again on the server. */
+const HERO_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Read a picked file as a `data:` URL for the server action.
+ *
+ * Base64 through a server action rather than a presigned direct-to-S3 upload:
+ * a hero image is a single small file chosen once in a settings dialog, and the
+ * presigned flow would need an initiate endpoint, a client PUT, and a
+ * confirmation round-trip to save nothing at this size.
+ */
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("error", () =>
+      reject(new Error("Could not read that file"))
+    );
+    reader.addEventListener("load", () => resolve(String(reader.result)));
+    reader.readAsDataURL(file);
+  });
 }
 
-export function SectionSettingsDialog({
+/**
+ * The section's header image: upload one, generate one, or remove it.
+ *
+ * Its own component with its own state, and it applies changes IMMEDIATELY
+ * rather than participating in the dialog's Save. Image work is slow (a
+ * generation call is several seconds) and independently fallible (no model
+ * configured, a provider refusal, an oversized file) — folding it into Save
+ * would let an image failure discard the description edits made beside it, and
+ * would make Save's latency unpredictable.
+ */
+function HeroImageEditor({
   collectionId,
-  sectionName,
-  initialDescription,
-  initialLandingObjectId,
-}: SectionSettingsDialogProps): React.JSX.Element {
+  hasHeroImage,
+  initialAlt,
+}: {
+  collectionId: string;
+  hasHeroImage: boolean;
+  initialAlt: string | null;
+}): React.JSX.Element {
   const router = useRouter();
-  const [open, setOpen] = useState(false);
-  const [description, setDescription] = useState(initialDescription ?? "");
-  const [landingObjectId, setLandingObjectId] = useState(
-    initialLandingObjectId ?? ""
+  const [prompt, setPrompt] = useState("");
+  const [alt, setAlt] = useState(initialAlt ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [present, setPresent] = useState(hasHeroImage);
+
+  const apply = useCallback(
+    async (input: { dataUrl?: string; prompt?: string; clear?: boolean }) => {
+      setBusy(true);
+      setError(null);
+      try {
+        const res = await setCollectionHeroImageAction(collectionId, {
+          ...input,
+          alt,
+        });
+        if (res.isSuccess) {
+          setPresent(!input.clear);
+          if (input.clear) setAlt("");
+          setPrompt("");
+          // The hero is server-rendered; re-run the server components in place
+          // rather than reloading the document.
+          router.refresh();
+        } else {
+          setError(res.message ?? "Could not update the header image");
+        }
+      } catch (e) {
+        setError("Could not update the header image");
+        log.error("setCollectionHeroImageAction threw", {
+          collectionId,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+      setBusy(false);
+    },
+    [collectionId, alt, router]
   );
+
+  const onPickFile = useCallback(
+    (file: File | undefined) => {
+      if (!file) return;
+      // Checked here as well as on the server so an oversized pick fails
+      // instantly instead of after base64-inflating it over the wire.
+      if (file.size > HERO_MAX_BYTES) {
+        setError(
+          `That image is ${(file.size / 1024 / 1024).toFixed(1)}MB. The limit is ${
+            HERO_MAX_BYTES / 1024 / 1024
+          }MB.`
+        );
+        return;
+      }
+      void (async () => {
+        try {
+          await apply({ dataUrl: await readFileAsDataUrl(file) });
+        } catch {
+          setError("Could not read that file");
+        }
+      })();
+    },
+    [apply]
+  );
+
+  // Alt text is required by the server on both set paths, so the controls are
+  // disabled until it exists rather than letting the request fail.
+  const needsAlt = alt.trim().length === 0;
+
+  return (
+    <div className="space-y-2">
+      <Label htmlFor="section-hero-alt">Header image</Label>
+      <input
+        id="section-hero-alt"
+        className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+        value={alt}
+        maxLength={300}
+        disabled={busy}
+        placeholder="Describe the image for screen readers"
+        onChange={(e) => setAlt(e.target.value)}
+        data-testid="section-hero-alt"
+      />
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="file"
+          accept="image/png,image/jpeg,image/webp,image/gif"
+          className="text-xs"
+          disabled={busy || needsAlt}
+          onChange={(e) => onPickFile(e.target.files?.[0])}
+          aria-label="Upload a header image"
+          data-testid="section-hero-upload"
+        />
+        {present && (
+          <button
+            type="button"
+            className="mer-btn"
+            disabled={busy}
+            onClick={() => void apply({ clear: true })}
+            data-testid="section-hero-remove"
+          >
+            Remove image
+          </button>
+        )}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          className="h-9 min-w-0 flex-1 rounded-md border bg-background px-3 text-sm"
+          value={prompt}
+          maxLength={1000}
+          disabled={busy}
+          placeholder="…or describe an image to generate"
+          onChange={(e) => setPrompt(e.target.value)}
+          data-testid="section-hero-prompt"
+        />
+        <button
+          type="button"
+          className="mer-btn"
+          disabled={busy || prompt.trim().length < 3 || needsAlt}
+          onClick={() => void apply({ prompt })}
+          data-testid="section-hero-generate"
+        >
+          {busy ? "Working…" : "Generate"}
+        </button>
+      </div>
+      {needsAlt && (
+        <p className="text-xs text-muted-foreground">
+          Add a description above before uploading or generating.
+        </p>
+      )}
+      {error && (
+        <p className="text-sm text-destructive" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The "start here" pin candidates — this section's pages.
+ *
+ * Loaded only while the dialog is OPEN: the landing page already paid for its
+ * own listing, and this is a different (unpaginated, title-only) shape that
+ * would otherwise be fetched on every section render for a dialog most viewers
+ * never open.
+ *
+ * Extracted from the component to keep it under the max-lines lint.
+ */
+function usePinOptions(
+  open: boolean,
+  collectionId: string
+): { options: ContentObjectDTO[]; loadingOptions: boolean } {
   const [options, setOptions] = useState<ContentObjectDTO[]>([]);
   const [loadingOptions, setLoadingOptions] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  // Load the pin candidates only while the dialog is open — the landing page
-  // already paid for its own listing, and this is a different (unpaginated,
-  // title-only) shape.
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
@@ -105,6 +276,34 @@ export function SectionSettingsDialog({
       cancelled = true;
     };
   }, [open, collectionId]);
+
+  return { options, loadingOptions };
+}
+
+/** Help text under the pin picker, by load state. */
+function pinHelpText(loading: boolean, count: number): string {
+  if (loading) return "Loading this section's pages…";
+  if (count === 0) return "This section has no pages yet.";
+  return "Pinned above everything else, so the page to read first is not buried by whatever changed most recently.";
+}
+
+export function SectionSettingsDialog({
+  collectionId,
+  sectionName,
+  initialDescription,
+  initialLandingObjectId,
+  hasHeroImage = false,
+  initialHeroImageAlt = null,
+}: SectionSettingsDialogProps): React.JSX.Element {
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
+  const [description, setDescription] = useState(initialDescription ?? "");
+  const [landingObjectId, setLandingObjectId] = useState(
+    initialLandingObjectId ?? ""
+  );
+  const { options, loadingOptions } = usePinOptions(open, collectionId);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const save = useCallback(() => {
     setSaving(true);
@@ -174,6 +373,12 @@ export function SectionSettingsDialog({
               onChange={(e) => setDescription(e.target.value)}
             />
           </div>
+
+          <HeroImageEditor
+            collectionId={collectionId}
+            hasHeroImage={hasHeroImage}
+            initialAlt={initialHeroImageAlt}
+          />
 
           <div className="space-y-2">
             <Label htmlFor="section-landing">Start here</Label>

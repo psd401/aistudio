@@ -51,6 +51,10 @@ import {
   VersionPreconditionFailedError,
 } from "./errors";
 import {
+  collectionAccessSnapshot,
+  isCollectionApprover,
+} from "./collection-access";
+import {
   isPublicDestination,
   type PublishAdapter,
   type PublishDestination,
@@ -453,6 +457,52 @@ function assertMayUnpublishPublicOrRaise(
       { destination, objectId, requestKind: "unpublish" }
     );
   }
+}
+
+/**
+ * Per-collection review gate (migration 178). Raises `ApprovalRequiredError`
+ * — persisting a durable `content_publish_requests` row pinned to the version
+ * being published — when the object sits in a collection with
+ * `requiresApproval` set and the caller is not one of its approvers.
+ *
+ * A no-op for unfiled content, for ungated collections (every collection by
+ * default), and for approvers, so the overwhelmingly common publish path pays
+ * one already-cached collection-access snapshot and nothing else.
+ *
+ * Pinning `versionId` is what makes approval meaningful: the approver replays
+ * the version that was submitted, not whatever the author edited it into while
+ * the request sat in the queue (#1118).
+ */
+async function raiseCollectionReviewApproval(args: {
+  req: Requester;
+  obj: PublishableObject;
+  objectId: string;
+  destination: PublishDestination;
+  publishedVersionId: string;
+}): Promise<void> {
+  const { req, obj, objectId, destination, publishedVersionId } = args;
+  if (!obj.collectionId) return;
+
+  const access = await collectionAccessSnapshot(req);
+  const collection = access.byId.get(obj.collectionId);
+  if (!collection?.requiresApproval) return;
+  if (isCollectionApprover(req, collection, access)) return;
+
+  raisePublishApprovalRequired(
+    req,
+    `Publishing from "${collection.name}" requires approval`,
+    { objectId, slug: obj.slug, destination },
+    {
+      destination,
+      objectId,
+      requestKind: "publish",
+      // Pins the queued row to the version submitted for review, so approving
+      // replays what was reviewed rather than whatever the author has since
+      // edited it into (#1118).
+      versionId: publishedVersionId,
+      collectionId: collection.id,
+    }
+  );
 }
 
 /**
@@ -882,6 +932,34 @@ export const publishService = {
         opts.expectedVersionId
       );
     }
+
+    // PER-COLLECTION REVIEW GATE (migration 178).
+    //
+    // Independent of §26.4 above, and deliberately narrower. §26.4 asks "is
+    // this exposure public?"; this asks "does this SECTION require review?".
+    // The district-wide policy is untouched and stays allow-then-notify
+    // (Hagel, 2026-07-25) — publishing is immediate everywhere except the
+    // sections an administrator has explicitly switched review on for, which
+    // in practice means the staff intranet and the SOP set, where an
+    // unreviewed page going live is the failure mode worth paying a queue for.
+    //
+    // Reuses the SAME `content_publish_requests` queue and the SAME admin
+    // surface rather than introducing a second approval mechanism. The pending
+    // dedupe index is (object_id, request_kind, destination), so an intranet
+    // review request cannot collide with a §26.4 public request for the same
+    // object — they carry different destinations.
+    //
+    // Runs AFTER the doomed-request validations above (no head, bad pinned
+    // version, unimplemented adapter) for the same reason §26.4 does: a request
+    // that can only fail on approve must not be queued for a human to discover
+    // that for us.
+    await raiseCollectionReviewApproval({
+      req,
+      obj,
+      objectId,
+      destination: input.destination,
+      publishedVersionId,
+    });
 
     // The actor recording the publish. Guests/autonomous agents have no user id;
     // `published_by` is nullable, so a null here is persisted as "system".

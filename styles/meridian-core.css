@@ -324,8 +324,20 @@
   color: var(--mer-brand);
 }
 .mer-badge-draft {
+  background: var(--mer-draft-tint, #fdf3e0);
+  color: var(--mer-draft, #8a5a00);
+}
+/* Archived keeps the recessed grey Draft used to borrow: inactive, not urgent. */
+.mer-badge-archived {
   background: var(--mer-canvas-sunken);
   color: var(--mer-ink-secondary);
+}
+/* Awaiting approval. Solid amber rather than Draft's tint — a queued item is
+   waiting on a PERSON, so it should read louder than the thing still being
+   written. Same hue keeps the two visibly related. */
+.mer-badge-review {
+  background: var(--mer-draft, #8a5a00);
+  color: #fff;
 }
 .mer-badge-agent {
   background: var(--mer-agent-tint);
@@ -511,6 +523,34 @@
   display: flex;
   align-items: center;
   gap: 10px;
+}
+/* The orthogonal status / creator filters that sit beside the tag box. Styled
+   to read as siblings of .mer-chip rather than as form fields — they are
+   filters, not data entry — while staying a native <select> for free keyboard
+   and screen-reader behaviour. */
+.mer-chip-select {
+  height: 36px;
+  padding: 0 8px;
+  border: 1px solid var(--mer-line);
+  border-radius: var(--mer-r-pill);
+  background: var(--mer-canvas);
+  color: var(--mer-ink-secondary);
+  font-size: 12.5px;
+  line-height: 1;
+  cursor: pointer;
+  max-width: 9.5rem;
+}
+.mer-chip-select:hover:not(:disabled) {
+  border-color: var(--mer-brand);
+  color: var(--mer-ink);
+}
+.mer-chip-select:focus-visible {
+  outline: 2px solid var(--mer-brand);
+  outline-offset: 1px;
+}
+.mer-chip-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .mer-sorted-label {
   font-size: 12.5px;
@@ -949,6 +989,63 @@
 }
 .mer-lib-card-star:hover {
   color: var(--mer-brand);
+}
+
+/* Section hero art (migration 178). A fixed aspect band rather than the
+   image's natural height, so a portrait upload cannot push the section's title
+   and contents below the fold. */
+.mer-section-hero-image {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 5;
+  object-fit: cover;
+  border-radius: var(--mer-r-card, 10px);
+  margin-bottom: 14px;
+  background: var(--mer-canvas-sunken);
+}
+
+/* Audience line on a card ("All staff", "Shared · 3"). Quieter than the owner
+   name above it — it is orienting metadata, not the card's subject. */
+.mer-lib-card-audience {
+  font-size: 11.5px;
+  color: var(--mer-ink-muted);
+  margin-top: 2px;
+}
+
+/* Full-screen shortcut on artifact cards. Also a sibling of the card link,
+   tucked just left of the favourite star so the two never overlap. Mirrors the
+   star's reveal-on-hover behaviour for the same reason: the grid should not
+   read as a wall of buttons at rest. */
+.mer-lib-card-fullscreen {
+  position: absolute;
+  top: 8px;
+  right: 40px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--mer-r-pill);
+  background: rgba(255, 255, 255, 0.86);
+  color: var(--mer-ink-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease;
+}
+.mer-lib-card-wrap:hover .mer-lib-card-fullscreen,
+.mer-lib-card-fullscreen:focus-visible {
+  opacity: 1;
+}
+.mer-lib-card-fullscreen:hover {
+  color: var(--mer-brand);
+}
+/* Touch devices get no hover, so the control must be permanently visible or it
+   is unreachable — same accommodation the selection checkbox makes. */
+@media (hover: none) {
+  .mer-lib-card-fullscreen {
+    opacity: 1;
+  }
 }
 
 /* Content card grid */
@@ -2829,6 +2926,29 @@
   transition: background 150ms ease-out, border-color 150ms ease-out;
 }
 .mer-reader-edit:hover {
+  background: var(--mer-brand-tint);
+  border-color: var(--mer-brand-mid);
+}
+/* Full-screen action in the artifact reader bar. Same shape as Edit — it sits
+   beside it and they are peers — but it never carries Edit's emphasis: looking
+   at an artifact should not compete with changing one. */
+.mer-reader-fullscreen {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: var(--mer-r-button);
+  font-size: 12.5px;
+  font-weight: 600;
+  border: 1px solid var(--mer-border);
+  background: var(--mer-surface);
+  color: var(--mer-ink-secondary);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background 150ms ease-out, border-color 150ms ease-out;
+}
+.mer-reader-fullscreen:hover {
   background: var(--mer-brand-tint);
   border-color: var(--mer-brand-mid);
 }

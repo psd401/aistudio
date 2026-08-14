@@ -272,6 +272,12 @@ export default async function ReaderPage({
         editHref={editHref}
         commentHref={editHref}
         commentCount={commentCount}
+        // The chrome-free viewer, reachable in ONE click from here for every
+        // viewer. Previously the only route was Edit → "Open full screen",
+        // which put an editing surface in front of a read-only action and left
+        // non-editors with no route at all. `/atrium/[id]/view` re-runs its own
+        // `canView` server-side, so this link grants nothing.
+        fullScreenHref={`/atrium/${published.id}/view`}
         publishedAt={published.publishedAt}
         collectionName={published.collectionName}
         // Artifact readers skip the TOC (no document headings to walk).

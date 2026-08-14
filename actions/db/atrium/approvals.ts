@@ -30,7 +30,7 @@
  * `pending` so the decision can be retried later.
  */
 
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import {
   createLogger,
   generateRequestId,
@@ -55,6 +55,10 @@ import { visibilityService } from "@/lib/content/visibility-service";
 import { isPublishDestination } from "@/lib/content/validators";
 import type { PublishDestination } from "@/lib/content/publish-adapters/types";
 import type { Requester } from "@/lib/content/types";
+import {
+  collectionAccessSnapshot,
+  isCollectionApprover,
+} from "@/lib/content/collection-access";
 import type { ActionState } from "@/types";
 import { getUserRequester } from "./requester";
 
@@ -76,19 +80,109 @@ export interface PendingApprovalDTO {
 type AdminRequester = Extract<Requester, { kind: "user" }>;
 
 /**
- * Resolve the session into an admin `user` Requester or throw. The requester is
- * returned (not just checked) because approve REPLAYS the blocked action AS
- * this admin — the same object that gates the action authorizes the replay.
+ * The set of collection ids this requester may approve publishes out of, or
+ * `null` for an administrator (who may approve anything).
+ *
+ * Migration 178 made the approver roster per-collection and configurable — a
+ * section can name its own approvers by role, group, or person — so the queue
+ * is no longer an admin-only surface. A department's SOP owner should clear
+ * their own section's queue without district admin involvement.
  */
-async function requireAdminRequester(
+async function approvableCollectionIds(
+  req: Requester
+): Promise<Set<string> | null> {
+  if (req.kind === "user" && req.isAdmin) return null;
+  const access = await collectionAccessSnapshot(req);
+  const ids = new Set<string>();
+  for (const collection of access.collections) {
+    if (!collection.requiresApproval) continue;
+    if (isCollectionApprover(req, collection, access)) ids.add(collection.id);
+  }
+  return ids;
+}
+
+/**
+ * Coarse eligibility, checked BEFORE any request row is loaded.
+ *
+ * Migration 178 made the per-request decider set depend on the request's
+ * collection, which means the row has to be read before the precise check can
+ * run. Done naively that hands an unauthorized caller an existence oracle: a
+ * bad id 404s while a real id they cannot decide returns "forbidden", so they
+ * can enumerate valid request ids. This restores the old uniform rejection for
+ * anyone who cannot decide ANYTHING, without giving up the per-collection
+ * roster.
+ *
+ * Callers who clear this still cannot learn about requests outside their own
+ * sections — `assertMayDecide` folds that case into the not-found response.
+ */
+async function requireEligibleDecider(
   requestId: string,
   operation: string
 ): Promise<AdminRequester> {
   const requester = await getUserRequester(requestId);
-  if (requester.kind !== "user" || !requester.isAdmin) {
+  if (requester.kind !== "user") {
+    throw ErrorFactories.authzAdminRequired(operation);
+  }
+  const approvable = await approvableCollectionIds(requester);
+  // `null` = administrator (decides anything). An empty set = approves nothing.
+  if (approvable != null && approvable.size === 0) {
     throw ErrorFactories.authzAdminRequired(operation);
   }
   return requester;
+}
+
+/**
+ * The precise per-request check, run once the row is loaded.
+ *
+ * An eligible caller who may not decide THIS request is answered exactly like
+ * one asking about a request that does not exist — same error, same shape — so
+ * clearing the coarse gate does not turn into an oracle for other sections'
+ * queues.
+ *
+ * Self-approval is the one deliberate exception to that masking: the requester
+ * obviously knows their own request exists, so a specific message costs nothing
+ * and a generic "not found" would just be baffling. It enforces segregation of
+ * duties and cannot strand anything — whoever raised a request was by
+ * definition not an approver at raise time, since an approver's publish is
+ * never queued.
+ */
+async function assertMayDecide(
+  requester: AdminRequester,
+  request: ContentPublishRequestRow,
+  id: string
+): Promise<void> {
+  if (
+    request.requestedByUserId != null &&
+    request.requestedByUserId === requester.userId
+  ) {
+    throw ErrorFactories.authzToolAccessDenied(
+      "Approving your own request is not permitted — another approver must review it"
+    );
+  }
+
+  if (requester.isAdmin) return;
+
+  // Non-admin: must approve the collection THIS request's object lives in. An
+  // object-less request (`export`) has no collection to derive a roster from,
+  // so it stays administrator-only.
+  const objectId = request.objectId;
+  const [obj] = objectId
+    ? await executeQuery(
+        (db) =>
+          db
+            .select({ collectionId: contentObjects.collectionId })
+            .from(contentObjects)
+            .where(eq(contentObjects.id, objectId))
+            .limit(1),
+        "atrium.approvals.loadRequestCollection"
+      )
+    : [undefined];
+
+  const allowed = await approvableCollectionIds(requester);
+  if (allowed == null || !obj?.collectionId || !allowed.has(obj.collectionId)) {
+    // Deliberately the NOT-FOUND error, not a forbidden one — see the docblock.
+    throw ErrorFactories.dbRecordNotFound("content_publish_requests", id);
+  }
 }
 
 /**
@@ -238,6 +332,31 @@ async function loadRequest(id: string): Promise<ContentPublishRequestRow> {
  * List the pending §26.4 approval queue (admin only), newest first, with the
  * object's title/slug and the requesting user's email joined in for display.
  */
+/**
+ * Whether the caller approves publishes for at least one collection — the
+ * entry check for /admin/atrium's non-admin path.
+ *
+ * Returns a boolean rather than throwing so the page can 404 (mask the
+ * surface's existence) instead of surfacing an authorization error.
+ */
+export async function isCollectionApproverAction(): Promise<
+  ActionState<boolean>
+> {
+  const requestId = generateRequestId();
+  try {
+    const requester = await getUserRequester(requestId);
+    const approvable = await approvableCollectionIds(requester);
+    // `null` = administrator (approves everything).
+    return createSuccess(approvable == null || approvable.size > 0, "Checked");
+  } catch (error) {
+    return handleError(error, "Failed to check approver status", {
+      context: "isCollectionApproverAction",
+      requestId,
+      operation: "isCollectionApproverAction",
+    });
+  }
+}
+
 export async function listPendingApprovalsAction(): Promise<
   ActionState<PendingApprovalDTO[]>
 > {
@@ -246,7 +365,16 @@ export async function listPendingApprovalsAction(): Promise<
   const log = createLogger({ requestId, action: "listPendingApprovalsAction" });
 
   try {
-    await requireAdminRequester(requestId, "listPendingApprovals");
+    // Admins see the whole queue; a collection approver sees only the requests
+    // they can actually act on. `null` means "no restriction" (administrator);
+    // an EMPTY set means this caller approves nothing, which must yield an
+    // empty list rather than the unfiltered queue — the difference between the
+    // two is why this is `Set | null` and not a bare set.
+    const viewer = await getUserRequester(requestId);
+    const approvable = await approvableCollectionIds(viewer);
+    if (approvable != null && approvable.size === 0) {
+      throw ErrorFactories.authzAdminRequired("listPendingApprovals");
+    }
 
     const rows = await executeQuery(
       (db) =>
@@ -273,7 +401,17 @@ export async function listPendingApprovalsAction(): Promise<
             users,
             eq(contentPublishRequests.requestedByUserId, users.id)
           )
-          .where(eq(contentPublishRequests.status, "pending"))
+          .where(
+            approvable == null
+              ? eq(contentPublishRequests.status, "pending")
+              : and(
+                  eq(contentPublishRequests.status, "pending"),
+                  // Non-admin approvers see only their own sections' requests.
+                  // Object-less (`export`) rows have no collection and so are
+                  // excluded here — they stay administrator-only.
+                  inArray(contentObjects.collectionId, [...approvable])
+                )
+          )
           .orderBy(desc(contentPublishRequests.createdAt)),
       "atrium.approvals.listPending"
     );
@@ -326,12 +464,19 @@ export async function approvePublishRequestAction(
       id,
       hasNote: Boolean(note),
     });
-    const requester = await requireAdminRequester(
+    // Coarse gate FIRST, so a caller who can decide nothing is rejected without
+    // the row load ever happening — otherwise "bad id" and "real id I may not
+    // touch" answer differently and become an enumeration oracle.
+    const requester = await requireEligibleDecider(
       requestId,
       "approvePublishRequest"
     );
-
+    // Then the row, then the precise per-request check: who may decide depends
+    // on which collection the object sits in, so the row is an INPUT to that
+    // gate rather than something read after passing it.
     const request = await loadRequest(id);
+    await assertMayDecide(requester, request, id);
+
     if (request.status !== "pending") {
       throw ErrorFactories.invalidInput(
         "id",
@@ -437,16 +582,18 @@ export async function denyPublishRequestAction(
 
   try {
     log.info("Action started: deny publish request", { id });
-    const requester = await requireAdminRequester(
+    // Same ordering as approve, for the same reason — see there.
+    const requester = await requireEligibleDecider(
       requestId,
       "denyPublishRequest"
     );
+    const request = await loadRequest(id);
+    await assertMayDecide(requester, request, id);
 
     if (!note?.trim()) {
       throw ErrorFactories.missingRequiredField("note");
     }
 
-    const request = await loadRequest(id);
     if (request.status !== "pending") {
       throw ErrorFactories.invalidInput(
         "id",

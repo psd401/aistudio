@@ -65,8 +65,12 @@ test.describe("Atrium content library (authenticated)", () => {
       await expect(
         page.getByRole("textbox", { name: "Search content by title or tag" })
       ).toBeVisible();
+      // `combobox`, not `textbox`: the tag filter carries a `list` attribute
+      // (its typeahead datalist, migration 178's tag-discovery work), and an
+      // input with `list` has an implicit ARIA role of combobox. Still a
+      // free-text field — the suggestions accelerate, they never constrain.
       await expect(
-        page.getByRole("textbox", { name: "Filter by tag" })
+        page.getByRole("combobox", { name: "Filter by tag" })
       ).toBeVisible();
     } finally {
       await context.close();
