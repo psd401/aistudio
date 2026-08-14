@@ -67,6 +67,7 @@ jobs:
       run: |
         uv run --python 3.12 --no-project -m unittest \
           infra/agent-image/test_harness_adapter.py \
+          infra/agent-image/test_reply_replay.py \
           infra/agent-image/test_agentcore_wrapper.py \
           infra/agent-image/test_iteration_telemetry.py \
           infra/agent-image/test_mantle_proxy.py \
