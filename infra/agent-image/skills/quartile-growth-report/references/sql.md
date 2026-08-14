@@ -22,7 +22,8 @@ labeled `(Not on file)`.
 Generate the `norms` body first:
 
 ```bash
-python3 scripts/norms_values.py --grade 3 --period Fall --period Spring \
+/opt/agentcore-venv/bin/python3 /opt/psd-skills/quartile-growth-report/scripts/norms_values.py \
+  --grade 3 --period Fall --period Spring \
   --measure ORF-WRC --measure NWF-CLS --as "<warehouse name>" --as "<warehouse name>"
 ```
 

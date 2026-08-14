@@ -2,7 +2,7 @@
 name: quartile-growth-report
 summary: Build a principal's growth-by-quartile spreadsheet from psd-data — average growth per starting-point quartile by classroom, school, district, and subgroup, one tab per grade.
 description: Produce a growth-by-quartile report for an elementary school as a Google Sheet — average growth for each starting-point quartile (A = lowest 25% … D = highest) by classroom, school, district and subgroup, one tab per grade. Use when someone asks for a quartile growth report, growth by quartile, a teacher quartile report, or how their lowest quartile grew.
-allowed-tools: Bash(node:*)
+allowed-tools: Bash(/opt/agentcore-venv/bin/python3:*), Bash(node:*)
 ---
 
 # quartile-growth-report
@@ -100,7 +100,8 @@ Generate only the cuts a query needs — the full table is far too large to inli
 but one measure-window is ~60-100 rows:
 
 ```bash
-python3 scripts/norms_values.py --grade 3 --period Fall --period Spring \
+/opt/agentcore-venv/bin/python3 /opt/psd-skills/quartile-growth-report/scripts/norms_values.py \
+  --grade 3 --period Fall --period Spring \
   --measure ORF-WRC --as "<warehouse assessment_group>"
 ```
 
