@@ -24,6 +24,7 @@ import {
   ArrowUpRight,
   Archive,
   SearchX,
+  Maximize2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { timeAgo } from "@/lib/atrium/relative-time";
@@ -33,15 +34,31 @@ import { TagPills } from "./TagPills";
 import { FavoriteStar } from "./FavoriteStar";
 
 /** Meridian status pill class for a content object's lifecycle status. */
-function statusBadge(status: ContentObjectDTO["status"]): {
+function statusBadge(
+  status: ContentObjectDTO["status"],
+  /**
+   * A publish request for this object is sitting in the approval queue. It
+   * OVERRIDES the lifecycle label because it is the more actionable fact: the
+   * object is still technically a draft, but nobody should keep editing it or
+   * wonder why it has not gone live — it is waiting on a person.
+   */
+  pendingReview = false
+): {
   cls: string;
   label: string;
 } {
+  if (pendingReview && status !== "archived") {
+    return { cls: "mer-badge-review", label: "In review" };
+  }
   switch (status) {
     case "published":
       return { cls: "mer-badge-published", label: "Published" };
+    // Archived has its OWN pill now. It used to borrow the draft style, so the
+    // two states that behave most differently — one still being worked on, one
+    // deliberately put away — were the same grey and could only be told apart
+    // by reading the word.
     case "archived":
-      return { cls: "mer-badge-draft", label: "Archived" };
+      return { cls: "mer-badge-archived", label: "Archived" };
     default:
       return { cls: "mer-badge-draft", label: "Draft" };
   }
@@ -71,8 +88,81 @@ function cardMeta(it: ContentObjectDTO): string {
   return edited ? `${who} · edited ${edited}` : who;
 }
 
+/**
+ * The audience line on a card: who, roughly, can see this.
+ *
+ * The catalogue showed lifecycle (draft/published) but never AUDIENCE, so
+ * "which of these is actually shared, and how widely?" — the question that
+ * matters most when auditing a district-wide library — could only be answered
+ * by opening each item's Share dialog one at a time.
+ *
+ * A COUNT, never names. The grant roster is editor-only (see
+ * `getVisibilityAction`); printing it on a card would show every grantee the
+ * whole roster. "Shared · 3" answers the question without identifying anyone,
+ * and only reaches viewers who can already see the object.
+ */
+function AudienceLabel({ it }: { it: ContentObjectDTO }): React.JSX.Element | null {
+  const label = ((): string | null => {
+    switch (it.visibilityLevel) {
+      case "public":
+        return "Public";
+      case "internal":
+        return "All staff";
+      case "group":
+        // A group-level object with zero grants is reachable by nobody but its
+        // owner — a real and confusing state worth naming rather than
+        // rendering as a bare "Shared · 0".
+        return it.grantCount > 0
+          ? `Shared · ${it.grantCount}`
+          : "Shared with nobody yet";
+      case "private":
+        return "Private";
+      default:
+        return null;
+    }
+  })();
+  if (!label) return null;
+  return (
+    <p className="mer-lib-card-audience" data-testid="card-audience">
+      {label}
+    </p>
+  );
+}
+
+/**
+ * One-click full screen for an artifact card.
+ *
+ * Full screen already existed at `/atrium/[id]/view` but was linked from
+ * exactly one place: the authoring topbar. Reaching it from the library meant
+ * opening the artifact, clicking Edit, then "Open full screen" — three steps
+ * through an EDITING surface to do the most common read-only thing anyone does
+ * with an artifact.
+ *
+ * A SIBLING of the card's `<Link>`, never a descendant: an anchor inside an
+ * anchor is invalid HTML, and the click would also trigger the card's own
+ * navigation. Same rule the selection checkbox and favourite star follow.
+ *
+ * Deliberately not `target="_blank"`: the authoring topbar opens a new tab
+ * because you are working in the editor and want to keep it, but from the
+ * library this is just "look at this thing", and back should return to the
+ * grid.
+ */
+function FullScreenLink({ it }: { it: ContentObjectDTO }): React.JSX.Element {
+  return (
+    <Link
+      href={`/atrium/${it.id}/view`}
+      className="mer-lib-card-fullscreen"
+      aria-label={`Open ${it.title} full screen`}
+      title="Open full screen"
+      data-testid={`card-fullscreen-${it.id}`}
+    >
+      <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
+    </Link>
+  );
+}
+
 function DocCard({ it }: { it: ContentObjectDTO }): React.JSX.Element {
-  const status = statusBadge(it.status);
+  const status = statusBadge(it.status, it.pendingReview);
   const isAgent = it.createdByActor === "agent";
   const isArchived = it.status === "archived";
   return (
@@ -115,6 +205,7 @@ function DocCard({ it }: { it: ContentObjectDTO }): React.JSX.Element {
           {it.ownerName}
         </p>
       )}
+      <AudienceLabel it={it} />
       <TagPills tags={it.tags} />
     </Link>
   );
@@ -129,6 +220,7 @@ function ArtifactCard({
 }): React.JSX.Element {
   const isAgent = it.createdByActor === "agent";
   const isArchived = it.status === "archived";
+  const status = statusBadge(it.status, it.pendingReview);
   return (
     <Link
       href={cardHref(it)}
@@ -144,11 +236,18 @@ function ArtifactCard({
           in the accessibility tree). */}
       <div className="mer-artifact-preview-wrap">
         <ArtifactThumbnail artifactId={it.id} sandboxSrc={sandboxSrc} />
-        {isArchived && (
-          <span className="mer-badge mer-badge-draft mer-artifact-archived-badge">
-            Archived
-          </span>
-        )}
+        {/*
+          Artifact cards carried NO lifecycle pill — only an Archived overlay —
+          so a published artifact and an unpublished draft were
+          indistinguishable in the grid while doc cards showed the difference
+          plainly. Same badge vocabulary as `DocCard`, positioned as an overlay
+          because the thumbnail occupies the card's head slot.
+        */}
+        <span
+          className={cn("mer-badge", status.cls, "mer-artifact-archived-badge")}
+        >
+          {status.label}
+        </span>
       </div>
       <p className="mer-lib-card-title">{it.title}</p>
       {it.ownerName && (
@@ -156,6 +255,7 @@ function ArtifactCard({
           {it.ownerName}
         </p>
       )}
+      <AudienceLabel it={it} />
       <TagPills tags={it.tags} />
       <div className="mer-lib-card-foot">
         <span className="mer-lib-card-meta">
@@ -211,6 +311,7 @@ function SelectableCard({
         initial={it.isFavorite}
         onChange={onFavoriteChange}
       />
+      {it.kind === "artifact" && <FullScreenLink it={it} />}
       {children}
     </div>
   );
@@ -239,7 +340,10 @@ export function ContentCard({
         onChange={onFavoriteChange}
       />
       {it.kind === "artifact" ? (
-        <ArtifactCard it={it} sandboxSrc={sandboxSrc} />
+        <>
+          <FullScreenLink it={it} />
+          <ArtifactCard it={it} sandboxSrc={sandboxSrc} />
+        </>
       ) : (
         <DocCard it={it} />
       )}

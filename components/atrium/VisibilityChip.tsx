@@ -469,6 +469,7 @@ function ShareDialogBody({
   canEdit,
   saving,
   grants,
+  grantLabels,
   roleOptions,
   groupOptions,
   publicNotice,
@@ -492,6 +493,7 @@ function ShareDialogBody({
   canEdit: boolean;
   saving: boolean;
   grants: Grant[];
+  grantLabels: Record<string, string>;
   roleOptions: string[];
   groupOptions: GroupOption[];
   publicNotice: PublicNoticeState;
@@ -549,6 +551,7 @@ function ShareDialogBody({
         {level === "group" && (
           <GroupGrantEditor
             grants={grants}
+            grantLabels={grantLabels}
             canEdit={canEdit}
             saving={saving}
             roleOptions={roleOptions}
@@ -744,6 +747,46 @@ function useSharePublish(idOrSlug: string, onChanged: () => void) {
   return { publishBusy, publishError, publishPending, publish, unpublish };
 }
 
+/**
+ * Fold a successful `getVisibilityAction` read into component state.
+ *
+ * `draftDirty` decides whether the DRAFT is reseeded: a re-read must never
+ * clobber an edit in progress, so a dirty draft updates only the "last
+ * persisted" baseline that Cancel restores.
+ *
+ * Extracted from the load effect to keep `VisibilityChip` under the max-lines
+ * lint.
+ */
+function applyLoadedVisibility(
+  data: { visibilityLevel: string; grants: unknown[]; grantLabels: Record<string, string>; canEdit: boolean },
+  draftDirty: boolean,
+  set: {
+    setLevel: (v: Level) => void;
+    setGrants: (v: Grant[]) => void;
+    setSavedLevel: (v: Level) => void;
+    setSavedGrants: (v: Grant[]) => void;
+    setGrantLabels: (fn: (prev: Record<string, string>) => Record<string, string>) => void;
+    setCanEdit: (v: boolean) => void;
+    setError: (v: string | null) => void;
+    setLevelKnown: (v: boolean) => void;
+  }
+): void {
+  const level = data.visibilityLevel as Level;
+  const grants = data.grants as Grant[];
+  if (!draftDirty) {
+    set.setLevel(level);
+    set.setGrants(grants);
+  }
+  set.setSavedLevel(level);
+  set.setSavedGrants(grants);
+  // Merge, don't replace: a person just added through the picker has a
+  // locally-known label the server has not been told about yet.
+  set.setGrantLabels((prev) => ({ ...prev, ...data.grantLabels }));
+  set.setCanEdit(data.canEdit);
+  set.setError(null);
+  set.setLevelKnown(true);
+}
+
 export function VisibilityChip({ idOrSlug, share, onChange }: VisibilityChipProps) {
   const [open, setOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -756,6 +799,8 @@ export function VisibilityChip({ idOrSlug, share, onChange }: VisibilityChipProp
   const [canEdit, setCanEdit] = useState(false);
   const [level, setLevel] = useState<Level>("private");
   const [grants, setGrants] = useState<Grant[]>([]);
+  // Display names for `user` grants — see `grantDisplay`.
+  const [grantLabels, setGrantLabels] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // §26.4 pending-approval notice — rendered distinctly from `error` (not a failure).
@@ -794,17 +839,16 @@ export function VisibilityChip({ idOrSlug, share, onChange }: VisibilityChipProp
         const result = await getVisibilityAction(idOrSlug);
         if (cancelled) return;
         if (result.isSuccess) {
-          const loadedLevel = result.data.visibilityLevel as Level;
-          const loadedGrants = result.data.grants as Grant[];
-          if (!draftDirtyRef.current) {
-            setLevel(loadedLevel);
-            setGrants(loadedGrants);
-          }
-          setSavedLevel(loadedLevel);
-          setSavedGrants(loadedGrants);
-          setCanEdit(result.data.canEdit);
-          setError(null);
-          setLevelKnown(true);
+          applyLoadedVisibility(result.data, draftDirtyRef.current, {
+            setLevel,
+            setGrants,
+            setSavedLevel,
+            setSavedGrants,
+            setGrantLabels,
+            setCanEdit,
+            setError,
+            setLevelKnown,
+          });
         } else {
           // Leave `levelKnown=false` so the badge keeps the neutral placeholder
           // rather than the default "Private" chrome for an unknown level.
@@ -850,7 +894,7 @@ export function VisibilityChip({ idOrSlug, share, onChange }: VisibilityChipProp
     setGrants((prev) => prev.filter((_, i) => i !== index));
   }, []);
 
-  const addGrant = useCallback((grant: Grant) => {
+  const addGrant = useCallback((grant: Grant, label?: string) => {
     draftDirtyRef.current = true;
     // Skip an exact duplicate (kind+value) — the DB enforces uniqueness anyway.
     setGrants((prev) =>
@@ -858,6 +902,11 @@ export function VisibilityChip({ idOrSlug, share, onChange }: VisibilityChipProp
         ? prev
         : [...prev, grant]
     );
+    // Remember the picker's label so the new chip reads as a person straight
+    // away, rather than as "user 42" until the dialog is next re-read.
+    if (label) {
+      setGrantLabels((prev) => ({ ...prev, [`${grant.kind}:${grant.value}`]: label }));
+    }
   }, []);
 
   const save = useCallback(
@@ -935,6 +984,7 @@ export function VisibilityChip({ idOrSlug, share, onChange }: VisibilityChipProp
         canEdit={canEdit}
         saving={saving}
         grants={grants}
+        grantLabels={grantLabels}
         roleOptions={roleOptions}
         groupOptions={groupOptions}
         publicNotice={publicNotice}
@@ -993,12 +1043,54 @@ function LevelPicker({ level, disabled, onChange }: LevelPickerProps) {
 
 interface GroupGrantEditorProps {
   grants: Grant[];
+  /**
+   * Display labels keyed `${kind}:${value}`, from `getVisibilityAction`. Only
+   * `user` grants carry one; everything else is already readable.
+   */
+  grantLabels: Record<string, string>;
   canEdit: boolean;
   saving: boolean;
   roleOptions: string[];
   groupOptions: GroupOption[];
-  onAdd: (grant: Grant) => void;
+  /**
+   * `label` is the human name for a `user` grant, supplied by the people
+   * picker. Passing it through means a just-added person shows as their name
+   * immediately instead of as a numeric id until the next server read.
+   */
+  onAdd: (grant: Grant, label?: string) => void;
   onRemove: (index: number) => void;
+}
+
+/**
+ * What a grant chip should SAY.
+ *
+ * A `user` grant stores the numeric users.id, so the chip used to read
+ * "user 42" — technically the truth and practically unusable: nobody can
+ * verify they shared a page with the right person by reading a primary key.
+ *
+ * A `user` grant with no resolved label means the account is gone (the grant
+ * column is loose text with no FK, so this is a real state). Say so, rather
+ * than falling back to the id we were trying to get away from.
+ *
+ * ## Why labels are held apart from the grants themselves
+ *
+ * `VisibilityChip` keeps `grantLabels` in its own state rather than folding a
+ * name into each `Grant`. The grant list is the thing that gets SAVED, and a
+ * display name is not part of that record — merging them would send resolved
+ * names back to the write action and risk persisting a stale name as data.
+ * The map is also accumulated rather than replaced on each read, so a person
+ * just added through the picker keeps their name until the save round-trips.
+ */
+function grantDisplay(
+  grant: Grant,
+  labels: Record<string, string>
+): { kind: string; value: string } {
+  if (grant.kind !== "user") return { kind: grant.kind, value: grant.value };
+  const label = labels[`user:${grant.value}`];
+  return {
+    kind: "person",
+    value: label ?? "Account no longer exists",
+  };
 }
 
 /**
@@ -1027,7 +1119,12 @@ function GrantValueField({
   saving: boolean;
   roleOptions: string[];
   groupOptions: GroupOption[];
-  onAdd: (grant: Grant) => void;
+  /**
+   * `label` is the human name for a `user` grant, supplied by the people
+   * picker. Passing it through means a just-added person shows as their name
+   * immediately instead of as a numeric id until the next server read.
+   */
+  onAdd: (grant: Grant, label?: string) => void;
   onSubmit: () => void;
 }): React.JSX.Element {
   if (draftKind === "role") {
@@ -1074,7 +1171,12 @@ function GrantValueField({
     return (
       <PeoplePicker
         disabled={saving}
-        onSelect={(person) => onAdd({ kind: "user", value: String(person.id) })}
+        onSelect={(person) =>
+          onAdd(
+            { kind: "user", value: String(person.id) },
+            person.name?.trim() || person.email
+          )
+        }
       />
     );
   }
@@ -1097,6 +1199,7 @@ function GrantValueField({
 
 function GroupGrantEditor({
   grants,
+  grantLabels,
   canEdit,
   saving,
   roleOptions,
@@ -1126,24 +1229,27 @@ function GroupGrantEditor({
         </p>
       ) : (
         <ul className="flex flex-wrap gap-2">
-          {grants.map((g, i) => (
-            <li key={`${g.kind}:${g.value}`}>
-              <Badge variant="outline" className="gap-1">
-                <span className="font-medium">{g.kind}</span>
-                <span className="text-muted-foreground">{g.value}</span>
-                {canEdit && (
-                  <button
-                    type="button"
-                    aria-label={`Remove ${g.kind} grant ${g.value}`}
-                    className="ml-0.5 rounded-sm hover:text-destructive"
-                    onClick={() => onRemove(i)}
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                )}
-              </Badge>
-            </li>
-          ))}
+          {grants.map((g, i) => {
+            const shown = grantDisplay(g, grantLabels);
+            return (
+              <li key={`${g.kind}:${g.value}`}>
+                <Badge variant="outline" className="gap-1">
+                  <span className="font-medium">{shown.kind}</span>
+                  <span className="text-muted-foreground">{shown.value}</span>
+                  {canEdit && (
+                    <button
+                      type="button"
+                      aria-label={`Remove ${shown.kind} grant ${shown.value}`}
+                      className="ml-0.5 rounded-sm hover:text-destructive"
+                      onClick={() => onRemove(i)}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  )}
+                </Badge>
+              </li>
+            );
+          })}
         </ul>
       )}
 

@@ -39,7 +39,17 @@ export interface VisibilityGrant {
 export type VisibilityLevel = "private" | "group" | "internal" | "public";
 
 export type CollectionScope = "district" | "private";
-export type CollectionGrantAccess = "view" | "create";
+/**
+ * `view` = may enter the collection; `create` = may put content in it;
+ * `approve` (migration 178) = may clear the publish queue of a collection whose
+ * `requiresApproval` flag is set.
+ *
+ * Must stay in lockstep with the identically-named type on the schema table
+ * module — they are structurally compared at the service boundary, so a value
+ * added to one and not the other is a compile error rather than a silent
+ * divergence.
+ */
+export type CollectionGrantAccess = "view" | "create" | "approve";
 
 export interface CollectionGrant {
   access: CollectionGrantAccess;
@@ -75,6 +85,12 @@ export interface UpdateCollectionInput {
   defaultVisibilityLevel?: VisibilityLevel;
   inheritGrants?: boolean;
   grants?: CollectionGrant[];
+  /** Section hero image S3 key; `null` clears it (and its alt text). */
+  heroImageKey?: string | null;
+  /** Alt text for the hero image; `null` clears it. */
+  heroImageAlt?: string | null;
+  /** Route publishes out of this collection through the approval queue. */
+  requiresApproval?: boolean;
   archived?: boolean;
 }
 
@@ -95,6 +111,15 @@ export interface CollectionDTO {
   description: string | null;
   /** Pinned "start here" object for the landing page, or null. */
   landingObjectId: string | null;
+  /** Section hero image S3 key (migration 178), or null. */
+  heroImageKey: string | null;
+  /** Alt text for the hero image; null whenever there is no image. */
+  heroImageAlt: string | null;
+  /**
+   * Publishing out of this collection needs approval (migration 178). False
+   * everywhere by default — the district-wide policy is unchanged.
+   */
+  requiresApproval: boolean;
   directContentCount: number;
   subtreeContentCount: number;
   grants: CollectionGrant[];
@@ -219,6 +244,32 @@ export interface ListFilter {
   collectionIds?: string[];
   kind?: ContentKind;
   tag?: string;
+  /**
+   * How `tag` is matched. Defaults to `"exact"` — case-insensitive whole-tag
+   * equality, the long-standing behaviour every REST/MCP caller was written
+   * against, so this stays the default rather than silently widening their
+   * result sets.
+   *
+   * `"prefix"` matches any tag STARTING WITH the supplied text, which is what
+   * the library's tag box passes: typing `psd-staff-` used to collapse the list
+   * to "No matches" until the whole tag was typed, because a partially-typed
+   * tag equals nothing. Progressive narrowing as you type is the point of the
+   * control, so the UI opts in.
+   */
+  tagMatch?: "exact" | "prefix";
+  /**
+   * Restrict to objects created by a human or by an agent
+   * (`content_objects.created_by_actor`).
+   *
+   * Object-grain, matching the library card badge: it reflects who CREATED the
+   * object, not who authored the version currently at head. An agent-created
+   * doc later edited by a human still reads as agent-created here. The
+   * per-version truth lives on `content_versions.author_actor` and is surfaced
+   * by the provenance footer.
+   *
+   * Narrowing-only, like `owner` and `filed` — never a visibility rule.
+   */
+  actor?: "human" | "agent";
   /** Return objects updated at or after this ISO 8601 timestamp. */
   since?: string;
   /**
@@ -237,8 +288,15 @@ export interface ListFilter {
    * it is not a visibility rule and needs no `canView` mirroring. Omitted / "all"
    * applies no ownership restriction; a guest (no user id) gets no rows under
    * "shared".
+   *
+   * "others" is the admin triage counterpart to "mine": everything visible that
+   * the caller does NOT own, whatever route it became visible by. It is
+   * deliberately broader than "shared" — an admin sees the whole district, and
+   * the question they actually need answered is "what is everyone else's?", not
+   * "what did someone hand me?". The two are not complements: "shared"
+   * additionally requires group/private visibility, so "others" is a superset.
    */
-  owner?: "all" | "shared" | "mine";
+  owner?: "all" | "shared" | "mine" | "others";
   /**
    * Whether the object sits in a collection. "unfiled" is `collection_id IS
    * NULL`; "filed" is its complement. Added for the library home, where an
@@ -288,6 +346,30 @@ export interface ContentObjectDTO {
    * for content whose author never wrote one.
    */
   summary: string | null;
+  /**
+   * How many explicit visibility grants this object carries, so a library card
+   * can say "Shared · 3" without naming anyone.
+   *
+   * A COUNT, deliberately not the grant list. Who an object is shared with is
+   * editor-only information (see `getVisibilityAction`) — surfacing the roster
+   * on a card would show every grantee the whole roster, which the owner never
+   * agreed to. A bare count answers the question the catalogue actually raises
+   * ("is this shared, and roughly how widely?") without identifying anyone, and
+   * only ever reaches viewers who can already see the object.
+   *
+   * LIST-ONLY, like `ownerName` / `isFavorite` / `summary`: 0 everywhere else.
+   */
+  grantCount: number;
+  /**
+   * A publish request for this object is pending in the approval queue.
+   *
+   * Derived from `content_publish_requests`, not stored on the object — the
+   * queue is the single source of truth for "awaiting review", so there is no
+   * second state that can drift out of sync with it.
+   *
+   * LIST-ONLY: false everywhere else.
+   */
+  pendingReview: boolean;
   createdByActor: "human" | "agent";
   createdByAgentId: string | null;
   collectionId: string | null;

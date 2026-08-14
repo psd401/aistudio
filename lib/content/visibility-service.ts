@@ -15,6 +15,7 @@ import { and, desc, eq, gte, ilike, inArray, ne, sql, type SQL } from "drizzle-o
 import {
   executeQuery,
   executeTransaction,
+  toPgRows,
   type DbTransaction,
   type DrizzleDB,
 } from "@/lib/db/drizzle-client";
@@ -75,9 +76,10 @@ function escapeLikePattern(text: string): string {
 
 /**
  * The narrowing filters behind the library HOME views and the section landing
- * page — `collectionIds`, `owner: "mine"`, `filed`, and `favorite`.
+ * page — `collectionIds`, `owner: "mine" | "others"`, `actor`, `filed`, and
+ * `favorite`.
  *
- * All three are additive ANDs on top of `buildVisibilitySql`: they can only
+ * All of them are additive ANDs on top of `buildVisibilitySql`: they can only
  * shrink the already-authorized set, never widen it, so none of them is a
  * visibility rule and none needs mirroring in `canView`. A guest (no user id)
  * owns nothing and has favorited nothing, so those two arms fail closed to
@@ -107,6 +109,21 @@ function buildNarrowingFilters(filter: ListFilter, principal: Principal): SQL[] 
         ? sql`${o.ownerUserId} = ${principal.userId}`
         : sql`false`
     );
+  } else if (filter.owner === "others") {
+    // The admin-triage counterpart to "mine". Unlike the fail-closed arms
+    // above, a guest owning nothing means EVERYTHING visible is "someone
+    // else's" — so the honest degenerate case is no restriction, not `false`.
+    // Skipping the push (rather than pushing `true`) keeps the predicate list
+    // free of a no-op term.
+    if (principal.userId != null) {
+      out.push(sql`${o.ownerUserId} <> ${principal.userId}`);
+    }
+  }
+
+  if (filter.actor === "human" || filter.actor === "agent") {
+    // Object-grain provenance, matching the library card badge. Compared as a
+    // bound parameter against the `actor_kind` enum column.
+    out.push(sql`${o.createdByActor} = ${filter.actor}`);
   }
 
   if (filter.filed === "unfiled") {
@@ -899,12 +916,27 @@ export const visibilityService = {
       // case-sensitive overlap), but like the query arm this runs only on
       // explicit user filter text and is bounded by the visibility predicate +
       // LIMIT.
+      //
+      // PREFIX mode (`tagMatch: "prefix"`, opted into by the library tag box)
+      // relaxes that equality to `LIKE '<typed>%'`. Whole-tag equality makes a
+      // partially-typed tag match nothing, so typing toward
+      // `psd-staff-intranet` emptied the list at every keystroke until the
+      // final character — the control looked broken precisely while being
+      // used. The typed text is LIKE-escaped like the query arm below, so a
+      // tag containing `%` or `_` still narrows literally instead of turning
+      // into a wildcard. Exact remains the default so REST/MCP callers, which
+      // pass a known whole tag, keep their existing result sets.
       const tag = filter.tag.slice(0, MAX_TAG_LENGTH);
       filters.push(
-        sql`EXISTS (
-          SELECT 1 FROM unnest(${o.tags}) AS exact_tag
-          WHERE lower(exact_tag) = lower(${tag})
-        )`
+        filter.tagMatch === "prefix"
+          ? sql`EXISTS (
+              SELECT 1 FROM unnest(${o.tags}) AS prefix_tag
+              WHERE lower(prefix_tag) LIKE lower(${`${escapeLikePattern(tag)}%`})
+            )`
+          : sql`EXISTS (
+              SELECT 1 FROM unnest(${o.tags}) AS exact_tag
+              WHERE lower(exact_tag) = lower(${tag})
+            )`
       );
     }
     if (filter.query) {
@@ -964,6 +996,29 @@ export const visibilityService = {
         SELECT v.summary FROM content_versions v
         WHERE v.id = ${o.currentVersionId}
       )`,
+      // How many principals were explicitly granted access, for the card's
+      // audience line. A COUNT and never the grant rows themselves — the
+      // roster is editor-only (see `getVisibilityAction`), and these cards
+      // render to every viewer. Correlated subquery for the same reason as
+      // `summary` above: a join would multiply rows and corrupt LIMIT/OFFSET.
+      grantCount: sql<number>`(
+        SELECT count(*)::int FROM content_visibility_grants g
+        WHERE g.object_id = ${o.id}
+      )`,
+      // Whether a publish request for this object is sitting in the approval
+      // queue (migration 178's per-collection review, or the §26.4 public
+      // gate). Derived from the queue rather than stored on the object, so
+      // there is exactly one source of truth for "awaiting review" and no
+      // second state to keep in sync with the request rows.
+      //
+      // Deliberately NOT a new `content_status` enum value: adding one would
+      // mean an enum migration plus auditing every `status` comparison in the
+      // codebase for a fourth case, to represent something the queue already
+      // knows.
+      pendingReview: sql<boolean>`EXISTS (
+        SELECT 1 FROM content_publish_requests pr
+        WHERE pr.object_id = ${o.id} AND pr.status = 'pending'
+      )`,
     };
 
     const rows = await executeQuery(
@@ -993,5 +1048,60 @@ export const visibilityService = {
     // narrows enum columns, so it is not directly assignable to the mapper's
     // ObjectRowAsText parameter.
     return rows.map((row) => rowToObjectDTO(row as ObjectRowAsText));
+  },
+
+  /**
+   * Distinct tags starting with `prefix`, for the library tag box's typeahead.
+   *
+   * ## Why this cannot be a plain `SELECT DISTINCT unnest(tags)`
+   *
+   * A tag STRING is itself disclosure. `psd-superintendent-search-finalists` on
+   * a private object tells you the object exists, roughly what it is about, and
+   * that it is being worked on — without ever returning the row. So this runs
+   * behind the SAME `buildVisibilitySql` + collection-access predicates as
+   * `listVisible`, not a cheaper "distinct tags" query over the whole table.
+   * Suggestions are therefore a strict projection of what the caller could
+   * already have found by listing.
+   *
+   * Archived objects are excluded to match the library's default view, so a tag
+   * that survives only on archived content does not resurface as a suggestion
+   * that then yields an empty list.
+   *
+   * Returns at most `limit` (hard-capped) tags, alphabetically. An empty prefix
+   * is legal and yields the first page of visible tags.
+   */
+  async listVisibleTags(
+    req: Requester,
+    prefix: string,
+    limit = 12
+  ): Promise<string[]> {
+    const principal = principalOf(req);
+    const o = contentObjects;
+    const visiblePredicate = buildVisibilitySql(principal);
+    const collectionPredicate = buildCollectionAccessSql(
+      (await collectionAccessSnapshot(req)).allowedCollectionIds
+    );
+    const cap = Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 50) : 12;
+    // LIKE-escaped and length-bounded exactly like the `filter.tag` prefix arm,
+    // so `%` typed into the box narrows literally instead of matching every tag.
+    const pattern = `${escapeLikePattern(prefix.slice(0, MAX_TAG_LENGTH))}%`;
+
+    const rows = await executeQuery(
+      (db: DrizzleDB) =>
+        db.execute(sql`
+          SELECT DISTINCT tag_value AS tag
+          FROM ${o}, unnest(${o.tags}) AS tag_value
+          WHERE ${and(
+            sql`${o.status} <> 'archived'`,
+            visiblePredicate,
+            collectionPredicate,
+            sql`lower(tag_value) LIKE lower(${pattern})`
+          )}
+          ORDER BY tag
+          LIMIT ${cap}
+        `),
+      "content.listVisibleTags"
+    );
+    return toPgRows<{ tag: string }>(rows).map((r) => r.tag);
   },
 };

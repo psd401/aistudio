@@ -21,6 +21,14 @@ interface AtriumAdminTabsProps {
   auditError: string | null
   initialCollections: CollectionDTO[]
   collectionsError: string | null
+  /**
+   * District administrator. False for a collection approver (migration 178),
+   * who reaches this page for their own sections' queue and must see ONLY the
+   * Approvals tab — collection management and the audit trail stay
+   * administrator-only. This hides them; their own server actions refuse a
+   * non-admin caller independently, so this is presentation, not the boundary.
+   */
+  isAdmin: boolean
 }
 
 export function AtriumAdminTabs({
@@ -30,6 +38,7 @@ export function AtriumAdminTabs({
   auditError,
   initialCollections,
   collectionsError,
+  isAdmin,
 }: AtriumAdminTabsProps) {
   return (
     <Tabs defaultValue="approvals">
@@ -38,8 +47,8 @@ export function AtriumAdminTabs({
           Approvals
           {initialApprovals.length > 0 ? ` (${initialApprovals.length})` : ""}
         </TabsTrigger>
-        <TabsTrigger value="collections">Collections</TabsTrigger>
-        <TabsTrigger value="audit">Audit</TabsTrigger>
+        {isAdmin && <TabsTrigger value="collections">Collections</TabsTrigger>}
+        {isAdmin && <TabsTrigger value="audit">Audit</TabsTrigger>}
       </TabsList>
       <TabsContent value="approvals">
         <ApprovalsQueue
@@ -47,16 +56,20 @@ export function AtriumAdminTabs({
           initialError={approvalsError}
         />
       </TabsContent>
-      <TabsContent value="collections">
-        <CollectionManagementPanel
-          mode="admin"
-          initialCollections={initialCollections}
-          initialError={collectionsError}
-        />
-      </TabsContent>
-      <TabsContent value="audit">
-        <AuditLogTable initialData={initialAudit} initialError={auditError} />
-      </TabsContent>
+      {isAdmin && (
+        <TabsContent value="collections">
+          <CollectionManagementPanel
+            mode="admin"
+            initialCollections={initialCollections}
+            initialError={collectionsError}
+          />
+        </TabsContent>
+      )}
+      {isAdmin && (
+        <TabsContent value="audit">
+          <AuditLogTable initialData={initialAudit} initialError={auditError} />
+        </TabsContent>
+      )}
     </Tabs>
   )
 }

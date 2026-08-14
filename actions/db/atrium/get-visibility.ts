@@ -21,6 +21,7 @@ import { createSuccess, handleError } from "@/lib/error-utils";
 import { contentService } from "@/lib/content/content-service";
 import { visibilityService } from "@/lib/content/visibility-service";
 import { canEdit } from "@/lib/content/helpers";
+import { resolveGrantLabels } from "@/lib/content/grant-labels";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { NotFoundError } from "@/lib/content/errors";
 import type { VisibilityGrant, VisibilityLevel } from "@/lib/content/types";
@@ -31,6 +32,15 @@ import { getOptionalRequester } from "./requester";
 export interface VisibilityState {
   visibilityLevel: VisibilityLevel;
   grants: VisibilityGrant[];
+  /**
+   * Display labels for the grants above, keyed `${kind}:${value}`.
+   *
+   * Only `user` grants appear — every other kind already stores readable text.
+   * Empty for non-editors, who receive no grants at all. A grant whose target
+   * no longer exists is simply absent, so the UI falls back rather than
+   * rendering a raw id.
+   */
+  grantLabels: Record<string, string>;
   /** Whether the current requester may change the visibility (owner/admin). */
   canEdit: boolean;
 }
@@ -85,6 +95,10 @@ export async function getVisibilityAction(
     // for a `group` object; load them (cheap, indexed) so the editor can show the
     // prior selection if the level was toggled away from group and back.
     const grants = editable ? await visibilityService.grantsFor(obj.id) : [];
+    // Resolve `user` grants to names for display. Gated on the SAME `editable`
+    // flag as the grants themselves — a non-editor gets neither, so this can
+    // never widen who learns a grantee's identity.
+    const grantLabels = editable ? await resolveGrantLabels(grants) : {};
 
     timer({ status: "success" });
     log.info("Visibility loaded", {
@@ -96,6 +110,7 @@ export async function getVisibilityAction(
       {
         visibilityLevel: obj.visibilityLevel,
         grants,
+        grantLabels,
         canEdit: editable,
       },
       "Visibility loaded"

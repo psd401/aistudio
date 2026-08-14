@@ -134,8 +134,10 @@ test.describe('Atrium archived-content view (authenticated)', () => {
       // once the debounced tag commits — so assert it inside the retry.
       const zeroMatch = page.getByTestId('library-search-empty')
       await expect(async () => {
+        // `combobox`, not `textbox`: the tag filter gained a typeahead
+        // `list` attribute, which changes the input's implicit ARIA role.
         await page
-          .getByRole('textbox', { name: 'Filter by tag' })
+          .getByRole('combobox', { name: 'Filter by tag' })
           .fill('no-such-tag-zzz-e2e')
         await expect(zeroMatch).toBeVisible({ timeout: 3000 })
       }).toPass({ timeout: 30_000 })

@@ -18,6 +18,7 @@
  */
 
 import Link from "next/link";
+import { Maximize2 } from "lucide-react";
 import { fontMeridian } from "@/lib/meridian/fonts";
 import type { DocumentHeading } from "@/lib/content/render/headings";
 import { coverGradientClass } from "@/lib/atrium/cover";
@@ -38,6 +39,15 @@ export interface ReaderFrameProps {
   editHref: string | null;
   /** Where the editors-only comment chip links (the editor), or null. */
   commentHref: string | null;
+  /**
+   * The `/atrium/[id]/view` chrome-free viewer, for artifact readers. Null on
+   * document readers (a document already IS the sheet — there is nothing to
+   * expand) and on the anonymous public reader, whose viewer route is
+   * authenticated.
+   *
+   * Shown to EVERY viewer, not just editors — see `ReaderBarActions`.
+   */
+  fullScreenHref?: string | null;
   /** Unresolved root-comment threads; the chip is hidden when 0 or non-editor. */
   commentCount: number;
   /** When the published version went live at this destination (meta line). */
@@ -136,21 +146,47 @@ function ReaderBarActions({
   commentHref,
   commentCount,
   editHref,
+  fullScreenHref,
 }: {
   viewOnly: boolean;
   commentHref: string | null;
   commentCount: number;
   editHref: string | null;
+  fullScreenHref: string | null;
 }): React.JSX.Element {
+  /*
+   * Full screen is rendered OUTSIDE the view-only branch on purpose.
+   *
+   * The reader's only route to full screen used to be Edit → "Open full
+   * screen", which meant the people most likely to just want to look at an
+   * artifact full size — the ones who cannot edit it — had no route at all.
+   * Reading is not an editing privilege, so this shows for every viewer who
+   * can see the artifact.
+   */
+  const fullScreen = fullScreenHref ? (
+    <Link
+      href={fullScreenHref}
+      className="mer-reader-fullscreen"
+      data-testid="reader-fullscreen-link"
+    >
+      <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
+      Full screen
+    </Link>
+  ) : null;
+
   if (viewOnly) {
     return (
-      <span className="mer-reader-viewonly-inline" data-testid="reader-view-only">
-        👁 View only
-      </span>
+      <>
+        {fullScreen}
+        <span className="mer-reader-viewonly-inline" data-testid="reader-view-only">
+          👁 View only
+        </span>
+      </>
     );
   }
   return (
     <>
+      {fullScreen}
       {commentHref && commentCount > 0 && (
         <Link
           href={commentHref}
@@ -183,6 +219,7 @@ function FullBleedReaderFrame({
   commentHref,
   commentCount,
   editHref,
+  fullScreenHref,
   children,
   footer,
 }: {
@@ -193,6 +230,7 @@ function FullBleedReaderFrame({
   commentHref: string | null;
   commentCount: number;
   editHref: string | null;
+  fullScreenHref: string | null;
   children: React.ReactNode;
   footer: React.ReactNode;
 }): React.JSX.Element {
@@ -217,6 +255,7 @@ function FullBleedReaderFrame({
             commentHref={commentHref}
             commentCount={commentCount}
             editHref={editHref}
+            fullScreenHref={fullScreenHref}
           />
         </div>
       </div>
@@ -241,6 +280,7 @@ export function ReaderFrame({
   footer,
   fullBleed = false,
   surface = "app",
+  fullScreenHref = null,
 }: ReaderFrameProps): React.JSX.Element {
   const isPublic = surface === "public";
   const viewOnly = editHref === null;
@@ -267,6 +307,7 @@ export function ReaderFrame({
         commentHref={commentHref}
         commentCount={commentCount}
         editHref={editHref}
+        fullScreenHref={fullScreenHref}
         footer={footer}
       >
         {children}
@@ -303,6 +344,11 @@ export function ReaderFrame({
                     commentHref={commentHref}
                     commentCount={commentCount}
                     editHref={editHref}
+                    // The sheet variant is the DOCUMENT reader: the sheet is
+                    // already the whole document, so there is nothing a
+                    // full-screen view would add. Artifacts render through the
+                    // full-bleed variant above.
+                    fullScreenHref={null}
                   />
                 </div>
               )}

@@ -44,6 +44,12 @@ export interface CollectionAccessRow {
   description: string | null;
   /** Pinned "start here" object for the section landing page, or null. */
   landingObjectId: string | null;
+  /** Section hero image S3 key (migration 178), or null. */
+  heroImageKey: string | null;
+  /** Alt text for the hero image; null whenever there is no image. */
+  heroImageAlt: string | null;
+  /** Publishing out of this collection needs approval (migration 178). */
+  requiresApproval: boolean;
 }
 
 export interface CollectionAccessSnapshot {
@@ -87,6 +93,53 @@ export function principalMatchesCollectionGrant(
   }
 }
 
+/**
+ * May this requester approve a publish out of `collection`?
+ *
+ * Only consulted for a collection with `requiresApproval` set. Three ways in,
+ * and the first two are implicit on purpose: a gated collection must never be
+ * able to reach a state where nobody can clear its queue, which is exactly what
+ * happens if the only approvers are an explicit roster that is later emptied,
+ * or whose members leave the district.
+ *
+ *  1. District administrators — the existing /admin/atrium approvers.
+ *  2. The collection's owner, for a personal collection.
+ *  3. Anyone matching an `approve` grant on the collection.
+ *
+ * Grant INHERITANCE follows the same rule as view/create: a district collection
+ * inherits approvers from its ancestors while `inheritGrants` holds, and a
+ * personal collection never inherits (its grants are read directly). This
+ * matters for the intranet, where sub-sections should be approvable by the
+ * people who approve their parent without re-listing them on every child.
+ *
+ * An `approve` grant confers NO view or create access — `effectiveGrantResolver`
+ * matches on exact access — so naming an approver does not hand them the
+ * contents.
+ */
+export function isCollectionApprover(
+  req: Requester,
+  collection: CollectionAccessRow,
+  access: Pick<CollectionAccessSnapshot, "effectiveGrants" | "directGrants">
+): boolean {
+  const principal = principalOf(req);
+  if (principal.isAdmin) return true;
+  if (
+    collection.ownerUserId != null &&
+    collectionOwnerUserId(req) === collection.ownerUserId
+  ) {
+    return true;
+  }
+  const approveGrants =
+    collection.ownerUserId == null
+      ? access.effectiveGrants(collection.id, "approve")
+      : (access.directGrants.get(collection.id) ?? []).filter(
+          (grant) => grant.access === "approve"
+        );
+  return approveGrants.some((grant) =>
+    principalMatchesCollectionGrant(principal, grant)
+  );
+}
+
 async function loadRows(): Promise<{
   collections: CollectionAccessRow[];
   directGrants: Map<string, CollectionGrant[]>;
@@ -108,6 +161,9 @@ async function loadRows(): Promise<{
             archivedAt: contentCollections.archivedAt,
             description: contentCollections.description,
             landingObjectId: contentCollections.landingObjectId,
+            heroImageKey: contentCollections.heroImageKey,
+            heroImageAlt: contentCollections.heroImageAlt,
+            requiresApproval: contentCollections.requiresApproval,
           })
           .from(contentCollections)
           .orderBy(
@@ -171,6 +227,9 @@ async function loadRowsInTx(tx: DbTransaction): Promise<{
       archivedAt: contentCollections.archivedAt,
       description: contentCollections.description,
       landingObjectId: contentCollections.landingObjectId,
+      heroImageKey: contentCollections.heroImageKey,
+      heroImageAlt: contentCollections.heroImageAlt,
+      requiresApproval: contentCollections.requiresApproval,
     })
     .from(contentCollections)
     .orderBy(
@@ -274,6 +333,50 @@ export async function collectionAccessSnapshotInTx(
   return accessSnapshotFromRows(req, collections, directGrants);
 }
 
+/**
+ * Access to ONE owner-bound (personal) collection: its owner always, plus
+ * anyone the owner explicitly granted after migration 178 made personal
+ * collections shareable.
+ *
+ * Grants are read from `directGrants`, deliberately NOT `effectiveGrants`. The
+ * no-inheritance rule for personal trees then holds STRUCTURALLY rather than by
+ * convention, so a future change to the inheritance walk cannot quietly start
+ * leaking a parent's grants into someone's private tree.
+ *
+ * The zero-grants case is the OPPOSITE of a district collection's. There, "no
+ * view grants" means unrestricted (legacy behaviour). Here it must mean OWNER
+ * ONLY — an ungranted personal collection is private by definition, and reusing
+ * the district rule would publish every private tree in the district to
+ * everyone. `.some()` over an empty array is false, so this fails closed by
+ * construction rather than by a guard someone could remove.
+ *
+ * Administrators are deliberately NOT admitted. Object-level `canView` already
+ * gives them the CONTENTS; the collection itself is someone's personal
+ * organization of their own work and stays out of everyone else's sidebar.
+ * That boundary predates sharing and is unchanged by it.
+ */
+function personalCollectionAccess(
+  collection: CollectionAccessRow,
+  principal: Principal,
+  ownerUserId: number | null,
+  directGrants: Map<string, CollectionGrant[]>
+): { mayView: boolean; mayCreate: boolean } {
+  if (ownerUserId != null && collection.ownerUserId === ownerUserId) {
+    return { mayView: true, mayCreate: true };
+  }
+  const own = directGrants.get(collection.id) ?? [];
+  const matches = (access: CollectionGrantAccess): boolean =>
+    own.some(
+      (grant) =>
+        grant.access === access &&
+        principalMatchesCollectionGrant(principal, grant)
+    );
+  const mayCreate = matches("create");
+  // `create` implies `view`: filing into a collection you cannot open is not a
+  // state worth representing.
+  return { mayView: mayCreate || matches("view"), mayCreate };
+}
+
 function accessSnapshotFromRows(
   req: Requester,
   collections: CollectionAccessRow[],
@@ -290,17 +393,14 @@ function accessSnapshotFromRows(
     if (collection.archivedAt) continue;
 
     if (collection.ownerUserId != null) {
-      if (
-        (ownerUserId != null && collection.ownerUserId === ownerUserId)
-      ) {
-        allowedCollectionIds.add(collection.id);
-      }
-      if (
-        ownerUserId != null &&
-        collection.ownerUserId === ownerUserId
-      ) {
-        selectableCollectionIds.add(collection.id);
-      }
+      const personal = personalCollectionAccess(
+        collection,
+        principal,
+        ownerUserId,
+        directGrants
+      );
+      if (personal.mayView) allowedCollectionIds.add(collection.id);
+      if (personal.mayCreate) selectableCollectionIds.add(collection.id);
       continue;
     }
 
@@ -336,6 +436,16 @@ function accessSnapshotFromRows(
     selectableCollectionIds,
   };
 }
+
+/**
+ * Pure internals exposed for unit tests. `accessSnapshotFromRows` is the whole
+ * access decision as a pure function of (requester, rows, grants), so the
+ * personal-collection and approver rules can be tested without a database.
+ */
+export const accessInternals = {
+  accessSnapshotFromRows,
+  personalCollectionAccess,
+};
 
 export async function requesterMayViewCollection(
   req: Requester,

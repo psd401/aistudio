@@ -21,7 +21,14 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { Archive, ArchiveRestore, FolderInput, Trash2, X } from "lucide-react";
+import {
+  Archive,
+  ArchiveRestore,
+  FolderInput,
+  Globe,
+  Trash2,
+  X,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -32,6 +39,7 @@ import {
 } from "@/components/ui/select";
 import { updateContentAction } from "@/actions/db/atrium/update-content";
 import { deleteContentAction } from "@/actions/db/atrium/delete-content";
+import { publishDocumentAction } from "@/actions/db/atrium/publish-document";
 import { collectionTreeAction } from "@/actions/db/atrium/collection-tree";
 import { meridianPortalClassName } from "@/lib/meridian/fonts";
 import {
@@ -88,6 +96,7 @@ function BulkControls({
   onArchive,
   onRestore,
   onMove,
+  onPublish,
   onDelete,
   onClear,
 }: {
@@ -98,6 +107,7 @@ function BulkControls({
   onArchive: () => void;
   onRestore: () => void;
   onMove: (value: string) => void;
+  onPublish: () => void;
   onDelete: () => void;
   onClear: () => void;
 }): React.JSX.Element {
@@ -130,6 +140,22 @@ function BulkControls({
         >
           <Archive className="h-4 w-4" aria-hidden="true" />
           Archive
+        </Button>
+      )}
+
+      {/* Publishing an ARCHIVED object is incoherent (archiving retracts its
+          publications), so this is offered only in the working views. */}
+      {!archivedView && (
+        <Button
+          type="button"
+          size="sm"
+          variant="secondary"
+          disabled={busy}
+          onClick={onPublish}
+          data-testid="bulk-publish"
+        >
+          <Globe className="h-4 w-4" aria-hidden="true" />
+          Publish to intranet
         </Button>
       )}
 
@@ -257,6 +283,46 @@ export function LibraryBulkBar({
     [run]
   );
 
+  /**
+   * Bulk publish to the internal reader.
+   *
+   * The motivating case: a whole section authored as drafts (the staff
+   * intranet, the SOP set) has to go live at once. One-at-a-time publishing
+   * through each object's Share dialog is the only route that existed, which
+   * for a 48-page section is 48 round trips through a modal.
+   *
+   * `widenOnly: true` is what makes this safe to fan out over a mixed
+   * selection. Publishing to the intranet requires `internal` visibility, but
+   * assignment semantics would NARROW anything already public down to
+   * internal. As a widen OFFER it is applied only where it actually broadens
+   * the object's locked audience, and skipped everywhere else — so a public
+   * page in the selection stays public.
+   *
+   * Still a per-object server call, so every visibility and permission gate
+   * runs unchanged; an object the user may not publish fails on its own and is
+   * reported in the aggregate line rather than failing the batch.
+   */
+  const publish = useCallback(() => {
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm(
+        `Publish ${count} ${count === 1 ? "item" : "items"} to the staff intranet?\n\n` +
+          "Anything not already visible to staff will be widened to Internal so " +
+          "it can be read there. Items that are already more widely published " +
+          "keep their current audience. Items you cannot publish are skipped and " +
+          "reported."
+      )
+    ) {
+      return;
+    }
+    void run("Published", (id) =>
+      publishDocumentAction(id, {
+        destination: "intranet",
+        visibility: { level: "internal", widenOnly: true },
+      })
+    );
+  }, [count, run]);
+
   const remove = useCallback(() => {
     if (
       typeof window !== "undefined" &&
@@ -290,6 +356,7 @@ export function LibraryBulkBar({
           onArchive={() => void setStatus("archived", "Archived")}
           onRestore={() => void setStatus("draft", "Restored")}
           onMove={(v) => void move(v)}
+          onPublish={publish}
           onDelete={remove}
           onClear={onClear}
         />

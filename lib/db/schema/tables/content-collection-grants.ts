@@ -1,10 +1,17 @@
 /**
  * Collection-level access grants for Atrium.
  *
- * Issue #1438. A collection grant controls either entry/view access or whether
- * content may be created in the collection. District/shared collections may
- * inherit grants from their ancestors. Owner-bound private collections never
- * carry or inherit grants.
+ * Issue #1438. A collection grant controls entry/view access, whether content
+ * may be created in the collection, or (migration 178) who may approve a
+ * publish out of a collection that requires review. District/shared
+ * collections may inherit grants from their ancestors.
+ *
+ * Owner-bound private collections carry their own grants but never INHERIT
+ * (`inherit_grants` is pinned false for them by
+ * `ck_collection_private_owner_policy`). Migration 178 widened that policy so
+ * an owner may share their personal tree at `group` level; the grants that
+ * make it shared live in this table, and every one of them is an explicit act
+ * by the owner rather than something absorbed from a district ancestor.
  */
 
 import {
@@ -20,7 +27,13 @@ import { sql } from "drizzle-orm";
 import { grantKindEnum } from "../enums";
 import { contentCollections } from "./content-collections";
 
-export type CollectionGrantAccess = "view" | "create";
+/**
+ * `approve` (migration 178) names the approver roster for a collection whose
+ * `requires_approval` flag is set. It is additive to the implicit approvers the
+ * service always honours (the collection owner and district admins), so a
+ * gated collection is never left with nobody able to clear its queue.
+ */
+export type CollectionGrantAccess = "view" | "create" | "approve";
 
 export const contentCollectionGrants = pgTable(
   "content_collection_grants",
@@ -46,7 +59,7 @@ export const contentCollectionGrants = pgTable(
     ),
     check(
       "ck_content_collection_grant_access",
-      sql`${t.access} IN ('view', 'create')`
+      sql`${t.access} IN ('view', 'create', 'approve')`
     ),
   ]
 );

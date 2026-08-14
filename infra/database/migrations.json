@@ -167,6 +167,7 @@
     "174-unified-content-message-sanitizer-recovery.sql",
     "175-atrium-library-usability.sql",
     "176-openclaw-oauth-client-redirect-repair.sql",
-    "177-agent-usage-capture-complete.sql"
+    "177-agent-usage-capture-complete.sql",
+    "178-atrium-ux-overhaul.sql"
   ]
 }

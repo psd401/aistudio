@@ -68,6 +68,16 @@ export interface ObjectRowAsText {
    * optional. Coalesced to null.
    */
   summary?: string | null;
+  /**
+   * Explicit grant count — present only on the `listVisible` projection, hence
+   * optional. Coalesced to 0.
+   */
+  grantCount?: number | null;
+  /**
+   * Pending approval-queue request — present only on the `listVisible`
+   * projection, hence optional. Coalesced to false.
+   */
+  pendingReview?: boolean | null;
   createdByActor: string;
   createdByAgentId: string | null;
   collectionId: string | null;
@@ -100,6 +110,10 @@ export function rowToObjectDTO(row: ObjectRowAsText): ContentObjectDTO {
     isFavorite: row.isFavorite ?? false,
     // Present only on the list projection; null everywhere else.
     summary: row.summary ?? null,
+    // Present only on the list projection; 0 everywhere else.
+    grantCount: Number(row.grantCount ?? 0),
+    // Present only on the list projection; false everywhere else.
+    pendingReview: row.pendingReview === true,
     createdByActor: row.createdByActor as "human" | "agent",
     createdByAgentId: row.createdByAgentId,
     collectionId: row.collectionId,

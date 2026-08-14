@@ -88,6 +88,25 @@ function SectionHero({ node }: { node: CollectionTreeNode }): React.JSX.Element 
   const isPrivate = node.scope === "private";
   return (
     <header className="mer-section-hero">
+      {/*
+        Hero art (migration 178). Rendered through the access-checked API route
+        rather than a direct S3/CDN URL, so a personal collection's artwork is
+        as private as the collection.
+
+        A plain <img>, not next/image: the route is dynamic and access-gated per
+        request, so the image optimizer's cache would either be bypassed or
+        become a way to read a section's art without the access check.
+      */}
+      {node.hasHeroImage && (
+        <img
+          className="mer-section-hero-image"
+          src={`/api/atrium/collections/${node.id}/hero`}
+          // Alt text is required at write time; the fallback covers rows that
+          // predate the requirement rather than shipping an empty alt.
+          alt={node.heroImageAlt ?? `${node.name} header image`}
+          data-testid="section-hero-image"
+        />
+      )}
       <div className="mer-section-hero-head">
         <span className="mer-section-hero-icon" aria-hidden="true">
           {isPrivate ? <Lock className="h-5 w-5" /> : <FolderOpen className="h-5 w-5" />}
@@ -113,6 +132,8 @@ function SectionHero({ node }: { node: CollectionTreeNode }): React.JSX.Element 
               sectionName={node.name}
               initialDescription={node.description}
               initialLandingObjectId={node.landingObjectId}
+              hasHeroImage={node.hasHeroImage}
+              initialHeroImageAlt={node.heroImageAlt}
             />
           </div>
         )}

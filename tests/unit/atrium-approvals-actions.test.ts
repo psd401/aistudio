@@ -30,6 +30,17 @@ jest.mock("@/lib/content/visibility-service", () => ({
   visibilityService: { setLevel: (...a: unknown[]) => setLevelMock(...a) },
 }));
 
+// Migration 178 made the approver roster per-collection, so the actions now
+// consult collection access. Mocked to "approves nothing" by default; the
+// approver test overrides it.
+const collectionAccessSnapshotMock = jest.fn();
+const isCollectionApproverMock = jest.fn();
+jest.mock("@/lib/content/collection-access", () => ({
+  collectionAccessSnapshot: (...a: unknown[]) =>
+    collectionAccessSnapshotMock(...a),
+  isCollectionApprover: (...a: unknown[]) => isCollectionApproverMock(...a),
+}));
+
 // Queries never execute their drizzle callback — the mock dispatches on the
 // executeQuery label (2nd arg), so the schema/drizzle imports stay real.
 type Row = Record<string, unknown>;
@@ -97,8 +108,22 @@ beforeEach(() => {
   unpublishMock.mockReset().mockResolvedValue({ unpublished: true });
   setLevelMock.mockReset().mockResolvedValue({ visibilityLevel: "public" });
   executeQueryMock.mockClear();
+  // Default: no collection anywhere requires approval, so nobody is a
+  // collection approver and authority comes from the administrator role alone.
+  collectionAccessSnapshotMock.mockReset().mockResolvedValue({
+    collections: [],
+    byId: new Map(),
+    directGrants: new Map(),
+    effectiveGrants: () => [],
+    allowedCollectionIds: new Set(),
+    selectableCollectionIds: new Set(),
+  });
+  isCollectionApproverMock.mockReset().mockReturnValue(false);
   queryResults.clear();
   queryResults.set("atrium.approvals.load", [{ ...BASE_ROW }]);
+  queryResults.set("atrium.approvals.loadRequestCollection", [
+    { collectionId: "col-1" },
+  ]);
   // Claim-first: the atomic pending→approved compare-and-set. A non-empty result
   // means THIS caller won the claim; [] means it was decided concurrently.
   queryResults.set("atrium.approvals.claimApprove", [{ id: "req-1" }]);
@@ -106,7 +131,7 @@ beforeEach(() => {
   queryResults.set("atrium.approvals.markDenied", [{ id: "req-1" }]);
 });
 
-describe("admin gating", () => {
+describe("authorization gating", () => {
   it.each([
     ["listPendingApprovalsAction", () => listPendingApprovalsAction()],
     [
@@ -118,13 +143,61 @@ describe("admin gating", () => {
       () => denyPublishRequestAction("req-1", "no"),
     ],
     ["listContentAuditAction", () => listContentAuditAction({})],
-  ])("%s rejects a non-admin before any query or replay", async (_name, run) => {
-    getUserRequesterMock.mockResolvedValue(NON_ADMIN);
-    const result = await run();
-    expect(result.isSuccess).toBe(false);
-    expect(executeQueryMock).not.toHaveBeenCalled();
+  ])(
+    "%s rejects a caller who is neither an admin nor a collection approver",
+    async (_name, run) => {
+      getUserRequesterMock.mockResolvedValue(NON_ADMIN);
+      const result = await run();
+      expect(result.isSuccess).toBe(false);
+      // The guarantee that matters: an unauthorized caller can never cause the
+      // recorded action to be replayed, nor the request to be DECIDED.
+      //
+      // Note this no longer asserts "before any query". Migration 178 made the
+      // approver roster per-collection, so approve/deny must READ the request
+      // (and its collection) to know who is allowed to decide it — the read is
+      // an input to the gate, not something done after passing it.
+      expect(publishMock).not.toHaveBeenCalled();
+      expect(unpublishMock).not.toHaveBeenCalled();
+      expect(setLevelMock).not.toHaveBeenCalled();
+      expect(labelCalls("atrium.approvals.claimApprove")).toBe(0);
+      expect(labelCalls("atrium.approvals.markDenied")).toBe(0);
+    }
+  );
+
+  it("refuses to let anyone decide their own request, administrator included", async () => {
+    // Segregation of duties. Cannot strand a request: whoever raised it was by
+    // definition not an approver at raise time, so another approver exists.
+    getUserRequesterMock.mockResolvedValue({ ...ADMIN, userId: 42 });
+    queryResults.set("atrium.approvals.load", [
+      { ...BASE_ROW, requestedByUserId: 42 },
+    ]);
+
+    const approved = await approvePublishRequestAction("req-1");
+    expect(approved.isSuccess).toBe(false);
+    const denied = await denyPublishRequestAction("req-1", "nope");
+    expect(denied.isSuccess).toBe(false);
+
     expect(publishMock).not.toHaveBeenCalled();
-    expect(setLevelMock).not.toHaveBeenCalled();
+    expect(labelCalls("atrium.approvals.claimApprove")).toBe(0);
+    expect(labelCalls("atrium.approvals.markDenied")).toBe(0);
+  });
+
+  it("lets a non-admin approver of the request's collection decide it", async () => {
+    getUserRequesterMock.mockResolvedValue(NON_ADMIN);
+    // This caller approves the collection the request's object lives in.
+    collectionAccessSnapshotMock.mockResolvedValue({
+      collections: [{ id: "col-1", requiresApproval: true }],
+      byId: new Map(),
+      directGrants: new Map(),
+      effectiveGrants: () => [],
+      allowedCollectionIds: new Set(),
+      selectableCollectionIds: new Set(),
+    });
+    isCollectionApproverMock.mockReturnValue(true);
+
+    const result = await approvePublishRequestAction("req-1", "reviewed");
+    expect(result.isSuccess).toBe(true);
+    expect(publishMock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -283,10 +356,13 @@ describe("approvePublishRequestAction — replay", () => {
 });
 
 describe("denyPublishRequestAction", () => {
-  it("requires a non-empty note before touching the database", async () => {
+  it("requires a non-empty note, and records nothing without one", async () => {
     const result = await denyPublishRequestAction("req-1", "   ");
     expect(result.isSuccess).toBe(false);
-    expect(executeQueryMock).not.toHaveBeenCalled();
+    // The request row IS read first now — migration 178 derives who may decide
+    // from the request's collection, so the read precedes both the authority
+    // check and this validation. What must not happen is the WRITE.
+    expect(labelCalls("atrium.approvals.markDenied")).toBe(0);
   });
 
   it("records the denial without replaying anything", async () => {
