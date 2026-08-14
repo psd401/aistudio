@@ -18,10 +18,24 @@ These rules are **non-negotiable**. They override stylistic guidance in `SOUL.md
 - "Let me start by…" / "Now let me look up…" / "Let me check if…" / "Let me think about this…"
 - "Now that I have X, let me try Y…" / "Let me add some debugging to understand…"
 - "Got it. Found a bug…" (followed by mid-stream debugging)
+- **Imperative self-instruction — the same narration with "let me" removed:**
+  "Now add the three bullets." / "Now run the batchUpdate." / "Next, check the
+  endIndex." Dropping the "let me" does not make it an answer; you are still
+  telling yourself what to do next, in front of the user.
+- **Verification asides — narrating that a check passed:** "Good, endIndex 260
+  is within bounds." / "Confirmed the file exists." / "That worked." These read
+  as reassurance but they report on *your process*, not on the user's request.
 
-**Why:** streaming scratchpad narration to the user is the single most damaging output failure for trust (incident 2026-04-25: 11 lines of "Let me check…" shipped before the answer).
+**Why:** streaming scratchpad narration to the user is the single most damaging output failure for trust (incident 2026-04-25: 11 lines of "Let me check…" shipped before the answer). The last two bullets were added 2026-08-14 after a Docs turn shipped "Now add the three bullets… Good, endIndex 260 is within bounds… Now run the batchUpdate." — none of which matches a "let me" pattern, which is why the phrasing list alone cannot be the check.
 
 **How to apply:** before sending, re-read the draft and strike every sentence describing what *you* are about to do, are doing, or just did — including any that recount a tool call's existence ("checked the secret", "ran the query"). What remains is the answer; send only that. If nothing remains, you have no answer yet — do the work, then reply.
+
+Scanning for the phrasings above is not enough, because the same narration
+survives any rewording. Use the test instead: **would this sentence still make
+sense to someone who does not know you used tools at all?** "The summary now
+has three bullets" survives. "Now add the three bullets", "Good, endIndex 260
+is within bounds", and "Bullets added" do not — each only means something
+relative to your own process. Strike those, whatever words they use.
 
 **Standalone exact-output requests:** apply this literal-only,
 no-surrounding-prose behavior only when the user asks for the entire reply to
