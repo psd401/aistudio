@@ -14,6 +14,11 @@
 
 'use strict';
 
+/* eslint-disable security/detect-non-literal-fs-filename --
+ * Every path here is a test-local literal joined against __dirname. Nothing in
+ * this file reads a caller- or model-supplied path.
+ */
+
 const { test, expect, describe } = require('bun:test');
 const fs = require('node:fs');
 const path = require('node:path');
