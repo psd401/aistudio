@@ -94,8 +94,9 @@ actually are:
 
 ```json
 {"media": {"workspacePath": "downloads/download.pdf",
-           "downloadUrl": "https://…", "bytes": 481920,
-           "contentType": "application/pdf"}}
+           "downloadUrl": "https://…",
+           "requiredHeaders": {"Range": "bytes=0-481919"},
+           "bytes": 481920, "contentType": "application/pdf"}}
 ```
 
 - **`media.workspacePath`** — the file inside YOUR private workspace. It is not
@@ -104,21 +105,28 @@ actually are:
   a URL.
 - **`media.downloadUrl`** — a short-lived (about 2 minutes) presigned link to
   the same object, so you can use it in THIS turn rather than waiting for the
-  next workspace sync. Fetch it and work on the local copy. Treat it as a
-  credential: never paste it into chat or into a document.
+  next workspace sync. Treat it as a credential: never paste it into chat or
+  into a document.
+- **`media.requiredHeaders` is not optional.** The URL is signed for a bounded
+  request with `Range` in the signature, so a plain fetch fails on a
+  signature/range mismatch. Send the header exactly as given.
 
 To get text out of a PDF, hand the local copy to pdf-to-markdown:
 
 ```bash
 node /opt/psd-skills/psd-workspace/run.js --user <caller> \
   --command "drive files get --params '{\"fileId\":\"<id>\",\"alt\":\"media\"}'"
-# then fetch media.downloadUrl to a local path and:
+# then fetch it WITH the required Range header, and convert the local copy:
+curl -fsS -H "Range: $(…media.requiredHeaders.Range…)" "$(…media.downloadUrl…)" \
+  -o /home/node/.openclaw/downloads/download.pdf
 /opt/agentcore-venv/bin/python3 /opt/psd-skills/psd-pdf-to-markdown/scripts/convert.py \
   --path /home/node/.openclaw/downloads/download.pdf
 ```
 
-Each download overwrites the previous one, so process a file before fetching the
-next. If `mediaError` is present the bytes could not be saved — say so and stop;
+A download replaces the previous one of the SAME type; a different type lands
+beside it (`download.pdf` and `download.png` can coexist). Process a file before
+fetching the next of that type, and use `media.workspacePath` rather than
+assuming a name. If `mediaError` is present the bytes could not be saved — say so and stop;
 do not try to re-download by another route.
 
 **Do not pass `-o`/`--output`.** It is refused by design (the broker will not

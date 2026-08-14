@@ -63,13 +63,30 @@ describe("downloaded media hand-off", () => {
     expect(args.signedWorkspacePrefix).toBe("ws/a@psd401.net")
     expect(args.relativePath).not.toContain("public-images")
     expect(args.relativePath).toBe("downloads/download.pdf")
-    expect(result.media).toEqual(
-      expect.objectContaining({
-        workspacePath: "downloads/download.pdf",
-        downloadUrl: "https://s3.example/presigned",
-        contentType: "application/pdf",
-      })
-    )
+    // Exact, not objectContaining: an earlier version of this test used
+    // objectContaining and therefore never noticed that requiredHeaders was
+    // being dropped, which would have made every documented fetch fail on an
+    // S3 signature/range mismatch.
+    expect(result.media).toEqual({
+      workspacePath: "downloads/download.pdf",
+      downloadUrl: "https://s3.example/presigned",
+      requiredHeaders: { Range: "bytes=0-12" },
+      bytes: 13,
+      contentType: "application/pdf",
+    })
+  })
+
+  it("carries the Range header the presigned URL was signed with", async () => {
+    // createWorkspaceDownloadUrl signs a bounded GET; workspace_sync.py
+    // re-attaches this same header and treats a mismatch as invalid. Without
+    // it on the handoff there is nothing for a caller to re-attach.
+    createWorkspaceDownloadUrl.mockResolvedValue({
+      downloadUrl: "https://s3.example/presigned",
+      contentLength: 13,
+      requiredHeaders: { Range: "bytes=0-12" },
+    })
+    const result = await executeWorkspaceCommand(cmd, "tok", "a@psd401.net", "ws/a@psd401.net")
+    expect(result.media?.requiredHeaders).toEqual({ Range: "bytes=0-12" })
   })
 
   it("does nothing when no workspace prefix is supplied", async () => {
@@ -93,5 +110,21 @@ describe("downloaded media hand-off", () => {
     const result = await executeWorkspaceCommand(cmd, "tok", "a@psd401.net", "ws/a@psd401.net")
     expect(putWorkspaceObject).not.toHaveBeenCalled()
     expect(result.media).toBeUndefined()
+  })
+})
+
+describe("run.js forwards the hand-off to the agent", () => {
+  // The broker returning `media` is useless if the CLI the agent actually
+  // invokes never prints it. run.js wrote only stdout/stderr, so the whole
+  // path was unreachable through the documented invocation and the unit tests
+  // above — which call the executor directly — could not see that.
+  const runJs = fs.readFileSync(
+    path.join(process.cwd(), "infra/agent-image/skills/psd-workspace/run.js"),
+    "utf8"
+  )
+
+  it("prints media and mediaError, not just stdout/stderr", () => {
+    expect(runJs).toContain("result.media")
+    expect(runJs).toContain("result.mediaError")
   })
 })

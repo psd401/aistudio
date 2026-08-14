@@ -67,6 +67,20 @@ function normalizeUnwrappedCron(expr) {
   if (domSpecified && dowSpecified) {
     fail("Cannot specify both day-of-month and day-of-week.");
   }
+  // Numeric day-of-week means different days in the two cron dialects:
+  // EventBridge counts 1=SUN, ordinary cron counts 0=SUN, so `1-5` is Mon-Fri
+  // in one and Sun-Thu in the other. Nothing downstream rejects the wrong one —
+  // a weekday brief written `30 6 * * 1-5` ran Sunday through Thursday for a
+  // week (agent_failures 8157). Caught here as well as server-side so the agent
+  // learns before spending a round trip.
+  if (dowSpecified && /\d/.test(expanded[4])) {
+    fail(
+      "cron day-of-week must use names (SUN,MON,TUE,WED,THU,FRI,SAT), not " +
+        "numbers. EventBridge counts 1=SUN while ordinary cron counts 0=SUN, " +
+        "so a numeric range runs a day off without failing. Weekdays are " +
+        "MON-FRI.",
+    );
+  }
   if (dowSpecified) expanded[2] = "?";
   else expanded[4] = "?";
   return `cron(${expanded.join(" ")})`;

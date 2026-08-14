@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process"
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises"
+import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -40,6 +40,13 @@ export interface WorkspaceCommandResult {
 export interface WorkspaceMediaHandoff {
   workspacePath: string
   downloadUrl: string
+  /**
+   * MUST be sent with the GET. createWorkspaceDownloadUrl signs a bounded
+   * request with `Range` baked into the signature, so a plain fetch of
+   * `downloadUrl` fails on a signature/range mismatch. workspace_sync.py does
+   * the same re-attach and treats a mismatch as an invalid download.
+   */
+  requiredHeaders: { Range: string }
   bytes: number
   contentType?: string
 }
@@ -864,9 +871,12 @@ const MAX_HANDOFF_BYTES = 64 * 1024 * 1024
  *
  * The destination is deliberately a fixed, self-describing relative path rather
  * than anything model-supplied: the agent never chooses where these bytes land,
- * so this cannot be steered into overwriting memory files. Each call overwrites
- * the previous download, which keeps the workspace from accruing copies of
- * every attachment ever read.
+ * so this cannot be steered into overwriting memory files.
+ *
+ * The key carries the extension, so a download of the same type replaces its
+ * predecessor while a different type lands beside it — `downloads/download.pdf`
+ * and `downloads/download.png` can coexist. That is a bounded set (one object
+ * per extension), not unbounded growth, but it is not "one file" either.
  */
 async function handOffDownloadedMedia(
   commandDirectory: string,
@@ -881,14 +891,19 @@ async function handOffDownloadedMedia(
   const downloaded = entries.find((name) => name.startsWith("download."))
   if (!downloaded) return undefined
 
-  const body = await readFile(join(commandDirectory, downloaded))
-  /* eslint-enable security/detect-non-literal-fs-filename */
-  if (body.byteLength === 0) return undefined
-  if (body.byteLength > MAX_HANDOFF_BYTES) {
+  // Check the on-disk size BEFORE reading. The tighter cap exists because the
+  // file is buffered in web-tier memory, so a check that runs after readFile()
+  // does not actually bound peak memory — it only reports the overrun once the
+  // allocation has already happened.
+  const stats = await stat(join(commandDirectory, downloaded))
+  if (stats.size === 0) return undefined
+  if (stats.size > MAX_HANDOFF_BYTES) {
     throw new Error(
-      `Downloaded file is ${body.byteLength} bytes, over the ${MAX_HANDOFF_BYTES}-byte hand-off limit`
+      `Downloaded file is ${stats.size} bytes, over the ${MAX_HANDOFF_BYTES}-byte hand-off limit`
     )
   }
+  const body = await readFile(join(commandDirectory, downloaded))
+  /* eslint-enable security/detect-non-literal-fs-filename */
 
   const extension = downloaded.slice("download.".length).toLowerCase()
   const contentType = DOWNLOAD_CONTENT_TYPES[extension]
@@ -899,13 +914,14 @@ async function handOffDownloadedMedia(
     body,
     ...(contentType ? { contentType } : {}),
   })
-  const { downloadUrl } = await createWorkspaceDownloadUrl(
+  const { downloadUrl, requiredHeaders } = await createWorkspaceDownloadUrl(
     signedWorkspacePrefix,
     relativePath
   )
   return {
     workspacePath: relativePath,
     downloadUrl,
+    requiredHeaders,
     bytes: body.byteLength,
     ...(contentType ? { contentType } : {}),
   }
