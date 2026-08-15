@@ -29,9 +29,29 @@ as a "summary" row or a note next to a number.
 
 1. Resolve the school. Confirm back which school and year you are running.
 2. Discover the roster: `GR0x` homeroom sections + lead teachers + counts.
-3. Per grade, run the measure blocks (see `references/sql.md`).
+3. Per grade, **extract then aggregate** (see `references/sql.md`):
+   - run the extraction query — raw matched pairs, no `NTILE`, no norms join,
+     no `GROUPING SETS`
+   - pipe those rows through `scripts/aggregate.py`, which applies the national
+     norms and computes every quartile scope
 4. Build ONE spreadsheet with `psd-workspace`: a tab per grade + Definitions.
 5. Share it and paste the bare URL on its own line.
+
+**Never put a window function or the norms lookup in SQL.** Window functions do
+not complete against `dibels_scores` on this MCP server at any size — a bare
+`NTILE(4)` over ~1,100 rows times out, while the same query without it runs in
+seconds (isolated 2026-08-15, Evergreen Elementary). The extraction query is a
+plain indexed read and returned 2,232 rows for grade K in about 3 seconds.
+
+Do not try to make `NTILE` work by simplifying around it. That was attempted
+over several passes — dropping the norms join, dropping the classroom
+breakdown, splitting the partitions — and produced no report at all. If an
+extraction query times out, simplify the extraction; never move arithmetic back
+into it.
+
+**One extraction query per grade, not per measure.** The `IN (…)` list takes
+every measure for the grade at once. Per-measure querying turns 6 grades into
+30+ round trips and is what makes this report feel endless.
 
 ### How to run it
 

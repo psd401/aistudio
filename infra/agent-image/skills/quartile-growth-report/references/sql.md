@@ -17,94 +17,112 @@ enrollment per student; teacher is `role_name = 'Lead Teacher'`. Never filter on
 `priorityorder` — it is often null. `LEFT JOIN teachers`; an unresolvable id is
 labeled `(Not on file)`.
 
-## Core pattern — local quartiles + national PR
+## Core pattern — extract raw pairs, aggregate locally
 
-Generate the `norms` body first:
+**The warehouse returns matched pairs. Quartiles and national PR are computed
+on this box.** Do not put `NTILE`, norms, or `GROUPING SETS` in the query.
 
-```bash
-/opt/agentcore-venv/bin/python3 /opt/psd-skills/quartile-growth-report/scripts/norms_values.py \
-  --grade 3 --period Fall --period Spring \
-  --measure ORF-WRC --measure NWF-CLS --as "<warehouse name>" --as "<warehouse name>"
-```
+That is not a style preference. **Window functions do not complete against
+`dibels_scores` on this MCP server at any size.** Isolated on 2026-08-15
+(Evergreen Elementary 2025-26): a bare `NTILE(4)` over ~1,100 rows, with no
+norms join and no classroom breakdown, timed out; the same query without the
+window ran in seconds. Row count is not the variable — a 2,200-row window
+function should be instant.
+
+The extraction query below returned **2,232 matched rows for grade K in about
+3 seconds**, confirmed in the same session.
+
+So the split is not an optimization to tune, it is the only shape that runs. Do
+not try to make `NTILE` work here by simplifying around it — that was tried
+across several passes and cost hours without producing a report.
+
+### Step 1 — the query (ONE per grade, covering every measure)
+
+`assessment_group IN (…)` takes the whole measure list for the grade in a single
+call. Do not run this per measure: that turns 6 grades into 30+ round trips for
+no benefit, and pass count is what makes this report feel endless.
+
+Student ids are pulled because the quartile tiebreak needs them. They stay in
+the local rows and in `aggregate.py`; only aggregated cells reach the workbook
+or the reply.
 
 ```sql
-WITH norms(meas0, per, cut, pr) AS (VALUES /* paste generated rows */),
-stu AS (  -- one row per student/measure/window; AVG neutralizes retests
+WITH stu AS (  -- one row per student/measure/window; AVG neutralizes retests
   SELECT assessment_group AS meas, studentid, "window", AVG(score) AS s
   FROM dibels_scores
   WHERE yearid = :yearid AND grade_level = :grade
     AND assessment_group IN (…) AND "window" IN (:baseline, 'Spring')
   GROUP BY 1,2,3),
-m AS (   -- matched pairs + per-student PR at both windows
-  SELECT f.meas, f.studentid, f.s AS b, sp.s AS e, pb.pr AS prb, pe.pr AS pre
+m AS (   -- matched baseline/spring pairs
+  SELECT f.meas, f.studentid, f.s AS b, sp.s AS e
   FROM stu f
   JOIN stu sp ON sp.studentid = f.studentid AND sp.meas = f.meas AND sp."window" = 'Spring'
-  LEFT JOIN LATERAL (SELECT n.pr FROM norms n WHERE n.meas0 = f.meas AND n.per = :baseline
-                     AND n.cut <= f.s ORDER BY n.cut DESC LIMIT 1) pb ON true
-  LEFT JOIN LATERAL (SELECT n.pr FROM norms n WHERE n.meas0 = sp.meas AND n.per = 'Spring'
-                     AND n.cut <= sp.s ORDER BY n.cut DESC LIMIT 1) pe ON true
   WHERE f."window" = :baseline),
 hr AS (SELECT DISTINCT ON (studentid) studentid, sectionid FROM section_enrollments
        WHERE yearid = :yearid AND schoolid = :schoolid AND course_code = :course
        ORDER BY studentid, dateleft DESC),
 sch AS (SELECT DISTINCT studentid FROM school_year_enrollments
-        WHERE yearid = :yearid AND schoolid = :schoolid AND grade_level = :grade),
-mm AS (SELECT m.*, hr.sectionid, (sch.studentid IS NOT NULL) AS in_sch
-       FROM m LEFT JOIN hr USING (studentid) LEFT JOIN sch USING (studentid)),
-q AS (SELECT mm.*,   -- THREE quartile assignments: class-local, school-local, district
-        NTILE(4) OVER (PARTITION BY meas, sectionid ORDER BY b, studentid) AS q_cls,
-        NTILE(4) OVER (PARTITION BY meas, in_sch  ORDER BY b, studentid) AS q_sch,
-        NTILE(4) OVER (PARTITION BY meas          ORDER BY b, studentid) AS q_dist
-      FROM mm),
-cls AS (SELECT meas, COALESCE(q_cls::text,'All') AS qt,
-          ROUND(AVG(e-b)     FILTER (WHERE sectionid = :sec1),1) AS a1,
-          ROUND(AVG(pre-prb) FILTER (WHERE sectionid = :sec1),1) AS p1,
-          COUNT(*)           FILTER (WHERE sectionid = :sec1)    AS n1
-          -- …repeat per homeroom; FILTER is safe with GROUPING SETS because
-          -- q_cls was computed within each section's own partition
-        FROM q WHERE sectionid IS NOT NULL
-        GROUP BY GROUPING SETS ((meas, q_cls),(meas))),
-scha AS (SELECT meas, COALESCE(q_sch::text,'All') AS qt,
-          ROUND(AVG(e-b),1) AS a_sch, ROUND(AVG(pre-prb),1) AS p_sch, COUNT(*) AS n_sch
-         FROM q WHERE in_sch GROUP BY GROUPING SETS ((meas, q_sch),(meas))),
-dist AS (SELECT meas, COALESCE(q_dist::text,'All') AS qt,
-          ROUND(AVG(e-b),1) AS a_dist, ROUND(AVG(pre-prb),1) AS p_dist, COUNT(*) AS n_dist
-         FROM q GROUP BY GROUPING SETS ((meas, q_dist),(meas)))
-SELECT * FROM dist LEFT JOIN scha USING (meas, qt) LEFT JOIN cls USING (meas, qt)
-ORDER BY meas, qt
+        WHERE yearid = :yearid AND schoolid = :schoolid AND grade_level = :grade)
+SELECT m.meas, m.studentid, m.b, m.e,
+       hr.sectionid, (sch.studentid IS NOT NULL) AS in_sch
+FROM m LEFT JOIN hr USING (studentid) LEFT JOIN sch USING (studentid)
 ```
 
-**`ORDER BY b, studentid` in every `NTILE` is mandatory**, not stylistic. See
-SKILL.md — without the tiebreak, quartile membership is nondeterministic across
-runs and re-running moved 19 of 100 quartile cells.
+No windows, no laterals, no grouping sets. It stays district-wide because the
+district quartile needs the full cohort — but it is now a plain indexed read
+returning a few thousand rows per grade.
+
+### Step 2 — aggregate
+
+Feed those rows to `aggregate.py`, which applies the norms, assigns the three
+quartile scopes, and emits the district/school/class rollups:
+
+```bash
+/opt/agentcore-venv/bin/python3 /opt/psd-skills/quartile-growth-report/scripts/aggregate.py \
+  --rows grade3.json --baseline Fall --spring Spring \
+  --measure-as "<warehouse name>=ORF-WRC"
+```
+
+Output is one record per `(meas, scope, qt)` with `growth`, `pr_growth` and `n`,
+including an `All` row per measure and scope — the same cells the SQL used to
+return. Use `--no-norms` for i-Ready, ORF Accuracy and SBA, which have no
+national PR.
+
+`--measure-as` maps the warehouse's `assessment_group` spelling to the norms
+file's (`ORF-WRC`, `NWF-CLS`); confirm the warehouse strings first, as above.
+
+**The `(b, studentid)` ordering inside every quartile is mandatory**, not
+stylistic. See SKILL.md — without the tiebreak, quartile membership is
+nondeterministic across runs and re-running moved 19 of 100 quartile cells.
+`aggregate.py` applies it and reproduces Postgres `NTILE(4)` exactly, remainder
+rule included (verified against Postgres for partition sizes 2-23); its tests
+pin both.
 
 ## Variants
 
+Every variant below keeps the same split: the query returns raw pairs, and
+`aggregate.py` does the quartiles. None of them should reintroduce `NTILE`,
+`LATERAL` norms, or `GROUPING SETS` into SQL.
+
 | Block | Change from the core pattern |
 |---|---|
-| i-Ready, ORF Accuracy | Drop `norms`; value is `e-b` only |
+| i-Ready, ORF Accuracy | Pass `--no-norms`; value is `e-b` only |
 | SBA grades 4-5 | Replace `stu`/`m` with a prior-year join (`yearid-1`, `grade-1`), filter `assessment_group LIKE 'Summative%'` and `is_strand = false` |
 | SBA grade 3 | Baseline = Fall i-Ready percentile; values `AVG(e)` scale and `AVG(metv)` % met |
-| Subgroups | One query per grade over the same `m`, `CROSS JOIN LATERAL (VALUES …)` for the four flags, school + district scope |
-| Fall-only status | Drop the Spring join; values are `AVG(b)` and `AVG(prb)` by quartile |
+| Subgroups | Same extraction query plus the four flag columns; group locally rather than re-querying per subgroup |
+| Fall-only status | Drop the Spring join and emit `e` as null; read `start_raw` / `start_pr` |
 
 ## School-vs-district PR mini-tables
 
-Same `stu`/`m` CTEs, but keep **levels** rather than deltas — `bs` = baseline PR
-(i-Ready: the percentile itself), `es` = spring PR:
+No second query. `aggregate.py` already emits levels alongside the deltas from
+the same run: read `start_pr` / `end_pr` (whole percentiles) instead of
+`pr_growth`, filtered to `scope` of `school` and `district`.
 
-```sql
-q AS (SELECT mm.*, NTILE(4) OVER (PARTITION BY meas, in_sch ORDER BY b, studentid) AS q_sch,
-                   NTILE(4) OVER (PARTITION BY meas ORDER BY b, studentid) AS q_dist FROM mm),
-schq  AS (SELECT meas, COALESCE(q_sch::text,'All') AS qt,
-                 ROUND(AVG(bs),0) AS s_start, ROUND(AVG(es),0) AS s_end, COUNT(*) AS n_sch
-          FROM q WHERE in_sch GROUP BY GROUPING SETS ((meas, q_sch),(meas))),
-distq AS (SELECT meas, COALESCE(q_dist::text,'All') AS qt,
-                 ROUND(AVG(bs),0) AS d_start, ROUND(AVG(es),0) AS d_end, COUNT(*) AS n_dist
-          FROM q GROUP BY GROUPING SETS ((meas, q_dist),(meas)))
-SELECT * FROM distq LEFT JOIN schq USING (meas, qt) ORDER BY meas, qt
-```
+Quartiles are still assigned on the raw baseline; only the reported averages are
+in PR space. SBA is excluded — scale scores have no PR. Fall-only reports use
+`start_pr` / `start_raw` and leave the End columns empty, which the script
+already returns as null when no spring score exists.
 
-`NTILE` still orders on the raw baseline `b`; only the reported averages are in
-PR space. SBA is excluded — scale scores have no PR. Fall-only: Start columns
-only.
+Computing both views in one pass is deliberate: they were two queries over the
+same rows, and keeping them together makes it impossible for the growth table
+and the PR table to disagree about who is in which quartile.
