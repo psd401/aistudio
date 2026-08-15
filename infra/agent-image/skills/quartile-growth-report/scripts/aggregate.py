@@ -253,10 +253,16 @@ def rollup(rows, scope, partition_key, value_digits=1):
         start_raw = mean([r["b"] for r in members])
         end_raw = mean([r["e"] for r in members if r.get("e") is not None])
 
+        # Carry the section on class-scope cells. Without it the workbook
+        # cannot build its per-teacher columns — the breakdown this report
+        # exists for — and the builder has no way to tell one class row from
+        # another.
+        sections = {r.get("sectionid") for r in members if r.get("sectionid")}
         out.append(
             {
                 "meas": meas,
                 "scope": scope,
+                "sectionid": sections.pop() if len(sections) == 1 else None,
                 "qt": qt,
                 "growth": pg_round(growth, value_digits),
                 "pr_growth": pg_round(pr_growth, value_digits),

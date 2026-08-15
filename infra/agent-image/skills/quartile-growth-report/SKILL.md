@@ -29,13 +29,33 @@ as a "summary" row or a note next to a number.
 
 1. Resolve the school. Confirm back which school and year you are running.
 2. Discover the roster: `GR0x` homeroom sections + lead teachers + counts.
-3. Per grade, **extract then aggregate** (see `references/sql.md`):
+3. Per grade, **extract → aggregate → build** (see `references/sql.md`):
    - run the extraction query — raw matched pairs, no `NTILE`, no norms join,
      no `GROUPING SETS`
-   - pipe those rows through `scripts/aggregate.py`, which applies the national
-     norms and computes every quartile scope
+   - `scripts/aggregate.py` — applies the norms, computes every quartile scope
+   - `scripts/build_tab.py` — emits the gws request body for that tab
 4. Build ONE spreadsheet with `psd-workspace`: a tab per grade + Definitions.
 5. Share it and paste the bare URL on its own line.
+
+**Write no scripts. Author no files.** Every step ships as a script that takes
+the previous step's output and emits the next step's input, ending in a body
+you pipe straight into `gws`:
+
+```bash
+P=/opt/agentcore-venv/bin/python3
+S=/opt/psd-skills/quartile-growth-report/scripts
+
+# tab first, then fill it
+$P $S/build_tab.py --school "<school>" --grade K --year 2025-26 --emit addsheet
+$P $S/aggregate.py --rows gradeK.csv --grade K --subgroup "low_income=Low Income|Non-Low Income" \
+  | $P $S/build_tab.py --school "<school>" --grade K --year 2025-26 --window "Fall→Spring"
+```
+
+This is not a style preference. Every file the model authors is a chance for
+the write tool to embed a literal `\n`, which produces a SyntaxError and a
+retry loop — it has killed this report three times, twice with every rollup
+already computed. If a step seems to need a script that does not exist, say so
+and stop; do not write one.
 
 **Never put a window function or the norms lookup in SQL.** Window functions do
 not complete against `dibels_scores` on this MCP server at any size — a bare
