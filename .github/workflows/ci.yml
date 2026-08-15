@@ -88,7 +88,8 @@ jobs:
           infra/agent-image/skills/psd-last30days/scripts/test_last30days.py \
           infra/agent-image/skills/psd-observances/tools/test_nspra_markdown.py \
           infra/agent-image/skills/quartile-growth-report/scripts/test_norms_values.py \
-          infra/agent-image/skills/quartile-growth-report/scripts/test_aggregate.py
+          infra/agent-image/skills/quartile-growth-report/scripts/test_aggregate.py \
+          infra/agent-image/skills/quartile-growth-report/scripts/test_build_tab.py
 
     - name: Run model-UID isolation test as root
       run: |
