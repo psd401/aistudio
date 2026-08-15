@@ -123,9 +123,18 @@ not administered), **Grade 1 ORF baseline = Winter** (ORF starts mid-year).
 | SBA grade 3 | spring scale + % met, by **Fall i-Ready quartile** (no prior SBA exists) |
 | SBA proficiency | % met standard among all tested, rows ELA/Math |
 
-Subgroups (School + District, "All" level): Low Income / Non-Low Income /
+**Subgroups** (School + District, "All" level): Low Income / Non-Low Income /
 Special Ed / Non-Special Ed, from `students_frl.frl` and
 `students_specialed.special_education`.
+
+**Join those flags district-wide, not just for this school**, and pass
+`--subgroup` to `aggregate.py` rather than grouping them yourself. A
+school-scoped join makes the District column a copy of the School column and
+dumps every unflagged district student into the negative class — it reads as
+real data. A student with no flag record is UNKNOWN and is excluded, never
+counted as negative. See `references/sql.md`. If `aggregate.py` warns that a
+district subgroup row matches its school row, the join is wrong; do not
+publish that workbook.
 
 ## National PR — the norms asset
 

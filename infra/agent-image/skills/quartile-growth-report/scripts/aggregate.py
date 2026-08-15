@@ -302,6 +302,82 @@ def coerce_row(row):
     return row
 
 
+UNKNOWN_FLAG = object()
+
+
+def flag_value(raw):
+    """Tri-state a subgroup flag: True, False, or UNKNOWN.
+
+    A student with NO flag record is UNKNOWN, never False. Defaulting a missing
+    record to the negative class is what made the district subgroup columns
+    wrong AND invisible on 2026-08-15: only Evergreen students carried an
+    FRL/SpEd record, so all 540 other district students silently became
+    "Non-Low Income", and the district row became a copy of the school row.
+    A missing record is not evidence that a student is not low income.
+    """
+    if raw is None:
+        return UNKNOWN_FLAG
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text == "":
+        return UNKNOWN_FLAG
+    if text in TRUE_TEXT:
+        return True
+    if text in {"false", "f", "no", "n", "0"}:
+        return False
+    return UNKNOWN_FLAG
+
+
+def subgroup_rollups(rows, column, positive_label, negative_label):
+    """School and district rollups for one flag column, at the All level.
+
+    Students whose flag is UNKNOWN are excluded from BOTH sides rather than
+    swelling the negative class. That makes the denominators smaller and
+    honest; the alternative reports a number that looks complete and is not.
+    """
+    out = []
+    for scope, population in (
+        ("district", rows),
+        ("school", [r for r in rows if r.get("in_sch")]),
+    ):
+        for label, wanted in ((positive_label, True), (negative_label, False)):
+            members = [r for r in population if flag_value(r.get(column)) is wanted]
+            if not members:
+                continue
+            for cell in rollup(members, scope, lambda r: r["meas"]):
+                if cell["qt"] != "All":
+                    continue
+                cell["subgroup"] = label
+                out.append(cell)
+    return out
+
+
+def subgroup_scope_warning(records):
+    """Warn when a subgroup's district row is identical to its school row.
+
+    That is the fingerprint of a flag joined only for the report's own school:
+    the district cell is really the school cell, and its complement is
+    contaminated with every unflagged student in the district. It reads as
+    plausible data, which is exactly why it needs to be called out rather than
+    left for a reader to notice.
+    """
+    by_key = defaultdict(dict)
+    for record in records:
+        subgroup = record.get("subgroup")
+        if subgroup:
+            by_key[(record["meas"], subgroup)][record["scope"]] = record
+
+    suspect = []
+    for (meas, subgroup), scopes in sorted(by_key.items()):
+        school, district = scopes.get("school"), scopes.get("district")
+        if not school or not district:
+            continue
+        if school["n"] == district["n"] and school["growth"] == district["growth"]:
+            suspect.append(f"{meas}/{subgroup}")
+    return suspect
+
+
 def read_rows(handle):
     """Accept the export CSV as-is, or JSON, without being told which.
 
@@ -343,6 +419,14 @@ def main() -> int:
         default=[],
         metavar="WAREHOUSE=NORMS",
         help="map a warehouse measure name to its norms-file name; repeatable",
+    )
+    parser.add_argument(
+        "--subgroup",
+        action="append",
+        default=[],
+        metavar="COLUMN=POSITIVE|NEGATIVE",
+        help="emit School+District rollups for a flag column, e.g. "
+        "low_income='Low Income|Non-Low Income'; repeatable",
     )
     parser.add_argument(
         "--no-norms",
@@ -450,6 +534,29 @@ def main() -> int:
             lambda r: (r["meas"], r["sectionid"]),
         )
     )
+
+    for spec in args.subgroup:
+        if "=" not in spec or "|" not in spec:
+            parser.error(
+                f"--subgroup expects COLUMN='POSITIVE|NEGATIVE', got {spec!r}"
+            )
+        column, labels = spec.split("=", 1)
+        positive, negative = labels.split("|", 1)
+        results.extend(
+            subgroup_rollups(rows, column, positive.strip(), negative.strip())
+        )
+
+    suspect = subgroup_scope_warning(results)
+    if suspect:
+        print(
+            "WARNING: district subgroup rows are identical to school rows for: "
+            + ", ".join(suspect)
+            + ". The flag column is almost certainly joined only for this "
+            "school, so the district figure is the school figure and its "
+            "complement includes every unflagged district student. Join the "
+            "flags district-wide (see references/sql.md).",
+            file=sys.stderr,
+        )
 
     print(json.dumps(results, indent=1))
     return 0

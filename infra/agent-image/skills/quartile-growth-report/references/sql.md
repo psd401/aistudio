@@ -131,8 +131,43 @@ Every variant below keeps the same split: the query returns raw pairs, and
 | i-Ready, ORF Accuracy | Pass `--no-norms`; value is `e-b` only |
 | SBA grades 4-5 | Replace `stu`/`m` with a prior-year join (`yearid-1`, `grade-1`), filter `assessment_group LIKE 'Summative%'` and `is_strand = false` |
 | SBA grade 3 | Baseline = Fall i-Ready percentile; values `AVG(e)` scale and `AVG(metv)` % met |
-| Subgroups | Same extraction query plus the four flag columns; group locally rather than re-querying per subgroup |
+| Subgroups | Join the flags **district-wide** (below) and pass `--subgroup` to `aggregate.py` |
 | Fall-only status | Drop the Spring join and emit `e` as null; read `start_raw` / `start_pr` |
+
+## Subgroups — the flag join must be DISTRICT-WIDE
+
+Add the flag columns to the same extraction query, joined across the whole
+district cohort, not just the report's school:
+
+```sql
+LEFT JOIN students_frl f       ON f.studentid = m.studentid AND f.yearid = :yearid
+LEFT JOIN students_specialed sp ON sp.studentid = m.studentid AND sp.yearid = :yearid
+-- …and select them, cast like everything else:
+       f.frl::text                AS low_income,
+       sp.special_education::text AS special_ed
+```
+
+Then let `aggregate.py` do the rollups:
+
+```bash
+… --subgroup "low_income=Low Income|Non-Low Income" \
+  --subgroup "special_ed=Special Ed|Non-Special Ed"
+```
+
+**Do not scope the join to the school.** On 2026-08-15 every grade reported
+School and District identically — grade K showed 18/18 against a district
+cohort of 558 — because only Evergreen students carried a flag. The district
+cell WAS the school cell, and its complement silently absorbed all 540
+unflagged district students. Every number looked plausible.
+
+**A student with no flag record is UNKNOWN, not negative.** `aggregate.py`
+excludes them from both sides. Counting a missing record as "not low income"
+is what made the contamination invisible; smaller honest denominators beat a
+complete-looking wrong one.
+
+`aggregate.py` prints a warning to stderr when a subgroup's district row is
+identical to its school row, which is the fingerprint of this bug. Do not
+publish a workbook that emitted that warning.
 
 ## School-vs-district PR mini-tables
 
