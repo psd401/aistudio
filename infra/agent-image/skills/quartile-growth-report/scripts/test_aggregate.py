@@ -610,3 +610,72 @@ class CsvInputNeedsNoGlueScript(unittest.TestCase):
 
     def test_empty_csv_header_only(self):
         self.assertEqual(self.run_on("meas,studentid,b,e\n", "--no-norms"), [])
+
+
+class SubgroupsAreScopedAndTriState(unittest.TestCase):
+    """District subgroup rows must not be copies of the school rows.
+
+    On 2026-08-15 every grade reported School and District identically for Low
+    Income and Special Ed — grade K showed 18/18 against a district cohort of
+    558. The flags were joined only for the report's own school, so the
+    district cell WAS the school cell and its complement silently absorbed all
+    540 unflagged district students. It looked like data.
+    """
+
+    ROWS = [
+        {"meas": "ORF", "studentid": 1, "b": 10, "e": 20, "in_sch": True, "low_income": True},
+        {"meas": "ORF", "studentid": 2, "b": 20, "e": 35, "in_sch": True, "low_income": False},
+        {"meas": "ORF", "studentid": 3, "b": 30, "e": 40, "in_sch": False, "low_income": True},
+        {"meas": "ORF", "studentid": 4, "b": 40, "e": 55, "in_sch": False, "low_income": None},
+    ]
+
+    def cells(self):
+        return aggregate.subgroup_rollups(
+            [dict(r, prb=None, pre=None) for r in self.ROWS],
+            "low_income", "Low Income", "Non-Low Income",
+        )
+
+    def test_district_is_wider_than_school(self):
+        cells = self.cells()
+        school = next(c for c in cells if c["scope"] == "school" and c["subgroup"] == "Low Income")
+        district = next(c for c in cells if c["scope"] == "district" and c["subgroup"] == "Low Income")
+        self.assertEqual(school["n"], 1)
+        self.assertEqual(district["n"], 2)
+        self.assertGreater(district["n"], school["n"])
+
+    def test_missing_flag_is_excluded_not_counted_as_negative(self):
+        # Student 4 has no flag record. Counting them as Non-Low Income is the
+        # bug; a missing record is not evidence of anything.
+        cells = self.cells()
+        negative = next(
+            c for c in cells
+            if c["scope"] == "district" and c["subgroup"] == "Non-Low Income"
+        )
+        self.assertEqual(negative["n"], 1)
+
+    def test_flag_value_tri_states(self):
+        self.assertIs(aggregate.flag_value(True), True)
+        self.assertIs(aggregate.flag_value("t"), True)
+        self.assertIs(aggregate.flag_value("false"), False)
+        self.assertIs(aggregate.flag_value(None), aggregate.UNKNOWN_FLAG)
+        self.assertIs(aggregate.flag_value(""), aggregate.UNKNOWN_FLAG)
+        self.assertIs(aggregate.flag_value("maybe"), aggregate.UNKNOWN_FLAG)
+
+    def test_identical_school_and_district_is_flagged(self):
+        # The fingerprint of a school-only flag join.
+        same = [
+            {"meas": "ORF", "scope": "school", "qt": "All", "subgroup": "Low Income",
+             "n": 18, "growth": 19.9},
+            {"meas": "ORF", "scope": "district", "qt": "All", "subgroup": "Low Income",
+             "n": 18, "growth": 19.9},
+        ]
+        self.assertEqual(aggregate.subgroup_scope_warning(same), ["ORF/Low Income"])
+
+    def test_properly_scoped_subgroups_are_not_flagged(self):
+        ok = [
+            {"meas": "ORF", "scope": "school", "qt": "All", "subgroup": "Low Income",
+             "n": 18, "growth": 19.9},
+            {"meas": "ORF", "scope": "district", "qt": "All", "subgroup": "Low Income",
+             "n": 402, "growth": 15.2},
+        ]
+        self.assertEqual(aggregate.subgroup_scope_warning(ok), [])
