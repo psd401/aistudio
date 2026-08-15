@@ -135,7 +135,17 @@ class NormsAreScopedByGrade(unittest.TestCase):
     def test_grade_is_normalized_from_the_csvs_float_form(self):
         self.assertEqual(aggregate.normalize_grade("3.0"), "3")
         self.assertEqual(aggregate.normalize_grade(3), "3")
-        self.assertEqual(aggregate.normalize_grade("K"), "K")
+
+    def test_grade_K_is_kindergarten_not_a_literal_K(self):
+        # The norms file stores kindergarten as grade 0 and SKILL.md labels the
+        # tabs K-5, so --grade K is what an agent passes. Returning a literal
+        # "K" keys nothing in the table — every K report would fail.
+        # norms_values.py has the same mapping; the two must not diverge.
+        self.assertEqual(aggregate.normalize_grade("K"), "0")
+        self.assertEqual(aggregate.normalize_grade("k"), "0")
+        self.assertEqual(
+            aggregate.normalize_grade("K"), aggregate.normalize_grade("0")
+        )
 
 
 class PercentileLookup(unittest.TestCase):
@@ -350,7 +360,8 @@ class EndToEnd(unittest.TestCase):
                 text=True,
             )
             self.assertNotEqual(proc.returncode, 0)
-            self.assertIn("no norms for measure", proc.stderr)
+            self.assertIn("no norms at grade '42'", proc.stderr)
+            self.assertIn("ORF-WRC", proc.stderr)
         finally:
             os.unlink(path)
 
@@ -375,8 +386,11 @@ class EndToEnd(unittest.TestCase):
         err = self.run_expecting_failure(
             rows_of([("a", 20.0, 60.0)], meas="I-READY-READING"), "--grade", "3"
         )
-        self.assertIn("no norms for measure 'I-READY-READING'", err)
-        self.assertIn("available measures:", err)
+        self.assertIn("I-READY-READING", err)
+        self.assertIn("no norms at grade '3' for any requested measure", err)
+        # The message must show what the file does have, so the operator can
+        # see the name it expected rather than guessing.
+        self.assertIn("ORF-WRC", err)
 
     def test_a_mistyped_measure_alias_fails_loudly(self):
         # A typo in --measure-as is the likeliest way to reach the above.
@@ -385,8 +399,51 @@ class EndToEnd(unittest.TestCase):
             "--grade", "3",
             "--measure-as", "ORF-WRC=ORF_WRC",
         )
-        self.assertIn("no norms for measure 'ORF_WRC'", err)
+        self.assertIn("ORF_WRC", err)
+        self.assertIn("no norms at grade '3' for any requested measure", err)
         self.assertIn("--no-norms", err)
+
+    def test_grade_K_scores_against_kindergarten_norms(self):
+        # End-to-end counterpart: --grade K must behave exactly like --grade 0,
+        # not die in the no-norms guard. LNF is a K measure in the shipped file.
+        rows = rows_of([("a", 10.0, 40.0), ("b", 20.0, 55.0)], meas="LNF")
+        args = ("--measure-as", "LNF=LNF")
+        k = self.run_script(rows, "--grade", "K", *args)
+        zero = self.run_script(rows, "--grade", "0", *args)
+        self.assertEqual(k, zero)
+        district_all = next(
+            r for r in k if r["scope"] == "district" and r["qt"] == "All"
+        )
+        self.assertIsNotNone(district_all["pr_growth"])
+
+    def test_one_unnormed_measure_does_not_abort_the_normed_ones(self):
+        # LNF has no grade-3 norms, ORF-WRC does. SKILL.md: a measure-window
+        # missing from the file emits raw change only "and say so" — so the
+        # run must survive, warn on stderr, and still score ORF-WRC.
+        rows = rows_of([("a", 20.0, 60.0)]) + rows_of([("b", 30.0, 50.0)], meas="LNF")
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(rows, fh)
+            path = fh.name
+        try:
+            proc = subprocess.run(
+                [sys.executable, SCRIPT, "--rows", path, "--grade", "3"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("no norms for measure 'LNF' at grade '3'", proc.stderr)
+            self.assertIn("raw change only", proc.stderr)
+            out = json.loads(proc.stdout)
+        finally:
+            os.unlink(path)
+        by_meas = {
+            r["meas"]: r
+            for r in out
+            if r["scope"] == "district" and r["qt"] == "All"
+        }
+        self.assertIsNotNone(by_meas["ORF-WRC"]["start_pr"])
+        self.assertIsNone(by_meas["LNF"]["start_pr"])
+        self.assertIsNotNone(by_meas["LNF"]["start_raw"])
 
     def test_an_unnormed_measure_still_runs_under_no_norms(self):
         # --no-norms remains the documented escape hatch for i-Ready/SBA, so

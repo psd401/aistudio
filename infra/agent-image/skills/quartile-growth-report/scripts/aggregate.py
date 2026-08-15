@@ -108,13 +108,21 @@ def order_key(row):
 
 
 def normalize_grade(value):
-    """'3', '3.0', 3 -> '3'.
+    """'3', '3.0', 3 -> '3'; 'K' -> '0'.
+
+    Kindergarten is why this must stay in lockstep with `norms_values.py`'s
+    function of the same name: SKILL.md labels the tabs K-5, so `--grade K` is
+    the natural thing for an agent to pass, but the norms file stores
+    kindergarten as grade 0. The two scripts key the same CSV on the same
+    domain concept; a divergence here scores kindergarten against nothing.
 
     The shipped `dibels8_norms_2021-22.csv` stores grade as a plain integer
     (0-5); the float-tolerant parse is defensive, for a norms file or a
     `--grade` argument that arrives in the '3.0' form instead.
     """
     text = str(value).strip()
+    if text.upper() == "K":
+        return "0"
     try:
         return str(int(float(text)))
     except (TypeError, ValueError):
@@ -312,23 +320,35 @@ def main() -> int:
     grade = normalize_grade(args.grade) if args.grade else None
 
     if not args.no_norms:
-        measures = {alias.get(r["meas"], r["meas"]) for r in rows}
-        for measure in sorted(measures):
-            # Loud, not silent, at both levels: an unmatched measure or grade
-            # would otherwise yield a null percentile for every student and
-            # look like missing data rather than a wrong invocation.
-            if measure not in norms:
-                parser.error(
-                    f"no norms for measure {measure!r}; "
-                    f"available measures: {sorted(norms)}. "
-                    "Map it with --measure-as WAREHOUSE=NORMS, or pass "
-                    "--no-norms to skip percentiles entirely."
-                )
-            if grade not in norms[measure]:
-                parser.error(
-                    f"no norms for measure {measure!r} at grade {grade!r}; "
-                    f"available grades: {sorted(norms[measure])}"
-                )
+        measures = sorted({alias.get(r["meas"], r["meas"]) for r in rows})
+        unnormed = [m for m in measures if grade not in norms.get(m, {})]
+
+        if unnormed == measures:
+            # Nothing in this run can be scored at all — a wrong --grade, a
+            # mistyped --measure-as, or the wrong norms file. Loud, not a null
+            # percentile for every student in the report, which reads as
+            # missing data rather than a wrong invocation.
+            have = ", ".join(f"{m} {sorted(norms[m])}" for m in sorted(norms))
+            parser.error(
+                f"no norms at grade {grade!r} for any requested measure "
+                f"({', '.join(measures)}); the norms file has {have}. "
+                "Map warehouse names with --measure-as WAREHOUSE=NORMS, or "
+                "pass --no-norms to skip percentiles entirely."
+            )
+
+        for measure in unnormed:
+            # Partial coverage is normal, not an error: LNF and PSF stop after
+            # grade 1, MAZE does not start until 2. SKILL.md is explicit that a
+            # measure-window missing from the file emits raw change only "and
+            # say so" — so one unnormed measure must not abort the measures
+            # that can be scored. Still loud: named on stderr so the null PR is
+            # attributable rather than mistaken for missing data.
+            print(
+                f"warning: no norms for measure {measure!r} at grade {grade!r} "
+                f"(available grades: {sorted(norms.get(measure, {})) or 'none'}); "
+                "emitting raw change only for it",
+                file=sys.stderr,
+            )
 
     for row in rows:
         row.setdefault("e", None)
