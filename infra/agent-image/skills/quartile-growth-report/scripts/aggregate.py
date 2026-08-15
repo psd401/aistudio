@@ -83,13 +83,76 @@ def ntile(rows, buckets=4):
 
 
 def order_key(row):
-    """The mandatory NTILE ordering: baseline, then studentid as tiebreak."""
-    return (row["b"], str(row["studentid"]))
+    """The mandatory NTILE ordering: baseline, then studentid as tiebreak.
+
+    The id sorts NUMERICALLY when it is numeric. Postgres orders a numeric
+    `studentid` column as a number — 9 before 10 — while `str()` would order it
+    lexically and put 10 first. On any baseline tie involving multi-digit ids
+    that picks a different student for the quartile boundary, which is the
+    "19 of 100 quartile cells moved" failure this ordering exists to prevent,
+    reintroduced one level down.
+
+    The (kind, value) pair keeps numeric and non-numeric ids from being
+    compared against each other; a real column is one or the other.
+    """
+    if row.get("b") is None:
+        raise ValueError(
+            f"row for student {row.get('studentid')!r} has no baseline score; "
+            "the extraction query must not return null b"
+        )
+    sid = row["studentid"]
+    try:
+        # via float() so a JSON-decoded 10.0 still sorts as 10: int("10.0")
+        # raises, which would drop an integer id into the string branch below
+        # and sort it lexically — the exact tiebreak bug this function fixes.
+        return (row["b"], 0, int(float(str(sid).strip())), "")
+    except (TypeError, ValueError):
+        return (row["b"], 1, 0, str(sid))
+
+
+def normalize_grade(value):
+    """'3', '3.0', 3 -> '3'; 'K' -> '0'.
+
+    Kindergarten is why this must stay in lockstep with `norms_values.py`'s
+    function of the same name: SKILL.md labels the tabs K-5, so `--grade K` is
+    the natural thing for an agent to pass, but the norms file stores
+    kindergarten as grade 0. The two scripts key the same CSV on the same
+    domain concept; a divergence here scores kindergarten against nothing.
+
+    The shipped `dibels8_norms_2021-22.csv` stores grade as a plain integer
+    (0-5); the float-tolerant parse is defensive, for a norms file or a
+    `--grade` argument that arrives in the '3.0' form instead.
+
+    Lockstep means the K mapping and the numeric normalization, not the
+    invalid-input path, which intentionally differs: `norms_values.py` raises
+    on `--grade banana` because nothing downstream would catch it, while here
+    the unparsed text falls through to the no-norms-at-that-grade guard in
+    `main()` and fails there with the measures listed. Do not "fix" this
+    divergence into a raise without moving that guard.
+    """
+    text = str(value).strip()
+    if text.upper() == "K":
+        return "0"
+    try:
+        return str(int(float(text)))
+    except (TypeError, ValueError):
+        return text
 
 
 def load_norms(path):
-    """measure -> period -> ascending [(cut, pr)] for a largest-cut-<=-score lookup."""
-    table = defaultdict(lambda: defaultdict(list))
+    """measure -> grade -> period -> ascending [(cut, pr)].
+
+    Grade is part of the key, not an afterthought: the same measure has
+    different cut points per grade — Fall ORF-WRC is 188 cuts topping at raw
+    187 for grade 3, and 206 cuts topping at 205 for grade 5. Merging grades
+    into one sorted list makes `percentile_for` return whichever grade's cut
+    happened to be the largest one at or below the score, producing percentiles
+    that are silently wrong rather than raising.
+
+    `norms_values.py` filters by grade before emitting its rows, which is why
+    the SQL this replaces never mixed them.
+    """
+    table = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     with open(path, newline="") as handle:
         for row in csv.DictReader(handle):
             try:
@@ -97,10 +160,12 @@ def load_norms(path):
                 pr = float(row["percentile"])
             except (TypeError, ValueError):
                 continue
-            table[row["measure"]][row["period"]].append((raw, pr))
+            grade = normalize_grade(row["grade"])
+            table[row["measure"]][grade][row["period"]].append((raw, pr))
     for measure in table:
-        for period in table[measure]:
-            table[measure][period].sort()
+        for grade in table[measure]:
+            for period in table[measure][grade]:
+                table[measure][grade][period].sort()
     return table
 
 
@@ -219,7 +284,12 @@ def main() -> int:
     parser.add_argument("--rows", help="JSON rows file; default stdin")
     parser.add_argument("--baseline", default="Fall", help="baseline window name")
     parser.add_argument("--spring", default="Spring", help="end window name")
-    parser.add_argument("--grade", help="grade, for the norms lookup")
+    # Required, matching norms_values.py's contract. The same measure has
+    # different cut points per grade, so a norms lookup without a grade is not
+    # a lookup — it silently mixes them.
+    parser.add_argument(
+        "--grade", help="grade for the norms lookup; required unless --no-norms"
+    )
     parser.add_argument(
         "--measure-as",
         action="append",
@@ -246,6 +316,20 @@ def main() -> int:
         print(json.dumps([]))
         return 0
 
+    # `order_key` raises on a null baseline too — that is the sort's own
+    # invariant and stays — but it fires from inside `sorted()` deep in
+    # `rollup`, so the operator (an agent reading stderr, per SKILL.md) gets a
+    # traceback rather than something diagnosable. Same loud failure, checked
+    # up front in this file's parser.error style.
+    no_baseline = [r for r in rows if r.get("b") is None]
+    if no_baseline:
+        parser.error(
+            f"{len(no_baseline)} of {len(rows)} rows have a null baseline "
+            f"score (first: student {no_baseline[0].get('studentid')!r}); the "
+            "extraction query must not return null b — filter those rows out "
+            "in SQL, or use the Fall-only status view if there is no baseline."
+        )
+
     alias = {}
     for pair in args.measure_as:
         if "=" not in pair:
@@ -253,7 +337,42 @@ def main() -> int:
         warehouse, norms_name = pair.split("=", 1)
         alias[warehouse] = norms_name
 
+    if not args.no_norms and not args.grade:
+        parser.error("--grade is required unless --no-norms (cut points differ by grade)")
+
     norms = {} if args.no_norms else load_norms(args.norms)
+    grade = normalize_grade(args.grade) if args.grade else None
+
+    if not args.no_norms:
+        measures = sorted({alias.get(r["meas"], r["meas"]) for r in rows})
+        unnormed = [m for m in measures if grade not in norms.get(m, {})]
+
+        if len(unnormed) == len(measures):
+            # Nothing in this run can be scored at all — a wrong --grade, a
+            # mistyped --measure-as, or the wrong norms file. Loud, not a null
+            # percentile for every student in the report, which reads as
+            # missing data rather than a wrong invocation.
+            have = ", ".join(f"{m} {sorted(norms[m])}" for m in sorted(norms))
+            parser.error(
+                f"no norms at grade {grade!r} for any requested measure "
+                f"({', '.join(measures)}); the norms file has {have}. "
+                "Map warehouse names with --measure-as WAREHOUSE=NORMS, or "
+                "pass --no-norms to skip percentiles entirely."
+            )
+
+        for measure in unnormed:
+            # Partial coverage is normal, not an error: LNF and PSF stop after
+            # grade 1, MAZE does not start until 2. SKILL.md is explicit that a
+            # measure-window missing from the file emits raw change only "and
+            # say so" — so one unnormed measure must not abort the measures
+            # that can be scored. Still loud: named on stderr so the null PR is
+            # attributable rather than mistaken for missing data.
+            print(
+                f"warning: no norms for measure {measure!r} at grade {grade!r} "
+                f"(available grades: {sorted(norms.get(measure, {})) or 'none'}); "
+                "emitting raw change only for it",
+                file=sys.stderr,
+            )
 
     for row in rows:
         row.setdefault("e", None)
@@ -263,9 +382,9 @@ def main() -> int:
             row["prb"] = row["pre"] = None
             continue
         measure = alias.get(row["meas"], row["meas"])
-        grade_table = norms.get(measure, {})
-        row["prb"] = percentile_for(grade_table.get(args.baseline, []), row.get("b"))
-        row["pre"] = percentile_for(grade_table.get(args.spring, []), row.get("e"))
+        periods = norms.get(measure, {}).get(grade, {})
+        row["prb"] = percentile_for(periods.get(args.baseline, []), row.get("b"))
+        row["pre"] = percentile_for(periods.get(args.spring, []), row.get("e"))
 
     results = []
     results.extend(rollup(rows, "district", lambda r: r["meas"]))

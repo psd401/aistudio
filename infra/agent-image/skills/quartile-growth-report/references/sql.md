@@ -79,7 +79,7 @@ quartile scopes, and emits the district/school/class rollups:
 
 ```bash
 /opt/agentcore-venv/bin/python3 /opt/psd-skills/quartile-growth-report/scripts/aggregate.py \
-  --rows grade3.json --baseline Fall --spring Spring \
+  --rows grade3.json --grade 3 --baseline Fall --spring Spring \
   --measure-as "<warehouse name>=ORF-WRC"
 ```
 

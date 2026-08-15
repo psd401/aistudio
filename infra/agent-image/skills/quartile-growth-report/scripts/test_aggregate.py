@@ -81,10 +81,84 @@ class OrderingIsDeterministic(unittest.TestCase):
             ["a", "b", "c"],
         )
 
-    def test_numeric_studentids_compare_as_strings_consistently(self):
+    def test_numeric_studentids_sort_numerically_like_postgres(self):
+        # Postgres orders a numeric studentid column as a number: 9 before 10.
+        # str() would order lexically and put 10 first, picking a different
+        # student at the quartile boundary on any baseline tie.
         tied = [{"b": 1, "studentid": 10}, {"b": 1, "studentid": 9}]
         ordered = sorted(tied, key=aggregate.order_key)
-        self.assertEqual([r["studentid"] for r in ordered], [10, 9])
+        self.assertEqual([r["studentid"] for r in ordered], [9, 10])
+
+    def test_numeric_strings_also_sort_numerically(self):
+        tied = [{"b": 1, "studentid": "100"}, {"b": 1, "studentid": "99"}]
+        ordered = sorted(tied, key=aggregate.order_key)
+        self.assertEqual([r["studentid"] for r in ordered], ["99", "100"])
+
+    def test_float_shaped_ids_sort_numerically_too(self):
+        # A JSON-decoded studentid can arrive as 10.0. int("10.0") raises, so
+        # without the float() hop these fall into the string branch and sort
+        # lexically — 10.0 before 9.0, the tiebreak bug one form further out.
+        tied = [{"b": 1, "studentid": 10.0}, {"b": 1, "studentid": 9.0}]
+        ordered = sorted(tied, key=aggregate.order_key)
+        self.assertEqual([r["studentid"] for r in ordered], [9.0, 10.0])
+        # and a float-shaped id ties with its integer form, not against it
+        self.assertEqual(
+            aggregate.order_key({"b": 1, "studentid": "10.0"}),
+            aggregate.order_key({"b": 1, "studentid": 10}),
+        )
+
+    def test_alphanumeric_ids_still_sort(self):
+        tied = [{"b": 1, "studentid": "b7"}, {"b": 1, "studentid": "a3"}]
+        ordered = sorted(tied, key=aggregate.order_key)
+        self.assertEqual([r["studentid"] for r in ordered], ["a3", "b7"])
+
+    def test_null_baseline_raises_instead_of_TypeError(self):
+        with self.assertRaises(ValueError):
+            aggregate.order_key({"b": None, "studentid": "a"})
+
+
+class NormsAreScopedByGrade(unittest.TestCase):
+    """The same measure has different cut points per grade.
+
+    Fall ORF-WRC is 188 cuts topping at raw 187 for grade 3, and 206 topping at
+    205 for grade 5. A lookup that ignores grade returns whichever grade's cut
+    happened to be largest at or below the score — silently wrong, never
+    raising. Asserting only that a percentile is non-null would not catch it,
+    so these pin actual values from the shipped CSV.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.norms = aggregate.load_norms(aggregate.NORMS)
+
+    def test_the_same_score_scores_differently_by_grade(self):
+        g3 = self.norms["ORF-WRC"]["3"]["Fall"]
+        g5 = self.norms["ORF-WRC"]["5"]["Fall"]
+        score = 100.0
+        self.assertNotEqual(
+            aggregate.percentile_for(g3, score),
+            aggregate.percentile_for(g5, score),
+            "grade 3 and grade 5 must not share a cut table",
+        )
+
+    def test_grade_tables_have_their_own_ceilings(self):
+        self.assertEqual(max(c for c, _ in self.norms["ORF-WRC"]["3"]["Fall"]), 187.0)
+        self.assertEqual(max(c for c, _ in self.norms["ORF-WRC"]["5"]["Fall"]), 205.0)
+
+    def test_grade_is_normalized_from_the_csvs_float_form(self):
+        self.assertEqual(aggregate.normalize_grade("3.0"), "3")
+        self.assertEqual(aggregate.normalize_grade(3), "3")
+
+    def test_grade_K_is_kindergarten_not_a_literal_K(self):
+        # The norms file stores kindergarten as grade 0 and SKILL.md labels the
+        # tabs K-5, so --grade K is what an agent passes. Returning a literal
+        # "K" keys nothing in the table — every K report would fail.
+        # norms_values.py has the same mapping; the two must not diverge.
+        self.assertEqual(aggregate.normalize_grade("K"), "0")
+        self.assertEqual(aggregate.normalize_grade("k"), "0")
+        self.assertEqual(
+            aggregate.normalize_grade("K"), aggregate.normalize_grade("0")
+        )
 
 
 class PercentileLookup(unittest.TestCase):
@@ -252,11 +326,159 @@ class EndToEnd(unittest.TestCase):
         # Exercises the shipped CSV, not a fixture: ORF-WRC grade 3 exists in
         # the UO norms, so a real baseline/spring pair must yield a PR delta.
         rows = rows_of([("a", 20.0, 60.0), ("b", 30.0, 90.0)])
-        out = self.run_script(rows, "--measure-as", "ORF-WRC=ORF-WRC")
+        out = self.run_script(rows, "--grade", "3", "--measure-as", "ORF-WRC=ORF-WRC")
         district_all = next(
             r for r in out if r["scope"] == "district" and r["qt"] == "All"
         )
         self.assertIsNotNone(district_all["pr_growth"])
+
+    def test_the_same_scores_score_differently_at_a_different_grade(self):
+        # End-to-end proof that --grade is actually threaded through: identical
+        # input, different --grade, different percentile growth. Before this
+        # fix --grade was parsed and never used, so both runs agreed.
+        rows = rows_of([("a", 20.0, 60.0), ("b", 30.0, 90.0)])
+        args = ("--measure-as", "ORF-WRC=ORF-WRC")
+        g3 = self.run_script(rows, "--grade", "3", *args)
+        g5 = self.run_script(rows, "--grade", "5", *args)
+        pr3 = next(r for r in g3 if r["scope"] == "district" and r["qt"] == "All")
+        pr5 = next(r for r in g5 if r["scope"] == "district" and r["qt"] == "All")
+        self.assertNotEqual(pr3["pr_growth"], pr5["pr_growth"])
+
+    def test_missing_grade_is_refused_rather_than_guessed(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(rows_of([("a", 20.0, 60.0)]), fh)
+            path = fh.name
+        try:
+            proc = subprocess.run(
+                [sys.executable, SCRIPT, "--rows", path],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("--grade is required", proc.stderr)
+        finally:
+            os.unlink(path)
+
+    def test_a_grade_with_no_norms_fails_loudly(self):
+        # A silent null percentile for every student would read as missing
+        # data rather than a wrong invocation.
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(rows_of([("a", 20.0, 60.0)]), fh)
+            path = fh.name
+        try:
+            proc = subprocess.run(
+                [sys.executable, SCRIPT, "--rows", path, "--grade", "42",
+                 "--measure-as", "ORF-WRC=ORF-WRC"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("no norms at grade '42'", proc.stderr)
+            self.assertIn("ORF-WRC", proc.stderr)
+        finally:
+            os.unlink(path)
+
+    def run_expecting_failure(self, rows, *extra):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(rows, fh)
+            path = fh.name
+        try:
+            proc = subprocess.run(
+                [sys.executable, SCRIPT, "--rows", path, *extra],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(proc.returncode, 0, proc.stdout)
+            return proc.stderr
+        finally:
+            os.unlink(path)
+
+    def test_a_measure_with_no_norms_fails_loudly(self):
+        # The same silent-null failure as an unmatched grade, one level up: a
+        # measure the norms file has never heard of scored every student null.
+        err = self.run_expecting_failure(
+            rows_of([("a", 20.0, 60.0)], meas="I-READY-READING"), "--grade", "3"
+        )
+        self.assertIn("I-READY-READING", err)
+        self.assertIn("no norms at grade '3' for any requested measure", err)
+        # The message must show what the file does have, so the operator can
+        # see the name it expected rather than guessing.
+        self.assertIn("ORF-WRC", err)
+
+    def test_a_mistyped_measure_alias_fails_loudly(self):
+        # A typo in --measure-as is the likeliest way to reach the above.
+        err = self.run_expecting_failure(
+            rows_of([("a", 20.0, 60.0)]),
+            "--grade", "3",
+            "--measure-as", "ORF-WRC=ORF_WRC",
+        )
+        self.assertIn("ORF_WRC", err)
+        self.assertIn("no norms at grade '3' for any requested measure", err)
+        self.assertIn("--no-norms", err)
+
+    def test_grade_K_scores_against_kindergarten_norms(self):
+        # End-to-end counterpart: --grade K must behave exactly like --grade 0,
+        # not die in the no-norms guard. LNF is a K measure in the shipped file.
+        rows = rows_of([("a", 10.0, 40.0), ("b", 20.0, 55.0)], meas="LNF")
+        args = ("--measure-as", "LNF=LNF")
+        k = self.run_script(rows, "--grade", "K", *args)
+        zero = self.run_script(rows, "--grade", "0", *args)
+        self.assertEqual(k, zero)
+        district_all = next(
+            r for r in k if r["scope"] == "district" and r["qt"] == "All"
+        )
+        self.assertIsNotNone(district_all["pr_growth"])
+
+    def test_one_unnormed_measure_does_not_abort_the_normed_ones(self):
+        # LNF has no grade-3 norms, ORF-WRC does. SKILL.md: a measure-window
+        # missing from the file emits raw change only "and say so" — so the
+        # run must survive, warn on stderr, and still score ORF-WRC.
+        rows = rows_of([("a", 20.0, 60.0)]) + rows_of([("b", 30.0, 50.0)], meas="LNF")
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(rows, fh)
+            path = fh.name
+        try:
+            proc = subprocess.run(
+                [sys.executable, SCRIPT, "--rows", path, "--grade", "3"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("no norms for measure 'LNF' at grade '3'", proc.stderr)
+            self.assertIn("raw change only", proc.stderr)
+            out = json.loads(proc.stdout)
+        finally:
+            os.unlink(path)
+        by_meas = {
+            r["meas"]: r
+            for r in out
+            if r["scope"] == "district" and r["qt"] == "All"
+        }
+        self.assertIsNotNone(by_meas["ORF-WRC"]["start_pr"])
+        self.assertIsNone(by_meas["LNF"]["start_pr"])
+        self.assertIsNotNone(by_meas["LNF"]["start_raw"])
+
+    def test_a_null_baseline_is_diagnosable_not_a_traceback(self):
+        # order_key still raises (its own invariant, unit-tested above), but
+        # the operator is an agent reading stderr — a traceback out of
+        # sorted() is not actionable, so main() catches it up front.
+        rows = rows_of([("a", 20.0, 60.0)]) + [
+            {"meas": "ORF-WRC", "studentid": "b", "b": None, "e": 40.0,
+             "in_sch": True, "sectionid": "S1"}
+        ]
+        err = self.run_expecting_failure(rows, "--grade", "3")
+        self.assertIn("null baseline", err)
+        self.assertIn("extraction query must not return null b", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_an_unnormed_measure_still_runs_under_no_norms(self):
+        # --no-norms remains the documented escape hatch for i-Ready/SBA, so
+        # the new guard must not fire there.
+        out = self.run_script(
+            rows_of([("a", 1, 2), ("b", 5, 9)], meas="I-READY-READING"), "--no-norms"
+        )
+        self.assertTrue(out)
+        self.assertTrue(all(r["pr_growth"] is None for r in out))
 
 
 if __name__ == "__main__":
