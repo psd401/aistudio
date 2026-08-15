@@ -102,7 +102,10 @@ def order_key(row):
         )
     sid = row["studentid"]
     try:
-        return (row["b"], 0, int(str(sid).strip()), "")
+        # via float() so a JSON-decoded 10.0 still sorts as 10: int("10.0")
+        # raises, which would drop an integer id into the string branch below
+        # and sort it lexically — the exact tiebreak bug this function fixes.
+        return (row["b"], 0, int(float(str(sid).strip())), "")
     except (TypeError, ValueError):
         return (row["b"], 1, 0, str(sid))
 

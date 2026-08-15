@@ -94,6 +94,19 @@ class OrderingIsDeterministic(unittest.TestCase):
         ordered = sorted(tied, key=aggregate.order_key)
         self.assertEqual([r["studentid"] for r in ordered], ["99", "100"])
 
+    def test_float_shaped_ids_sort_numerically_too(self):
+        # A JSON-decoded studentid can arrive as 10.0. int("10.0") raises, so
+        # without the float() hop these fall into the string branch and sort
+        # lexically — 10.0 before 9.0, the tiebreak bug one form further out.
+        tied = [{"b": 1, "studentid": 10.0}, {"b": 1, "studentid": 9.0}]
+        ordered = sorted(tied, key=aggregate.order_key)
+        self.assertEqual([r["studentid"] for r in ordered], [9.0, 10.0])
+        # and a float-shaped id ties with its integer form, not against it
+        self.assertEqual(
+            aggregate.order_key({"b": 1, "studentid": "10.0"}),
+            aggregate.order_key({"b": 1, "studentid": 10}),
+        )
+
     def test_alphanumeric_ids_still_sort(self):
         tied = [{"b": 1, "studentid": "b7"}, {"b": 1, "studentid": "a3"}]
         ordered = sorted(tied, key=aggregate.order_key)
