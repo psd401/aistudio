@@ -354,6 +354,49 @@ class EndToEnd(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def run_expecting_failure(self, rows, *extra):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(rows, fh)
+            path = fh.name
+        try:
+            proc = subprocess.run(
+                [sys.executable, SCRIPT, "--rows", path, *extra],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(proc.returncode, 0, proc.stdout)
+            return proc.stderr
+        finally:
+            os.unlink(path)
+
+    def test_a_measure_with_no_norms_fails_loudly(self):
+        # The same silent-null failure as an unmatched grade, one level up: a
+        # measure the norms file has never heard of scored every student null.
+        err = self.run_expecting_failure(
+            rows_of([("a", 20.0, 60.0)], meas="I-READY-READING"), "--grade", "3"
+        )
+        self.assertIn("no norms for measure 'I-READY-READING'", err)
+        self.assertIn("available measures:", err)
+
+    def test_a_mistyped_measure_alias_fails_loudly(self):
+        # A typo in --measure-as is the likeliest way to reach the above.
+        err = self.run_expecting_failure(
+            rows_of([("a", 20.0, 60.0)]),
+            "--grade", "3",
+            "--measure-as", "ORF-WRC=ORF_WRC",
+        )
+        self.assertIn("no norms for measure 'ORF_WRC'", err)
+        self.assertIn("--no-norms", err)
+
+    def test_an_unnormed_measure_still_runs_under_no_norms(self):
+        # --no-norms remains the documented escape hatch for i-Ready/SBA, so
+        # the new guard must not fire there.
+        out = self.run_script(
+            rows_of([("a", 1, 2), ("b", 5, 9)], meas="I-READY-READING"), "--no-norms"
+        )
+        self.assertTrue(out)
+        self.assertTrue(all(r["pr_growth"] is None for r in out))
+
 
 if __name__ == "__main__":
     unittest.main()

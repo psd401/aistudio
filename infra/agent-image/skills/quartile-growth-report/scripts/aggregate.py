@@ -108,7 +108,12 @@ def order_key(row):
 
 
 def normalize_grade(value):
-    """'3', '3.0', 3 -> '3'. The CSV stores grade as a float-ish string."""
+    """'3', '3.0', 3 -> '3'.
+
+    The shipped `dibels8_norms_2021-22.csv` stores grade as a plain integer
+    (0-5); the float-tolerant parse is defensive, for a norms file or a
+    `--grade` argument that arrives in the '3.0' form instead.
+    """
     text = str(value).strip()
     try:
         return str(int(float(text)))
@@ -309,9 +314,17 @@ def main() -> int:
     if not args.no_norms:
         measures = {alias.get(r["meas"], r["meas"]) for r in rows}
         for measure in sorted(measures):
-            if measure in norms and grade not in norms[measure]:
-                # Loud, not silent: an unmatched grade would otherwise yield a
-                # null percentile for every student and look like missing data.
+            # Loud, not silent, at both levels: an unmatched measure or grade
+            # would otherwise yield a null percentile for every student and
+            # look like missing data rather than a wrong invocation.
+            if measure not in norms:
+                parser.error(
+                    f"no norms for measure {measure!r}; "
+                    f"available measures: {sorted(norms)}. "
+                    "Map it with --measure-as WAREHOUSE=NORMS, or pass "
+                    "--no-norms to skip percentiles entirely."
+                )
+            if grade not in norms[measure]:
                 parser.error(
                     f"no norms for measure {measure!r} at grade {grade!r}; "
                     f"available grades: {sorted(norms[measure])}"
