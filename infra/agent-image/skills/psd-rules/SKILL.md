@@ -266,9 +266,28 @@ a differently-broken file, so the loop can repeat for many turns.
 2. If you genuinely need a script, `write` it to a real `.py`/`.js` file, then
    run that file. Never pass a multi-line program as a `-c` argument.
 3. After writing a script file and **before running it**, `head -5` the file.
-   If you see a literal `\n`, the write did not land as intended — rewrite it
-   as a file rather than adding another layer of escaping.
+   If you see a literal `\n`, the write did not land as intended. **Repair it —
+   do not rewrite it:**
+
+   ```bash
+   /opt/agentcore-venv/bin/python3 \
+     /opt/psd-skills/psd-rules/scripts/repair_literal_newlines.py <file>
+   ```
+
+   It prints `repaired` and the file is then runnable; `clean` means the
+   escapes are not your problem; `ambiguous` (exit 2) means the file has real
+   line structure and its `\n` are string literals in working code, so it was
+   left untouched.
+
+   **Rewriting is the trap.** This step used to say "rewrite it as a file" —
+   but it WAS a file, and `write` is what produced the literal `\n`. Rewriting
+   runs the tool that just failed, which is why this loop has consumed whole
+   turns repeatedly instead of ending. Repair once, then run.
 4. Never hand-author a heredoc (`<<'EOF'`) to build a file. Use `write`.
+5. **A shipped script always beats a written one.** If a skill ships a script
+   that does the step, call it — writing your own is Rule 9's "replicating the
+   skill" in a different costume, and it re-enters the failure above for no
+   reason. Only write a file when no shipped script covers the step.
 
 **Self-check:** does my command contain `python3 -c`, `node -e`, or `<<EOF`? If
 yes, replace it with a skill call or a written-out file before running it.

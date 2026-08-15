@@ -53,9 +53,16 @@ $P $S/aggregate.py --rows gradeK.csv --grade K --subgroup "low_income=Low Income
 
 This is not a style preference. Every file the model authors is a chance for
 the write tool to embed a literal `\n`, which produces a SyntaxError and a
-retry loop — it has killed this report three times, twice with every rollup
-already computed. If a step seems to need a script that does not exist, say so
-and stop; do not write one.
+retry loop — it has killed this report four times, twice with every rollup
+already computed.
+
+**If a step genuinely needs a script these do not cover**, psd-rules Rule 9a
+governs: write a real file (never a `-c` heredoc), `head -5` it, and if the
+newlines arrived literal run
+`scripts/repair_literal_newlines.py` on it rather than rewriting it. Rule 9a
+and this section agree — prefer a shipped script, and when you must write one,
+repair rather than retry. Do not read "author no files" as a reason to reach
+for `python3 -c` instead; that is the failure Rule 9a exists to prevent.
 
 **Never put a window function or the norms lookup in SQL.** Window functions do
 not complete against `dibels_scores` on this MCP server at any size — a bare
