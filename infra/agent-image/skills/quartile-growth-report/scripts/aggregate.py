@@ -40,6 +40,7 @@ columns the SQL used to emit, plus an 'All' row per measure and scope.
 
 import argparse
 import csv
+import io
 import json
 import os
 import sys
@@ -302,12 +303,27 @@ def coerce_row(row):
 
 
 def read_rows(handle):
+    """Accept the export CSV as-is, or JSON, without being told which.
+
+    psd-data exports CSV. Requiring JSON here forced a hand-written CSV->JSON
+    converter on every run, and that glue is where runs kept dying: the write
+    tool emits literal `\\n` sequences into helper scripts, producing a
+    SyntaxError and a retry loop that has now burned parts of three sessions
+    (agent_failures 6804, and again 2026-08-15 mid-report).
+
+    The fix is to remove the need for the script rather than to warn about it
+    again. Detection is by content, not by extension, because the export
+    filename is not always .csv.
+    """
     text = handle.read().strip()
     if not text:
         return []
-    if text.lstrip().startswith("["):
-        return json.loads(text)
-    return [json.loads(line) for line in text.splitlines() if line.strip()]
+    if text.lstrip().startswith(("[", "{")):
+        if text.lstrip().startswith("["):
+            return json.loads(text)
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
+    # CSV: a header line naming the extraction columns.
+    return list(csv.DictReader(io.StringIO(text)))
 
 
 def main() -> int:

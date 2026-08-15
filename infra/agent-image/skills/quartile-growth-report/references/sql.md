@@ -90,12 +90,18 @@ Skipping them cost roughly ten round trips of trial and error per run on
 
 ### Step 2 — aggregate
 
-Feed those rows to `aggregate.py`, which applies the norms, assigns the three
-quartile scopes, and emits the district/school/class rollups:
+**Feed the exported CSV straight in. Do not write a converter.** `aggregate.py`
+reads the export as-is — CSV, a JSON array, or JSON lines, detected by content
+rather than extension. Writing a CSV→JSON glue script is where runs keep dying:
+the write tool emits literal `\n` into helper scripts, producing a SyntaxError
+and a retry loop that has burned parts of three sessions.
+
+`aggregate.py` applies the norms, assigns the three quartile scopes, and emits
+the district/school/class rollups:
 
 ```bash
 /opt/agentcore-venv/bin/python3 /opt/psd-skills/quartile-growth-report/scripts/aggregate.py \
-  --rows grade3.json --grade 3 --baseline Fall --spring Spring \
+  --rows grade3.csv --grade 3 --baseline Fall --spring Spring \
   --measure-as "<warehouse name>=ORF-WRC"
 ```
 

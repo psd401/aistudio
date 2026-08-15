@@ -549,3 +549,64 @@ class TextCastColumnsAreParsedBack(unittest.TestCase):
             self.assertEqual(all_row["growth"], 15.0)
         finally:
             os.unlink(path)
+
+
+class CsvInputNeedsNoGlueScript(unittest.TestCase):
+    """psd-data exports CSV; requiring JSON forced a hand-written converter.
+
+    That glue is where runs kept dying — the write tool emits literal \\n into
+    helper scripts, producing a SyntaxError and a retry loop (agent_failures
+    6804, and again mid-report 2026-08-15). Reading the export directly removes
+    the script rather than warning about it again.
+    """
+
+    def run_on(self, text, *extra, suffix=".csv"):
+        with tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False) as fh:
+            fh.write(text)
+            path = fh.name
+        try:
+            proc = subprocess.run(
+                [sys.executable, SCRIPT, "--rows", path, *extra],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            return json.loads(proc.stdout)
+        finally:
+            os.unlink(path)
+
+    CSV = (
+        "meas,studentid,b,e,sectionid,in_sch\n"
+        "ORF-WRC,9,10,20,S1,true\n"
+        "ORF-WRC,100,30,50,S1,t\n"
+    )
+
+    def test_csv_export_is_read_directly(self):
+        out = self.run_on(self.CSV, "--no-norms")
+        cell = next(r for r in out if r["scope"] == "district" and r["qt"] == "All")
+        self.assertEqual(cell["growth"], 15.0)
+        self.assertEqual(cell["n"], 2)
+
+    def test_csv_text_columns_are_coerced_like_json(self):
+        # Everything arrives as text from CSV, so the numeric/boolean coercion
+        # has to apply on this path too — otherwise b sorts lexically.
+        out = self.run_on(self.CSV, "--no-norms")
+        self.assertIn("school", {r["scope"] for r in out})
+
+    def test_detection_is_by_content_not_extension(self):
+        # The export filename is not always .csv.
+        out = self.run_on(self.CSV, "--no-norms", suffix=".txt")
+        self.assertTrue(out)
+
+    def test_json_array_still_works(self):
+        rows = rows_of([("a", 1, 2), ("b", 5, 9)])
+        out = self.run_on(json.dumps(rows), "--no-norms", suffix=".json")
+        self.assertTrue(out)
+
+    def test_jsonl_still_works(self):
+        rows = rows_of([("a", 1, 2), ("b", 5, 9)])
+        text = "\n".join(json.dumps(r) for r in rows)
+        out = self.run_on(text, "--no-norms", suffix=".jsonl")
+        self.assertTrue(out)
+
+    def test_empty_csv_header_only(self):
+        self.assertEqual(self.run_on("meas,studentid,b,e\n", "--no-norms"), [])
