@@ -149,6 +149,15 @@ const ALLOWED_WRITES = new Set([
   "sheets spreadsheets create",
   "sheets spreadsheets values append",
   "sheets spreadsheets values update",
+  // The BULK form of values.update — one call writes many ranges. Building a
+  // workbook is inherently multi-range (a tab per grade), so without this the
+  // only route is one values.update per range: dozens of round trips for one
+  // report, on the slowest step of the slowest skill. A quartile report stalled
+  // here with an empty spreadsheet and every tab still to fill
+  // (dev 2026-08-15). It writes the same cells values.update already writes, to
+  // the same spreadsheet, under the same scope rules — the bulk spelling was
+  // simply missed when the singular one was added.
+  "sheets spreadsheets values batchupdate",
   "slides presentations batchupdate",
   "slides presentations create",
   "tasks tasks insert",
@@ -213,6 +222,11 @@ const AGENT_ONLY_WRITES = new Set([
   // boundary, and the helper is the spelling the model actually reaches for.
   "sheets +append",
   "sheets spreadsheets values update",
+  // Same reasoning as the singular form directly above: authored content, so
+  // it stays on the agent slot. Splitting the two spellings across the
+  // impersonation boundary is how `sheets +append` and its canonical form
+  // disagreed once already.
+  "sheets spreadsheets values batchupdate",
   "slides presentations batchupdate",
   "slides presentations create",
   "tasks tasks patch",

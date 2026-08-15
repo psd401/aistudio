@@ -424,3 +424,78 @@ class ForeignRunsCannotAnswerThisTurn(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def asks_question(payload):
+    """A `question.requested` event, as the gateway actually sends it."""
+    return {"type": "event", "event": "question.requested", "payload": payload}
+
+
+REAL_PAYLOAD = {
+    "agentId": "main",
+    "id": "q1",
+    "runId": TURN_RUN_ID,
+    "sessionKey": "agent:main:replay",
+    "status": "pending",
+    "questions": [
+        {
+            "id": "continue_report",
+            "header": "Quartile report",
+            "question": "Your last run got interrupted while I was building the "
+            "Evergreen quartile growth Sheet. Want me to finish and post the link now?",
+            "options": [
+                {"label": "Yes, finish and share it now (Recommended)"},
+                {"label": "Hold off for now"},
+            ],
+        }
+    ],
+}
+
+
+class StructuredQuestionsReachTheUser(unittest.TestCase):
+    """`questions` (PLURAL) is the shape the gateway sends.
+
+    The extractor probed singular question/text/prompt/message/content and
+    missed it, so every structured ask was replaced by "I need a bit more
+    information to continue — could you clarify what you'd like me to do?".
+    The user could not answer a question they never saw, the agent asked
+    again, and the loop cost a whole report (dev 2026-08-15, payload_keys
+    ['agentId','createdAtMs','expiresAtMs','id','questions','runId',
+    'sessionKey','status']).
+    """
+
+    def test_the_real_question_text_reaches_the_user(self):
+        text = replay([asks_question(REAL_PAYLOAD)])
+        self.assertIn("Want me to finish and post the link now?", text)
+        self.assertNotIn("I need a bit more information", text)
+
+    def test_answer_options_are_included(self):
+        # Without the options the user is guessing at what a valid reply is.
+        text = replay([asks_question(REAL_PAYLOAD)])
+        self.assertIn("Yes, finish and share it now", text)
+        self.assertIn("Hold off for now", text)
+
+    def test_work_streamed_before_the_question_is_kept(self):
+        text = replay([says("Rollups are done."), asks_question(REAL_PAYLOAD)])
+        self.assertIn("Rollups are done.", text)
+        self.assertIn("Want me to finish", text)
+
+    def test_multiple_questions_all_render(self):
+        payload = {"questions": [{"question": "First?"}, {"question": "Second?"}]}
+        text = replay([asks_question(payload)])
+        self.assertIn("First?", text)
+        self.assertIn("Second?", text)
+
+    def test_plain_string_questions_render(self):
+        text = replay([asks_question({"questions": ["Just a string?"]})])
+        self.assertIn("Just a string?", text)
+
+    def test_legacy_singular_shape_still_works(self):
+        text = replay([asks_question({"question": "Legacy shape?"})])
+        self.assertIn("Legacy shape?", text)
+
+    def test_genuinely_empty_payload_still_falls_back(self):
+        # The fallback must remain for a shape we truly cannot read — but it
+        # is now the last resort, not the common path.
+        text = replay([asks_question({"questions": []})])
+        self.assertIn("I need a bit more information", text)

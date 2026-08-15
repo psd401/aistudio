@@ -2027,19 +2027,33 @@ class OpenClawAdapter(HarnessAdapter):
                         q_data = q_payload.get("data")
                         if not isinstance(q_data, dict):
                             q_data = {}
-                        question_text = None
-                        # The gateway's exact field name is not pinned by any
-                        # contract we own, so probe the plausible carriers and
-                        # fall back to a generic prompt rather than returning
-                        # an empty turn.
-                        for source in (q_payload, q_data):
-                            for key in ("question", "text", "prompt", "message", "content"):
-                                candidate = self._extract_text(source.get(key))
-                                if candidate:
-                                    question_text = candidate
+                        # `questions` (PLURAL) is the shape the gateway actually
+                        # sends, confirmed from a live payload on 2026-08-15:
+                        #
+                        #   {"questions": [{"id": ..., "header": ...,
+                        #     "question": "...?",
+                        #     "options": [{"label": "Yes, finish it now"}, ...]}]}
+                        #
+                        # The probe below looked for singular `question`/`text`/
+                        # `prompt`/`message`/`content` and missed it entirely, so
+                        # every structured question the agent asked was replaced
+                        # by the generic fallback further down. The user saw "I
+                        # need a bit more information to continue" in place of a
+                        # real question that already had answer options, could
+                        # not answer it, and the agent asked again — a loop that
+                        # cost an entire report.
+                        question_text = self._render_questions(q_payload) or self._render_questions(q_data)
+                        # Legacy/alternate carriers stay as a fallback so a
+                        # differently-shaped event is still readable.
+                        if not question_text:
+                            for source in (q_payload, q_data):
+                                for key in ("question", "text", "prompt", "message", "content"):
+                                    candidate = self._extract_text(source.get(key))
+                                    if candidate:
+                                        question_text = candidate
+                                        break
+                                if question_text:
                                     break
-                            if question_text:
-                                break
                         if not question_text:
                             question_text = (
                                 "I need a bit more information to continue — "
@@ -2641,6 +2655,54 @@ class OpenClawAdapter(HarnessAdapter):
         if boundary_pending:
             return increment
         return accum + increment
+
+    @staticmethod
+    def _render_questions(payload: object) -> str:
+        """Render a `question.requested` payload's `questions` list for Chat.
+
+        The gateway sends the agent's structured ask as
+        `{"questions": [{"question": "...?", "header": ..., "options":
+        [{"label": "..."}]}]}`. Options are included because they are the
+        answer set the agent is waiting on — dropping them leaves the user
+        guessing at what a valid reply looks like, which is most of why the
+        question loop was unanswerable.
+        """
+        if not isinstance(payload, dict):
+            return ""
+        questions = payload.get("questions")
+        if not isinstance(questions, list):
+            return ""
+
+        blocks = []
+        for entry in questions:
+            if isinstance(entry, str):
+                blocks.append(entry.strip())
+                continue
+            if not isinstance(entry, dict):
+                continue
+            text = ""
+            for key in ("question", "text", "prompt"):
+                value = entry.get(key)
+                if isinstance(value, str) and value.strip():
+                    text = value.strip()
+                    break
+            if not text:
+                continue
+            labels = []
+            options = entry.get("options")
+            if isinstance(options, list):
+                for option in options:
+                    if isinstance(option, str) and option.strip():
+                        labels.append(option.strip())
+                    elif isinstance(option, dict):
+                        label = option.get("label") or option.get("value")
+                        if isinstance(label, str) and label.strip():
+                            labels.append(label.strip())
+            if labels:
+                text += "\n" + "\n".join(f"- {label}" for label in labels)
+            blocks.append(text)
+
+        return "\n\n".join(block for block in blocks if block)
 
     @staticmethod
     def _is_tool_activity_stream(stream: object, data: object) -> bool:
