@@ -122,6 +122,44 @@ describe("hero image — authorize before spending", () => {
   });
 });
 
+describe("hero image — alt text", () => {
+  it("uses the generation prompt as alt text when none was written", async () => {
+    // The prompt already describes the image. Demanding alt text separately
+    // meant the Generate button sat disabled after you had typed a perfectly
+    // good description into the field right next to it, doing nothing when
+    // pressed and explaining nothing.
+    await setCollectionHeroImageAction(COLLECTION, {
+      prompt: "a quiet school library at golden hour",
+    });
+
+    expect(updateMock).toHaveBeenCalledWith(USER, COLLECTION, {
+      heroImageKey: "atrium/collections/x/hero/gen.png",
+      heroImageAlt: "a quiet school library at golden hour",
+    });
+  });
+
+  it("prefers explicit alt text over the prompt when both are given", async () => {
+    await setCollectionHeroImageAction(COLLECTION, {
+      prompt: "a quiet school library at golden hour",
+      alt: "Students reading by a window",
+    });
+
+    expect(updateMock).toHaveBeenCalledWith(USER, COLLECTION, {
+      heroImageKey: "atrium/collections/x/hero/gen.png",
+      heroImageAlt: "Students reading by a window",
+    });
+  });
+
+  it("still requires alt text for an upload, which has no prompt to borrow", async () => {
+    const result = await setCollectionHeroImageAction(COLLECTION, {
+      dataUrl: "data:image/png;base64,aGk=",
+    });
+
+    expect(result.isSuccess).toBe(false);
+    expect(storeMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("hero image — superseded object cleanup", () => {
   it("deletes the previous image only after the row points at the new one", async () => {
     assertMaySetSectionCopyMock.mockResolvedValue({
