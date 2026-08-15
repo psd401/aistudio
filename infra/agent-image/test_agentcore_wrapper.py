@@ -1790,3 +1790,40 @@ class TestSanitizeHeaderField(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkspaceRestoreFailureIsRecorded(unittest.TestCase):
+    """The workspace-restore failure path must reach agent_failures.
+
+    Nothing in agentcore_wrapper.py called record_failure at all, so
+    WorkspaceMigrationFailed had a LIFETIME count of zero in the table while a
+    real user hit it in prod on 2026-08-15. They saw a clear message; the
+    Failures tab saw nothing; the only reason anyone found out was the user
+    reporting it by hand. Telemetry for a user-visible failure is not optional.
+    """
+
+    def test_the_wrapper_imports_record_failure(self):
+        self.assertTrue(callable(agentcore_wrapper.record_failure))
+
+    def test_the_restore_failure_path_calls_it(self):
+        # Pinned by source rather than by driving a full invocation: the call
+        # site sits inside an async generator behind a real workspace mount,
+        # and the thing worth guarding is simply that this path reports.
+        import inspect
+
+        source = inspect.getsource(agentcore_wrapper)
+        marker = 'error_class="WorkspaceMigrationFailed"'
+        self.assertIn(marker, source)
+        # …and that it is a record_failure call, not only the yielded metadata.
+        before = source[: source.index(marker)]
+        self.assertIn("record_failure(", before[-800:])
+
+    def test_it_records_the_user_and_session(self):
+        # A failure with no user attached cannot be chased down later.
+        import inspect
+
+        source = inspect.getsource(agentcore_wrapper)
+        window = source[source.index("record_failure(") :][:900]
+        self.assertIn("user_id=user_email", window)
+        self.assertIn("session_id=session_id", window)
+        self.assertIn("workspace_prefix", window)
