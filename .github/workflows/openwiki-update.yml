@@ -7,6 +7,9 @@ on:
     - cron: "0 8 * * 1"
 jobs:
   openwiki:
+    permissions:
+      contents: write # rolling docs PR + self-merge; caller must grant (org default is read-only)
+      pull-requests: write
     uses: PSD401/.github/.github/workflows/reusable-openwiki.yml@main
     with:
       base_branch: dev
