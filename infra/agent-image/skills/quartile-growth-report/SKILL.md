@@ -33,7 +33,31 @@ as a "summary" row or a note next to a number.
 4. Build ONE spreadsheet with `psd-workspace`: a tab per grade + Definitions.
 5. Share it and paste the bare URL on its own line.
 
-Say up front that it takes a few minutes — this is many queries per grade.
+### How to run it
+
+**Work the grades one at a time, in this turn, start to finish.** Run a grade's
+measure blocks, keep the rows, move to the next grade. Do not parallelize, do
+not sample a subset, do not stop at a "representative" grade and offer the rest
+later. Every grade in the roster, then one spreadsheet.
+
+**A long turn is the intended shape of this report, not a problem to route
+around.** Many queries per grade means this can run well past a normal turn.
+That is fine and expected: when it outruns the turn deadline the platform
+promotes it to a background job that resumes on ECS — up to two hours — and
+posts the finished Sheet link into this thread. Running long is how the user
+gets the report.
+
+Two things break that, and both have happened:
+
+- **Do not announce a follow-up.** Never "I'll send it when it's done" — nothing
+  can send it, and the turn ends on a promise you cannot keep. If you say
+  anything before starting, say "this runs long, stand by".
+- **Do not spawn a subagent.** `sessions_*` is disabled here (psd-rules Rule 15)
+  and children die without reporting. On 2026-08-14 this exact report was
+  spawned into a subagent twice, promised twice, and produced nothing.
+
+If a query fails, report which grade and measure failed and keep going — a
+report missing one measure beats no report.
 
 ## Windows
 
