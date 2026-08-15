@@ -33,7 +33,17 @@ as a "summary" row or a note next to a number.
 4. Build ONE spreadsheet with `psd-workspace`: a tab per grade + Definitions.
 5. Share it and paste the bare URL on its own line.
 
-Say up front that it takes a few minutes — this is many queries per grade.
+This is many queries per grade and it runs long. **Run them in your own turn and
+let it take as long as it takes.** If the work outruns the turn deadline the
+platform promotes it to a background job and delivers the finished report into
+this thread — see psd-rules Rule 4.
+
+Do not announce a follow-up. Say "this runs long, stand by" if you say anything
+— never "I'll send it when it's done". If you do fan the grades out to
+subagents, psd-rules **Rule 15** applies without exception: hold your turn,
+`sessions_yield`, and deliver the Sheet link yourself. On 2026-08-14 this report
+was spawned into a subagent twice, promised twice, and produced nothing — both
+children died and the turn ended on the promise.
 
 ## Windows
 

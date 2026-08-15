@@ -223,7 +223,26 @@ def _shape_of(value: object) -> str:
 
 # The only fields echoed by value. Each is a closed-vocabulary discriminator
 # the adapter already branches on, so none of them carries user content.
-_STRUCTURAL_MARK_FIELDS = ("stream", "phase", "kind", "status", "state")
+_STRUCTURAL_MARK_FIELDS = (
+    "stream",
+    "phase",
+    "kind",
+    "status",
+    "state",
+    # `event:task` frames are shaped {"action": str, "task": dict} and carry no
+    # runId, so neither the run fence nor the boundary logic can see them. They
+    # are also the difference between a turn that fuses assistant segments and
+    # one that does not: a Docs turn with 43 of them fused twice
+    # ("ownership.Now", "Kris.Done") while a calendar turn with none stayed
+    # clean, both with ordinary stream=item tool events present.
+    #
+    # `action` is the discriminator that decides whether a frame marks work
+    # starting/finishing (a real segment boundary) or is a progress update
+    # inside one segment. Treating all 43 as boundaries would drop the earlier
+    # part of any segment they interleave with — trading fusion for truncated
+    # answers — so capture the vocabulary before changing behaviour.
+    "action",
+)
 
 
 def _structural_marks(payload: object) -> str:
@@ -231,7 +250,10 @@ def _structural_marks(payload: object) -> str:
     if not isinstance(payload, dict):
         return "{}"
     marks: dict = {}
-    for source in (payload, payload.get("data")):
+    # `task` is where an event:task frame keeps its detail, exactly as `data`
+    # is for an event:agent frame; both are scanned so neither shape hides its
+    # discriminators.
+    for source in (payload, payload.get("data"), payload.get("task")):
         if not isinstance(source, dict):
             continue
         for field in _STRUCTURAL_MARK_FIELDS:
@@ -1591,7 +1613,10 @@ class OpenClawAdapter(HarnessAdapter):
                             key,
                             _shape_of(msg.get("payload")),
                             _shape_of(
+                                # event:agent keeps detail under `data`;
+                                # event:task keeps it under `task`.
                                 (msg.get("payload") or {}).get("data")
+                                or (msg.get("payload") or {}).get("task")
                                 if isinstance(msg.get("payload"), dict)
                                 else None
                             ),
