@@ -221,6 +221,22 @@ def _shape_of(value: object) -> str:
     return type(value).__name__ if value is not None else "none"
 
 
+def _detail_of(payload: object) -> object:
+    """The detail sub-object of a frame, from whichever key holds it.
+
+    `event:agent` frames keep their detail under `data`; `event:task` frames
+    keep it under `task`. Presence decides, not truthiness: an empty `data`
+    dict is still a `data`-shaped frame, and falling through to `task` there
+    would mislabel the very shapes this diagnostic exists to discover.
+    """
+    if not isinstance(payload, dict):
+        return None
+    detail = payload.get("data")
+    if detail is not None:
+        return detail
+    return payload.get("task")
+
+
 # The only fields echoed by value. Each is a closed-vocabulary discriminator
 # the adapter already branches on, so none of them carries user content.
 _STRUCTURAL_MARK_FIELDS = (
@@ -1612,14 +1628,9 @@ class OpenClawAdapter(HarnessAdapter):
                             "openclaw_kind_shape kind=%s payload=%s data=%s marks=%s",
                             key,
                             _shape_of(msg.get("payload")),
-                            _shape_of(
-                                # event:agent keeps detail under `data`;
-                                # event:task keeps it under `task`.
-                                (msg.get("payload") or {}).get("data")
-                                or (msg.get("payload") or {}).get("task")
-                                if isinstance(msg.get("payload"), dict)
-                                else None
-                            ),
+                            # event:agent keeps detail under `data`;
+                            # event:task keeps it under `task`.
+                            _shape_of(_detail_of(msg.get("payload"))),
                             _structural_marks(msg.get("payload")),
                         )
 

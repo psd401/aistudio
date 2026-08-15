@@ -2610,5 +2610,104 @@ class TestFailedPartialNamesSideEffects(unittest.TestCase):
         self.assertIn("may have already run", text)
 
 
+class TestDetailOf(unittest.TestCase):
+    """`event:agent` keeps detail under `data`, `event:task` under `task`.
+
+    Presence must pick the source, not truthiness — an empty-but-present
+    `data` is still a `data`-shaped frame. Selecting on truthiness would let
+    `{}` fall through to `task` and mislabel the shape in the one log line
+    that exists to discover these schemas.
+    """
+
+    def test_empty_data_wins_over_task(self):
+        self.assertEqual(
+            harness_adapter._detail_of({"data": {}, "task": {"action": "started"}}), {}
+        )
+
+    def test_populated_data_wins_over_task(self):
+        self.assertEqual(
+            harness_adapter._detail_of(
+                {"data": {"stream": "item"}, "task": {"action": "started"}}
+            ),
+            {"stream": "item"},
+        )
+
+    def test_falls_back_to_task_only_when_data_absent(self):
+        self.assertEqual(
+            harness_adapter._detail_of({"task": {"action": "completed"}}),
+            {"action": "completed"},
+        )
+
+    def test_explicit_null_data_falls_back_to_task(self):
+        self.assertEqual(
+            harness_adapter._detail_of({"data": None, "task": {"action": "x"}}),
+            {"action": "x"},
+        )
+
+    def test_neither_key_is_none(self):
+        self.assertIsNone(harness_adapter._detail_of({"runId": "r1"}))
+
+    def test_non_dict_payload_is_none(self):
+        self.assertIsNone(harness_adapter._detail_of(None))
+        self.assertIsNone(harness_adapter._detail_of("payload"))
+
+    def test_shape_of_empty_data_is_not_the_task_shape(self):
+        """The regression this guards: `{}` logged as the task's shape."""
+        payload = {"data": {}, "task": {"action": "started", "title": "secret.xlsx"}}
+        self.assertEqual(
+            harness_adapter._shape_of(harness_adapter._detail_of(payload)), "{}"
+        )
+
+
+class TestStructuralMarks(unittest.TestCase):
+    """Only closed-vocabulary discriminators, from either detail key."""
+
+    def test_action_is_captured_from_a_task_frame(self):
+        marks = json.loads(
+            harness_adapter._structural_marks({"task": {"action": "started"}})
+        )
+        self.assertEqual(marks["action"], "started")
+
+    def test_task_source_is_scanned_alongside_data(self):
+        marks = json.loads(
+            harness_adapter._structural_marks(
+                {"data": {"stream": "item"}, "task": {"action": "completed"}}
+            )
+        )
+        self.assertEqual(marks["stream"], "item")
+        self.assertEqual(marks["action"], "completed")
+
+    def test_top_level_wins_over_nested(self):
+        marks = json.loads(
+            harness_adapter._structural_marks(
+                {"status": "ok", "task": {"status": "error"}}
+            )
+        )
+        self.assertEqual(marks["status"], "ok")
+
+    def test_long_values_are_not_discriminators(self):
+        marks = json.loads(
+            harness_adapter._structural_marks({"task": {"action": "x" * 33}})
+        )
+        self.assertNotIn("action", marks)
+
+    def test_non_string_values_are_skipped(self):
+        marks = json.loads(
+            harness_adapter._structural_marks({"task": {"action": {"nested": 1}}})
+        )
+        self.assertNotIn("action", marks)
+
+    def test_user_content_fields_are_never_echoed(self):
+        marks = json.loads(
+            harness_adapter._structural_marks(
+                {"task": {"action": "started", "title": "/secret/salaries.xlsx"}}
+            )
+        )
+        self.assertEqual(marks, {"action": "started"})
+
+    def test_non_dict_payload_returns_empty_marks(self):
+        self.assertEqual(harness_adapter._structural_marks(None), "{}")
+
+
 if __name__ == "__main__":
     unittest.main()
