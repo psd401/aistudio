@@ -445,6 +445,19 @@ class EndToEnd(unittest.TestCase):
         self.assertIsNone(by_meas["LNF"]["start_pr"])
         self.assertIsNotNone(by_meas["LNF"]["start_raw"])
 
+    def test_a_null_baseline_is_diagnosable_not_a_traceback(self):
+        # order_key still raises (its own invariant, unit-tested above), but
+        # the operator is an agent reading stderr — a traceback out of
+        # sorted() is not actionable, so main() catches it up front.
+        rows = rows_of([("a", 20.0, 60.0)]) + [
+            {"meas": "ORF-WRC", "studentid": "b", "b": None, "e": 40.0,
+             "in_sch": True, "sectionid": "S1"}
+        ]
+        err = self.run_expecting_failure(rows, "--grade", "3")
+        self.assertIn("null baseline", err)
+        self.assertIn("extraction query must not return null b", err)
+        self.assertNotIn("Traceback", err)
+
     def test_an_unnormed_measure_still_runs_under_no_norms(self):
         # --no-norms remains the documented escape hatch for i-Ready/SBA, so
         # the new guard must not fire there.

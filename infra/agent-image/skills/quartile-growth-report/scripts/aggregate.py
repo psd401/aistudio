@@ -119,6 +119,13 @@ def normalize_grade(value):
     The shipped `dibels8_norms_2021-22.csv` stores grade as a plain integer
     (0-5); the float-tolerant parse is defensive, for a norms file or a
     `--grade` argument that arrives in the '3.0' form instead.
+
+    Lockstep means the K mapping and the numeric normalization, not the
+    invalid-input path, which intentionally differs: `norms_values.py` raises
+    on `--grade banana` because nothing downstream would catch it, while here
+    the unparsed text falls through to the no-norms-at-that-grade guard in
+    `main()` and fails there with the measures listed. Do not "fix" this
+    divergence into a raise without moving that guard.
     """
     text = str(value).strip()
     if text.upper() == "K":
@@ -306,6 +313,20 @@ def main() -> int:
         print(json.dumps([]))
         return 0
 
+    # `order_key` raises on a null baseline too — that is the sort's own
+    # invariant and stays — but it fires from inside `sorted()` deep in
+    # `rollup`, so the operator (an agent reading stderr, per SKILL.md) gets a
+    # traceback rather than something diagnosable. Same loud failure, checked
+    # up front in this file's parser.error style.
+    no_baseline = [r for r in rows if r.get("b") is None]
+    if no_baseline:
+        parser.error(
+            f"{len(no_baseline)} of {len(rows)} rows have a null baseline "
+            f"score (first: student {no_baseline[0].get('studentid')!r}); the "
+            "extraction query must not return null b — filter those rows out "
+            "in SQL, or use the Fall-only status view if there is no baseline."
+        )
+
     alias = {}
     for pair in args.measure_as:
         if "=" not in pair:
@@ -323,7 +344,7 @@ def main() -> int:
         measures = sorted({alias.get(r["meas"], r["meas"]) for r in rows})
         unnormed = [m for m in measures if grade not in norms.get(m, {})]
 
-        if unnormed == measures:
+        if len(unnormed) == len(measures):
             # Nothing in this run can be scored at all — a wrong --grade, a
             # mistyped --measure-as, or the wrong norms file. Loud, not a null
             # percentile for every student in the report, which reads as
