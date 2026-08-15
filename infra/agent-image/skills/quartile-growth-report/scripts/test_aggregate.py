@@ -483,3 +483,69 @@ class EndToEnd(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TextCastColumnsAreParsedBack(unittest.TestCase):
+    """references/sql.md casts every numeric and boolean column to ::text.
+
+    psd-data's export mode fails on decimal, integer and boolean columns, so
+    the extraction query is required to cast them. That means b/e/in_sch arrive
+    as strings — and a string baseline sorts lexically ('9' after '100'),
+    silently reordering the quartile boundary instead of raising.
+    """
+
+    def test_numeric_strings_become_numbers(self):
+        row = aggregate.coerce_row({"b": "12.5", "e": "20"})
+        self.assertEqual(row["b"], 12.5)
+        self.assertEqual(row["e"], 20.0)
+
+    def test_string_baselines_would_otherwise_sort_lexically(self):
+        rows = [{"b": "100", "studentid": 1}, {"b": "9", "studentid": 2}]
+        for row in rows:
+            aggregate.coerce_row(row)
+        ordered = sorted(rows, key=aggregate.order_key)
+        self.assertEqual([r["b"] for r in ordered], [9.0, 100.0])
+
+    def test_boolean_text_forms(self):
+        for text in ("true", "t", "TRUE", "yes", "1"):
+            self.assertIs(aggregate.coerce_row({"b": 1, "in_sch": text})["in_sch"], True)
+        for text in ("false", "f", "FALSE", "no", "0", ""):
+            self.assertIs(
+                aggregate.coerce_row({"b": 1, "in_sch": text})["in_sch"], False
+            )
+
+    def test_empty_text_becomes_null_not_zero(self):
+        # An empty spring score must stay missing; 0.0 would be a real score
+        # and would drag every growth average toward a fabricated decline.
+        self.assertIsNone(aggregate.coerce_row({"b": "1", "e": ""})["e"])
+        self.assertIsNone(aggregate.coerce_row({"b": "1", "sectionid": ""})["sectionid"])
+
+    def test_already_typed_values_pass_through(self):
+        row = aggregate.coerce_row({"b": 1.5, "e": None, "in_sch": True})
+        self.assertEqual(row["b"], 1.5)
+        self.assertIsNone(row["e"])
+        self.assertIs(row["in_sch"], True)
+
+    def test_end_to_end_with_every_column_as_text(self):
+        rows = [
+            {"meas": "ORF-WRC", "studentid": "9", "b": "10", "e": "20",
+             "in_sch": "true", "sectionid": "S1"},
+            {"meas": "ORF-WRC", "studentid": "100", "b": "30", "e": "50",
+             "in_sch": "t", "sectionid": "S1"},
+        ]
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(rows, fh)
+            path = fh.name
+        try:
+            proc = subprocess.run(
+                [sys.executable, SCRIPT, "--rows", path, "--no-norms"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            out = json.loads(proc.stdout)
+            school = [r for r in out if r["scope"] == "school"]
+            self.assertTrue(school, "in_sch text must resolve to a real boolean")
+            all_row = next(r for r in school if r["qt"] == "All")
+            self.assertEqual(all_row["growth"], 15.0)
+        finally:
+            os.unlink(path)

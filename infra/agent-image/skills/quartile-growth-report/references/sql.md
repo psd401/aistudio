@@ -72,6 +72,22 @@ No windows, no laterals, no grouping sets. It stays district-wide because the
 district quartile needs the full cohort — but it is now a plain indexed read
 returning a few thousand rows per grade.
 
+**Cast every non-text column to `::text`.** psd-data's export mode fails on
+decimal, integer and boolean columns; the rows come back malformed rather than
+erroring cleanly. Casting fixes it, and the cast must be *inside* each
+aggregate, not only at the final select — `AVG(score)::text` is wrong, it needs
+the cast applied to the aggregate's result where the export sees it. The
+boolean needs it too:
+
+```sql
+SELECT m.meas, m.studentid::text, m.b::text, m.e::text,
+       hr.sectionid::text, (sch.studentid IS NOT NULL)::text AS in_sch
+```
+
+`aggregate.py` parses the numbers back, so the casts cost nothing downstream.
+Skipping them cost roughly ten round trips of trial and error per run on
+2026-08-15 — the agent rediscovered this the hard way, one column at a time.
+
 ### Step 2 — aggregate
 
 Feed those rows to `aggregate.py`, which applies the norms, assigns the three

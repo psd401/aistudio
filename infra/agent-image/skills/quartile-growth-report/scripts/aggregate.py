@@ -270,6 +270,37 @@ def rollup(rows, scope, partition_key, value_digits=1):
     return out
 
 
+TRUE_TEXT = {"true", "t", "yes", "y", "1"}
+
+
+def coerce_row(row):
+    """Parse the ::text columns the extraction query is required to emit.
+
+    psd-data's export mode fails on decimal, integer and boolean columns, so
+    references/sql.md casts every one of them to text. That means `b`, `e` and
+    `in_sch` arrive here as strings, and a string baseline would sort
+    lexically — '9' after '100' — silently reordering the quartile boundary
+    rather than raising. Numbers are parsed back before anything compares them.
+
+    Values that are already numeric or boolean pass through untouched, so rows
+    from a non-export path behave the same.
+    """
+    for key in ("b", "e"):
+        value = row.get(key)
+        if isinstance(value, str):
+            text = value.strip()
+            row[key] = None if text == "" else float(text)
+
+    flag = row.get("in_sch")
+    if isinstance(flag, str):
+        row["in_sch"] = flag.strip().lower() in TRUE_TEXT
+
+    section = row.get("sectionid")
+    if isinstance(section, str) and section.strip() == "":
+        row["sectionid"] = None
+    return row
+
+
 def read_rows(handle):
     text = handle.read().strip()
     if not text:
@@ -378,6 +409,7 @@ def main() -> int:
         row.setdefault("e", None)
         row.setdefault("sectionid", None)
         row.setdefault("in_sch", False)
+        coerce_row(row)
         if args.no_norms:
             row["prb"] = row["pre"] = None
             continue
