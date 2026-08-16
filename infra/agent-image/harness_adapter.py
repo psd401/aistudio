@@ -345,6 +345,120 @@ MAX_RESOLVE_TERMINAL_FRAMES = 16
 RESOLVE_ACK_WAIT_S = 10
 
 
+# --- question answering -------------------------------------------------
+#
+# Ported from the pinned OpenClaw bundle (2026.7.2-beta.5,
+# app/dist/openclaw-tools-Be4wAI1K.js: buildAgentHarnessUserInputAnswers,
+# normalizeAgentHarnessUserInputAnswer, parseKeyedAnswers). Deliberately a
+# port and not an interpretation — this decides what the model reads back as
+# the user's answer, and inventing a third dialect here means the agent's own
+# ask_user tool is answered in a language it does not speak.
+#
+# Wire shape, from the gateway protocol schemas in the same image
+# (packages/gateway-protocol/src/schema/questions.ts):
+#
+#   question.requested payload = QuestionRecordSchema
+#     { id, questions: [QuestionSchema], runId?, sessionKey?, status,
+#       createdAtMs, expiresAtMs, ... }
+#   QuestionSchema = { questionId, header, question, options: [{label,
+#                      description?}], multiSelect?, isOther?, isSecret? }
+#   question.resolve = { id, answers: { answers: { <questionId>: [str] } } }
+#
+# NOTE the per-question key is `questionId`, NOT `id`, and QuestionSchema is a
+# closedObject so `id` is not merely absent, it is rejected.
+
+# Upstream's regex, character class included: `-` is a valid separator, so it
+# is also excluded from the key. A hyphenated header ("Multi-Select: yes")
+# therefore parses as key "multi" and falls through to positional matching.
+# That is upstream's behaviour and this is a port — diverging here would mean
+# our keyed form accepts headers the gateway's own plain-text path does not.
+_KEYED_ANSWER_RE = re.compile(r"^\s*([^:=-]+?)\s*[:=-]\s*(.+?)\s*$")
+_DIGITS_RE = re.compile(r"\d+")
+
+
+def _parse_keyed_answers(text: str) -> dict:
+    """`header: value` lines -> {key: value}, keys lowercased."""
+    answers: dict = {}
+    for line in re.split(r"\r?\n", text or ""):
+        match = _KEYED_ANSWER_RE.match(line)
+        if not match:
+            continue
+        key = (match.group(1) or "").strip().lower()
+        value = (match.group(2) or "").strip()
+        if key and value:
+            answers[key] = value
+    return answers
+
+
+def _normalize_question_answer(answer: str, question: dict):
+    """One reply -> the option label it names, or the raw text, or None.
+
+    None means "no answer" and the tool renders it to the model literally as
+    `(no answer)`. That is only reachable for a fixed-choice question, and
+    ask_user hardcodes isOther=true on every question it builds, so in
+    practice free text always survives. Kept anyway: the gateway accepts
+    questions from sources other than ask_user.
+    """
+    trimmed = (answer or "").strip()
+    options = [o for o in (question.get("options") or []) if isinstance(o, dict)]
+
+    if _DIGITS_RE.fullmatch(trimmed):
+        index = int(trimmed) - 1
+        if 0 <= index < len(options):
+            # Matches upstream: an in-range index wins outright and does not
+            # fall through to the label comparison below.
+            label = options[index].get("label")
+            return label if isinstance(label, str) and label else None
+
+    for option in options:
+        label = option.get("label")
+        if isinstance(label, str) and label.lower() == trimmed.lower():
+            return label
+
+    if options and not question.get("isOther"):
+        return None
+    return trimmed or None
+
+
+def _build_question_answers(questions: list, text: str) -> dict:
+    """{questionId: [answer]} for the whole ask, upstream's mapping.
+
+    One question: the reply IS the answer. Several: match by question id,
+    header, question text or 1-based position (`header: value` lines), then
+    fall back to the Nth line. Broadcasting the same text to every question —
+    what this adapter did before — is not one of the options; it answers
+    "which grades?" and "which year?" identically.
+    """
+    answers: dict = {}
+    if len(questions) == 1:
+        question = questions[0]
+        if not question.get("questionId"):
+            return answers
+        normalized = _normalize_question_answer(text, question)
+        answers[question["questionId"]] = [normalized] if normalized else []
+        return answers
+
+    keyed = _parse_keyed_answers(text)
+    lines = [line.strip() for line in re.split(r"\r?\n", text or "")]
+    for index, question in enumerate(questions):
+        # `index` still advances for a slot we cannot answer — that is the
+        # whole point of holding it.
+        if not question.get("questionId"):
+            continue
+        answer = (
+            keyed.get(str(question.get("questionId") or "").lower())
+            or keyed.get(str(question.get("header") or "").lower())
+            or keyed.get(str(question.get("question") or "").lower())
+            or keyed.get(str(index + 1))
+            or (lines[index] if index < len(lines) else "")
+        )
+        normalized = (
+            _normalize_question_answer(answer, question) if answer else None
+        )
+        answers[question["questionId"]] = [normalized] if normalized else []
+    return answers
+
+
 def _frames_from_run(frames, run_id) -> bool:
     """True when any buffered frame belongs to `run_id`.
 
@@ -1306,7 +1420,7 @@ class OpenClawAdapter(HarnessAdapter):
 
 
     def _remember_pending_question(
-        self, session_id, pending_id, question_ids, run_id
+        self, session_id, pending_id, questions, run_id
     ):
         """Hold one pending question per session, oldest evicted first.
 
@@ -1332,7 +1446,10 @@ class OpenClawAdapter(HarnessAdapter):
         self._pending_questions.pop(session_id, None)
         self._pending_questions[session_id] = {
             "id": pending_id,
-            "question_ids": question_ids,
+            # Whole questions, not just ids: answering correctly needs each
+            # question's options and isOther flag — see
+            # _normalize_question_answer.
+            "questions": questions,
             "run_id": run_id,
         }
         while len(self._pending_questions) > MAX_PENDING_QUESTIONS:
@@ -1396,19 +1513,19 @@ class OpenClawAdapter(HarnessAdapter):
             logger.info("question.resolve disabled by OPENCLAW_QUESTION_RESOLVE=0")
             return False, [], None
 
-        question_ids = pending.get("question_ids") or []
-        if not question_ids:
+        questions = pending.get("questions") or []
+        if not questions:
             return False, [], None
-        # One free-text reply, N sub-questions: every id gets the same text.
-        #
-        # OUR CHOICE, not a verified mirror of upstream's plain-text path —
-        # the pinned bundle was not available to check when this was written,
-        # and it is recorded that way rather than implied to be authoritative.
-        # The reasoning: answering only the first id leaves the rest unanswered,
-        # and a partial resolve the gateway refuses puts us straight back on
-        # the abort-and-cancel path this whole mechanism removes. A redundant
-        # answer the agent can parse beats a refused one.
-        answers = {qid: [message] for qid in question_ids}
+        # Upstream's own mapping, ported — see _build_question_answers.
+        answers = _build_question_answers(questions, message)
+        if not answers:
+            # Every question was unusable. Sending an empty answers map would
+            # mark the question answered with nothing in it; fall back and let
+            # the user's message run as its own turn.
+            logger.warning(
+                "pending question had no answerable questions; falling back"
+            )
+            return False, [], None
 
         # Popped before every failure branch below, including a transport
         # error, and never restored. That is deliberate rather than an
@@ -2455,12 +2572,51 @@ class OpenClawAdapter(HarnessAdapter):
                         # killed by the next turn's pre-send abort.
                         pending_id = q_payload.get("id")
                         if isinstance(pending_id, str) and pending_id:
-                            question_ids = [
-                                entry.get("id")
-                                for entry in (q_payload.get("questions") or [])
-                                if isinstance(entry, dict)
-                                and isinstance(entry.get("id"), str)
-                            ]
+                            # `questionId`, per QuestionSchema. This read
+                            # `id`, which that closedObject does not even
+                            # permit — so every question yielded None, the
+                            # id list came back empty, and the resolve was
+                            # skipped for a fallback to the abort that started
+                            # all of this. The fix shipped as a no-op.
+                            #
+                            # `id` is still accepted as a fallback so a future
+                            # rename degrades instead of silently reverting to
+                            # that same no-op.
+                            #
+                            # POSITION IS PRESERVED, including for entries we
+                            # cannot use. The multi-question fallback answers
+                            # question N with line N, so dropping a malformed
+                            # entry here would silently shift every later
+                            # question's answer by one. An unusable entry
+                            # keeps its slot with questionId None and is
+                            # skipped when the answers are built.
+                            pending_questions = []
+                            for entry in (q_payload.get("questions") or []):
+                                if not isinstance(entry, dict):
+                                    pending_questions.append({"questionId": None})
+                                    continue
+                                qid = entry.get("questionId") or entry.get("id")
+                                pending_questions.append({
+                                    "questionId": (
+                                        qid if isinstance(qid, str) and qid
+                                        else None
+                                    ),
+                                    "header": entry.get("header"),
+                                    "question": entry.get("question"),
+                                    "options": entry.get("options") or [],
+                                    "isOther": entry.get("isOther"),
+                                })
+                            unusable = sum(
+                                1 for q in pending_questions
+                                if not q.get("questionId")
+                            )
+                            if unusable:
+                                logger.warning(
+                                    "question event carried %d question(s) with "
+                                    "no usable id; their slots are held so the "
+                                    "others still line up",
+                                    unusable,
+                                )
                             # The run that asked is the run that resumes. Prefer
                             # what the event says; fall back to this turn's own
                             # run, which is the same run by construction — the
@@ -2469,7 +2625,8 @@ class OpenClawAdapter(HarnessAdapter):
                             if not (isinstance(asked_by, str) and asked_by):
                                 asked_by = turn_run_id
                             self._remember_pending_question(
-                                session_id, pending_id, question_ids, asked_by
+                                session_id, pending_id, pending_questions,
+                                asked_by
                             )
                         got_final = True
                         break
