@@ -787,6 +787,22 @@ class AnsweringAQuestionDoesNotAbortIt(unittest.TestCase):
         )
         self.assertIn("Sheet shared", second)
 
+    def test_a_multi_question_ask_answers_every_sub_question(self):
+        # One reply, several sub-questions. Answering only the first leaves the
+        # rest unanswered, and a partial resolve the gateway refuses lands us
+        # back on the abort path. Redundant beats refused.
+        multi = dict(ASK)
+        multi["payload"] = dict(ASK["payload"], questions=[
+            {"id": "grades", "question": "Which grades?"},
+            {"id": "year", "question": "Which year?"},
+        ])
+        _, _, g2 = two_turn_replay([multi], "K-5, 2025-26", [says("Done.")])
+        self.assertEqual(
+            g2.question_answers,
+            {"answers": {"grades": ["K-5, 2025-26"], "year": ["K-5, 2025-26"]}},
+        )
+        self.assertEqual(g2.question_status, "answered")
+
     def test_a_failed_resolve_still_counts_toward_reported_latency(self):
         # A resolve that times out and falls back has already burned the ack
         # wait and the abort drain — time the user spent waiting. Restarting
@@ -937,4 +953,44 @@ class AnsweringAQuestionDoesNotAbortIt(unittest.TestCase):
         self.assertIn("Plain answer.", result.text)
         self.assertEqual(
             [m for m in g.sent if m.get("method") == "question.resolve"], []
+        )
+
+
+class FramesFromRunIsEvidenceNotAGuess(unittest.TestCase):
+    """Direct contract for the sole evidence source behind "lost ack = accepted".
+
+    Exercised through the replay tests too, but this is the check that decides
+    whether a user's answer gets executed a second time, so it is pinned on its
+    own rather than only inside a larger scenario.
+    """
+
+    def test_a_frame_from_that_run_counts(self):
+        self.assertTrue(
+            harness_adapter._frames_from_run(
+                [json.dumps(says("hi"))], TURN_RUN_ID)
+        )
+
+    def test_a_frame_from_another_run_does_not(self):
+        self.assertFalse(
+            harness_adapter._frames_from_run(
+                [json.dumps(foreign_says("hi"))], TURN_RUN_ID)
+        )
+
+    def test_no_frames_is_no_evidence(self):
+        self.assertFalse(harness_adapter._frames_from_run([], TURN_RUN_ID))
+
+    def test_malformed_frames_are_skipped_not_raised(self):
+        # A frame we cannot parse is not evidence, and must not take the turn
+        # down either — this runs on the path that decides whether to re-send.
+        frames = ["{not json", json.dumps(["a", "list"]), json.dumps({}),
+                  json.dumps({"payload": None}), json.dumps(says("hi"))]
+        self.assertTrue(harness_adapter._frames_from_run(frames, TURN_RUN_ID))
+        self.assertFalse(
+            harness_adapter._frames_from_run(frames[:-1], TURN_RUN_ID))
+
+    def test_a_null_run_id_never_matches_a_payload_without_one(self):
+        # Guards the caller's `if asking_run and ...`: two unknowns must not
+        # compare equal into a false "it resumed".
+        self.assertFalse(
+            harness_adapter._frames_from_run([json.dumps({"payload": {}})], None)
         )

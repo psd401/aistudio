@@ -351,7 +351,16 @@ def _frames_from_run(frames, run_id) -> bool:
     Used as proof that a run has resumed. This socket carries every run in the
     container, so "some frames arrived" proves nothing on its own — the run id
     is what makes it evidence rather than a guess.
+
+    An unknown run id is never evidence. Without this, a None run_id matches
+    any payload that also lacks one — two unknowns comparing equal into "it
+    resumed", which is the answer that skips the fallback and strands the
+    user's message. The only caller guards against it today; the guard is 100
+    lines away and this function decides whether a turn re-runs, so it defends
+    itself.
     """
+    if not run_id:
+        return False
     for raw in frames:
         try:
             payload = (json.loads(raw) or {}).get("payload") or {}
@@ -1334,8 +1343,10 @@ class OpenClawAdapter(HarnessAdapter):
             # or an abuse pattern, not routine churn. At info it would be lost
             # in normal log volume.
             logger.warning(
-                "evicted pending question for an idle session; %d sessions "
-                "were holding one", MAX_PENDING_QUESTIONS,
+                "evicted pending question for session %s; %d sessions are "
+                "holding one (cap %d)",
+                str(evicted)[:12], len(self._pending_questions),
+                MAX_PENDING_QUESTIONS,
             )
 
     def _resolve_pending_question(self, ws, websocket, message, session_id):
@@ -1388,6 +1399,15 @@ class OpenClawAdapter(HarnessAdapter):
         question_ids = pending.get("question_ids") or []
         if not question_ids:
             return False, [], None
+        # One free-text reply, N sub-questions: every id gets the same text.
+        #
+        # OUR CHOICE, not a verified mirror of upstream's plain-text path —
+        # the pinned bundle was not available to check when this was written,
+        # and it is recorded that way rather than implied to be authoritative.
+        # The reasoning: answering only the first id leaves the rest unanswered,
+        # and a partial resolve the gateway refuses puts us straight back on
+        # the abort-and-cancel path this whole mechanism removes. A redundant
+        # answer the agent can parse beats a refused one.
         answers = {qid: [message] for qid in question_ids}
 
         # Popped before every failure branch below, including a transport
