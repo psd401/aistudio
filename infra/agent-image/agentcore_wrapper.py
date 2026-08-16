@@ -1528,6 +1528,22 @@ def main():
                 "(session=%s)",
                 session_id,
             )
+            # Security-relevant and previously invisible: a rejected signed
+            # context is exactly the event that should be reviewable after the
+            # fact. user_email is deliberately NOT attached — the identity is
+            # what failed to verify, so recording it as fact would launder an
+            # unverified claim into telemetry.
+            record_failure(
+                source="harness",
+                severity="error",
+                error_class="InvocationContextInvalid",
+                error_message=(
+                    "signed invocation context missing or malformed; "
+                    "invocation rejected before any skill ran"
+                ),
+                session_id=session_id,
+                context={"phase": "verify_invocation_context"},
+            )
             yield {
                 "result": (
                     "I couldn't verify the identity for this request. "
@@ -1552,6 +1568,26 @@ def main():
                 "microVM (current=%s requested=%s)",
                 _current_workspace_prefix or "-",
                 workspace_prefix or "-",
+            )
+            # The cross-user boundary guard firing. Rare by design, and if it
+            # ever stops being rare that is a containment problem nobody would
+            # see from the Failures tab today. Both prefixes are recorded so a
+            # reviewer can tell which pair collided.
+            record_failure(
+                source="harness",
+                severity="error",
+                error_class="WorkspaceAuthorityChanged",
+                error_message=(
+                    "workspace prefix changed in a live runtime; invocation "
+                    "rejected to keep one microVM bound to one workspace"
+                ),
+                user_id=user_email,
+                session_id=session_id,
+                context={
+                    "phase": "bind_workspace_prefix",
+                    "bound_prefix": _current_workspace_prefix,
+                    "requested_prefix": workspace_prefix,
+                },
             )
             yield {
                 "result": (
@@ -1726,6 +1762,22 @@ def main():
                 _workspace_prefix_hydrated = True
         except Exception as exc:  # noqa: BLE001
             logger.error("OpenClaw gateway start FAILED: %s", exc)
+            # Distinct from the restore failure above: the workspace came back
+            # fine and the gateway did not start. Same telemetry gap, different
+            # cause, and telling them apart matters when triaging.
+            record_failure(
+                source="harness",
+                severity="error",
+                error_class="OpenClawStartupFailed",
+                error_message=f"OpenClaw gateway start failed: {str(exc)[:500]}",
+                user_id=user_email,
+                session_id=session_id,
+                context={
+                    "phase": "gateway_start",
+                    "workspace_prefix": workspace_prefix,
+                },
+                exc=exc,
+            )
             yield {
                 "result": (
                     "I restored this agent's workspace but couldn't start its "
