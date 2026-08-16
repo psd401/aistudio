@@ -1418,6 +1418,7 @@ class OpenClawAdapter(HarnessAdapter):
         # already destroyed — and would resolve a stale id on the NEXT turn.
         buffered: list = []
         overflowed = False
+        terminal_overflowed = False
         resolve_id = str(uuid.uuid4())
         try:
             ws.send(json.dumps({
@@ -1490,10 +1491,26 @@ class OpenClawAdapter(HarnessAdapter):
                 is_chat_frame = (
                     reply.get("type") == "event" and reply.get("event") == "chat"
                 )
-                if is_chat_frame and len(buffered) < (
+                if not is_chat_frame:
+                    continue
+                if len(buffered) < (
                     MAX_RESOLVE_BUFFERED_FRAMES + MAX_RESOLVE_TERMINAL_FRAMES
                 ):
                     buffered.append(raw)
+                elif not terminal_overflowed:
+                    # The narration cap is a truncated reply. THIS one can cost
+                    # the run's final event, and a turn that loses its final
+                    # sits until the outer deadline and answers "the agent
+                    # stalled". The narration cap already warns; without this
+                    # the worse failure was the silent one, diagnosable only by
+                    # noticing a stall with no cause in the log.
+                    terminal_overflowed = True
+                    logger.warning(
+                        "question.resolve terminal-frame allowance (%d) "
+                        "exhausted before the ack; a chat state transition may "
+                        "be lost and this turn may run to its deadline",
+                        MAX_RESOLVE_TERMINAL_FRAMES,
+                    )
 
             # No ack inside the window. That is NOT the same as "refused" —
             # the ack may simply be slow, and the caller's fallback aborts and

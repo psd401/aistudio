@@ -890,6 +890,44 @@ class AnsweringAQuestionDoesNotAbortIt(unittest.TestCase):
         self.assertNotIn("stalled", second)
         self.assertIn("chunk0", second)
 
+    def test_exhausting_the_terminal_allowance_says_so(self):
+        # The narration cap warns; this one did not. It is the worse of the
+        # two — losing a chat state transition can cost the run's final event,
+        # and the turn then sits to its outer deadline answering "the agent
+        # stalled" with nothing in the log pointing here.
+        #
+        # Driven directly rather than through a replay: a turn that really
+        # loses its final event runs for the full 550s deadline, which is the
+        # bug, not something to pay for on every test run.
+        chat_frame = json.dumps({"type": "event", "event": "chat",
+                                 "payload": {"state": "running"}})
+        frames = [json.dumps(says("narration"))] + [chat_frame] * 4
+
+        adapter = OpenClawAdapter()
+        adapter._remember_pending_question("s", "q-abc", ["only"], TURN_RUN_ID)
+
+        ws = mock.Mock()
+        ws.recv.side_effect = frames + [_FakeTimeout()]
+        websocket_module = mock.Mock()
+        websocket_module.WebSocketTimeoutException = _FakeTimeout
+
+        with mock.patch.object(harness_adapter, "MAX_RESOLVE_BUFFERED_FRAMES", 1), \
+             mock.patch.object(harness_adapter, "MAX_RESOLVE_TERMINAL_FRAMES", 1), \
+             mock.patch.object(harness_adapter.logger, "warning") as warned:
+            answered, buffered, _ = adapter._resolve_pending_question(
+                ws, websocket_module, "Keep going", "s")
+
+        messages = [call.args[0] for call in warned.call_args_list]
+        self.assertTrue(
+            any("terminal-frame allowance" in m for m in messages),
+            f"exhausting the terminal cap must be logged; got {messages}",
+        )
+        # Capped at narration(1) + terminal(1), not the four that arrived.
+        self.assertEqual(len(buffered), 2)
+        # No ack came, and the asking run WAS streaming, so this is the
+        # accept-on-evidence path rather than a re-send.
+        self.assertTrue(answered)
+
     def test_pending_questions_are_capped_and_evict_oldest_first(self):
         adapter = OpenClawAdapter()
         with mock.patch.object(harness_adapter, "MAX_PENDING_QUESTIONS", 3):
