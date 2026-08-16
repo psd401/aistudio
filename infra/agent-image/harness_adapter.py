@@ -2007,6 +2007,26 @@ class OpenClawAdapter(HarnessAdapter):
                 # final-event handler suppresses ("Here's how far I got: Now
                 # run the batchUpdate."). Covered by test_reply_replay.py.
                 assistant_boundary_pending: bool = False
+                # SEPARATE from the flag above, and the distinction matters.
+                #
+                # `assistant_boundary_pending` answers "does the next delta
+                # start a NEW message?" — set by any model activity, so
+                # segments never fuse.
+                #
+                # This one answers "is the accumulated text scratchpad?" — set
+                # ONLY by genuine tool work. Text followed by a tool call is
+                # something the model said on its way to doing something else;
+                # text followed by a reasoning or commentary item is still its
+                # answer.
+                #
+                # Review caught these being one flag: any `item` frame then
+                # suppressed a COMPLETE answer that happened to be followed by
+                # a non-tool progress item — the exact case
+                # _is_tool_activity_stream's carve-out exists for, reintroduced
+                # while fixing fusion. itemKind() in the pinned bundle emits
+                # `analysis` for reasoning and context compaction, so those
+                # frames are real, not hypothetical.
+                tool_activity_since_text: bool = False
                 # The run THIS turn started, learned from the chat.send res
                 # (`{"runId": ..., "status": "started"}`). Everything the reply
                 # is built from must belong to it.
@@ -2035,6 +2055,8 @@ class OpenClawAdapter(HarnessAdapter):
                 # socket carrying other runs. Seed it from the run that asked;
                 # that is the run resuming, and it is the only run whose output
                 # belongs in this reply.
+                # Why the run stopped, as the chat channel reported it.
+                final_stop_reason: Optional[str] = None
                 turn_run_id: Optional[str] = (
                     resumed_run_id if answered_pending else None
                 )
@@ -2269,9 +2291,11 @@ class OpenClawAdapter(HarnessAdapter):
                                     assistant_boundary_pending,
                                 )
                                 assistant_boundary_pending = False
+                                tool_activity_since_text = False
                             elif isinstance(cumulative, str) and cumulative:
                                 agent_assistant_accum = cumulative
                                 assistant_boundary_pending = False
+                                tool_activity_since_text = False
                         elif stream in ("item", "command_output"):
                             # Newer OpenClaw builds report tool activity as
                             # `item`/`command_output` streams. Tool activity
@@ -2286,6 +2310,7 @@ class OpenClawAdapter(HarnessAdapter):
                                 and (agent_assistant_accum or response_text)
                             ):
                                 assistant_boundary_pending = True
+                                tool_activity_since_text = True
                                 response_text = ""
                             # Native-tool mode (#1138 r12+) reports tool
                             # execution ONLY here — record it so telemetry's
@@ -2300,6 +2325,7 @@ class OpenClawAdapter(HarnessAdapter):
                             # Same boundary rule for protocol-v3 tool events.
                             if agent_assistant_accum or response_text:
                                 assistant_boundary_pending = True
+                                tool_activity_since_text = True
                                 response_text = ""
                             tool_id = (
                                 data.get("id")
@@ -2315,6 +2341,7 @@ class OpenClawAdapter(HarnessAdapter):
                         elif stream == "tool_result" and isinstance(data, dict):
                             if agent_assistant_accum or response_text:
                                 assistant_boundary_pending = True
+                                tool_activity_since_text = True
                                 response_text = ""
                             tool_id = (
                                 data.get("id")
@@ -2368,6 +2395,8 @@ class OpenClawAdapter(HarnessAdapter):
                         # message that is still being written.
                         if agent_assistant_accum or response_text:
                             assistant_boundary_pending = True
+                            tool_activity_since_text = True
+                            response_text = ""
 
                     elif mtype == "event" and mevent == "chat":
                         payload = msg.get("payload", {})
@@ -2396,6 +2425,16 @@ class OpenClawAdapter(HarnessAdapter):
                             continue
                         state = payload.get("state")
                         last_state = state
+                        # Kept for every state, not just aborts. The Artondale
+                        # turn ended at `final` while the model's last message
+                        # was still stopReason=toolUse — i.e. the run stopped
+                        # mid-loop and the report was never built — and there
+                        # was no way to tell that from the logs without pulling
+                        # the workspace transcript out of S3. One field here
+                        # answers it next time.
+                        final_stop_reason = (
+                            payload.get("stopReason") or final_stop_reason
+                        )
                         event_message = payload.get("message")
                         content = event_message.get("content") if isinstance(event_message, dict) else None
                         text = self._extract_text(content) or self._extract_text(event_message)
@@ -2417,7 +2456,7 @@ class OpenClawAdapter(HarnessAdapter):
                             if (
                                 not response_text
                                 and agent_assistant_accum
-                                and not assistant_boundary_pending
+                                and not tool_activity_since_text
                             ):
                                 response_text = agent_assistant_accum
                             got_final = True
@@ -2743,7 +2782,7 @@ class OpenClawAdapter(HarnessAdapter):
                             if (
                                 not response_text
                                 and agent_assistant_accum
-                                and not assistant_boundary_pending
+                                and not tool_activity_since_text
                             ):
                                 response_text = agent_assistant_accum
                             got_final = True
@@ -2827,7 +2866,7 @@ class OpenClawAdapter(HarnessAdapter):
             if (
                 not response_text
                 and agent_assistant_accum
-                and not assistant_boundary_pending
+                and not tool_activity_since_text
             ):
                 response_text = agent_assistant_accum
             error_message = (
@@ -2881,7 +2920,7 @@ class OpenClawAdapter(HarnessAdapter):
             if (
                 not response_text
                 and agent_assistant_accum
-                and not assistant_boundary_pending
+                and not tool_activity_since_text
             ):
                 response_text = agent_assistant_accum
             logger.error(
@@ -2955,12 +2994,13 @@ class OpenClawAdapter(HarnessAdapter):
             )
 
         logger.info(
-            "chat turn ok: resp_len=%d last_state=%s run_id=%s "
-            "foreign_run_events=%d event_counts=%s "
+            "chat turn ok: resp_len=%d last_state=%s stop_reason=%s "
+            "run_id=%s foreign_run_events=%d event_counts=%s "
             "model=%s tokens_in=%d tokens_out=%d cache_read=%d cache_write=%d "
             "latency_ms=%d tool_calls=%d transcript_model_calls=%d",
             len(response_text),
             last_state,
+            final_stop_reason or "none",
             turn_run_id or "unknown",
             foreign_run_events,
             json.dumps(event_counts),

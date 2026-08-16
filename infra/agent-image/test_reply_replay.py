@@ -129,6 +129,20 @@ def runs_task(kind="exec", status="running"):
                  "progressSummary": "p", "runtime": "r", "sourceId": "s"}}}
 
 
+
+def reasons(title="considering the roster"):
+    """A non-tool `item` frame.
+
+    itemKind() in the pinned bundle maps `reasoning` and `contextCompaction`
+    to kind="analysis", so item frames that are NOT tool work genuinely occur.
+    _is_tool_activity_stream carves them out on purpose: one arriving right
+    before the final chat event must not discard a finished answer.
+    """
+    return agent_event("item", {"itemId": "analysis:1", "phase": "start",
+                                "kind": "analysis", "title": title,
+                                "status": "running"})
+
+
 def beats():
     """A heartbeat on the agent stream. Must never split a live message."""
     event = agent_event("thinking", {"text": "", "delta": ""})
@@ -1280,6 +1294,25 @@ class SegmentsEndAtAnyModelActivity(unittest.TestCase):
     def test_deltas_of_one_message_still_concatenate(self):
         text = replay([says("The "), says("report "), says("is ready.")])
         self.assertEqual(text.strip(), "The report is ready.")
+
+    def test_a_non_tool_item_before_final_does_not_discard_the_answer(self):
+        # The carve-out _is_tool_activity_stream was written for. Fixing
+        # fusion by treating every item as tool activity would silently
+        # reintroduce it — review caught exactly that.
+        text = replay([says("The report is ready: https://example.test/s"),
+                       reasons()])
+        self.assertIn("The report is ready", text)
+
+    def test_a_non_tool_item_still_ends_the_segment(self):
+        # It is not tool work, but it IS activity: a message that resumes
+        # after it is a new message, not a continuation.
+        text = replay([says("scratchpad. "), reasons(), says("answer.")])
+        self.assertEqual(text.strip(), "answer.")
+
+    def test_a_real_tool_before_final_still_suppresses_narration(self):
+        # The other half. Text followed by actual tool work is scratchpad.
+        text = replay([says("Now let me run the query."), *uses_tool("exec")])
+        self.assertNotIn("run the query", text)
 
     def test_narration_followed_by_a_task_is_not_offered_as_the_answer(self):
         # The turn's other symptom: it ended right after a tool call, with
