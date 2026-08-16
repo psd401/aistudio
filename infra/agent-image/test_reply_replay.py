@@ -1309,9 +1309,13 @@ class SegmentsEndAtAnyModelActivity(unittest.TestCase):
                        says("two")])
         self.assertEqual(text.strip(), "one two")
 
-    def test_our_own_task_frame_still_ends_the_segment(self):
-        # The fence must not defeat the fix it is protecting.
-        text = replay([says("scratchpad. "), runs_task(), says("answer.")])
+    def test_the_fence_passes_a_same_run_task_frame(self):
+        # The fence must not defeat the fix it is protecting: an EXPLICIT
+        # this-turn run id still ends the segment. Stated explicitly rather
+        # than relying on the fixture default, which is what hid the foreign
+        # case in the first place.
+        text = replay([says("scratchpad. "),
+                       runs_task(run_id=TURN_RUN_ID), says("answer.")])
         self.assertEqual(text.strip(), "answer.")
 
     def test_a_non_tool_item_before_final_does_not_discard_the_answer(self):

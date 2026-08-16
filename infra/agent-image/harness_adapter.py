@@ -246,18 +246,24 @@ _STRUCTURAL_MARK_FIELDS = (
     "kind",
     "status",
     "state",
-    # `event:task` frames are shaped {"action": str, "task": dict} and carry no
-    # runId, so neither the run fence nor the boundary logic can see them. They
-    # are also the difference between a turn that fuses assistant segments and
-    # one that does not: a Docs turn with 43 of them fused twice
-    # ("ownership.Now", "Kris.Done") while a calendar turn with none stayed
-    # clean, both with ordinary stream=item tool events present.
+    # `event:task` frames are shaped {"action": str, "task": dict}. This note
+    # used to say they carry no runId and that neither the run fence nor the
+    # boundary logic could see them. BOTH claims are now false: the id is
+    # nested at payload.task.runId (which is why it read as absent), the task
+    # branch fences on it, and task frames end an assistant segment.
     #
-    # `action` is the discriminator that decides whether a frame marks work
-    # starting/finishing (a real segment boundary) or is a progress update
-    # inside one segment. Treating all 43 as boundaries would drop the earlier
-    # part of any segment they interleave with — trading fusion for truncated
-    # answers — so capture the vocabulary before changing behaviour.
+    # The correlation this note recorded held up. A Docs turn with 43 of them
+    # fused twice ("ownership.Now", "Kris.Done") while a calendar turn with
+    # none stayed clean; on 2026-08-16 a quartile turn fused four fragments
+    # into 515 chars with `thinking` and task frames between them.
+    #
+    # It also warned that treating all 43 as boundaries would trade fusion for
+    # truncated answers. That was the right worry and it is handled, but not by
+    # inspecting `action`: segment splitting and answer suppression are now two
+    # flags (assistant_boundary_pending, tool_activity_since_text), so a task
+    # frame can end a segment without condemning a finished answer as
+    # scratchpad. `action` stays sampled — it is still the vocabulary a future
+    # reader needs.
     "action",
 )
 
@@ -2310,7 +2316,8 @@ class OpenClawAdapter(HarnessAdapter):
                                 and (agent_assistant_accum or response_text)
                             ):
                                 assistant_boundary_pending = True
-                                tool_activity_since_text = True
+                                if not agent_payload.get("isHeartbeat"):
+                                    tool_activity_since_text = True
                                 response_text = ""
                             # Native-tool mode (#1138 r12+) reports tool
                             # execution ONLY here — record it so telemetry's
@@ -2325,7 +2332,8 @@ class OpenClawAdapter(HarnessAdapter):
                             # Same boundary rule for protocol-v3 tool events.
                             if agent_assistant_accum or response_text:
                                 assistant_boundary_pending = True
-                                tool_activity_since_text = True
+                                if not agent_payload.get("isHeartbeat"):
+                                    tool_activity_since_text = True
                                 response_text = ""
                             tool_id = (
                                 data.get("id")
@@ -2341,7 +2349,8 @@ class OpenClawAdapter(HarnessAdapter):
                         elif stream == "tool_result" and isinstance(data, dict):
                             if agent_assistant_accum or response_text:
                                 assistant_boundary_pending = True
-                                tool_activity_since_text = True
+                                if not agent_payload.get("isHeartbeat"):
+                                    tool_activity_since_text = True
                                 response_text = ""
                             tool_id = (
                                 data.get("id")
