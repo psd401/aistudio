@@ -186,6 +186,15 @@ _INVOCATION_CONTEXT_RE = re.compile(
     r"^v1\.[A-Za-z0-9_-]{40,3500}\.[A-Za-z0-9_-]{43}$"
 )
 _REQUEST_PROOF_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+# Serializes every turn in this container, and is LOAD-BEARING beyond this
+# file: `adapter` below is a module-level singleton shared by every user, and
+# harness_adapter's `_pending_questions` / `_gateway_token` are plain
+# unsynchronized attributes on it that rely on this lock for their safety.
+# Narrowing its scope, or moving to multiple workers, needs those to grow
+# their own synchronization first — the interleaving is only ever sequential
+# today, so no test would catch it. Cross-referenced in
+# harness_adapter._remember_pending_question so a grep for either name finds
+# both halves.
 _invocation_lock = asyncio.Lock()
 FINAL_WORKSPACE_FLUSH_SECONDS = 120
 # Interactive and cron callers run inside a 900-second Lambda. A stuck

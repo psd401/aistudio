@@ -1312,9 +1312,13 @@ class OpenClawAdapter(HarnessAdapter):
         compare against — see _process_once.
 
         Access is unsynchronized: agentcore_wrapper serializes the whole
-        entrypoint behind `_invocation_lock`, so no two turns are ever inside
-        _process_once at once. That invariant lives in another file; if the
-        lock is ever narrowed or removed, this dict needs its own.
+        entrypoint behind `_invocation_lock` (grep that name — the definition
+        carries the other half of this note), so no two turns are ever inside
+        _process_once at once. That invariant lives in another file and is
+        enforced by nothing but these two comments; if the lock is narrowed or
+        the container ever runs multiple workers, this dict needs its own
+        synchronization. No test would catch it — the interleaving tests
+        interleave sequentially, which is all a single-threaded replay can do.
         """
         self._pending_questions.pop(session_id, None)
         self._pending_questions[session_id] = {
