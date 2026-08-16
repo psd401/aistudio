@@ -88,6 +88,13 @@ SELECT m.meas, m.studentid::text, m.b::text, m.e::text,
 Skipping them cost roughly ten round trips of trial and error per run on
 2026-08-15 — the agent rediscovered this the hard way, one column at a time.
 
+### Step 1b — carry the teacher map
+
+The roster query already returns lead teacher per section. Keep it as a
+`{sectionid: "Last, First"}` map and pass it to `build_tab.py --teachers`.
+Without it the classroom columns are headed by raw section ids, which is what
+shipped on 2026-08-15 and had to be relabelled by hand afterwards.
+
 ### Step 2 — aggregate
 
 **Feed the exported CSV straight in. Do not write a converter.** `aggregate.py`

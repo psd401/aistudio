@@ -29,6 +29,15 @@ as a "summary" row or a note next to a number.
 
 1. Resolve the school. Confirm back which school and year you are running.
 2. Discover the roster: `GR0x` homeroom sections + lead teachers + counts.
+   **The roster defines the grade span — never state one you did not query.**
+   On 2026-08-15 the agent announced "Minter Creek is a K-2 school (it's PSD's
+   K-2 primary)", invented the justification, and scoped an entire report to
+   it. Minter Creek is K-5. The roster query answers this; asserting it from
+   apparent knowledge is a Rule 3 fabrication in a document a principal reads
+   as fact.
+   **Keep the section -> teacher map from this step** and pass it to
+   `build_tab.py --teachers`; the classroom columns are headed by teacher
+   name, not section id.
 3. Per grade, **extract → aggregate → build** (see `references/sql.md`):
    - run the extraction query — raw matched pairs, no `NTILE`, no norms join,
      no `GROUPING SETS`

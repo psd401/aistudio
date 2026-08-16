@@ -618,6 +618,10 @@ class OpenClawAdapter(HarnessAdapter):
         # --token` (launcher) and reused in the connect envelope (client), so the
         # two always agree within this process.
         self._gateway_token: str = secrets.token_urlsafe(32)
+        # The question the agent asked on the PREVIOUS turn, still pending on
+        # the gateway. The user's next message is its answer, not a new
+        # request — see _resolve_pending_question.
+        self._pending_question: Optional[dict] = None
 
     def configure(self, config: dict) -> None:
         """Configure the OpenClaw adapter. Idempotent — safe to call multiple times."""
@@ -1240,6 +1244,77 @@ class OpenClawAdapter(HarnessAdapter):
             return False
         return result.latency_ms <= UPSTREAM_RETRY_MAX_LATENCY_MS
 
+
+    def _resolve_pending_question(self, ws, websocket, message, session_id):
+        """Answer the question the gateway is still holding, if there is one.
+
+        The agent's ask leaves a question in `pending` on the gateway, waiting
+        for `question.resolve`. This adapter used to walk away from it and let
+        the next turn's pre-send `chat.abort` cancel it — the bundle's ask-user
+        tool registers an abort listener that fires
+        `cancelPendingQuestion("run-abort")` — after which the model correctly
+        reported that its question had been aborted. Users read that as the
+        agent inventing an abort they never performed. They were right that
+        they never aborted anything; we did, on every turn.
+
+        Params are exactly QuestionResolveParamsSchema:
+            { id, answers: { answers: { <questionId>: [<text>] } }, resolvedBy }
+        which is the same shape OpenClaw's own plain-text claim path sends.
+
+        Returns True when the gateway accepted the answer, meaning the ORIGINAL
+        run resumes and this turn must listen to it rather than starting a new
+        one. Returns False for anything else — expired, cancelled, unknown id,
+        transport error — so the caller falls back to a normal chat.send. A
+        question we cannot answer must never block the user's message.
+        """
+        pending = self._pending_question
+        self._pending_question = None
+        if not pending or pending.get("session_id") != session_id:
+            return False
+
+        question_ids = pending.get("question_ids") or []
+        if not question_ids:
+            return False
+        answers = {qid: [message] for qid in question_ids}
+
+        resolve_id = str(uuid.uuid4())
+        try:
+            ws.send(json.dumps({
+                "type": "req",
+                "id": resolve_id,
+                "method": "question.resolve",
+                "params": {
+                    "id": pending["id"],
+                    "answers": {"answers": answers},
+                    "resolvedBy": "plain-text",
+                },
+            }))
+            ws.settimeout(10)
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                try:
+                    raw = ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    break
+                try:
+                    reply = json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if reply.get("type") == "res" and reply.get("id") == resolve_id:
+                    ok = bool(reply.get("ok"))
+                    status = (reply.get("payload") or {}).get("status")
+                    logger.info(
+                        "question.resolve ok=%s status=%s id=%s",
+                        ok, status, str(pending["id"])[:12],
+                    )
+                    return ok and status == "answered"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "question.resolve failed (falling back to chat.send): %s",
+                str(exc)[:200],
+            )
+        return False
+
     def _process_once(
         self,
         message: str,
@@ -1426,7 +1501,21 @@ class OpenClawAdapter(HarnessAdapter):
                 # protocol (sessions.reset would additionally wipe stored
                 # conversation state, so we deliberately do NOT use it here).
                 # Kill switch: OPENCLAW_PRESEND_ABORT=0.
-                if os.environ.get("OPENCLAW_PRESEND_ABORT", "1") != "0":
+                # Answer the gateway's pending question BEFORE anything can
+                # cancel it. The pre-send abort below is exactly what used to
+                # kill it, so the two are mutually exclusive by construction.
+                answered_pending = self._resolve_pending_question(
+                    ws, websocket, message, session_id
+                )
+                if answered_pending:
+                    logger.info(
+                        "pending question answered; resuming the original run "
+                        "instead of starting a new one"
+                    )
+
+                if not answered_pending and os.environ.get(
+                    "OPENCLAW_PRESEND_ABORT", "1"
+                ) != "0":
                     try:
                         abort_id = str(uuid.uuid4())
                         ws.send(json.dumps({
@@ -1474,21 +1563,32 @@ class OpenClawAdapter(HarnessAdapter):
                 # multi-user case) other users' history entirely. The
                 # AgentCore runtime gives us a stable per-user session_id;
                 # use it directly.
+                # When the answer was accepted the ORIGINAL run resumes and
+                # streams its continuation on this same socket. Sending a new
+                # chat.send here would run the user's answer a second time as a
+                # fresh prompt — OpenClaw's own claim path returns without
+                # queueing for the same reason.
                 chat_id = str(uuid.uuid4())
                 # Latency clock starts the instant we hand the message to
                 # the gateway. final_state event stops it. Captured before
                 # ws.send so we don't count our own serialization.
                 chat_send_at = time.time()
-                ws.send(json.dumps({
-                    "type": "req",
-                    "id": chat_id,
-                    "method": "chat.send",
-                    "params": {
-                        "sessionKey": session_id or "default",
-                        "message": message,
-                        "idempotencyKey": chat_id,
-                    },
-                }))
+                if answered_pending:
+                    # No chat.send: listen for the resumed run. The loop below
+                    # ends on the chat `final` event, which that run still
+                    # emits, rather than on a chat.send response id.
+                    pass
+                else:
+                    ws.send(json.dumps({
+                        "type": "req",
+                        "id": chat_id,
+                        "method": "chat.send",
+                        "params": {
+                            "sessionKey": session_id or "default",
+                            "message": message,
+                            "idempotencyKey": chat_id,
+                        },
+                    }))
 
                 # Step 4: Collect response events until final.
                 # Instrumented to log every event type we see so we can
@@ -2080,6 +2180,24 @@ class OpenClawAdapter(HarnessAdapter):
                             max(0, int(time.time() - chat_send_at)),
                             bool(prefix),
                         )
+                        # Remember it so the NEXT turn answers it instead of
+                        # cancelling it. The gateway holds this question open
+                        # (status pending, with expiresAtMs) waiting for
+                        # question.resolve; walking away is what left it to be
+                        # killed by the next turn's pre-send abort.
+                        pending_id = q_payload.get("id")
+                        if isinstance(pending_id, str) and pending_id:
+                            question_ids = [
+                                entry.get("id")
+                                for entry in (q_payload.get("questions") or [])
+                                if isinstance(entry, dict)
+                                and isinstance(entry.get("id"), str)
+                            ]
+                            self._pending_question = {
+                                "id": pending_id,
+                                "question_ids": question_ids,
+                                "session_id": session_id,
+                            }
                         got_final = True
                         break
 

@@ -113,8 +113,18 @@ class FakeGateway:
     is what a real idle socket does and what the bounded drain loops expect.
     """
 
-    def __init__(self, agent_events):
+    def __init__(self, agent_events, resume_events=None, question_expired=False):
         self._agent_events = agent_events
+        # What the ORIGINAL run streams once its question is answered. Modelled
+        # because that is what really happens: question.resolve unblocks the
+        # run that asked, and it continues on this same socket.
+        self._resume_events = resume_events or []
+        self._question_expired = question_expired
+        # Gateway-side question state, mirroring QuestionStatusSchema:
+        # pending | answered | cancelled | expired.
+        self.question_status = None
+        self.question_answers = None
+        self.aborted_a_pending_question = False
         self._outbox = collections.deque()
         self.sent = []
         self.closed = False
@@ -139,7 +149,34 @@ class FakeGateway:
             self._reply(request_id, {"protocol": 4})
         elif method == "tools.catalog":
             self._reply(request_id, {"tools": ["exec", "read"]})
+        elif method == "question.resolve":
+            params = message.get("params") or {}
+            if self._question_expired or self.question_status != "pending":
+                # Terminal states are refused, exactly as the manager does.
+                self._reply(request_id, {"status": "cancelled"}, ok=False)
+            elif params.get("cancel"):
+                self.question_status = "cancelled"
+                self._reply(request_id, {"status": "cancelled"})
+            else:
+                self.question_status = "answered"
+                self.question_answers = params.get("answers")
+                self._reply(request_id, {"status": "answered"})
+                # The run that asked resumes and streams its continuation.
+                for event in self._resume_events:
+                    self._outbox.append(json.dumps(event))
+                self._outbox.append(
+                    json.dumps({
+                        "type": "event", "event": "chat",
+                        "payload": {"state": "final"},
+                    })
+                )
         elif method == "chat.abort":
+            # The bundle's ask-user tool registers an abort listener that fires
+            # cancelPendingQuestion("run-abort"). This models that: aborting
+            # while a question is pending destroys it.
+            if self.question_status == "pending":
+                self.question_status = "cancelled"
+                self.aborted_a_pending_question = True
             self._reply(request_id, {})
         elif method == "chat.send":
             # The gateway names this turn's run before streaming anything —
@@ -157,10 +194,16 @@ class FakeGateway:
         return self._outbox.popleft()
 
     # -- helpers ------------------------------------------------------------
-    def _reply(self, request_id, payload):
+    def _reply(self, request_id, payload, ok=True):
         self._outbox.append(
-            json.dumps({"type": "res", "id": request_id, "ok": True, "payload": payload})
+            json.dumps({"type": "res", "id": request_id, "ok": ok, "payload": payload})
         )
+
+    def hold_question(self, question_id="q1", ids=("continue_report",)):
+        """Put the gateway into the state it is in after the agent asks."""
+        self.question_status = "pending"
+        self._pending_ids = list(ids)
+        self._pending_id = question_id
 
 
 def aborts(stop_reason="cancelled"):
@@ -499,3 +542,128 @@ class StructuredQuestionsReachTheUser(unittest.TestCase):
         # is now the last resort, not the common path.
         text = replay([asks_question({"questions": []})])
         self.assertIn("I need a bit more information", text)
+
+
+def two_turn_replay(first_events, answer_text, resume_events, question_expired=False):
+    """Turn 1 asks a question; turn 2 is the user's answer, on ONE adapter.
+
+    The adapter instance is shared deliberately — the pending question is
+    carried on it between turns, which is the whole mechanism under test.
+    Returns (first_reply, second_reply, gateway_of_turn_2).
+    """
+    adapter = OpenClawAdapter()
+    adapter._ready = True
+    zero_usage = {"model_calls": 0, "input": 0, "output": 0,
+                  "cache_read": 0, "cache_write": 0}
+
+    def run(gateway, text):
+        fake_websocket = mock.Mock()
+        fake_websocket.create_connection.return_value = gateway
+        fake_websocket.WebSocketTimeoutException = _FakeTimeout
+        with mock.patch.dict(sys.modules, {"websocket": fake_websocket}), \
+             mock.patch.object(OpenClawAdapter, "_read_turn_usage",
+                               return_value=zero_usage), \
+             mock.patch.object(harness_adapter, "record_failure"):
+            return adapter._process_once(text, "session-replay")
+
+    g1 = FakeGateway(first_events)
+    first = run(g1, "Give me a quartile growth report")
+    # The gateway is now holding that question open, as it does in production.
+    g2 = FakeGateway([], resume_events=resume_events,
+                     question_expired=question_expired)
+    g2.question_status = "pending"
+    second = run(g2, answer_text)
+    return first.text, second.text, g2
+
+
+ASK = {
+    "type": "event",
+    "event": "question.requested",
+    "payload": {
+        "id": "q-abc",
+        "runId": TURN_RUN_ID,
+        "sessionKey": "agent:main:replay",
+        "status": "pending",
+        "questions": [{
+            "id": "continue_report",
+            "question": "Want me to finish and post the link now?",
+            "options": [{"label": "Keep going to completion (Recommended)"},
+                        {"label": "Stop here"}],
+        }],
+    },
+}
+
+
+class AnsweringAQuestionDoesNotAbortIt(unittest.TestCase):
+    """The user's answer must RESOLVE the pending question, not cancel it.
+
+    The gateway holds an asked question in `pending` awaiting question.resolve.
+    This adapter walked away from it, and the next turn's pre-send chat.abort
+    hit the ask-user tool's abort listener — cancelPendingQuestion("run-abort")
+    in the bundle — destroying it. The model then correctly reported that its
+    question had been aborted, and users read that as a fabricated abort they
+    never performed. They never did. We did, every turn.
+    """
+
+    def test_the_pending_question_is_answered_not_cancelled(self):
+        _, _, g2 = two_turn_replay(
+            [ASK], "Keep going", [says("Done — here is the link.")]
+        )
+        self.assertEqual(g2.question_status, "answered")
+        self.assertFalse(
+            g2.aborted_a_pending_question,
+            "the pre-send abort cancelled the question the user was answering",
+        )
+
+    def test_the_answer_carries_the_users_text_in_the_schema_shape(self):
+        # QuestionResolveParamsSchema: answers is {answers: {qid: [str]}}
+        _, _, g2 = two_turn_replay(
+            [ASK], "Keep going", [says("Done.")]
+        )
+        self.assertEqual(g2.question_answers, {"answers": {"continue_report": ["Keep going"]}})
+
+    def test_no_second_chat_send_is_issued(self):
+        # OpenClaw's own claim path returns without queueing; running the
+        # answer again as a fresh prompt would double-execute the turn.
+        _, _, g2 = two_turn_replay([ASK], "Keep going", [says("Done.")])
+        sends = [m for m in g2.sent if m.get("method") == "chat.send"]
+        self.assertEqual(sends, [])
+
+    def test_the_resumed_run_reply_reaches_the_user(self):
+        _, second, _ = two_turn_replay(
+            [ASK], "Keep going", [says("Grades 3-5 written. Sheet shared.")]
+        )
+        self.assertIn("Grades 3-5 written", second)
+
+    def test_the_question_still_reaches_the_user_on_turn_one(self):
+        first, _, _ = two_turn_replay([ASK], "Keep going", [says("Done.")])
+        self.assertIn("Want me to finish and post the link now?", first)
+        self.assertIn("Keep going to completion", first)
+
+    def test_an_expired_question_falls_back_to_a_normal_turn(self):
+        # A question we cannot answer must never block the user's message.
+        _, _, g2 = two_turn_replay(
+            [ASK], "Keep going", [], question_expired=True
+        )
+        sends = [m for m in g2.sent if m.get("method") == "chat.send"]
+        self.assertEqual(len(sends), 1, "expired question must fall back to chat.send")
+
+    def test_a_turn_with_no_pending_question_is_unchanged(self):
+        # The ordinary path must not grow a question.resolve call.
+        adapter = OpenClawAdapter()
+        adapter._ready = True
+        g = FakeGateway([says("Plain answer.")])
+        fake_websocket = mock.Mock()
+        fake_websocket.create_connection.return_value = g
+        fake_websocket.WebSocketTimeoutException = _FakeTimeout
+        with mock.patch.dict(sys.modules, {"websocket": fake_websocket}), \
+             mock.patch.object(OpenClawAdapter, "_read_turn_usage",
+                               return_value={"model_calls": 0, "input": 0,
+                                             "output": 0, "cache_read": 0,
+                                             "cache_write": 0}), \
+             mock.patch.object(harness_adapter, "record_failure"):
+            result = adapter._process_once("hello", "session-replay")
+        self.assertIn("Plain answer.", result.text)
+        self.assertEqual(
+            [m for m in g.sent if m.get("method") == "question.resolve"], []
+        )
