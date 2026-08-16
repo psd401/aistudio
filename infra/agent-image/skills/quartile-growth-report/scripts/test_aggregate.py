@@ -679,3 +679,59 @@ class SubgroupsAreScopedAndTriState(unittest.TestCase):
              "n": 402, "growth": 15.2},
         ]
         self.assertEqual(aggregate.subgroup_scope_warning(ok), [])
+
+
+class MultipleSectionsStaySeparate(unittest.TestCase):
+    """Two homerooms must produce two sets of class cells, not one merged set.
+
+    Keying cells on (meas, qt) alone merged every section's rows together:
+    quartiles were still computed per section, but the OUTPUT collapsed across
+    them, sectionid became ambiguous and resolved to None, and build_tab
+    rendered ZERO teacher columns. Silently absent, not wrong — which is why
+    a member-count assertion did not catch it.
+
+    Found by the agent while running Minter Creek (self-reported failure 793,
+    with a synthetic two-section repro).
+    """
+
+    ROWS = [
+        {"meas": "ORF", "studentid": i, "b": b, "e": b + 5,
+         "in_sch": True, "sectionid": sec, "prb": None, "pre": None}
+        for i, (b, sec) in enumerate(
+            [(10, "S1"), (20, "S1"), (30, "S1"), (40, "S1"),
+             (15, "S2"), (25, "S2"), (35, "S2"), (45, "S2")], start=1
+        )
+    ]
+
+    def cells(self):
+        return aggregate.rollup(
+            [dict(r) for r in self.ROWS], "class", lambda r: (r["meas"], r["sectionid"])
+        )
+
+    def test_each_section_gets_its_own_cells(self):
+        sections = {c["sectionid"] for c in self.cells()}
+        self.assertEqual(sections, {"S1", "S2"})
+
+    def test_sectionid_is_never_none_when_sections_are_partitioned(self):
+        # None is the symptom build_tab sees: it cannot name a column for a
+        # cell whose section is unknown, so the column disappears.
+        self.assertTrue(all(c["sectionid"] is not None for c in self.cells()))
+
+    def test_each_section_has_its_own_All_row(self):
+        alls = [c for c in self.cells() if c["qt"] == "All"]
+        self.assertEqual(len(alls), 2)
+        self.assertEqual({c["n"] for c in alls}, {4})
+
+    def test_a_merged_key_would_have_produced_one_All_of_eight(self):
+        # Pins the actual bug shape: before the fix this was a single cell of 8.
+        alls = [c for c in self.cells() if c["qt"] == "All"]
+        self.assertNotEqual([c["n"] for c in alls], [8])
+
+    def test_district_scope_still_collapses_to_one_cell(self):
+        # The fix must not split scopes that are meant to be single-partition.
+        cells = aggregate.rollup(
+            [dict(r) for r in self.ROWS], "district", lambda r: r["meas"]
+        )
+        alls = [c for c in cells if c["qt"] == "All"]
+        self.assertEqual(len(alls), 1)
+        self.assertEqual(alls[0]["n"], 8)
