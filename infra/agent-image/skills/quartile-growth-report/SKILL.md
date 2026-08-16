@@ -38,13 +38,34 @@ as a "summary" row or a note next to a number.
    **Keep the section -> teacher map from this step** and pass it to
    `build_tab.py --teachers`; the classroom columns are headed by teacher
    name, not section id.
-3. Per grade, **extract → aggregate → build** (see `references/sql.md`):
-   - run the extraction query — raw matched pairs, no `NTILE`, no norms join,
-     no `GROUPING SETS`
-   - `scripts/aggregate.py` — applies the norms, computes every quartile scope
-   - `scripts/build_tab.py` — emits the gws request body for that tab
-4. Build ONE spreadsheet with `psd-workspace`: a tab per grade + Definitions.
-5. Share it and paste the bare URL on its own line.
+3. **Run the report — ONE command.** It does the roster, every grade's
+   extraction, the aggregation, the tabs, the Definitions tab, and the share:
+
+   ```bash
+   /opt/agentcore-venv/bin/python3 \
+     /opt/psd-skills/quartile-growth-report/scripts/run_report.py \
+     --school "<school>" --user "<caller email>"
+   ```
+
+   It prints the spreadsheet URL on stdout and progress on stderr.
+4. Paste that bare URL on its own line.
+
+**Do not orchestrate this yourself.** Between 2026-08-14 and 2026-08-16 this
+report failed five times running, and not once on the arithmetic: a no-op edit
+ended the run, four assistant messages fused into one reply, a promoted
+background job aborted the run it was meant to continue, `--export` timed out,
+and the write tool put literal newline escapes in a model-authored converter.
+Every one of those was orchestration. `run_report.py` runs inside a single
+exec, so the turn deadline, the promotion, and the continuation turn stop
+applying at all.
+
+**If it fails, re-run the same command.** Every step checkpoints to
+`--work-dir` (default `/tmp/qgr-<school>`), so a second run resumes from where
+it stopped instead of starting over. Report the error it printed; do not
+rebuild its steps by hand.
+
+`--dry-run` resolves the school, year and roster and prints the plan without
+touching a spreadsheet. Use it when the user asks what the report will cover.
 
 **Write no scripts. Author no files.** Every step ships as a script that takes
 the previous step's output and emits the next step's input, ending in a body
