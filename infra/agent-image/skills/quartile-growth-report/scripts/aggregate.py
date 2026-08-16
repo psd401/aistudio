@@ -229,13 +229,30 @@ def rollup(rows, scope, partition_key, value_digits=1):
         group.sort(key=order_key)
         quartiled.extend(ntile(group))
 
+    # The partition is part of the cell identity, not just of the quartile
+    # assignment. Keying on (meas, qt) alone merged every homeroom's rows into
+    # one cell: quartiles were still computed per section, but the OUTPUT
+    # collapsed across them, `sectionid` became ambiguous and resolved to None,
+    # and build_tab rendered ZERO teacher columns — the breakdown this report
+    # exists for, silently absent rather than wrong.
+    #
+    # Found by the agent while running Minter Creek and self-reported as
+    # failure 793, with a synthetic two-section repro. My own partition test
+    # missed it because it asserted member COUNTS, which stay correct when
+    # cells merge.
+    #
+    # `partition_key(row)` is exactly what quartiles were computed within, so
+    # using it here keeps the two in lockstep by construction.
     by_cell = defaultdict(list)
     for row, bucket in quartiled:
-        by_cell[(row["meas"], str(bucket))].append(row)
-        by_cell[(row["meas"], "All")].append(row)
+        partition = partition_key(row)
+        by_cell[(row["meas"], str(bucket), partition)].append(row)
+        by_cell[(row["meas"], "All", partition)].append(row)
 
     out = []
-    for (meas, qt), members in sorted(by_cell.items()):
+    for (meas, qt, _partition), members in sorted(
+        by_cell.items(), key=lambda item: (item[0][0], item[0][1], str(item[0][2]))
+    ):
         growth = mean([r["e"] - r["b"] for r in members if r.get("e") is not None])
         pr_growth = mean(
             [
