@@ -708,6 +708,63 @@ class AnsweringAQuestionDoesNotAbortIt(unittest.TestCase):
         self.assertEqual(len(resolves), 1)
         self.assertEqual(resolves[0]["params"]["id"], "q-abc")
 
+    def test_a_foreign_run_cannot_contribute_to_the_resumed_reply(self):
+        # turn_run_id is normally learned from the chat.send `started` res, and
+        # BOTH fences are gated on it being truthy. A resumed-question turn
+        # sends no chat.send — so without seeding it from the asking run, the
+        # fence was off for exactly the turns that listen longest to a socket
+        # carrying other runs. That is the 2026-08-14 incident's setup.
+        _, second, _ = two_turn_replay(
+            [ASK], "Keep going",
+            [foreign_says("STOLEN: someone else's answer."),
+             says("Grades 3-5 written.")],
+        )
+        self.assertNotIn("STOLEN", second)
+        self.assertIn("Grades 3-5 written", second)
+
+    def test_the_asking_runs_own_output_is_not_fenced_out(self):
+        # The converse, and the way a fence like this usually breaks: seeding
+        # the wrong id would silence the run we are actually waiting for.
+        _, second, _ = two_turn_replay(
+            [ASK], "Keep going", [says("Sheet shared.")]
+        )
+        self.assertIn("Sheet shared", second)
+
+    def test_a_flood_before_the_ack_falls_back_instead_of_hanging(self):
+        # The cap must not silently truncate. Discarding frames past it takes
+        # the final event with them and hangs the turn to its full deadline —
+        # the exact failure the buffer exists to prevent. Falling back to
+        # abort + chat.send costs the in-flight work but answers the user.
+        with mock.patch.object(harness_adapter, "MAX_RESOLVE_BUFFERED_FRAMES", 2):
+            _, second, g2 = two_turn_replay(
+                [ASK], "Keep going",
+                [says(f"chunk {i} ") for i in range(6)],
+                resume_before_ack=True,
+            )
+        sends = [m for m in g2.sent if m.get("method") == "chat.send"]
+        self.assertEqual(len(sends), 1, "overflow must fall back, not hang")
+        self.assertNotIn("stalled", second)
+
+    def test_pending_questions_are_capped_and_evict_oldest_first(self):
+        adapter = OpenClawAdapter()
+        with mock.patch.object(harness_adapter, "MAX_PENDING_QUESTIONS", 3):
+            for n in range(5):
+                adapter._remember_pending_question(
+                    f"session-{n}", f"q-{n}", ["only"], f"run-{n}"
+                )
+        self.assertEqual(len(adapter._pending_questions), 3)
+        # Oldest gone, newest kept — a session that asked and walked away must
+        # not pin an entry for the container's life.
+        self.assertNotIn("session-0", adapter._pending_questions)
+        self.assertIn("session-4", adapter._pending_questions)
+
+    def test_re_asking_in_one_session_replaces_rather_than_accumulates(self):
+        adapter = OpenClawAdapter()
+        adapter._remember_pending_question("s", "q-first", ["a"], "run-1")
+        adapter._remember_pending_question("s", "q-second", ["b"], "run-2")
+        self.assertEqual(len(adapter._pending_questions), 1)
+        self.assertEqual(adapter._pending_questions["s"]["id"], "q-second")
+
     def test_the_kill_switch_restores_the_old_behaviour_exactly(self):
         # OPENCLAW_QUESTION_RESOLVE=0 must back this out to what shipped
         # before — abandon the question, abort, re-send — without an image
