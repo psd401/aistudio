@@ -1481,25 +1481,12 @@ class OpenClawAdapter(HarnessAdapter):
                         MAX_RESOLVE_BUFFERED_FRAMES,
                     )
 
-                # Two bad options here, and the third one is what this does.
-                #
-                # Give up and fall back to abort + chat.send: the ONLY thing
-                # that floods this window is a run already streaming, which
-                # means the gateway already accepted the answer. Aborting and
-                # re-sending the same text then runs the user's answer TWICE —
-                # once as the accepted resolve whose side effects are already
-                # partly done, once as a fresh prompt. Duplicate spreadsheets,
-                # duplicate writes, and no way for the user to know.
-                #
-                # Keep reading and discarding everything: the run's terminal
-                # chat event goes with it, so the turn waits for a final that
-                # already passed and stalls to its full deadline.
-                #
-                # So: drop the narration, never the chat channel. It carries
-                # the state transitions (final/error/aborted) and is a handful
-                # of frames, not a stream. Worst case is a reply missing its
-                # middle — visibly truncated, logged, and honest — rather than
-                # a silent double-execution or a stall.
+                # Drop the narration, never the chat channel — it carries the
+                # run's terminal state (final/error/aborted). Both alternatives
+                # are worse and both were tried: giving up here re-sends the
+                # answer to a run the gateway already accepted (double
+                # execution), and discarding everything loses the final event
+                # (stalls to the full deadline). See the commit message.
                 is_chat_frame = (
                     reply.get("type") == "event" and reply.get("event") == "chat"
                 )
