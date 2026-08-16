@@ -6,6 +6,7 @@ without changing the AgentCore wrapper. Each adapter implements the same interfa
 """
 
 import abc
+import collections
 import dataclasses
 import json
 import logging
@@ -1385,6 +1386,12 @@ class OpenClawAdapter(HarnessAdapter):
             return False, [], None
         answers = {qid: [message] for qid in question_ids}
 
+        # Popped before every failure branch below, including a transport
+        # error, and never restored. That is deliberate rather than an
+        # oversight: on any path out of here that is not "answered", the
+        # caller's pre-send chat.abort fires and cancels the question on the
+        # gateway anyway, so a retained entry would only point at something
+        # already destroyed — and would resolve a stale id on the NEXT turn.
         buffered: list = []
         overflowed = False
         resolve_id = str(uuid.uuid4())
@@ -1692,8 +1699,13 @@ class OpenClawAdapter(HarnessAdapter):
                 # Answer the gateway's pending question BEFORE anything can
                 # cancel it. The pre-send abort below is exactly what used to
                 # kill it, so the two are mutually exclusive by construction.
-                # Before the resolve, so a resumed turn's latency includes
-                # the ack wait the user actually waited through.
+                # Before the resolve, so a turn that answers a pending
+                # question counts the ack wait the user actually waited
+                # through. Recorded for the FAILURE path too: a resolve that
+                # times out and falls back has already burned the ack wait and
+                # the abort drain, and restarting the clock afterwards would
+                # report the slowest turns as the fastest.
+                attempted_resolve = session_id in self._pending_questions
                 resolve_started_at = time.time()
                 (
                     answered_pending,
@@ -1702,6 +1714,9 @@ class OpenClawAdapter(HarnessAdapter):
                 ) = self._resolve_pending_question(
                     ws, websocket, message, session_id
                 )
+                # deque, not list: the event loop drains this from the front,
+                # and popping index 0 off a list is O(n) each time.
+                resumed_frames = collections.deque(resumed_frames)
                 if answered_pending:
                     logger.info(
                         "pending question answered; resuming the original run "
@@ -1768,12 +1783,9 @@ class OpenClawAdapter(HarnessAdapter):
                 # the gateway. final_state event stops it. Captured before
                 # ws.send so we don't count our own serialization.
                 #
-                # On a resumed turn the message was handed over at
-                # question.resolve, and the ack wait already elapsed. Starting
-                # the clock here instead would report resumed turns as faster
-                # than the user experienced them — and those are precisely the
-                # turns whose latency we most need to be able to trust.
-                chat_send_at = resolve_started_at if answered_pending else time.time()
+                chat_send_at = (
+                    resolve_started_at if attempted_resolve else time.time()
+                )
                 if answered_pending:
                     # No chat.send: listen for the resumed run. The loop below
                     # ends on the chat `final` event, which that run still
@@ -1903,7 +1915,7 @@ class OpenClawAdapter(HarnessAdapter):
                         # waiting for the question.resolve ack. Drained first
                         # and in order, so the continuation this turn returns
                         # is not missing its opening events.
-                        raw = resumed_frames.pop(0)
+                        raw = resumed_frames.popleft()
                     else:
                         try:
                             raw = ws.recv()

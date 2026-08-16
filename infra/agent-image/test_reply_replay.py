@@ -35,6 +35,7 @@ import collections
 import json
 import os
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -785,6 +786,27 @@ class AnsweringAQuestionDoesNotAbortIt(unittest.TestCase):
             [ASK], "Keep going", [says("Sheet shared.")]
         )
         self.assertIn("Sheet shared", second)
+
+    def test_a_failed_resolve_still_counts_toward_reported_latency(self):
+        # A resolve that times out and falls back has already burned the ack
+        # wait and the abort drain — time the user spent waiting. Restarting
+        # the clock afterwards reports the SLOWEST turns as the fastest, which
+        # is worse than not measuring them at all.
+        original = OpenClawAdapter._resolve_pending_question
+
+        def slow(adapter_self, *args, **kwargs):
+            time.sleep(0.15)
+            return original(adapter_self, *args, **kwargs)
+
+        adapter, run = turn_runner()
+        run(FakeGateway([ASK]), "Quartile growth report")
+        # Expired: the resolve is refused, so this turn takes the fallback.
+        g2 = FakeGateway([says("Done.")], question_expired=True).hold_question()
+        with mock.patch.object(OpenClawAdapter, "_resolve_pending_question", slow):
+            result = run(g2, "Keep going")
+        sends = [m for m in g2.sent if m.get("method") == "chat.send"]
+        self.assertEqual(len(sends), 1, "this test must exercise the fallback")
+        self.assertGreaterEqual(result.latency_ms, 150)
 
     def test_a_lost_ack_with_the_run_streaming_is_not_treated_as_a_refusal(self):
         # The ack and the resumed run's output are unordered. If the ack is
