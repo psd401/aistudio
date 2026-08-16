@@ -724,22 +724,37 @@ CUTOVER_PATHS=(
 )
 
 deployed_commit() {
-  # Deployed image -> digest -> its commit- tag. Older images predate that tag
-  # but follow a <name>-<sha12> convention, so fall back to the trailing field.
-  local runtime_id digest tags t sha
+  # Deployed image -> its commit- tag. Older images predate that tag but follow
+  # a <name>-<sha12> convention, so fall back to the trailing field.
+  local runtime_id uri ref tags t sha
   runtime_id="$(aws cloudformation describe-stacks \
     --region "${REGION}" --stack-name "${STACK_NAME}" \
     --query 'Stacks[0].Outputs[?OutputKey==`AgentCoreRuntimeId`].OutputValue | [0]' \
     --output text 2>/dev/null)" || return 1
   [ -n "${runtime_id}" ] && [ "${runtime_id}" != "None" ] || return 1
-  digest="$(aws bedrock-agentcore-control get-agent-runtime \
+  uri="$(aws bedrock-agentcore-control get-agent-runtime \
     --region "${REGION}" --agent-runtime-id "${runtime_id}" \
     --query 'agentRuntimeArtifact.containerConfiguration.containerUri' \
     --output text 2>/dev/null)" || return 1
-  digest="${digest##*@}"
-  [ -n "${digest}" ] && [ "${digest}" != "None" ] || return 1
+  [ -n "${uri}" ] && [ "${uri}" != "None" ] || return 1
+  # A runtime is pinned EITHER by digest (repo@sha256:...) or by tag
+  # (repo:2026-08-14-run-fence), depending on whether the deploy passed
+  # agentImageDigest. This only handled the digest form: for a tag-pinned
+  # runtime `${uri##*@}` is a no-op, so the whole URI was passed as an
+  # imageDigest, the lookup failed, and the guard fell to "cannot determine"
+  # and demanded a drain. prod has been tag-pinned the entire time, so every
+  # prod build since 2026-08-03 raised a cutover that was never real.
+  #
+  # Crying wolf on every prod build is not a safe default. It is how a guard
+  # gets ignored on the one build where it matters — the exact failure the
+  # comment above says this rewrite existed to fix.
+  case "${uri}" in
+    *@*) ref="imageDigest=${uri##*@}" ;;
+    *:*) ref="imageTag=${uri##*:}" ;;
+    *)   return 1 ;;
+  esac
   tags="$(aws ecr describe-images --region "${REGION}" \
-    --repository-name "${ECR_URI##*/}" --image-ids "imageDigest=${digest}" \
+    --repository-name "${ECR_URI##*/}" --image-ids "${ref}" \
     --query 'imageDetails[0].imageTags' --output text 2>/dev/null)" || return 1
   for t in ${tags}; do
     case "${t}" in
