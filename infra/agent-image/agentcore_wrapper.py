@@ -48,7 +48,7 @@ logger = logging.getLogger("agentcore_wrapper")
 
 from harness_adapter import OpenClawAdapter
 import workspace_sync
-from agent_failures import emit_agent_metric
+from agent_failures import emit_agent_metric, record_failure
 from check_bootstrap_budget import check_runtime_bootstrap
 
 # Runtime path OpenClaw reads its credential-free config and bootstrap files from.
@@ -1647,6 +1647,34 @@ def main():
                     "workspace mount/migration FAILED (%s) — push DISABLED for "
                     "this microVM to protect the remote workspace",
                     exc,
+                )
+                # Telemetry, not just a log line. This whole failure class was
+                # invisible in agent_failures — WorkspaceMigrationFailed had a
+                # lifetime count of ZERO while a real user hit it in prod on
+                # 2026-08-15 — because nothing in this file ever called
+                # record_failure. The user got a clear message and the Failures
+                # tab showed nothing, so the only way anyone learned about it
+                # was the user reporting it by hand.
+                #
+                # Best-effort by contract: record_failure never raises, so a
+                # telemetry problem cannot turn a handled workspace failure
+                # into an unhandled one.
+                record_failure(
+                    source="harness",
+                    severity="error",
+                    error_class="WorkspaceMigrationFailed",
+                    error_message=f"workspace restore failed: {str(exc)[:500]}",
+                    user_id=user_email,
+                    session_id=session_id,
+                    context={
+                        "phase": "workspace_restore",
+                        "workspace_prefix": workspace_prefix,
+                        # Push is off for this microVM, so the next invocation
+                        # must do an exact committed restore. Recorded because
+                        # it changes what a retry actually does.
+                        "push_disabled": True,
+                    },
+                    exc=exc,
                 )
                 yield {
                     "result": (
