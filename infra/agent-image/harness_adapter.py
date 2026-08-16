@@ -332,6 +332,11 @@ MAX_PENDING_QUESTIONS = 256
 # anything beyond this is a gateway misbehaving, not a run to reassemble.
 MAX_RESOLVE_BUFFERED_FRAMES = 200
 
+# How long to wait for the question.resolve ack before giving up and falling
+# back to a normal chat.send. Small on purpose: this sits in front of the
+# user's turn, and every path out of it is safe.
+RESOLVE_ACK_WAIT_S = 10
+
 
 def _classify_chat_error(error_message: str) -> str:
     """Name the chat-error class from OpenClaw's message.
@@ -1320,12 +1325,21 @@ class OpenClawAdapter(HarnessAdapter):
         if not pending:
             return False, []
 
+        # Kill switch, matching OPENCLAW_PRESEND_ABORT on the path this one
+        # replaces. Disabling it restores the previous behaviour exactly —
+        # the question is abandoned and the abort below cancels it — so an
+        # operator can back this out without shipping an image.
+        if os.environ.get("OPENCLAW_QUESTION_RESOLVE", "1") == "0":
+            logger.info("question.resolve disabled by OPENCLAW_QUESTION_RESOLVE=0")
+            return False, []
+
         question_ids = pending.get("question_ids") or []
         if not question_ids:
             return False, []
         answers = {qid: [message] for qid in question_ids}
 
         buffered: list = []
+        overflowed = False
         resolve_id = str(uuid.uuid4())
         try:
             ws.send(json.dumps({
@@ -1338,9 +1352,17 @@ class OpenClawAdapter(HarnessAdapter):
                     "resolvedBy": "plain-text",
                 },
             }))
-            ws.settimeout(10)
-            deadline = time.time() + 10
-            while time.time() < deadline:
+            deadline = time.time() + RESOLVE_ACK_WAIT_S
+            while True:
+                # The socket timeout is what actually bounds this, so it has to
+                # shrink with the deadline. A single settimeout() up front only
+                # bounds each recv() individually: a frame at the 9s mark would
+                # re-enter recv() with a fresh 10s budget, so the real ceiling
+                # was double the one the comment claimed.
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                ws.settimeout(remaining)
                 try:
                     raw = ws.recv()
                 except websocket.WebSocketTimeoutException:
@@ -1363,9 +1385,19 @@ class OpenClawAdapter(HarnessAdapter):
                     return answered, (buffered if answered else [])
                 # Not the ack — the resumed run's own output, arriving ahead of
                 # or interleaved with it. Bounded so a chatty gateway cannot
-                # grow this without limit inside a 10-second window.
+                # grow this without limit inside the ack window.
                 if len(buffered) < MAX_RESOLVE_BUFFERED_FRAMES:
                     buffered.append(raw)
+                elif not overflowed:
+                    # Said once, loudly. Silently truncating here would surface
+                    # later as a reply missing its middle, with nothing in the
+                    # logs to connect it to this cap.
+                    overflowed = True
+                    logger.warning(
+                        "question.resolve buffer full at %d frames; further "
+                        "resumed-run output before the ack is being dropped",
+                        MAX_RESOLVE_BUFFERED_FRAMES,
+                    )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "question.resolve failed (falling back to chat.send): %s",

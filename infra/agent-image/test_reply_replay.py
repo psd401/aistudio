@@ -560,7 +560,7 @@ class StructuredQuestionsReachTheUser(unittest.TestCase):
 
 
 def two_turn_replay(first_events, answer_text, resume_events, question_expired=False,
-                    resume_before_ack=False, interleaved_session=None):
+                    resume_before_ack=False, interleaved_session=None, env=None):
     """Turn 1 asks a question; turn 2 is the user's answer, on ONE adapter.
 
     The adapter instance is shared deliberately — the pending question is
@@ -583,6 +583,7 @@ def two_turn_replay(first_events, answer_text, resume_events, question_expired=F
         fake_websocket.create_connection.return_value = gateway
         fake_websocket.WebSocketTimeoutException = _FakeTimeout
         with mock.patch.dict(sys.modules, {"websocket": fake_websocket}), \
+             mock.patch.dict(os.environ, env or {}), \
              mock.patch.object(OpenClawAdapter, "_read_turn_usage",
                                return_value=zero_usage), \
              mock.patch.object(harness_adapter, "record_failure"):
@@ -706,6 +707,19 @@ class AnsweringAQuestionDoesNotAbortIt(unittest.TestCase):
         resolves = [m for m in adapter_sends if m.get("method") == "question.resolve"]
         self.assertEqual(len(resolves), 1)
         self.assertEqual(resolves[0]["params"]["id"], "q-abc")
+
+    def test_the_kill_switch_restores_the_old_behaviour_exactly(self):
+        # OPENCLAW_QUESTION_RESOLVE=0 must back this out to what shipped
+        # before — abandon the question, abort, re-send — without an image
+        # build. An escape hatch that half-works is worse than none.
+        _, _, g2 = two_turn_replay(
+            [ASK], "Keep going", [says("Done.")],
+            env={"OPENCLAW_QUESTION_RESOLVE": "0"},
+        )
+        resolves = [m for m in g2.sent if m.get("method") == "question.resolve"]
+        self.assertEqual(resolves, [])
+        sends = [m for m in g2.sent if m.get("method") == "chat.send"]
+        self.assertEqual(len(sends), 1, "disabled path must still deliver the message")
 
     def test_resumed_output_arriving_before_the_ack_is_not_lost(self):
         # question.resolve is a req/res, but the resumed run streams onto the
