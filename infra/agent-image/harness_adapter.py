@@ -2311,13 +2311,21 @@ class OpenClawAdapter(HarnessAdapter):
                                 stream,
                                 data,
                             )
+                            # Segment splitting is NOT set here: the general
+                            # rule above already did it for every non-assistant
+                            # stream, heartbeat-guarded. Setting it again here
+                            # skipped that guard, so a heartbeat tagged as
+                            # item/command_output would have split a live
+                            # message and blanked response_text — the
+                            # mirror-image bug this rule exists to avoid.
+                            # This branch now decides ONE thing: whether the
+                            # accumulated text is scratchpad.
                             if (
                                 is_tool_activity
+                                and not agent_payload.get("isHeartbeat")
                                 and (agent_assistant_accum or response_text)
                             ):
-                                assistant_boundary_pending = True
-                                if not agent_payload.get("isHeartbeat"):
-                                    tool_activity_since_text = True
+                                tool_activity_since_text = True
                                 response_text = ""
                             # Native-tool mode (#1138 r12+) reports tool
                             # execution ONLY here — record it so telemetry's
@@ -2331,10 +2339,9 @@ class OpenClawAdapter(HarnessAdapter):
                         elif stream == "tool_call" and isinstance(data, dict):
                             # Same boundary rule for protocol-v3 tool events.
                             if agent_assistant_accum or response_text:
-                                assistant_boundary_pending = True
                                 if not agent_payload.get("isHeartbeat"):
                                     tool_activity_since_text = True
-                                response_text = ""
+                                    response_text = ""
                             tool_id = (
                                 data.get("id")
                                 or data.get("toolCallId")
@@ -2348,10 +2355,9 @@ class OpenClawAdapter(HarnessAdapter):
                             }
                         elif stream == "tool_result" and isinstance(data, dict):
                             if agent_assistant_accum or response_text:
-                                assistant_boundary_pending = True
                                 if not agent_payload.get("isHeartbeat"):
                                     tool_activity_since_text = True
-                                response_text = ""
+                                    response_text = ""
                             tool_id = (
                                 data.get("id")
                                 or data.get("toolCallId")
@@ -2428,6 +2434,24 @@ class OpenClawAdapter(HarnessAdapter):
                         ):
                             foreign_run_events += 1
                             continue
+                        # Every task frame counts as work, with no `kind`
+                        # check — unlike the item lane, deliberately.
+                        #
+                        # `item` is a SHARED progress lane: it carries tool
+                        # work and also reasoning/commentary, which is why it
+                        # has to discriminate. A task frame is not shared —
+                        # it exists because the runtime is executing something
+                        # on the model's behalf. Only kind="exec" has been
+                        # observed, so a future non-exec kind is unproven
+                        # either way; the reason not to guess at an allowlist
+                        # is that this file has now been wrong twice about
+                        # which kinds matter.
+                        #
+                        # If that turns out wrong, the cost is a finished
+                        # answer suppressed as scratchpad. Pinned by
+                        # test_a_non_exec_task_frame_is_still_treated_as_work
+                        # so the decision is visible rather than implied, and
+                        # changing it trips a test.
                         if agent_assistant_accum or response_text:
                             assistant_boundary_pending = True
                             tool_activity_since_text = True

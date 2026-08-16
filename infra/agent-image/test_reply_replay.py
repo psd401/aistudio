@@ -1295,6 +1295,26 @@ class SegmentsEndAtAnyModelActivity(unittest.TestCase):
         text = replay([says("The "), says("report "), says("is ready.")])
         self.assertEqual(text.strip(), "The report is ready.")
 
+    def test_a_non_exec_task_frame_is_still_treated_as_work(self):
+        # Documents a decision rather than an observation: only kind="exec"
+        # has ever been seen on a task frame. Unlike `item` — a shared lane
+        # carrying commentary as well as tool work — a task frame exists
+        # because the runtime is executing something, so it is not
+        # discriminated by kind. If that is ever wrong, this test is what
+        # changes, deliberately.
+        text = replay([says("The report is ready."),
+                       runs_task(kind="planning")])
+        self.assertNotIn("report is ready", text)
+
+    def test_a_heartbeat_on_the_item_stream_never_splits_a_live_message(self):
+        # The general boundary rule guards heartbeats; the tool branches used
+        # to set the boundary again without that guard, so a heartbeat tagged
+        # as item would have split a live message and blanked response_text.
+        beat = calls_tool("exec", "start")
+        beat["payload"]["isHeartbeat"] = True
+        text = replay([says("one "), beat, says("two")])
+        self.assertEqual(text.strip(), "one two")
+
     def test_a_foreign_task_frame_cannot_suppress_this_turns_answer(self):
         # The operator socket carries every run in the container, so another
         # session's long-running exec emits task frames here. Unfenced, one
