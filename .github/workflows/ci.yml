@@ -72,6 +72,7 @@ jobs:
           infra/agent-image/test_iteration_telemetry.py \
           infra/agent-image/test_mantle_proxy.py \
           infra/agent-image/test_mantle_proxy_logging.py \
+          infra/agent-image/test_cutover_guard.py \
           infra/agent-image/test_check_bootstrap_budget.py \
           infra/agent-image/test_check_config_consistency.py \
           infra/agent-image/test_candidate_matrix.py \
