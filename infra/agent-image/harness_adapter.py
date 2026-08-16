@@ -2193,6 +2193,45 @@ class OpenClawAdapter(HarnessAdapter):
                                     tokens_in = max(tokens_in, ti)
                                 if isinstance(to, int):
                                     tokens_out = max(tokens_out, to)
+                        # SEGMENT BOUNDARY — inverted rule, deliberately.
+                        #
+                        # One assistant message's deltas arrive back-to-back.
+                        # So anything that is NOT more assistant content ended
+                        # that message, and the next delta starts a new one.
+                        #
+                        # This used to name the events that count as a
+                        # boundary (item/command_output/tool_call with a
+                        # tool-ish `kind`). That list was incomplete twice, and
+                        # the second time shipped: on 2026-08-16 a quartile
+                        # report answered with four fused narration fragments —
+                        # 244+131+76+64 = 515 chars, exactly the resp_len in
+                        # the turn log. Between those fragments were 22
+                        # `thinking` events and `event:task` frames carrying
+                        # kind=exec, neither of which was on the list, so the
+                        # accumulator never reset and every fragment the model
+                        # wrote across six minutes was concatenated into one
+                        # reply.
+                        #
+                        # An allowlist fails toward FUSING (a wrong answer
+                        # built from scratchpad). This fails toward SPLITTING
+                        # (at worst the last part of an answer), and an unknown
+                        # future stream defaults to the safe side.
+                        # `lifecycle` and `run_status` are excluded because they
+                        # describe the RUN, not the model: a lifecycle error
+                        # means the run is dying, and a run_status phase is
+                        # workspace plumbing. Neither means the model started a
+                        # new message, and treating them as boundaries throws
+                        # away the partial text a failed turn is supposed to
+                        # show (issue #1461, pinned by
+                        # test_context_overflow_abort_is_not_recorded_as_deadline).
+                        # Everything else — known or not — is model activity
+                        # and ends the segment.
+                        if (
+                            stream not in ("assistant", "lifecycle", "run_status")
+                            and not agent_payload.get("isHeartbeat")
+                            and (agent_assistant_accum or response_text)
+                        ):
+                            assistant_boundary_pending = True
                         if stream == "lifecycle" and isinstance(data, dict):
                             phase = data.get("phase")
                             lifecycle_error = data.get("error")
@@ -2315,6 +2354,20 @@ class OpenClawAdapter(HarnessAdapter):
                                 ).isoformat(),
                             }
                             tool_calls.append(entry)
+
+                    elif mtype == "event" and mevent == "task":
+                        # Long-running tool execution reports here, not on the
+                        # agent stream: the sampled frame carries
+                        # marks={"action": "upserted", "kind": "exec",
+                        # "status": "running"}. It is model activity between
+                        # assistant messages, so it ends a segment for the same
+                        # reason the agent-stream rule above does. `event:tick`
+                        # and `event:health` are NOT included — they are
+                        # timers, not the model doing something, and a
+                        # heartbeat landing mid-stream must never split a
+                        # message that is still being written.
+                        if agent_assistant_accum or response_text:
+                            assistant_boundary_pending = True
 
                     elif mtype == "event" and mevent == "chat":
                         payload = msg.get("payload", {})

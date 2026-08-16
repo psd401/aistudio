@@ -101,6 +101,41 @@ def uses_tool(name="exec"):
     return [calls_tool(name, "start"), calls_tool(name, "end")]
 
 
+
+def thinks(text):
+    """A `thinking` delta — reasoning, dropped from the reply but real activity.
+
+    Shape from the live dev runtime (openclaw_event_sample stream=thinking,
+    2026-08-16). 22 of these sat between the assistant fragments of the fused
+    Artondale turn.
+    """
+    return agent_event("thinking", {"text": text, "delta": text})
+
+
+def runs_task(kind="exec", status="running"):
+    """An `event:task` frame — long-running tool execution.
+
+    Shape from the live runtime's own openclaw_kind_shape diagnostic:
+    marks={"action": "upserted", "kind": "exec", "status": "running"}.
+    This is NOT an event:agent frame, which is exactly why the old
+    boundary rule never saw it.
+    """
+    return {"type": "event", "event": "task", "payload": {
+        "action": "upserted",
+        "task": {"agentId": "main", "id": "t1", "taskId": "t1", "kind": kind,
+                 "status": status, "runId": TURN_RUN_ID, "title": kind,
+                 "sessionKey": "agent:main:replay", "createdAt": 1,
+                 "updatedAt": 2, "startedAt": 1, "ownerKey": "o",
+                 "progressSummary": "p", "runtime": "r", "sourceId": "s"}}}
+
+
+def beats():
+    """A heartbeat on the agent stream. Must never split a live message."""
+    event = agent_event("thinking", {"text": "", "delta": ""})
+    event["payload"]["isHeartbeat"] = True
+    return event
+
+
 class FakeGateway:
     """In-process stand-in for the OpenClaw gateway WebSocket.
 
@@ -1183,3 +1218,72 @@ class AnswerMappingMatchesTheGateway(unittest.TestCase):
                 [{"questionId": None}], "anything"),
             {},
         )
+
+class SegmentsEndAtAnyModelActivity(unittest.TestCase):
+    """The Artondale fusion, 2026-08-16 — reproduced, then fixed.
+
+    A quartile-growth request answered with four narration fragments the model
+    wrote across six minutes, concatenated into one reply. The transcript
+    (agents/main/agent/openclaw-agent.sqlite) stored them as four separate
+    assistant messages at seq 45/50/117/119, lengths 244+131+76+64 = 515 —
+    exactly the resp_len the turn logged. Between them: 22 `thinking` events
+    and `event:task` frames carrying kind=exec, plus 33 tool calls.
+
+    The old rule named which events count as a boundary (item/command_output/
+    tool_call with a tool-ish kind). `thinking` and `event:task` were not on
+    that list, so the accumulator never reset. An allowlist fails toward
+    FUSING; the rule now fails toward splitting.
+    """
+
+    FRAGMENTS = [
+        "Good — Fall+Spring data present across DIBELS, i-Ready, and SBA. ",
+        "Good, dibels_scores has grade_level directly. ",
+        "Only the load_csv line is broken. Fix that single line directly.",
+    ]
+
+    def _production_sequence(self):
+        events = [says(self.FRAGMENTS[0]), thinks("check tables"), runs_task()]
+        events += [says(self.FRAGMENTS[1]), thinks("repair it"), runs_task()]
+        events += [says(self.FRAGMENTS[2])]
+        return events
+
+    def test_the_production_sequence_returns_only_the_last_fragment(self):
+        text = replay(self._production_sequence())
+        self.assertEqual(text.strip(), self.FRAGMENTS[2].strip())
+
+    def test_no_earlier_fragment_survives_into_the_reply(self):
+        text = replay(self._production_sequence())
+        for stale in self.FRAGMENTS[:2]:
+            self.assertNotIn(stale.strip()[:24], text)
+
+    def test_thinking_alone_ends_a_segment(self):
+        text = replay([says("scratchpad. "), thinks("hmm"), says("answer.")])
+        self.assertEqual(text.strip(), "answer.")
+
+    def test_an_event_task_alone_ends_a_segment(self):
+        text = replay([says("scratchpad. "), runs_task(), says("answer.")])
+        self.assertEqual(text.strip(), "answer.")
+
+    def test_an_unknown_future_stream_ends_a_segment(self):
+        # The point of inverting the rule: a stream nobody has seen yet must
+        # fail toward splitting, not toward fusing.
+        unknown = agent_event("some_new_stream_2027", {"whatever": True})
+        text = replay([says("scratchpad. "), unknown, says("answer.")])
+        self.assertEqual(text.strip(), "answer.")
+
+    def test_a_heartbeat_never_splits_a_live_message(self):
+        # The mirror-image risk. Heartbeats arrive on a timer and can land
+        # mid-stream; splitting there would truncate a real answer.
+        text = replay([says("one "), beats(), says("two "), beats(), says("three")])
+        self.assertEqual(text.strip(), "one two three")
+
+    def test_deltas_of_one_message_still_concatenate(self):
+        text = replay([says("The "), says("report "), says("is ready.")])
+        self.assertEqual(text.strip(), "The report is ready.")
+
+    def test_narration_followed_by_a_task_is_not_offered_as_the_answer(self):
+        # The turn's other symptom: it ended right after a tool call, with
+        # narration as the last text. That is not an answer, and promoting it
+        # is how the user got "Fix that single line directly." as a reply.
+        text = replay([says("Only the load_csv line is broken."), runs_task()])
+        self.assertNotIn("load_csv", text)
