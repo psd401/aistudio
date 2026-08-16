@@ -253,12 +253,93 @@ selection.source = replaceOnce(
   "detach ingress user before orphan repair",
 );
 
+// A no-op file mutation must not END THE RUN.
+//
+// On 2026-08-16 a quartile-growth report died 484 seconds in, 53 model calls
+// deep, with the whole report still to build. The last thing the agent did was
+// repair a script and issue an `edit` whose replacement happened to match what
+// was already there. That returns `terminate: true`, and agent-core does:
+//
+//     hasMoreToolCalls = !executedToolBatch.terminate;
+//     shouldTerminateToolBatch = calls.length > 0 && calls.every(c => c.terminate)
+//
+// The batch held that one call, so the loop exited while the model's own
+// stopReason was still `toolUse` — it was asking to continue. The gateway then
+// broadcast `final` and the user got a half-finished narration instead of a
+// spreadsheet.
+//
+// The trap is worst exactly where it is most likely: repairing a file (the
+// literal-\n bug, psd-rules Rule 9a) means writing content that may already be
+// correct, so the recovery action and the kill switch are the same keystroke.
+// Same for `write` when the file is already right, and `patch` when the hunk
+// is already applied.
+//
+// Upstream presumably wants to stop a model looping on no-op edits forever.
+// That trade is wrong here: our turns are already bounded by the chat deadline
+// and the two-hour job budget, so the worst case without this is a few wasted
+// iterations, while the worst case with it is a destroyed multi-minute run.
+//
+// The client-delegated `terminate: true` in the tool-definition adapter
+// ("Tool execution delegated to client") is NOT touched — that one is a real
+// pause, not a no-op.
+const fileTools = findUniqueBundle(files, "file mutation no-op terminate", [
+  "The replacement text is identical to the original.",
+  "The file already has identical content.",
+]);
+
+fileTools.source = replaceOnce(
+  fileTools.source,
+  [
+    "\t\t\t\t\t\t...textResult(`No changes made to ${path}. The replacement text is identical to the original.`, { changed: false }),",
+    "\t\t\t\t\t\tterminate: true",
+  ].join("\n"),
+  "\t\t\t\t\t\t...textResult(`No changes made to ${path}. The replacement text is identical to the original.`, { changed: false })",
+  "edit no-op must not terminate the run",
+);
+
+fileTools.source = replaceOnce(
+  fileTools.source,
+  [
+    "\t\t\t\t\t\t...textResult(`No changes made to ${path}. The replacement produced identical content.`, { changed: false }),",
+    "\t\t\t\t\t\tterminate: true",
+  ].join("\n"),
+  "\t\t\t\t\t\t...textResult(`No changes made to ${path}. The replacement produced identical content.`, { changed: false })",
+  "edit identical-content must not terminate the run",
+);
+
+fileTools.source = replaceOnce(
+  fileTools.source,
+  [
+    "\t\t\t\t\t...textResult(`No changes made to ${path}. The file already has identical content.`, { changed: false }),",
+    "\t\t\t\t\tterminate: true",
+  ].join("\n"),
+  "\t\t\t\t\t...textResult(`No changes made to ${path}. The file already has identical content.`, { changed: false })",
+  "write no-op must not terminate the run",
+);
+
+const patchTool = findUniqueBundle(files, "patch tool no-op terminate", [
+  "\t\t\t\t...result.noOp ? { terminate: true } : {}",
+  "Provide a patch input.",
+]);
+
+patchTool.source = replaceOnce(
+  patchTool.source,
+  [
+    "\t\t\t\tdetails: { summary: result.summary },",
+    "\t\t\t\t...result.noOp ? { terminate: true } : {}",
+  ].join("\n"),
+  "\t\t\t\tdetails: { summary: result.summary }",
+  "patch no-op must not terminate the run",
+);
+
 for (const file of [
   embeddedAgent,
   agentCommand,
   sessionManager,
   guardWrapper,
   selection,
+  fileTools,
+  patchTool,
 ]) {
   // filePath is confined to the enumerated, version-checked dist directory.
   // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -267,7 +348,15 @@ for (const file of [
 
 process.stdout.write(
   `Patched OpenClaw ${EXPECTED_OPENCLAW_VERSION}: ` +
-    [embeddedAgent, agentCommand, sessionManager, guardWrapper, selection]
+    [
+      embeddedAgent,
+      agentCommand,
+      sessionManager,
+      guardWrapper,
+      selection,
+      fileTools,
+      patchTool,
+    ]
       .map((file) => file.name)
       .join(", ") +
     "\n",
