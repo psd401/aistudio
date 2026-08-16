@@ -6,6 +6,7 @@ without changing the AgentCore wrapper. Each adapter implements the same interfa
 """
 
 import abc
+import collections
 import dataclasses
 import json
 import logging
@@ -320,6 +321,55 @@ UPSTREAM_RETRY_MAX_LATENCY_MS = 30_000
 # silently rounded back UP into an overshoot.
 UPSTREAM_RETRY_MIN_REMAINING_S = 60
 
+# One entry per session that asked a question and has not been answered yet.
+# This is a singleton adapter shared by every user in the container, so the
+# map is per-session; the cap keeps a session that never answers from pinning
+# an entry for the container's lifetime. Far above any real concurrent-asker
+# count — it is a leak stop, not a throttle.
+MAX_PENDING_QUESTIONS = 256
+
+# Frames buffered while waiting for the question.resolve ack, in case the
+# resumed run streams ahead of it. Bounded because the wait is only ~10s and
+# anything beyond this is a gateway misbehaving, not a run to reassemble.
+MAX_RESOLVE_BUFFERED_FRAMES = 200
+
+# Past that cap, chat-channel frames are STILL kept — they carry the run's
+# terminal state, and losing it stalls the turn to its full deadline. They are
+# a handful of state transitions, not a stream, so this second allowance is
+# small on purpose.
+MAX_RESOLVE_TERMINAL_FRAMES = 16
+
+# How long to wait for the question.resolve ack before giving up and falling
+# back to a normal chat.send. Small on purpose: this sits in front of the
+# user's turn, and every path out of it is safe.
+RESOLVE_ACK_WAIT_S = 10
+
+
+def _frames_from_run(frames, run_id) -> bool:
+    """True when any buffered frame belongs to `run_id`.
+
+    Used as proof that a run has resumed. This socket carries every run in the
+    container, so "some frames arrived" proves nothing on its own — the run id
+    is what makes it evidence rather than a guess.
+
+    An unknown run id is never evidence. Without this, a None run_id matches
+    any payload that also lacks one — two unknowns comparing equal into "it
+    resumed", which is the answer that skips the fallback and strands the
+    user's message. The only caller guards against it today; the guard is 100
+    lines away and this function decides whether a turn re-runs, so it defends
+    itself.
+    """
+    if not run_id:
+        return False
+    for raw in frames:
+        try:
+            payload = (json.loads(raw) or {}).get("payload") or {}
+        except (json.JSONDecodeError, ValueError, AttributeError):
+            continue
+        if payload.get("runId") == run_id:
+            return True
+    return False
+
 
 def _classify_chat_error(error_message: str) -> str:
     """Name the chat-error class from OpenClaw's message.
@@ -618,6 +668,20 @@ class OpenClawAdapter(HarnessAdapter):
         # --token` (launcher) and reused in the connect envelope (client), so the
         # two always agree within this process.
         self._gateway_token: str = secrets.token_urlsafe(32)
+        # Questions the agent asked on a PREVIOUS turn, still pending on the
+        # gateway. The asking user's next message is the answer, not a new
+        # request — see _resolve_pending_question.
+        #
+        # KEYED BY SESSION, deliberately. This is a module-level singleton
+        # adapter (agentcore_wrapper.py) serving every user in the container,
+        # and turns from different sessions interleave freely — the run-id
+        # fence in _process_once exists for exactly that reason. A single
+        # scalar here would let ANY other user's turn clear the entry between
+        # the ask and the answer, dropping the pending question back onto the
+        # pre-send abort path this whole mechanism exists to avoid. The bug
+        # would be intermittent and multi-user only, which is the worst kind
+        # to find in production.
+        self._pending_questions: dict = {}
 
     def configure(self, config: dict) -> None:
         """Configure the OpenClaw adapter. Idempotent — safe to call multiple times."""
@@ -1240,6 +1304,240 @@ class OpenClawAdapter(HarnessAdapter):
             return False
         return result.latency_ms <= UPSTREAM_RETRY_MAX_LATENCY_MS
 
+
+    def _remember_pending_question(
+        self, session_id, pending_id, question_ids, run_id
+    ):
+        """Hold one pending question per session, oldest evicted first.
+
+        Bounded because a session that asks and never answers would otherwise
+        leave its entry here for the life of the container. Eviction is safe:
+        the gateway expires questions on its own, and a dropped entry only
+        costs us the resolve, falling back to a normal chat.send.
+
+        `run_id` is the run that ASKED, and therefore the run that resumes when
+        the question is answered. The answering turn has no chat.send to learn
+        a run id from, so without this the run fence would have nothing to
+        compare against — see _process_once.
+
+        Access is unsynchronized: agentcore_wrapper serializes the whole
+        entrypoint behind `_invocation_lock` (grep that name — the definition
+        carries the other half of this note), so no two turns are ever inside
+        _process_once at once. That invariant lives in another file and is
+        enforced by nothing but these two comments; if the lock is narrowed or
+        the container ever runs multiple workers, this dict needs its own
+        synchronization. No test would catch it — the interleaving tests
+        interleave sequentially, which is all a single-threaded replay can do.
+        """
+        self._pending_questions.pop(session_id, None)
+        self._pending_questions[session_id] = {
+            "id": pending_id,
+            "question_ids": question_ids,
+            "run_id": run_id,
+        }
+        while len(self._pending_questions) > MAX_PENDING_QUESTIONS:
+            evicted, _ = next(iter(self._pending_questions.items()))
+            self._pending_questions.pop(evicted, None)
+            # Warning, not info: the cap sits far above any plausible number
+            # of concurrent askers, so an eviction firing at all means a leak
+            # or an abuse pattern, not routine churn. At info it would be lost
+            # in normal log volume.
+            logger.warning(
+                "evicted pending question for session %s; %d sessions are "
+                "holding one (cap %d)",
+                str(evicted)[:12], len(self._pending_questions),
+                MAX_PENDING_QUESTIONS,
+            )
+
+    def _resolve_pending_question(self, ws, websocket, message, session_id):
+        """Answer the question the gateway is still holding, if there is one.
+
+        The agent's ask leaves a question in `pending` on the gateway, waiting
+        for `question.resolve`. This adapter used to walk away from it and let
+        the next turn's pre-send `chat.abort` cancel it — the bundle's ask-user
+        tool registers an abort listener that fires
+        `cancelPendingQuestion("run-abort")` — after which the model correctly
+        reported that its question had been aborted. Users read that as the
+        agent inventing an abort they never performed. They were right that
+        they never aborted anything; we did, on every turn.
+
+        Params are exactly QuestionResolveParamsSchema:
+            { id, answers: { answers: { <questionId>: [<text>] } }, resolvedBy }
+        which is the same shape OpenClaw's own plain-text claim path sends.
+
+        Returns `(answered, frames, run_id)`. `answered` is True when the gateway
+        accepted the answer, meaning the ORIGINAL run resumes and this turn
+        must listen to it rather than starting a new one; False for anything
+        else — expired, cancelled, unknown id, transport error — so the caller
+        falls back to a normal chat.send. A question we cannot answer must
+        never block the user's message.
+
+        `run_id` is the run that asked and is now resuming — the answering
+        turn issues no chat.send, so this is the only place the run fence can
+        learn which run this turn's reply may be built from.
+
+        `frames` are raw messages that arrived while waiting for the resolve
+        ack. The resumed run streams onto this same socket, so those frames
+        can be its continuation; they are handed back for the event loop to
+        consume rather than dropped. (The pre-send abort drain below discards
+        its frames on purpose — those belong to a run being torn down. This
+        one does not.)
+        """
+        # Only this session's question, and only ever consumed once.
+        pending = self._pending_questions.pop(session_id, None)
+        if not pending:
+            return False, [], None
+
+        # Kill switch, matching OPENCLAW_PRESEND_ABORT on the path this one
+        # replaces. Disabling it restores the previous behaviour exactly —
+        # the question is abandoned and the abort below cancels it — so an
+        # operator can back this out without shipping an image.
+        if os.environ.get("OPENCLAW_QUESTION_RESOLVE", "1") == "0":
+            logger.info("question.resolve disabled by OPENCLAW_QUESTION_RESOLVE=0")
+            return False, [], None
+
+        question_ids = pending.get("question_ids") or []
+        if not question_ids:
+            return False, [], None
+        # One free-text reply, N sub-questions: every id gets the same text.
+        #
+        # OUR CHOICE, not a verified mirror of upstream's plain-text path —
+        # the pinned bundle was not available to check when this was written,
+        # and it is recorded that way rather than implied to be authoritative.
+        # The reasoning: answering only the first id leaves the rest unanswered,
+        # and a partial resolve the gateway refuses puts us straight back on
+        # the abort-and-cancel path this whole mechanism removes. A redundant
+        # answer the agent can parse beats a refused one.
+        answers = {qid: [message] for qid in question_ids}
+
+        # Popped before every failure branch below, including a transport
+        # error, and never restored. That is deliberate rather than an
+        # oversight: on any path out of here that is not "answered", the
+        # caller's pre-send chat.abort fires and cancels the question on the
+        # gateway anyway, so a retained entry would only point at something
+        # already destroyed — and would resolve a stale id on the NEXT turn.
+        buffered: list = []
+        overflowed = False
+        terminal_overflowed = False
+        resolve_id = str(uuid.uuid4())
+        try:
+            ws.send(json.dumps({
+                "type": "req",
+                "id": resolve_id,
+                "method": "question.resolve",
+                "params": {
+                    "id": pending["id"],
+                    "answers": {"answers": answers},
+                    "resolvedBy": "plain-text",
+                },
+            }))
+            deadline = time.time() + RESOLVE_ACK_WAIT_S
+            while True:
+                # The socket timeout is what actually bounds this, so it has to
+                # shrink with the deadline. A single settimeout() up front only
+                # bounds each recv() individually: a frame at the 9s mark would
+                # re-enter recv() with a fresh 10s budget, so the real ceiling
+                # was double the one the comment claimed.
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                ws.settimeout(remaining)
+                try:
+                    raw = ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    break
+                try:
+                    reply = json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if reply.get("type") == "res" and reply.get("id") == resolve_id:
+                    ok = bool(reply.get("ok"))
+                    status = (reply.get("payload") or {}).get("status")
+                    answered = ok and status == "answered"
+                    logger.info(
+                        "question.resolve ok=%s status=%s id=%s buffered=%d",
+                        ok, status, str(pending["id"])[:12], len(buffered),
+                    )
+                    # Frames only matter when the run actually resumes. On any
+                    # other outcome the caller aborts and re-sends, so keeping
+                    # them would replay a dead run's events into a new turn.
+                    return (
+                        answered,
+                        buffered if answered else [],
+                        pending.get("run_id") if answered else None,
+                    )
+                # Not the ack — the resumed run's own output, arriving ahead of
+                # or interleaved with it. Bounded so a chatty gateway cannot
+                # grow this without limit inside the ack window.
+                if len(buffered) < MAX_RESOLVE_BUFFERED_FRAMES:
+                    buffered.append(raw)
+                    continue
+
+                if not overflowed:
+                    overflowed = True
+                    logger.warning(
+                        "question.resolve buffer hit %d frames before the ack; "
+                        "narration past this point is dropped, terminal state "
+                        "is not",
+                        MAX_RESOLVE_BUFFERED_FRAMES,
+                    )
+
+                # Drop the narration, never the chat channel — it carries the
+                # run's terminal state (final/error/aborted). Both alternatives
+                # are worse and both were tried: giving up here re-sends the
+                # answer to a run the gateway already accepted (double
+                # execution), and discarding everything loses the final event
+                # (stalls to the full deadline). See the commit message.
+                is_chat_frame = (
+                    reply.get("type") == "event" and reply.get("event") == "chat"
+                )
+                if not is_chat_frame:
+                    continue
+                if len(buffered) < (
+                    MAX_RESOLVE_BUFFERED_FRAMES + MAX_RESOLVE_TERMINAL_FRAMES
+                ):
+                    buffered.append(raw)
+                elif not terminal_overflowed:
+                    # The narration cap is a truncated reply. THIS one can cost
+                    # the run's final event, and a turn that loses its final
+                    # sits until the outer deadline and answers "the agent
+                    # stalled". The narration cap already warns; without this
+                    # the worse failure was the silent one, diagnosable only by
+                    # noticing a stall with no cause in the log.
+                    terminal_overflowed = True
+                    logger.warning(
+                        "question.resolve terminal-frame allowance (%d) "
+                        "exhausted before the ack; a chat state transition may "
+                        "be lost and this turn may run to its deadline",
+                        MAX_RESOLVE_TERMINAL_FRAMES,
+                    )
+
+            # No ack inside the window. That is NOT the same as "refused" —
+            # the ack may simply be slow, and the caller's fallback aborts and
+            # re-sends the identical text, running the user's answer twice.
+            #
+            # There is direct evidence available, so use it instead of
+            # guessing: a run blocked on a question emits nothing. If frames
+            # from the ASKING run arrived during this wait, that run resumed,
+            # which it only does once the gateway accepts the answer. Treat it
+            # as accepted and listen, rather than aborting work already in
+            # flight.
+            asking_run = pending.get("run_id")
+            if asking_run and _frames_from_run(buffered, asking_run):
+                logger.warning(
+                    "question.resolve ack not seen in %ss, but run %s is "
+                    "already streaming — treating the answer as accepted "
+                    "rather than sending it a second time",
+                    RESOLVE_ACK_WAIT_S, str(asking_run)[:12],
+                )
+                return True, buffered, asking_run
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "question.resolve failed (falling back to chat.send): %s",
+                str(exc)[:200],
+            )
+        return False, [], None
+
     def _process_once(
         self,
         message: str,
@@ -1426,7 +1724,39 @@ class OpenClawAdapter(HarnessAdapter):
                 # protocol (sessions.reset would additionally wipe stored
                 # conversation state, so we deliberately do NOT use it here).
                 # Kill switch: OPENCLAW_PRESEND_ABORT=0.
-                if os.environ.get("OPENCLAW_PRESEND_ABORT", "1") != "0":
+                # Answer the gateway's pending question BEFORE anything can
+                # cancel it. The pre-send abort below is exactly what used to
+                # kill it, so the two are mutually exclusive by construction.
+                # Before the resolve, so a turn that answers a pending
+                # question counts the ack wait the user actually waited
+                # through. Recorded for the FAILURE path too: a resolve that
+                # times out and falls back has already burned the ack wait and
+                # the abort drain, and restarting the clock afterwards would
+                # report the slowest turns as the fastest.
+                # "Had a pending entry", not "sent a resolve": with
+                # OPENCLAW_QUESTION_RESOLVE=0 the helper pops the entry and
+                # returns before any ws.send, and this is still True.
+                had_pending_question = session_id in self._pending_questions
+                resolve_started_at = time.time()
+                (
+                    answered_pending,
+                    resumed_frames,
+                    resumed_run_id,
+                ) = self._resolve_pending_question(
+                    ws, websocket, message, session_id
+                )
+                # deque, not list: the event loop drains this from the front,
+                # and popping index 0 off a list is O(n) each time.
+                resumed_frames = collections.deque(resumed_frames)
+                if answered_pending:
+                    logger.info(
+                        "pending question answered; resuming the original run "
+                        "instead of starting a new one"
+                    )
+
+                if not answered_pending and os.environ.get(
+                    "OPENCLAW_PRESEND_ABORT", "1"
+                ) != "0":
                     try:
                         abort_id = str(uuid.uuid4())
                         ws.send(json.dumps({
@@ -1474,21 +1804,35 @@ class OpenClawAdapter(HarnessAdapter):
                 # multi-user case) other users' history entirely. The
                 # AgentCore runtime gives us a stable per-user session_id;
                 # use it directly.
+                # When the answer was accepted the ORIGINAL run resumes and
+                # streams its continuation on this same socket. Sending a new
+                # chat.send here would run the user's answer a second time as a
+                # fresh prompt — OpenClaw's own claim path returns without
+                # queueing for the same reason.
                 chat_id = str(uuid.uuid4())
                 # Latency clock starts the instant we hand the message to
                 # the gateway. final_state event stops it. Captured before
                 # ws.send so we don't count our own serialization.
-                chat_send_at = time.time()
-                ws.send(json.dumps({
-                    "type": "req",
-                    "id": chat_id,
-                    "method": "chat.send",
-                    "params": {
-                        "sessionKey": session_id or "default",
-                        "message": message,
-                        "idempotencyKey": chat_id,
-                    },
-                }))
+                #
+                chat_send_at = (
+                    resolve_started_at if had_pending_question else time.time()
+                )
+                if answered_pending:
+                    # No chat.send: listen for the resumed run. The loop below
+                    # ends on the chat `final` event, which that run still
+                    # emits, rather than on a chat.send response id.
+                    pass
+                else:
+                    ws.send(json.dumps({
+                        "type": "req",
+                        "id": chat_id,
+                        "method": "chat.send",
+                        "params": {
+                            "sessionKey": session_id or "default",
+                            "message": message,
+                            "idempotencyKey": chat_id,
+                        },
+                    }))
 
                 # Step 4: Collect response events until final.
                 # Instrumented to log every event type we see so we can
@@ -1566,7 +1910,24 @@ class OpenClawAdapter(HarnessAdapter):
                 # answered with that stale run's text, and the user's actual
                 # request was never processed. A confidently wrong answer is a
                 # worse failure than an error, so this fences by run id.
-                turn_run_id: Optional[str] = None
+                #
+                # A resumed-question turn sends no chat.send, so it never sees
+                # a `started` res and would leave this None — and both fences
+                # below are gated on it being truthy, so the whole mechanism
+                # would be OFF for exactly the turns that listen longest to a
+                # socket carrying other runs. Seed it from the run that asked;
+                # that is the run resuming, and it is the only run whose output
+                # belongs in this reply.
+                turn_run_id: Optional[str] = (
+                    resumed_run_id if answered_pending else None
+                )
+                if answered_pending and not turn_run_id:
+                    # Fails open, deliberately — an unfenced reply beats no
+                    # reply — but it is the pre-fix exposure, so say so.
+                    logger.warning(
+                        "resumed question carried no run id; this turn's reply "
+                        "is not run-fenced"
+                    )
                 # Counted, not silent: if this is ever large the gateway is
                 # delivering someone else's traffic and we want that visible in
                 # the turn log rather than inferred from a wrong answer.
@@ -1580,13 +1941,20 @@ class OpenClawAdapter(HarnessAdapter):
                 # with the scratchpad as the final reply.
                 ws.settimeout(60)
                 while time.time() < deadline:
-                    try:
-                        raw = ws.recv()
-                    except websocket.WebSocketTimeoutException:
-                        # Idle gap, not a failure — outer deadline still
-                        # governs. Fall through and let the while loop
-                        # re-check time.time().
-                        continue
+                    if resumed_frames:
+                        # The resumed run's output that arrived while we were
+                        # waiting for the question.resolve ack. Drained first
+                        # and in order, so the continuation this turn returns
+                        # is not missing its opening events.
+                        raw = resumed_frames.popleft()
+                    else:
+                        try:
+                            raw = ws.recv()
+                        except websocket.WebSocketTimeoutException:
+                            # Idle gap, not a failure — outer deadline still
+                            # governs. Fall through and let the while loop
+                            # re-check time.time().
+                            continue
                     msg = json.loads(raw)
                     mtype = msg.get("type")
                     mevent = msg.get("event") if mtype == "event" else None
@@ -2080,6 +2448,29 @@ class OpenClawAdapter(HarnessAdapter):
                             max(0, int(time.time() - chat_send_at)),
                             bool(prefix),
                         )
+                        # Remember it so the NEXT turn answers it instead of
+                        # cancelling it. The gateway holds this question open
+                        # (status pending, with expiresAtMs) waiting for
+                        # question.resolve; walking away is what left it to be
+                        # killed by the next turn's pre-send abort.
+                        pending_id = q_payload.get("id")
+                        if isinstance(pending_id, str) and pending_id:
+                            question_ids = [
+                                entry.get("id")
+                                for entry in (q_payload.get("questions") or [])
+                                if isinstance(entry, dict)
+                                and isinstance(entry.get("id"), str)
+                            ]
+                            # The run that asked is the run that resumes. Prefer
+                            # what the event says; fall back to this turn's own
+                            # run, which is the same run by construction — the
+                            # question came from it.
+                            asked_by = q_payload.get("runId")
+                            if not (isinstance(asked_by, str) and asked_by):
+                                asked_by = turn_run_id
+                            self._remember_pending_question(
+                                session_id, pending_id, question_ids, asked_by
+                            )
                         got_final = True
                         break
 

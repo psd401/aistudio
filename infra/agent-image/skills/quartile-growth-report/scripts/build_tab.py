@@ -48,7 +48,27 @@ def cell(record):
     return "/".join(part for part in parts if part != "")
 
 
-def build(records, school, grade, year, window, sections=None):
+def column_label(section_id, teachers):
+    """The header for a classroom column: the teacher, not a section number.
+
+    layout.md specifies `Teacher1 | … | School | District`. This emitted the
+    raw sectionid instead, so a principal opening the workbook saw column
+    headers like `274893` and had to be told which teacher that was. The agent
+    papered over it by hand-writing relabeling scripts after the fact — the one
+    thing this script exists to make unnecessary.
+
+    The id is kept alongside the name because two teachers can share a name and
+    section ids are what every downstream query keys on.
+    """
+    name = (teachers or {}).get(str(section_id))
+    if not name:
+        # A section with no Lead Teacher in PowerSchool. Named explicitly so it
+        # cannot be mistaken for a lookup that silently failed.
+        return f"(Not on file) ({section_id})"
+    return f"{name} ({section_id})"
+
+
+def build(records, school, grade, year, window, sections=None, teachers=None):
     """One tab's grid: a block per measure, quartile rows, then subgroups."""
     by_measure = defaultdict(lambda: defaultdict(dict))
     subgroups = defaultdict(list)
@@ -77,7 +97,11 @@ def build(records, school, grade, year, window, sections=None):
     for meas in sorted(by_measure):
         scopes = by_measure[meas]
         values.append([f"{meas} ({window})"])
-        values.append(["Quartile"] + [str(s) for s in section_ids] + ["School", "District"])
+        values.append(
+            ["Quartile"]
+            + [column_label(s, teachers) for s in section_ids]
+            + ["School", "District"]
+        )
         for label, key in QUARTILE_ROWS:
             row = [label]
             for section in section_ids:
@@ -117,6 +141,11 @@ def main() -> int:
         "Fall→Spring is a wrong report, not a cosmetic slip",
     )
     parser.add_argument(
+        "--teachers",
+        help='JSON map of sectionid -> teacher name, e.g. \'{"274893":"Hansen, Jane"}\'. '
+        "Sections without an entry render as (Not on file).",
+    )
+    parser.add_argument(
         "--emit",
         choices=("grid", "values", "addsheet"),
         default="values",
@@ -148,7 +177,26 @@ def main() -> int:
         if args.rows:
             handle.close()
 
-    tab = build(records, args.school, args.grade, args.year, args.window)
+    teachers = None
+    if args.teachers:
+        # A raw JSONDecodeError here reads as a script bug and costs the agent
+        # a debugging round trip — the exact tax this skill's docs exist to
+        # avoid. Name what was wrong and what the argument should look like.
+        try:
+            teachers = json.loads(args.teachers)
+        except (json.JSONDecodeError, ValueError) as exc:
+            parser.error(
+                f"--teachers is not valid JSON ({exc}). Expected a map of "
+                'sectionid to teacher name, e.g. \'{"274893": "Hansen, Jane"}\''
+            )
+        if not isinstance(teachers, dict):
+            parser.error(
+                "--teachers must be a JSON object mapping sectionid to teacher "
+                f"name, got {type(teachers).__name__}"
+            )
+    tab = build(
+        records, args.school, args.grade, args.year, args.window, teachers=teachers
+    )
 
     if args.emit == "grid":
         print(json.dumps(tab, indent=1))

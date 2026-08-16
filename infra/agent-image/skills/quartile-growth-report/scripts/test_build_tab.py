@@ -60,10 +60,12 @@ class Layout(unittest.TestCase):
 
     def test_classroom_columns_appear(self):
         # The per-teacher breakdown is the point of the report; aggregate.py
-        # emits sectionid so these columns can exist at all.
+        # emits sectionid so these columns can exist at all. Headers carry the
+        # teacher per layout.md — this originally asserted the raw section id,
+        # i.e. it pinned the bug instead of the spec.
         header = next(r for r in self.grid()["values"] if r and r[0] == "Quartile")
-        self.assertIn("S1", header)
-        self.assertIn("S2", header)
+        self.assertTrue(any("S1" in str(c) for c in header))
+        self.assertTrue(any("S2" in str(c) for c in header))
         self.assertEqual(header[-2:], ["School", "District"])
 
     def test_section_columns_are_ordered_deterministically(self):
@@ -127,3 +129,48 @@ class Payloads(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClassroomColumnsAreHeadedByTeacher(unittest.TestCase):
+    """layout.md says `Teacher1 | … | School | District`.
+
+    build_tab emitted raw section ids, so a principal saw headers like `274893`
+    and the agent hand-wrote relabeling scripts after the fact — the exact glue
+    this script exists to remove. The spec was in the same directory the whole
+    time; the tests asserted the implementation instead of it.
+    """
+
+    RECORDS = [
+        rec("class", "All", section="274893"),
+        rec("class", "All", section="274894"),
+        rec("school", "All"),
+        rec("district", "All"),
+    ]
+    TEACHERS = {"274893": "Hansen, Jane"}
+
+    def header(self, teachers):
+        grid = build_tab.build(
+            self.RECORDS, "Purdy", "3", "2025-26", "Fall→Spring", teachers=teachers
+        )
+        return next(r for r in grid["values"] if r and r[0] == "Quartile")
+
+    def test_the_teacher_name_is_the_column_header(self):
+        self.assertIn("Hansen, Jane (274893)", self.header(self.TEACHERS))
+
+    def test_a_section_with_no_teacher_says_so_explicitly(self):
+        # "(Not on file)" must not be mistaken for a lookup that failed.
+        self.assertIn("(Not on file) (274894)", self.header(self.TEACHERS))
+
+    def test_the_section_id_is_retained_alongside_the_name(self):
+        # Two teachers can share a name, and every downstream query keys on id.
+        header = self.header(self.TEACHERS)
+        self.assertTrue(any("274893" in str(c) for c in header))
+
+    def test_school_and_district_stay_the_last_two_columns(self):
+        self.assertEqual(self.header(self.TEACHERS)[-2:], ["School", "District"])
+
+    def test_no_map_still_renders_a_usable_header(self):
+        # Degrades to (Not on file) rather than crashing or emitting a bare id.
+        header = self.header(None)
+        self.assertNotIn("274893", header)
+        self.assertIn("(Not on file) (274893)", header)
