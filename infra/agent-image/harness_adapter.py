@@ -332,6 +332,12 @@ MAX_PENDING_QUESTIONS = 256
 # anything beyond this is a gateway misbehaving, not a run to reassemble.
 MAX_RESOLVE_BUFFERED_FRAMES = 200
 
+# Past that cap, chat-channel frames are STILL kept — they carry the run's
+# terminal state, and losing it stalls the turn to its full deadline. They are
+# a handful of state transitions, not a stream, so this second allowance is
+# small on purpose.
+MAX_RESOLVE_TERMINAL_FRAMES = 16
+
 # How long to wait for the question.resolve ack before giving up and falling
 # back to a normal chat.send. Small on purpose: this sits in front of the
 # user's turn, and every path out of it is safe.
@@ -1356,6 +1362,7 @@ class OpenClawAdapter(HarnessAdapter):
         answers = {qid: [message] for qid in question_ids}
 
         buffered: list = []
+        overflowed = False
         resolve_id = str(uuid.uuid4())
         try:
             ws.send(json.dumps({
@@ -1406,20 +1413,45 @@ class OpenClawAdapter(HarnessAdapter):
                 # Not the ack — the resumed run's own output, arriving ahead of
                 # or interleaved with it. Bounded so a chatty gateway cannot
                 # grow this without limit inside the ack window.
-                if len(buffered) >= MAX_RESOLVE_BUFFERED_FRAMES:
-                    # Do NOT keep reading and discarding. Dropping frames here
-                    # is the same bug this buffer was added to fix: the final
-                    # event goes with them and the turn hangs to its full
-                    # deadline, answering "the agent stalled". Giving up on the
-                    # resolve instead falls back to abort + chat.send, which
-                    # costs the in-flight work but answers the user.
+                if len(buffered) < MAX_RESOLVE_BUFFERED_FRAMES:
+                    buffered.append(raw)
+                    continue
+
+                if not overflowed:
+                    overflowed = True
                     logger.warning(
                         "question.resolve buffer hit %d frames before the ack; "
-                        "abandoning the resume and falling back to chat.send",
+                        "narration past this point is dropped, terminal state "
+                        "is not",
                         MAX_RESOLVE_BUFFERED_FRAMES,
                     )
-                    return False, [], None
-                buffered.append(raw)
+
+                # Two bad options here, and the third one is what this does.
+                #
+                # Give up and fall back to abort + chat.send: the ONLY thing
+                # that floods this window is a run already streaming, which
+                # means the gateway already accepted the answer. Aborting and
+                # re-sending the same text then runs the user's answer TWICE —
+                # once as the accepted resolve whose side effects are already
+                # partly done, once as a fresh prompt. Duplicate spreadsheets,
+                # duplicate writes, and no way for the user to know.
+                #
+                # Keep reading and discarding everything: the run's terminal
+                # chat event goes with it, so the turn waits for a final that
+                # already passed and stalls to its full deadline.
+                #
+                # So: drop the narration, never the chat channel. It carries
+                # the state transitions (final/error/aborted) and is a handful
+                # of frames, not a stream. Worst case is a reply missing its
+                # middle — visibly truncated, logged, and honest — rather than
+                # a silent double-execution or a stall.
+                is_chat_frame = (
+                    reply.get("type") == "event" and reply.get("event") == "chat"
+                )
+                if is_chat_frame and len(buffered) < (
+                    MAX_RESOLVE_BUFFERED_FRAMES + MAX_RESOLVE_TERMINAL_FRAMES
+                ):
+                    buffered.append(raw)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "question.resolve failed (falling back to chat.send): %s",

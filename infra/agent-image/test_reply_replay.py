@@ -776,20 +776,29 @@ class AnsweringAQuestionDoesNotAbortIt(unittest.TestCase):
         )
         self.assertIn("Sheet shared", second)
 
-    def test_a_flood_before_the_ack_falls_back_instead_of_hanging(self):
-        # The cap must not silently truncate. Discarding frames past it takes
-        # the final event with them and hangs the turn to its full deadline —
-        # the exact failure the buffer exists to prevent. Falling back to
-        # abort + chat.send costs the in-flight work but answers the user.
+    def test_a_flood_before_the_ack_truncates_but_never_double_sends(self):
+        # Only a run already streaming can flood this window — which means the
+        # gateway already accepted the answer. Falling back to abort +
+        # chat.send would then run the user's answer a SECOND time, with the
+        # first run's side effects already partly done. Dropping everything
+        # instead loses the terminal chat event and stalls the turn.
+        #
+        # So the narration is dropped and the chat channel is not: a visibly
+        # truncated reply, rather than a silent double-execution or a stall.
         with mock.patch.object(harness_adapter, "MAX_RESOLVE_BUFFERED_FRAMES", 2):
             _, second, g2 = two_turn_replay(
                 [ASK], "Keep going",
-                [says(f"chunk {i} ") for i in range(6)],
+                [says(f"chunk{i} ") for i in range(6)],
                 resume_before_ack=True,
             )
         sends = [m for m in g2.sent if m.get("method") == "chat.send"]
-        self.assertEqual(len(sends), 1, "overflow must fall back, not hang")
+        self.assertEqual(sends, [], "the answer must never be sent twice")
+        aborts = [m for m in g2.sent if m.get("method") == "chat.abort"]
+        self.assertEqual(aborts, [], "the accepted run must not be aborted")
+        self.assertEqual(g2.question_status, "answered")
+        # Completed rather than stalled, and what survived is real text.
         self.assertNotIn("stalled", second)
+        self.assertIn("chunk0", second)
 
     def test_pending_questions_are_capped_and_evict_oldest_first(self):
         adapter = OpenClawAdapter()
