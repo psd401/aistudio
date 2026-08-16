@@ -75,13 +75,55 @@ def sql_escape(value):
     return str(value).replace("'", "''")
 
 
-def run_json(argv, what):
+# psd-workspace's splitCommand has NO escape syntax: a quote inside a
+# same-quoted token ends the token. Its own source says so, from a live 2026-07-06
+# failure — "any content with an apostrophe, mixed quotes, or newlines cannot
+# ride inside --command at all". Payloads dodge this with --json-file, whose
+# content becomes exactly one argv token, but `--params` has no file form, so
+# whatever goes there must be quote-free by construction.
+#
+# The typographic apostrophe is not a quote character to the tokenizer and is
+# what a title would use in print anyway, so a school like "O'Brien Elementary"
+# keeps a correct-looking name instead of a broken command.
+SAFE_APOSTROPHE = "\u2019"
+
+
+def command_literal(value):
+    """Make a value safe to splice into a --command string."""
+    text = str(value).replace("'", SAFE_APOSTROPHE).replace('"', SAFE_APOSTROPHE)
+    return " ".join(text.split())
+
+
+def assert_command_safe(command):
+    """Fail loudly if an unquotable character reached the command string.
+
+    A late failure in the share step, after every grade has been extracted and
+    written, is exactly what this script exists to prevent — so this refuses
+    before the call rather than after.
+    """
+    payload = command.split("--params", 1)[-1]
+    if "'" in payload.replace("'{", "").replace("}'", ""):
+        raise ReportError(
+            f"unquotable character in a workspace command: {command[:200]}"
+        )
+    return command
+
+
+def run_json(argv, what, timeout=900):
     """Run a command and parse its stdout as JSON.
 
     Errors carry the command's own stderr. A report that dies on step 4 of 30
     is only debuggable if the failure says which step and what the tool said.
     """
-    done = subprocess.run(argv, capture_output=True, text=True)
+    try:
+        done = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        # Now that this runs outside the turn deadline, nothing else would
+        # ever stop a hung call — and a hang leaves no checkpoint, so the
+        # re-run would hang in the same place.
+        raise ReportError(f"{what} timed out after {timeout}s")
     if done.returncode != 0:
         raise ReportError(
             f"{what} failed (exit {done.returncode}): "
@@ -142,7 +184,7 @@ def workspace(command, user, scope="agent", json_file=None):
     argv = ["node", WORKSPACE, "--user", user, "--scope", scope]
     if json_file:
         command = f"{command} --json-file {json_file}"
-    argv += ["--command", command]
+    argv += ["--command", assert_command_safe(command)]
     return run_json(argv, f"workspace ({command.split(' --')[0]})")
 
 
@@ -321,7 +363,7 @@ def create_workbook(title, user):
     """
     created = workspace(
         "sheets spreadsheets create "
-        f"--params '{json.dumps({'properties': {'title': title}})}'",
+        f"--params '{json.dumps({'properties': {'title': command_literal(title)}})}'",
         user,
     )
     sheet_id = created.get("spreadsheetId") or (
@@ -345,6 +387,8 @@ def add_tab(sheet_id, title, user, work_dir):
     payload = work_dir / f"addsheet-{title}.json"
     payload.write_text(json.dumps(
         {"requests": [{"addSheet": {"properties": {"title": str(title)}}}]}))
+    # The title rides in the FILE here, not the command, so it needs no
+    # sanitising — only the params below are spliced.
     return workspace(
         "sheets spreadsheets batchUpdate "
         f"--params '{json.dumps({'spreadsheetId': sheet_id})}'",

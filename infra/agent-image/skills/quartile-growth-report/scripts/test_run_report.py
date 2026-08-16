@@ -192,3 +192,98 @@ class RosterDefinesTheGradeSpan(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CommandStringsSurviveApostrophes(unittest.TestCase):
+    """psd-workspace's splitCommand has no escape syntax.
+
+    Its own source records the live failure: "any content with an apostrophe,
+    mixed quotes, or newlines cannot ride inside --command at all"
+    (2026-07-06). `--params` has no file form, so anything spliced there must
+    be quote-free by construction. The SQL path was already escaped; this is
+    the same character arriving through the other door, and it would have
+    broken the workbook AFTER every grade was extracted — a late failure in
+    the script written to remove late failures.
+    """
+
+    def test_a_straight_apostrophe_never_reaches_a_command(self):
+        self.assertNotIn("'", R.command_literal("O'Brien Elementary"))
+
+    def test_the_name_still_reads_correctly(self):
+        self.assertEqual(
+            R.command_literal("O'Brien Elementary"),
+            "O\u2019Brien Elementary",
+        )
+
+    def test_double_quotes_are_handled_too(self):
+        self.assertNotIn('"', R.command_literal('The "Annex" School'))
+
+    def test_newlines_cannot_split_a_token(self):
+        self.assertEqual(R.command_literal("Harbor\nRidge"), "Harbor Ridge")
+
+    def test_the_workbook_title_is_sanitised_before_it_is_spliced(self):
+        seen = {}
+
+        def fake_workspace(command, user, scope="agent", json_file=None):
+            seen["command"] = command
+            return {"spreadsheetId": "SHEET1"}
+
+        R.workspace = fake_workspace
+        R.create_workbook("O'Brien Elementary - Report (2025-26)", "u@psd401.net")
+        self.assertNotIn("O'Brien", seen["command"])
+        self.assertIn("Brien", seen["command"])
+
+    def test_the_guard_refuses_a_command_it_cannot_quote(self):
+        with self.assertRaises(R.ReportError):
+            R.assert_command_safe("sheets spreadsheets create --params '{\'x\': 1}'")
+
+
+class HungCallsAreBounded(unittest.TestCase):
+    """Once this runs outside the turn deadline, nothing else stops a hang.
+
+    And a hang leaves no checkpoint, so the re-run would wedge in the same
+    place — the one failure mode checkpointing cannot help with.
+    """
+
+    def test_the_timeout_is_actually_passed_to_subprocess(self):
+        # The point is the kwarg reaching subprocess.run. Asserting only that
+        # TimeoutExpired becomes a ReportError tests the handler and lets the
+        # kwarg be dropped silently — which is precisely how a hang would come
+        # back.
+        seen = {}
+
+        def capture(argv, **kwargs):
+            seen.update(kwargs)
+            raise AssertionError("stop here")
+
+        original = R.subprocess.run
+        R.subprocess.run = capture
+        try:
+            with self.assertRaises(AssertionError):
+                R.run_json(["true"], "call", timeout=42)
+        finally:
+            R.subprocess.run = original
+        self.assertEqual(seen.get("timeout"), 42)
+
+    def test_a_timeout_becomes_a_report_error(self):
+        import subprocess as sp
+
+        def boom(*a, **k):
+            raise sp.TimeoutExpired(cmd="x", timeout=1)
+
+        original = R.subprocess.run
+        R.subprocess.run = boom
+        try:
+            with self.assertRaises(R.ReportError) as caught:
+                R.run_json(["true"], "wedged call", timeout=1)
+            self.assertIn("timed out", str(caught.exception))
+        finally:
+            R.subprocess.run = original
+
+    def test_every_external_call_inherits_a_bound(self):
+        # A default of None on run_json would make every caller unbounded
+        # while these tests still passed.
+        import inspect
+        default = inspect.signature(R.run_json).parameters["timeout"].default
+        self.assertIsInstance(default, int)
+        self.assertGreater(default, 0)
