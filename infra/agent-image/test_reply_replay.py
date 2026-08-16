@@ -112,7 +112,7 @@ def thinks(text):
     return agent_event("thinking", {"text": text, "delta": text})
 
 
-def runs_task(kind="exec", status="running"):
+def runs_task(kind="exec", status="running", run_id=TURN_RUN_ID):
     """An `event:task` frame — long-running tool execution.
 
     Shape from the live runtime's own openclaw_kind_shape diagnostic:
@@ -123,7 +123,7 @@ def runs_task(kind="exec", status="running"):
     return {"type": "event", "event": "task", "payload": {
         "action": "upserted",
         "task": {"agentId": "main", "id": "t1", "taskId": "t1", "kind": kind,
-                 "status": status, "runId": TURN_RUN_ID, "title": kind,
+                 "status": status, "runId": run_id, "title": kind,
                  "sessionKey": "agent:main:replay", "createdAt": 1,
                  "updatedAt": 2, "startedAt": 1, "ownerKey": "o",
                  "progressSummary": "p", "runtime": "r", "sourceId": "s"}}}
@@ -1294,6 +1294,25 @@ class SegmentsEndAtAnyModelActivity(unittest.TestCase):
     def test_deltas_of_one_message_still_concatenate(self):
         text = replay([says("The "), says("report "), says("is ready.")])
         self.assertEqual(text.strip(), "The report is ready.")
+
+    def test_a_foreign_task_frame_cannot_suppress_this_turns_answer(self):
+        # The operator socket carries every run in the container, so another
+        # session's long-running exec emits task frames here. Unfenced, one
+        # would mark THIS turn's finished answer as scratchpad on the strength
+        # of somebody else's tool call.
+        text = replay([says("The report is ready: https://example.test/s"),
+                       runs_task(run_id="run-somebody-else")])
+        self.assertIn("The report is ready", text)
+
+    def test_a_foreign_task_frame_cannot_split_this_turns_answer(self):
+        text = replay([says("one "), runs_task(run_id="run-somebody-else"),
+                       says("two")])
+        self.assertEqual(text.strip(), "one two")
+
+    def test_our_own_task_frame_still_ends_the_segment(self):
+        # The fence must not defeat the fix it is protecting.
+        text = replay([says("scratchpad. "), runs_task(), says("answer.")])
+        self.assertEqual(text.strip(), "answer.")
 
     def test_a_non_tool_item_before_final_does_not_discard_the_answer(self):
         # The carve-out _is_tool_activity_stream was written for. Fixing

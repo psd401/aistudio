@@ -2393,6 +2393,32 @@ class OpenClawAdapter(HarnessAdapter):
                         # timers, not the model doing something, and a
                         # heartbeat landing mid-stream must never split a
                         # message that is still being written.
+                        # Fenced like every other stream that mutates turn
+                        # state. This socket is operator-scoped, so a
+                        # concurrent subagent's long-running exec emits task
+                        # frames here too — and an unfenced one would mark THIS
+                        # turn's finished answer as scratchpad and blank
+                        # response_text, on the strength of somebody else's
+                        # tool call. That is the 2026-08-14 incident's shape,
+                        # which is why the agent and chat streams are fenced;
+                        # this branch was added without it.
+                        #
+                        # The id sits one level deeper than on the other
+                        # streams (payload.task.runId, not payload.runId).
+                        task_payload = msg.get("payload") or {}
+                        task_detail = task_payload.get("task")
+                        task_run_id = (
+                            task_detail.get("runId")
+                            if isinstance(task_detail, dict) else None
+                        )
+                        if (
+                            isinstance(task_run_id, str)
+                            and task_run_id
+                            and turn_run_id
+                            and task_run_id != turn_run_id
+                        ):
+                            foreign_run_events += 1
+                            continue
                         if agent_assistant_accum or response_text:
                             assistant_boundary_pending = True
                             tool_activity_since_text = True
