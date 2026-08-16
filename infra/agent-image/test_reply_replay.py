@@ -34,6 +34,7 @@ Run:
 import collections
 import json
 import os
+import pathlib
 import sys
 import time
 import unittest
@@ -1363,3 +1364,65 @@ class SegmentsEndAtAnyModelActivity(unittest.TestCase):
         # is how the user got "Fix that single line directly." as a reply.
         text = replay([says("Only the load_csv line is broken."), runs_task()])
         self.assertNotIn("load_csv", text)
+
+
+class PromotedJobDoesNotAbortTheRunItContinues(unittest.TestCase):
+    """Measured on dev 2026-08-16 (Artondale quartile report):
+
+        15:06:44  deadline expired -> promoted to a background job
+        15:07:22  ECS job starts
+        15:07:53  pre-send chat.abort  ok=True
+        15:08:12  job posts "nothing written to the sheet yet"
+        15:08:47  job stops — 85 seconds, no data extracted
+
+    Promotion happens BECAUSE the OpenClaw run is still going when our
+    deadline hits. The job's first act was to abort it, so it started from
+    nothing. The model then told the user they had interrupted it — true, and
+    not the user.
+
+    Only the job runner sends deadline_s, clamped above the interactive
+    ceiling, so that is the marker.
+    """
+
+    LONG = harness_adapter.LONG_JOB_DEADLINE_THRESHOLD_S + 1
+
+    def _run(self, deadline_s):
+        gateway = FakeGateway([says("done.")])
+        fake_websocket = mock.Mock()
+        fake_websocket.create_connection.return_value = gateway
+        fake_websocket.WebSocketTimeoutException = _FakeTimeout
+        adapter = OpenClawAdapter()
+        adapter._ready = True
+        zero = {"model_calls": 0, "input": 0, "output": 0,
+                "cache_read": 0, "cache_write": 0}
+        with mock.patch.dict(sys.modules, {"websocket": fake_websocket}), \
+             mock.patch.object(OpenClawAdapter, "_read_turn_usage", return_value=zero), \
+             mock.patch.object(harness_adapter, "record_failure"):
+            adapter._process_once("go", "s1", deadline_s=deadline_s)
+        return [m.get("method") for m in gateway.sent]
+
+    def test_a_promoted_job_turn_sends_no_pre_send_abort(self):
+        self.assertNotIn("chat.abort", self._run(self.LONG))
+
+    def test_a_promoted_job_turn_still_sends_the_message(self):
+        self.assertIn("chat.send", self._run(self.LONG))
+
+    def test_an_interactive_turn_keeps_the_abort(self):
+        # The abort still clears a wedged reply session on the path it was
+        # written for (2026-07-01, "I encountered an error" on every follow-up).
+        self.assertIn("chat.abort", self._run(None))
+
+    def test_a_short_explicit_deadline_is_not_a_promoted_job(self):
+        # Cron sends its own bounded deadline; only the long-job override
+        # clears the threshold.
+        self.assertIn("chat.abort", self._run(120))
+
+    def test_the_threshold_matches_the_wrapper(self):
+        # Two modules keying off one number. If the wrapper's threshold moves,
+        # a promoted job silently starts aborting itself again.
+        wrapper = pathlib.Path(__file__).with_name("agentcore_wrapper.py").read_text()
+        self.assertIn(
+            f"LONG_JOB_DEADLINE_THRESHOLD_SECONDS = "
+            f"{harness_adapter.LONG_JOB_DEADLINE_THRESHOLD_S}",
+            wrapper,
+        )

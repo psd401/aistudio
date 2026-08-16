@@ -327,6 +327,12 @@ UPSTREAM_RETRY_MAX_LATENCY_MS = 30_000
 # silently rounded back UP into an overshoot.
 UPSTREAM_RETRY_MIN_REMAINING_S = 60
 
+# Above this, a payload deadline can only be the async-job runner's explicit
+# override — interactive turns are clamped to 550 and send no override at all.
+# Mirrors agentcore_wrapper.LONG_JOB_DEADLINE_THRESHOLD_SECONDS; the two must
+# agree, because that module uses the same number to pick the long drain.
+LONG_JOB_DEADLINE_THRESHOLD_S = 600
+
 # One entry per session that asked a question and has not been answered yet.
 # This is a singleton adapter shared by every user in the container, so the
 # map is per-session; the cap keeps a session that never answers from pinning
@@ -1877,9 +1883,47 @@ class OpenClawAdapter(HarnessAdapter):
                         "instead of starting a new one"
                     )
 
-                if not answered_pending and os.environ.get(
-                    "OPENCLAW_PRESEND_ABORT", "1"
-                ) != "0":
+                # A PROMOTED JOB MUST NOT ABORT THE RUN IT EXISTS TO FINISH.
+                #
+                # The comment above is right about interactive turns and wrong
+                # about this one. Promotion happens precisely BECAUSE the
+                # OpenClaw run is still going when our deadline hits — we stop
+                # listening, the run keeps working, and a background job picks
+                # it up. That job runs on ECS, outside the router's per-session
+                # lock, so "no legitimate work is active here" is false for it.
+                #
+                # Measured on dev 2026-08-16, an Artondale quartile report:
+                #     15:06:44  deadline expired -> promoted
+                #     15:07:22  ECS job starts
+                #     15:07:53  pre-send chat.abort  ok=True
+                #     15:08:12  job posts "nothing written to the sheet yet"
+                #     15:08:47  job stops, 85s, no data extracted
+                # The job's first act killed the run it was promoted to
+                # continue, so it began from nothing and had 85 seconds. The
+                # model then told the user they had interrupted it — true, and
+                # not the user.
+                #
+                # A long-job deadline is the marker: only the job runner sends
+                # deadline_s, and it is clamped above the interactive ceiling
+                # (agentcore_wrapper.LONG_JOB_DEADLINE_THRESHOLD_SECONDS).
+                # Interactive turns send nothing and keep the abort, which is
+                # what clears a wedged reply session.
+                is_promoted_job = (
+                    deadline_s is not None
+                    and int(deadline_s) > LONG_JOB_DEADLINE_THRESHOLD_S
+                )
+                if is_promoted_job:
+                    logger.info(
+                        "promoted job turn: skipping the pre-send abort so the "
+                        "run this job continues is not killed (deadline_s=%s)",
+                        deadline_s,
+                    )
+
+                if (
+                    not answered_pending
+                    and not is_promoted_job
+                    and os.environ.get("OPENCLAW_PRESEND_ABORT", "1") != "0"
+                ):
                     try:
                         abort_id = str(uuid.uuid4())
                         ws.send(json.dumps({
