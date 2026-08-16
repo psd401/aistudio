@@ -559,6 +559,34 @@ class StructuredQuestionsReachTheUser(unittest.TestCase):
         self.assertIn("I need a bit more information", text)
 
 
+def turn_runner():
+    """One adapter, many turns — the production shape.
+
+    agentcore_wrapper holds a single module-level OpenClawAdapter for the life
+    of the container, so state carried between turns (the pending question) is
+    carried on THIS object. Sharing it is the point, not a shortcut.
+
+    Returns (adapter, run) where run(gateway, text, session, env) -> TurnResult.
+    """
+    adapter = OpenClawAdapter()
+    adapter._ready = True
+    zero_usage = {"model_calls": 0, "input": 0, "output": 0,
+                  "cache_read": 0, "cache_write": 0}
+
+    def run(gateway, text, session="session-replay", env=None):
+        fake_websocket = mock.Mock()
+        fake_websocket.create_connection.return_value = gateway
+        fake_websocket.WebSocketTimeoutException = _FakeTimeout
+        with mock.patch.dict(sys.modules, {"websocket": fake_websocket}), \
+             mock.patch.dict(os.environ, env or {}), \
+             mock.patch.object(OpenClawAdapter, "_read_turn_usage",
+                               return_value=zero_usage), \
+             mock.patch.object(harness_adapter, "record_failure"):
+            return adapter._process_once(text, session)
+
+    return adapter, run
+
+
 def two_turn_replay(first_events, answer_text, resume_events, question_expired=False,
                     resume_before_ack=False, interleaved_session=None, env=None):
     """Turn 1 asks a question; turn 2 is the user's answer, on ONE adapter.
@@ -573,21 +601,10 @@ def two_turn_replay(first_events, answer_text, resume_events, question_expired=F
 
     Returns (first_reply, second_reply, gateway_of_turn_2).
     """
-    adapter = OpenClawAdapter()
-    adapter._ready = True
-    zero_usage = {"model_calls": 0, "input": 0, "output": 0,
-                  "cache_read": 0, "cache_write": 0}
+    adapter, run_on = turn_runner()
 
     def run(gateway, text, session="session-replay"):
-        fake_websocket = mock.Mock()
-        fake_websocket.create_connection.return_value = gateway
-        fake_websocket.WebSocketTimeoutException = _FakeTimeout
-        with mock.patch.dict(sys.modules, {"websocket": fake_websocket}), \
-             mock.patch.dict(os.environ, env or {}), \
-             mock.patch.object(OpenClawAdapter, "_read_turn_usage",
-                               return_value=zero_usage), \
-             mock.patch.object(harness_adapter, "record_failure"):
-            return adapter._process_once(text, session)
+        return run_on(gateway, text, session, env)
 
     g1 = FakeGateway(first_events)
     first = run(g1, "Give me a quartile growth report")
@@ -707,6 +724,35 @@ class AnsweringAQuestionDoesNotAbortIt(unittest.TestCase):
         resolves = [m for m in adapter_sends if m.get("method") == "question.resolve"]
         self.assertEqual(len(resolves), 1)
         self.assertEqual(resolves[0]["params"]["id"], "q-abc")
+
+    def test_a_second_question_asked_inside_the_resumed_run_also_resolves(self):
+        # The agent asks, is answered, and asks AGAIN from the resumed run —
+        # a clarify-then-clarify-again exchange. The second ask arrives on the
+        # resumed listen path rather than after a chat.send, so it has to be
+        # remembered the same way or turn 3 falls back onto the abort that
+        # started this whole bug.
+        adapter, run = turn_runner()
+
+        second_ask = dict(ASK)
+        second_ask["payload"] = dict(ASK["payload"], id="q-def")
+
+        run(FakeGateway([ASK]), "Quartile growth report for Purdy")
+
+        # Turn 2: answers q-abc, and the resumed run immediately asks q-def.
+        g2 = FakeGateway([], resume_events=[second_ask]).hold_question()
+        second = run(g2, "Keep going")
+        self.assertEqual(g2.question_status, "answered")
+        self.assertIn("Want me to finish", second.text)
+        self.assertEqual(adapter._pending_questions["session-replay"]["id"], "q-def")
+
+        # Turn 3: the follow-up answer must resolve q-def, not abort it.
+        g3 = FakeGateway([], resume_events=[says("Sheet shared.")]).hold_question()
+        third = run(g3, "Yes, all grades")
+        self.assertEqual(g3.question_status, "answered")
+        self.assertFalse(g3.aborted_a_pending_question)
+        resolves = [m for m in g3.sent if m.get("method") == "question.resolve"]
+        self.assertEqual(resolves[0]["params"]["id"], "q-def")
+        self.assertIn("Sheet shared", third.text)
 
     def test_a_foreign_run_cannot_contribute_to_the_resumed_reply(self):
         # turn_run_id is normally learned from the chat.send `started` res, and
