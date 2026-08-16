@@ -1729,7 +1729,10 @@ class OpenClawAdapter(HarnessAdapter):
                 # times out and falls back has already burned the ack wait and
                 # the abort drain, and restarting the clock afterwards would
                 # report the slowest turns as the fastest.
-                attempted_resolve = session_id in self._pending_questions
+                # "Had a pending entry", not "sent a resolve": with
+                # OPENCLAW_QUESTION_RESOLVE=0 the helper pops the entry and
+                # returns before any ws.send, and this is still True.
+                had_pending_question = session_id in self._pending_questions
                 resolve_started_at = time.time()
                 (
                     answered_pending,
@@ -1808,7 +1811,7 @@ class OpenClawAdapter(HarnessAdapter):
                 # ws.send so we don't count our own serialization.
                 #
                 chat_send_at = (
-                    resolve_started_at if attempted_resolve else time.time()
+                    resolve_started_at if had_pending_question else time.time()
                 )
                 if answered_pending:
                     # No chat.send: listen for the resumed run. The loop below
