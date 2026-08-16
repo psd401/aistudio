@@ -320,6 +320,18 @@ UPSTREAM_RETRY_MAX_LATENCY_MS = 30_000
 # silently rounded back UP into an overshoot.
 UPSTREAM_RETRY_MIN_REMAINING_S = 60
 
+# One entry per session that asked a question and has not been answered yet.
+# This is a singleton adapter shared by every user in the container, so the
+# map is per-session; the cap keeps a session that never answers from pinning
+# an entry for the container's lifetime. Far above any real concurrent-asker
+# count — it is a leak stop, not a throttle.
+MAX_PENDING_QUESTIONS = 256
+
+# Frames buffered while waiting for the question.resolve ack, in case the
+# resumed run streams ahead of it. Bounded because the wait is only ~10s and
+# anything beyond this is a gateway misbehaving, not a run to reassemble.
+MAX_RESOLVE_BUFFERED_FRAMES = 200
+
 
 def _classify_chat_error(error_message: str) -> str:
     """Name the chat-error class from OpenClaw's message.
@@ -618,10 +630,20 @@ class OpenClawAdapter(HarnessAdapter):
         # --token` (launcher) and reused in the connect envelope (client), so the
         # two always agree within this process.
         self._gateway_token: str = secrets.token_urlsafe(32)
-        # The question the agent asked on the PREVIOUS turn, still pending on
-        # the gateway. The user's next message is its answer, not a new
+        # Questions the agent asked on a PREVIOUS turn, still pending on the
+        # gateway. The asking user's next message is the answer, not a new
         # request — see _resolve_pending_question.
-        self._pending_question: Optional[dict] = None
+        #
+        # KEYED BY SESSION, deliberately. This is a module-level singleton
+        # adapter (agentcore_wrapper.py) serving every user in the container,
+        # and turns from different sessions interleave freely — the run-id
+        # fence in _process_once exists for exactly that reason. A single
+        # scalar here would let ANY other user's turn clear the entry between
+        # the ask and the answer, dropping the pending question back onto the
+        # pre-send abort path this whole mechanism exists to avoid. The bug
+        # would be intermittent and multi-user only, which is the worst kind
+        # to find in production.
+        self._pending_questions: dict = {}
 
     def configure(self, config: dict) -> None:
         """Configure the OpenClaw adapter. Idempotent — safe to call multiple times."""
@@ -1245,6 +1267,24 @@ class OpenClawAdapter(HarnessAdapter):
         return result.latency_ms <= UPSTREAM_RETRY_MAX_LATENCY_MS
 
 
+    def _remember_pending_question(self, session_id, pending_id, question_ids):
+        """Hold one pending question per session, oldest evicted first.
+
+        Bounded because a session that asks and never answers would otherwise
+        leave its entry here for the life of the container. Eviction is safe:
+        the gateway expires questions on its own, and a dropped entry only
+        costs us the resolve, falling back to a normal chat.send.
+        """
+        self._pending_questions.pop(session_id, None)
+        self._pending_questions[session_id] = {
+            "id": pending_id,
+            "question_ids": question_ids,
+        }
+        while len(self._pending_questions) > MAX_PENDING_QUESTIONS:
+            evicted, _ = next(iter(self._pending_questions.items()))
+            self._pending_questions.pop(evicted, None)
+            logger.info("evicted pending question for an idle session")
+
     def _resolve_pending_question(self, ws, websocket, message, session_id):
         """Answer the question the gateway is still holding, if there is one.
 
@@ -1261,22 +1301,31 @@ class OpenClawAdapter(HarnessAdapter):
             { id, answers: { answers: { <questionId>: [<text>] } }, resolvedBy }
         which is the same shape OpenClaw's own plain-text claim path sends.
 
-        Returns True when the gateway accepted the answer, meaning the ORIGINAL
-        run resumes and this turn must listen to it rather than starting a new
-        one. Returns False for anything else — expired, cancelled, unknown id,
-        transport error — so the caller falls back to a normal chat.send. A
-        question we cannot answer must never block the user's message.
+        Returns `(answered, frames)`. `answered` is True when the gateway
+        accepted the answer, meaning the ORIGINAL run resumes and this turn
+        must listen to it rather than starting a new one; False for anything
+        else — expired, cancelled, unknown id, transport error — so the caller
+        falls back to a normal chat.send. A question we cannot answer must
+        never block the user's message.
+
+        `frames` are raw messages that arrived while waiting for the resolve
+        ack. The resumed run streams onto this same socket, so those frames
+        can be its continuation; they are handed back for the event loop to
+        consume rather than dropped. (The pre-send abort drain below discards
+        its frames on purpose — those belong to a run being torn down. This
+        one does not.)
         """
-        pending = self._pending_question
-        self._pending_question = None
-        if not pending or pending.get("session_id") != session_id:
-            return False
+        # Only this session's question, and only ever consumed once.
+        pending = self._pending_questions.pop(session_id, None)
+        if not pending:
+            return False, []
 
         question_ids = pending.get("question_ids") or []
         if not question_ids:
-            return False
+            return False, []
         answers = {qid: [message] for qid in question_ids}
 
+        buffered: list = []
         resolve_id = str(uuid.uuid4())
         try:
             ws.send(json.dumps({
@@ -1303,17 +1352,26 @@ class OpenClawAdapter(HarnessAdapter):
                 if reply.get("type") == "res" and reply.get("id") == resolve_id:
                     ok = bool(reply.get("ok"))
                     status = (reply.get("payload") or {}).get("status")
+                    answered = ok and status == "answered"
                     logger.info(
-                        "question.resolve ok=%s status=%s id=%s",
-                        ok, status, str(pending["id"])[:12],
+                        "question.resolve ok=%s status=%s id=%s buffered=%d",
+                        ok, status, str(pending["id"])[:12], len(buffered),
                     )
-                    return ok and status == "answered"
+                    # Frames only matter when the run actually resumes. On any
+                    # other outcome the caller aborts and re-sends, so keeping
+                    # them would replay a dead run's events into a new turn.
+                    return answered, (buffered if answered else [])
+                # Not the ack — the resumed run's own output, arriving ahead of
+                # or interleaved with it. Bounded so a chatty gateway cannot
+                # grow this without limit inside a 10-second window.
+                if len(buffered) < MAX_RESOLVE_BUFFERED_FRAMES:
+                    buffered.append(raw)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "question.resolve failed (falling back to chat.send): %s",
                 str(exc)[:200],
             )
-        return False
+        return False, []
 
     def _process_once(
         self,
@@ -1504,7 +1562,7 @@ class OpenClawAdapter(HarnessAdapter):
                 # Answer the gateway's pending question BEFORE anything can
                 # cancel it. The pre-send abort below is exactly what used to
                 # kill it, so the two are mutually exclusive by construction.
-                answered_pending = self._resolve_pending_question(
+                answered_pending, resumed_frames = self._resolve_pending_question(
                     ws, websocket, message, session_id
                 )
                 if answered_pending:
@@ -1680,13 +1738,20 @@ class OpenClawAdapter(HarnessAdapter):
                 # with the scratchpad as the final reply.
                 ws.settimeout(60)
                 while time.time() < deadline:
-                    try:
-                        raw = ws.recv()
-                    except websocket.WebSocketTimeoutException:
-                        # Idle gap, not a failure — outer deadline still
-                        # governs. Fall through and let the while loop
-                        # re-check time.time().
-                        continue
+                    if resumed_frames:
+                        # The resumed run's output that arrived while we were
+                        # waiting for the question.resolve ack. Drained first
+                        # and in order, so the continuation this turn returns
+                        # is not missing its opening events.
+                        raw = resumed_frames.pop(0)
+                    else:
+                        try:
+                            raw = ws.recv()
+                        except websocket.WebSocketTimeoutException:
+                            # Idle gap, not a failure — outer deadline still
+                            # governs. Fall through and let the while loop
+                            # re-check time.time().
+                            continue
                     msg = json.loads(raw)
                     mtype = msg.get("type")
                     mevent = msg.get("event") if mtype == "event" else None
@@ -2193,11 +2258,9 @@ class OpenClawAdapter(HarnessAdapter):
                                 if isinstance(entry, dict)
                                 and isinstance(entry.get("id"), str)
                             ]
-                            self._pending_question = {
-                                "id": pending_id,
-                                "question_ids": question_ids,
-                                "session_id": session_id,
-                            }
+                            self._remember_pending_question(
+                                session_id, pending_id, question_ids
+                            )
                         got_final = True
                         break
 

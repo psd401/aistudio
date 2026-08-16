@@ -177,7 +177,23 @@ def main() -> int:
         if args.rows:
             handle.close()
 
-    teachers = json.loads(args.teachers) if args.teachers else None
+    teachers = None
+    if args.teachers:
+        # A raw JSONDecodeError here reads as a script bug and costs the agent
+        # a debugging round trip — the exact tax this skill's docs exist to
+        # avoid. Name what was wrong and what the argument should look like.
+        try:
+            teachers = json.loads(args.teachers)
+        except (json.JSONDecodeError, ValueError) as exc:
+            parser.error(
+                f"--teachers is not valid JSON ({exc}). Expected a map of "
+                'sectionid to teacher name, e.g. \'{"274893": "Hansen, Jane"}\''
+            )
+        if not isinstance(teachers, dict):
+            parser.error(
+                "--teachers must be a JSON object mapping sectionid to teacher "
+                f"name, got {type(teachers).__name__}"
+            )
     tab = build(
         records, args.school, args.grade, args.year, args.window, teachers=teachers
     )

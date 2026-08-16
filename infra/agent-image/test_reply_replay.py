@@ -113,8 +113,13 @@ class FakeGateway:
     is what a real idle socket does and what the bounded drain loops expect.
     """
 
-    def __init__(self, agent_events, resume_events=None, question_expired=False):
+    def __init__(self, agent_events, resume_events=None, question_expired=False,
+                 resume_before_ack=False):
         self._agent_events = agent_events
+        # Whether the resumed run's output lands BEFORE the question.resolve
+        # ack. The gateway is async; nothing guarantees the ack wins that race,
+        # and frames dropped during the resolve wait are gone for good.
+        self._resume_before_ack = resume_before_ack
         # What the ORIGINAL run streams once its question is answered. Modelled
         # because that is what really happens: question.resolve unblocks the
         # run that asked, and it continues on this same socket.
@@ -160,16 +165,24 @@ class FakeGateway:
             else:
                 self.question_status = "answered"
                 self.question_answers = params.get("answers")
-                self._reply(request_id, {"status": "answered"})
-                # The run that asked resumes and streams its continuation.
-                for event in self._resume_events:
-                    self._outbox.append(json.dumps(event))
-                self._outbox.append(
-                    json.dumps({
-                        "type": "event", "event": "chat",
-                        "payload": {"state": "final"},
-                    })
-                )
+
+                def stream_the_resumed_run():
+                    # The run that asked resumes and streams its continuation.
+                    for event in self._resume_events:
+                        self._outbox.append(json.dumps(event))
+                    self._outbox.append(
+                        json.dumps({
+                            "type": "event", "event": "chat",
+                            "payload": {"state": "final"},
+                        })
+                    )
+
+                if self._resume_before_ack:
+                    stream_the_resumed_run()
+                    self._reply(request_id, {"status": "answered"})
+                else:
+                    self._reply(request_id, {"status": "answered"})
+                    stream_the_resumed_run()
         elif method == "chat.abort":
             # The bundle's ask-user tool registers an abort listener that fires
             # cancelPendingQuestion("run-abort"). This models that: aborting
@@ -199,11 +212,13 @@ class FakeGateway:
             json.dumps({"type": "res", "id": request_id, "ok": ok, "payload": payload})
         )
 
-    def hold_question(self, question_id="q1", ids=("continue_report",)):
-        """Put the gateway into the state it is in after the agent asks."""
+    def hold_question(self):
+        """Put the gateway into the state it is in after the agent asks.
+
+        Returns self so it can be chained at construction.
+        """
         self.question_status = "pending"
-        self._pending_ids = list(ids)
-        self._pending_id = question_id
+        return self
 
 
 def aborts(stop_reason="cancelled"):
@@ -544,11 +559,18 @@ class StructuredQuestionsReachTheUser(unittest.TestCase):
         self.assertIn("I need a bit more information", text)
 
 
-def two_turn_replay(first_events, answer_text, resume_events, question_expired=False):
+def two_turn_replay(first_events, answer_text, resume_events, question_expired=False,
+                    resume_before_ack=False, interleaved_session=None):
     """Turn 1 asks a question; turn 2 is the user's answer, on ONE adapter.
 
     The adapter instance is shared deliberately — the pending question is
     carried on it between turns, which is the whole mechanism under test.
+
+    `interleaved_session` runs an unrelated session's turn BETWEEN the two, on
+    the same adapter. That is the production shape: agentcore_wrapper holds one
+    module-level adapter for every user in the container, and turns from
+    different sessions interleave freely.
+
     Returns (first_reply, second_reply, gateway_of_turn_2).
     """
     adapter = OpenClawAdapter()
@@ -556,7 +578,7 @@ def two_turn_replay(first_events, answer_text, resume_events, question_expired=F
     zero_usage = {"model_calls": 0, "input": 0, "output": 0,
                   "cache_read": 0, "cache_write": 0}
 
-    def run(gateway, text):
+    def run(gateway, text, session="session-replay"):
         fake_websocket = mock.Mock()
         fake_websocket.create_connection.return_value = gateway
         fake_websocket.WebSocketTimeoutException = _FakeTimeout
@@ -564,14 +586,20 @@ def two_turn_replay(first_events, answer_text, resume_events, question_expired=F
              mock.patch.object(OpenClawAdapter, "_read_turn_usage",
                                return_value=zero_usage), \
              mock.patch.object(harness_adapter, "record_failure"):
-            return adapter._process_once(text, "session-replay")
+            return adapter._process_once(text, session)
 
     g1 = FakeGateway(first_events)
     first = run(g1, "Give me a quartile growth report")
+
+    if interleaved_session:
+        # Someone else's turn, start to finish, while our question waits.
+        run(FakeGateway([says("Unrelated answer.")]),
+            "What's the weather", interleaved_session)
+
     # The gateway is now holding that question open, as it does in production.
     g2 = FakeGateway([], resume_events=resume_events,
-                     question_expired=question_expired)
-    g2.question_status = "pending"
+                     question_expired=question_expired,
+                     resume_before_ack=resume_before_ack).hold_question()
     second = run(g2, answer_text)
     return first.text, second.text, g2
 
@@ -647,6 +675,49 @@ class AnsweringAQuestionDoesNotAbortIt(unittest.TestCase):
         )
         sends = [m for m in g2.sent if m.get("method") == "chat.send"]
         self.assertEqual(len(sends), 1, "expired question must fall back to chat.send")
+
+    def test_another_users_turn_in_between_does_not_drop_the_question(self):
+        # agentcore_wrapper holds ONE module-level adapter for every user in
+        # the container, so turns from different sessions interleave. Holding
+        # the pending question in a single scalar let any unrelated session's
+        # turn clear it, dropping this user straight back onto the abort path
+        # — the original bug, now intermittent and multi-user only.
+        _, second, g2 = two_turn_replay(
+            [ASK], "Keep going", [says("Grades 3-5 written.")],
+            interleaved_session="someone-else",
+        )
+        self.assertEqual(g2.question_status, "answered")
+        self.assertFalse(
+            g2.aborted_a_pending_question,
+            "another session's turn let the pre-send abort kill this question",
+        )
+        self.assertIn("Grades 3-5 written", second)
+
+    def test_the_other_session_does_not_answer_our_question(self):
+        # The converse: an unrelated turn must never resolve a question it did
+        # not ask, which is what a global scalar would have allowed.
+        adapter_sends = []
+
+        _, _, g2 = two_turn_replay(
+            [ASK], "Keep going", [says("Done.")],
+            interleaved_session="someone-else",
+        )
+        adapter_sends.extend(g2.sent)
+        resolves = [m for m in adapter_sends if m.get("method") == "question.resolve"]
+        self.assertEqual(len(resolves), 1)
+        self.assertEqual(resolves[0]["params"]["id"], "q-abc")
+
+    def test_resumed_output_arriving_before_the_ack_is_not_lost(self):
+        # question.resolve is a req/res, but the resumed run streams onto the
+        # SAME socket and nothing orders it after the ack. Frames read during
+        # the resolve wait used to be discarded, so a run that answered fast
+        # lost its opening events — or its whole reply.
+        _, second, g2 = two_turn_replay(
+            [ASK], "Keep going", [says("Sheet shared: the link.")],
+            resume_before_ack=True,
+        )
+        self.assertEqual(g2.question_status, "answered")
+        self.assertIn("Sheet shared", second)
 
     def test_a_turn_with_no_pending_question_is_unchanged(self):
         # The ordinary path must not grow a question.resolve call.
