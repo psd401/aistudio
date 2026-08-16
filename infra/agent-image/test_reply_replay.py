@@ -114,8 +114,13 @@ class FakeGateway:
     """
 
     def __init__(self, agent_events, resume_events=None, question_expired=False,
-                 resume_before_ack=False):
+                 resume_before_ack=False, withhold_ack=False):
         self._agent_events = agent_events
+        # The gateway accepts the resolve and the run resumes, but the ack
+        # itself never lands inside our wait window. Nothing in the protocol
+        # orders those two, and this is the case where guessing "refused"
+        # costs the user a duplicate execution.
+        self._withhold_ack = withhold_ack
         # Whether the resumed run's output lands BEFORE the question.resolve
         # ack. The gateway is async; nothing guarantees the ack wins that race,
         # and frames dropped during the resolve wait are gone for good.
@@ -177,7 +182,10 @@ class FakeGateway:
                         })
                     )
 
-                if self._resume_before_ack:
+                if self._withhold_ack:
+                    # Accepted server-side; the ack is lost or slow.
+                    stream_the_resumed_run()
+                elif self._resume_before_ack:
                     stream_the_resumed_run()
                     self._reply(request_id, {"status": "answered"})
                 else:
@@ -588,7 +596,8 @@ def turn_runner():
 
 
 def two_turn_replay(first_events, answer_text, resume_events, question_expired=False,
-                    resume_before_ack=False, interleaved_session=None, env=None):
+                    resume_before_ack=False, interleaved_session=None, env=None,
+                    withhold_ack=False):
     """Turn 1 asks a question; turn 2 is the user's answer, on ONE adapter.
 
     The adapter instance is shared deliberately — the pending question is
@@ -617,7 +626,8 @@ def two_turn_replay(first_events, answer_text, resume_events, question_expired=F
     # The gateway is now holding that question open, as it does in production.
     g2 = FakeGateway([], resume_events=resume_events,
                      question_expired=question_expired,
-                     resume_before_ack=resume_before_ack).hold_question()
+                     resume_before_ack=resume_before_ack,
+                     withhold_ack=withhold_ack).hold_question()
     second = run(g2, answer_text)
     return first.text, second.text, g2
 
@@ -775,6 +785,48 @@ class AnsweringAQuestionDoesNotAbortIt(unittest.TestCase):
             [ASK], "Keep going", [says("Sheet shared.")]
         )
         self.assertIn("Sheet shared", second)
+
+    def test_a_lost_ack_with_the_run_streaming_is_not_treated_as_a_refusal(self):
+        # The ack and the resumed run's output are unordered. If the ack is
+        # slow or lost, "no ack" is NOT "refused" — and the fallback aborts
+        # the accepted run and re-sends the same text, running the user's
+        # answer twice against side effects already underway.
+        #
+        # A run blocked on a question emits nothing, so frames carrying the
+        # ASKING run's id are proof it resumed, which only happens once the
+        # gateway accepts. Evidence, not a heuristic — the socket carries
+        # every run in the container, so the run id is what makes it evidence.
+        _, second, g2 = two_turn_replay(
+            [ASK], "Keep going", [says("Sheet shared: the link.")],
+            withhold_ack=True,
+        )
+        sends = [m for m in g2.sent if m.get("method") == "chat.send"]
+        self.assertEqual(sends, [], "a lost ack must not re-run the answer")
+        aborts = [m for m in g2.sent if m.get("method") == "chat.abort"]
+        self.assertEqual(aborts, [], "the accepted run must not be aborted")
+        self.assertIn("Sheet shared", second)
+
+    def test_a_lost_ack_with_nothing_streaming_still_falls_back(self):
+        # The converse. No ack AND no sign of the run means we have no reason
+        # to believe it was accepted, and the user's message must still be
+        # delivered rather than silently swallowed.
+        _, _, g2 = two_turn_replay(
+            [ASK], "Keep going", [], withhold_ack=True,
+        )
+        sends = [m for m in g2.sent if m.get("method") == "chat.send"]
+        self.assertEqual(len(sends), 1, "a message we cannot resolve must still send")
+
+    def test_another_runs_frames_are_not_mistaken_for_ours_resuming(self):
+        # Frames arriving during the wait prove nothing on their own — this
+        # socket carries every run in the container. Only the asking run's id
+        # counts, or an unrelated busy run would suppress the fallback and
+        # strand the user's message.
+        _, _, g2 = two_turn_replay(
+            [ASK], "Keep going", [foreign_says("Someone else's run.")],
+            withhold_ack=True,
+        )
+        sends = [m for m in g2.sent if m.get("method") == "chat.send"]
+        self.assertEqual(len(sends), 1, "foreign traffic must not look like our resume")
 
     def test_a_flood_before_the_ack_truncates_but_never_double_sends(self):
         # Only a run already streaming can flood this window — which means the

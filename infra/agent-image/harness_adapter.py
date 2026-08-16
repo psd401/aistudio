@@ -344,6 +344,23 @@ MAX_RESOLVE_TERMINAL_FRAMES = 16
 RESOLVE_ACK_WAIT_S = 10
 
 
+def _frames_from_run(frames, run_id) -> bool:
+    """True when any buffered frame belongs to `run_id`.
+
+    Used as proof that a run has resumed. This socket carries every run in the
+    container, so "some frames arrived" proves nothing on its own — the run id
+    is what makes it evidence rather than a guess.
+    """
+    for raw in frames:
+        try:
+            payload = (json.loads(raw) or {}).get("payload") or {}
+        except (json.JSONDecodeError, ValueError, AttributeError):
+            continue
+        if payload.get("runId") == run_id:
+            return True
+    return False
+
+
 def _classify_chat_error(error_message: str) -> str:
     """Name the chat-error class from OpenClaw's message.
 
@@ -1307,7 +1324,14 @@ class OpenClawAdapter(HarnessAdapter):
         while len(self._pending_questions) > MAX_PENDING_QUESTIONS:
             evicted, _ = next(iter(self._pending_questions.items()))
             self._pending_questions.pop(evicted, None)
-            logger.info("evicted pending question for an idle session")
+            # Warning, not info: the cap sits far above any plausible number
+            # of concurrent askers, so an eviction firing at all means a leak
+            # or an abuse pattern, not routine churn. At info it would be lost
+            # in normal log volume.
+            logger.warning(
+                "evicted pending question for an idle session; %d sessions "
+                "were holding one", MAX_PENDING_QUESTIONS,
+            )
 
     def _resolve_pending_question(self, ws, websocket, message, session_id):
         """Answer the question the gateway is still holding, if there is one.
@@ -1452,6 +1476,26 @@ class OpenClawAdapter(HarnessAdapter):
                     MAX_RESOLVE_BUFFERED_FRAMES + MAX_RESOLVE_TERMINAL_FRAMES
                 ):
                     buffered.append(raw)
+
+            # No ack inside the window. That is NOT the same as "refused" —
+            # the ack may simply be slow, and the caller's fallback aborts and
+            # re-sends the identical text, running the user's answer twice.
+            #
+            # There is direct evidence available, so use it instead of
+            # guessing: a run blocked on a question emits nothing. If frames
+            # from the ASKING run arrived during this wait, that run resumed,
+            # which it only does once the gateway accepts the answer. Treat it
+            # as accepted and listen, rather than aborting work already in
+            # flight.
+            asking_run = pending.get("run_id")
+            if asking_run and _frames_from_run(buffered, asking_run):
+                logger.warning(
+                    "question.resolve ack not seen in %ss, but run %s is "
+                    "already streaming — treating the answer as accepted "
+                    "rather than sending it a second time",
+                    RESOLVE_ACK_WAIT_S, str(asking_run)[:12],
+                )
+                return True, buffered, asking_run
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "question.resolve failed (falling back to chat.send): %s",
@@ -1648,6 +1692,9 @@ class OpenClawAdapter(HarnessAdapter):
                 # Answer the gateway's pending question BEFORE anything can
                 # cancel it. The pre-send abort below is exactly what used to
                 # kill it, so the two are mutually exclusive by construction.
+                # Before the resolve, so a resumed turn's latency includes
+                # the ack wait the user actually waited through.
+                resolve_started_at = time.time()
                 (
                     answered_pending,
                     resumed_frames,
@@ -1720,7 +1767,13 @@ class OpenClawAdapter(HarnessAdapter):
                 # Latency clock starts the instant we hand the message to
                 # the gateway. final_state event stops it. Captured before
                 # ws.send so we don't count our own serialization.
-                chat_send_at = time.time()
+                #
+                # On a resumed turn the message was handed over at
+                # question.resolve, and the ack wait already elapsed. Starting
+                # the clock here instead would report resumed turns as faster
+                # than the user experienced them — and those are precisely the
+                # turns whose latency we most need to be able to trust.
+                chat_send_at = resolve_started_at if answered_pending else time.time()
                 if answered_pending:
                     # No chat.send: listen for the resumed run. The loop below
                     # ends on the chat `final` event, which that run still
