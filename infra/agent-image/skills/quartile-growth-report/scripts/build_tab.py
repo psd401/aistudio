@@ -68,6 +68,20 @@ def column_label(section_id, teachers):
     return f"{name} ({section_id})"
 
 
+def window_for(meas, window):
+    """The window label for one measure block.
+
+    Usually one string for the whole tab. But a grade can mix baselines —
+    grade 1 ORF starts mid-year, so it is Winter->Spring while everything else
+    in that grade is Fall->Spring — and labelling those blocks identically
+    would misstate what was measured. A dict maps measure to label; a plain
+    string still applies to every block.
+    """
+    if isinstance(window, dict):
+        return window.get(meas) or window.get("*") or ""
+    return window
+
+
 def build(records, school, grade, year, window, sections=None, teachers=None):
     """One tab's grid: a block per measure, quartile rows, then subgroups."""
     by_measure = defaultdict(lambda: defaultdict(dict))
@@ -96,7 +110,7 @@ def build(records, school, grade, year, window, sections=None, teachers=None):
 
     for meas in sorted(by_measure):
         scopes = by_measure[meas]
-        values.append([f"{meas} ({window})"])
+        values.append([f"{meas} ({window_for(meas, window)})"])
         values.append(
             ["Quartile"]
             + [column_label(s, teachers) for s in section_ids]
@@ -138,7 +152,9 @@ def main() -> int:
         "--window",
         default="Fall→Spring",
         help="the window ACTUALLY used; a Fall→Winter report labeled "
-        "Fall→Spring is a wrong report, not a cosmetic slip",
+        "Fall→Spring is a wrong report, not a cosmetic slip. May be a JSON "
+        'object mapping measure to label ({"ORF-WRC": "Winter→Spring", '
+        '"*": "Fall→Spring"}) when one grade mixes baselines.',
     )
     parser.add_argument(
         "--teachers",
@@ -177,6 +193,13 @@ def main() -> int:
         if args.rows:
             handle.close()
 
+    window = args.window
+    if window.strip().startswith("{"):
+        try:
+            window = json.loads(window)
+        except (json.JSONDecodeError, ValueError) as exc:
+            parser.error(f"--window is not valid JSON ({exc})")
+
     teachers = None
     if args.teachers:
         # A raw JSONDecodeError here reads as a script bug and costs the agent
@@ -195,7 +218,7 @@ def main() -> int:
                 f"name, got {type(teachers).__name__}"
             )
     tab = build(
-        records, args.school, args.grade, args.year, args.window, teachers=teachers
+        records, args.school, args.grade, args.year, window, teachers=teachers
     )
 
     if args.emit == "grid":

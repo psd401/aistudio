@@ -113,9 +113,30 @@ class ExtractionSql(unittest.TestCase):
         self.assertIn("'Winter'", self._sql(grade="K", baseline="Winter"))
         self.assertNotIn("'Fall'", self._sql(grade="K", baseline="Winter"))
 
-    def test_kindergarten_defaults_to_a_winter_baseline(self):
-        self.assertEqual(R.BASELINE_BY_GRADE.get("K"), "Winter")
-        self.assertIsNone(R.BASELINE_BY_GRADE.get("3"))
+    def test_kindergarten_uses_a_winter_baseline_for_every_measure(self):
+        # K DIBELS has no Fall administration at all.
+        self.assertEqual(R.baseline_for("K", "ORF-WRC"), "Winter")
+        self.assertEqual(R.baseline_for("K", "LNF"), "Winter")
+
+    def test_grade_one_orf_is_winter_but_the_rest_of_grade_one_is_not(self):
+        # ORF starts mid-year in grade 1 — and ONLY ORF. Applying one baseline
+        # to the whole grade returns zero matched pairs for the odd measure,
+        # which drops it from the tab with no error at all.
+        self.assertEqual(R.baseline_for("1", "ORF-WRC"), "Winter")
+        self.assertEqual(R.baseline_for("1", "NWF-CLS"), "Fall")
+
+    def test_other_grades_are_fall_including_orf(self):
+        self.assertEqual(R.baseline_for("3", "ORF-WRC"), "Fall")
+        self.assertEqual(R.baseline_for("5", "NWF-CLS"), "Fall")
+
+    def test_a_mixed_grade_runs_one_extraction_per_baseline(self):
+        groups = R.group_by_baseline("1", ["ORF-WRC", "NWF-CLS", "PSF"])
+        self.assertEqual(groups["Winter"], ["ORF-WRC"])
+        self.assertEqual(sorted(groups["Fall"]), ["NWF-CLS", "PSF"])
+
+    def test_a_uniform_grade_runs_a_single_extraction(self):
+        groups = R.group_by_baseline("3", ["ORF-WRC", "NWF-CLS"])
+        self.assertEqual(list(groups), ["Fall"])
 
 
 class SqlEscaping(unittest.TestCase):
@@ -287,3 +308,48 @@ class HungCallsAreBounded(unittest.TestCase):
         default = inspect.signature(R.run_json).parameters["timeout"].default
         self.assertIsInstance(default, int)
         self.assertGreater(default, 0)
+
+
+class SideEffectsAreCheckpointed(unittest.TestCase):
+    """A retry must be able to succeed.
+
+    add_tab was the one side effect not checkpointed: a failure between
+    creating the tab and writing the grade's done-marker left the tab present
+    and the marker absent, so the re-run tried to add it again, Sheets
+    rejected the duplicate, and the report was stuck forever. A re-run that
+    CANNOT succeed is worse than no checkpointing.
+    """
+
+    def setUp(self):
+        self.work = pathlib.Path(tempfile.mkdtemp())
+        self.calls = []
+        R.workspace = lambda command, user, scope="agent", json_file=None: (
+            self.calls.append(command.split(" --")[0]) or {"ok": True})
+
+    def test_a_tab_is_created_once_across_re_runs(self):
+        R.add_tab("SHEET1", "3", "u@psd401.net", self.work)
+        R.add_tab("SHEET1", "3", "u@psd401.net", self.work)
+        self.assertEqual(self.calls.count("sheets spreadsheets batchUpdate"), 1)
+
+    def test_each_tab_gets_its_own_marker(self):
+        R.add_tab("SHEET1", "3", "u@psd401.net", self.work)
+        R.add_tab("SHEET1", "4", "u@psd401.net", self.work)
+        self.assertEqual(self.calls.count("sheets spreadsheets batchUpdate"), 2)
+        self.assertTrue((self.work / "tab-3-added.json").exists())
+        self.assertTrue((self.work / "tab-4-added.json").exists())
+
+
+class WindowLabels(unittest.TestCase):
+    """A Fall→Winter block labelled Fall→Spring is a wrong report."""
+
+    def test_a_measure_specific_window_wins(self):
+        import build_tab
+        window = {"ORF-WRC": "Winter→Spring", "*": "Fall→Spring"}
+        self.assertEqual(build_tab.window_for("ORF-WRC", window), "Winter→Spring")
+        self.assertEqual(build_tab.window_for("NWF-CLS", window), "Fall→Spring")
+
+    def test_a_plain_string_still_applies_to_every_block(self):
+        import build_tab
+        self.assertEqual(
+            build_tab.window_for("anything", "Fall→Spring"), "Fall→Spring"
+        )

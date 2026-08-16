@@ -56,9 +56,41 @@ MAX_PAGES = 40
 # Grades in report order. K sorts first and is stored as "K", not 0.
 DEFAULT_GRADES = ["K", "1", "2", "3", "4", "5"]
 
-# Per-grade DIBELS measures. Grade 1 ORF starts mid-year and K has no Fall
-# DIBELS at all, both per SKILL.md's Windows table.
+# Baselines are PER MEASURE, not per grade. SKILL.md's Windows table gives two
+# exceptions and they are different shapes: K DIBELS has no Fall administration
+# at all, while in grade 1 only ORF starts mid-year — every other grade-1
+# measure has Fall data.
+#
+# Modelling this per grade looked simpler and silently dropped data: one
+# baseline applied to a whole grade means the matched-pair join returns ZERO
+# rows for any measure that lacks that window, so grade 1 ORF would vanish
+# from the tab with no error and nothing to notice on a re-run. Review caught
+# it. A measure missing from a report is worse than a report that fails.
+BASELINE_DEFAULT = "Fall"
 BASELINE_BY_GRADE = {"K": "Winter"}
+BASELINE_BY_GRADE_MEASURE = {("1", "ORF"): "Winter"}
+
+
+def baseline_for(grade, measure):
+    """The baseline window for one measure in one grade.
+
+    Matched on an ORF prefix rather than an exact name because the warehouse's
+    spelling is not guaranteed to be the norms file's — that mismatch is why
+    every measure name is discovered rather than assumed.
+    """
+    grade = str(grade)
+    for (g, prefix), window in BASELINE_BY_GRADE_MEASURE.items():
+        if g == grade and str(measure).upper().startswith(prefix):
+            return window
+    return BASELINE_BY_GRADE.get(grade, BASELINE_DEFAULT)
+
+
+def group_by_baseline(grade, measures):
+    """{baseline: [measure, ...]} — one extraction pass per distinct window."""
+    groups = {}
+    for measure in measures:
+        groups.setdefault(baseline_for(grade, measure), []).append(measure)
+    return groups
 
 
 class ReportError(RuntimeError):
@@ -383,7 +415,22 @@ def share_workbook(sheet_id, user):
     )
 
 
-def add_tab(sheet_id, title, user, work_dir):
+def add_tab(sheet_id, title, user, work_dir, log=lambda m: None):
+    """Create one tab, ONCE.
+
+    Checkpointed like every other side effect. Without it, a failure between
+    the tab creation and the grade's done-marker leaves the tab present and
+    the marker absent, so the re-run tries to add it again, Sheets rejects the
+    duplicate, and the report is permanently stuck — a re-run that cannot
+    succeed is worse than no checkpointing at all. Review caught this; it is
+    exactly the failure class this script exists to remove.
+    """
+    return step(work_dir, f"tab-{title}-added",
+                lambda: {"result": _add_tab(sheet_id, title, user, work_dir)},
+                log)
+
+
+def _add_tab(sheet_id, title, user, work_dir):
     payload = work_dir / f"addsheet-{title}.json"
     payload.write_text(json.dumps(
         {"requests": [{"addSheet": {"properties": {"title": str(title)}}}]}))
@@ -508,6 +555,13 @@ def main() -> int:
                         lambda: {"id": create_workbook(title, args.user)},
                         log)["id"]
         url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
+        # Share IMMEDIATELY, not after the last grade. The URL is printed the
+        # moment the workbook exists, and until the transfer the agent account
+        # owns it — so a run that dies partway through would surface a link
+        # the user cannot open. That undercuts the whole point of a
+        # diagnosable partial run.
+        step(work_dir, "shared",
+             lambda: {"result": share_workbook(sheet_id, args.user)}, log)
         log(f"  workbook: {url}")
 
         for grade in grades:
@@ -516,7 +570,6 @@ def main() -> int:
                 log(f"grade {grade}: already written")
                 continue
             log(f"grade {grade}: extracting")
-            baseline = BASELINE_BY_GRADE.get(grade, "Fall")
             measures = step(work_dir, f"grade-{grade}-measures",
                             lambda g=grade: discover_measures(yearid, g), log)
             if not measures:
@@ -524,46 +577,61 @@ def main() -> int:
                 step(work_dir, done_marker, lambda: {"skipped": "no measures"}, log)
                 continue
 
-            rows = step(
-                work_dir, f"grade-{grade}-rows",
-                lambda g=grade, b=baseline, m=measures: query_all(
-                    extraction_sql(schoolid, yearid, g, m, b),
-                    f"Matched {b}/Spring pairs for grade {g}"),
-                log)
-            if not rows:
-                log(f"grade {grade}: no matched pairs — skipping")
+            # One pass per distinct baseline. Grade 1 ORF starts mid-year, so
+            # it runs Winter→Spring while the rest of grade 1 runs
+            # Fall→Spring; a single pass would return zero matched pairs for
+            # the odd measure and drop it from the tab silently.
+            groups = group_by_baseline(grade, measures)
+            windows = {}
+            records = []
+            for baseline, group in sorted(groups.items()):
+                tag = f"grade-{grade}-{baseline.lower()}"
+                log(f"grade {grade}: {baseline}→Spring for {', '.join(group)}")
+                rows = step(
+                    work_dir, f"{tag}-rows",
+                    lambda g=grade, b=baseline, m=group: query_all(
+                        extraction_sql(schoolid, yearid, g, m, b),
+                        f"Matched {b}/Spring pairs for grade {g}"),
+                    log)
+                if not rows:
+                    log(f"grade {grade}: no {baseline} matched pairs")
+                    continue
+                log(f"grade {grade}: {len(rows)} rows ({baseline})")
+                part = step(
+                    work_dir, f"{tag}-agg",
+                    lambda g=grade, b=baseline, t=tag: aggregate_rows(
+                        work_dir / f"{t}-rows.json", g, b),
+                    log)
+                records.extend(part)
+                for measure in group:
+                    windows[measure] = f"{baseline}→Spring"
+
+            if not records:
+                log(f"grade {grade}: no matched pairs at all — skipping")
                 step(work_dir, done_marker, lambda: {"skipped": "no rows"}, log)
                 continue
-            log(f"grade {grade}: {len(rows)} matched rows")
 
-            rows_path = work_dir / f"grade-{grade}-rows.json"
-            records = step(
-                work_dir, f"grade-{grade}-agg",
-                lambda g=grade, b=baseline: aggregate_rows(rows_path, g, b),
-                log)
-            records_path = work_dir / f"grade-{grade}-agg.json"
-
-            window = f"{baseline}→Spring"
+            records_path = work_dir / f"grade-{grade}-records.json"
+            records_path.write_text(json.dumps(records))
+            windows["*"] = f"{BASELINE_DEFAULT}→Spring"
             body = step(
                 work_dir, f"grade-{grade}-values",
-                lambda g=grade, w=window: build_values(
+                lambda g=grade, w=windows: build_values(
                     records_path, school["school_name"], g,
-                    year["year_name"], w, roster["teachers"]),
+                    year["year_name"], json.dumps(w), roster["teachers"]),
                 log)
 
-            add_tab(sheet_id, grade, args.user, work_dir)
+            add_tab(sheet_id, grade, args.user, work_dir, log)
             write_tab(sheet_id, body, args.user, work_dir, grade)
-            step(work_dir, done_marker, lambda: {"rows": len(rows)}, log)
+            step(work_dir, done_marker, lambda: {"records": len(records)}, log)
             log(f"grade {grade}: written")
 
         if not (work_dir / "definitions-written.json").exists():
-            add_tab(sheet_id, "Definitions", args.user, work_dir)
+            add_tab(sheet_id, "Definitions", args.user, work_dir, log)
             write_tab(sheet_id, definitions_values(), args.user,
                       work_dir, "Definitions")
             step(work_dir, "definitions-written", lambda: {"ok": True}, log)
 
-        step(work_dir, "shared",
-             lambda: {"result": share_workbook(sheet_id, args.user)}, log)
         log("done")
         print(url)
         return 0
