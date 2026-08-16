@@ -633,6 +633,17 @@ def two_turn_replay(first_events, answer_text, resume_events, question_expired=F
     return first.text, second.text, g2
 
 
+# QuestionRecordSchema, read from the pinned bundle's gateway-protocol
+# schemas (2026.7.2-beta.5, packages/gateway-protocol/src/schema/questions.ts)
+# rather than authored to match the adapter. The per-question key is
+# `questionId`; QuestionSchema is a closedObject, so `id` is not just absent
+# from real traffic, it is rejected by it. The previous fixture used `id`,
+# which is precisely how the adapter's `entry.get("id")` bug stayed green
+# through eleven rounds of review — the warning in this module's docstring,
+# earned.
+#
+# ask_user hardcodes isOther=true on every question it builds
+# (normalizeAskUserParams), so it is set here too.
 ASK = {
     "type": "event",
     "event": "question.requested",
@@ -641,11 +652,15 @@ ASK = {
         "runId": TURN_RUN_ID,
         "sessionKey": "agent:main:replay",
         "status": "pending",
+        "createdAtMs": 0,
+        "expiresAtMs": 600000,
         "questions": [{
-            "id": "continue_report",
+            "questionId": "continue_report",
+            "header": "Continue",
             "question": "Want me to finish and post the link now?",
             "options": [{"label": "Keep going to completion (Recommended)"},
                         {"label": "Stop here"}],
+            "isOther": True,
         }],
     },
 }
@@ -793,13 +808,17 @@ class AnsweringAQuestionDoesNotAbortIt(unittest.TestCase):
         # back on the abort path. Redundant beats refused.
         multi = dict(ASK)
         multi["payload"] = dict(ASK["payload"], questions=[
-            {"id": "grades", "question": "Which grades?"},
-            {"id": "year", "question": "Which year?"},
+            {"questionId": "grades", "header": "Grades",
+             "question": "Which grades?", "options": [], "isOther": True},
+            {"questionId": "year", "header": "Year",
+             "question": "Which year?", "options": [], "isOther": True},
         ])
-        _, _, g2 = two_turn_replay([multi], "K-5, 2025-26", [says("Done.")])
+        # `header: value` lines, upstream's keyed form.
+        _, _, g2 = two_turn_replay(
+            [multi], "Grades: K-5\nYear: 2025-26", [says("Done.")])
         self.assertEqual(
             g2.question_answers,
-            {"answers": {"grades": ["K-5, 2025-26"], "year": ["K-5, 2025-26"]}},
+            {"answers": {"grades": ["K-5"], "year": ["2025-26"]}},
         )
         self.assertEqual(g2.question_status, "answered")
 
@@ -904,7 +923,10 @@ class AnsweringAQuestionDoesNotAbortIt(unittest.TestCase):
         frames = [json.dumps(says("narration"))] + [chat_frame] * 4
 
         adapter = OpenClawAdapter()
-        adapter._remember_pending_question("s", "q-abc", ["only"], TURN_RUN_ID)
+        adapter._remember_pending_question(
+            "s", "q-abc",
+            [{"questionId": "only", "options": [], "isOther": True}],
+            TURN_RUN_ID)
 
         ws = mock.Mock()
         ws.recv.side_effect = frames + [_FakeTimeout()]
@@ -933,7 +955,8 @@ class AnsweringAQuestionDoesNotAbortIt(unittest.TestCase):
         with mock.patch.object(harness_adapter, "MAX_PENDING_QUESTIONS", 3):
             for n in range(5):
                 adapter._remember_pending_question(
-                    f"session-{n}", f"q-{n}", ["only"], f"run-{n}"
+                    f"session-{n}", f"q-{n}",
+                    [{"questionId": "only", "options": []}], f"run-{n}"
                 )
         self.assertEqual(len(adapter._pending_questions), 3)
         # Oldest gone, newest kept — a session that asked and walked away must
@@ -943,8 +966,10 @@ class AnsweringAQuestionDoesNotAbortIt(unittest.TestCase):
 
     def test_re_asking_in_one_session_replaces_rather_than_accumulates(self):
         adapter = OpenClawAdapter()
-        adapter._remember_pending_question("s", "q-first", ["a"], "run-1")
-        adapter._remember_pending_question("s", "q-second", ["b"], "run-2")
+        adapter._remember_pending_question(
+            "s", "q-first", [{"questionId": "a", "options": []}], "run-1")
+        adapter._remember_pending_question(
+            "s", "q-second", [{"questionId": "b", "options": []}], "run-2")
         self.assertEqual(len(adapter._pending_questions), 1)
         self.assertEqual(adapter._pending_questions["s"]["id"], "q-second")
 
@@ -1032,3 +1057,105 @@ class FramesFromRunIsEvidenceNotAGuess(unittest.TestCase):
         self.assertFalse(
             harness_adapter._frames_from_run([json.dumps({"payload": {}})], None)
         )
+
+
+class AnswerMappingMatchesTheGateway(unittest.TestCase):
+    """Ported from the pinned bundle; these pin the port, not my reading of it.
+
+    Source: 2026.7.2-beta.5, app/dist/openclaw-tools-Be4wAI1K.js —
+    buildAgentHarnessUserInputAnswers / normalizeAgentHarnessUserInputAnswer /
+    parseKeyedAnswers. The adapter previously broadcast the raw reply to every
+    question id, which answers "which grades?" and "which year?" identically
+    and sends "1" where the gateway expects an option label.
+    """
+
+    CHOICE = {
+        "questionId": "continue_report",
+        "header": "Continue",
+        "question": "Finish and post the link?",
+        "options": [{"label": "Keep going to completion (Recommended)"},
+                    {"label": "Stop here"}],
+        "isOther": True,
+    }
+
+    def test_a_number_selects_that_option_by_label(self):
+        answers = harness_adapter._build_question_answers([self.CHOICE], "1")
+        self.assertEqual(
+            answers,
+            {"continue_report": ["Keep going to completion (Recommended)"]},
+        )
+
+    def test_the_second_number_selects_the_second_option(self):
+        answers = harness_adapter._build_question_answers([self.CHOICE], "2")
+        self.assertEqual(answers, {"continue_report": ["Stop here"]})
+
+    def test_an_out_of_range_number_is_not_an_option(self):
+        # Falls through to the label comparison, then to free text because
+        # ask_user sets isOther.
+        answers = harness_adapter._build_question_answers([self.CHOICE], "9")
+        self.assertEqual(answers, {"continue_report": ["9"]})
+
+    def test_an_exact_option_label_is_matched_case_insensitively(self):
+        answers = harness_adapter._build_question_answers(
+            [self.CHOICE], "stop HERE")
+        self.assertEqual(answers, {"continue_report": ["Stop here"]})
+
+    def test_free_text_survives_because_ask_user_sets_isOther(self):
+        # The case Hagel actually hit. normalizeAskUserParams hardcodes
+        # isOther=true, so an off-menu reply is kept rather than discarded.
+        answers = harness_adapter._build_question_answers(
+            [self.CHOICE], "Keep going")
+        self.assertEqual(answers, {"continue_report": ["Keep going"]})
+
+    def test_a_fixed_choice_question_discards_an_off_menu_reply(self):
+        # Not reachable through ask_user, but the gateway takes questions from
+        # elsewhere. Upstream returns no answer, which the tool renders to the
+        # model as "(no answer)".
+        fixed = dict(self.CHOICE, isOther=False)
+        answers = harness_adapter._build_question_answers([fixed], "maybe")
+        self.assertEqual(answers, {"continue_report": []})
+
+    def test_several_questions_are_matched_by_header(self):
+        questions = [
+            {"questionId": "grades", "header": "Grades",
+             "question": "Which grades?", "options": [], "isOther": True},
+            {"questionId": "year", "header": "Year",
+             "question": "Which year?", "options": [], "isOther": True},
+        ]
+        answers = harness_adapter._build_question_answers(
+            questions, "Grades: K-5\nYear: 2025-26")
+        self.assertEqual(answers, {"grades": ["K-5"], "year": ["2025-26"]})
+
+    def test_several_questions_fall_back_to_one_line_each(self):
+        questions = [
+            {"questionId": "grades", "header": "Grades",
+             "question": "Which grades?", "options": [], "isOther": True},
+            {"questionId": "year", "header": "Year",
+             "question": "Which year?", "options": [], "isOther": True},
+        ]
+        answers = harness_adapter._build_question_answers(
+            questions, "K-5\n2025-26")
+        self.assertEqual(answers, {"grades": ["K-5"], "year": ["2025-26"]})
+
+    def test_a_missing_line_leaves_that_question_unanswered(self):
+        questions = [
+            {"questionId": "grades", "header": "Grades",
+             "question": "Which grades?", "options": [], "isOther": True},
+            {"questionId": "year", "header": "Year",
+             "question": "Which year?", "options": [], "isOther": True},
+        ]
+        answers = harness_adapter._build_question_answers(questions, "K-5")
+        self.assertEqual(answers, {"grades": ["K-5"], "year": []})
+
+    def test_one_reply_is_never_broadcast_to_every_question(self):
+        # The behaviour this replaces. Named so a future "simplification"
+        # back to a dict comprehension trips something.
+        questions = [
+            {"questionId": "grades", "header": "Grades",
+             "question": "Which grades?", "options": [], "isOther": True},
+            {"questionId": "year", "header": "Year",
+             "question": "Which year?", "options": [], "isOther": True},
+        ]
+        answers = harness_adapter._build_question_answers(
+            questions, "K-5, 2025-26")
+        self.assertNotEqual(answers["grades"], answers["year"])
