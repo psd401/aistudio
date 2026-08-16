@@ -246,18 +246,24 @@ _STRUCTURAL_MARK_FIELDS = (
     "kind",
     "status",
     "state",
-    # `event:task` frames are shaped {"action": str, "task": dict} and carry no
-    # runId, so neither the run fence nor the boundary logic can see them. They
-    # are also the difference between a turn that fuses assistant segments and
-    # one that does not: a Docs turn with 43 of them fused twice
-    # ("ownership.Now", "Kris.Done") while a calendar turn with none stayed
-    # clean, both with ordinary stream=item tool events present.
+    # `event:task` frames are shaped {"action": str, "task": dict}. This note
+    # used to say they carry no runId and that neither the run fence nor the
+    # boundary logic could see them. BOTH claims are now false: the id is
+    # nested at payload.task.runId (which is why it read as absent), the task
+    # branch fences on it, and task frames end an assistant segment.
     #
-    # `action` is the discriminator that decides whether a frame marks work
-    # starting/finishing (a real segment boundary) or is a progress update
-    # inside one segment. Treating all 43 as boundaries would drop the earlier
-    # part of any segment they interleave with — trading fusion for truncated
-    # answers — so capture the vocabulary before changing behaviour.
+    # The correlation this note recorded held up. A Docs turn with 43 of them
+    # fused twice ("ownership.Now", "Kris.Done") while a calendar turn with
+    # none stayed clean; on 2026-08-16 a quartile turn fused four fragments
+    # into 515 chars with `thinking` and task frames between them.
+    #
+    # It also warned that treating all 43 as boundaries would trade fusion for
+    # truncated answers. That was the right worry and it is handled, but not by
+    # inspecting `action`: segment splitting and answer suppression are now two
+    # flags (assistant_boundary_pending, tool_activity_since_text), so a task
+    # frame can end a segment without condemning a finished answer as
+    # scratchpad. `action` stays sampled — it is still the vocabulary a future
+    # reader needs.
     "action",
 )
 
@@ -2007,6 +2013,26 @@ class OpenClawAdapter(HarnessAdapter):
                 # final-event handler suppresses ("Here's how far I got: Now
                 # run the batchUpdate."). Covered by test_reply_replay.py.
                 assistant_boundary_pending: bool = False
+                # SEPARATE from the flag above, and the distinction matters.
+                #
+                # `assistant_boundary_pending` answers "does the next delta
+                # start a NEW message?" — set by any model activity, so
+                # segments never fuse.
+                #
+                # This one answers "is the accumulated text scratchpad?" — set
+                # ONLY by genuine tool work. Text followed by a tool call is
+                # something the model said on its way to doing something else;
+                # text followed by a reasoning or commentary item is still its
+                # answer.
+                #
+                # Review caught these being one flag: any `item` frame then
+                # suppressed a COMPLETE answer that happened to be followed by
+                # a non-tool progress item — the exact case
+                # _is_tool_activity_stream's carve-out exists for, reintroduced
+                # while fixing fusion. itemKind() in the pinned bundle emits
+                # `analysis` for reasoning and context compaction, so those
+                # frames are real, not hypothetical.
+                tool_activity_since_text: bool = False
                 # The run THIS turn started, learned from the chat.send res
                 # (`{"runId": ..., "status": "started"}`). Everything the reply
                 # is built from must belong to it.
@@ -2035,6 +2061,8 @@ class OpenClawAdapter(HarnessAdapter):
                 # socket carrying other runs. Seed it from the run that asked;
                 # that is the run resuming, and it is the only run whose output
                 # belongs in this reply.
+                # Why the run stopped, as the chat channel reported it.
+                final_stop_reason: Optional[str] = None
                 turn_run_id: Optional[str] = (
                     resumed_run_id if answered_pending else None
                 )
@@ -2193,6 +2221,45 @@ class OpenClawAdapter(HarnessAdapter):
                                     tokens_in = max(tokens_in, ti)
                                 if isinstance(to, int):
                                     tokens_out = max(tokens_out, to)
+                        # SEGMENT BOUNDARY — inverted rule, deliberately.
+                        #
+                        # One assistant message's deltas arrive back-to-back.
+                        # So anything that is NOT more assistant content ended
+                        # that message, and the next delta starts a new one.
+                        #
+                        # This used to name the events that count as a
+                        # boundary (item/command_output/tool_call with a
+                        # tool-ish `kind`). That list was incomplete twice, and
+                        # the second time shipped: on 2026-08-16 a quartile
+                        # report answered with four fused narration fragments —
+                        # 244+131+76+64 = 515 chars, exactly the resp_len in
+                        # the turn log. Between those fragments were 22
+                        # `thinking` events and `event:task` frames carrying
+                        # kind=exec, neither of which was on the list, so the
+                        # accumulator never reset and every fragment the model
+                        # wrote across six minutes was concatenated into one
+                        # reply.
+                        #
+                        # An allowlist fails toward FUSING (a wrong answer
+                        # built from scratchpad). This fails toward SPLITTING
+                        # (at worst the last part of an answer), and an unknown
+                        # future stream defaults to the safe side.
+                        # `lifecycle` and `run_status` are excluded because they
+                        # describe the RUN, not the model: a lifecycle error
+                        # means the run is dying, and a run_status phase is
+                        # workspace plumbing. Neither means the model started a
+                        # new message, and treating them as boundaries throws
+                        # away the partial text a failed turn is supposed to
+                        # show (issue #1461, pinned by
+                        # test_context_overflow_abort_is_not_recorded_as_deadline).
+                        # Everything else — known or not — is model activity
+                        # and ends the segment.
+                        if (
+                            stream not in ("assistant", "lifecycle", "run_status")
+                            and not agent_payload.get("isHeartbeat")
+                            and (agent_assistant_accum or response_text)
+                        ):
+                            assistant_boundary_pending = True
                         if stream == "lifecycle" and isinstance(data, dict):
                             phase = data.get("phase")
                             lifecycle_error = data.get("error")
@@ -2230,9 +2297,11 @@ class OpenClawAdapter(HarnessAdapter):
                                     assistant_boundary_pending,
                                 )
                                 assistant_boundary_pending = False
+                                tool_activity_since_text = False
                             elif isinstance(cumulative, str) and cumulative:
                                 agent_assistant_accum = cumulative
                                 assistant_boundary_pending = False
+                                tool_activity_since_text = False
                         elif stream in ("item", "command_output"):
                             # Newer OpenClaw builds report tool activity as
                             # `item`/`command_output` streams. Tool activity
@@ -2242,11 +2311,21 @@ class OpenClawAdapter(HarnessAdapter):
                                 stream,
                                 data,
                             )
+                            # Segment splitting is NOT set here: the general
+                            # rule above already did it for every non-assistant
+                            # stream, heartbeat-guarded. Setting it again here
+                            # skipped that guard, so a heartbeat tagged as
+                            # item/command_output would have split a live
+                            # message and blanked response_text — the
+                            # mirror-image bug this rule exists to avoid.
+                            # This branch now decides ONE thing: whether the
+                            # accumulated text is scratchpad.
                             if (
                                 is_tool_activity
+                                and not agent_payload.get("isHeartbeat")
                                 and (agent_assistant_accum or response_text)
                             ):
-                                assistant_boundary_pending = True
+                                tool_activity_since_text = True
                                 response_text = ""
                             # Native-tool mode (#1138 r12+) reports tool
                             # execution ONLY here — record it so telemetry's
@@ -2260,8 +2339,9 @@ class OpenClawAdapter(HarnessAdapter):
                         elif stream == "tool_call" and isinstance(data, dict):
                             # Same boundary rule for protocol-v3 tool events.
                             if agent_assistant_accum or response_text:
-                                assistant_boundary_pending = True
-                                response_text = ""
+                                if not agent_payload.get("isHeartbeat"):
+                                    tool_activity_since_text = True
+                                    response_text = ""
                             tool_id = (
                                 data.get("id")
                                 or data.get("toolCallId")
@@ -2275,8 +2355,9 @@ class OpenClawAdapter(HarnessAdapter):
                             }
                         elif stream == "tool_result" and isinstance(data, dict):
                             if agent_assistant_accum or response_text:
-                                assistant_boundary_pending = True
-                                response_text = ""
+                                if not agent_payload.get("isHeartbeat"):
+                                    tool_activity_since_text = True
+                                    response_text = ""
                             tool_id = (
                                 data.get("id")
                                 or data.get("toolCallId")
@@ -2316,6 +2397,66 @@ class OpenClawAdapter(HarnessAdapter):
                             }
                             tool_calls.append(entry)
 
+                    elif mtype == "event" and mevent == "task":
+                        # Long-running tool execution reports here, not on the
+                        # agent stream: the sampled frame carries
+                        # marks={"action": "upserted", "kind": "exec",
+                        # "status": "running"}. It is model activity between
+                        # assistant messages, so it ends a segment for the same
+                        # reason the agent-stream rule above does. `event:tick`
+                        # and `event:health` are NOT included — they are
+                        # timers, not the model doing something, and a
+                        # heartbeat landing mid-stream must never split a
+                        # message that is still being written.
+                        # Fenced like every other stream that mutates turn
+                        # state. This socket is operator-scoped, so a
+                        # concurrent subagent's long-running exec emits task
+                        # frames here too — and an unfenced one would mark THIS
+                        # turn's finished answer as scratchpad and blank
+                        # response_text, on the strength of somebody else's
+                        # tool call. That is the 2026-08-14 incident's shape,
+                        # which is why the agent and chat streams are fenced;
+                        # this branch was added without it.
+                        #
+                        # The id sits one level deeper than on the other
+                        # streams (payload.task.runId, not payload.runId).
+                        task_payload = msg.get("payload") or {}
+                        task_detail = task_payload.get("task")
+                        task_run_id = (
+                            task_detail.get("runId")
+                            if isinstance(task_detail, dict) else None
+                        )
+                        if (
+                            isinstance(task_run_id, str)
+                            and task_run_id
+                            and turn_run_id
+                            and task_run_id != turn_run_id
+                        ):
+                            foreign_run_events += 1
+                            continue
+                        # Every task frame counts as work, with no `kind`
+                        # check — unlike the item lane, deliberately.
+                        #
+                        # `item` is a SHARED progress lane: it carries tool
+                        # work and also reasoning/commentary, which is why it
+                        # has to discriminate. A task frame is not shared —
+                        # it exists because the runtime is executing something
+                        # on the model's behalf. Only kind="exec" has been
+                        # observed, so a future non-exec kind is unproven
+                        # either way; the reason not to guess at an allowlist
+                        # is that this file has now been wrong twice about
+                        # which kinds matter.
+                        #
+                        # If that turns out wrong, the cost is a finished
+                        # answer suppressed as scratchpad. Pinned by
+                        # test_a_non_exec_task_frame_is_still_treated_as_work
+                        # so the decision is visible rather than implied, and
+                        # changing it trips a test.
+                        if agent_assistant_accum or response_text:
+                            assistant_boundary_pending = True
+                            tool_activity_since_text = True
+                            response_text = ""
+
                     elif mtype == "event" and mevent == "chat":
                         payload = msg.get("payload", {})
                         # Same fence as the agent stream, and for a sharper
@@ -2343,6 +2484,16 @@ class OpenClawAdapter(HarnessAdapter):
                             continue
                         state = payload.get("state")
                         last_state = state
+                        # Kept for every state, not just aborts. The Artondale
+                        # turn ended at `final` while the model's last message
+                        # was still stopReason=toolUse — i.e. the run stopped
+                        # mid-loop and the report was never built — and there
+                        # was no way to tell that from the logs without pulling
+                        # the workspace transcript out of S3. One field here
+                        # answers it next time.
+                        final_stop_reason = (
+                            payload.get("stopReason") or final_stop_reason
+                        )
                         event_message = payload.get("message")
                         content = event_message.get("content") if isinstance(event_message, dict) else None
                         text = self._extract_text(content) or self._extract_text(event_message)
@@ -2364,7 +2515,7 @@ class OpenClawAdapter(HarnessAdapter):
                             if (
                                 not response_text
                                 and agent_assistant_accum
-                                and not assistant_boundary_pending
+                                and not tool_activity_since_text
                             ):
                                 response_text = agent_assistant_accum
                             got_final = True
@@ -2690,7 +2841,7 @@ class OpenClawAdapter(HarnessAdapter):
                             if (
                                 not response_text
                                 and agent_assistant_accum
-                                and not assistant_boundary_pending
+                                and not tool_activity_since_text
                             ):
                                 response_text = agent_assistant_accum
                             got_final = True
@@ -2774,7 +2925,7 @@ class OpenClawAdapter(HarnessAdapter):
             if (
                 not response_text
                 and agent_assistant_accum
-                and not assistant_boundary_pending
+                and not tool_activity_since_text
             ):
                 response_text = agent_assistant_accum
             error_message = (
@@ -2828,7 +2979,7 @@ class OpenClawAdapter(HarnessAdapter):
             if (
                 not response_text
                 and agent_assistant_accum
-                and not assistant_boundary_pending
+                and not tool_activity_since_text
             ):
                 response_text = agent_assistant_accum
             logger.error(
@@ -2902,12 +3053,13 @@ class OpenClawAdapter(HarnessAdapter):
             )
 
         logger.info(
-            "chat turn ok: resp_len=%d last_state=%s run_id=%s "
-            "foreign_run_events=%d event_counts=%s "
+            "chat turn ok: resp_len=%d last_state=%s stop_reason=%s "
+            "run_id=%s foreign_run_events=%d event_counts=%s "
             "model=%s tokens_in=%d tokens_out=%d cache_read=%d cache_write=%d "
             "latency_ms=%d tool_calls=%d transcript_model_calls=%d",
             len(response_text),
             last_state,
+            final_stop_reason or "none",
             turn_run_id or "unknown",
             foreign_run_events,
             json.dumps(event_counts),
