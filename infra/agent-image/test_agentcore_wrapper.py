@@ -1823,7 +1823,66 @@ class WorkspaceRestoreFailureIsRecorded(unittest.TestCase):
         import inspect
 
         source = inspect.getsource(agentcore_wrapper)
-        window = source[source.index("record_failure(") :][:900]
+        # Anchored on THIS failure's call site, not "the first record_failure
+        # in the file" — the wrapper now has several, and the identity one
+        # deliberately omits user_id.
+        start = source.index('error_class="WorkspaceMigrationFailed"')
+        window = source[max(0, start - 400) : start + 900]
         self.assertIn("user_id=user_email", window)
         self.assertIn("session_id=session_id", window)
         self.assertIn("workspace_prefix", window)
+
+
+class EveryWrapperFailureIsRecorded(unittest.TestCase):
+    """No user-visible failure in the wrapper may be telemetry-silent.
+
+    The restore path was fixed after a prod user reported one by hand. Three
+    more paths had the identical gap — a clear message to the user, a log
+    line, and nothing in agent_failures. This asserts the invariant rather than
+    the four instances, so a fifth failure path added later cannot reintroduce
+    it quietly.
+    """
+
+    def source(self):
+        import inspect
+
+        return inspect.getsource(agentcore_wrapper)
+
+    def test_every_failed_yield_is_paired_with_a_record_failure(self):
+        source = self.source()
+        yields = source.count('"failed": True')
+        calls = source.count("record_failure(")
+        self.assertGreater(yields, 0, "no failure yields found — test is stale")
+        self.assertGreaterEqual(
+            calls, yields,
+            f"{yields} user-visible failure yields but only {calls} "
+            "record_failure calls — a failure path is telemetry-silent",
+        )
+
+    def test_each_known_failure_class_reports(self):
+        source = self.source()
+        for error_class in (
+            "WorkspaceMigrationFailed",
+            "InvocationContextInvalid",
+            "WorkspaceAuthorityChanged",
+            "OpenClawStartupFailed",
+        ):
+            marker = f'error_class="{error_class}"'
+            self.assertIn(marker, source, f"{error_class} never reaches record_failure")
+
+    def test_identity_failure_does_not_launder_an_unverified_user(self):
+        # InvocationContextInvalid means the signed identity FAILED to verify.
+        # Recording user_email there would turn an unverified claim into a
+        # stored fact.
+        source = self.source()
+        start = source.index('error_class="InvocationContextInvalid"')
+        window = source[max(0, start - 700) : start + 400]
+        self.assertNotIn("user_id=user_email", window)
+
+    def test_authority_change_records_both_prefixes(self):
+        # Which pair collided is the whole diagnostic value of this event.
+        source = self.source()
+        start = source.index('error_class="WorkspaceAuthorityChanged"')
+        window = source[start : start + 700]
+        self.assertIn("bound_prefix", window)
+        self.assertIn("requested_prefix", window)
