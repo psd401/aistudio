@@ -367,6 +367,11 @@ RESOLVE_ACK_WAIT_S = 10
 # NOTE the per-question key is `questionId`, NOT `id`, and QuestionSchema is a
 # closedObject so `id` is not merely absent, it is rejected.
 
+# Upstream's regex, character class included: `-` is a valid separator, so it
+# is also excluded from the key. A hyphenated header ("Multi-Select: yes")
+# therefore parses as key "multi" and falls through to positional matching.
+# That is upstream's behaviour and this is a port — diverging here would mean
+# our keyed form accepts headers the gateway's own plain-text path does not.
 _KEYED_ANSWER_RE = re.compile(r"^\s*([^:=-]+?)\s*[:=-]\s*(.+?)\s*$")
 _DIGITS_RE = re.compile(r"\d+")
 
@@ -427,6 +432,8 @@ def _build_question_answers(questions: list, text: str) -> dict:
     answers: dict = {}
     if len(questions) == 1:
         question = questions[0]
+        if not question.get("questionId"):
+            return answers
         normalized = _normalize_question_answer(text, question)
         answers[question["questionId"]] = [normalized] if normalized else []
         return answers
@@ -434,6 +441,10 @@ def _build_question_answers(questions: list, text: str) -> dict:
     keyed = _parse_keyed_answers(text)
     lines = [line.strip() for line in re.split(r"\r?\n", text or "")]
     for index, question in enumerate(questions):
+        # `index` still advances for a slot we cannot answer — that is the
+        # whole point of holding it.
+        if not question.get("questionId"):
+            continue
         answer = (
             keyed.get(str(question.get("questionId") or "").lower())
             or keyed.get(str(question.get("header") or "").lower())
@@ -1507,6 +1518,14 @@ class OpenClawAdapter(HarnessAdapter):
             return False, [], None
         # Upstream's own mapping, ported — see _build_question_answers.
         answers = _build_question_answers(questions, message)
+        if not answers:
+            # Every question was unusable. Sending an empty answers map would
+            # mark the question answered with nothing in it; fall back and let
+            # the user's message run as its own turn.
+            logger.warning(
+                "pending question had no answerable questions; falling back"
+            )
+            return False, [], None
 
         # Popped before every failure branch below, including a transport
         # error, and never restored. That is deliberate rather than an
@@ -2563,20 +2582,41 @@ class OpenClawAdapter(HarnessAdapter):
                             # `id` is still accepted as a fallback so a future
                             # rename degrades instead of silently reverting to
                             # that same no-op.
+                            #
+                            # POSITION IS PRESERVED, including for entries we
+                            # cannot use. The multi-question fallback answers
+                            # question N with line N, so dropping a malformed
+                            # entry here would silently shift every later
+                            # question's answer by one. An unusable entry
+                            # keeps its slot with questionId None and is
+                            # skipped when the answers are built.
                             pending_questions = []
                             for entry in (q_payload.get("questions") or []):
                                 if not isinstance(entry, dict):
+                                    pending_questions.append({"questionId": None})
                                     continue
                                 qid = entry.get("questionId") or entry.get("id")
-                                if not (isinstance(qid, str) and qid):
-                                    continue
                                 pending_questions.append({
-                                    "questionId": qid,
+                                    "questionId": (
+                                        qid if isinstance(qid, str) and qid
+                                        else None
+                                    ),
                                     "header": entry.get("header"),
                                     "question": entry.get("question"),
                                     "options": entry.get("options") or [],
                                     "isOther": entry.get("isOther"),
                                 })
+                            unusable = sum(
+                                1 for q in pending_questions
+                                if not q.get("questionId")
+                            )
+                            if unusable:
+                                logger.warning(
+                                    "question event carried %d question(s) with "
+                                    "no usable id; their slots are held so the "
+                                    "others still line up",
+                                    unusable,
+                                )
                             # The run that asked is the run that resumes. Prefer
                             # what the event says; fall back to this turn's own
                             # run, which is the same run by construction — the

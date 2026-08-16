@@ -1159,3 +1159,27 @@ class AnswerMappingMatchesTheGateway(unittest.TestCase):
         answers = harness_adapter._build_question_answers(
             questions, "K-5, 2025-26")
         self.assertNotEqual(answers["grades"], answers["year"])
+
+    def test_an_unusable_question_holds_its_slot(self):
+        # Dropping it would answer question 3 with line 2. This whole PR
+        # exists because a should-not-happen shape did happen, so the
+        # malformed case gets the same treatment as the happy one.
+        questions = [
+            {"questionId": "grades", "header": "Grades",
+             "question": "Which grades?", "options": [], "isOther": True},
+            {"questionId": None},
+            {"questionId": "year", "header": "Year",
+             "question": "Which year?", "options": [], "isOther": True},
+        ]
+        answers = harness_adapter._build_question_answers(
+            questions, "K-5\nignored\n2025-26")
+        self.assertEqual(answers, {"grades": ["K-5"], "year": ["2025-26"]})
+
+    def test_all_questions_unusable_yields_nothing_to_send(self):
+        # The caller turns this into a fallback rather than resolving a
+        # question with an empty answer map.
+        self.assertEqual(
+            harness_adapter._build_question_answers(
+                [{"questionId": None}], "anything"),
+            {},
+        )
