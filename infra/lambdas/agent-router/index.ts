@@ -1452,11 +1452,12 @@ function dmSpaceForUserRecord(
 /**
  * The "owner touched the agent" mutation applied on every inbound message.
  *
- * `email` is rewritten on every touch, not only at creation. Every
- * email-index consumer — the schedules service, triage poll, and cross-user
- * invocation — queries that GSI with a lowercased address, and DynamoDB key
- * equality is byte-exact, so a record persisted with whatever casing Google
- * Chat happened to supply is invisible to all of them. That surfaced as
+ * `email` is rewritten on every touch, not only at creation. All four
+ * email-index consumers — the schedules service, triage poll, cross-user
+ * invocation, and the schedule target backfill — query that GSI with a
+ * lowercased address, and DynamoDB key equality is byte-exact, so a record
+ * persisted with whatever casing Google Chat happened to supply is invisible
+ * to all of them. That surfaced as
  * schedule creation failing with "Owner must first open a direct message with
  * the agent" for owners whose DM space was in fact already recorded.
  * Normalizing here keeps new records queryable and heals legacy mixed-case
