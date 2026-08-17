@@ -1449,6 +1449,42 @@ function dmSpaceForUserRecord(
   return spaceName;
 }
 
+/**
+ * The "owner touched the agent" mutation applied on every inbound message.
+ *
+ * `email` is rewritten on every touch, not only at creation. Every
+ * email-index consumer — the schedules service, triage poll, and cross-user
+ * invocation — queries that GSI with a lowercased address, and DynamoDB key
+ * equality is byte-exact, so a record persisted with whatever casing Google
+ * Chat happened to supply is invisible to all of them. That surfaced as
+ * schedule creation failing with "Owner must first open a direct message with
+ * the agent" for owners whose DM space was in fact already recorded.
+ * Normalizing here keeps new records queryable and heals legacy mixed-case
+ * records on the owner's next message.
+ */
+function userActivityUpdate(
+  senderEmail: string,
+  dmSpaceName: string | undefined,
+  now: string
+): {
+  UpdateExpression: string;
+  ExpressionAttributeValues: Record<string, string>;
+} {
+  const assignments = ['lastActiveAt = :now', 'email = :email'];
+  const values: Record<string, string> = {
+    ':now': now,
+    ':email': senderEmail.toLowerCase(),
+  };
+  if (dmSpaceName) {
+    assignments.push('dmSpaceName = :dm');
+    values[':dm'] = dmSpaceName;
+  }
+  return {
+    UpdateExpression: `SET ${assignments.join(', ')}`,
+    ExpressionAttributeValues: values,
+  };
+}
+
 async function getOrCreateUser(
   senderName: string,
   senderEmail: string,
@@ -1470,13 +1506,8 @@ async function getOrCreateUser(
       new UpdateCommand({
         TableName: USERS_TABLE,
         Key: { googleIdentity: senderName },
-        UpdateExpression: dmSpaceName
-          ? 'SET lastActiveAt = :now, dmSpaceName = :dm'
-          : 'SET lastActiveAt = :now',
+        ...userActivityUpdate(senderEmail, dmSpaceName, now),
         ConditionExpression: 'attribute_exists(googleIdentity)',
-        ExpressionAttributeValues: dmSpaceName
-          ? { ':now': now, ':dm': dmSpaceName }
-          : { ':now': now },
         ReturnValues: 'ALL_NEW',
       })
     );
@@ -1499,7 +1530,7 @@ async function getOrCreateUser(
   const workspacePrefix = `${localPart}-${uuidSuffix}`;
   const newUser: AgentUser = {
     googleIdentity: senderName,
-    email: senderEmail,
+    email: emailNormalized,
     displayName: senderDisplayName,
     department: 'unknown', // Updated by admin later or via directory sync
     workspacePrefix,
@@ -1541,13 +1572,8 @@ async function getOrCreateUser(
       new UpdateCommand({
         TableName: USERS_TABLE,
         Key: { googleIdentity: senderName },
-        UpdateExpression: dmSpaceName
-          ? 'SET lastActiveAt = :now, dmSpaceName = :dm'
-          : 'SET lastActiveAt = :now',
+        ...userActivityUpdate(senderEmail, dmSpaceName, now),
         ConditionExpression: 'attribute_exists(googleIdentity)',
-        ExpressionAttributeValues: dmSpaceName
-          ? { ':now': now, ':dm': dmSpaceName }
-          : { ':now': now },
         ReturnValues: 'ALL_NEW',
       })
     );
@@ -5464,6 +5490,7 @@ async function processRecord(
 
 export const agentRouterTestHelpers = {
   dmSpaceForUserRecord,
+  userActivityUpdate,
   normalizeChatEvent,
   cardClickMessageText,
   parseAgentCoreResult,
