@@ -407,6 +407,18 @@ class TheDefaultTabIsRemoved(unittest.TestCase):
         R.add_tab("SHEET1", "4", "u@psd401.net", self.work)
         self.assertNotIn("deleteSheet", self.calls)
 
+    def test_a_non_report_error_also_never_fails_the_report(self):
+        # The docstring promises non-fatal; catching only ReportError meant an
+        # OSError writing the request payload would still kill a finished run.
+        def boom(command, user, scope="agent", json_file=None):
+            if json_file and "deletesheet" in json_file:
+                raise OSError("read-only file system")
+            return self.fake_workspace(command, user, scope, json_file)
+
+        R.workspace = boom
+        R.add_tab("SHEET1", "3", "u@psd401.net", self.work)
+        self.assertTrue((self.work / "default-tab-dropped.json").exists())
+
     def test_a_failed_delete_never_fails_the_report(self):
         # The numbers are all in by this point. Losing a finished report over
         # a cosmetic tab would be the worse trade by a wide margin.

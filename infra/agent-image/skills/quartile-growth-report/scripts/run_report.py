@@ -532,8 +532,11 @@ def drop_default_tab(sheet_id, user, work_dir, log=lambda m: None):
         return
     try:
         _delete_sheet(sheet_id, DEFAULT_SHEET_ID, user, work_dir)
-    except ReportError as exc:
-        # Already gone, or renamed by hand — either way the report stands.
+    except Exception as exc:  # noqa: BLE001 - non-fatal by design
+        # Already gone, renamed by hand, or the payload file would not write —
+        # every one of those is survivable. Catching only ReportError here
+        # contradicted the docstring above: an OSError writing the request
+        # would have propagated and killed a run whose numbers were all in.
         log(f"note: could not remove the default tab ({exc}); continuing")
     marker.write_text(json.dumps({"sheetId": DEFAULT_SHEET_ID}))
 
