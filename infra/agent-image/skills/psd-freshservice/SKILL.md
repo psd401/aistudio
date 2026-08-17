@@ -94,6 +94,12 @@ node get_workspaces.js --user <email> [--id <workspace_id>]
 
 Workspace IDs in PSD: 2 Technology (primary), 3 Employee Support Services, 4 Business Services, 5 Teaching & Learning, 6 Maintenance, 8 Investigations, 9 Transportation, 10 Safety & Security, 11 Communications, 13 Software Development.
 
+These three commands need agent-administration rights that most callers do not
+have. A 403 from them is normal and says nothing about the caller's key — do
+not run them to check whether a key works. There is no endpoint that every
+valid key can reach, so a newly stored key needs no verification step at all:
+run the command the user actually asked for and let it report.
+
 ## Approvals
 
 ```bash
@@ -136,10 +142,29 @@ When presenting summary output, write a 1-minute narrative that:
 
 ## Errors
 
-- **`freshservice_key_missing`** (exit 2) — caller has not registered their API key. Prompt for it (see above).
+- **`freshservice_key_missing`** (exit 2) — caller has not registered their API key. Prompt for it (see above). **This is the only signal that a key is absent.**
 - **`upstream_error`** — Freshservice returned non-2xx. Surface status and message; ask the user before retrying mutating operations.
 - **`bad_args`** — required argument missing or malformed.
 - **`agent_lookup_failed`** — could not resolve the caller's Freshservice agent ID via `/agents?email=`. Confirm the caller's email matches their Freshservice login.
+
+### 403 is a permission scope, never a bad key
+
+Freshservice authorizes **per endpoint and per workspace**. A 403 means the
+caller's Freshservice role does not cover *that specific call*, and it happily
+coexists with other calls succeeding on the same key — one caller's
+`list_tickets` worked while `get_agent`, `get_workspaces` and `list_agents`
+all returned 403; another's `workspace_id=3` worked while `workspace_id=8`
+returned 403.
+
+On a 403 (`freshservice_endpoint_forbidden`):
+
+- **Never** tell the user their key is invalid, and never ask them to re-issue
+  or re-paste it. Their key is not implicated.
+- Probe what they *can* reach — `list_tickets.js --user <email> --options
+  '{"workspace_id":N}'` across the workspace IDs above — and report which
+  workspaces are available rather than declaring the integration broken.
+- If they need a workspace they cannot reach, the fix is a Freshservice role
+  change on their account, not a new key. Say that plainly.
 
 ## Security
 
