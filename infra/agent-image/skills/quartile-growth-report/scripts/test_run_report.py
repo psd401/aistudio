@@ -710,6 +710,45 @@ class SbaIsNotLabelledFallToSpring(RestoresModuleFunctions):
         self.assertIn("SBA ELA (prior year→this year)", flat)
         self.assertNotIn("SBA ELA (Fall→Spring)", flat)
 
+class EveryBlockHonoursTheGapContract(RestoresModuleFunctions):
+    """SKILL.md: "Anything it cannot produce is written INTO the tab."
+
+    SBA and i-Ready went through run_block, which records a gap on a failed
+    query and on an empty result. The DIBELS block — the one the report is
+    named for — was built inline and did neither, so the PRIMARY measures
+    could go missing while the secondary ones announced themselves. That
+    asymmetry is precisely what makes a workbook look complete.
+    """
+
+    def test_the_source_records_a_gap_for_a_failed_dibels_extraction(self):
+        source = pathlib.Path(R.__file__).read_text()
+        block = source.split("One pass per distinct baseline", 1)[1]
+        block = block.split("# i-Ready", 1)[0]
+        self.assertIn("query failed", block)
+        self.assertIn("no matched students", block)
+
+    def test_a_grade_with_no_dibels_measures_still_reports_it(self):
+        source = pathlib.Path(R.__file__).read_text()
+        self.assertIn(
+            "no DIBELS measures recorded for this grade", source
+        )
+
+    def test_the_dibels_gap_list_is_not_reset_before_the_other_blocks(self):
+        # `gaps = []` appearing twice would silently discard whatever the
+        # DIBELS pass recorded before SBA and i-Ready ran.
+        source = pathlib.Path(R.__file__).read_text()
+        self.assertEqual(source.count("            gaps = []"), 1)
+
+    def test_a_gap_only_grade_still_produces_a_tab(self):
+        # A grade with nothing to report must still say so in the workbook
+        # rather than being skipped into silence.
+        import build_tab
+        tab = build_tab.build([], "S", "2", "2025-26", "Fall→Spring",
+                              gaps=["DIBELS growth: not included (x)"])
+        flat = [c for row in tab["values"] for c in row]
+        self.assertIn("NOT INCLUDED IN THIS REPORT", flat)
+        self.assertTrue(any("DIBELS growth" in c for c in flat))
+
 
 # Keep this guard LAST in the file. It used to sit mid-file (line 214), which
 # meant `python test_run_report.py` ran unittest.main() and sys.exit()ed before

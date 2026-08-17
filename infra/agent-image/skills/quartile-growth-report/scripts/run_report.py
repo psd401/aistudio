@@ -828,12 +828,14 @@ def main() -> int:
                 log(f"grade {grade}: already written")
                 continue
             log(f"grade {grade}: extracting")
+            gaps = []
             measures = step(work_dir, f"grade-{grade}-measures",
                             lambda g=grade: discover_measures(yearid, g), log)
             if not measures:
-                log(f"grade {grade}: no DIBELS measures present — skipping")
-                step(work_dir, done_marker, lambda: {"skipped": "no measures"}, log)
-                continue
+                log(f"grade {grade}: no DIBELS measures present")
+                gaps.append(
+                    "DIBELS growth: not included "
+                    "(no DIBELS measures recorded for this grade)")
 
             # One pass per distinct baseline. Grade 1 ORF starts mid-year, so
             # it runs Winter→Spring while the rest of grade 1 runs
@@ -845,14 +847,30 @@ def main() -> int:
             for baseline, group in sorted(groups.items()):
                 tag = f"grade-{grade}-{baseline.lower()}"
                 log(f"grade {grade}: {baseline}→Spring for {', '.join(group)}")
-                rows = step(
-                    work_dir, f"{tag}-rows",
-                    lambda g=grade, b=baseline, m=group: query_all(
-                        extraction_sql(schoolid, yearid, g, m, b),
-                        f"Matched {b}/Spring pairs for grade {g}"),
-                    log)
+                try:
+                    rows = step(
+                        work_dir, f"{tag}-rows",
+                        lambda g=grade, b=baseline, m=group: query_all(
+                            extraction_sql(schoolid, yearid, g, m, b),
+                            f"Matched {b}/Spring pairs for grade {g}"),
+                        log)
+                except ReportError as exc:
+                    log(f"grade {grade}: {baseline} extraction FAILED — {exc}")
+                    gaps.append(
+                        f"DIBELS {', '.join(group)} ({baseline}→Spring): "
+                        f"not included (query failed: {str(exc)[:160]})")
+                    continue
                 if not rows:
+                    # SKILL.md's contract is "anything it cannot produce is
+                    # written INTO the tab", and the DIBELS block is the one
+                    # the whole report is named for. Logging and moving on
+                    # would leave the primary measures silently absent while
+                    # SBA and i-Ready announced themselves — the exact
+                    # asymmetry that makes a workbook look complete.
                     log(f"grade {grade}: no {baseline} matched pairs")
+                    gaps.append(
+                        f"DIBELS {', '.join(group)} ({baseline}→Spring): "
+                        "not included (no matched students)")
                     continue
                 log(f"grade {grade}: {len(rows)} rows ({baseline})")
                 part = step(
@@ -864,8 +882,6 @@ def main() -> int:
                 records.extend(part)
                 for measure in group:
                     windows[measure] = f"{baseline}→Spring"
-
-            gaps = []
 
             # i-Ready. Skipped for K by SKILL.md (not district-representative).
             if grade != "K":
