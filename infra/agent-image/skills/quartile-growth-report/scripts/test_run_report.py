@@ -759,16 +759,37 @@ class EverySplicedValueIsSanitised(RestoresModuleFunctions):
     same door — and this test fails if a new splice site skips it.
     """
 
-    def test_no_raw_interpolation_reaches_a_params_or_body_string(self):
+    def test_no_raw_interpolation_reaches_any_command_string(self):
+        # Scoped to --params/--body at first, which is exactly why the
+        # --json-file path slipped through as the FOURTH variant of this bug.
+        # Any interpolation into a command string counts now.
         source = pathlib.Path(R.__file__).read_text()
         offenders = []
         for line in source.splitlines():
-            if "--params '{json.dumps(" in line or "--body '{json.dumps(" in line:
-                # A literal dict of constants is fine; a bare name is not.
-                if "command_literal" not in line and "json.dumps(params)" not in line \
-                        and "json.dumps(body)" not in line:
-                    offenders.append(line.strip())
+            stripped = line.strip()
+            if "--params" not in stripped and "--body" not in stripped \
+                    and "--json-file" not in stripped:
+                continue
+            if "{" not in stripped:
+                continue
+            if any(guard in stripped for guard in
+                   ("command_literal", "safe_path", "json.dumps(params)",
+                    "json.dumps(body)")):
+                continue
+            offenders.append(stripped)
         self.assertEqual(offenders, [], f"unsanitised splice: {offenders}")
+
+    def test_a_work_dir_with_a_space_is_refused_not_mangled(self):
+        with self.assertRaises(R.ReportError) as caught:
+            R.safe_path("/tmp/my reports/x.json")
+        self.assertIn("separate tokens", str(caught.exception))
+
+    def test_a_work_dir_with_a_quote_is_refused(self):
+        with self.assertRaises(R.ReportError):
+            R.safe_path("/tmp/o'brien/x.json")
+
+    def test_an_ordinary_path_passes_through(self):
+        self.assertEqual(R.safe_path("/tmp/qgr-a-b/x.json"), "/tmp/qgr-a-b/x.json")
 
     def test_the_share_body_sanitises_the_caller(self):
         seen = {}

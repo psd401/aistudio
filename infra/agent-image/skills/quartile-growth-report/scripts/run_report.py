@@ -128,6 +128,17 @@ def command_literal(value):
     return " ".join(text.split())
 
 
+def safe_path(path):
+    """A filesystem path fit to splice into a --command string."""
+    text = str(path)
+    if any(ch.isspace() for ch in text) or "'" in text or '"' in text:
+        raise ReportError(
+            "work dir path must contain no spaces or quotes — splitCommand "
+            f"would split it into separate tokens and lose the payload: {text}"
+        )
+    return text
+
+
 def assert_command_safe(command):
     """Fail loudly if an unquotable character reached the command string.
 
@@ -217,7 +228,13 @@ def workspace(command, user, scope="agent", json_file=None):
     """
     argv = ["node", WORKSPACE, "--user", user, "--scope", scope]
     if json_file:
-        command = f"{command} --json-file {json_file}"
+        # The path is spliced into --command like everything else, and
+        # splitCommand tokenizes on whitespace with no escape syntax — so a
+        # path containing a space or a quote silently becomes two tokens and
+        # the payload is lost. Ours are derived from a slugged school name and
+        # are safe, but --work-dir is caller-supplied. Refuse loudly here
+        # rather than produce a workbook missing a tab.
+        command = f"{command} --json-file {safe_path(json_file)}"
     argv += ["--command", assert_command_safe(command)]
     return run_json(argv, f"workspace ({command.split(' --')[0]})")
 
