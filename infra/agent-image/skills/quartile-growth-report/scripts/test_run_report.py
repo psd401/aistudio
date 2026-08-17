@@ -804,6 +804,217 @@ class EverySplicedValueIsSanitised(RestoresModuleFunctions):
             R.command_literal("hagelk@psd401.net"), "hagelk@psd401.net"
         )
 
+# --- issue #1679: seven bugs that every existing test missed ---------------
+#
+# Every test above passed while run_report.py failed on EVERY invocation
+# against the live warehouse. They asserted shapes this file invented rather
+# than shapes the warehouse and psd-workspace actually use — the same mistake
+# as the authored `questionId` fixture that let #1660 ship as a no-op.
+#
+# These pin the real ones, taken from the live schema recorded in #1679.
+
+
+class McpResponseIsAMarkdownTable(RestoresModuleFunctions):
+    """psd-data returns the raw tools/call envelope, not a rows array.
+
+    run.js writes JSON.stringify(response.result), shaped
+    {"content": [{"type": "text", "text": "<markdown>"}], "isError": false}.
+    Reading payload["rows"] returned [] for EVERY query — while 1,706 matched
+    grade-1 pairs sat behind it — and an empty result read as "no data", so
+    the workbook came out with a tab per grade and nothing in any of them.
+    """
+
+    ENVELOPE = {
+        "content": [{"type": "text", "text":
+                     "| schoolid | school_name |\n"
+                     "| --- | --- |\n"
+                     "| 3299 | Artondale Elementary |\n"}],
+        "isError": False,
+    }
+
+    def test_rows_are_parsed_out_of_the_envelope(self):
+        rows = R.parse_mcp_rows(self.ENVELOPE, "test")
+        self.assertEqual(rows, [{"schoolid": "3299",
+                                 "school_name": "Artondale Elementary"}])
+
+    def test_query_itself_returns_rows_from_a_real_envelope(self):
+        # Testing parse_mcp_rows directly proved nothing about query(): with
+        # the old payload["rows"] line restored, every direct test still
+        # passed. This one goes through query(), which is where the bug was.
+        R.run_json = lambda argv, what, **k: self.ENVELOPE
+        rows = R.query("SELECT 1", "resolve the school")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["school_name"], "Artondale Elementary")
+
+    def test_query_all_pages_a_real_envelope(self):
+        R.run_json = lambda argv, what, **k: self.ENVELOPE
+        self.assertEqual(len(R.query_all("SELECT 1", "roster")), 1)
+
+    def test_query_raises_on_an_error_envelope(self):
+        R.run_json = lambda argv, what, **k: {
+            "content": [{"type": "text",
+                         "text": 'column "schoolid" does not exist'}],
+            "isError": True}
+        with self.assertRaises(R.ReportError):
+            R.query("SELECT 1", "resolve the school")
+
+    def test_an_error_envelope_raises_instead_of_reading_as_no_data(self):
+        # This conflation is what let four other bugs hide: a query that
+        # FAILED looked exactly like a query that found nothing.
+        envelope = {"content": [{"type": "text",
+                                 "text": 'column "schoolid" does not exist'}],
+                    "isError": True}
+        with self.assertRaises(R.ReportError) as caught:
+            R.parse_mcp_rows(envelope, "resolve the school")
+        self.assertIn("does not exist", str(caught.exception))
+
+    def test_an_empty_result_set_is_empty_not_a_fake_row(self):
+        envelope = {"content": [{"type": "text", "text": "No rows returned."}],
+                    "isError": False}
+        self.assertEqual(R.parse_mcp_rows(envelope, "test"), [])
+
+    def test_a_structured_rows_key_is_used_when_present(self):
+        # So a future psd-data JSON mode needs no change here.
+        envelope = {"rows": [{"a": 1}], "isError": False}
+        self.assertEqual(R.parse_mcp_rows(envelope, "test"), [{"a": 1}])
+
+    def test_null_cells_become_none(self):
+        text = "| a | b |\n| --- | --- |\n| 1 | NULL |\n"
+        self.assertEqual(R.parse_markdown_table(text), [{"a": "1", "b": None}])
+
+    def test_prose_without_a_separator_row_is_not_a_table(self):
+        self.assertEqual(R.parse_markdown_table("| not a table"), [])
+
+
+class SqlMatchesTheLiveSchema(unittest.TestCase):
+    """The column names in #1679, not the ones this file guessed."""
+
+    def test_schools_is_id_and_name(self):
+        R.query = lambda sql, *a, **k: [{"schoolid": 1, "school_name": "X"}]
+        captured = {}
+
+        def fake(sql, *a, **k):
+            captured["sql"] = sql
+            return [{"schoolid": 1, "school_name": "Artondale Elementary"}]
+
+        original = R.query
+        R.query = fake
+        try:
+            R.resolve_school("Artondale Elementary")
+        finally:
+            R.query = original
+        self.assertIn("id AS schoolid", captured["sql"])
+        self.assertIn("name AS school_name", captured["sql"])
+        self.assertNotIn("LOWER(school_name)", captured["sql"])
+
+    def test_school_years_is_id_and_name(self):
+        captured = {}
+
+        def fake(sql, *a, **k):
+            captured["sql"] = sql
+            return [{"yearid": 35, "year_name": "2025-26"}]
+
+        original = R.query
+        R.query = fake
+        try:
+            R.resolve_year("2025-26")
+        finally:
+            R.query = original
+        self.assertIn("id AS yearid", captured["sql"])
+        self.assertIn("name AS year_name", captured["sql"])
+        self.assertNotIn("WHERE year_name", captured["sql"])
+
+    def test_the_teacher_join_uses_the_real_primary_key(self):
+        captured = {}
+
+        def fake(sql, *a, **k):
+            captured["sql"] = sql
+            return [{"sectionid": "1", "grade_level": "K",
+                     "teacher_name": "Hansen, Jane"}]
+
+        original = R.query_all
+        R.query_all = fake
+        try:
+            R.fetch_roster(1, 2)
+        finally:
+            R.query_all = original
+        self.assertIn("teachers t ON t.id = st.teacherid", captured["sql"])
+        self.assertNotIn("t.teacherid = st.teacherid", captured["sql"])
+        self.assertIn("first_name", captured["sql"])
+        self.assertNotIn("t.teacher_name", captured["sql"])
+
+    def test_the_subgroup_tables_are_not_year_scoped(self):
+        # THE most damaging of the seven: students_frl and students_specialed
+        # have no yearid, so the predicate errored the whole extraction for
+        # every grade and produced a complete-looking, empty workbook.
+        sql = R.extraction_sql(1, 35, "3", ["ORF WC"], "Fall")
+        self.assertIn("students_frl f ON f.studentid = m.studentid", sql)
+        self.assertNotIn("f.yearid", sql)
+        self.assertNotIn("sp.yearid", sql)
+
+
+class WorkspaceCallShapes(RestoresModuleFunctions):
+    """--params is query parameters; the resource is the request body."""
+
+    def test_create_sends_the_resource_as_json_not_params(self):
+        seen = {}
+
+        def fake(command, user, **kwargs):
+            seen["c"] = command
+            return {"spreadsheetId": "S"}
+
+        R.workspace = fake
+        R.create_workbook("T", "u@psd401.net")
+        self.assertIn("--json", seen["c"])
+        self.assertNotIn("--params", seen["c"])
+
+    def test_share_uses_json_and_a_boolean(self):
+        seen = {}
+
+        def fake(command, user, **kwargs):
+            seen["c"] = command
+            return {"ok": True}
+
+        R.workspace = fake
+        R.share_workbook("S", "u@psd401.net")
+        self.assertIn("--json", seen["c"])
+        self.assertNotIn("--body ", seen["c"])
+        self.assertIn('"transferOwnership": true', seen["c"])
+        self.assertNotIn('"transferOwnership": "true"', seen["c"])
+
+
+class NormsNamesAreMapped(unittest.TestCase):
+    """The warehouse and the norms file disagree, and aggregate.py joins on it.
+
+    Unmapped, it aborts the whole run for every grade with an ORF measure —
+    grades 1-5, i.e. the report.
+    """
+
+    def test_orf_warehouse_names_map_to_norms_names(self):
+        args = R.measure_as_args(["ORF Accuracy", "ORF WC", "ORF Errors"])
+        self.assertIn("ORF Accuracy=ORF-ACC", args)
+        self.assertIn("ORF WC=ORF-WRC", args)
+
+    def test_an_already_matching_name_is_not_mapped(self):
+        self.assertEqual(R.measure_as_args(["LNF", "PSF"]), [])
+
+    def test_an_unknown_measure_passes_through_unmapped(self):
+        # Loud in aggregate.py beats silently dropped here.
+        self.assertEqual(R.measure_as_args(["BRAND NEW"]), [])
+
+    def test_aggregate_receives_the_mapping(self):
+        seen = {}
+        original = R.run_json
+        R.run_json = lambda argv, what, **k: seen.setdefault("argv", argv) or []
+        try:
+            R.aggregate_rows(pathlib.Path("/tmp/x.json"), "1", "Fall",
+                             measures=["ORF WC"])
+        finally:
+            R.run_json = original
+        joined = " ".join(seen["argv"])
+        self.assertIn("--measure-as", joined)
+        self.assertIn("ORF WC=ORF-WRC", joined)
+
 
 # Keep this guard LAST in the file. It used to sit mid-file (line 214), which
 # meant `python test_run_report.py` ran unittest.main() and sys.exit()ed before
