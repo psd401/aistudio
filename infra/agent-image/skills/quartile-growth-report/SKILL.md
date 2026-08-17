@@ -50,6 +50,26 @@ as a "summary" row or a note next to a number.
    It prints the spreadsheet URL on stdout and progress on stderr.
 4. Paste that bare URL on its own line.
 
+**What the one command covers — and what it does not.** `run_report.py` builds
+the **DIBELS growth** half of this report: it queries `dibels_scores` only. It
+does **not** build, and does not pass `--subgroup` for:
+
+| Not built by `run_report.py` | Where it is defined |
+|---|---|
+| SBA grades 4-5 (scale change vs prior year) | ## Measures |
+| SBA grade 3 (spring scale + % met by Fall i-Ready quartile) | ## Measures |
+| SBA proficiency (% met, ELA/Math) | ## Measures |
+| i-Ready Reading / Math percentile change | ## Measures |
+| Low Income / Special Ed subgroup rollups | ## Subgroups |
+
+**Say so when you hand over the sheet.** A workbook from the one command is a
+DIBELS growth report, not the full "Teacher Quartile Growth and SBA
+Proficiency" report it is modeled on. Reporting it as complete is the same
+"looks complete, isn't" failure as the Minter Creek grade span — the principal
+cannot tell from the sheet that a measure was never queried. If the request
+needs SBA, i-Ready or subgroups, build those blocks by hand (see *How to run
+it by hand* below) and add them, or tell the user which measures are missing.
+
 **Do not orchestrate this yourself.** Between 2026-08-14 and 2026-08-16 this
 report failed five times running, and not once on the arithmetic: a no-op edit
 ended the run, four assistant messages fused into one reply, a promoted
@@ -110,7 +130,18 @@ into it.
 every measure for the grade at once. Per-measure querying turns 6 grades into
 30+ round trips and is what makes this report feel endless.
 
-### How to run it
+### How to run it by hand — FALLBACK ONLY
+
+**Everything from here to the end of this section applies only when
+`run_report.py` cannot be used** (it is unavailable, or it fails in a way a
+re-run does not clear, or you are covering a measure it does not build — see
+*What the one command covers* above). For a normal quartile growth report, stop
+reading here and run the one command in step 3.
+
+This section describes the manual orchestration path, and it is kept because
+that path is still the only way to reach SBA, i-Ready and the subgroup
+rollups. Do not read it as the default; the five consecutive failures that
+motivated `run_report.py` all happened on this path.
 
 **Work the grades one at a time, in this turn, start to finish.** Run a grade's
 measure blocks, keep the rows, move to the next grade. Do not parallelize, do
