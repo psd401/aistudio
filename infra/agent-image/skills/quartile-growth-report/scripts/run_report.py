@@ -426,6 +426,14 @@ def query_all(sql, reason, expected=None):
         if not rows:
             break
         out.extend(rows)
+        # If the warehouse caps pages at 30 and rate-limits at 60/min, a large
+        # grade is minutes of paging with nothing on stdout. Say so, so a slow
+        # run is visibly working rather than apparently hung — the promoted
+        # job has a two-hour budget and no way to ask.
+        if page and page % 25 == 0:
+            logger_line = (f"  {reason}: {len(out)} rows after "
+                           f"{page + 1} pages")
+            print(logger_line, file=sys.stderr, flush=True)
     else:
         raise ReportError(
             f"{reason}: still returning rows after {MAX_PAGES} pages "
@@ -1163,7 +1171,10 @@ def main() -> int:
                      for subject, table in IREADY_TABLES_BY_SUBJECT.items()
                      if discover_table([table], yearid)}, log)
         missing = sorted(set(IREADY_TABLES_BY_SUBJECT) - set(iready_tables))
-        log(f"  i-Ready: {', '.join(sorted(iready_tables)) or 'NONE FOUND'}"
+        # The TABLE names, not the subject keys. This PR exists because the
+        # wrong table names were baked in; a log that hides which table
+        # answered is the one line you would want next time.
+        log(f"  i-Ready: {', '.join(sorted(iready_tables.values())) or 'NONE FOUND'}"
             + (f" (missing: {', '.join(missing)})" if missing else ""))
 
         if dry_run:
