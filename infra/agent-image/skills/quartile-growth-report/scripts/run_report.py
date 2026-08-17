@@ -37,6 +37,7 @@ Re-running with the same --work-dir skips work already done.
 """
 
 import argparse
+import datetime
 import json
 import pathlib
 import re
@@ -671,6 +672,49 @@ def run_block(work_dir, tag, grade, build_sql, reason, log, gaps,
 # --- checkpointing ------------------------------------------------------
 
 
+SBA_WINDOW = "prior year→this year"
+
+
+def label_windows(windows, records):
+    """Give every measure block the window it was ACTUALLY measured over.
+
+    SBA compares against the PRIOR YEAR's summative, so the grade's
+    Fall→Spring fallback would render "SBA ELA (Fall→Spring)" — a window that
+    was never measured. This file's own rule, from the build_tab docstring: a
+    Fall→Winter block labelled Fall→Spring is a wrong report, not a cosmetic
+    slip.
+
+    setdefault, so a real per-measure label always wins over the fallback.
+    """
+    labelled = dict(windows)
+    for record in records:
+        meas = str(record.get("meas") or "")
+        if meas.startswith("SBA "):
+            labelled.setdefault(meas, SBA_WINDOW)
+    return labelled
+
+
+def default_work_dir(slug, year, user):
+    """Checkpoints belong to ONE run, not to a school forever.
+
+    Keyed on school alone, a second report for the same school silently
+    reused the first one's checkpoints — including `sheet` and `shared`. So a
+    different caller got a URL they had no access to (exit 0, no error), and
+    everybody got whatever the numbers were the first time the school was
+    ever run, however stale. It also falsified this script's own claim that a
+    school can be run twice and diffed: the second run returned the first
+    run's cache.
+
+    Date, caller and year are in the path. A retry the same day resumes,
+    which is what a failed run needs. Tomorrow's run is fresh. Another
+    caller gets their own workbook and their own share. Pass --work-dir to
+    resume deliberately across any of those boundaries.
+    """
+    who = re.sub(r"[^a-z0-9]+", "-", str(user).lower()).strip("-")
+    stamp = datetime.date.today().isoformat()
+    return f"/tmp/qgr-{slug}-{year or 'latest'}-{who}-{stamp}"
+
+
 def step(work_dir, name, produce, log):
     """Run `produce` once, then reuse its output on later runs.
 
@@ -713,7 +757,8 @@ def main() -> int:
         print(message, file=sys.stderr, flush=True)
 
     slug = re.sub(r"[^a-z0-9]+", "-", args.school.lower()).strip("-")
-    work_dir = pathlib.Path(args.work_dir or f"/tmp/qgr-{slug}")
+    work_dir = pathlib.Path(args.work_dir or default_work_dir(
+        slug, args.year, args.user))
     work_dir.mkdir(parents=True, exist_ok=True)
     # The checkpoints are not metadata: grade-<g>-rows.json holds studentid
     # paired with assessment scores, which is student-level FERPA data sitting
@@ -850,6 +895,8 @@ def main() -> int:
 
             if not records:
                 log(f"grade {grade}: nothing to report — writing gaps only")
+
+            windows = label_windows(windows, records)
 
             records_path = work_dir / f"grade-{grade}-records.json"
             records_path.write_text(json.dumps(records))

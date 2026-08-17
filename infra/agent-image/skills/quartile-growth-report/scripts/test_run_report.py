@@ -622,6 +622,82 @@ class WorkDirIsOwnerOnly(unittest.TestCase):
         source = pathlib.Path(R.__file__).read_text()
         self.assertIn("work_dir.chmod(0o700)", source)
 
+class CheckpointsBelongToOneRun(RestoresModuleFunctions):
+    """Keyed on school alone, a second report reused the first one's answers.
+
+    `sheet` and `shared` are checkpointed, so a different caller received a
+    URL they had no access to — exit 0, no error — and every run returned
+    whatever the numbers were the first time that school was ever built. It
+    also falsified this script's own claim that a school can be run twice and
+    diffed.
+    """
+
+    def test_a_different_caller_gets_a_different_work_dir(self):
+        a = R.default_work_dir("artondale", "2025-26", "one@psd401.net")
+        b = R.default_work_dir("artondale", "2025-26", "two@psd401.net")
+        self.assertNotEqual(a, b)
+
+    def test_a_different_year_gets_a_different_work_dir(self):
+        a = R.default_work_dir("artondale", "2024-25", "one@psd401.net")
+        b = R.default_work_dir("artondale", "2025-26", "one@psd401.net")
+        self.assertNotEqual(a, b)
+
+    def test_the_same_run_resumes_within_the_day(self):
+        # A retry after a failure must reuse checkpoints — that is the whole
+        # point of having them.
+        a = R.default_work_dir("artondale", "2025-26", "one@psd401.net")
+        b = R.default_work_dir("artondale", "2025-26", "one@psd401.net")
+        self.assertEqual(a, b)
+
+    def test_the_date_is_in_the_path(self):
+        import datetime
+        path = R.default_work_dir("artondale", "2025-26", "one@psd401.net")
+        self.assertIn(datetime.date.today().isoformat(), path)
+
+
+class SbaIsNotLabelledFallToSpring(RestoresModuleFunctions):
+    """SBA compares against the PRIOR YEAR's summative.
+
+    The grade's DIBELS fallback would render "SBA ELA (Fall→Spring)", a window
+    that was never measured. This file's own rule: a Fall→Winter block
+    labelled Fall→Spring is a wrong report, not a cosmetic slip.
+    """
+
+    def test_run_report_labels_sba_records_itself(self):
+        # Building the windows dict by hand in the test only proved build_tab
+        # reads it. This proves run_report WRITES it — the mutation that
+        # removed the labelling failed nothing until this existed.
+        records = [{"meas": "SBA ELA"}, {"meas": "ORF-WRC"}]
+        windows = R.label_windows({"*": "Fall→Spring"}, records)
+        self.assertEqual(windows["SBA ELA"], R.SBA_WINDOW)
+        self.assertNotEqual(windows["SBA ELA"], "Fall→Spring")
+
+    def test_a_real_per_measure_label_beats_the_sba_default(self):
+        windows = R.label_windows({"SBA ELA": "Winter→Spring"},
+                                  [{"meas": "SBA ELA"}])
+        self.assertEqual(windows["SBA ELA"], "Winter→Spring")
+
+    def test_non_sba_records_are_left_alone(self):
+        windows = R.label_windows({"*": "Fall→Spring"}, [{"meas": "ORF-WRC"}])
+        self.assertNotIn("ORF-WRC", windows)
+
+    def test_a_dibels_block_keeps_its_own_window(self):
+        import build_tab
+        windows = {"ORF-WRC": "Winter→Spring", "*": "Fall→Spring"}
+        self.assertEqual(
+            build_tab.window_for("ORF-WRC", windows), "Winter→Spring")
+
+    def test_the_rendered_sba_header_says_prior_year(self):
+        import build_tab
+        records = [{"meas": "SBA ELA", "scope": "school", "qt": "All",
+                    "growth": 12, "n": 30}]
+        tab = build_tab.build(records, "S", "4", "2025-26",
+                              {"SBA ELA": "prior year→this year",
+                               "*": "Fall→Spring"})
+        flat = [c for row in tab["values"] for c in row]
+        self.assertIn("SBA ELA (prior year→this year)", flat)
+        self.assertNotIn("SBA ELA (Fall→Spring)", flat)
+
 
 # Keep this guard LAST in the file. It used to sit mid-file (line 214), which
 # meant `python test_run_report.py` ran unittest.main() and sys.exit()ed before
