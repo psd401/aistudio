@@ -54,9 +54,9 @@ describe("multi-line argument values", () => {
 
   it.each([
     ["NUL", "a\u0000b"],
-    ["ESC", "a\u001bb"],
+    ["ESC", "a\u001Bb"],
     ["BEL", "a\u0007b"],
-    ["DEL", "a\u007fb"],
+    ["DEL", "a\u007Fb"],
   ])("still rejects %s", (_name, body) => {
     expect(() =>
       validateGitHubCommand(["issue", "create", "--repo", "psd401/aistudio", "--body", body])
