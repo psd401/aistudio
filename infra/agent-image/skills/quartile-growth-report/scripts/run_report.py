@@ -88,7 +88,26 @@ NORMS_NAME_BY_WAREHOUSE = {
     "orf wc": "ORF-WRC",
     "nwf cls": "NWF-CLS",
     "nwf wrc": "NWF-WRC",
+    # Grade 5's warehouse name. Unmapped, aggregate.py aborts the whole grade-5
+    # DIBELS block, and because the failure came out of a truncated result page
+    # it read as "no measures" rather than "unmapped name".
+    "maze adjusted score": "MAZE",
+    "maze": "MAZE",
 }
+
+# Measures with no national norms at all. Passed with --no-norms rather than
+# mapped, because inventing a percentile for them would misstate how a child
+# scored against national peers in a document a principal reads as fact.
+MEASURES_WITHOUT_NORMS = {"composite", "orf errors"}
+
+
+def split_by_norms(measures):
+    """(with_norms, without_norms) for one grade's measure list."""
+    with_norms, without = [], []
+    for measure in measures:
+        key = str(measure).strip().lower()
+        (without if key in MEASURES_WITHOUT_NORMS else with_norms).append(measure)
+    return with_norms, without
 
 
 def measure_as_args(measures):
@@ -346,18 +365,53 @@ def parse_markdown_table(text):
     return rows
 
 
-def query_all(sql, reason):
-    """Page a SELECT to completion."""
+def query_all(sql, reason, expected=None):
+    """Page a SELECT to completion.
+
+    STOPS ON AN EMPTY PAGE, NOT A SHORT ONE. psd-data is documented as
+    returning at most 30 rows per call (SKILL.md's pitfalls list). Asking for
+    5,000 and stopping when fewer come back would have ended after the FIRST
+    page — every extraction silently truncated to 30 students, and quartiles
+    computed over them would look entirely plausible and be wrong.
+
+    I could not verify that cap from outside the warehouse, which is exactly
+    why the loop no longer depends on knowing it: a short page proves nothing,
+    an empty one proves the end.
+    """
     out = []
     for page in range(MAX_PAGES):
-        rows = query(sql, reason, limit=PAGE_SIZE, offset=page * PAGE_SIZE)
+        rows = query(sql, reason, limit=PAGE_SIZE, offset=len(out))
+        if not rows:
+            break
         out.extend(rows)
-        if len(rows) < PAGE_SIZE:
-            return out
-    raise ReportError(
-        f"{reason}: still returning full pages after {MAX_PAGES} "
-        f"({len(out)} rows) — refusing to page forever"
-    )
+    else:
+        raise ReportError(
+            f"{reason}: still returning rows after {MAX_PAGES} pages "
+            f"({len(out)}) — refusing to page forever"
+        )
+    if expected is not None and len(out) != expected:
+        # A count that disagrees with what paging returned means the result
+        # was capped or the offsets skipped. Loud, because the alternative is
+        # a report whose every number is computed over a fraction of the
+        # cohort and looks fine.
+        raise ReportError(
+            f"{reason}: expected {expected} rows, paged {len(out)}. "
+            "The result set is being truncated; the numbers would be wrong."
+        )
+    return out
+
+
+def count_rows(sql, reason):
+    """COUNT(*) over a SELECT, so truncation cannot pass unnoticed."""
+    rows = query(f"SELECT COUNT(*) AS n FROM ({sql}) AS counted", reason,
+                 limit=1)
+    if not rows:
+        return None
+    value = (rows[0] or {}).get("n")
+    try:
+        return int(str(value).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
 
 
 def workspace(command, user, scope="agent", json_file=None):
@@ -795,14 +849,30 @@ def discover_table(candidates, yearid):
     return None
 
 
-IREADY_TABLES = ("iready_scores", "i_ready_scores", "iready_diagnostic_scores")
+# One table PER SUBJECT, discovered on 2026-08-17 by asking the warehouse
+# instead of guessing. The three names this used to probe —
+# iready_scores, i_ready_scores, iready_diagnostic_scores — do not exist, so
+# i-Ready reported itself as "table not found" on every run while the data sat
+# there under a different name.
+#
+# Guessing table names was the mistake. These are recorded, and an unknown one
+# still degrades to a stated gap rather than a silent omission.
+IREADY_TABLES_BY_SUBJECT = {
+    "Reading": "iready_reading_diagnostics",
+    "Math": "iready_math_diagnostics",
+}
 
 
-def iready_sql(schoolid, yearid, grade, table):
-    """i-Ready percentile change. Already national, so no norms lookup."""
+def iready_sql(schoolid, yearid, grade, table, subject):
+    """i-Ready percentile change for ONE subject table.
+
+    Percentile is already national, so no norms lookup — this always runs
+    --no-norms.
+    """
     return (
         "WITH stu AS ("
-        "  SELECT subject AS meas, studentid, \"window\", AVG(percentile) AS s"
+        f"  SELECT '{sql_escape(subject)}' AS meas, studentid, \"window\","
+        "         AVG(percentile) AS s"
         f"  FROM {table}"
         f"  WHERE yearid = {int(yearid)} AND grade_level = '{sql_escape(grade)}'"
         "    AND \"window\" IN ('Fall', 'Spring')"
@@ -976,10 +1046,14 @@ def main() -> int:
             )
         log(f"  grades served: {', '.join(served)}")
 
-        iready_table = step(
-            work_dir, "iready-table",
-            lambda: {"name": discover_table(IREADY_TABLES, yearid)}, log)["name"]
-        log(f"  i-Ready table: {iready_table or 'NOT FOUND'}")
+        iready_tables = step(
+            work_dir, "iready-tables",
+            lambda: {subject: table
+                     for subject, table in IREADY_TABLES_BY_SUBJECT.items()
+                     if discover_table([table], yearid)}, log)
+        missing = sorted(set(IREADY_TABLES_BY_SUBJECT) - set(iready_tables))
+        log(f"  i-Ready: {', '.join(sorted(iready_tables)) or 'NONE FOUND'}"
+            + (f" (missing: {', '.join(missing)})" if missing else ""))
 
         if dry_run:
             print(json.dumps({
@@ -1068,17 +1142,21 @@ def main() -> int:
 
             # i-Ready. Skipped for K by SKILL.md (not district-representative).
             if grade != "K":
-                if iready_table:
+                for subject in sorted(IREADY_TABLES_BY_SUBJECT):
+                    table = iready_tables.get(subject)
+                    if not table:
+                        gaps.append(
+                            f"i-Ready {subject}: not included (table "
+                            f"{IREADY_TABLES_BY_SUBJECT[subject]} not found)")
+                        continue
                     records.extend(run_block(
-                        work_dir, f"grade-{grade}-iready", grade,
-                        lambda g=grade: iready_sql(schoolid, yearid, g,
-                                                   iready_table),
-                        f"i-Ready Fall/Spring percentiles for grade {grade}",
-                        log, gaps, "i-Ready Reading/Math", no_norms=True))
-                else:
-                    gaps.append(
-                        "i-Ready Reading/Math: not included (no i-Ready table "
-                        f"found; tried {', '.join(IREADY_TABLES)})")
+                        work_dir, f"grade-{grade}-iready-{subject.lower()}",
+                        grade,
+                        lambda g=grade, t=table, sub=subject: iready_sql(
+                            schoolid, yearid, g, t, sub),
+                        f"i-Ready {subject} Fall/Spring percentiles, "
+                        f"grade {grade}",
+                        log, gaps, f"i-Ready {subject}", no_norms=True))
 
             # SBA grades 4-5: scale change against the prior-year summative.
             if grade in ("4", "5"):
