@@ -348,8 +348,66 @@ def extraction_sql(schoolid, yearid, grade, measures, baseline):
         f"    AND grade_level = '{sql_escape(grade)}') "
         "SELECT m.meas, m.studentid::text AS studentid, m.b::text AS b, "
         "  m.e::text AS e, hr.sectionid::text AS sectionid, "
+        "  (sch.studentid IS NOT NULL)::text AS in_sch, "
+        "  f.frl::text AS low_income, "
+        "  sp.special_education::text AS special_ed "
+        "FROM m LEFT JOIN hr USING (studentid) LEFT JOIN sch USING (studentid) "
+        # DISTRICT-WIDE, never scoped to the school. On 2026-08-15 every grade
+        # reported School and District identically — grade K showed 18/18
+        # against a district cohort of 558 — because only this school's
+        # students carried a flag, so the district cell WAS the school cell and
+        # its complement absorbed 540 unflagged students. Every number looked
+        # plausible.
+        f"LEFT JOIN students_frl f ON f.studentid = m.studentid "
+        f"  AND f.yearid = {int(yearid)} "
+        f"LEFT JOIN students_specialed sp ON sp.studentid = m.studentid "
+        f"  AND sp.yearid = {int(yearid)}"
+    )
+
+
+SUBGROUPS = (
+    "low_income=Low Income|Non-Low Income",
+    "special_ed=Special Ed|Non-Special Ed",
+)
+
+
+def sba_sql(schoolid, yearid, grade):
+    """SBA scale growth vs the prior-year summative, quartiled on that prior score.
+
+    smarter_balanced_scores mixes IAB/FIAB participation rows (score = 1) with
+    summatives, so the two filters are mandatory — unfiltered averages are
+    garbage (SKILL.md, psd-data pitfalls).
+    """
+    prior_grade = str(int(grade) - 1)
+    return (
+        "WITH cur AS ("
+        "  SELECT studentid, assessment_group AS meas, AVG(score) AS e,"
+        "         AVG(CASE WHEN met_standard THEN 100.0 ELSE 0.0 END) AS metv"
+        "  FROM smarter_balanced_scores"
+        f"  WHERE yearid = {int(yearid)} AND grade_level = '{sql_escape(grade)}'"
+        "    AND assessment_group LIKE 'Summative%' AND is_strand = false"
+        "  GROUP BY 1,2), "
+        "prior AS ("
+        "  SELECT studentid, assessment_group AS meas, AVG(score) AS b"
+        "  FROM smarter_balanced_scores"
+        f"  WHERE yearid = {int(yearid) - 1}"
+        f"    AND grade_level = '{sql_escape(prior_grade)}'"
+        "    AND assessment_group LIKE 'Summative%' AND is_strand = false"
+        "  GROUP BY 1,2), "
+        "hr AS (SELECT DISTINCT ON (studentid) studentid, sectionid"
+        "  FROM section_enrollments"
+        f"  WHERE yearid = {int(yearid)} AND schoolid = {int(schoolid)}"
+        "    AND course_code LIKE 'GR0%'"
+        "  ORDER BY studentid, dateleft DESC), "
+        "sch AS (SELECT DISTINCT studentid FROM school_year_enrollments"
+        f"  WHERE yearid = {int(yearid)} AND schoolid = {int(schoolid)}"
+        f"    AND grade_level = '{sql_escape(grade)}') "
+        "SELECT ('SBA ' || cur.meas) AS meas, cur.studentid::text AS studentid, "
+        "  prior.b::text AS b, cur.e::text AS e, cur.metv::text AS met_pct, "
+        "  hr.sectionid::text AS sectionid, "
         "  (sch.studentid IS NOT NULL)::text AS in_sch "
-        "FROM m LEFT JOIN hr USING (studentid) LEFT JOIN sch USING (studentid)"
+        "FROM cur JOIN prior USING (studentid, meas) "
+        "LEFT JOIN hr USING (studentid) LEFT JOIN sch USING (studentid)"
     )
 
 
@@ -370,7 +428,7 @@ def discover_measures(yearid, grade):
     )
 
 
-def aggregate_rows(rows_path, grade, baseline, no_norms=False):
+def aggregate_rows(rows_path, grade, baseline, no_norms=False, subgroups=()):
     argv = [
         PYTHON, str(HERE / "aggregate.py"),
         "--rows", str(rows_path),
@@ -380,10 +438,12 @@ def aggregate_rows(rows_path, grade, baseline, no_norms=False):
     ]
     if no_norms:
         argv.append("--no-norms")
+    for spec in subgroups or ():
+        argv += ["--subgroup", spec]
     return run_json(argv, f"aggregate.py (grade {grade})")
 
 
-def build_values(records_path, school, grade, year, window, teachers):
+def build_values(records_path, school, grade, year, window, teachers, gaps=()):
     argv = [
         PYTHON, str(HERE / "build_tab.py"),
         "--rows", str(records_path),
@@ -392,6 +452,7 @@ def build_values(records_path, school, grade, year, window, teachers):
         "--year", year,
         "--window", window,
         "--teachers", json.dumps(teachers),
+        "--gaps", json.dumps(list(gaps)),
         "--emit", "values",
     ]
     return run_json(argv, f"build_tab.py (grade {grade})")
@@ -529,6 +590,84 @@ def definitions_values():
     }
 
 
+def discover_table(candidates, yearid):
+    """Return the first candidate table that answers, or None.
+
+    i-Ready's table name is not written down anywhere in this skill, unlike
+    smarter_balanced_scores and students_frl. Rather than guess one and have
+    the block vanish, ask — and if none answers, the caller records a VISIBLE
+    gap instead of an absence.
+    """
+    for table in candidates:
+        try:
+            query(f"SELECT 1 FROM {table} WHERE yearid = {int(yearid)}",
+                  f"Confirm {table} exists for the report", limit=1)
+            return table
+        except ReportError:
+            continue
+    return None
+
+
+IREADY_TABLES = ("iready_scores", "i_ready_scores", "iready_diagnostic_scores")
+
+
+def iready_sql(schoolid, yearid, grade, table):
+    """i-Ready percentile change. Already national, so no norms lookup."""
+    return (
+        "WITH stu AS ("
+        "  SELECT subject AS meas, studentid, \"window\", AVG(percentile) AS s"
+        f"  FROM {table}"
+        f"  WHERE yearid = {int(yearid)} AND grade_level = '{sql_escape(grade)}'"
+        "    AND \"window\" IN ('Fall', 'Spring')"
+        "  GROUP BY 1,2,3), "
+        "m AS ("
+        "  SELECT f.meas, f.studentid, f.s AS b, sp.s AS e"
+        "  FROM stu f"
+        "  JOIN stu sp ON sp.studentid = f.studentid AND sp.meas = f.meas"
+        "    AND sp.\"window\" = 'Spring'"
+        "  WHERE f.\"window\" = 'Fall'), "
+        "hr AS (SELECT DISTINCT ON (studentid) studentid, sectionid"
+        "  FROM section_enrollments"
+        f"  WHERE yearid = {int(yearid)} AND schoolid = {int(schoolid)}"
+        "    AND course_code LIKE 'GR0%'"
+        "  ORDER BY studentid, dateleft DESC), "
+        "sch AS (SELECT DISTINCT studentid FROM school_year_enrollments"
+        f"  WHERE yearid = {int(yearid)} AND schoolid = {int(schoolid)}"
+        f"    AND grade_level = '{sql_escape(grade)}') "
+        "SELECT ('i-Ready ' || m.meas) AS meas, m.studentid::text AS studentid, "
+        "  m.b::text AS b, m.e::text AS e, hr.sectionid::text AS sectionid, "
+        "  (sch.studentid IS NOT NULL)::text AS in_sch "
+        "FROM m LEFT JOIN hr USING (studentid) LEFT JOIN sch USING (studentid)"
+    )
+
+
+def run_block(work_dir, tag, grade, build_sql, reason, log, gaps,
+              label, no_norms=False, subgroups=()):
+    """Extract + aggregate one measure family, recording a GAP if it fails.
+
+    A block that returns nothing, errors, or has no table must show up in the
+    workbook — not only in a log the principal never reads. Silently omitting
+    SBA or i-Ready produces a report that looks complete and is not, which is
+    the exact failure this whole redesign exists to end.
+    """
+    try:
+        rows = step(work_dir, f"{tag}-rows",
+                    lambda: query_all(build_sql(), reason), log)
+    except ReportError as exc:
+        log(f"  {label}: FAILED — {exc}")
+        gaps.append(f"{label}: not included (query failed: {str(exc)[:160]})")
+        return []
+    if not rows:
+        log(f"  {label}: no matched rows")
+        gaps.append(f"{label}: not included (no matched students)")
+        return []
+    log(f"  {label}: {len(rows)} rows")
+    return step(work_dir, f"{tag}-agg",
+                lambda: aggregate_rows(work_dir / f"{tag}-rows.json", grade,
+                                       "Fall", no_norms=no_norms,
+                                       subgroups=subgroups), log)
+
+
 # --- checkpointing ------------------------------------------------------
 
 
@@ -606,6 +745,11 @@ def main() -> int:
             )
         log(f"  grades served: {', '.join(served)}")
 
+        iready_table = step(
+            work_dir, "iready-table",
+            lambda: {"name": discover_table(IREADY_TABLES, yearid)}, log)["name"]
+        log(f"  i-Ready table: {iready_table or 'NOT FOUND'}")
+
         if dry_run:
             print(json.dumps({
                 "school": school, "year": year,
@@ -666,16 +810,46 @@ def main() -> int:
                 part = step(
                     work_dir, f"{tag}-agg",
                     lambda g=grade, b=baseline, t=tag: aggregate_rows(
-                        work_dir / f"{t}-rows.json", g, b),
+                        work_dir / f"{t}-rows.json", g, b,
+                        subgroups=SUBGROUPS),
                     log)
                 records.extend(part)
                 for measure in group:
                     windows[measure] = f"{baseline}→Spring"
 
+            gaps = []
+
+            # i-Ready. Skipped for K by SKILL.md (not district-representative).
+            if grade != "K":
+                if iready_table:
+                    records.extend(run_block(
+                        work_dir, f"grade-{grade}-iready", grade,
+                        lambda g=grade: iready_sql(schoolid, yearid, g,
+                                                   iready_table),
+                        f"i-Ready Fall/Spring percentiles for grade {grade}",
+                        log, gaps, "i-Ready Reading/Math", no_norms=True))
+                else:
+                    gaps.append(
+                        "i-Ready Reading/Math: not included (no i-Ready table "
+                        f"found; tried {', '.join(IREADY_TABLES)})")
+
+            # SBA grades 4-5: scale change against the prior-year summative.
+            if grade in ("4", "5"):
+                records.extend(run_block(
+                    work_dir, f"grade-{grade}-sba", grade,
+                    lambda g=grade: sba_sql(schoolid, yearid, g),
+                    f"SBA summative pairs for grade {grade}",
+                    log, gaps, "SBA grades 4-5", no_norms=True))
+            elif grade == "3":
+                # Grade 3 has no prior SBA to quartile on — SKILL.md puts it on
+                # the Fall i-Ready quartile instead, which needs the i-Ready
+                # table. Stated rather than silently absent.
+                gaps.append(
+                    "SBA grade 3: not included (needs the Fall i-Ready "
+                    "baseline; implement once the i-Ready table is confirmed)")
+
             if not records:
-                log(f"grade {grade}: no matched pairs at all — skipping")
-                step(work_dir, done_marker, lambda: {"skipped": "no rows"}, log)
-                continue
+                log(f"grade {grade}: nothing to report — writing gaps only")
 
             records_path = work_dir / f"grade-{grade}-records.json"
             records_path.write_text(json.dumps(records))
@@ -689,9 +863,9 @@ def main() -> int:
             windows.setdefault("*", f"{grade_default}→Spring")
             body = step(
                 work_dir, f"grade-{grade}-values",
-                lambda g=grade, w=windows: build_values(
+                lambda g=grade, w=windows, gp=gaps: build_values(
                     records_path, school["school_name"], g,
-                    year["year_name"], json.dumps(w), roster["teachers"]),
+                    year["year_name"], json.dumps(w), roster["teachers"], gp),
                 log)
 
             add_tab(sheet_id, grade, args.user, work_dir, log)

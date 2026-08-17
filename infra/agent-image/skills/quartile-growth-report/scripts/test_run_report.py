@@ -22,6 +22,25 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import run_report as R  # noqa: E402
 
+_PATCHABLE = ("query", "query_all", "run_json", "workspace")
+
+
+class RestoresModuleFunctions(unittest.TestCase):
+    """Stubs must not leak between tests.
+
+    Patching R.query/R.query_all in place and leaving them there made the
+    paging suite fail depending on test ORDER — a self-inflicted version of
+    exactly the flakiness these tests exist to prevent.
+    """
+
+    def setUp(self):
+        self._saved = {name: getattr(R, name) for name in _PATCHABLE}
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        for name, value in self._saved.items():
+            setattr(R, name, value)
+
 
 class Checkpoints(unittest.TestCase):
     """A re-run must resume, not restart.
@@ -59,7 +78,7 @@ class Checkpoints(unittest.TestCase):
         )
 
 
-class Paging(unittest.TestCase):
+class Paging(RestoresModuleFunctions):
     """`--export` is not used anywhere, on purpose.
 
     It timed out repeatedly on the grade-K extraction on 2026-08-16 while the
@@ -98,7 +117,9 @@ class ExtractionSql(unittest.TestCase):
 
     def test_no_window_function_reaches_the_warehouse(self):
         upper = self._sql().upper()
-        for banned in ("NTILE", "GROUPING SETS", "LATERAL", "OVER ("):
+        # NTILE( with the paren: AVG(PERCENTILE) contains the substring
+        # "NTILE", so the bare name matches the very column i-Ready reports on.
+        for banned in ("NTILE(", "GROUPING SETS", "LATERAL", "OVER ("):
             self.assertNotIn(banned, upper, f"{banned} must stay out of SQL")
 
     def test_every_non_text_column_is_cast(self):
@@ -139,7 +160,7 @@ class ExtractionSql(unittest.TestCase):
         self.assertEqual(list(groups), ["Fall"])
 
 
-class SqlEscaping(unittest.TestCase):
+class SqlEscaping(RestoresModuleFunctions):
     def test_an_apostrophe_in_a_school_name_is_escaped(self):
         self.assertEqual(R.sql_escape("O'Brien"), "O''Brien")
 
@@ -155,7 +176,7 @@ class SqlEscaping(unittest.TestCase):
         self.assertIn("O''Brien Elementary", captured["sql"])
 
 
-class SchoolResolution(unittest.TestCase):
+class SchoolResolution(RestoresModuleFunctions):
     def test_an_ambiguous_name_refuses_rather_than_guessing(self):
         R.query = lambda *a, **k: [
             {"schoolid": 1, "school_name": "Harbor Ridge Middle"},
@@ -180,7 +201,7 @@ class SchoolResolution(unittest.TestCase):
             R.resolve_school("Nowhere Elementary")
 
 
-class RosterDefinesTheGradeSpan(unittest.TestCase):
+class RosterDefinesTheGradeSpan(RestoresModuleFunctions):
     """On 2026-08-15 the agent announced "Minter Creek is a K-2 school",
     invented the justification, and scoped a whole report to it. It is K-5.
     The span is a query result here, never an assertion.
@@ -211,7 +232,7 @@ class RosterDefinesTheGradeSpan(unittest.TestCase):
             R.fetch_roster(1, 2)
 
 
-class CommandStringsSurviveApostrophes(unittest.TestCase):
+class CommandStringsSurviveApostrophes(RestoresModuleFunctions):
     """psd-workspace's splitCommand has no escape syntax.
 
     Its own source records the live failure: "any content with an apostrophe,
@@ -306,7 +327,7 @@ class HungCallsAreBounded(unittest.TestCase):
         self.assertGreater(default, 0)
 
 
-class SideEffectsAreCheckpointed(unittest.TestCase):
+class SideEffectsAreCheckpointed(RestoresModuleFunctions):
     """A retry must be able to succeed.
 
     add_tab was the one side effect not checkpointed: a failure between
@@ -317,6 +338,7 @@ class SideEffectsAreCheckpointed(unittest.TestCase):
     """
 
     def setUp(self):
+        super().setUp()
         self.work = pathlib.Path(tempfile.mkdtemp())
         self.calls = []
 
@@ -420,7 +442,113 @@ class WindowLabels(unittest.TestCase):
         )
 
 
-class LikeWildcards(unittest.TestCase):
+class TheWholeReportIsAttempted(RestoresModuleFunctions):
+    """SBA, i-Ready and the subgroup rollups are part of the report.
+
+    The first version of this pipeline did DIBELS growth only, while SKILL.md
+    told the agent not to orchestrate anything itself — so a principal would
+    have received a workbook silently missing SBA proficiency (half the
+    report's name), i-Ready, and both subgroup breakdowns. Review caught it.
+    That is the same "looks complete, isn't" class as the Minter Creek grade
+    span and the district-column-mirrors-school-column bug.
+    """
+
+    def test_the_dibels_extraction_carries_the_subgroup_flags(self):
+        sql = R.extraction_sql(1, 2, "3", ["ORF-WRC"], "Fall")
+        self.assertIn("students_frl", sql)
+        self.assertIn("students_specialed", sql)
+        self.assertIn("low_income", sql)
+        self.assertIn("special_ed", sql)
+
+    def test_the_subgroup_join_is_district_wide(self):
+        # Scoping it to the school made every District cell equal its School
+        # cell on 2026-08-15 — grade K showed 18/18 against a district cohort
+        # of 558 — and every number looked plausible.
+        sql = R.extraction_sql(7, 2, "3", ["ORF-WRC"], "Fall")
+        frl = sql.split("students_frl", 1)[1].split("LEFT JOIN", 1)[0]
+        self.assertNotIn("schoolid", frl)
+
+    def test_both_subgroups_are_requested_from_aggregate(self):
+        seen = {}
+        R.run_json = lambda argv, what, **k: seen.setdefault("argv", argv) or []
+        R.aggregate_rows(pathlib.Path("/tmp/x.json"), "3", "Fall",
+                         subgroups=R.SUBGROUPS)
+        joined = " ".join(seen["argv"])
+        self.assertIn("low_income=Low Income|Non-Low Income", joined)
+        self.assertIn("special_ed=Special Ed|Non-Special Ed", joined)
+
+    def test_sba_filters_out_iab_participation_rows(self):
+        # smarter_balanced_scores mixes IAB/FIAB rows (score = 1) with
+        # summatives; unfiltered averages are garbage.
+        sql = R.sba_sql(1, 35, "4")
+        self.assertIn("LIKE 'Summative%'", sql)
+        self.assertIn("is_strand = false", sql)
+
+    def test_sba_quartiles_on_the_prior_year_score(self):
+        sql = R.sba_sql(1, 35, "5")
+        self.assertIn("yearid = 34", sql)      # prior year
+        self.assertIn("grade_level = '4'", sql)  # prior grade
+        self.assertIn("prior.b::text", sql)
+
+    def test_iready_uses_percentile_not_raw_score(self):
+        sql = R.iready_sql(1, 2, "3", "iready_scores")
+        self.assertIn("AVG(percentile)", sql)
+
+    def test_no_block_reintroduces_a_window_function(self):
+        for sql in (R.sba_sql(1, 35, "4"),
+                    R.iready_sql(1, 2, "3", "iready_scores")):
+            upper = sql.upper()
+            for banned in ("NTILE(", "GROUPING SETS", "LATERAL"):
+                self.assertNotIn(banned, upper)
+
+
+class OmissionsAreVisibleInTheWorkbook(RestoresModuleFunctions):
+    """A principal does not read the run log.
+
+    Every previous "looks complete, isn't" failure was invisible at the point
+    of use. A block that cannot be produced is written INTO the tab.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(tempfile.mkdtemp())
+
+    def test_a_failed_block_becomes_a_gap_not_an_absence(self):
+        def boom():
+            raise R.ReportError("table does not exist")
+
+        gaps = []
+        R.query_all = lambda *a, **k: (_ for _ in ()).throw(
+            R.ReportError("table does not exist"))
+        out = R.run_block(self.work, "t", "3", lambda: "SELECT 1", "why",
+                          lambda m: None, gaps, "SBA grades 4-5")
+        self.assertEqual(out, [])
+        self.assertEqual(len(gaps), 1)
+        self.assertIn("SBA grades 4-5", gaps[0])
+        self.assertIn("not included", gaps[0])
+
+    def test_an_empty_block_is_also_a_gap(self):
+        gaps = []
+        R.query_all = lambda *a, **k: []
+        R.run_block(self.work, "t2", "3", lambda: "SELECT 1", "why",
+                    lambda m: None, gaps, "i-Ready Reading/Math")
+        self.assertIn("no matched students", gaps[0])
+
+    def test_gaps_are_rendered_into_the_tab(self):
+        import build_tab
+        tab = build_tab.build([], "S", "3", "2025-26", "Fall→Spring",
+                              gaps=["SBA grades 4-5: not included (x)"])
+        flat = [c for row in tab["values"] for c in row]
+        self.assertIn("NOT INCLUDED IN THIS REPORT", flat)
+        self.assertTrue(any("SBA grades 4-5" in c for c in flat))
+
+    def test_a_complete_tab_carries_no_gap_banner(self):
+        import build_tab
+        tab = build_tab.build([], "S", "3", "2025-26", "Fall→Spring")
+        flat = [c for row in tab["values"] for c in row]
+        self.assertNotIn("NOT INCLUDED IN THIS REPORT", flat)
+
+class LikeWildcards(RestoresModuleFunctions):
     """A school name is a literal, not a pattern.
 
     sql_escape closes the quote hole; it does nothing about `%` and `_`, which

@@ -82,7 +82,8 @@ def window_for(meas, window):
     return window
 
 
-def build(records, school, grade, year, window, sections=None, teachers=None):
+def build(records, school, grade, year, window, sections=None, teachers=None,
+          gaps=()):
     """One tab's grid: a block per measure, quartile rows, then subgroups."""
     by_measure = defaultdict(lambda: defaultdict(dict))
     subgroups = defaultdict(list)
@@ -125,6 +126,16 @@ def build(records, school, grade, year, window, sections=None, teachers=None):
             values.append(row)
         values.append([BLANK])
 
+    if gaps:
+        # A block that could not be produced is stated IN THE WORKBOOK. A
+        # principal does not read the run log, and a report that silently
+        # omits SBA or i-Ready looks complete and is not — the exact failure
+        # this report has produced repeatedly in other forms.
+        values.append(["NOT INCLUDED IN THIS REPORT"])
+        for gap in gaps:
+            values.append([gap])
+        values.append([BLANK])
+
     if subgroups:
         values.append(['Subgroups (All level) — School vs District'])
         values.append(["Subgroup", "Measure", "School", "District"])
@@ -155,6 +166,11 @@ def main() -> int:
         "Fall→Spring is a wrong report, not a cosmetic slip. May be a JSON "
         'object mapping measure to label ({"ORF-WRC": "Winter→Spring", '
         '"*": "Fall→Spring"}) when one grade mixes baselines.',
+    )
+    parser.add_argument(
+        "--gaps",
+        help="JSON list of measure families that could not be produced; "
+        "rendered in the tab so an omission is visible to the reader",
     )
     parser.add_argument(
         "--teachers",
@@ -217,8 +233,16 @@ def main() -> int:
                 "--teachers must be a JSON object mapping sectionid to teacher "
                 f"name, got {type(teachers).__name__}"
             )
+    gaps = []
+    if args.gaps:
+        try:
+            gaps = json.loads(args.gaps)
+        except (json.JSONDecodeError, ValueError) as exc:
+            parser.error(f"--gaps is not valid JSON ({exc})")
+
     tab = build(
-        records, args.school, args.grade, args.year, window, teachers=teachers
+        records, args.school, args.grade, args.year, window,
+        teachers=teachers, gaps=gaps,
     )
 
     if args.emit == "grid":

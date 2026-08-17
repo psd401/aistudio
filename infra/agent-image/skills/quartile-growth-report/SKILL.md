@@ -87,6 +87,17 @@ rebuild its steps by hand.
 `--dry-run` resolves the school, year and roster and prints the plan without
 touching a spreadsheet. Use it when the user asks what the report will cover.
 
+**What it covers**: DIBELS growth with national PR, i-Ready Reading/Math
+(skipped for K), SBA grades 4-5 against the prior-year summative, and the Low
+Income / Special Ed subgroup rollups joined district-wide.
+
+**Anything it cannot produce is written INTO the tab** under "NOT INCLUDED IN
+THIS REPORT", with the reason. Do not remove those rows, and do not describe
+the report as complete when they are present — a principal does not read the
+run log, and a workbook that silently omits SBA looks finished and is not.
+SBA grade 3 needs the Fall i-Ready quartile and reports itself as a gap until
+that table is confirmed.
+
 **Write no scripts. Author no files.** Every step ships as a script that takes
 the previous step's output and emits the next step's input, ending in a body
 you pipe straight into `gws`:
