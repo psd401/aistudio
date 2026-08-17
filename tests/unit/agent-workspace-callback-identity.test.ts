@@ -82,15 +82,40 @@ describe("verifyGrantedIdentity (#1234)", () => {
 let executedLabels: string[] = []
 let userRows: Array<{ id: number }> = [{ id: 1 }]
 const nonceRow = { ownerEmail: "hagelk@psd401.net", agentEmail: "agnt_hagelk@psd401.net", tokenKind: "user_account" as const }
+// The user lookup's predicate is load-bearing (#1682): migration 112 makes
+// users.email unique on lower(email), so a case-sensitive compare misses a
+// differently-cased row that the index will still reject. Run that one
+// builder against a recorder so a test can assert the emitted predicate
+// instead of only its label — no other query's shape is exercised here.
+let capturedUserWhere: unknown = null
+const recordingDb = () => ({
+  select: () => ({
+    from: () => ({
+      where: (predicate: unknown) => {
+        capturedUserWhere = predicate
+        return { limit: () => userRows }
+      },
+    }),
+  }),
+})
 jest.mock("@/lib/db/drizzle-client", () => ({
-  executeQuery: jest.fn(async (_cb: unknown, label: string) => {
+  executeQuery: jest.fn(async (cb: unknown, label: string) => {
     executedLabels.push(label)
     if (label === "lookupConsentNonce") return [nonceRow]
-    if (label === "findUserByEmail") return userRows
+    if (label === "findUserByEmail") {
+      ;(cb as (db: unknown) => unknown)(recordingDb())
+      return userRows
+    }
     return []
   }),
   executeTransaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) => cb({})),
 }))
+
+/** Literal SQL text of a drizzle fragment, dropping bound params. */
+function sqlText(fragment: unknown): string {
+  const chunks = (fragment as { queryChunks?: Array<{ value?: unknown }> })?.queryChunks ?? []
+  return chunks.map((c) => (Array.isArray(c?.value) ? c.value.join("") : "")).join("")
+}
 
 const storeRefreshTokenMock = jest.fn(async (..._a: unknown[]) => "arn:aws:secretsmanager:us-east-1:1:secret:x-abc123")
 jest.mock("@/lib/agent-workspace/secrets-manager", () => ({
@@ -179,5 +204,23 @@ describe("handleOAuthCallback identity enforcement (#1234)", () => {
     expect(res.data!.success).toBe(false)
     expect(storeRefreshTokenMock).not.toHaveBeenCalled()
     expect(executedLabels).not.toContain("consumeConsentNonce")
+  })
+
+  // #1682. users.email is unique on lower(email) (migration 112), and the
+  // Cognito upsert stores whatever casing the IdP sends — one prod owner's row
+  // is GEORGEK@psd401.net. A case-sensitive lookup misses her, routes an
+  // existing user into auto-provisioning, and that INSERT then dies on
+  // uq_users_email_lower, so the callback throws and every retry fails
+  // identically. The predicate must lower BOTH sides to match the index.
+  it("looks the owner up case-insensitively so a differently-cased row is found", async () => {
+    capturedUserWhere = null
+    await handleOAuthCallback("code", HEX_NONCE)
+
+    expect(executedLabels).toContain("findUserByEmail")
+    const predicate = sqlText(capturedUserWhere)
+    expect(predicate).toContain("lower(")
+    // Both sides — lowering only the column still misses a mixed-case input.
+    expect(predicate.match(/lower\(/g) ?? []).toHaveLength(2)
+    expect(predicate).not.toMatch(/^\s*=/)
   })
 })

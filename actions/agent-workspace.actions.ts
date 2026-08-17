@@ -490,8 +490,19 @@ async function exchangeAndStore(
   }
   const grantedScopes = validated.grantedScopes
 
+  // Case-INSENSITIVE, per the convention documented on getUserByEmail
+  // (lib/db/drizzle/users.ts) — email is an authorization join key and
+  // migration 112 enforces uniqueness on lower(email). A case-sensitive `=`
+  // here misses an existing row whenever the IdP stored a differently-cased
+  // address, which sends an already-provisioned user down the auto-provision
+  // branch below and re-runs its staff role assignment as a side effect.
   const [existing] = await executeQuery(
-    (db) => db.select({ id: users.id }).from(users).where(eq(users.email, payload.sub)).limit(1),
+    (db) =>
+      db
+        .select({ id: users.id })
+        .from(users)
+        .where(sql`lower(${users.email}) = lower(${payload.sub})`)
+        .limit(1),
     "findUserByEmail"
   )
 
