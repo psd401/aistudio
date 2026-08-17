@@ -497,6 +497,42 @@ def _frames_from_run(frames, run_id) -> bool:
     return False
 
 
+def _is_reply_session_conflict(error) -> bool:
+    """Does this chat.send error mean a stale reply session is in the way?
+
+    The wedge the pre-send abort was written for (2026-07-01): a prior turn's
+    server-side reply session survives its ws.close() and rejects the next
+    chat.send. It announces itself, which is why guessing at it every turn was
+    never necessary.
+    """
+    # Underscores normalised so a code like SESSION_INITIALIZATION_FAILED
+    # matches the same rule as the prose message. The exact wire text is not
+    # pinned by anything we control, so match liberally — the cost of a false
+    # positive is one wasted abort+resend on a turn that was already failing.
+    text = json.dumps(error).lower().replace("_", " ") if error else ""
+    return "reply session" in text or "session initialization" in text
+
+
+def _abort_and_resend(ws, session_id, message, model_override) -> str:
+    """Clear the stale reply session, then re-send. Returns the new chat id."""
+    ws.send(json.dumps({
+        "type": "req", "id": str(uuid.uuid4()), "method": "chat.abort",
+        "params": {"sessionKey": session_id or "default"},
+    }))
+    chat_id = str(uuid.uuid4())
+    params = {
+        "sessionKey": session_id or "default",
+        "message": message,
+        "idempotencyKey": chat_id,
+    }
+    if model_override:
+        params["model"] = model_override
+    ws.send(json.dumps({
+        "type": "req", "id": chat_id, "method": "chat.send", "params": params,
+    }))
+    return chat_id
+
+
 def _classify_chat_error(error_message: str) -> str:
     """Name the chat-error class from OpenClaw's message.
 
@@ -1919,10 +1955,35 @@ class OpenClawAdapter(HarnessAdapter):
                         deadline_s,
                     )
 
+                # DEFAULT OFF, deliberately — this is now REACTIVE.
+                #
+                # The abort was preemptive: every turn destroyed whatever was
+                # running for this session before sending. Its comment argued
+                # that was safe because the router serializes turns, so nothing
+                # legitimate could be active. #1665 found the first hole (a
+                # promoted job's own turn). This is the second and it is the
+                # one users feel: when a background job is working and the user
+                # sends ANY message, the interactive turn aborts the job's run.
+                #
+                # On 2026-08-17 that happened repeatedly on one request. The
+                # agent kept telling the user it had been interrupted and kept
+                # stopping to ask whether to continue; the user answered "I
+                # never aborted anything" three times. He was right, every
+                # time.
+                #
+                # The wedge it was written for (2026-07-01) announces itself:
+                # chat.send comes back with a reply-session conflict. So do not
+                # pre-destroy state on the chance of a wedge — send, and if
+                # that specific error arrives, abort and re-send once. The cost
+                # is one extra round trip on the rare broken turn instead of
+                # killing live work on every healthy one.
+                #
+                # OPENCLAW_PRESEND_ABORT=1 restores the old preemptive
+                # behaviour without an image build.
                 if (
                     not answered_pending
                     and not is_promoted_job
-                    and os.environ.get("OPENCLAW_PRESEND_ABORT", "1") != "0"
+                    and os.environ.get("OPENCLAW_PRESEND_ABORT", "0") == "1"
                 ):
                     try:
                         abort_id = str(uuid.uuid4())
@@ -1981,6 +2042,8 @@ class OpenClawAdapter(HarnessAdapter):
                 # the gateway. final_state event stops it. Captured before
                 # ws.send so we don't count our own serialization.
                 #
+                # One reactive retry per turn, never a loop.
+                conflict_retried = False
                 chat_send_at = (
                     resolve_started_at if had_pending_question else time.time()
                 )
@@ -2838,6 +2901,21 @@ class OpenClawAdapter(HarnessAdapter):
                             )
                         if not msg.get("ok"):
                             error = msg.get("error", {})
+                            if (
+                                not conflict_retried
+                                and _is_reply_session_conflict(error)
+                            ):
+                                # The wedge the pre-send abort used to guess
+                                # at, now handled where it actually shows up.
+                                conflict_retried = True
+                                logger.warning(
+                                    "reply session conflict: aborting the "
+                                    "stale session and re-sending once"
+                                )
+                                chat_id = _abort_and_resend(
+                                    ws, session_id, message, model_override
+                                )
+                                continue
                             logger.error("chat.send error: %s", json.dumps(error)[:500])
                             # Previously returned silently — no failure signal.
                             record_failure(

@@ -73,6 +73,34 @@ BASELINE_BY_GRADE = {"K": "Winter"}
 BASELINE_BY_GRADE_MEASURE = {("1", "ORF"): "Winter"}
 
 
+# The warehouse and the bundled norms file spell DIBELS measures differently,
+# and aggregate.py joins on that string. Unmapped, it aborts the whole run:
+#   "no norms at grade '1' for any requested measure (ORF Accuracy, ORF Errors,
+#    ORF WC); the norms file has ... ORF-ACC ... ORF-WRC"
+#
+# That killed every grade with an ORF measure, which is grades 1-5 — i.e. the
+# report. Matched case-insensitively on the warehouse spelling; an unmapped
+# name is passed through unchanged so a NEW measure fails loudly in
+# aggregate.py rather than being silently dropped here.
+NORMS_NAME_BY_WAREHOUSE = {
+    "orf accuracy": "ORF-ACC",
+    "orf errors": "ORF-WRC",
+    "orf wc": "ORF-WRC",
+    "nwf cls": "NWF-CLS",
+    "nwf wrc": "NWF-WRC",
+}
+
+
+def measure_as_args(measures):
+    """--measure-as WAREHOUSE=NORMS for every measure that needs mapping."""
+    args = []
+    for measure in measures:
+        norms = NORMS_NAME_BY_WAREHOUSE.get(str(measure).strip().lower())
+        if norms and norms != measure:
+            args.append(f"{measure}={norms}")
+    return args
+
+
 def baseline_for(grade, measure):
     """The baseline window for one measure in one grade.
 
@@ -202,8 +230,120 @@ def query(sql, reason, limit=None, offset=None):
     if offset is not None:
         argv += ["--offset", str(offset)]
     payload = run_json(argv, f"psd-data query ({reason})")
-    rows = payload.get("rows") if isinstance(payload, dict) else payload
-    return rows or []
+    return parse_mcp_rows(payload, reason)
+
+
+def parse_mcp_rows(payload, reason):
+    """Rows out of psd-data's MCP envelope.
+
+    run.js writes `JSON.stringify(response.result)` — the raw tools/call
+    result, shaped {"content": [{"type": "text", "text": "<markdown table>"}],
+    "isError": false}. There is no top-level "rows" key.
+
+    This read `payload.get("rows")`, so EVERY query returned [] — school
+    resolution, roster, every extraction — while real data sat behind it
+    (1,706 matched grade-1 pairs existed while the script reported "no Fall
+    matched pairs"). Combined with the empty-result path being a soft "no
+    data", it produced a workbook with a tab per grade and nothing in them.
+
+    An `isError` envelope is raised, not parsed: a query that failed must not
+    read as a query that found nothing. That conflation is what let four other
+    bugs hide behind this one.
+    """
+    if not isinstance(payload, dict):
+        return payload or []
+    if payload.get("isError"):
+        raise ReportError(f"{reason}: psd-data returned an error: "
+                          f"{_mcp_text(payload)[:400]}")
+    if isinstance(payload.get("rows"), list):
+        return payload["rows"]          # a future structured mode
+    return parse_result_text(_mcp_text(payload))
+
+
+def parse_result_text(text):
+    """Rows out of the MCP's text block, whatever shape it is in.
+
+    The one recorded fixture in this repo (psd-data/evals/fixtures/
+    list-tables.json) has JSON inside `text`:
+
+        "text": "{\"tables\":[\"EVAL_1426_ATTENDANCE\"]}"
+
+    The #1679 report says query_data returns a markdown table there instead.
+    I have no recorded query_data response either way, so this reads BOTH
+    rather than betting on one — the previous version bet on markdown alone,
+    and if the real shape is JSON it would have returned [] exactly like the
+    bug it was written to fix.
+
+    JSON is tried first because it is unambiguous; markdown is the fallback.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    if text[0] in "[{":
+        try:
+            return rows_from_json(json.loads(text))
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return parse_markdown_table(text)
+
+
+def rows_from_json(value):
+    """A decoded JSON payload down to a list of row dicts."""
+    if isinstance(value, list):
+        return [v for v in value if isinstance(v, dict)]
+    if not isinstance(value, dict):
+        return []
+    for key in ("rows", "records", "data", "results"):
+        inner = value.get(key)
+        if isinstance(inner, list):
+            # {"columns": [...], "rows": [[...], ...]} — pair them up.
+            columns = value.get("columns")
+            if (inner and isinstance(inner[0], list)
+                    and isinstance(columns, list)):
+                return [dict(zip(columns, row)) for row in inner
+                        if isinstance(row, list)]
+            return [v for v in inner if isinstance(v, dict)]
+    # A single object that is itself the row.
+    return [value] if value else []
+
+
+def _mcp_text(payload):
+    parts = []
+    for block in payload.get("content") or []:
+        if isinstance(block, dict) and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+    return "\n".join(parts)
+
+
+def parse_markdown_table(text):
+    """`| a | b |` blocks into dicts. Empty result sets return [].
+
+    Deliberately strict about the separator row: a markdown table without one
+    is prose, and guessing at prose is how a "no rows" message becomes a fake
+    data row.
+    """
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    table = [ln for ln in lines if ln.startswith("|")]
+    if len(table) < 2:
+        return []
+
+    def cells(line):
+        return [c.strip() for c in line.strip().strip("|").split("|")]
+
+    header = cells(table[0])
+    separator = cells(table[1])
+    if not all(set(c) <= set("-: ") and c for c in separator):
+        return []
+    rows = []
+    for line in table[2:]:
+        values = cells(line)
+        if len(values) != len(header):
+            continue
+        rows.append({
+            key: (None if value in ("", "NULL", "null") else value)
+            for key, value in zip(header, values)
+        })
+    return rows
 
 
 def query_all(sql, reason):
@@ -257,8 +397,11 @@ def like_escape(value):
 
 def resolve_school(name):
     rows = query(
-        "SELECT schoolid, school_name FROM schools "
-        "WHERE LOWER(school_name) LIKE LOWER("
+        # Live schema: schools(id, abbreviation, name, level). There is no
+        # schoolid/school_name. Aliased rather than renamed downstream, so the
+        # rest of the script keeps one vocabulary.
+        "SELECT id AS schoolid, name AS school_name FROM schools "
+        "WHERE LOWER(name) LIKE LOWER("
         f"'%{sql_escape(like_escape(name))}%') ESCAPE '\\'",
         f"Resolve the school named {name} for a quartile growth report",
     )
@@ -275,10 +418,12 @@ def resolve_school(name):
 
 
 def resolve_year(year):
-    where = f"WHERE year_name = '{sql_escape(year)}'" if year else ""
-    order = "" if year else "ORDER BY yearid DESC"
+    where = f"WHERE name = '{sql_escape(year)}'" if year else ""
+    order = "" if year else "ORDER BY id DESC"
     rows = query(
-        f"SELECT yearid, year_name FROM school_years {where} {order}".strip(),
+        # Live schema: school_years(id, name, year_rank, first_day, last_day).
+        f"SELECT id AS yearid, name AS year_name FROM school_years "
+        f"{where} {order}".strip(),
         "Resolve the school year for a quartile growth report",
         limit=1,
     )
@@ -302,13 +447,15 @@ def fetch_roster(schoolid, yearid):
         "SELECT DISTINCT se.sectionid::text AS sectionid, "
         "  se.course_code, "
         "  sy.grade_level::text AS grade_level, "
-        "  t.teacher_name "
+        # Live schema: teachers has no teacher_name — only first_name /
+        # last_name — and its PK is `id`, not `teacherid`.
+        "  (t.first_name || ' ' || t.last_name) AS teacher_name "
         "FROM section_enrollments se "
         "JOIN school_year_enrollments sy "
         "  ON sy.studentid = se.studentid AND sy.yearid = se.yearid "
         "LEFT JOIN section_teachers st "
         "  ON st.sectionid = se.sectionid AND st.role_name = 'Lead Teacher' "
-        "LEFT JOIN teachers t ON t.teacherid = st.teacherid "
+        "LEFT JOIN teachers t ON t.id = st.teacherid "
         f"WHERE se.yearid = {int(yearid)} AND se.schoolid = {int(schoolid)} "
         "  AND se.course_code LIKE 'GR0%'",
         "Homeroom roster and lead teachers for a quartile growth report",
@@ -376,10 +523,15 @@ def extraction_sql(schoolid, yearid, grade, measures, baseline):
         # students carried a flag, so the district cell WAS the school cell and
         # its complement absorbed 540 unflagged students. Every number looked
         # plausible.
-        f"LEFT JOIN students_frl f ON f.studentid = m.studentid "
-        f"  AND f.yearid = {int(yearid)} "
-        f"LEFT JOIN students_specialed sp ON sp.studentid = m.studentid "
-        f"  AND sp.yearid = {int(yearid)}"
+        # NOT year-scoped: students_frl(studentid, frl) and
+        # students_specialed(studentid, special_education, iep, s504, ...)
+        # have no yearid at all. The predicate errored the WHOLE extraction
+        # for every grade, and because a failed query read as an empty one,
+        # the report came out with a tab per grade and no data in any of
+        # them — the exact "looks complete, isn't" outcome this script was
+        # written to prevent.
+        "LEFT JOIN students_frl f ON f.studentid = m.studentid "
+        "LEFT JOIN students_specialed sp ON sp.studentid = m.studentid"
     )
 
 
@@ -446,7 +598,8 @@ def discover_measures(yearid, grade):
     )
 
 
-def aggregate_rows(rows_path, grade, baseline, no_norms=False, subgroups=()):
+def aggregate_rows(rows_path, grade, baseline, no_norms=False, subgroups=(),
+                   measures=()):
     argv = [
         PYTHON, str(HERE / "aggregate.py"),
         "--rows", str(rows_path),
@@ -458,6 +611,8 @@ def aggregate_rows(rows_path, grade, baseline, no_norms=False, subgroups=()):
         argv.append("--no-norms")
     for spec in subgroups or ():
         argv += ["--subgroup", spec]
+    for spec in measure_as_args(measures or ()):
+        argv += ["--measure-as", spec]
     return run_json(argv, f"aggregate.py (grade {grade})")
 
 
@@ -488,8 +643,11 @@ def create_workbook(title, user):
     a ticket (issue #1636).
     """
     created = workspace(
+        # --params is path/query parameters; the resource is the request
+        # BODY. Sending it as a param returns HTTP 400 "Unknown name
+        # 'properties': Cannot bind query parameter."
         "sheets spreadsheets create "
-        f"--params '{json.dumps({'properties': {'title': command_literal(title)}})}'",
+        f"--json '{json.dumps({'properties': {'title': command_literal(title)}})}'",
         user,
     )
     sheet_id = created.get("spreadsheetId") or (
@@ -505,13 +663,14 @@ def share_workbook(sheet_id, user):
     # the failure would land on the LAST step of a finished report — the
     # costliest place for it. Consistency here is cheaper than reasoning about
     # which values are safe.
-    params = {"fileId": command_literal(sheet_id),
-              "transferOwnership": "true"}
+    # psd-workspace has no --body flag (only --params/--json/--json-file),
+    # and transferOwnership is a JSON boolean, not the string "true".
+    params = {"fileId": command_literal(sheet_id), "transferOwnership": True}
     body = {"type": "user", "role": "owner",
             "emailAddress": command_literal(user)}
     return workspace(
         f"drive permissions create --params '{json.dumps(params)}' "
-        f"--body '{json.dumps(body)}'",
+        f"--json '{json.dumps(body)}'",
         user,
     )
 
@@ -899,9 +1058,9 @@ def main() -> int:
                 log(f"grade {grade}: {len(rows)} rows ({baseline})")
                 part = step(
                     work_dir, f"{tag}-agg",
-                    lambda g=grade, b=baseline, t=tag: aggregate_rows(
+                    lambda g=grade, b=baseline, t=tag, m=group: aggregate_rows(
                         work_dir / f"{t}-rows.json", g, b,
-                        subgroups=SUBGROUPS),
+                        subgroups=SUBGROUPS, measures=m),
                     log)
                 records.extend(part)
                 for measure in group:
