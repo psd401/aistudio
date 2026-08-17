@@ -440,9 +440,51 @@ def add_tab(sheet_id, title, user, work_dir, log=lambda m: None):
     succeed is worse than no checkpointing at all. Review caught this; it is
     exactly the failure class this script exists to remove.
     """
-    return step(work_dir, f"tab-{title}-added",
-                lambda: {"result": _add_tab(sheet_id, title, user, work_dir)},
-                log)
+    added = step(work_dir, f"tab-{title}-added",
+                 lambda: {"result": _add_tab(sheet_id, title, user, work_dir)},
+                 log)
+    # Only safe once a real tab exists: a spreadsheet must keep at least one.
+    drop_default_tab(sheet_id, user, work_dir, log)
+    return added
+
+
+DEFAULT_SHEET_ID = 0
+
+
+def drop_default_tab(sheet_id, user, work_dir, log=lambda m: None):
+    """Remove the empty tab the Sheets API creates with every spreadsheet.
+
+    `spreadsheets.create` is called with only `properties`, so Sheets adds its
+    own first sheet ("Sheet1", sheetId 0). Grade tabs are appended after it,
+    which leaves the blank one LEFTMOST — the first thing a principal sees on
+    opening the link, in a report whose whole point is not shipping something
+    that looks complete and isn't.
+
+    Checkpointed, so it runs once no matter how many tabs are added or how
+    often the script resumes. Deliberately NON-fatal: a leftover blank tab is
+    cosmetic, and failing a run that otherwise produced every number would be
+    the worse outcome by far.
+    """
+    marker = work_dir / "default-tab-dropped.json"
+    if marker.exists():
+        return
+    try:
+        _delete_sheet(sheet_id, DEFAULT_SHEET_ID, user, work_dir)
+    except ReportError as exc:
+        # Already gone, or renamed by hand — either way the report stands.
+        log(f"note: could not remove the default tab ({exc}); continuing")
+    marker.write_text(json.dumps({"sheetId": DEFAULT_SHEET_ID}))
+
+
+def _delete_sheet(sheet_id, tab_id, user, work_dir):
+    payload = work_dir / f"deletesheet-{tab_id}.json"
+    payload.write_text(json.dumps(
+        {"requests": [{"deleteSheet": {"sheetId": tab_id}}]}))
+    return workspace(
+        "sheets spreadsheets batchUpdate "
+        f"--params '{json.dumps({'spreadsheetId': sheet_id})}'",
+        user, json_file=str(payload),
+    )
 
 
 def _add_tab(sheet_id, title, user, work_dir):
@@ -534,6 +576,15 @@ def main() -> int:
     slug = re.sub(r"[^a-z0-9]+", "-", args.school.lower()).strip("-")
     work_dir = pathlib.Path(args.work_dir or f"/tmp/qgr-{slug}")
     work_dir.mkdir(parents=True, exist_ok=True)
+    # The checkpoints are not metadata: grade-<g>-rows.json holds studentid
+    # paired with assessment scores, which is student-level FERPA data sitting
+    # in a predictable /tmp path for as long as the container lives. Default
+    # mkdir permissions make that world-readable. Owner-only costs nothing and
+    # does not depend on an assumption about how ephemeral the sandbox is.
+    try:
+        work_dir.chmod(0o700)
+    except OSError as exc:
+        log(f"warning: could not restrict {work_dir} to owner-only: {exc}")
     log(f"work dir: {work_dir}")
 
     try:

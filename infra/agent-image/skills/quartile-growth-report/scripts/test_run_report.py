@@ -319,20 +319,89 @@ class SideEffectsAreCheckpointed(unittest.TestCase):
     def setUp(self):
         self.work = pathlib.Path(tempfile.mkdtemp())
         self.calls = []
-        R.workspace = lambda command, user, scope="agent", json_file=None: (
-            self.calls.append(command.split(" --")[0]) or {"ok": True})
+
+        # Both addSheet and deleteSheet are "sheets spreadsheets batchUpdate";
+        # the request kind only shows up in the payload file, so record that.
+        def fake_workspace(command, user, scope="agent", json_file=None):
+            kind = command.split(" --")[0]
+            if json_file:
+                body = json.loads(pathlib.Path(json_file).read_text())
+                requests = body.get("requests") or [{}]
+                kind = next(iter(requests[0]), kind)
+            self.calls.append(kind)
+            return {"ok": True}
+
+        R.workspace = fake_workspace
 
     def test_a_tab_is_created_once_across_re_runs(self):
         R.add_tab("SHEET1", "3", "u@psd401.net", self.work)
         R.add_tab("SHEET1", "3", "u@psd401.net", self.work)
-        self.assertEqual(self.calls.count("sheets spreadsheets batchUpdate"), 1)
+        self.assertEqual(self.calls.count("addSheet"), 1)
 
     def test_each_tab_gets_its_own_marker(self):
         R.add_tab("SHEET1", "3", "u@psd401.net", self.work)
         R.add_tab("SHEET1", "4", "u@psd401.net", self.work)
-        self.assertEqual(self.calls.count("sheets spreadsheets batchUpdate"), 2)
+        self.assertEqual(self.calls.count("addSheet"), 2)
         self.assertTrue((self.work / "tab-3-added.json").exists())
         self.assertTrue((self.work / "tab-4-added.json").exists())
+
+
+class TheDefaultTabIsRemoved(unittest.TestCase):
+    """spreadsheets.create always makes a blank "Sheet1" nobody asked for.
+
+    Grade tabs are appended after it, so the empty one stays LEFTMOST — the
+    tab a principal opens onto. Cosmetic, but this report is entirely about
+    not handing over something that looks complete and isn't.
+    """
+
+    def setUp(self):
+        self.work = pathlib.Path(tempfile.mkdtemp())
+        self.calls = []
+
+        def fake_workspace(command, user, scope="agent", json_file=None):
+            kind = command.split(" --")[0]
+            if json_file:
+                body = json.loads(pathlib.Path(json_file).read_text())
+                requests = body.get("requests") or [{}]
+                kind = next(iter(requests[0]), kind)
+            self.calls.append(kind)
+            return {"ok": True}
+
+        self.fake_workspace = fake_workspace
+        R.workspace = fake_workspace
+
+    def test_the_blank_tab_is_deleted_after_a_real_one_exists(self):
+        R.add_tab("SHEET1", "3", "u@psd401.net", self.work)
+        self.assertEqual(self.calls, ["addSheet", "deleteSheet"])
+
+    def test_it_is_deleted_only_once_however_many_tabs_are_added(self):
+        for grade in ("K", "1", "2"):
+            R.add_tab("SHEET1", grade, "u@psd401.net", self.work)
+        self.assertEqual(self.calls.count("deleteSheet"), 1)
+
+    def test_it_is_not_retried_after_a_resume(self):
+        R.add_tab("SHEET1", "3", "u@psd401.net", self.work)
+        self.calls.clear()
+        R.add_tab("SHEET1", "4", "u@psd401.net", self.work)
+        self.assertNotIn("deleteSheet", self.calls)
+
+    def test_a_failed_delete_never_fails_the_report(self):
+        # The numbers are all in by this point. Losing a finished report over
+        # a cosmetic tab would be the worse trade by a wide margin.
+        def boom(command, user, scope="agent", json_file=None):
+            if json_file and "deletesheet" in json_file:
+                raise R.ReportError("sheet not found")
+            return self.fake_workspace(command, user, scope, json_file)
+
+        R.workspace = boom
+        R.add_tab("SHEET1", "3", "u@psd401.net", self.work)
+        self.assertTrue((self.work / "default-tab-dropped.json").exists())
+
+    def test_a_real_tab_must_exist_before_the_delete(self):
+        # A spreadsheet must keep at least one sheet, so the order matters.
+        R.add_tab("SHEET1", "3", "u@psd401.net", self.work)
+        self.assertLess(self.calls.index("addSheet"),
+                        self.calls.index("deleteSheet"))
 
 
 class WindowLabels(unittest.TestCase):
@@ -404,6 +473,26 @@ class FallbackWindowLabel(unittest.TestCase):
     def test_the_hardcoded_default_label_is_gone(self):
         source = pathlib.Path(R.__file__).read_text()
         self.assertNotIn('windows["*"] = f"{BASELINE_DEFAULT}', source)
+
+
+class WorkDirIsOwnerOnly(unittest.TestCase):
+    """Checkpoints are student data, not scratch metadata.
+
+    grade-<g>-rows.json pairs studentid with assessment scores and lives at a
+    predictable /tmp path for the life of the container. Default mkdir
+    permissions leave that world-readable; owner-only costs nothing and does
+    not rely on an assumption about how ephemeral the sandbox is.
+    """
+
+    def test_the_work_dir_is_restricted(self):
+        work = pathlib.Path(tempfile.mkdtemp()) / "qgr-test"
+        work.mkdir(parents=True, exist_ok=True)
+        work.chmod(0o700)
+        self.assertEqual(work.stat().st_mode & 0o777, 0o700)
+
+    def test_main_restricts_the_work_dir_it_creates(self):
+        source = pathlib.Path(R.__file__).read_text()
+        self.assertIn("work_dir.chmod(0o700)", source)
 
 
 # Keep this guard LAST in the file. It used to sit mid-file (line 214), which
