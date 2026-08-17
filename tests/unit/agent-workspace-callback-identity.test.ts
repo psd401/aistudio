@@ -81,6 +81,7 @@ describe("verifyGrantedIdentity (#1234)", () => {
 // Label-dispatched executeQuery mock records which queries ran.
 let executedLabels: string[] = []
 let userRows: Array<{ id: number }> = [{ id: 1 }]
+// ownerEmail is mutable: one test drives it with directory-supplied casing.
 const nonceRow = { ownerEmail: "hagelk@psd401.net", agentEmail: "agnt_hagelk@psd401.net", tokenKind: "user_account" as const }
 // The user lookup's predicate is load-bearing (#1682): migration 112 makes
 // users.email unique on lower(email), so a case-sensitive compare misses a
@@ -108,8 +109,28 @@ jest.mock("@/lib/db/drizzle-client", () => ({
     }
     return []
   }),
-  executeTransaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) => cb({})),
+  executeTransaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) =>
+    cb(recordingTx())
+  ),
 }))
+
+// provisionAgentUser's transaction re-checks then INSERTs. Record the inserted
+// values so a test can assert the stored casing — migration 112 makes
+// users.email unique on lower(email), so a mixed-case row is invisible to any
+// case-sensitive reader. `userRows` drives the re-check: non-empty means the
+// user already exists and no INSERT happens.
+let insertedUserValues: { email?: string } | null = null
+const recordingTx = () => ({
+  select: () => ({
+    from: () => ({ where: () => ({ limit: () => userRows }) }),
+  }),
+  insert: () => ({
+    values: (values: { email?: string }) => {
+      insertedUserValues = values
+      return { returning: () => [{ id: 99 }] }
+    },
+  }),
+})
 
 /** Literal SQL text of a drizzle fragment, dropping bound params. */
 function sqlText(fragment: unknown): string {
@@ -142,6 +163,7 @@ beforeEach(() => {
   process.env.GOOGLE_WORKSPACE_CLIENT_SECRET = "test-secret"
   executedLabels = []
   userRows = [{ id: 1 }]
+  nonceRow.ownerEmail = "hagelk@psd401.net"
   storeRefreshTokenMock.mockClear()
   mockVerifyImpl = async () => ({ getPayload: () => ({ email: "hagelk@psd401.net", email_verified: true }) })
   tokenBody = {
@@ -222,5 +244,23 @@ describe("handleOAuthCallback identity enforcement (#1234)", () => {
     // Both sides — lowering only the column still misses a mixed-case input.
     expect(predicate.match(/lower\(/g) ?? []).toHaveLength(2)
     expect(predicate).not.toMatch(/^\s*=/)
+  })
+
+  // The nonce's ownerEmail carries whatever casing the directory supplied, so
+  // auto-provisioning must not plant a fresh mixed-case row behind the
+  // lower(email) unique index it will later be read through.
+  it("auto-provisions a new owner with a normalized email", async () => {
+    userRows = [] // no existing row -> falls through to provisionAgentUser
+    insertedUserValues = null
+    // Directory-supplied casing, exactly what put GEORGEK@psd401.net in prod.
+    nonceRow.ownerEmail = "HAGELK@PSD401.NET"
+    mockVerifyImpl = async () => ({
+      getPayload: () => ({ email: "HAGELK@PSD401.NET", email_verified: true }),
+    })
+
+    await handleOAuthCallback("code", HEX_NONCE)
+
+    expect(insertedUserValues).not.toBeNull()
+    expect(insertedUserValues!.email).toBe("hagelk@psd401.net")
   })
 })

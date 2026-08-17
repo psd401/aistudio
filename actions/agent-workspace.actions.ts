@@ -344,9 +344,16 @@ async function provisionAgentUser(
       .limit(1)
     if (again) return again.id
 
+    // Store the normalized address. `email` traces back to the consent nonce's
+    // ownerEmail — the same "whatever casing the directory supplied" value the
+    // lookups above stopped trusting — and migration 112 made uniqueness
+    // case-insensitive, so the original casing carries no information and only
+    // creates rows that case-sensitive readers can miss. Safe for the later
+    // Cognito link: resolve-user.ts matches through getUserByEmail, which
+    // compares on lower(email).
     const [created] = await tx
       .insert(users)
-      .values({ email, firstName, lastName })
+      .values({ email: email.toLowerCase(), firstName, lastName })
       .returning({ id: users.id })
     return created.id
   }, "provisionAgentUser")
