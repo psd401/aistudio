@@ -873,6 +873,40 @@ class McpResponseIsAMarkdownTable(RestoresModuleFunctions):
                     "isError": False}
         self.assertEqual(R.parse_mcp_rows(envelope, "test"), [])
 
+    def test_json_inside_the_text_block_is_read(self):
+        # The one recorded fixture in this repo (psd-data/evals/fixtures/
+        # list-tables.json) puts JSON in `text`, not a markdown table. #1679
+        # reported markdown for query_data. With no recorded query_data
+        # response either way, both are read — betting on markdown alone would
+        # have returned [] on a JSON payload, which is the same bug again.
+        envelope = {"content": [{"type": "text", "text":
+                                 '{"rows":[{"schoolid":"3299",'
+                                 '"school_name":"Artondale Elementary"}]}'}],
+                    "isError": False}
+        rows = R.parse_mcp_rows(envelope, "test")
+        self.assertEqual(rows[0]["school_name"], "Artondale Elementary")
+
+    def test_a_bare_json_array_is_read(self):
+        envelope = {"content": [{"type": "text",
+                                 "text": '[{"a":"1"},{"a":"2"}]'}],
+                    "isError": False}
+        self.assertEqual(len(R.parse_mcp_rows(envelope, "test")), 2)
+
+    def test_columns_plus_row_arrays_are_paired(self):
+        self.assertEqual(
+            R.rows_from_json({"columns": ["a", "b"], "rows": [["1", "2"]]}),
+            [{"a": "1", "b": "2"}],
+        )
+
+    def test_json_wins_over_a_markdown_reading(self):
+        # Unambiguous beats heuristic.
+        self.assertEqual(R.parse_result_text('{"rows":[{"a":"1"}]}'),
+                         [{"a": "1"}])
+
+    def test_malformed_json_falls_back_to_markdown(self):
+        text = '{"broken"\n| a |\n| --- |\n| 1 |\n'
+        self.assertEqual(R.parse_result_text(text), [{"a": "1"}])
+
     def test_a_structured_rows_key_is_used_when_present(self):
         # So a future psd-data JSON mode needs no change here.
         envelope = {"rows": [{"a": 1}], "isError": False}

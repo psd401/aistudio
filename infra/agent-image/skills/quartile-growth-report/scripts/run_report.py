@@ -257,7 +257,54 @@ def parse_mcp_rows(payload, reason):
                           f"{_mcp_text(payload)[:400]}")
     if isinstance(payload.get("rows"), list):
         return payload["rows"]          # a future structured mode
-    return parse_markdown_table(_mcp_text(payload))
+    return parse_result_text(_mcp_text(payload))
+
+
+def parse_result_text(text):
+    """Rows out of the MCP's text block, whatever shape it is in.
+
+    The one recorded fixture in this repo (psd-data/evals/fixtures/
+    list-tables.json) has JSON inside `text`:
+
+        "text": "{\"tables\":[\"EVAL_1426_ATTENDANCE\"]}"
+
+    The #1679 report says query_data returns a markdown table there instead.
+    I have no recorded query_data response either way, so this reads BOTH
+    rather than betting on one — the previous version bet on markdown alone,
+    and if the real shape is JSON it would have returned [] exactly like the
+    bug it was written to fix.
+
+    JSON is tried first because it is unambiguous; markdown is the fallback.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    if text[0] in "[{":
+        try:
+            return rows_from_json(json.loads(text))
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return parse_markdown_table(text)
+
+
+def rows_from_json(value):
+    """A decoded JSON payload down to a list of row dicts."""
+    if isinstance(value, list):
+        return [v for v in value if isinstance(v, dict)]
+    if not isinstance(value, dict):
+        return []
+    for key in ("rows", "records", "data", "results"):
+        inner = value.get(key)
+        if isinstance(inner, list):
+            # {"columns": [...], "rows": [[...], ...]} — pair them up.
+            columns = value.get("columns")
+            if (inner and isinstance(inner[0], list)
+                    and isinstance(columns, list)):
+                return [dict(zip(columns, row)) for row in inner
+                        if isinstance(row, list)]
+            return [v for v in inner if isinstance(v, dict)]
+    # A single object that is itself the row.
+    return [value] if value else []
 
 
 def _mcp_text(payload):
