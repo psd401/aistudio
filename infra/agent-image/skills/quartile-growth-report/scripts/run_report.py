@@ -30,7 +30,7 @@ be run twice and diffed — which the previous design never allowed.
 USAGE
 
     run_report.py --school "Artondale Elementary" --user you@psd401.net
-                  [--year 2025-26] [--grades K,1,2,3,4,5]
+                  [--year 2025-2026] [--grades K,1,2,3,4,5]
                   [--work-dir DIR] [--dry-run] [--plan-only]
 
 Re-running with the same --work-dir skips work already done.
@@ -472,18 +472,67 @@ def resolve_school(name):
 
 
 def resolve_year(year):
-    where = f"WHERE name = '{sql_escape(year)}'" if year else ""
-    order = "" if year else "ORDER BY id DESC"
+    """The year to report on.
+
+    DEFAULTS TO THE MOST RECENT year that has actually STARTED, not the most
+    recent row. On 2026-08-17 `ORDER BY id DESC` picked 2026-27 — a year that
+    had not begun, had no roster, and produced an empty report before the user
+    noticed and asked for the completed year by hand.
+
+    A growth report needs a baseline AND an ending window, so a year that has
+    not started cannot produce one. first_day is the honest test.
+
+    The name is matched leniently because the warehouse spells it "2025-2026"
+    while this skill's own usage line said "2025-26" — the user hit that too,
+    and being strict about a format we documented wrong is our error to
+    absorb, not theirs to work around.
+    """
+    if year:
+        wanted = str(year).strip()
+        rows = query(
+            "SELECT id AS yearid, name AS year_name FROM school_years",
+            "List school years for a quartile growth report",
+        )
+        for row in rows:
+            if str(row.get("year_name", "")).strip() == wanted:
+                return row
+        loose = _loose_year(wanted)
+        for row in rows:
+            if _loose_year(row.get("year_name")) == loose:
+                return row
+        names = ", ".join(str(r.get("year_name")) for r in rows[:8])
+        raise ReportError(
+            f"no school year matched {year!r}. The warehouse has: {names}"
+        )
+
     rows = query(
-        # Live schema: school_years(id, name, year_rank, first_day, last_day).
-        f"SELECT id AS yearid, name AS year_name FROM school_years "
-        f"{where} {order}".strip(),
-        "Resolve the school year for a quartile growth report",
-        limit=1,
+        "SELECT id AS yearid, name AS year_name, first_day "
+        "FROM school_years ORDER BY id DESC",
+        "Resolve the most recent completed school year",
     )
-    if not rows:
-        raise ReportError(f"no school year matched {year!r}")
-    return rows[0]
+    today = datetime.date.today().isoformat()
+    for row in rows:
+        first_day = str(row.get("first_day") or "")[:10]
+        if first_day and first_day <= today:
+            return row
+    if rows:
+        # No first_day recorded anywhere — fall back to newest rather than
+        # refusing, but say so, because the choice is then unverified.
+        raise ReportError(
+            "no school year has a first_day on or before today; pass --year "
+            f"explicitly. Newest is {rows[0].get('year_name')!r}"
+        )
+    raise ReportError("no school years found")
+
+
+def _loose_year(name):
+    """"2025-26", "2025-2026" and "2025/26" compare equal."""
+    digits = re.findall(r"\d+", str(name or ""))
+    if not digits:
+        return str(name or "").strip().lower()
+    start = digits[0]
+    end = digits[1] if len(digits) > 1 else ""
+    return f"{start}-{end[-2:]}" if end else start
 
 
 def fetch_roster(schoolid, yearid):
@@ -998,7 +1047,11 @@ def main() -> int:
     )
     parser.add_argument("--school", required=True)
     parser.add_argument("--user", required=True, help="caller email for gws")
-    parser.add_argument("--year", help='e.g. "2025-26"; default most recent')
+    parser.add_argument(
+        "--year",
+        help='e.g. "2025-2026" (the warehouse spelling; "2025-26" also '
+        "works). Default: the most recent year that has STARTED — the newest "
+        "row may not have begun yet, and a growth report needs both windows.")
     parser.add_argument("--grades", help="comma list; default the roster's own")
     parser.add_argument("--work-dir", help="checkpoints; default /tmp/qgr-<school>")
     parser.add_argument("--dry-run", action="store_true",

@@ -1143,6 +1143,74 @@ class NormsGapsThatKilledAWholeGrade(unittest.TestCase):
         with_norms, without = R.split_by_norms(["ORF WC", "NWF CLS"])
         self.assertEqual(without, [])
 
+class TheDefaultYearMustHaveStarted(RestoresModuleFunctions):
+    """`ORDER BY id DESC` picked a year that had not begun.
+
+    On 2026-08-17 the default resolved to 2026-27 — no roster, no scores — and
+    the report came out empty until the user worked out what had happened and
+    passed the completed year by hand. A growth report needs a baseline AND an
+    ending window, so a year that has not started cannot produce one.
+    """
+
+    YEARS = [
+        {"yearid": 36, "year_name": "2026-2027", "first_day": "2026-09-01"},
+        {"yearid": 35, "year_name": "2025-2026", "first_day": "2025-09-02"},
+        {"yearid": 34, "year_name": "2024-2025", "first_day": "2024-09-03"},
+    ]
+
+    def test_a_year_that_has_not_started_is_skipped(self):
+        R.query = lambda *a, **k: self.YEARS
+        self.assertEqual(R.resolve_year(None)["year_name"], "2025-2026")
+
+    def test_the_newest_started_year_wins(self):
+        started = [dict(y, first_day="2020-09-01") for y in self.YEARS]
+        R.query = lambda *a, **k: started
+        self.assertEqual(R.resolve_year(None)["yearid"], 36)
+
+    def test_no_started_year_refuses_rather_than_guessing(self):
+        future = [dict(y, first_day="2099-09-01") for y in self.YEARS]
+        R.query = lambda *a, **k: future
+        with self.assertRaises(R.ReportError) as caught:
+            R.resolve_year(None)
+        self.assertIn("--year", str(caught.exception))
+
+
+class TheYearFormatIsForgiving(RestoresModuleFunctions):
+    """The warehouse says "2025-2026"; this skill's usage line said "2025-26".
+
+    The user hit that too. Being strict about a format we documented wrong is
+    our error to absorb, not theirs to work around.
+    """
+
+    YEARS = [{"yearid": 35, "year_name": "2025-2026", "first_day": "2025-09-02"}]
+
+    def test_the_short_form_matches_the_long_one(self):
+        R.query = lambda *a, **k: self.YEARS
+        self.assertEqual(R.resolve_year("2025-26")["yearid"], 35)
+
+    def test_the_exact_form_still_matches(self):
+        R.query = lambda *a, **k: self.YEARS
+        self.assertEqual(R.resolve_year("2025-2026")["yearid"], 35)
+
+    def test_a_slash_form_matches(self):
+        R.query = lambda *a, **k: self.YEARS
+        self.assertEqual(R.resolve_year("2025/26")["yearid"], 35)
+
+    def test_an_unknown_year_lists_what_exists(self):
+        # "no school year matched" with nothing else is a dead end for the
+        # user; the warehouse's own spelling is the useful part.
+        R.query = lambda *a, **k: self.YEARS
+        with self.assertRaises(R.ReportError) as caught:
+            R.resolve_year("1999-2000")
+        self.assertIn("2025-2026", str(caught.exception))
+
+    def test_an_exact_match_beats_a_loose_one(self):
+        R.query = lambda *a, **k: [
+            {"yearid": 1, "year_name": "2025-26", "first_day": "2025-09-02"},
+            {"yearid": 2, "year_name": "2025-2026", "first_day": "2025-09-02"},
+        ]
+        self.assertEqual(R.resolve_year("2025-2026")["yearid"], 2)
+
 
 # Keep this guard LAST in the file. It used to sit mid-file (line 214), which
 # meant `python test_run_report.py` ran unittest.main() and sys.exit()ed before
