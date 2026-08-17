@@ -72,10 +72,29 @@ const MAX_ARGUMENT_LENGTH = 100_000
 const MAX_TOTAL_ARGUMENT_LENGTH = 300_000
 const MAX_OUTPUT_BYTES = 1024 * 1024
 
+// Tab, line feed and carriage return are CONTENT, not control characters, in
+// the one place this guard is applied: `gh` argument values. An issue body, a
+// PR description and a comment are all multi-line by nature.
+//
+// Rejecting them made every agent-authored issue a single unreadable
+// paragraph. On 2026-08-17 the agent bisected this from the outside — a body
+// with zero newlines filed instantly, one newline anywhere failed — and had to
+// flatten a 9KB writeup (issue #1679) into one run-on block to get it filed at
+// all. It burned several rounds of the user's time working out that the
+// restriction was ours.
+//
+// Allowing them is safe here and nowhere near a shell: arguments go to
+// execFile as an argv array, so a newline inside a value cannot split it into
+// another argument. Everything else still goes — NUL, ESC (ANSI/terminal
+// escapes), and the rest of C0 plus DEL.
+const ALLOWED_WHITESPACE_CONTROLS = new Set([9, 10, 13])
+
 function hasControlCharacter(value: string): boolean {
   for (const character of value) {
     const codePoint = character.codePointAt(0)
-    if (codePoint !== undefined && (codePoint <= 31 || codePoint === 127)) {
+    if (codePoint === undefined) continue
+    if (ALLOWED_WHITESPACE_CONTROLS.has(codePoint)) continue
+    if (codePoint <= 31 || codePoint === 127) {
       return true
     }
   }

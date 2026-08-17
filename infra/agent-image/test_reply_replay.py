@@ -1407,15 +1407,36 @@ class PromotedJobDoesNotAbortTheRunItContinues(unittest.TestCase):
     def test_a_promoted_job_turn_still_sends_the_message(self):
         self.assertIn("chat.send", self._run(self.LONG))
 
-    def test_an_interactive_turn_keeps_the_abort(self):
-        # The abort still clears a wedged reply session on the path it was
-        # written for (2026-07-01, "I encountered an error" on every follow-up).
-        self.assertIn("chat.abort", self._run(None))
+    def test_an_interactive_turn_no_longer_aborts_preemptively(self):
+        # Changed deliberately. The preemptive abort destroyed whatever was
+        # running for this session on EVERY turn — so a user replying while a
+        # background job worked killed the job's run, and the agent then told
+        # him he had interrupted it. He had not. The wedge it guarded against
+        # announces itself on chat.send, so it is handled there now.
+        self.assertNotIn("chat.abort", self._run(None))
 
-    def test_a_short_explicit_deadline_is_not_a_promoted_job(self):
-        # Cron sends its own bounded deadline; only the long-job override
-        # clears the threshold.
-        self.assertIn("chat.abort", self._run(120))
+    def test_a_short_explicit_deadline_also_does_not_abort(self):
+        # Cron sends its own bounded deadline; it is no more entitled to
+        # destroy a live run than an interactive turn is.
+        self.assertNotIn("chat.abort", self._run(120))
+
+    def test_the_env_flag_restores_the_preemptive_abort(self):
+        # An escape hatch back to the old behaviour without an image build.
+        with mock.patch.dict(os.environ, {"OPENCLAW_PRESEND_ABORT": "1"}):
+            self.assertIn("chat.abort", self._run(None))
+
+    def test_a_reply_session_conflict_is_recognised(self):
+        self.assertTrue(harness_adapter._is_reply_session_conflict(
+            {"message": "reply session initialization conflicted"}))
+        self.assertTrue(harness_adapter._is_reply_session_conflict(
+            {"code": "SESSION_INITIALIZATION_FAILED"}))
+
+    def test_an_unrelated_error_is_not_a_conflict(self):
+        # Aborting and re-sending on any error would re-run the user's message
+        # against a model that already refused it.
+        self.assertFalse(harness_adapter._is_reply_session_conflict(
+            {"message": "rate limited"}))
+        self.assertFalse(harness_adapter._is_reply_session_conflict({}))
 
     def test_the_threshold_matches_the_wrapper(self):
         # Two modules keying off one number. If the wrapper's threshold moves,
@@ -1426,3 +1447,66 @@ class PromotedJobDoesNotAbortTheRunItContinues(unittest.TestCase):
             f"{harness_adapter.LONG_JOB_DEADLINE_THRESHOLD_S}",
             wrapper,
         )
+
+class AWedgedSessionRecoversWithoutKillingLiveWork(unittest.TestCase):
+    """The 2026-07-01 wedge, handled where it actually surfaces.
+
+    A prior turn's server-side reply session survives its ws.close() and
+    rejects the next chat.send. The old fix pre-destroyed session state on
+    EVERY turn on the chance of it; this reacts to the error itself, so a
+    healthy turn never touches a live run.
+    """
+
+    class ConflictingGateway(FakeGateway):
+        """Rejects the first chat.send with a reply-session conflict."""
+
+        def __init__(self, agent_events):
+            super().__init__(agent_events)
+            self.sends = 0
+
+        def send(self, raw):
+            message = json.loads(raw)
+            if message.get("method") == "chat.send":
+                self.sends += 1
+                if self.sends == 1:
+                    self.sent.append(message)
+                    self._outbox.append(json.dumps({
+                        "type": "res", "id": message.get("id"), "ok": False,
+                        "error": {"message":
+                                  "reply session initialization conflicted"},
+                    }))
+                    return
+            super().send(raw)
+
+    def _run(self, gateway):
+        fake_websocket = mock.Mock()
+        fake_websocket.create_connection.return_value = gateway
+        fake_websocket.WebSocketTimeoutException = _FakeTimeout
+        adapter = OpenClawAdapter()
+        adapter._ready = True
+        zero = {"model_calls": 0, "input": 0, "output": 0,
+                "cache_read": 0, "cache_write": 0}
+        with mock.patch.dict(sys.modules, {"websocket": fake_websocket}), \
+             mock.patch.object(OpenClawAdapter, "_read_turn_usage", return_value=zero), \
+             mock.patch.object(harness_adapter, "record_failure"):
+            return adapter._process_once("go", "s-wedge")
+
+    def test_the_turn_recovers_and_answers(self):
+        gateway = self.ConflictingGateway([says("Here is the answer.")])
+        result = self._run(gateway)
+        self.assertIn("Here is the answer", result.text)
+
+    def test_it_aborts_only_after_the_conflict(self):
+        gateway = self.ConflictingGateway([says("ok")])
+        self._run(gateway)
+        methods = [m.get("method") for m in gateway.sent]
+        self.assertEqual(methods.count("chat.abort"), 1)
+        # The abort follows the failed send; it does not precede it.
+        self.assertLess(methods.index("chat.send"), methods.index("chat.abort"))
+
+    def test_it_retries_only_once(self):
+        gateway = self.ConflictingGateway([says("ok")])
+        self._run(gateway)
+        self.assertLessEqual(
+            [m.get("method") for m in gateway.sent].count("chat.abort"), 1)
+
