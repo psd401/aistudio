@@ -42,6 +42,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import traceback
 
 HERE = pathlib.Path(__file__).resolve().parent
 PSD_DATA = "/opt/psd-skills/psd-data/run.js"
@@ -223,10 +224,24 @@ def workspace(command, user, scope="agent", json_file=None):
 # --- data steps ---------------------------------------------------------
 
 
+def like_escape(value):
+    """Neutralise LIKE wildcards in a caller-supplied name.
+
+    `sql_escape` stops the quote from breaking the literal, but inside a LIKE
+    a bare `%` or `_` is still a pattern: "Harbor_" would match "Harbor Ridge"
+    and "Harbor Heights" and land in the ambiguous-match branch, while a lone
+    "%" matches every school in the district. Escaped with a backslash and
+    declared via ESCAPE so the characters match themselves.
+    """
+    out = str(value).replace("\\", "\\\\")
+    return out.replace("%", "\\%").replace("_", "\\_")
+
+
 def resolve_school(name):
     rows = query(
         "SELECT schoolid, school_name FROM schools "
-        f"WHERE LOWER(school_name) LIKE LOWER('%{sql_escape(name)}%')",
+        "WHERE LOWER(school_name) LIKE LOWER("
+        f"'%{sql_escape(like_escape(name))}%') ESCAPE '\\'",
         f"Resolve the school named {name} for a quartile growth report",
     )
     if not rows:
@@ -613,7 +628,14 @@ def main() -> int:
 
             records_path = work_dir / f"grade-{grade}-records.json"
             records_path.write_text(json.dumps(records))
-            windows["*"] = f"{BASELINE_DEFAULT}→Spring"
+            # The fallback label must follow the GRADE, not the global default.
+            # Hardcoding "Fall→Spring" here mislabels every K block, where each
+            # measure's baseline is actually Winter. Only reached for a measure
+            # absent from the discovered set, so it is latent — but a wrong
+            # window label misstates what was measured, which is the one thing
+            # a principal cannot check from the sheet.
+            grade_default = BASELINE_BY_GRADE.get(str(grade), BASELINE_DEFAULT)
+            windows.setdefault("*", f"{grade_default}→Spring")
             body = step(
                 work_dir, f"grade-{grade}-values",
                 lambda g=grade, w=windows: build_values(
@@ -637,6 +659,17 @@ def main() -> int:
         return 0
     except ReportError as exc:
         log(f"FAILED: {exc}")
+        return 1
+    except Exception as exc:  # noqa: BLE001 - see below
+        # A ReportError is an expected, checkpoint-resumable stop. Anything
+        # else is a genuine bug (a KeyError off an unexpected roster shape,
+        # say) where a re-run will not help — but the agent reads stderr and
+        # reports it, so it still needs the same one-line FAILED shape rather
+        # than a raw traceback. The traceback is kept, below the summary, for
+        # whoever fixes it.
+        log(f"FAILED: unexpected {type(exc).__name__}: {exc}")
+        log("This is a bug, not a resumable failure — re-running will not help.")
+        traceback.print_exc(file=sys.stderr)
         return 1
 
 
