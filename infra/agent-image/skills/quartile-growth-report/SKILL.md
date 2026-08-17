@@ -38,13 +38,45 @@ as a "summary" row or a note next to a number.
    **Keep the section -> teacher map from this step** and pass it to
    `build_tab.py --teachers`; the classroom columns are headed by teacher
    name, not section id.
-3. Per grade, **extract → aggregate → build** (see `references/sql.md`):
-   - run the extraction query — raw matched pairs, no `NTILE`, no norms join,
-     no `GROUPING SETS`
-   - `scripts/aggregate.py` — applies the norms, computes every quartile scope
-   - `scripts/build_tab.py` — emits the gws request body for that tab
-4. Build ONE spreadsheet with `psd-workspace`: a tab per grade + Definitions.
-5. Share it and paste the bare URL on its own line.
+3. **Run the report — ONE command.** It does the roster, every grade's
+   extraction, the aggregation, the tabs, the Definitions tab, and the share:
+
+   ```bash
+   /opt/agentcore-venv/bin/python3 \
+     /opt/psd-skills/quartile-growth-report/scripts/run_report.py \
+     --school "<school>" --user "<caller email>"
+   ```
+
+   It prints the spreadsheet URL on stdout and progress on stderr.
+4. Paste that bare URL on its own line.
+
+**What the one command covers.** `run_report.py` builds the report:
+
+| Block | Notes |
+|---|---|
+| DIBELS growth + national PR | per-measure baselines; K is Winter, grade 1 ORF is Winter |
+| i-Ready Reading / Math | percentile change, no norms; skipped for K |
+| SBA grades 4-5 | scale change vs the prior-year summative |
+| Low Income / Special Ed subgroups | flags joined DISTRICT-WIDE |
+
+**Anything it cannot produce is written INTO the tab** under `NOT INCLUDED IN
+THIS REPORT`, with the reason — a failed query, no matched students, or a
+table it could not find. Do not delete those rows and do not call the report
+complete while they are present.
+
+That banner is the whole point. Every past failure of this report was
+invisible at the point of use — the Minter Creek grade span, the District
+column mirroring School, the missing teacher names. A principal cannot tell
+from a sheet that a measure was never queried, so the sheet has to say it.
+
+Two blocks report themselves as gaps today: **SBA grade 3**, which needs the
+Fall i-Ready quartile, and **i-Ready** where the warehouse table cannot be
+found (its name is not recorded in this skill, unlike `smarter_balanced_scores`
+and `students_frl`, so the script probes for it). Confirm the table name and
+they stop being gaps.
+
+`--dry-run` resolves the school, year and roster and prints the plan without
+touching a spreadsheet. Use it when the user asks what the report will cover.
 
 **Write no scripts. Author no files.** Every step ships as a script that takes
 the previous step's output and emits the next step's input, ending in a body
@@ -89,7 +121,18 @@ into it.
 every measure for the grade at once. Per-measure querying turns 6 grades into
 30+ round trips and is what makes this report feel endless.
 
-### How to run it
+### How to run it by hand — FALLBACK ONLY
+
+**Everything from here to the end of this section applies only when
+`run_report.py` cannot be used** (it is unavailable, or it fails in a way a
+re-run does not clear, or you are covering a block it reports as a gap — see
+*What the one command covers* above). For a normal quartile growth report, stop
+reading here and run the one command in step 3.
+
+This section describes the manual orchestration path. It is kept for the
+blocks the one command still reports as gaps, and for debugging. Do not read
+it as the default; the five consecutive failures that motivated
+`run_report.py` all happened on this path.
 
 **Work the grades one at a time, in this turn, start to finish.** Run a grade's
 measure blocks, keep the rows, move to the next grade. Do not parallelize, do

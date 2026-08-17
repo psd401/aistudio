@@ -68,7 +68,22 @@ def column_label(section_id, teachers):
     return f"{name} ({section_id})"
 
 
-def build(records, school, grade, year, window, sections=None, teachers=None):
+def window_for(meas, window):
+    """The window label for one measure block.
+
+    Usually one string for the whole tab. But a grade can mix baselines —
+    grade 1 ORF starts mid-year, so it is Winter->Spring while everything else
+    in that grade is Fall->Spring — and labelling those blocks identically
+    would misstate what was measured. A dict maps measure to label; a plain
+    string still applies to every block.
+    """
+    if isinstance(window, dict):
+        return window.get(meas) or window.get("*") or ""
+    return window
+
+
+def build(records, school, grade, year, window, sections=None, teachers=None,
+          gaps=()):
     """One tab's grid: a block per measure, quartile rows, then subgroups."""
     by_measure = defaultdict(lambda: defaultdict(dict))
     subgroups = defaultdict(list)
@@ -96,7 +111,7 @@ def build(records, school, grade, year, window, sections=None, teachers=None):
 
     for meas in sorted(by_measure):
         scopes = by_measure[meas]
-        values.append([f"{meas} ({window})"])
+        values.append([f"{meas} ({window_for(meas, window)})"])
         values.append(
             ["Quartile"]
             + [column_label(s, teachers) for s in section_ids]
@@ -109,6 +124,16 @@ def build(records, school, grade, year, window, sections=None, teachers=None):
             row.append(cell(scopes.get("school", {}).get(key)))
             row.append(cell(scopes.get("district", {}).get(key)))
             values.append(row)
+        values.append([BLANK])
+
+    if gaps:
+        # A block that could not be produced is stated IN THE WORKBOOK. A
+        # principal does not read the run log, and a report that silently
+        # omits SBA or i-Ready looks complete and is not — the exact failure
+        # this report has produced repeatedly in other forms.
+        values.append(["NOT INCLUDED IN THIS REPORT"])
+        for gap in gaps:
+            values.append([gap])
         values.append([BLANK])
 
     if subgroups:
@@ -138,7 +163,14 @@ def main() -> int:
         "--window",
         default="Fall→Spring",
         help="the window ACTUALLY used; a Fall→Winter report labeled "
-        "Fall→Spring is a wrong report, not a cosmetic slip",
+        "Fall→Spring is a wrong report, not a cosmetic slip. May be a JSON "
+        'object mapping measure to label ({"ORF-WRC": "Winter→Spring", '
+        '"*": "Fall→Spring"}) when one grade mixes baselines.',
+    )
+    parser.add_argument(
+        "--gaps",
+        help="JSON list of measure families that could not be produced; "
+        "rendered in the tab so an omission is visible to the reader",
     )
     parser.add_argument(
         "--teachers",
@@ -177,6 +209,13 @@ def main() -> int:
         if args.rows:
             handle.close()
 
+    window = args.window
+    if window.strip().startswith("{"):
+        try:
+            window = json.loads(window)
+        except (json.JSONDecodeError, ValueError) as exc:
+            parser.error(f"--window is not valid JSON ({exc})")
+
     teachers = None
     if args.teachers:
         # A raw JSONDecodeError here reads as a script bug and costs the agent
@@ -194,8 +233,16 @@ def main() -> int:
                 "--teachers must be a JSON object mapping sectionid to teacher "
                 f"name, got {type(teachers).__name__}"
             )
+    gaps = []
+    if args.gaps:
+        try:
+            gaps = json.loads(args.gaps)
+        except (json.JSONDecodeError, ValueError) as exc:
+            parser.error(f"--gaps is not valid JSON ({exc})")
+
     tab = build(
-        records, args.school, args.grade, args.year, args.window, teachers=teachers
+        records, args.school, args.grade, args.year, window,
+        teachers=teachers, gaps=gaps,
     )
 
     if args.emit == "grid":
