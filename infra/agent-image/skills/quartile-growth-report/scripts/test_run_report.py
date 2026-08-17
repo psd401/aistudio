@@ -86,18 +86,51 @@ class Paging(RestoresModuleFunctions):
     separate history of silently dropping numeric columns from the CSV.
     """
 
-    def test_paging_stops_on_a_short_page(self):
-        pages = [[{"r": i} for i in range(R.PAGE_SIZE)], [{"r": "last"}]]
+    def test_a_short_page_does_NOT_end_paging(self):
+        # THE truncation bug. psd-data is documented as returning at most 30
+        # rows per call, so asking for 5,000 and stopping when fewer arrive
+        # would have ended after the first page — every extraction cut to 30
+        # students, with quartiles over them looking entirely plausible.
+        pages = [[{"r": 1}] * 30, [{"r": 2}] * 30, [{"r": 3}] * 7, []]
         R.query = lambda *a, **k: pages.pop(0) if pages else []
-        self.assertEqual(len(R.query_all("SELECT 1", "test")), R.PAGE_SIZE + 1)
+        self.assertEqual(len(R.query_all("SELECT 1", "capped")), 67)
+
+    def test_paging_stops_on_an_empty_page(self):
+        pages = [[{"r": 1}], []]
+        R.query = lambda *a, **k: pages.pop(0) if pages else []
+        self.assertEqual(len(R.query_all("SELECT 1", "test")), 1)
+
+    def test_the_offset_follows_rows_received_not_the_page_size(self):
+        # With a server cap, page N does not start at N * PAGE_SIZE.
+        seen = []
+
+        def fake(sql, reason, limit=None, offset=None):
+            seen.append(offset)
+            return [{"r": 1}] * 30 if len(seen) < 3 else []
+
+        R.query = fake
+        R.query_all("SELECT 1", "offsets")
+        self.assertEqual(seen, [0, 30, 60])
 
     def test_paging_refuses_to_run_forever(self):
-        # A query that never shortens is a bug somewhere else; looping until
-        # the turn dies would hide it.
         R.query = lambda *a, **k: [{"r": i} for i in range(R.PAGE_SIZE)]
         with self.assertRaises(R.ReportError) as caught:
             R.query_all("SELECT 1", "runaway")
         self.assertIn("refusing to page forever", str(caught.exception))
+
+    def test_a_count_mismatch_is_loud(self):
+        # Silence here means a report whose every number is computed over a
+        # fraction of the cohort.
+        pages = [[{"r": 1}] * 30, []]
+        R.query = lambda *a, **k: pages.pop(0) if pages else []
+        with self.assertRaises(R.ReportError) as caught:
+            R.query_all("SELECT 1", "extraction", expected=1706)
+        self.assertIn("truncated", str(caught.exception))
+
+    def test_a_matching_count_passes(self):
+        pages = [[{"r": 1}] * 30, []]
+        R.query = lambda *a, **k: pages.pop(0) if pages else []
+        self.assertEqual(len(R.query_all("SELECT 1", "x", expected=30)), 30)
 
     def test_export_is_never_requested(self):
         source = pathlib.Path(R.__file__).read_text()
@@ -503,12 +536,12 @@ class TheWholeReportIsAttempted(RestoresModuleFunctions):
         self.assertIn("prior.b::text", sql)
 
     def test_iready_uses_percentile_not_raw_score(self):
-        sql = R.iready_sql(1, 2, "3", "iready_scores")
+        sql = R.iready_sql(1, 2, "3", "iready_reading_diagnostics", "Reading")
         self.assertIn("AVG(percentile)", sql)
 
     def test_no_block_reintroduces_a_window_function(self):
         for sql in (R.sba_sql(1, 35, "4"),
-                    R.iready_sql(1, 2, "3", "iready_scores")):
+                    R.iready_sql(1, 2, "3", "iready_reading_diagnostics", "Reading")):
             upper = sql.upper()
             for banned in ("NTILE(", "GROUPING SETS", "LATERAL"):
                 self.assertNotIn(banned, upper)
@@ -847,7 +880,11 @@ class McpResponseIsAMarkdownTable(RestoresModuleFunctions):
         self.assertEqual(rows[0]["school_name"], "Artondale Elementary")
 
     def test_query_all_pages_a_real_envelope(self):
-        R.run_json = lambda argv, what, **k: self.ENVELOPE
+        envelopes = [self.ENVELOPE, {"content": [{"type": "text",
+                                                  "text": ""}],
+                                     "isError": False}]
+        R.run_json = lambda argv, what, **k: (
+            envelopes.pop(0) if envelopes else {"content": [], "isError": False})
         self.assertEqual(len(R.query_all("SELECT 1", "roster")), 1)
 
     def test_query_raises_on_an_error_envelope(self):
@@ -1048,6 +1085,261 @@ class NormsNamesAreMapped(unittest.TestCase):
         joined = " ".join(seen["argv"])
         self.assertIn("--measure-as", joined)
         self.assertIn("ORF WC=ORF-WRC", joined)
+
+class IReadyIsTwoTables(unittest.TestCase):
+    """Guessed table names cost a whole measure family.
+
+    The script probed iready_scores / i_ready_scores /
+    iready_diagnostic_scores. None exist. i-Ready reported itself as "table
+    not found" on every run while the data sat under
+    iready_reading_diagnostics and iready_math_diagnostics — one table PER
+    SUBJECT, not one table with a subject column.
+
+    The gap banner did its job: the omission was stated in the sheet rather
+    than silent. But the user still had to ask why, and the answer was that we
+    guessed instead of asking the warehouse.
+    """
+
+    def test_the_recorded_tables_are_the_real_ones(self):
+        self.assertEqual(
+            R.IREADY_TABLES_BY_SUBJECT,
+            {"Reading": "iready_reading_diagnostics",
+             "Math": "iready_math_diagnostics"},
+        )
+
+    def test_each_subject_queries_its_own_table(self):
+        reading = R.iready_sql(1, 2, "3", "iready_reading_diagnostics", "Reading")
+        math = R.iready_sql(1, 2, "3", "iready_math_diagnostics", "Math")
+        self.assertIn("iready_reading_diagnostics", reading)
+        self.assertNotIn("iready_math_diagnostics", reading)
+        self.assertIn("iready_math_diagnostics", math)
+
+    def test_the_subject_is_a_literal_not_a_column(self):
+        # There is no `subject` column to select — the table IS the subject.
+        sql = R.iready_sql(1, 2, "3", "iready_reading_diagnostics", "Reading")
+        self.assertIn("'Reading' AS meas", sql)
+        self.assertNotIn("subject AS meas", sql)
+
+    def test_the_measure_is_labelled_for_the_tab(self):
+        sql = R.iready_sql(1, 2, "3", "iready_math_diagnostics", "Math")
+        self.assertIn("'i-Ready ' || m.meas", sql)
+
+
+class NormsGapsThatKilledAWholeGrade(unittest.TestCase):
+    """Two measure names, each of which aborted an entire grade block."""
+
+    def test_maze_adjusted_score_maps_to_maze(self):
+        self.assertIn("MAZE Adjusted Score=MAZE",
+                      R.measure_as_args(["MAZE Adjusted Score"]))
+
+    def test_composite_has_no_norms_and_is_not_mapped(self):
+        # Inventing a percentile for it would misstate how a child scored
+        # against national peers, in a document read as fact.
+        with_norms, without = R.split_by_norms(["ORF WC", "Composite"])
+        self.assertEqual(with_norms, ["ORF WC"])
+        self.assertEqual(without, ["Composite"])
+
+    def test_a_normal_measure_keeps_its_norms(self):
+        with_norms, without = R.split_by_norms(["ORF WC", "NWF CLS"])
+        self.assertEqual(without, [])
+
+class TheDefaultYearMustHaveStarted(RestoresModuleFunctions):
+    """`ORDER BY id DESC` picked a year that had not begun.
+
+    On 2026-08-17 the default resolved to 2026-27 — no roster, no scores — and
+    the report came out empty until the user worked out what had happened and
+    passed the completed year by hand. A growth report needs a baseline AND an
+    ending window, so a year that has not started cannot produce one.
+    """
+
+    YEARS = [
+        {"yearid": 36, "year_name": "2026-2027", "first_day": "2026-09-01"},
+        {"yearid": 35, "year_name": "2025-2026", "first_day": "2025-09-02"},
+        {"yearid": 34, "year_name": "2024-2025", "first_day": "2024-09-03"},
+    ]
+
+    def test_a_year_that_has_not_started_is_skipped(self):
+        R.query = lambda *a, **k: self.YEARS
+        self.assertEqual(R.resolve_year(None)["year_name"], "2025-2026")
+
+    def test_the_newest_started_year_wins(self):
+        started = [dict(y, first_day="2020-09-01") for y in self.YEARS]
+        R.query = lambda *a, **k: started
+        self.assertEqual(R.resolve_year(None)["yearid"], 36)
+
+    def test_no_started_year_refuses_rather_than_guessing(self):
+        future = [dict(y, first_day="2099-09-01") for y in self.YEARS]
+        R.query = lambda *a, **k: future
+        with self.assertRaises(R.ReportError) as caught:
+            R.resolve_year(None)
+        self.assertIn("--year", str(caught.exception))
+
+
+class TheYearFormatIsForgiving(RestoresModuleFunctions):
+    """The warehouse says "2025-2026"; this skill's usage line said "2025-26".
+
+    The user hit that too. Being strict about a format we documented wrong is
+    our error to absorb, not theirs to work around.
+    """
+
+    YEARS = [{"yearid": 35, "year_name": "2025-2026", "first_day": "2025-09-02"}]
+
+    def test_the_short_form_matches_the_long_one(self):
+        R.query = lambda *a, **k: self.YEARS
+        self.assertEqual(R.resolve_year("2025-26")["yearid"], 35)
+
+    def test_the_exact_form_still_matches(self):
+        R.query = lambda *a, **k: self.YEARS
+        self.assertEqual(R.resolve_year("2025-2026")["yearid"], 35)
+
+    def test_a_slash_form_matches(self):
+        R.query = lambda *a, **k: self.YEARS
+        self.assertEqual(R.resolve_year("2025/26")["yearid"], 35)
+
+    def test_an_unknown_year_lists_what_exists(self):
+        # "no school year matched" with nothing else is a dead end for the
+        # user; the warehouse's own spelling is the useful part.
+        R.query = lambda *a, **k: self.YEARS
+        with self.assertRaises(R.ReportError) as caught:
+            R.resolve_year("1999-2000")
+        self.assertIn("2025-2026", str(caught.exception))
+
+    def test_an_exact_match_beats_a_loose_one(self):
+        R.query = lambda *a, **k: [
+            {"yearid": 1, "year_name": "2025-26", "first_day": "2025-09-02"},
+            {"yearid": 2, "year_name": "2025-2026", "first_day": "2025-09-02"},
+        ]
+        self.assertEqual(R.resolve_year("2025-2026")["yearid"], 2)
+
+class TheNormsSplitIsActuallyUsed(RestoresModuleFunctions):
+    """split_by_norms was defined, unit-tested, and never called.
+
+    Review caught it: the helper and its tests both passed while the report
+    pipeline still made one aggregate call for the whole group, so a grade
+    containing Composite would abort exactly as before. A test that exercises
+    a helper proves nothing about whether anything calls it — the same lesson
+    as the parse_mcp_rows test that passed while query() stayed broken.
+
+    These call the pipeline's own function.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(tempfile.mkdtemp())
+        self.calls = []
+        (self.work / "t-rows.json").write_text("[]")
+
+        def fake_aggregate(rows_path, grade, baseline, no_norms=False,
+                           subgroups=(), measures=()):
+            self.calls.append({"measures": list(measures),
+                               "no_norms": no_norms})
+            return [{"meas": m} for m in measures]
+
+        self._real = R.aggregate_rows
+        R.aggregate_rows = fake_aggregate
+        self.addCleanup(lambda: setattr(R, "aggregate_rows", self._real))
+
+    def test_a_mixed_group_is_aggregated_twice(self):
+        out = R.aggregate_group(self.work, "t", "5", "Fall",
+                                ["ORF WC", "Composite"], lambda m: None)
+        self.assertEqual(len(self.calls), 2)
+        normed = [c for c in self.calls if not c["no_norms"]][0]
+        skipped = [c for c in self.calls if c["no_norms"]][0]
+        self.assertEqual(normed["measures"], ["ORF WC"])
+        self.assertEqual(skipped["measures"], ["Composite"])
+        self.assertEqual(len(out), 2)
+
+    def test_a_normal_group_is_aggregated_once_with_norms(self):
+        R.aggregate_group(self.work, "t", "3", "Fall",
+                          ["ORF WC", "NWF CLS"], lambda m: None)
+        self.assertEqual(len(self.calls), 1)
+        self.assertFalse(self.calls[0]["no_norms"])
+
+    def test_a_norms_free_group_never_asks_for_norms(self):
+        R.aggregate_group(self.work, "t", "5", "Fall",
+                          ["Composite"], lambda m: None)
+        self.assertEqual(len(self.calls), 1)
+        self.assertTrue(self.calls[0]["no_norms"])
+
+    def test_both_passes_read_the_same_extracted_rows(self):
+        # Two aggregations, never two extractions.
+        R.aggregate_group(self.work, "t", "5", "Fall",
+                          ["ORF WC", "Composite"], lambda m: None)
+        self.assertEqual(len(list(self.work.glob("*-rows.json"))), 1)
+
+    def test_the_pipeline_calls_aggregate_group(self):
+        source = pathlib.Path(R.__file__).read_text()
+        block = source.split("One pass per distinct baseline", 1)[1]
+        self.assertIn("aggregate_group(", block.split("# i-Ready", 1)[0])
+
+class TruncationVerificationIsWiredIn(RestoresModuleFunctions):
+    """count_rows and expected= were primitives nothing called.
+
+    Review caught that too, in the same PR as split_by_norms. Scaffolding with
+    tests is indistinguishable from a fix until something calls it.
+    """
+
+    def test_the_extraction_path_counts_before_it_pages(self):
+        calls = []
+
+        def fake_query(sql, reason, limit=None, offset=None):
+            calls.append(sql)
+            if sql.startswith("SELECT COUNT(*)"):
+                return [{"n": "2"}]
+            return [{"r": 1}, {"r": 2}] if len(calls) == 2 else []
+
+        R.query = fake_query
+        rows = R.extract_verified("SELECT 1", "grade 3 pairs")
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(calls[0].startswith("SELECT COUNT(*)"))
+
+    def test_a_short_paged_extraction_raises(self):
+        def fake_query(sql, reason, limit=None, offset=None):
+            if sql.startswith("SELECT COUNT(*)"):
+                return [{"n": "1706"}]
+            return [{"r": 1}] * 30 if offset == 0 else []
+
+        R.query = fake_query
+        with self.assertRaises(R.ReportError) as caught:
+            R.extract_verified("SELECT 1", "grade 1 pairs")
+        self.assertIn("truncated", str(caught.exception))
+
+    def test_an_unavailable_count_does_not_fail_the_report(self):
+        # Failing a whole report over a diagnostic would be its own bug.
+        def fake_query(sql, reason, limit=None, offset=None):
+            if sql.startswith("SELECT COUNT(*)"):
+                return [{"n": None}]
+            return [{"r": 1}] if offset == 0 else []
+
+        R.query = fake_query
+        self.assertEqual(len(R.extract_verified("SELECT 1", "x")), 1)
+
+    def test_the_pipeline_uses_the_verified_extraction(self):
+        source = pathlib.Path(R.__file__).read_text()
+        block = source.split("One pass per distinct baseline", 1)[1]
+        self.assertIn("extract_verified(", block.split("# i-Ready", 1)[0])
+
+
+class PageCeilingCoversARealSchool(unittest.TestCase):
+    """MAX_PAGES was sized for 5,000-row pages.
+
+    If psd-data caps at 30, 40 pages is 1,200 rows — and this file's own
+    docstring cites a real extraction of 1,706. Continuing past a short page
+    without raising the ceiling turns a silent truncation into a hard failure
+    on every real school.
+    """
+
+    def test_the_ceiling_covers_a_capped_real_extraction(self):
+        self.assertGreaterEqual(R.MAX_PAGES * 30, 30_000)
+
+    def test_orf_errors_keeps_its_norms(self):
+        # It is aliased to ORF-WRC, which has real rows in the norms CSV.
+        # Listing it as norm-free would strip norms from a working measure.
+        self.assertNotIn("orf errors", R.MEASURES_WITHOUT_NORMS)
+        self.assertIn("ORF Errors=ORF-WRC", R.measure_as_args(["ORF Errors"]))
+
+    def test_composite_is_still_norm_free(self):
+        self.assertIn("composite", R.MEASURES_WITHOUT_NORMS)
 
 
 # Keep this guard LAST in the file. It used to sit mid-file (line 214), which

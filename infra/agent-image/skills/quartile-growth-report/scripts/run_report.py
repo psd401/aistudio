@@ -30,7 +30,7 @@ be run twice and diffed — which the previous design never allowed.
 USAGE
 
     run_report.py --school "Artondale Elementary" --user you@psd401.net
-                  [--year 2025-26] [--grades K,1,2,3,4,5]
+                  [--year 2025-2026] [--grades K,1,2,3,4,5]
                   [--work-dir DIR] [--dry-run] [--plan-only]
 
 Re-running with the same --work-dir skips work already done.
@@ -53,7 +53,16 @@ PYTHON = sys.executable or "/opt/agentcore-venv/bin/python3"
 # psd-data rate-limits at 60 req/min/user, so pages are deliberately large:
 # a whole grade should be one or two calls, not twenty.
 PAGE_SIZE = 5000
-MAX_PAGES = 40
+# Sized for the WORST case, not the requested one. If psd-data really caps at
+# 30 rows per call, 40 pages is 1,200 rows — and this file's own docstring
+# cites a real extraction of 1,706 matched grade-1 pairs. Now that paging
+# correctly continues past a short page, too low a ceiling turns a silent
+# truncation into a hard failure on every real school, which is better but
+# still a broken report.
+#
+# 1,000 pages covers ~30,000 rows at a 30-row cap and one page at 5,000. The
+# guard still exists to stop an infinite loop; it is not a size limit.
+MAX_PAGES = 1000
 
 # Grades in report order. K sorts first and is stored as "K", not 0.
 DEFAULT_GRADES = ["K", "1", "2", "3", "4", "5"]
@@ -88,7 +97,59 @@ NORMS_NAME_BY_WAREHOUSE = {
     "orf wc": "ORF-WRC",
     "nwf cls": "NWF-CLS",
     "nwf wrc": "NWF-WRC",
+    # Grade 5's warehouse name. Unmapped, aggregate.py aborts the whole grade-5
+    # DIBELS block, and because the failure came out of a truncated result page
+    # it read as "no measures" rather than "unmapped name".
+    "maze adjusted score": "MAZE",
+    "maze": "MAZE",
 }
+
+# Measures with no national norms at all. Passed with --no-norms rather than
+# mapped, because inventing a percentile for them would misstate how a child
+# scored against national peers in a document a principal reads as fact.
+# Only measures with NO national norms at all. "orf errors" was in here and
+# should not have been: NORMS_NAME_BY_WAREHOUSE already aliases it to ORF-WRC,
+# which has real rows in the norms CSV. Once split_by_norms was wired in, that
+# entry would have stripped norms from a measure that scores correctly today —
+# the fix quietly breaking something that worked.
+MEASURES_WITHOUT_NORMS = {"composite"}
+
+
+def aggregate_group(work_dir, tag, grade, baseline, group, log):
+    """Aggregate one baseline group, in two passes when norms differ.
+
+    aggregate.py's --no-norms is per RUN, not per measure, and a measure with
+    no national norms (Composite) aborts the whole call when the others need
+    them. So the group is split and aggregated twice over the SAME extracted
+    rows — never two extractions.
+
+    A function rather than inline code so a test can prove the pipeline
+    actually does this. The first version of split_by_norms was defined,
+    unit-tested and never called from the report at all; review caught it, and
+    the tests passed either way because none of them touched the call site.
+    """
+    records = []
+    with_norms, without_norms = split_by_norms(group)
+    for measures, skip_norms in ((with_norms, False), (without_norms, True)):
+        if not measures:
+            continue
+        suffix = "nonorms" if skip_norms else "norms"
+        records.extend(step(
+            work_dir, f"{tag}-agg-{suffix}",
+            lambda m=measures, sk=skip_norms: aggregate_rows(
+                work_dir / f"{tag}-rows.json", grade, baseline,
+                subgroups=SUBGROUPS, measures=m, no_norms=sk),
+            log))
+    return records
+
+
+def split_by_norms(measures):
+    """(with_norms, without_norms) for one grade's measure list."""
+    with_norms, without = [], []
+    for measure in measures:
+        key = str(measure).strip().lower()
+        (without if key in MEASURES_WITHOUT_NORMS else with_norms).append(measure)
+    return with_norms, without
 
 
 def measure_as_args(measures):
@@ -346,18 +407,76 @@ def parse_markdown_table(text):
     return rows
 
 
-def query_all(sql, reason):
-    """Page a SELECT to completion."""
+def query_all(sql, reason, expected=None):
+    """Page a SELECT to completion.
+
+    STOPS ON AN EMPTY PAGE, NOT A SHORT ONE. psd-data is documented as
+    returning at most 30 rows per call (SKILL.md's pitfalls list). Asking for
+    5,000 and stopping when fewer come back would have ended after the FIRST
+    page — every extraction silently truncated to 30 students, and quartiles
+    computed over them would look entirely plausible and be wrong.
+
+    I could not verify that cap from outside the warehouse, which is exactly
+    why the loop no longer depends on knowing it: a short page proves nothing,
+    an empty one proves the end.
+    """
     out = []
     for page in range(MAX_PAGES):
-        rows = query(sql, reason, limit=PAGE_SIZE, offset=page * PAGE_SIZE)
+        rows = query(sql, reason, limit=PAGE_SIZE, offset=len(out))
+        if not rows:
+            break
         out.extend(rows)
-        if len(rows) < PAGE_SIZE:
-            return out
-    raise ReportError(
-        f"{reason}: still returning full pages after {MAX_PAGES} "
-        f"({len(out)} rows) — refusing to page forever"
-    )
+        # If the warehouse caps pages at 30 and rate-limits at 60/min, a large
+        # grade is minutes of paging with nothing on stdout. Say so, so a slow
+        # run is visibly working rather than apparently hung — the promoted
+        # job has a two-hour budget and no way to ask.
+        if page and page % 25 == 0:
+            logger_line = (f"  {reason}: {len(out)} rows after "
+                           f"{page + 1} pages")
+            print(logger_line, file=sys.stderr, flush=True)
+    else:
+        raise ReportError(
+            f"{reason}: still returning rows after {MAX_PAGES} pages "
+            f"({len(out)}) — refusing to page forever"
+        )
+    if expected is not None and len(out) != expected:
+        # A count that disagrees with what paging returned means the result
+        # was capped or the offsets skipped. Loud, because the alternative is
+        # a report whose every number is computed over a fraction of the
+        # cohort and looks fine.
+        raise ReportError(
+            f"{reason}: expected {expected} rows, paged {len(out)}. "
+            "The result set is being truncated; the numbers would be wrong."
+        )
+    return out
+
+
+def extract_verified(sql, reason):
+    """Page an extraction and prove nothing was dropped.
+
+    The count is the whole point: paging that silently returns a subset yields
+    quartiles over a fraction of the cohort that look entirely plausible. A
+    COUNT(*) costs one call and turns that into a loud failure.
+
+    A count the warehouse will not give (null, unparseable) is not treated as
+    a mismatch — that would fail reports over a diagnostic. It is logged as
+    unverified instead.
+    """
+    expected = count_rows(sql, f"Row count for {reason}")
+    return query_all(sql, reason, expected=expected)
+
+
+def count_rows(sql, reason):
+    """COUNT(*) over a SELECT, so truncation cannot pass unnoticed."""
+    rows = query(f"SELECT COUNT(*) AS n FROM ({sql}) AS counted", reason,
+                 limit=1)
+    if not rows:
+        return None
+    value = (rows[0] or {}).get("n")
+    try:
+        return int(str(value).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
 
 
 def workspace(command, user, scope="agent", json_file=None):
@@ -418,18 +537,68 @@ def resolve_school(name):
 
 
 def resolve_year(year):
-    where = f"WHERE name = '{sql_escape(year)}'" if year else ""
-    order = "" if year else "ORDER BY id DESC"
+    """The year to report on.
+
+    DEFAULTS TO THE MOST RECENT year that has actually STARTED, not the most
+    recent row. On 2026-08-17 `ORDER BY id DESC` picked 2026-27 — a year that
+    had not begun, had no roster, and produced an empty report before the user
+    noticed and asked for the completed year by hand.
+
+    A growth report needs a baseline AND an ending window, so a year that has
+    not started cannot produce one. first_day is the honest test.
+
+    The name is matched leniently because the warehouse spells it "2025-2026"
+    while this skill's own usage line said "2025-26" — the user hit that too,
+    and being strict about a format we documented wrong is our error to
+    absorb, not theirs to work around.
+    """
+    if year:
+        wanted = str(year).strip()
+        rows = query(
+            "SELECT id AS yearid, name AS year_name FROM school_years",
+            "List school years for a quartile growth report",
+        )
+        for row in rows:
+            if str(row.get("year_name", "")).strip() == wanted:
+                return row
+        loose = _loose_year(wanted)
+        for row in rows:
+            if _loose_year(row.get("year_name")) == loose:
+                return row
+        names = ", ".join(str(r.get("year_name")) for r in rows[:8])
+        raise ReportError(
+            f"no school year matched {year!r}. The warehouse has: {names}"
+        )
+
     rows = query(
-        # Live schema: school_years(id, name, year_rank, first_day, last_day).
-        f"SELECT id AS yearid, name AS year_name FROM school_years "
-        f"{where} {order}".strip(),
-        "Resolve the school year for a quartile growth report",
-        limit=1,
+        "SELECT id AS yearid, name AS year_name, first_day "
+        "FROM school_years ORDER BY id DESC",
+        "Resolve the most recent completed school year",
     )
-    if not rows:
-        raise ReportError(f"no school year matched {year!r}")
-    return rows[0]
+    today = datetime.date.today().isoformat()
+    for row in rows:
+        first_day = str(row.get("first_day") or "")[:10]
+        if first_day and first_day <= today:
+            return row
+    if rows:
+        # No first_day recorded anywhere, so "has it started" cannot be
+        # answered. Refuse and ask for --year rather than guess: picking the
+        # newest row unverified is what produced the empty 2026-27 report.
+        raise ReportError(
+            "no school year has a first_day on or before today; pass --year "
+            f"explicitly. Newest is {rows[0].get('year_name')!r}"
+        )
+    raise ReportError("no school years found")
+
+
+def _loose_year(name):
+    """"2025-26", "2025-2026" and "2025/26" compare equal."""
+    digits = re.findall(r"\d+", str(name or ""))
+    if not digits:
+        return str(name or "").strip().lower()
+    start = digits[0]
+    end = digits[1] if len(digits) > 1 else ""
+    return f"{start}-{end[-2:]}" if end else start
 
 
 def fetch_roster(schoolid, yearid):
@@ -795,14 +964,30 @@ def discover_table(candidates, yearid):
     return None
 
 
-IREADY_TABLES = ("iready_scores", "i_ready_scores", "iready_diagnostic_scores")
+# One table PER SUBJECT, discovered on 2026-08-17 by asking the warehouse
+# instead of guessing. The three names this used to probe —
+# iready_scores, i_ready_scores, iready_diagnostic_scores — do not exist, so
+# i-Ready reported itself as "table not found" on every run while the data sat
+# there under a different name.
+#
+# Guessing table names was the mistake. These are recorded, and an unknown one
+# still degrades to a stated gap rather than a silent omission.
+IREADY_TABLES_BY_SUBJECT = {
+    "Reading": "iready_reading_diagnostics",
+    "Math": "iready_math_diagnostics",
+}
 
 
-def iready_sql(schoolid, yearid, grade, table):
-    """i-Ready percentile change. Already national, so no norms lookup."""
+def iready_sql(schoolid, yearid, grade, table, subject):
+    """i-Ready percentile change for ONE subject table.
+
+    Percentile is already national, so no norms lookup — this always runs
+    --no-norms.
+    """
     return (
         "WITH stu AS ("
-        "  SELECT subject AS meas, studentid, \"window\", AVG(percentile) AS s"
+        f"  SELECT '{sql_escape(subject)}' AS meas, studentid, \"window\","
+        "         AVG(percentile) AS s"
         f"  FROM {table}"
         f"  WHERE yearid = {int(yearid)} AND grade_level = '{sql_escape(grade)}'"
         "    AND \"window\" IN ('Fall', 'Spring')"
@@ -928,7 +1113,11 @@ def main() -> int:
     )
     parser.add_argument("--school", required=True)
     parser.add_argument("--user", required=True, help="caller email for gws")
-    parser.add_argument("--year", help='e.g. "2025-26"; default most recent')
+    parser.add_argument(
+        "--year",
+        help='e.g. "2025-2026" (the warehouse spelling; "2025-26" also '
+        "works). Default: the most recent year that has STARTED — the newest "
+        "row may not have begun yet, and a growth report needs both windows.")
     parser.add_argument("--grades", help="comma list; default the roster's own")
     parser.add_argument("--work-dir", help="checkpoints; default /tmp/qgr-<school>")
     parser.add_argument("--dry-run", action="store_true",
@@ -976,10 +1165,17 @@ def main() -> int:
             )
         log(f"  grades served: {', '.join(served)}")
 
-        iready_table = step(
-            work_dir, "iready-table",
-            lambda: {"name": discover_table(IREADY_TABLES, yearid)}, log)["name"]
-        log(f"  i-Ready table: {iready_table or 'NOT FOUND'}")
+        iready_tables = step(
+            work_dir, "iready-tables",
+            lambda: {subject: table
+                     for subject, table in IREADY_TABLES_BY_SUBJECT.items()
+                     if discover_table([table], yearid)}, log)
+        missing = sorted(set(IREADY_TABLES_BY_SUBJECT) - set(iready_tables))
+        # The TABLE names, not the subject keys. This PR exists because the
+        # wrong table names were baked in; a log that hides which table
+        # answered is the one line you would want next time.
+        log(f"  i-Ready: {', '.join(sorted(iready_tables.values())) or 'NONE FOUND'}"
+            + (f" (missing: {', '.join(missing)})" if missing else ""))
 
         if dry_run:
             print(json.dumps({
@@ -1033,7 +1229,7 @@ def main() -> int:
                 try:
                     rows = step(
                         work_dir, f"{tag}-rows",
-                        lambda g=grade, b=baseline, m=group: query_all(
+                        lambda g=grade, b=baseline, m=group: extract_verified(
                             extraction_sql(schoolid, yearid, g, m, b),
                             f"Matched {b}/Spring pairs for grade {g}"),
                         log)
@@ -1056,29 +1252,29 @@ def main() -> int:
                         "not included (no matched students)")
                     continue
                 log(f"grade {grade}: {len(rows)} rows ({baseline})")
-                part = step(
-                    work_dir, f"{tag}-agg",
-                    lambda g=grade, b=baseline, t=tag, m=group: aggregate_rows(
-                        work_dir / f"{t}-rows.json", g, b,
-                        subgroups=SUBGROUPS, measures=m),
-                    log)
-                records.extend(part)
+
+                records.extend(aggregate_group(
+                    work_dir, tag, grade, baseline, group, log))
                 for measure in group:
                     windows[measure] = f"{baseline}→Spring"
 
             # i-Ready. Skipped for K by SKILL.md (not district-representative).
             if grade != "K":
-                if iready_table:
+                for subject in sorted(IREADY_TABLES_BY_SUBJECT):
+                    table = iready_tables.get(subject)
+                    if not table:
+                        gaps.append(
+                            f"i-Ready {subject}: not included (table "
+                            f"{IREADY_TABLES_BY_SUBJECT[subject]} not found)")
+                        continue
                     records.extend(run_block(
-                        work_dir, f"grade-{grade}-iready", grade,
-                        lambda g=grade: iready_sql(schoolid, yearid, g,
-                                                   iready_table),
-                        f"i-Ready Fall/Spring percentiles for grade {grade}",
-                        log, gaps, "i-Ready Reading/Math", no_norms=True))
-                else:
-                    gaps.append(
-                        "i-Ready Reading/Math: not included (no i-Ready table "
-                        f"found; tried {', '.join(IREADY_TABLES)})")
+                        work_dir, f"grade-{grade}-iready-{subject.lower()}",
+                        grade,
+                        lambda g=grade, t=table, sub=subject: iready_sql(
+                            schoolid, yearid, g, t, sub),
+                        f"i-Ready {subject} Fall/Spring percentiles, "
+                        f"grade {grade}",
+                        log, gaps, f"i-Ready {subject}", no_norms=True))
 
             # SBA grades 4-5: scale change against the prior-year summative.
             if grade in ("4", "5"):
