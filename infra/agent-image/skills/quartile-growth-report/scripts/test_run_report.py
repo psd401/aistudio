@@ -1211,6 +1211,136 @@ class TheYearFormatIsForgiving(RestoresModuleFunctions):
         ]
         self.assertEqual(R.resolve_year("2025-2026")["yearid"], 2)
 
+class TheNormsSplitIsActuallyUsed(RestoresModuleFunctions):
+    """split_by_norms was defined, unit-tested, and never called.
+
+    Review caught it: the helper and its tests both passed while the report
+    pipeline still made one aggregate call for the whole group, so a grade
+    containing Composite would abort exactly as before. A test that exercises
+    a helper proves nothing about whether anything calls it — the same lesson
+    as the parse_mcp_rows test that passed while query() stayed broken.
+
+    These call the pipeline's own function.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.work = pathlib.Path(tempfile.mkdtemp())
+        self.calls = []
+        (self.work / "t-rows.json").write_text("[]")
+
+        def fake_aggregate(rows_path, grade, baseline, no_norms=False,
+                           subgroups=(), measures=()):
+            self.calls.append({"measures": list(measures),
+                               "no_norms": no_norms})
+            return [{"meas": m} for m in measures]
+
+        self._real = R.aggregate_rows
+        R.aggregate_rows = fake_aggregate
+        self.addCleanup(lambda: setattr(R, "aggregate_rows", self._real))
+
+    def test_a_mixed_group_is_aggregated_twice(self):
+        out = R.aggregate_group(self.work, "t", "5", "Fall",
+                                ["ORF WC", "Composite"], lambda m: None)
+        self.assertEqual(len(self.calls), 2)
+        normed = [c for c in self.calls if not c["no_norms"]][0]
+        skipped = [c for c in self.calls if c["no_norms"]][0]
+        self.assertEqual(normed["measures"], ["ORF WC"])
+        self.assertEqual(skipped["measures"], ["Composite"])
+        self.assertEqual(len(out), 2)
+
+    def test_a_normal_group_is_aggregated_once_with_norms(self):
+        R.aggregate_group(self.work, "t", "3", "Fall",
+                          ["ORF WC", "NWF CLS"], lambda m: None)
+        self.assertEqual(len(self.calls), 1)
+        self.assertFalse(self.calls[0]["no_norms"])
+
+    def test_a_norms_free_group_never_asks_for_norms(self):
+        R.aggregate_group(self.work, "t", "5", "Fall",
+                          ["Composite"], lambda m: None)
+        self.assertEqual(len(self.calls), 1)
+        self.assertTrue(self.calls[0]["no_norms"])
+
+    def test_both_passes_read_the_same_extracted_rows(self):
+        # Two aggregations, never two extractions.
+        R.aggregate_group(self.work, "t", "5", "Fall",
+                          ["ORF WC", "Composite"], lambda m: None)
+        self.assertEqual(len(list(self.work.glob("*-rows.json"))), 1)
+
+    def test_the_pipeline_calls_aggregate_group(self):
+        source = pathlib.Path(R.__file__).read_text()
+        block = source.split("One pass per distinct baseline", 1)[1]
+        self.assertIn("aggregate_group(", block.split("# i-Ready", 1)[0])
+
+class TruncationVerificationIsWiredIn(RestoresModuleFunctions):
+    """count_rows and expected= were primitives nothing called.
+
+    Review caught that too, in the same PR as split_by_norms. Scaffolding with
+    tests is indistinguishable from a fix until something calls it.
+    """
+
+    def test_the_extraction_path_counts_before_it_pages(self):
+        calls = []
+
+        def fake_query(sql, reason, limit=None, offset=None):
+            calls.append(sql)
+            if sql.startswith("SELECT COUNT(*)"):
+                return [{"n": "2"}]
+            return [{"r": 1}, {"r": 2}] if len(calls) == 2 else []
+
+        R.query = fake_query
+        rows = R.extract_verified("SELECT 1", "grade 3 pairs")
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(calls[0].startswith("SELECT COUNT(*)"))
+
+    def test_a_short_paged_extraction_raises(self):
+        def fake_query(sql, reason, limit=None, offset=None):
+            if sql.startswith("SELECT COUNT(*)"):
+                return [{"n": "1706"}]
+            return [{"r": 1}] * 30 if offset == 0 else []
+
+        R.query = fake_query
+        with self.assertRaises(R.ReportError) as caught:
+            R.extract_verified("SELECT 1", "grade 1 pairs")
+        self.assertIn("truncated", str(caught.exception))
+
+    def test_an_unavailable_count_does_not_fail_the_report(self):
+        # Failing a whole report over a diagnostic would be its own bug.
+        def fake_query(sql, reason, limit=None, offset=None):
+            if sql.startswith("SELECT COUNT(*)"):
+                return [{"n": None}]
+            return [{"r": 1}] if offset == 0 else []
+
+        R.query = fake_query
+        self.assertEqual(len(R.extract_verified("SELECT 1", "x")), 1)
+
+    def test_the_pipeline_uses_the_verified_extraction(self):
+        source = pathlib.Path(R.__file__).read_text()
+        block = source.split("One pass per distinct baseline", 1)[1]
+        self.assertIn("extract_verified(", block.split("# i-Ready", 1)[0])
+
+
+class PageCeilingCoversARealSchool(unittest.TestCase):
+    """MAX_PAGES was sized for 5,000-row pages.
+
+    If psd-data caps at 30, 40 pages is 1,200 rows — and this file's own
+    docstring cites a real extraction of 1,706. Continuing past a short page
+    without raising the ceiling turns a silent truncation into a hard failure
+    on every real school.
+    """
+
+    def test_the_ceiling_covers_a_capped_real_extraction(self):
+        self.assertGreaterEqual(R.MAX_PAGES * 30, 30_000)
+
+    def test_orf_errors_keeps_its_norms(self):
+        # It is aliased to ORF-WRC, which has real rows in the norms CSV.
+        # Listing it as norm-free would strip norms from a working measure.
+        self.assertNotIn("orf errors", R.MEASURES_WITHOUT_NORMS)
+        self.assertIn("ORF Errors=ORF-WRC", R.measure_as_args(["ORF Errors"]))
+
+    def test_composite_is_still_norm_free(self):
+        self.assertIn("composite", R.MEASURES_WITHOUT_NORMS)
+
 
 # Keep this guard LAST in the file. It used to sit mid-file (line 214), which
 # meant `python test_run_report.py` ran unittest.main() and sys.exit()ed before

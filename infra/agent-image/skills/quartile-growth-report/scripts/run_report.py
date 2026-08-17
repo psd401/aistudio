@@ -53,7 +53,16 @@ PYTHON = sys.executable or "/opt/agentcore-venv/bin/python3"
 # psd-data rate-limits at 60 req/min/user, so pages are deliberately large:
 # a whole grade should be one or two calls, not twenty.
 PAGE_SIZE = 5000
-MAX_PAGES = 40
+# Sized for the WORST case, not the requested one. If psd-data really caps at
+# 30 rows per call, 40 pages is 1,200 rows — and this file's own docstring
+# cites a real extraction of 1,706 matched grade-1 pairs. Now that paging
+# correctly continues past a short page, too low a ceiling turns a silent
+# truncation into a hard failure on every real school, which is better but
+# still a broken report.
+#
+# 1,000 pages covers ~30,000 rows at a 30-row cap and one page at 5,000. The
+# guard still exists to stop an infinite loop; it is not a size limit.
+MAX_PAGES = 1000
 
 # Grades in report order. K sorts first and is stored as "K", not 0.
 DEFAULT_GRADES = ["K", "1", "2", "3", "4", "5"]
@@ -98,7 +107,40 @@ NORMS_NAME_BY_WAREHOUSE = {
 # Measures with no national norms at all. Passed with --no-norms rather than
 # mapped, because inventing a percentile for them would misstate how a child
 # scored against national peers in a document a principal reads as fact.
-MEASURES_WITHOUT_NORMS = {"composite", "orf errors"}
+# Only measures with NO national norms at all. "orf errors" was in here and
+# should not have been: NORMS_NAME_BY_WAREHOUSE already aliases it to ORF-WRC,
+# which has real rows in the norms CSV. Once split_by_norms was wired in, that
+# entry would have stripped norms from a measure that scores correctly today —
+# the fix quietly breaking something that worked.
+MEASURES_WITHOUT_NORMS = {"composite"}
+
+
+def aggregate_group(work_dir, tag, grade, baseline, group, log):
+    """Aggregate one baseline group, in two passes when norms differ.
+
+    aggregate.py's --no-norms is per RUN, not per measure, and a measure with
+    no national norms (Composite) aborts the whole call when the others need
+    them. So the group is split and aggregated twice over the SAME extracted
+    rows — never two extractions.
+
+    A function rather than inline code so a test can prove the pipeline
+    actually does this. The first version of split_by_norms was defined,
+    unit-tested and never called from the report at all; review caught it, and
+    the tests passed either way because none of them touched the call site.
+    """
+    records = []
+    with_norms, without_norms = split_by_norms(group)
+    for measures, skip_norms in ((with_norms, False), (without_norms, True)):
+        if not measures:
+            continue
+        suffix = "nonorms" if skip_norms else "norms"
+        records.extend(step(
+            work_dir, f"{tag}-agg-{suffix}",
+            lambda m=measures, sk=skip_norms: aggregate_rows(
+                work_dir / f"{tag}-rows.json", grade, baseline,
+                subgroups=SUBGROUPS, measures=m, no_norms=sk),
+            log))
+    return records
 
 
 def split_by_norms(measures):
@@ -401,6 +443,21 @@ def query_all(sql, reason, expected=None):
     return out
 
 
+def extract_verified(sql, reason):
+    """Page an extraction and prove nothing was dropped.
+
+    The count is the whole point: paging that silently returns a subset yields
+    quartiles over a fraction of the cohort that look entirely plausible. A
+    COUNT(*) costs one call and turns that into a loud failure.
+
+    A count the warehouse will not give (null, unparseable) is not treated as
+    a mismatch — that would fail reports over a diagnostic. It is logged as
+    unverified instead.
+    """
+    expected = count_rows(sql, f"Row count for {reason}")
+    return query_all(sql, reason, expected=expected)
+
+
 def count_rows(sql, reason):
     """COUNT(*) over a SELECT, so truncation cannot pass unnoticed."""
     rows = query(f"SELECT COUNT(*) AS n FROM ({sql}) AS counted", reason,
@@ -516,8 +573,9 @@ def resolve_year(year):
         if first_day and first_day <= today:
             return row
     if rows:
-        # No first_day recorded anywhere — fall back to newest rather than
-        # refusing, but say so, because the choice is then unverified.
+        # No first_day recorded anywhere, so "has it started" cannot be
+        # answered. Refuse and ask for --year rather than guess: picking the
+        # newest row unverified is what produced the empty 2026-27 report.
         raise ReportError(
             "no school year has a first_day on or before today; pass --year "
             f"explicitly. Newest is {rows[0].get('year_name')!r}"
@@ -1160,7 +1218,7 @@ def main() -> int:
                 try:
                     rows = step(
                         work_dir, f"{tag}-rows",
-                        lambda g=grade, b=baseline, m=group: query_all(
+                        lambda g=grade, b=baseline, m=group: extract_verified(
                             extraction_sql(schoolid, yearid, g, m, b),
                             f"Matched {b}/Spring pairs for grade {g}"),
                         log)
@@ -1183,13 +1241,9 @@ def main() -> int:
                         "not included (no matched students)")
                     continue
                 log(f"grade {grade}: {len(rows)} rows ({baseline})")
-                part = step(
-                    work_dir, f"{tag}-agg",
-                    lambda g=grade, b=baseline, t=tag, m=group: aggregate_rows(
-                        work_dir / f"{t}-rows.json", g, b,
-                        subgroups=SUBGROUPS, measures=m),
-                    log)
-                records.extend(part)
+
+                records.extend(aggregate_group(
+                    work_dir, tag, grade, baseline, group, log))
                 for measure in group:
                     windows[measure] = f"{baseline}→Spring"
 
