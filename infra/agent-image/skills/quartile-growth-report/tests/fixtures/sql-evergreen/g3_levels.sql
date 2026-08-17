@@ -1,0 +1,37 @@
+WITH norms(meas0, per, cut, pr) AS (VALUES ('ORF WC','Fall',0,1),('ORF WC','Fall',3,2),('ORF WC','Fall',5,3),('ORF WC','Fall',7,4),('ORF WC','Fall',9,5),('ORF WC','Fall',11,6),('ORF WC','Fall',12,7),('ORF WC','Fall',14,8),('ORF WC','Fall',16,9),('ORF WC','Fall',18,10),('ORF WC','Fall',20,11),('ORF WC','Fall',22,12),('ORF WC','Fall',23,13),('ORF WC','Fall',25,14),('ORF WC','Fall',27,15),('ORF WC','Fall',28,16),('ORF WC','Fall',29,17),('ORF WC','Fall',31,18),('ORF WC','Fall',32,19),('ORF WC','Fall',34,20),('ORF WC','Fall',35,21),('ORF WC','Fall',36,22),('ORF WC','Fall',38,23),('ORF WC','Fall',39,24),('ORF WC','Fall',40,25),('ORF WC','Fall',42,26),('ORF WC','Fall',43,27),('ORF WC','Fall',45,28),('ORF WC','Fall',47,29),('ORF WC','Fall',48,30),('ORF WC','Fall',50,31),('ORF WC','Fall',52,32),('ORF WC','Fall',53,33),('ORF WC','Fall',55,34),('ORF WC','Fall',57,35),('ORF WC','Fall',59,36),('ORF WC','Fall',61,37),('ORF WC','Fall',62,38),('ORF WC','Fall',63,39),('ORF WC','Fall',65,40),('ORF WC','Fall',66,41),('ORF WC','Fall',67,42),('ORF WC','Fall',68,43),('ORF WC','Fall',69,44),('ORF WC','Fall',70,45),('ORF WC','Fall',71,46),('ORF WC','Fall',72,47),('ORF WC','Fall',73,48),('ORF WC','Fall',74,50),('ORF WC','Fall',75,51),('ORF WC','Fall',76,53),('ORF WC','Fall',77,54),('ORF WC','Fall',78,55),('ORF WC','Fall',79,56),('ORF WC','Fall',80,57),('ORF WC','Fall',81,58),('ORF WC','Fall',82,59),('ORF WC','Fall',83,60),('ORF WC','Fall',84,61),('ORF WC','Fall',85,62),('ORF WC','Fall',86,63),('ORF WC','Fall',87,64),('ORF WC','Fall',88,65),('ORF WC','Fall',90,66),('ORF WC','Fall',91,67),('ORF WC','Fall',92,68),('ORF WC','Fall',93,69),('ORF WC','Fall',95,70),('ORF WC','Fall',96,71),('ORF WC','Fall',97,72),('ORF WC','Fall',99,73),('ORF WC','Fall',100,74),('ORF WC','Fall',101,75),('ORF WC','Fall',102,76),('ORF WC','Fall',103,77),('ORF WC','Fall',104,78),('ORF WC','Fall',105,79),('ORF WC','Fall',106,80),('ORF WC','Fall',107,81),('ORF WC','Fall',109,82),('ORF WC','Fall',111,83),('ORF WC','Fall',113,84),('ORF WC','Fall',115,85),('ORF WC','Fall',117,86),('ORF WC','Fall',119,87),('ORF WC','Fall',121,88),('ORF WC','Fall',124,89),('ORF WC','Fall',126,90),('ORF WC','Fall',129,91),('ORF WC','Fall',131,92),('ORF WC','Fall',136,93),('ORF WC','Fall',140,94),('ORF WC','Fall',144,95),('ORF WC','Fall',149,96),('ORF WC','Fall',155,97),('ORF WC','Fall',162,98),('ORF WC','Fall',174,99),('ORF WC','Spring',0,1),('ORF WC','Spring',10,2),('ORF WC','Spring',16,3),('ORF WC','Spring',21,4),('ORF WC','Spring',26,5),('ORF WC','Spring',32,6),('ORF WC','Spring',39,7),('ORF WC','Spring',46,8),('ORF WC','Spring',52,9),('ORF WC','Spring',57,10),('ORF WC','Spring',62,11),('ORF WC','Spring',65,12),('ORF WC','Spring',68,13),('ORF WC','Spring',71,14),('ORF WC','Spring',74,15),('ORF WC','Spring',76,16),('ORF WC','Spring',79,17),('ORF WC','Spring',81,18),('ORF WC','Spring',82,19),('ORF WC','Spring',83,20),('ORF WC','Spring',86,21),('ORF WC','Spring',88,22),('ORF WC','Spring',90,23),('ORF WC','Spring',92,24),('ORF WC','Spring',93,26),('ORF WC','Spring',95,27),('ORF WC','Spring',97,28),('ORF WC','Spring',99,29),('ORF WC','Spring',100,30),('ORF WC','Spring',101,31),('ORF WC','Spring',102,32),('ORF WC','Spring',103,33),('ORF WC','Spring',104,34),('ORF WC','Spring',105,35),('ORF WC','Spring',106,36),('ORF WC','Spring',107,37),('ORF WC','Spring',108,38),('ORF WC','Spring',109,39),('ORF WC','Spring',110,42),('ORF WC','Spring',112,43),('ORF WC','Spring',113,44),('ORF WC','Spring',114,46),('ORF WC','Spring',116,48),('ORF WC','Spring',117,49),('ORF WC','Spring',118,50),('ORF WC','Spring',119,51),('ORF WC','Spring',120,52),('ORF WC','Spring',121,53),('ORF WC','Spring',122,56),('ORF WC','Spring',124,57),('ORF WC','Spring',125,59),('ORF WC','Spring',127,60),('ORF WC','Spring',128,61),('ORF WC','Spring',129,62),('ORF WC','Spring',131,63),('ORF WC','Spring',132,64),('ORF WC','Spring',133,66),('ORF WC','Spring',135,67),('ORF WC','Spring',136,68),('ORF WC','Spring',138,69),('ORF WC','Spring',140,70),('ORF WC','Spring',142,71),('ORF WC','Spring',144,72),('ORF WC','Spring',145,73),('ORF WC','Spring',146,74),('ORF WC','Spring',147,75),('ORF WC','Spring',148,77),('ORF WC','Spring',149,78),('ORF WC','Spring',150,79),('ORF WC','Spring',151,80),('ORF WC','Spring',153,81),('ORF WC','Spring',155,82),('ORF WC','Spring',157,83),('ORF WC','Spring',160,84),('ORF WC','Spring',161,85),('ORF WC','Spring',164,87),('ORF WC','Spring',165,88),('ORF WC','Spring',168,89),('ORF WC','Spring',170,90),('ORF WC','Spring',172,91),('ORF WC','Spring',174,92),('ORF WC','Spring',178,93),('ORF WC','Spring',180,94),('ORF WC','Spring',184,95),('ORF WC','Spring',188,96),('ORF WC','Spring',191,97),('ORF WC','Spring',198,98),('ORF WC','Spring',202,99)),
+dst AS (SELECT d.assessment_group AS meas, mp.b0, d.studentid, d."window", AVG(d.score) AS s
+  FROM dibels_scores d
+  JOIN (VALUES ('ORF WC','Fall')) mp(m0, b0) ON mp.m0 = d.assessment_group
+  WHERE d.yearid=35 AND d.grade_level=3 AND d."window" IN (mp.b0, 'Spring')
+  GROUP BY 1,2,3,4),
+dm AS (SELECT f.meas, f.studentid, f.s AS b, pb.pr AS bs, pe.pr AS es
+  FROM dst f
+  JOIN dst sp ON sp.studentid=f.studentid AND sp.meas=f.meas AND sp."window"='Spring'
+  LEFT JOIN LATERAL (SELECT n.pr FROM norms n WHERE n.meas0=f.meas AND n.per=f.b0 AND n.cut <= f.s ORDER BY n.cut DESC LIMIT 1) pb ON true
+  LEFT JOIN LATERAL (SELECT n.pr FROM norms n WHERE n.meas0=sp.meas AND n.per='Spring' AND n.cut <= sp.s ORDER BY n.cut DESC LIMIT 1) pe ON true
+  WHERE f."window" = f.b0),
+ist AS (SELECT 'iReady Reading' AS meas, studentid, "window", AVG(percentile) AS s
+  FROM iready_reading_diagnostics WHERE yearid=35 AND grade_level=3 AND "window" IN ('Fall','Spring') GROUP BY 1,2,3
+  UNION ALL
+SELECT 'iReady Math' AS meas, studentid, "window", AVG(percentile) AS s
+  FROM iready_math_diagnostics WHERE yearid=35 AND grade_level=3 AND "window" IN ('Fall','Spring') GROUP BY 1,2,3),
+im AS (SELECT f.meas, f.studentid, f.s AS b, f.s AS bs, sp.s AS es
+  FROM ist f JOIN ist sp ON sp.studentid=f.studentid AND sp.meas=f.meas AND sp."window"='Spring'
+  WHERE f."window" <> 'Spring'),
+m AS (SELECT * FROM dm UNION ALL SELECT * FROM im),
+sch AS (SELECT DISTINCT studentid FROM school_year_enrollments WHERE yearid=35 AND schoolid=3055 AND grade_level=3),
+mm AS (SELECT m.*, (sch.studentid IS NOT NULL) AS in_sch
+       FROM m LEFT JOIN sch ON sch.studentid=m.studentid),
+q AS (SELECT mm.*,
+        NTILE(4) OVER (PARTITION BY meas, in_sch ORDER BY b, studentid) AS q_sch,
+        NTILE(4) OVER (PARTITION BY meas ORDER BY b, studentid) AS q_dist
+      FROM mm),
+schq AS (SELECT meas, COALESCE(q_sch::text,'All') AS qt,
+           ROUND(AVG(bs),0) AS s_start, ROUND(AVG(es),0) AS s_end, COUNT(*) AS n_sch
+         FROM q WHERE in_sch GROUP BY GROUPING SETS ((meas, q_sch),(meas))),
+distq AS (SELECT meas, COALESCE(q_dist::text,'All') AS qt,
+           ROUND(AVG(bs),0) AS d_start, ROUND(AVG(es),0) AS d_end, COUNT(*) AS n_dist
+          FROM q GROUP BY GROUPING SETS ((meas, q_dist),(meas)))
+SELECT meas, qt, s_start, s_end, n_sch, d_start, d_end, n_dist
+FROM distq LEFT JOIN schq USING (meas, qt)
+ORDER BY meas, qt
