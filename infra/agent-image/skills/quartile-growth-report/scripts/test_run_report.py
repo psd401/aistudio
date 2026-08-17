@@ -749,6 +749,40 @@ class EveryBlockHonoursTheGapContract(RestoresModuleFunctions):
         self.assertIn("NOT INCLUDED IN THIS REPORT", flat)
         self.assertTrue(any("DIBELS growth" in c for c in flat))
 
+class EverySplicedValueIsSanitised(RestoresModuleFunctions):
+    """One unsanitised value is enough.
+
+    The title was fixed after review caught it; share_workbook still spliced
+    the caller's address raw. Same tokenizer, same missing escape syntax, and
+    the failure would land on the LAST step of a finished report. Rather than
+    reason about which values can contain a quote, every one goes through the
+    same door — and this test fails if a new splice site skips it.
+    """
+
+    def test_no_raw_interpolation_reaches_a_params_or_body_string(self):
+        source = pathlib.Path(R.__file__).read_text()
+        offenders = []
+        for line in source.splitlines():
+            if "--params '{json.dumps(" in line or "--body '{json.dumps(" in line:
+                # A literal dict of constants is fine; a bare name is not.
+                if "command_literal" not in line and "json.dumps(params)" not in line \
+                        and "json.dumps(body)" not in line:
+                    offenders.append(line.strip())
+        self.assertEqual(offenders, [], f"unsanitised splice: {offenders}")
+
+    def test_the_share_body_sanitises_the_caller(self):
+        seen = {}
+        R.workspace = lambda command, user, scope="agent", json_file=None: (
+            seen.setdefault("command", command) or {"ok": True})
+        R.share_workbook("SHEET1", "o'brien@psd401.net")
+        self.assertNotIn("o'brien", seen["command"])
+        self.assertIn("brien", seen["command"])
+
+    def test_a_normal_address_is_unchanged(self):
+        self.assertEqual(
+            R.command_literal("hagelk@psd401.net"), "hagelk@psd401.net"
+        )
+
 
 # Keep this guard LAST in the file. It used to sit mid-file (line 214), which
 # meant `python test_run_report.py` ran unittest.main() and sys.exit()ed before

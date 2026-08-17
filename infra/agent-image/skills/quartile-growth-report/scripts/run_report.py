@@ -483,8 +483,15 @@ def create_workbook(title, user):
 
 
 def share_workbook(sheet_id, user):
-    params = {"fileId": sheet_id, "transferOwnership": "true"}
-    body = {"type": "user", "role": "owner", "emailAddress": user}
+    # Sanitised like the title. An address is unlikely to carry a quote, but
+    # this is the same tokenizer with the same lack of an escape syntax, and
+    # the failure would land on the LAST step of a finished report — the
+    # costliest place for it. Consistency here is cheaper than reasoning about
+    # which values are safe.
+    params = {"fileId": command_literal(sheet_id),
+              "transferOwnership": "true"}
+    body = {"type": "user", "role": "owner",
+            "emailAddress": command_literal(user)}
     return workspace(
         f"drive permissions create --params '{json.dumps(params)}' "
         f"--body '{json.dumps(body)}'",
@@ -547,7 +554,7 @@ def _delete_sheet(sheet_id, tab_id, user, work_dir):
         {"requests": [{"deleteSheet": {"sheetId": tab_id}}]}))
     return workspace(
         "sheets spreadsheets batchUpdate "
-        f"--params '{json.dumps({'spreadsheetId': sheet_id})}'",
+        f"--params '{json.dumps({'spreadsheetId': command_literal(sheet_id)})}'",
         user, json_file=str(payload),
     )
 
@@ -560,7 +567,7 @@ def _add_tab(sheet_id, title, user, work_dir):
     # sanitising — only the params below are spliced.
     return workspace(
         "sheets spreadsheets batchUpdate "
-        f"--params '{json.dumps({'spreadsheetId': sheet_id})}'",
+        f"--params '{json.dumps({'spreadsheetId': command_literal(sheet_id)})}'",
         user, json_file=str(payload),
     )
 
@@ -576,7 +583,7 @@ def write_tab(sheet_id, body, user, work_dir, title):
     payload.write_text(json.dumps(body))
     return workspace(
         "sheets spreadsheets values batchUpdate "
-        f"--params '{json.dumps({'spreadsheetId': sheet_id})}'",
+        f"--params '{json.dumps({'spreadsheetId': command_literal(sheet_id)})}'",
         user, json_file=str(payload),
     )
 
