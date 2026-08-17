@@ -722,4 +722,52 @@ describe('retention and failures', () => {
       /ownerEmail|userEmail|userId/,
     );
   });
+
+  // validateSynthesis discards the whole brief over one undecided inbox item,
+  // so the request has to hand the model the exact checklist rather than leave
+  // it to transcribe opaque ids out of the snapshot file.
+  test('synthesis request enumerates every inbox id it will be judged against', () => {
+    const snapshot = {
+      displayDate: 'Monday, August 17',
+      localDate: '2026-08-17',
+      sections: [
+        {
+          id: 'inbox',
+          title: 'Inbox',
+          status: 'ready',
+          data: {
+            emails: [
+              { id: '1a00a7a08af776d1', subject: 'One' },
+              { id: '1a00a47b970cf5e1', subject: 'Two' },
+              { id: '', subject: 'Unusable id is not required' },
+            ],
+          },
+        },
+      ],
+    };
+    const request = makeSynthesisRequest(snapshot);
+
+    expect(request.requiredInboxDecisionIds).toEqual([
+      '1a00a7a08af776d1',
+      '1a00a47b970cf5e1',
+    ]);
+    // The checklist must match what validateSynthesis actually enforces:
+    // deciding exactly these ids has to produce a valid synthesis.
+    const accepted = validateSynthesis(
+      {
+        ...deterministicSynthesis(snapshot, normalizeConfig()),
+        inboxDecisions: request.requiredInboxDecisionIds.map((messageId) => ({
+          messageId,
+          decision: 'archive',
+          rationale: 'Handled.',
+        })),
+      },
+      snapshot,
+      normalizeConfig(),
+    );
+    expect(accepted.inboxDecisions.map((d) => d.messageId)).toEqual(
+      request.requiredInboxDecisionIds,
+    );
+    expect(request.rules.join(' ')).toContain('2 total');
+  });
 });
