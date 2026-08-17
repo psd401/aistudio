@@ -211,10 +211,6 @@ class RosterDefinesTheGradeSpan(unittest.TestCase):
             R.fetch_roster(1, 2)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class CommandStringsSurviveApostrophes(unittest.TestCase):
     """psd-workspace's splitCommand has no escape syntax.
 
@@ -353,3 +349,69 @@ class WindowLabels(unittest.TestCase):
         self.assertEqual(
             build_tab.window_for("anything", "Fall→Spring"), "Fall→Spring"
         )
+
+
+class LikeWildcards(unittest.TestCase):
+    """A school name is a literal, not a pattern.
+
+    sql_escape closes the quote hole; it does nothing about `%` and `_`, which
+    are still wildcards inside a LIKE. A stray one broadens the match, and the
+    ambiguous branch then refuses a name that should have resolved cleanly.
+    """
+
+    def test_wildcards_are_escaped(self):
+        self.assertEqual(R.like_escape("Harbor_Ridge"), "Harbor\\_Ridge")
+        self.assertEqual(R.like_escape("100%"), "100\\%")
+
+    def test_a_backslash_is_escaped_first(self):
+        # Otherwise the escape character introduced here becomes escapable.
+        self.assertEqual(R.like_escape("a\\b"), "a\\\\b")
+
+    def test_an_ordinary_name_is_untouched(self):
+        self.assertEqual(R.like_escape("Artondale Elementary"),
+                         "Artondale Elementary")
+
+    def test_the_query_declares_its_escape_character(self):
+        captured = {}
+
+        def fake_query(sql, reason, **kwargs):
+            captured["sql"] = sql
+            return [{"schoolid": 1, "school_name": "Harbor_Ridge"}]
+
+        R.query = fake_query
+        R.resolve_school("Harbor_Ridge")
+        self.assertIn("ESCAPE", captured["sql"])
+        self.assertIn("Harbor\\_Ridge", captured["sql"])
+
+
+class FallbackWindowLabel(unittest.TestCase):
+    """The '*' label follows the grade, not the global default.
+
+    K has no Fall administration at all, so labelling a K block "Fall→Spring"
+    states a window that was never measured.
+    """
+
+    def test_kindergarten_falls_back_to_winter(self):
+        self.assertEqual(
+            R.BASELINE_BY_GRADE.get("K", R.BASELINE_DEFAULT), "Winter"
+        )
+
+    def test_other_grades_fall_back_to_fall(self):
+        self.assertEqual(
+            R.BASELINE_BY_GRADE.get("3", R.BASELINE_DEFAULT), "Fall"
+        )
+
+    def test_the_hardcoded_default_label_is_gone(self):
+        source = pathlib.Path(R.__file__).read_text()
+        self.assertNotIn('windows["*"] = f"{BASELINE_DEFAULT}', source)
+
+
+# Keep this guard LAST in the file. It used to sit mid-file (line 214), which
+# meant `python test_run_report.py` ran unittest.main() and sys.exit()ed before
+# the four classes below it were even defined — 22 tests instead of 35,
+# silently skipping the apostrophe-safety, timeout-bound, checkpointed
+# side-effect and window-label suites. CI imports the module via
+# `python -m unittest`, so it never noticed; a developer debugging locally got
+# a green run that had not executed the tests they were debugging.
+if __name__ == "__main__":
+    unittest.main()
