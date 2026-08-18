@@ -171,7 +171,7 @@ public release" on the Definitions tab.
 - `references/definitions.md` — the Definitions tab text
 - `references/layout.md` — per-grade tab layout
 
-The 40 queries R&A actually ran live in `tests/fixtures/sql-evergreen/` in the
+The 40 queries R&A actually ran live in `test-fixtures/` in the
 repo, and are deliberately **not** in this image. They are pinned to
 Evergreen's school and section ids, so running one against another school
 returns Evergreen's numbers under that school's name — and a principal cannot

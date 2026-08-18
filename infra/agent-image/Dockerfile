@@ -406,28 +406,30 @@ ARG BEDROCK_PLUGIN_ASSERTION=claude-sonnet-5
 ARG BEDROCK_TOOLCONFIG_CANARY='if (!tools?.length || toolChoice === "none") return;'
 ARG PARALLEL_PLUGIN_VERSION=2026.7.2-beta.5
 ARG PARALLEL_PLUGIN_ENDPOINT=https://search.parallel.ai/mcp
-# Drop CI-only test material from the runtime image. This is not size (356K);
-# it is what the agent can find and paste. quartile-growth-report's fixtures
-# are the 40 queries R&A ran against EVERGREEN, with schoolid=3055 and
-# Evergreen's section ids baked in — they have to stay byte-exact in the repo
-# because test_gen_sql.py byte-compares generator output against them, which
-# is the only test in that skill measured against material we did not write.
+# Drop CI-only fixtures from the runtime image. Mostly this is not size (364K
+# across three skills); it is what the agent can find and paste.
 #
-# In the image they are a trap: the skill generates its SQL at runtime from a
-# discovered roster, so a ready-made .sql is by definition pinned to the wrong
-# school. An agent improvising after a failed run would get real, plausible,
-# correct-looking numbers for a school nobody asked about, and a principal
-# cannot tell from the sheet. The parameterised copy the agent SHOULD read
-# ships in references/SKILL-PROPOSAL.md with :schoolid / :sec1 slots.
+# quartile-growth-report's are the 40 queries R&A ran against EVERGREEN, with
+# schoolid=3055 and Evergreen's section ids baked in. They have to stay
+# byte-exact in the repo because test_gen_sql.py byte-compares generator output
+# against them — the only test in that skill measured against material we did
+# not write. In the image they are a trap: the skill GENERATES its SQL at
+# runtime from a roster it queries, so a ready-made .sql is by definition
+# pinned to the wrong school. An agent improvising after a failed run would get
+# real, plausible, internally consistent numbers for a school nobody asked
+# about, and a principal cannot tell from the sheet. The parameterised copy the
+# agent SHOULD read ships in references/SKILL-PROPOSAL.md with :schoolid /
+# :sec1 slots.
 #
-# Scoped to tests/ deliberately: every other skill keeps runtime-reachable
-# fixtures under evals/fixtures, and those stay. The find guard fails the
-# build if a .sql file ever reappears in this skill's image tree.
+# test-fixtures/ is the repo-wide convention (psd-learning-page,
+# psd-sop-creator) and nothing reads it at runtime — evals/fixtures/, which the
+# eval runner DOES reach, is deliberately untouched. The find guard fails the
+# build if a .sql file ever reappears in the quartile skill's image tree.
 #
 # Folded into the RUN below rather than given its own: the base image is at 53
 # layers and a 54th fails to mount under AgentCore's Firecracker overlay
 # ("Failed to mount overlay: No such file or directory", outage 2026-07-02).
-RUN rm -rf /opt/psd-skills/*/tests && \
+RUN rm -rf /opt/psd-skills/*/test-fixtures && \
     test -z "$(find /opt/psd-skills/quartile-growth-report -name '*.sql')" && \
     cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-fund && \
     cd /opt/psd-skills/psd-credentials && npm install --omit=dev --no-audit --no-fund && \

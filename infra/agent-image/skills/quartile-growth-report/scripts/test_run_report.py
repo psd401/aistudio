@@ -31,7 +31,7 @@ import layout  # noqa: E402
 import run_report as R  # noqa: E402
 
 HERE = pathlib.Path(__file__).resolve().parent
-FIXTURES = HERE.parent / "tests" / "fixtures" / "sql-evergreen"
+FIXTURES = HERE.parent / "test-fixtures"
 
 _PATCHABLE = ("query", "query_one", "run_json", "workspace")
 
