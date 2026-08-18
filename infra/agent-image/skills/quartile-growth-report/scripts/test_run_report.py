@@ -1,12 +1,18 @@
 """The one-command report pipeline.
 
-Every failure this report hit between 2026-08-14 and 2026-08-16 was
-orchestration, never arithmetic: a no-op edit ending the run, assistant
-messages fusing, a promoted job aborting its own run, `--export` timing out,
-literal newline escapes in model-authored glue. This script exists to delete
-that surface, so these tests pin the properties that make it deletable —
-checkpoint resume, paging without export, a queried grade span, and SQL that
-does not reintroduce the shapes that time out.
+The report's arithmetic is not tested here — it is not in this file any more.
+R&A validated 40 queries against psd-data before this skill existed and the
+handoff's instruction was to transcribe them, so every number in the workbook
+is computed by the warehouse. What is left in run_report.py is orchestration,
+and orchestration is what failed on every run between 2026-08-14 and
+2026-08-16: a no-op edit ending the run, assistant messages fusing, a promoted
+job aborting its own run, `--export` timing out, literal newline escapes in
+model-authored glue.
+
+So these tests pin what makes the script safe to re-run and hard to mislead:
+checkpoint resume, a grade span that came from a query, SQL escaping on the
+only caller-supplied values, quote-safe workspace commands, and a response
+parser that does not confuse an error with an empty result.
 
 The two external CLIs (psd-data, psd-workspace) are stubbed. Everything
 between them is the real code path.
@@ -20,17 +26,22 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
+import gen_sql  # noqa: E402
+import layout  # noqa: E402
 import run_report as R  # noqa: E402
 
-_PATCHABLE = ("query", "query_all", "run_json", "workspace")
+HERE = pathlib.Path(__file__).resolve().parent
+FIXTURES = HERE.parent / "tests" / "fixtures" / "sql-evergreen"
+
+_PATCHABLE = ("query", "query_one", "run_json", "workspace")
 
 
 class RestoresModuleFunctions(unittest.TestCase):
     """Stubs must not leak between tests.
 
-    Patching R.query/R.query_all in place and leaving them there made the
-    paging suite fail depending on test ORDER — a self-inflicted version of
-    exactly the flakiness these tests exist to prevent.
+    Patching R.query in place and leaving it there made the suite fail
+    depending on test ORDER — a self-inflicted version of exactly the
+    flakiness these tests exist to prevent.
     """
 
     def setUp(self):
@@ -78,121 +89,6 @@ class Checkpoints(unittest.TestCase):
         )
 
 
-class Paging(RestoresModuleFunctions):
-    """`--export` is not used anywhere, on purpose.
-
-    It timed out repeatedly on the grade-K extraction on 2026-08-16 while the
-    same query in normal mode returned 2,232 rows in seconds, and it has a
-    separate history of silently dropping numeric columns from the CSV.
-    """
-
-    def test_a_short_page_does_NOT_end_paging(self):
-        # THE truncation bug. psd-data is documented as returning at most 30
-        # rows per call, so asking for 5,000 and stopping when fewer arrive
-        # would have ended after the first page — every extraction cut to 30
-        # students, with quartiles over them looking entirely plausible.
-        pages = [[{"r": 1}] * 30, [{"r": 2}] * 30, [{"r": 3}] * 7, []]
-        R.query = lambda *a, **k: pages.pop(0) if pages else []
-        self.assertEqual(len(R.query_all("SELECT 1", "capped")), 67)
-
-    def test_paging_stops_on_an_empty_page(self):
-        pages = [[{"r": 1}], []]
-        R.query = lambda *a, **k: pages.pop(0) if pages else []
-        self.assertEqual(len(R.query_all("SELECT 1", "test")), 1)
-
-    def test_the_offset_follows_rows_received_not_the_page_size(self):
-        # With a server cap, page N does not start at N * PAGE_SIZE.
-        seen = []
-
-        def fake(sql, reason, limit=None, offset=None):
-            seen.append(offset)
-            return [{"r": 1}] * 30 if len(seen) < 3 else []
-
-        R.query = fake
-        R.query_all("SELECT 1", "offsets")
-        self.assertEqual(seen, [0, 30, 60])
-
-    def test_paging_refuses_to_run_forever(self):
-        R.query = lambda *a, **k: [{"r": i} for i in range(R.PAGE_SIZE)]
-        with self.assertRaises(R.ReportError) as caught:
-            R.query_all("SELECT 1", "runaway")
-        self.assertIn("refusing to page forever", str(caught.exception))
-
-    def test_a_count_mismatch_is_loud(self):
-        # Silence here means a report whose every number is computed over a
-        # fraction of the cohort.
-        pages = [[{"r": 1}] * 30, []]
-        R.query = lambda *a, **k: pages.pop(0) if pages else []
-        with self.assertRaises(R.ReportError) as caught:
-            R.query_all("SELECT 1", "extraction", expected=1706)
-        self.assertIn("truncated", str(caught.exception))
-
-    def test_a_matching_count_passes(self):
-        pages = [[{"r": 1}] * 30, []]
-        R.query = lambda *a, **k: pages.pop(0) if pages else []
-        self.assertEqual(len(R.query_all("SELECT 1", "x", expected=30)), 30)
-
-    def test_export_is_never_requested(self):
-        source = pathlib.Path(R.__file__).read_text()
-        self.assertNotIn('"--export"', source)
-
-
-class ExtractionSql(unittest.TestCase):
-    """The only query shape that completes against dibels_scores.
-
-    Window functions do not finish on this MCP at any size: a bare NTILE(4)
-    over ~1,100 rows timed out on 2026-08-15 while the same query without it
-    ran in seconds. Quartiles are computed locally by aggregate.py.
-    """
-
-    def _sql(self, grade="3", baseline="Fall"):
-        return R.extraction_sql(1, 2, grade, ["ORF-WRC", "NWF-CLS"], baseline)
-
-    def test_no_window_function_reaches_the_warehouse(self):
-        upper = self._sql().upper()
-        # NTILE( with the paren: AVG(PERCENTILE) contains the substring
-        # "NTILE", so the bare name matches the very column i-Ready reports on.
-        for banned in ("NTILE(", "GROUPING SETS", "LATERAL", "OVER ("):
-            self.assertNotIn(banned, upper, f"{banned} must stay out of SQL")
-
-    def test_every_non_text_column_is_cast(self):
-        # The export path drops unqualified numerics, and the boolean too.
-        sql = self._sql()
-        for column in ("m.studentid::text", "m.b::text", "m.e::text",
-                       "hr.sectionid::text", "IS NOT NULL)::text"):
-            self.assertIn(column, sql)
-
-    def test_the_baseline_window_is_honored(self):
-        # K has no Fall DIBELS; a Fall baseline there silently returns nothing.
-        self.assertIn("'Winter'", self._sql(grade="K", baseline="Winter"))
-        self.assertNotIn("'Fall'", self._sql(grade="K", baseline="Winter"))
-
-    def test_kindergarten_uses_a_winter_baseline_for_every_measure(self):
-        # K DIBELS has no Fall administration at all.
-        self.assertEqual(R.baseline_for("K", "ORF-WRC"), "Winter")
-        self.assertEqual(R.baseline_for("K", "LNF"), "Winter")
-
-    def test_grade_one_orf_is_winter_but_the_rest_of_grade_one_is_not(self):
-        # ORF starts mid-year in grade 1 — and ONLY ORF. Applying one baseline
-        # to the whole grade returns zero matched pairs for the odd measure,
-        # which drops it from the tab with no error at all.
-        self.assertEqual(R.baseline_for("1", "ORF-WRC"), "Winter")
-        self.assertEqual(R.baseline_for("1", "NWF-CLS"), "Fall")
-
-    def test_other_grades_are_fall_including_orf(self):
-        self.assertEqual(R.baseline_for("3", "ORF-WRC"), "Fall")
-        self.assertEqual(R.baseline_for("5", "NWF-CLS"), "Fall")
-
-    def test_a_mixed_grade_runs_one_extraction_per_baseline(self):
-        groups = R.group_by_baseline("1", ["ORF-WRC", "NWF-CLS", "PSF"])
-        self.assertEqual(groups["Winter"], ["ORF-WRC"])
-        self.assertEqual(sorted(groups["Fall"]), ["NWF-CLS", "PSF"])
-
-    def test_a_uniform_grade_runs_a_single_extraction(self):
-        groups = R.group_by_baseline("3", ["ORF-WRC", "NWF-CLS"])
-        self.assertEqual(list(groups), ["Fall"])
-
-
 class SqlEscaping(RestoresModuleFunctions):
     def test_an_apostrophe_in_a_school_name_is_escaped(self):
         self.assertEqual(R.sql_escape("O'Brien"), "O''Brien")
@@ -232,37 +128,6 @@ class SchoolResolution(RestoresModuleFunctions):
         R.query = lambda *a, **k: []
         with self.assertRaises(R.ReportError):
             R.resolve_school("Nowhere Elementary")
-
-
-class RosterDefinesTheGradeSpan(RestoresModuleFunctions):
-    """On 2026-08-15 the agent announced "Minter Creek is a K-2 school",
-    invented the justification, and scoped a whole report to it. It is K-5.
-    The span is a query result here, never an assertion.
-    """
-
-    ROWS = [
-        {"sectionid": "1", "grade_level": "K", "teacher_name": "Hansen, Jane"},
-        {"sectionid": "2", "grade_level": "1", "teacher_name": None},
-        {"sectionid": "3", "grade_level": "5", "teacher_name": "Ruiz, Ana"},
-    ]
-
-    def test_the_span_comes_from_the_roster(self):
-        R.query_all = lambda *a, **k: self.ROWS
-        roster = R.fetch_roster(1, 2)
-        self.assertEqual(sorted(roster["grades"]), ["1", "5", "K"])
-
-    def test_a_section_with_no_lead_teacher_is_kept(self):
-        # build_tab renders it "(Not on file)". Dropping the section would
-        # silently remove a classroom column from the report.
-        R.query_all = lambda *a, **k: self.ROWS
-        roster = R.fetch_roster(1, 2)
-        self.assertIn("2", roster["grades"]["1"])
-        self.assertNotIn("2", roster["teachers"])
-
-    def test_an_empty_roster_is_an_error(self):
-        R.query_all = lambda *a, **k: []
-        with self.assertRaises(R.ReportError):
-            R.fetch_roster(1, 2)
 
 
 class CommandStringsSurviveApostrophes(RestoresModuleFunctions):
@@ -471,128 +336,6 @@ class TheDefaultTabIsRemoved(unittest.TestCase):
                         self.calls.index("deleteSheet"))
 
 
-class WindowLabels(unittest.TestCase):
-    """A Fall→Winter block labelled Fall→Spring is a wrong report."""
-
-    def test_a_measure_specific_window_wins(self):
-        import build_tab
-        window = {"ORF-WRC": "Winter→Spring", "*": "Fall→Spring"}
-        self.assertEqual(build_tab.window_for("ORF-WRC", window), "Winter→Spring")
-        self.assertEqual(build_tab.window_for("NWF-CLS", window), "Fall→Spring")
-
-    def test_a_plain_string_still_applies_to_every_block(self):
-        import build_tab
-        self.assertEqual(
-            build_tab.window_for("anything", "Fall→Spring"), "Fall→Spring"
-        )
-
-
-class TheWholeReportIsAttempted(RestoresModuleFunctions):
-    """SBA, i-Ready and the subgroup rollups are part of the report.
-
-    The first version of this pipeline did DIBELS growth only, while SKILL.md
-    told the agent not to orchestrate anything itself — so a principal would
-    have received a workbook silently missing SBA proficiency (half the
-    report's name), i-Ready, and both subgroup breakdowns. Review caught it.
-    That is the same "looks complete, isn't" class as the Minter Creek grade
-    span and the district-column-mirrors-school-column bug.
-    """
-
-    def test_the_dibels_extraction_carries_the_subgroup_flags(self):
-        sql = R.extraction_sql(1, 2, "3", ["ORF-WRC"], "Fall")
-        self.assertIn("students_frl", sql)
-        self.assertIn("students_specialed", sql)
-        self.assertIn("low_income", sql)
-        self.assertIn("special_ed", sql)
-
-    def test_the_subgroup_join_is_district_wide(self):
-        # Scoping it to the school made every District cell equal its School
-        # cell on 2026-08-15 — grade K showed 18/18 against a district cohort
-        # of 558 — and every number looked plausible.
-        sql = R.extraction_sql(7, 2, "3", ["ORF-WRC"], "Fall")
-        frl = sql.split("students_frl", 1)[1].split("LEFT JOIN", 1)[0]
-        self.assertNotIn("schoolid", frl)
-
-    def test_both_subgroups_are_requested_from_aggregate(self):
-        seen = {}
-        R.run_json = lambda argv, what, **k: seen.setdefault("argv", argv) or []
-        R.aggregate_rows(pathlib.Path("/tmp/x.json"), "3", "Fall",
-                         subgroups=R.SUBGROUPS)
-        joined = " ".join(seen["argv"])
-        self.assertIn("low_income=Low Income|Non-Low Income", joined)
-        self.assertIn("special_ed=Special Ed|Non-Special Ed", joined)
-
-    def test_sba_filters_out_iab_participation_rows(self):
-        # smarter_balanced_scores mixes IAB/FIAB rows (score = 1) with
-        # summatives; unfiltered averages are garbage.
-        sql = R.sba_sql(1, 35, "4")
-        self.assertIn("LIKE 'Summative%'", sql)
-        self.assertIn("is_strand = false", sql)
-
-    def test_sba_quartiles_on_the_prior_year_score(self):
-        sql = R.sba_sql(1, 35, "5")
-        self.assertIn("yearid = 34", sql)      # prior year
-        self.assertIn("grade_level = '4'", sql)  # prior grade
-        self.assertIn("prior.b::text", sql)
-
-    def test_iready_uses_percentile_not_raw_score(self):
-        sql = R.iready_sql(1, 2, "3", "iready_reading_diagnostics", "Reading")
-        self.assertIn("AVG(percentile)", sql)
-
-    def test_no_block_reintroduces_a_window_function(self):
-        for sql in (R.sba_sql(1, 35, "4"),
-                    R.iready_sql(1, 2, "3", "iready_reading_diagnostics", "Reading")):
-            upper = sql.upper()
-            for banned in ("NTILE(", "GROUPING SETS", "LATERAL"):
-                self.assertNotIn(banned, upper)
-
-
-class OmissionsAreVisibleInTheWorkbook(RestoresModuleFunctions):
-    """A principal does not read the run log.
-
-    Every previous "looks complete, isn't" failure was invisible at the point
-    of use. A block that cannot be produced is written INTO the tab.
-    """
-
-    def setUp(self):
-        super().setUp()
-        self.work = pathlib.Path(tempfile.mkdtemp())
-
-    def test_a_failed_block_becomes_a_gap_not_an_absence(self):
-        def boom():
-            raise R.ReportError("table does not exist")
-
-        gaps = []
-        R.query_all = lambda *a, **k: (_ for _ in ()).throw(
-            R.ReportError("table does not exist"))
-        out = R.run_block(self.work, "t", "3", lambda: "SELECT 1", "why",
-                          lambda m: None, gaps, "SBA grades 4-5")
-        self.assertEqual(out, [])
-        self.assertEqual(len(gaps), 1)
-        self.assertIn("SBA grades 4-5", gaps[0])
-        self.assertIn("not included", gaps[0])
-
-    def test_an_empty_block_is_also_a_gap(self):
-        gaps = []
-        R.query_all = lambda *a, **k: []
-        R.run_block(self.work, "t2", "3", lambda: "SELECT 1", "why",
-                    lambda m: None, gaps, "i-Ready Reading/Math")
-        self.assertIn("no matched students", gaps[0])
-
-    def test_gaps_are_rendered_into_the_tab(self):
-        import build_tab
-        tab = build_tab.build([], "S", "3", "2025-26", "Fall→Spring",
-                              gaps=["SBA grades 4-5: not included (x)"])
-        flat = [c for row in tab["values"] for c in row]
-        self.assertIn("NOT INCLUDED IN THIS REPORT", flat)
-        self.assertTrue(any("SBA grades 4-5" in c for c in flat))
-
-    def test_a_complete_tab_carries_no_gap_banner(self):
-        import build_tab
-        tab = build_tab.build([], "S", "3", "2025-26", "Fall→Spring")
-        flat = [c for row in tab["values"] for c in row]
-        self.assertNotIn("NOT INCLUDED IN THIS REPORT", flat)
-
 class LikeWildcards(RestoresModuleFunctions):
     """A school name is a literal, not a pattern.
 
@@ -624,28 +367,6 @@ class LikeWildcards(RestoresModuleFunctions):
         R.resolve_school("Harbor_Ridge")
         self.assertIn("ESCAPE", captured["sql"])
         self.assertIn("Harbor\\_Ridge", captured["sql"])
-
-
-class FallbackWindowLabel(unittest.TestCase):
-    """The '*' label follows the grade, not the global default.
-
-    K has no Fall administration at all, so labelling a K block "Fall→Spring"
-    states a window that was never measured.
-    """
-
-    def test_kindergarten_falls_back_to_winter(self):
-        self.assertEqual(
-            R.BASELINE_BY_GRADE.get("K", R.BASELINE_DEFAULT), "Winter"
-        )
-
-    def test_other_grades_fall_back_to_fall(self):
-        self.assertEqual(
-            R.BASELINE_BY_GRADE.get("3", R.BASELINE_DEFAULT), "Fall"
-        )
-
-    def test_the_hardcoded_default_label_is_gone(self):
-        source = pathlib.Path(R.__file__).read_text()
-        self.assertNotIn('windows["*"] = f"{BASELINE_DEFAULT}', source)
 
 
 class WorkDirIsOwnerOnly(unittest.TestCase):
@@ -699,88 +420,6 @@ class CheckpointsBelongToOneRun(RestoresModuleFunctions):
         path = R.default_work_dir("artondale", "2025-26", "one@psd401.net")
         self.assertIn(datetime.date.today().isoformat(), path)
 
-
-class SbaIsNotLabelledFallToSpring(RestoresModuleFunctions):
-    """SBA compares against the PRIOR YEAR's summative.
-
-    The grade's DIBELS fallback would render "SBA ELA (Fall→Spring)", a window
-    that was never measured. This file's own rule: a Fall→Winter block
-    labelled Fall→Spring is a wrong report, not a cosmetic slip.
-    """
-
-    def test_run_report_labels_sba_records_itself(self):
-        # Building the windows dict by hand in the test only proved build_tab
-        # reads it. This proves run_report WRITES it — the mutation that
-        # removed the labelling failed nothing until this existed.
-        records = [{"meas": "SBA ELA"}, {"meas": "ORF-WRC"}]
-        windows = R.label_windows({"*": "Fall→Spring"}, records)
-        self.assertEqual(windows["SBA ELA"], R.SBA_WINDOW)
-        self.assertNotEqual(windows["SBA ELA"], "Fall→Spring")
-
-    def test_a_real_per_measure_label_beats_the_sba_default(self):
-        windows = R.label_windows({"SBA ELA": "Winter→Spring"},
-                                  [{"meas": "SBA ELA"}])
-        self.assertEqual(windows["SBA ELA"], "Winter→Spring")
-
-    def test_non_sba_records_are_left_alone(self):
-        windows = R.label_windows({"*": "Fall→Spring"}, [{"meas": "ORF-WRC"}])
-        self.assertNotIn("ORF-WRC", windows)
-
-    def test_a_dibels_block_keeps_its_own_window(self):
-        import build_tab
-        windows = {"ORF-WRC": "Winter→Spring", "*": "Fall→Spring"}
-        self.assertEqual(
-            build_tab.window_for("ORF-WRC", windows), "Winter→Spring")
-
-    def test_the_rendered_sba_header_says_prior_year(self):
-        import build_tab
-        records = [{"meas": "SBA ELA", "scope": "school", "qt": "All",
-                    "growth": 12, "n": 30}]
-        tab = build_tab.build(records, "S", "4", "2025-26",
-                              {"SBA ELA": "prior year→this year",
-                               "*": "Fall→Spring"})
-        flat = [c for row in tab["values"] for c in row]
-        self.assertIn("SBA ELA (prior year→this year)", flat)
-        self.assertNotIn("SBA ELA (Fall→Spring)", flat)
-
-class EveryBlockHonoursTheGapContract(RestoresModuleFunctions):
-    """SKILL.md: "Anything it cannot produce is written INTO the tab."
-
-    SBA and i-Ready went through run_block, which records a gap on a failed
-    query and on an empty result. The DIBELS block — the one the report is
-    named for — was built inline and did neither, so the PRIMARY measures
-    could go missing while the secondary ones announced themselves. That
-    asymmetry is precisely what makes a workbook look complete.
-    """
-
-    def test_the_source_records_a_gap_for_a_failed_dibels_extraction(self):
-        source = pathlib.Path(R.__file__).read_text()
-        block = source.split("One pass per distinct baseline", 1)[1]
-        block = block.split("# i-Ready", 1)[0]
-        self.assertIn("query failed", block)
-        self.assertIn("no matched students", block)
-
-    def test_a_grade_with_no_dibels_measures_still_reports_it(self):
-        source = pathlib.Path(R.__file__).read_text()
-        self.assertIn(
-            "no DIBELS measures recorded for this grade", source
-        )
-
-    def test_the_dibels_gap_list_is_not_reset_before_the_other_blocks(self):
-        # `gaps = []` appearing twice would silently discard whatever the
-        # DIBELS pass recorded before SBA and i-Ready ran.
-        source = pathlib.Path(R.__file__).read_text()
-        self.assertEqual(source.count("            gaps = []"), 1)
-
-    def test_a_gap_only_grade_still_produces_a_tab(self):
-        # A grade with nothing to report must still say so in the workbook
-        # rather than being skipped into silence.
-        import build_tab
-        tab = build_tab.build([], "S", "2", "2025-26", "Fall→Spring",
-                              gaps=["DIBELS growth: not included (x)"])
-        flat = [c for row in tab["values"] for c in row]
-        self.assertIn("NOT INCLUDED IN THIS REPORT", flat)
-        self.assertTrue(any("DIBELS growth" in c for c in flat))
 
 class EverySplicedValueIsSanitised(RestoresModuleFunctions):
     """One unsanitised value is enough.
@@ -879,14 +518,6 @@ class McpResponseIsAMarkdownTable(RestoresModuleFunctions):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["school_name"], "Artondale Elementary")
 
-    def test_query_all_pages_a_real_envelope(self):
-        envelopes = [self.ENVELOPE, {"content": [{"type": "text",
-                                                  "text": ""}],
-                                     "isError": False}]
-        R.run_json = lambda argv, what, **k: (
-            envelopes.pop(0) if envelopes else {"content": [], "isError": False})
-        self.assertEqual(len(R.query_all("SELECT 1", "roster")), 1)
-
     def test_query_raises_on_an_error_envelope(self):
         R.run_json = lambda argv, what, **k: {
             "content": [{"type": "text",
@@ -957,7 +588,7 @@ class McpResponseIsAMarkdownTable(RestoresModuleFunctions):
         self.assertEqual(R.parse_markdown_table("| not a table"), [])
 
 
-class SqlMatchesTheLiveSchema(unittest.TestCase):
+class SqlMatchesTheLiveSchema(RestoresModuleFunctions):
     """The column names in #1679, not the ones this file guessed."""
 
     def test_schools_is_id_and_name(self):
@@ -1000,28 +631,27 @@ class SqlMatchesTheLiveSchema(unittest.TestCase):
 
         def fake(sql, *a, **k):
             captured["sql"] = sql
-            return [{"sectionid": "1", "grade_level": "K",
-                     "teacher_name": "Hansen, Jane"}]
+            return [{"sectionid": "1", "teacher_name": "Jane Hansen"}]
 
-        original = R.query_all
-        R.query_all = fake
-        try:
-            R.fetch_roster(1, 2)
-        finally:
-            R.query_all = original
+        R.query_one = fake
+        R.fetch_sections(1, 2, 0, "GR00K")
         self.assertIn("teachers t ON t.id = st.teacherid", captured["sql"])
         self.assertNotIn("t.teacherid = st.teacherid", captured["sql"])
         self.assertIn("first_name", captured["sql"])
         self.assertNotIn("t.teacher_name", captured["sql"])
 
     def test_the_subgroup_tables_are_not_year_scoped(self):
-        # THE most damaging of the seven: students_frl and students_specialed
-        # have no yearid, so the predicate errored the whole extraction for
-        # every grade and produced a complete-looking, empty workbook.
-        sql = R.extraction_sql(1, 35, "3", ["ORF WC"], "Fall")
-        self.assertIn("students_frl f ON f.studentid = m.studentid", sql)
-        self.assertNotIn("f.yearid", sql)
-        self.assertNotIn("sp.yearid", sql)
+        # THE most damaging of the seven bugs in #1679: students_frl and
+        # students_specialed have no yearid, so the predicate errored the
+        # whole extraction for every grade and produced a complete-looking,
+        # empty workbook. R&A's queries join them unscoped; this asserts
+        # against the generated SQL so the fix cannot regress.
+        blob = "".join(
+            path.read_text() for path in
+            (FIXTURES.glob("*_sub*.sql")))
+        self.assertIn("students_frl fr ON fr.studentid=m.studentid", blob)
+        self.assertNotIn("fr.yearid", blob)
+        self.assertNotIn("sp2.yearid", blob)
 
 
 class WorkspaceCallShapes(RestoresModuleFunctions):
@@ -1053,95 +683,6 @@ class WorkspaceCallShapes(RestoresModuleFunctions):
         self.assertIn('"transferOwnership": true', seen["c"])
         self.assertNotIn('"transferOwnership": "true"', seen["c"])
 
-
-class NormsNamesAreMapped(unittest.TestCase):
-    """The warehouse and the norms file disagree, and aggregate.py joins on it.
-
-    Unmapped, it aborts the whole run for every grade with an ORF measure —
-    grades 1-5, i.e. the report.
-    """
-
-    def test_orf_warehouse_names_map_to_norms_names(self):
-        args = R.measure_as_args(["ORF Accuracy", "ORF WC", "ORF Errors"])
-        self.assertIn("ORF Accuracy=ORF-ACC", args)
-        self.assertIn("ORF WC=ORF-WRC", args)
-
-    def test_an_already_matching_name_is_not_mapped(self):
-        self.assertEqual(R.measure_as_args(["LNF", "PSF"]), [])
-
-    def test_an_unknown_measure_passes_through_unmapped(self):
-        # Loud in aggregate.py beats silently dropped here.
-        self.assertEqual(R.measure_as_args(["BRAND NEW"]), [])
-
-    def test_aggregate_receives_the_mapping(self):
-        seen = {}
-        original = R.run_json
-        R.run_json = lambda argv, what, **k: seen.setdefault("argv", argv) or []
-        try:
-            R.aggregate_rows(pathlib.Path("/tmp/x.json"), "1", "Fall",
-                             measures=["ORF WC"])
-        finally:
-            R.run_json = original
-        joined = " ".join(seen["argv"])
-        self.assertIn("--measure-as", joined)
-        self.assertIn("ORF WC=ORF-WRC", joined)
-
-class IReadyIsTwoTables(unittest.TestCase):
-    """Guessed table names cost a whole measure family.
-
-    The script probed iready_scores / i_ready_scores /
-    iready_diagnostic_scores. None exist. i-Ready reported itself as "table
-    not found" on every run while the data sat under
-    iready_reading_diagnostics and iready_math_diagnostics — one table PER
-    SUBJECT, not one table with a subject column.
-
-    The gap banner did its job: the omission was stated in the sheet rather
-    than silent. But the user still had to ask why, and the answer was that we
-    guessed instead of asking the warehouse.
-    """
-
-    def test_the_recorded_tables_are_the_real_ones(self):
-        self.assertEqual(
-            R.IREADY_TABLES_BY_SUBJECT,
-            {"Reading": "iready_reading_diagnostics",
-             "Math": "iready_math_diagnostics"},
-        )
-
-    def test_each_subject_queries_its_own_table(self):
-        reading = R.iready_sql(1, 2, "3", "iready_reading_diagnostics", "Reading")
-        math = R.iready_sql(1, 2, "3", "iready_math_diagnostics", "Math")
-        self.assertIn("iready_reading_diagnostics", reading)
-        self.assertNotIn("iready_math_diagnostics", reading)
-        self.assertIn("iready_math_diagnostics", math)
-
-    def test_the_subject_is_a_literal_not_a_column(self):
-        # There is no `subject` column to select — the table IS the subject.
-        sql = R.iready_sql(1, 2, "3", "iready_reading_diagnostics", "Reading")
-        self.assertIn("'Reading' AS meas", sql)
-        self.assertNotIn("subject AS meas", sql)
-
-    def test_the_measure_is_labelled_for_the_tab(self):
-        sql = R.iready_sql(1, 2, "3", "iready_math_diagnostics", "Math")
-        self.assertIn("'i-Ready ' || m.meas", sql)
-
-
-class NormsGapsThatKilledAWholeGrade(unittest.TestCase):
-    """Two measure names, each of which aborted an entire grade block."""
-
-    def test_maze_adjusted_score_maps_to_maze(self):
-        self.assertIn("MAZE Adjusted Score=MAZE",
-                      R.measure_as_args(["MAZE Adjusted Score"]))
-
-    def test_composite_has_no_norms_and_is_not_mapped(self):
-        # Inventing a percentile for it would misstate how a child scored
-        # against national peers, in a document read as fact.
-        with_norms, without = R.split_by_norms(["ORF WC", "Composite"])
-        self.assertEqual(with_norms, ["ORF WC"])
-        self.assertEqual(without, ["Composite"])
-
-    def test_a_normal_measure_keeps_its_norms(self):
-        with_norms, without = R.split_by_norms(["ORF WC", "NWF CLS"])
-        self.assertEqual(without, [])
 
 class TheDefaultYearMustHaveStarted(RestoresModuleFunctions):
     """`ORDER BY id DESC` picked a year that had not begun.
@@ -1211,143 +752,208 @@ class TheYearFormatIsForgiving(RestoresModuleFunctions):
         ]
         self.assertEqual(R.resolve_year("2025-2026")["yearid"], 2)
 
-class TheNormsSplitIsActuallyUsed(RestoresModuleFunctions):
-    """split_by_norms was defined, unit-tested, and never called.
+class TheRosterDrivesEveryQuery(RestoresModuleFunctions):
+    """R&A's "Adapting to a school" step, done from a live query.
 
-    Review caught it: the helper and its tests both passed while the report
-    pipeline still made one aggregate call for the whole group, so a grade
-    containing Composite would abort exactly as before. A test that exercises
-    a helper proves nothing about whether anything calls it — the same lesson
-    as the parse_mcp_rows test that passed while query() stayed broken.
+    Their generator carried a hardcoded SCHOOLS dict. This builds the same
+    entry from `section_enrollments`, so the grade span and the classroom
+    column order come from the warehouse and not from an assertion — the
+    agent once announced "Minter Creek is a K-2 school", invented the reason,
+    and scoped a whole report to it. Minter Creek is K-5.
+    """
 
-    These call the pipeline's own function.
+    def _roster(self, by_course):
+        def fake(sql, reason):
+            for course, rows in by_course.items():
+                if f"course_code = '{course}'" in sql:
+                    return rows
+            return []
+        R.query_one = fake
+
+    def test_the_grade_span_comes_from_the_roster(self):
+        self._roster({
+            "GR00K": [{"sectionid": "11", "teacher_name": "Jane Hansen"}],
+            "GR001": [{"sectionid": "12", "teacher_name": "Ann Lee"}],
+        })
+        roster = R.fetch_roster(3055, 35)
+        self.assertEqual(sorted(roster["sections"]), [0, 1])
+
+    def test_a_school_without_grade_five_generates_no_grade_five_queries(self):
+        self._roster({
+            "GR00K": [{"sectionid": "11", "teacher_name": "Jane Hansen"}],
+            "GR001": [{"sectionid": "12", "teacher_name": "Ann Lee"}],
+            "GR002": [{"sectionid": "13", "teacher_name": "Bo Ruiz"}],
+        })
+        roster = R.fetch_roster(3055, 35)
+        config = R.build_school(
+            {"schoolid": 3055, "school_name": "Somewhere K-2"}, roster)
+        out = pathlib.Path(tempfile.mkdtemp())
+        names = {path.name for path in gen_sql.generate(config, out, year=35)}
+        self.assertTrue(names)
+        # Not just "no g5_" — the SBA families are written OUTSIDE the grade
+        # loop, so a guard that only covered the loop would still emit them.
+        stray = sorted(n for n in names
+                       if n.startswith(("g3_", "g4_", "g5_")))
+        self.assertEqual(stray, [])
+        self.assertEqual(names, {s["name"] for s in gen_sql.specs(config)})
+
+    def test_a_section_with_no_lead_teacher_is_kept(self):
+        self._roster({"GR00K": [{"sectionid": "11", "teacher_name": None}]})
+        roster = R.fetch_roster(3055, 35)
+        # The students are still in the numbers; layout labels the column.
+        self.assertEqual(roster["sections"][0], ["11"])
+        self.assertNotIn("11", roster["teachers"])
+
+    def test_a_school_with_no_homerooms_is_an_error(self):
+        self._roster({})
+        with self.assertRaises(R.ReportError):
+            R.fetch_roster(3055, 35)
+
+    def test_section_order_is_the_query_order(self):
+        # sectionid order IS the classroom column order in the sheet.
+        self._roster({"GR00K": [{"sectionid": "274411"},
+                                {"sectionid": "274378"},
+                                {"sectionid": "274379"}]})
+        roster = R.fetch_roster(3055, 35)
+        self.assertEqual(roster["sections"][0], ["274411", "274378", "274379"])
+
+    def test_a_non_numeric_sectionid_is_refused(self):
+        # Section ids are inlined into FILTER clauses by gen_sql. A
+        # non-numeric one is both a broken query and an injection point.
+        with self.assertRaises(R.ReportError):
+            R.section_ids(["274378", "274379); DROP"])
+
+    def test_numeric_ids_become_ints(self):
+        self.assertEqual(R.section_ids(["274378", " 274379 "]),
+                         [274378, 274379])
+
+
+class TheYearReachesTheWarehouse(RestoresModuleFunctions):
+    """The resolved yearid must appear in the SQL, not the module default."""
+
+    def test_the_generated_sql_uses_the_resolved_year(self):
+        config = {"id": 3055, "name": "X", "sections": {0: [11]}}
+        out = pathlib.Path(tempfile.mkdtemp())
+        blob = "".join(p.read_text()
+                       for p in gen_sql.generate(config, out, year=34))
+        self.assertIn("yearid=34", blob)
+        self.assertNotIn("yearid=35", blob)
+
+
+class QueriesRunOnceAndRetryOnce(RestoresModuleFunctions):
+    """No paging, no export, and R&A's "retry once" for the ~90s queries."""
+
+    def test_a_query_is_one_call(self):
+        calls = []
+        R.query = lambda sql, reason: calls.append(reason) or [{"meas": "x"}]
+        R.query_one("SELECT 1", "why")
+        self.assertEqual(len(calls), 1)
+
+    def test_a_timeout_is_retried_exactly_once(self):
+        calls = []
+
+        def flaky(sql, reason):
+            calls.append(reason)
+            if len(calls) == 1:
+                raise R.ReportError("statement timeout")
+            return [{"meas": "x"}]
+
+        R.query = flaky
+        self.assertEqual(R.query_one("SELECT 1", "why"), [{"meas": "x"}])
+        self.assertEqual(len(calls), 2)
+
+    def test_a_second_failure_is_not_swallowed(self):
+        def always(sql, reason):
+            raise R.ReportError("statement timeout")
+
+        R.query = always
+        with self.assertRaises(R.ReportError):
+            R.query_one("SELECT 1", "why")
+
+    def test_export_is_never_requested(self):
+        seen = {}
+
+        def fake(argv, what, **kwargs):
+            seen["argv"] = argv
+            return {"content": [{"type": "text", "text": "[]"}]}
+
+        R.run_json = fake
+        self.assertEqual(R.query("SELECT 1", "why"), [])
+        self.assertNotIn("--export", seen["argv"])
+        self.assertNotIn("--limit", seen["argv"])
+        self.assertNotIn("--offset", seen["argv"])
+
+
+class OneBadQueryDoesNotLoseTheReport(RestoresModuleFunctions):
+    """A failed block is a stated gap IN the tab, never a silent absence.
+
+    Losing 39 good queries to one bad one is the failure mode this replaces;
+    so is a workbook that looks complete because the block that could not be
+    produced simply is not there.
     """
 
     def setUp(self):
         super().setUp()
         self.work = pathlib.Path(tempfile.mkdtemp())
-        self.calls = []
-        (self.work / "t-rows.json").write_text("[]")
+        self.sqldir = self.work / "sql"
+        self.sqldir.mkdir()
+        self.specs = [
+            {"name": "g0_A_dibels_pr.sql", "grade": 0, "shape": "quartile",
+             "values": [("a", "Raw")], "order": 20, "title": "DIBELS",
+             "note": "", "sections": [11]},
+            {"name": "g0_levels.sql", "grade": 0, "shape": "levels",
+             "values": [("start", "PR Start")], "order": 60,
+             "title": "Levels", "note": "", "sections": []},
+        ]
+        for spec in self.specs:
+            (self.sqldir / spec["name"]).write_text("SELECT 1")
 
-        def fake_aggregate(rows_path, grade, baseline, no_norms=False,
-                           subgroups=(), measures=()):
-            self.calls.append({"measures": list(measures),
-                               "no_norms": no_norms})
-            return [{"meas": m} for m in measures]
+    def test_a_failed_query_becomes_a_gap_and_the_rest_still_run(self):
+        def fake(sql, reason):
+            if "levels" in reason:
+                raise R.ReportError("statement timeout")
+            return [{"meas": "LNF", "qt": "All", "a1": 3, "n1": 5}]
 
-        self._real = R.aggregate_rows
-        R.aggregate_rows = fake_aggregate
-        self.addCleanup(lambda: setattr(R, "aggregate_rows", self._real))
+        R.query_one = fake
+        results, gaps = R.run_queries(self.specs, self.sqldir, self.work,
+                                      lambda m: None)
+        self.assertIn("g0_A_dibels_pr.sql", results)
+        self.assertNotIn("g0_levels.sql", results)
+        self.assertEqual(len(gaps[0]), 1)
+        self.assertIn("Levels", gaps[0][0])
 
-    def test_a_mixed_group_is_aggregated_twice(self):
-        out = R.aggregate_group(self.work, "t", "5", "Fall",
-                                ["ORF WC", "Composite"], lambda m: None)
-        self.assertEqual(len(self.calls), 2)
-        normed = [c for c in self.calls if not c["no_norms"]][0]
-        skipped = [c for c in self.calls if c["no_norms"]][0]
-        self.assertEqual(normed["measures"], ["ORF WC"])
-        self.assertEqual(skipped["measures"], ["Composite"])
-        self.assertEqual(len(out), 2)
+    def test_the_gap_is_written_into_the_tab(self):
+        R.query_one = lambda sql, reason: (_ for _ in ()).throw(
+            R.ReportError("boom"))
+        results, gaps = R.run_queries(self.specs, self.sqldir, self.work,
+                                      lambda m: None)
+        values = layout.tab("Somewhere", 0, "2025-2026",
+                            [(s, results.get(s["name"], [])) for s in self.specs],
+                            {}, gaps.get(0, ()))
+        flat = "\n".join(str(cell) for row in values for cell in row)
+        self.assertIn("Not included in this report", flat)
 
-    def test_a_normal_group_is_aggregated_once_with_norms(self):
-        R.aggregate_group(self.work, "t", "3", "Fall",
-                          ["ORF WC", "NWF CLS"], lambda m: None)
-        self.assertEqual(len(self.calls), 1)
-        self.assertFalse(self.calls[0]["no_norms"])
-
-    def test_a_norms_free_group_never_asks_for_norms(self):
-        R.aggregate_group(self.work, "t", "5", "Fall",
-                          ["Composite"], lambda m: None)
-        self.assertEqual(len(self.calls), 1)
-        self.assertTrue(self.calls[0]["no_norms"])
-
-    def test_both_passes_read_the_same_extracted_rows(self):
-        # Two aggregations, never two extractions.
-        R.aggregate_group(self.work, "t", "5", "Fall",
-                          ["ORF WC", "Composite"], lambda m: None)
-        self.assertEqual(len(list(self.work.glob("*-rows.json"))), 1)
-
-    def test_the_pipeline_calls_aggregate_group(self):
-        source = pathlib.Path(R.__file__).read_text()
-        block = source.split("One pass per distinct baseline", 1)[1]
-        self.assertIn("aggregate_group(", block.split("# i-Ready", 1)[0])
-
-class TruncationVerificationIsWiredIn(RestoresModuleFunctions):
-    """count_rows and expected= were primitives nothing called.
-
-    Review caught that too, in the same PR as split_by_norms. Scaffolding with
-    tests is indistinguishable from a fix until something calls it.
-    """
-
-    def test_the_extraction_path_counts_before_it_pages(self):
+    def test_each_query_is_checkpointed_separately(self):
         calls = []
+        R.query_one = lambda sql, reason: calls.append(reason) or []
+        R.run_queries(self.specs, self.sqldir, self.work, lambda m: None)
+        self.assertEqual(len(calls), 2)
+        # A resumed run must not re-run what already answered: a report that
+        # dies on query 31 of 40 resumes at 31.
+        R.run_queries(self.specs, self.sqldir, self.work, lambda m: None)
+        self.assertEqual(len(calls), 2)
 
-        def fake_query(sql, reason, limit=None, offset=None):
-            calls.append(sql)
-            if sql.startswith("SELECT COUNT(*)"):
-                return [{"n": "2"}]
-            return [{"r": 1}, {"r": 2}] if len(calls) == 2 else []
-
-        R.query = fake_query
-        rows = R.extract_verified("SELECT 1", "grade 3 pairs")
-        self.assertEqual(len(rows), 2)
-        self.assertTrue(calls[0].startswith("SELECT COUNT(*)"))
-
-    def test_a_short_paged_extraction_raises(self):
-        def fake_query(sql, reason, limit=None, offset=None):
-            if sql.startswith("SELECT COUNT(*)"):
-                return [{"n": "1706"}]
-            return [{"r": 1}] * 30 if offset == 0 else []
-
-        R.query = fake_query
-        with self.assertRaises(R.ReportError) as caught:
-            R.extract_verified("SELECT 1", "grade 1 pairs")
-        self.assertIn("truncated", str(caught.exception))
-
-    def test_an_unavailable_count_does_not_fail_the_report(self):
-        # Failing a whole report over a diagnostic would be its own bug.
-        def fake_query(sql, reason, limit=None, offset=None):
-            if sql.startswith("SELECT COUNT(*)"):
-                return [{"n": None}]
-            return [{"r": 1}] if offset == 0 else []
-
-        R.query = fake_query
-        self.assertEqual(len(R.extract_verified("SELECT 1", "x")), 1)
-
-    def test_the_pipeline_uses_the_verified_extraction(self):
-        source = pathlib.Path(R.__file__).read_text()
-        block = source.split("One pass per distinct baseline", 1)[1]
-        self.assertIn("extract_verified(", block.split("# i-Ready", 1)[0])
+    def test_a_failed_query_is_retried_on_the_next_run(self):
+        R.query_one = lambda sql, reason: (_ for _ in ()).throw(
+            R.ReportError("boom"))
+        R.run_queries(self.specs, self.sqldir, self.work, lambda m: None)
+        calls = []
+        R.query_one = lambda sql, reason: calls.append(reason) or []
+        results, gaps = R.run_queries(self.specs, self.sqldir, self.work,
+                                      lambda m: None)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(gaps, {})
 
 
-class PageCeilingCoversARealSchool(unittest.TestCase):
-    """MAX_PAGES was sized for 5,000-row pages.
-
-    If psd-data caps at 30, 40 pages is 1,200 rows — and this file's own
-    docstring cites a real extraction of 1,706. Continuing past a short page
-    without raising the ceiling turns a silent truncation into a hard failure
-    on every real school.
-    """
-
-    def test_the_ceiling_covers_a_capped_real_extraction(self):
-        self.assertGreaterEqual(R.MAX_PAGES * 30, 30_000)
-
-    def test_orf_errors_keeps_its_norms(self):
-        # It is aliased to ORF-WRC, which has real rows in the norms CSV.
-        # Listing it as norm-free would strip norms from a working measure.
-        self.assertNotIn("orf errors", R.MEASURES_WITHOUT_NORMS)
-        self.assertIn("ORF Errors=ORF-WRC", R.measure_as_args(["ORF Errors"]))
-
-    def test_composite_is_still_norm_free(self):
-        self.assertIn("composite", R.MEASURES_WITHOUT_NORMS)
-
-
-# Keep this guard LAST in the file. It used to sit mid-file (line 214), which
-# meant `python test_run_report.py` ran unittest.main() and sys.exit()ed before
-# the four classes below it were even defined — 22 tests instead of 35,
-# silently skipping the apostrophe-safety, timeout-bound, checkpointed
-# side-effect and window-label suites. CI imports the module via
-# `python -m unittest`, so it never noticed; a developer debugging locally got
-# a green run that had not executed the tests they were debugging.
 if __name__ == "__main__":
     unittest.main()
