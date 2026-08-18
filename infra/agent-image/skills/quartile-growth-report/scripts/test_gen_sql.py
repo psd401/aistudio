@@ -12,7 +12,7 @@ run against psd-data for Evergreen (schoolid 3055, yearid 35), and its first
 instruction is that the skill be "a transcription of this material, not a
 fresh design".
 
-So the fixtures in tests/fixtures/sql-evergreen are the source of truth, and
+So the fixtures in test-fixtures/ are the source of truth, and
 this test fails if the generator drifts from them by a single byte. A test
 against real validated output cannot pass while the thing it describes is
 broken — which is exactly what my invented fixtures did.
@@ -25,7 +25,7 @@ import tempfile
 import unittest
 
 HERE = pathlib.Path(__file__).resolve().parent
-FIXTURES = HERE.parent / "tests" / "fixtures" / "sql-evergreen"
+FIXTURES = HERE.parent / "test-fixtures"
 NORMS = HERE.parent / "references" / "norms"
 
 sys.path.insert(0, str(HERE))

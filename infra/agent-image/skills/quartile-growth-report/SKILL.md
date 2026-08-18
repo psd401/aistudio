@@ -164,8 +164,18 @@ public release" on the Definitions tab.
 
 ## References
 
-- `references/SKILL-PROPOSAL.md` — R&A's spec: method, reference SQL, layout
-- `references/HANDOFF.md` — the non-negotiables list, verbatim
-- `tests/fixtures/sql-evergreen/` — the 40 queries as actually run
+- `references/SKILL-PROPOSAL.md` — R&A's spec: method, layout, and the core
+  query with parameter slots (`:yearid`, `:schoolid`, `:course`, `:sec1`).
+  Read this if you need to understand a query's shape.
+- `references/HANDOFF.md` — the non-negotiables list, verbatim, behind an
+  editorial note marking the one step that does not apply here (hand-editing
+  a pinned query, which R&A did at a psql prompt and this skill must not)
 - `references/definitions.md` — the Definitions tab text
 - `references/layout.md` — per-grade tab layout
+
+The 40 queries R&A actually ran live in `test-fixtures/` in the
+repo, and are deliberately **not** in this image. They are pinned to
+Evergreen's school and section ids, so running one against another school
+returns Evergreen's numbers under that school's name — and a principal cannot
+tell from the sheet. Generate SQL with the command above; never paste a
+pre-written query.
