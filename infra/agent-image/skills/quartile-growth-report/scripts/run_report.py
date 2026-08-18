@@ -638,9 +638,9 @@ def _add_tab(sheet_id, title, user, work_dir):
 def write_tab(sheet_id, body, user, work_dir, title):
     """Write one tab's values.
 
-    build_tab.py already emits the exact `values batchUpdate` body, RAW, so
-    nothing here reshapes it — that reshaping step is what the model used to
-    hand-write, and where the literal-newline bug kept landing.
+    `layout.body_for` already emits the exact `values batchUpdate` body, RAW,
+    so nothing here reshapes it — that reshaping step is what the model used
+    to hand-write, and where the literal-newline bug kept landing.
     """
     payload = work_dir / f"values-{title}.json"
     payload.write_text(json.dumps(body))

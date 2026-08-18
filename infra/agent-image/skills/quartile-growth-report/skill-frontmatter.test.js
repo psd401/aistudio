@@ -63,8 +63,8 @@ describe('quartile-growth-report frontmatter', () => {
   });
 
   test('allowed-tools grants the interpreter the skill actually shells out to', () => {
-    // The grant is prefix-matched, so `Bash(node:*)` alone would refuse every
-    // norms_values.py invocation and silently cost the report its PR columns.
+    // The grant is prefix-matched, so `Bash(node:*)` alone would refuse the
+    // run_report.py invocation, which is the entire skill.
     expect(frontmatter()['allowed-tools']).toContain(VENV_PYTHON);
   });
 
