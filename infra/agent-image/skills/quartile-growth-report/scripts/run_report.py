@@ -1,31 +1,38 @@
 #!/usr/bin/env python3
 """Build the whole quartile growth report in one command.
 
-WHY THIS EXISTS
+WHY THIS SHAPE
 
-The report's arithmetic was never the problem. Between 2026-08-14 and
-2026-08-16 it failed on: a no-op edit ending the run, four assistant messages
-fusing into one reply, a promoted background job aborting the run it existed to
-continue, `--export` timing out, and the write tool emitting literal newline
-escapes into model-authored glue. Every one of those is ORCHESTRATION. Not one
-was in the quartiles, the norms, or the rollups.
+R&A (James Cantonwine) ran this report for Evergreen and Purdy before the
+skill existed, and handed over the 40 queries that produced it. The handoff's
+first instruction is that the skill be "a transcription of this material, not
+a fresh design — every non-obvious decision below cost a query cycle to
+discover".
 
-That path has roughly eight serial failure points, and a run only ever reveals
-the first one that fires — fix it, and the next run shows the next. So this
-removes the path instead of hardening it. The agent's job becomes: resolve the
-school, run this once, paste the link.
+The design this replaces was mine, and it was wrong in three load-bearing
+places. It paged raw student rows and computed quartiles locally, because I
+had concluded NTILE could not run against this MCP; R&A's queries use 57 of
+them. It converted national percentiles in Python; the validated queries do it
+in SQL with a norms VALUES CTE and a LATERAL cut-point lookup. And it fought
+the 30-row result cap by paging, where the queries pivot teachers into COLUMNS
+and use GROUPING SETS so a whole block comes back in one page.
 
-WHAT THAT DELETES
+So this script no longer computes anything. It resolves the school and year,
+discovers the homerooms, asks gen_sql for R&A's queries against them, runs
+each one ONCE, and lays the results out. Every number in the workbook is
+computed by the warehouse.
 
-  - ~100 model round-trips, each a chance to derail
-  - model-authored files, so the literal-newline bug is unreachable
-  - the turn deadline, the promotion, and the continuation turn: this runs
-    inside ONE exec, and re-running resumes from its checkpoints
+WHAT IT STILL DOES
+
+  - one exec, so the turn deadline, the promotion, and the continuation turn
+    are all out of the picture
+  - checkpoints, so a re-run resumes instead of restarting
+  - no model-authored files anywhere in the path
 
 WHAT IT DOES NOT FIX
 
-Whether the numbers are right. It makes that answerable — the same school can
-be run twice and diffed — which the previous design never allowed.
+Whether the numbers are right. It makes that answerable: the same school run
+twice is diffable, and every query is written to the work dir as it ran.
 
 USAGE
 
@@ -45,143 +52,23 @@ import subprocess
 import sys
 import traceback
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+import gen_sql  # noqa: E402
+import layout  # noqa: E402
+
 HERE = pathlib.Path(__file__).resolve().parent
 PSD_DATA = "/opt/psd-skills/psd-data/run.js"
 WORKSPACE = "/opt/psd-skills/psd-workspace/run.js"
-PYTHON = sys.executable or "/opt/agentcore-venv/bin/python3"
 
-# psd-data rate-limits at 60 req/min/user, so pages are deliberately large:
-# a whole grade should be one or two calls, not twenty.
-PAGE_SIZE = 5000
-# Sized for the WORST case, not the requested one. If psd-data really caps at
-# 30 rows per call, 40 pages is 1,200 rows — and this file's own docstring
-# cites a real extraction of 1,706 matched grade-1 pairs. Now that paging
-# correctly continues past a short page, too low a ceiling turns a silent
-# truncation into a hard failure on every real school, which is better but
-# still a broken report.
-#
-# 1,000 pages covers ~30,000 rows at a 30-row cap and one page at 5,000. The
-# guard still exists to stop an infinite loop; it is not a size limit.
-MAX_PAGES = 1000
-
-# Grades in report order. K sorts first and is stored as "K", not 0.
-DEFAULT_GRADES = ["K", "1", "2", "3", "4", "5"]
-
-# Baselines are PER MEASURE, not per grade. SKILL.md's Windows table gives two
-# exceptions and they are different shapes: K DIBELS has no Fall administration
-# at all, while in grade 1 only ORF starts mid-year — every other grade-1
-# measure has Fall data.
-#
-# Modelling this per grade looked simpler and silently dropped data: one
-# baseline applied to a whole grade means the matched-pair join returns ZERO
-# rows for any measure that lacks that window, so grade 1 ORF would vanish
-# from the tab with no error and nothing to notice on a re-run. Review caught
-# it. A measure missing from a report is worse than a report that fails.
-BASELINE_DEFAULT = "Fall"
-BASELINE_BY_GRADE = {"K": "Winter"}
-BASELINE_BY_GRADE_MEASURE = {("1", "ORF"): "Winter"}
-
-
-# The warehouse and the bundled norms file spell DIBELS measures differently,
-# and aggregate.py joins on that string. Unmapped, it aborts the whole run:
-#   "no norms at grade '1' for any requested measure (ORF Accuracy, ORF Errors,
-#    ORF WC); the norms file has ... ORF-ACC ... ORF-WRC"
-#
-# That killed every grade with an ORF measure, which is grades 1-5 — i.e. the
-# report. Matched case-insensitively on the warehouse spelling; an unmapped
-# name is passed through unchanged so a NEW measure fails loudly in
-# aggregate.py rather than being silently dropped here.
-NORMS_NAME_BY_WAREHOUSE = {
-    "orf accuracy": "ORF-ACC",
-    "orf errors": "ORF-WRC",
-    "orf wc": "ORF-WRC",
-    "nwf cls": "NWF-CLS",
-    "nwf wrc": "NWF-WRC",
-    # Grade 5's warehouse name. Unmapped, aggregate.py aborts the whole grade-5
-    # DIBELS block, and because the failure came out of a truncated result page
-    # it read as "no measures" rather than "unmapped name".
-    "maze adjusted score": "MAZE",
-    "maze": "MAZE",
-}
-
-# Measures with no national norms at all. Passed with --no-norms rather than
-# mapped, because inventing a percentile for them would misstate how a child
-# scored against national peers in a document a principal reads as fact.
-# Only measures with NO national norms at all. "orf errors" was in here and
-# should not have been: NORMS_NAME_BY_WAREHOUSE already aliases it to ORF-WRC,
-# which has real rows in the norms CSV. Once split_by_norms was wired in, that
-# entry would have stripped norms from a measure that scores correctly today —
-# the fix quietly breaking something that worked.
-MEASURES_WITHOUT_NORMS = {"composite"}
-
-
-def aggregate_group(work_dir, tag, grade, baseline, group, log):
-    """Aggregate one baseline group, in two passes when norms differ.
-
-    aggregate.py's --no-norms is per RUN, not per measure, and a measure with
-    no national norms (Composite) aborts the whole call when the others need
-    them. So the group is split and aggregated twice over the SAME extracted
-    rows — never two extractions.
-
-    A function rather than inline code so a test can prove the pipeline
-    actually does this. The first version of split_by_norms was defined,
-    unit-tested and never called from the report at all; review caught it, and
-    the tests passed either way because none of them touched the call site.
-    """
-    records = []
-    with_norms, without_norms = split_by_norms(group)
-    for measures, skip_norms in ((with_norms, False), (without_norms, True)):
-        if not measures:
-            continue
-        suffix = "nonorms" if skip_norms else "norms"
-        records.extend(step(
-            work_dir, f"{tag}-agg-{suffix}",
-            lambda m=measures, sk=skip_norms: aggregate_rows(
-                work_dir / f"{tag}-rows.json", grade, baseline,
-                subgroups=SUBGROUPS, measures=m, no_norms=sk),
-            log))
-    return records
-
-
-def split_by_norms(measures):
-    """(with_norms, without_norms) for one grade's measure list."""
-    with_norms, without = [], []
-    for measure in measures:
-        key = str(measure).strip().lower()
-        (without if key in MEASURES_WITHOUT_NORMS else with_norms).append(measure)
-    return with_norms, without
-
-
-def measure_as_args(measures):
-    """--measure-as WAREHOUSE=NORMS for every measure that needs mapping."""
-    args = []
-    for measure in measures:
-        norms = NORMS_NAME_BY_WAREHOUSE.get(str(measure).strip().lower())
-        if norms and norms != measure:
-            args.append(f"{measure}={norms}")
-    return args
-
-
-def baseline_for(grade, measure):
-    """The baseline window for one measure in one grade.
-
-    Matched on an ORF prefix rather than an exact name because the warehouse's
-    spelling is not guaranteed to be the norms file's — that mismatch is why
-    every measure name is discovered rather than assumed.
-    """
-    grade = str(grade)
-    for (g, prefix), window in BASELINE_BY_GRADE_MEASURE.items():
-        if g == grade and str(measure).upper().startswith(prefix):
-            return window
-    return BASELINE_BY_GRADE.get(grade, BASELINE_DEFAULT)
-
-
-def group_by_baseline(grade, measures):
-    """{baseline: [measure, ...]} — one extraction pass per distinct window."""
-    groups = {}
-    for measure in measures:
-        groups.setdefault(baseline_for(grade, measure), []).append(measure)
-    return groups
+# Course codes ARE the grade span. gen_sql.MEASURES keys grades 0-5 to
+# 'GR00K'..'GR005'; the roster query below asks which of those the school
+# actually runs, and a grade with no homeroom simply produces no queries.
+# Nothing in this script may assert a grade span it did not query — the agent
+# announced "Minter Creek is a K-2 school" once, invented the reason, and
+# scoped a whole report to it. Minter Creek is K-5.
+GRADE_LABELS = {0: "K", 1: "1", 2: "2", 3: "3", 4: "4", 5: "5"}
+GRADE_BY_LABEL = {label: grade for grade, label in GRADE_LABELS.items()}
 
 
 class ReportError(RuntimeError):
@@ -277,19 +164,19 @@ def run_json(argv, what, timeout=900):
         return json.loads(match.group(0))
 
 
-def query(sql, reason, limit=None, offset=None):
+def query(sql, reason):
     """One psd-data SELECT.
 
     NOT `--export`. Export mode timed out repeatedly on the grade-K extraction
     on 2026-08-16 while the same query in normal mode returned 2,232 rows in
     seconds, and it has a separate history of silently dropping numeric
-    columns from the CSV. Paging is more calls and has actually worked.
+    columns from the CSV.
+
+    No --limit / --offset either: every query this script runs is an aggregate
+    that fits in one result. Paging existed to move raw student rows, and
+    those no longer leave the warehouse.
     """
     argv = ["node", PSD_DATA, "query", "--reason", reason, "--sql", sql]
-    if limit is not None:
-        argv += ["--limit", str(limit)]
-    if offset is not None:
-        argv += ["--offset", str(offset)]
     payload = run_json(argv, f"psd-data query ({reason})")
     return parse_mcp_rows(payload, reason)
 
@@ -407,78 +294,29 @@ def parse_markdown_table(text):
     return rows
 
 
-def query_all(sql, reason, expected=None):
-    """Page a SELECT to completion.
+def query_one(sql, reason):
+    """Run one of R&A's queries. ONE call, no paging, no row count.
 
-    STOPS ON AN EMPTY PAGE, NOT A SHORT ONE. psd-data is documented as
-    returning at most 30 rows per call (SKILL.md's pitfalls list). Asking for
-    5,000 and stopping when fewer come back would have ended after the FIRST
-    page — every extraction silently truncated to 30 students, and quartiles
-    computed over them would look entirely plausible and be wrong.
+    These queries return aggregates: GROUPING SETS puts the All row beside the
+    quartile rows, and teachers are pivoted into columns, so a whole block is
+    a handful of rows. That is the point of the shapes R&A validated — the
+    30-row display cap was designed around, not paged around.
 
-    I could not verify that cap from outside the warehouse, which is exactly
-    why the loop no longer depends on knowing it: a short page proves nothing,
-    an empty one proves the end.
+    The previous design paged raw student rows here and then had to prove
+    nothing was dropped, because a silently truncated extraction yields
+    quartiles over a fraction of the cohort that look entirely plausible.
+    There is nothing to truncate now.
+
+    R&A's note: the long queries run about 90 seconds and occasionally time
+    out on the MCP — "simply retry once before changing anything". So this
+    does, once, rather than failing a whole grade over a slow warehouse.
     """
-    out = []
-    for page in range(MAX_PAGES):
-        rows = query(sql, reason, limit=PAGE_SIZE, offset=len(out))
-        if not rows:
-            break
-        out.extend(rows)
-        # If the warehouse caps pages at 30 and rate-limits at 60/min, a large
-        # grade is minutes of paging with nothing on stdout. Say so, so a slow
-        # run is visibly working rather than apparently hung — the promoted
-        # job has a two-hour budget and no way to ask.
-        if page and page % 25 == 0:
-            logger_line = (f"  {reason}: {len(out)} rows after "
-                           f"{page + 1} pages")
-            print(logger_line, file=sys.stderr, flush=True)
-    else:
-        raise ReportError(
-            f"{reason}: still returning rows after {MAX_PAGES} pages "
-            f"({len(out)}) — refusing to page forever"
-        )
-    if expected is not None and len(out) != expected:
-        # A count that disagrees with what paging returned means the result
-        # was capped or the offsets skipped. Loud, because the alternative is
-        # a report whose every number is computed over a fraction of the
-        # cohort and looks fine.
-        raise ReportError(
-            f"{reason}: expected {expected} rows, paged {len(out)}. "
-            "The result set is being truncated; the numbers would be wrong."
-        )
-    return out
-
-
-def extract_verified(sql, reason):
-    """Page an extraction and prove nothing was dropped.
-
-    The count is the whole point: paging that silently returns a subset yields
-    quartiles over a fraction of the cohort that look entirely plausible. A
-    COUNT(*) costs one call and turns that into a loud failure.
-
-    A count the warehouse will not give (null, unparseable) is not treated as
-    a mismatch — that would fail reports over a diagnostic. It is logged as
-    unverified instead.
-    """
-    expected = count_rows(sql, f"Row count for {reason}")
-    return query_all(sql, reason, expected=expected)
-
-
-def count_rows(sql, reason):
-    """COUNT(*) over a SELECT, so truncation cannot pass unnoticed."""
-    rows = query(f"SELECT COUNT(*) AS n FROM ({sql}) AS counted", reason,
-                 limit=1)
-    if not rows:
-        return None
-    value = (rows[0] or {}).get("n")
     try:
-        return int(str(value).replace(",", ""))
-    except (TypeError, ValueError):
-        return None
-
-
+        return query(sql, reason)
+    except ReportError as first:
+        print(f"  {reason}: retrying once after {first}",
+              file=sys.stderr, flush=True)
+        return query(sql, reason)
 def workspace(command, user, scope="agent", json_file=None):
     """One psd-workspace (gws) call.
 
@@ -601,203 +439,83 @@ def _loose_year(name):
     return f"{start}-{end[-2:]}" if end else start
 
 
-def fetch_roster(schoolid, yearid):
-    """Homeroom sections + lead teachers + the grades actually served.
+def fetch_sections(schoolid, yearid, grade, course):
+    """The homerooms and lead teachers for ONE grade.
 
-    THE ROSTER DEFINES THE GRADE SPAN. On 2026-08-15 the agent announced
-    "Minter Creek is a K-2 school", invented the justification, and scoped a
-    whole report to it; Minter Creek is K-5. Nothing here may assert a span
-    that was not queried.
+    R&A's "Adapting to a school" step 1: `section_enrollments` for this year
+    and school where `course_code` is the grade's GR0xx code, ordered by
+    sectionid — that order becomes the classroom column order in the sheet.
 
     `role_name = 'Lead Teacher'` and never `priorityorder`, which is often
-    null. An unresolvable teacher is labelled by build_tab, not dropped.
+    null; an unresolvable teacher is labelled by layout.py, never dropped,
+    because those students are still in the numbers.
+
+    One call per grade rather than one for the school: a big building can have
+    more homerooms than the MCP will display in a single result, and the whole
+    report is built on this list being complete.
     """
-    rows = query_all(
-        "SELECT DISTINCT se.sectionid::text AS sectionid, "
-        "  se.course_code, "
-        "  sy.grade_level::text AS grade_level, "
+    rows = query_one(
+        "SELECT DISTINCT se.sectionid AS sectionid, "
         # Live schema: teachers has no teacher_name — only first_name /
         # last_name — and its PK is `id`, not `teacherid`.
         "  (t.first_name || ' ' || t.last_name) AS teacher_name "
         "FROM section_enrollments se "
-        "JOIN school_year_enrollments sy "
-        "  ON sy.studentid = se.studentid AND sy.yearid = se.yearid "
         "LEFT JOIN section_teachers st "
         "  ON st.sectionid = se.sectionid AND st.role_name = 'Lead Teacher' "
         "LEFT JOIN teachers t ON t.id = st.teacherid "
         f"WHERE se.yearid = {int(yearid)} AND se.schoolid = {int(schoolid)} "
-        "  AND se.course_code LIKE 'GR0%'",
-        "Homeroom roster and lead teachers for a quartile growth report",
+        f"  AND se.course_code = '{sql_escape(course)}' "
+        "ORDER BY se.sectionid",
+        f"Homeroom sections and lead teachers for grade {GRADE_LABELS[grade]}",
     )
-    if not rows:
-        raise ReportError(
-            f"no GR0x homeroom sections for schoolid={schoolid} yearid={yearid}"
-        )
-    grades, teachers = {}, {}
+    sections, teachers = [], {}
     for row in rows:
-        grade = str(row.get("grade_level") or "").strip()
         section = str(row.get("sectionid") or "").strip()
-        if not grade or not section:
+        if not section or section in sections:
             continue
-        grades.setdefault(grade, [])
-        if section not in grades[grade]:
-            grades[grade].append(section)
+        sections.append(section)
         name = row.get("teacher_name")
-        if name:
-            teachers[section] = str(name)
-    return {"grades": grades, "teachers": teachers}
+        if name and str(name).strip():
+            teachers[section] = str(name).strip()
+    return {"sections": sections, "teachers": teachers}
 
 
-def extraction_sql(schoolid, yearid, grade, measures, baseline):
-    """Raw matched pairs. No NTILE, no norms join, no GROUPING SETS.
+def fetch_roster(schoolid, yearid):
+    """Every grade this school actually serves, with its homerooms.
 
-    Window functions do not complete against dibels_scores on this MCP at any
-    size — a bare NTILE(4) over ~1,100 rows timed out on 2026-08-15 while the
-    same query without it ran in seconds. This is the only shape that runs,
-    not a preference. Every non-text column is cast INSIDE the aggregate,
-    because export/serialisation drops unqualified numerics.
+    THE ROSTER DEFINES THE GRADE SPAN — nothing here may assert one that was
+    not queried.
     """
-    measure_list = ", ".join(f"'{sql_escape(m)}'" for m in measures)
-    return (
-        "WITH stu AS ("
-        "  SELECT assessment_group AS meas, studentid, \"window\", AVG(score) AS s"
-        "  FROM dibels_scores"
-        f"  WHERE yearid = {int(yearid)} AND grade_level = '{sql_escape(grade)}'"
-        f"    AND assessment_group IN ({measure_list})"
-        f"    AND \"window\" IN ('{sql_escape(baseline)}', 'Spring')"
-        "  GROUP BY 1,2,3), "
-        "m AS ("
-        "  SELECT f.meas, f.studentid, f.s AS b, sp.s AS e"
-        "  FROM stu f"
-        "  JOIN stu sp ON sp.studentid = f.studentid AND sp.meas = f.meas"
-        "    AND sp.\"window\" = 'Spring'"
-        f"  WHERE f.\"window\" = '{sql_escape(baseline)}'), "
-        "hr AS (SELECT DISTINCT ON (studentid) studentid, sectionid"
-        "  FROM section_enrollments"
-        f"  WHERE yearid = {int(yearid)} AND schoolid = {int(schoolid)}"
-        "    AND course_code LIKE 'GR0%'"
-        "  ORDER BY studentid, dateleft DESC), "
-        "sch AS (SELECT DISTINCT studentid FROM school_year_enrollments"
-        f"  WHERE yearid = {int(yearid)} AND schoolid = {int(schoolid)}"
-        f"    AND grade_level = '{sql_escape(grade)}') "
-        "SELECT m.meas, m.studentid::text AS studentid, m.b::text AS b, "
-        "  m.e::text AS e, hr.sectionid::text AS sectionid, "
-        "  (sch.studentid IS NOT NULL)::text AS in_sch, "
-        "  f.frl::text AS low_income, "
-        "  sp.special_education::text AS special_ed "
-        "FROM m LEFT JOIN hr USING (studentid) LEFT JOIN sch USING (studentid) "
-        # DISTRICT-WIDE, never scoped to the school. On 2026-08-15 every grade
-        # reported School and District identically — grade K showed 18/18
-        # against a district cohort of 558 — because only this school's
-        # students carried a flag, so the district cell WAS the school cell and
-        # its complement absorbed 540 unflagged students. Every number looked
-        # plausible.
-        # NOT year-scoped: students_frl(studentid, frl) and
-        # students_specialed(studentid, special_education, iep, s504, ...)
-        # have no yearid at all. The predicate errored the WHOLE extraction
-        # for every grade, and because a failed query read as an empty one,
-        # the report came out with a tab per grade and no data in any of
-        # them — the exact "looks complete, isn't" outcome this script was
-        # written to prevent.
-        "LEFT JOIN students_frl f ON f.studentid = m.studentid "
-        "LEFT JOIN students_specialed sp ON sp.studentid = m.studentid"
-    )
+    sections, teachers = {}, {}
+    for grade, cfg in sorted(gen_sql.MEASURES.items()):
+        found = fetch_sections(schoolid, yearid, grade, cfg["course"])
+        if not found["sections"]:
+            continue
+        sections[grade] = found["sections"]
+        teachers.update(found["teachers"])
+    if not sections:
+        raise ReportError(
+            f"no GR0x homeroom sections for schoolid={schoolid} "
+            f"yearid={yearid} — this school serves no K-5 grades in that year"
+        )
+    return {"sections": sections, "teachers": teachers}
 
 
-SUBGROUPS = (
-    "low_income=Low Income|Non-Low Income",
-    "special_ed=Special Ed|Non-Special Ed",
-)
+def section_ids(sections):
+    """Section ids as ints, for splicing into SQL.
 
-
-def sba_sql(schoolid, yearid, grade):
-    """SBA scale growth vs the prior-year summative, quartiled on that prior score.
-
-    smarter_balanced_scores mixes IAB/FIAB participation rows (score = 1) with
-    summatives, so the two filters are mandatory — unfiltered averages are
-    garbage (SKILL.md, psd-data pitfalls).
+    The MCP returns them as text; gen_sql inlines them into FILTER clauses.
+    A non-numeric id would be a SQL injection point AND a broken query, so it
+    fails here rather than in the warehouse.
     """
-    prior_grade = str(int(grade) - 1)
-    return (
-        "WITH cur AS ("
-        "  SELECT studentid, assessment_group AS meas, AVG(score) AS e,"
-        "         AVG(CASE WHEN met_standard THEN 100.0 ELSE 0.0 END) AS metv"
-        "  FROM smarter_balanced_scores"
-        f"  WHERE yearid = {int(yearid)} AND grade_level = '{sql_escape(grade)}'"
-        "    AND assessment_group LIKE 'Summative%' AND is_strand = false"
-        "  GROUP BY 1,2), "
-        "prior AS ("
-        "  SELECT studentid, assessment_group AS meas, AVG(score) AS b"
-        "  FROM smarter_balanced_scores"
-        f"  WHERE yearid = {int(yearid) - 1}"
-        f"    AND grade_level = '{sql_escape(prior_grade)}'"
-        "    AND assessment_group LIKE 'Summative%' AND is_strand = false"
-        "  GROUP BY 1,2), "
-        "hr AS (SELECT DISTINCT ON (studentid) studentid, sectionid"
-        "  FROM section_enrollments"
-        f"  WHERE yearid = {int(yearid)} AND schoolid = {int(schoolid)}"
-        "    AND course_code LIKE 'GR0%'"
-        "  ORDER BY studentid, dateleft DESC), "
-        "sch AS (SELECT DISTINCT studentid FROM school_year_enrollments"
-        f"  WHERE yearid = {int(yearid)} AND schoolid = {int(schoolid)}"
-        f"    AND grade_level = '{sql_escape(grade)}') "
-        "SELECT ('SBA ' || cur.meas) AS meas, cur.studentid::text AS studentid, "
-        "  prior.b::text AS b, cur.e::text AS e, cur.metv::text AS met_pct, "
-        "  hr.sectionid::text AS sectionid, "
-        "  (sch.studentid IS NOT NULL)::text AS in_sch "
-        "FROM cur JOIN prior USING (studentid, meas) "
-        "LEFT JOIN hr USING (studentid) LEFT JOIN sch USING (studentid)"
-    )
+    out = []
+    for value in sections:
+        try:
+            out.append(int(str(value).strip()))
+        except (TypeError, ValueError):
+            raise ReportError(f"non-numeric sectionid from the roster: {value!r}")
+    return out
 
-
-def discover_measures(yearid, grade):
-    """Ask the warehouse which measures exist, never assume the spelling.
-
-    The norms file uses UO's names (ORF-WRC, NWF-CLS); the warehouse may
-    differ, and the join is on that string. A mismatch silently produces NULL
-    percentiles, which read as "no growth" rather than "no norms".
-    """
-    rows = query(
-        "SELECT DISTINCT assessment_group FROM dibels_scores "
-        f"WHERE yearid = {int(yearid)} AND grade_level = '{sql_escape(grade)}'",
-        f"List DIBELS measures present for grade {grade}",
-    )
-    return sorted(
-        str(r.get("assessment_group")) for r in rows if r.get("assessment_group")
-    )
-
-
-def aggregate_rows(rows_path, grade, baseline, no_norms=False, subgroups=(),
-                   measures=()):
-    argv = [
-        PYTHON, str(HERE / "aggregate.py"),
-        "--rows", str(rows_path),
-        "--grade", str(grade),
-        "--baseline", baseline,
-        "--spring", "Spring",
-    ]
-    if no_norms:
-        argv.append("--no-norms")
-    for spec in subgroups or ():
-        argv += ["--subgroup", spec]
-    for spec in measure_as_args(measures or ()):
-        argv += ["--measure-as", spec]
-    return run_json(argv, f"aggregate.py (grade {grade})")
-
-
-def build_values(records_path, school, grade, year, window, teachers, gaps=()):
-    argv = [
-        PYTHON, str(HERE / "build_tab.py"),
-        "--rows", str(records_path),
-        "--school", school,
-        "--grade", str(grade),
-        "--year", year,
-        "--window", window,
-        "--teachers", json.dumps(teachers),
-        "--gaps", json.dumps(list(gaps)),
-        "--emit", "values",
-    ]
-    return run_json(argv, f"build_tab.py (grade {grade})")
 
 
 # --- spreadsheet -------------------------------------------------------
@@ -946,123 +664,7 @@ def definitions_values():
     }
 
 
-def discover_table(candidates, yearid):
-    """Return the first candidate table that answers, or None.
-
-    i-Ready's table name is not written down anywhere in this skill, unlike
-    smarter_balanced_scores and students_frl. Rather than guess one and have
-    the block vanish, ask — and if none answers, the caller records a VISIBLE
-    gap instead of an absence.
-    """
-    for table in candidates:
-        try:
-            query(f"SELECT 1 FROM {table} WHERE yearid = {int(yearid)}",
-                  f"Confirm {table} exists for the report", limit=1)
-            return table
-        except ReportError:
-            continue
-    return None
-
-
-# One table PER SUBJECT, discovered on 2026-08-17 by asking the warehouse
-# instead of guessing. The three names this used to probe —
-# iready_scores, i_ready_scores, iready_diagnostic_scores — do not exist, so
-# i-Ready reported itself as "table not found" on every run while the data sat
-# there under a different name.
-#
-# Guessing table names was the mistake. These are recorded, and an unknown one
-# still degrades to a stated gap rather than a silent omission.
-IREADY_TABLES_BY_SUBJECT = {
-    "Reading": "iready_reading_diagnostics",
-    "Math": "iready_math_diagnostics",
-}
-
-
-def iready_sql(schoolid, yearid, grade, table, subject):
-    """i-Ready percentile change for ONE subject table.
-
-    Percentile is already national, so no norms lookup — this always runs
-    --no-norms.
-    """
-    return (
-        "WITH stu AS ("
-        f"  SELECT '{sql_escape(subject)}' AS meas, studentid, \"window\","
-        "         AVG(percentile) AS s"
-        f"  FROM {table}"
-        f"  WHERE yearid = {int(yearid)} AND grade_level = '{sql_escape(grade)}'"
-        "    AND \"window\" IN ('Fall', 'Spring')"
-        "  GROUP BY 1,2,3), "
-        "m AS ("
-        "  SELECT f.meas, f.studentid, f.s AS b, sp.s AS e"
-        "  FROM stu f"
-        "  JOIN stu sp ON sp.studentid = f.studentid AND sp.meas = f.meas"
-        "    AND sp.\"window\" = 'Spring'"
-        "  WHERE f.\"window\" = 'Fall'), "
-        "hr AS (SELECT DISTINCT ON (studentid) studentid, sectionid"
-        "  FROM section_enrollments"
-        f"  WHERE yearid = {int(yearid)} AND schoolid = {int(schoolid)}"
-        "    AND course_code LIKE 'GR0%'"
-        "  ORDER BY studentid, dateleft DESC), "
-        "sch AS (SELECT DISTINCT studentid FROM school_year_enrollments"
-        f"  WHERE yearid = {int(yearid)} AND schoolid = {int(schoolid)}"
-        f"    AND grade_level = '{sql_escape(grade)}') "
-        "SELECT ('i-Ready ' || m.meas) AS meas, m.studentid::text AS studentid, "
-        "  m.b::text AS b, m.e::text AS e, hr.sectionid::text AS sectionid, "
-        "  (sch.studentid IS NOT NULL)::text AS in_sch "
-        "FROM m LEFT JOIN hr USING (studentid) LEFT JOIN sch USING (studentid)"
-    )
-
-
-def run_block(work_dir, tag, grade, build_sql, reason, log, gaps,
-              label, no_norms=False, subgroups=()):
-    """Extract + aggregate one measure family, recording a GAP if it fails.
-
-    A block that returns nothing, errors, or has no table must show up in the
-    workbook — not only in a log the principal never reads. Silently omitting
-    SBA or i-Ready produces a report that looks complete and is not, which is
-    the exact failure this whole redesign exists to end.
-    """
-    try:
-        rows = step(work_dir, f"{tag}-rows",
-                    lambda: query_all(build_sql(), reason), log)
-    except ReportError as exc:
-        log(f"  {label}: FAILED — {exc}")
-        gaps.append(f"{label}: not included (query failed: {str(exc)[:160]})")
-        return []
-    if not rows:
-        log(f"  {label}: no matched rows")
-        gaps.append(f"{label}: not included (no matched students)")
-        return []
-    log(f"  {label}: {len(rows)} rows")
-    return step(work_dir, f"{tag}-agg",
-                lambda: aggregate_rows(work_dir / f"{tag}-rows.json", grade,
-                                       "Fall", no_norms=no_norms,
-                                       subgroups=subgroups), log)
-
-
 # --- checkpointing ------------------------------------------------------
-
-
-SBA_WINDOW = "prior year→this year"
-
-
-def label_windows(windows, records):
-    """Give every measure block the window it was ACTUALLY measured over.
-
-    SBA compares against the PRIOR YEAR's summative, so the grade's
-    Fall→Spring fallback would render "SBA ELA (Fall→Spring)" — a window that
-    was never measured. This file's own rule, from the build_tab docstring: a
-    Fall→Winter block labelled Fall→Spring is a wrong report, not a cosmetic
-    slip.
-
-    setdefault, so a real per-measure label always wins over the fallback.
-    """
-    labelled = dict(windows)
-    for record in records:
-        meas = str(record.get("meas") or "")
-        if meas.startswith("SBA "):
-            labelled.setdefault(meas, SBA_WINDOW)
-    return labelled
 
 
 def default_work_dir(slug, year, user):
@@ -1107,6 +709,52 @@ def step(work_dir, name, produce, log):
     return value
 
 
+def build_school(school, roster):
+    """The config gen_sql wants: schoolid, name, and sections per grade.
+
+    R&A's generator took this from a hardcoded SCHOOLS dict — the handoff's
+    step 2 is "either add a SCHOOLS entry and regenerate, or substitute
+    schoolid + sectionids into the queries directly (they are otherwise
+    school-independent)". This builds the entry from the live roster instead,
+    so any school works without editing the generator.
+    """
+    return {
+        "id": int(school["schoolid"]),
+        "name": school["school_name"],
+        "sections": {grade: section_ids(ids)
+                     for grade, ids in roster["sections"].items()},
+    }
+
+
+def run_queries(specs, sqldir, work_dir, log):
+    """Run every generated query once, checkpointed by filename.
+
+    Checkpointed individually, not per grade: a run that dies on query 31 of
+    40 resumes at 31. A block whose query fails is recorded as a GAP and the
+    report continues — the alternative is losing 39 good queries to one bad
+    one, and the gap is written into the tab where the reader can see it.
+    """
+    results, gaps = {}, {}
+    for spec in specs:
+        name = spec["name"]
+        sql = (sqldir / name).read_text()
+        try:
+            rows = step(
+                work_dir, f"q-{name[:-4]}",
+                lambda s=sql, n=name: query_one(
+                    s, f"Quartile growth report: {n[:-4]}"),
+                log)
+        except ReportError as exc:
+            log(f"  {name}: FAILED — {exc}")
+            gaps.setdefault(spec["grade"], []).append(
+                f"{spec['title']}: not included (query failed: "
+                f"{str(exc)[:160]})")
+            continue
+        results[name] = rows
+        log(f"  {name}: {len(rows)} rows")
+    return results, gaps
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Build a full quartile growth report in one command.",
@@ -1135,11 +783,10 @@ def main() -> int:
     work_dir = pathlib.Path(args.work_dir or default_work_dir(
         slug, args.year, args.user))
     work_dir.mkdir(parents=True, exist_ok=True)
-    # The checkpoints are not metadata: grade-<g>-rows.json holds studentid
-    # paired with assessment scores, which is student-level FERPA data sitting
-    # in a predictable /tmp path for as long as the container lives. Default
-    # mkdir permissions make that world-readable. Owner-only costs nothing and
-    # does not depend on an assumption about how ephemeral the sandbox is.
+    # Aggregates now, not student rows — but the checkpoints still hold
+    # classroom-level cells for real children in a predictable /tmp path for
+    # as long as the container lives, and default mkdir permissions make that
+    # world-readable. Owner-only costs nothing.
     try:
         work_dir.chmod(0o700)
     except OSError as exc:
@@ -1151,37 +798,48 @@ def main() -> int:
                       lambda: resolve_school(args.school), log)
         year = step(work_dir, "year", lambda: resolve_year(args.year), log)
         schoolid, yearid = school["schoolid"], year["yearid"]
-        log(f"  {school['school_name']} ({schoolid}), {year['year_name']} ({yearid})")
+        log(f"  {school['school_name']} ({schoolid}), "
+            f"{year['year_name']} ({yearid})")
 
         roster = step(work_dir, "roster",
                       lambda: fetch_roster(schoolid, yearid), log)
-        served = sorted(roster["grades"], key=lambda g: (g != "K", g))
-        grades = [g.strip() for g in args.grades.split(",")] if args.grades else served
-        unknown = [g for g in grades if g not in roster["grades"]]
-        if unknown:
-            raise ReportError(
-                f"grade(s) {unknown} are not in this school's roster "
-                f"(served: {served})"
-            )
-        log(f"  grades served: {', '.join(served)}")
+        # JSON turns the integer grade keys into strings on the way back out
+        # of a checkpoint. Normalised here so a resumed run and a fresh one
+        # agree about which grades exist.
+        roster["sections"] = {int(g): v
+                              for g, v in roster["sections"].items()}
+        served = sorted(roster["sections"])
+        if args.grades:
+            wanted = [g.strip() for g in args.grades.split(",") if g.strip()]
+            unknown = [g for g in wanted if GRADE_BY_LABEL.get(g) not in served]
+            if unknown:
+                raise ReportError(
+                    f"grade(s) {unknown} are not in this school's roster "
+                    f"(served: {[GRADE_LABELS[g] for g in served]})")
+            grades = [GRADE_BY_LABEL[g] for g in wanted]
+        else:
+            grades = served
+        log("  grades served: "
+            + ", ".join(GRADE_LABELS[g] for g in served))
+        for grade in served:
+            log(f"    grade {GRADE_LABELS[grade]}: "
+                f"{len(roster['sections'][grade])} homerooms")
 
-        iready_tables = step(
-            work_dir, "iready-tables",
-            lambda: {subject: table
-                     for subject, table in IREADY_TABLES_BY_SUBJECT.items()
-                     if discover_table([table], yearid)}, log)
-        missing = sorted(set(IREADY_TABLES_BY_SUBJECT) - set(iready_tables))
-        # The TABLE names, not the subject keys. This PR exists because the
-        # wrong table names were baked in; a log that hides which table
-        # answered is the one line you would want next time.
-        log(f"  i-Ready: {', '.join(sorted(iready_tables.values())) or 'NONE FOUND'}"
-            + (f" (missing: {', '.join(missing)})" if missing else ""))
+        config = build_school(school, roster)
+        config["sections"] = {g: config["sections"][g] for g in grades}
+        sqldir = work_dir / "sql"
+        gen_sql.generate(config, sqldir, year=int(yearid))
+        specs = gen_sql.specs(config)
+        log(f"  {len(specs)} queries generated into {sqldir}")
 
         if dry_run:
             print(json.dumps({
                 "school": school, "year": year,
-                "grades_served": served, "grades_planned": grades,
-                "sections": {g: roster["grades"][g] for g in grades},
+                "grades_served": [GRADE_LABELS[g] for g in served],
+                "grades_planned": [GRADE_LABELS[g] for g in grades],
+                "sections": {GRADE_LABELS[g]: config["sections"][g]
+                             for g in grades},
+                "queries": [s["name"] for s in specs],
                 "work_dir": str(work_dir),
             }, indent=1))
             return 0
@@ -1192,131 +850,33 @@ def main() -> int:
                         lambda: {"id": create_workbook(title, args.user)},
                         log)["id"]
         url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
-        # Share IMMEDIATELY, not after the last grade. The URL is printed the
-        # moment the workbook exists, and until the transfer the agent account
-        # owns it — so a run that dies partway through would surface a link
-        # the user cannot open. That undercuts the whole point of a
-        # diagnosable partial run.
+        # Share IMMEDIATELY, not after the last grade. Until the transfer the
+        # agent account owns the file, so a run that dies partway would
+        # surface a link the user cannot open — which undercuts the whole
+        # point of a diagnosable partial run.
         step(work_dir, "shared",
              lambda: {"result": share_workbook(sheet_id, args.user)}, log)
         log(f"  workbook: {url}")
 
+        results, gaps = run_queries(specs, sqldir, work_dir, log)
+
         for grade in grades:
-            done_marker = f"grade-{grade}-written"
+            label = GRADE_LABELS[grade]
+            done_marker = f"grade-{label}-written"
             if (work_dir / f"{done_marker}.json").exists():
-                log(f"grade {grade}: already written")
+                log(f"grade {label}: already written")
                 continue
-            log(f"grade {grade}: extracting")
-            gaps = []
-            measures = step(work_dir, f"grade-{grade}-measures",
-                            lambda g=grade: discover_measures(yearid, g), log)
-            if not measures:
-                log(f"grade {grade}: no DIBELS measures present")
-                gaps.append(
-                    "DIBELS growth: not included "
-                    "(no DIBELS measures recorded for this grade)")
-
-            # One pass per distinct baseline. Grade 1 ORF starts mid-year, so
-            # it runs Winter→Spring while the rest of grade 1 runs
-            # Fall→Spring; a single pass would return zero matched pairs for
-            # the odd measure and drop it from the tab silently.
-            groups = group_by_baseline(grade, measures)
-            windows = {}
-            records = []
-            for baseline, group in sorted(groups.items()):
-                tag = f"grade-{grade}-{baseline.lower()}"
-                log(f"grade {grade}: {baseline}→Spring for {', '.join(group)}")
-                try:
-                    rows = step(
-                        work_dir, f"{tag}-rows",
-                        lambda g=grade, b=baseline, m=group: extract_verified(
-                            extraction_sql(schoolid, yearid, g, m, b),
-                            f"Matched {b}/Spring pairs for grade {g}"),
-                        log)
-                except ReportError as exc:
-                    log(f"grade {grade}: {baseline} extraction FAILED — {exc}")
-                    gaps.append(
-                        f"DIBELS {', '.join(group)} ({baseline}→Spring): "
-                        f"not included (query failed: {str(exc)[:160]})")
-                    continue
-                if not rows:
-                    # SKILL.md's contract is "anything it cannot produce is
-                    # written INTO the tab", and the DIBELS block is the one
-                    # the whole report is named for. Logging and moving on
-                    # would leave the primary measures silently absent while
-                    # SBA and i-Ready announced themselves — the exact
-                    # asymmetry that makes a workbook look complete.
-                    log(f"grade {grade}: no {baseline} matched pairs")
-                    gaps.append(
-                        f"DIBELS {', '.join(group)} ({baseline}→Spring): "
-                        "not included (no matched students)")
-                    continue
-                log(f"grade {grade}: {len(rows)} rows ({baseline})")
-
-                records.extend(aggregate_group(
-                    work_dir, tag, grade, baseline, group, log))
-                for measure in group:
-                    windows[measure] = f"{baseline}→Spring"
-
-            # i-Ready. Skipped for K by SKILL.md (not district-representative).
-            if grade != "K":
-                for subject in sorted(IREADY_TABLES_BY_SUBJECT):
-                    table = iready_tables.get(subject)
-                    if not table:
-                        gaps.append(
-                            f"i-Ready {subject}: not included (table "
-                            f"{IREADY_TABLES_BY_SUBJECT[subject]} not found)")
-                        continue
-                    records.extend(run_block(
-                        work_dir, f"grade-{grade}-iready-{subject.lower()}",
-                        grade,
-                        lambda g=grade, t=table, sub=subject: iready_sql(
-                            schoolid, yearid, g, t, sub),
-                        f"i-Ready {subject} Fall/Spring percentiles, "
-                        f"grade {grade}",
-                        log, gaps, f"i-Ready {subject}", no_norms=True))
-
-            # SBA grades 4-5: scale change against the prior-year summative.
-            if grade in ("4", "5"):
-                records.extend(run_block(
-                    work_dir, f"grade-{grade}-sba", grade,
-                    lambda g=grade: sba_sql(schoolid, yearid, g),
-                    f"SBA summative pairs for grade {grade}",
-                    log, gaps, "SBA grades 4-5", no_norms=True))
-            elif grade == "3":
-                # Grade 3 has no prior SBA to quartile on — SKILL.md puts it on
-                # the Fall i-Ready quartile instead, which needs the i-Ready
-                # table. Stated rather than silently absent.
-                gaps.append(
-                    "SBA grade 3: not included (needs the Fall i-Ready "
-                    "baseline; implement once the i-Ready table is confirmed)")
-
-            if not records:
-                log(f"grade {grade}: nothing to report — writing gaps only")
-
-            windows = label_windows(windows, records)
-
-            records_path = work_dir / f"grade-{grade}-records.json"
-            records_path.write_text(json.dumps(records))
-            # The fallback label must follow the GRADE, not the global default.
-            # Hardcoding "Fall→Spring" here mislabels every K block, where each
-            # measure's baseline is actually Winter. Only reached for a measure
-            # absent from the discovered set, so it is latent — but a wrong
-            # window label misstates what was measured, which is the one thing
-            # a principal cannot check from the sheet.
-            grade_default = BASELINE_BY_GRADE.get(str(grade), BASELINE_DEFAULT)
-            windows.setdefault("*", f"{grade_default}→Spring")
-            body = step(
-                work_dir, f"grade-{grade}-values",
-                lambda g=grade, w=windows, gp=gaps: build_values(
-                    records_path, school["school_name"], g,
-                    year["year_name"], json.dumps(w), roster["teachers"], gp),
-                log)
-
-            add_tab(sheet_id, grade, args.user, work_dir, log)
-            write_tab(sheet_id, body, args.user, work_dir, grade)
-            step(work_dir, done_marker, lambda: {"records": len(records)}, log)
-            log(f"grade {grade}: written")
+            blocks = [(spec, results.get(spec["name"], []))
+                      for spec in specs if spec["grade"] == grade]
+            values = layout.tab(school["school_name"], grade,
+                                year["year_name"], blocks,
+                                roster["teachers"], gaps.get(grade, ()))
+            add_tab(sheet_id, label, args.user, work_dir, log)
+            write_tab(sheet_id, layout.body_for(label, values),
+                      args.user, work_dir, label)
+            step(work_dir, done_marker,
+                 lambda b=blocks: {"blocks": len(b)}, log)
+            log(f"grade {label}: written ({len(blocks)} blocks)")
 
         if not (work_dir / "definitions-written.json").exists():
             add_tab(sheet_id, "Definitions", args.user, work_dir, log)
@@ -1324,7 +884,11 @@ def main() -> int:
                       work_dir, "Definitions")
             step(work_dir, "definitions-written", lambda: {"ok": True}, log)
 
-        log("done")
+        failed = sum(len(v) for v in gaps.values())
+        if failed:
+            log(f"done, with {failed} block(s) missing — see the tabs")
+        else:
+            log("done")
         print(url)
         return 0
     except ReportError as exc:

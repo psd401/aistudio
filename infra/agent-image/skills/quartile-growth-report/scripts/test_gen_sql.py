@@ -124,5 +124,107 @@ class TheNonNegotiablesAreInTheSql(unittest.TestCase):
             self.assertNotIn("priorityorder", text, name)
 
 
+class TheManifestMatchesWhatIsGenerated(unittest.TestCase):
+    """specs() says how to READ each query back; generate() writes them.
+
+    They live in one module so the sheet layout is derived from the same list
+    that built the SELECT. If they drift, a column gets read under the wrong
+    heading and every number in that block is mislabelled — silently, because
+    the numbers are all real.
+    """
+
+    def test_every_generated_file_has_a_spec(self):
+        out = pathlib.Path(tempfile.mkdtemp())
+        files = {p.name for p in
+                 gen_sql.generate(gen_sql.SCHOOLS["evergreen"], out)}
+        names = [s["name"] for s in gen_sql.specs(gen_sql.SCHOOLS["evergreen"])]
+        self.assertEqual(sorted(names), sorted(files))
+        self.assertEqual(len(names), len(set(names)), "duplicate spec")
+
+    def test_a_quartile_spec_carries_the_sections_it_pivots_on(self):
+        specs = {s["name"]: s
+                 for s in gen_sql.specs(gen_sql.SCHOOLS["evergreen"])}
+        spec = specs["g0_A_dibels_pr.sql"]
+        self.assertEqual(spec["shape"], "quartile")
+        self.assertEqual(spec["sections"],
+                         gen_sql.SCHOOLS["evergreen"]["sections"][0])
+        # The value prefixes must be the ones the SELECT aliased.
+        sql = (FIXTURES / "g0_A_dibels_pr.sql").read_text()
+        for prefix, _ in spec["values"]:
+            self.assertIn(f" AS {prefix}1", sql)
+            self.assertIn(f" AS {prefix}_sch", sql)
+
+    def test_the_orf_block_is_labelled_with_its_own_baseline(self):
+        # Grade 1 ORF starts mid-year: Winter->Spring while the rest of the
+        # grade is Fall->Spring. Labelling both the same misstates what was
+        # measured, which is the one thing a principal cannot check.
+        specs = {s["name"]: s
+                 for s in gen_sql.specs(gen_sql.SCHOOLS["evergreen"])}
+        self.assertIn("Winter", specs["g1_A2_orf_pr.sql"]["title"])
+        self.assertIn("Fall", specs["g1_A_dibels_pr.sql"]["title"])
+
+
+class TheSchoolAndYearAreParameters(unittest.TestCase):
+    """R&A's generator hardcoded both; the skill discovers them.
+
+    Accepting a `year` argument and then interpolating the module constant is
+    exactly the dead-parameter bug this skill has shipped before — the tests
+    pass, the report is silently built for the wrong year.
+    """
+
+    def _blob(self, **kwargs):
+        out = pathlib.Path(tempfile.mkdtemp())
+        return "".join(p.read_text() for p in
+                       gen_sql.generate(gen_sql.SCHOOLS["evergreen"], out,
+                                        **kwargs))
+
+    def test_the_year_argument_reaches_every_query(self):
+        blob = self._blob(year=34)
+        self.assertIn("yearid=34", blob)
+        self.assertNotIn("yearid=35", blob)
+
+    def test_the_prior_year_sba_follows_the_requested_year(self):
+        self.assertIn("yearid=33", self._blob(year=34))
+
+    def test_the_school_id_reaches_every_scoped_query(self):
+        out = pathlib.Path(tempfile.mkdtemp())
+        blob = "".join(p.read_text() for p in gen_sql.generate(
+            {"id": 4242, "name": "X",
+             "sections": {0: [11], 1: [12]}}, out))
+        self.assertIn("schoolid=4242", blob)
+        self.assertNotIn("schoolid=3055", blob)
+
+
+class ASchoolNeedNotServeEveryGrade(unittest.TestCase):
+    """A grade with no homeroom produces no query, not a query over nothing.
+
+    The SBA, proficiency and levels families are written OUTSIDE the grade
+    loop, so a guard that only covered the loop would still emit grade-3/4/5
+    queries for a K-2 building — against sections that do not exist.
+    """
+
+    def setUp(self):
+        self.out = pathlib.Path(tempfile.mkdtemp())
+        self.names = {p.name for p in gen_sql.generate(
+            {"id": 3055, "name": "K-2 School",
+             "sections": {0: [11], 1: [12], 2: [13]}}, self.out)}
+
+    def test_only_the_served_grades_are_generated(self):
+        self.assertTrue(self.names)
+        self.assertEqual(
+            sorted(n for n in self.names
+                   if n.startswith(("g3_", "g4_", "g5_"))), [])
+
+    def test_the_served_grades_are_complete(self):
+        for grade in (0, 1, 2):
+            self.assertIn(f"g{grade}_A_dibels_pr.sql", self.names)
+            self.assertIn(f"g{grade}_levels.sql", self.names)
+
+    def test_a_school_with_no_sections_at_all_generates_nothing(self):
+        out = pathlib.Path(tempfile.mkdtemp())
+        self.assertEqual(
+            gen_sql.generate({"id": 1, "name": "X", "sections": {}}, out), [])
+
+
 if __name__ == "__main__":
     unittest.main()
