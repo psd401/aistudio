@@ -2,6 +2,28 @@
 
 From James Cantonwine (R&A). Everything here was validated against psd-data for Evergreen Elementary and Purdy Elementary, 2025-26. Goal: your Chat-agent skill should be a **transcription of this material, not a fresh design** — every non-obvious decision below cost a query cycle to discover.
 
+> **Editorial note — added by the skill, not by R&A. Everything below this
+> block is James's document verbatim; nothing in it has been altered.**
+>
+> This was written for R&A's own workflow, where a person adapts the generator
+> by hand. In this skill `run_report.py` does that automatically: it queries
+> the roster, builds the school config, and calls `gen_sql.generate()`. Two
+> consequences for anyone reading further:
+>
+> - **Ignore the second half of "Adapting to a school" step 2.** Substituting
+>   ids into a pre-written query is a valid thing for a person to do at a psql
+>   prompt with the school in front of them. It is not valid here: the queries
+>   are pinned to Evergreen, and a mis-swapped id returns real, plausible,
+>   internally consistent numbers for the wrong school in a document a
+>   principal reads as fact. Generate; never hand-edit a pinned query.
+> - **The `sql-evergreen/` paths describe R&A's bundle layout.** In this repo
+>   those 40 queries live in `test-fixtures/`, and they are deliberately NOT in
+>   the agent image — they exist so `test_gen_sql.py` can byte-compare the
+>   generator against them.
+>
+> The norms fragments, the non-negotiables list and every method decision below
+> apply exactly as written.
+
 ## Contents
 
 | Path | What it is |

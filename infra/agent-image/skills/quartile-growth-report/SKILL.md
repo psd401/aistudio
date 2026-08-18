@@ -167,7 +167,9 @@ public release" on the Definitions tab.
 - `references/SKILL-PROPOSAL.md` — R&A's spec: method, layout, and the core
   query with parameter slots (`:yearid`, `:schoolid`, `:course`, `:sec1`).
   Read this if you need to understand a query's shape.
-- `references/HANDOFF.md` — the non-negotiables list, verbatim
+- `references/HANDOFF.md` — the non-negotiables list, verbatim, behind an
+  editorial note marking the one step that does not apply here (hand-editing
+  a pinned query, which R&A did at a psql prompt and this skill must not)
 - `references/definitions.md` — the Definitions tab text
 - `references/layout.md` — per-grade tab layout
 
