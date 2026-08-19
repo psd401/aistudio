@@ -322,9 +322,13 @@ async function deferJob(
   reason: DeferredProcessingReason,
   claimedAttempt: number,
 ): Promise<void> {
-  // Read the elapsed wait BEFORE prepareDeferredProcessingMetrics stamps this
-  // round, so a reason change (scan -> OCR) restarts the cadence at its shortest
-  // delay rather than inheriting the previous reason's backoff.
+  // Measure the wait against the INCOMING `metrics`, never the stamped
+  // `deferredMetrics`: elapsedWaitMs returns 0 when the stored waitReason differs
+  // from this one, which is what restarts the cadence at its shortest delay on a
+  // reason change (scan -> OCR) instead of inheriting the previous reason's
+  // backoff. prepareDeferredProcessingMetrics returns a new object rather than
+  // mutating its argument, so the two calls below are order-independent — it is
+  // the object passed in that matters, not the sequence.
   const waitedMs = elapsedWaitMs(metrics, reason);
   const deferredMetrics = prepareDeferredProcessingMetrics(metrics, reason);
   const delaySeconds = deferDelaySeconds(reason, waitedMs);
