@@ -236,6 +236,15 @@ export interface StreamingCallbacks {
     toolCalls?: ToolCallData[];
     /** Per-step breakdown — populated when maxSteps > 1 (MCP connector multi-step) */
     steps?: StepCallbackData[];
+    /**
+     * True when the run was cut short (wall-clock budget exhausted, or the caller
+     * aborted) rather than completing. AI SDK v6 still fires `onFinish` after an
+     * abort, carrying only the steps that finished before the cut — so `text` may
+     * be empty or a partial answer. Callers MUST NOT persist an aborted run as a
+     * completed assistant turn; doing so is what wrote blank assistant bubbles
+     * into prod Nexus conversations.
+     */
+    aborted?: boolean;
   }) => void;
   onError?: (error: Error) => void;
 

@@ -315,11 +315,17 @@ export class OpenAIAdapter extends BaseProviderAdapter {
       const accumulatedToolCalls: AccumulatedToolCall[] = [];
 
       // Use the SHARED stop conditions (maxSteps + cost cap) and the SHARED
-      // wall-clock timeout (#926). The Responses-API path previously set only
+      // wall-clock budget (#926). The Responses-API path previously set only
       // stepCountIs(maxSteps), silently bypassing the cost cap and timeout for
       // these models. Reuse the base-adapter helpers so all paths enforce both.
       const stopConditions = this.buildStopConditions(enhancedConfig, logger);
-      const abortSignal = this.buildTimeoutSignal(enhancedConfig.timeout, logger);
+      const deadline = this.buildStreamDeadline(
+        enhancedConfig.timeout,
+        enhancedConfig.maxSteps,
+        logger
+      );
+      const abortSignal = deadline.signal;
+      let streamAborted = false;
 
       // Stream with Responses API enhancements
       const result = streamText({
@@ -334,6 +340,10 @@ export class OpenAIAdapter extends BaseProviderAdapter {
         ...(stopConditions.length > 0 && { stopWhen: stopConditions }),
         // Capture tool calls as each step finishes
         onStepFinish: (event) => {
+          // A completed step buys the next one a fresh budget (see
+          // buildStreamDeadline) so tool time doesn't consume the answer's time.
+          deadline.extend();
+
           if (event.toolCalls && Array.isArray(event.toolCalls)) {
             for (const tc of event.toolCalls) {
               const toolCall = tc as { toolCallId: string; toolName: string; args?: unknown; input?: unknown };
@@ -351,12 +361,16 @@ export class OpenAIAdapter extends BaseProviderAdapter {
           }
         },
         onFinish: async (event) => {
+          deadline.dispose();
+          const aborted = streamAborted || deadline.timedOut();
+
           logger.info('OpenAI streamText onFinish triggered', {
             hasText: !!event.text,
             hasUsage: !!event.usage,
             finishReason: event.finishReason,
             textLength: event.text?.length || 0,
-            toolCallCount: accumulatedToolCalls.length
+            toolCallCount: accumulatedToolCalls.length,
+            aborted
           });
 
           // Extract tool results from event.steps (shared method from base adapter)
@@ -368,7 +382,9 @@ export class OpenAIAdapter extends BaseProviderAdapter {
             text: event.text || '',
             usage: transformFinishUsage(event.usage),
             finishReason: event.finishReason || 'stop',
-            toolCalls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined
+            toolCalls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined,
+            // Truncated run — callers must not persist this as a completed turn.
+            aborted
           };
 
           // Call finish callbacks
@@ -381,7 +397,20 @@ export class OpenAIAdapter extends BaseProviderAdapter {
             await callbacks.onFinish(transformedData);
           }
         },
+        // An aborted run reaches neither onError nor onFinish's error path in AI
+        // SDK v6, so without this the wall-clock abort was silent here too.
+        onAbort: ({ steps }) => {
+          streamAborted = true;
+          this.reportStreamAbort({
+            deadline,
+            completedSteps: steps.length,
+            toolCallCount: accumulatedToolCalls.length,
+            callbacks,
+            logger
+          });
+        },
         onError: (event) => {
+          deadline.dispose();
           const error = event.error instanceof Error ? event.error : new Error(String(event.error));
 
           // handleError() logs at warn (transient) or error (permanent) — no need to log here too.
@@ -402,11 +431,17 @@ export class OpenAIAdapter extends BaseProviderAdapter {
         });
       });
       
+      const buildResponse = (options?: { headers?: Record<string, string> }) =>
+        this.buildAbortAwareResponse(
+          result,
+          () => streamAborted || deadline.timedOut(),
+          () => deadline.timedOut(),
+          options
+        );
+
       return {
-        toDataStreamResponse: (options?: { headers?: Record<string, string> }) =>
-          result.toUIMessageStreamResponse ? result.toUIMessageStreamResponse(options) : result.toTextStreamResponse(options),
-        toUIMessageStreamResponse: (options?: { headers?: Record<string, string> }) =>
-          result.toUIMessageStreamResponse ? result.toUIMessageStreamResponse(options) : result.toTextStreamResponse(options),
+        toDataStreamResponse: buildResponse,
+        toUIMessageStreamResponse: buildResponse,
         usage: Promise.resolve(result.usage)
       };
     }

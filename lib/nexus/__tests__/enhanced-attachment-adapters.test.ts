@@ -519,3 +519,201 @@ const defineVisionImageAdapterRepositoryBackedProcessingSuite2 = () => {
 };
 
 describe('VisionImageAdapter repository-backed processing', defineVisionImageAdapterRepositoryBackedProcessingSuite2);
+
+/**
+ * Images used to upload inside send(), so the whole repository round-trip — which
+ * measured 2m18s in prod for a pair of images — ran after the user pressed Send,
+ * freezing the composer. The adapter also never fired the processing callbacks
+ * that drive the UI's "processing" indicator, so there was nothing on screen for
+ * the duration. Both are fixed by uploading at attach time.
+ */
+const defineVisionImageAdapterEagerUploadSuite = () => {
+  beforeEach(() => {
+    mockUploadTemporaryAttachment.mockReset();
+    mockWaitForTemporaryAttachment.mockReset();
+  });
+
+  const pngFile = () =>
+    new File([new Uint8Array([0x89, 0x50, 0x4E, 0x47])], 'diagram.png', {
+      type: 'image/png',
+    });
+
+  it('starts the repository upload at attach time, not at send time', async () => {
+    mockUploadTemporaryAttachment.mockResolvedValue({
+      mode: 'canonical',
+      reference: { bindingId: 'b1', itemId: 43 },
+    });
+    mockWaitForTemporaryAttachment.mockResolvedValue('[[marker]]');
+
+    const adapter = new VisionImageAdapter(undefined, { repositoryBacked: true });
+    await adapter.add({ file: pngFile() });
+
+    // The upload is already in flight before send() is ever called.
+    expect(mockUploadTemporaryAttachment).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports processing start and completion so the UI can show progress', async () => {
+    mockUploadTemporaryAttachment.mockResolvedValue({
+      mode: 'canonical',
+      reference: { bindingId: 'b1', itemId: 43 },
+    });
+    mockWaitForTemporaryAttachment.mockResolvedValue('[[marker]]');
+
+    const onProcessingStart = jest.fn();
+    const onProcessingComplete = jest.fn();
+    const adapter = new VisionImageAdapter(
+      { onProcessingStart, onProcessingComplete },
+      { repositoryBacked: true }
+    );
+
+    const pending = await adapter.add({ file: pngFile() });
+    expect(onProcessingStart).toHaveBeenCalledWith(pending.id);
+
+    await adapter.send(pending);
+    expect(onProcessingComplete).toHaveBeenCalledWith(pending.id);
+  });
+
+  it('reuses the in-flight upload rather than uploading a second time', async () => {
+    mockUploadTemporaryAttachment.mockResolvedValue({
+      mode: 'canonical',
+      reference: { bindingId: 'b1', itemId: 43 },
+    });
+    mockWaitForTemporaryAttachment.mockResolvedValue('[[marker]]');
+
+    const adapter = new VisionImageAdapter(undefined, { repositoryBacked: true });
+    const pending = await adapter.add({ file: pngFile() });
+    const complete = await adapter.send(pending);
+
+    expect(mockUploadTemporaryAttachment).toHaveBeenCalledTimes(1);
+    expect(complete.content).toContainEqual({ type: 'text', text: '[[marker]]' });
+  });
+
+  it('reports completion and surfaces the error when the upload fails', async () => {
+    mockUploadTemporaryAttachment.mockRejectedValue(new Error('storage exploded'));
+
+    const onProcessingComplete = jest.fn();
+    const onError = jest.fn();
+    const adapter = new VisionImageAdapter(
+      { onProcessingComplete, onError },
+      { repositoryBacked: true }
+    );
+
+    const pending = await adapter.add({ file: pngFile() });
+    // The indicator must clear even on failure, or the composer looks stuck.
+    await expect(adapter.send(pending)).rejects.toThrow('storage exploded');
+    expect(onProcessingComplete).toHaveBeenCalledWith(pending.id);
+  });
+
+  it('reports an attach-time failure immediately, without waiting for send()', async () => {
+    // Uploading eagerly moved the failure to attach time too. If it were only
+    // reported from send(), a user who removed the attachment (or never sent)
+    // would never learn the upload failed.
+    mockUploadTemporaryAttachment.mockRejectedValue(new Error('storage exploded'));
+
+    const onError = jest.fn();
+    const adapter = new VisionImageAdapter({ onError }, { repositoryBacked: true });
+    const pending = await adapter.add({ file: pngFile() });
+
+    // Let the background promise settle — send() is never called here.
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    const [attachmentId, error] = onError.mock.calls[0] as [string, Error];
+    expect(attachmentId).toBe(pending.id);
+    // The ORIGINAL error is passed through so callers can tell an auth failure
+    // from an infra blip.
+    expect(error.message).toBe('storage exploded');
+  });
+
+  it('falls back to a synchronous upload when send() sees no in-flight upload', async () => {
+    mockUploadTemporaryAttachment.mockResolvedValue({
+      mode: 'canonical',
+      reference: { bindingId: 'b1', itemId: 43 },
+    });
+    mockWaitForTemporaryAttachment.mockResolvedValue('[[marker]]');
+
+    const adapter = new VisionImageAdapter(undefined, { repositoryBacked: true });
+    // An attachment that never went through THIS adapter's add() (restored draft,
+    // adapter swapped mid-composition) must still resolve its marker.
+    const complete = await adapter.send({
+      id: 'never-added',
+      type: 'image',
+      name: 'diagram.png',
+      contentType: 'image/png',
+      file: pngFile(),
+      status: { type: 'running', reason: 'uploading', progress: 0 },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+
+    expect(mockUploadTemporaryAttachment).toHaveBeenCalledTimes(1);
+    expect(complete.content).toContainEqual({ type: 'text', text: '[[marker]]' });
+  });
+
+  it('does not upload at all when the repository path is disabled', async () => {
+    const adapter = new VisionImageAdapter(undefined, { repositoryBacked: false });
+    const pending = await adapter.add({ file: pngFile() });
+    const complete = await adapter.send(pending);
+
+    expect(mockUploadTemporaryAttachment).not.toHaveBeenCalled();
+    expect(complete.content).toEqual([
+      { type: 'image', image: expect.stringMatching(/^data:image\/png;base64,/) },
+    ]);
+  });
+};
+
+describe('VisionImageAdapter eager upload', defineVisionImageAdapterEagerUploadSuite);
+
+/**
+ * remove() used to be a no-op on both adapters, so a discarded attachment kept
+ * its cached CompleteAttachment (which holds the whole File) and its in-flight
+ * upload promise for the life of the adapter. A prod session showed four uploaded
+ * repositories but only three attachment references in the sent message — an
+ * orphan of exactly this shape.
+ */
+const defineAdapterRemoveCleanupSuite = () => {
+  beforeEach(() => {
+    mockUploadTemporaryAttachment.mockReset();
+    mockWaitForTemporaryAttachment.mockReset();
+    mockUploadTemporaryAttachment.mockResolvedValue({
+      mode: 'canonical',
+      reference: { bindingId: 'b1', itemId: 43 },
+    });
+    mockWaitForTemporaryAttachment.mockResolvedValue('[[marker]]');
+  });
+
+  it('releases the image adapter upload state so the File is not retained', async () => {
+    const imageAdapter = new VisionImageAdapter(undefined, { repositoryBacked: true });
+    const file = new File([new Uint8Array([0x89, 0x50, 0x4E, 0x47])], 'diagram.png', {
+      type: 'image/png',
+    });
+    const pending = await imageAdapter.add({ file });
+
+    await imageAdapter.remove(pending);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((imageAdapter as any).uploadPromises.size).toBe(0);
+  });
+
+  it('releases the document adapter caches so the File is not retained', async () => {
+    const onProcessingStart = jest.fn();
+    const docAdapter = new HybridDocumentAdapter(
+      { onProcessingStart, onProcessingComplete: jest.fn() },
+      { repositoryBacked: true }
+    );
+    const file = new File([new Uint8Array([0x25, 0x50, 0x44, 0x46])], 'calendar.pdf', {
+      type: 'application/pdf',
+    });
+    const pending = await docAdapter.add({ file });
+    // Let the eager background upload settle into processedCache.
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    await docAdapter.remove(pending);
+
+    /* eslint-disable @typescript-eslint/no-explicit-any */
+    expect((docAdapter as any).processedCache.size).toBe(0);
+    expect((docAdapter as any).processingPromises.size).toBe(0);
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+  });
+};
+
+describe('attachment adapter remove() cleanup', defineAdapterRemoveCleanupSuite);

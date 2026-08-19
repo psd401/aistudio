@@ -138,6 +138,8 @@ import {
 import { buildRepositorySourceObjectKey } from "../../../lib/repositories/content-platform/object-key";
 import {
   classifyContentProcessingError,
+  deferDelaySeconds,
+  elapsedWaitMs,
   PermanentContentProcessingError,
   prepareDeferredProcessingMetrics,
   processingRetryDelaySeconds,
@@ -206,7 +208,6 @@ const dataAutomationProjectArn = requiredEnvironment("BDA_DATA_AUTOMATION_PROJEC
 const dataAutomationProfileArn = requiredEnvironment("BDA_DATA_AUTOMATION_PROFILE_ARN");
 const databaseSecretArn = requiredEnvironment("DATABASE_SECRET_ARN");
 const databaseHost = requiredEnvironment("DATABASE_HOST");
-const DEFER_SECONDS = 60;
 const DISPATCH_BATCH_SIZE = 25;
 const environment = requiredEnvironment("ENVIRONMENT");
 
@@ -321,7 +322,29 @@ async function deferJob(
   reason: DeferredProcessingReason,
   claimedAttempt: number,
 ): Promise<void> {
+  // Measure the wait against the INCOMING `metrics`, never the stamped
+  // `deferredMetrics`: elapsedWaitMs returns 0 when the stored waitReason differs
+  // from this one, which is what restarts the cadence at its shortest delay on a
+  // reason change (scan -> OCR) instead of inheriting the previous reason's
+  // backoff. prepareDeferredProcessingMetrics returns a new object rather than
+  // mutating its argument, so the two calls below are order-independent — it is
+  // the object passed in that matters, not the sequence.
+  const waitedMs = elapsedWaitMs(metrics, reason);
   const deferredMetrics = prepareDeferredProcessingMetrics(metrics, reason);
+  const delaySeconds = deferDelaySeconds(reason, waitedMs);
+
+  // The reason was previously written only to lastErrorCode, so diagnosing a slow
+  // upload from CloudWatch alone was impossible — the reason had to be inferred
+  // from the gaps between calls. Log it.
+  log.info("Deferring content processing job", {
+    jobId: message.jobId,
+    itemVersionId: message.itemVersionId,
+    reason,
+    delaySeconds,
+    waitedMs,
+    attempt: claimedAttempt,
+  });
+
   await executeQuery(
     (db) =>
       db
@@ -338,7 +361,7 @@ async function deferJob(
           leaseOwner: null,
           leaseExpiresAt: null,
           lastErrorCode: reason,
-          availableAt: new Date(Date.now() + DEFER_SECONDS * 1000),
+          availableAt: new Date(Date.now() + delaySeconds * 1000),
           updatedAt: new Date(),
         })
         .where(eq(repositoryProcessingJobs.id, message.jobId)),
@@ -348,7 +371,7 @@ async function deferJob(
     new SendMessageCommand({
       QueueUrl: queueUrl,
       MessageBody: JSON.stringify(message),
-      DelaySeconds: DEFER_SECONDS,
+      DelaySeconds: delaySeconds,
     }),
   );
   await executeQuery(
