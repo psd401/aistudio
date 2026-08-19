@@ -19,6 +19,8 @@ const log = createLogger({ module: 'unified-streaming-service' });
  * and inherited a 30s abort that killed long responses mid-sentence).
  */
 const DEFAULT_STREAM_TIMEOUT_MS = 120_000;
+
+
 import {
   isTextDeltaEvent,
   isTextStartEvent,
@@ -31,6 +33,44 @@ import {
   isErrorEvent,
   isFinishEvent
 } from './sse-event-types';
+
+/**
+ * Resolve the per-step wall-clock budget for a stream.
+ *
+ * Exported and pure so the production rule is testable directly — the previous
+ * test reimplemented this ladder and would have passed against a half-fixed
+ * version of it. Order matters:
+ *
+ *  1. An explicitly configured timeout always wins (e.g. an agentic run's per-run
+ *     limit, #926); the adaptive values are only for callers that don't set one.
+ *  2. The model's capability entry is AUTHORITATIVE. Every entry declares
+ *     `maxTimeoutMs`, yet this used to ignore it completely: non-reasoning models
+ *     got a flat 30s and reasoning models got one of three hard-coded values that
+ *     silently overrode the table (a declared 180s became 120s for Claude 4.x and
+ *     60s for Gemini 3). Reading it keeps the budget in ONE place instead of split
+ *     between the table and a ladder of conditionals nobody updates when a new
+ *     model generation lands.
+ *  3. Only if an entry omits `maxTimeoutMs` do the coarse heuristics apply.
+ */
+export function resolveStreamTimeout(
+  capabilities: Pick<ProviderCapabilities, 'supportsReasoning' | 'supportsThinking' | 'maxTimeoutMs'>,
+  requestTimeout?: number
+): number {
+  if (typeof requestTimeout === 'number' && Number.isFinite(requestTimeout) && requestTimeout > 0) {
+    return requestTimeout;
+  }
+  if (
+    typeof capabilities.maxTimeoutMs === 'number' &&
+    Number.isFinite(capabilities.maxTimeoutMs) &&
+    capabilities.maxTimeoutMs > 0
+  ) {
+    return capabilities.maxTimeoutMs;
+  }
+  if (capabilities.supportsReasoning) {
+    return capabilities.supportsThinking ? 120000 : 60000;
+  }
+  return DEFAULT_STREAM_TIMEOUT_MS;
+}
 
 /**
  * Result of content safety input check
@@ -683,42 +723,7 @@ export class UnifiedStreamingService {
    * Calculate adaptive timeout based on model capabilities and request
    */
   private getAdaptiveTimeout(capabilities: ProviderCapabilities, request: StreamRequest): number {
-    // An explicitly configured timeout always wins (e.g. an agentic run's per-run
-    // wall-clock limit, #926). The adaptive values below are only fallbacks for
-    // callers that don't set one — otherwise a reasoning/thinking model would
-    // ignore the author-configured timeout entirely.
-    if (typeof request.timeout === 'number' && Number.isFinite(request.timeout) && request.timeout > 0) {
-      return request.timeout;
-    }
-
-    // Extend timeout for reasoning models
-    if (capabilities.supportsReasoning) {
-      // o3/o4 models may need up to 5 minutes for complex reasoning
-      if (request.modelId.includes('o3') || request.modelId.includes('o4')) {
-        return 300000; // 5 minutes
-      }
-      // Claude thinking models may need up to 2 minutes
-      if (capabilities.supportsThinking) {
-        return 120000; // 2 minutes
-      }
-      // Other reasoning models get 1 minute
-      return 60000;
-    }
-
-    // Every capability entry declares `maxTimeoutMs`, but this method used to
-    // ignore it entirely and hand back a flat 30s to any non-reasoning model —
-    // including every model that falls through its provider's pattern table to
-    // `getDefaultCapabilities()`. Honour the declared value so a stale pattern
-    // list degrades to a survivable budget instead of the tightest one.
-    if (
-      typeof capabilities.maxTimeoutMs === 'number' &&
-      Number.isFinite(capabilities.maxTimeoutMs) &&
-      capabilities.maxTimeoutMs > 0
-    ) {
-      return capabilities.maxTimeoutMs;
-    }
-
-    return DEFAULT_STREAM_TIMEOUT_MS;
+    return resolveStreamTimeout(capabilities, request.timeout);
   }
 
   /**

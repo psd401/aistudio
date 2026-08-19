@@ -617,9 +617,18 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
         : result.toTextStreamResponse(options);
     }
 
+    // Track whether the turn produced anything the user can actually see. A
+    // tool-only turn still renders (the thread shows tool output), so only a
+    // stream with neither text nor tool activity is genuinely blank.
+    let producedVisibleOutput = false;
+
     const stream = result.toUIMessageStream().pipeThrough(
       new TransformStream<UIMessageChunk, UIMessageChunk>({
         transform(chunk, controller) {
+          const type = (chunk as { type?: string }).type ?? '';
+          if (type === 'text-delta' || type.startsWith('tool-') || type === 'reasoning-delta') {
+            producedVisibleOutput = true;
+          }
           controller.enqueue(chunk);
         },
         flush(controller) {
@@ -627,6 +636,18 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
             controller.enqueue({
               type: 'error',
               errorText: BaseProviderAdapter.abortNotice(didTimeOut()),
+            });
+            return;
+          }
+          // A run that ended cleanly having emitted nothing at all is still a
+          // dead end for the user: the route now refuses to persist it, so
+          // without this the stream would simply stop and reload as if the turn
+          // never happened. Say so instead. (PR #1686 review.)
+          if (!producedVisibleOutput) {
+            controller.enqueue({
+              type: 'error',
+              errorText:
+                'The model returned an empty response. Please try again, or rephrase your request.',
             });
           }
         },

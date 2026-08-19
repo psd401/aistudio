@@ -239,6 +239,34 @@ describe('buildAbortAwareResponse', () => {
     expect(error.errorText).not.toContain('ran out of time');
   });
 
+  it('explains an empty response even when the run was NOT aborted', async () => {
+    // A run that ends cleanly having emitted nothing is still a dead end: the
+    // route refuses to persist it, so without a notice the stream would simply
+    // stop and reload as though the turn never happened. (PR #1686 review.)
+    const chunks = await readChunks(
+      responder.respond([{ type: 'start' }, { type: 'finish' }], false, false)
+    );
+    const last = chunks.at(-1) as { type: string; errorText: string };
+    expect(last.type).toBe('error');
+    expect(last.errorText).toContain('empty response');
+  });
+
+  it('stays silent for a tool-only turn, which the thread still renders', async () => {
+    const chunks = await readChunks(
+      responder.respond(
+        [
+          { type: 'start' },
+          { type: 'tool-input-start', toolCallId: 'c1', toolName: 'searchNexusAttachments' },
+          { type: 'tool-output-available', toolCallId: 'c1', output: { ok: true } },
+          { type: 'finish' },
+        ],
+        false,
+        false
+      )
+    );
+    expect(chunks.some(c => c.type === 'error')).toBe(false);
+  });
+
   it('leaves already-streamed content intact and only appends', async () => {
     const chunks = await readChunks(responder.respond(okChunks, true, true));
     // Everything the model produced still arrives, in order, ahead of the notice.

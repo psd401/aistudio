@@ -25,6 +25,8 @@ import { describe, it, expect } from '@jest/globals';
 import { ClaudeAdapter } from '../provider-adapters/claude-adapter';
 import { GeminiAdapter } from '../provider-adapters/gemini-adapter';
 import { OpenAIAdapter } from '../provider-adapters/openai-adapter';
+import type { ProviderCapabilities } from '../types';
+import { resolveStreamTimeout } from '../unified-streaming-service';
 
 /**
  * Shortest budget in which a model can realistically produce a long answer —
@@ -45,7 +47,7 @@ const openai = new OpenAIAdapter();
 const PRODUCTION_MODELS: ReadonlyArray<{
   label: string;
   modelId: string;
-  adapter: { getCapabilities(modelId: string): { maxTimeoutMs: number } };
+  adapter: { getCapabilities(modelId: string): ProviderCapabilities };
 }> = [
   { label: 'Claude Sonnet 4.6 (Bedrock)', modelId: 'us.anthropic.claude-sonnet-4-6', adapter: claude },
   { label: 'Claude Opus 4.6 (Bedrock)', modelId: 'us.anthropic.claude-opus-4-6-v1', adapter: claude },
@@ -78,6 +80,43 @@ describe('model capability coverage', () => {
   });
 });
 
+describe('declared budget is the one actually used', () => {
+  // The first version of this suite only asserted `>= 60_000`, which a HALF-fixed
+  // getAdaptiveTimeout passed: it honoured maxTimeoutMs for non-reasoning models
+  // but let a ladder of hard-coded conditionals override it for reasoning ones,
+  // so a declared 180s silently became 120s (Claude 4.x) or 60s (Gemini 3).
+  //
+  // This calls the REAL resolveStreamTimeout rather than restating the ladder —
+  // a test that reimplements the rule it checks cannot catch the rule being wrong.
+  // (PR #1686 review.)
+
+  it.each(PRODUCTION_MODELS)('$label uses its declared budget verbatim', ({ modelId, adapter }) => {
+    const caps = adapter.getCapabilities(modelId);
+    expect(resolveStreamTimeout(caps)).toBe(caps.maxTimeoutMs);
+  });
+});
+
+describe('advertised capabilities match actual behaviour', () => {
+  // supportsThinking is served to the browser by /api/models/capabilities and
+  // scores model selection in nexus-provider-factory. Advertising it while the
+  // adapter's private gate never attaches thinking config to the Bedrock request
+  // would show a toggle that does nothing and bias routing. (PR #1686 review.)
+  const thinkingGate = (modelId: string): boolean =>
+    [/^claude-4/i, /^anthropic\.claude-4/i].some(re =>
+      re.test(modelId) || re.test(modelId.replace(/^us\./, ''))
+    );
+
+  it.each([
+    'us.anthropic.claude-sonnet-4-6',
+    'us.anthropic.claude-opus-4-6-v1',
+    'anthropic.claude-sonnet-5',
+    'claude-haiku-4.5',
+    'us.anthropic.claude-3-5-haiku-20241022-v1',
+  ])('%s advertises supportsThinking only when the gate would fire', modelId => {
+    expect(claude.getCapabilities(modelId).supportsThinking).toBe(thinkingGate(modelId));
+  });
+});
+
 describe('capability pattern precedence', () => {
   it('does not let family-first Claude patterns swallow legacy version-first IDs', () => {
     // Legacy IDs put the version BEFORE the family (claude-3-5-haiku-*), so they
@@ -104,5 +143,46 @@ describe('capability pattern precedence', () => {
 
     expect(opus.costPerOutputToken).toBeGreaterThan(sonnet.costPerOutputToken!);
     expect(sonnet.costPerOutputToken).toBeGreaterThan(haiku.costPerOutputToken!);
+  });
+});
+
+describe('resolveStreamTimeout precedence', () => {
+  const caps = (over: Partial<ProviderCapabilities> = {}): ProviderCapabilities =>
+    ({
+      supportsReasoning: false,
+      supportsThinking: false,
+      supportedResponseModes: ['standard'],
+      supportsBackgroundMode: false,
+      supportedTools: [],
+      typicalLatencyMs: 1000,
+      maxTimeoutMs: 90_000,
+      ...over,
+    }) as ProviderCapabilities;
+
+  it('lets an explicit caller timeout win over the table (agentic per-run limit)', () => {
+    expect(resolveStreamTimeout(caps({ maxTimeoutMs: 90_000 }), 15_000)).toBe(15_000);
+  });
+
+  it('ignores a non-positive or non-finite caller timeout', () => {
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(resolveStreamTimeout(caps(), bad)).toBe(90_000);
+    }
+  });
+
+  it('prefers the declared budget over the reasoning heuristics', () => {
+    // The bug this guards: a reasoning model's declared 180s was overridden to
+    // 120s (thinking) or 60s (not thinking) by the old conditional ladder.
+    expect(
+      resolveStreamTimeout(caps({ supportsReasoning: true, supportsThinking: true, maxTimeoutMs: 180_000 }))
+    ).toBe(180_000);
+    expect(
+      resolveStreamTimeout(caps({ supportsReasoning: true, supportsThinking: false, maxTimeoutMs: 180_000 }))
+    ).toBe(180_000);
+  });
+
+  it('falls back to the heuristics only when no budget is declared', () => {
+    expect(resolveStreamTimeout(caps({ supportsReasoning: true, supportsThinking: true, maxTimeoutMs: 0 }))).toBe(120_000);
+    expect(resolveStreamTimeout(caps({ supportsReasoning: true, supportsThinking: false, maxTimeoutMs: 0 }))).toBe(60_000);
+    expect(resolveStreamTimeout(caps({ maxTimeoutMs: 0 }))).toBe(120_000);
   });
 });

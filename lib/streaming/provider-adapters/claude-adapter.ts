@@ -108,8 +108,20 @@ export class ClaudeAdapter extends BaseProviderAdapter {
 
     return {
       supportsReasoning: true,
-      supportsThinking: true,
-      maxThinkingTokens: 6553,
+      // Deliberately false, and it must stay in lockstep with the private
+      // `supportsThinking()` gate below — that gate is what actually attaches
+      // thinking config to the Bedrock request, and it still matches only
+      // `claude-4*`. Advertising `true` here while the gate never fires would be
+      // a live lie: `supportsThinking` is served to the browser by
+      // /api/models/capabilities (driving UI affordances) and scores model
+      // selection in nexus-provider-factory, so the UI could offer an Extended
+      // Thinking toggle that does nothing and routing could prefer a model that
+      // never returns reasoning traces.
+      //
+      // Turning thinking ON for these models changes the Bedrock request payload
+      // for every Nexus turn, which is a behaviour change beyond this incident
+      // fix. Flip BOTH together in that follow-up. (PR #1686 review.)
+      supportsThinking: false,
       supportedResponseModes: ['standard'],
       supportsBackgroundMode: false,
       supportedTools: [],

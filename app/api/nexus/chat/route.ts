@@ -123,14 +123,30 @@ export const maxDuration = 1800;
  * Close all MCP connector clients, ignoring errors.
  * Called after streaming completes (onFinish) or on error to release connections.
  */
+/**
+ * Clients already closed, so a second cleanup pass is a no-op.
+ *
+ * A turn can reach cleanup from more than one place: onFinish, onError, and the
+ * outer catch. An ABORTED stream hits two of them — the adapter's onAbort raises
+ * through onError, and AI SDK v6 then fires onFinish anyway — so without this the
+ * exact path this PR adds visibility for would close every connector twice.
+ * `Promise.allSettled` hid the double close rather than preventing it.
+ *
+ * A WeakSet keeps this per-client and non-mutating (the caller's array is still
+ * read by header/tool assembly earlier in the request) and cannot leak.
+ */
+const closedMcpClients = new WeakSet<McpConnectorToolsResult>();
+
 async function closeMcpClients(
   connectorToolResults: McpConnectorToolsResult[],
   log: ReturnType<typeof createLogger>,
   context: string
 ) {
-  if (connectorToolResults.length === 0) return;
-  log.debug('Closing MCP clients', { context, clientCount: connectorToolResults.length });
-  await Promise.allSettled(connectorToolResults.map(r => r.close()));
+  const pending = connectorToolResults.filter(result => !closedMcpClients.has(result));
+  if (pending.length === 0) return;
+  for (const result of pending) closedMcpClients.add(result);
+  log.debug('Closing MCP clients', { context, clientCount: pending.length });
+  await Promise.allSettled(pending.map(r => r.close()));
 }
 
 function createOnFinishCallback(params: {
