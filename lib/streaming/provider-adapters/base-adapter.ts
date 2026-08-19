@@ -585,6 +585,28 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
   }
 
   /**
+   * Does this UI chunk type put something in front of the user?
+   *
+   * Used only to decide whether a cleanly-finished run was genuinely blank, so it
+   * errs towards "visible": a false positive merely withholds the empty-response
+   * notice, while a false negative tells someone their rendered answer was empty.
+   * Beyond text and reasoning it covers every part type the thread renders on its
+   * own — tool activity (`tool-input-start`, `tool-output-available`, … — MCP
+   * tools stream through these same types with a `dynamic` flag), generated
+   * files, retrieved sources, and custom `data-*` parts. (PR #1686 review.)
+   */
+  protected static isVisibleChunkType(type: string): boolean {
+    return (
+      type === 'text-delta' ||
+      type === 'reasoning-delta' ||
+      type === 'file' ||
+      type.startsWith('tool-') ||
+      type.startsWith('source-') ||
+      type.startsWith('data-')
+    );
+  }
+
+  /**
    * Build the HTTP response, appending a terminal `error` chunk when the run was
    * cut short.
    *
@@ -626,7 +648,7 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       new TransformStream<UIMessageChunk, UIMessageChunk>({
         transform(chunk, controller) {
           const type = (chunk as { type?: string }).type ?? '';
-          if (type === 'text-delta' || type.startsWith('tool-') || type === 'reasoning-delta') {
+          if (BaseProviderAdapter.isVisibleChunkType(type)) {
             producedVisibleOutput = true;
           }
           controller.enqueue(chunk);

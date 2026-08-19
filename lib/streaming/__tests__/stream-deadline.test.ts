@@ -267,6 +267,24 @@ describe('buildAbortAwareResponse', () => {
     expect(chunks.some(c => c.type === 'error')).toBe(false);
   });
 
+  it('stays silent for a turn that rendered only a file, a source, or a data part', async () => {
+    // Text and tool chunks are not the only things the thread renders. Calling
+    // one of these turns "empty" would tell someone their visible answer wasn't
+    // there, so the check errs towards "visible". (PR #1686 review.)
+    const rendered: Array<Record<string, unknown>> = [
+      { type: 'file', url: 'https://example.test/a.png', mediaType: 'image/png' },
+      { type: 'source-url', sourceId: 's1', url: 'https://example.test' },
+      { type: 'data-schedule', data: { rows: 1 } },
+    ];
+
+    for (const part of rendered) {
+      const chunks = await readChunks(
+        responder.respond([{ type: 'start' }, part, { type: 'finish' }], false, false)
+      );
+      expect(chunks.some(c => c.type === 'error')).toBe(false);
+    }
+  });
+
   it('leaves already-streamed content intact and only appends', async () => {
     const chunks = await readChunks(responder.respond(okChunks, true, true));
     // Everything the model produced still arrives, in order, ahead of the notice.
