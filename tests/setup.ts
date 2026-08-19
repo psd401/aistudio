@@ -62,8 +62,22 @@ const mockHeaders = class Headers {
     return this.values.get(name.toLowerCase()) ?? null;
   }
 
+  /**
+   * Part of the standard Headers API, and used by library code that merges
+   * defaults into caller-supplied headers (e.g. the AI SDK's `prepareHeaders`,
+   * which does `if (!responseHeaders.has(key))`). Omitting it made any such
+   * code throw "responseHeaders.has is not a function" under test only.
+   */
+  has(name: string): boolean {
+    return this.values.has(name.toLowerCase());
+  }
+
   set(name: string, value: string): void {
     this.values.set(name.toLowerCase(), String(value));
+  }
+
+  delete(name: string): void {
+    this.values.delete(name.toLowerCase());
   }
 } as unknown as typeof Headers;
 

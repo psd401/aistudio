@@ -9,6 +9,16 @@ import { ContentSafetyBlockedError } from './types';
 
 // Module-level logger for free functions (class methods use per-request loggers)
 const log = createLogger({ module: 'unified-streaming-service' });
+
+/**
+ * Last-resort per-step wall-clock budget when neither the caller nor the model's
+ * capability entry declares one. Two minutes, not thirty seconds: a model that
+ * reaches this branch is one nobody has characterised, and cutting an
+ * uncharacterised model off at 30s truncates real answers (prod incident — every
+ * Claude 4.x / Gemini 3 / Nova model fell through its provider's pattern table
+ * and inherited a 30s abort that killed long responses mid-sentence).
+ */
+const DEFAULT_STREAM_TIMEOUT_MS = 120_000;
 import {
   isTextDeltaEvent,
   isTextStartEvent,
@@ -673,8 +683,6 @@ export class UnifiedStreamingService {
    * Calculate adaptive timeout based on model capabilities and request
    */
   private getAdaptiveTimeout(capabilities: ProviderCapabilities, request: StreamRequest): number {
-    const baseTimeout = 30000; // 30 seconds
-
     // An explicitly configured timeout always wins (e.g. an agentic run's per-run
     // wall-clock limit, #926). The adaptive values below are only fallbacks for
     // callers that don't set one — otherwise a reasoning/thinking model would
@@ -697,8 +705,20 @@ export class UnifiedStreamingService {
       return 60000;
     }
 
-    // Standard models use base timeout
-    return request.timeout || baseTimeout;
+    // Every capability entry declares `maxTimeoutMs`, but this method used to
+    // ignore it entirely and hand back a flat 30s to any non-reasoning model —
+    // including every model that falls through its provider's pattern table to
+    // `getDefaultCapabilities()`. Honour the declared value so a stale pattern
+    // list degrades to a survivable budget instead of the tightest one.
+    if (
+      typeof capabilities.maxTimeoutMs === 'number' &&
+      Number.isFinite(capabilities.maxTimeoutMs) &&
+      capabilities.maxTimeoutMs > 0
+    ) {
+      return capabilities.maxTimeoutMs;
+    }
+
+    return DEFAULT_STREAM_TIMEOUT_MS;
   }
 
   /**

@@ -86,7 +86,52 @@ export class ClaudeAdapter extends BaseProviderAdapter {
     return [];
   }
 
+  /**
+   * Model IDs that put the family BEFORE the version (`claude-sonnet-4-6`,
+   * `claude-opus-4-6-v1`, `claude-haiku-4.5`, `claude-sonnet-5`), with or without
+   * an `anthropic.` / `us.anthropic.` Bedrock prefix. Legacy IDs put the version
+   * first (`claude-3-5-haiku-*`), so these patterns cannot collide with them.
+   */
+  private static readonly FAMILY_FIRST_PATTERNS = [
+    'claude-opus-*',
+    'claude-sonnet-*',
+    'claude-haiku-*',
+    'anthropic.claude-opus-*',
+    'anthropic.claude-sonnet-*',
+    'anthropic.claude-haiku-*'
+  ];
+
+  /** Capabilities for Claude 4.x and newer (see FAMILY_FIRST_PATTERNS). */
+  private familyFirstCapabilities(modelId: string): ProviderCapabilities {
+    const isOpus = this.matchesPattern(modelId, ['*opus*']);
+    const isHaiku = this.matchesPattern(modelId, ['*haiku*']);
+
+    return {
+      supportsReasoning: true,
+      supportsThinking: true,
+      maxThinkingTokens: 6553,
+      supportedResponseModes: ['standard'],
+      supportsBackgroundMode: false,
+      supportedTools: [],
+      typicalLatencyMs: isHaiku ? 1200 : isOpus ? 3500 : 2500,
+      maxTimeoutMs: 180000, // 3 minutes — these write long answers
+      costPerInputToken: isOpus ? 0.000015 : isHaiku ? 0.000001 : 0.000003,
+      costPerOutputToken: isOpus ? 0.000075 : isHaiku ? 0.000005 : 0.000015
+    };
+  }
+
   getCapabilities(modelId: string): ProviderCapabilities {
+    // Claude 4.x and newer use family-first model IDs (`claude-sonnet-4-6`,
+    // `claude-opus-4-6-v1`, `claude-haiku-4.5`, `claude-sonnet-5`, each also with
+    // an `anthropic.`/`us.anthropic.` prefix on Bedrock). None of those contain
+    // the literal "claude-4", so every one of them fell through this table to
+    // `getDefaultCapabilities()` and inherited a 30s abort. Checked first; the
+    // legacy `claude-3-5-haiku-*` IDs put the family AFTER the version and so do
+    // not collide with these patterns.
+    if (this.matchesPattern(modelId, ClaudeAdapter.FAMILY_FIRST_PATTERNS)) {
+      return this.familyFirstCapabilities(modelId);
+    }
+
     // Claude 4 models with thinking capabilities
     if (this.matchesPattern(modelId, ['claude-4*', 'anthropic.claude-4*'])) {
       return {

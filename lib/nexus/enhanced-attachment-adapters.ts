@@ -658,8 +658,30 @@ Please try re-uploading. If the issue persists, contact support.`
     return -1;
   }
 
-  async remove(_attachment: PendingAttachment): Promise<void> {
-    // Cleanup if needed
+  async remove(attachment: PendingAttachment): Promise<void> {
+    // Both maps were previously left populated forever. Two consequences:
+    //
+    //   1. `processedCache` holds a CompleteAttachment, which holds `file` — the
+    //      whole File blob. Removing an attachment did not release it, so a long
+    //      composing session retained every file the user had ever discarded.
+    //   2. The background upload kept running and its repository/item stayed
+    //      bound to nothing. A prod session showed four uploaded repositories but
+    //      only three attachment references in the sent message — an orphan of
+    //      exactly this shape.
+    //
+    // The in-flight request itself cannot be cancelled from here (the upload
+    // client takes no abort signal), but dropping the entries stops the retention
+    // and makes the orphan explicit rather than silent.
+    const orphaned =
+      this.processedCache.has(attachment.id) || this.processingPromises.has(attachment.id);
+    this.processedCache.delete(attachment.id);
+    this.processingPromises.delete(attachment.id);
+    if (orphaned) {
+      log.info('Discarded attachment upload state on remove', {
+        attachmentId: attachment.id,
+        fileName: attachment.name,
+      });
+    }
   }
 }
 
@@ -673,6 +695,16 @@ export class VisionImageAdapter implements AttachmentAdapter {
 
   private callbacks?: AttachmentProcessingCallbacks;
   private readonly options: NexusAttachmentAdapterOptions;
+  /**
+   * Repository upload started at attach time, keyed by attachment id. Images used
+   * to upload inside send(), which froze the composer for as long as repository
+   * ingestion took — measured at 2m18s in prod for a pair of images, with no
+   * spinner, because this adapter also never fired the processing callbacks that
+   * drive the UI indicator. Uploading here mirrors HybridDocumentAdapter: the
+   * work overlaps the user still typing, and send() awaits a promise that is
+   * usually already resolved.
+   */
+  private uploadPromises = new Map<string, Promise<string | null>>();
 
   constructor(
     callbacks?: AttachmentProcessingCallbacks,
@@ -680,6 +712,63 @@ export class VisionImageAdapter implements AttachmentAdapter {
   ) {
     this.callbacks = callbacks;
     this.options = options;
+  }
+
+  /**
+   * Upload to the repository and wait for the extracted content to be queryable.
+   * Resolves to the opaque marker, or null when the repository path is off.
+   */
+  private async uploadToRepository(file: File): Promise<string | null> {
+    if (!this.options.repositoryBacked) {
+      return null;
+    }
+    const repositoryUpload = await uploadTemporaryAttachment({
+      file,
+      draftKey: generateUUID(),
+      purpose: "nexus",
+      conversationId: this.options.getConversationId?.() ?? undefined,
+    });
+    if (repositoryUpload.mode !== "canonical") {
+      return null;
+    }
+    return waitForTemporaryAttachment(repositoryUpload);
+  }
+
+  /** Start the upload in the background and report progress to the UI. */
+  private startBackgroundUpload(attachmentId: string, file: File): void {
+    this.callbacks?.onProcessingStart?.(attachmentId);
+
+    const promise = this.uploadToRepository(file)
+      .then(marker => {
+        this.callbacks?.onProcessingComplete?.(attachmentId);
+        return marker;
+      })
+      .catch((error: unknown) => {
+        this.callbacks?.onProcessingComplete?.(attachmentId);
+        log.error('Background image upload failed', {
+          attachmentId,
+          fileName: file.name,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        // Moving the upload to attach time moved the FAILURE there too. Without
+        // this the rejection would sit unreported until send() awaited it — and
+        // silently forever if the user removed the attachment first. Report it
+        // the same way HybridDocumentAdapter does, so the page can raise its
+        // "File upload failed" / expired-session toast right when it happens.
+        // The original error is passed through (not a redacted string) so the
+        // caller can still distinguish an auth failure from an infra blip.
+        this.callbacks?.onError?.(
+          attachmentId,
+          error instanceof Error ? error : new Error(String(error))
+        );
+        throw error;
+      });
+
+    // Attach a no-op catch so a failure that send() never awaits (the user
+    // removed the attachment, or navigated away) does not surface as an
+    // unhandled rejection. send() still sees the rejection via the stored promise.
+    promise.catch(() => {});
+    this.uploadPromises.set(attachmentId, promise);
   }
 
   async add({ file }: { file: File }): Promise<PendingAttachment> {
@@ -703,8 +792,7 @@ export class VisionImageAdapter implements AttachmentAdapter {
 
     log.info('VisionImageAdapter.add() validation passed');
 
-    // Return pending attachment while processing
-    return {
+    const attachment: PendingAttachment = {
       id: generateUUID(),
       type: "image",
       name: this.sanitizeFileName(file.name),
@@ -716,24 +804,30 @@ export class VisionImageAdapter implements AttachmentAdapter {
         progress: 0
       },
     };
+
+    // Start the repository upload now rather than at send time.
+    this.startBackgroundUpload(attachment.id, file);
+
+    return attachment;
   }
 
   async send(attachment: PendingAttachment): Promise<CompleteAttachment> {
     // Convert image to base64 data URL
     const base64 = await this.fileToBase64DataURL(attachment.file);
-    let repositoryMarker: string | null = null;
 
-    if (this.options.repositoryBacked) {
-      const repositoryUpload = await uploadTemporaryAttachment({
-        file: attachment.file,
-        draftKey: generateUUID(),
-        purpose: "nexus",
-        conversationId: this.options.getConversationId?.() ?? undefined,
+    // Normally already resolved — add() kicked this off when the file was picked.
+    // The fallback covers an attachment that reached send() without going through
+    // this adapter's add() (restored draft, adapter swap mid-composition).
+    const pending = this.uploadPromises.get(attachment.id);
+    this.uploadPromises.delete(attachment.id);
+    if (!pending) {
+      log.info('No background image upload found — uploading synchronously', {
+        attachmentId: attachment.id,
+        fileName: attachment.name,
       });
-      if (repositoryUpload.mode === "canonical") {
-        repositoryMarker = await waitForTemporaryAttachment(repositoryUpload);
-      }
     }
+    // `??` short-circuits, so the synchronous upload only runs without a pending one.
+    const repositoryMarker = await (pending ?? this.uploadToRepository(attachment.file));
 
     log.info('VisionImageAdapter.send() called', {
       attachmentId: attachment.id,
@@ -764,8 +858,11 @@ export class VisionImageAdapter implements AttachmentAdapter {
   }
 
 
-  async remove(_attachment: PendingAttachment): Promise<void> {
-    // Cleanup if needed (e.g., revoke object URLs if you created any)
+  async remove(attachment: PendingAttachment): Promise<void> {
+    // Drop the in-flight upload's entry so a long composing session that adds and
+    // removes images repeatedly does not retain every File through its promise.
+    // The request itself is already detached (see startBackgroundUpload).
+    this.uploadPromises.delete(attachment.id);
   }
 
   private async fileToBase64DataURL(file: File): Promise<string> {

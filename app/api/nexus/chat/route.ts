@@ -71,6 +71,7 @@ import {
   saveAssistantMessage,
   saveConversationSteps,
   type StepData,
+  incompleteTurnReason,
 } from './chat-helpers';
 
 import { eq, and } from 'drizzle-orm';
@@ -163,6 +164,7 @@ function createOnFinishCallback(params: {
     finishReason,
     toolCalls,
     steps,
+    aborted,
   }: {
     text: string;
     usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
@@ -174,6 +176,7 @@ function createOnFinishCallback(params: {
       result?: unknown;
     }>;
     steps?: StepData[];
+    aborted?: boolean;
   }) => {
     log.info('Stream finished, saving assistant message', {
       conversationId,
@@ -181,7 +184,26 @@ function createOnFinishCallback(params: {
       textLength: text?.length || 0,
       toolCallCount: toolCalls?.length || 0,
       stepCount: steps?.length ?? 0,
+      aborted: !!aborted,
     });
+
+    const skipReason = incompleteTurnReason({ text, aborted, steps });
+    if (skipReason) {
+      log.warn('Skipping assistant message persistence — incomplete turn', {
+        conversationId,
+        reason: skipReason,
+        finishReason,
+      });
+      // Still release MCP clients — the cleanup below is not reached on this
+      // path, and an aborted turn would otherwise leak connector clients.
+      await closeMcpClients(connectorToolResults, log, 'onFinish');
+      timer({
+        status: skipReason === 'stream_aborted' ? 'error' : 'success',
+        conversationId,
+        tokensUsed: usage?.totalTokens,
+      });
+      return;
+    }
 
     let assistantMessagePersisted = false;
     try {

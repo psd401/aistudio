@@ -1,4 +1,12 @@
-import { streamText, stepCountIs, type LanguageModel, type ModelMessage, type ToolSet } from 'ai';
+import {
+  streamText,
+  stepCountIs,
+  createUIMessageStreamResponse,
+  type LanguageModel,
+  type ModelMessage,
+  type ToolSet,
+  type UIMessageChunk
+} from 'ai';
 import { createLogger } from '@/lib/logger';
 import { createUniversalTools } from '@/lib/tools/provider-native-tools';
 import type {
@@ -23,6 +31,45 @@ type CostStopPredicate = (opts: {
 
 /** A single AI SDK `stopWhen` condition: a step-count guard or a cost predicate. */
 type StopCondition = ReturnType<typeof stepCountIs> | CostStopPredicate;
+
+/**
+ * Hard ceiling for any single streaming run, regardless of per-step budget and
+ * step count. Bounds a wedged model/tool loop that keeps producing step
+ * boundaries; the route/platform ceiling (`maxDuration`) is the backstop above it.
+ */
+const ABSOLUTE_STREAM_CEILING_MS = 600_000; // 10 minutes
+
+/**
+ * A step-aware wall-clock budget for one streaming run.
+ *
+ * A plain `AbortSignal.timeout()` bounds the ENTIRE `streamText` call — every
+ * model call AND every tool execution — against one fixed clock. With multi-step
+ * tool use that is actively wrong: a retrieval tool that takes 7s silently steals
+ * 7s from the model's budget to write the answer. In prod this aborted a Nexus
+ * attachment turn at exactly 30s with `textLength: 0` — the tool returned at +7s
+ * and the model never got enough clock to produce a token.
+ *
+ * This grants each step its own `stepBudgetMs`, pushed forward at every step
+ * boundary, while an absolute ceiling still bounds a runaway loop.
+ */
+export interface StreamDeadline {
+  /** Abort signal for `streamText`; undefined when no budget is configured. */
+  readonly signal?: AbortSignal;
+  /** Push the per-step clock forward. Call at each step boundary. */
+  extend(): void;
+  /** True once THIS deadline aborted the run (vs. a caller-initiated abort). */
+  timedOut(): boolean;
+  /** Release the timer. Safe to call more than once. */
+  dispose(): void;
+}
+
+/** Shared handle for "no timeout configured" — nothing to arm or release. */
+const NO_STREAM_DEADLINE: StreamDeadline = {
+  signal: undefined,
+  extend: () => {},
+  timedOut: () => false,
+  dispose: () => {},
+};
 
 /**
  * Standalone transient error classifier used by both the streaming adapters
@@ -260,6 +307,9 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       maxSteps: config.maxSteps || 'not set'
     });
     
+    // Hoisted so a synchronous streamText failure still releases the timer.
+    let deadline: StreamDeadline = NO_STREAM_DEADLINE;
+
     try {
       // Create enhanced configuration
       const enhancedConfig = this.enhanceStreamConfig(config);
@@ -273,7 +323,19 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       // accumulated usage cost reaches the per-run cap. AI SDK `stopWhen` accepts
       // an array — ANY condition stops the loop.
       const stopConditions = this.buildStopConditions(enhancedConfig, logger);
-      const abortSignal = this.buildTimeoutSignal(enhancedConfig.timeout, logger); // #926
+      deadline = this.buildStreamDeadline( // #926
+        enhancedConfig.timeout,
+        enhancedConfig.maxSteps,
+        logger
+      );
+      const abortSignal = deadline.signal;
+
+      // Set when the run is cut short (budget exhausted or caller abort) so
+      // onFinish can tell a completed answer from a truncated one. AI SDK v6
+      // still fires onFinish after an abort, carrying only the steps that had
+      // already completed — persisting that as-is is what wrote empty assistant
+      // messages to prod conversations.
+      let streamAborted = false;
 
       // Start streaming with AI SDK
       const result = streamText({
@@ -295,6 +357,11 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
         }),
         // Capture tool calls as each step finishes (AI SDK v6)
         onStepFinish: (event) => {
+          // Reaching a step boundary buys the next step a fresh budget, so the
+          // time a tool spent executing is not deducted from the model's time to
+          // write the answer.
+          deadline.extend();
+
           logger.info('onStepFinish called', {
             provider: this.providerName,
             hasToolCalls: !!event.toolCalls,
@@ -305,25 +372,7 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
           });
 
           // Capture tool calls
-          if (event.toolCalls && Array.isArray(event.toolCalls)) {
-            for (const tc of event.toolCalls) {
-              // AI SDK v6 uses "input" for tool arguments, not "args"
-              const toolCall = tc as { toolCallId: string; toolName: string; args?: unknown; input?: unknown };
-              const toolArgs = (toolCall.input || toolCall.args || {}) as Record<string, unknown>;
-
-              accumulatedToolCalls.push({
-                toolCallId: toolCall.toolCallId,
-                toolName: toolCall.toolName,
-                args: toolArgs
-              });
-              logger.debug('Tool call captured from step', {
-                provider: this.providerName,
-                toolCallId: toolCall.toolCallId,
-                toolName: toolCall.toolName,
-                hasArgs: Object.keys(toolArgs).length > 0
-              });
-            }
-          }
+          this.captureStepToolCalls(event.toolCalls, accumulatedToolCalls, logger);
 
           // NOTE: Tool results are NOT available in onStepFinish — AI SDK v4+ fires this
           // callback when the LLM call finishes, before tool execution completes.
@@ -331,6 +380,9 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
           // See: https://ai-sdk.dev/docs/reference/ai-sdk-core/stream-text#on-step-finish
         },
         onFinish: async (event) => {
+          deadline.dispose();
+          const aborted = streamAborted || deadline.timedOut();
+
           logger.info('streamText onFinish triggered', {
             provider: this.providerName,
             hasText: !!event.text,
@@ -338,32 +390,18 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
             finishReason: event.finishReason,
             textLength: event.text?.length || 0,
             toolCallCount: accumulatedToolCalls.length,
-            toolNames: accumulatedToolCalls.map(tc => tc.toolName)
+            toolNames: accumulatedToolCalls.map(tc => tc.toolName),
+            aborted
           });
 
           // Extract tool results from event.steps (shared method handles runtime validation)
           this.extractToolResultsFromSteps(event, accumulatedToolCalls, logger);
 
-          // Build per-step breakdown for multi-step tool-use persistence
-          // (transformFinishStep, Issue #977). AI SDK v6 TypeScript types don't
-          // declare `steps` on the onFinish event object, but the runtime value
-          // includes it for multi-step tool-use flows. Cast to access the field
-          // until the SDK's types are updated.
-          const rawSteps = (event as Record<string, unknown>).steps;
-          const steps = Array.isArray(rawSteps)
-            ? rawSteps.map(transformFinishStep)
-            : undefined;
-
-          const transformedData = {
-            text: event.text || '',
-            usage: transformFinishUsage(event.usage),
-            finishReason: event.finishReason || 'stop',
-            toolCalls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined,
-            // Pass steps whenever any exist (not only > 1): a single-step agentic
-            // run that calls one tool still needs its step data so onFinish can
-            // count tool calls. `> 1` dropped single-step tool data. (Correctness review.)
-            steps: steps && steps.length > 0 ? steps : undefined,
-          };
+          const transformedData = this.buildFinishPayload(
+            event,
+            accumulatedToolCalls,
+            aborted
+          );
 
           // Call provider-specific finish handler
           await this.handleFinish(transformedData, callbacks);
@@ -378,17 +416,38 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
             await callbacks.onFinish(transformedData);
           }
         },
+        // An aborted run reaches NEITHER onError NOR onFinish's error path in AI
+        // SDK v6 — without this handler a wall-clock abort was silent server-side:
+        // no log, no metric, no onError, and onFinish then persisted the partial
+        // (often empty) result as if the turn had succeeded.
+        //
+        // NOTE (verified against ai@6.0.208): the SDK enqueues an `abort` UI part
+        // and sets its internal isAborted flag, but does NOT raise a client-side
+        // error, so the browser still just sees the stream stop. Making the cut-off
+        // visible in the UI needs a separate client-side change; this handler only
+        // guarantees the SERVER notices, records, and refuses to persist it.
+        onAbort: ({ steps }) => {
+          streamAborted = true;
+          this.reportStreamAbort({
+            deadline,
+            completedSteps: steps.length,
+            toolCallCount: accumulatedToolCalls.length,
+            callbacks,
+            logger
+          });
+        },
         onError: (event) => {
+          deadline.dispose();
           const error = event.error instanceof Error ? event.error : new Error(String(event.error));
-          
+
           logger.error('Stream error', {
             provider: this.providerName,
             error: error.message
           });
-          
+
           // Call provider-specific error handler
           this.handleError(error, callbacks);
-          
+
           // Call user's error callback
           if (callbacks.onError) {
             callbacks.onError(error);
@@ -399,15 +458,22 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       // Handle streaming chunks for progress tracking
       this.handleStreamProgress(result, callbacks);
       
+      const buildResponse = (options?: { headers?: Record<string, string> }) =>
+        this.buildAbortAwareResponse(
+          result,
+          () => streamAborted || deadline.timedOut(),
+          () => deadline.timedOut(),
+          options
+        );
+
       return {
-        toDataStreamResponse: (options?: { headers?: Record<string, string> }) =>
-          result.toUIMessageStreamResponse ? result.toUIMessageStreamResponse(options) : result.toTextStreamResponse(options),
-        toUIMessageStreamResponse: (options?: { headers?: Record<string, string> }) =>
-          result.toUIMessageStreamResponse ? result.toUIMessageStreamResponse(options) : result.toTextStreamResponse(options),
+        toDataStreamResponse: buildResponse,
+        toUIMessageStreamResponse: buildResponse,
         usage: Promise.resolve(result.usage)
       };
-      
+
     } catch (error) {
+      deadline.dispose();
       logger.error('Failed to start stream', {
         provider: this.providerName,
         error: error instanceof Error ? error.message : String(error)
@@ -415,7 +481,7 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       throw error;
     }
   }
-  
+
   /**
    * Validate if this adapter supports the given model
    * Must be implemented by each provider
@@ -448,25 +514,250 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
   }
 
   /**
-   * Build a wall-clock abort signal for the per-run timeout (#926). Without it the
-   * configured `timeout` was inert: a hung model/tool loop ran until the
-   * route/platform ceiling (up to 900s). `AbortSignal.timeout` aborts the whole
-   * streamText call (model calls + tool loop) once the limit elapses. Returns
-   * undefined when no positive, finite timeout is configured. Shared by all
-   * adapters (base + provider overrides) so every path enforces the timeout.
+   * Accumulate a step's tool calls. AI SDK v6 names tool arguments `input`;
+   * `args` is the pre-v6 name, kept as a fallback.
    */
-  protected buildTimeoutSignal(
-    timeoutMs: number | undefined,
+  protected captureStepToolCalls(
+    toolCalls: unknown,
+    accumulatedToolCalls: AccumulatedToolCall[],
     logger: ReturnType<typeof createLogger>
-  ): AbortSignal | undefined {
-    if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-      return undefined;
+  ): void {
+    if (!Array.isArray(toolCalls)) {
+      return;
     }
-    logger.debug('Applying stream wall-clock timeout', {
-      provider: this.providerName,
-      timeoutMs,
+    for (const tc of toolCalls) {
+      const toolCall = tc as { toolCallId: string; toolName: string; args?: unknown; input?: unknown };
+      const toolArgs = (toolCall.input || toolCall.args || {}) as Record<string, unknown>;
+
+      accumulatedToolCalls.push({
+        toolCallId: toolCall.toolCallId,
+        toolName: toolCall.toolName,
+        args: toolArgs
+      });
+      logger.debug('Tool call captured from step', {
+        provider: this.providerName,
+        toolCallId: toolCall.toolCallId,
+        toolName: toolCall.toolName,
+        hasArgs: Object.keys(toolArgs).length > 0
+      });
+    }
+  }
+
+  /**
+   * Shape the AI SDK finish event into the callback payload used across adapters.
+   *
+   * Per-step breakdown feeds multi-step tool-use persistence (transformFinishStep,
+   * Issue #977). AI SDK v6's TypeScript types don't declare `steps` on the finish
+   * event, but the runtime value carries it for multi-step flows — hence the cast,
+   * which can go once the SDK's types catch up.
+   */
+  protected buildFinishPayload(
+    event: { text?: string; usage?: unknown; finishReason?: string },
+    accumulatedToolCalls: AccumulatedToolCall[],
+    aborted: boolean
+  ) {
+    const rawSteps = (event as Record<string, unknown>).steps;
+    const steps = Array.isArray(rawSteps) ? rawSteps.map(transformFinishStep) : undefined;
+
+    return {
+      text: event.text || '',
+      usage: transformFinishUsage(event.usage as Parameters<typeof transformFinishUsage>[0]),
+      finishReason: event.finishReason || 'stop',
+      toolCalls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined,
+      // Pass steps whenever any exist (not only > 1): a single-step agentic run
+      // that calls one tool still needs its step data so onFinish can count tool
+      // calls. `> 1` dropped single-step tool data. (Correctness review.)
+      steps: steps && steps.length > 0 ? steps : undefined,
+      // Truncated run — callers must not persist this as a completed turn.
+      aborted,
+    };
+  }
+
+  /**
+   * User-facing text for a run that ended early. Shared by the server-side error
+   * (`reportStreamAbort`) and the terminal chunk sent to the browser, so the log
+   * and the thread say the same thing.
+   */
+  protected static abortNotice(timedOut: boolean): string {
+    return timedOut
+      ? 'The response was cut off before it finished — the model ran out of time. Try asking again, or break the request into smaller parts.'
+      : 'The response was interrupted before it finished. Please try again.';
+  }
+
+  /**
+   * Build the HTTP response, appending a terminal `error` chunk when the run was
+   * cut short.
+   *
+   * Verified against ai@6.0.208: an abort enqueues an `abort` UI chunk and sets an
+   * internal flag, but raises NO client-side error — the browser simply sees the
+   * stream stop, which is exactly the "it just died mid-response" symptom users
+   * reported. An `error` chunk DOES reach the client (`onError(new
+   * Error(chunk.errorText))`), and the Thread renders it through
+   * `MessagePrimitive.Error`. Appending one on flush turns a silent truncation
+   * into a visible, explained one.
+   *
+   * The chunk is appended at end-of-stream, so it neither reorders nor rewrites
+   * any content the model already produced.
+   */
+  protected buildAbortAwareResponse(
+    result: {
+      toUIMessageStream?: () => ReadableStream<UIMessageChunk>;
+      toUIMessageStreamResponse?: (options?: { headers?: Record<string, string> }) => Response;
+      toTextStreamResponse: (options?: { headers?: Record<string, string> }) => Response;
+    },
+    wasAborted: () => boolean,
+    didTimeOut: () => boolean,
+    options?: { headers?: Record<string, string> }
+  ): Response {
+    // Providers without the UI-message stream (plain text responses) keep the
+    // previous behaviour — there is no chunk protocol to append to.
+    if (typeof result.toUIMessageStream !== 'function') {
+      return result.toUIMessageStreamResponse
+        ? result.toUIMessageStreamResponse(options)
+        : result.toTextStreamResponse(options);
+    }
+
+    const stream = result.toUIMessageStream().pipeThrough(
+      new TransformStream<UIMessageChunk, UIMessageChunk>({
+        transform(chunk, controller) {
+          controller.enqueue(chunk);
+        },
+        flush(controller) {
+          if (wasAborted()) {
+            controller.enqueue({
+              type: 'error',
+              errorText: BaseProviderAdapter.abortNotice(didTimeOut()),
+            });
+          }
+        },
+      })
+    );
+
+    return createUIMessageStreamResponse({
+      stream,
+      ...(options?.headers ? { headers: options.headers } : {}),
     });
-    return AbortSignal.timeout(timeoutMs);
+  }
+
+  /**
+   * Surface an aborted run: release the timer, log it, and raise a real error to
+   * the caller. Shared by every adapter so no path can abort silently again.
+   */
+  protected reportStreamAbort(input: {
+    deadline: StreamDeadline;
+    completedSteps: number;
+    toolCallCount: number;
+    callbacks: StreamingCallbacks;
+    logger: ReturnType<typeof createLogger>;
+  }): void {
+    const { deadline, completedSteps, toolCallCount, callbacks, logger } = input;
+    deadline.dispose();
+    const timedOut = deadline.timedOut();
+
+    const error = new Error(BaseProviderAdapter.abortNotice(timedOut));
+    logger.error('Stream aborted before completion', {
+      provider: this.providerName,
+      timedOut,
+      completedSteps,
+      toolCallCount
+    });
+
+    this.handleError(error, callbacks);
+    if (callbacks.onError) {
+      callbacks.onError(error);
+    }
+  }
+
+  /**
+   * Build the wall-clock budget for the per-run timeout (#926). Without it the
+   * configured `timeout` was inert: a hung model/tool loop ran until the
+   * route/platform ceiling (up to 900s).
+   *
+   * `timeoutMs` is the budget for a SINGLE step, not for the whole run: the clock
+   * is pushed forward each time a step boundary is reached (see `StreamDeadline`),
+   * so tool-execution time no longer eats the model's time to answer. The total
+   * run is still bounded by `timeoutMs × maxSteps`, capped at
+   * `ABSOLUTE_STREAM_CEILING_MS`. Single-step runs (no `maxSteps`) keep exactly
+   * the previous semantics.
+   *
+   * Returns a no-op handle when no positive, finite timeout is configured. Shared
+   * by all adapters (base + provider overrides) so every path enforces it.
+   */
+  protected buildStreamDeadline(
+    timeoutMs: number | undefined,
+    maxSteps: number | undefined,
+    logger: ReturnType<typeof createLogger>
+  ): StreamDeadline {
+    if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      return NO_STREAM_DEADLINE;
+    }
+
+    const steps =
+      typeof maxSteps === 'number' && Number.isFinite(maxSteps) && maxSteps > 0
+        ? Math.floor(maxSteps)
+        : 1;
+    const ceilingMs = Math.min(timeoutMs * steps, ABSOLUTE_STREAM_CEILING_MS);
+    const controller = new AbortController();
+    const startedAt = Date.now();
+    const hardStopAt = startedAt + ceilingMs;
+    let deadlineAt = startedAt + timeoutMs;
+    let expired = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    logger.debug('Applying stream wall-clock budget', {
+      provider: this.providerName,
+      stepBudgetMs: timeoutMs,
+      maxSteps: steps,
+      ceilingMs,
+    });
+
+    const clear = () => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+    };
+
+    const arm = () => {
+      clear();
+      const firesAt = Math.min(deadlineAt, hardStopAt);
+      timer = setTimeout(() => {
+        timer = undefined;
+        // `deadlineAt` may have moved while this timer was pending (a step
+        // finished). Re-arm for the remainder rather than aborting early.
+        if (Date.now() < Math.min(deadlineAt, hardStopAt)) {
+          arm();
+          return;
+        }
+        expired = true;
+        logger.warn('Stream wall-clock budget exhausted — aborting run', {
+          provider: this.providerName,
+          stepBudgetMs: timeoutMs,
+          ceilingMs,
+          elapsedMs: Date.now() - startedAt,
+        });
+        controller.abort(
+          new Error(
+            `Stream exceeded its wall-clock budget (${Math.round(ceilingMs / 1000)}s)`
+          )
+        );
+      }, Math.max(0, firesAt - Date.now()));
+    };
+
+    arm();
+
+    return {
+      signal: controller.signal,
+      extend: () => {
+        if (expired) {
+          return;
+        }
+        deadlineAt = Date.now() + timeoutMs;
+        arm();
+      },
+      timedOut: () => expired,
+      dispose: clear,
+    };
   }
 
   /**
@@ -647,7 +938,13 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       supportsBackgroundMode: false,
       supportedTools: [],
       typicalLatencyMs: 2000,
-      maxTimeoutMs: 30000
+      // Deliberately generous. Reaching this default means the model is NEWER
+      // than its provider's pattern table, not smaller — new models are the ones
+      // most likely to be slow, capable, and used for long answers. The old 30s
+      // here silently truncated every Claude 4.x / Gemini 3 / Nova response in
+      // Nexus. Pattern tables will always lag the model catalogue, so the
+      // fallback must fail safe.
+      maxTimeoutMs: 120000
     };
   }
   
