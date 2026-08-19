@@ -594,6 +594,15 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
    * own — tool activity (`tool-input-start`, `tool-output-available`, … — MCP
    * tools stream through these same types with a `dynamic` flag), generated
    * files, retrieved sources, and custom `data-*` parts. (PR #1686 review.)
+   *
+   * Paired with `incompleteTurnReason` (`app/api/nexus/chat/chat-helpers.ts`),
+   * which decides whether the turn is persisted from text and step history
+   * alone. The two answer different questions and are allowed to disagree, but
+   * a turn this method calls visible while that one calls `no_content` renders
+   * and then vanishes on reload with nothing said. No such turn is reachable
+   * today (Nexus streams generated images through `image-generation-handler`,
+   * not this path, and no `data-*` part is emitted through an adapter), so if a
+   * chunk type is ever added on one side, check the other.
    */
   protected static isVisibleChunkType(type: string): boolean {
     return (
