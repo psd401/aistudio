@@ -11,6 +11,11 @@
 #   suppress Dependabot ALERTS.
 # - Do NOT use YAML anchors/aliases here: Dependabot's parser rejects them
 #   ("YAML aliases are not supported") and the config check fails.
+# - infra/lambdas/agent-router is deliberately NOT listed: it ships no
+#   committed lockfile on purpose (installed with --frozen-lockfile so it
+#   resolves fresh without writing one -- see CLAUDE.md). Adding a Dependabot
+#   entry there would reintroduce exactly the package.json/lockfile drift
+#   this config exists to prevent.
 version: 2
 updates:
   # JavaScript/TypeScript dependencies (root package.json + bun.lock)
