@@ -1,3 +1,6 @@
+# Dependabot configuration for automated dependency updates
+# Helps keep dependencies up-to-date and secure
+#
 # Managed per PSD standards. Notes:
 # - bun repos use package-ecosystem "bun" (npm entries edit package.json
 #   without bun.lock -> psd-ci's frozen-lockfile install correctly refuses;
@@ -6,63 +9,79 @@
 # - Majors are ignored by default: major bumps are migration work humans
 #   schedule (standards/03; auto-remediation matrix). Ignore rules do not
 #   suppress Dependabot ALERTS.
+# - Do NOT use YAML anchors/aliases here: Dependabot's parser rejects them
+#   ("YAML aliases are not supported") and the config check fails.
 version: 2
 updates:
-- package-ecosystem: bun
-  directory: /
-  target-branch: dev
-  schedule:
-    interval: weekly
-    day: monday
-    time: '10:00'
-    timezone: America/Los_Angeles
-  open-pull-requests-limit: 10
-  groups:
-    minor-and-patch:
-      patterns:
-      - '*'
-      update-types:
-      - minor
-      - patch
-  ignore:
-  - dependency-name: '*'
-    update-types: &id001
-    - version-update:semver-major
-- package-ecosystem: bun
-  directory: /infra
-  target-branch: dev
-  schedule:
-    interval: weekly
-    day: monday
-    time: '10:00'
-    timezone: America/Los_Angeles
-  open-pull-requests-limit: 5
-  groups:
-    aws-cdk:
-      patterns:
-      - aws-cdk*
-      - '@aws-cdk/*'
-      - constructs
-      update-types:
-      - minor
-      - patch
-    minor-and-patch:
-      patterns:
-      - '*'
-      exclude-patterns:
-      - aws-cdk*
-      - '@aws-cdk/*'
-      - constructs
-      update-types:
-      - minor
-      - patch
-  ignore:
-  - dependency-name: '*'
-    update-types: *id001
-- package-ecosystem: github-actions
-  directory: /
-  target-branch: dev
-  schedule:
-    interval: weekly
-    day: monday
-  open-pull-requests-limit: 5
+  # JavaScript/TypeScript dependencies (root package.json + bun.lock)
+  - package-ecosystem: "bun"
+    directory: "/"
+    target-branch: "dev"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "10:00"
+      timezone: "America/Los_Angeles"
+    open-pull-requests-limit: 10
+    groups:
+      # Group all minor and patch updates together
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    # Majors are human-scheduled migration work (does not affect alerts)
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+
+  # CDK Infrastructure dependencies
+  - package-ecosystem: "bun"
+    directory: "/infra"
+    target-branch: "dev"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "10:00"
+      timezone: "America/Los_Angeles"
+    open-pull-requests-limit: 5
+    groups:
+      # Group AWS CDK related updates
+      aws-cdk:
+        patterns:
+          - "aws-cdk*"
+          - "@aws-cdk/*"
+          - "constructs"
+        update-types:
+          - "minor"
+          - "patch"
+      # Group other minor and patch updates
+      minor-and-patch:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "aws-cdk*"
+          - "@aws-cdk/*"
+          - "constructs"
+        update-types:
+          - "minor"
+          - "patch"
+    # Majors are human-scheduled migration work (does not affect alerts)
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+
+  # GitHub Actions
+  # No major-version ignore here on purpose: Actions majors are pinned-tag
+  # bumps (actions/checkout@v4 -> @v5), not dependency migrations, and they
+  # carry the runner/security fixes we want picked up promptly.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "dev"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
