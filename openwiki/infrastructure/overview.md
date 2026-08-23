@@ -363,7 +363,7 @@ Benefits:
 |----------|---------|---------|
 | `ci.yml` | Push to dev, PR | Lint, typecheck, tests |
 | `claude-code-review.yml` | PR opened/ready | AI-assisted code review |
-| `openwiki-update.yml` | Push to dev, weekly schedule | Regenerate OpenWiki docs |
+| `openwiki-update.yml` | Push to dev (excluding openwiki/**), weekly schedule | Regenerate OpenWiki docs |
 | `agent-eval-nightly.yml` | Nightly schedule | Agent skill evaluation |
 | `codeql.yml` | Weekly schedule | Security analysis |
 
