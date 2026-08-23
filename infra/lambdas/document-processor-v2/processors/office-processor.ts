@@ -1,6 +1,7 @@
 import {
   ProcessingParams,
   ProcessingResult,
+  ProcessingChunk,
   DocumentProcessor,
   ProcessorConfig,
 } from "./factory";
@@ -12,7 +13,7 @@ import { createLambdaLogger } from "../utils/lambda-logger";
 import { sanitizeHtml } from "../utils/html-sanitizer";
 
 interface XlsxSheetData {
-  name: unknown;
+  name: string;
   json: unknown[][];
   rowCount: number;
   columnCount: number;
@@ -27,23 +28,19 @@ interface OfficeExtractedContent {
   text: string;
   metadata: Record<string, unknown>;
   html?: string;
-  sheets?: unknown[];
-  slides?: unknown[];
+  sheets?: XlsxSheetData[];
+  slides?: PptxSlide[];
 }
 
 interface PptxSlide {
-  id: unknown;
-  text?: unknown;
+  id: number;
+  text?: string[];
 }
 
-interface PptxContent {
-  slides?: PptxSlide[];
-  text?: string;
-  metadata?: {
-    slideCount?: unknown;
-    slidesWithContent?: unknown;
-    extractionMethod?: unknown;
-  };
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
 }
 
 export class OfficeProcessor implements DocumentProcessor {
@@ -273,7 +270,7 @@ export class OfficeProcessor implements DocumentProcessor {
       const zipData = await zip.loadAsync(buffer);
 
       // Extract text from all slides
-      const slides: unknown[] = [];
+      const slides: PptxSlide[] = [];
       let combinedText = "";
 
       // Enumerate the slide entries actually present in the archive, sorted by their
@@ -368,28 +365,36 @@ export class OfficeProcessor implements DocumentProcessor {
           try {
             // Navigate through the PPTX XML structure to find text elements
             // Structure: p:sld -> p:cSld -> p:spTree -> p:sp -> p:txBody -> a:p -> a:r -> a:t
-            const slide = result["p:sld"];
-            if (slide && slide["p:cSld"] && slide["p:cSld"]["p:spTree"]) {
-              const shapes = slide["p:cSld"]["p:spTree"]["p:sp"];
+            const slide = asRecord(asRecord(result)?.["p:sld"]);
+            const commonSlideData = asRecord(slide?.["p:cSld"]);
+            const shapeTree = asRecord(commonSlideData?.["p:spTree"]);
+            const shapes = shapeTree?.["p:sp"];
+            if (shapes) {
               const shapesArray = Array.isArray(shapes) ? shapes : [shapes];
 
-              for (const shape of shapesArray) {
-                if (shape && shape["p:txBody"] && shape["p:txBody"]["a:p"]) {
-                  const paragraphs = Array.isArray(shape["p:txBody"]["a:p"])
-                    ? shape["p:txBody"]["a:p"]
-                    : [shape["p:txBody"]["a:p"]];
+              for (const shapeValue of shapesArray) {
+                const shape = asRecord(shapeValue);
+                const textBody = asRecord(shape?.["p:txBody"]);
+                const paragraphValue = textBody?.["a:p"];
+                if (paragraphValue) {
+                  const paragraphs = Array.isArray(paragraphValue)
+                    ? paragraphValue
+                    : [paragraphValue];
 
                   const handleNestedBranch1 = () => {
-                    for (const paragraph of paragraphs) {
-                      if (paragraph && paragraph["a:r"]) {
-                        const runs = Array.isArray(paragraph["a:r"])
-                          ? paragraph["a:r"]
-                          : [paragraph["a:r"]];
+                    for (const paragraphValue of paragraphs) {
+                      const paragraph = asRecord(paragraphValue);
+                      const runValue = paragraph?.["a:r"];
+                      if (runValue) {
+                        const runs = Array.isArray(runValue)
+                          ? runValue
+                          : [runValue];
 
                         let paragraphText = "";
-                        for (const run of runs) {
-                          if (run && run["a:t"]) {
-                            paragraphText += run["a:t"];
+                        for (const runValue of runs) {
+                          const text = asRecord(runValue)?.["a:t"];
+                          if (typeof text === "string") {
+                            paragraphText += text;
                           }
                         }
 
@@ -399,11 +404,9 @@ export class OfficeProcessor implements DocumentProcessor {
                       }
 
                       // Handle direct text in paragraphs (without runs)
-                      if (paragraph && paragraph["a:t"]) {
-                        const directText = paragraph["a:t"];
-                        if (directText && directText.trim()) {
-                          textBlocks.push(directText.trim());
-                        }
+                      const directText = paragraph?.["a:t"];
+                      if (typeof directText === "string" && directText.trim()) {
+                        textBlocks.push(directText.trim());
                       }
                     }
                   };
@@ -445,7 +448,7 @@ export class OfficeProcessor implements DocumentProcessor {
     }
   }
 
-  private convertDocxToMarkdown(content: unknown): string {
+  private convertDocxToMarkdown(content: OfficeExtractedContent): string {
     // Use HTML content if available for better structure
     if (content.html) {
       try {
@@ -592,7 +595,7 @@ export class OfficeProcessor implements DocumentProcessor {
     return markdown;
   }
 
-  private pptxMetadataMarkdown(metadata: PptxContent["metadata"]): string {
+  private pptxMetadataMarkdown(metadata: Record<string, unknown> | undefined): string {
     let markdown = "\n---\n";
     if (metadata?.slideCount) {
       markdown += `**Total Slides:** ${metadata.slideCount}\n`;
@@ -604,15 +607,14 @@ export class OfficeProcessor implements DocumentProcessor {
     return markdown;
   }
 
-  private convertPptxToMarkdown(content: unknown): string {
-    const pptx = content as PptxContent;
-    const slidesMarkdown = Array.isArray(pptx.slides)
-      ? this.structuredSlidesMarkdown(pptx.slides)
-      : this.fallbackSlidesMarkdown(pptx.text ?? "");
+  private convertPptxToMarkdown(content: OfficeExtractedContent): string {
+    const slidesMarkdown = Array.isArray(content.slides)
+      ? this.structuredSlidesMarkdown(content.slides)
+      : this.fallbackSlidesMarkdown(content.text);
     return (
       "# PowerPoint Presentation\n\n" +
       slidesMarkdown +
-      this.pptxMetadataMarkdown(pptx.metadata)
+      this.pptxMetadataMarkdown(content.metadata)
     );
   }
 
@@ -645,11 +647,11 @@ export class OfficeProcessor implements DocumentProcessor {
     return markdown.trim();
   }
 
-  private async chunkText(text: string): Promise<unknown[]> {
+  private async chunkText(text: string): Promise<ProcessingChunk[]> {
     const chunkSize = 2000;
     const overlap = 200;
 
-    const chunks = [];
+    const chunks: ProcessingChunk[] = [];
     let startIndex = 0;
     let chunkIndex = 0;
 

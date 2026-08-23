@@ -1,7 +1,9 @@
 import { createLambdaLogger } from './lambda-logger';
 
+type DetectedFileType = 'pdf' | 'docx' | 'xlsx' | 'pptx' | 'txt' | 'csv' | 'md' | 'unknown';
+
 export interface FileTypeDetectionResult {
-  detectedType: 'pdf' | 'docx' | 'xlsx' | 'pptx' | 'txt' | 'csv' | 'md' | 'unknown';
+  detectedType: DetectedFileType;
   confidence: 'high' | 'medium' | 'low';
   method: 'magic-number' | 'extension' | 'mime-type' | 'fallback';
   reason: string;
@@ -43,7 +45,7 @@ export class FileTypeDetector {
     ]
   };
 
-  private static readonly EXTENSION_MAP: Record<string, string> = {
+  private static readonly EXTENSION_MAP: Record<string, DetectedFileType> = {
     '.pdf': 'pdf',
     '.docx': 'docx',
     '.doc': 'docx', // Treat legacy DOC as DOCX for processing
@@ -61,7 +63,7 @@ export class FileTypeDetector {
     '.yml': 'txt'   // Treat YML as text for processing
   };
 
-  private static readonly MIME_TYPE_MAP: Record<string, string> = {
+  private static readonly MIME_TYPE_MAP: Record<string, DetectedFileType> = {
     'application/pdf': 'pdf',
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
@@ -160,7 +162,7 @@ export class FileTypeDetector {
       const officeType = this.detectOfficeTypeFromZip(buffer, fileName);
       if (officeType !== 'unknown') {
         return {
-          detectedType: officeType as unknown,
+          detectedType: officeType,
           confidence: 'high',
           method: 'magic-number',
           reason: `ZIP archive with ${officeType.toUpperCase()} content structure detected`
@@ -203,7 +205,7 @@ export class FileTypeDetector {
   /**
    * Detect Office document type by inspecting ZIP archive structure
    */
-  private static detectOfficeTypeFromZip(buffer: Buffer, fileName?: string): string {
+  private static detectOfficeTypeFromZip(buffer: Buffer, fileName?: string): DetectedFileType {
     try {
       // Convert buffer to string to search for internal file paths
       const content = buffer.toString('binary', 0, Math.min(buffer.length, 8192)); // Check first 8KB
@@ -254,7 +256,7 @@ export class FileTypeDetector {
     for (const [ext, type] of Object.entries(this.EXTENSION_MAP)) {
       if (lowercaseFileName.endsWith(ext)) {
         return {
-          detectedType: type as unknown,
+          detectedType: type,
           confidence: 'medium',
           method: 'extension',
           reason: `File extension ${ext} indicates ${type.toUpperCase()} file`
@@ -279,7 +281,7 @@ export class FileTypeDetector {
     const detectedType = this.MIME_TYPE_MAP[normalizedMimeType];
     if (detectedType) {
       return {
-        detectedType: detectedType as unknown,
+        detectedType,
         confidence: 'medium',
         method: 'mime-type',
         reason: `MIME type ${mimeType} indicates ${detectedType.toUpperCase()} file`
@@ -345,7 +347,7 @@ export class FileTypeDetector {
           const officeType = this.detectOfficeTypeFromZip(buffer);
           if (officeType !== 'unknown') {
             return {
-              detectedType: officeType as unknown,
+              detectedType: officeType,
               confidence: 'medium',
               method: 'fallback',
               reason: `Content inspection identified ${officeType.toUpperCase()} structure`
