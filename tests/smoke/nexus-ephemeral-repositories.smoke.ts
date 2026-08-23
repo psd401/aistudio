@@ -36,7 +36,9 @@ import {
 } from "@/lib/nexus/ephemeral-repository-service";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const NOW = new Date("2026-07-23T12:00:00.000Z");
+// Access checks compare expiry against the database wall clock, so a fixed
+// fixture date eventually turns this active-repository smoke into a time bomb.
+const NOW = new Date();
 const policy = {
   nexusAttachmentRetentionDays: 30,
   deletionGraceDays: 7,
