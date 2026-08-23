@@ -35,7 +35,6 @@ export interface ProcessingChunk {
 }
 
 export interface ProcessingResult {
-  [key: string]: unknown;
   text?: string;
   markdown?: string;
   chunks?: ProcessingChunk[];

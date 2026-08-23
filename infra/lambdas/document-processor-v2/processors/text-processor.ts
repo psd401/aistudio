@@ -27,10 +27,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function isCsvRecords(value: unknown): value is Array<Record<string, string>> {
-  return Array.isArray(value) && value.every((record) =>
-    isRecord(record) && Object.values(record).every((cell) => typeof cell === 'string')
-  );
+function isCsvRecord(value: unknown): value is Record<string, string> {
+  return isRecord(value) && Object.values(value).every((cell) => typeof cell === 'string');
 }
 
 async function reportProgress(
@@ -356,17 +354,18 @@ export class TextProcessor implements DocumentProcessor {
   }
 
   private csvToMarkdown(content: ExtractedTextContent): string {
-    if (!isCsvRecords(content.rawData) || content.rawData.length === 0) {
+    if (!Array.isArray(content.rawData) || content.rawData.length === 0) {
       return '# CSV Data\n\nNo data found.';
     }
 
-    const records = content.rawData;
-    const headers = Object.keys(records[0]);
+    const totalRecords = content.rawData.length;
+    const displayRecords = content.rawData.slice(0, 20);
+    if (!displayRecords.every(isCsvRecord)) {
+      return '# CSV Data\n\nUnable to render malformed CSV data.';
+    }
+    const headers = Object.keys(displayRecords[0]);
 
-    let markdown = `# CSV Data\n\n**${records.length} records** with columns: ${headers.join(', ')}\n\n`;
-
-    // Create table (limit to first 20 records)
-    const displayRecords = records.slice(0, 20);
+    let markdown = `# CSV Data\n\n**${totalRecords} records** with columns: ${headers.join(', ')}\n\n`;
 
     markdown += '| ' + headers.join(' | ') + ' |\n';
     markdown += '| ' + headers.map(() => '---').join(' | ') + ' |\n';
@@ -380,8 +379,8 @@ export class TextProcessor implements DocumentProcessor {
       markdown += '| ' + row.join(' | ') + ' |\n';
     }
 
-    if (records.length > 20) {
-      markdown += `\n*... and ${records.length - 20} more records*\n`;
+    if (totalRecords > 20) {
+      markdown += `\n*... and ${totalRecords - 20} more records*\n`;
     }
 
     return markdown;
