@@ -66,7 +66,7 @@
         "cacheTtlMinutes": 15
       }
     },
-    "deny": ["cron", "nodes", "gateway"]
+    "deny": ["cron", "nodes", "gateway", "sessions", "agents"]
   },
   "skills": {
     "load": {

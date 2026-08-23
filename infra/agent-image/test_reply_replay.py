@@ -34,7 +34,9 @@ Run:
 import collections
 import json
 import os
+import pathlib
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -48,13 +50,18 @@ class _FakeTimeout(Exception):
     """Stands in for websocket.WebSocketTimeoutException (an idle gap)."""
 
 
-def agent_event(stream, data):
+# The run FakeGateway reports for this turn via the chat.send res. Events
+# carrying a different runId belong to somebody else's run.
+TURN_RUN_ID = "run-replay"
+
+
+def agent_event(stream, data, run_id=TURN_RUN_ID):
     """One `event:agent` frame, matching the captured envelope."""
     return {
         "type": "event",
         "event": "agent",
         "payload": {
-            "runId": "run-replay",
+            "runId": run_id,
             "stream": stream,
             "data": data,
             "sessionKey": "agent:main:replay",
@@ -62,6 +69,11 @@ def agent_event(stream, data):
             "isHeartbeat": False,
         },
     }
+
+
+def foreign_says(text, run_id="run-somebody-else"):
+    """An assistant delta from a run this turn did not start."""
+    return agent_event("assistant", {"text": text, "delta": text}, run_id=run_id)
 
 
 def says(text):
@@ -90,6 +102,55 @@ def uses_tool(name="exec"):
     return [calls_tool(name, "start"), calls_tool(name, "end")]
 
 
+
+def thinks(text):
+    """A `thinking` delta — reasoning, dropped from the reply but real activity.
+
+    Shape from the live dev runtime (openclaw_event_sample stream=thinking,
+    2026-08-16). 22 of these sat between the assistant fragments of the fused
+    Artondale turn.
+    """
+    return agent_event("thinking", {"text": text, "delta": text})
+
+
+def runs_task(kind="exec", status="running", run_id=TURN_RUN_ID):
+    """An `event:task` frame — long-running tool execution.
+
+    Shape from the live runtime's own openclaw_kind_shape diagnostic:
+    marks={"action": "upserted", "kind": "exec", "status": "running"}.
+    This is NOT an event:agent frame, which is exactly why the old
+    boundary rule never saw it.
+    """
+    return {"type": "event", "event": "task", "payload": {
+        "action": "upserted",
+        "task": {"agentId": "main", "id": "t1", "taskId": "t1", "kind": kind,
+                 "status": status, "runId": run_id, "title": kind,
+                 "sessionKey": "agent:main:replay", "createdAt": 1,
+                 "updatedAt": 2, "startedAt": 1, "ownerKey": "o",
+                 "progressSummary": "p", "runtime": "r", "sourceId": "s"}}}
+
+
+
+def reasons(title="considering the roster"):
+    """A non-tool `item` frame.
+
+    itemKind() in the pinned bundle maps `reasoning` and `contextCompaction`
+    to kind="analysis", so item frames that are NOT tool work genuinely occur.
+    _is_tool_activity_stream carves them out on purpose: one arriving right
+    before the final chat event must not discard a finished answer.
+    """
+    return agent_event("item", {"itemId": "analysis:1", "phase": "start",
+                                "kind": "analysis", "title": title,
+                                "status": "running"})
+
+
+def beats():
+    """A heartbeat on the agent stream. Must never split a live message."""
+    event = agent_event("thinking", {"text": "", "delta": ""})
+    event["payload"]["isHeartbeat"] = True
+    return event
+
+
 class FakeGateway:
     """In-process stand-in for the OpenClaw gateway WebSocket.
 
@@ -103,8 +164,28 @@ class FakeGateway:
     is what a real idle socket does and what the bounded drain loops expect.
     """
 
-    def __init__(self, agent_events):
+    def __init__(self, agent_events, resume_events=None, question_expired=False,
+                 resume_before_ack=False, withhold_ack=False):
         self._agent_events = agent_events
+        # The gateway accepts the resolve and the run resumes, but the ack
+        # itself never lands inside our wait window. Nothing in the protocol
+        # orders those two, and this is the case where guessing "refused"
+        # costs the user a duplicate execution.
+        self._withhold_ack = withhold_ack
+        # Whether the resumed run's output lands BEFORE the question.resolve
+        # ack. The gateway is async; nothing guarantees the ack wins that race,
+        # and frames dropped during the resolve wait are gone for good.
+        self._resume_before_ack = resume_before_ack
+        # What the ORIGINAL run streams once its question is answered. Modelled
+        # because that is what really happens: question.resolve unblocks the
+        # run that asked, and it continues on this same socket.
+        self._resume_events = resume_events or []
+        self._question_expired = question_expired
+        # Gateway-side question state, mirroring QuestionStatusSchema:
+        # pending | answered | cancelled | expired.
+        self.question_status = None
+        self.question_answers = None
+        self.aborted_a_pending_question = False
         self._outbox = collections.deque()
         self.sent = []
         self.closed = False
@@ -129,9 +210,52 @@ class FakeGateway:
             self._reply(request_id, {"protocol": 4})
         elif method == "tools.catalog":
             self._reply(request_id, {"tools": ["exec", "read"]})
+        elif method == "question.resolve":
+            params = message.get("params") or {}
+            if self._question_expired or self.question_status != "pending":
+                # Terminal states are refused, exactly as the manager does.
+                self._reply(request_id, {"status": "cancelled"}, ok=False)
+            elif params.get("cancel"):
+                self.question_status = "cancelled"
+                self._reply(request_id, {"status": "cancelled"})
+            else:
+                self.question_status = "answered"
+                self.question_answers = params.get("answers")
+
+                def stream_the_resumed_run():
+                    # The run that asked resumes and streams its continuation.
+                    for event in self._resume_events:
+                        self._outbox.append(json.dumps(event))
+                    self._outbox.append(
+                        json.dumps({
+                            "type": "event", "event": "chat",
+                            "payload": {"state": "final"},
+                        })
+                    )
+
+                if self._withhold_ack:
+                    # Accepted server-side; the ack is lost or slow.
+                    stream_the_resumed_run()
+                elif self._resume_before_ack:
+                    stream_the_resumed_run()
+                    self._reply(request_id, {"status": "answered"})
+                else:
+                    self._reply(request_id, {"status": "answered"})
+                    stream_the_resumed_run()
         elif method == "chat.abort":
+            # The bundle's ask-user tool registers an abort listener that fires
+            # cancelPendingQuestion("run-abort"). This models that: aborting
+            # while a question is pending destroys it.
+            if self.question_status == "pending":
+                self.question_status = "cancelled"
+                self.aborted_a_pending_question = True
             self._reply(request_id, {})
         elif method == "chat.send":
+            # The gateway names this turn's run before streaming anything —
+            # `{"runId": ..., "status": "started"}` — then closes with a final
+            # res. Both are replayed so the runId fence sees what it sees in
+            # production.
+            self._reply(request_id, {"status": "started", "runId": TURN_RUN_ID})
             for event in self._agent_events:
                 self._outbox.append(json.dumps(event))
             self._reply(request_id, {"status": "final"})
@@ -142,10 +266,18 @@ class FakeGateway:
         return self._outbox.popleft()
 
     # -- helpers ------------------------------------------------------------
-    def _reply(self, request_id, payload):
+    def _reply(self, request_id, payload, ok=True):
         self._outbox.append(
-            json.dumps({"type": "res", "id": request_id, "ok": True, "payload": payload})
+            json.dumps({"type": "res", "id": request_id, "ok": ok, "payload": payload})
         )
+
+    def hold_question(self):
+        """Put the gateway into the state it is in after the agent asks.
+
+        Returns self so it can be chained at construction.
+        """
+        self.question_status = "pending"
+        return self
 
 
 def aborts(stop_reason="cancelled"):
@@ -154,6 +286,19 @@ def aborts(stop_reason="cancelled"):
         "type": "event",
         "event": "chat",
         "payload": {"state": "aborted", "stopReason": stop_reason},
+    }
+
+
+def foreign_error(run_id="announce:v1:agent:main:subagent:4a5a5b24:7c6a718d"):
+    """A chat error belonging to a subagent run, not to this turn."""
+    return {
+        "type": "event",
+        "event": "chat",
+        "payload": {
+            "state": "error",
+            "runId": run_id,
+            "errorMessage": "LLM request failed.",
+        },
     }
 
 
@@ -302,5 +447,1066 @@ class AbortedTurnDoesNotShipScratchpad(unittest.TestCase):
         self.assertIn("The Q3 doc lists four owners.", text)
 
 
+class ForeignRunsCannotAnswerThisTurn(unittest.TestCase):
+    """The reply must be built only from the run this turn started.
+
+    The adapter's socket is not private to the turn: it connects as
+    `role: operator` with operator.admin/read/write, so the gateway delivers
+    agent events for runs this turn did not start — other sessions included.
+    Assistant text was accumulated from all of them.
+
+    On 2026-08-14 a Docs turn failed at the harness (subagent Bedrock error),
+    kept running, and finished two minutes later. The next turn — a different
+    request in a DIFFERENT session (6ef59dd1 -> 0093fbb5) — was answered with
+    that stale run's text, and the user's real request was never processed.
+    """
+
+    def test_a_stale_runs_answer_is_not_returned(self):
+        text = replay(
+            [
+                foreign_says("Done. Doc created and ownership transferred."),
+                says("Updated the cell to 253.590.6433."),
+            ]
+        )
+        self.assertEqual(text, "Updated the cell to 253.590.6433.")
+
+    def test_a_foreign_run_cannot_supply_the_whole_reply(self):
+        # The turn produced nothing of its own. Answering with someone else's
+        # text is the exact failure; an empty reply is the honest outcome.
+        text = replay([foreign_says("Done. Doc created and ownership transferred.")])
+        self.assertNotIn("Doc created", text)
+
+    def test_a_foreign_run_cannot_split_this_turns_answer(self):
+        # Interleaving must not corrupt the real reply either.
+        text = replay(
+            [
+                says("The sheet has "),
+                foreign_says("Done. Doc created."),
+                says("20 entries."),
+            ]
+        )
+        self.assertEqual(text, "The sheet has 20 entries.")
+
+    def test_a_subagents_failure_does_not_abort_the_parent_turn(self):
+        # A chat event with state:"error" aborts the turn. A subagent's failure
+        # arrives on that channel under its own announce: run id, so one
+        # failing subagent killed a parent turn that went on to finish the
+        # work — the user got "I couldn't complete that" for a doc that was
+        # created and handed over two minutes later.
+        text = replay(
+            [
+                says("Working on it."),
+                foreign_error(),
+                *uses_tool("exec"),
+                says("Created the doc and transferred ownership to you."),
+            ]
+        )
+        self.assertEqual(text, "Created the doc and transferred ownership to you.")
+
+    def test_an_error_on_this_turns_own_run_still_fails_it(self):
+        # The fence must not swallow a real failure of our own run.
+        text = replay(
+            [
+                says("Working on it."),
+                {
+                    "type": "event",
+                    "event": "chat",
+                    "payload": {
+                        "state": "error",
+                        "runId": TURN_RUN_ID,
+                        "errorMessage": "LLM request failed.",
+                    },
+                },
+            ]
+        )
+        self.assertIn("couldn't", text.lower())
+
+    def test_events_without_a_run_id_are_still_accepted(self):
+        # Fails open: a gateway that does not name the run must behave exactly
+        # as before rather than silently muting every reply.
+        text = replay(
+            [
+                {
+                    "type": "event",
+                    "event": "agent",
+                    "payload": {
+                        "stream": "assistant",
+                        "data": {"text": "No runId here.", "delta": "No runId here."},
+                    },
+                }
+            ]
+        )
+        self.assertEqual(text, "No runId here.")
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+def asks_question(payload):
+    """A `question.requested` event, as the gateway actually sends it."""
+    return {"type": "event", "event": "question.requested", "payload": payload}
+
+
+REAL_PAYLOAD = {
+    "agentId": "main",
+    "id": "q1",
+    "runId": TURN_RUN_ID,
+    "sessionKey": "agent:main:replay",
+    "status": "pending",
+    "questions": [
+        {
+            "id": "continue_report",
+            "header": "Quartile report",
+            "question": "Your last run got interrupted while I was building the "
+            "Evergreen quartile growth Sheet. Want me to finish and post the link now?",
+            "options": [
+                {"label": "Yes, finish and share it now (Recommended)"},
+                {"label": "Hold off for now"},
+            ],
+        }
+    ],
+}
+
+
+class StructuredQuestionsReachTheUser(unittest.TestCase):
+    """`questions` (PLURAL) is the shape the gateway sends.
+
+    The extractor probed singular question/text/prompt/message/content and
+    missed it, so every structured ask was replaced by "I need a bit more
+    information to continue — could you clarify what you'd like me to do?".
+    The user could not answer a question they never saw, the agent asked
+    again, and the loop cost a whole report (dev 2026-08-15, payload_keys
+    ['agentId','createdAtMs','expiresAtMs','id','questions','runId',
+    'sessionKey','status']).
+    """
+
+    def test_the_real_question_text_reaches_the_user(self):
+        text = replay([asks_question(REAL_PAYLOAD)])
+        self.assertIn("Want me to finish and post the link now?", text)
+        self.assertNotIn("I need a bit more information", text)
+
+    def test_answer_options_are_included(self):
+        # Without the options the user is guessing at what a valid reply is.
+        text = replay([asks_question(REAL_PAYLOAD)])
+        self.assertIn("Yes, finish and share it now", text)
+        self.assertIn("Hold off for now", text)
+
+    def test_work_streamed_before_the_question_is_kept(self):
+        text = replay([says("Rollups are done."), asks_question(REAL_PAYLOAD)])
+        self.assertIn("Rollups are done.", text)
+        self.assertIn("Want me to finish", text)
+
+    def test_multiple_questions_all_render(self):
+        payload = {"questions": [{"question": "First?"}, {"question": "Second?"}]}
+        text = replay([asks_question(payload)])
+        self.assertIn("First?", text)
+        self.assertIn("Second?", text)
+
+    def test_plain_string_questions_render(self):
+        text = replay([asks_question({"questions": ["Just a string?"]})])
+        self.assertIn("Just a string?", text)
+
+    def test_legacy_singular_shape_still_works(self):
+        text = replay([asks_question({"question": "Legacy shape?"})])
+        self.assertIn("Legacy shape?", text)
+
+    def test_genuinely_empty_payload_still_falls_back(self):
+        # The fallback must remain for a shape we truly cannot read — but it
+        # is now the last resort, not the common path.
+        text = replay([asks_question({"questions": []})])
+        self.assertIn("I need a bit more information", text)
+
+
+def turn_runner():
+    """One adapter, many turns — the production shape.
+
+    agentcore_wrapper holds a single module-level OpenClawAdapter for the life
+    of the container, so state carried between turns (the pending question) is
+    carried on THIS object. Sharing it is the point, not a shortcut.
+
+    Returns (adapter, run) where run(gateway, text, session, env) -> TurnResult.
+    """
+    adapter = OpenClawAdapter()
+    adapter._ready = True
+    zero_usage = {"model_calls": 0, "input": 0, "output": 0,
+                  "cache_read": 0, "cache_write": 0}
+
+    def run(gateway, text, session="session-replay", env=None):
+        fake_websocket = mock.Mock()
+        fake_websocket.create_connection.return_value = gateway
+        fake_websocket.WebSocketTimeoutException = _FakeTimeout
+        with mock.patch.dict(sys.modules, {"websocket": fake_websocket}), \
+             mock.patch.dict(os.environ, env or {}), \
+             mock.patch.object(OpenClawAdapter, "_read_turn_usage",
+                               return_value=zero_usage), \
+             mock.patch.object(harness_adapter, "record_failure"):
+            return adapter._process_once(text, session)
+
+    return adapter, run
+
+
+def two_turn_replay(first_events, answer_text, resume_events, question_expired=False,
+                    resume_before_ack=False, interleaved_session=None, env=None,
+                    withhold_ack=False):
+    """Turn 1 asks a question; turn 2 is the user's answer, on ONE adapter.
+
+    The adapter instance is shared deliberately — the pending question is
+    carried on it between turns, which is the whole mechanism under test.
+
+    `interleaved_session` runs an unrelated session's turn BETWEEN the two, on
+    the same adapter. That is the production shape: agentcore_wrapper holds one
+    module-level adapter for every user in the container, and turns from
+    different sessions interleave freely.
+
+    Returns (first_reply, second_reply, gateway_of_turn_2).
+    """
+    adapter, run_on = turn_runner()
+
+    def run(gateway, text, session="session-replay"):
+        return run_on(gateway, text, session, env)
+
+    g1 = FakeGateway(first_events)
+    first = run(g1, "Give me a quartile growth report")
+
+    if interleaved_session:
+        # Someone else's turn, start to finish, while our question waits.
+        run(FakeGateway([says("Unrelated answer.")]),
+            "What's the weather", interleaved_session)
+
+    # The gateway is now holding that question open, as it does in production.
+    g2 = FakeGateway([], resume_events=resume_events,
+                     question_expired=question_expired,
+                     resume_before_ack=resume_before_ack,
+                     withhold_ack=withhold_ack).hold_question()
+    second = run(g2, answer_text)
+    return first.text, second.text, g2
+
+
+# QuestionRecordSchema, read from the pinned bundle's gateway-protocol
+# schemas (2026.7.2-beta.5, packages/gateway-protocol/src/schema/questions.ts)
+# rather than authored to match the adapter. The per-question key is
+# `questionId`; QuestionSchema is a closedObject, so `id` is not just absent
+# from real traffic, it is rejected by it. The previous fixture used `id`,
+# which is precisely how the adapter's `entry.get("id")` bug stayed green
+# through eleven rounds of review — the warning in this module's docstring,
+# earned.
+#
+# ask_user hardcodes isOther=true on every question it builds
+# (normalizeAskUserParams), so it is set here too.
+ASK = {
+    "type": "event",
+    "event": "question.requested",
+    "payload": {
+        "id": "q-abc",
+        "runId": TURN_RUN_ID,
+        "sessionKey": "agent:main:replay",
+        "status": "pending",
+        "createdAtMs": 0,
+        "expiresAtMs": 600000,
+        "questions": [{
+            "questionId": "continue_report",
+            "header": "Continue",
+            "question": "Want me to finish and post the link now?",
+            "options": [{"label": "Keep going to completion (Recommended)"},
+                        {"label": "Stop here"}],
+            "isOther": True,
+        }],
+    },
+}
+
+
+class AnsweringAQuestionDoesNotAbortIt(unittest.TestCase):
+    """The user's answer must RESOLVE the pending question, not cancel it.
+
+    The gateway holds an asked question in `pending` awaiting question.resolve.
+    This adapter walked away from it, and the next turn's pre-send chat.abort
+    hit the ask-user tool's abort listener — cancelPendingQuestion("run-abort")
+    in the bundle — destroying it. The model then correctly reported that its
+    question had been aborted, and users read that as a fabricated abort they
+    never performed. They never did. We did, every turn.
+    """
+
+    def test_the_pending_question_is_answered_not_cancelled(self):
+        _, _, g2 = two_turn_replay(
+            [ASK], "Keep going", [says("Done — here is the link.")]
+        )
+        self.assertEqual(g2.question_status, "answered")
+        self.assertFalse(
+            g2.aborted_a_pending_question,
+            "the pre-send abort cancelled the question the user was answering",
+        )
+
+    def test_the_answer_carries_the_users_text_in_the_schema_shape(self):
+        # QuestionResolveParamsSchema: answers is {answers: {qid: [str]}}
+        _, _, g2 = two_turn_replay(
+            [ASK], "Keep going", [says("Done.")]
+        )
+        self.assertEqual(g2.question_answers, {"answers": {"continue_report": ["Keep going"]}})
+
+    def test_no_second_chat_send_is_issued(self):
+        # OpenClaw's own claim path returns without queueing; running the
+        # answer again as a fresh prompt would double-execute the turn.
+        _, _, g2 = two_turn_replay([ASK], "Keep going", [says("Done.")])
+        sends = [m for m in g2.sent if m.get("method") == "chat.send"]
+        self.assertEqual(sends, [])
+
+    def test_the_resumed_run_reply_reaches_the_user(self):
+        _, second, _ = two_turn_replay(
+            [ASK], "Keep going", [says("Grades 3-5 written. Sheet shared.")]
+        )
+        self.assertIn("Grades 3-5 written", second)
+
+    def test_the_question_still_reaches_the_user_on_turn_one(self):
+        first, _, _ = two_turn_replay([ASK], "Keep going", [says("Done.")])
+        self.assertIn("Want me to finish and post the link now?", first)
+        self.assertIn("Keep going to completion", first)
+
+    def test_an_expired_question_falls_back_to_a_normal_turn(self):
+        # A question we cannot answer must never block the user's message.
+        _, _, g2 = two_turn_replay(
+            [ASK], "Keep going", [], question_expired=True
+        )
+        sends = [m for m in g2.sent if m.get("method") == "chat.send"]
+        self.assertEqual(len(sends), 1, "expired question must fall back to chat.send")
+
+    def test_another_users_turn_in_between_does_not_drop_the_question(self):
+        # agentcore_wrapper holds ONE module-level adapter for every user in
+        # the container, so turns from different sessions interleave. Holding
+        # the pending question in a single scalar let any unrelated session's
+        # turn clear it, dropping this user straight back onto the abort path
+        # — the original bug, now intermittent and multi-user only.
+        _, second, g2 = two_turn_replay(
+            [ASK], "Keep going", [says("Grades 3-5 written.")],
+            interleaved_session="someone-else",
+        )
+        self.assertEqual(g2.question_status, "answered")
+        self.assertFalse(
+            g2.aborted_a_pending_question,
+            "another session's turn let the pre-send abort kill this question",
+        )
+        self.assertIn("Grades 3-5 written", second)
+
+    def test_the_other_session_does_not_answer_our_question(self):
+        # The converse: an unrelated turn must never resolve a question it did
+        # not ask, which is what a global scalar would have allowed.
+        adapter_sends = []
+
+        _, _, g2 = two_turn_replay(
+            [ASK], "Keep going", [says("Done.")],
+            interleaved_session="someone-else",
+        )
+        adapter_sends.extend(g2.sent)
+        resolves = [m for m in adapter_sends if m.get("method") == "question.resolve"]
+        self.assertEqual(len(resolves), 1)
+        self.assertEqual(resolves[0]["params"]["id"], "q-abc")
+
+    def test_a_second_question_asked_inside_the_resumed_run_also_resolves(self):
+        # The agent asks, is answered, and asks AGAIN from the resumed run —
+        # a clarify-then-clarify-again exchange. The second ask arrives on the
+        # resumed listen path rather than after a chat.send, so it has to be
+        # remembered the same way or turn 3 falls back onto the abort that
+        # started this whole bug.
+        adapter, run = turn_runner()
+
+        second_ask = dict(ASK)
+        second_ask["payload"] = dict(ASK["payload"], id="q-def")
+
+        run(FakeGateway([ASK]), "Quartile growth report for Purdy")
+
+        # Turn 2: answers q-abc, and the resumed run immediately asks q-def.
+        g2 = FakeGateway([], resume_events=[second_ask]).hold_question()
+        second = run(g2, "Keep going")
+        self.assertEqual(g2.question_status, "answered")
+        self.assertIn("Want me to finish", second.text)
+        self.assertEqual(adapter._pending_questions["session-replay"]["id"], "q-def")
+
+        # Turn 3: the follow-up answer must resolve q-def, not abort it.
+        g3 = FakeGateway([], resume_events=[says("Sheet shared.")]).hold_question()
+        third = run(g3, "Yes, all grades")
+        self.assertEqual(g3.question_status, "answered")
+        self.assertFalse(g3.aborted_a_pending_question)
+        resolves = [m for m in g3.sent if m.get("method") == "question.resolve"]
+        self.assertEqual(resolves[0]["params"]["id"], "q-def")
+        self.assertIn("Sheet shared", third.text)
+
+    def test_a_foreign_run_cannot_contribute_to_the_resumed_reply(self):
+        # turn_run_id is normally learned from the chat.send `started` res, and
+        # BOTH fences are gated on it being truthy. A resumed-question turn
+        # sends no chat.send — so without seeding it from the asking run, the
+        # fence was off for exactly the turns that listen longest to a socket
+        # carrying other runs. That is the 2026-08-14 incident's setup.
+        _, second, _ = two_turn_replay(
+            [ASK], "Keep going",
+            [foreign_says("STOLEN: someone else's answer."),
+             says("Grades 3-5 written.")],
+        )
+        self.assertNotIn("STOLEN", second)
+        self.assertIn("Grades 3-5 written", second)
+
+    def test_the_asking_runs_own_output_is_not_fenced_out(self):
+        # The converse, and the way a fence like this usually breaks: seeding
+        # the wrong id would silence the run we are actually waiting for.
+        _, second, _ = two_turn_replay(
+            [ASK], "Keep going", [says("Sheet shared.")]
+        )
+        self.assertIn("Sheet shared", second)
+
+    def test_a_multi_question_ask_answers_every_sub_question(self):
+        # One reply, several sub-questions. Answering only the first leaves the
+        # rest unanswered, and a partial resolve the gateway refuses lands us
+        # back on the abort path. Redundant beats refused.
+        multi = dict(ASK)
+        multi["payload"] = dict(ASK["payload"], questions=[
+            {"questionId": "grades", "header": "Grades",
+             "question": "Which grades?", "options": [], "isOther": True},
+            {"questionId": "year", "header": "Year",
+             "question": "Which year?", "options": [], "isOther": True},
+        ])
+        # `header: value` lines, upstream's keyed form.
+        _, _, g2 = two_turn_replay(
+            [multi], "Grades: K-5\nYear: 2025-26", [says("Done.")])
+        self.assertEqual(
+            g2.question_answers,
+            {"answers": {"grades": ["K-5"], "year": ["2025-26"]}},
+        )
+        self.assertEqual(g2.question_status, "answered")
+
+    def test_a_failed_resolve_still_counts_toward_reported_latency(self):
+        # A resolve that times out and falls back has already burned the ack
+        # wait and the abort drain — time the user spent waiting. Restarting
+        # the clock afterwards reports the SLOWEST turns as the fastest, which
+        # is worse than not measuring them at all.
+        original = OpenClawAdapter._resolve_pending_question
+
+        def slow(adapter_self, *args, **kwargs):
+            time.sleep(0.15)
+            return original(adapter_self, *args, **kwargs)
+
+        adapter, run = turn_runner()
+        run(FakeGateway([ASK]), "Quartile growth report")
+        # Expired: the resolve is refused, so this turn takes the fallback.
+        g2 = FakeGateway([says("Done.")], question_expired=True).hold_question()
+        with mock.patch.object(OpenClawAdapter, "_resolve_pending_question", slow):
+            result = run(g2, "Keep going")
+        sends = [m for m in g2.sent if m.get("method") == "chat.send"]
+        self.assertEqual(len(sends), 1, "this test must exercise the fallback")
+        self.assertGreaterEqual(result.latency_ms, 150)
+
+    def test_a_lost_ack_with_the_run_streaming_is_not_treated_as_a_refusal(self):
+        # The ack and the resumed run's output are unordered. If the ack is
+        # slow or lost, "no ack" is NOT "refused" — and the fallback aborts
+        # the accepted run and re-sends the same text, running the user's
+        # answer twice against side effects already underway.
+        #
+        # A run blocked on a question emits nothing, so frames carrying the
+        # ASKING run's id are proof it resumed, which only happens once the
+        # gateway accepts. Evidence, not a heuristic — the socket carries
+        # every run in the container, so the run id is what makes it evidence.
+        _, second, g2 = two_turn_replay(
+            [ASK], "Keep going", [says("Sheet shared: the link.")],
+            withhold_ack=True,
+        )
+        sends = [m for m in g2.sent if m.get("method") == "chat.send"]
+        self.assertEqual(sends, [], "a lost ack must not re-run the answer")
+        aborts = [m for m in g2.sent if m.get("method") == "chat.abort"]
+        self.assertEqual(aborts, [], "the accepted run must not be aborted")
+        self.assertIn("Sheet shared", second)
+
+    def test_a_lost_ack_with_nothing_streaming_still_falls_back(self):
+        # The converse. No ack AND no sign of the run means we have no reason
+        # to believe it was accepted, and the user's message must still be
+        # delivered rather than silently swallowed.
+        _, _, g2 = two_turn_replay(
+            [ASK], "Keep going", [], withhold_ack=True,
+        )
+        sends = [m for m in g2.sent if m.get("method") == "chat.send"]
+        self.assertEqual(len(sends), 1, "a message we cannot resolve must still send")
+
+    def test_another_runs_frames_are_not_mistaken_for_ours_resuming(self):
+        # Frames arriving during the wait prove nothing on their own — this
+        # socket carries every run in the container. Only the asking run's id
+        # counts, or an unrelated busy run would suppress the fallback and
+        # strand the user's message.
+        _, _, g2 = two_turn_replay(
+            [ASK], "Keep going", [foreign_says("Someone else's run.")],
+            withhold_ack=True,
+        )
+        sends = [m for m in g2.sent if m.get("method") == "chat.send"]
+        self.assertEqual(len(sends), 1, "foreign traffic must not look like our resume")
+
+    def test_a_flood_before_the_ack_truncates_but_never_double_sends(self):
+        # Only a run already streaming can flood this window — which means the
+        # gateway already accepted the answer. Falling back to abort +
+        # chat.send would then run the user's answer a SECOND time, with the
+        # first run's side effects already partly done. Dropping everything
+        # instead loses the terminal chat event and stalls the turn.
+        #
+        # So the narration is dropped and the chat channel is not: a visibly
+        # truncated reply, rather than a silent double-execution or a stall.
+        with mock.patch.object(harness_adapter, "MAX_RESOLVE_BUFFERED_FRAMES", 2):
+            _, second, g2 = two_turn_replay(
+                [ASK], "Keep going",
+                [says(f"chunk{i} ") for i in range(6)],
+                resume_before_ack=True,
+            )
+        sends = [m for m in g2.sent if m.get("method") == "chat.send"]
+        self.assertEqual(sends, [], "the answer must never be sent twice")
+        aborts = [m for m in g2.sent if m.get("method") == "chat.abort"]
+        self.assertEqual(aborts, [], "the accepted run must not be aborted")
+        self.assertEqual(g2.question_status, "answered")
+        # Completed rather than stalled, and what survived is real text.
+        self.assertNotIn("stalled", second)
+        self.assertIn("chunk0", second)
+
+    def test_exhausting_the_terminal_allowance_says_so(self):
+        # The narration cap warns; this one did not. It is the worse of the
+        # two — losing a chat state transition can cost the run's final event,
+        # and the turn then sits to its outer deadline answering "the agent
+        # stalled" with nothing in the log pointing here.
+        #
+        # Driven directly rather than through a replay: a turn that really
+        # loses its final event runs for the full 550s deadline, which is the
+        # bug, not something to pay for on every test run.
+        chat_frame = json.dumps({"type": "event", "event": "chat",
+                                 "payload": {"state": "running"}})
+        frames = [json.dumps(says("narration"))] + [chat_frame] * 4
+
+        adapter = OpenClawAdapter()
+        adapter._remember_pending_question(
+            "s", "q-abc",
+            [{"questionId": "only", "options": [], "isOther": True}],
+            TURN_RUN_ID)
+
+        ws = mock.Mock()
+        ws.recv.side_effect = frames + [_FakeTimeout()]
+        websocket_module = mock.Mock()
+        websocket_module.WebSocketTimeoutException = _FakeTimeout
+
+        with mock.patch.object(harness_adapter, "MAX_RESOLVE_BUFFERED_FRAMES", 1), \
+             mock.patch.object(harness_adapter, "MAX_RESOLVE_TERMINAL_FRAMES", 1), \
+             mock.patch.object(harness_adapter.logger, "warning") as warned:
+            answered, buffered, _ = adapter._resolve_pending_question(
+                ws, websocket_module, "Keep going", "s")
+
+        messages = [call.args[0] for call in warned.call_args_list]
+        self.assertTrue(
+            any("terminal-frame allowance" in m for m in messages),
+            f"exhausting the terminal cap must be logged; got {messages}",
+        )
+        # Capped at narration(1) + terminal(1), not the four that arrived.
+        self.assertEqual(len(buffered), 2)
+        # No ack came, and the asking run WAS streaming, so this is the
+        # accept-on-evidence path rather than a re-send.
+        self.assertTrue(answered)
+
+    def test_pending_questions_are_capped_and_evict_oldest_first(self):
+        adapter = OpenClawAdapter()
+        with mock.patch.object(harness_adapter, "MAX_PENDING_QUESTIONS", 3):
+            for n in range(5):
+                adapter._remember_pending_question(
+                    f"session-{n}", f"q-{n}",
+                    [{"questionId": "only", "options": []}], f"run-{n}"
+                )
+        self.assertEqual(len(adapter._pending_questions), 3)
+        # Oldest gone, newest kept — a session that asked and walked away must
+        # not pin an entry for the container's life.
+        self.assertNotIn("session-0", adapter._pending_questions)
+        self.assertIn("session-4", adapter._pending_questions)
+
+    def test_re_asking_in_one_session_replaces_rather_than_accumulates(self):
+        adapter = OpenClawAdapter()
+        adapter._remember_pending_question(
+            "s", "q-first", [{"questionId": "a", "options": []}], "run-1")
+        adapter._remember_pending_question(
+            "s", "q-second", [{"questionId": "b", "options": []}], "run-2")
+        self.assertEqual(len(adapter._pending_questions), 1)
+        self.assertEqual(adapter._pending_questions["s"]["id"], "q-second")
+
+    def test_the_kill_switch_restores_the_old_behaviour_exactly(self):
+        # OPENCLAW_QUESTION_RESOLVE=0 must back this out to what shipped
+        # before — abandon the question, abort, re-send — without an image
+        # build. An escape hatch that half-works is worse than none.
+        _, _, g2 = two_turn_replay(
+            [ASK], "Keep going", [says("Done.")],
+            env={"OPENCLAW_QUESTION_RESOLVE": "0"},
+        )
+        resolves = [m for m in g2.sent if m.get("method") == "question.resolve"]
+        self.assertEqual(resolves, [])
+        sends = [m for m in g2.sent if m.get("method") == "chat.send"]
+        self.assertEqual(len(sends), 1, "disabled path must still deliver the message")
+
+    def test_resumed_output_arriving_before_the_ack_is_not_lost(self):
+        # question.resolve is a req/res, but the resumed run streams onto the
+        # SAME socket and nothing orders it after the ack. Frames read during
+        # the resolve wait used to be discarded, so a run that answered fast
+        # lost its opening events — or its whole reply.
+        _, second, g2 = two_turn_replay(
+            [ASK], "Keep going", [says("Sheet shared: the link.")],
+            resume_before_ack=True,
+        )
+        self.assertEqual(g2.question_status, "answered")
+        self.assertIn("Sheet shared", second)
+
+    def test_a_turn_with_no_pending_question_is_unchanged(self):
+        # The ordinary path must not grow a question.resolve call.
+        adapter = OpenClawAdapter()
+        adapter._ready = True
+        g = FakeGateway([says("Plain answer.")])
+        fake_websocket = mock.Mock()
+        fake_websocket.create_connection.return_value = g
+        fake_websocket.WebSocketTimeoutException = _FakeTimeout
+        with mock.patch.dict(sys.modules, {"websocket": fake_websocket}), \
+             mock.patch.object(OpenClawAdapter, "_read_turn_usage",
+                               return_value={"model_calls": 0, "input": 0,
+                                             "output": 0, "cache_read": 0,
+                                             "cache_write": 0}), \
+             mock.patch.object(harness_adapter, "record_failure"):
+            result = adapter._process_once("hello", "session-replay")
+        self.assertIn("Plain answer.", result.text)
+        self.assertEqual(
+            [m for m in g.sent if m.get("method") == "question.resolve"], []
+        )
+
+
+class FramesFromRunIsEvidenceNotAGuess(unittest.TestCase):
+    """Direct contract for the sole evidence source behind "lost ack = accepted".
+
+    Exercised through the replay tests too, but this is the check that decides
+    whether a user's answer gets executed a second time, so it is pinned on its
+    own rather than only inside a larger scenario.
+    """
+
+    def test_a_frame_from_that_run_counts(self):
+        self.assertTrue(
+            harness_adapter._frames_from_run(
+                [json.dumps(says("hi"))], TURN_RUN_ID)
+        )
+
+    def test_a_frame_from_another_run_does_not(self):
+        self.assertFalse(
+            harness_adapter._frames_from_run(
+                [json.dumps(foreign_says("hi"))], TURN_RUN_ID)
+        )
+
+    def test_no_frames_is_no_evidence(self):
+        self.assertFalse(harness_adapter._frames_from_run([], TURN_RUN_ID))
+
+    def test_malformed_frames_are_skipped_not_raised(self):
+        # A frame we cannot parse is not evidence, and must not take the turn
+        # down either — this runs on the path that decides whether to re-send.
+        frames = ["{not json", json.dumps(["a", "list"]), json.dumps({}),
+                  json.dumps({"payload": None}), json.dumps(says("hi"))]
+        self.assertTrue(harness_adapter._frames_from_run(frames, TURN_RUN_ID))
+        self.assertFalse(
+            harness_adapter._frames_from_run(frames[:-1], TURN_RUN_ID))
+
+    def test_a_null_run_id_never_matches_a_payload_without_one(self):
+        # Guards the caller's `if asking_run and ...`: two unknowns must not
+        # compare equal into a false "it resumed".
+        self.assertFalse(
+            harness_adapter._frames_from_run([json.dumps({"payload": {}})], None)
+        )
+
+
+class AnswerMappingMatchesTheGateway(unittest.TestCase):
+    """Ported from the pinned bundle; these pin the port, not my reading of it.
+
+    Source: 2026.7.2-beta.5, app/dist/openclaw-tools-Be4wAI1K.js —
+    buildAgentHarnessUserInputAnswers / normalizeAgentHarnessUserInputAnswer /
+    parseKeyedAnswers. The adapter previously broadcast the raw reply to every
+    question id, which answers "which grades?" and "which year?" identically
+    and sends "1" where the gateway expects an option label.
+    """
+
+    CHOICE = {
+        "questionId": "continue_report",
+        "header": "Continue",
+        "question": "Finish and post the link?",
+        "options": [{"label": "Keep going to completion (Recommended)"},
+                    {"label": "Stop here"}],
+        "isOther": True,
+    }
+
+    def test_a_number_selects_that_option_by_label(self):
+        answers = harness_adapter._build_question_answers([self.CHOICE], "1")
+        self.assertEqual(
+            answers,
+            {"continue_report": ["Keep going to completion (Recommended)"]},
+        )
+
+    def test_the_second_number_selects_the_second_option(self):
+        answers = harness_adapter._build_question_answers([self.CHOICE], "2")
+        self.assertEqual(answers, {"continue_report": ["Stop here"]})
+
+    def test_an_out_of_range_number_is_not_an_option(self):
+        # Falls through to the label comparison, then to free text because
+        # ask_user sets isOther.
+        answers = harness_adapter._build_question_answers([self.CHOICE], "9")
+        self.assertEqual(answers, {"continue_report": ["9"]})
+
+    def test_an_exact_option_label_is_matched_case_insensitively(self):
+        answers = harness_adapter._build_question_answers(
+            [self.CHOICE], "stop HERE")
+        self.assertEqual(answers, {"continue_report": ["Stop here"]})
+
+    def test_free_text_survives_because_ask_user_sets_isOther(self):
+        # The case Hagel actually hit. normalizeAskUserParams hardcodes
+        # isOther=true, so an off-menu reply is kept rather than discarded.
+        answers = harness_adapter._build_question_answers(
+            [self.CHOICE], "Keep going")
+        self.assertEqual(answers, {"continue_report": ["Keep going"]})
+
+    def test_a_fixed_choice_question_discards_an_off_menu_reply(self):
+        # Not reachable through ask_user, but the gateway takes questions from
+        # elsewhere. Upstream returns no answer, which the tool renders to the
+        # model as "(no answer)".
+        fixed = dict(self.CHOICE, isOther=False)
+        answers = harness_adapter._build_question_answers([fixed], "maybe")
+        self.assertEqual(answers, {"continue_report": []})
+
+    def test_several_questions_are_matched_by_header(self):
+        questions = [
+            {"questionId": "grades", "header": "Grades",
+             "question": "Which grades?", "options": [], "isOther": True},
+            {"questionId": "year", "header": "Year",
+             "question": "Which year?", "options": [], "isOther": True},
+        ]
+        answers = harness_adapter._build_question_answers(
+            questions, "Grades: K-5\nYear: 2025-26")
+        self.assertEqual(answers, {"grades": ["K-5"], "year": ["2025-26"]})
+
+    def test_several_questions_fall_back_to_one_line_each(self):
+        questions = [
+            {"questionId": "grades", "header": "Grades",
+             "question": "Which grades?", "options": [], "isOther": True},
+            {"questionId": "year", "header": "Year",
+             "question": "Which year?", "options": [], "isOther": True},
+        ]
+        answers = harness_adapter._build_question_answers(
+            questions, "K-5\n2025-26")
+        self.assertEqual(answers, {"grades": ["K-5"], "year": ["2025-26"]})
+
+    def test_a_missing_line_leaves_that_question_unanswered(self):
+        questions = [
+            {"questionId": "grades", "header": "Grades",
+             "question": "Which grades?", "options": [], "isOther": True},
+            {"questionId": "year", "header": "Year",
+             "question": "Which year?", "options": [], "isOther": True},
+        ]
+        answers = harness_adapter._build_question_answers(questions, "K-5")
+        self.assertEqual(answers, {"grades": ["K-5"], "year": []})
+
+    def test_one_reply_is_never_broadcast_to_every_question(self):
+        # The behaviour this replaces. Named so a future "simplification"
+        # back to a dict comprehension trips something.
+        questions = [
+            {"questionId": "grades", "header": "Grades",
+             "question": "Which grades?", "options": [], "isOther": True},
+            {"questionId": "year", "header": "Year",
+             "question": "Which year?", "options": [], "isOther": True},
+        ]
+        answers = harness_adapter._build_question_answers(
+            questions, "K-5, 2025-26")
+        self.assertNotEqual(answers["grades"], answers["year"])
+
+    def test_an_unusable_question_holds_its_slot(self):
+        # Dropping it would answer question 3 with line 2. This whole PR
+        # exists because a should-not-happen shape did happen, so the
+        # malformed case gets the same treatment as the happy one.
+        questions = [
+            {"questionId": "grades", "header": "Grades",
+             "question": "Which grades?", "options": [], "isOther": True},
+            {"questionId": None},
+            {"questionId": "year", "header": "Year",
+             "question": "Which year?", "options": [], "isOther": True},
+        ]
+        answers = harness_adapter._build_question_answers(
+            questions, "K-5\nignored\n2025-26")
+        self.assertEqual(answers, {"grades": ["K-5"], "year": ["2025-26"]})
+
+    def test_all_questions_unusable_yields_nothing_to_send(self):
+        # The caller turns this into a fallback rather than resolving a
+        # question with an empty answer map.
+        self.assertEqual(
+            harness_adapter._build_question_answers(
+                [{"questionId": None}], "anything"),
+            {},
+        )
+
+class SegmentsEndAtAnyModelActivity(unittest.TestCase):
+    """The Artondale fusion, 2026-08-16 — reproduced, then fixed.
+
+    A quartile-growth request answered with four narration fragments the model
+    wrote across six minutes, concatenated into one reply. The transcript
+    (agents/main/agent/openclaw-agent.sqlite) stored them as four separate
+    assistant messages at seq 45/50/117/119, lengths 244+131+76+64 = 515 —
+    exactly the resp_len the turn logged. Between them: 22 `thinking` events
+    and `event:task` frames carrying kind=exec, plus 33 tool calls.
+
+    The old rule named which events count as a boundary (item/command_output/
+    tool_call with a tool-ish kind). `thinking` and `event:task` were not on
+    that list, so the accumulator never reset. An allowlist fails toward
+    FUSING; the rule now fails toward splitting.
+    """
+
+    FRAGMENTS = [
+        "Good — Fall+Spring data present across DIBELS, i-Ready, and SBA. ",
+        "Good, dibels_scores has grade_level directly. ",
+        "Only the load_csv line is broken. Fix that single line directly.",
+    ]
+
+    def _production_sequence(self):
+        events = [says(self.FRAGMENTS[0]), thinks("check tables"), runs_task()]
+        events += [says(self.FRAGMENTS[1]), thinks("repair it"), runs_task()]
+        events += [says(self.FRAGMENTS[2])]
+        return events
+
+    def test_the_production_sequence_returns_only_the_last_fragment(self):
+        text = replay(self._production_sequence())
+        self.assertEqual(text.strip(), self.FRAGMENTS[2].strip())
+
+    def test_no_earlier_fragment_survives_into_the_reply(self):
+        text = replay(self._production_sequence())
+        for stale in self.FRAGMENTS[:2]:
+            self.assertNotIn(stale.strip()[:24], text)
+
+    def test_thinking_alone_ends_a_segment(self):
+        text = replay([says("scratchpad. "), thinks("hmm"), says("answer.")])
+        self.assertEqual(text.strip(), "answer.")
+
+    def test_an_event_task_alone_ends_a_segment(self):
+        text = replay([says("scratchpad. "), runs_task(), says("answer.")])
+        self.assertEqual(text.strip(), "answer.")
+
+    def test_an_unknown_future_stream_ends_a_segment(self):
+        # The point of inverting the rule: a stream nobody has seen yet must
+        # fail toward splitting, not toward fusing.
+        unknown = agent_event("some_new_stream_2027", {"whatever": True})
+        text = replay([says("scratchpad. "), unknown, says("answer.")])
+        self.assertEqual(text.strip(), "answer.")
+
+    def test_a_heartbeat_never_splits_a_live_message(self):
+        # The mirror-image risk. Heartbeats arrive on a timer and can land
+        # mid-stream; splitting there would truncate a real answer.
+        text = replay([says("one "), beats(), says("two "), beats(), says("three")])
+        self.assertEqual(text.strip(), "one two three")
+
+    def test_deltas_of_one_message_still_concatenate(self):
+        text = replay([says("The "), says("report "), says("is ready.")])
+        self.assertEqual(text.strip(), "The report is ready.")
+
+    def test_a_non_exec_task_frame_is_still_treated_as_work(self):
+        # Documents a decision rather than an observation: only kind="exec"
+        # has ever been seen on a task frame. Unlike `item` — a shared lane
+        # carrying commentary as well as tool work — a task frame exists
+        # because the runtime is executing something, so it is not
+        # discriminated by kind. If that is ever wrong, this test is what
+        # changes, deliberately.
+        text = replay([says("The report is ready."),
+                       runs_task(kind="planning")])
+        self.assertNotIn("report is ready", text)
+
+    def test_a_heartbeat_on_the_item_stream_never_splits_a_live_message(self):
+        # The general boundary rule guards heartbeats; the tool branches used
+        # to set the boundary again without that guard, so a heartbeat tagged
+        # as item would have split a live message and blanked response_text.
+        beat = calls_tool("exec", "start")
+        beat["payload"]["isHeartbeat"] = True
+        text = replay([says("one "), beat, says("two")])
+        self.assertEqual(text.strip(), "one two")
+
+    def test_a_foreign_task_frame_cannot_suppress_this_turns_answer(self):
+        # The operator socket carries every run in the container, so another
+        # session's long-running exec emits task frames here. Unfenced, one
+        # would mark THIS turn's finished answer as scratchpad on the strength
+        # of somebody else's tool call.
+        text = replay([says("The report is ready: https://example.test/s"),
+                       runs_task(run_id="run-somebody-else")])
+        self.assertIn("The report is ready", text)
+
+    def test_a_foreign_task_frame_cannot_split_this_turns_answer(self):
+        text = replay([says("one "), runs_task(run_id="run-somebody-else"),
+                       says("two")])
+        self.assertEqual(text.strip(), "one two")
+
+    def test_the_fence_passes_a_same_run_task_frame(self):
+        # The fence must not defeat the fix it is protecting: an EXPLICIT
+        # this-turn run id still ends the segment. Stated explicitly rather
+        # than relying on the fixture default, which is what hid the foreign
+        # case in the first place.
+        text = replay([says("scratchpad. "),
+                       runs_task(run_id=TURN_RUN_ID), says("answer.")])
+        self.assertEqual(text.strip(), "answer.")
+
+    def test_a_non_tool_item_before_final_does_not_discard_the_answer(self):
+        # The carve-out _is_tool_activity_stream was written for. Fixing
+        # fusion by treating every item as tool activity would silently
+        # reintroduce it — review caught exactly that.
+        text = replay([says("The report is ready: https://example.test/s"),
+                       reasons()])
+        self.assertIn("The report is ready", text)
+
+    def test_a_non_tool_item_still_ends_the_segment(self):
+        # It is not tool work, but it IS activity: a message that resumes
+        # after it is a new message, not a continuation.
+        text = replay([says("scratchpad. "), reasons(), says("answer.")])
+        self.assertEqual(text.strip(), "answer.")
+
+    def test_a_real_tool_before_final_still_suppresses_narration(self):
+        # The other half. Text followed by actual tool work is scratchpad.
+        text = replay([says("Now let me run the query."), *uses_tool("exec")])
+        self.assertNotIn("run the query", text)
+
+    def test_narration_followed_by_a_task_is_not_offered_as_the_answer(self):
+        # The turn's other symptom: it ended right after a tool call, with
+        # narration as the last text. That is not an answer, and promoting it
+        # is how the user got "Fix that single line directly." as a reply.
+        text = replay([says("Only the load_csv line is broken."), runs_task()])
+        self.assertNotIn("load_csv", text)
+
+
+class PromotedJobDoesNotAbortTheRunItContinues(unittest.TestCase):
+    """Measured on dev 2026-08-16 (Artondale quartile report):
+
+        15:06:44  deadline expired -> promoted to a background job
+        15:07:22  ECS job starts
+        15:07:53  pre-send chat.abort  ok=True
+        15:08:12  job posts "nothing written to the sheet yet"
+        15:08:47  job stops — 85 seconds, no data extracted
+
+    Promotion happens BECAUSE the OpenClaw run is still going when our
+    deadline hits. The job's first act was to abort it, so it started from
+    nothing. The model then told the user they had interrupted it — true, and
+    not the user.
+
+    Only the job runner sends deadline_s, clamped above the interactive
+    ceiling, so that is the marker.
+    """
+
+    LONG = harness_adapter.LONG_JOB_DEADLINE_THRESHOLD_S + 1
+
+    def _run(self, deadline_s):
+        gateway = FakeGateway([says("done.")])
+        fake_websocket = mock.Mock()
+        fake_websocket.create_connection.return_value = gateway
+        fake_websocket.WebSocketTimeoutException = _FakeTimeout
+        adapter = OpenClawAdapter()
+        adapter._ready = True
+        zero = {"model_calls": 0, "input": 0, "output": 0,
+                "cache_read": 0, "cache_write": 0}
+        with mock.patch.dict(sys.modules, {"websocket": fake_websocket}), \
+             mock.patch.object(OpenClawAdapter, "_read_turn_usage", return_value=zero), \
+             mock.patch.object(harness_adapter, "record_failure"):
+            adapter._process_once("go", "s1", deadline_s=deadline_s)
+        return [m.get("method") for m in gateway.sent]
+
+    def test_a_promoted_job_turn_sends_no_pre_send_abort(self):
+        self.assertNotIn("chat.abort", self._run(self.LONG))
+
+    def test_a_promoted_job_turn_still_sends_the_message(self):
+        self.assertIn("chat.send", self._run(self.LONG))
+
+    def test_an_interactive_turn_no_longer_aborts_preemptively(self):
+        # Changed deliberately. The preemptive abort destroyed whatever was
+        # running for this session on EVERY turn — so a user replying while a
+        # background job worked killed the job's run, and the agent then told
+        # him he had interrupted it. He had not. The wedge it guarded against
+        # announces itself on chat.send, so it is handled there now.
+        self.assertNotIn("chat.abort", self._run(None))
+
+    def test_a_short_explicit_deadline_also_does_not_abort(self):
+        # Cron sends its own bounded deadline; it is no more entitled to
+        # destroy a live run than an interactive turn is.
+        self.assertNotIn("chat.abort", self._run(120))
+
+    def test_the_env_flag_restores_the_preemptive_abort(self):
+        # An escape hatch back to the old behaviour without an image build.
+        with mock.patch.dict(os.environ, {"OPENCLAW_PRESEND_ABORT": "1"}):
+            self.assertIn("chat.abort", self._run(None))
+
+    def test_a_reply_session_conflict_is_recognised(self):
+        self.assertTrue(harness_adapter._is_reply_session_conflict(
+            {"message": "reply session initialization conflicted"}))
+        self.assertTrue(harness_adapter._is_reply_session_conflict(
+            {"code": "SESSION_INITIALIZATION_FAILED"}))
+
+    def test_an_unrelated_error_is_not_a_conflict(self):
+        # Aborting and re-sending on any error would re-run the user's message
+        # against a model that already refused it.
+        self.assertFalse(harness_adapter._is_reply_session_conflict(
+            {"message": "rate limited"}))
+        self.assertFalse(harness_adapter._is_reply_session_conflict({}))
+
+    def test_the_threshold_matches_the_wrapper(self):
+        # Two modules keying off one number. If the wrapper's threshold moves,
+        # a promoted job silently starts aborting itself again.
+        wrapper = pathlib.Path(__file__).with_name("agentcore_wrapper.py").read_text()
+        self.assertIn(
+            f"LONG_JOB_DEADLINE_THRESHOLD_SECONDS = "
+            f"{harness_adapter.LONG_JOB_DEADLINE_THRESHOLD_S}",
+            wrapper,
+        )
+
+class AWedgedSessionRecoversWithoutKillingLiveWork(unittest.TestCase):
+    """The 2026-07-01 wedge, handled where it actually surfaces.
+
+    A prior turn's server-side reply session survives its ws.close() and
+    rejects the next chat.send. The old fix pre-destroyed session state on
+    EVERY turn on the chance of it; this reacts to the error itself, so a
+    healthy turn never touches a live run.
+    """
+
+    class ConflictingGateway(FakeGateway):
+        """Rejects the first chat.send with a reply-session conflict."""
+
+        def __init__(self, agent_events):
+            super().__init__(agent_events)
+            self.sends = 0
+
+        def send(self, raw):
+            message = json.loads(raw)
+            if message.get("method") == "chat.send":
+                self.sends += 1
+                if self.sends == 1:
+                    self.sent.append(message)
+                    self._outbox.append(json.dumps({
+                        "type": "res", "id": message.get("id"), "ok": False,
+                        "error": {"message":
+                                  "reply session initialization conflicted"},
+                    }))
+                    return
+            super().send(raw)
+
+    def _run(self, gateway):
+        fake_websocket = mock.Mock()
+        fake_websocket.create_connection.return_value = gateway
+        fake_websocket.WebSocketTimeoutException = _FakeTimeout
+        adapter = OpenClawAdapter()
+        adapter._ready = True
+        zero = {"model_calls": 0, "input": 0, "output": 0,
+                "cache_read": 0, "cache_write": 0}
+        with mock.patch.dict(sys.modules, {"websocket": fake_websocket}), \
+             mock.patch.object(OpenClawAdapter, "_read_turn_usage", return_value=zero), \
+             mock.patch.object(harness_adapter, "record_failure"):
+            return adapter._process_once("go", "s-wedge")
+
+    def test_the_turn_recovers_and_answers(self):
+        gateway = self.ConflictingGateway([says("Here is the answer.")])
+        result = self._run(gateway)
+        self.assertIn("Here is the answer", result.text)
+
+    def test_it_aborts_only_after_the_conflict(self):
+        gateway = self.ConflictingGateway([says("ok")])
+        self._run(gateway)
+        methods = [m.get("method") for m in gateway.sent]
+        self.assertEqual(methods.count("chat.abort"), 1)
+        # The abort follows the failed send; it does not precede it.
+        self.assertLess(methods.index("chat.send"), methods.index("chat.abort"))
+
+    def test_it_retries_only_once(self):
+        gateway = self.ConflictingGateway([says("ok")])
+        self._run(gateway)
+        self.assertLessEqual(
+            [m.get("method") for m in gateway.sent].count("chat.abort"), 1)
+

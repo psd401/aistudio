@@ -325,19 +325,35 @@ async function provisionAgentUser(
   if (!firstName) firstName = username || "User"
 
   // SELECT-then-INSERT inside a transaction to avoid a duplicate row if the
-  // user double-clicks the consent flow. Email is indexed but not unique, so
-  // we serialize within the transaction by re-checking under the lock window.
+  // user double-clicks the consent flow.
+  //
+  // The guard MUST match uq_users_email_lower (migration 112), which is unique
+  // on lower(email) — not on email. A case-sensitive compare here misses a row
+  // the index will nonetheless reject, so provisioning an existing user whose
+  // stored email differs only in case falls through to an INSERT that dies on
+  // the constraint. The whole callback then throws and the user sees the
+  // generic "Failed to complete OAuth callback"; retrying with a fresh consent
+  // link cannot help, because the collision is in the table, not the link. One
+  // owner burned five consent links against this on 2026-08-17 — her row was
+  // stored as GEORGEK@psd401.net while the callback looked up georgek@.
   const userId = await executeTransaction(async (tx) => {
     const [again] = await tx
       .select({ id: users.id })
       .from(users)
-      .where(eq(users.email, email))
+      .where(sql`lower(${users.email}) = lower(${email})`)
       .limit(1)
     if (again) return again.id
 
+    // Store the normalized address. `email` traces back to the consent nonce's
+    // ownerEmail — the same "whatever casing the directory supplied" value the
+    // lookups above stopped trusting — and migration 112 made uniqueness
+    // case-insensitive, so the original casing carries no information and only
+    // creates rows that case-sensitive readers can miss. Safe for the later
+    // Cognito link: resolve-user.ts matches through getUserByEmail, which
+    // compares on lower(email).
     const [created] = await tx
       .insert(users)
-      .values({ email, firstName, lastName })
+      .values({ email: email.toLowerCase(), firstName, lastName })
       .returning({ id: users.id })
     return created.id
   }, "provisionAgentUser")
@@ -481,8 +497,19 @@ async function exchangeAndStore(
   }
   const grantedScopes = validated.grantedScopes
 
+  // Case-INSENSITIVE, per the convention documented on getUserByEmail
+  // (lib/db/drizzle/users.ts) — email is an authorization join key and
+  // migration 112 enforces uniqueness on lower(email). A case-sensitive `=`
+  // here misses an existing row whenever the IdP stored a differently-cased
+  // address, which sends an already-provisioned user down the auto-provision
+  // branch below and re-runs its staff role assignment as a side effect.
   const [existing] = await executeQuery(
-    (db) => db.select({ id: users.id }).from(users).where(eq(users.email, payload.sub)).limit(1),
+    (db) =>
+      db
+        .select({ id: users.id })
+        .from(users)
+        .where(sql`lower(${users.email}) = lower(${payload.sub})`)
+        .limit(1),
     "findUserByEmail"
   )
 

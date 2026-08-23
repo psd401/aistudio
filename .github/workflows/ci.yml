@@ -9,6 +9,40 @@ on:
     branches: [ "main", "dev" ]
 
 jobs:
+  document-processor-v2:
+    name: Document Processor v2
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+    - name: Setup Node.js
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7
+      with:
+        node-version: "20"
+        cache: npm
+        cache-dependency-path: infra/lambdas/document-processor-v2/package-lock.json
+
+    - name: Install dependencies
+      working-directory: infra/lambdas/document-processor-v2
+      run: npm ci
+
+    - name: Build
+      working-directory: infra/lambdas/document-processor-v2
+      run: npm run build
+
+    - name: Test
+      working-directory: infra/lambdas/document-processor-v2
+      run: npm test
+
+    - name: Audit runtime dependencies
+      working-directory: infra/lambdas/document-processor-v2
+      run: npm audit --omit=dev
+
   test:
     name: Test, Lint, and Type Check
     runs-on: ubuntu-latest
@@ -72,6 +106,7 @@ jobs:
           infra/agent-image/test_iteration_telemetry.py \
           infra/agent-image/test_mantle_proxy.py \
           infra/agent-image/test_mantle_proxy_logging.py \
+          infra/agent-image/test_cutover_guard.py \
           infra/agent-image/test_check_bootstrap_budget.py \
           infra/agent-image/test_check_config_consistency.py \
           infra/agent-image/test_candidate_matrix.py \
@@ -86,7 +121,11 @@ jobs:
           infra/agent-image/test_report.py \
           infra/agent-image/test_tts_synthesize.py \
           infra/agent-image/skills/psd-last30days/scripts/test_last30days.py \
-          infra/agent-image/skills/psd-observances/tools/test_nspra_markdown.py
+          infra/agent-image/skills/psd-observances/tools/test_nspra_markdown.py \
+          infra/agent-image/skills/quartile-growth-report/scripts/test_run_report.py \
+          infra/agent-image/skills/quartile-growth-report/scripts/test_gen_sql.py \
+          infra/agent-image/skills/quartile-growth-report/scripts/test_layout.py \
+          infra/agent-image/skills/psd-rules/scripts/test_repair_literal_newlines.py
 
     - name: Run model-UID isolation test as root
       run: |

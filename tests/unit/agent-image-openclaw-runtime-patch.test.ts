@@ -43,6 +43,31 @@ describe("pinned OpenClaw runtime backports", () => {
     expect(runtimePatch).toContain("expected anchor occurred more than once")
   })
 
+  it("stops a no-op file mutation from ending the whole run", () => {
+    // A quartile report died 484s in, 53 model calls deep, because the agent
+    // issued an `edit` whose replacement matched what was already there.
+    // That returns `terminate: true`, and agent-core ends the run when every
+    // call in the batch terminated — while the model's own stopReason was
+    // still `toolUse`. Worst exactly where it is most likely: repairing a file
+    // means writing content that may already be correct.
+    expect(runtimePatch).toContain("edit no-op must not terminate the run")
+    expect(runtimePatch).toContain(
+      "edit identical-content must not terminate the run",
+    )
+    expect(runtimePatch).toContain("write no-op must not terminate the run")
+    expect(runtimePatch).toContain("patch no-op must not terminate the run")
+  })
+
+  it("leaves the client-delegated terminate alone", () => {
+    // "Tool execution delegated to client" is a real pause, not a no-op, and
+    // must keep terminating. Named here so a future sweep for `terminate:
+    // true` does not take it out with the others.
+    expect(runtimePatch).toContain("Tool execution delegated to client")
+    expect(runtimePatch).not.toContain(
+      "delegated to client must not terminate",
+    )
+  })
+
   it("contains every transcript-ownership fix required by the backport", () => {
     expect(runtimePatch).toContain("reuse ingress transcript recorder")
     expect(runtimePatch).toContain("detach ingress user before orphan repair")

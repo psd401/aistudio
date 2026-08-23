@@ -1,0 +1,23 @@
+WITH cur AS (SELECT studentid, subject, AVG(score) AS e FROM smarter_balanced_scores
+  WHERE yearid=35 AND grade_level=4 AND is_strand=false AND assessment_group LIKE 'Summative%' GROUP BY 1,2),
+pri AS (SELECT studentid, subject, AVG(score) AS b FROM smarter_balanced_scores
+  WHERE yearid=34 AND grade_level=3 AND is_strand=false AND assessment_group LIKE 'Summative%' GROUP BY 1,2),
+m AS (SELECT c.subject AS meas, c.studentid, p.b, c.e FROM cur c JOIN pri p ON p.studentid=c.studentid AND p.subject=c.subject),
+hr AS (SELECT DISTINCT ON (studentid) studentid, sectionid FROM section_enrollments WHERE yearid=35 AND schoolid=3055 AND course_code='GR004' ORDER BY studentid, dateleft DESC),
+sch AS (SELECT DISTINCT studentid FROM school_year_enrollments WHERE yearid=35 AND schoolid=3055 AND grade_level=4),
+mm AS (SELECT m.*, hr.sectionid, (sch.studentid IS NOT NULL) AS in_sch
+       FROM m LEFT JOIN hr ON hr.studentid=m.studentid LEFT JOIN sch ON sch.studentid=m.studentid),
+q AS (SELECT mm.*,
+        NTILE(4) OVER (PARTITION BY meas, sectionid ORDER BY b, studentid) AS q_cls,
+        NTILE(4) OVER (PARTITION BY meas, in_sch ORDER BY b, studentid) AS q_sch,
+        NTILE(4) OVER (PARTITION BY meas ORDER BY b, studentid) AS q_dist
+      FROM mm),
+cls AS (SELECT meas, COALESCE(q_cls::text,'All') AS qt, ROUND(AVG(e-b) FILTER (WHERE sectionid=274390),1) AS a1, COUNT(*) FILTER (WHERE sectionid=274390) AS n1, ROUND(AVG(e-b) FILTER (WHERE sectionid=274414),1) AS a2, COUNT(*) FILTER (WHERE sectionid=274414) AS n2, ROUND(AVG(e-b) FILTER (WHERE sectionid=274424),1) AS a3, COUNT(*) FILTER (WHERE sectionid=274424) AS n3
+        FROM q WHERE sectionid IS NOT NULL GROUP BY GROUPING SETS ((meas, q_cls),(meas))),
+scha AS (SELECT meas, COALESCE(q_sch::text,'All') AS qt, ROUND(AVG(e-b),1) AS a_sch, COUNT(*) AS n_sch
+        FROM q WHERE in_sch GROUP BY GROUPING SETS ((meas, q_sch),(meas))),
+dist AS (SELECT meas, COALESCE(q_dist::text,'All') AS qt, ROUND(AVG(e-b),1) AS a_dist, COUNT(*) AS n_dist
+        FROM q GROUP BY GROUPING SETS ((meas, q_dist),(meas)))
+SELECT meas, qt, a1, n1, a2, n2, a3, n3, a_sch, n_sch, a_dist, n_dist
+FROM dist LEFT JOIN scha USING (meas, qt) LEFT JOIN cls USING (meas, qt)
+ORDER BY meas, qt

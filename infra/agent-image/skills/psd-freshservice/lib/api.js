@@ -206,10 +206,32 @@ function normalizeFreshserviceResult(result) {
   }
   if (!result || result.ok !== true) {
     const status = (result && result.status) || 0;
+    const detail = JSON.stringify((result && result.data) ?? {}).slice(0, 500);
+    // Freshservice authorizes per endpoint AND per workspace, so a 403 scopes
+    // this one call — it is not a verdict on the key. The two coexist freely:
+    // on 2026-08-17 one caller's list_tickets succeeded while get_agent,
+    // get_workspaces and list_agents all returned 403, and another's
+    // workspace_id=3 succeeded while workspace_id=8 returned 403. Reporting
+    // 403 as a bad key sent four users off to re-issue working credentials,
+    // so say what it actually means where every command can see it.
+    if (status === 403) {
+      return {
+        __ok: false,
+        status,
+        code: 'freshservice_endpoint_forbidden',
+        error:
+          `API error 403: ${detail} — this caller's Freshservice role does not `
+          + 'cover this endpoint or workspace. The stored key is not implicated: '
+          + 'do not tell the user it is invalid and do not ask them to re-issue '
+          + 'it. Retry against a workspace they can reach (list_tickets '
+          + '--options \'{"workspace_id":N}\') or report the specific gap. '
+          + 'A missing key surfaces as freshservice_key_missing instead.',
+      };
+    }
     return {
       __ok: false,
       status,
-      error: `API error ${status}: ${JSON.stringify((result && result.data) ?? {}).slice(0, 500)}`,
+      error: `API error ${status}: ${detail}`,
     };
   }
   return { __ok: true, status: result.status, data: result.data ?? {} };

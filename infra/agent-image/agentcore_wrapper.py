@@ -48,7 +48,7 @@ logger = logging.getLogger("agentcore_wrapper")
 
 from harness_adapter import OpenClawAdapter
 import workspace_sync
-from agent_failures import emit_agent_metric
+from agent_failures import emit_agent_metric, record_failure
 from check_bootstrap_budget import check_runtime_bootstrap
 
 # Runtime path OpenClaw reads its credential-free config and bootstrap files from.
@@ -186,6 +186,15 @@ _INVOCATION_CONTEXT_RE = re.compile(
     r"^v1\.[A-Za-z0-9_-]{40,3500}\.[A-Za-z0-9_-]{43}$"
 )
 _REQUEST_PROOF_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+# Serializes every turn in this container, and is LOAD-BEARING beyond this
+# file: `adapter` below is a module-level singleton shared by every user, and
+# harness_adapter's `_pending_questions` / `_gateway_token` are plain
+# unsynchronized attributes on it that rely on this lock for their safety.
+# Narrowing its scope, or moving to multiple workers, needs those to grow
+# their own synchronization first — the interleaving is only ever sequential
+# today, so no test would catch it. Cross-referenced in
+# harness_adapter._remember_pending_question so a grep for either name finds
+# both halves.
 _invocation_lock = asyncio.Lock()
 FINAL_WORKSPACE_FLUSH_SECONDS = 120
 # Interactive and cron callers run inside a 900-second Lambda. A stuck
@@ -1528,6 +1537,22 @@ def main():
                 "(session=%s)",
                 session_id,
             )
+            # Security-relevant and previously invisible: a rejected signed
+            # context is exactly the event that should be reviewable after the
+            # fact. user_email is deliberately NOT attached — the identity is
+            # what failed to verify, so recording it as fact would launder an
+            # unverified claim into telemetry.
+            record_failure(
+                source="harness",
+                severity="error",
+                error_class="InvocationContextInvalid",
+                error_message=(
+                    "signed invocation context missing or malformed; "
+                    "invocation rejected before any skill ran"
+                ),
+                session_id=session_id,
+                context={"phase": "verify_invocation_context"},
+            )
             yield {
                 "result": (
                     "I couldn't verify the identity for this request. "
@@ -1552,6 +1577,26 @@ def main():
                 "microVM (current=%s requested=%s)",
                 _current_workspace_prefix or "-",
                 workspace_prefix or "-",
+            )
+            # The cross-user boundary guard firing. Rare by design, and if it
+            # ever stops being rare that is a containment problem nobody would
+            # see from the Failures tab today. Both prefixes are recorded so a
+            # reviewer can tell which pair collided.
+            record_failure(
+                source="harness",
+                severity="error",
+                error_class="WorkspaceAuthorityChanged",
+                error_message=(
+                    "workspace prefix changed in a live runtime; invocation "
+                    "rejected to keep one microVM bound to one workspace"
+                ),
+                user_id=user_email,
+                session_id=session_id,
+                context={
+                    "phase": "bind_workspace_prefix",
+                    "bound_prefix": _current_workspace_prefix,
+                    "requested_prefix": workspace_prefix,
+                },
             )
             yield {
                 "result": (
@@ -1648,6 +1693,34 @@ def main():
                     "this microVM to protect the remote workspace",
                     exc,
                 )
+                # Telemetry, not just a log line. This whole failure class was
+                # invisible in agent_failures — WorkspaceMigrationFailed had a
+                # lifetime count of ZERO while a real user hit it in prod on
+                # 2026-08-15 — because nothing in this file ever called
+                # record_failure. The user got a clear message and the Failures
+                # tab showed nothing, so the only way anyone learned about it
+                # was the user reporting it by hand.
+                #
+                # Best-effort by contract: record_failure never raises, so a
+                # telemetry problem cannot turn a handled workspace failure
+                # into an unhandled one.
+                record_failure(
+                    source="harness",
+                    severity="error",
+                    error_class="WorkspaceMigrationFailed",
+                    error_message=f"workspace restore failed: {str(exc)[:500]}",
+                    user_id=user_email,
+                    session_id=session_id,
+                    context={
+                        "phase": "workspace_restore",
+                        "workspace_prefix": workspace_prefix,
+                        # Push is off for this microVM, so the next invocation
+                        # must do an exact committed restore. Recorded because
+                        # it changes what a retry actually does.
+                        "push_disabled": True,
+                    },
+                    exc=exc,
+                )
                 yield {
                     "result": (
                         "I couldn't safely restore this agent's workspace. "
@@ -1698,6 +1771,22 @@ def main():
                 _workspace_prefix_hydrated = True
         except Exception as exc:  # noqa: BLE001
             logger.error("OpenClaw gateway start FAILED: %s", exc)
+            # Distinct from the restore failure above: the workspace came back
+            # fine and the gateway did not start. Same telemetry gap, different
+            # cause, and telling them apart matters when triaging.
+            record_failure(
+                source="harness",
+                severity="error",
+                error_class="OpenClawStartupFailed",
+                error_message=f"OpenClaw gateway start failed: {str(exc)[:500]}",
+                user_id=user_email,
+                session_id=session_id,
+                context={
+                    "phase": "gateway_start",
+                    "workspace_prefix": workspace_prefix,
+                },
+                exc=exc,
+            )
             yield {
                 "result": (
                     "I restored this agent's workspace but couldn't start its "

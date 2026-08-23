@@ -20,7 +20,7 @@
  * need an admin; restructuring it still does.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Settings2 } from "lucide-react";
 import {
@@ -79,44 +79,70 @@ function readFileAsDataUrl(file: File): Promise<string> {
 }
 
 /**
- * The section's header image: upload one, generate one, or remove it.
+ * All hero-image state and side effects, for `HeroImageEditor`.
  *
- * Its own component with its own state, and it applies changes IMMEDIATELY
- * rather than participating in the dialog's Save. Image work is slow (a
- * generation call is several seconds) and independently fallible (no model
- * configured, a provider refusal, an oversized file) — folding it into Save
- * would let an image failure discard the description edits made beside it, and
+ * Changes apply IMMEDIATELY rather than participating in the dialog's Save.
+ * Image work is slow (generation takes seconds) and independently fallible (no
+ * model configured, a provider refusal, an oversized file) — folding it into
+ * Save would let an image failure discard the description edits beside it, and
  * would make Save's latency unpredictable.
+ *
+ * Split from the component so the component is markup only and both stay under
+ * the max-lines lint.
  */
-function HeroImageEditor({
-  collectionId,
-  hasHeroImage,
-  initialAlt,
-}: {
-  collectionId: string;
-  hasHeroImage: boolean;
-  initialAlt: string | null;
-}): React.JSX.Element {
+function useHeroImage(
+  collectionId: string,
+  hasHeroImage: boolean,
+  initialAlt: string | null
+) {
   const router = useRouter();
   const [prompt, setPrompt] = useState("");
   const [alt, setAlt] = useState(initialAlt ?? "");
   const [busy, setBusy] = useState(false);
+  const [busyLabel, setBusyLabel] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [present, setPresent] = useState(hasHeroImage);
+  /**
+   * Cache-buster for the preview `src`.
+   *
+   * The hero route sets `immutable` and each write stores a NEW key, so the URL
+   * is stable while its bytes change. Without a changing query the browser
+   * keeps showing the OLD image after a replace — which reads as "nothing
+   * happened", the single most confusing thing about the first version of this
+   * control.
+   */
+  const [previewSeq, setPreviewSeq] = useState(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const apply = useCallback(
-    async (input: { dataUrl?: string; prompt?: string; clear?: boolean }) => {
+    async (
+      input: { dataUrl?: string; prompt?: string; clear?: boolean },
+      label: string,
+      /**
+       * Alt text to send. Generation passes the PROMPT when the author has not
+       * written alt text separately — the prompt already describes the image,
+       * so demanding it twice was pure friction.
+       */
+      altToSend: string
+    ) => {
       setBusy(true);
+      setBusyLabel(label);
       setError(null);
+      setNotice(null);
       try {
         const res = await setCollectionHeroImageAction(collectionId, {
           ...input,
-          alt,
+          alt: altToSend,
         });
         if (res.isSuccess) {
           setPresent(!input.clear);
-          if (input.clear) setAlt("");
+          setAlt(input.clear ? "" : altToSend);
           setPrompt("");
+          setPreviewSeq((n) => n + 1);
+          setNotice(
+            input.clear ? "Header image removed." : "Header image updated."
+          );
           // The hero is server-rendered; re-run the server components in place
           // rather than reloading the document.
           router.refresh();
@@ -131,8 +157,9 @@ function HeroImageEditor({
         });
       }
       setBusy(false);
+      setBusyLabel("");
     },
-    [collectionId, alt, router]
+    [collectionId, router]
   );
 
   const onPickFile = useCallback(
@@ -148,24 +175,123 @@ function HeroImageEditor({
         );
         return;
       }
+      // An UPLOAD has no prompt to borrow, so alt text is genuinely required.
+      // Say so on the attempt rather than disabling the control — a dead button
+      // with a hint underneath reads as "broken", which is exactly how the
+      // first version of this was received.
+      if (alt.trim().length === 0) {
+        setError(
+          "Add a short description of the image first — screen readers need it."
+        );
+        return;
+      }
       void (async () => {
         try {
-          await apply({ dataUrl: await readFileAsDataUrl(file) });
+          await apply(
+            { dataUrl: await readFileAsDataUrl(file) },
+            "Uploading…",
+            alt.trim()
+          );
         } catch {
           setError("Could not read that file");
         }
       })();
     },
-    [apply]
+    [apply, alt]
   );
 
-  // Alt text is required by the server on both set paths, so the controls are
-  // disabled until it exists rather than letting the request fail.
-  const needsAlt = alt.trim().length === 0;
+  const onGenerate = useCallback(() => {
+    const description = prompt.trim();
+    if (description.length < 3) {
+      setError("Describe the image you want in a few more words.");
+      return;
+    }
+    // The prompt IS a description of the image, so it doubles as alt text when
+    // the author has not written their own. Requiring both was asking the same
+    // question twice.
+    void apply({ prompt: description }, "Generating…", alt.trim() || description);
+  }, [apply, prompt, alt]);
+
+  return {
+    prompt, setPrompt, alt, setAlt, busy, busyLabel, error, notice, present,
+    previewSeq, fileInputRef, apply, onPickFile, onGenerate,
+  };
+}
+
+function HeroImageEditor({
+  collectionId,
+  hasHeroImage,
+  initialAlt,
+}: {
+  collectionId: string;
+  hasHeroImage: boolean;
+  initialAlt: string | null;
+}): React.JSX.Element {
+  const {
+    prompt, setPrompt, alt, setAlt, busy, busyLabel, error, notice, present,
+    previewSeq, fileInputRef, apply, onPickFile, onGenerate,
+  } = useHeroImage(collectionId, hasHeroImage, initialAlt);
 
   return (
     <div className="space-y-2">
-      <Label htmlFor="section-hero-alt">Header image</Label>
+      <Label>Header image</Label>
+
+      {/*
+        PREVIEW. The first version showed nothing at all: the hero renders on
+        the page BEHIND this modal, so generating produced no visible change
+        and looked like a no-op even when it had worked. `previewSeq` busts the
+        immutable cache so a replacement actually appears.
+      */}
+      {present ? (
+        <img
+          src={`/api/atrium/collections/${collectionId}/hero?v=${previewSeq}`}
+          alt={alt || "Current header image"}
+          className="mer-hero-preview"
+          data-testid="section-hero-preview"
+        />
+      ) : (
+        <p className="mer-hero-preview mer-hero-preview--empty">
+          No header image yet
+        </p>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2">
+        {/*
+          A real button. This was a bare <input type="file">, which macOS
+          renders as the unstyled text "Choose File / No file chosen" — it did
+          not read as clickable and was routinely missed. The input is still
+          the thing that opens the picker (that cannot be synthesised
+          accessibly), just visually hidden behind a label styled as a button.
+        */}
+        <label className="mer-btn" data-testid="section-hero-upload-label">
+          Upload image…
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            className="sr-only"
+            disabled={busy}
+            onChange={(e) => {
+              onPickFile(e.target.files?.[0]);
+              // Reset so picking the SAME file again still fires onChange.
+              if (fileInputRef.current) fileInputRef.current.value = "";
+            }}
+            data-testid="section-hero-upload"
+          />
+        </label>
+        {present && (
+          <button
+            type="button"
+            className="mer-btn"
+            disabled={busy}
+            onClick={() => void apply({ clear: true }, "Removing…", "")}
+            data-testid="section-hero-remove"
+          >
+            Remove image
+          </button>
+        )}
+      </div>
+
       <input
         id="section-hero-alt"
         className="h-9 w-full rounded-md border bg-background px-3 text-sm"
@@ -174,30 +300,10 @@ function HeroImageEditor({
         disabled={busy}
         placeholder="Describe the image for screen readers"
         onChange={(e) => setAlt(e.target.value)}
+        aria-label="Describe the image for screen readers"
         data-testid="section-hero-alt"
       />
-      <div className="flex flex-wrap items-center gap-2">
-        <input
-          type="file"
-          accept="image/png,image/jpeg,image/webp,image/gif"
-          className="text-xs"
-          disabled={busy || needsAlt}
-          onChange={(e) => onPickFile(e.target.files?.[0])}
-          aria-label="Upload a header image"
-          data-testid="section-hero-upload"
-        />
-        {present && (
-          <button
-            type="button"
-            className="mer-btn"
-            disabled={busy}
-            onClick={() => void apply({ clear: true })}
-            data-testid="section-hero-remove"
-          >
-            Remove image
-          </button>
-        )}
-      </div>
+
       <div className="flex flex-wrap items-center gap-2">
         <input
           className="h-9 min-w-0 flex-1 rounded-md border bg-background px-3 text-sm"
@@ -208,19 +314,30 @@ function HeroImageEditor({
           onChange={(e) => setPrompt(e.target.value)}
           data-testid="section-hero-prompt"
         />
+        {/*
+          Enabled whenever there is a prompt. It used to also require the alt
+          field, which meant pressing it after typing a prompt did NOTHING and
+          gave no reason why. The prompt now doubles as the alt text.
+        */}
         <button
           type="button"
           className="mer-btn"
-          disabled={busy || prompt.trim().length < 3 || needsAlt}
-          onClick={() => void apply({ prompt })}
+          disabled={busy}
+          onClick={onGenerate}
           data-testid="section-hero-generate"
         >
-          {busy ? "Working…" : "Generate"}
+          {busy && busyLabel === "Generating…" ? "Generating…" : "Generate"}
         </button>
       </div>
-      {needsAlt && (
-        <p className="text-xs text-muted-foreground">
-          Add a description above before uploading or generating.
+
+      {busy && (
+        <p className="text-xs text-muted-foreground" role="status">
+          {busyLabel} This can take a few seconds.
+        </p>
+      )}
+      {notice && !busy && (
+        <p className="text-xs text-muted-foreground" role="status">
+          {notice}
         </p>
       )}
       {error && (

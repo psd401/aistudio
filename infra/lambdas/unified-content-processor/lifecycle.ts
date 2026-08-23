@@ -33,6 +33,72 @@ const DEFER_DEADLINE_MS: Readonly<Record<DeferredProcessingReason, number>> = {
   AWAITING_MEDIA_ANALYSIS: 6 * 60 * 60 * 1_000,
 };
 
+/**
+ * Re-poll cadence per wait reason: `initial` is the first delay, doubling for
+ * each further minute already spent on this reason, bounded by `cap`.
+ *
+ * These waits were previously one flat 60s for every reason. That was wildly
+ * mismatched to what is actually being waited on: GuardDuty tags a small object
+ * within seconds and Textract returns a single image in seconds, yet each cost a
+ * full minute. In prod a Nexus image paid 60s for the malware tag plus another
+ * 60s for OCR — 120s of pure sleep around ~2s of real work, per file.
+ *
+ * Backing off with elapsed wait keeps the common case (service answers almost
+ * immediately) fast without polling a genuinely slow job hundreds of times.
+ */
+const DEFER_BACKOFF: Readonly<
+  Record<DeferredProcessingReason, { initialSeconds: number; capSeconds: number }>
+> = {
+  // Nothing changes until an operator re-enables the platform — poll rarely.
+  CONTENT_PLATFORM_DISABLED: { initialSeconds: 300, capSeconds: 900 },
+  // GuardDuty usually tags a small upload within a few seconds.
+  AWAITING_SECURITY_SCAN: { initialSeconds: 5, capSeconds: 60 },
+  // Textract returns a page or an image quickly; multi-page PDFs take longer.
+  AWAITING_OCR: { initialSeconds: 5, capSeconds: 60 },
+  // Bedrock Data Automation is a minutes-scale job — no value in fast polling.
+  AWAITING_MEDIA_ANALYSIS: { initialSeconds: 15, capSeconds: 120 },
+};
+
+/** SQS caps DelaySeconds at 15 minutes. */
+const MAX_SQS_DELAY_SECONDS = 900;
+
+/**
+ * How long to wait before re-checking a deferred job, given how long this wait
+ * has already been running. Pure and total so the cadence can be asserted in
+ * tests without SQS or a clock.
+ */
+export function deferDelaySeconds(
+  reason: DeferredProcessingReason,
+  elapsedWaitMs = 0
+): number {
+  const { initialSeconds, capSeconds } = DEFER_BACKOFF[reason];
+  const elapsed = Number.isFinite(elapsedWaitMs) ? Math.max(0, elapsedWaitMs) : 0;
+  // Bounded exponent: 2**10 already exceeds every cap, and it keeps the result
+  // finite if a corrupt waitStartedAt ever yields an enormous elapsed value.
+  const doublings = Math.min(10, Math.floor(elapsed / 60_000));
+  const delay = initialSeconds * 2 ** doublings;
+  return Math.max(1, Math.min(capSeconds, MAX_SQS_DELAY_SECONDS, Math.round(delay)));
+}
+
+/**
+ * Milliseconds already spent on the CURRENT wait reason. A reason change resets
+ * the clock (scan -> OCR), matching prepareDeferredProcessingMetrics.
+ */
+export function elapsedWaitMs(
+  metrics: DeferredProcessingMetrics,
+  reason: DeferredProcessingReason,
+  now = new Date()
+): number {
+  if (metrics.waitReason !== reason || !metrics.waitStartedAt) {
+    return 0;
+  }
+  const startedAt = Date.parse(metrics.waitStartedAt);
+  if (!Number.isFinite(startedAt)) {
+    return 0;
+  }
+  return Math.max(0, now.getTime() - startedAt);
+}
+
 const RETRYABLE_AWS_ERROR =
   /(?:throttl|timeout|timedout|requesttimeout|serviceunavailable|internalserver|slowdown|temporar|network|connection)/i;
 

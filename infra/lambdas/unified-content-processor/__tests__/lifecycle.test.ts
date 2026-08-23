@@ -1,5 +1,7 @@
 import {
   classifyContentProcessingError,
+  deferDelaySeconds,
+  elapsedWaitMs,
   PermanentContentProcessingError,
   prepareDeferredProcessingMetrics,
   processingRetryDelaySeconds,
@@ -243,5 +245,74 @@ describe("canonical artifact replay mismatch classification", () => {
     expect(
       classifyContentProcessingError(new Error("Connection reset while matching"))
     ).toMatchObject({ terminal: false });
+  });
+});
+
+describe("deferred wait cadence", () => {
+  test("re-polls fast-answering services in seconds, not a flat minute", () => {
+    // Every reason used to defer a flat 60s. GuardDuty tags a small object and
+    // Textract returns a single image within seconds, so a minute per stage was
+    // pure dead time: a Nexus image paid 60s for the scan plus 60s for OCR.
+    expect(deferDelaySeconds("AWAITING_SECURITY_SCAN", 0)).toBe(5);
+    expect(deferDelaySeconds("AWAITING_OCR", 0)).toBe(5);
+  });
+
+  test("backs off as a wait drags on, bounded by the per-reason cap", () => {
+    expect(deferDelaySeconds("AWAITING_SECURITY_SCAN", 60_000)).toBe(10);
+    expect(deferDelaySeconds("AWAITING_SECURITY_SCAN", 120_000)).toBe(20);
+    expect(deferDelaySeconds("AWAITING_SECURITY_SCAN", 180_000)).toBe(40);
+    // Capped at 60s however long the wait runs.
+    expect(deferDelaySeconds("AWAITING_SECURITY_SCAN", 240_000)).toBe(60);
+    expect(deferDelaySeconds("AWAITING_SECURITY_SCAN", 60 * 60_000)).toBe(60);
+  });
+
+  test("polls minutes-scale and operator-gated waits slowly from the start", () => {
+    expect(deferDelaySeconds("AWAITING_MEDIA_ANALYSIS", 0)).toBe(15);
+    expect(deferDelaySeconds("AWAITING_MEDIA_ANALYSIS", 10 * 60_000)).toBe(120);
+    // Nothing changes until an operator re-enables the platform.
+    expect(deferDelaySeconds("CONTENT_PLATFORM_DISABLED", 0)).toBe(300);
+    expect(deferDelaySeconds("CONTENT_PLATFORM_DISABLED", 60 * 60_000)).toBe(900);
+  });
+
+  test("never exceeds the SQS DelaySeconds ceiling", () => {
+    const reasons = [
+      "CONTENT_PLATFORM_DISABLED",
+      "AWAITING_SECURITY_SCAN",
+      "AWAITING_OCR",
+      "AWAITING_MEDIA_ANALYSIS",
+    ] as const;
+    for (const reason of reasons) {
+      for (const elapsed of [0, 1, 60_000, 3_600_000, Number.MAX_SAFE_INTEGER]) {
+        const delay = deferDelaySeconds(reason, elapsed);
+        expect(delay).toBeGreaterThanOrEqual(1);
+        expect(delay).toBeLessThanOrEqual(900);
+      }
+    }
+  });
+
+  test("treats a corrupt or absent elapsed value as the start of the wait", () => {
+    expect(deferDelaySeconds("AWAITING_OCR")).toBe(5);
+    expect(deferDelaySeconds("AWAITING_OCR", Number.NaN)).toBe(5);
+    expect(deferDelaySeconds("AWAITING_OCR", -1)).toBe(5);
+  });
+
+  test("measures elapsed wait only while the reason is unchanged", () => {
+    const now = new Date("2026-07-22T12:02:00.000Z");
+    const metrics = {
+      waitReason: "AWAITING_SECURITY_SCAN" as const,
+      waitStartedAt: "2026-07-22T12:00:00.000Z",
+    };
+    expect(elapsedWaitMs(metrics, "AWAITING_SECURITY_SCAN", now)).toBe(120_000);
+    // Scan -> OCR is a NEW wait, so the cadence restarts at its shortest delay
+    // rather than inheriting the previous reason's backoff.
+    expect(elapsedWaitMs(metrics, "AWAITING_OCR", now)).toBe(0);
+    expect(elapsedWaitMs({}, "AWAITING_OCR", now)).toBe(0);
+    expect(
+      elapsedWaitMs(
+        { waitReason: "AWAITING_OCR", waitStartedAt: "not-a-date" },
+        "AWAITING_OCR",
+        now
+      )
+    ).toBe(0);
   });
 });

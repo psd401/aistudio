@@ -1,9 +1,9 @@
-import { SQSEvent, Context, SQSBatchResponse, SQSBatchItemFailure } from 'aws-lambda';
+import type { SQSEvent, Context, SQSBatchResponse, SQSBatchItemFailure } from 'aws-lambda';
 import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { DynamoDBClient, PutItemCommand, QueryCommand } from '@aws-sdk/client-dynamodb';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 import { Readable } from 'node:stream';
-import { DocumentProcessorFactory } from './processors/factory';
+import { DocumentProcessorFactory, type ProcessingResult } from './processors/factory';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import { createLambdaLogger } from './utils/lambda-logger';
 
@@ -96,7 +96,7 @@ async function updateJobStatus(
 }
 
 // Store processing results
-async function storeResults(jobId: string, result: Record<string, unknown>): Promise<void> {
+async function storeResults(jobId: string, result: ProcessingResult): Promise<void> {
   const resultSize = JSON.stringify(result).length;
 
   if (resultSize > 400 * 1024) { // 400KB limit for DynamoDB

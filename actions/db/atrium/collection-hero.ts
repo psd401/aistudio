@@ -148,7 +148,17 @@ export async function setCollectionHeroImageAction(
       return createSuccess(cleared, "Header image removed");
     }
 
-    const alt = parsed.alt?.trim() ?? "";
+    // Alt text, with the GENERATION prompt as its fallback.
+    //
+    // The prompt is already a description of the image, so requiring separate
+    // alt text asked the same question twice — and the UI expressed that by
+    // disabling Generate until both were filled, which read as a broken button.
+    // Defaulting here rather than only in the client means every caller gets
+    // the same behaviour and the accessibility requirement still always holds.
+    //
+    // An UPLOAD has no prompt to borrow, so alt text remains genuinely
+    // required there.
+    const alt = parsed.alt?.trim() || parsed.prompt?.trim() || "";
     if (alt.length === 0) {
       // Enforced here rather than in the schema so it applies only to the two
       // set paths — a clear has no image left to describe.

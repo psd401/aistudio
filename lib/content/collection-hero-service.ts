@@ -234,8 +234,12 @@ export async function generateHeroImage(
     // approach the agent `images.generate` tool takes with `agent-{requestId}`.
     conversationId: `atrium-collection-${collectionId}`,
     userId: String(userId),
-    // Wide, because it renders as a banner across the top of a section page.
-    size: "1792x1024",
+    // NO explicit size. `1792x1024` is a DALL·E-era dimension and the current
+    // gpt-image models reject it, which failed generation for a banner shape we
+    // do not actually need: `.mer-section-hero-image` crops to 16/5 with
+    // `object-fit: cover`, so a square render looks identical once placed.
+    // Letting each provider use its own default keeps this working across
+    // whichever image model the deployment has configured.
   });
 
   // Read the bytes back through the presigned URL the generation service

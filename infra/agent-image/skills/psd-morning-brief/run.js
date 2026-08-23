@@ -1530,6 +1530,24 @@ async function gatherSnapshot(options = {}, deps = {}) {
   };
 }
 
+/**
+ * The inbox message ids this brief's synthesis must decide, in snapshot order.
+ *
+ * Shared by the synthesis request, the deterministic synthesis, and
+ * validateSynthesis so the list handed to the model cannot drift from the list
+ * it is then checked against.
+ */
+function inboxMessageIdsOf(snapshot) {
+  return snapshot.sections
+    .filter((section) => section.id === 'inbox')
+    .flatMap((section) => {
+      const data = asObject(section.data);
+      return Array.isArray(data.emails) ? data.emails : [];
+    })
+    .filter((email) => email && typeof email.id === 'string' && email.id)
+    .map((email) => email.id);
+}
+
 function makeSynthesisRequest(snapshot) {
   const sections = snapshot.sections.map((section) => ({
     id: section.id,
@@ -1545,11 +1563,20 @@ function makeSynthesisRequest(snapshot) {
           dataPath: `sections[id=${section.id}].data`,
         }),
   }));
+  // Enumerate the ids rather than leaving the model to transcribe them out of
+  // the snapshot file. validateSynthesis fails the whole brief if a single
+  // inbox item goes undecided, and asking for a decision per item while
+  // withholding the item list made that a transcription exercise over opaque
+  // 16-hex-char ids: on 2026-08-17 two owners lost their brief outright, one
+  // missing 10 decisions and one missing 5. Handing over the checklist is what
+  // makes the requirement satisfiable.
+  const requiredInboxIds = inboxMessageIdsOf(snapshot);
   return {
     task:
       'Read the data snapshot, gather every custom section from its listed sources, and write the synthesis JSON. Cross-connect related topics, curate rather than dump, make an explicit decision for every inbox item, and write a complete spoken podcast script.',
     dataFile: null,
     availableSections: sections,
+    requiredInboxDecisionIds: requiredInboxIds,
     outputShape: {
       headline: 'string',
       subheadline: 'string',
@@ -1588,6 +1615,7 @@ function makeSynthesisRequest(snapshot) {
       'Custom sections are first-class: gather their sources and include them in sections.',
       'Do not infer a person name from an email or Chat id; use only directory-resolved names in snapshot.people.',
       'Keep URLs exactly as supplied by sources.',
+      `inboxDecisions must contain exactly one entry for every id in requiredInboxDecisionIds (${requiredInboxIds.length} total), copied verbatim. Any id left out, misspelled, or given a decision outside act-now|review|defer|archive discards the entire brief. When an item does not warrant attention, still decide it — 'archive' is a decision.`,
       'Return JSON only.',
     ],
   };
@@ -1714,18 +1742,11 @@ function deterministicSynthesis(snapshot, config) {
     subheadline: leadStory.summary,
     leadStory,
     sections,
-    inboxDecisions: snapshot.sections
-      .filter((section) => section.id === 'inbox')
-      .flatMap((section) => {
-        const data = asObject(section.data);
-        return Array.isArray(data.emails) ? data.emails : [];
-      })
-      .filter((email) => email && typeof email.id === 'string' && email.id)
-      .map((email) => ({
-        messageId: email.id,
-        decision: 'review',
-        rationale: 'Review this message in the inbox.',
-      })),
+    inboxDecisions: inboxMessageIdsOf(snapshot).map((messageId) => ({
+      messageId,
+      decision: 'review',
+      rationale: 'Review this message in the inbox.',
+    })),
     podcastScript:
       `Good morning. This is your morning brief for ${snapshot.displayDate}. ` +
       `${spokenSections} That concludes today's brief.`,
@@ -1787,16 +1808,7 @@ function validateSynthesis(raw, snapshot, config) {
       'synthesis',
     );
   }
-  const inboxMessageIds = new Set(
-    snapshot.sections
-      .filter((section) => section.id === 'inbox')
-      .flatMap((section) => {
-        const data = asObject(section.data);
-        return Array.isArray(data.emails) ? data.emails : [];
-      })
-      .filter((email) => email && typeof email.id === 'string' && email.id)
-      .map((email) => email.id),
-  );
+  const inboxMessageIds = new Set(inboxMessageIdsOf(snapshot));
   const allowedInboxDecisions = new Set([
     'act-now',
     'review',

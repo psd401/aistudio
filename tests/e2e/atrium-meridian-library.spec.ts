@@ -7,7 +7,7 @@ import { mkdirSync } from "node:fs";
  *
  * Drives the restyled `/atrium` library as an authenticated capability holder:
  * the Meridian search field (⌘K-focusable), the filter chips (All / Docs /
- * Artifacts / Shared with me — the last exercising the new server `owner:
+ * Artifacts, plus the orthogonal owner select exercising the server `owner:
  * "shared"` filter), the content card grid, and the dashed "Create with the
  * agent" card. Screenshots land in docs/verification/meridian/.
  *
@@ -45,7 +45,7 @@ test.describe("Atrium Meridian library (authenticated)", () => {
       // Filter chips.
       const chips = page.getByRole("group", { name: "Filter content" });
       await expect(chips).toBeVisible();
-      for (const label of ["All", "Docs", "Artifacts", "Shared with me"]) {
+      for (const label of ["All", "Docs", "Artifacts"]) {
         await expect(chips.getByRole("button", { name: label })).toBeVisible();
       }
 
@@ -84,12 +84,25 @@ test.describe("Atrium Meridian library (authenticated)", () => {
       await page.keyboard.press("Meta+k");
       await expect(search).toBeFocused();
 
-      // "Shared with me" chip is a live filter (reloads without error).
-      const sharedChip = chips.getByRole("button", { name: "Shared with me" });
-      await sharedChip.click();
-      await expect(sharedChip).toHaveAttribute("aria-pressed", "true");
-      // The grid re-queries; the create card is always present (proves no crash /
-      // no error state after the owner-scoped reload).
+      // Ownership is an ORTHOGONAL select, not a chip: chips are single-select,
+      // so "Mine" as a chip meant giving up "Docs" and could never answer "show
+      // me MY docs". Combining the two is the point, so drive both and assert
+      // the grid survives the owner-scoped reload.
+      const ownerFilter = page.getByTestId("library-owner-filter");
+      await expect(ownerFilter).toBeVisible();
+      await ownerFilter.selectOption("shared");
+      await expect(ownerFilter).toHaveValue("shared");
+
+      // Owner + kind together — the combination the chip row could not express.
+      await ownerFilter.selectOption("mine");
+      await chips.getByRole("button", { name: "Docs" }).click();
+      await expect(ownerFilter).toHaveValue("mine");
+      await expect(chips.getByRole("button", { name: "Docs" })).toHaveAttribute(
+        "aria-pressed",
+        "true"
+      );
+
+      // The create card is always present (proves no crash / no error state).
       await expect(
         page.getByRole("button", { name: /New interactive page/i })
       ).toBeVisible();

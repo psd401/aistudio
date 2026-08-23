@@ -916,3 +916,33 @@ export async function saveConversationSteps(params: {
     totalTokens: usage?.totalTokens,
   });
 }
+
+/**
+ * Why a finished stream must NOT be persisted as a completed assistant turn, or
+ * null when it should be saved.
+ *
+ * - `stream_aborted`: the run was cut short (wall-clock budget exhausted, or the
+ *   caller aborted). AI SDK v6 still fires `onFinish` after an abort, carrying
+ *   only the steps that completed before the cut. Its trailing step can hold a
+ *   tool call whose result never arrived, and replaying that pair throws
+ *   AI_MissingToolResultsError the next time the conversation loads.
+ * - `no_content`: no prose AND no multi-step history — there is nothing to show.
+ *   This is the exact production failure behind the blank Nexus replies: a 30s
+ *   wall-clock abort after a single tool-call step persisted `textLength: 0` and
+ *   logged it as a success, leaving a permanently empty assistant bubble.
+ *
+ * Completed multi-step runs still persist via saveConversationSteps even when the
+ * final step is text-free, so MCP tool history survives.
+ */
+export function incompleteTurnReason(input: {
+  text: string;
+  aborted?: boolean;
+  steps?: StepData[];
+}): "stream_aborted" | "no_content" | null {
+  if (input.aborted) {
+    return "stream_aborted";
+  }
+  const hasText = input.text.trim().length > 0;
+  const hasMultiStepHistory = (input.steps?.length ?? 0) > 1;
+  return hasText || hasMultiStepHistory ? null : "no_content";
+}

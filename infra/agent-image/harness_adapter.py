@@ -6,6 +6,7 @@ without changing the AgentCore wrapper. Each adapter implements the same interfa
 """
 
 import abc
+import collections
 import dataclasses
 import json
 import logging
@@ -205,6 +206,88 @@ class TurnResult:
     nudged: bool = False
 
 
+def _shape_of(value: object) -> str:
+    """Field names and types of a payload — never its values.
+
+    Schema discovery needs to know which fields a frame carries. The values
+    can be spreadsheet cells, document text or tool arguments, so they must
+    not reach the logs to establish a key list.
+    """
+    if isinstance(value, dict):
+        return json.dumps(
+            {key: type(item).__name__ for key, item in sorted(value.items())}
+        )[:600]
+    if isinstance(value, list):
+        return f"list[{len(value)}]"
+    return type(value).__name__ if value is not None else "none"
+
+
+def _detail_of(payload: object) -> object:
+    """The detail sub-object of a frame, from whichever key holds it.
+
+    `event:agent` frames keep their detail under `data`; `event:task` frames
+    keep it under `task`. Presence decides, not truthiness: an empty `data`
+    dict is still a `data`-shaped frame, and falling through to `task` there
+    would mislabel the very shapes this diagnostic exists to discover.
+    """
+    if not isinstance(payload, dict):
+        return None
+    detail = payload.get("data")
+    if detail is not None:
+        return detail
+    return payload.get("task")
+
+
+# The only fields echoed by value. Each is a closed-vocabulary discriminator
+# the adapter already branches on, so none of them carries user content.
+_STRUCTURAL_MARK_FIELDS = (
+    "stream",
+    "phase",
+    "kind",
+    "status",
+    "state",
+    # `event:task` frames are shaped {"action": str, "task": dict}. This note
+    # used to say they carry no runId and that neither the run fence nor the
+    # boundary logic could see them. BOTH claims are now false: the id is
+    # nested at payload.task.runId (which is why it read as absent), the task
+    # branch fences on it, and task frames end an assistant segment.
+    #
+    # The correlation this note recorded held up. A Docs turn with 43 of them
+    # fused twice ("ownership.Now", "Kris.Done") while a calendar turn with
+    # none stayed clean; on 2026-08-16 a quartile turn fused four fragments
+    # into 515 chars with `thinking` and task frames between them.
+    #
+    # It also warned that treating all 43 as boundaries would trade fusion for
+    # truncated answers. That was the right worry and it is handled, but not by
+    # inspecting `action`: segment splitting and answer suppression are now two
+    # flags (assistant_boundary_pending, tool_activity_since_text), so a task
+    # frame can end a segment without condemning a finished answer as
+    # scratchpad. `action` stays sampled — it is still the vocabulary a future
+    # reader needs.
+    "action",
+)
+
+
+def _structural_marks(payload: object) -> str:
+    """Echo only closed-vocabulary discriminators, and only short ones."""
+    if not isinstance(payload, dict):
+        return "{}"
+    marks: dict = {}
+    # `task` is where an event:task frame keeps its detail, exactly as `data`
+    # is for an event:agent frame; both are scanned so neither shape hides its
+    # discriminators.
+    for source in (payload, payload.get("data"), payload.get("task")):
+        if not isinstance(source, dict):
+            continue
+        for field in _STRUCTURAL_MARK_FIELDS:
+            candidate = source.get(field)
+            # Bounded: a discriminator is a short token. Anything longer is
+            # not one, and is not worth risking.
+            if isinstance(candidate, str) and 0 < len(candidate) <= 32:
+                marks.setdefault(field, candidate)
+    return json.dumps(marks)[:300]
+
+
 def _format_for_chat(text: str) -> str:
     """Final transform applied to every outbound message before it leaves
     the adapter. Converts model-emitted Markdown into Google Chat's
@@ -243,6 +326,211 @@ UPSTREAM_RETRY_MAX_LATENCY_MS = 30_000
 # `_resolve_deadline_s`'s own lower clamp, so a smaller remainder would be
 # silently rounded back UP into an overshoot.
 UPSTREAM_RETRY_MIN_REMAINING_S = 60
+
+# Above this, a payload deadline can only be the async-job runner's explicit
+# override — interactive turns are clamped to 550 and send no override at all.
+# Mirrors agentcore_wrapper.LONG_JOB_DEADLINE_THRESHOLD_SECONDS; the two must
+# agree, because that module uses the same number to pick the long drain.
+LONG_JOB_DEADLINE_THRESHOLD_S = 600
+
+# One entry per session that asked a question and has not been answered yet.
+# This is a singleton adapter shared by every user in the container, so the
+# map is per-session; the cap keeps a session that never answers from pinning
+# an entry for the container's lifetime. Far above any real concurrent-asker
+# count — it is a leak stop, not a throttle.
+MAX_PENDING_QUESTIONS = 256
+
+# Frames buffered while waiting for the question.resolve ack, in case the
+# resumed run streams ahead of it. Bounded because the wait is only ~10s and
+# anything beyond this is a gateway misbehaving, not a run to reassemble.
+MAX_RESOLVE_BUFFERED_FRAMES = 200
+
+# Past that cap, chat-channel frames are STILL kept — they carry the run's
+# terminal state, and losing it stalls the turn to its full deadline. They are
+# a handful of state transitions, not a stream, so this second allowance is
+# small on purpose.
+MAX_RESOLVE_TERMINAL_FRAMES = 16
+
+# How long to wait for the question.resolve ack before giving up and falling
+# back to a normal chat.send. Small on purpose: this sits in front of the
+# user's turn, and every path out of it is safe.
+RESOLVE_ACK_WAIT_S = 10
+
+
+# --- question answering -------------------------------------------------
+#
+# Ported from the pinned OpenClaw bundle (2026.7.2-beta.5,
+# app/dist/openclaw-tools-Be4wAI1K.js: buildAgentHarnessUserInputAnswers,
+# normalizeAgentHarnessUserInputAnswer, parseKeyedAnswers). Deliberately a
+# port and not an interpretation — this decides what the model reads back as
+# the user's answer, and inventing a third dialect here means the agent's own
+# ask_user tool is answered in a language it does not speak.
+#
+# Wire shape, from the gateway protocol schemas in the same image
+# (packages/gateway-protocol/src/schema/questions.ts):
+#
+#   question.requested payload = QuestionRecordSchema
+#     { id, questions: [QuestionSchema], runId?, sessionKey?, status,
+#       createdAtMs, expiresAtMs, ... }
+#   QuestionSchema = { questionId, header, question, options: [{label,
+#                      description?}], multiSelect?, isOther?, isSecret? }
+#   question.resolve = { id, answers: { answers: { <questionId>: [str] } } }
+#
+# NOTE the per-question key is `questionId`, NOT `id`, and QuestionSchema is a
+# closedObject so `id` is not merely absent, it is rejected.
+
+# Upstream's regex, character class included: `-` is a valid separator, so it
+# is also excluded from the key. A hyphenated header ("Multi-Select: yes")
+# therefore parses as key "multi" and falls through to positional matching.
+# That is upstream's behaviour and this is a port — diverging here would mean
+# our keyed form accepts headers the gateway's own plain-text path does not.
+_KEYED_ANSWER_RE = re.compile(r"^\s*([^:=-]+?)\s*[:=-]\s*(.+?)\s*$")
+_DIGITS_RE = re.compile(r"\d+")
+
+
+def _parse_keyed_answers(text: str) -> dict:
+    """`header: value` lines -> {key: value}, keys lowercased."""
+    answers: dict = {}
+    for line in re.split(r"\r?\n", text or ""):
+        match = _KEYED_ANSWER_RE.match(line)
+        if not match:
+            continue
+        key = (match.group(1) or "").strip().lower()
+        value = (match.group(2) or "").strip()
+        if key and value:
+            answers[key] = value
+    return answers
+
+
+def _normalize_question_answer(answer: str, question: dict):
+    """One reply -> the option label it names, or the raw text, or None.
+
+    None means "no answer" and the tool renders it to the model literally as
+    `(no answer)`. That is only reachable for a fixed-choice question, and
+    ask_user hardcodes isOther=true on every question it builds, so in
+    practice free text always survives. Kept anyway: the gateway accepts
+    questions from sources other than ask_user.
+    """
+    trimmed = (answer or "").strip()
+    options = [o for o in (question.get("options") or []) if isinstance(o, dict)]
+
+    if _DIGITS_RE.fullmatch(trimmed):
+        index = int(trimmed) - 1
+        if 0 <= index < len(options):
+            # Matches upstream: an in-range index wins outright and does not
+            # fall through to the label comparison below.
+            label = options[index].get("label")
+            return label if isinstance(label, str) and label else None
+
+    for option in options:
+        label = option.get("label")
+        if isinstance(label, str) and label.lower() == trimmed.lower():
+            return label
+
+    if options and not question.get("isOther"):
+        return None
+    return trimmed or None
+
+
+def _build_question_answers(questions: list, text: str) -> dict:
+    """{questionId: [answer]} for the whole ask, upstream's mapping.
+
+    One question: the reply IS the answer. Several: match by question id,
+    header, question text or 1-based position (`header: value` lines), then
+    fall back to the Nth line. Broadcasting the same text to every question —
+    what this adapter did before — is not one of the options; it answers
+    "which grades?" and "which year?" identically.
+    """
+    answers: dict = {}
+    if len(questions) == 1:
+        question = questions[0]
+        if not question.get("questionId"):
+            return answers
+        normalized = _normalize_question_answer(text, question)
+        answers[question["questionId"]] = [normalized] if normalized else []
+        return answers
+
+    keyed = _parse_keyed_answers(text)
+    lines = [line.strip() for line in re.split(r"\r?\n", text or "")]
+    for index, question in enumerate(questions):
+        # `index` still advances for a slot we cannot answer — that is the
+        # whole point of holding it.
+        if not question.get("questionId"):
+            continue
+        answer = (
+            keyed.get(str(question.get("questionId") or "").lower())
+            or keyed.get(str(question.get("header") or "").lower())
+            or keyed.get(str(question.get("question") or "").lower())
+            or keyed.get(str(index + 1))
+            or (lines[index] if index < len(lines) else "")
+        )
+        normalized = (
+            _normalize_question_answer(answer, question) if answer else None
+        )
+        answers[question["questionId"]] = [normalized] if normalized else []
+    return answers
+
+
+def _frames_from_run(frames, run_id) -> bool:
+    """True when any buffered frame belongs to `run_id`.
+
+    Used as proof that a run has resumed. This socket carries every run in the
+    container, so "some frames arrived" proves nothing on its own — the run id
+    is what makes it evidence rather than a guess.
+
+    An unknown run id is never evidence. Without this, a None run_id matches
+    any payload that also lacks one — two unknowns comparing equal into "it
+    resumed", which is the answer that skips the fallback and strands the
+    user's message. The only caller guards against it today; the guard is 100
+    lines away and this function decides whether a turn re-runs, so it defends
+    itself.
+    """
+    if not run_id:
+        return False
+    for raw in frames:
+        try:
+            payload = (json.loads(raw) or {}).get("payload") or {}
+        except (json.JSONDecodeError, ValueError, AttributeError):
+            continue
+        if payload.get("runId") == run_id:
+            return True
+    return False
+
+
+def _is_reply_session_conflict(error) -> bool:
+    """Does this chat.send error mean a stale reply session is in the way?
+
+    The wedge the pre-send abort was written for (2026-07-01): a prior turn's
+    server-side reply session survives its ws.close() and rejects the next
+    chat.send. It announces itself, which is why guessing at it every turn was
+    never necessary.
+    """
+    # Underscores normalised so a code like SESSION_INITIALIZATION_FAILED
+    # matches the same rule as the prose message. The exact wire text is not
+    # pinned by anything we control, so match liberally — the cost of a false
+    # positive is one wasted abort+resend on a turn that was already failing.
+    text = json.dumps(error).lower().replace("_", " ") if error else ""
+    return "reply session" in text or "session initialization" in text
+
+
+def _abort_and_resend(ws, session_id, message, model_override) -> str:
+    """Clear the stale reply session, then re-send. Returns the new chat id."""
+    ws.send(json.dumps({
+        "type": "req", "id": str(uuid.uuid4()), "method": "chat.abort",
+        "params": {"sessionKey": session_id or "default"},
+    }))
+    chat_id = str(uuid.uuid4())
+    params = {
+        "sessionKey": session_id or "default",
+        "message": message,
+        "idempotencyKey": chat_id,
+    }
+    if model_override:
+        params["model"] = model_override
+    ws.send(json.dumps({
+        "type": "req", "id": chat_id, "method": "chat.send", "params": params,
+    }))
+    return chat_id
 
 
 def _classify_chat_error(error_message: str) -> str:
@@ -542,6 +830,20 @@ class OpenClawAdapter(HarnessAdapter):
         # --token` (launcher) and reused in the connect envelope (client), so the
         # two always agree within this process.
         self._gateway_token: str = secrets.token_urlsafe(32)
+        # Questions the agent asked on a PREVIOUS turn, still pending on the
+        # gateway. The asking user's next message is the answer, not a new
+        # request — see _resolve_pending_question.
+        #
+        # KEYED BY SESSION, deliberately. This is a module-level singleton
+        # adapter (agentcore_wrapper.py) serving every user in the container,
+        # and turns from different sessions interleave freely — the run-id
+        # fence in _process_once exists for exactly that reason. A single
+        # scalar here would let ANY other user's turn clear the entry between
+        # the ask and the answer, dropping the pending question back onto the
+        # pre-send abort path this whole mechanism exists to avoid. The bug
+        # would be intermittent and multi-user only, which is the worst kind
+        # to find in production.
+        self._pending_questions: dict = {}
 
     def configure(self, config: dict) -> None:
         """Configure the OpenClaw adapter. Idempotent — safe to call multiple times."""
@@ -1164,6 +1466,243 @@ class OpenClawAdapter(HarnessAdapter):
             return False
         return result.latency_ms <= UPSTREAM_RETRY_MAX_LATENCY_MS
 
+
+    def _remember_pending_question(
+        self, session_id, pending_id, questions, run_id
+    ):
+        """Hold one pending question per session, oldest evicted first.
+
+        Bounded because a session that asks and never answers would otherwise
+        leave its entry here for the life of the container. Eviction is safe:
+        the gateway expires questions on its own, and a dropped entry only
+        costs us the resolve, falling back to a normal chat.send.
+
+        `run_id` is the run that ASKED, and therefore the run that resumes when
+        the question is answered. The answering turn has no chat.send to learn
+        a run id from, so without this the run fence would have nothing to
+        compare against — see _process_once.
+
+        Access is unsynchronized: agentcore_wrapper serializes the whole
+        entrypoint behind `_invocation_lock` (grep that name — the definition
+        carries the other half of this note), so no two turns are ever inside
+        _process_once at once. That invariant lives in another file and is
+        enforced by nothing but these two comments; if the lock is narrowed or
+        the container ever runs multiple workers, this dict needs its own
+        synchronization. No test would catch it — the interleaving tests
+        interleave sequentially, which is all a single-threaded replay can do.
+        """
+        self._pending_questions.pop(session_id, None)
+        self._pending_questions[session_id] = {
+            "id": pending_id,
+            # Whole questions, not just ids: answering correctly needs each
+            # question's options and isOther flag — see
+            # _normalize_question_answer.
+            "questions": questions,
+            "run_id": run_id,
+        }
+        while len(self._pending_questions) > MAX_PENDING_QUESTIONS:
+            evicted, _ = next(iter(self._pending_questions.items()))
+            self._pending_questions.pop(evicted, None)
+            # Warning, not info: the cap sits far above any plausible number
+            # of concurrent askers, so an eviction firing at all means a leak
+            # or an abuse pattern, not routine churn. At info it would be lost
+            # in normal log volume.
+            logger.warning(
+                "evicted pending question for session %s; %d sessions are "
+                "holding one (cap %d)",
+                str(evicted)[:12], len(self._pending_questions),
+                MAX_PENDING_QUESTIONS,
+            )
+
+    def _resolve_pending_question(self, ws, websocket, message, session_id):
+        """Answer the question the gateway is still holding, if there is one.
+
+        The agent's ask leaves a question in `pending` on the gateway, waiting
+        for `question.resolve`. This adapter used to walk away from it and let
+        the next turn's pre-send `chat.abort` cancel it — the bundle's ask-user
+        tool registers an abort listener that fires
+        `cancelPendingQuestion("run-abort")` — after which the model correctly
+        reported that its question had been aborted. Users read that as the
+        agent inventing an abort they never performed. They were right that
+        they never aborted anything; we did, on every turn.
+
+        Params are exactly QuestionResolveParamsSchema:
+            { id, answers: { answers: { <questionId>: [<text>] } }, resolvedBy }
+        which is the same shape OpenClaw's own plain-text claim path sends.
+
+        Returns `(answered, frames, run_id)`. `answered` is True when the gateway
+        accepted the answer, meaning the ORIGINAL run resumes and this turn
+        must listen to it rather than starting a new one; False for anything
+        else — expired, cancelled, unknown id, transport error — so the caller
+        falls back to a normal chat.send. A question we cannot answer must
+        never block the user's message.
+
+        `run_id` is the run that asked and is now resuming — the answering
+        turn issues no chat.send, so this is the only place the run fence can
+        learn which run this turn's reply may be built from.
+
+        `frames` are raw messages that arrived while waiting for the resolve
+        ack. The resumed run streams onto this same socket, so those frames
+        can be its continuation; they are handed back for the event loop to
+        consume rather than dropped. (The pre-send abort drain below discards
+        its frames on purpose — those belong to a run being torn down. This
+        one does not.)
+        """
+        # Only this session's question, and only ever consumed once.
+        pending = self._pending_questions.pop(session_id, None)
+        if not pending:
+            return False, [], None
+
+        # Kill switch, matching OPENCLAW_PRESEND_ABORT on the path this one
+        # replaces. Disabling it restores the previous behaviour exactly —
+        # the question is abandoned and the abort below cancels it — so an
+        # operator can back this out without shipping an image.
+        if os.environ.get("OPENCLAW_QUESTION_RESOLVE", "1") == "0":
+            logger.info("question.resolve disabled by OPENCLAW_QUESTION_RESOLVE=0")
+            return False, [], None
+
+        questions = pending.get("questions") or []
+        if not questions:
+            return False, [], None
+        # Upstream's own mapping, ported — see _build_question_answers.
+        answers = _build_question_answers(questions, message)
+        if not answers:
+            # Every question was unusable. Sending an empty answers map would
+            # mark the question answered with nothing in it; fall back and let
+            # the user's message run as its own turn.
+            logger.warning(
+                "pending question had no answerable questions; falling back"
+            )
+            return False, [], None
+
+        # Popped before every failure branch below, including a transport
+        # error, and never restored. That is deliberate rather than an
+        # oversight: on any path out of here that is not "answered", the
+        # caller's pre-send chat.abort fires and cancels the question on the
+        # gateway anyway, so a retained entry would only point at something
+        # already destroyed — and would resolve a stale id on the NEXT turn.
+        buffered: list = []
+        overflowed = False
+        terminal_overflowed = False
+        resolve_id = str(uuid.uuid4())
+        try:
+            ws.send(json.dumps({
+                "type": "req",
+                "id": resolve_id,
+                "method": "question.resolve",
+                "params": {
+                    "id": pending["id"],
+                    "answers": {"answers": answers},
+                    "resolvedBy": "plain-text",
+                },
+            }))
+            deadline = time.time() + RESOLVE_ACK_WAIT_S
+            while True:
+                # The socket timeout is what actually bounds this, so it has to
+                # shrink with the deadline. A single settimeout() up front only
+                # bounds each recv() individually: a frame at the 9s mark would
+                # re-enter recv() with a fresh 10s budget, so the real ceiling
+                # was double the one the comment claimed.
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                ws.settimeout(remaining)
+                try:
+                    raw = ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    break
+                try:
+                    reply = json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if reply.get("type") == "res" and reply.get("id") == resolve_id:
+                    ok = bool(reply.get("ok"))
+                    status = (reply.get("payload") or {}).get("status")
+                    answered = ok and status == "answered"
+                    logger.info(
+                        "question.resolve ok=%s status=%s id=%s buffered=%d",
+                        ok, status, str(pending["id"])[:12], len(buffered),
+                    )
+                    # Frames only matter when the run actually resumes. On any
+                    # other outcome the caller aborts and re-sends, so keeping
+                    # them would replay a dead run's events into a new turn.
+                    return (
+                        answered,
+                        buffered if answered else [],
+                        pending.get("run_id") if answered else None,
+                    )
+                # Not the ack — the resumed run's own output, arriving ahead of
+                # or interleaved with it. Bounded so a chatty gateway cannot
+                # grow this without limit inside the ack window.
+                if len(buffered) < MAX_RESOLVE_BUFFERED_FRAMES:
+                    buffered.append(raw)
+                    continue
+
+                if not overflowed:
+                    overflowed = True
+                    logger.warning(
+                        "question.resolve buffer hit %d frames before the ack; "
+                        "narration past this point is dropped, terminal state "
+                        "is not",
+                        MAX_RESOLVE_BUFFERED_FRAMES,
+                    )
+
+                # Drop the narration, never the chat channel — it carries the
+                # run's terminal state (final/error/aborted). Both alternatives
+                # are worse and both were tried: giving up here re-sends the
+                # answer to a run the gateway already accepted (double
+                # execution), and discarding everything loses the final event
+                # (stalls to the full deadline). See the commit message.
+                is_chat_frame = (
+                    reply.get("type") == "event" and reply.get("event") == "chat"
+                )
+                if not is_chat_frame:
+                    continue
+                if len(buffered) < (
+                    MAX_RESOLVE_BUFFERED_FRAMES + MAX_RESOLVE_TERMINAL_FRAMES
+                ):
+                    buffered.append(raw)
+                elif not terminal_overflowed:
+                    # The narration cap is a truncated reply. THIS one can cost
+                    # the run's final event, and a turn that loses its final
+                    # sits until the outer deadline and answers "the agent
+                    # stalled". The narration cap already warns; without this
+                    # the worse failure was the silent one, diagnosable only by
+                    # noticing a stall with no cause in the log.
+                    terminal_overflowed = True
+                    logger.warning(
+                        "question.resolve terminal-frame allowance (%d) "
+                        "exhausted before the ack; a chat state transition may "
+                        "be lost and this turn may run to its deadline",
+                        MAX_RESOLVE_TERMINAL_FRAMES,
+                    )
+
+            # No ack inside the window. That is NOT the same as "refused" —
+            # the ack may simply be slow, and the caller's fallback aborts and
+            # re-sends the identical text, running the user's answer twice.
+            #
+            # There is direct evidence available, so use it instead of
+            # guessing: a run blocked on a question emits nothing. If frames
+            # from the ASKING run arrived during this wait, that run resumed,
+            # which it only does once the gateway accepts the answer. Treat it
+            # as accepted and listen, rather than aborting work already in
+            # flight.
+            asking_run = pending.get("run_id")
+            if asking_run and _frames_from_run(buffered, asking_run):
+                logger.warning(
+                    "question.resolve ack not seen in %ss, but run %s is "
+                    "already streaming — treating the answer as accepted "
+                    "rather than sending it a second time",
+                    RESOLVE_ACK_WAIT_S, str(asking_run)[:12],
+                )
+                return True, buffered, asking_run
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "question.resolve failed (falling back to chat.send): %s",
+                str(exc)[:200],
+            )
+        return False, [], None
+
     def _process_once(
         self,
         message: str,
@@ -1350,7 +1889,102 @@ class OpenClawAdapter(HarnessAdapter):
                 # protocol (sessions.reset would additionally wipe stored
                 # conversation state, so we deliberately do NOT use it here).
                 # Kill switch: OPENCLAW_PRESEND_ABORT=0.
-                if os.environ.get("OPENCLAW_PRESEND_ABORT", "1") != "0":
+                # Answer the gateway's pending question BEFORE anything can
+                # cancel it. The pre-send abort below is exactly what used to
+                # kill it, so the two are mutually exclusive by construction.
+                # Before the resolve, so a turn that answers a pending
+                # question counts the ack wait the user actually waited
+                # through. Recorded for the FAILURE path too: a resolve that
+                # times out and falls back has already burned the ack wait and
+                # the abort drain, and restarting the clock afterwards would
+                # report the slowest turns as the fastest.
+                # "Had a pending entry", not "sent a resolve": with
+                # OPENCLAW_QUESTION_RESOLVE=0 the helper pops the entry and
+                # returns before any ws.send, and this is still True.
+                had_pending_question = session_id in self._pending_questions
+                resolve_started_at = time.time()
+                (
+                    answered_pending,
+                    resumed_frames,
+                    resumed_run_id,
+                ) = self._resolve_pending_question(
+                    ws, websocket, message, session_id
+                )
+                # deque, not list: the event loop drains this from the front,
+                # and popping index 0 off a list is O(n) each time.
+                resumed_frames = collections.deque(resumed_frames)
+                if answered_pending:
+                    logger.info(
+                        "pending question answered; resuming the original run "
+                        "instead of starting a new one"
+                    )
+
+                # A PROMOTED JOB MUST NOT ABORT THE RUN IT EXISTS TO FINISH.
+                #
+                # The comment above is right about interactive turns and wrong
+                # about this one. Promotion happens precisely BECAUSE the
+                # OpenClaw run is still going when our deadline hits — we stop
+                # listening, the run keeps working, and a background job picks
+                # it up. That job runs on ECS, outside the router's per-session
+                # lock, so "no legitimate work is active here" is false for it.
+                #
+                # Measured on dev 2026-08-16, an Artondale quartile report:
+                #     15:06:44  deadline expired -> promoted
+                #     15:07:22  ECS job starts
+                #     15:07:53  pre-send chat.abort  ok=True
+                #     15:08:12  job posts "nothing written to the sheet yet"
+                #     15:08:47  job stops, 85s, no data extracted
+                # The job's first act killed the run it was promoted to
+                # continue, so it began from nothing and had 85 seconds. The
+                # model then told the user they had interrupted it — true, and
+                # not the user.
+                #
+                # A long-job deadline is the marker: only the job runner sends
+                # deadline_s, and it is clamped above the interactive ceiling
+                # (agentcore_wrapper.LONG_JOB_DEADLINE_THRESHOLD_SECONDS).
+                # Interactive turns send nothing and keep the abort, which is
+                # what clears a wedged reply session.
+                is_promoted_job = (
+                    deadline_s is not None
+                    and int(deadline_s) > LONG_JOB_DEADLINE_THRESHOLD_S
+                )
+                if is_promoted_job:
+                    logger.info(
+                        "promoted job turn: skipping the pre-send abort so the "
+                        "run this job continues is not killed (deadline_s=%s)",
+                        deadline_s,
+                    )
+
+                # DEFAULT OFF, deliberately — this is now REACTIVE.
+                #
+                # The abort was preemptive: every turn destroyed whatever was
+                # running for this session before sending. Its comment argued
+                # that was safe because the router serializes turns, so nothing
+                # legitimate could be active. #1665 found the first hole (a
+                # promoted job's own turn). This is the second and it is the
+                # one users feel: when a background job is working and the user
+                # sends ANY message, the interactive turn aborts the job's run.
+                #
+                # On 2026-08-17 that happened repeatedly on one request. The
+                # agent kept telling the user it had been interrupted and kept
+                # stopping to ask whether to continue; the user answered "I
+                # never aborted anything" three times. He was right, every
+                # time.
+                #
+                # The wedge it was written for (2026-07-01) announces itself:
+                # chat.send comes back with a reply-session conflict. So do not
+                # pre-destroy state on the chance of a wedge — send, and if
+                # that specific error arrives, abort and re-send once. The cost
+                # is one extra round trip on the rare broken turn instead of
+                # killing live work on every healthy one.
+                #
+                # OPENCLAW_PRESEND_ABORT=1 restores the old preemptive
+                # behaviour without an image build.
+                if (
+                    not answered_pending
+                    and not is_promoted_job
+                    and os.environ.get("OPENCLAW_PRESEND_ABORT", "0") == "1"
+                ):
                     try:
                         abort_id = str(uuid.uuid4())
                         ws.send(json.dumps({
@@ -1398,21 +2032,37 @@ class OpenClawAdapter(HarnessAdapter):
                 # multi-user case) other users' history entirely. The
                 # AgentCore runtime gives us a stable per-user session_id;
                 # use it directly.
+                # When the answer was accepted the ORIGINAL run resumes and
+                # streams its continuation on this same socket. Sending a new
+                # chat.send here would run the user's answer a second time as a
+                # fresh prompt — OpenClaw's own claim path returns without
+                # queueing for the same reason.
                 chat_id = str(uuid.uuid4())
                 # Latency clock starts the instant we hand the message to
                 # the gateway. final_state event stops it. Captured before
                 # ws.send so we don't count our own serialization.
-                chat_send_at = time.time()
-                ws.send(json.dumps({
-                    "type": "req",
-                    "id": chat_id,
-                    "method": "chat.send",
-                    "params": {
-                        "sessionKey": session_id or "default",
-                        "message": message,
-                        "idempotencyKey": chat_id,
-                    },
-                }))
+                #
+                # One reactive retry per turn, never a loop.
+                conflict_retried = False
+                chat_send_at = (
+                    resolve_started_at if had_pending_question else time.time()
+                )
+                if answered_pending:
+                    # No chat.send: listen for the resumed run. The loop below
+                    # ends on the chat `final` event, which that run still
+                    # emits, rather than on a chat.send response id.
+                    pass
+                else:
+                    ws.send(json.dumps({
+                        "type": "req",
+                        "id": chat_id,
+                        "method": "chat.send",
+                        "params": {
+                            "sessionKey": session_id or "default",
+                            "message": message,
+                            "idempotencyKey": chat_id,
+                        },
+                    }))
 
                 # Step 4: Collect response events until final.
                 # Instrumented to log every event type we see so we can
@@ -1470,6 +2120,70 @@ class OpenClawAdapter(HarnessAdapter):
                 # final-event handler suppresses ("Here's how far I got: Now
                 # run the batchUpdate."). Covered by test_reply_replay.py.
                 assistant_boundary_pending: bool = False
+                # SEPARATE from the flag above, and the distinction matters.
+                #
+                # `assistant_boundary_pending` answers "does the next delta
+                # start a NEW message?" — set by any model activity, so
+                # segments never fuse.
+                #
+                # This one answers "is the accumulated text scratchpad?" — set
+                # ONLY by genuine tool work. Text followed by a tool call is
+                # something the model said on its way to doing something else;
+                # text followed by a reasoning or commentary item is still its
+                # answer.
+                #
+                # Review caught these being one flag: any `item` frame then
+                # suppressed a COMPLETE answer that happened to be followed by
+                # a non-tool progress item — the exact case
+                # _is_tool_activity_stream's carve-out exists for, reintroduced
+                # while fixing fusion. itemKind() in the pinned bundle emits
+                # `analysis` for reasoning and context compaction, so those
+                # frames are real, not hypothetical.
+                tool_activity_since_text: bool = False
+                # The run THIS turn started, learned from the chat.send res
+                # (`{"runId": ..., "status": "started"}`). Everything the reply
+                # is built from must belong to it.
+                #
+                # This socket is not private to this turn. The adapter connects
+                # as `role: operator` with operator.admin/read/write, so the
+                # gateway delivers agent events for runs this turn did not
+                # start — including runs in OTHER sessions, and subagent
+                # `announce:` runs. Assistant text was accumulated from all of
+                # them, so a run that outlived the turn which launched it had
+                # its answer returned to whatever turn happened to be listening
+                # when it finished.
+                #
+                # That is not hypothetical. On 2026-08-14 a Docs turn failed at
+                # the harness (subagent Bedrock error), kept running, and
+                # completed two minutes later; the next turn — a different
+                # request, in a DIFFERENT session (6ef59dd1 -> 0093fbb5) — was
+                # answered with that stale run's text, and the user's actual
+                # request was never processed. A confidently wrong answer is a
+                # worse failure than an error, so this fences by run id.
+                #
+                # A resumed-question turn sends no chat.send, so it never sees
+                # a `started` res and would leave this None — and both fences
+                # below are gated on it being truthy, so the whole mechanism
+                # would be OFF for exactly the turns that listen longest to a
+                # socket carrying other runs. Seed it from the run that asked;
+                # that is the run resuming, and it is the only run whose output
+                # belongs in this reply.
+                # Why the run stopped, as the chat channel reported it.
+                final_stop_reason: Optional[str] = None
+                turn_run_id: Optional[str] = (
+                    resumed_run_id if answered_pending else None
+                )
+                if answered_pending and not turn_run_id:
+                    # Fails open, deliberately — an unfenced reply beats no
+                    # reply — but it is the pre-fix exposure, so say so.
+                    logger.warning(
+                        "resumed question carried no run id; this turn's reply "
+                        "is not run-fenced"
+                    )
+                # Counted, not silent: if this is ever large the gateway is
+                # delivering someone else's traffic and we want that visible in
+                # the turn log rather than inferred from a wrong answer.
+                foreign_run_events: int = 0
                 # Allow recv() to sit idle for up to 60s between events
                 # without raising — long tool calls (web_fetch, model
                 # inference on a big prompt) produce gaps with no stream
@@ -1479,13 +2193,20 @@ class OpenClawAdapter(HarnessAdapter):
                 # with the scratchpad as the final reply.
                 ws.settimeout(60)
                 while time.time() < deadline:
-                    try:
-                        raw = ws.recv()
-                    except websocket.WebSocketTimeoutException:
-                        # Idle gap, not a failure — outer deadline still
-                        # governs. Fall through and let the while loop
-                        # re-check time.time().
-                        continue
+                    if resumed_frames:
+                        # The resumed run's output that arrived while we were
+                        # waiting for the question.resolve ack. Drained first
+                        # and in order, so the continuation this turn returns
+                        # is not missing its opening events.
+                        raw = resumed_frames.popleft()
+                    else:
+                        try:
+                            raw = ws.recv()
+                        except websocket.WebSocketTimeoutException:
+                            # Idle gap, not a failure — outer deadline still
+                            # governs. Fall through and let the while loop
+                            # re-check time.time().
+                            continue
                     msg = json.loads(raw)
                     mtype = msg.get("type")
                     mevent = msg.get("event") if mtype == "event" else None
@@ -1495,6 +2216,43 @@ class OpenClawAdapter(HarnessAdapter):
                         first_event_types.append(key)
                     if len(raw_event_samples) < 3:
                         raw_event_samples.append(raw[:600] if isinstance(raw, str) else str(raw)[:600])
+
+                    # DIAGNOSTIC: sample the first frame of every message KIND,
+                    # not just `event:agent`.
+                    #
+                    # The agent-only sampler below is why the adapter's picture
+                    # of the protocol has a hole in it. A turn on 2026-08-14
+                    # carried 69 `event:task` frames and 1 `event:tick`, none of
+                    # which had ever been sampled, so nothing is known about
+                    # what they mean. That matters because assistant segments
+                    # fused in that same turn ("Now read values." + "It's a
+                    # single-column staff directory" -> "values.It's"), and the
+                    # task lane is the obvious suspect for the tool activity
+                    # that should have separated them.
+                    #
+                    # Treating those frames as segment boundaries on a guess
+                    # could truncate real answers if they are progress ticks
+                    # inside one segment, so capture the shape first and change
+                    # behaviour second.
+                    # Logs the SHAPE, never the values. What is needed here is
+                    # which fields a task/tick frame carries, not what the user
+                    # was working on — and these payloads can hold spreadsheet
+                    # cells, document text and tool arguments. Field names plus
+                    # types answer the question; a raw dump would put user
+                    # content in CloudWatch to establish a key list.
+                    # Only the structural discriminators are echoed by value.
+                    _kind_key = f"_seen_kind::{key}"
+                    if _kind_key not in event_counts:
+                        event_counts[_kind_key] = 1
+                        logger.info(
+                            "openclaw_kind_shape kind=%s payload=%s data=%s marks=%s",
+                            key,
+                            _shape_of(msg.get("payload")),
+                            # event:agent keeps detail under `data`;
+                            # event:task keeps it under `task`.
+                            _shape_of(_detail_of(msg.get("payload"))),
+                            _structural_marks(msg.get("payload")),
+                        )
 
                     if mtype == "event" and mevent == "agent":
                         # DIAGNOSTIC (remove after schema discovery): log the
@@ -1531,6 +2289,21 @@ class OpenClawAdapter(HarnessAdapter):
                         agent_payload = msg.get("payload", {})
                         stream = agent_payload.get("stream")
                         data = agent_payload.get("data", {})
+                        # Drop events belonging to a run this turn did not
+                        # start. Deliberately conservative: it discards only
+                        # when BOTH ids are known and they disagree, so an
+                        # event without a runId, or a gateway that never names
+                        # the run, behaves exactly as before rather than
+                        # silently muting the reply.
+                        event_run_id = agent_payload.get("runId")
+                        if (
+                            isinstance(event_run_id, str)
+                            and event_run_id
+                            and turn_run_id
+                            and event_run_id != turn_run_id
+                        ):
+                            foreign_run_events += 1
+                            continue
                         # Lifecycle events carry sessionId/agentId at the
                         # payload top level (streaming events don't) — capture
                         # them wherever they appear so the post-turn transcript
@@ -1555,6 +2328,45 @@ class OpenClawAdapter(HarnessAdapter):
                                     tokens_in = max(tokens_in, ti)
                                 if isinstance(to, int):
                                     tokens_out = max(tokens_out, to)
+                        # SEGMENT BOUNDARY — inverted rule, deliberately.
+                        #
+                        # One assistant message's deltas arrive back-to-back.
+                        # So anything that is NOT more assistant content ended
+                        # that message, and the next delta starts a new one.
+                        #
+                        # This used to name the events that count as a
+                        # boundary (item/command_output/tool_call with a
+                        # tool-ish `kind`). That list was incomplete twice, and
+                        # the second time shipped: on 2026-08-16 a quartile
+                        # report answered with four fused narration fragments —
+                        # 244+131+76+64 = 515 chars, exactly the resp_len in
+                        # the turn log. Between those fragments were 22
+                        # `thinking` events and `event:task` frames carrying
+                        # kind=exec, neither of which was on the list, so the
+                        # accumulator never reset and every fragment the model
+                        # wrote across six minutes was concatenated into one
+                        # reply.
+                        #
+                        # An allowlist fails toward FUSING (a wrong answer
+                        # built from scratchpad). This fails toward SPLITTING
+                        # (at worst the last part of an answer), and an unknown
+                        # future stream defaults to the safe side.
+                        # `lifecycle` and `run_status` are excluded because they
+                        # describe the RUN, not the model: a lifecycle error
+                        # means the run is dying, and a run_status phase is
+                        # workspace plumbing. Neither means the model started a
+                        # new message, and treating them as boundaries throws
+                        # away the partial text a failed turn is supposed to
+                        # show (issue #1461, pinned by
+                        # test_context_overflow_abort_is_not_recorded_as_deadline).
+                        # Everything else — known or not — is model activity
+                        # and ends the segment.
+                        if (
+                            stream not in ("assistant", "lifecycle", "run_status")
+                            and not agent_payload.get("isHeartbeat")
+                            and (agent_assistant_accum or response_text)
+                        ):
+                            assistant_boundary_pending = True
                         if stream == "lifecycle" and isinstance(data, dict):
                             phase = data.get("phase")
                             lifecycle_error = data.get("error")
@@ -1592,9 +2404,11 @@ class OpenClawAdapter(HarnessAdapter):
                                     assistant_boundary_pending,
                                 )
                                 assistant_boundary_pending = False
+                                tool_activity_since_text = False
                             elif isinstance(cumulative, str) and cumulative:
                                 agent_assistant_accum = cumulative
                                 assistant_boundary_pending = False
+                                tool_activity_since_text = False
                         elif stream in ("item", "command_output"):
                             # Newer OpenClaw builds report tool activity as
                             # `item`/`command_output` streams. Tool activity
@@ -1604,11 +2418,21 @@ class OpenClawAdapter(HarnessAdapter):
                                 stream,
                                 data,
                             )
+                            # Segment splitting is NOT set here: the general
+                            # rule above already did it for every non-assistant
+                            # stream, heartbeat-guarded. Setting it again here
+                            # skipped that guard, so a heartbeat tagged as
+                            # item/command_output would have split a live
+                            # message and blanked response_text — the
+                            # mirror-image bug this rule exists to avoid.
+                            # This branch now decides ONE thing: whether the
+                            # accumulated text is scratchpad.
                             if (
                                 is_tool_activity
+                                and not agent_payload.get("isHeartbeat")
                                 and (agent_assistant_accum or response_text)
                             ):
-                                assistant_boundary_pending = True
+                                tool_activity_since_text = True
                                 response_text = ""
                             # Native-tool mode (#1138 r12+) reports tool
                             # execution ONLY here — record it so telemetry's
@@ -1622,8 +2446,9 @@ class OpenClawAdapter(HarnessAdapter):
                         elif stream == "tool_call" and isinstance(data, dict):
                             # Same boundary rule for protocol-v3 tool events.
                             if agent_assistant_accum or response_text:
-                                assistant_boundary_pending = True
-                                response_text = ""
+                                if not agent_payload.get("isHeartbeat"):
+                                    tool_activity_since_text = True
+                                    response_text = ""
                             tool_id = (
                                 data.get("id")
                                 or data.get("toolCallId")
@@ -1637,8 +2462,9 @@ class OpenClawAdapter(HarnessAdapter):
                             }
                         elif stream == "tool_result" and isinstance(data, dict):
                             if agent_assistant_accum or response_text:
-                                assistant_boundary_pending = True
-                                response_text = ""
+                                if not agent_payload.get("isHeartbeat"):
+                                    tool_activity_since_text = True
+                                    response_text = ""
                             tool_id = (
                                 data.get("id")
                                 or data.get("toolCallId")
@@ -1678,10 +2504,103 @@ class OpenClawAdapter(HarnessAdapter):
                             }
                             tool_calls.append(entry)
 
+                    elif mtype == "event" and mevent == "task":
+                        # Long-running tool execution reports here, not on the
+                        # agent stream: the sampled frame carries
+                        # marks={"action": "upserted", "kind": "exec",
+                        # "status": "running"}. It is model activity between
+                        # assistant messages, so it ends a segment for the same
+                        # reason the agent-stream rule above does. `event:tick`
+                        # and `event:health` are NOT included — they are
+                        # timers, not the model doing something, and a
+                        # heartbeat landing mid-stream must never split a
+                        # message that is still being written.
+                        # Fenced like every other stream that mutates turn
+                        # state. This socket is operator-scoped, so a
+                        # concurrent subagent's long-running exec emits task
+                        # frames here too — and an unfenced one would mark THIS
+                        # turn's finished answer as scratchpad and blank
+                        # response_text, on the strength of somebody else's
+                        # tool call. That is the 2026-08-14 incident's shape,
+                        # which is why the agent and chat streams are fenced;
+                        # this branch was added without it.
+                        #
+                        # The id sits one level deeper than on the other
+                        # streams (payload.task.runId, not payload.runId).
+                        task_payload = msg.get("payload") or {}
+                        task_detail = task_payload.get("task")
+                        task_run_id = (
+                            task_detail.get("runId")
+                            if isinstance(task_detail, dict) else None
+                        )
+                        if (
+                            isinstance(task_run_id, str)
+                            and task_run_id
+                            and turn_run_id
+                            and task_run_id != turn_run_id
+                        ):
+                            foreign_run_events += 1
+                            continue
+                        # Every task frame counts as work, with no `kind`
+                        # check — unlike the item lane, deliberately.
+                        #
+                        # `item` is a SHARED progress lane: it carries tool
+                        # work and also reasoning/commentary, which is why it
+                        # has to discriminate. A task frame is not shared —
+                        # it exists because the runtime is executing something
+                        # on the model's behalf. Only kind="exec" has been
+                        # observed, so a future non-exec kind is unproven
+                        # either way; the reason not to guess at an allowlist
+                        # is that this file has now been wrong twice about
+                        # which kinds matter.
+                        #
+                        # If that turns out wrong, the cost is a finished
+                        # answer suppressed as scratchpad. Pinned by
+                        # test_a_non_exec_task_frame_is_still_treated_as_work
+                        # so the decision is visible rather than implied, and
+                        # changing it trips a test.
+                        if agent_assistant_accum or response_text:
+                            assistant_boundary_pending = True
+                            tool_activity_since_text = True
+                            response_text = ""
+
                     elif mtype == "event" and mevent == "chat":
                         payload = msg.get("payload", {})
+                        # Same fence as the agent stream, and for a sharper
+                        # reason: a chat event carrying `state: "error"` ABORTS
+                        # the turn. A subagent's failure arrives on this
+                        # channel under its own `announce:v1:...subagent:...`
+                        # run id, so one failing subagent killed the parent
+                        # turn even though the parent went on to finish the
+                        # work. That is what returned "I couldn't complete
+                        # that" for a Docs task whose doc was created, and
+                        # ownership transferred, two minutes later
+                        # (2026-08-14, run 63282254).
+                        #
+                        # A foreign run's outcome is not this turn's outcome.
+                        # If the turn's own run then never reaches final, the
+                        # deadline still governs — nothing hangs forever.
+                        chat_run_id = payload.get("runId")
+                        if (
+                            isinstance(chat_run_id, str)
+                            and chat_run_id
+                            and turn_run_id
+                            and chat_run_id != turn_run_id
+                        ):
+                            foreign_run_events += 1
+                            continue
                         state = payload.get("state")
                         last_state = state
+                        # Kept for every state, not just aborts. The Artondale
+                        # turn ended at `final` while the model's last message
+                        # was still stopReason=toolUse — i.e. the run stopped
+                        # mid-loop and the report was never built — and there
+                        # was no way to tell that from the logs without pulling
+                        # the workspace transcript out of S3. One field here
+                        # answers it next time.
+                        final_stop_reason = (
+                            payload.get("stopReason") or final_stop_reason
+                        )
                         event_message = payload.get("message")
                         content = event_message.get("content") if isinstance(event_message, dict) else None
                         text = self._extract_text(content) or self._extract_text(event_message)
@@ -1703,7 +2622,7 @@ class OpenClawAdapter(HarnessAdapter):
                             if (
                                 not response_text
                                 and agent_assistant_accum
-                                and not assistant_boundary_pending
+                                and not tool_activity_since_text
                             ):
                                 response_text = agent_assistant_accum
                             got_final = True
@@ -1851,19 +2770,33 @@ class OpenClawAdapter(HarnessAdapter):
                         q_data = q_payload.get("data")
                         if not isinstance(q_data, dict):
                             q_data = {}
-                        question_text = None
-                        # The gateway's exact field name is not pinned by any
-                        # contract we own, so probe the plausible carriers and
-                        # fall back to a generic prompt rather than returning
-                        # an empty turn.
-                        for source in (q_payload, q_data):
-                            for key in ("question", "text", "prompt", "message", "content"):
-                                candidate = self._extract_text(source.get(key))
-                                if candidate:
-                                    question_text = candidate
+                        # `questions` (PLURAL) is the shape the gateway actually
+                        # sends, confirmed from a live payload on 2026-08-15:
+                        #
+                        #   {"questions": [{"id": ..., "header": ...,
+                        #     "question": "...?",
+                        #     "options": [{"label": "Yes, finish it now"}, ...]}]}
+                        #
+                        # The probe below looked for singular `question`/`text`/
+                        # `prompt`/`message`/`content` and missed it entirely, so
+                        # every structured question the agent asked was replaced
+                        # by the generic fallback further down. The user saw "I
+                        # need a bit more information to continue" in place of a
+                        # real question that already had answer options, could
+                        # not answer it, and the agent asked again — a loop that
+                        # cost an entire report.
+                        question_text = self._render_questions(q_payload) or self._render_questions(q_data)
+                        # Legacy/alternate carriers stay as a fallback so a
+                        # differently-shaped event is still readable.
+                        if not question_text:
+                            for source in (q_payload, q_data):
+                                for key in ("question", "text", "prompt", "message", "content"):
+                                    candidate = self._extract_text(source.get(key))
+                                    if candidate:
+                                        question_text = candidate
+                                        break
+                                if question_text:
                                     break
-                            if question_text:
-                                break
                         if not question_text:
                             question_text = (
                                 "I need a bit more information to continue — "
@@ -1890,6 +2823,69 @@ class OpenClawAdapter(HarnessAdapter):
                             max(0, int(time.time() - chat_send_at)),
                             bool(prefix),
                         )
+                        # Remember it so the NEXT turn answers it instead of
+                        # cancelling it. The gateway holds this question open
+                        # (status pending, with expiresAtMs) waiting for
+                        # question.resolve; walking away is what left it to be
+                        # killed by the next turn's pre-send abort.
+                        pending_id = q_payload.get("id")
+                        if isinstance(pending_id, str) and pending_id:
+                            # `questionId`, per QuestionSchema. This read
+                            # `id`, which that closedObject does not even
+                            # permit — so every question yielded None, the
+                            # id list came back empty, and the resolve was
+                            # skipped for a fallback to the abort that started
+                            # all of this. The fix shipped as a no-op.
+                            #
+                            # `id` is still accepted as a fallback so a future
+                            # rename degrades instead of silently reverting to
+                            # that same no-op.
+                            #
+                            # POSITION IS PRESERVED, including for entries we
+                            # cannot use. The multi-question fallback answers
+                            # question N with line N, so dropping a malformed
+                            # entry here would silently shift every later
+                            # question's answer by one. An unusable entry
+                            # keeps its slot with questionId None and is
+                            # skipped when the answers are built.
+                            pending_questions = []
+                            for entry in (q_payload.get("questions") or []):
+                                if not isinstance(entry, dict):
+                                    pending_questions.append({"questionId": None})
+                                    continue
+                                qid = entry.get("questionId") or entry.get("id")
+                                pending_questions.append({
+                                    "questionId": (
+                                        qid if isinstance(qid, str) and qid
+                                        else None
+                                    ),
+                                    "header": entry.get("header"),
+                                    "question": entry.get("question"),
+                                    "options": entry.get("options") or [],
+                                    "isOther": entry.get("isOther"),
+                                })
+                            unusable = sum(
+                                1 for q in pending_questions
+                                if not q.get("questionId")
+                            )
+                            if unusable:
+                                logger.warning(
+                                    "question event carried %d question(s) with "
+                                    "no usable id; their slots are held so the "
+                                    "others still line up",
+                                    unusable,
+                                )
+                            # The run that asked is the run that resumes. Prefer
+                            # what the event says; fall back to this turn's own
+                            # run, which is the same run by construction — the
+                            # question came from it.
+                            asked_by = q_payload.get("runId")
+                            if not (isinstance(asked_by, str) and asked_by):
+                                asked_by = turn_run_id
+                            self._remember_pending_question(
+                                session_id, pending_id, pending_questions,
+                                asked_by
+                            )
                         got_final = True
                         break
 
@@ -1905,6 +2901,21 @@ class OpenClawAdapter(HarnessAdapter):
                             )
                         if not msg.get("ok"):
                             error = msg.get("error", {})
+                            if (
+                                not conflict_retried
+                                and _is_reply_session_conflict(error)
+                            ):
+                                # The wedge the pre-send abort used to guess
+                                # at, now handled where it actually shows up.
+                                conflict_retried = True
+                                logger.warning(
+                                    "reply session conflict: aborting the "
+                                    "stale session and re-sending once"
+                                )
+                                chat_id = _abort_and_resend(
+                                    ws, session_id, message, model_override
+                                )
+                                continue
                             logger.error("chat.send error: %s", json.dumps(error)[:500])
                             # Previously returned silently — no failure signal.
                             record_failure(
@@ -1941,12 +2952,18 @@ class OpenClawAdapter(HarnessAdapter):
                             observed_model = model_field
                         status = res_payload.get("status")
                         if status in {"started", "accepted"}:
+                            # The gateway names THIS turn's run here. Capture it
+                            # so foreign runs on this socket cannot contribute
+                            # to the reply — see turn_run_id below.
+                            started_run = res_payload.get("runId")
+                            if isinstance(started_run, str) and started_run:
+                                turn_run_id = started_run
                             continue
                         if status in {"final", "done"}:
                             if (
                                 not response_text
                                 and agent_assistant_accum
-                                and not assistant_boundary_pending
+                                and not tool_activity_since_text
                             ):
                                 response_text = agent_assistant_accum
                             got_final = True
@@ -2030,7 +3047,7 @@ class OpenClawAdapter(HarnessAdapter):
             if (
                 not response_text
                 and agent_assistant_accum
-                and not assistant_boundary_pending
+                and not tool_activity_since_text
             ):
                 response_text = agent_assistant_accum
             error_message = (
@@ -2084,7 +3101,7 @@ class OpenClawAdapter(HarnessAdapter):
             if (
                 not response_text
                 and agent_assistant_accum
-                and not assistant_boundary_pending
+                and not tool_activity_since_text
             ):
                 response_text = agent_assistant_accum
             logger.error(
@@ -2158,11 +3175,15 @@ class OpenClawAdapter(HarnessAdapter):
             )
 
         logger.info(
-            "chat turn ok: resp_len=%d last_state=%s event_counts=%s "
+            "chat turn ok: resp_len=%d last_state=%s stop_reason=%s "
+            "run_id=%s foreign_run_events=%d event_counts=%s "
             "model=%s tokens_in=%d tokens_out=%d cache_read=%d cache_write=%d "
             "latency_ms=%d tool_calls=%d transcript_model_calls=%d",
             len(response_text),
             last_state,
+            final_stop_reason or "none",
+            turn_run_id or "unknown",
+            foreign_run_events,
             json.dumps(event_counts),
             observed_model or "unknown",
             tokens_in,
@@ -2456,6 +3477,54 @@ class OpenClawAdapter(HarnessAdapter):
         if boundary_pending:
             return increment
         return accum + increment
+
+    @staticmethod
+    def _render_questions(payload: object) -> str:
+        """Render a `question.requested` payload's `questions` list for Chat.
+
+        The gateway sends the agent's structured ask as
+        `{"questions": [{"question": "...?", "header": ..., "options":
+        [{"label": "..."}]}]}`. Options are included because they are the
+        answer set the agent is waiting on — dropping them leaves the user
+        guessing at what a valid reply looks like, which is most of why the
+        question loop was unanswerable.
+        """
+        if not isinstance(payload, dict):
+            return ""
+        questions = payload.get("questions")
+        if not isinstance(questions, list):
+            return ""
+
+        blocks = []
+        for entry in questions:
+            if isinstance(entry, str):
+                blocks.append(entry.strip())
+                continue
+            if not isinstance(entry, dict):
+                continue
+            text = ""
+            for key in ("question", "text", "prompt"):
+                value = entry.get(key)
+                if isinstance(value, str) and value.strip():
+                    text = value.strip()
+                    break
+            if not text:
+                continue
+            labels = []
+            options = entry.get("options")
+            if isinstance(options, list):
+                for option in options:
+                    if isinstance(option, str) and option.strip():
+                        labels.append(option.strip())
+                    elif isinstance(option, dict):
+                        label = option.get("label") or option.get("value")
+                        if isinstance(label, str) and label.strip():
+                            labels.append(label.strip())
+            if labels:
+                text += "\n" + "\n".join(f"- {label}" for label in labels)
+            blocks.append(text)
+
+        return "\n\n".join(block for block in blocks if block)
 
     @staticmethod
     def _is_tool_activity_stream(stream: object, data: object) -> bool:

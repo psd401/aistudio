@@ -2143,6 +2143,51 @@ describe("background promotion bounded idempotent retry", () => {
   })
 })
 
+describe("userActivityUpdate", () => {
+  const { userActivityUpdate } = agentRouterTestHelpers
+  const now = "2026-08-17T20:00:00.000Z"
+
+  test("records activity and the DM space when one is known", () => {
+    const update = userActivityUpdate(
+      "owner@psd401.net",
+      "spaces/AAA1",
+      now,
+    )
+    expect(update.UpdateExpression).toBe(
+      "SET lastActiveAt = :now, email = :email, dmSpaceName = :dm",
+    )
+    expect(update.ExpressionAttributeValues).toEqual({
+      ":now": now,
+      ":email": "owner@psd401.net",
+      ":dm": "spaces/AAA1",
+    })
+  })
+
+  test("omits the DM space outside a 1:1 DM", () => {
+    const update = userActivityUpdate("owner@psd401.net", undefined, now)
+    expect(update.UpdateExpression).toBe("SET lastActiveAt = :now, email = :email")
+    expect(update.ExpressionAttributeValues).not.toHaveProperty(":dm")
+  })
+
+  // The email-index GSI is queried with a lowercased address and DynamoDB key
+  // equality is byte-exact, so a mixed-case record is invisible to the
+  // schedules service, triage poll, and cross-user invocation. Writing the
+  // normalized address on every touch heals those records.
+  test("normalizes the stored email so the email-index stays queryable", () => {
+    const update = userActivityUpdate("GEORGEK@psd401.net", undefined, now)
+    expect(update.ExpressionAttributeValues[":email"]).toBe(
+      "georgek@psd401.net",
+    )
+  })
+
+  test("writes email on every touch, not only at record creation", () => {
+    for (const dm of [undefined, "spaces/AAA1"]) {
+      expect(userActivityUpdate("Owner@PSD401.NET", dm, now).UpdateExpression)
+        .toContain("email = :email")
+    }
+  })
+})
+
 describe("dmSpaceForUserRecord", () => {
   const { dmSpaceForUserRecord } = agentRouterTestHelpers
 
