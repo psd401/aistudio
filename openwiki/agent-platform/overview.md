@@ -1,7 +1,7 @@
 ---
 type: Platform Overview
 title: Agent Platform & Skills System
-description: Extensible agent skill system with 35 domain-specific capabilities, Google Workspace integration, Cedar governance, and MCP tool exposure for K-12 AI assistants.
+description: Extensible agent skill system with 36 domain-specific capabilities, Google Workspace integration, Cedar governance, and MCP tool exposure for K-12 AI assistants.
 tags: [agents, skills, mcp, workspace, governance]
 ---
 
@@ -35,6 +35,7 @@ infra/agent-image/skills/{skill-name}/
 - `psd-conversation-coach` — Crucial Conversations framework coaching for difficult conversations
 - `psd-morning-brief` — Personalized daily newspaper/podcast delivered through private Atrium artifacts
 - `psd-observances` — Cited dates for national observances, awareness months, state school holidays, and education conferences via NSPRA calendar lookups
+- `psd-directory` — Identity lookup for staff and colleagues by email or Google Chat sender ID
 
 **Content & Media**
 - `psd-aistudio` — Live capability discovery + authenticated actions in AI Studio
@@ -44,6 +45,7 @@ infra/agent-image/skills/{skill-name}/
 - `psd-pdf-to-markdown` — Document conversion
 - `psd-image-gen` — Image generation
 - `psd-sop-creator` — PSD Standard Operating Procedure document creation
+- `psd-instructional-vision` — PSD instructional framework (Instructional Essentials, UDL, MTSS) from live repository
 
 **Data & Integration**
 - `psd-data` — District data queries (PowerSchool, spreadsheets)
@@ -51,7 +53,7 @@ infra/agent-image/skills/{skill-name}/
 - `psd-credentials` — Secure credential management and capability verification
 - `psd-canva` — Canva design integration
 - `psd-plaud` — Plaud note integration
-- `psd-open-adaptive-district` — Adaptive learning platform
+- `psd-open-adaptive-district` — Open Adaptive District operating model (six-week build cycle)
 
 **Analysis & Reporting**
 - `psd-deep-research` — Gemini Deep Research for cited multi-source reports
@@ -62,6 +64,7 @@ infra/agent-image/skills/{skill-name}/
 - `psd-github` — GitHub integration
 - `psd-summarize` — Content summarization
 - `psd-tts` — Text-to-speech
+- `psd-strategic-plan` — Peninsula 2030 strategic plan queries from live repository 166
 
 **Utilities**
 - `chat-card`, `chat-chart` — Chat UI enhancements
