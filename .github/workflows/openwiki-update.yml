@@ -3,6 +3,8 @@ on:
   workflow_dispatch:
   push:
     branches: [dev]
+    paths-ignore:
+      - "openwiki/**"
   schedule:
     - cron: "0 8 * * 1"
 jobs:
