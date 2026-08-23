@@ -1,7 +1,7 @@
 ---
 type: Platform Overview
 title: Agent Platform & Skills System
-description: Extensible agent skill system with 34 domain-specific capabilities, Google Workspace integration, Cedar governance, and MCP tool exposure for K-12 AI assistants.
+description: Extensible agent skill system with 35 domain-specific capabilities, Google Workspace integration, Cedar governance, and MCP tool exposure for K-12 AI assistants.
 tags: [agents, skills, mcp, workspace, governance]
 ---
 
@@ -56,6 +56,7 @@ infra/agent-image/skills/{skill-name}/
 **Analysis & Reporting**
 - `psd-deep-research` — Gemini Deep Research for cited multi-source reports
 - `psd-workflows` — Dynamic PSD gateway workflows (evaluations, requests, timesheets) with caller binding
+- `quartile-growth-report` — Growth-by-quartile spreadsheet generator for elementary school principals (one tab per grade, data-only output)
 - `psd-failure-report` — Failure analysis and reporting
 - `psd-last30days` — Recent activity analysis
 - `psd-github` — GitHub integration
