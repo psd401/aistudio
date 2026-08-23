@@ -1,4 +1,4 @@
-import { SQSEvent, Context, SQSBatchResponse, SQSBatchItemFailure } from 'aws-lambda';
+import type { SQSEvent, Context, SQSBatchResponse, SQSBatchItemFailure } from 'aws-lambda';
 import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { DynamoDBClient, PutItemCommand, QueryCommand } from '@aws-sdk/client-dynamodb';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';

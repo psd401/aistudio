@@ -1,6 +1,7 @@
 import {
   ProcessingParams,
   ProcessingResult,
+  ProcessingChunk,
   DocumentProcessor,
   ProcessorConfig
 } from './factory';
@@ -200,9 +201,9 @@ export class PDFProcessor implements DocumentProcessor {
 
 
   // Copy the exact chunking logic from file-processor
-  private chunkText(text: string): unknown[] {
+  private chunkText(text: string): ProcessingChunk[] {
     const maxChunkSize = 2000; // Same as file-processor
-    const chunks: unknown[] = [];
+    const chunks: ProcessingChunk[] = [];
     const lines = text.split('\n');
     let currentChunk = '';
     let chunkIndex = 0;

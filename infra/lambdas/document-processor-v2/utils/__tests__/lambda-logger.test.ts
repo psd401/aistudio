@@ -43,7 +43,7 @@ describe('LambdaLogger.sanitizeData (REV-INFRA-095)', () => {
 
   it('does not pollute Object.prototype from a __proto__ key', () => {
     const payload = JSON.parse('{"__proto__": {"polluted": true}, "safe": 1}');
-    const out = sanitize(payload);
+    const out = sanitize(payload) as Record<string, unknown>;
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
     expect((Object.prototype as Record<string, unknown>).polluted).toBeUndefined();
     expect(out.safe).toBe(1);

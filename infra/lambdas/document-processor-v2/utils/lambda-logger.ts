@@ -133,6 +133,10 @@ function redactSensitiveAssignments(input: string): string {
   return output + input.slice(cursor);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 export class LambdaLogger {
   private context: LogContext;
 
@@ -149,7 +153,7 @@ export class LambdaLogger {
       level: level.toUpperCase(),
       message,
       ...this.context,
-      ...(data && { data: this.sanitizeData(data) }),
+      ...(data === undefined ? {} : { data: this.sanitizeData(data) }),
       timestamp: new Date().toISOString()
     };
 
@@ -212,12 +216,17 @@ export class LambdaLogger {
   }
 
   error(message: string, error?: Error | unknown, data?: unknown): void {
+    const additionalData = isRecord(data)
+      ? data
+      : data === undefined
+        ? {}
+        : { data };
     const errorData = error instanceof Error ? {
       errorName: error.name,
       errorMessage: error.message,
       errorStack: error.stack,
-      ...data
-    } : { error, ...data };
+      ...additionalData
+    } : { error, ...additionalData };
 
 
     console.error(this.formatMessage('error', message, errorData));

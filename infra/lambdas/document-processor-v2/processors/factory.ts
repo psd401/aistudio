@@ -26,15 +26,19 @@ export interface ProcessingParams {
   onProgress?: (stage: string, progress: number) => Promise<void>;
 }
 
+export interface ProcessingChunk {
+  chunkIndex: number;
+  content: string;
+  embedding?: number[];
+  metadata?: unknown;
+  tokens?: number;
+}
+
 export interface ProcessingResult {
+  [key: string]: unknown;
   text?: string;
   markdown?: string;
-  chunks?: Array<{
-    chunkIndex: number;
-    content: string;
-    embedding?: number[];
-    metadata?: unknown;
-  }>;
+  chunks?: ProcessingChunk[];
   images?: Array<{
     imageIndex: number;
     s3Key: string;

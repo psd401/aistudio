@@ -1,6 +1,7 @@
 import {
   ProcessingParams,
   ProcessingResult,
+  ProcessingChunk,
   DocumentProcessor,
   ProcessorConfig
 } from './factory';
@@ -20,6 +21,16 @@ interface ExtractedTextContent {
   markdown?: string;
   metadata?: Record<string, unknown>;
   rawData?: unknown;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isCsvRecords(value: unknown): value is Array<Record<string, string>> {
+  return Array.isArray(value) && value.every((record) =>
+    isRecord(record) && Object.values(record).every((cell) => typeof cell === 'string')
+  );
 }
 
 async function reportProgress(
@@ -118,7 +129,7 @@ export class TextProcessor implements DocumentProcessor {
   ): Promise<ExtractedTextContent> {
     try {
       const extension = fileName.split('.').pop()?.toLowerCase() || '';
-      let extracted: unknown;
+      let extracted: ExtractedTextContent;
       if (extension === 'csv') extracted = await this.processCsv(content);
       else if (extension === 'md' || extension === 'markdown') {
         extracted = await this.processMarkdown(content);
@@ -129,7 +140,7 @@ export class TextProcessor implements DocumentProcessor {
       } else {
         extracted = await this.processPlainText(content);
       }
-      return extracted as ExtractedTextContent;
+      return extracted;
     } catch (error) {
       logger.error('Error processing text document', error);
       throw new Error(
@@ -139,7 +150,7 @@ export class TextProcessor implements DocumentProcessor {
     }
   }
 
-  private async processCsv(content: string): Promise<unknown> {
+  private async processCsv(content: string): Promise<ExtractedTextContent> {
     const logger = createLambdaLogger({ operation: 'TextProcessor.processCsv' });
     logger.info('Processing CSV content');
 
@@ -190,7 +201,7 @@ export class TextProcessor implements DocumentProcessor {
     }
   }
 
-  private async processMarkdown(content: string): Promise<unknown> {
+  private async processMarkdown(content: string): Promise<ExtractedTextContent> {
     const logger = createLambdaLogger({ operation: 'TextProcessor.processMarkdown' });
     logger.info('Processing Markdown content');
 
@@ -215,12 +226,12 @@ export class TextProcessor implements DocumentProcessor {
     }
   }
 
-  private async processJson(content: string): Promise<unknown> {
+  private async processJson(content: string): Promise<ExtractedTextContent> {
     const logger = createLambdaLogger({ operation: 'TextProcessor.processJson' });
     logger.info('Processing JSON content');
 
     try {
-      const data = JSON.parse(content);
+      const data = JSON.parse(content) as unknown;
 
       // Convert JSON to readable text format
       const textOutput = this.jsonToText(data);
@@ -232,7 +243,7 @@ export class TextProcessor implements DocumentProcessor {
         metadata: {
           format: 'json',
           dataType: Array.isArray(data) ? 'array' : typeof data,
-          size: Array.isArray(data) ? data.length : Object.keys(data).length,
+          size: Array.isArray(data) ? data.length : isRecord(data) ? Object.keys(data).length : 1,
         }
       };
     } catch (error) {
@@ -241,7 +252,7 @@ export class TextProcessor implements DocumentProcessor {
     }
   }
 
-  private async processXml(content: string): Promise<unknown> {
+  private async processXml(content: string): Promise<ExtractedTextContent> {
     const logger = createLambdaLogger({ operation: 'TextProcessor.processXml' });
     logger.info('Processing XML content');
 
@@ -262,7 +273,7 @@ export class TextProcessor implements DocumentProcessor {
     };
   }
 
-  private async processPlainText(content: string): Promise<unknown> {
+  private async processPlainText(content: string): Promise<ExtractedTextContent> {
     const logger = createLambdaLogger({ operation: 'TextProcessor.processPlainText' });
     logger.info('Processing plain text content');
 
@@ -306,12 +317,13 @@ export class TextProcessor implements DocumentProcessor {
     }
 
     if (typeof data === 'object' && data !== null) {
-      const keys = Object.keys(data);
+      const record = data as Record<string, unknown>;
+      const keys = Object.keys(record);
       if (keys.length === 0) return 'Empty object';
 
       let result = '';
       for (const key of keys.slice(0, 10)) {
-        const value = data[key];
+        const value = record[key];
         if (typeof value === 'object') {
           result += `${spaces}${key}: ${this.jsonToText(value, indent + 1)}\n`;
         } else {
@@ -327,7 +339,7 @@ export class TextProcessor implements DocumentProcessor {
     return String(data);
   }
 
-  private async convertToMarkdown(extractedContent: unknown): Promise<string> {
+  private async convertToMarkdown(extractedContent: ExtractedTextContent): Promise<string> {
     const text = extractedContent.text;
     const method = extractedContent.method;
 
@@ -343,8 +355,8 @@ export class TextProcessor implements DocumentProcessor {
     }
   }
 
-  private csvToMarkdown(content: unknown): string {
-    if (!content.rawData || content.rawData.length === 0) {
+  private csvToMarkdown(content: ExtractedTextContent): string {
+    if (!isCsvRecords(content.rawData) || content.rawData.length === 0) {
       return '# CSV Data\n\nNo data found.';
     }
 
@@ -375,7 +387,7 @@ export class TextProcessor implements DocumentProcessor {
     return markdown;
   }
 
-  private jsonToMarkdown(content: unknown): string {
+  private jsonToMarkdown(content: ExtractedTextContent): string {
     let markdown = '# JSON Data\n\n';
 
     if (content.rawData) {
@@ -399,7 +411,7 @@ export class TextProcessor implements DocumentProcessor {
     return markdown;
   }
 
-  private xmlToMarkdown(content: unknown): string {
+  private xmlToMarkdown(content: ExtractedTextContent): string {
     return `# XML Document\n\n${content.text}`;
   }
 
@@ -428,11 +440,11 @@ export class TextProcessor implements DocumentProcessor {
     return markdown.trim() || text;
   }
 
-  private async chunkText(text: string): Promise<unknown[]> {
+  private async chunkText(text: string): Promise<ProcessingChunk[]> {
     const chunkSize = 2000;
     const overlap = 200;
 
-    const chunks = [];
+    const chunks: ProcessingChunk[] = [];
     let startIndex = 0;
     let chunkIndex = 0;
 
