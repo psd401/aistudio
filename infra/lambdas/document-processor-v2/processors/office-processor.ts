@@ -406,7 +406,7 @@ export class OfficeProcessor implements DocumentProcessor {
                       // Handle direct text in paragraphs (without runs)
                       const directText = paragraph?.["a:t"];
                       if (typeof directText === "string" && directText.trim()) {
-                          textBlocks.push(directText.trim());
+                        textBlocks.push(directText.trim());
                       }
                     }
                   };
