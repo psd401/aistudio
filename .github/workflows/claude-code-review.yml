@@ -1,57 +1,15 @@
-name: Claude Code Review
-
+name: Claude Review
 on:
   pull_request:
-    types: [opened, synchronize]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
-
+    types: [opened, ready_for_review, reopened]
 jobs:
   claude-review:
-    # Dependabot-triggered runs read from the separate "Dependabot secrets"
-    # store, which does not contain CLAUDE_CODE_OAUTH_TOKEN — the action then
-    # fails env validation and blocks every dependabot PR. Skip those runs (a
-    # skipped check does not fail the PR). To enable reviews on dependabot
-    # PRs instead: add CLAUDE_CODE_OAUTH_TOKEN under Settings → Secrets →
-    # Dependabot and remove this condition (allowed_bots below already
-    # permits the actor).
-    if: github.actor != 'dependabot[bot]'
-    runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
       issues: read
-      id-token: write
-    
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-
-      - name: Run Claude Code Review
-        id: claude-review
-        uses: anthropics/claude-code-action@v1
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          allowed_bots: "dependabot"
-          prompt: |
-            Please review this pull request and provide feedback on:
-            - Code quality and best practices
-            - Potential bugs or issues
-            - Performance considerations
-            - Security concerns
-            - Test coverage
-            
-            Use the repository's CLAUDE.md for guidance on style and conventions. Be constructive and helpful in your feedback.
-
-            Use `gh pr comment` with your Bash tool to leave your review as a comment on the PR.
-          
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://docs.anthropic.com/en/docs/claude-code/sdk#command-line for available options
-          claude_args: '--allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
-
+      id-token: write # reusable's claude-code-action OIDC exchange; caller must grant (org default is read-only)
+    # Dependabot cannot grant id-token: write to the reusable (startup_failure).
+    if: github.actor != 'dependabot[bot]'
+    uses: PSD401/.github/.github/workflows/reusable-claude-review.yml@main
+    secrets: inherit
