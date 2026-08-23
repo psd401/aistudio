@@ -8,8 +8,9 @@ on:
 jobs:
   openwiki:
     permissions:
-      contents: write # rolling docs PR + self-merge; caller must grant (org default is read-only)
-      pull-requests: write
+      # The reusable mints a down-scoped psd-automation App token for writes;
+      # GITHUB_TOKEN is only used by checkout.
+      contents: read
     uses: PSD401/.github/.github/workflows/reusable-openwiki.yml@main
     with:
       base_branch: dev
