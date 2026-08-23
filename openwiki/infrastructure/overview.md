@@ -323,6 +323,52 @@ Run: `cd infra && bun test`
 
 ---
 
+## CI/CD Workflows
+
+**Location**: `.github/workflows/`
+
+AI Studio uses GitHub Actions for continuous integration and deployment. Non-trivial workflows consume reusable workflows from the org repository (`PSD401/.github`) for consistency across district projects.
+
+### Reusable Workflow Consumers
+
+| Workflow | Reusable Source | Purpose |
+|----------|-----------------|---------|
+| `claude-code-review.yml` | `PSD401/.github/.github/workflows/reusable-claude-review.yml@main` | AI-assisted PR review |
+| `openwiki-update.yml` | `PSD401/.github/.github/workflows/reusable-openwiki.yml@main` | Automated documentation regeneration |
+
+### Caller Pattern
+
+Caller workflows are minimal—granting permissions and passing configuration:
+
+```yaml
+jobs:
+  openwiki:
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: PSD401/.github/.github/workflows/reusable-openwiki.yml@main
+    with:
+      base_branch: dev
+    secrets: inherit
+```
+
+Benefits:
+- Single source of truth for workflow logic
+- Centralized security and dependency updates
+- Reduced boilerplate in repository callers
+
+### Index of Workflows
+
+| Workflow | Trigger | Purpose |
+|----------|---------|---------|
+| `ci.yml` | Push to dev, PR | Lint, typecheck, tests |
+| `claude-code-review.yml` | PR opened/ready | AI-assisted code review |
+| `openwiki-update.yml` | Push to dev, weekly schedule | Regenerate OpenWiki docs |
+| `agent-eval-nightly.yml` | Nightly schedule | Agent skill evaluation |
+| `codeql.yml` | Weekly schedule | Security analysis |
+
+---
+
 ## Key Source Files
 
 | File/Directory | Purpose |
@@ -334,6 +380,7 @@ Run: `cd infra && bun test`
 | `/infra/lambdas/` | Lambda function code |
 | `/infra/policies/` | Cedar policies |
 | `/infra/agent-image/` | Agent container |
+| `/.github/workflows/` | CI/CD workflows |
 
 ---
 
