@@ -8,9 +8,10 @@ on:
 jobs:
   openwiki:
     permissions:
-      # The reusable mints a down-scoped psd-automation App token for writes;
-      # GITHUB_TOKEN is only used by checkout.
-      contents: read
+      # The current reusable declares these scopes, so the caller must grant
+      # them even though repository writes use a down-scoped App token.
+      contents: write
+      pull-requests: write
     uses: PSD401/.github/.github/workflows/reusable-openwiki.yml@main
     with:
       base_branch: dev
