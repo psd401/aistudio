@@ -98,7 +98,6 @@ The following areas have substantial existing documentation and are deferred fro
 - **API Reference**: See `/docs/API_REFERENCE.md`
 - **Deployment Guide**: See `/docs/DEPLOYMENT.md`
 - **Testing Guide**: See `/docs/guides/TESTING.md`
-- **Open Adaptive District Skill**: Skill category description in agent-platform/overview.md uses outdated "adaptive learning platform" label. Should align with simplified OAD model (six-week build cycle) when agent-platform docs next refreshed. Source: `/infra/agent-image/skills/psd-open-adaptive-district/SKILL.md`.
 - **K-12 Content Safety**: See `/docs/features/k12-content-safety.md`
 - **Individual Skill Docs**: See `/infra/agent-image/skills/*/SKILL.md`
 - **Database Migrations**: See `/docs/database/drizzle-migration-guide.md`
