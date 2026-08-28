@@ -1774,47 +1774,91 @@ describe("durable workspace checkpoints", () => {
     }
   })
 
-  it("fails closed when an exact pending journal is retried by a different invocation", async () => {
+  it("commits an exact pending batch replayed by a later invocation", async () => {
+    // The harness retries a failed final flush at the START OF THE NEXT
+    // invocation, replaying the batch with the proof it stored from the
+    // original one. That proof is bound to an invocation nonce and expiry
+    // that no longer exist, so enforcing the binding made this replay
+    // impossible: it 409'd every time, the restore aborted, push was disabled
+    // for the microVM, and the user lost the turn along with their un-pushed
+    // work. Six rows across five users in the week of 2026-08-21, every one
+    // reading "Workspace finalization proof is invalid".
+    //
+    // A byte-identical journal entry proves this exact request was already
+    // admitted under a valid binding, so the replay is the idempotent resume
+    // the journal exists to allow. Only the binding is relaxed — the
+    // signature, prefix and generation claims are all still enforced, and the
+    // manifest-generation check below still refuses a moved-on workspace.
     const expiresAt = Math.floor(Date.now() / 1000) + 5
     const checkpoint = await ensureFinalizationCheckpoint(
       "invocation-pending",
       expiresAt,
     )
-    const proofHash = createHash("sha256")
-      .update(checkpoint.proof)
-      .digest("hex")
-    const ownerHash = createHash("sha256")
-      .update("owner@example.com")
-      .digest("hex")
-    const request = {
-      version: 1,
-      ownerHash,
-      signedWorkspacePrefix: PREFIX,
-      baseWorkspaceGeneration: checkpoint.workspaceGeneration,
-      proofHash,
-      reservationIds: [] as string[],
-      deletedPaths: [] as string[],
+    stageWorkspaceUpload(
+      RESERVATION_ONE,
+      "state/a.sqlite",
+      '"a-new"',
+      "nnnn",
+    )
+    seedPendingFinalizationJournal(
+      checkpoint.workspaceGeneration,
+      checkpoint.proof,
+      [RESERVATION_ONE],
+    )
+    returnActiveReservationAsVerifying()
+    const now = jest
+      .spyOn(Date, "now")
+      .mockReturnValue((expiresAt + 10) * 1_000)
+    try {
+      const result = await finalizeWorkspaceCheckpoint(
+        "owner@example.com",
+        PREFIX,
+        checkpoint.workspaceGeneration,
+        [RESERVATION_ONE],
+        [],
+        checkpoint.proof,
+        "invocation-later",
+        expiresAt + 300,
+      )
+
+      expect(result.uploads).toEqual([
+        {
+          reservationId: RESERVATION_ONE,
+          key: `${PREFIX}/state/a.sqlite`,
+          eTag: '"a-new"',
+        },
+      ])
+      expect(store.current(`${PREFIX}/state/a.sqlite`)?.body).toBe("nnnn")
+      expect(manifest().workspaceGeneration).toBe(result.workspaceGeneration)
+    } finally {
+      now.mockRestore()
     }
-    const requestDigest = createHash("sha256")
-      .update(JSON.stringify(request))
-      .digest("hex")
-    const journal = JSON.stringify({
-      version: 1,
-      state: "pending",
-      ownerHash,
-      signedWorkspacePrefix: PREFIX,
-      baseWorkspaceGeneration: checkpoint.workspaceGeneration,
-      proofHash,
-      reservationIds: [],
-      deletedPaths: [],
-      requestDigest,
-    })
-    store.add(finalizationJournalKey(), {
-      size: Buffer.byteLength(journal),
-      eTag: '"pending-journal"',
-      body: journal,
-      scope: "Scope=checkpoint",
-    })
+  })
+
+  it("still refuses a rebound proof whose journal describes another batch", async () => {
+    // The relaxation above is licensed by the journal, not by the proof. A
+    // pending journal for a DIFFERENT request must not launder an expired,
+    // rebound proof into authority over this one — otherwise any stale proof
+    // would be replayable as long as some journal happened to exist.
+    const expiresAt = Math.floor(Date.now() / 1000) + 5
+    const checkpoint = await ensureFinalizationCheckpoint(
+      "invocation-pending",
+      expiresAt,
+    )
+    stageWorkspaceUpload(
+      RESERVATION_ONE,
+      "state/a.sqlite",
+      '"a-new"',
+      "nnnn",
+    )
+    // Journal records a batch with NO reservations; the call claims one.
+    seedPendingFinalizationJournal(
+      checkpoint.workspaceGeneration,
+      checkpoint.proof,
+      [],
+    )
+    returnActiveReservationAsVerifying()
+    const beforeFinalize = store.commands.length
     const now = jest
       .spyOn(Date, "now")
       .mockReturnValue((expiresAt + 10) * 1_000)
@@ -1824,18 +1868,22 @@ describe("durable workspace checkpoints", () => {
           "owner@example.com",
           PREFIX,
           checkpoint.workspaceGeneration,
-          [],
+          [RESERVATION_ONE],
           [],
           checkpoint.proof,
           "invocation-later",
           expiresAt + 300,
         ),
       ).rejects.toThrow("finalization proof is invalid")
+
+      expect(store.current(`${PREFIX}/state/a.sqlite`)).toBeUndefined()
       expect(
-        JSON.parse(
-          store.current(finalizationJournalKey())?.body ?? "{}",
+        store.commands.slice(beforeFinalize).some(
+          (command) =>
+            command.name === "CopyObjectCommand" ||
+            command.name === "DeleteObjectCommand",
         ),
-      ).toMatchObject({ state: "pending", requestDigest })
+      ).toBe(false)
     } finally {
       now.mockRestore()
     }

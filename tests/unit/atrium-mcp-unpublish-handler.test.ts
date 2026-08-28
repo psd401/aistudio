@@ -61,6 +61,17 @@ jest.mock("@/lib/content", () => {
 jest.mock("@/lib/content/surface-helpers", () => ({
   assertContentAuthoringCapability: (...a: unknown[]) => mockAssertCapability(...a),
   contentDeepLink: (slug: string) => `/c/${slug}`,
+  // Mirrors the real builder: only PUBLISHED objects have a reader page, so a
+  // draft is linked to its authoring surface instead of a `/c/` URL that 404s.
+  contentSurfaceLink: (object: {
+    id: string
+    slug: string
+    kind: "document" | "artifact"
+    status: string
+  }) =>
+    object.status === "published"
+      ? `/c/${object.slug}`
+      : `/atrium/${object.id}/${object.kind === "artifact" ? "view" : "edit"}`,
   resolveCollectionId: (...a: unknown[]) => mockResolveCollectionId(...a),
 }));
 
@@ -242,6 +253,8 @@ describe("create_document handler", () => {
     mockCreate.mockResolvedValue({
       id: "obj-1",
       slug: "my-doc",
+      kind: "document",
+      status: "draft",
       visibilityLevel: "private",
     });
 
@@ -254,7 +267,9 @@ describe("create_document handler", () => {
     expect(payloadOf(result)).toEqual({
       id: "obj-1",
       slug: "my-doc",
-      url: "/c/my-doc",
+      // A brand-new document has no live intranet publication, so `/c/my-doc`
+      // would 404 — for its own author, because the reader masks existence.
+      url: "/atrium/obj-1/edit",
       visibilityLevel: "private",
     });
   });

@@ -3880,6 +3880,87 @@ async function recordFailure(
 }
 
 /**
+ * Settle the harness's failure row after the turn was promoted to a job.
+ *
+ * The harness writes the row the moment the interactive clock runs out (or the
+ * transcript overflows) — it cannot know that this Lambda is about to hand the
+ * same request to the job runner on a 2-hour deadline and deliver the real
+ * answer. Left alone, a designed, successful recovery reads as an
+ * unacknowledged failure: in the week of 2026-08-21 EVERY promotable row in
+ * prod had in fact been promoted within ~20 seconds — 10/10
+ * ChatDeadlineExpired* and 4/4 ContextOverflow — 14 of that week's 35
+ * hard-error rows describing turns the user got answered.
+ *
+ * The row is kept (the 550s ceiling and the overflow rate are both worth
+ * trending) but downgraded to warn and self-acknowledged, so the Failures tab
+ * shows what actually broke.
+ *
+ * Never throws — this is telemetry hygiene running after the user's work is
+ * already safely in flight.
+ *
+ * Scoping note: `sessionId` is the build-rotated runtime session, which is
+ * stable per owner rather than per turn, so the match is additionally bounded
+ * to the newest unacknowledged row of THIS error class in the last five
+ * minutes. A promotable turn ends either at the ~550s ceiling or on a
+ * first-call overflow, so the wrong row cannot be in range.
+ */
+async function markPromotedTurnRecovered(
+  sessionId: string,
+  errorClass: string,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  if (!DATABASE_HOST || !DATABASE_SECRET_ARN) return;
+  await markPromotedTurnRecoveredWithDependencies(
+    sessionId,
+    errorClass,
+    log,
+    getDbClient
+  );
+}
+
+async function markPromotedTurnRecoveredWithDependencies(
+  sessionId: string,
+  errorClass: string,
+  log: ReturnType<typeof createLogger>,
+  getSql: () => Promise<postgres.Sql>
+): Promise<void> {
+  if (!sessionId || !errorClass) return;
+  try {
+    const sql = await getSql();
+    const updated = await sql`
+      UPDATE agent_failures
+         SET severity = 'warn',
+             acknowledged = TRUE,
+             acknowledged_by = 'system:job-promotion',
+             acknowledged_at = NOW(),
+             context = COALESCE(context, '{}'::jsonb)
+                       || '{"promoted":true}'::jsonb
+       WHERE id = (
+         SELECT id
+           FROM agent_failures
+          WHERE session_id = ${sessionId}
+            AND error_class = ${errorClass}
+            AND acknowledged = FALSE
+            AND occurred_at > NOW() - INTERVAL '5 minutes'
+          ORDER BY occurred_at DESC
+          LIMIT 1
+       )
+       RETURNING id`;
+    log.info('Settled the promoted turn\'s failure row', {
+      sessionId,
+      errorClass,
+      rowsSettled: updated.length,
+    });
+  } catch (error) {
+    log.warn('Could not settle the promoted turn\'s failure row', {
+      sessionId,
+      errorClass,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/**
  * Observe a failed agent turn without changing the user-facing behavior (the
  * error text is still delivered to Chat by the caller). Fixes the gap where a
  * 0-token error turn — e.g. an OpenClaw session-init conflict — was logged as a
@@ -5300,6 +5381,14 @@ async function promoteOwnerTurn(
   );
   if (!promoted) return false;
 
+  // The turn is recovering on the job path, so the harness's row no longer
+  // describes a failed turn. Settle it before telemetry.
+  await markPromotedTurnRecovered(
+    turn.sessionId,
+    turn.result.errorClass ?? '',
+    log
+  );
+
   const latencyMs =
     turn.result.latencyMs > 0
       ? turn.result.latencyMs
@@ -5523,6 +5612,7 @@ export const agentRouterTestHelpers = {
   isDuplicateMessage,
   parseDeferredChatDelivery,
   parseDeferredChatDeliveryRecord,
+  markPromotedTurnRecoveredWithDependencies,
   btwSlashCommandId: BTW_SLASH_COMMAND_ID,
 };
 

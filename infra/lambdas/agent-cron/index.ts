@@ -89,6 +89,7 @@ import {
   createRunTelemetry,
   isPromotedRunPending,
   reservePromotedRunId,
+  settlePromotedTurnFailure,
   updatePromotedRunTerminal,
 } from './run-telemetry';
 import { runSchedulePreflight } from './schedule-preflight';
@@ -1638,6 +1639,29 @@ async function tryPromoteScheduledResult(
       log,
     );
     return false;
+  }
+  // The turn is recovering on the job path, so the harness's row no longer
+  // describes a failed turn. Telemetry hygiene only — never let it break a
+  // promotion that already succeeded.
+  try {
+    await settlePromotedTurnFailure(
+      {
+        databaseResourceArn: DATABASE_RESOURCE_ARN,
+        databaseSecretArn: DATABASE_SECRET_ARN,
+        databaseName: DATABASE_NAME,
+      },
+      runTelemetryRdsClient,
+      {
+        sessionId: runtimeSessionId,
+        errorClass: result.errorClass ?? '',
+      },
+    );
+  } catch (error) {
+    log.warn('Could not settle the promoted turn\'s failure row', {
+      sessionId: runtimeSessionId,
+      errorClass: result.errorClass ?? null,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
   await sendPromotionAcknowledgement(context, reason);
   return true;

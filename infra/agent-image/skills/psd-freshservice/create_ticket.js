@@ -31,10 +31,17 @@ async function main() {
   // Allowlist of Freshservice ticket fields the agent may set. Prevents callers
   // from injecting privileged fields (e.g. source, type, internal metadata) that
   // Freshservice may accept but the agent should not control.
+  //
+  // `department_id` is REQUIRED by some PSD workspaces: without it every create
+  // returns 400 "department_id should be of type Positive Integer", and with no
+  // way to pass it the caller could not file a ticket at all (failure 12777,
+  // 2026-08-24). It routes the ticket to the requester's own department, the
+  // same requester the caller already names via `email`/`requester_id`, so it
+  // grants no authority the field list did not already imply.
   const ALLOWED_FIELDS = new Set([
     'subject', 'description', 'email', 'requester_id', 'status', 'priority',
-    'workspace_id', 'group_id', 'responder_id', 'cc_emails', 'tags',
-    'category', 'sub_category', 'item_category', 'due_by', 'fr_due_by',
+    'workspace_id', 'department_id', 'group_id', 'responder_id', 'cc_emails',
+    'tags', 'category', 'sub_category', 'item_category', 'due_by', 'fr_due_by',
     'urgency', 'impact',
   ]);
   const filtered = Object.create(null);

@@ -54,6 +54,17 @@ jest.mock("@/lib/content/rest", () => {
 jest.mock("@/lib/content/surface-helpers", () => ({
   assertContentAuthoringCapability: jest.fn(),
   contentDeepLink: (slug: string) => `/c/${slug}`,
+  // Mirrors the real builder: only PUBLISHED objects have a reader page, so a
+  // draft is linked to its authoring surface instead of a `/c/` URL that 404s.
+  contentSurfaceLink: (object: {
+    id: string
+    slug: string
+    kind: "document" | "artifact"
+    status: string
+  }) =>
+    object.status === "published"
+      ? `/c/${object.slug}`
+      : `/atrium/${object.id}/${object.kind === "artifact" ? "view" : "edit"}`,
   resolveCollectionId: (...a: unknown[]) => mockResolveCollectionId(...a),
 }));
 

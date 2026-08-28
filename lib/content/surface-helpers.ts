@@ -102,7 +102,11 @@ export async function resolveCollectionId(
 // The two reader-link builders moved to the dependency-free `./reader-links`
 // leaf (#1336) so services can import them without pulling in this module's
 // capability/DB graph. Re-exported here so every existing import path is unchanged.
-export { contentDeepLink, publicReaderLink } from "./reader-links";
+export {
+  contentDeepLink,
+  contentSurfaceLink,
+  publicReaderLink,
+} from "./reader-links";
 
 /** The capability every Atrium authoring entry point (UI actions + agent surfaces) gates on. */
 export const ATRIUM_CONTENT_CAPABILITY = "atrium-content";

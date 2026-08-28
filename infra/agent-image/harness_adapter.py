@@ -204,6 +204,20 @@ class TurnResult:
     # the dashboard can trend nudge-fire rate. A recovered-after-nudge turn
     # writes no agent_failures row, so this flag is its only persisted signal.
     nudged: bool = False
+    # A failure this ATTEMPT hit that has not been written to agent_failures
+    # yet, because `process()` may still recover the turn by retrying it (see
+    # `_should_retry_upstream`). `process()` is the only reader: it flushes the
+    # row via `_flush_deferred_failure` when the turn ends failed, and drops it
+    # when the retry succeeds — the same policy `nudged` already documents,
+    # that a recovered turn writes no agent_failures row.
+    #
+    # Deferring is why this exists at all. Recording at the attempt meant every
+    # recovered turn still left a severity=error row and still ticked the
+    # AgentFailuresHarness metric behind the failure alarm: in the week of
+    # 2026-08-21, 8 of 10 OpenClawChatError rows in prod had ALREADY been
+    # recovered by the retry below (7 clean, 1 via job promotion), so the
+    # Failures tab read as 10 broken turns when 2 were.
+    deferred_failure: Optional[Dict[str, Any]] = None
 
 
 def _shape_of(value: object) -> str:
@@ -1401,7 +1415,7 @@ class OpenClawAdapter(HarnessAdapter):
             message, session_id, model_override, deadline_s, _is_nudge
         )
         if not self._should_retry_upstream(attempt):
-            return attempt
+            return self._flush_deferred_failure(attempt)
         # Wall clock, not attempt.latency_ms: latency is measured from
         # chat.send and so misses connection setup, which the retry must also
         # pay for a second time.
@@ -1416,7 +1430,7 @@ class OpenClawAdapter(HarnessAdapter):
                 remaining_s,
                 attempt.error_class,
             )
-            return attempt
+            return self._flush_deferred_failure(attempt)
         logger.warning(
             "retrying turn after a clean upstream failure: error_class=%s "
             "latency_ms=%d retry_deadline_s=%d",
@@ -1431,15 +1445,40 @@ class OpenClawAdapter(HarnessAdapter):
         if retried.failed:
             # Keep the retry's result — it is the more recent evidence — but
             # say plainly that a retry happened, so a two-failure turn is not
-            # read as a single blip.
+            # read as a single blip. Both attempts' rows are written: the turn
+            # really did fail twice, and the first attempt is the evidence that
+            # says so.
             logger.error(
                 "upstream retry also failed: first=%s second=%s",
                 attempt.error_class,
                 retried.error_class,
             )
-            return retried
+            self._flush_deferred_failure(attempt)
+            return self._flush_deferred_failure(retried)
+        # The turn was recovered, so no agent_failures row is written for the
+        # attempt that failed — the same policy a recovered-after-nudge turn
+        # follows. The two log lines above remain the record that it happened.
+        if attempt.deferred_failure:
+            logger.info(
+                "dropping the failed attempt's agent_failures row — the "
+                "retry recovered the turn: error_class=%s",
+                attempt.error_class,
+            )
         logger.info("upstream retry recovered the turn")
         return retried
+
+    @staticmethod
+    def _flush_deferred_failure(result: TurnResult) -> TurnResult:
+        """Write a held-back attempt failure now that the turn is settled.
+
+        Idempotent: the record is cleared as it is written, so a result that
+        passes through more than one terminal path cannot double-record.
+        """
+        pending = result.deferred_failure
+        if pending:
+            result.deferred_failure = None
+            record_failure(**pending)
+        return result
 
     @staticmethod
     def _should_retry_upstream(result: TurnResult) -> bool:
@@ -2688,15 +2727,38 @@ class OpenClawAdapter(HarnessAdapter):
                             # fail-closed downstream: the upgraded OpenClaw host
                             # already attempted the only safe, tools-disabled
                             # finalization. See _classify_chat_error.
-                            record_failure(
-                                source="harness",
-                                severity="error",
-                                error_class=err_class,
-                                error_message=str(err_msg),
-                                session_id=session_id,
-                                model=observed_model or model_override,
-                                context=failure_context,
+                            err_latency_ms = int(
+                                (time.time() - chat_send_at) * 1000
                             )
+                            failure_record = {
+                                "source": "harness",
+                                "severity": "error",
+                                "error_class": err_class,
+                                "error_message": str(err_msg),
+                                "session_id": session_id,
+                                "model": observed_model or model_override,
+                                "context": failure_context,
+                            }
+                            # Hold the row back when `process()` may still
+                            # recover this turn by replaying it. The predicate
+                            # mirrors `_should_retry_upstream` on the result
+                            # this branch is about to return, so a deferred row
+                            # is exactly a row whose turn gets a second attempt.
+                            # `process()` flushes it if that attempt does not
+                            # land; nothing else reads it.
+                            deferred_failure = (
+                                failure_record
+                                if (
+                                    err_class == "OpenClawChatError"
+                                    and not tool_calls
+                                    and not tool_starts
+                                    and err_latency_ms
+                                    <= UPSTREAM_RETRY_MAX_LATENCY_MS
+                                )
+                                else None
+                            )
+                            if deferred_failure is None:
+                                record_failure(**failure_record)
                             # Never post the accumulated scratchpad narration
                             # as if it were the answer — frame it as a failed
                             # partial (issue #1138 F4).
@@ -2729,12 +2791,13 @@ class OpenClawAdapter(HarnessAdapter):
                                 usage_capture_complete=bool(
                                     err_usage.get("capture_complete")
                                 ),
-                                latency_ms=int((time.time() - chat_send_at) * 1000),
+                                latency_ms=err_latency_ms,
                                 messages=messages_log,
                                 tool_calls=tool_calls,
                                 tools_in_flight=len(tool_starts),
                                 failed=True,
                                 error_class=err_class,
+                                deferred_failure=deferred_failure,
                             )
 
                         elif state == "aborted":

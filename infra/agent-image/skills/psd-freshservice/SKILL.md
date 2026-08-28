@@ -57,6 +57,10 @@ node get_service_request.js --user <email> --id <ticket_id>
 node create_ticket.js --user <email> \
   --data '{"subject":"...","description":"...","email":"requester@...","priority":2,"workspace_id":2}'
 
+# Create when the workspace requires a department — see "department_id" below
+node create_ticket.js --user <email> \
+  --data '{"subject":"...","description":"...","email":"requester@...","department_id":6000119622}'
+
 # Update — status 2 Open / 3 Pending / 4 Resolved / 5 Closed; priority 1-4
 node update_ticket.js --user <email> --id <id> --data '{"status":4}'
 
@@ -165,6 +169,21 @@ On a 403 (`freshservice_endpoint_forbidden`):
   workspaces are available rather than declaring the integration broken.
 - If they need a workspace they cannot reach, the fix is a Freshservice role
   change on their account, not a new key. Say that plainly.
+
+### `department_id` is mandatory on some accounts
+
+Some PSD Freshservice accounts reject every create with 400 `department_id
+should be of type Positive Integer`. Retrying, or dropping `email` /
+`requester_id` / `workspace_id`, does not help — the field is simply required.
+
+Pass the requester's own department:
+
+1. Read it off any existing ticket of theirs — `get_ticket.js` returns
+   `department_id` in the ticket body.
+2. Include it in `--data`: `{"...", "department_id": 6000119622}`.
+
+Do not guess a department id. If no ticket of theirs is available to read it
+from, say the create needs a department id and ask which department they are in.
 
 ## Security
 

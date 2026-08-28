@@ -1169,6 +1169,125 @@ class TestUpstreamRetry(unittest.TestCase):
         self.assertTrue(result.failed)
         self.assertEqual(result.error_class, "OpenClawChatError")
 
+    def test_a_recovered_turn_writes_no_failure_row(self):
+        # The whole point of deferring: a turn the retry rescued is not a
+        # failure, so it must not leave a severity=error row behind. In the
+        # week of 2026-08-21 this alone accounted for 8 of the 10
+        # OpenClawChatError rows in prod.
+        adapter = OpenClawAdapter()
+        held = {
+            "source": "harness",
+            "severity": "error",
+            "error_class": "OpenClawChatError",
+            "error_message": "LLM request failed.",
+            "session_id": "s1",
+            "model": None,
+            "context": {"phase": "chat_event_error"},
+        }
+        calls = []
+
+        def fake_once(*_a, **_kw):
+            calls.append(1)
+            if len(calls) == 1:
+                return self._result(deferred_failure=dict(held))
+            return harness_adapter.TurnResult(text="recovered", failed=False)
+
+        with mock.patch.object(adapter, "_process_once", side_effect=fake_once), \
+                mock.patch.object(harness_adapter.time, "sleep"), \
+                mock.patch.object(
+                    harness_adapter, "record_failure"
+                ) as record_failure:
+            result = adapter.process("x", "s1")
+
+        self.assertFalse(result.failed)
+        record_failure.assert_not_called()
+
+    def test_an_unrecovered_turn_still_writes_its_failure_row(self):
+        # Deferring must never LOSE a row — a turn that stays broken is
+        # exactly what the Failures tab exists to show.
+        adapter = OpenClawAdapter()
+        held = {
+            "source": "harness",
+            "severity": "error",
+            "error_class": "OpenClawChatError",
+            "error_message": "LLM request failed.",
+            "session_id": "s1",
+            "model": None,
+            "context": {"phase": "chat_event_error"},
+        }
+
+        with mock.patch.object(
+            adapter,
+            "_process_once",
+            side_effect=lambda *a, **k: self._result(
+                deferred_failure=dict(held)
+            ),
+        ), mock.patch.object(harness_adapter.time, "sleep"), \
+                mock.patch.object(
+                    harness_adapter, "record_failure"
+                ) as record_failure:
+            result = adapter.process("x", "s1")
+
+        self.assertTrue(result.failed)
+        # Both attempts really failed, so both are recorded.
+        self.assertEqual(record_failure.call_count, 2)
+        self.assertEqual(
+            record_failure.call_args.kwargs["error_class"], "OpenClawChatError"
+        )
+
+    def test_a_deferred_row_is_flushed_when_no_retry_is_attempted(self):
+        # A held row whose turn never gets a second attempt must still land.
+        # Reaching `process` at all means the caller thinks the turn is over.
+        adapter = OpenClawAdapter()
+        held = {
+            "source": "harness",
+            "severity": "error",
+            "error_class": "OpenClawChatError",
+            "error_message": "LLM request failed.",
+            "session_id": "s1",
+            "model": None,
+            "context": {"phase": "chat_event_error"},
+        }
+
+        with mock.patch.object(
+            adapter,
+            "_process_once",
+            # tool_calls makes the turn replay-UNSAFE, so no retry happens.
+            side_effect=lambda *a, **k: self._result(
+                tool_calls=[{"name": "docs.create"}],
+                deferred_failure=dict(held),
+            ),
+        ), mock.patch.object(harness_adapter.time, "sleep"), \
+                mock.patch.object(
+                    harness_adapter, "record_failure"
+                ) as record_failure:
+            result = adapter.process("x", "s1")
+
+        self.assertTrue(result.failed)
+        record_failure.assert_called_once()
+
+    def test_flushing_a_deferred_row_twice_records_it_once(self):
+        # `process` flushes on more than one path; a row must not double-write
+        # if a result ever crosses two of them.
+        result = self._result(
+            deferred_failure={
+                "source": "harness",
+                "severity": "error",
+                "error_class": "OpenClawChatError",
+                "error_message": "LLM request failed.",
+                "session_id": "s1",
+                "model": None,
+                "context": {},
+            }
+        )
+        with mock.patch.object(
+            harness_adapter, "record_failure"
+        ) as record_failure:
+            OpenClawAdapter._flush_deferred_failure(result)
+            OpenClawAdapter._flush_deferred_failure(result)
+        record_failure.assert_called_once()
+        self.assertIsNone(result.deferred_failure)
+
     def test_never_retries_a_turn_with_a_tool_still_in_flight(self):
         # The dangerous case tool_calls alone cannot see: the call STARTED,
         # may already have created the Doc, and its result event never
@@ -1275,6 +1394,96 @@ class TestUpstreamRetry(unittest.TestCase):
         self.assertEqual(result.tool_calls, [], "the start never completed")
         self.assertEqual(result.tools_in_flight, 1)
         self.assertFalse(OpenClawAdapter._should_retry_upstream(result))
+
+    def test_a_clean_upstream_error_defers_its_row_end_to_end(self):
+        # The mirror of the tool-in-flight test above, and the half that makes
+        # the deferral real: drive a turn that dies as a clean upstream error
+        # with NO tool activity and assert `_process_once` wrote nothing —
+        # `process` owns that decision now, because only `process` knows
+        # whether the retry rescued the turn.
+        chat_id = None
+
+        class FakeWebSocket:
+            def __init__(self, messages):
+                self.messages = list(messages)
+                self.sent = []
+
+            def send(self, payload):
+                nonlocal chat_id
+                parsed = json.loads(payload)
+                self.sent.append(parsed)
+                if parsed.get("method") == "chat.send":
+                    chat_id = parsed["id"]
+
+            def recv(self):
+                message = self.messages.pop(0)
+                return message() if callable(message) else message
+
+            def settimeout(self, _timeout):
+                return None
+
+            def close(self):
+                return None
+
+        def envelope(**fields):
+            return json.dumps(fields)
+
+        messages = [
+            envelope(type="event", event="connect.challenge", payload={}),
+            lambda: envelope(type="res", id=socket.sent[-1]["id"], ok=True,
+                             payload={}),
+            lambda: envelope(type="res", id=socket.sent[-1]["id"], ok=True,
+                             payload={"tools": []}),
+            lambda: envelope(type="res", id=socket.sent[-1]["id"], ok=True,
+                             payload={}),
+            lambda: envelope(type="res", id=chat_id, ok=True,
+                             payload={"runId": chat_id, "status": "started"}),
+            # The exact prod shape: dies immediately, no tool ever started.
+            lambda: envelope(
+                type="event",
+                event="chat",
+                payload={
+                    "runId": chat_id,
+                    "seq": 3,
+                    "state": "error",
+                    "errorMessage": "LLM request failed.",
+                },
+            ),
+        ]
+        socket = FakeWebSocket(messages)
+        fake_websocket_module = mock.Mock()
+        fake_websocket_module.create_connection.return_value = socket
+        fake_websocket_module.WebSocketTimeoutException = TimeoutError
+        empty_usage = {
+            "input": 0,
+            "output": 0,
+            "cache_read": 0,
+            "cache_write": 0,
+            "model_calls": 0,
+            "capture_complete": False,
+        }
+        adapter = OpenClawAdapter()
+        adapter._ready = True
+
+        with (
+            mock.patch.dict(sys.modules, {"websocket": fake_websocket_module}),
+            mock.patch.object(adapter, "_read_turn_usage",
+                              return_value=empty_usage),
+            mock.patch("harness_adapter.record_failure") as record_failure,
+            mock.patch("harness_adapter.time.time", return_value=100.0),
+        ):
+            result = adapter._process_once("summarize", "s1", deadline_s=550)
+
+        self.assertEqual(result.error_class, "OpenClawChatError")
+        self.assertTrue(OpenClawAdapter._should_retry_upstream(result))
+        record_failure.assert_not_called()
+        self.assertIsNotNone(result.deferred_failure)
+        self.assertEqual(
+            result.deferred_failure["error_class"], "OpenClawChatError"
+        )
+        self.assertEqual(
+            result.deferred_failure["context"]["phase"], "chat_event_error"
+        )
 
     def test_retry_runs_inside_the_remaining_turn_budget(self):
         # A second FULL deadline would blow through the 550s ceiling that

@@ -21,7 +21,7 @@ import type { PublishDestination } from "@/lib/content/publish-adapters/types"
 import { requesterForUserId } from "@/lib/content/requester-from-auth"
 import {
   assertContentAuthoringCapability,
-  contentDeepLink,
+  contentSurfaceLink,
   resolveCollectionId,
 } from "@/lib/content/surface-helpers"
 import { contentSourceRefSchema } from "@/lib/content/source-ref"
@@ -331,7 +331,7 @@ async function executeSingleSegmentRead(
     return success([...collectionsById.values()], requestId)
   }
   const object = await contentService.get(req, segment)
-  return success({ ...object, url: contentDeepLink(object.slug) }, requestId)
+  return success({ ...object, url: contentSurfaceLink(object) }, requestId)
 }
 
 async function executeTwoSegmentRead(
@@ -444,7 +444,7 @@ async function executeAtriumRead(
     return success(
       items.map((item) => ({
         ...item,
-        url: contentDeepLink(item.slug),
+        url: contentSurfaceLink(item),
       })),
       input.requestId
     )
@@ -538,7 +538,7 @@ async function executeContentWrite(
     audit.objectId = created.id
     recordAudit(req, audit, input.requestId, "ok")
     return success(
-      { ...created, url: contentDeepLink(created.slug) },
+      { ...created, url: contentSurfaceLink(created) },
       input.requestId,
       201
     )

@@ -1833,6 +1833,65 @@ class WorkspaceRestoreFailureIsRecorded(unittest.TestCase):
         self.assertIn("workspace_prefix", window)
 
 
+class PendingCheckpointRetryDoesNotKillTheInvocation(unittest.TestCase):
+    """A pending checkpoint that cannot be replayed must not cost a turn.
+
+    The pre-restore retry replays the PREVIOUS turn's fenced batch using the
+    proof stored from that invocation. Until the broker learned to accept an
+    identical journaled replay, that proof was bound to an invocation that no
+    longer existed, so the retry 409'd every time; the exception escaped to the
+    outer restore handler, push was disabled, and the user got a workspace
+    error — after which the NEXT invocation performed the exact committed
+    restore anyway. Six rows across five users in the week of 2026-08-21, all
+    reading "Workspace finalization proof is invalid".
+
+    The unreconcilable local changes are lost either way. Losing the user's
+    turn on top of that was the avoidable half.
+    """
+
+    def source(self):
+        import inspect
+
+        return inspect.getsource(agentcore_wrapper)
+
+    def test_the_retry_push_is_guarded(self):
+        # Pinned by source for the same reason the restore-failure tests are:
+        # the call site is inside an async generator behind a real mount.
+        source = self.source()
+        start = source.index("retry_push = functools.partial(")
+        end = source.index('error_class="WorkspaceCheckpointRetryAbandoned"')
+        self.assertLess(start, end, "the abandonment path must follow the push")
+        window = source[start:end]
+        self.assertIn("try:", window)
+        self.assertIn("except Exception as retry_exc", window)
+
+    def test_the_abandonment_is_recorded_as_recovered_not_as_an_outage(self):
+        # The turn continues on an exact committed restore, so this row must
+        # not read like the WorkspaceMigrationFailed it replaces.
+        source = self.source()
+        start = source.index('error_class="WorkspaceCheckpointRetryAbandoned"')
+        window = source[max(0, start - 900) : start + 900]
+        self.assertIn('severity="warn"', window)
+        self.assertIn('"recovered": True', window)
+        self.assertIn("user_id=user_email", window)
+        self.assertIn("session_id=session_id", window)
+
+    def test_the_invocation_continues_into_the_committed_restore(self):
+        # The point of the change: quarantine, then keep going. The refresh
+        # that rebuilds the tree must still run after the abandonment, and the
+        # handler must not short-circuit the invocation on its way there.
+        source = self.source()
+        start = source.index('error_class="WorkspaceCheckpointRetryAbandoned"')
+        tail = source[start:]
+        refresh = tail.index("workspace_sync.refresh_workspace")
+        self.assertNotIn("return", tail[:refresh])
+        self.assertIn(
+            "_fail_closed_workspace_after_restore_error",
+            source[max(0, start - 1200) : start],
+            "local state must be invalidated so the refresh prunes it",
+        )
+
+
 class EveryWrapperFailureIsRecorded(unittest.TestCase):
     """No user-visible failure in the wrapper may be telemetry-silent.
 
@@ -1863,6 +1922,7 @@ class EveryWrapperFailureIsRecorded(unittest.TestCase):
         source = self.source()
         for error_class in (
             "WorkspaceMigrationFailed",
+            "WorkspaceCheckpointRetryAbandoned",
             "InvocationContextInvalid",
             "WorkspaceAuthorityChanged",
             "OpenClawStartupFailed",

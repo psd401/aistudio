@@ -52,6 +52,17 @@ jest.mock("@/lib/content/surface-helpers", () => ({
   assertContentAuthoringCapability: (...args: unknown[]) =>
     assertContentAuthoringCapabilityMock(...args),
   contentDeepLink: (slug: string) => `/c/${slug}`,
+  // Mirrors the real builder: only PUBLISHED objects have a reader page, so a
+  // draft is linked to its authoring surface instead of a `/c/` URL that 404s.
+  contentSurfaceLink: (object: {
+    id: string
+    slug: string
+    kind: "document" | "artifact"
+    status: string
+  }) =>
+    object.status === "published"
+      ? `/c/${object.slug}`
+      : `/atrium/${object.id}/${object.kind === "artifact" ? "view" : "edit"}`,
   resolveCollectionId: (...args: unknown[]) => resolveCollectionIdMock(...args),
 }))
 jest.mock("@/lib/content", () => {
@@ -435,8 +446,9 @@ describe("signed-owner Atrium operations", () => {
   })
 
   it("resolves the signed email to the owner requester for reads", async () => {
+    const draft = { kind: "document", status: "draft" }
     contentListMock.mockResolvedValue([
-      { id: "content-1", slug: "staff-handbook" },
+      { id: "content-1", slug: "staff-handbook", ...draft },
     ])
     await expect(
       executeOwnerAtriumOperation({
@@ -457,7 +469,10 @@ describe("signed-owner Atrium operations", () => {
           {
             id: "content-1",
             slug: "staff-handbook",
-            url: "/c/staff-handbook",
+            ...draft,
+            // NOT `/c/staff-handbook`: that reader needs a live intranet
+            // publication and 404s without one, for the owner too.
+            url: "/atrium/content-1/edit",
           },
         ],
         meta: { requestId: "request-1" },
@@ -500,6 +515,8 @@ describe("signed-owner Atrium mutations", () => {
     contentCreateMock.mockResolvedValue({
       id: "content-1",
       slug: "new-document",
+      kind: "document",
+      status: "draft",
     })
     await expect(
       executeOwnerAtriumOperation({
@@ -519,7 +536,11 @@ describe("signed-owner Atrium mutations", () => {
         data: {
           id: "content-1",
           slug: "new-document",
-          url: "/c/new-document",
+          kind: "document",
+          status: "draft",
+          // A just-created object is never published, so the link an agent
+          // hands its user must be one that opens.
+          url: "/atrium/content-1/edit",
         },
         meta: { requestId: "request-2" },
       },
