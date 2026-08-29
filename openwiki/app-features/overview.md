@@ -138,6 +138,17 @@ Destinations ← Content Layer ← Surfaces (UI, Agents, Scripts)
 
 All surfaces are clients of the content API—there is no UI-only creation path.
 
+### Content Surface Links
+
+**Source**: `/lib/content/reader-links.ts`
+
+Content links resolve based on publication status:
+
+- **Published** → Canonical reader link (`/c/{slug}`) — accessible to anyone with visibility
+- **Draft/Archived** → Authoring surface link (`/atrium/{id}/view` or `/edit`) — requires `canView`, renders head version
+
+The `contentSurfaceLink()` function handles this routing automatically. This fix resolved dead links for unpublished content (e.g., psd-morning-brief artifacts that are never published) where the reader link would 404 for both recipients and owners.
+
 ### Visibility & Publishing
 
 - **Private** — Only author
