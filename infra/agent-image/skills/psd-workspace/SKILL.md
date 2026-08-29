@@ -414,6 +414,33 @@ gws gmail.users.labels.create --scope user --user hagelk@psd401.net \
   --json '{"name":"Digested"}'
 ```
 
+**Gmail filters.** Same reasoning as labels — a filter organizes the user's own
+inbox — so it is on the user slot too. List, create and delete are all allowed:
+
+```bash
+gws gmail.users.settings.filters.list --scope user --user hagelk@psd401.net
+
+# Skip the inbox and label instead. Get label IDs from gmail.users.labels.list;
+# INBOX and UNREAD are built-in ids you can remove directly.
+gws gmail.users.settings.filters.create --scope user --user hagelk@psd401.net \
+  --json '{"criteria":{"from":"eoc-alarms@psd401.net"},
+           "action":{"addLabelIds":["Label_12"],"removeLabelIds":["INBOX"]}}'
+
+gws gmail.users.settings.filters.delete --scope user --user hagelk@psd401.net \
+  --params '{"id":"<filterId>"}'
+```
+
+Filters need `gmail.settings.basic`, which `gmail.modify` does NOT include, so
+a user whose connection predates 2026-08-28 gets `scope-upgrade-required` on
+the first filter call. That is the ordinary re-consent path — hand them the
+link and retry after they authorize; it is not a failure to report.
+
+Two things this does NOT cover, both by design: **forwarding addresses** and
+**send-as aliases / delegates** live behind `gmail.settings.sharing`, which is
+not granted. If a user asks you to stop mail being forwarded away, you can
+remove the FILTER that forwards it, but you cannot remove a
+Settings → Forwarding rule — say so and point them at Gmail settings.
+
 **Granting a request someone already made.** When a user hits "request access" on an
 agent-owned file, Drive records an access proposal. List them with
 `drive accessproposals list` and grant one with `drive accessproposals resolve`
@@ -521,6 +548,31 @@ So on this error, once:
    it via the link and copy it into their own Drive now.
 
 Never report this as "I could not create the document" — the document exists.
+
+**Google Tasks.** The agent may add tasks to the user's own lists and reorder
+them — `tasks.tasks.insert`, `tasks.tasks.move` — on the user slot. `move`
+takes the destination in `--params`, not `--json`:
+
+```bash
+# Put a task directly under a heading task, as its child.
+gws tasks.tasks.move --scope user --user hagelk@psd401.net \
+  --params '{"tasklist":"@default","task":"<taskId>","parent":"<headingTaskId>"}'
+
+# Or just reposition it after another task at the same level.
+gws tasks.tasks.move --scope user --user hagelk@psd401.net \
+  --params '{"tasklist":"@default","task":"<taskId>","previous":"<afterTaskId>"}'
+```
+
+Deleting tasks or task lists stays forbidden on both slots (Phase 1).
+
+**Finding a person's DM space.** To deliver into your one-to-one Chat with
+someone, resolve the space first — `chat.spaces.list` only returns spaces that
+already exist for you, so a DM you have never used will not appear there:
+
+```bash
+gws chat.spaces.findDirectMessage --scope agent --user hagelk@psd401.net \
+  --params '{"name":"users/<googleUserId>"}'
+```
 
 ## My inbox vs your inbox
 

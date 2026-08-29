@@ -38,6 +38,23 @@ const SCOPES_BY_KIND: Record<"user_account", string[]> = {
     // requires a fresh consent click — existing refresh tokens retain
     // only the original scope set until re-issued.
     "https://www.googleapis.com/auth/gmail.modify",
+    // Inbox FILTERS (approved 2026-08-28). Google does not fold filter
+    // management into gmail.modify — settings.filters needs
+    // gmail.settings.basic specifically — so three users asking for
+    // skip-inbox-and-label rules, or for existing rules to be removed, had no
+    // route at all (agent_failures 12909, 13866, 14559).
+    //
+    // `.basic` is the narrow half of the settings surface: filters, labels,
+    // vacation and IMAP/POP. It does NOT cover forwarding addresses, send-as
+    // aliases or delegates — those need gmail.settings.sharing, which is
+    // deliberately not requested. The broker allowlist independently confines
+    // this to the filters resource (command-executor ALLOWED_WRITES).
+    //
+    // Existing refresh tokens keep the scope set they were issued with, so
+    // every current user must re-consent before filter calls work; until they
+    // do, requiredWorkspaceScopeGap turns the call into a re-authorize prompt
+    // rather than a Google 403.
+    "https://www.googleapis.com/auth/gmail.settings.basic",
     // Full calendar so the agent can write events with markers (per user
     // direction 2026-04-26: "the way it is working right now is fine").
     "https://www.googleapis.com/auth/calendar",

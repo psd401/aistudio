@@ -75,6 +75,41 @@ describe("SKILL.md examples stay reachable through the broker", () => {
         "--json", '{"action":"accept","role":"writer"}',
       ],
     },
+    // Widened 2026-08-28 — the three operations users hit all week with
+    // operation_not_allowed (agent_failures 12909/13866/14559, 14394, 14031).
+    {
+      scope: "user",
+      argv: ["gmail", "users", "settings", "filters", "list"],
+    },
+    {
+      scope: "user",
+      argv: [
+        "gmail", "users", "settings", "filters", "create",
+        "--json",
+        '{"criteria":{"from":"a@psd401.net"},"action":{"removeLabelIds":["INBOX"]}}',
+      ],
+    },
+    {
+      scope: "user",
+      argv: [
+        "gmail", "users", "settings", "filters", "delete",
+        "--params", '{"id":"f1"}',
+      ],
+    },
+    {
+      scope: "user",
+      argv: [
+        "tasks", "tasks", "move",
+        "--params", '{"tasklist":"@default","task":"t1","parent":"h1"}',
+      ],
+    },
+    {
+      scope: "agent",
+      argv: [
+        "chat", "spaces", "findDirectMessage",
+        "--params", '{"name":"users/1"}',
+      ],
+    },
   ]
 
   it.each(DOCUMENTED_WORKED_EXAMPLES)(
