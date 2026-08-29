@@ -38,6 +38,7 @@ const {
   isDuplicateMessage,
   parseDeferredChatDelivery,
   parseDeferredChatDeliveryRecord,
+  markPromotedTurnRecoveredWithDependencies,
   btwSlashCommandId,
 } = agentRouterTestHelpers
 
@@ -2219,5 +2220,98 @@ describe("dmSpaceForUserRecord", () => {
       dmSpaceForUserRecord({ name: "DDD4", type: "DM" }, "DDD4"),
     ).toBeUndefined()
     expect(dmSpaceForUserRecord({ name: "", type: "DM" }, "")).toBeUndefined()
+  })
+})
+
+describe("settling a promoted turn's harness failure row", () => {
+  // The harness writes its deadline / overflow row from inside the container
+  // the moment the interactive clock runs out — before the router decides to
+  // resume the same request on the job path and answer it for real. Every
+  // promotable row in prod during the week of 2026-08-21 was in fact promoted
+  // within ~20 seconds (10/10 ChatDeadlineExpired*, 4/4 ContextOverflow), so
+  // 14 of that week's 35 hard-error rows described turns the user got answered.
+  function sqlSpy() {
+    const statements: string[] = []
+    const values: unknown[][] = []
+    const sql = ((strings: TemplateStringsArray, ...args: unknown[]) => {
+      statements.push(strings.join("?"))
+      values.push(args)
+      return Promise.resolve([{ id: 1 }])
+    }) as unknown as Parameters<
+      typeof markPromotedTurnRecoveredWithDependencies
+    >[3] extends () => Promise<infer S>
+      ? S
+      : never
+    return { sql, statements, values }
+  }
+
+  const log = createLogger({ action: "test" })
+
+  test("downgrades and self-acknowledges the row rather than deleting it", async () => {
+    const spy = sqlSpy()
+
+    await markPromotedTurnRecoveredWithDependencies(
+      "agent-rt-abc-def",
+      "ChatDeadlineExpired",
+      log,
+      async () => spy.sql
+    )
+
+    expect(spy.statements).toHaveLength(1)
+    const statement = spy.statements[0]
+    // Kept, not removed: the 550s ceiling is worth trending.
+    expect(statement).toContain("UPDATE agent_failures")
+    expect(statement).not.toContain("DELETE")
+    expect(statement).toContain("severity = 'warn'")
+    expect(statement).toContain("acknowledged = TRUE")
+    expect(statement).toContain("'system:job-promotion'")
+    expect(statement).toContain('\'{"promoted":true}\'::jsonb')
+    expect(spy.values[0]).toEqual([
+      "agent-rt-abc-def",
+      "ChatDeadlineExpired",
+    ])
+  })
+
+  test("cannot settle a row belonging to another turn", async () => {
+    // The runtime session id is stable per OWNER, not per turn, so an
+    // unbounded match could acknowledge a genuinely-broken failure of theirs.
+    const spy = sqlSpy()
+
+    await markPromotedTurnRecoveredWithDependencies(
+      "agent-rt-abc-def",
+      "ContextOverflow",
+      log,
+      async () => spy.sql
+    )
+
+    const statement = spy.statements[0]
+    expect(statement).toContain("acknowledged = FALSE")
+    expect(statement).toContain("NOW() - INTERVAL '5 minutes'")
+    expect(statement).toContain("ORDER BY occurred_at DESC")
+    expect(statement).toContain("LIMIT 1")
+  })
+
+  test("does nothing without a session id or an error class", async () => {
+    const spy = sqlSpy()
+
+    await markPromotedTurnRecoveredWithDependencies("", "ChatDeadlineExpired", log, async () => spy.sql)
+    await markPromotedTurnRecoveredWithDependencies("agent-rt-abc-def", "", log, async () => spy.sql)
+
+    expect(spy.statements).toHaveLength(0)
+  })
+
+  test("never lets telemetry hygiene fail a promotion that already succeeded", async () => {
+    // Reached only AFTER the job task is accepted. The user's work is already
+    // in flight; a database problem here must not turn that into an error.
+    await expect(
+      markPromotedTurnRecoveredWithDependencies(
+        "agent-rt-abc-def",
+        "ChatDeadlineExpired",
+        log,
+        async () => {
+          throw new Error("pool exhausted")
+        }
+      )
+    ).resolves.toBeUndefined()
   })
 })

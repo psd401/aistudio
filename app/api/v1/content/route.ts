@@ -33,7 +33,7 @@ import {
 } from "@/lib/content/rest";
 import {
   assertContentAuthoringCapability,
-  contentDeepLink,
+  contentSurfaceLink,
   resolveCollectionId,
 } from "@/lib/content/surface-helpers";
 import { decodeContentBody } from "@/lib/content/code-encoding";
@@ -75,7 +75,7 @@ function createContentResponse(
 ) {
   return createApiResponse(
     {
-      data: { ...created, url: contentDeepLink(created.slug) },
+      data: { ...created, url: contentSurfaceLink(created) },
       meta: { requestId },
     },
     requestId,

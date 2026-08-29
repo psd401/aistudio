@@ -30,7 +30,7 @@ import {
 } from "@/lib/content";
 import {
   assertContentAuthoringCapability,
-  contentDeepLink,
+  contentSurfaceLink,
   resolveCollectionId,
 } from "@/lib/content/surface-helpers";
 import {
@@ -238,7 +238,7 @@ async function createContent(
     return ok({
       id: created.id,
       slug: created.slug,
-      url: contentDeepLink(created.slug),
+      url: contentSurfaceLink(created),
       visibilityLevel: created.visibilityLevel,
       sourceRef: created.sourceRef,
     });
@@ -333,7 +333,7 @@ async function handleGetContent(
             authorActor: obj.version.authorActor,
           }
         : null,
-      url: contentDeepLink(obj.slug),
+      url: contentSurfaceLink(obj),
     });
   } catch (err) {
     return failRead(err);

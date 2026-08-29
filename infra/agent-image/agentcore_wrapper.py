@@ -1649,12 +1649,57 @@ def main():
                         ),
                         require_generation=True,
                     )
-                    await asyncio.get_running_loop().run_in_executor(
-                        None,
-                        retry_push,
-                    )
-                    _workspace_local_clean = True
-                    _workspace_turn_writable = False
+                    try:
+                        await asyncio.get_running_loop().run_in_executor(
+                            None,
+                            retry_push,
+                        )
+                    except Exception as retry_exc:  # noqa: BLE001
+                        # The prior turn's fenced batch could not be replayed.
+                        # It used to take the whole invocation down with it:
+                        # the exception escaped to the outer handler, which
+                        # disabled push and answered the user with a workspace
+                        # error — and the NEXT invocation then did the exact
+                        # committed restore anyway. The user lost a turn to
+                        # reach a recovery we can perform right here.
+                        #
+                        # Those local changes are unreconcilable either way, so
+                        # quarantine them (invalidate the local generation so
+                        # the refresh below is a full, pruning restore from the
+                        # committed manifest) and let the turn continue. This
+                        # is a recovered outcome, so it records at warn and
+                        # does NOT page — the failure that matters is a restore
+                        # that could not be completed, which still raises.
+                        _fail_closed_workspace_after_restore_error(
+                            workspace_prefix
+                        )
+                        logger.warning(
+                            "pending workspace checkpoint could not be "
+                            "replayed (%s) — discarding unpushable local "
+                            "changes and restoring the committed generation",
+                            retry_exc,
+                        )
+                        record_failure(
+                            source="harness",
+                            severity="warn",
+                            error_class="WorkspaceCheckpointRetryAbandoned",
+                            error_message=(
+                                "pending checkpoint replay failed; local "
+                                f"changes discarded: {str(retry_exc)[:500]}"
+                            ),
+                            user_id=user_email,
+                            session_id=session_id,
+                            context={
+                                "phase": "workspace_checkpoint_retry",
+                                "workspace_prefix": workspace_prefix,
+                                # The turn continues on an exact committed
+                                # restore, so this is telemetry, not an outage.
+                                "recovered": True,
+                            },
+                        )
+                    else:
+                        _workspace_local_clean = True
+                        _workspace_turn_writable = False
                 pulled = await asyncio.get_running_loop().run_in_executor(
                     None,
                     workspace_sync.refresh_workspace,

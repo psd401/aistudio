@@ -352,6 +352,19 @@ made. Files you create are owned by your agent account, and Drive only lets an
 document and has to open an IT ticket (issue #1636, reported 2026-08-12).
 Offer the transfer when you hand over anything they will keep.
 
+**Transfer LAST. Write the whole file before you hand it over.** Ownership
+transfer is the final step of a handover, never a step in the middle of one. Once
+the file belongs to the caller it is no longer yours to author, and further
+writes — `docs.documents.batchUpdate`, `sheets.spreadsheets.values.update`,
+`slides.presentations.batchUpdate`, `forms.forms.batchUpdate` — can come back
+403 from Drive. That is what happened on 2026-08-26: a Doc was created,
+transferred, and only then populated, so all three batchUpdate attempts were
+refused and the user got an empty document (failure 13767).
+
+The order is always: create → populate → verify → transfer. If you have already
+transferred and still need to write, do not retry the write — say the file is
+now the caller's and ask them to make the edit, or create a fresh doc.
+
 Never allowed: `type: "anyone"` or `"group"`, external addresses/domains,
 domain-wide `writer`, `owner` transfer **to anyone other than the caller**, or
 any permission change on user-owned files.
@@ -400,6 +413,33 @@ authoring, so it stays on the user slot (`gmail.modify` covers it):
 gws gmail.users.labels.create --scope user --user hagelk@psd401.net \
   --json '{"name":"Digested"}'
 ```
+
+**Gmail filters.** Same reasoning as labels — a filter organizes the user's own
+inbox — so it is on the user slot too. List, create and delete are all allowed:
+
+```bash
+gws gmail.users.settings.filters.list --scope user --user hagelk@psd401.net
+
+# Skip the inbox and label instead. Get label IDs from gmail.users.labels.list;
+# INBOX and UNREAD are built-in ids you can remove directly.
+gws gmail.users.settings.filters.create --scope user --user hagelk@psd401.net \
+  --json '{"criteria":{"from":"eoc-alarms@psd401.net"},
+           "action":{"addLabelIds":["Label_12"],"removeLabelIds":["INBOX"]}}'
+
+gws gmail.users.settings.filters.delete --scope user --user hagelk@psd401.net \
+  --params '{"id":"<filterId>"}'
+```
+
+Filters need `gmail.settings.basic`, which `gmail.modify` does NOT include, so
+a user whose connection predates 2026-08-28 gets `scope-upgrade-required` on
+the first filter call. That is the ordinary re-consent path — hand them the
+link and retry after they authorize; it is not a failure to report.
+
+Two things this does NOT cover, both by design: **forwarding addresses** and
+**send-as aliases / delegates** live behind `gmail.settings.sharing`, which is
+not granted. If a user asks you to stop mail being forwarded away, you can
+remove the FILTER that forwards it, but you cannot remove a
+Settings → Forwarding rule — say so and point them at Gmail settings.
 
 **Granting a request someone already made.** When a user hits "request access" on an
 agent-owned file, Drive records an access proposal. List them with
@@ -484,6 +524,55 @@ Then report it under Rule 11 with the fileId and both scopes you tried. Do not
 loop. On 2026-08-14 a supervision schedule was retried nine times across eight
 minutes, re-shared as a different file type, and still abandoned — the user had
 shared it correctly the whole time (agent_failures 8289, 8322).
+
+### When Drive says you exceeded your sharing quota
+
+`Rate limit exceeded: Sorry, you have exceeded your sharing quota` on
+`drive.permissions.create` is a Google anti-abuse throttle on the SHARING
+account, not a transient error and not a problem with the file. It is most
+common on a freshly-provisioned `agnt_` account, whose sharing allowance starts
+low and rises over its first days.
+
+Retrying inside the turn cannot clear it — the window is hours, not seconds. On
+2026-08-24 and 2026-08-25 two turns each burned three attempts and ~90 seconds
+of the user's clock before giving up (failures 12744, 13241).
+
+So on this error, once:
+
+1. **Stop.** Do not retry, and do not try a different role — `writer` hits the
+   same quota as `owner`.
+2. **Give them the file anyway.** The document is built and live; only the
+   share failed. Send the `https://docs.google.com/…/d/<id>` link, and say the
+   file is currently owned by `agnt_<their-uniqname>@psd401.net`.
+3. **Say what to do.** Either they ask you to share it again later, or they open
+   it via the link and copy it into their own Drive now.
+
+Never report this as "I could not create the document" — the document exists.
+
+**Google Tasks.** The agent may add tasks to the user's own lists and reorder
+them — `tasks.tasks.insert`, `tasks.tasks.move` — on the user slot. `move`
+takes the destination in `--params`, not `--json`:
+
+```bash
+# Put a task directly under a heading task, as its child.
+gws tasks.tasks.move --scope user --user hagelk@psd401.net \
+  --params '{"tasklist":"@default","task":"<taskId>","parent":"<headingTaskId>"}'
+
+# Or just reposition it after another task at the same level.
+gws tasks.tasks.move --scope user --user hagelk@psd401.net \
+  --params '{"tasklist":"@default","task":"<taskId>","previous":"<afterTaskId>"}'
+```
+
+Deleting tasks or task lists stays forbidden on both slots (Phase 1).
+
+**Finding a person's DM space.** To deliver into your one-to-one Chat with
+someone, resolve the space first — `chat.spaces.list` only returns spaces that
+already exist for you, so a DM you have never used will not appear there:
+
+```bash
+gws chat.spaces.findDirectMessage --scope agent --user hagelk@psd401.net \
+  --params '{"name":"users/<googleUserId>"}'
+```
 
 ## My inbox vs your inbox
 

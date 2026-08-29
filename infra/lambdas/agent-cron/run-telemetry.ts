@@ -499,6 +499,58 @@ export async function writeCronFailure(
   );
 }
 
+/**
+ * Settle the HARNESS's failure row after a scheduled turn was promoted.
+ *
+ * Mirrors agent-router's `markPromotedTurnRecovered` — see the reasoning
+ * there. The row this touches is not one this Lambda wrote: the harness
+ * records it inside the container the moment the interactive clock runs out or
+ * the transcript overflows, keyed on the AgentCore runtime session id, before
+ * anything here knows the turn is about to be resumed on the job path.
+ *
+ * `sessionId` must therefore be the RUNTIME session (`runtimeSessionId`), not
+ * the per-schedule conversation session — matching what the container wrote.
+ *
+ * Bounded to the newest unacknowledged row of this class in the last five
+ * minutes so a runtime session id, which is stable per owner rather than per
+ * turn, cannot settle an unrelated failure.
+ */
+export async function settlePromotedTurnFailure(
+  config: RunTelemetryConfig,
+  rdsDataClient: RunTelemetryRdsClient,
+  params: { sessionId: string; errorClass: string },
+): Promise<void> {
+  if (!config.databaseResourceArn || !config.databaseSecretArn) {
+    throw new Error('Cron failure telemetry database is not configured');
+  }
+  await rdsDataClient.execute({
+    resourceArn: config.databaseResourceArn,
+    secretArn: config.databaseSecretArn,
+    database: config.databaseName,
+    sql: `UPDATE agent_failures
+             SET severity = 'warn',
+                 acknowledged = TRUE,
+                 acknowledged_by = 'system:job-promotion',
+                 acknowledged_at = NOW(),
+                 context = COALESCE(context, '{}'::jsonb)
+                           || '{"promoted":true}'::jsonb
+           WHERE id = (
+             SELECT id
+               FROM agent_failures
+              WHERE session_id = :session_id
+                AND error_class = :error_class
+                AND acknowledged = FALSE
+                AND occurred_at > NOW() - INTERVAL '5 minutes'
+              ORDER BY occurred_at DESC
+              LIMIT 1
+           )`,
+    parameters: [
+      { name: 'session_id', value: { stringValue: params.sessionId } },
+      { name: 'error_class', value: { stringValue: params.errorClass } },
+    ],
+  });
+}
+
 type CronFailureRecorder = (
   params: CronFailureRecord,
   log: CronTelemetryLogger,

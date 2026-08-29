@@ -70,6 +70,19 @@ const READ_ACTIONS = new Set([
   "get",
   "list",
   "search",
+  // Chat's `spaces.findDirectMessage` is a GET that resolves the DM space the
+  // caller shares with one person; it creates nothing and sends nothing. Being
+  // spelled as a verb rather than `get` was the only reason it fell through to
+  // the write allowlist and was refused with operation_not_allowed, which left
+  // a scheduled digest with no way to find the DM it was supposed to deliver
+  // into (agent_failures 14394, 2026-08-28).
+  //
+  // Classified as a READ rather than allowlisted as a Chat write on purpose:
+  // ALLOWED_CHAT_WRITES is derived from ALLOWED_WRITES precisely because every
+  // Chat WRITE leaves the owner's Workspace and must reach the outbound audit
+  // log. A lookup that sends nothing would enter that derivation as an audit
+  // row with a null space and null body, which is not what the log means.
+  "finddirectmessage",
 ])
 
 // Bare mutating verbs only. `+`-prefixed helper verbs are covered by the
@@ -129,6 +142,25 @@ const ALLOWED_WRITES = new Set([
   "gmail users drafts create",
   "gmail users drafts update",
   "gmail users labels create",
+  // Inbox filters, on the user's own mailbox — the organizing counterpart to
+  // the label create directly above, and useless without it: three users asked
+  // for skip-inbox-and-label rules or for existing rules to be removed, and
+  // every attempt was refused (agent_failures 12909, 13866, 14559).
+  //
+  // NOTE THE TRUNCATION. operationTokens caps at FOUR positionals, so this one
+  // entry is the whole `gmail.users.settings.filters` resource — create, get,
+  // list and delete alike, since the fifth token never reaches the operation
+  // string. That is the intended grant here (removing a filter is half the
+  // ask), but it means this entry cannot be narrowed to a subset of actions
+  // without a payload-level validator. Sibling settings resources are NOT
+  // covered: `forwardingAddresses`, `sendAs`, `delegates` and `updateVacation`
+  // each occupy the fourth token themselves and so remain refused.
+  //
+  // Requires `gmail.settings.basic`, which `gmail.modify` does NOT imply — see
+  // SCOPES_BY_KIND in actions/agent-workspace.actions.ts and the scope gap in
+  // requiredWorkspaceScopeGap below, without which this widening would only
+  // convert our refusal into a Google 403.
+  "gmail users settings filters",
   "gmail users messages modify",
   // Helper forms of writes already permitted in canonical form. Verified
   // against the pinned gws v0.22.5 binary: `sheets +append` and `drive
@@ -161,6 +193,21 @@ const ALLOWED_WRITES = new Set([
   "slides presentations batchupdate",
   "slides presentations create",
   "tasks tasks insert",
+  // Reordering / reparenting a task inside a list the agent may already insert
+  // into. A user asked for their tasks grouped under four heading tasks; the
+  // four headings were inserted on the user slot and then could not be moved,
+  // so the list was left worse than before (agent_failures 14031).
+  //
+  // Placed with `tasks tasks insert` — i.e. NOT in AGENT_ONLY_WRITES — rather
+  // than with `patch`/`update`, which are agent-only. A move changes position
+  // and parent, never content, and the user slot already permits the strictly
+  // larger act of creating the task being moved. Drawing the impersonation
+  // line between "may add a task to your list" and "may reorder it" would
+  // leave the reported case broken for no gain in containment.
+  //
+  // The inconsistency with `patch`/`update` was raised and the user-slot
+  // placement was confirmed deliberately (2026-08-28). Settled, not overlooked.
+  "tasks tasks move",
   "tasks tasks patch",
   "tasks tasks update",
 ])
@@ -236,6 +283,8 @@ const AGENT_ONLY_WRITES = new Set([
 const DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
 const DRIVE_READ_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 const DRIVE_METADATA_SCOPE = "https://www.googleapis.com/auth/drive.metadata"
+const GMAIL_SETTINGS_SCOPE =
+  "https://www.googleapis.com/auth/gmail.settings.basic"
 const DRIVE_METADATA_FIELDS = new Set([
   "name",
   "starred",
@@ -1147,7 +1196,23 @@ export function requiredWorkspaceScopeGap(
   const operation = tokens.join(" ")
   const granted = new Set(grantedScopeString.split(/\s+/).filter(Boolean))
   const required: WorkspaceScopeGap | null =
-    operation === "drive files update"
+    // `gmail.modify` does not imply `gmail.settings.basic`, and Gmail requires
+    // the latter for every settings.filters call. Without this branch the
+    // allowlist entry above would simply move the failure downstream: instead
+    // of our operation_not_allowed the user would get an opaque Google 403,
+    // which is the shape of the Classroom scope failure from the same week
+    // (agent_failures 13536). Reported as a gap instead, this reaches the
+    // existing `scope-upgrade-required` path and the skill hands the user a
+    // re-authorize link.
+    //
+    // Every user with an existing refresh token needs that re-consent: a
+    // stored token keeps the scope set it was ISSUED with.
+    operation === "gmail users settings filters"
+      ? {
+          scopes: [GMAIL_SETTINGS_SCOPE],
+          capability: "manage the filters in your Gmail inbox",
+        }
+      : operation === "drive files update"
       ? {
           scopes: [DRIVE_METADATA_SCOPE],
           capability: "rename and move files in your Drive",

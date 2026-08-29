@@ -25,7 +25,7 @@ import {
 import { contentErrorToResponse, resolveRestRequester } from "@/lib/content/rest";
 import {
   assertContentAuthoringCapability,
-  contentDeepLink,
+  contentSurfaceLink,
   resolveCollectionId,
 } from "@/lib/content/surface-helpers";
 import { createLogger } from "@/lib/logger";
@@ -58,7 +58,7 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId, par
     const req = await requesterFromApiAuth(auth);
     const obj = await contentService.get(req, id);
     const response = createApiResponse(
-      { data: { ...obj, url: contentDeepLink(obj.slug) }, meta: { requestId } },
+      { data: { ...obj, url: contentSurfaceLink(obj) }, meta: { requestId } },
       requestId
     );
     response.headers.set("ETag", contentHeadEtag(obj.currentVersionId));

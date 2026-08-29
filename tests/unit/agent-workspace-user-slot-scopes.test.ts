@@ -45,6 +45,10 @@ function userAccountScopes(): string[] {
 
 const DRIVE_READONLY = "https://www.googleapis.com/auth/drive.readonly";
 const DRIVE_METADATA = "https://www.googleapis.com/auth/drive.metadata";
+const GMAIL_SETTINGS_BASIC =
+  "https://www.googleapis.com/auth/gmail.settings.basic";
+const GMAIL_SETTINGS_SHARING =
+  "https://www.googleapis.com/auth/gmail.settings.sharing";
 
 describe("user-slot consent scopes", () => {
   it("is exactly the approved set — no more, no less", () => {
@@ -59,9 +63,26 @@ describe("user-slot consent scopes", () => {
         DRIVE_METADATA,
         DRIVE_READONLY,
         "https://www.googleapis.com/auth/gmail.modify",
+        GMAIL_SETTINGS_BASIC,
         "https://www.googleapis.com/auth/tasks",
       ].sort()
     );
+  });
+
+  it("grants gmail.settings.basic for inbox filters (approved 2026-08-28)", () => {
+    // gmail.modify does NOT cover settings.filters, so filter management was
+    // impossible for three users who asked for it (agent_failures 12909,
+    // 13866, 14559) — the broker allowlist alone could not have fixed it.
+    expect(userAccountScopes()).toContain(GMAIL_SETTINGS_BASIC);
+  });
+
+  it("never requests gmail.settings.sharing — the account-takeover half", () => {
+    // `.basic` covers filters, labels, vacation and IMAP/POP. `.sharing` is
+    // the one that adds FORWARDING ADDRESSES, SEND-AS ALIASES and DELEGATES:
+    // standing configuration that redirects a mailbox or lets another account
+    // send as this user. Nothing asked for needs it, and it must not arrive as
+    // a side effect of wanting filters.
+    expect(userAccountScopes()).not.toContain(GMAIL_SETTINGS_SHARING);
   });
 
   it("grants the two Drive scopes #1305 added", () => {

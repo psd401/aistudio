@@ -3,6 +3,7 @@ import {
   createRunTelemetry,
   isPromotedRunPending,
   reservePromotedRunId,
+  settlePromotedTurnFailure,
   updatePromotedRunTerminal,
   writePreflightRun,
   type CronTelemetryLogger,
@@ -25,6 +26,70 @@ function harness(overrides: Partial<typeof config> = {}) {
   const log = { warn, error } satisfies CronTelemetryLogger
   return { telemetry, execute, warn, error, log }
 }
+
+describe("settling a promoted turn's harness failure row", () => {
+  // The harness writes its row the moment the interactive clock runs out or
+  // the transcript overflows — before anything knows the turn is about to be
+  // resumed on the job path and answered. In the week of 2026-08-21 that made
+  // 14 of prod's 35 hard-error rows describe turns the user got answered
+  // (10/10 ChatDeadlineExpired*, 4/4 ContextOverflow — every promotable row
+  // was in fact promoted, within ~20s).
+  it("downgrades and self-acknowledges the row rather than deleting it", async () => {
+    const execute = jest.fn().mockResolvedValue({})
+
+    await settlePromotedTurnFailure(config, { execute }, {
+      sessionId: "agent-rt-abc-def",
+      errorClass: "ChatDeadlineExpired",
+    })
+
+    const { sql, parameters } = execute.mock.calls[0][0]
+    // Kept, not removed: the 550s ceiling is worth trending.
+    expect(sql).toContain("UPDATE agent_failures")
+    expect(sql).not.toContain("DELETE")
+    expect(sql).toContain("severity = 'warn'")
+    expect(sql).toContain("acknowledged = TRUE")
+    expect(sql).toContain("'system:job-promotion'")
+    expect(sql).toContain('\'{"promoted":true}\'::jsonb')
+    expect(parameters).toEqual([
+      { name: "session_id", value: { stringValue: "agent-rt-abc-def" } },
+      {
+        name: "error_class",
+        value: { stringValue: "ChatDeadlineExpired" },
+      },
+    ])
+  })
+
+  it("cannot settle a row belonging to another turn", async () => {
+    // The runtime session id is stable per OWNER, not per turn, so the match
+    // has to be bounded or a promotion could acknowledge an unrelated,
+    // genuinely-broken failure from the same user.
+    const execute = jest.fn().mockResolvedValue({})
+
+    await settlePromotedTurnFailure(config, { execute }, {
+      sessionId: "agent-rt-abc-def",
+      errorClass: "ContextOverflow",
+    })
+
+    const { sql } = execute.mock.calls[0][0]
+    expect(sql).toContain("acknowledged = FALSE")
+    expect(sql).toContain("NOW() - INTERVAL '5 minutes'")
+    expect(sql).toContain("ORDER BY occurred_at DESC")
+    expect(sql).toContain("LIMIT 1")
+  })
+
+  it("refuses to run without a configured database", async () => {
+    const execute = jest.fn()
+
+    await expect(
+      settlePromotedTurnFailure(
+        { ...config, databaseResourceArn: "" },
+        { execute },
+        { sessionId: "agent-rt-abc-def", errorClass: "ChatDeadlineExpired" },
+      ),
+    ).rejects.toThrow("not configured")
+    expect(execute).not.toHaveBeenCalled()
+  })
+})
 
 describe("agent-cron run telemetry", () => {
   it("reserves a promoted row ID without creating the row", async () => {

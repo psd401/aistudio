@@ -818,11 +818,38 @@ async function createWorkspaceFinalizationProof(
   return `${WORKSPACE_FINALIZATION_PROOF_VERSION}.${encoded}.${signature}`
 }
 
+/**
+ * Verify a checkpoint finalization proof.
+ *
+ * `journaledReplay` relaxes ONLY the invocation binding (`invocationNonce`,
+ * `expiresAt`) — never the signature, the workspace prefix, or the generation.
+ *
+ * Why it has to: a final flush that fails or times out leaves a fenced batch
+ * pending in the harness, which retries that exact batch at the START OF THE
+ * NEXT INVOCATION (agentcore_wrapper.py, pre-restore retry). The stored proof
+ * carries the ORIGINAL invocation's nonce and expiry, so with the binding
+ * enforced the retry could never succeed — it 409'd every time, the restore
+ * aborted, push was disabled for the microVM, and the user lost the turn plus
+ * their un-pushed local changes. That is the entire `WorkspaceMigrationFailed`
+ * cluster (6 rows / 5 users in the week of 2026-08-21, all with the message
+ * "Workspace finalization proof is invalid").
+ *
+ * Why it is safe to: the caller only passes `journaledReplay` when a journal
+ * entry on THIS prefix already matches the request byte for byte — same owner
+ * hash, base generation, proof hash, reservation ids, and deleted paths. That
+ * entry can only exist because a correctly-bound invocation already admitted
+ * this request. The binding's job is to stop a proof being replayed as a
+ * DIFFERENT request; an identical replay of an already-admitted one is exactly
+ * the idempotent resume the journal exists to allow. Cross-generation and
+ * cross-owner replay stay blocked by the retained generation claim and the
+ * manifest-generation check below.
+ */
 // Proof verification deliberately checks every authenticated claim before use.
 // eslint-disable-next-line complexity
 async function verifyWorkspaceFinalizationProof(
   proof: string,
   expected: WorkspaceFinalizationProofClaims,
+  options: { journaledReplay?: boolean } = {},
 ): Promise<void> {
   if (
     !proof ||
@@ -885,10 +912,20 @@ async function verifyWorkspaceFinalizationProof(
     candidate.signedWorkspacePrefix !==
       expected.signedWorkspacePrefix ||
     candidate.workspaceGeneration !== expected.workspaceGeneration ||
-    candidate.invocationNonce !== expected.invocationNonce ||
-    candidate.expiresAt !== expected.expiresAt ||
-    !Number.isInteger(candidate.expiresAt) ||
-    candidate.expiresAt! < Math.floor(Date.now() / 1000)
+    typeof candidate.invocationNonce !== "string" ||
+    !candidate.invocationNonce ||
+    !Number.isInteger(candidate.expiresAt)
+  ) {
+    throw new WorkspaceStorageCompletionError(
+      "Workspace finalization proof is invalid",
+    )
+  }
+  // The invocation binding is the only thing a journaled replay may outlive.
+  if (
+    !options.journaledReplay &&
+    (candidate.invocationNonce !== expected.invocationNonce ||
+      candidate.expiresAt !== expected.expiresAt ||
+      candidate.expiresAt! < Math.floor(Date.now() / 1000))
   ) {
     throw new WorkspaceStorageCompletionError(
       "Workspace finalization proof is invalid",
@@ -4241,13 +4278,19 @@ export async function finalizeWorkspaceCheckpoint(
         const existingJournal = await readWorkspaceFinalizationJournal(
           prefix,
         )
-        if (
+        // A byte-identical journal entry proves THIS EXACT request was already
+        // admitted under a valid invocation binding: same owner, same prefix,
+        // same base generation, same proof hash, same reservations, same
+        // deletions. The replay may therefore arrive on a LATER invocation —
+        // see the `journaledReplay` note on verifyWorkspaceFinalizationProof.
+        const journaledReplay = Boolean(
           existingJournal &&
           workspaceFinalizationRequestsEqual(
             existingJournal,
             journalRequest,
           )
-        ) {
+        )
+        if (existingJournal && journaledReplay) {
           if (existingJournal.state !== "pending") {
             if (
               manifest &&
@@ -4296,6 +4339,7 @@ export async function finalizeWorkspaceCheckpoint(
             invocationNonce,
             expiresAt: invocationExpiresAt,
           },
+          { journaledReplay },
         )
         if (
           !manifest ||

@@ -20,6 +20,45 @@ export function contentDeepLink(slug: string): string {
 }
 
 /**
+ * The authoring-surface link for an object that has no live reader page.
+ *
+ * Artifacts get the chrome-free full-screen view; documents get the authoring
+ * page, which is where their body actually renders. Both are gated purely on
+ * `canView`, so an owner reaches their own unpublished content through either.
+ */
+function atriumSurfaceLink(id: string, kind: "document" | "artifact"): string {
+  const base = process.env.ATRIUM_PUBLIC_BASE_URL?.replace(/\/$/, "") ?? "";
+  return `${base}/atrium/${id}/${kind === "artifact" ? "view" : "edit"}`;
+}
+
+/**
+ * The link to hand a caller for a content object — the one that will actually
+ * open for someone who can view it.
+ *
+ * `/c/{slug}` requires a LIVE INTRANET PUBLICATION (see the reader page). For a
+ * draft it 404s, and because the reader masks existence it 404s for the OWNER
+ * too. Returning it unconditionally therefore handed every API and skill caller
+ * a dead link for content that had just been created: psd-morning-brief creates
+ * a private artifact and never publishes it, so EVERY morning brief DM linked
+ * to a page that 404'd for its own recipient — every user, every day, from the
+ * feature's first run until this fix. It surfaced only because one user
+ * reported it twice (failures 13503 / 13998, week of 2026-08-21).
+ *
+ * Published objects keep the canonical reader link; everything else gets the
+ * authoring surface, which renders the head version for anyone who can view it.
+ */
+export function contentSurfaceLink(object: {
+  id: string;
+  slug: string;
+  kind: "document" | "artifact";
+  status: "draft" | "published" | "archived";
+}): string {
+  return object.status === "published"
+    ? contentDeepLink(object.slug)
+    : atriumSurfaceLink(object.id, object.kind);
+}
+
+/**
  * The PUBLIC (anonymous) reader link for a content object at `/p/[slug]` — the
  * `external_ref` the `public_web` publish adapter records and the URL a
  * public-web publication is served at (Phase 7, #1057). Built from
