@@ -157,6 +157,10 @@ describe("tasks tasks move", () => {
     // changes position and parent, never content, and the user slot already
     // permits creating the task being moved. The reported case (14031) was a
     // user-slot insert followed by a user-slot move.
+    //
+    // The inconsistency with patch/update was raised and this placement was
+    // confirmed deliberately (2026-08-28), so moving `tasks tasks move` into
+    // AGENT_ONLY_WRITES is a reversal of a settled decision, not a cleanup.
     expect(() =>
       check(
         [

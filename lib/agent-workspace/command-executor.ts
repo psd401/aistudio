@@ -204,6 +204,9 @@ const ALLOWED_WRITES = new Set([
   // larger act of creating the task being moved. Drawing the impersonation
   // line between "may add a task to your list" and "may reorder it" would
   // leave the reported case broken for no gain in containment.
+  //
+  // The inconsistency with `patch`/`update` was raised and the user-slot
+  // placement was confirmed deliberately (2026-08-28). Settled, not overlooked.
   "tasks tasks move",
   "tasks tasks patch",
   "tasks tasks update",
