@@ -146,7 +146,15 @@ Migrations run via Lambda function:
 | `textract/` | OCR document processing |
 | `group-sync/` | Google Directory synchronization |
 | `atrium-content-key-bootstrap/` | Atrium key provisioning |
-| `agent-router/` | Agent request routing |
+| `agent-router/` | Agent request routing with promoted turn recovery |
+
+### Agent Router
+
+The `agent-router` Lambda handles agent request routing with automatic failure telemetry hygiene:
+
+**Promoted Turn Recovery**: When an interactive turn times out (~550s ceiling) or overflows context but is promoted to a job queue, `markPromotedTurnRecovered()` downgrades the failure row from `error` to `warn` with `system:job-promotion` acknowledgment. This preserves latency trending while ensuring the Failures tab shows what actually broke.
+
+For multi-turn agent architecture, see **[agent-platform/overview.md](../agent-platform/overview.md)**.
 
 ### Agent Platform Lambdas
 

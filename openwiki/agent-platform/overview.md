@@ -92,6 +92,66 @@ The skill initializer (`infra/lambdas/agent-skill-initializer/`) handles both re
 
 ---
 
+## Workspace Checkpoint Recovery
+
+Agent workspaces use journal-based finalization proofs to survive invocation failures and resume idempotently.
+
+### Journal-Based Finalization
+
+When workspace changes are committed, a finalization proof is stored in the journal table with:
+
+- Owner hash and workspace prefix
+- Base generation and proof hash
+- Reservation IDs and deleted paths
+- Invocation nonce and expiry
+
+If a final flush fails or times out, the harness retries the fenced batch at the start of the next invocation. The stored proof carries the original invocation's nonce and expiry.
+
+### Journaled Replay
+
+**Source**: `/lib/agent-workspace/storage-broker.ts`
+
+The `journaledReplay` option in `verifyWorkspaceFinalizationProof()` relaxes ONLY the invocation binding—never the signature, workspace prefix, or generation. A byte-identical journal entry proves the request was already admitted under valid invocation, allowing the retry to succeed.
+
+**Why it's safe**: The caller only passes `journaledReplay` when a journal entry on the same prefix matches the request byte for byte. Cross-generation and cross-owner replay remain blocked by the retained generation claim and manifest-generation check.
+
+### Checkpoint Retry Recovery
+
+**Source**: `/infra/agent-image/agentcore_wrapper.py`
+
+When a pending checkpoint cannot be replayed, the local changes are quarantined (generation invalidated) and the turn continues with a full restore from the committed manifest. This records at `warn` severity with `recovered: true` and does not trigger alerts—the failure that matters is a restore that cannot be completed, which still raises.
+
+---
+
+## Failure Telemetry Hygiene
+
+The agent platform carefully tracks failures while avoiding false positives from recovered turns.
+
+### Deferred Failure Recording
+
+**Source**: `/infra/agent-image/harness_adapter.py`
+
+When `process()` may still recover a turn by retrying, the failure is held in `TurnResult.deferred_failure` rather than written immediately. The retry path:
+
+- **Success**: Drops the deferred row—the turn recovered, so no `agent_failures` row is written
+- **Failure**: Flushes both attempts' rows—the turn really did fail twice
+
+This prevents recovered turns from inflating failure metrics. In the week of 2026-08-21, 8 of 10 `OpenClawChatError` rows had already been recovered by retry but were still written as errors, making 10 broken turns appear when only 2 actually failed.
+
+### Promoted Turn Acknowledgement
+
+**Source**: `/infra/lambdas/agent-router/index.ts`, `/infra/lambdas/agent-cron/run-telemetry.ts`
+
+When an interactive turn times out or overflows but is promoted to a job queue, `markPromotedTurnRecovered()` downgrades the failure row:
+
+- Severity set to `warn`
+- Acknowledged with `system:job-promotion`
+- Context marked with `promoted: true`
+
+This preserves latency and overflow trending data while ensuring the Failures tab shows what actually broke. In the week of 2026-08-21, 14 of 35 hard-error rows described turns the user got answered via job promotion.
+
+---
+
 ## Google Workspace Integration
 
 **Documentation**: `/docs/features/agent-workspace-integration.md`
@@ -134,6 +194,36 @@ Agent accounts are provisioned automatically via OneSync sheet:
 | Mint Lambda | `/infra/lambdas/agent-mint/` | WIF token minting (isolated) |
 | Workspace Skill | `/infra/agent-image/skills/psd-workspace/` | Google Workspace CLI wrapper |
 | Cedar Policy | `/infra/policies/cedar/psd-agent-governance.cedar` | Capability allowlisting |
+
+### Operation Allowlist
+
+**Source**: `/lib/agent-workspace/command-executor.ts`
+
+Google Workspace operations are classified into allowlist categories:
+
+| Category | Description | Examples |
+|----------|-------------|----------|
+| `READ_ACTIONS` | Read-only operations, never mutate | `get`, `list`, `search`, `findDirectMessage` |
+| `ALLOWED_WRITES` | User-slot permitted mutations | `gmail users settings filters`, `tasks tasks move` |
+| `AGENT_ONLY_WRITES` | Agent-slot mutations only | `tasks tasks patch`, `tasks tasks update` |
+
+The allowlist evolves based on production failure patterns. Recent additions:
+
+| Operation | Reason |
+|-----------|--------|
+| `spaces.findDirectMessage` | DM lookup sends nothing; was refusing scheduled digests with no way to find target DM |
+| `gmail users settings filters` | Inbox filter management; requires separate `gmail.settings.basic` scope |
+| `tasks tasks move` | Task reordering within lists the user-slot can already insert into |
+
+#### Scope Gap Handling
+
+Some operations require OAuth scopes not implied by existing grants. The `requiredWorkspaceScopeGap()` function detects these gaps and returns a user-facing capability description and re-authorization link:
+
+```
+gmail.modify ≠ gmail.settings.basic
+```
+
+When a user attempts Gmail filter operations without `gmail.settings.basic`, they receive a prompt to re-authorize with the additional scope rather than an opaque Google 403.
 
 ---
 
