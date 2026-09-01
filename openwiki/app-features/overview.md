@@ -3,6 +3,20 @@ type: Feature Overview
 title: Core Application Features
 description: Multi-model AI chat with automatic routing, no-code assistant builder, agent-native content workspace, and knowledge repositories for K-12 education platform.
 tags: [features, nexus, atrium, assistants, knowledge]
+openwiki:
+  roles: [architecture, domain]
+  source_paths:
+    - components/atrium/LibraryView.tsx
+    - components/atrium/LibraryList.tsx
+    - tests/e2e/atrium-library-view-filters.functional.spec.ts
+  invariants:
+    - Filter identity via JSON.stringify captures all ListFilter fields automatically
+    - Unfiled view drops collection scope rather than ANDing into empty grid
+    - Instant card removal on star toggle in Favorites view (local removal)
+    - data-results-key set in same state batch as items/error for E2E synchronization
+  validation_commands:
+    - bun run typecheck
+    - bun run lint
 ---
 
 # Core Application Features
@@ -170,6 +184,27 @@ The `contentSurfaceLink()` function handles this routing automatically. This fix
 - Empty favorites band is suppressed (no empty state shown)
 
 **Section Landing Pages** (`components/atrium/SectionLanding.tsx`) provide collection-specific navigation with settings dialogs for collection owners.
+
+### Library View Filters
+
+The library grid provides filter chips that map to server-side `ListFilter` fields:
+
+| Chip | Filter Field | Behavior |
+|------|-------------|----------|
+| **All content** | — | No filter restriction |
+| **Favorites** | `favorite: true` | Shows only starred content |
+| **Docs** | `kind: "document"` | Documents only |
+| **Artifacts** | `kind: "artifact"` | Artifacts only |
+| **Unfiled** | `filed: "unfiled"` | Content not in any collection |
+| **Archived** | `status: "archived"` | Archived content only |
+
+**Filter Identity Architecture** — The `useLibraryPage` hook uses `JSON.stringify(filter)` for filter identity rather than manually destructuring fields. This prevents silent bugs where new filter fields are added but forgotten in the dependency array. The serialized filter is rendered as `data-results-key` on the grid section so E2E tests can wait for filter changes without racing the debounce.
+
+**Instant Removal in Filtered Views** — When unstarring content inside the Favorites view, the card is removed immediately (local removal, no refetch). The card no longer matches the view's filter condition. In other views, the card remains because the star state is not a filter.
+
+**Section Scope vs. Unfiled** — The `scopedCollectionId` helper drops collection scope when entering the Unfiled view. A `?collection=X` deep link combined with "Unfiled" would otherwise AND `collection_id = X` with `collection_id IS NULL`, resulting in an empty grid by construction.
+
+**Focused Test**: `tests/e2e/atrium-library-view-filters.functional.spec.ts` — Regression guard for Favorites and Unfiled chip filters, including error state handling and legacy `?collection=` scope interactions.
 
 ### MCP Tools
 
