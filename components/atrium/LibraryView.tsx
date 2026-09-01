@@ -861,6 +861,19 @@ function useLibraryPage(filter: LibraryPageFilter) {
 }
 
 /**
+ * A card dragged into (or out of) a section by `AtriumDndProvider` changes its
+ * filing, so it must leave a section view / the Unfiled view: re-fetch page
+ * one, exactly like a bulk move does through `refresh`. Its own hook so the
+ * listener does not count against `LibraryView`'s max-lines budget.
+ */
+function useContentMovedRefresh(refresh: () => void): void {
+  useEffect(() => {
+    window.addEventListener("atrium:content-moved", refresh);
+    return () => window.removeEventListener("atrium:content-moved", refresh);
+  }, [refresh]);
+}
+
+/**
  * Multi-select state for the bulk-action bar (#1336). The caller clears it
  * whenever the underlying set changes (filter/search/section change or a
  * post-mutation refetch) so a bulk action can never operate on ids the user can
@@ -1042,6 +1055,8 @@ export function LibraryView({
   useFilterChangeReset(fetchPage, clearSelection);
 
   const handleFavoriteChange = useFavoriteViewPrune(favorite === true, removeItem);
+
+  useContentMovedRefresh(refresh);
 
   // `refresh` (re-fetch page one after a bulk mutation, so archived rows leave
   // the default views and moved rows leave a section view) comes from the hook

@@ -170,3 +170,49 @@ export async function updateCollectionAction(
     );
   }
 }
+
+/**
+ * Drag-reorder one complete sibling group in the sidebar tree. `orderedIds`
+ * is the group's ids in their new sequence; the service enforces that they are
+ * true siblings, that the group is complete, and `assertMayManage` on each.
+ */
+export async function reorderCollectionsAction(
+  orderedIds: string[]
+): Promise<ActionState<null>> {
+  const requestId = generateRequestId();
+  const timer = startTimer("reorderCollectionsAction");
+  const log = createLogger({ requestId, action: "reorderCollectionsAction" });
+  try {
+    log.info("Action started: reorder collections", {
+      count: Array.isArray(orderedIds) ? orderedIds.length : -1,
+    });
+    const requester = await authorizedRequester(requestId);
+    if (
+      !Array.isArray(orderedIds) ||
+      orderedIds.length === 0 ||
+      orderedIds.some((id) => typeof id !== "string")
+    ) {
+      throw new ValidationError("orderedIds must be a non-empty list of collection ids");
+    }
+    await collectionManagementService.reorder(requester, orderedIds, {
+      surface: "ui",
+      requestId,
+    });
+    timer({ status: "success" });
+    log.info("Collections reordered", { count: orderedIds.length });
+    return createSuccess(null, "Collections reordered");
+  } catch (error) {
+    timer({ status: "error" });
+    return handleError(
+      error,
+      error instanceof ContentError
+        ? error.message
+        : "Failed to reorder collections",
+      {
+        context: "reorderCollectionsAction",
+        requestId,
+        operation: "reorderCollectionsAction",
+      }
+    );
+  }
+}

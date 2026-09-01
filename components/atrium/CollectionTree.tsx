@@ -20,18 +20,138 @@
  * Expansion starts COLLAPSED and is remembered per viewer (`useExpandedSections`,
  * localStorage). It used to be a per-row `useState(true)`: every section unfolded
  * on every visit, and a collapse survived only until the next route change.
+ *
+ * Drag-and-drop (see `dnd/atrium-dnd.tsx`): every row is a drop target for
+ * library cards and for other rows; the group headings are targets for "move to
+ * the top level". Rows the viewer may manage (administrators for district
+ * sections, owners for their private collections — the same rule as the
+ * server's `assertMayManage`) also get a grip handle and take part in sibling
+ * reordering. The provider performs the moves; this component only registers
+ * targets, lights them up, and shows the provider's status line.
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { ChevronDown, ChevronRight, FolderOpen, Layers, Lock } from "lucide-react";
+import { useDroppable } from "@dnd-kit/core";
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import {
+  ChevronDown,
+  ChevronRight,
+  FolderOpen,
+  GripVertical,
+  Layers,
+  Lock,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { collectionTreeAction } from "@/actions/db/atrium/collection-tree";
 import type { CollectionTreeNode } from "@/lib/content";
 import { createLogger } from "@/lib/client-logger";
 import { useUser } from "@/components/auth/user-provider";
 import { useExpandedSections } from "./use-expanded-sections";
+import {
+  intoId,
+  rootId,
+  useAtriumDnd,
+  type DragPayload,
+  type DropPayload,
+} from "./dnd/atrium-dnd-context";
 
 const log = createLogger({ component: "CollectionTree" });
+
+/**
+ * Who may move which rows — a mirror of the server's `assertMayManage`:
+ * administrators manage district sections; a private collection is managed by
+ * its owner (and by nobody else — not even an administrator). The server
+ * re-checks on every drop; this only decides which rows get a grip handle.
+ */
+function useCanManageCollection(): {
+  userId: number | null;
+  canManage: (node: CollectionTreeNode) => boolean;
+} {
+  const { user, roles } = useUser();
+  const isAdmin = roles.some((role) => role.name === "administrator");
+  const userId = user?.id ?? null;
+  const canManage = useCallback(
+    (node: CollectionTreeNode): boolean =>
+      node.scope === "private"
+        ? userId !== null && node.ownerUserId === userId
+        : isAdmin,
+    [isAdmin, userId]
+  );
+  return { userId, canManage };
+}
+
+/** The provider's outcome line for the last drop (success or the server's refusal). */
+function DndStatusLine(): React.JSX.Element | null {
+  const { status } = useAtriumDnd();
+  if (!status) return null;
+  return (
+    <p
+      role="status"
+      className="mer-tree-status px-2 py-1 text-xs"
+      data-tone={status.tone}
+      data-testid="tree-dnd-status"
+    >
+      {status.text}
+    </p>
+  );
+}
+
+/** Every id nested under a node — the set a dragged row may never land in. */
+function descendantIdsOf(node: CollectionTreeNode): string[] {
+  const out: string[] = [];
+  const walk = (n: CollectionTreeNode) => {
+    for (const child of n.children) {
+      out.push(child.id);
+      walk(child);
+    }
+  };
+  walk(node);
+  return out;
+}
+
+function scopeOf(node: CollectionTreeNode): "district" | "private" {
+  return node.scope === "private" ? "private" : "district";
+}
+
+/**
+ * A group heading ("Sections" / "My collections") that is also the "move to
+ * the top level" drop target for its scope, and the "un-file" target for cards.
+ */
+function GroupHeading({
+  scope,
+  icon,
+  label,
+  className,
+}: {
+  scope: "district" | "private";
+  icon: React.ReactNode;
+  label: string;
+  className?: string;
+}): React.JSX.Element {
+  const { active } = useAtriumDnd();
+  const { setNodeRef, isOver } = useDroppable({
+    id: rootId(scope),
+    data: { kind: "root", scope } satisfies DropPayload,
+  });
+  return (
+    <div
+      ref={setNodeRef}
+      data-drop-over={isOver && active ? "true" : undefined}
+      className={cn(
+        "flex items-center gap-1.5 px-2 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground",
+        className
+      )}
+    >
+      {icon}
+      {label}
+    </div>
+  );
+}
 
 interface CollectionTreeProps {
   /** Currently selected collection id, or null for "All content". */
@@ -54,6 +174,8 @@ function TreeRow({
   onSelect,
   expandedIds,
   onToggle,
+  siblingIds,
+  canManage,
 }: {
   node: CollectionTreeNode;
   depth: number;
@@ -67,22 +189,69 @@ function TreeRow({
   /** Ids the viewer has expanded (tree-level, persisted) — see `useExpandedSections`. */
   expandedIds: ReadonlySet<string>;
   onToggle: (collectionId: string) => void;
+  /** This row's whole sibling group in tree order — the drag-reorder payload. */
+  siblingIds: string[];
+  /** Whether the viewer may move a row (mirrors the server's `assertMayManage`). */
+  canManage: (node: CollectionTreeNode) => boolean;
 }): React.JSX.Element {
   const hasChildren = node.children.length > 0;
   const expanded = expandedIds.has(node.id);
   const isSelected = selectedCollectionId === node.id;
+  const manageable = canManage(node);
+  const { active } = useAtriumDnd();
+
+  // Sortable (this row as something to drag) — disabled, not hidden, for rows
+  // the viewer may not manage, so they still count as reorder targets' siblings.
+  const dragPayload: DragPayload = {
+    kind: "collection",
+    id: node.id,
+    name: node.name,
+    parentId: node.parentId,
+    scope: scopeOf(node),
+    siblingIds,
+    descendantIds: descendantIdsOf(node),
+  };
+  const {
+    attributes,
+    listeners,
+    setNodeRef: setSortableRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: node.id, data: dragPayload, disabled: !manageable });
+
+  // Droppable (this row as somewhere to land). Registered on the row div, not
+  // the <li>, so the nested children list is never part of the target rect.
+  const { setNodeRef: setDropRef, isOver } = useDroppable({
+    id: intoId(node.id),
+    data: {
+      kind: "into",
+      collectionId: node.id,
+      scope: scopeOf(node),
+      childCount: node.children.length,
+    } satisfies DropPayload,
+  });
+  const childIds = node.children.map((child) => child.id);
 
   return (
-    <li>
+    <li
+      ref={setSortableRef}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+      data-dragging={isDragging ? "true" : undefined}
+    >
       <div
+        ref={setDropRef}
         // `data-selected` is a stable styling hook: the Meridian shell restyles
         // the selected row via `.mer-navcol [data-selected="true"]` (see
         // styles/meridian.css) rather than depending on the Tailwind
         // utility class strings below, which have no compile-time link to that CSS
         // and are shared with the reader sidebar. It is inert everywhere else.
         data-selected={isSelected ? "true" : undefined}
+        // Lit only while something is actually being dragged over it.
+        data-drop-over={isOver && active ? "true" : undefined}
+        data-testid={`section-row-${node.id}`}
         className={cn(
-          "flex items-center gap-1 rounded-md px-2 py-1.5 text-sm",
+          "group/row flex items-center gap-1 rounded-md px-2 py-1.5 text-sm",
           isSelected
             ? "bg-accent text-accent-foreground font-medium"
             : "hover:bg-muted/60"
@@ -134,23 +303,65 @@ function TreeRow({
             </span>
           )}
         </button>
+        {manageable && (
+          // The drag handle. Only the handle starts a drag, so clicking the
+          // name still navigates and the chevron still toggles.
+          <button
+            type="button"
+            className="mer-tree-grip shrink-0 rounded p-1 hover:bg-muted"
+            aria-label={`Move ${node.name}`}
+            title="Drag to move or reorder"
+            data-testid={`move-collection-${node.id}`}
+            {...attributes}
+            {...listeners}
+          >
+            <GripVertical className="h-3.5 w-3.5" aria-hidden="true" />
+          </button>
+        )}
       </div>
       {hasChildren && expanded && (
-        <ul id={`section-children-${node.id}`}>
-          {node.children.map((child) => (
-            <TreeRow
-              key={child.id}
-              node={child}
-              depth={depth + 1}
-              selectedCollectionId={selectedCollectionId}
-              onSelect={onSelect}
-              expandedIds={expandedIds}
-              onToggle={onToggle}
-            />
-          ))}
-        </ul>
+        <SortableContext items={childIds} strategy={verticalListSortingStrategy}>
+          <ul id={`section-children-${node.id}`}>
+            {node.children.map((child) => (
+              <TreeRow
+                key={child.id}
+                node={child}
+                depth={depth + 1}
+                selectedCollectionId={selectedCollectionId}
+                onSelect={onSelect}
+                expandedIds={expandedIds}
+                onToggle={onToggle}
+                siblingIds={childIds}
+                canManage={canManage}
+              />
+            ))}
+          </ul>
+        </SortableContext>
       )}
     </li>
+  );
+}
+
+/** One sibling group's rows: a sortable list, so drags reorder within it. */
+function TreeRows({
+  nodes,
+  rowProps,
+}: {
+  nodes: CollectionTreeNode[];
+  rowProps: Omit<
+    React.ComponentProps<typeof TreeRow>,
+    "node" | "depth" | "siblingIds"
+  >;
+}): React.JSX.Element {
+  const ids = nodes.map((n) => n.id);
+  return (
+    <SortableContext items={ids} strategy={verticalListSortingStrategy}>
+      <ul>
+        {nodes.map((node) => (
+          <TreeRow key={node.id} node={node} depth={0} siblingIds={ids} {...rowProps} />
+        ))}
+      </ul>
+    </SortableContext>
   );
 }
 
@@ -165,8 +376,8 @@ export function CollectionTree({
   // Per-viewer, persisted expansion set. `user` resolves asynchronously from
   // UserProvider; until then the hook runs memory-only under an anonymous key,
   // and switches to the viewer's stored layout in the same commit `user` lands.
-  const { user } = useUser();
-  const [expandedIds, toggleExpanded] = useExpandedSections(user?.id ?? null);
+  const { userId, canManage } = useCanManageCollection();
+  const [expandedIds, toggleExpanded] = useExpandedSections(userId);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -203,16 +414,24 @@ export function CollectionTree({
   // construction, so grouping deeper would just repeat the same label.
   const districtNodes = tree.filter((n) => n.scope !== "private");
   const privateNodes = tree.filter((n) => n.scope === "private");
+  const rowProps = {
+    selectedCollectionId,
+    onSelect,
+    expandedIds,
+    onToggle: toggleExpanded,
+    canManage,
+  };
 
   return (
     <nav
       aria-label="Content sections"
       className={cn("flex flex-col gap-1 text-sm", className)}
     >
-      <div className="flex items-center gap-1.5 px-2 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        <Layers className="h-3.5 w-3.5" />
-        Sections
-      </div>
+      <GroupHeading
+        scope="district"
+        icon={<Layers className="h-3.5 w-3.5" />}
+        label="Sections"
+      />
       <ul>
         <li>
           <button
@@ -246,19 +465,7 @@ export function CollectionTree({
         </p>
       )}
       {!loading && districtNodes.length > 0 && (
-        <ul>
-          {districtNodes.map((node) => (
-            <TreeRow
-              key={node.id}
-              node={node}
-              depth={0}
-              selectedCollectionId={selectedCollectionId}
-              onSelect={onSelect}
-              expandedIds={expandedIds}
-              onToggle={toggleExpanded}
-            />
-          ))}
-        </ul>
+        <TreeRows nodes={districtNodes} rowProps={rowProps} />
       )}
 
       {/* Owner-bound private sections get their OWN group. Intermixed with the
@@ -267,25 +474,17 @@ export function CollectionTree({
           one undifferentiated list. */}
       {!loading && privateNodes.length > 0 && (
         <>
-          <div className="mt-2 flex items-center gap-1.5 px-2 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            <Lock className="h-3.5 w-3.5" />
-            My collections
-          </div>
-          <ul>
-            {privateNodes.map((node) => (
-              <TreeRow
-                key={node.id}
-                node={node}
-                depth={0}
-                selectedCollectionId={selectedCollectionId}
-                onSelect={onSelect}
-                expandedIds={expandedIds}
-                onToggle={toggleExpanded}
-              />
-            ))}
-          </ul>
+          <GroupHeading
+            scope="private"
+            icon={<Lock className="h-3.5 w-3.5" />}
+            label="My collections"
+            className="mt-2"
+          />
+          <TreeRows nodes={privateNodes} rowProps={rowProps} />
         </>
       )}
+
+      <DndStatusLine />
     </nav>
   );
 }

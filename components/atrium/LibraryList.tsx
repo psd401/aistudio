@@ -17,6 +17,7 @@
  */
 
 import Link from "next/link";
+import { useDraggable } from "@dnd-kit/core";
 import {
   FileText,
   Loader2,
@@ -25,6 +26,7 @@ import {
   Archive,
   SearchX,
   Maximize2,
+  GripVertical,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { timeAgo } from "@/lib/atrium/relative-time";
@@ -32,6 +34,7 @@ import type { ContentObjectDTO } from "@/lib/content";
 import { ArtifactThumbnail } from "./ArtifactThumbnail";
 import { TagPills } from "./TagPills";
 import { FavoriteStar } from "./FavoriteStar";
+import { contentDragId, type DragPayload } from "./dnd/atrium-dnd-context";
 
 /** Meridian status pill class for a content object's lifecycle status. */
 function statusBadge(
@@ -290,10 +293,24 @@ function SelectableCard({
   onFavoriteChange?: (id: string, isFavorite: boolean) => void;
   children: React.ReactNode;
 }): React.JSX.Element {
+  // Drag-into-a-section (dnd/atrium-dnd.tsx). The whole wrapper is the
+  // draggable node, but only the grip handle STARTS a drag — the card body is
+  // still a plain link.
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: contentDragId(it.id),
+    data: {
+      kind: "content",
+      id: it.id,
+      title: it.title,
+      collectionId: it.collectionId,
+    } satisfies DragPayload,
+  });
   return (
     <div
+      ref={setNodeRef}
       className="mer-lib-card-wrap"
       data-selected={selected ? "true" : "false"}
+      data-dragging={isDragging ? "true" : undefined}
       data-testid="library-card-wrap"
     >
       <input
@@ -312,6 +329,18 @@ function SelectableCard({
         onChange={onFavoriteChange}
       />
       {it.kind === "artifact" && <FullScreenLink it={it} />}
+      {/* Drag handle — a sibling of the link like every other control here. */}
+      <button
+        type="button"
+        className="mer-lib-card-grip"
+        aria-label={`Move ${it.title}`}
+        title="Drag into a section"
+        data-testid={`drag-${it.id}`}
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical className="h-3.5 w-3.5" aria-hidden="true" />
+      </button>
       {children}
     </div>
   );
