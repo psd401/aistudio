@@ -430,6 +430,13 @@ interface LibraryListProps {
   /** Toggle one id's membership in the selection. */
   onToggleSelect: (id: string) => void;
   /**
+   * A card's star was toggled and the write is durable. `LibraryView` uses it
+   * to drop a card unstarred INSIDE the Favorites view (where the star is the
+   * grid's own filter); every other view ignores it. Optional so the archived
+   * management surface and any future caller can leave it off.
+   */
+  onFavoriteChange?: (id: string, isFavorite: boolean) => void;
+  /**
    * The active search term, non-empty only when the user is filtering. Drives
    * the zero-match empty state (which must NOT be confused with an empty
    * library — the copy and the missing "create" affordance differ).
@@ -455,6 +462,7 @@ export function LibraryList({
   archivedView,
   selected,
   onToggleSelect,
+  onFavoriteChange,
   searchTerm,
   tagTerm,
 }: LibraryListProps): React.JSX.Element {
@@ -501,6 +509,7 @@ export function LibraryList({
           it={it}
           selected={selected.has(it.id)}
           onToggle={onToggleSelect}
+          onFavoriteChange={onFavoriteChange}
         >
           {it.kind === "artifact" ? (
             <ArtifactCard it={it} sandboxSrc={sandboxSrc} />

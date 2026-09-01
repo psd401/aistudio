@@ -18,10 +18,12 @@ The two external CLIs (psd-data, psd-workspace) are stubbed. Everything
 between them is the real code path.
 """
 
+import datetime
 import json
 import pathlib
 import sys
 import tempfile
+import types
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -33,7 +35,21 @@ import run_report as R  # noqa: E402
 HERE = pathlib.Path(__file__).resolve().parent
 FIXTURES = HERE.parent / "test-fixtures"
 
-_PATCHABLE = ("query", "query_one", "run_json", "workspace")
+_PATCHABLE = ("query", "query_one", "run_json", "workspace", "datetime")
+
+# The clock, pinned for the tests that reason about "has this year started".
+# run_report reaches it only through its own `datetime` binding
+# (`datetime.date.today()`), so swapping that one module attribute — restored by
+# RestoresModuleFunctions like any other patched name — freezes it without
+# touching the shared stdlib module for other tests. 2026-08-17 is the incident
+# date those tests describe.
+_TODAY = datetime.date(2026, 8, 17)
+
+
+class _FrozenDate(datetime.date):
+    @classmethod
+    def today(cls):
+        return _TODAY
 
 
 class RestoresModuleFunctions(unittest.TestCase):
@@ -691,6 +707,11 @@ class TheDefaultYearMustHaveStarted(RestoresModuleFunctions):
     the report came out empty until the user worked out what had happened and
     passed the completed year by hand. A growth report needs a baseline AND an
     ending window, so a year that has not started cannot produce one.
+
+    "Today" is PINNED to that incident date (`_TODAY`). On the real clock this
+    class started failing on 2026-09-01 — the day 2026-27 actually began, so
+    the fixture's "not started" year had started and the assertion inverted. A
+    test about calendar boundaries must not itself drift across one.
     """
 
     YEARS = [
@@ -699,9 +720,22 @@ class TheDefaultYearMustHaveStarted(RestoresModuleFunctions):
         {"yearid": 34, "year_name": "2024-2025", "first_day": "2024-09-03"},
     ]
 
+    def setUp(self):
+        super().setUp()
+        R.datetime = types.SimpleNamespace(date=_FrozenDate)
+
     def test_a_year_that_has_not_started_is_skipped(self):
         R.query = lambda *a, **k: self.YEARS
         self.assertEqual(R.resolve_year(None)["year_name"], "2025-2026")
+
+    def test_a_year_starting_today_counts_as_started(self):
+        # The boundary is INCLUSIVE: a year whose first day is today has begun.
+        # Every other year is in the future, so a slip to a strict comparison
+        # would leave nothing started and raise instead of returning yearid 36.
+        rows = [dict(y, first_day="2099-09-01") for y in self.YEARS]
+        rows[0] = dict(rows[0], first_day=_TODAY.isoformat())
+        R.query = lambda *a, **k: rows
+        self.assertEqual(R.resolve_year(None)["yearid"], 36)
 
     def test_the_newest_started_year_wins(self):
         started = [dict(y, first_day="2020-09-01") for y in self.YEARS]
