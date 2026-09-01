@@ -8,10 +8,9 @@
  * canonical markdown (`source.md`) through the sanitizing pipeline and shows a
  * provenance footer.
  *
- * ## Visibility gate (always 404, never 403)
- * - No object for the slug, or no live intranet publication -> `notFound()` (404).
- *   We do NOT leak "this exists but you can't see it" for the not-published case.
- * - Object exists and is published, but the requester fails `canView`
+ * ## Visibility gate (404 for non-viewers, redirect for viewers of unpublished)
+ * - No object for the slug -> `notFound()` (404).
+ * - Object exists, but the requester fails `canView`
  *   (e.g. an out-of-building user for a building-scoped `group` document) ->
  *   ALSO `notFound()` (404). A non-viewable object must NOT 403: 403 confirms the
  *   slug exists, letting an out-of-audience or unauthenticated probe enumerate
@@ -23,6 +22,19 @@
  *   `(protected)` so the route already requires a session, and
  *   `getOptionalRequester` resolves that session into the principal `canView`
  *   checks.
+ * - Object exists, the requester PASSES `canView`, but there is no live
+ *   `intranet` publication -> `redirect()` to the object's authoring surface
+ *   (`/atrium/{id}/view` for artifacts, `/atrium/{id}/edit` for documents — the
+ *   same targets `contentSurfaceLink` hands out for drafts). This is the
+ *   dead-link backstop: agents and API callers handed out `/c/{slug}` links for
+ *   unpublished content (unconditionally before PR #1699; still today for a
+ *   `status='published'` object whose only publication is `public_web`, or whose
+ *   intranet publication was retracted). Those links live forever in chat
+ *   histories and DMs; a viewer following one lands on the content they are
+ *   already allowed to see instead of a dead 404. The mask is preserved: the
+ *   redirect fires only AFTER `canView` passes, so an out-of-audience probe
+ *   still cannot distinguish an unpublished slug from an absent one — which is
+ *   also why `canView` now runs BEFORE the publication check.
  *
  * ## Rendering / security
  * - DOCUMENTS: the markdown is re-rendered on every request from `source.md`
@@ -52,7 +64,7 @@
  * page must never be statically cached or shared across principals.
  */
 
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { and, eq } from "drizzle-orm";
 import type { Metadata } from "next";
 import { executeQuery } from "@/lib/db/drizzle-client";
@@ -91,11 +103,13 @@ interface ReaderPageProps {
 }
 
 /**
- * Load the object + live intranet publication for a slug, or `null` when there
- * is no such object or it is not published. Shared by the page and metadata so
- * the slug is resolved once per concern.
+ * Load the object for a slug plus its live intranet publication (when one
+ * exists), or `null` when there is no object at all. The publication is
+ * nullable rather than collapsing "unpublished" into the absent case: the page
+ * needs to tell the two apart so it can run the `canView`-gated dead-link
+ * redirect for unpublished-but-viewable objects (see the file header).
  */
-async function loadPublishedObject(slug: string): Promise<{
+async function loadReaderObject(slug: string): Promise<{
   id: string;
   kind: "document" | "artifact";
   ownerUserId: number;
@@ -107,9 +121,12 @@ async function loadPublishedObject(slug: string): Promise<{
   /** Cover-gradient preset key + emoji icon (slice F) for the reader cover band. */
   coverGradient: string | null;
   icon: string | null;
-  publishedVersionId: string;
-  /** When the live intranet publication went live, for the "Published …" meta. */
-  publishedAt: Date | null;
+  /** The live intranet publication, or null when the object is not published there. */
+  publication: {
+    publishedVersionId: string;
+    /** When the live intranet publication went live, for the "Published …" meta. */
+    publishedAt: Date | null;
+  } | null;
 } | null> {
   const [obj] = await executeQuery(
     (db) =>
@@ -158,13 +175,16 @@ async function loadPublishedObject(slug: string): Promise<{
         .limit(1),
     "atrium.reader.livePublication"
   );
-  if (!publication) return null;
 
   return {
     ...obj,
     collectionName: obj.collectionName ?? null,
-    publishedVersionId: publication.publishedVersionId,
-    publishedAt: publication.publishedAt ?? null,
+    publication: publication
+      ? {
+          publishedVersionId: publication.publishedVersionId,
+          publishedAt: publication.publishedAt ?? null,
+        }
+      : null,
   };
 }
 
@@ -206,24 +226,26 @@ export default async function ReaderPage({
   const { slug } = await params;
   const log = createLogger({ action: "atrium.readerPage" });
 
-  // (b)+(c) Object must exist AND have a live intranet publication, else 404.
-  // `loadPublishedObject` (a DB lookup) and `getOptionalRequester` (a session
-  // lookup) are independent, so run them concurrently — under Aurora Serverless
-  // v2 with dev auto-pause, cold-start connection latency would otherwise stack
-  // serially on every reader render. The session lookup is cheap and wasted only
-  // on the (rare) 404 path; the visibility gate below still 404s before using it.
+  // (b) Object must exist, else 404. `loadReaderObject` (a DB lookup) and
+  // `getOptionalRequester` (a session lookup) are independent, so run them
+  // concurrently — under Aurora Serverless v2 with dev auto-pause, cold-start
+  // connection latency would otherwise stack serially on every reader render.
+  // The session lookup is cheap and wasted only on the (rare) 404 path; the
+  // visibility gate below still 404s before using it.
   const [published, requester] = await Promise.all([
-    loadPublishedObject(slug),
+    loadReaderObject(slug),
     getOptionalRequester(),
   ]);
   if (!published) {
     notFound();
   }
 
-  // (d) Visibility gate. A published-but-not-viewable object (e.g. an
-  // out-of-building user) 404s — NOT 403 — so its slug cannot be enumerated by
-  // distinguishing "exists but forbidden" from "absent". `getOptionalRequester`
-  // resolves the session into the principal `canView` evaluates.
+  // (c) Visibility gate — deliberately BEFORE the publication check, so an
+  // unpublished slug stays indistinguishable from an absent one for
+  // out-of-audience probes. A not-viewable object (e.g. an out-of-building
+  // user) 404s — NOT 403 — so its slug cannot be enumerated by distinguishing
+  // "exists but forbidden" from "absent". `getOptionalRequester` resolves the
+  // session into the principal `canView` evaluates.
   const viewable = await visibilityService.canView(requester, {
     id: published.id,
     ownerUserId: published.ownerUserId,
@@ -234,12 +256,22 @@ export default async function ReaderPage({
     notFound();
   }
 
+  // (d) Dead-link backstop (see file header): viewable but no live intranet
+  // publication -> redirect to the authoring surface, mirroring
+  // `contentSurfaceLink`'s draft targets. `redirect()` throws, so past this
+  // gate a live publication is guaranteed.
+  if (!published.publication) {
+    redirect(
+      `/atrium/${published.id}/${published.kind === "artifact" ? "view" : "edit"}`
+    );
+  }
+
   // (e) Load the published version (object-scoped) for its body. Documents read
   // their canonical markdown from S3; artifacts resolve their untrusted code
   // (inline or S3) for the cross-origin sandbox.
   const version = await versionService.getById(
     published.id,
-    published.publishedVersionId
+    published.publication.publishedVersionId
   );
   if (!version) {
     // The publication points at a version that no longer exists — treat as not
@@ -278,7 +310,7 @@ export default async function ReaderPage({
         // non-editors with no route at all. `/atrium/[id]/view` re-runs its own
         // `canView` server-side, so this link grants nothing.
         fullScreenHref={`/atrium/${published.id}/view`}
-        publishedAt={published.publishedAt}
+        publishedAt={published.publication.publishedAt}
         collectionName={published.collectionName}
         // Artifact readers skip the TOC (no document headings to walk).
         headings={[]}
@@ -345,7 +377,7 @@ export default async function ReaderPage({
       editHref={editHref}
       commentHref={editHref}
       commentCount={commentCount}
-      publishedAt={published.publishedAt}
+      publishedAt={published.publication.publishedAt}
       collectionName={published.collectionName}
       headings={headings}
       coverGradient={published.coverGradient}

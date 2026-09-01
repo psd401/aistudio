@@ -46,6 +46,17 @@ function atriumSurfaceLink(id: string, kind: "document" | "artifact"): string {
  *
  * Published objects keep the canonical reader link; everything else gets the
  * authoring surface, which renders the head version for anyone who can view it.
+ *
+ * Known mismatch, covered downstream: this keys off `status === "published"`,
+ * but the reader requires a live INTRANET publication — an object published
+ * only to `public_web`, or whose intranet publication was retracted without a
+ * status change, still gets a `/c/` link here. Making this function
+ * publication-aware would force a per-object publications query into every
+ * list-decorating call site, so instead the reader page itself backstops the
+ * gap: `/c/[slug]` redirects a `canView`-passing viewer of an unpublished
+ * object to the authoring surface (see `app/(protected)/c/[slug]/page.tsx`).
+ * Every `/c/` link this function emits therefore resolves for anyone allowed
+ * to see the object.
  */
 export function contentSurfaceLink(object: {
   id: string;
