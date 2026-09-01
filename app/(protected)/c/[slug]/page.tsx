@@ -232,11 +232,13 @@ export default async function ReaderPage({
   // connection latency would otherwise stack serially on every reader render.
   // The session lookup is cheap and wasted only on the (rare) 404 path; the
   // visibility gate below still 404s before using it.
-  const [published, requester] = await Promise.all([
+  // `target`, not `published`: past gate (d) below it is guaranteed to carry a
+  // live publication, but before it the object may well be an unpublished one.
+  const [target, requester] = await Promise.all([
     loadReaderObject(slug),
     getOptionalRequester(),
   ]);
-  if (!published) {
+  if (!target) {
     notFound();
   }
 
@@ -247,10 +249,10 @@ export default async function ReaderPage({
   // "exists but forbidden" from "absent". `getOptionalRequester` resolves the
   // session into the principal `canView` evaluates.
   const viewable = await visibilityService.canView(requester, {
-    id: published.id,
-    ownerUserId: published.ownerUserId,
-    collectionId: published.collectionId,
-    visibilityLevel: published.visibilityLevel,
+    id: target.id,
+    ownerUserId: target.ownerUserId,
+    collectionId: target.collectionId,
+    visibilityLevel: target.visibilityLevel,
   });
   if (!viewable) {
     notFound();
@@ -260,9 +262,9 @@ export default async function ReaderPage({
   // publication -> redirect to the authoring surface, mirroring
   // `contentSurfaceLink`'s draft targets. `redirect()` throws, so past this
   // gate a live publication is guaranteed.
-  if (!published.publication) {
+  if (!target.publication) {
     redirect(
-      `/atrium/${published.id}/${published.kind === "artifact" ? "view" : "edit"}`
+      `/atrium/${target.id}/${target.kind === "artifact" ? "view" : "edit"}`
     );
   }
 
@@ -270,8 +272,8 @@ export default async function ReaderPage({
   // their canonical markdown from S3; artifacts resolve their untrusted code
   // (inline or S3) for the cross-origin sandbox.
   const version = await versionService.getById(
-    published.id,
-    published.publication.publishedVersionId
+    target.id,
+    target.publication.publishedVersionId
   );
   if (!version) {
     // The publication points at a version that no longer exists — treat as not
@@ -283,23 +285,23 @@ export default async function ReaderPage({
   // predicate the authoring page uses (owner / admin / delegated-for-owner).
   // A guest requester (userId null) can never pass it. Computed only AFTER the
   // visibility gate above, so it never runs for a masked object.
-  const editHref = canEdit(requester, published.ownerUserId)
-    ? `/atrium/${published.id}/edit`
+  const editHref = canEdit(requester, target.ownerUserId)
+    ? `/atrium/${target.id}/edit`
     : null;
 
   // Editors-only comment chip count. Only read when the viewer may edit (the chip
   // is editor-gated) so a non-editor render never issues the comments query.
-  const commentCount = editHref ? await unresolvedCommentCount(published.id) : 0;
+  const commentCount = editHref ? await unresolvedCommentCount(target.id) : 0;
 
   // ARTIFACT reader: load the untrusted code server-side and render it ONLY in
   // the cross-origin sandbox. The code is never placed in app-origin HTML.
-  if (published.kind === "artifact") {
+  if (target.kind === "artifact") {
     // Missing/unreadable body degrades to an empty preview (never the raw S3
     // error) — the shared loadArtifactCodeSafe contract.
     const code = await versionService.loadArtifactCodeSafe(version);
     return (
       <ReaderFrame
-        title={published.title}
+        title={target.title}
         authenticated
         editHref={editHref}
         commentHref={editHref}
@@ -309,9 +311,9 @@ export default async function ReaderPage({
         // which put an editing surface in front of a read-only action and left
         // non-editors with no route at all. `/atrium/[id]/view` re-runs its own
         // `canView` server-side, so this link grants nothing.
-        fullScreenHref={`/atrium/${published.id}/view`}
-        publishedAt={published.publication.publishedAt}
-        collectionName={published.collectionName}
+        fullScreenHref={`/atrium/${target.id}/view`}
+        publishedAt={target.publication.publishedAt}
+        collectionName={target.collectionName}
         // Artifact readers skip the TOC (no document headings to walk).
         headings={[]}
         // Full-bleed: the interactive artifact fills the viewport instead of the
@@ -319,7 +321,7 @@ export default async function ReaderPage({
         fullBleed
         footer={
           <ProvenanceFooter
-            objectId={published.id}
+            objectId={target.id}
             publishedVersionNumber={version.versionNumber}
           />
         }
@@ -328,7 +330,7 @@ export default async function ReaderPage({
           code={code}
           src={getArtifactSandboxRenderUrl()}
           dataBridgeEnabled={true}
-          contentId={published.id}
+          contentId={target.id}
           className="atrium-artifact-reader-frame"
         />
       </ReaderFrame>
@@ -372,19 +374,19 @@ export default async function ReaderPage({
 
   return (
     <ReaderFrame
-      title={published.title}
+      title={target.title}
       authenticated
       editHref={editHref}
       commentHref={editHref}
       commentCount={commentCount}
-      publishedAt={published.publication.publishedAt}
-      collectionName={published.collectionName}
+      publishedAt={target.publication.publishedAt}
+      collectionName={target.collectionName}
       headings={headings}
-      coverGradient={published.coverGradient}
-      icon={published.icon}
+      coverGradient={target.coverGradient}
+      icon={target.icon}
       footer={
         <ProvenanceFooter
-          objectId={published.id}
+          objectId={target.id}
           publishedVersionNumber={version.versionNumber}
         />
       }

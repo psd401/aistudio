@@ -183,6 +183,7 @@ test.describe('Atrium reader dead-link backstop (authenticated)', () => {
       })
       expect(res.status()).toBe(201)
       const data = (await res.json())?.data
+      expect(data?.id).toBeTruthy()
       expect(data?.slug).toBeTruthy()
       created.push(data.id as string)
 

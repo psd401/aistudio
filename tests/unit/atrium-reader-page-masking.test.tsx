@@ -67,6 +67,10 @@ jest.mock("@/lib/db/drizzle-client", () => ({
 jest.mock("@/lib/db/schema", () => ({
   contentObjects: {},
   contentPublications: {},
+  // The reader left-joins the collection for its meta line; the query
+  // builder callback never runs here (executeQuery is mocked), but the
+  // import must resolve so a future eager reference cannot throw at load.
+  contentCollections: {},
 }));
 jest.mock("drizzle-orm", () => ({
   and: (...a: unknown[]) => a,
@@ -101,14 +105,17 @@ jest.mock("@/actions/db/atrium/requester", () => ({
   getOptionalRequester: (...a: unknown[]) => getOptionalRequesterMock(...a),
 }));
 
-// The reader now reads an editors-only unresolved-comment count via this action;
-// the real module drags the whole content/DB stack (drizzle sql helpers) into the
-// unit test, so mock it to an empty thread list (count 0 → no chip).
-const listCommentThreadsMock = jest.fn((..._a: unknown[]) =>
-  Promise.resolve({ isSuccess: true, message: "", data: [] })
+// The reader reads an editors-only unresolved-comment COUNT via this action;
+// the real module drags the whole content/DB stack (drizzle sql helpers) into
+// the unit test, so mock it to zero (no chip). It must be the count action the
+// page actually calls — the page swallows a missing export in its try/catch,
+// which would let a stale mock pass silently while exercising nothing.
+const countUnresolvedMock = jest.fn((..._a: unknown[]) =>
+  Promise.resolve({ isSuccess: true, message: "", data: 0 })
 );
 jest.mock("@/actions/db/atrium/comments", () => ({
-  listCommentThreadsAction: (...a: unknown[]) => listCommentThreadsMock(...a),
+  countUnresolvedCommentThreadsAction: (...a: unknown[]) =>
+    countUnresolvedMock(...a),
 }));
 
 jest.mock("@/lib/content/artifact-sandbox-config", () => ({
@@ -323,6 +330,8 @@ describe("Atrium reader page — Edit link + collection meta gating", () => {
 
     const result = await render();
     expect(shellProps(result).editHref).toBe("/atrium/obj-1/edit");
+    // The editor-gated comment count is actually consulted for an editor.
+    expect(countUnresolvedMock).toHaveBeenCalledWith("obj-1");
   });
 
   it("renders the Edit link for an ADMIN non-owner", async () => {
