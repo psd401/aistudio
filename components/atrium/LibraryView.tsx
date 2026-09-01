@@ -656,8 +656,18 @@ function useLibraryPage(filter: ListFilter) {
   const [settledStatus, setSettledStatus] = useState<string | undefined>(undefined);
   const reqSeqRef = useRef(0);
 
-  const { collectionId, kind, owner, status, tag, tagMatch, actor, query } =
-    filter;
+  const {
+    collectionId,
+    kind,
+    owner,
+    status,
+    filed,
+    favorite,
+    tag,
+    tagMatch,
+    actor,
+    query,
+  } = filter;
 
   const fetchPage = useCallback(
     async (offset: number) => {
@@ -672,6 +682,8 @@ function useLibraryPage(filter: ListFilter) {
           kind,
           owner,
           status,
+          filed,
+          favorite,
           tag,
           tagMatch,
           actor,
@@ -702,7 +714,7 @@ function useLibraryPage(filter: ListFilter) {
         }
       }
     },
-    [collectionId, kind, owner, status, tag, tagMatch, actor, query]
+    [collectionId, kind, owner, status, filed, favorite, tag, tagMatch, actor, query]
   );
 
   // A STABLE re-fetch handle that always runs the CURRENT `fetchPage`.
