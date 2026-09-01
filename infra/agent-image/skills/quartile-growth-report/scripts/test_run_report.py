@@ -18,10 +18,12 @@ The two external CLIs (psd-data, psd-workspace) are stubbed. Everything
 between them is the real code path.
 """
 
+import datetime
 import json
 import pathlib
 import sys
 import tempfile
+import types
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -691,13 +693,36 @@ class TheDefaultYearMustHaveStarted(RestoresModuleFunctions):
     the report came out empty until the user worked out what had happened and
     passed the completed year by hand. A growth report needs a baseline AND an
     ending window, so a year that has not started cannot produce one.
+
+    "Today" is PINNED to that incident date. On the real clock this class
+    started failing on 2026-09-01 — the day 2026-27 actually began, so the
+    fixture's "not started" year had started and the assertion inverted. A
+    test about calendar boundaries must not itself drift across one.
     """
+
+    TODAY = datetime.date(2026, 8, 17)
 
     YEARS = [
         {"yearid": 36, "year_name": "2026-2027", "first_day": "2026-09-01"},
         {"yearid": 35, "year_name": "2025-2026", "first_day": "2025-09-02"},
         {"yearid": 34, "year_name": "2024-2025", "first_day": "2024-09-03"},
     ]
+
+    def setUp(self):
+        super().setUp()
+        pinned = self.TODAY
+
+        class FrozenDate(datetime.date):
+            @classmethod
+            def today(cls):
+                return cls(pinned.year, pinned.month, pinned.day)
+
+        # run_report reaches the clock only through its own `datetime` binding
+        # (`datetime.date.today()`), so swapping that one name freezes it
+        # without touching the shared stdlib module for other tests.
+        self._saved_datetime = R.datetime
+        R.datetime = types.SimpleNamespace(date=FrozenDate)
+        self.addCleanup(setattr, R, "datetime", self._saved_datetime)
 
     def test_a_year_that_has_not_started_is_skipped(self):
         R.query = lambda *a, **k: self.YEARS
