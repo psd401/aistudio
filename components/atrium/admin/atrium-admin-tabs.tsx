@@ -14,7 +14,6 @@ import { AtriumUsagePanel } from "./atrium-usage-panel"
 import { CollectionManagementPanel } from "@/components/atrium/CollectionManagementPanel"
 import type { PendingApprovalDTO } from "@/actions/db/atrium/approvals"
 import type { ContentAuditPage } from "@/actions/db/atrium/audit-log"
-import type { AtriumUsageStats } from "@/actions/db/atrium/usage-stats"
 import type { CollectionDTO } from "@/lib/content"
 
 interface AtriumAdminTabsProps {
@@ -24,9 +23,6 @@ interface AtriumAdminTabsProps {
   auditError: string | null
   initialCollections: CollectionDTO[]
   collectionsError: string | null
-  /** Null for a non-admin (the tab is not rendered) or when the load failed. */
-  initialUsage: AtriumUsageStats | null
-  usageError: string | null
   /**
    * District administrator. False for a collection approver (migration 178),
    * who reaches this page for their own sections' queue and must see ONLY the
@@ -44,8 +40,6 @@ export function AtriumAdminTabs({
   auditError,
   initialCollections,
   collectionsError,
-  initialUsage,
-  usageError,
   isAdmin,
 }: AtriumAdminTabsProps) {
   return (
@@ -81,7 +75,8 @@ export function AtriumAdminTabs({
       )}
       {isAdmin && (
         <TabsContent value="usage">
-          <AtriumUsagePanel initialStats={initialUsage} initialError={usageError} />
+          {/* Self-loading on activation — the stats are not part of the page load. */}
+          <AtriumUsagePanel />
         </TabsContent>
       )}
     </Tabs>

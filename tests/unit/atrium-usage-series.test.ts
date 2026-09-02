@@ -1,6 +1,20 @@
 /** @jest-environment node */
 
-import { fillDailySeries, dayKey } from "@/lib/atrium/usage-series";
+import { fillDailySeries, dayKey, dailyWindowStart } from "@/lib/atrium/usage-series";
+
+describe("dailyWindowStart", () => {
+  it("is the UTC midnight that opens the first day of the window fillDailySeries builds", () => {
+    const today = new Date("2026-09-01T17:45:00Z");
+    expect(dailyWindowStart(3, today).toISOString()).toBe("2026-08-30T00:00:00.000Z");
+    expect(fillDailySeries([], 3, today)[0].day).toBe("2026-08-30");
+  });
+
+  it("a one-day window starts at today's UTC midnight", () => {
+    expect(dailyWindowStart(1, new Date("2026-09-01T00:30:00Z")).toISOString()).toBe(
+      "2026-09-01T00:00:00.000Z"
+    );
+  });
+});
 
 describe("fillDailySeries", () => {
   const today = new Date("2026-09-01T17:45:00Z");

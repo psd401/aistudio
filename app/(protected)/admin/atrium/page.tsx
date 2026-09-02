@@ -14,10 +14,6 @@ import {
 import type { CollectionDTO } from "@/lib/content"
 import { AtriumAdminTabs } from "@/components/atrium/admin/atrium-admin-tabs"
 import { listManageableCollectionsAction } from "@/actions/db/atrium/collection-management"
-import {
-  getAtriumUsageStatsAction,
-  type AtriumUsageStats,
-} from "@/actions/db/atrium/usage-stats"
 
 /**
  * Atrium oversight (Epic #1059 completion) — the surface for the publish
@@ -59,23 +55,22 @@ function unwrap<T>(
 }
 
 /**
- * Load the panels' initial data.
+ * Load the three panels' initial data.
  *
- * The audit trail, collection management and the usage dashboard are
- * administrator-only, so for a collection approver they are not fetched at all
- * rather than fetched and discarded — their own actions would refuse the call,
- * and issuing it would mean a guaranteed error round-trip on every page load.
+ * The audit trail and collection management are administrator-only, so for a
+ * collection approver they are not fetched at all rather than fetched and
+ * discarded — their own actions would refuse the call, and issuing it would
+ * mean a guaranteed error round-trip on every page load. The Usage tab loads
+ * itself on activation (a dozen aggregates most visits never open).
  *
  * Extracted from the page component to keep it under the complexity lint.
  */
 async function loadPanels(isAdmin: boolean) {
-  const [approvalsResult, auditResult, collectionsResult, usageResult] =
-    await Promise.all([
-      listPendingApprovalsAction(),
-      isAdmin ? listContentAuditAction({}) : null,
-      isAdmin ? listManageableCollectionsAction() : null,
-      isAdmin ? getAtriumUsageStatsAction("30d") : null,
-    ])
+  const [approvalsResult, auditResult, collectionsResult] = await Promise.all([
+    listPendingApprovalsAction(),
+    isAdmin ? listContentAuditAction({}) : null,
+    isAdmin ? listManageableCollectionsAction() : null,
+  ])
 
   const approvals = unwrap(approvalsResult, [] as PendingApprovalDTO[], "Failed to load pending approvals")
   const audit = unwrap(
@@ -84,7 +79,6 @@ async function loadPanels(isAdmin: boolean) {
     "Failed to load the audit log"
   )
   const collections = unwrap(collectionsResult, [] as CollectionDTO[], "Failed to load collections")
-  const usage = unwrap(usageResult, null as AtriumUsageStats | null, "Failed to load usage")
 
   return {
     approvals: approvals.value,
@@ -93,8 +87,6 @@ async function loadPanels(isAdmin: boolean) {
     auditError: audit.error,
     collections: collections.value,
     collectionsError: collections.error,
-    usage: usage.value,
-    usageError: usage.error,
   }
 }
 
@@ -114,8 +106,6 @@ export default async function AtriumAdminPage() {
     auditError,
     collections,
     collectionsError,
-    usage,
-    usageError,
   } = await loadPanels(isAdmin)
 
   return (
@@ -139,8 +129,6 @@ export default async function AtriumAdminPage() {
         auditError={auditError}
         initialCollections={collections}
         collectionsError={collectionsError}
-        initialUsage={usage}
-        usageError={usageError}
         isAdmin={isAdmin}
       />
     </div>

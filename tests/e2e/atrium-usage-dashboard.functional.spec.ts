@@ -13,14 +13,17 @@ import { mkdirSync } from 'node:fs'
  * /admin/atrium (components/atrium/admin/atrium-usage-panel.tsx, backed by
  * getAtriumUsageStatsAction over content_audit_logs).
  *
- *  - An administrator sees the Usage tab; opening it renders the headline
- *    tiles, the daily strip, and the people / agents / sections tables.
- *  - Seeding one document through the REST API (an audited `create`) is
- *    reflected in the "Created" tile — the numbers come from the trail, not
- *    from a placeholder.
- *  - Switching the range re-fetches without an error.
- *  - A non-admin staff user gets no Usage tab (and, without approver rights,
- *    no page at all — the existing 404 mask).
+ *  - Happy path: an administrator opens the tab; it loads itself and renders
+ *    the headline tiles, the daily strip, and the people / agents / sections
+ *    tables. Seeding one document through the REST API (an audited `create`)
+ *    moves the "Created" tile by at least one — the numbers are live, not a
+ *    placeholder. Switching the range re-fetches cleanly.
+ *  - Error state: when the stats request fails (the server-action POST is
+ *    aborted at the network layer), the panel shows its inline error rather
+ *    than a blank or stale tab.
+ *  - Auth gate: a non-admin staff user gets no Usage tab (and, without
+ *    approver rights, no page at all — the existing 404 mask). The
+ *    unauthenticated gate is pinned by atrium-admin.guard.spec.ts.
  *
  * Auth: minted session cookies (helpers/session-auth). Gated behind
  * PLAYWRIGHT_AUTH_ENABLED.
@@ -28,8 +31,24 @@ import { mkdirSync } from 'node:fs'
 
 const SHOT_DIR = 'docs/verification/atrium-usage-dashboard'
 
+type Page = import('@playwright/test').Page
+
 function runToken(): string {
   return `${Date.now()}${Math.floor(Math.random() * 1000)}`
+}
+
+/** Open the Usage tab and wait for its self-load to render the tiles. */
+async function openUsageTab(page: Page): Promise<void> {
+  await page.goto('/admin/atrium')
+  await page.getByRole('tab', { name: 'Usage' }).click()
+  await expect(page.getByTestId('atrium-usage-panel')).toBeVisible()
+  await expect(page.getByTestId('usage-tile-created')).toBeVisible({ timeout: 60000 })
+}
+
+/** The numeric value of a headline tile (locale separators stripped). */
+async function readTile(page: Page, testId: string): Promise<number> {
+  const text = await page.getByTestId(`${testId}-value`).textContent()
+  return Number((text ?? '0').replace(/[^\d]/g, ''))
 }
 
 test.describe('Atrium usage dashboard (authenticated)', () => {
@@ -54,17 +73,8 @@ test.describe('Atrium usage dashboard (authenticated)', () => {
     const page = await context.newPage()
     const created: string[] = []
     try {
-      // Baseline "Created" for the default 30d range, then seed one audited
-      // create and expect the tile to move by at least one.
-      await page.goto('/admin/atrium')
-      await page.getByRole('tab', { name: 'Usage' }).click()
-      const panel = page.getByTestId('atrium-usage-panel')
-      await expect(panel).toBeVisible()
-      const createdTile = page.getByTestId('usage-tile-created')
-      await expect(createdTile).toBeVisible()
-      const before = Number(
-        (await createdTile.locator('p').nth(1).textContent())?.replace(/[^\d]/g, '') ?? '0'
-      )
+      await openUsageTab(page)
+      const before = await readTile(page, 'usage-tile-created')
 
       const res = await page.request.post('/api/v1/content', {
         data: {
@@ -76,21 +86,13 @@ test.describe('Atrium usage dashboard (authenticated)', () => {
         },
       })
       expect(res.status()).toBe(201)
-      created.push((await res.json()).data.id as string)
+      const data = (await res.json())?.data
+      expect(data?.id).toBeTruthy()
+      created.push(data.id as string)
 
-      await page.reload()
-      await page.getByRole('tab', { name: 'Usage' }).click()
-      await expect(page.getByTestId('usage-tile-created')).toBeVisible()
-      await expect
-        .poll(
-          async () =>
-            Number(
-              (await page.getByTestId('usage-tile-created').locator('p').nth(1).textContent())
-                ?.replace(/[^\d]/g, '') ?? '0'
-            ),
-          { timeout: 30_000 }
-        )
-        .toBeGreaterThanOrEqual(before + 1)
+      // A fresh open re-fetches; the seeded create is in the 30-day window.
+      await openUsageTab(page)
+      expect(await readTile(page, 'usage-tile-created')).toBeGreaterThanOrEqual(before + 1)
 
       // The rest of the dashboard renders from the same load.
       await expect(page.getByTestId('usage-tile-authors')).toBeVisible()
@@ -102,14 +104,13 @@ test.describe('Atrium usage dashboard (authenticated)', () => {
       await expect(page.getByTestId('usage-sections')).toBeVisible()
       await page.screenshot({ path: `${SHOT_DIR}/01-usage-tab.png`, fullPage: true })
 
-      // Range switch re-fetches without error and keeps the tiles.
+      // Range switch re-fetches without error; the seeded create is within 7d.
       await page.getByRole('combobox', { name: 'Usage range' }).click()
       await page.getByRole('option', { name: 'Last 7 days' }).click()
-      await expect(page.getByTestId('atrium-usage-panel')).toHaveAttribute('aria-busy', 'false', {
-        timeout: 30_000,
-      })
-      await expect(page.getByRole('alert')).toHaveCount(0)
-      await expect(page.getByTestId('usage-tile-created')).toBeVisible()
+      await expect
+        .poll(async () => readTile(page, 'usage-tile-created'), { timeout: 30_000 })
+        .toBeGreaterThanOrEqual(1)
+      await expect(page.getByTestId('usage-error')).toHaveCount(0)
       await page.screenshot({ path: `${SHOT_DIR}/02-usage-7d.png`, fullPage: false })
     } finally {
       for (const id of created) {
@@ -119,6 +120,40 @@ test.describe('Atrium usage dashboard (authenticated)', () => {
           // Ignored on purpose — teardown must never mask the assertion.
         }
       }
+      await context.close()
+    }
+  })
+
+  test('a failed stats request shows the inline error instead of a blank tab', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+    })
+    await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB)
+    try {
+      const page = await context.newPage()
+      await openUsageTab(page)
+
+      // Server actions travel as a POST carrying a `next-action` header; abort
+      // the next one so the range change's fetch fails at the network layer.
+      await page.route(
+        (url) => url.pathname === '/admin/atrium',
+        (route) => {
+          const req = route.request()
+          if (req.method() === 'POST' && req.headers()['next-action'] !== undefined) {
+            void route.abort('failed')
+          } else {
+            void route.continue()
+          }
+        }
+      )
+      await page.getByRole('combobox', { name: 'Usage range' }).click()
+      await page.getByRole('option', { name: 'Last 90 days' }).click()
+      await expect(page.getByTestId('usage-error')).toBeVisible({ timeout: 30_000 })
+      await expect(page.getByTestId('usage-error')).toContainText(/usage/i)
+      await page.unrouteAll()
+    } finally {
       await context.close()
     }
   })

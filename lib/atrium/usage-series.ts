@@ -20,6 +20,18 @@ export function dayKey(date: Date): string {
 }
 
 /**
+ * The UTC start of the first calendar day in a `days`-long window ending on
+ * `today` — the query bound that matches `fillDailySeries`'s window exactly.
+ * "Now minus N×24h" would start mid-day and fetch a leading partial day the
+ * series then drops, so the tiles and the strip would disagree by that day.
+ */
+export function dailyWindowStart(days: number, today: Date = new Date()): Date {
+  const span = Math.max(1, Math.floor(days));
+  const end = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
+  return new Date(end - (span - 1) * 86_400_000);
+}
+
+/**
  * A contiguous `days`-long window ending on `today` (UTC), with the given
  * points placed on their days and zeros everywhere else. Points outside the
  * window are dropped; duplicate days are summed (defensive — the query groups

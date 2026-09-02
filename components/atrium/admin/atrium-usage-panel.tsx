@@ -8,12 +8,16 @@
  * per-surface splits, the current inventory, a daily activity strip, and
  * the most active authors, agents and sections for a selectable range.
  *
+ * Loads when the tab is opened (Radix mounts a tab's content on activation),
+ * not with the page: the page's default tab is Approvals, and the stats are
+ * a dozen aggregates that most visits never look at.
+ *
  * The trail is MUTATION-only (see `getAtriumUsageStatsAction`), so this shows
  * authoring and organizing activity, never reads — the panel says so, rather
  * than letting a "views" column be assumed.
  */
 
-import { useState, useTransition } from "react"
+import { useCallback, useEffect, useState, useTransition } from "react"
 import {
   getAtriumUsageStatsAction,
   type AtriumUsageRange,
@@ -64,7 +68,7 @@ function Tile({
     <Card data-testid={testId}>
       <CardContent>
         <p className="text-sm font-medium text-muted-foreground">{label}</p>
-        <p className="mt-1 text-2xl font-bold">
+        <p className="mt-1 text-2xl font-bold" data-testid={`${testId}-value`}>
           {typeof value === "number" ? value.toLocaleString() : value}
         </p>
         {sub && <p className="mt-1 text-xs text-muted-foreground">{sub}</p>}
@@ -75,7 +79,7 @@ function Tile({
 
 /** The headline tiles: what happened in the range, and who did it. */
 function UsageTiles({ stats }: { stats: AtriumUsageStats }) {
-  const mutations = stats.actors.human + stats.actors.agent
+  const changes = stats.actors.human + stats.actors.agent
   const surfaces = stats.surfaces
   return (
     <>
@@ -84,19 +88,19 @@ function UsageTiles({ stats }: { stats: AtriumUsageStats }) {
           testId="usage-tile-created"
           label="Created"
           value={stats.totals.created}
-          sub={`${stats.last24h.created} today · ${stats.last7d.created} this week`}
+          sub={`${stats.last24h.created} in the last 24h ·${stats.last7d.created} this week`}
         />
         <Tile
           testId="usage-tile-updated"
           label="Updated"
           value={stats.totals.updated}
-          sub={`${stats.last24h.updated} today · ${stats.last7d.updated} this week`}
+          sub={`${stats.last24h.updated} in the last 24h ·${stats.last7d.updated} this week`}
         />
         <Tile
           testId="usage-tile-published"
           label="Published"
           value={stats.totals.published}
-          sub={`${stats.last24h.published} today · ${stats.last7d.published} this week`}
+          sub={`${stats.last24h.published} in the last 24h ·${stats.last7d.published} this week`}
         />
         <Tile
           testId="usage-tile-authors"
@@ -107,8 +111,8 @@ function UsageTiles({ stats }: { stats: AtriumUsageStats }) {
         <Tile
           testId="usage-tile-agents"
           label="Agent share"
-          value={pct(stats.actors.agent, mutations)}
-          sub={`${stats.actors.agent.toLocaleString()} of ${mutations.toLocaleString()} changes · ${stats.activeAgentsRange} agents`}
+          value={pct(stats.actors.agent, changes)}
+          sub={`${stats.actors.agent.toLocaleString()} of ${changes.toLocaleString()} changes · ${stats.activeAgentsRange} agents`}
         />
       </div>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -127,7 +131,7 @@ function UsageTiles({ stats }: { stats: AtriumUsageStats }) {
         <Tile
           testId="usage-tile-surfaces"
           label="Where changes came from"
-          value={`${pct(surfaces.ui, mutations)} in-app`}
+          value={`${pct(surfaces.ui, changes)} in-app`}
           sub={`${surfaces.ui} app · ${surfaces.mcp} agent (MCP) · ${surfaces.rest} API`}
         />
         <Tile
@@ -288,29 +292,33 @@ function SectionsTable({ stats }: { stats: AtriumUsageStats }) {
   )
 }
 
-interface AtriumUsagePanelProps {
-  initialStats: AtriumUsageStats | null
-  initialError: string | null
-}
-
-export function AtriumUsagePanel({ initialStats, initialError }: AtriumUsagePanelProps) {
-  const [range, setRange] = useState<AtriumUsageRange>(initialStats?.range ?? "30d")
-  const [stats, setStats] = useState<AtriumUsageStats | null>(initialStats)
-  const [error, setError] = useState<string | null>(initialError)
+export function AtriumUsagePanel() {
+  const [range, setRange] = useState<AtriumUsageRange>("30d")
+  const [stats, setStats] = useState<AtriumUsageStats | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const [isPending, startTransition] = useTransition()
 
-  const load = (next: AtriumUsageRange) => {
-    setRange(next)
+  // One fetch per range value; runs on mount (tab activation) and on change.
+  const fetchStats = useCallback((next: AtriumUsageRange) => {
     startTransition(async () => {
-      const res = await getAtriumUsageStatsAction(next)
-      if (res.isSuccess) {
-        setStats(res.data)
-        setError(null)
-      } else {
-        setError(res.message ?? "Failed to load usage")
+      try {
+        const res = await getAtriumUsageStatsAction(next)
+        if (res.isSuccess) {
+          setStats(res.data)
+          setError(null)
+        } else {
+          setError(res.message ?? "Failed to load usage")
+        }
+      } catch {
+        // The action call itself failed (network, aborted request).
+        setError("Could not load usage")
       }
     })
-  }
+  }, [])
+
+  useEffect(() => {
+    fetchStats(range)
+  }, [fetchStats, range])
 
   return (
     <div className="space-y-4" data-testid="atrium-usage-panel" aria-busy={isPending}>
@@ -320,7 +328,7 @@ export function AtriumUsagePanel({ initialStats, initialError }: AtriumUsagePane
           trail. Atrium records changes, not views — reading activity is not
           tracked.
         </p>
-        <Select value={range} onValueChange={(v) => load(v as AtriumUsageRange)}>
+        <Select value={range} onValueChange={(v) => setRange(v as AtriumUsageRange)}>
           <SelectTrigger className="w-[160px]" aria-label="Usage range">
             <SelectValue />
           </SelectTrigger>
@@ -335,8 +343,14 @@ export function AtriumUsagePanel({ initialStats, initialError }: AtriumUsagePane
       </div>
 
       {error && (
-        <p className="text-sm text-destructive" role="alert">
+        <p className="text-sm text-destructive" role="alert" data-testid="usage-error">
           {error}
+        </p>
+      )}
+
+      {!stats && !error && (
+        <p className="text-sm text-muted-foreground" role="status">
+          Loading usage…
         </p>
       )}
 
