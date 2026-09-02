@@ -1499,6 +1499,9 @@ Two-grain provenance + `content_audit_logs` + the public-publish human gate give
 | Prompt-injected instructions in source docs | Source content is data; tools require explicit caller scope; no auto-publish-from-content |
 | Stale published content after edits | `published_version_id` tracked separately; re-publish is explicit; events re-index |
 | PII in generated content | Guardrails plus Comprehend detect-only entity-type telemetry on agent write paths |
+| Hostile author harvests district data a VIEWER can see (#1705) | The no-egress invariant: `connect-src 'none'`, `img-src` with no https wildcard, `form-action 'none'`, `base-uri 'none'`, `webrtc 'block'`, `sandbox="allow-scripts"` with no navigation/popups — plus `content_objects.data_access` making the record store and viewer-scoped queries **mutually exclusive**, which closes the one remaining "write rows the author can read back" loop. With every path closed, a data-connected artifact is a pure function from what the viewer may see to pixels on the viewer's screen, so no per-artifact review is required |
+| Artifact reaches a data-MCP write tool or a CSV export link | `queryArtifactData` allowlists exactly one tool (`query_data`) and forces `export: false` / `format: "json"`; the data MCP rejects export in JSON mode |
+| Artifact impersonates another viewer's permissions | The viewer's Cognito ID token is read server-side from the session and passed to `cognito_passthrough`; it never enters the frame, and the page can influence only `sql`, `limit`, `offset` |
 
 ## 29. Errors, idempotency, rate limiting, observability
 

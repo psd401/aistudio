@@ -1588,6 +1588,7 @@ interpreted client-side.
       "currentVersionId": "11111111-2222-4333-8444-555555555555",
       "sourceRef": null,
       "tags": ["policy"],
+      "dataAccess": "records",
       "status": "published",
       "indexedAt": "2026-06-30T12:00:00.000Z",
       "createdAt": "2026-06-29T09:00:00.000Z",
@@ -1618,11 +1619,22 @@ initial version (v1) is snapshotted. Requires `content:create`.
 | `visibility` | object | no | `{ level, grants? }` (see Visibility below). Defaults to the collection default, else `private` |
 | `tags` | string[] | no | — |
 | `sourceRef` | object | no | Create-only typed provenance; see Capture provenance below |
+| `dataAccess` | `records` \| `query` \| `none` | no | Artifact sandbox data bridge mode (#1705). Defaults to `records`. Ignored for `kind: "document"` |
 
 Collection placement is re-authorized inside the object write transaction under
 collection locks. The persisted default visibility and inherited grants are the
 locked current values; a concurrent archive or grant revocation cannot commit a
 stale create.
+
+**Artifact data access (#1705):** `dataAccess` decides which
+`window.AtriumData` operation a sandboxed artifact may use — `records` (the
+default: `submit` / `list` against the artifact record store), `query`
+(`AtriumData.query`, read-only PSD data reads executed as the PERSON VIEWING
+the page under their own row-level permissions), or `none`. The modes are
+**mutually exclusive** and that is a security control, not a preference: records
+are readable by the author out-of-band, so an artifact that could both query as
+its viewer and write records would give a hostile author an exfiltration channel.
+See `docs/features/atrium-artifact-data.md`.
 
 **Capture provenance (#1290):** Atrium Capture may send
 `sourceRef: { type: "capture", provider, externalId, clientSurface, clientVersion,
@@ -1757,6 +1769,7 @@ Requires `content:update`.
 | `tags` | string[] \| null | Replaces all tags; `null` clears them |
 | `collectionId` | string \| null | Collection slug or UUID; `null` clears the collection |
 | `status` | `draft` \| `published` \| `archived` | — |
+| `dataAccess` | `records` \| `query` \| `none` | Artifact sandbox data bridge mode (#1705). Not clearable — omit to leave the stored mode untouched |
 
 When `collectionId` changes, the target collection and its effective create
 grants are re-authorized under collection locks in the same transaction as the
@@ -2365,6 +2378,7 @@ curl -X POST -H "Authorization: Bearer <agent-oidc-jwt>" \
 | `visibilityLevel` | `private` \| `group` \| `internal` \| `public` | Effective visibility level |
 | `currentVersionId` | UUID \| null | Current version pointer |
 | `sourceRef` | typed object \| null | Create-only provenance (`capture`, `upload`, `object`, `chat`, `okf`, or `none`); known variants reject additional properties |
+| `dataAccess` | `records` \| `query` \| `none` | Which sandbox data bridge operation an artifact may use (#1705); `records` by default, and mutually exclusive with `query` by design |
 | `tags` | string[] | Free-form tags |
 | `status` | `draft` \| `published` \| `archived` | Lifecycle status |
 | `indexedAt` | ISO 8601 \| null | Last search-index time |

@@ -37,6 +37,9 @@ const updateBodySchema = z.object({
   // "unchanged" (undefined). Use null to explicitly clear the collection.
   collectionId: z.string().min(1).nullable().optional(),
   status: z.enum(["draft", "published", "archived"]).optional(),
+  // #1705 — artifact sandbox data-bridge mode. Not nullable: the column is NOT
+  // NULL, so omitting the field leaves the stored mode untouched.
+  dataAccess: z.enum(["records", "query", "none"]).optional(),
 });
 
 // ============================================
@@ -106,6 +109,7 @@ export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId, p
       tags: patch.tags,
       collectionId,
       status: patch.status,
+      dataAccess: patch.dataAccess,
     });
     void recordContentAudit({
       req,

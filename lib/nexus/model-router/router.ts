@@ -1,7 +1,4 @@
-import { eq } from "drizzle-orm"
 import { getNexusEnabledModels } from "@/lib/db/drizzle"
-import { executeQuery } from "@/lib/db/drizzle-client"
-import { nexusMcpServers } from "@/lib/db/schema"
 import { filterAccessibleResourceIds } from "@/lib/db/drizzle/resource-access"
 import { createLogger } from "@/lib/logger"
 import { hasCapability } from "@/lib/ai/capability-utils"
@@ -13,6 +10,7 @@ import {
 } from "@/lib/ai/model-router/core"
 import { classifyNexusRequest } from "./classifier"
 import { getNexusRouterConfig } from "./config"
+import { resolvePsdDataConnectorId } from "./psd-data-connector"
 import { NexusSpecialistUnavailableError } from "./errors"
 import type {
   NexusClassifierDecision,
@@ -135,31 +133,13 @@ function selectModel(args: {
   throw new Error("No accessible Nexus model is available")
 }
 
-async function resolvePsdDataConnector(config: NexusRouterConfig): Promise<string | null> {
-  if (config.specialists.psdDataConnectorId) {
-    const [row] = await executeQuery(
-      db => db.select({ id: nexusMcpServers.id }).from(nexusMcpServers)
-        .where(eq(nexusMcpServers.id, config.specialists.psdDataConnectorId!)).limit(1),
-      "resolvePsdDataConnectorById"
-    )
-    return row?.id ?? null
-  }
-  const rows = await executeQuery(
-    db => db.select({ id: nexusMcpServers.id, name: nexusMcpServers.name }).from(nexusMcpServers),
-    "resolvePsdDataConnectorByName"
-  )
-  const normalize = (value: string) => value.toLowerCase().replaceAll(/[^a-z0-9]/g, "")
-  const configuredName = normalize(config.specialists.psdDataConnectorName)
-  return rows.find(row => normalize(row.name) === configuredName)?.id ?? null
-}
-
 async function resolveAutomaticPsdConnector(
   intent: NexusRouterIntent,
   config: NexusRouterConfig
 ): Promise<string | null> {
   if (intent !== "psd-data") return null
   try {
-    const connectorId = await resolvePsdDataConnector(config)
+    const connectorId = await resolvePsdDataConnectorId(config)
     if (!connectorId) {
       log.warn("PSD-data route requested but the configured database MCP server was not found")
     }

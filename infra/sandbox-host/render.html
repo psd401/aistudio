@@ -33,6 +33,14 @@
   Before any artifact code runs, this host installs window.AtriumData. The helper
   uses postMessage to ask the authenticated parent for scoped data operations;
   it does not weaken the frame CSP or give artifact code direct network access.
+
+  AtriumData exposes three operations, and which ones an artifact may actually
+  use is decided by the PARENT from the object's stored data_access mode, never
+  here: submit/list (the artifact record store) and query (#1705, viewer-scoped
+  read-only PSD data). `query` runs as the person VIEWING the page — this frame
+  never sees a token, only SQL in and rows out — and it is mutually exclusive
+  with submit/list so a page can never read district data and then write it into
+  a store its author can read back.
 -->
 <html lang="en">
   <head>
@@ -81,6 +89,10 @@
         var DATA_REQUEST_TYPE = "atrium-artifact-data-request";
         var DATA_RESPONSE_TYPE = "atrium-artifact-data-response";
         var DATA_REQUEST_TIMEOUT_MS = 10000;
+        // A query is an MCP round trip to a Lambda + RDS, which the parent's
+        // connector path already budgets 30s for. Using the record timeout here
+        // would abandon legitimate aggregates while the server still answers.
+        var QUERY_REQUEST_TIMEOUT_MS = 30000;
         var MAX_PENDING_DATA_REQUESTS = 32;
         var pendingDataRequests = new Map();
         // Capture the primitives before artifact scripts can replace globals.
@@ -154,10 +166,13 @@
               reject(new Error("Atrium data request ID collision"));
               return;
             }
-            var timeoutId = scheduleTimeout(function () {
-              pendingDataRequests.delete(requestId);
-              reject(new Error("Atrium data request timed out"));
-            }, DATA_REQUEST_TIMEOUT_MS);
+            var timeoutId = scheduleTimeout(
+              function () {
+                pendingDataRequests.delete(requestId);
+                reject(new Error("Atrium data request timed out"));
+              },
+              op === "query" ? QUERY_REQUEST_TIMEOUT_MS : DATA_REQUEST_TIMEOUT_MS
+            );
 
             pendingDataRequests.set(requestId, {
               resolve: resolve,
@@ -169,10 +184,18 @@
               type: DATA_REQUEST_TYPE,
               requestId: requestId,
               op: op,
-              namespace: namespace,
             };
+            // `query` addresses no record namespace; the record ops always do.
+            if (op !== "query") message.namespace = namespace;
             if (op === "submit") {
               message.payload = fields.payload;
+            } else if (op === "query") {
+              // Only these three fields ever leave the frame. format/export/
+              // reason/tool name are forced by the parent's Server Action, so
+              // adding them here would change nothing.
+              message.sql = fields.sql;
+              if (fields.limit !== undefined) message.limit = fields.limit;
+              if (fields.offset !== undefined) message.offset = fields.offset;
             } else {
               if (fields.limit !== undefined) message.limit = fields.limit;
               if (fields.scope !== undefined) message.scope = fields.scope;
@@ -201,6 +224,25 @@
             return requestData("list", namespace, {
               limit: options.limit,
               scope: options.scope,
+            });
+          },
+          /**
+           * Viewer-scoped, read-only PSD data query (#1705).
+           *
+           * Resolves to { columns, rows, totalCount, returnedCount, limit,
+           * offset, truncated } where `rows` are tuples in `columns` order.
+           * REJECTS (with the same generic bridge error as every other failure)
+           * when the artifact is not in `query` mode, the viewer lacks access to
+           * the data server, the session has no live ID token, or the rate limit
+           * is exhausted — so pages must render a sign-in / no-access state
+           * rather than assuming a result.
+           */
+          query: function (sql, options) {
+            options = options || {};
+            return requestData("query", null, {
+              sql: sql,
+              limit: options.limit,
+              offset: options.offset,
             });
           },
         };

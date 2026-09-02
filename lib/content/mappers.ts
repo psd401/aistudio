@@ -11,6 +11,7 @@ import { pgTimestampAsText, stripJsonQuotes } from "@/lib/db/drizzle-helpers";
 import { contentObjects, type SourceRef } from "@/lib/db/schema";
 import type {
   BodyFormat,
+  ContentDataAccess,
   ContentKind,
   ContentObjectDTO,
   ContentVersionDTO,
@@ -39,6 +40,8 @@ export const objectSelectFields = {
   // Meridian slice F cover band + doc icon (migration 103).
   coverGradient: contentObjects.coverGradient,
   icon: contentObjects.icon,
+  // Artifact sandbox data-bridge mode (migration 179, #1705).
+  dataAccess: contentObjects.dataAccess,
   status: contentObjects.status,
   indexedAt: pgTimestampAsText(contentObjects.indexedAt),
   createdAt: pgTimestampAsText(contentObjects.createdAt),
@@ -87,6 +90,7 @@ export interface ObjectRowAsText {
   tags: string[];
   coverGradient: string | null;
   icon: string | null;
+  dataAccess: string;
   status: string;
   indexedAt: string | null;
   createdAt: string | null;
@@ -123,6 +127,7 @@ export function rowToObjectDTO(row: ObjectRowAsText): ContentObjectDTO {
     tags: row.tags ?? [],
     coverGradient: row.coverGradient,
     icon: row.icon,
+    dataAccess: row.dataAccess as ContentDataAccess,
     status: row.status as "draft" | "published" | "archived",
     indexedAt: stripJsonQuotes(row.indexedAt),
     createdAt: stripJsonQuotes(row.createdAt),

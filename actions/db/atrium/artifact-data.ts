@@ -8,6 +8,30 @@
  * data; content identity and user identity are resolved by this parent-side,
  * authenticated boundary. Both operations call `contentService.get`, preserving
  * the shared 404 mask for missing and non-viewable content.
+ *
+ * ## Why records and viewer-scoped queries can NEVER coexist (#1705)
+ *
+ * Both actions additionally require the target artifact's `data_access` mode to
+ * be `records`. An artifact in `query` mode -- one that can read district data
+ * as the PERSON VIEWING IT via `queryArtifactData` -- is refused here, and that
+ * refusal is the single enforcement point of the whole feature's security
+ * argument.
+ *
+ * The reason is an exfiltration loop, not tidiness. Records written through
+ * `submitArtifactRecord` are readable by any viewer via `list({scope:"all"})`
+ * and by the artifact's OWNER out-of-band (`psd-atrium list-data`). Every other
+ * egress path out of the sandbox is already closed -- `connect-src 'none'`,
+ * `img-src` with no https wildcard, `form-action 'none'`, `base-uri 'none'`,
+ * `sandbox="allow-scripts"` with no navigation or popups. So if one artifact
+ * could both query as the viewer AND submit records, a hostile author would
+ * have a working channel: query whatever a principal or district admin can see,
+ * submit it into a namespace at ~8 KiB x 120/min, then read it back as the
+ * author. Closing that loop is exactly what removes the need for per-artifact
+ * review or admin approval of data-connected dashboards.
+ *
+ * Do NOT relax this to "both modes for the owner" or "both when the author is
+ * trusted": the point is that the guarantee holds regardless of author intent.
+ * See docs/features/atrium-artifact-data.md (Locked decisions) and migration 179.
  */
 
 import { and, desc, eq, sql } from "drizzle-orm";
@@ -20,6 +44,7 @@ import {
 import { createSuccess, ErrorFactories, handleError } from "@/lib/error-utils";
 import { getServerSession } from "@/lib/auth/server-session";
 import { contentService } from "@/lib/content";
+import type { ContentDataAccess } from "@/lib/content";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { contentDataRecords, users } from "@/lib/db/schema";
 import { safeJsonbStringify } from "@/lib/db/json-utils";
@@ -378,6 +403,30 @@ function toArtifactRecordDTO(row: ArtifactRecordRow): ArtifactRecordDTO {
   };
 }
 
+/**
+ * The record store is available ONLY to artifacts in `records` mode.
+ *
+ * `query` mode is refused because combining the two reopens the exfiltration
+ * loop described in the file header; `none` is refused because it means "no
+ * bridge data operations at all". Every object created before migration 179
+ * defaults to `records`, so this is a no-op for existing artifacts.
+ */
+function assertRecordsMode(content: {
+  kind: string;
+  dataAccess: ContentDataAccess;
+}): void {
+  if (content.kind !== "artifact") {
+    throw ErrorFactories.validationFailed([
+      { field: "contentId", message: "Content is not an artifact" },
+    ]);
+  }
+  if (content.dataAccess !== "records") {
+    throw ErrorFactories.validationFailed([
+      { field: "contentId", message: "Artifact does not use the record store" },
+    ]);
+  }
+}
+
 export async function submitArtifactRecord(
   input: SubmitArtifactRecordInput
 ): Promise<ActionState<SubmitArtifactRecordResult>> {
@@ -427,11 +476,7 @@ export async function submitArtifactRecord(
     // missing or non-viewable target. The per-user guard runs first so a caller
     // over budget cannot keep generating database-backed visibility lookups.
     const content = await contentService.get(requester, contentId);
-    if (content.kind !== "artifact") {
-      throw ErrorFactories.validationFailed([
-        { field: "contentId", message: "Content is not an artifact" },
-      ]);
-    }
+    assertRecordsMode(content);
 
     const [created] = await executeQuery(
       (db) =>
@@ -521,11 +566,7 @@ export async function listArtifactRecords(
     });
 
     const content = await contentService.get(requester, contentId);
-    if (content.kind !== "artifact") {
-      throw ErrorFactories.validationFailed([
-        { field: "contentId", message: "Content is not an artifact" },
-      ]);
-    }
+    assertRecordsMode(content);
     const conditions = [
       eq(contentDataRecords.contentId, content.id),
       eq(contentDataRecords.namespace, namespace),

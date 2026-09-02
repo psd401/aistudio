@@ -102,6 +102,9 @@ const REQUESTER = {
 const CONTENT = {
   id: "11111111-1111-4111-8111-111111111111",
   kind: "artifact",
+  // #1705 — the record store is available only in `records` mode (the default
+  // for every object created before migration 179).
+  dataAccess: "records",
 };
 const CREATED_AT = new Date("2026-08-01T20:00:00.000Z");
 
@@ -634,5 +637,49 @@ describe("listArtifactRecords", () => {
 
     expect(result.isSuccess).toBe(false);
     expect(mockSelect).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * #1705 — the record store and viewer-scoped data queries are MUTUALLY
+ * EXCLUSIVE. These two tests are the enforcement point of that invariant: a
+ * `query`-mode artifact must not be able to write rows its author can read back,
+ * which is what would turn `content_data_records` into an exfiltration channel.
+ */
+describe("artifact record actions respect the data_access mode", () => {
+  it.each(["query", "none"] as const)(
+    "refuses submit for a %s-mode artifact before touching the database",
+    async (dataAccess) => {
+      mockContentGet.mockResolvedValueOnce({ ...CONTENT, dataAccess });
+
+      const result = await submitArtifactRecord(validSubmitInput);
+
+      expect(result.isSuccess).toBe(false);
+      expect(mockInsert).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(["query", "none"] as const)(
+    "refuses list for a %s-mode artifact before touching the database",
+    async (dataAccess) => {
+      mockContentGet.mockResolvedValueOnce({ ...CONTENT, dataAccess });
+
+      const result = await listArtifactRecords(validListInput);
+
+      expect(result.isSuccess).toBe(false);
+      expect(mockSelect).not.toHaveBeenCalled();
+    }
+  );
+
+  it("still allows the default records mode", async () => {
+    mockContentGet.mockResolvedValueOnce({ ...CONTENT, dataAccess: "records" });
+    mockReturning.mockResolvedValueOnce([
+      { id: "record-1", createdAt: CREATED_AT },
+    ]);
+
+    const result = await submitArtifactRecord(validSubmitInput);
+
+    expect(result.isSuccess).toBe(true);
+    expect(mockInsert).toHaveBeenCalled();
   });
 });

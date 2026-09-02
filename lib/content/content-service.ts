@@ -706,6 +706,11 @@ export const contentService = {
               createdByAgentId,
               collectionId: input.collectionId ?? null,
               visibilityLevel,
+              // #1705 — omitted leaves the column default (`records`), which is
+              // what every document and every legacy artifact wants.
+              ...(input.dataAccess !== undefined
+                ? { dataAccess: input.dataAccess }
+                : {}),
               status: "draft",
               // Typed JSONB must use the postgres.js cast pattern.
               sourceRef: sql`${safeJsonbStringify(
@@ -947,6 +952,11 @@ export const contentService = {
     };
     applyTitleAndTags(patch, setValues);
     applyStatusChange(patch, setValues);
+    // Artifact sandbox data-bridge mode (#1705). NOT a clearable field — the
+    // column is NOT NULL with a `records` default, so an omitted value leaves
+    // the stored mode alone and an explicit value always writes a valid enum
+    // member (validated at the action/tool boundary).
+    if (patch.dataAccess !== undefined) setValues.dataAccess = patch.dataAccess;
     // Slice-F presentation fields (cover gradient + emoji icon), validated at the
     // action boundary and merged as a typed partial (see presentationSetValues).
     Object.assign(setValues, presentationSetValues(patch));

@@ -5189,6 +5189,7 @@ components:
         - visibilityLevel
         - currentVersionId
         - tags
+        - dataAccess
         - status
       properties:
         id:
@@ -5229,6 +5230,19 @@ components:
           type: array
           items:
             type: string
+        dataAccess:
+          type: string
+          enum: [records, query, none]
+          description: >-
+            Which sandbox data bridge operation this artifact may use.
+            `records` (the default, and the value of every object created
+            before migration 179) allows `AtriumData.submit` / `.list`;
+            `query` allows `AtriumData.query` — read-only PSD data queries
+            executed as the PERSON VIEWING the page, under their own row-level
+            permissions; `none` disables the bridge. The modes are MUTUALLY
+            EXCLUSIVE for security: an artifact that can read district data
+            must never also be able to write records its author can read back.
+            Artifacts only — the value is ignored for documents.
         status:
           type: string
           enum: [draft, published, archived]
@@ -5437,6 +5451,19 @@ components:
             type: string
         sourceRef:
           $ref: "#/components/schemas/ContentSourceRef"
+        dataAccess:
+          type: string
+          enum: [records, query, none]
+          description: >-
+            Which sandbox data bridge operation this artifact may use.
+            `records` (the default, and the value of every object created
+            before migration 179) allows `AtriumData.submit` / `.list`;
+            `query` allows `AtriumData.query` — read-only PSD data queries
+            executed as the PERSON VIEWING the page, under their own row-level
+            permissions; `none` disables the bridge. The modes are MUTUALLY
+            EXCLUSIVE for security: an artifact that can read district data
+            must never also be able to write records its author can read back.
+            Artifacts only — the value is ignored for documents.
 
     UpdateContentRequest:
       type: object
@@ -5459,6 +5486,21 @@ components:
         status:
           type: string
           enum: [draft, published, archived]
+        dataAccess:
+          type: string
+          enum: [records, query, none]
+          description: >-
+            Which sandbox data bridge operation this artifact may use.
+            `records` (the default, and the value of every object created
+            before migration 179) allows `AtriumData.submit` / `.list`;
+            `query` allows `AtriumData.query` — read-only PSD data queries
+            executed as the PERSON VIEWING the page, under their own row-level
+            permissions; `none` disables the bridge. The modes are MUTUALLY
+            EXCLUSIVE for security: an artifact that can read district data
+            must never also be able to write records its author can read back.
+            Artifacts only — the value is ignored for documents. Omitting the
+            field leaves the stored mode untouched (the column is NOT NULL, so
+            it is not clearable).
 
     CreateVersionRequest:
       type: object

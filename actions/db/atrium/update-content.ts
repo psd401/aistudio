@@ -28,7 +28,11 @@ import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { contentService } from "@/lib/content";
 import { ValidationError } from "@/lib/content/errors";
 import { isCoverGradientKey } from "@/lib/atrium/cover";
-import type { ContentObjectDTO, UpdatePatch } from "@/lib/content";
+import type {
+  ContentDataAccess,
+  ContentObjectDTO,
+  UpdatePatch,
+} from "@/lib/content";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { getServerSession } from "@/lib/auth/server-session";
@@ -42,6 +46,22 @@ import { getUserRequester } from "./requester";
  */
 const EDITOR_STATUSES = ["draft", "archived"] as const;
 type EditorStatus = (typeof EDITOR_STATUSES)[number];
+
+/**
+ * Artifact sandbox data-bridge modes (#1705). Runtime-narrowed here so an
+ * unknown string is a clear 400 rather than a Postgres enum violation deeper in.
+ * The three modes are mutually exclusive by design — see `ContentDataAccess`.
+ */
+const DATA_ACCESS_MODES = ["records", "query", "none"] as const;
+
+function assertDataAccess(value: string): ContentDataAccess {
+  if (!(DATA_ACCESS_MODES as readonly string[]).includes(value)) {
+    throw new ValidationError(`Invalid data access mode: ${value}`, {
+      dataAccess: value,
+    });
+  }
+  return value as ContentDataAccess;
+}
 
 /** Runtime-narrow a widened `string` status; mirrors `assertLevel`'s pattern. */
 function assertEditorStatus(status: string): EditorStatus {
@@ -104,6 +124,12 @@ export async function updateContentAction(
     coverGradient?: string | null;
     /** Doc emoji icon (slice F); `null` clears it. Length-capped below. */
     icon?: string | null;
+    /**
+     * Artifact sandbox data-bridge mode (#1705): "records" | "query" | "none".
+     * Widened `string`, narrowed at runtime. Not clearable — the column is NOT
+     * NULL — so omitting it leaves the stored mode untouched.
+     */
+    dataAccess?: string;
   }
 ): Promise<ActionState<ContentObjectDTO>> {
   const requestId = generateRequestId();
@@ -151,6 +177,9 @@ export async function updateContentAction(
     if (input.tags !== undefined) patch.tags = input.tags;
     if (input.collectionId !== undefined) patch.collectionId = input.collectionId;
     if (input.status !== undefined) patch.status = assertEditorStatus(input.status);
+    if (input.dataAccess !== undefined) {
+      patch.dataAccess = assertDataAccess(input.dataAccess);
+    }
     // Slice-F cover band + icon (validated + applied in one helper so this action's
     // control flow stays flat).
     applyPresentationInput(input, patch);

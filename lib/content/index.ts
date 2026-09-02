@@ -136,6 +136,7 @@ export type {
   UpdateCollectionInput,
   CollectionDTO,
   ContentKind,
+  ContentDataAccess,
   BodyFormat,
   SnapshotInput,
   ContentObjectDTO,

@@ -192,6 +192,11 @@ authenticated `/c/<slug>` reader; signed-out/public readers and preview-only
 surfaces fail the bridge closed, so always catch rejections and show a signed-out
 state.
 
+`submit`/`list` require the artifact's data-access mode to be `records` — the
+default, so nothing extra is needed. They are REFUSED on an artifact created with
+`--data-access query`; see "Live PSD data" below for why the two can never be
+combined.
+
 ```js
 const created = await window.AtriumData.submit("leaderboard", {
   score: 1250,
@@ -213,6 +218,51 @@ const result = await window.AtriumData.list("leaderboard", {
   `userId`/`user_id` in the payload, or implement a name profanity filter.**
 - Wrap every bridge call in `try`/`catch`. A disabled bridge, signed-out reader,
   timeout, invalid input, or denied content access rejects the Promise.
+
+### Live PSD data inside an artifact (`window.AtriumData.query`)
+
+For a dashboard that must show CURRENT district data, create the artifact with
+`--data-access query` and call `window.AtriumData.query()` at runtime. The query
+runs on the PSD Data MCP **as the person viewing the page**, under that viewer's
+own row-level permissions — a principal and a district admin opening the same
+dashboard see different numbers, which is the point.
+
+```bash
+node run.js create-artifact --title "Enrollment dashboard" \
+  --code-file /tmp/dashboard.html --body-format html --data-access query
+```
+
+```js
+const { columns, rows, totalCount, truncated } = await window.AtriumData.query(
+  "SELECT school_name, COUNT(*) AS enrolled FROM enrollment GROUP BY school_name",
+  { limit: 200, offset: 0 }   // optional; limit is capped at 2000
+);
+// rows are tuples in `columns` order: [["Peninsula HS", 1234], ...]
+```
+
+Rules — follow all of them:
+
+- **Never embed query results in the artifact source.** Baked-in numbers are
+  stale the moment you write them AND they show every viewer data at YOUR
+  permission level; the Code tab exposes them verbatim. Query at runtime.
+- **Aggregate in SQL.** A chart query should return tens of rows, not a dataset.
+  Every call is a Lambda + database round trip.
+- **Page detail tables** with `limit` / `offset` instead of one huge read.
+- **Pass filters as query parameters** and re-query when the user changes them —
+  do not fetch everything once and filter in JavaScript.
+- **Handle rejection.** Wrap every call in `try`/`catch` and render a sign-in /
+  no-access state. A rejection means no session, an expired ID token (they last
+  about an hour — tell the viewer to reload), no access to a table, the wrong
+  data-access mode, or a rate limit (60 queries per artifact per minute).
+- **`query` and `submit`/`list` are mutually exclusive.** An artifact in `query`
+  mode cannot use the record store, and vice versa. This is a security boundary,
+  not a limitation to work around: records are readable by the artifact's author,
+  so an artifact that could do both would leak whatever its viewers can see. Do
+  not ask for both; pick the one the artifact actually needs.
+- You cannot influence `format`, `export`, the tool name, or the audit reason —
+  they are forced server-side, and the audit log records the viewer's identity
+  with the artifact id.
+- Students never reach this bridge; the connector is staff/administrator only.
 
 The following are **not live persistence options inside an Atrium artifact**:
 

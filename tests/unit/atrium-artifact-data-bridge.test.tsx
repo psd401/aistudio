@@ -2,11 +2,16 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 
 const submitArtifactRecordMock = jest.fn();
 const listArtifactRecordsMock = jest.fn();
+const queryArtifactDataMock = jest.fn();
 
 jest.mock("@/actions/db/atrium/artifact-data", () => ({
   submitArtifactRecord: (...args: unknown[]) =>
     submitArtifactRecordMock(...args),
   listArtifactRecords: (...args: unknown[]) => listArtifactRecordsMock(...args),
+}));
+
+jest.mock("@/actions/db/atrium/artifact-query", () => ({
+  queryArtifactData: (...args: unknown[]) => queryArtifactDataMock(...args),
 }));
 
 import { ArtifactSandbox } from "@/components/atrium/ArtifactSandbox";
@@ -119,6 +124,19 @@ beforeEach(() => {
     message: "Artifact records listed",
     data: { records: [] },
   });
+  queryArtifactDataMock.mockReset().mockResolvedValue({
+    isSuccess: true,
+    message: "Artifact data query completed",
+    data: {
+      columns: ["school"],
+      rows: [["Peninsula HS"]],
+      totalCount: 1,
+      returnedCount: 1,
+      limit: 200,
+      offset: 0,
+      truncated: false,
+    },
+  });
 });
 
 describe("ArtifactSandbox artifact data bridge", () => {
@@ -202,6 +220,126 @@ describe("ArtifactSandbox artifact data bridge", () => {
         data: { records: [] },
       },
       targetOrigin: "*",
+    });
+  });
+});
+
+/**
+ * #1705 — the query op. The bridge must copy ONLY sql/limit/offset out of the
+ * frame's message; every other field (contentId, tool name, export, format,
+ * reason) is either taken from trusted props or forced by the Server Action.
+ */
+describe("ArtifactSandbox viewer-scoped query bridge", () => {
+  it("copies only sql/limit/offset and uses the trusted prop contentId", async () => {
+    const { frameWindow, postMessage } = mountSandbox(true);
+
+    await sendMessage(
+      {
+        type: "atrium-artifact-data-request",
+        requestId: REQUEST_IDS[2],
+        op: "query",
+        sql: "SELECT 1",
+        limit: 10,
+        offset: 5,
+        // Fields a hostile page might attach — none may reach the action.
+        contentId: "attacker-chosen-content",
+        namespace: "leaderboard",
+        export: true,
+        format: "csv",
+        reason: "totally legitimate",
+      },
+      frameWindow,
+      "https://origin-is-not-the-authenticator.example"
+    );
+
+    expect(queryArtifactDataMock).toHaveBeenCalledWith({
+      contentId: TRUSTED_CONTENT_ID,
+      sql: "SELECT 1",
+      limit: 10,
+      offset: 5,
+    });
+    expect(dataResponses(postMessage)[0]?.targetOrigin).toBe("*");
+    expect(submitArtifactRecordMock).not.toHaveBeenCalled();
+    expect(listArtifactRecordsMock).not.toHaveBeenCalled();
+  });
+
+  it("drops a query request with no sql without invoking the action", async () => {
+    const { frameWindow, postMessage } = mountSandbox(true);
+
+    await sendMessage(
+      {
+        type: "atrium-artifact-data-request",
+        requestId: REQUEST_IDS[3],
+        op: "query",
+      },
+      frameWindow
+    );
+
+    expect(queryArtifactDataMock).not.toHaveBeenCalled();
+    expect(dataResponses(postMessage)).toEqual([]);
+  });
+
+  it("refuses oversized SQL before serializing a Server Action payload", async () => {
+    const { frameWindow, postMessage } = mountSandbox(true);
+
+    await sendMessage(
+      {
+        type: "atrium-artifact-data-request",
+        requestId: REQUEST_IDS[4],
+        op: "query",
+        sql: "a".repeat(8_001),
+      },
+      frameWindow
+    );
+
+    expect(queryArtifactDataMock).not.toHaveBeenCalled();
+    expect(dataResponses(postMessage)).toEqual([]);
+  });
+
+  it("refuses every query when the bridge is disabled", async () => {
+    const { frameWindow, postMessage } = mountSandbox(false);
+
+    await sendMessage(
+      {
+        type: "atrium-artifact-data-request",
+        requestId: REQUEST_IDS[5],
+        op: "query",
+        sql: "SELECT 1",
+      },
+      frameWindow
+    );
+
+    expect(queryArtifactDataMock).not.toHaveBeenCalled();
+    expect(dataResponses(postMessage)[0]?.message).toEqual({
+      type: "atrium-artifact-data-response",
+      requestId: REQUEST_IDS[5],
+      ok: false,
+      error: "Artifact data request failed",
+    });
+  });
+
+  it("returns the generic failure when the action refuses", async () => {
+    queryArtifactDataMock.mockResolvedValueOnce({
+      isSuccess: false,
+      message: "Artifact is not configured for data queries",
+    });
+    const { frameWindow, postMessage } = mountSandbox(true);
+
+    await sendMessage(
+      {
+        type: "atrium-artifact-data-request",
+        requestId: REQUEST_IDS[6],
+        op: "query",
+        sql: "SELECT 1",
+      },
+      frameWindow
+    );
+
+    expect(dataResponses(postMessage)[0]?.message).toEqual({
+      type: "atrium-artifact-data-response",
+      requestId: REQUEST_IDS[6],
+      ok: false,
+      error: "Artifact data request failed",
     });
   });
 });

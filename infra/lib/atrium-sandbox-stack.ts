@@ -171,6 +171,13 @@ export class AtriumSandboxStack extends cdk.Stack {
       "base-uri 'none'",
       "form-action 'none'",
       "worker-src 'none'",
+      // WebRTC is the one network channel CSP's fetch directives do NOT govern:
+      // an RTCPeerConnection can carry data out of the frame even under
+      // `connect-src 'none'`. Low bandwidth, but the whole no-egress invariant
+      // that lets viewer-scoped data queries ship without per-artifact review
+      // (#1705) depends on there being no channel at all, so block it
+      // explicitly. Browsers without `webrtc` support ignore the directive.
+      "webrtc 'block'",
     ].join('; ');
 
     // Render the static host page with deploy-time substitutions: the parent

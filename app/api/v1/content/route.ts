@@ -67,6 +67,10 @@ const createBodySchema = z.object({
   visibility: restVisibilitySchema.optional(),
   tags: z.array(z.string()).optional(),
   sourceRef: contentSourceRefSchema.optional(),
+  // #1705 — artifact sandbox data-bridge mode. Omitted keeps the column default
+  // (`records`), which is what every document and legacy artifact wants. The
+  // three modes are mutually exclusive by design; see ContentDataAccess.
+  dataAccess: z.enum(["records", "query", "none"]).optional(),
 });
 
 function createContentResponse(
@@ -175,6 +179,8 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       visibility: input.visibility,
       tags: input.tags,
       sourceRef: input.sourceRef,
+      // Documents have no sandbox, so a stray value is never written for one.
+      dataAccess: input.kind === "artifact" ? input.dataAccess : undefined,
     };
   };
 

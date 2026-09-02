@@ -59,6 +59,24 @@ describe('AtriumSandboxStack CSP media-src', () => {
     expect(csp).toContain("connect-src 'none'");
   });
 
+  // #1705 — viewer-scoped data queries rest on a "no egress from the frame"
+  // invariant. WebRTC is the one channel CSP's fetch directives do not cover,
+  // so it must stay explicitly blocked alongside connect-src.
+  it("blocks WebRTC, the channel connect-src does not govern", () => {
+    const csp = cspOf({ allowedMediaOrigins: [BUCKET_ORIGIN] });
+    expect(csp).toContain("webrtc 'block'");
+  });
+
+  // img-src must never gain an https wildcard: a pixel beacon would reopen
+  // exfiltration even with connect-src closed.
+  it('never allows an https wildcard in img-src', () => {
+    const csp = cspOf({ allowedMediaOrigins: [BUCKET_ORIGIN] });
+    const imgSrc = csp.split('; ').find((d: string) => d.startsWith('img-src'));
+    expect(imgSrc).toBeDefined();
+    expect(imgSrc).not.toContain('https:');
+    expect(imgSrc).not.toContain('*');
+  });
+
   it('rejects a non-http(s) media origin at synth', () => {
     expect(() => cspOf({ allowedMediaOrigins: ['ftp://evil.example'] })).toThrow();
   });

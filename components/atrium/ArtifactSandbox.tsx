@@ -34,7 +34,12 @@
  *   message would be silently dropped). Authentication is inverted: the host page
  *   accepts the message only from an allowlisted `event.origin`. The payload is
  *   the untrusted code itself, so `"*"` leaks no app secret. See `postCode` below.
- * - The reverse-direction artifact data bridge accepts requests only when
+ * - The reverse-direction artifact data bridge carries three operations —
+ *   `submit` / `list` (the artifact record store, #1516) and `query`
+ *   (viewer-scoped, read-only PSD data, #1705). Which ones a given artifact may
+ *   actually use is decided SERVER-SIDE from its stored `data_access` mode; this
+ *   component routes all three identically and never grants anything itself.
+ *   Requests are accepted only when
  *   `event.source === iframeRef.current?.contentWindow`. Opaque-origin frames
  *   report `event.origin === "null"`, so origin is deliberately NOT the bridge
  *   authenticator. The trusted `contentId` comes only from this component's
@@ -93,6 +98,12 @@ const MAX_DATA_PAYLOAD_STRING_CODE_UNITS = MAX_DATA_PAYLOAD_BYTES;
 /** One response for every bridge failure; never expose action or database detail. */
 const DATA_BRIDGE_ERROR_MESSAGE = "Artifact data request failed";
 const DATA_NAMESPACE_RE = /^[a-z0-9_-]{1,64}$/;
+/**
+ * Parent-side mirror of the query action's SQL cap (#1705). The action remains
+ * the authority and re-validates; this only stops an oversized string from being
+ * serialized into a Server Action payload at all.
+ */
+const MAX_QUERY_SQL_LENGTH = 8_000;
 const REQUEST_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -151,7 +162,27 @@ interface ListDataRequest {
   scope?: "all" | "mine";
 }
 
-type ArtifactDataRequest = SubmitDataRequest | ListDataRequest;
+/**
+ * Viewer-scoped PSD data read (#1705). The page supplies ONLY `sql`, `limit`,
+ * and `offset` — the tool name, `format`, `export`, `view_results` and the audit
+ * `reason` are all forced by `queryArtifactData` server-side. A request carrying
+ * any of those extra fields is not rejected for it; the fields are simply never
+ * copied out of the message (see `handleDataRequest`), so they cannot influence
+ * the call. Unlike submit/list this op carries no namespace.
+ */
+interface QueryDataRequest {
+  type: "atrium-artifact-data-request";
+  requestId: string;
+  op: "query";
+  sql: string;
+  limit?: number;
+  offset?: number;
+}
+
+type ArtifactDataRequest =
+  | SubmitDataRequest
+  | ListDataRequest
+  | QueryDataRequest;
 
 type ArtifactDataResponse =
   | {
@@ -270,6 +301,22 @@ function isPayloadWithinBridgeBounds(payload: ArtifactDataPayload): boolean {
   }
 }
 
+function isOptionalFiniteNumber(value: unknown): boolean {
+  return (
+    value === undefined || (typeof value === "number" && Number.isFinite(value))
+  );
+}
+
+function hasValidQueryOptions(candidate: Record<string, unknown>): boolean {
+  return (
+    typeof candidate.sql === "string" &&
+    candidate.sql.length > 0 &&
+    candidate.sql.length <= MAX_QUERY_SQL_LENGTH &&
+    isOptionalFiniteNumber(candidate.limit) &&
+    isOptionalFiniteNumber(candidate.offset)
+  );
+}
+
 function hasValidListOptions(candidate: Record<string, unknown>): boolean {
   const validLimit =
     candidate.limit === undefined ||
@@ -281,7 +328,7 @@ function hasValidListOptions(candidate: Record<string, unknown>): boolean {
   return validLimit && validScope;
 }
 
-/** Narrow an unknown payload to the two artifact data request operations. */
+/** Narrow an unknown payload to the three artifact data request operations. */
 function isArtifactDataRequest(data: unknown): data is ArtifactDataRequest {
   if (typeof data !== "object" || data === null) return false;
 
@@ -289,11 +336,19 @@ function isArtifactDataRequest(data: unknown): data is ArtifactDataRequest {
   if (
     candidate.type !== "atrium-artifact-data-request" ||
     typeof candidate.requestId !== "string" ||
-    !REQUEST_ID_RE.test(candidate.requestId) ||
-    typeof candidate.namespace !== "string"
+    !REQUEST_ID_RE.test(candidate.requestId)
   ) {
     return false;
   }
+
+  // `query` reads the PSD data connector and addresses no record namespace, so
+  // the namespace requirement is scoped to the two record ops rather than
+  // applied to every request.
+  if (candidate.op === "query") {
+    return hasValidQueryOptions(candidate);
+  }
+
+  if (typeof candidate.namespace !== "string") return false;
 
   if (candidate.op === "submit") {
     return isSubmitPayload(candidate.payload);
@@ -313,6 +368,74 @@ function dataBridgeFailure(requestId: string): ArtifactDataResponse {
     ok: false,
     error: DATA_BRIDGE_ERROR_MESSAGE,
   };
+}
+
+/**
+ * Per-op parent-side bounds. The Server Actions remain the authority and repeat
+ * their own validation; this mirror keeps an oversized or malformed request from
+ * being serialized into a Server Action payload at all.
+ */
+function isRequestWithinBridgeBounds(request: ArtifactDataRequest): boolean {
+  if (request.op === "query") {
+    // Length was already bounded by the narrowing predicate; nothing further to
+    // check here — the SQL itself is the data MCP's business, not the bridge's.
+    return true;
+  }
+  if (!DATA_NAMESPACE_RE.test(request.namespace)) return false;
+  if (request.op === "submit") {
+    return isPayloadWithinBridgeBounds(request.payload);
+  }
+  return true;
+}
+
+/** Sentinel for "the action ran and refused" — distinct from a thrown error. */
+const BRIDGE_ACTION_FAILED = Symbol("atrium-bridge-action-failed");
+
+/**
+ * Route one validated request to its Server Action, copying ONLY the fields the
+ * op is allowed to influence. `contentId` always comes from the trusted prop.
+ *
+ * The dynamic imports keep the server-only action graph out of fail-closed and
+ * preview-only clients: Next resolves these `use server` modules to action
+ * references only when an enabled bridge request reaches the authenticated
+ * parent. The record actions and the query action are imported separately so a
+ * records-only artifact never pulls in the data-connector action reference.
+ */
+async function invokeBridgeAction(
+  request: ArtifactDataRequest,
+  contentId: string
+): Promise<unknown> {
+  if (request.op === "query") {
+    const { queryArtifactData } = await import(
+      "@/actions/db/atrium/artifact-query"
+    );
+    const result = await queryArtifactData({
+      contentId,
+      sql: request.sql,
+      limit: request.limit,
+      offset: request.offset,
+    });
+    return result.isSuccess ? result.data : BRIDGE_ACTION_FAILED;
+  }
+
+  const { listArtifactRecords, submitArtifactRecord } = await import(
+    "@/actions/db/atrium/artifact-data"
+  );
+  if (request.op === "submit") {
+    const result = await submitArtifactRecord({
+      contentId,
+      namespace: request.namespace,
+      payload: request.payload,
+    });
+    return result.isSuccess ? result.data : BRIDGE_ACTION_FAILED;
+  }
+  const result = await listArtifactRecords({
+    contentId,
+    namespace: request.namespace,
+    limit: request.limit,
+    scope: request.scope,
+  });
+  return result.isSuccess ? result.data : BRIDGE_ACTION_FAILED;
 }
 
 interface ArtifactDataBridgeOptions {
@@ -343,9 +466,7 @@ function useArtifactDataBridge({
       if (
         !dataBridgeEnabled ||
         !contentId ||
-        !DATA_NAMESPACE_RE.test(request.namespace) ||
-        (request.op === "submit" &&
-          !isPayloadWithinBridgeBounds(request.payload)) ||
+        !isRequestWithinBridgeBounds(request) ||
         inFlightDataRequestsRef.current >= MAX_IN_FLIGHT_DATA_REQUESTS
       ) {
         frameWindow.postMessage(dataBridgeFailure(request.requestId), "*");
@@ -355,42 +476,16 @@ function useArtifactDataBridge({
       inFlightDataRequestsRef.current += 1;
       let response: ArtifactDataResponse;
       try {
-        // Keep the server-only action graph out of fail-closed/preview-only
-        // clients. Next resolves this `use server` module to action references
-        // when an enabled bridge request reaches the authenticated parent.
-        const { listArtifactRecords, submitArtifactRecord } = await import(
-          "@/actions/db/atrium/artifact-data"
-        );
-        if (request.op === "submit") {
-          const result = await submitArtifactRecord({
-            contentId,
-            namespace: request.namespace,
-            payload: request.payload,
-          });
-          response = result.isSuccess
-            ? {
+        const data = await invokeBridgeAction(request, contentId);
+        response =
+          data === BRIDGE_ACTION_FAILED
+            ? dataBridgeFailure(request.requestId)
+            : {
                 type: "atrium-artifact-data-response",
                 requestId: request.requestId,
                 ok: true,
-                data: result.data,
-              }
-            : dataBridgeFailure(request.requestId);
-        } else {
-          const result = await listArtifactRecords({
-            contentId,
-            namespace: request.namespace,
-            limit: request.limit,
-            scope: request.scope,
-          });
-          response = result.isSuccess
-            ? {
-                type: "atrium-artifact-data-response",
-                requestId: request.requestId,
-                ok: true,
-                data: result.data,
-              }
-            : dataBridgeFailure(request.requestId);
-        }
+                data,
+              };
       } catch {
         response = dataBridgeFailure(request.requestId);
       } finally {

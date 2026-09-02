@@ -131,6 +131,8 @@ export default async function AtriumEditPage({
           tags={obj.tags}
           collectionId={obj.collectionId}
           status={obj.status}
+          kind={obj.kind}
+          dataAccess={obj.dataAccess}
         />
       )}
       {/* ONE share surface: link + audience + destinations in one dialog. */}
