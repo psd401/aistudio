@@ -16,6 +16,10 @@
  * The tree is fetched on mount via `collectionTreeAction`. Nodes with children
  * are expandable; a node also shows how many objects in it the viewer can see
  * (`visibleObjectCount`) as a subtle count.
+ *
+ * Expansion starts COLLAPSED and is remembered per viewer (`useExpandedSections`,
+ * localStorage). It used to be a per-row `useState(true)`: every section unfolded
+ * on every visit, and a collapse survived only until the next route change.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -24,6 +28,8 @@ import { cn } from "@/lib/utils";
 import { collectionTreeAction } from "@/actions/db/atrium/collection-tree";
 import type { CollectionTreeNode } from "@/lib/content";
 import { createLogger } from "@/lib/client-logger";
+import { useUser } from "@/components/auth/user-provider";
+import { useExpandedSections } from "./use-expanded-sections";
 
 const log = createLogger({ component: "CollectionTree" });
 
@@ -46,6 +52,8 @@ function TreeRow({
   depth,
   selectedCollectionId,
   onSelect,
+  expandedIds,
+  onToggle,
 }: {
   node: CollectionTreeNode;
   depth: number;
@@ -56,9 +64,12 @@ function TreeRow({
    * URL beats a uuid in the query string. `null` means "All content".
    */
   onSelect: (node: CollectionTreeNode | null) => void;
+  /** Ids the viewer has expanded (tree-level, persisted) — see `useExpandedSections`. */
+  expandedIds: ReadonlySet<string>;
+  onToggle: (collectionId: string) => void;
 }): React.JSX.Element {
   const hasChildren = node.children.length > 0;
-  const [expanded, setExpanded] = useState(true);
+  const expanded = expandedIds.has(node.id);
   const isSelected = selectedCollectionId === node.id;
 
   return (
@@ -91,7 +102,7 @@ function TreeRow({
             className="shrink-0 rounded p-1 hover:bg-muted"
             onClick={(e) => {
               e.stopPropagation();
-              setExpanded((v) => !v);
+              onToggle(node.id);
             }}
           >
             {expanded ? (
@@ -133,6 +144,8 @@ function TreeRow({
               depth={depth + 1}
               selectedCollectionId={selectedCollectionId}
               onSelect={onSelect}
+              expandedIds={expandedIds}
+              onToggle={onToggle}
             />
           ))}
         </ul>
@@ -149,6 +162,11 @@ export function CollectionTree({
   const [tree, setTree] = useState<CollectionTreeNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Per-viewer, persisted expansion set. `user` resolves asynchronously from
+  // UserProvider; until then the hook runs memory-only under an anonymous key,
+  // and switches to the viewer's stored layout in the same commit `user` lands.
+  const { user } = useUser();
+  const [expandedIds, toggleExpanded] = useExpandedSections(user?.id ?? null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -236,6 +254,8 @@ export function CollectionTree({
               depth={0}
               selectedCollectionId={selectedCollectionId}
               onSelect={onSelect}
+              expandedIds={expandedIds}
+              onToggle={toggleExpanded}
             />
           ))}
         </ul>
@@ -259,6 +279,8 @@ export function CollectionTree({
                 depth={0}
                 selectedCollectionId={selectedCollectionId}
                 onSelect={onSelect}
+                expandedIds={expandedIds}
+                onToggle={toggleExpanded}
               />
             ))}
           </ul>
