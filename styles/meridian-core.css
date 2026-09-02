@@ -402,6 +402,27 @@
   box-shadow: inset 0 0 0 2px var(--mer-brand);
   border-radius: 8px;
 }
+/* Reorder target: an insertion line on the edge the dragged section will take
+ * (rows never slide apart during a drag — see TreeRow in CollectionTree.tsx). */
+.meridian .mer-navcol [data-drop-edge] {
+  position: relative;
+}
+.meridian .mer-navcol [data-drop-edge]::before {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--mer-brand);
+  pointer-events: none;
+}
+.meridian .mer-navcol [data-drop-edge="before"]::before {
+  top: -2px;
+}
+.meridian .mer-navcol [data-drop-edge="after"]::before {
+  bottom: -2px;
+}
 .mer-tree-grip {
   touch-action: none;
   cursor: grab;

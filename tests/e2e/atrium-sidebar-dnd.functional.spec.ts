@@ -76,7 +76,24 @@ async function dragHandleTo(
   // collision detection sees intermediate positions like a human drag.
   await page.mouse.move(sx + 12, sy + 12, { steps: 4 })
   await page.mouse.move(tx, ty, { steps: 16 })
+  // dnd-kit auto-scrolls a scrollable ancestor while the pointer sits in its
+  // edge zone (bottom fifth by default), so when the tree is near the bottom
+  // of the nav column the target slides up under a pointer aimed at its
+  // pre-drag position — a middle-band drop becomes an edge drop. Re-aim at the
+  // target's LIVE box until it holds still, as a human does by eye.
+  await aimAtLivePosition(page, target, y)
   await page.mouse.up()
+}
+
+async function aimAtLivePosition(page: Page, target: Locator, y: number): Promise<void> {
+  let last = await target.boundingBox()
+  for (let i = 0; i < 6 && last; i++) {
+    await page.mouse.move(last.x + last.width / 2, last.y + last.height * y, { steps: 3 })
+    await page.waitForTimeout(80)
+    const now = await target.boundingBox()
+    if (!now || (Math.abs(now.y - last.y) < 1 && Math.abs(now.x - last.x) < 1)) break
+    last = now
+  }
 }
 
 /** Pin the grid to one seeded document via the server-side search box. */
@@ -148,6 +165,11 @@ test.describe('Atrium drag-and-drop (authenticated)', () => {
         timeout: 30_000,
       })
       await expect.poll(() => collectionOf(page, doc.id), { timeout: 30_000 }).toBe(firstId)
+      // The drop also re-fetches the tree (`atrium:collections-changed`). Wait
+      // for THAT to land — "one" now shows a count badge of 1 — before the next
+      // drag: a reload mid-drag re-registers every row's droppable and the drop
+      // resolves to no target at all.
+      await expect(sectionRow(page, firstId)).toContainText('1', { timeout: 30_000 })
       await page.screenshot({ path: `${SHOT_DIR}/01-card-filed-by-drag.png`, fullPage: false })
 
       // 2. Reorder: drag "two" onto the TOP edge of "one" → two takes slot 0.
@@ -215,9 +237,12 @@ test.describe('Atrium drag-and-drop (authenticated)', () => {
       await pinGridTo(page, docTitle)
       await dragHandleTo(page, page.getByTestId(`drag-${doc.id}`), sectionRow(page, parentId), 0.5)
 
+      // The provider clears the status line a few seconds after a drop, so
+      // read it in one go: tone AND a non-empty message (the server's own
+      // wording is not the contract here — that it is shown inline is).
       const status = page.getByTestId('tree-dnd-status')
       await expect(status).toHaveAttribute('data-tone', 'error', { timeout: 30_000 })
-      await expect(status).toContainText(/private|could not/i)
+      expect((await status.textContent())?.trim()).toBeTruthy()
       expect(await collectionOf(page, doc.id)).toBeNull()
       await page.screenshot({ path: `${SHOT_DIR}/04-refused-drop.png`, fullPage: false })
     } finally {

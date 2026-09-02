@@ -33,13 +33,12 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useDroppable } from "@dnd-kit/core";
+import { useDroppable, type Active } from "@dnd-kit/core";
 import {
   SortableContext,
   useSortable,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
 import {
   ChevronDown,
   ChevronRight,
@@ -151,6 +150,20 @@ function GroupHeading({
 }
 
 /** One row in the tree, recursively rendering its kept children. */
+/**
+ * When this row is the sortable (reorder) target, which edge the dragged
+ * sibling will take: "before" if it is moving up the group, "after" if down.
+ */
+function slotEdgeFor(
+  isTarget: boolean,
+  active: Active | null,
+  groupIndex: number
+): "before" | "after" | undefined {
+  const drag = active?.data.current as DragPayload | undefined;
+  if (!isTarget || drag?.kind !== "collection") return undefined;
+  return drag.groupIndex > groupIndex ? "before" : "after";
+}
+
 function TreeRow({
   node,
   depth,
@@ -196,14 +209,24 @@ function TreeRow({
 
   // Sortable (this row as something to drag) — disabled, not hidden, for rows
   // the viewer may not manage, so they still take part in the list's layout.
+  //
+  // The displacement `transform` dnd-kit offers is deliberately NOT applied:
+  // rows stay put during a drag and the overlay ghost is the only thing that
+  // moves. Sliding rows apart would draw a sibling over the dragged row's
+  // original slot while collision detection keeps working from the original
+  // layout — the visible middle band of the displaced sibling would then map
+  // to the dragged row's own rect, and nesting into that sibling would resolve
+  // as a reorder. Reorder targets get an insertion line instead
+  // (`data-drop-edge`); nest targets keep the row highlight.
   const {
     attributes,
     listeners,
     setNodeRef: setSortableRef,
-    transform,
-    transition,
     isDragging,
+    isOver: isSlotTarget,
+    active,
   } = useSortable({ id: node.id, data: dragPayload, disabled: !node.canManage });
+  const slotEdge = slotEdgeFor(isSlotTarget, active, groupIndex);
 
   // Droppable (this row as somewhere to land). Registered on the row div, not
   // the <li>, so the nested children list is never part of the target rect.
@@ -213,11 +236,7 @@ function TreeRow({
   });
 
   return (
-    <li
-      ref={setSortableRef}
-      style={{ transform: CSS.Transform.toString(transform), transition }}
-      data-dragging={isDragging ? "true" : undefined}
-    >
+    <li ref={setSortableRef} data-dragging={isDragging ? "true" : undefined}>
       <div
         ref={setDropRef}
         // `data-selected` is a stable styling hook: the Meridian shell restyles
@@ -228,6 +247,9 @@ function TreeRow({
         data-selected={isSelected ? "true" : undefined}
         // dnd-kit only reports `isOver` while a drag is in progress.
         data-drop-over={isOver ? "true" : undefined}
+        // A sibling about to take this row's slot: a line above (moving up)
+        // or below (moving down) rather than a highlight.
+        data-drop-edge={slotEdge}
         data-testid={`section-row-${node.id}`}
         className={cn(
           "group/row flex items-center gap-1 rounded-md px-2 py-1.5 text-sm",

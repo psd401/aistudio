@@ -184,6 +184,13 @@ const atriumCollision: CollisionDetection = (args) => {
   const within = pointerWithin({ ...args, droppableContainers: zones });
   if (active.kind === "content") return within.slice(0, 1);
 
+  // Still over the row being dragged (where the press began): no target yet,
+  // rather than lighting up the nearest sibling before the user has moved.
+  const own = args.droppableRects.get(intoId(active.id));
+  if (own && pointer.y >= own.top && pointer.y <= own.bottom && pointer.x >= own.left && pointer.x <= own.right) {
+    return [];
+  }
+
   const nest = within.find((hit) => isNestHit(active, hit, args, pointer.y));
   return nest ? [nest] : nearestSibling(containers, args, pointer.y);
 };
