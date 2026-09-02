@@ -2,10 +2,13 @@
  * Unit test for the Atrium reader page's 404-existence-masking wiring (#1053).
  *
  * The reader at `app/(protected)/c/[slug]/page.tsx` is the IDOR-sensitive surface:
- * its core security guarantee is that an absent slug, an unpublished object, AND a
- * published-but-not-viewable object ALL resolve to `notFound()` (404) — never a 403
- * that would let an out-of-audience or unauthenticated probe distinguish "exists but
- * forbidden" from "absent" and thereby enumerate private document slugs.
+ * its core security guarantee is that an absent slug AND a not-viewable object
+ * (published or not) resolve to `notFound()` (404) — never a 403 that would let an
+ * out-of-audience or unauthenticated probe distinguish "exists but forbidden" from
+ * "absent" and thereby enumerate private document slugs. The one deliberate
+ * exception (the dead-link backstop): an unpublished object whose requester PASSES
+ * `canView` redirects to the authoring surface instead of 404ing — existence is
+ * only "leaked" to principals already entitled to the content itself.
  *
  * The `canView` truth table itself is covered by tests/unit/atrium-visibility.test.ts.
  * What was previously UNCOVERED in CI is the PAGE-LEVEL wiring: that the reader
@@ -42,10 +45,17 @@ jest.mock("@/lib/content/render/headings", () => ({
 // assertions can compare against it via the imported module.
 jest.mock("next/navigation", () => {
   const sentinel = "__atrium-reader-not-found__";
+  const redirectPrefix = "__atrium-reader-redirect__:";
   return {
     __NOT_FOUND_SENTINEL: sentinel,
+    __REDIRECT_PREFIX: redirectPrefix,
     notFound: jest.fn(() => {
       throw sentinel;
+    }),
+    // `redirect()` also throws in production; the sentinel carries the target
+    // URL so the backstop tests can assert WHERE the viewer was sent.
+    redirect: jest.fn((url: string) => {
+      throw redirectPrefix + url;
     }),
   };
 });
@@ -57,6 +67,10 @@ jest.mock("@/lib/db/drizzle-client", () => ({
 jest.mock("@/lib/db/schema", () => ({
   contentObjects: {},
   contentPublications: {},
+  // The reader left-joins the collection for its meta line; the query
+  // builder callback never runs here (executeQuery is mocked), but the
+  // import must resolve so a future eager reference cannot throw at load.
+  contentCollections: {},
 }));
 jest.mock("drizzle-orm", () => ({
   and: (...a: unknown[]) => a,
@@ -91,14 +105,17 @@ jest.mock("@/actions/db/atrium/requester", () => ({
   getOptionalRequester: (...a: unknown[]) => getOptionalRequesterMock(...a),
 }));
 
-// The reader now reads an editors-only unresolved-comment count via this action;
-// the real module drags the whole content/DB stack (drizzle sql helpers) into the
-// unit test, so mock it to an empty thread list (count 0 → no chip).
-const listCommentThreadsMock = jest.fn((..._a: unknown[]) =>
-  Promise.resolve({ isSuccess: true, message: "", data: [] })
+// The reader reads an editors-only unresolved-comment COUNT via this action;
+// the real module drags the whole content/DB stack (drizzle sql helpers) into
+// the unit test, so mock it to zero (no chip). It must be the count action the
+// page actually calls — the page swallows a missing export in its try/catch,
+// which would let a stale mock pass silently while exercising nothing.
+const countUnresolvedMock = jest.fn((..._a: unknown[]) =>
+  Promise.resolve({ isSuccess: true, message: "", data: 0 })
 );
 jest.mock("@/actions/db/atrium/comments", () => ({
-  listCommentThreadsAction: (...a: unknown[]) => listCommentThreadsMock(...a),
+  countUnresolvedCommentThreadsAction: (...a: unknown[]) =>
+    countUnresolvedMock(...a),
 }));
 
 jest.mock("@/lib/content/artifact-sandbox-config", () => ({
@@ -123,9 +140,13 @@ import ReaderPage from "@/app/(protected)/c/[slug]/page";
 import * as nextNavigation from "next/navigation";
 
 const mockNotFound = nextNavigation.notFound as unknown as jest.Mock;
+const mockRedirect = nextNavigation.redirect as unknown as jest.Mock;
 const NOT_FOUND_SENTINEL = (
   nextNavigation as unknown as { __NOT_FOUND_SENTINEL: string }
 ).__NOT_FOUND_SENTINEL;
+const REDIRECT_PREFIX = (
+  nextNavigation as unknown as { __REDIRECT_PREFIX: string }
+).__REDIRECT_PREFIX;
 
 const OBJ_ROW = {
   id: "obj-1",
@@ -138,7 +159,7 @@ const PUBLICATION_ROW = { publishedVersionId: "ver-1" };
 
 /** Resolve the slug→object and object→publication lookups in order. */
 function withLookups(objRow: unknown, publicationRow: unknown): void {
-  // loadPublishedObject runs two executeQuery calls: objectBySlug, then livePublication.
+  // loadReaderObject runs two executeQuery calls: objectBySlug, then livePublication.
   executeQueryMock.mockResolvedValueOnce(objRow ? [objRow] : []);
   executeQueryMock.mockResolvedValueOnce(publicationRow ? [publicationRow] : []);
 }
@@ -155,6 +176,7 @@ beforeEach(() => {
   loadArtifactCodeMock.mockReset();
   getOptionalRequesterMock.mockReset();
   mockNotFound.mockClear();
+  mockRedirect.mockClear();
   getOptionalRequesterMock.mockResolvedValue({ kind: "user", userId: 100, roles: [] });
 });
 
@@ -184,13 +206,42 @@ describe("Atrium reader page — 404 existence masking", () => {
     expect(canViewMock).not.toHaveBeenCalled();
   });
 
-  it("404s an object with no live intranet publication", async () => {
+  it("404s an unpublished object for a NON-viewer (mask preserved; canView runs before the publication check)", async () => {
     withLookups(OBJ_ROW, null);
+    canViewMock.mockResolvedValue(false); // out-of-audience principal
 
     await expect(render()).rejects.toBe(NOT_FOUND_SENTINEL);
 
     expect(mockNotFound).toHaveBeenCalledTimes(1);
-    expect(canViewMock).not.toHaveBeenCalled();
+    // The dead-link backstop must never fire for a non-viewer: a redirect here
+    // would confirm the slug exists and re-open the enumeration channel.
+    expect(mockRedirect).not.toHaveBeenCalled();
+    expect(getByIdMock).not.toHaveBeenCalled();
+  });
+
+  it("redirects a VIEWER of an unpublished document to the authoring surface (dead-link backstop)", async () => {
+    withLookups(OBJ_ROW, null);
+    canViewMock.mockResolvedValue(true);
+
+    await expect(render()).rejects.toBe(`${REDIRECT_PREFIX}/atrium/obj-1/edit`);
+
+    expect(mockNotFound).not.toHaveBeenCalled();
+    // The reader never loads/renders a body for an unpublished object — the
+    // authoring surface re-runs its own gates and does the rendering.
+    expect(getByIdMock).not.toHaveBeenCalled();
+    expect(getTextMock).not.toHaveBeenCalled();
+  });
+
+  it("redirects a VIEWER of an unpublished artifact to the full-screen view surface", async () => {
+    withLookups({ ...OBJ_ROW, kind: "artifact" }, null);
+    canViewMock.mockResolvedValue(true);
+
+    await expect(render("artifact-slug")).rejects.toBe(
+      `${REDIRECT_PREFIX}/atrium/obj-1/view`
+    );
+
+    expect(mockNotFound).not.toHaveBeenCalled();
+    expect(loadArtifactCodeMock).not.toHaveBeenCalled();
   });
 
   it("renders the body for a viewable object (canView === true)", async () => {
@@ -279,6 +330,8 @@ describe("Atrium reader page — Edit link + collection meta gating", () => {
 
     const result = await render();
     expect(shellProps(result).editHref).toBe("/atrium/obj-1/edit");
+    // The editor-gated comment count is actually consulted for an editor.
+    expect(countUnresolvedMock).toHaveBeenCalledWith("obj-1");
   });
 
   it("renders the Edit link for an ADMIN non-owner", async () => {
