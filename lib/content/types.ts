@@ -237,7 +237,8 @@ export interface CreateObjectInput {
  * table into an exfiltration channel for whatever the viewer can see. See
  * `docs/features/atrium-artifact-data.md` (Locked decisions).
  */
-export type ContentDataAccess = "records" | "query" | "none";
+export const CONTENT_DATA_ACCESS_MODES = ["records", "query", "none"] as const;
+export type ContentDataAccess = (typeof CONTENT_DATA_ACCESS_MODES)[number];
 
 /** Metadata-only patch for `update`. Body changes go through versionService.snapshot. */
 export interface UpdatePatch {

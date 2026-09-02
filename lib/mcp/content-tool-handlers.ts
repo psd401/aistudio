@@ -45,6 +45,9 @@ import {
   restVisibilitySchema as visibilityZ,
 } from "@/lib/content/rest";
 import type { PublishDestination } from "@/lib/content/publish-adapters/types";
+// Imported from the concrete module (not the barrel) so route/handler tests that
+// mock "@/lib/content" keep the real tuple at schema-construction time.
+import { CONTENT_DATA_ACCESS_MODES } from "@/lib/content/types";
 import {
   captureAuditDetails,
   contentSourceRefSchema,
@@ -164,7 +167,7 @@ async function resolveReq(
  * Artifact sandbox data-bridge mode (#1705). Mutually exclusive by design — see
  * `ContentDataAccess` and `actions/db/atrium/artifact-query.ts`.
  */
-const dataAccessZ = z.enum(["records", "query", "none"]);
+const dataAccessZ = z.enum(CONTENT_DATA_ACCESS_MODES);
 
 const createDocumentSchema = z.object({
   // Length caps mirror the REST createBodySchema (title→content_objects.title

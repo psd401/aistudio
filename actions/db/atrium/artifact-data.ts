@@ -44,17 +44,20 @@ import {
 import { createSuccess, ErrorFactories, handleError } from "@/lib/error-utils";
 import { getServerSession } from "@/lib/auth/server-session";
 import { contentService } from "@/lib/content";
-import type { ContentDataAccess } from "@/lib/content";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { contentDataRecords, users } from "@/lib/db/schema";
 import { safeJsonbStringify } from "@/lib/db/json-utils";
 import type { ArtifactDataPayload } from "@/lib/db/types/jsonb";
 import { consumeRateLimit } from "@/lib/rate-limit";
 import type { ActionState } from "@/types";
+import {
+  assertArtifactDataAccess,
+  hasPostgresIncompatibleUnicode,
+  validateContentId,
+} from "./artifact-guards";
 import { getUserRequester } from "./requester";
 
 const NAMESPACE_RE = /^[a-z0-9_-]{1,64}$/;
-const MAX_CONTENT_ID_LENGTH = 200;
 const MAX_PAYLOAD_BYTES = 8 * 1024;
 // Independent work cap for structural validation; it is not a byte-budget alias.
 const MAX_PAYLOAD_VALUES = 8_192;
@@ -113,34 +116,6 @@ interface ArtifactRecordRow {
   createdAt: Date;
   userFirstName: string | null;
   userLastName: string | null;
-}
-
-function validateContentId(contentId: unknown): string {
-  if (typeof contentId !== "string") {
-    throw ErrorFactories.missingRequiredField("contentId");
-  }
-  // Bound attacker-controlled work before trim scans or allocates a normalized
-  // copy. Padded IDs are invalid rather than a path around the raw input cap.
-  if (contentId.length > MAX_CONTENT_ID_LENGTH) {
-    throw ErrorFactories.valueOutOfRange(
-      "contentId",
-      contentId.length,
-      1,
-      MAX_CONTENT_ID_LENGTH
-    );
-  }
-  const normalized = contentId.trim();
-  if (!normalized) {
-    throw ErrorFactories.missingRequiredField("contentId");
-  }
-  if (hasPostgresIncompatibleUnicode(normalized)) {
-    throw ErrorFactories.invalidInput(
-      "contentId",
-      null,
-      "contentId must use PostgreSQL-compatible Unicode"
-    );
-  }
-  return normalized;
 }
 
 function validateNamespace(namespace: unknown): string {
@@ -334,22 +309,6 @@ function validateJsonValue(value: unknown): void {
   }
 }
 
-function hasPostgresIncompatibleUnicode(value: string): boolean {
-  if (value.includes("\u0000")) return true;
-
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code >= 0xD800 && code <= 0xDBFF) {
-      const next = value.charCodeAt(index + 1);
-      if (!(next >= 0xDC00 && next <= 0xDFFF)) return true;
-      else index += 1;
-    } else if (code >= 0xDC00 && code <= 0xDFFF) {
-      return true;
-    }
-  }
-  return false;
-}
-
 function validateJsonString(value: string): void {
   if (hasPostgresIncompatibleUnicode(value)) {
     throw ErrorFactories.invalidInput(
@@ -403,30 +362,6 @@ function toArtifactRecordDTO(row: ArtifactRecordRow): ArtifactRecordDTO {
   };
 }
 
-/**
- * The record store is available ONLY to artifacts in `records` mode.
- *
- * `query` mode is refused because combining the two reopens the exfiltration
- * loop described in the file header; `none` is refused because it means "no
- * bridge data operations at all". Every object created before migration 179
- * defaults to `records`, so this is a no-op for existing artifacts.
- */
-function assertRecordsMode(content: {
-  kind: string;
-  dataAccess: ContentDataAccess;
-}): void {
-  if (content.kind !== "artifact") {
-    throw ErrorFactories.validationFailed([
-      { field: "contentId", message: "Content is not an artifact" },
-    ]);
-  }
-  if (content.dataAccess !== "records") {
-    throw ErrorFactories.validationFailed([
-      { field: "contentId", message: "Artifact does not use the record store" },
-    ]);
-  }
-}
-
 export async function submitArtifactRecord(
   input: SubmitArtifactRecordInput
 ): Promise<ActionState<SubmitArtifactRecordResult>> {
@@ -476,7 +411,11 @@ export async function submitArtifactRecord(
     // missing or non-viewable target. The per-user guard runs first so a caller
     // over budget cannot keep generating database-backed visibility lookups.
     const content = await contentService.get(requester, contentId);
-    assertRecordsMode(content);
+    assertArtifactDataAccess(
+      content,
+      "records",
+      "Artifact does not use the record store"
+    );
 
     const [created] = await executeQuery(
       (db) =>
@@ -566,7 +505,11 @@ export async function listArtifactRecords(
     });
 
     const content = await contentService.get(requester, contentId);
-    assertRecordsMode(content);
+    assertArtifactDataAccess(
+      content,
+      "records",
+      "Artifact does not use the record store"
+    );
     const conditions = [
       eq(contentDataRecords.contentId, content.id),
       eq(contentDataRecords.namespace, namespace),

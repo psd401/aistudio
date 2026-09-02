@@ -37,6 +37,9 @@ import {
   resolveCollectionId,
 } from "@/lib/content/surface-helpers";
 import { decodeContentBody } from "@/lib/content/code-encoding";
+// Imported from the concrete module (not the barrel) so route/handler tests that
+// mock "@/lib/content" keep the real tuple at schema-construction time.
+import { CONTENT_DATA_ACCESS_MODES } from "@/lib/content/types";
 import { createLogger } from "@/lib/logger";
 import {
   captureAuditDetails,
@@ -70,7 +73,7 @@ const createBodySchema = z.object({
   // #1705 — artifact sandbox data-bridge mode. Omitted keeps the column default
   // (`records`), which is what every document and legacy artifact wants. The
   // three modes are mutually exclusive by design; see ContentDataAccess.
-  dataAccess: z.enum(["records", "query", "none"]).optional(),
+  dataAccess: z.enum(CONTENT_DATA_ACCESS_MODES).optional(),
 });
 
 function createContentResponse(

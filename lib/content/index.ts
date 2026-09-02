@@ -9,6 +9,7 @@
  */
 
 export { contentService } from "./content-service";
+export { CONTENT_DATA_ACCESS_MODES } from "./types";
 export type { DeletedContentSummary } from "./content-service";
 export { versionService } from "./version-service";
 export {

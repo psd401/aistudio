@@ -118,7 +118,7 @@ else is forced server-side and cannot be influenced from the frame:
 
 Bounds: SQL is capped at 8,000 characters, `limit` is clamped to 2,000 (the data
 MCP's `JSON_ROW_LIMIT`), `offset` to 1,000,000, and the viewer gets 60 queries
-per artifact per minute. The bridge allows a query 30s (matching the connector
+per artifact per minute. The action allows a query 30s (matching the connector
 service) rather than the records bridge's 10s, because each call is Lambda +
 RDS. `requireUserAccess` runs inside `getConnectorTools`, so a student — or any
 viewer outside the connector's allow list — is refused before any request
@@ -267,7 +267,9 @@ type ArtifactDataResponse =
 ```
 
 The host keeps at most 32 pending calls and applies a ten-second timeout
-(thirty seconds for `query`, matching the connector service). The
+(forty-five seconds for `query`: the action's own 30s budget starts only after
+authorization and the connector handshake, so the host must always outlast it
+or a late server answer is dropped and the page retries a running query). The
 parent independently bounds concurrent work and validates request ids,
 namespaces, list options, JSON structure, and payload size before loading the
 Server Action. The Server Action repeats authoritative validation.
@@ -364,9 +366,9 @@ object is deleted; deleting a user preserves records but clears attribution.
    an exfiltration loop through our own database (~8 KiB x 120/min). Do not relax
    this to "both for the owner" or "both for trusted authors": the guarantee has
    to hold regardless of author intent, which is exactly what removes the need
-   for per-artifact review. Enforced in `assertRecordsMode`
-   (`actions/db/atrium/artifact-data.ts`) and `assertQueryMode`
-   (`actions/db/atrium/artifact-query.ts`).
+   for per-artifact review. Enforced by one shared `assertArtifactDataAccess`
+   (`actions/db/atrium/artifact-guards.ts`), called from both
+   `artifact-data.ts` and `artifact-query.ts`, so the two sides cannot drift.
 7. Declared queries (storing SQL on the object with typed parameters) were
    considered and deferred. With no human reviewer in the loop they add audit
    legibility but no security, and they make dynamic filters harder to author.

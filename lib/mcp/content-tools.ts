@@ -14,6 +14,7 @@
  */
 
 import type { McpToolDefinition } from "./types";
+import { CONTENT_DATA_ACCESS_MODES } from "@/lib/content/types";
 import type { ApiScope } from "@/lib/api-keys/scopes";
 
 const VISIBILITY_DESC =
@@ -94,7 +95,7 @@ export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
         sourceRef: { type: "object", description: SOURCE_REF_DESC },
         dataAccess: {
           type: "string",
-          enum: ["records", "query", "none"],
+          enum: [...CONTENT_DATA_ACCESS_MODES],
           description: DATA_ACCESS_DESC,
         },
       },
@@ -159,7 +160,7 @@ export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
         },
         dataAccess: {
           type: "string",
-          enum: ["records", "query", "none"],
+          enum: [...CONTENT_DATA_ACCESS_MODES],
           description: DATA_ACCESS_DESC,
         },
       },

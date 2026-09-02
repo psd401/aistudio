@@ -57,11 +57,11 @@ import { getNexusRouterConfig } from "@/lib/nexus/model-router/config";
 import { resolvePsdDataConnectorId } from "@/lib/nexus/model-router/psd-data-connector";
 import { consumeRateLimit } from "@/lib/rate-limit";
 import type { ActionState } from "@/types";
+import { assertArtifactDataAccess, validateContentId } from "./artifact-guards";
 import { getUserRequester } from "./requester";
 
 /** The ONLY tool this action may invoke on the data connector. */
 const QUERY_TOOL_NAME = "query_data";
-const MAX_CONTENT_ID_LENGTH = 200;
 /**
  * Upper bound on the page-supplied SQL. Generous enough for a real aggregate
  * with CTEs, small enough that a hostile page cannot use the action transport
@@ -79,6 +79,12 @@ const MAX_QUERY_OFFSET = 1_000_000;
  * Each query is Lambda + RDS behind an MCP round trip. Chat's connector path
  * already budgets 30s, so the bridge uses the same ceiling rather than the
  * records bridge's 10s (which would time out legitimate aggregates).
+ *
+ * This clock starts only at `execute()`, after the session/rate/visibility
+ * checks and the connector handshake. The sandbox host's own clock starts when
+ * the page posts the request, so the host allows 45s (render.html) -- the
+ * server must always lose the race, or a late server answer is dropped and the
+ * page retries a query that is still running.
  */
 const QUERY_TIMEOUT_MS = 30_000;
 /**
@@ -119,24 +125,6 @@ interface DataMcpJsonBody {
   limit?: unknown;
   offset?: unknown;
   truncated?: unknown;
-}
-
-function validateContentId(contentId: unknown): string {
-  if (typeof contentId !== "string") {
-    throw ErrorFactories.missingRequiredField("contentId");
-  }
-  // Bound attacker-controlled work before trim allocates a normalized copy.
-  if (contentId.length > MAX_CONTENT_ID_LENGTH) {
-    throw ErrorFactories.valueOutOfRange(
-      "contentId",
-      contentId.length,
-      1,
-      MAX_CONTENT_ID_LENGTH
-    );
-  }
-  const normalized = contentId.trim();
-  if (!normalized) throw ErrorFactories.missingRequiredField("contentId");
-  return normalized;
 }
 
 function validateSql(sql: unknown): string {
@@ -233,24 +221,6 @@ async function authorizeQueryRequest(contentId: string): Promise<{
   return { session, idToken: session.idToken };
 }
 
-function assertQueryMode(content: { kind: string; dataAccess: string }): void {
-  if (content.kind !== "artifact") {
-    throw ErrorFactories.validationFailed([
-      { field: "contentId", message: "Content is not an artifact" },
-    ]);
-  }
-  // The exclusivity gate. `records` and `none` artifacts never reach the data
-  // MCP; see the file header for why the modes can never be combined.
-  if (content.dataAccess !== "query") {
-    throw ErrorFactories.validationFailed([
-      {
-        field: "contentId",
-        message: "Artifact is not configured for data queries",
-      },
-    ]);
-  }
-}
-
 /** Resolve "the PSD data server", failing closed when it is not configured. */
 async function requirePsdDataConnectorId(): Promise<string> {
   const { config } = await getNexusRouterConfig();
@@ -305,7 +275,15 @@ function parseToolResult(result: unknown): QueryArtifactDataResult {
   }
 
   const columns = body.columns.map((column) => String(column));
-  const rows = body.rows.map((row) => (Array.isArray(row) ? row : [row]));
+  // Every row must be a tuple in `columns` order. A row-object or a ragged row
+  // would otherwise reach the page as a "successful" result with every cell
+  // after the first reading `undefined` -- silent corruption, not a failure.
+  const rows = body.rows.map((row) => {
+    if (!Array.isArray(row) || row.length !== columns.length) {
+      throw dataMcpFailure("row/column shape mismatch");
+    }
+    return row;
+  });
   const toCount = (value: unknown, fallback: number): number =>
     typeof value === "number" && Number.isFinite(value) ? value : fallback;
 
@@ -400,7 +378,13 @@ export async function queryArtifactData(
     // Shared 404 mask for missing/non-viewable content, exactly as the record
     // actions do — a viewer who cannot see the artifact learns nothing.
     const content = await contentService.get(requester, contentId);
-    assertQueryMode(content);
+    // The exclusivity gate: `records` and `none` artifacts never reach the
+    // data MCP (see the artifact-data.ts header for why).
+    assertArtifactDataAccess(
+      content,
+      "query",
+      "Artifact is not configured for data queries"
+    );
 
     // `getConnectorTools` runs `requireUserAccess` internally (allow list, else
     // staff/administrator), so a student or an out-of-list viewer is refused

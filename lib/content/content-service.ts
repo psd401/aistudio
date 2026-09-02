@@ -956,7 +956,18 @@ export const contentService = {
     // column is NOT NULL with a `records` default, so an omitted value leaves
     // the stored mode alone and an explicit value always writes a valid enum
     // member (validated at the action/tool boundary).
-    if (patch.dataAccess !== undefined) setValues.dataAccess = patch.dataAccess;
+    if (patch.dataAccess !== undefined) {
+      // Documents have no sandbox: the create surfaces already refuse to write
+      // a mode for one, and the update surfaces enforce it here so a document
+      // can never carry a stray `query` that a future caller might trust.
+      if (existing.kind !== "artifact") {
+        throw new ValidationError("dataAccess only applies to artifacts", {
+          id,
+          kind: existing.kind,
+        });
+      }
+      setValues.dataAccess = patch.dataAccess;
+    }
     // Slice-F presentation fields (cover gradient + emoji icon), validated at the
     // action boundary and merged as a typed partial (see presentationSetValues).
     Object.assign(setValues, presentationSetValues(patch));

@@ -89,10 +89,13 @@
         var DATA_REQUEST_TYPE = "atrium-artifact-data-request";
         var DATA_RESPONSE_TYPE = "atrium-artifact-data-response";
         var DATA_REQUEST_TIMEOUT_MS = 10000;
-        // A query is an MCP round trip to a Lambda + RDS, which the parent's
-        // connector path already budgets 30s for. Using the record timeout here
-        // would abandon legitimate aggregates while the server still answers.
-        var QUERY_REQUEST_TIMEOUT_MS = 30000;
+        // A query is an MCP round trip to a Lambda + RDS, which the server
+        // action budgets 30s for -- but that clock starts only once the action
+        // has authorized the request and opened the connector. This clock
+        // starts now, so it must be longer than the server's, or the server's
+        // eventual answer arrives after the pending entry is gone and the page
+        // retries a query that is still running.
+        var QUERY_REQUEST_TIMEOUT_MS = 45000;
         var MAX_PENDING_DATA_REQUESTS = 32;
         var pendingDataRequests = new Map();
         // Capture the primitives before artifact scripts can replace globals.

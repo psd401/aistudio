@@ -360,6 +360,45 @@ describe("queryArtifactData upstream failures", () => {
     expect(result.isSuccess).toBe(false);
   });
 
+  it("fails instead of wrapping row-objects into one-cell tuples", async () => {
+    mockExecute.mockResolvedValueOnce({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            ...JSON_BODY,
+            rows: [{ school_name: "Peninsula HS", enrolled: 1234 }],
+          }),
+        },
+      ],
+    });
+
+    const result = await queryArtifactData(validInput);
+
+    // A "successful" result whose cells after the first read `undefined` is
+    // silent corruption; the bridge must report a failure instead.
+    expect(result.isSuccess).toBe(false);
+    expect(mockClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails on a ragged row rather than returning a partial tuple", async () => {
+    mockExecute.mockResolvedValueOnce({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            ...JSON_BODY,
+            rows: [["Peninsula HS", 1234], ["Gig Harbor HS"]],
+          }),
+        },
+      ],
+    });
+
+    const result = await queryArtifactData(validInput);
+
+    expect(result.isSuccess).toBe(false);
+  });
+
   it("closes the connector when the tool call throws", async () => {
     mockExecute.mockRejectedValueOnce(new Error("upstream timeout"));
 

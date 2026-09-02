@@ -12,6 +12,8 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { contentDataAccessEnum } from "@/lib/db/schema/enums";
+import { CONTENT_DATA_ACCESS_MODES } from "@/lib/content/types";
 
 const migrationName = "179-atrium-artifact-data-access.sql";
 const migration = fs.readFileSync(
@@ -64,6 +66,33 @@ describe("migration 179 artifact data access", () => {
       .filter((line) => /^\s*CREATE TYPE/i.test(line));
     expect(createTypeLines).toHaveLength(1);
     expect(createTypeLines[0].trim().endsWith(");")).toBe(true);
+  });
+
+  it("keeps every in-app mirror of the enum in sync with the SQL", () => {
+    const sqlModes = /AS ENUM \(([^)]*)\)/i
+      .exec(normalizedSql)?.[1]
+      .split(",")
+      .map((v) => v.trim().replace(/^'|'$/g, ""));
+
+    expect(sqlModes).toEqual([...CONTENT_DATA_ACCESS_MODES]);
+    expect(contentDataAccessEnum.enumValues).toEqual([
+      ...CONTENT_DATA_ACCESS_MODES,
+    ]);
+  });
+
+  it("keeps the psd-atrium skill's hand-maintained copy in sync", () => {
+    // The skill is a standalone CJS script in the agent image and cannot import
+    // from lib/, so its list is a manual mirror: pin it here.
+    const skill = fs.readFileSync(
+      path.join(process.cwd(), "infra/agent-image/skills/psd-atrium/run.js"),
+      "utf8",
+    );
+    const match = /const DATA_ACCESS_MODES = \[([^\]]*)\];/.exec(skill);
+    const skillModes = match?.[1]
+      .split(",")
+      .map((v) => v.trim().replace(/^'|'$/g, ""));
+
+    expect(skillModes).toEqual([...CONTENT_DATA_ACCESS_MODES]);
   });
 
   it("documents a manual rollback", () => {

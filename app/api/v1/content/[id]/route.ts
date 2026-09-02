@@ -23,6 +23,9 @@ import {
   requesterFromApiAuth,
 } from "@/lib/content";
 import { contentErrorToResponse, resolveRestRequester } from "@/lib/content/rest";
+// Imported from the concrete module (not the barrel) so route/handler tests that
+// mock "@/lib/content" keep the real tuple at schema-construction time.
+import { CONTENT_DATA_ACCESS_MODES } from "@/lib/content/types";
 import {
   assertContentAuthoringCapability,
   contentSurfaceLink,
@@ -39,7 +42,7 @@ const updateBodySchema = z.object({
   status: z.enum(["draft", "published", "archived"]).optional(),
   // #1705 — artifact sandbox data-bridge mode. Not nullable: the column is NOT
   // NULL, so omitting the field leaves the stored mode untouched.
-  dataAccess: z.enum(["records", "query", "none"]).optional(),
+  dataAccess: z.enum(CONTENT_DATA_ACCESS_MODES).optional(),
 });
 
 // ============================================

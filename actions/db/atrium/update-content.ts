@@ -26,6 +26,7 @@ import {
 } from "@/lib/logger";
 import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { contentService } from "@/lib/content";
+import { CONTENT_DATA_ACCESS_MODES } from "@/lib/content/types";
 import { ValidationError } from "@/lib/content/errors";
 import { isCoverGradientKey } from "@/lib/atrium/cover";
 import type {
@@ -52,10 +53,8 @@ type EditorStatus = (typeof EDITOR_STATUSES)[number];
  * unknown string is a clear 400 rather than a Postgres enum violation deeper in.
  * The three modes are mutually exclusive by design — see `ContentDataAccess`.
  */
-const DATA_ACCESS_MODES = ["records", "query", "none"] as const;
-
 function assertDataAccess(value: string): ContentDataAccess {
-  if (!(DATA_ACCESS_MODES as readonly string[]).includes(value)) {
+  if (!(CONTENT_DATA_ACCESS_MODES as readonly string[]).includes(value)) {
     throw new ValidationError(`Invalid data access mode: ${value}`, {
       dataAccess: value,
     });
