@@ -104,12 +104,16 @@ test.describe('Atrium usage dashboard (authenticated)', () => {
       await expect(page.getByTestId('usage-sections')).toBeVisible()
       await page.screenshot({ path: `${SHOT_DIR}/01-usage-tab.png`, fullPage: true })
 
-      // Range switch re-fetches without error; the seeded create is within 7d.
+      // Range switch re-fetches without error. The daily strip is the
+      // deterministic signal that the 7d data has REPLACED the 30d data: it
+      // renders one bar per day of the range (30 → 7), whereas the Created
+      // tile could satisfy a ">= 1" check against the stale 30d numbers.
       await page.getByRole('combobox', { name: 'Usage range' }).click()
       await page.getByRole('option', { name: 'Last 7 days' }).click()
-      await expect
-        .poll(async () => readTile(page, 'usage-tile-created'), { timeout: 30_000 })
-        .toBeGreaterThanOrEqual(1)
+      await expect(page.getByTestId('usage-daily-strip').locator('> div')).toHaveCount(7, {
+        timeout: 30_000,
+      })
+      expect(await readTile(page, 'usage-tile-created')).toBeGreaterThanOrEqual(1)
       await expect(page.getByTestId('usage-error')).toHaveCount(0)
       await page.screenshot({ path: `${SHOT_DIR}/02-usage-7d.png`, fullPage: false })
     } finally {
