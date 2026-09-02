@@ -76,7 +76,16 @@ function node(
     selectableForCreate: true,
     visibleObjectCount: 0,
     children,
-  } as unknown as CollectionTreeNode;
+    // Fields the tree never reads, but the contract requires. Spelled out
+    // rather than cast away so a change to CollectionTreeNode fails this file
+    // at typecheck instead of drifting silently past these tests.
+    ownerUserId: null,
+    defaultVisibilityLevel: "internal",
+    description: null,
+    landingObjectId: null,
+    hasHeroImage: false,
+    heroImageAlt: null,
+  };
 }
 
 const TREE: CollectionTreeNode[] = [
