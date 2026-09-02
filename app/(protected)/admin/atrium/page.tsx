@@ -60,7 +60,8 @@ function unwrap<T>(
  * The audit trail and collection management are administrator-only, so for a
  * collection approver they are not fetched at all rather than fetched and
  * discarded — their own actions would refuse the call, and issuing it would
- * mean a guaranteed error round-trip on every page load.
+ * mean a guaranteed error round-trip on every page load. The Usage tab loads
+ * itself on activation (a dozen aggregates most visits never open).
  *
  * Extracted from the page component to keep it under the complexity lint.
  */
@@ -116,7 +117,7 @@ export default async function AtriumAdminPage() {
         </h1>
         <p className="text-sm text-muted-foreground mt-1">
           {isAdmin
-            ? "Manage district collections, approve publish requests, and review the content audit trail"
+            ? "Manage district collections, approve publish requests, review the content audit trail, and see how Atrium is being used"
             : "Approve publish requests for the sections you review"}
         </p>
       </div>

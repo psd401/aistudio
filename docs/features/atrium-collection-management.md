@@ -112,9 +112,10 @@ administrators; this cannot strand anything, because whoever raised a request
 was by definition not an approver at raise time.
 
 `/admin/atrium` therefore admits non-admin approvers, who see ONLY the Approvals
-tab, filtered to their own sections. Collections and Audit remain
-administrator-only in both the UI and their own actions; a caller who approves
-nothing gets a 404 rather than a 403.
+tab, filtered to their own sections. Collections, Audit and Usage (the usage
+dashboard over the content audit trail) remain administrator-only in both the
+UI and their own actions; a caller who approves nothing gets a 404 rather than
+a 403.
 
 ## Section hero images (migration 178)
 
