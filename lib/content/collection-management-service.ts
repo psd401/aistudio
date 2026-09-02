@@ -511,12 +511,25 @@ interface SiblingMovePlan {
  * preview — with `toIndex` clamped to the group, and every row is renumbered
  * densely from 0. A sibling that appeared since the tree was loaded simply
  * takes part; the drop never fails for being stale.
+ *
+ * Throws (the one thing it refuses) when the MOVED row is itself archived —
+ * it belongs to no live group, so there is no slot to plan.
  */
 function planSiblingMove(
   rows: CollectionAccessRow[],
   moving: CollectionAccessRow,
   toIndex: number
 ): SiblingMovePlan {
+  // The group is the LIVE siblings, and the moved row is one of them. An
+  // archived row has no slot among them: splicing it in would give it a
+  // position in a group it is not part of and shift every live sibling past
+  // it. The sidebar never offers one (archived collections are not in the
+  // tree), but `moveCollectionAction` is callable directly.
+  if (moving.archivedAt) {
+    throw new ValidationError("An archived collection cannot be reordered", {
+      collectionId: moving.id,
+    });
+  }
   const order = rows
     .filter(
       (row) =>
@@ -1036,7 +1049,8 @@ export const collectionManagementService = {
    * caller who may not see it gets the same masked "Collection not found" as
    * everywhere else, before any structure is consulted — then the group is
    * resolved and renumbered in ONE serializable transaction
-   * (`planSiblingMove`). Every renumbered row gets an audit entry, in one
+   * (`planSiblingMove`, which refuses an archived row: it has no place in a
+   * live sibling group). Every renumbered row gets an audit entry, in one
    * batched, best-effort insert.
    */
   async move(

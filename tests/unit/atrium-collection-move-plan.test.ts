@@ -8,8 +8,9 @@
  * owner, not archived), the moved row is re-inserted at `toIndex` with the
  * same `arrayMove` semantics as the drag preview, and every row in the group
  * is renumbered densely. These pin: arrayMove placement, index clamping,
- * archived and other-owner rows staying out of the group, no-op moves
- * producing no updates, and other parents being untouched.
+ * archived and other-owner rows staying out of the group, an archived row
+ * being refused as the MOVED row, no-op moves producing no updates, and
+ * other parents being untouched.
  */
 
 import { collectionManagementInternals } from "@/lib/content/collection-management-service";
@@ -89,6 +90,13 @@ describe("planSiblingMove", () => {
   it("only touches the moved row's own parent", () => {
     const plan = planSiblingMove([A, B, C, D_CHILD], B, 0);
     expect(plan.updates.some(({ row: r }) => r.id === "D")).toBe(false);
+  });
+
+  it("refuses to reorder an archived row, rather than splicing it into the live group", () => {
+    const archived = row("X", { position: 1, archivedAt: new Date() });
+    expect(() => planSiblingMove([A, archived, B, C], archived, 0)).toThrow(
+      /archived collection cannot be reordered/i
+    );
   });
 
   it("renumbers densely even when stored positions have gaps", () => {
