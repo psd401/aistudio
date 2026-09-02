@@ -116,16 +116,16 @@ await executeTransaction(
 **Atrium Content**
 | Table | Purpose |
 |-------|---------|
-| `content_collections` | Content namespaces |
-| `content_objects` | Documents and artifacts |
+| `content_collections` | Content namespaces (sections) |
+| `content_objects` | Documents and artifacts — includes `data_access` enum (records/query/none) for artifact data bridge mode (migration 179) |
 | `content_versions` | Version history |
 | `content_visibility_grants` | Access permissions |
 | `content_publications` | Published content |
 | `content_user_favorites` | Per-user favorites (stars) for library home personalization |
-| `content_data_records` | Artifact data persistence for sandboxed interactive content |
+| `content_data_records` | Artifact data persistence for sandboxed interactive content (AtriumData.submit/list) |
 | `atrium_doc_state` | Live collaborative state (Yjs CRDT) |
 | `atrium_doc_comments` | Comments and track changes |
-| `content_audit_logs` | Content modification audit |
+| `content_audit_logs` | Content modification audit — source for usage dashboard |
 | `content_publish_requests` | Public publish approval queue |
 
 **Knowledge Repositories**

@@ -15,9 +15,9 @@ AI Studio is an open-source platform that provides K-12 educators and students w
 
 | Domain | Description |
 |--------|-------------|
-| **Nexus Chat** | Conversational AI with automatic model routing, conversation history, MCP tool integration, and real-time streaming |
+| **Nexus Chat** | Conversational AI with automatic model routing (including PSD-data queries), conversation history, MCP tool integration, and real-time streaming |
 | **Assistant Architect** | No-code custom AI assistant builder with visual prompt chain designer, variable substitution, and scheduled execution |
-| **Atrium** | Agent-native content workspace supporting documents and interactive artifacts with version control and permission-aware publishing |
+| **Atrium** | Agent-native content workspace supporting documents and interactive artifacts with viewer-scoped data bridge, drag-and-drop organization, and permission-aware publishing |
 | **Agent Platform** | Extensible skill system for AI agents with Google Workspace integration, Cedar-based governance, and MCP tool exposure |
 | **Knowledge Repositories** | Document upload, OCR processing, vector embeddings, and semantic search for context-aware AI responses |
 | **API Platform** | REST API v1 for external integrations, OAuth2/OIDC provider, and API key management |
