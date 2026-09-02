@@ -531,17 +531,70 @@ function viewToFilter(view: LibraryFilterView): {
 }
 
 /**
+ * The section scope to send with the active view. "Unfiled" means "in no
+ * section", so a section scope (the legacy `?collection=` deep link, where the
+ * Home chip and its "See all unfiled" stay reachable) would AND
+ * `collection_id = X` with `collection_id IS NULL`: an empty grid by
+ * construction, rendered as the generic empty library and indistinguishable
+ * from a broken filter. Same shape of rule as Archived-vs-status.
+ */
+function scopedCollectionId(
+  collectionId: string | null,
+  filed: "unfiled" | undefined
+): string | undefined {
+  if (filed === "unfiled") return undefined;
+  return collectionId ?? undefined;
+}
+
+/**
+ * Filters changed (or first mount): reload page one and drop the selection.
+ * `fetchPage`'s identity changes exactly when a server filter changes, so it is
+ * the correct trigger for both. A hook so `LibraryView` stays under the
+ * max-lines lint.
+ */
+function useFilterChangeReset(
+  fetchPage: (offset: number) => Promise<void>,
+  clearSelection: () => void
+): void {
+  useEffect(() => {
+    clearSelection();
+    void fetchPage(0);
+  }, [fetchPage, clearSelection]);
+}
+
+/**
+ * Unstarring INSIDE the Favorites view: the card no longer matches the grid's
+ * own filter, so it leaves at once (the home band does the same via a refetch).
+ * Any other view keeps the card — a star is not a filter there. A hook so the
+ * branch does not count against `LibraryView`'s complexity budget.
+ */
+function useFavoriteViewPrune(
+  favoriteView: boolean,
+  removeItem: (id: string) => void
+): (id: string, isFavorite: boolean) => void {
+  return useCallback(
+    (id: string, isFavorite: boolean) => {
+      if (favoriteView && !isFavorite) removeItem(id);
+    },
+    [favoriteView, removeItem]
+  );
+}
+
+/**
  * The "Load more" control. Renders nothing once a short page signals the end,
- * while the first page loads, on error, or when the current filter matched
- * nothing (a zero-result search must not render a dangling "Load more" —
- * #1336). Its own component so those four conditions do not count against
- * `LibraryView`'s complexity budget.
+ * while the first page loads, on a PAGE-ONE error, or when the current filter
+ * matched nothing (a zero-result search must not render a dangling "Load more"
+ * — #1336). A failed APPEND is different: the pages already on screen stay,
+ * and the button stays with them so the append can simply be retried. Its own
+ * component so those conditions do not count against `LibraryView`'s
+ * complexity budget.
  */
 function LoadMore({
   hasMore,
   loading,
   loadingMore,
   error,
+  loadMoreError,
   itemCount,
   onLoadMore,
 }: {
@@ -549,12 +602,18 @@ function LoadMore({
   loading: boolean;
   loadingMore: boolean;
   error: string | null;
+  loadMoreError: string | null;
   itemCount: number;
   onLoadMore: () => void;
 }): React.JSX.Element | null {
   if (!hasMore || loading || error || itemCount === 0) return null;
   return (
-    <div className="mt-5 flex justify-center">
+    <div className="mt-5 flex flex-col items-center gap-2">
+      {loadMoreError && (
+        <p className="text-sm text-destructive" role="alert">
+          {loadMoreError}
+        </p>
+      )}
       <button
         type="button"
         className={cn("mer-btn", loadingMore && "opacity-60")}
@@ -631,51 +690,74 @@ function useSearchHotkey(ref: React.RefObject<HTMLInputElement | null>): void {
 }
 
 /**
+ * Every field the library grid can filter on. `limit`/`offset` are the hook's
+ * own paging, so the type refuses them from a caller.
+ */
+type LibraryPageFilter = Omit<ListFilter, "limit" | "offset">;
+
+/**
  * The library's paged fetch (extracted from `LibraryView` so its body stays
  * under the max-lines lint). `fetchPage(0)` REPLACES the list for the current
  * filters; a non-zero offset APPENDS (the "Load more" path). A monotonic
  * sequence ref drops stale responses so a slow earlier request cannot overwrite
  * a newer one.
  */
-function useLibraryPage(filter: ListFilter) {
+function useLibraryPage(filter: LibraryPageFilter) {
   const [items, setItems] = useState<ContentObjectDTO[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   // Whether the LAST fetched page was full (== PAGE_SIZE rows): a short page
   // means the end was reached, so "Load more" hides.
   const [hasMore, setHasMore] = useState(false);
+  // A page-one failure: `LibraryList` renders it INSTEAD of the grid.
   const [error, setError] = useState<string | null>(null);
-  // The query/status the COMMITTED items were fetched with (undefined until the
-  // first fetch commits), set in the same state batch as `setItems` (so they can
-  // never describe a grid the view isn't showing). Rendered as `data-results-*`
-  // on the library section: the only deterministic "the grid now reflects THIS
-  // search + view" signal — `loading` flips inside a post-paint effect, leaving
-  // a window where the filters have changed but neither `loading` nor the items
-  // say so. E2E search pinning awaits these instead of racing the debounce.
-  const [settledQuery, setSettledQuery] = useState<string | undefined>(undefined);
-  const [settledStatus, setSettledStatus] = useState<string | undefined>(undefined);
+  // A failed "Load more" is kept apart from `error` on purpose: it must not
+  // take the pages already on screen down with it, and `LoadMore` keeps its
+  // button so the append can be retried.
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+  // The serialized filter the on-screen result (the items, or the page-one
+  // error) was fetched with — undefined until the first fetch finishes, then
+  // set in the same state batch as `setItems`/`setError` so it can never
+  // describe a grid the view isn't showing. Rendered as `data-results-key`
+  // (plus the older `data-results-query`/`-status` projections) on the library
+  // section: the only deterministic "the grid now reflects THIS filter set"
+  // signal — `loading` flips inside a post-paint effect, leaving a window where
+  // the filters have changed but neither `loading` nor the items say so, and
+  // the loading spinner unmounts every card, so "the other card is gone" alone
+  // proves nothing. E2E waits on this instead of racing the debounce or a
+  // chip's refetch.
+  const [settledKey, setSettledKey] = useState<string | undefined>(undefined);
   const reqSeqRef = useRef(0);
 
-  const { collectionId, kind, owner, status, tag, tagMatch, actor, query } =
-    filter;
+  // Identity by VALUE. The caller builds a fresh literal every render, and a
+  // hand-maintained field list here (destructure + payload + deps) is exactly
+  // what silently dropped `filed`/`favorite`: three commits edited that list,
+  // two of them missed the fields, and nothing could flag it — an
+  // un-destructured field is never referenced, so neither the type system nor
+  // exhaustive-deps sees it. Keying on the serialized filter forwards EVERY
+  // field and rebuilds `fetchPage` iff a value changes, the same idiom
+  // `useBand` uses in LibraryHome. Deterministic: one call site, fixed literal
+  // key order, primitives only, `undefined` omitted.
+  const filterKey = JSON.stringify(filter);
 
   const fetchPage = useCallback(
     async (offset: number) => {
       const reqSeq = ++reqSeqRef.current;
       const append = offset > 0;
-      if (append) setLoadingMore(true);
-      else setLoading(true);
-      setError(null);
+      const fail = (message: string) => {
+        if (append) setLoadMoreError(message);
+        else setError(message);
+      };
+      if (append) {
+        setLoadingMore(true);
+        setLoadMoreError(null);
+      } else {
+        setLoading(true);
+        setError(null);
+      }
       try {
         const res = await listContentAction({
-          collectionId,
-          kind,
-          owner,
-          status,
-          tag,
-          tagMatch,
-          actor,
-          query,
+          ...(JSON.parse(filterKey) as LibraryPageFilter),
           limit: PAGE_SIZE,
           offset,
         });
@@ -683,15 +765,16 @@ function useLibraryPage(filter: ListFilter) {
         if (res.isSuccess) {
           setItems((prev) => (append ? [...prev, ...res.data] : res.data));
           setHasMore(res.data.length === PAGE_SIZE);
-          setSettledQuery(query ?? "");
-          setSettledStatus(status ?? "");
         } else {
-          setError(res.message ?? "Could not load content");
+          fail(res.message ?? "Could not load content");
           log.warn("listContentAction failed", { message: res.message });
         }
+        // Success OR failure: whatever is on screen now answers to this filter.
+        setSettledKey(filterKey);
       } catch (e) {
         if (reqSeq !== reqSeqRef.current) return;
-        setError("Could not load content");
+        fail("Could not load content");
+        setSettledKey(filterKey);
         log.error("listContentAction threw", {
           error: e instanceof Error ? e.message : String(e),
         });
@@ -702,7 +785,7 @@ function useLibraryPage(filter: ListFilter) {
         }
       }
     },
-    [collectionId, kind, owner, status, tag, tagMatch, actor, query]
+    [filterKey]
   );
 
   // A STABLE re-fetch handle that always runs the CURRENT `fetchPage`.
@@ -723,16 +806,41 @@ function useLibraryPage(filter: ListFilter) {
     void fetchPageRef.current(0);
   }, []);
 
+  // Append the next offset page. `items.length` (not a page counter) is the
+  // offset so a short final page can never skip rows.
+  const loadMore = useCallback(() => {
+    void fetchPage(items.length);
+  }, [fetchPage, items.length]);
+
+  // Drop one row locally — a card unstarred inside the Favorites view no longer
+  // matches the grid's own filter. Cheaper and calmer than `refresh()`: no
+  // spinner, no collapse of "Load more" pages, and `loadMore`'s `items.length`
+  // offset stays right because the server's result set shrank by the same row.
+  const removeItem = useCallback((id: string) => {
+    setItems((prev) => prev.filter((it) => it.id !== id));
+  }, []);
+
+  // The older per-field projections, derived from the key so they can never
+  // disagree with it (search pinning in other specs awaits `data-results-query`).
+  const settled =
+    settledKey === undefined
+      ? undefined
+      : (JSON.parse(settledKey) as LibraryPageFilter);
+
   return {
     items,
     loading,
     loadingMore,
     hasMore,
     error,
-    settledQuery,
-    settledStatus,
+    loadMoreError,
+    settledKey,
+    settledQuery: settled ? (settled.query ?? "") : undefined,
+    settledStatus: settled ? (settled.status ?? "") : undefined,
     fetchPage,
+    loadMore,
     refresh,
+    removeItem,
   };
 }
 
@@ -882,12 +990,16 @@ export function LibraryView({
     loadingMore,
     hasMore,
     error,
+    loadMoreError,
+    settledKey,
     settledQuery,
     settledStatus,
     fetchPage,
+    loadMore,
     refresh,
+    removeItem,
   } = useLibraryPage({
-      collectionId: collectionId ?? undefined,
+      collectionId: scopedCollectionId(collectionId, filed),
       kind,
       owner: ownerFilter === "any" ? undefined : ownerFilter,
       status: effectiveStatus,
@@ -904,19 +1016,9 @@ export function LibraryView({
   const { selected, clearSelection, toggleSelect, removeFromSelection } =
     useLibrarySelection();
 
-  // Filters changed (or first mount): reload page one and drop the selection.
-  // `fetchPage`'s identity changes exactly when a server filter changes, so it
-  // is the correct trigger for both.
-  useEffect(() => {
-    clearSelection();
-    void fetchPage(0);
-  }, [fetchPage, clearSelection]);
+  useFilterChangeReset(fetchPage, clearSelection);
 
-  // Append the next offset page. `items.length` (not a page counter) is the
-  // offset so a short final page can never skip rows.
-  const loadMore = useCallback(() => {
-    void fetchPage(items.length);
-  }, [fetchPage, items.length]);
+  const handleFavoriteChange = useFavoriteViewPrune(favorite === true, removeItem);
 
   // `refresh` (re-fetch page one after a bulk mutation, so archived rows leave
   // the default views and moved rows leave a section view) comes from the hook
@@ -925,13 +1027,13 @@ export function LibraryView({
 
   return (
     <div className="w-full px-5 py-6 md:px-8 md:py-8">
-      {/* `data-results-*`: which query/view the committed grid was fetched for
-          (absent until the first fetch commits) — see the settled-state note in
-          `useLibraryPage`. */}
+      {/* `data-results-*`: the filter set the on-screen result was fetched for
+          (absent until the first fetch finishes) — see `useLibraryPage`. */}
       <section
         className="mx-auto min-w-0 max-w-6xl"
         data-results-query={settledQuery}
         data-results-status={settledStatus}
+        data-results-key={settledKey}
       >
         <LibraryHeader
           search={search}
@@ -984,6 +1086,7 @@ export function LibraryView({
           archivedView={archivedView}
           selected={selected}
           onToggleSelect={toggleSelect}
+          onFavoriteChange={handleFavoriteChange}
           searchTerm={debouncedSearch}
           tagTerm={debouncedTag}
         />
@@ -993,6 +1096,7 @@ export function LibraryView({
           loading={loading}
           loadingMore={loadingMore}
           error={error}
+          loadMoreError={loadMoreError}
           itemCount={items.length}
           onLoadMore={loadMore}
         />

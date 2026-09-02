@@ -51,7 +51,7 @@ const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 /** Title shapes the E2E specs generate. Keep in sync with tests/e2e/*.spec.ts. */
 const TITLE_PREFIXES = ["e2e %", "E2E %"] as const;
 const TOKENED_TITLE_REGEX =
-  "^(Quarterly plan|Dashboard|Bulk probe [0-9]+|Comments probe|Cover probe|Sync probe|OAuth PKCE e2e) [0-9]{12,}$";
+  "^(Quarterly plan|Dashboard|Bulk probe [0-9]+|Comments probe|Cover probe|Sync probe|OAuth PKCE e2e|Starred probe|Plain probe|Filed probe|Loose probe) [0-9]{12,}$";
 
 /** Seeded reference fixtures (tests/e2e/fixtures/*.sql) — never deleted. */
 const FIXTURE_ID_PREFIX = "a7100000-%";
@@ -76,11 +76,12 @@ const GRAPH_E2E_NAME_REGEX = "(E2E-[A-Z]+-|E2EGRAPH)[0-9]{12,}";
  * until they were pruned by hand (twice).
  *
  * Anchored to the exact shapes those specs generate ("E2E Private <token>",
- * "E2E Child <token>", "E2E Admin Private <token>", "E2E District <token>") so
- * a real collection that merely starts with "E2E" is never matched.
+ * "E2E Child <token>", "E2E Admin Private <token>", "E2E District <token>",
+ * and the view-filters spec's "Filing cabinet <token>") so a real collection
+ * that merely starts with "E2E" is never matched.
  */
 const COLLECTION_E2E_NAME_REGEX =
-  "^E2E (Private|Child|Admin Private|District) [A-Za-z0-9]+$";
+  "^(E2E (Private|Child|Admin Private|District) [A-Za-z0-9]+|Filing cabinet [0-9]{12,})$";
 
 interface CandidateRow {
   id: string;
