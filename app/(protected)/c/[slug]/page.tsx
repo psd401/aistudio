@@ -344,6 +344,12 @@ export default async function ReaderPage({
         }
       >
         <ArtifactSandbox
+          // #1712: the mode pin below lives in a ref for the mount's lifetime, so
+          // the mount MUST belong to exactly one artifact. Keying on the id makes
+          // that true by construction — a different artifact is a fresh mount and
+          // a fresh pin — instead of relying on the router remounting the leaf
+          // page on a param change (same pattern as ArtifactCanvas's version key).
+          key={target.id}
           code={code}
           src={getArtifactSandboxRenderUrl()}
           dataBridgeEnabled={true}

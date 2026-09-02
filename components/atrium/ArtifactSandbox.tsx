@@ -505,12 +505,16 @@ function useArtifactDataBridge({
   const inFlightDataRequestsRef = useRef(0);
   /**
    * #1712: pin the mode for the LIFETIME of this mount, not just to the current
-   * prop. A re-render with a fresher `dataAccess` (an RSC refresh of the reader
-   * after the owner flipped `data_access`) must not widen what an ALREADY
-   * RUNNING artifact may do — that artifact still holds whatever it queried
-   * under the old mode. Only a fresh mount, which starts with nothing in memory,
-   * picks up a new mode. `useRef`'s initial value is captured on the first
-   * render and never reassigned, so this is exactly "the mode at load".
+   * prop. Nothing on the reader route re-renders this component with a fresher
+   * `dataAccess` today (the mode is edited only on /atrium/[id]/edit, and the
+   * reader never calls router.refresh), but if that ever changes — an RSC
+   * refresh after the owner flipped `data_access`, say — it must not widen what
+   * an ALREADY RUNNING artifact may do: that artifact still holds whatever it
+   * queried under the old mode. Only a fresh mount, which starts with nothing
+   * in memory, picks up a new mode. `useRef`'s initial value is captured on the
+   * first render and never reassigned, so this is exactly "the mode at load".
+   * The reader keys the component on the artifact id so a mount is always one
+   * artifact.
    */
   const loadedDataAccessRef = useRef(dataAccess);
 

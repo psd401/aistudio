@@ -55,6 +55,7 @@ const MODE_PIN_REQUEST_IDS = [
   "00000000-0000-4000-8000-000000000024",
   "00000000-0000-4000-8000-000000000025",
   "00000000-0000-4000-8000-000000000026",
+  "00000000-0000-4000-8000-000000000027",
 ] as const;
 
 interface PostedDataResponse {
@@ -578,6 +579,39 @@ describe("ArtifactSandbox artifact data bridge failure controls", () => {
 });
 
 /**
+ * Mount with one mode, then re-render the SAME mount with another. Models an
+ * RSC re-render of the reader handing the component a fresher prop; the pin
+ * must stay at the mode the mount started with (#1712).
+ */
+function mountThenRerenderSandbox(
+  initial: ContentDataAccess,
+  later: ContentDataAccess
+): { frameWindow: Window; postMessage: jest.Mock } {
+  const sandbox = (dataAccess: ContentDataAccess) => (
+    <ArtifactSandbox
+      code="<p>artifact</p>"
+      src={SANDBOX_SRC}
+      dataBridgeEnabled={true}
+      contentId={TRUSTED_CONTENT_ID}
+      dataAccess={dataAccess}
+    />
+  );
+  const view = render(sandbox(initial));
+  const frame = screen.getByTestId(
+    "artifact-sandbox-frame"
+  ) as HTMLIFrameElement;
+  const frameWindow = frame.contentWindow;
+  if (!frameWindow) throw new Error("test iframe has no contentWindow");
+  const postMessage = jest.fn();
+  Object.defineProperty(frameWindow, "postMessage", {
+    configurable: true,
+    value: postMessage,
+  });
+  view.rerender(sandbox(later));
+  return { frameWindow, postMessage };
+}
+
+/**
  * #1712 — the loaded-mode pin. The owner can change `content_objects.data_access`
  * at any time (settings, REST PATCH, MCP) while a viewer's tab stays open. The
  * server check runs against the CURRENT value, so on its own it would let a page
@@ -654,34 +688,9 @@ describe("ArtifactSandbox loaded-mode pin", () => {
     // would hand this component a fresher prop. The already-running artifact
     // still holds whatever it queried under the OLD mode, so the pin must be
     // the mode at mount — only a fresh mount may widen.
-    const view = render(
-      <ArtifactSandbox
-        code="<p>artifact</p>"
-        src={SANDBOX_SRC}
-        dataBridgeEnabled={true}
-        contentId={TRUSTED_CONTENT_ID}
-        dataAccess="query"
-      />
-    );
-    const frame = screen.getByTestId(
-      "artifact-sandbox-frame"
-    ) as HTMLIFrameElement;
-    const frameWindow = frame.contentWindow;
-    if (!frameWindow) throw new Error("test iframe has no contentWindow");
-    const postMessage = jest.fn();
-    Object.defineProperty(frameWindow, "postMessage", {
-      configurable: true,
-      value: postMessage,
-    });
-
-    view.rerender(
-      <ArtifactSandbox
-        code="<p>artifact</p>"
-        src={SANDBOX_SRC}
-        dataBridgeEnabled={true}
-        contentId={TRUSTED_CONTENT_ID}
-        dataAccess="records"
-      />
+    const { frameWindow, postMessage } = mountThenRerenderSandbox(
+      "query",
+      "records"
     );
 
     await sendMessage(submitRequest(MODE_PIN_REQUEST_IDS[6]), frameWindow);
@@ -690,6 +699,33 @@ describe("ArtifactSandbox loaded-mode pin", () => {
     expect(dataResponses(postMessage)[0]?.message).toEqual({
       type: "atrium-artifact-data-response",
       requestId: MODE_PIN_REQUEST_IDS[6],
+      ok: false,
+      error: "Artifact data request failed",
+    });
+  });
+
+  it("keeps a records-mode pin when a re-render supplies query mode", async () => {
+    // The symmetric direction: a page that loaded with the record store must
+    // not gain live queries from a later, wider prop either.
+    const { frameWindow, postMessage } = mountThenRerenderSandbox(
+      "records",
+      "query"
+    );
+
+    await sendMessage(
+      {
+        type: "atrium-artifact-data-request",
+        requestId: MODE_PIN_REQUEST_IDS[7],
+        op: "query",
+        sql: "SELECT 1",
+      },
+      frameWindow
+    );
+
+    expect(queryArtifactDataMock).not.toHaveBeenCalled();
+    expect(dataResponses(postMessage)[0]?.message).toEqual({
+      type: "atrium-artifact-data-response",
+      requestId: MODE_PIN_REQUEST_IDS[7],
       ok: false,
       error: "Artifact data request failed",
     });
