@@ -37,8 +37,17 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { Loader2, Star, Clock, FolderOpen, Inbox, ArrowRight } from "lucide-react";
+import {
+  Loader2,
+  Star,
+  Clock,
+  FolderOpen,
+  Inbox,
+  ArrowRight,
+  Activity,
+} from "lucide-react";
 import { listContentAction } from "@/actions/db/atrium/list-content";
+import { recentSince, WHATS_NEW_DAYS } from "@/lib/atrium/recent-window";
 import { collectionTreeAction } from "@/actions/db/atrium/collection-tree";
 import type { ContentObjectDTO, ListFilter } from "@/lib/content";
 import type { CollectionTreeNode } from "@/lib/content/collection-service";
@@ -301,7 +310,7 @@ function subtreeCount(node: CollectionTreeNode): number {
 
 export interface LibraryHomeProps {
   /** Switch the parent to a full-grid view (the bands' "see all" targets). */
-  onSeeAll: (view: "all" | "mine" | "unfiled" | "favorites") => void;
+  onSeeAll: (view: "all" | "mine" | "unfiled" | "favorites" | "recent") => void;
 }
 
 export function LibraryHome({ onSeeAll }: LibraryHomeProps): React.JSX.Element {
@@ -351,6 +360,23 @@ export function LibraryHome({ onSeeAll }: LibraryHomeProps): React.JSX.Element {
         emptyText="Nothing yet — create a doc or an interactive page to get started."
         seeAllLabel="See all yours"
         onSeeAll={() => onSeeAll("mine")}
+        onFavoriteChange={handleFavoriteChange}
+      />
+      <ContentBand
+        testId="home-band-whats-new"
+        icon={<Activity className="h-4 w-4" />}
+        title="New across the district"
+        // The one band that is NOT personal: everything the viewer can see,
+        // anyone's, filed or not, touched in the last WHATS_NEW_DAYS. Home led
+        // only with "yours" before, so what the rest of the district was doing
+        // was invisible until you went looking. Hour-stable `since` — see
+        // recentSince.
+        filter={{ since: recentSince(WHATS_NEW_DAYS) }}
+        reloadKey={reloadKey}
+        hideEmpty={false}
+        emptyText={`Nothing has changed in the last ${WHATS_NEW_DAYS} days.`}
+        seeAllLabel="See everything new"
+        onSeeAll={() => onSeeAll("recent")}
         onFavoriteChange={handleFavoriteChange}
       />
       <SectionsBand />

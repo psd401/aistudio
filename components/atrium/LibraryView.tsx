@@ -32,6 +32,7 @@ import { listContentTagsAction } from "@/actions/db/atrium/list-tags";
 import { createContentAction } from "@/actions/db/atrium/create-content";
 import type { ContentObjectDTO, ContentKind, ListFilter } from "@/lib/content";
 import { ARTIFACT_STARTER_HTML } from "@/lib/content/artifact-starter";
+import { recentSince, WHATS_NEW_DAYS } from "@/lib/atrium/recent-window";
 import { createLogger } from "@/lib/client-logger";
 import { LibraryList } from "./LibraryList";
 import { LibraryHome } from "./LibraryHome";
@@ -53,6 +54,10 @@ const log = createLogger({ component: "LibraryView" });
 const VIEWS = [
   { value: "home", label: "Home" },
   { value: "all", label: "All content" },
+  // District-wide, everything the viewer can see that was TOUCHED in the last
+  // WHATS_NEW_DAYS (server `since` on updated_at) — the answer to "what has
+  // changed around here lately", which "Your recent work" on Home is not.
+  { value: "recent", label: "What's new" },
   { value: "favorites", label: "Favorites" },
   { value: "document", label: "Docs" },
   { value: "artifact", label: "Artifacts" },
@@ -72,6 +77,7 @@ const VIEWS = [
 const PRIMARY_VIEWS: readonly LibraryFilterView[] = [
   "home",
   "all",
+  "recent",
   "favorites",
   "document",
   "artifact",
@@ -493,7 +499,11 @@ function LibraryChips({
             <option key={t} value={t} />
           ))}
         </datalist>
-        <span className="mer-sorted-label">Sorted by recent</span>
+        <span className="mer-sorted-label" data-testid="library-sort-label">
+          {view === "recent"
+            ? `Updated in the last ${WHATS_NEW_DAYS} days · newest first`
+            : "Sorted by recent"}
+        </span>
       </div>
     </div>
   );
@@ -511,6 +521,7 @@ function viewToFilter(view: LibraryFilterView): {
   status?: "archived";
   filed?: "unfiled";
   favorite?: true;
+  since?: string;
 } {
   switch (view) {
     case "document":
@@ -523,6 +534,10 @@ function viewToFilter(view: LibraryFilterView): {
       return { filed: "unfiled" };
     case "archived":
       return { status: "archived" };
+    // Hour-stable (see recentSince): a per-render timestamp here would change
+    // the serialized filter key every render and refetch forever.
+    case "recent":
+      return { since: recentSince(WHATS_NEW_DAYS) };
     // "home" never reaches the grid (LibraryHome renders instead), and "all"
     // applies no restriction.
     default:
@@ -644,6 +659,7 @@ function resolveView(
   status?: "archived";
   filed?: "unfiled";
   favorite?: true;
+  since?: string;
   archivedView: boolean;
   homeView: boolean;
 } {
@@ -893,7 +909,7 @@ function useLibrarySelection() {
 function useSeeAllHandler(
   setView: (v: LibraryFilterView) => void,
   setOwnerFilter: (v: LibraryOwnerFilter) => void
-): (target: "all" | "mine" | "unfiled" | "favorites") => void {
+): (target: "all" | "mine" | "unfiled" | "favorites" | "recent") => void {
   return useCallback(
     (target) => {
       if (target === "mine") {
@@ -975,7 +991,7 @@ export function LibraryView({
   } = useLibraryCreate(collectionId);
 
   // Derive the server filter from the active chip.
-  const { effectiveView, kind, status, filed, favorite, archivedView, homeView } =
+  const { effectiveView, kind, status, filed, favorite, since, archivedView, homeView } =
     resolveView(view, searching);
 
   // The Archived VIEW wins over the status SELECT: it is itself a status
@@ -1012,6 +1028,7 @@ export function LibraryView({
       status: effectiveStatus,
       filed,
       favorite,
+      since,
       actor: actorFilter === "any" ? undefined : actorFilter,
       tag: debouncedTag.trim() || undefined,
       // Prefix, not whole-tag: typing toward a tag must narrow progressively
@@ -1020,8 +1037,7 @@ export function LibraryView({
       query: debouncedSearch.trim() || undefined,
     });
 
-  const { selected, clearSelection, toggleSelect, removeFromSelection } =
-    useLibrarySelection();
+  const { selected, clearSelection, toggleSelect, removeFromSelection } = useLibrarySelection();
 
   useFilterChangeReset(fetchPage, clearSelection);
 
