@@ -1,5 +1,6 @@
 /**
- * `contentService.update` refuses `dataAccess` on a document (#1705).
+ * `contentService.create` and `contentService.update` refuse `dataAccess` on a
+ * document (#1705).
  *
  * Both create surfaces (REST + MCP) already drop the field for documents. The
  * update path is where every surface converges, so the guard lives in the
@@ -74,6 +75,21 @@ const baseObj = {
 beforeEach(() => {
   rows.length = 0;
   (executeQuery as jest.Mock).mockClear();
+});
+
+describe("contentService.create: dataAccess is artifact-only", () => {
+  it("refuses a document created with a data-access mode before any DB work", async () => {
+    await expect(
+      contentService.create(owner, {
+        kind: "document",
+        title: "Not a sandbox",
+        body: "hello",
+        bodyFormat: "markdown",
+        dataAccess: "query",
+      })
+    ).rejects.toBeInstanceOf(ValidationError);
+    expect(executeQuery).not.toHaveBeenCalled();
+  });
 });
 
 describe("contentService.update: dataAccess is artifact-only", () => {

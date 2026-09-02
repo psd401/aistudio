@@ -344,6 +344,16 @@ function assertValidCreateInput(input: CreateObjectInput): void {
       kind: input.kind,
     });
   }
+  // #1705: documents have no sandbox, so a data-access mode is meaningless for
+  // one. The REST/MCP create surfaces already drop the field for documents;
+  // this is the converged check so no caller can persist a stray `query` that
+  // a later consumer of `content.dataAccess` might trust without re-checking
+  // `kind`. Mirrors the same guard in `update`.
+  if (input.dataAccess !== undefined && input.kind !== "artifact") {
+    throw new ValidationError("dataAccess only applies to artifacts", {
+      kind: input.kind,
+    });
+  }
 }
 
 /**
