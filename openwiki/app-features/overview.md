@@ -11,10 +11,12 @@ openwiki:
     - lib/nexus/model-router/psd-data-connector.ts
     - components/atrium/dnd/atrium-dnd.tsx
     - components/atrium/use-expanded-sections.ts
+    - components/atrium/ArtifactSandbox.tsx
     - lib/atrium/usage-series.ts
     - lib/atrium/recent-window.ts
   invariants:
     - Artifact data_access modes (records/query/none) are mutually exclusive — prevents exfiltration loop
+    - Mode is enforced twice (client-side pin + server-side check) and changes only take effect on fresh page load (#1712)
     - Viewer-scoped PSD queries execute as the VIEWER with their row-level security
     - Sidebar tree starts collapsed; expanded sections persist per-viewer in localStorage
     - What's New window is 7 days, hour-truncated to prevent render-loop refetches
@@ -256,6 +258,15 @@ Artifacts can interact with data through a sandbox bridge. The `data_access` mod
 
 **Security Model**: The modes are mutually exclusive by design to prevent exfiltration. An artifact that can query viewer data cannot also write records, closing the loop where a hostile author could query sensitive data and exfiltrate it through the records store.
 
+**Dual-Layer Enforcement** (#1712): Each mode is enforced twice, and both layers must agree. The reader page pins the mode it read when it rendered, and the sandbox refuses any operation that does not match that pinned mode. The Server Actions independently re-check the artifact's current mode. A mode change (settings, REST `PATCH`, MCP) only takes effect on a fresh page load, which starts with no queried data in memory. This prevents the owner from loading a viewer with `query` mode, then flipping to `records` to let that page submit queried rows back into the records store—exactly the exfiltration loop the mutual exclusivity is meant to close.
+
+**Pinning Mechanism**:
+- Reader page (`app/(protected)/c/[slug]/page.tsx`) reads `data_access` during render and passes it to `<ArtifactSandbox dataAccess=…>`
+- `ArtifactSandbox` stores the mode in a ref for the mount's lifetime—re-renders cannot widen what an already-running artifact may do
+- `isOpAllowedByLoadedMode()` rejects ops before the Server Action is called
+- Unrecognized values collapse to `"none"` (fail closed)
+- The component key on `target.id` ensures one mount is always one artifact
+
 **Viewer-Scoped PSD Queries** (`query` mode):
 - Artifact calls `window.AtriumData.query(sql, { limit, offset })`
 - Query executes **as the viewer** with their row-level security
@@ -279,6 +290,8 @@ interface AtriumData {
 - `tests/e2e/atrium-artifact-data-access.functional.spec.ts` — data access modes
 - `tests/unit/atrium-artifact-query-action.test.ts` — query action
 - `tests/unit/atrium-artifact-data-access-migration.test.ts` — migration 179
+- `tests/unit/atrium-artifact-data-bridge.test.tsx` — loaded-mode pin (#1712, both directions plus `none`)
+- `tests/unit/atrium-reader-page-masking.test.tsx` — reader page prop assertions including unrecognized mode pinning
 
 ### Usage Dashboard
 
