@@ -4,6 +4,8 @@ import {
   authenticateContext,
   SEEDED_ADMIN_EMAIL,
   SEEDED_ADMIN_SUB,
+  SEEDED_STAFF_EMAIL,
+  SEEDED_STAFF_SUB,
 } from './helpers/session-auth'
 
 /**
@@ -21,12 +23,15 @@ import {
  *    Then unstar it INSIDE the view (it must leave at once), restore All
  *    content, and force the chip's refetch to fail (the error state must show
  *    instead of stale cards or a dangling "Load more").
- *  - UNFILED (B2). Seed one doc inside a collection and one loose, enter the
- *    Unfiled view via the home band's "See all unfiled" (the same
- *    `useSeeAllHandler` path the bug report named): the loose doc must remain
- *    and the FILED one must leave — including when the page was opened with a
- *    legacy `?collection=` scope, which "unfiled" must drop rather than AND
- *    into an empty-by-construction grid.
+ *  - UNFILED (B2). Seed one doc inside a collection, one loose, and one loose
+ *    doc owned by ANOTHER user; enter the Unfiled view via the home band's
+ *    "See all unfiled" (the same `useSeeAllHandler` path the bug report named).
+ *    The band is "Not in a section yet" — the caller's OWN unfiled work — so
+ *    "See all" must open that list: owner select on "Mine", the loose doc
+ *    stays, the FILED one and the OTHER user's leave; widening the owner
+ *    select to "Anyone" brings the other user's back. Also covered: opening
+ *    the page with a legacy `?collection=` scope, which "unfiled" must drop
+ *    rather than AND into an empty-by-construction grid.
  *
  * Every wait on the grid goes through `data-results-key`, which the hook sets
  * in the same state batch as the items: the loading spinner unmounts every
@@ -51,10 +56,10 @@ function runToken(): string {
  * so `bun run db:cleanup:e2e` can prune anything a crashed run leaves behind.
  */
 async function seedDoc(
-  page: Page,
+  request: Page['request'],
   opts: { title: string; tag: string; collectionId?: string }
 ): Promise<string> {
-  const res = await page.request.post('/api/v1/content', {
+  const res = await request.post('/api/v1/content', {
     data: {
       kind: 'document',
       title: opts.title,
@@ -179,12 +184,15 @@ function defineFavoritesChipTest() {
 
       // Two drafts isolated by a unique tag: one will be starred, the other is
       // the card whose DISAPPEARANCE is the actual regression assertion.
-      const starredId = await seedDoc(page, {
+      const starredId = await seedDoc(page.request, {
         title: `Starred probe ${token}`,
         tag,
       })
       ids.push(starredId)
-      const plainId = await seedDoc(page, { title: `Plain probe ${token}`, tag })
+      const plainId = await seedDoc(page.request, {
+        title: `Plain probe ${token}`,
+        tag,
+      })
       ids.push(plainId)
       const starredCard = card(page, starredId)
       const plainCard = card(page, plainId)
@@ -280,13 +288,17 @@ function defineFavoritesChipTest() {
 }
 
 function defineUnfiledChipTest() {
-  test('atrium-library-unfiled-chip: "See all unfiled" narrows the grid to content outside every collection, and drops a ?collection= scope instead of ANDing it', async ({
+  test('atrium-library-unfiled-chip: "See all unfiled" narrows the grid to the caller\'s own content outside every collection, widens on request, and drops a ?collection= scope instead of ANDing it', async ({
     browser,
   }) => {
     const context = await browser.newContext({
       viewport: { width: 1440, height: 900 },
     })
     await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB)
+    // A second person: their unfiled doc is visible to the admin, so only the
+    // owner scope can exclude it.
+    const staff = await browser.newContext()
+    await authenticateContext(staff, SEEDED_STAFF_EMAIL, SEEDED_STAFF_SUB)
     const ids: string[] = []
     let collectionId: string | undefined
     try {
@@ -303,38 +315,65 @@ function defineUnfiledChipTest() {
       collectionId = (await coll.json())?.data?.id as string | undefined
       expect(collectionId).toBeTruthy()
 
-      const filedId = await seedDoc(page, {
+      const filedId = await seedDoc(page.request, {
         title: `Filed probe ${token}`,
         tag,
         collectionId,
       })
       ids.push(filedId)
-      const looseId = await seedDoc(page, { title: `Loose probe ${token}`, tag })
+      const looseId = await seedDoc(page.request, {
+        title: `Loose probe ${token}`,
+        tag,
+      })
       ids.push(looseId)
+      const theirsId = await seedDoc(staff.request, {
+        title: `Theirs probe ${token}`,
+        tag,
+      })
+      ids.push(theirsId)
       const looseCard = card(page, looseId)
       const filedCard = card(page, filedId)
+      const theirsCard = card(page, theirsId)
+      const ownerSelect = page.getByTestId('library-owner-filter')
 
       // Enter the Unfiled view the way a person does — the home band's
       // "See all unfiled" (useSeeAllHandler), which also proves the chip row
-      // adds the active non-primary chip back.
+      // adds the active non-primary chip back. The band is the caller's OWN
+      // unfiled work, so the handler scopes the owner select to "Mine".
       await page.goto('/atrium')
       await page.getByRole('button', { name: 'See all unfiled' }).click()
       await expect(
         chips(page).getByRole('button', { name: 'Unfiled', exact: true })
       ).toHaveAttribute('aria-pressed', 'true')
+      await expect(ownerSelect).toHaveValue('mine')
 
-      // Narrow to this run's probes. The loose doc stays; the FILED one must be
-      // excluded. Before the fix the `filed` restriction was silently dropped
-      // from the fetch, so both rendered.
+      // Narrow to this run's probes. The loose doc stays; the FILED one and the
+      // OTHER user's must be excluded. Before the fix the `filed` restriction
+      // was silently dropped from the fetch, so everything rendered; before
+      // the owner scope, the other user's unfiled doc did too.
       await searchBox(page).fill(tag)
       await awaitResultsFor(page, tag)
       await awaitSettledKey(page, /"filed":"unfiled"/)
+      await awaitSettledKey(page, /"owner":"mine"/)
       await expect(looseCard).toBeVisible()
       await expect(filedCard).toHaveCount(0)
+      await expect(theirsCard).toHaveCount(0)
 
       await page.screenshot({
         path: `${SHOT_DIR}/atrium-library-unfiled-chip.png`,
       })
+
+      // The owner select stays live: widening to "Anyone" is the district-wide
+      // unfiled audit, and the other user's doc appears (still unfiled-only).
+      await ownerSelect.selectOption('any')
+      await expect(page.locator('section[data-results-key]')).not.toHaveAttribute(
+        'data-results-key',
+        /"owner"/,
+        { timeout: 15000 }
+      )
+      await expect(theirsCard).toBeVisible()
+      await expect(looseCard).toBeVisible()
+      await expect(filedCard).toHaveCount(0)
 
       // A section scope must not poison the view. Arriving via the legacy
       // `?collection=` deep link keeps the Home chip (and its "See all unfiled")
@@ -353,7 +392,9 @@ function defineUnfiledChipTest() {
       await expect(looseCard).toBeVisible()
       await expect(filedCard).toHaveCount(0)
     } finally {
+      // The admin's request context deletes the staff-owned probe too.
       await cleanup(context.request, ids, collectionId)
+      await staff.close()
       await context.close()
     }
   })
