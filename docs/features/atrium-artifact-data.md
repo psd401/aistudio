@@ -85,6 +85,30 @@ Evaluate every FUTURE bridge operation against that invariant before shipping it
 The mode is owner-settable in the editor's **Content settings** dialog (artifacts
 only) and via the `create_artifact` / `update_content` MCP tools.
 
+### The mode is enforced twice, and a change only lands on a fresh load (#1712)
+
+Because the owner can change `data_access` at any time, a server-side check alone
+is necessary but not sufficient: it runs against the *current* value, while a
+reader page that loaded in `query` mode still holds queried rows in memory. An
+author could therefore load a viewer with `query`, flip to `records`, and let the
+page's retry loop submit those rows into `content_data_records` for the author to
+read back — the exact loop the exclusivity is supposed to close.
+
+So the mode is pinned per page load:
+
+- `app/(protected)/c/[slug]/page.tsx` reads `data_access` when it renders and
+  passes it to `<ArtifactSandbox dataAccess=…>` (unrecognized values collapse to
+  `none`). It is a required member of the bridge-enabled prop branch, so no
+  caller can enable the bridge without pinning a mode.
+- `ArtifactSandbox` refuses any op that does not match that pinned mode *before*
+  the Server Action is called, with the same generic failure as every other
+  bridge refusal.
+- The Server Actions still re-check the artifact's current mode
+  (`assertArtifactDataAccess`).
+
+Both layers must agree, so a mode flipped under an open page satisfies neither —
+and the fresh load that would satisfy both starts with no queried data in memory.
+
 ## Viewer-scoped data queries (#1705)
 
 ```text

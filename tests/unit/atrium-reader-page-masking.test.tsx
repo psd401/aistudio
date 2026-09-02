@@ -261,7 +261,10 @@ describe("Atrium reader page — 404 existence masking", () => {
   });
 
   it("enables the data bridge with the trusted object id for an authenticated artifact reader", async () => {
-    withLookups({ ...OBJ_ROW, kind: "artifact" }, PUBLICATION_ROW);
+    withLookups(
+      { ...OBJ_ROW, kind: "artifact", dataAccess: "query" },
+      PUBLICATION_ROW
+    );
     canViewMock.mockResolvedValue(true);
     getByIdMock.mockResolvedValue({
       objectId: "obj-1",
@@ -277,7 +280,30 @@ describe("Atrium reader page — 404 existence masking", () => {
       expect.objectContaining({
         dataBridgeEnabled: true,
         contentId: "obj-1",
+        // #1712: the mode is pinned per page load, so the sandbox can refuse an
+        // op the owner enables only after this page rendered.
+        dataAccess: "query",
       })
+    );
+  });
+
+  it("pins an unrecognized data_access value to none (fail closed, #1712)", async () => {
+    withLookups(
+      // A value outside the enum — e.g. a row predating migration 179 read
+      // through a widened column. The reader must not forward it verbatim.
+      { ...OBJ_ROW, kind: "artifact", dataAccess: "everything" },
+      PUBLICATION_ROW
+    );
+    canViewMock.mockResolvedValue(true);
+    getByIdMock.mockResolvedValue({ objectId: "obj-1", versionNumber: 3 });
+    loadArtifactCodeMock.mockResolvedValue("<p>artifact</p>");
+
+    const result = await render("artifact-slug");
+    const child = (result as { props: { children: React.ReactElement } }).props
+      .children;
+
+    expect(child.props).toEqual(
+      expect.objectContaining({ dataAccess: "none" })
     );
   });
 

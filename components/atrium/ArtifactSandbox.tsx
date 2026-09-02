@@ -37,9 +37,17 @@
  * - The reverse-direction artifact data bridge carries three operations —
  *   `submit` / `list` (the artifact record store, #1516) and `query`
  *   (viewer-scoped, read-only PSD data, #1705). Which ones a given artifact may
- *   actually use is decided SERVER-SIDE from its stored `data_access` mode; this
- *   component routes all three identically and never grants anything itself.
- *   Requests are accepted only when
+ *   use is enforced TWICE, and both layers must agree (#1712): this component
+ *   refuses any op that does not match the `dataAccess` mode the page was
+ *   LOADED with, and each Server Action independently refuses unless the mode
+ *   the artifact CURRENTLY holds matches. The parent pin matters because the
+ *   owner can flip `data_access` at any time (settings, REST PATCH, MCP): a
+ *   page loaded in `query` mode holds queried rows in memory, so without the
+ *   pin a mid-session flip to `records` would let that page submit them back to
+ *   a store the author can read — exactly the exfiltration loop migration 179
+ *   closes. A mode change therefore only takes effect on a fresh load, which
+ *   starts with no queried data. This component still never GRANTS anything —
+ *   it can only narrow. Requests are accepted only when
  *   `event.source === iframeRef.current?.contentWindow`. Opaque-origin frames
  *   report `event.origin === "null"`, so origin is deliberately NOT the bridge
  *   authenticator. The trusted `contentId` comes only from this component's
@@ -60,6 +68,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { normalizeOrigin } from "@/lib/content/artifact-sandbox-config";
+import type { ContentDataAccess } from "@/lib/content/types";
 import type { ArtifactDataPayload } from "@/lib/db/types/jsonb";
 
 type FrameLoadStatus = "loading" | "loaded" | "error";
@@ -132,11 +141,20 @@ interface ArtifactSandboxBaseProps {
  * The bridge is absent unless a trusted caller deliberately enables it and
  * supplies the content identity. The disabled variant cannot carry a contentId,
  * which keeps anonymous/public-reader wiring fail-closed at the type boundary.
+ *
+ * The enabling branch also REQUIRES `dataAccess` (#1712) — the artifact's mode
+ * as read when this page was rendered. It is a required member rather than an
+ * optional one so a caller cannot enable the bridge without pinning a mode; an
+ * absent value at runtime still fails closed (see `isOpAllowedByLoadedMode`).
  */
 export type ArtifactSandboxProps = ArtifactSandboxBaseProps &
   (
-    | { dataBridgeEnabled: true; contentId: string }
-    | { dataBridgeEnabled?: false; contentId?: never }
+    | {
+        dataBridgeEnabled: true;
+        contentId: string;
+        dataAccess: ContentDataAccess;
+      }
+    | { dataBridgeEnabled?: false; contentId?: never; dataAccess?: never }
   );
 
 interface RenderAck {
@@ -398,6 +416,25 @@ function isRequestWithinBridgeBounds(request: ArtifactDataRequest): boolean {
   return true;
 }
 
+/**
+ * The per-page-load mode pin (#1712).
+ *
+ * `dataAccess` is the artifact's mode as read when this page was RENDERED, not
+ * when the request arrives. The server re-checks the mode the artifact holds at
+ * request time, so a mode flipped after load fails BOTH checks (they disagree)
+ * and only a fresh load — which has no queried rows in memory — can use the new
+ * mode. `none`, and any value outside the three modes (including a missing one),
+ * allow nothing.
+ */
+function isOpAllowedByLoadedMode(
+  op: ArtifactDataRequest["op"],
+  dataAccess: ContentDataAccess | undefined
+): boolean {
+  if (dataAccess === "query") return op === "query";
+  if (dataAccess === "records") return op === "submit" || op === "list";
+  return false;
+}
+
 /** Sentinel for "the action ran and refused" — distinct from a thrown error. */
 const BRIDGE_ACTION_FAILED = Symbol("atrium-bridge-action-failed");
 
@@ -453,6 +490,8 @@ interface ArtifactDataBridgeOptions {
   origin: string | null;
   dataBridgeEnabled: boolean;
   contentId?: string;
+  /** The artifact's data-access mode as of THIS page load (#1712). */
+  dataAccess?: ContentDataAccess;
 }
 
 /** Install the source-authenticated, bounded artifact data request listener. */
@@ -461,8 +500,19 @@ function useArtifactDataBridge({
   origin,
   dataBridgeEnabled,
   contentId,
+  dataAccess,
 }: ArtifactDataBridgeOptions): void {
   const inFlightDataRequestsRef = useRef(0);
+  /**
+   * #1712: pin the mode for the LIFETIME of this mount, not just to the current
+   * prop. A re-render with a fresher `dataAccess` (an RSC refresh of the reader
+   * after the owner flipped `data_access`) must not widen what an ALREADY
+   * RUNNING artifact may do — that artifact still holds whatever it queried
+   * under the old mode. Only a fresh mount, which starts with nothing in memory,
+   * picks up a new mode. `useRef`'s initial value is captured on the first
+   * render and never reassigned, so this is exactly "the mode at load".
+   */
+  const loadedDataAccessRef = useRef(dataAccess);
 
   /**
    * Execute one source-authenticated bridge request. `contentId` is constructed
@@ -476,6 +526,9 @@ function useArtifactDataBridge({
       if (
         !dataBridgeEnabled ||
         !contentId ||
+        // The mode this page was LOADED with (#1712) — checked before the
+        // action so a mode flipped under an open page cannot be used by it.
+        !isOpAllowedByLoadedMode(request.op, loadedDataAccessRef.current) ||
         !isRequestWithinBridgeBounds(request) ||
         inFlightDataRequestsRef.current >= MAX_IN_FLIGHT_DATA_REQUESTS
       ) {
@@ -506,6 +559,8 @@ function useArtifactDataBridge({
       // postCode, a concrete targetOrigin would silently discard the response.
       frameWindow.postMessage(response, "*");
     },
+    // `loadedDataAccessRef` is a stable ref, deliberately NOT a dependency: the
+    // pinned mode must not change for the life of this mount (see the ref).
     [contentId, dataBridgeEnabled]
   );
 
@@ -546,6 +601,7 @@ export function ArtifactSandbox({
   className,
   dataBridgeEnabled = false,
   contentId,
+  dataAccess,
 }: ArtifactSandboxProps) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   // The render URL is resolved server-side and arrives via `src`. Derive the
@@ -574,6 +630,7 @@ export function ArtifactSandbox({
     origin,
     dataBridgeEnabled,
     contentId,
+    dataAccess,
   });
 
   /**
