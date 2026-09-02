@@ -969,9 +969,7 @@ export function LibraryView({
   // the viewer asked for one section's contents, and answering that with the
   // curated home would ignore the request. (Section links now target
   // /atrium/s/[slug]; this keeps older ?collection= deep links working.)
-  const [view, setView] = useState<LibraryFilterView>(
-    collectionId ? "all" : "home"
-  );
+  const [view, setView] = useState<LibraryFilterView>(collectionId ? "all" : "home");
   const [tag, setTag] = useState("");
   const [search, setSearch] = useState("");
   // Orthogonal to the view chips — see STATUS_FILTERS / ACTOR_FILTERS.
