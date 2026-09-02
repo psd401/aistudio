@@ -30,7 +30,11 @@ import {
   collectionOwnerUserId,
   type CollectionAccessRow,
 } from "./collection-access";
-import { recordContentAudit, type ContentAuditSurface } from "./audit";
+import {
+  recordContentAudit,
+  recordContentAuditBatch,
+  type ContentAuditSurface,
+} from "./audit";
 import {
   ConflictError,
   ForbiddenError,
@@ -488,69 +492,51 @@ function descendantIds(
  * Pure hierarchy helpers exposed for focused regression tests. The mutation
  * service remains the only production write surface.
  */
-/** Upper bound on one drag-reorder; a sibling group larger than this is not a UI. */
-const REORDER_MAX = 500;
-
-interface SiblingReorderPlan {
-  parentId: string | null;
-  ownerUserId: number | null;
-  /** The sibling rows in their requested order. */
-  rows: CollectionAccessRow[];
+interface SiblingMovePlan {
+  /** The live sibling group (same parent AND owner) in its new order. */
+  order: CollectionAccessRow[];
+  /** Rows whose stored position differs from their new index. */
+  updates: Array<{ row: CollectionAccessRow; position: number }>;
 }
 
 /**
- * Validate a drag-reorder request against the current rows — pure, so the
- * rules are unit-testable without a transaction.
+ * Plan moving one collection to `toIndex` within its live sibling group —
+ * pure, so the rule is unit-testable without a transaction.
  *
- * The ids must be distinct, must all exist, must all share one parent AND one
- * owner (i.e. be true siblings), and must cover EVERY live sibling in that
- * group. Positions are dense (0,1,2…, see `nextPosition`), so a partial list
- * would leave the unlisted siblings colliding with the renumbered ones and the
- * tree falling back to name order for the ties — a reorder that "worked" and
- * then did not. Requiring the full group makes the result exactly what the
- * caller dragged; a stale client (a sibling appeared meanwhile) gets a clear
- * error and reloads.
+ * The group is resolved HERE, from the rows as they are now: same parent, same
+ * owner (a private collection another owner shared into this viewer's tree is
+ * not a sibling, whatever the sidebar shows next to it), not archived, in the
+ * order the tree displays (position, then name). The moved row is taken out
+ * and re-inserted at `toIndex` — the same `arrayMove` semantics as the drag
+ * preview — with `toIndex` clamped to the group, and every row is renumbered
+ * densely from 0. A sibling that appeared since the tree was loaded simply
+ * takes part; the drop never fails for being stale.
  */
-function planSiblingReorder(
+function planSiblingMove(
   rows: CollectionAccessRow[],
-  orderedIds: string[]
-): SiblingReorderPlan {
-  const unique = new Set(orderedIds);
-  if (unique.size !== orderedIds.length) {
-    throw new ValidationError("Duplicate collection ids in reorder");
-  }
-  const byId = new Map(rows.map((row) => [row.id, row]));
-  const ordered = orderedIds.map((id) => {
-    const row = byId.get(id);
-    if (!row) throw new NotFoundError("Collection not found", { collectionId: id });
-    return row;
-  });
-  const { parentId, ownerUserId } = ordered[0];
-  for (const row of ordered) {
-    if (row.parentId !== parentId || row.ownerUserId !== ownerUserId) {
-      throw new ValidationError("Collections must be siblings to be reordered");
-    }
-  }
-  const liveSiblings = rows.filter(
-    (row) =>
-      row.parentId === parentId &&
-      row.ownerUserId === ownerUserId &&
-      row.archivedAt === null
-  );
-  if (
-    liveSiblings.length !== ordered.length ||
-    liveSiblings.some((row) => !unique.has(row.id))
-  ) {
-    throw new ValidationError(
-      "Reorder must include every collection in the group — the sections may have changed, reload and try again"
-    );
-  }
-  return { parentId, ownerUserId, rows: ordered };
+  moving: CollectionAccessRow,
+  toIndex: number
+): SiblingMovePlan {
+  const order = rows
+    .filter(
+      (row) =>
+        row.id !== moving.id &&
+        row.parentId === moving.parentId &&
+        row.ownerUserId === moving.ownerUserId &&
+        row.archivedAt === null
+    )
+    .sort((a, b) => a.position - b.position || a.name.localeCompare(b.name));
+  const target = Math.max(0, Math.min(Math.floor(toIndex), order.length));
+  order.splice(target, 0, moving);
+  const updates = order
+    .map((row, position) => ({ row, position }))
+    .filter(({ row, position }) => row.position !== position);
+  return { order, updates };
 }
 
 export const collectionManagementInternals = {
   assertCollectionId,
-  planSiblingReorder,
+  planSiblingMove,
   assertGroupDefaultHasEffectiveViewGrant,
   assertUpdatedSubtreeGroupDefaults,
   assertMayCreateScope,
@@ -950,6 +936,27 @@ async function applyArchiveState(
     .where(inArray(contentCollections.id, descendantIds(rows, collectionId)));
 }
 
+/**
+ * A reparent with no explicit position lands as the LAST sibling of the new
+ * group (drag-to-nest and un-nest never send one). Left alone, the row kept
+ * its old number and collided with whichever sibling already had it, and the
+ * tree's name tie-break decided the order.
+ */
+function withReparentPosition(
+  rows: CollectionAccessRow[],
+  existing: CollectionAccessRow,
+  input: UpdateCollectionInput,
+  normalized: NormalizedCollectionUpdate,
+  parentId: string | null
+): NormalizedCollectionUpdate {
+  const reparenting = input.parentId !== undefined && parentId !== existing.parentId;
+  if (!reparenting || normalized.position !== undefined) return normalized;
+  return {
+    ...normalized,
+    position: nextPosition(rows, parentId, existing.ownerUserId),
+  };
+}
+
 async function updateCollectionInTx(
   tx: DbTransaction,
   update: CollectionUpdateTxInput
@@ -966,6 +973,7 @@ async function updateCollectionInTx(
   const scope = scopeOf(existing);
   const parentId =
     input.parentId === undefined ? existing.parentId : input.parentId ?? null;
+  const positioned = withReparentPosition(rows, existing, input, normalized, parentId);
   audit.name = normalized.name ?? existing.name;
   audit.scope = scope;
   audit.parentId = parentId;
@@ -993,7 +1001,7 @@ async function updateCollectionInTx(
 
   await tx
     .update(contentCollections)
-    .set(collectionUpdateValues(input, normalized, parentId))
+    .set(collectionUpdateValues(input, positioned, parentId))
     .where(eq(contentCollections.id, collectionId));
   // Un-sharing a personal collection CLEARS its grants, even when the caller
   // sent only `defaultVisibilityLevel`.
@@ -1023,70 +1031,77 @@ async function updateCollectionInTx(
 
 export const collectionManagementService = {
   /**
-   * Reorder one complete sibling group to the given sequence (drag-and-drop in
-   * the sidebar tree). Each collection is renumbered to its index, in ONE
-   * serializable transaction, after `assertMayManage` on every row — so an
-   * administrator may reorder district sections and an owner their own private
-   * collections, and nobody can smuggle someone else's collection into the
-   * list. See `planSiblingReorder` for the sibling/completeness rules.
+   * Move one collection to `toIndex` among its live siblings (drag-reorder in
+   * the sidebar tree). The row is located and `assertMayManage`d FIRST — so a
+   * caller who may not see it gets the same masked "Collection not found" as
+   * everywhere else, before any structure is consulted — then the group is
+   * resolved and renumbered in ONE serializable transaction
+   * (`planSiblingMove`). Every renumbered row gets an audit entry, in one
+   * batched, best-effort insert.
    */
-  async reorder(
+  async move(
     req: Requester,
-    orderedIds: string[],
+    collectionId: string,
+    toIndex: number,
     options: MutationOptions = {}
   ): Promise<void> {
-    if (orderedIds.length === 0) throw new ValidationError("Nothing to reorder");
-    if (orderedIds.length > REORDER_MAX) {
-      throw new ValidationError(
-        `At most ${REORDER_MAX} collections can be reordered at once`
-      );
+    assertCollectionId(collectionId);
+    if (!Number.isInteger(toIndex) || toIndex < 0) {
+      throw new ValidationError("toIndex must be a non-negative integer");
     }
-    for (const id of orderedIds) assertCollectionId(id);
 
-    let plan: SiblingReorderPlan | undefined;
+    let plan: SiblingMovePlan;
     try {
-      await executeTransaction(
+      plan = await executeTransaction(
         async (tx) => {
           const rows = await loadCollectionRows(tx);
-          plan = planSiblingReorder(rows, orderedIds);
-          for (const row of plan.rows) assertMayManage(req, row);
-          for (const [index, row] of plan.rows.entries()) {
-            if (row.position === index) continue;
+          const moving = rows.find((row) => row.id === collectionId);
+          if (!moving) {
+            throw new NotFoundError("Collection not found", { collectionId });
+          }
+          assertMayManage(req, moving);
+          const next = planSiblingMove(rows, moving, toIndex);
+          // Same parent and owner ⇒ the same verdict as `moving`, but asserted
+          // per row so the rule never depends on that reasoning staying true.
+          for (const { row } of next.updates) assertMayManage(req, row);
+          for (const { row, position } of next.updates) {
             await tx
               .update(contentCollections)
-              .set({ position: index, updatedAt: new Date() })
+              .set({ position, updatedAt: new Date() })
               .where(eq(contentCollections.id, row.id));
           }
+          return next;
         },
-        "collectionManagement.reorder",
+        "collectionManagement.move",
         { isolationLevel: "serializable" }
       );
     } catch (error) {
       await auditCollectionMutation({
         req,
         action: "collection_update",
-        collectionId: orderedIds[0],
-        parentId: plan?.parentId,
+        collectionId,
         outcome: "error",
         error,
         options,
       });
       throw error;
     }
-    // One audit row per renumbered collection: each row's position changed, and
-    // the audit table is per-collection. Best-effort, like every other audit.
-    for (const row of plan?.rows ?? []) {
-      await auditCollectionMutation({
+    await recordContentAuditBatch(
+      plan.updates.map(({ row }) => ({
         req,
         action: "collection_update",
-        collectionId: row.id,
-        collectionName: row.name,
-        collectionScope: scopeOf(row),
-        parentId: row.parentId,
+        surface: options.surface ?? "ui",
+        objectId: null,
         outcome: "ok",
-        options,
-      });
-    }
+        details: {
+          collectionId: row.id,
+          collectionName: row.name,
+          collectionScope: scopeOf(row),
+          parentId: row.parentId,
+        },
+        requestId: options.requestId ?? null,
+      }))
+    );
   },
 
   async listManageable(req: Requester): Promise<CollectionDTO[]> {

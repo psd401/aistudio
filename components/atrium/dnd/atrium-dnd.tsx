@@ -8,24 +8,27 @@
  *    into that section (`updateContentAction(id, { collectionId })`); onto a
  *    group heading ("Sections" / "My collections") → it is un-filed.
  *  - Drag a SECTION ROW: onto another row's middle band (or anywhere on a row
- *    that is not its sibling) → it is nested inside that section; onto a group
- *    heading → it moves to the top level; onto a sibling's top/bottom edge →
- *    the sibling group is reordered (`reorderCollectionsAction`).
+ *    that is not its sibling) → it is nested inside that section; onto its own
+ *    group's heading → it moves to the top level; onto a sibling's top/bottom
+ *    edge → it takes that sibling's slot (`moveCollectionAction`).
  *
  * The provider lives in `AtriumShell` because the tree (nav column) and the
  * grid (page content) are siblings there — a drag has to cross that boundary.
- * Tree rows register droppables (`into:<id>`, plus `root:<scope>` headings) and
- * sortables (their own id); cards register draggables (`content:<id>`). The
- * ids, payload types and context live in `atrium-dnd-context.ts`.
+ * Every target carries a typed payload (`atrium-dnd-context.ts`); which
+ * targets a drag may land on, and which one the pointer means, is decided in
+ * `atriumCollision` from those payloads — scope, ownership and ancestry are
+ * all known client-side, so a target the server would refuse never lights up.
  *
- * Permission is enforced server-side (`assertMayManage`, `assertNoCycle`, the
- * private-collection visibility rule in `applyCollectionChangeInTx`); the
- * client only hides handles it knows would be refused and shows the server's
- * message when a drop is rejected. Feedback is an inline status line (Atrium
- * uses no toasts), rendered by the tree.
+ * Positions are the server's business: a nest/un-nest sends only the new
+ * parent (the service appends), and a reorder sends only the target index
+ * (the service resolves the live sibling group). Permission is enforced
+ * server-side on every drop; the client only hides handles it knows would be
+ * refused (`node.canManage`) and shows the server's message when a drop is
+ * still rejected. Feedback is an inline status line (Atrium uses no toasts).
  *
  * Sensors: mouse (small distance threshold so clicks still click), touch (a
- * hold before the drag starts, so the list still scrolls), keyboard.
+ * hold before the drag starts, so the list still scrolls), keyboard (with a
+ * closest-center fallback, since a keyboard drag has no pointer).
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -39,23 +42,27 @@ import {
   pointerWithin,
   useSensor,
   useSensors,
+  type Announcements,
+  type Collision,
   type CollisionDetection,
   type DragEndEvent,
   type DragStartEvent,
+  type DroppableContainer,
 } from "@dnd-kit/core";
-import { arrayMove, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
+import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { FolderOpen, FileText } from "lucide-react";
 import { updateContentAction } from "@/actions/db/atrium/update-content";
 import {
-  reorderCollectionsAction,
+  moveCollectionAction,
   updateCollectionAction,
 } from "@/actions/db/atrium/collection-management";
 import { createLogger } from "@/lib/client-logger";
 import {
   AtriumDndContext,
+  intoId,
   type DndStatus,
   type DragPayload,
-  type DropPayload,
+  type TargetPayload,
 } from "./atrium-dnd-context";
 
 const log = createLogger({ component: "AtriumDnd" });
@@ -63,134 +70,206 @@ const log = createLogger({ component: "AtriumDnd" });
 type ContentDrag = Extract<DragPayload, { kind: "content" }>;
 type CollectionDrag = Extract<DragPayload, { kind: "collection" }>;
 
+function targetOf(container: DroppableContainer): TargetPayload | undefined {
+  return container.data.current as TargetPayload | undefined;
+}
+
+function labelOf(payload: DragPayload | TargetPayload | undefined): string {
+  if (!payload) return "nothing";
+  switch (payload.kind) {
+    case "content":
+      return `“${payload.title}”`;
+    case "collection":
+      return `section “${payload.name}”`;
+    case "into":
+      return `section “${payload.name}”`;
+    case "root":
+      return payload.scope === "private" ? "the top of My collections" : "the top of Sections";
+  }
+}
+
 /** Ask the tree and the grid to re-fetch after a successful drop. */
 function announceMoved(kind: DragPayload["kind"]): void {
   window.dispatchEvent(new Event("atrium:collections-changed"));
   if (kind === "content") window.dispatchEvent(new Event("atrium:content-moved"));
 }
 
+function sameGroup(a: CollectionDrag, t: { parentId: string | null; ownerUserId: number | null }): boolean {
+  return t.parentId === a.parentId && t.ownerUserId === a.ownerUserId;
+}
+
 /**
- * Which target a pointer is over — the one decision that makes the two
- * gestures feel right.
- *
- * Cards: only sections and group headings are targets; whatever the pointer
- * is inside wins.
- *
- * Section rows: a group heading, or a row that is NOT a sibling, is a nest
- * target anywhere on it. A SIBLING row is a nest target only in its vertical
- * middle band; its top/bottom quarters mean "put me before/after this" and fall
- * through to the ordinary sortable reorder among the siblings. The dragged row
- * itself and everything nested under it are never targets (a cycle).
+ * May `active` land on `target` at all? Everything the server would refuse
+ * on structural grounds is excluded here, so it never highlights: the row
+ * itself and its descendants (a cycle), the other scope's rows and heading
+ * (private and district hierarchies cannot mix), and — for sibling reorder —
+ * rows outside the live group (a shared private collection sitting next to
+ * the viewer's own is not a sibling).
  */
+function accepts(active: DragPayload, target: TargetPayload | undefined): boolean {
+  if (!target) return false;
+  if (active.kind === "content") return target.kind === "into" || target.kind === "root";
+  switch (target.kind) {
+    case "root":
+      return target.scope === active.scope;
+    case "into":
+      return (
+        target.scope === active.scope &&
+        target.collectionId !== active.id &&
+        !active.descendantIds.includes(target.collectionId)
+      );
+    case "collection":
+      return target.id !== active.id && sameGroup(active, target);
+  }
+}
+
+/**
+ * Which target the pointer means.
+ *
+ * Cards: whichever section row or heading the pointer is inside.
+ *
+ * Section rows: a heading, or a row that is NOT a sibling, is a nest target
+ * anywhere on it. A SIBLING row is a nest target only in its vertical middle
+ * band; its top/bottom quarters mean "put me in this slot" and resolve to the
+ * sibling whose ROW (not its expanded subtree) is nearest the pointer. A
+ * keyboard drag has no pointer, so it falls back to closest-center over every
+ * acceptable target.
+ */
+type CollisionArgs = Parameters<CollisionDetection>[0];
+
+/**
+ * For a section drag, does this zone hit mean "nest here" (true) or "this
+ * is a sibling's edge — reorder instead" (false)?
+ */
+function isNestHit(active: CollectionDrag, hit: Collision, args: CollisionArgs, pointerY: number): boolean {
+  const container = hit.data?.droppableContainer as DroppableContainer | undefined;
+  const target = container ? targetOf(container) : undefined;
+  if (!target || target.kind === "root") return true;
+  if (target.kind !== "into") return false;
+  if (!sameGroup(active, target)) return true;
+  const rect = args.droppableRects.get(hit.id);
+  if (!rect) return false;
+  const band = rect.height * 0.25;
+  return pointerY > rect.top + band && pointerY < rect.bottom - band;
+}
+
+/** The sibling whose ROW rect (its `into:` droppable, not the <li> with children) is nearest the pointer. */
+function nearestSibling(
+  containers: DroppableContainer[],
+  args: CollisionArgs,
+  pointerY: number
+): Collision[] {
+  let best: { container: DroppableContainer; distance: number } | null = null;
+  for (const container of containers) {
+    const target = targetOf(container);
+    if (target?.kind !== "collection") continue;
+    const rect = args.droppableRects.get(intoId(target.id));
+    if (!rect) continue;
+    const distance = Math.abs(pointerY - (rect.top + rect.height / 2));
+    if (!best || distance < best.distance) best = { container, distance };
+  }
+  return best
+    ? [{ id: best.container.id, data: { droppableContainer: best.container, value: best.distance } }]
+    : [];
+}
+
 const atriumCollision: CollisionDetection = (args) => {
   const active = args.active.data.current as DragPayload | undefined;
   if (!active) return [];
-  const within = pointerWithin(args).filter((c) => {
-    const id = String(c.id);
-    return id.startsWith("into:") || id.startsWith("root:");
-  });
+  const containers = args.droppableContainers.filter((c) => accepts(active, targetOf(c)));
+  const pointer = args.pointerCoordinates;
+  if (!pointer) return closestCenter({ ...args, droppableContainers: containers });
 
+  const zones = containers.filter((c) => targetOf(c)?.kind !== "collection");
+  const within = pointerWithin({ ...args, droppableContainers: zones });
   if (active.kind === "content") return within.slice(0, 1);
 
-  const y = args.pointerCoordinates?.y ?? null;
-  const excluded = new Set([active.id, ...active.descendantIds]);
-  for (const collision of within) {
-    const id = String(collision.id);
-    if (id.startsWith("root:")) return [collision];
-    const targetId = id.slice("into:".length);
-    if (excluded.has(targetId)) continue;
-    if (!active.siblingIds.includes(targetId)) return [collision];
-    const rect = args.droppableRects.get(collision.id);
-    if (rect && y !== null) {
-      const band = rect.height * 0.25;
-      if (y > rect.top + band && y < rect.bottom - band) return [collision];
-    }
-  }
-
-  const siblings = args.droppableContainers.filter((c) =>
-    active.siblingIds.includes(String(c.id))
-  );
-  return closestCenter({ ...args, droppableContainers: siblings });
+  const nest = within.find((hit) => isNestHit(active, hit, args, pointer.y));
+  return nest ? [nest] : nearestSibling(containers, args, pointer.y);
 };
 
 function failure(message: string | undefined, fallback: string): DndStatus {
   return { tone: "error", text: message ?? fallback };
 }
 
-async function dropContent(
-  active: ContentDrag,
-  overId: string
-): Promise<DndStatus | null> {
-  const target = overId.startsWith("into:")
-    ? overId.slice("into:".length)
-    : overId.startsWith("root:")
-      ? null
-      : undefined;
-  if (target === undefined || target === active.collectionId) return null;
-  const res = await updateContentAction(active.id, { collectionId: target });
+async function dropContent(active: ContentDrag, over: TargetPayload): Promise<DndStatus | null> {
+  if (over.kind !== "into" && over.kind !== "root") return null;
+  const collectionId = over.kind === "into" ? over.collectionId : null;
+  if (collectionId === active.collectionId) return null;
+  const res = await updateContentAction(active.id, { collectionId });
   if (!res.isSuccess) return failure(res.message, "Could not move the item");
   announceMoved("content");
   return {
     tone: "ok",
-    text: target
-      ? `Moved “${active.title}”`
+    text: collectionId
+      ? `Moved “${active.title}” into ${labelOf(over)}`
       : `Removed “${active.title}” from its section`,
   };
 }
 
-async function nestCollection(
+async function reparentCollection(
   active: CollectionDrag,
-  parentId: string,
-  over: DropPayload | undefined
+  parentId: string | null
 ): Promise<DndStatus | null> {
   if (parentId === active.parentId) return null;
-  // Land as the LAST child: positions are dense, so the next free slot is the
-  // current child count (the same rule as the service's `nextPosition`).
-  const position = over?.kind === "into" ? over.childCount : 0;
-  const res = await updateCollectionAction(active.id, { parentId, position });
+  const res = await updateCollectionAction(active.id, { parentId });
   if (!res.isSuccess) return failure(res.message, "Could not move the section");
   announceMoved("collection");
-  return { tone: "ok", text: `Moved “${active.name}”` };
+  return {
+    tone: "ok",
+    text: parentId ? `Moved “${active.name}”` : `Moved “${active.name}” to the top level`,
+  };
 }
 
-async function unnestCollection(active: CollectionDrag): Promise<DndStatus | null> {
-  if (active.parentId === null) return null;
-  const res = await updateCollectionAction(active.id, { parentId: null });
-  if (!res.isSuccess) return failure(res.message, "Could not move the section");
-  announceMoved("collection");
-  return { tone: "ok", text: `Moved “${active.name}” to the top level` };
-}
-
-async function reorderSiblings(
-  active: CollectionDrag,
-  overId: string
-): Promise<DndStatus | null> {
-  const from = active.siblingIds.indexOf(active.id);
-  const to = active.siblingIds.indexOf(overId);
-  if (from < 0 || to < 0 || from === to) return null;
-  const res = await reorderCollectionsAction(
-    arrayMove(active.siblingIds, from, to)
-  );
+async function moveWithinSiblings(active: CollectionDrag, toIndex: number): Promise<DndStatus | null> {
+  if (toIndex === active.groupIndex) return null;
+  const res = await moveCollectionAction(active.id, toIndex);
   if (!res.isSuccess) return failure(res.message, "Could not reorder the sections");
   announceMoved("collection");
   return { tone: "ok", text: `Reordered “${active.name}”` };
 }
 
 /** Run the drop the user made; returns the status line to show (or nothing). */
-async function executeDrop(
-  active: DragPayload,
-  overId: string,
-  over: DropPayload | undefined
-): Promise<DndStatus | null> {
-  if (active.kind === "content") return dropContent(active, overId);
-  if (overId.startsWith("into:")) {
-    return nestCollection(active, overId.slice("into:".length), over);
+async function executeDrop(active: DragPayload, over: TargetPayload): Promise<DndStatus | null> {
+  if (active.kind === "content") return dropContent(active, over);
+  switch (over.kind) {
+    case "into":
+      return reparentCollection(active, over.collectionId);
+    case "root":
+      return reparentCollection(active, null);
+    case "collection":
+      return moveWithinSiblings(active, over.groupIndex);
   }
-  if (overId.startsWith("root:")) return unnestCollection(active);
-  return reorderSiblings(active, overId);
 }
 
 const STATUS_TTL_MS = 4000;
+
+/** Screen-reader narration in terms of titles and section names, not ids. */
+const announcements: Announcements = {
+  onDragStart({ active }) {
+    return `Picked up ${labelOf(active.data.current as DragPayload | undefined)}.`;
+  },
+  onDragOver({ active, over }) {
+    const what = labelOf(active.data.current as DragPayload | undefined);
+    return over
+      ? `${what} is over ${labelOf(over.data.current as TargetPayload | undefined)}.`
+      : `${what} is no longer over a target.`;
+  },
+  onDragEnd({ active, over }) {
+    const what = labelOf(active.data.current as DragPayload | undefined);
+    return over
+      ? `Dropped ${what} on ${labelOf(over.data.current as TargetPayload | undefined)}.`
+      : `Dropped ${what}; nothing changed.`;
+  },
+  onDragCancel({ active }) {
+    return `Cancelled moving ${labelOf(active.data.current as DragPayload | undefined)}.`;
+  },
+};
+
+const screenReaderInstructions = {
+  draggable:
+    "To pick up an item, press space or enter. Use the arrow keys to move it over a section or heading, then press space or enter again to drop it, or escape to cancel.",
+};
 
 export function AtriumDndProvider({
   children,
@@ -231,11 +310,10 @@ export function AtriumDndProvider({
   const onDragEnd = useCallback(
     (event: DragEndEvent) => {
       const payload = event.active.data.current as DragPayload | undefined;
+      const over = event.over?.data.current as TargetPayload | undefined;
       setActive(null);
-      if (!payload || !event.over) return;
-      const overId = String(event.over.id);
-      const over = event.over.data.current as DropPayload | undefined;
-      void executeDrop(payload, overId, over)
+      if (!payload || !over) return;
+      void executeDrop(payload, over)
         .then((result) => {
           if (result) showStatus(result);
         })
@@ -251,13 +329,14 @@ export function AtriumDndProvider({
 
   const onDragCancel = useCallback(() => setActive(null), []);
 
-  const value = useMemo(() => ({ active, status }), [active, status]);
+  const value = useMemo(() => ({ status }), [status]);
 
   return (
     <AtriumDndContext.Provider value={value}>
       <DndContext
         sensors={sensors}
         collisionDetection={atriumCollision}
+        accessibility={{ announcements, screenReaderInstructions }}
         onDragStart={onDragStart}
         onDragEnd={onDragEnd}
         onDragCancel={onDragCancel}

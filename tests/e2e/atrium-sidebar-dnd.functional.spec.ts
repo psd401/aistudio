@@ -4,6 +4,17 @@ import {
   SEEDED_ADMIN_EMAIL,
   SEEDED_ADMIN_SUB,
 } from './helpers/session-auth'
+import {
+  archiveCollections,
+  deleteDocs,
+  runToken,
+  sectionRow,
+  sectionsNav,
+  seedCollection,
+  seedDoc,
+  setExpanded,
+  waitForTree,
+} from './helpers/atrium-sidebar'
 import { mkdirSync } from 'node:fs'
 
 /**
@@ -15,12 +26,17 @@ import { mkdirSync } from 'node:fs'
  * the failure mode this exists to catch):
  *
  *  1. A library CARD dragged onto a section row is filed into that section.
- *  2. A section row dragged onto a SIBLING's top edge reorders the group.
+ *  2. A section row dragged onto a SIBLING's top edge takes that slot.
  *  3. A section row dragged onto a sibling's MIDDLE band is nested inside it.
  *
- * Seeds a private parent with two children plus one unfiled draft document
- * via REST, and tears them down afterwards. Runs as the seeded admin, who
- * owns the private collections (so the grip handles render).
+ * And one refusal: an INTERNAL-visibility document dropped on a PRIVATE
+ * collection is rejected by the server's visibility rule, the tree shows the
+ * refusal inline, and the document stays where it was.
+ *
+ * Seeds private collections and draft documents via REST (each id is queued
+ * for teardown the moment it exists, so a later seed failure cannot leak the
+ * earlier rows). Runs as the seeded admin, who owns the private collections
+ * (so the grip handles render).
  *
  * dnd-kit's mouse sensor needs a real pointer sequence — press, move past the
  * activation distance, glide, release — so the drags are driven through
@@ -34,85 +50,10 @@ const SHOT_DIR = 'docs/verification/atrium-sidebar-dnd'
 type Page = import('@playwright/test').Page
 type Locator = import('@playwright/test').Locator
 
-function runToken(): string {
-  return `${Date.now()}${Math.floor(Math.random() * 1000)}`
-}
-
-async function seedCollection(
-  page: Page,
-  name: string,
-  parentId: string | null
-): Promise<string> {
-  const res = await page.request.post('/api/v1/content/collections', {
-    data: { name, scope: 'private', ...(parentId ? { parentId } : {}) },
-  })
-  expect(res.status()).toBe(201)
-  const data = (await res.json())?.data
-  expect(data?.id).toBeTruthy()
-  return data.id as string
-}
-
-async function seedDoc(page: Page, title: string): Promise<string> {
-  const res = await page.request.post('/api/v1/content', {
-    data: {
-      kind: 'document',
-      title,
-      body: `# ${title}\n\nA draft to file by dragging.`,
-      bodyFormat: 'markdown',
-      visibility: { level: 'private' },
-    },
-  })
-  expect(res.status()).toBe(201)
-  const data = (await res.json())?.data
-  expect(data?.id).toBeTruthy()
-  return data.id as string
-}
-
-/** Best-effort teardown; never masks the real assertion failure. */
-async function cleanup(
-  page: Page,
-  docIds: string[],
-  collectionIds: string[]
-): Promise<void> {
-  for (const id of docIds) {
-    try {
-      await page.request.delete(`/api/v1/content/${id}`)
-    } catch {
-      // Ignored on purpose.
-    }
-  }
-  for (const id of collectionIds) {
-    try {
-      await page.request.patch(`/api/v1/content/collections/${id}`, {
-        data: { archived: true },
-      })
-    } catch {
-      // Ignored on purpose.
-    }
-  }
-}
-
-function sectionsNav(page: Page): Locator {
-  return page
-    .getByRole('complementary', { name: 'Workspace' })
-    .getByRole('navigation', { name: 'Content sections' })
-}
-
-async function waitForTree(page: Page): Promise<void> {
-  await expect(sectionsNav(page)).toBeVisible()
-  await expect(sectionsNav(page).getByText('Loading sections…')).toHaveCount(0, {
-    timeout: 60000,
-  })
-}
-
-/** The drop-target div of a section row (the element that lights up). */
-function rowOf(page: Page, collectionId: string): Locator {
-  return page.getByTestId(`section-row-${collectionId}`)
-}
-
 /**
  * Drag with a real pointer sequence. `y` picks where on the target to land as
- * a fraction of its height (0.5 = middle band = nest; 0.05 = top edge = before).
+ * a fraction of its height (0.5 = middle band = nest; 0.06 = top edge = take
+ * this slot).
  */
 async function dragHandleTo(
   page: Page,
@@ -138,15 +79,22 @@ async function dragHandleTo(
   await page.mouse.up()
 }
 
-/** Expand a section by name (idempotent; retries past hydration). */
-async function expandSection(page: Page, name: string): Promise<void> {
-  const nav = sectionsNav(page)
+/** Pin the grid to one seeded document via the server-side search box. */
+async function pinGridTo(page: Page, title: string): Promise<void> {
+  const box = page.getByRole('textbox', { name: 'Search content by title or tag' })
   await expect(async () => {
-    const collapse = nav.getByRole('button', { name: `Collapse ${name}`, exact: true })
-    if ((await collapse.count()) > 0) return
-    await nav.getByRole('button', { name: `Expand ${name}`, exact: true }).click()
-    await expect(collapse).toHaveAttribute('aria-expanded', 'true', { timeout: 1500 })
+    await box.fill(title)
+    await expect(page.locator('section[data-results-query]')).toHaveAttribute(
+      'data-results-query',
+      title,
+      { timeout: 3000 }
+    )
   }).toPass({ timeout: 30_000 })
+}
+
+async function collectionOf(page: Page, docId: string): Promise<string | null> {
+  const res = await page.request.get(`/api/v1/content/${docId}`)
+  return (await res.json())?.data?.collectionId ?? null
 }
 
 test.describe('Atrium drag-and-drop (authenticated)', () => {
@@ -175,60 +123,44 @@ test.describe('Atrium drag-and-drop (authenticated)', () => {
     const secondName = `DnD child two ${token}`
     const docTitle = `DnD draft ${token}`
     const docs: string[] = []
+    // Children first, for teardown ordering; each id is queued as soon as it exists.
     const collections: string[] = []
     try {
       const parentId = await seedCollection(page, parentName, null)
+      collections.push(parentId)
       const firstId = await seedCollection(page, firstName, parentId)
+      collections.unshift(firstId)
       const secondId = await seedCollection(page, secondName, parentId)
-      collections.push(firstId, secondId, parentId)
-      const docId = await seedDoc(page, docTitle)
-      docs.push(docId)
+      collections.unshift(secondId)
+      const doc = await seedDoc(page, docTitle)
+      docs.push(doc.id)
 
       await page.goto('/atrium')
       await waitForTree(page)
-      // The grid must show the seeded draft: pin it via the server-side search.
-      const box = page.getByRole('textbox', { name: 'Search content by title or tag' })
-      await expect(async () => {
-        await box.fill(docTitle)
-        await expect(page.locator('section[data-results-query]')).toHaveAttribute(
-          'data-results-query',
-          docTitle,
-          { timeout: 3000 }
-        )
-      }).toPass({ timeout: 30_000 })
-      const cardGrip = page.getByTestId(`drag-${docId}`)
+      await pinGridTo(page, docTitle)
+      const cardGrip = page.getByTestId(`drag-${doc.id}`)
       await expect(cardGrip).toBeAttached()
 
       // 1. Card → section row (any point on the row files it there).
-      await expandSection(page, parentName)
-      await dragHandleTo(page, cardGrip, rowOf(page, firstId), 0.5)
-      await expect(page.getByTestId('tree-dnd-status')).toHaveText(
-        `Moved “${docTitle}”`,
-        { timeout: 30_000 }
-      )
-      await expect
-        .poll(
-          async () => {
-            const res = await page.request.get(`/api/v1/content/${docId}`)
-            return (await res.json())?.data?.collectionId ?? null
-          },
-          { timeout: 30_000 }
-        )
-        .toBe(firstId)
+      await setExpanded(page, parentName, true)
+      await dragHandleTo(page, cardGrip, sectionRow(page, firstId), 0.5)
+      await expect(page.getByTestId('tree-dnd-status')).toContainText(`Moved “${docTitle}”`, {
+        timeout: 30_000,
+      })
+      await expect.poll(() => collectionOf(page, doc.id), { timeout: 30_000 }).toBe(firstId)
       await page.screenshot({ path: `${SHOT_DIR}/01-card-filed-by-drag.png`, fullPage: false })
 
-      // 2. Reorder: drag "two" onto the TOP edge of "one" → two comes first.
-      await expandSection(page, parentName)
+      // 2. Reorder: drag "two" onto the TOP edge of "one" → two takes slot 0.
+      await setExpanded(page, parentName, true)
       await dragHandleTo(
         page,
         page.getByTestId(`move-collection-${secondId}`),
-        rowOf(page, firstId),
+        sectionRow(page, firstId),
         0.06
       )
-      await expect(page.getByTestId('tree-dnd-status')).toHaveText(
-        `Reordered “${secondName}”`,
-        { timeout: 30_000 }
-      )
+      await expect(page.getByTestId('tree-dnd-status')).toHaveText(`Reordered “${secondName}”`, {
+        timeout: 30_000,
+      })
       const children = sectionsNav(page).locator(`#section-children-${parentId} > li`)
       await expect(children.first()).toContainText(secondName, { timeout: 30_000 })
       await expect(children.nth(1)).toContainText(firstName)
@@ -238,21 +170,59 @@ test.describe('Atrium drag-and-drop (authenticated)', () => {
       await dragHandleTo(
         page,
         page.getByTestId(`move-collection-${firstId}`),
-        rowOf(page, secondId),
+        sectionRow(page, secondId),
         0.5
       )
-      await expect(page.getByTestId('tree-dnd-status')).toHaveText(
-        `Moved “${firstName}”`,
-        { timeout: 30_000 }
-      )
-      await expandSection(page, parentName)
-      await expandSection(page, secondName)
+      await expect(page.getByTestId('tree-dnd-status')).toHaveText(`Moved “${firstName}”`, {
+        timeout: 30_000,
+      })
+      await setExpanded(page, parentName, true)
+      await setExpanded(page, secondName, true)
       await expect(
         sectionsNav(page).locator(`#section-children-${secondId} > li`).first()
       ).toContainText(firstName, { timeout: 30_000 })
       await page.screenshot({ path: `${SHOT_DIR}/03-section-nested.png`, fullPage: false })
     } finally {
-      await cleanup(page, docs, collections)
+      await deleteDocs(page, docs)
+      await archiveCollections(page, collections)
+      await context.close()
+    }
+  })
+
+  test('a refused drop shows the server\'s reason and leaves the document where it was', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+    })
+    await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB)
+    const page = await context.newPage()
+    const token = runToken()
+    const parentName = `DnD refusal parent ${token}`
+    const docTitle = `DnD internal draft ${token}`
+    const docs: string[] = []
+    const collections: string[] = []
+    try {
+      const parentId = await seedCollection(page, parentName, null)
+      collections.push(parentId)
+      // Internal visibility into a PRIVATE collection is refused by
+      // `applyCollectionChangeInTx` ("Set content visibility to private…").
+      const doc = await seedDoc(page, docTitle, 'internal')
+      docs.push(doc.id)
+
+      await page.goto('/atrium')
+      await waitForTree(page)
+      await pinGridTo(page, docTitle)
+      await dragHandleTo(page, page.getByTestId(`drag-${doc.id}`), sectionRow(page, parentId), 0.5)
+
+      const status = page.getByTestId('tree-dnd-status')
+      await expect(status).toHaveAttribute('data-tone', 'error', { timeout: 30_000 })
+      await expect(status).toContainText(/private|could not/i)
+      expect(await collectionOf(page, doc.id)).toBeNull()
+      await page.screenshot({ path: `${SHOT_DIR}/04-refused-drop.png`, fullPage: false })
+    } finally {
+      await deleteDocs(page, docs)
+      await archiveCollections(page, collections)
       await context.close()
     }
   })

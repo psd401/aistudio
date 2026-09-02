@@ -172,46 +172,48 @@ export async function updateCollectionAction(
 }
 
 /**
- * Drag-reorder one complete sibling group in the sidebar tree. `orderedIds`
- * is the group's ids in their new sequence; the service enforces that they are
- * true siblings, that the group is complete, and `assertMayManage` on each.
+ * Drag-reorder in the sidebar tree: move one collection to `toIndex` among its
+ * live siblings. The service resolves the group (same parent and owner) and
+ * `assertMayManage`s the row before anything else, so a caller who may not see
+ * it gets the masked "not found" and never learns its neighbours.
  */
-export async function reorderCollectionsAction(
-  orderedIds: string[]
+export async function moveCollectionAction(
+  collectionId: string,
+  toIndex: number
 ): Promise<ActionState<null>> {
   const requestId = generateRequestId();
-  const timer = startTimer("reorderCollectionsAction");
-  const log = createLogger({ requestId, action: "reorderCollectionsAction" });
+  const timer = startTimer("moveCollectionAction");
+  const log = createLogger({ requestId, action: "moveCollectionAction" });
   try {
-    log.info("Action started: reorder collections", {
-      count: Array.isArray(orderedIds) ? orderedIds.length : -1,
+    log.info("Action started: move collection", {
+      collectionId: sanitizeForLogging(collectionId),
+      toIndex,
     });
+    // Authenticate and capability-gate before branching on caller-controlled
+    // input, for the same reasons as updateCollectionAction.
     const requester = await authorizedRequester(requestId);
-    if (
-      !Array.isArray(orderedIds) ||
-      orderedIds.length === 0 ||
-      orderedIds.some((id) => typeof id !== "string")
-    ) {
-      throw new ValidationError("orderedIds must be a non-empty list of collection ids");
+    if (typeof collectionId !== "string" || !collectionId) {
+      throw ErrorFactories.missingRequiredField("collectionId");
     }
-    await collectionManagementService.reorder(requester, orderedIds, {
+    if (!Number.isInteger(toIndex) || toIndex < 0) {
+      throw new ValidationError("toIndex must be a non-negative integer");
+    }
+    await collectionManagementService.move(requester, collectionId, toIndex, {
       surface: "ui",
       requestId,
     });
     timer({ status: "success" });
-    log.info("Collections reordered", { count: orderedIds.length });
-    return createSuccess(null, "Collections reordered");
+    log.info("Collection moved", { collectionId, toIndex });
+    return createSuccess(null, "Collection moved");
   } catch (error) {
     timer({ status: "error" });
     return handleError(
       error,
-      error instanceof ContentError
-        ? error.message
-        : "Failed to reorder collections",
+      error instanceof ContentError ? error.message : "Failed to move collection",
       {
-        context: "reorderCollectionsAction",
+        context: "moveCollectionAction",
         requestId,
-        operation: "reorderCollectionsAction",
+        operation: "moveCollectionAction",
       }
     );
   }

@@ -96,6 +96,35 @@ export function contentAuditInsertValues(
   };
 }
 
+/**
+ * Append several audit rows in ONE insert. Same best-effort contract as
+ * `recordContentAudit` (never throws), for callers that renumber or touch many
+ * rows in one gesture — a sidebar drag-reorder renumbers a whole sibling group
+ * and would otherwise pay one round trip per row.
+ */
+export async function recordContentAuditBatch(
+  entries: ContentAuditEntry[]
+): Promise<void> {
+  if (entries.length === 0) return;
+  try {
+    await executeQuery(
+      (db) => db.insert(contentAuditLogs).values(entries.map(contentAuditInsertValues)),
+      "content.audit.recordBatch"
+    );
+  } catch (error) {
+    auditFailureCount += 1;
+    createLogger({ action: "content.audit.recordBatch" }).error(
+      "content audit batch write failed",
+      {
+        count: entries.length,
+        action: entries[0]?.action,
+        failureCount: auditFailureCount,
+        error: error instanceof Error ? error.message : String(error),
+      }
+    );
+  }
+}
+
 let auditFailureCount = 0;
 
 /** Cap an error message so a runaway stack trace cannot bloat the audit row. */
