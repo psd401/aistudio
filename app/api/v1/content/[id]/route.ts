@@ -23,6 +23,9 @@ import {
   requesterFromApiAuth,
 } from "@/lib/content";
 import { contentErrorToResponse, resolveRestRequester } from "@/lib/content/rest";
+// Imported from the concrete module (not the barrel) so route/handler tests that
+// mock "@/lib/content" keep the real tuple at schema-construction time.
+import { CONTENT_DATA_ACCESS_MODES } from "@/lib/content/types";
 import {
   assertContentAuthoringCapability,
   contentSurfaceLink,
@@ -37,6 +40,9 @@ const updateBodySchema = z.object({
   // "unchanged" (undefined). Use null to explicitly clear the collection.
   collectionId: z.string().min(1).nullable().optional(),
   status: z.enum(["draft", "published", "archived"]).optional(),
+  // #1705 — artifact sandbox data-bridge mode. Not nullable: the column is NOT
+  // NULL, so omitting the field leaves the stored mode untouched.
+  dataAccess: z.enum(CONTENT_DATA_ACCESS_MODES).optional(),
 });
 
 // ============================================
@@ -106,6 +112,7 @@ export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId, p
       tags: patch.tags,
       collectionId,
       status: patch.status,
+      dataAccess: patch.dataAccess,
     });
     void recordContentAudit({
       req,

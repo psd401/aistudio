@@ -116,6 +116,23 @@ export const contentStatusEnum = pgEnum("content_status", [
 ]);
 
 /**
+ * Which sandbox data-bridge operation an artifact may use (migration 179, #1705).
+ *
+ * The three modes are MUTUALLY EXCLUSIVE and that exclusivity is a security
+ * control: `records` writes rows other viewers (and the author) can read back,
+ * while `query` reads district data as the VIEWER. Allowing both on one object
+ * would give a hostile author an exfiltration loop through our own database.
+ * See migration 179 and docs/features/atrium-artifact-data.md.
+ *
+ * Used in: content_objects.data_access
+ */
+export const contentDataAccessEnum = pgEnum("content_data_access", [
+  "records",
+  "query",
+  "none",
+]);
+
+/**
  * Actor kind — every creation/edit is attributed to a human or an agent.
  * Used in: content_objects.created_by_actor, content_versions.author_actor
  */

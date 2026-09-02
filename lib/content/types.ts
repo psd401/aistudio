@@ -215,7 +215,30 @@ export interface CreateObjectInput {
   visibility?: VisibilityInput;
   tags?: string[];
   sourceRef?: SourceRef;
+  /**
+   * Artifact sandbox data-bridge mode (#1705). Defaults to `records` (the column
+   * default) when omitted, which is what every non-artifact create wants.
+   */
+  dataAccess?: ContentDataAccess;
 }
+
+/**
+ * Which sandbox data-bridge operation an artifact may use (#1705, migration 179).
+ *
+ * MUTUALLY EXCLUSIVE by design, and the exclusivity is the security control that
+ * lets viewer-scoped queries ship without per-artifact review:
+ *  - `records` — `AtriumData.submit` / `.list` (the #1516 store). The DEFAULT.
+ *  - `query`   — `AtriumData.query`: read-only PSD Data MCP reads executed as the
+ *                VIEWER, with the viewer's row-level permissions.
+ *  - `none`    — no data bridge operation at all.
+ *
+ * A single artifact may never hold both `records` and `query`: records are
+ * readable by the author out-of-band, so combining them would turn the records
+ * table into an exfiltration channel for whatever the viewer can see. See
+ * `docs/features/atrium-artifact-data.md` (Locked decisions).
+ */
+export const CONTENT_DATA_ACCESS_MODES = ["records", "query", "none"] as const;
+export type ContentDataAccess = (typeof CONTENT_DATA_ACCESS_MODES)[number];
 
 /** Metadata-only patch for `update`. Body changes go through versionService.snapshot. */
 export interface UpdatePatch {
@@ -227,6 +250,8 @@ export interface UpdatePatch {
   coverGradient?: string | null;
   /** Doc emoji icon (slice F), or `null` to clear it. */
   icon?: string | null;
+  /** Artifact sandbox data-bridge mode (#1705). Never nullable — see the enum. */
+  dataAccess?: ContentDataAccess;
 }
 
 export interface ListFilter {
@@ -385,6 +410,12 @@ export interface ContentObjectDTO {
    */
   coverGradient: string | null;
   icon: string | null;
+  /**
+   * Which sandbox data-bridge operation this artifact may use (#1705). See
+   * `ContentDataAccess`. `records` for every object created before migration 179
+   * and for documents (which have no sandbox at all).
+   */
+  dataAccess: ContentDataAccess;
   status: "draft" | "published" | "archived";
   indexedAt: string | null;
   createdAt: string | null;

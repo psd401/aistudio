@@ -45,6 +45,9 @@ import {
   restVisibilitySchema as visibilityZ,
 } from "@/lib/content/rest";
 import type { PublishDestination } from "@/lib/content/publish-adapters/types";
+// Imported from the concrete module (not the barrel) so route/handler tests that
+// mock "@/lib/content" keep the real tuple at schema-construction time.
+import { CONTENT_DATA_ACCESS_MODES } from "@/lib/content/types";
 import {
   captureAuditDetails,
   contentSourceRefSchema,
@@ -160,6 +163,12 @@ async function resolveReq(
 // Handlers
 // ============================================
 
+/**
+ * Artifact sandbox data-bridge mode (#1705). Mutually exclusive by design — see
+ * `ContentDataAccess` and `actions/db/atrium/artifact-query.ts`.
+ */
+const dataAccessZ = z.enum(CONTENT_DATA_ACCESS_MODES);
+
 const createDocumentSchema = z.object({
   // Length caps mirror the REST createBodySchema (title→content_objects.title
   // varchar(500), collection→200) so both surfaces reject oversized input at the
@@ -190,6 +199,8 @@ async function createContent(
     visibility?: z.infer<typeof visibilityZ>;
     tags?: string[];
     sourceRef?: z.infer<typeof contentSourceRefSchema>;
+    /** Artifact-only sandbox data-bridge mode (#1705); ignored for documents. */
+    dataAccess?: z.infer<typeof dataAccessZ>;
   },
   body: {
     body?: string;
@@ -223,6 +234,9 @@ async function createContent(
         visibility: common.visibility,
         tags: common.tags,
         sourceRef: common.sourceRef,
+        // Only meaningful for artifacts; documents have no sandbox at all, so a
+        // stray value is not written for them.
+        dataAccess: kind === "artifact" ? common.dataAccess : undefined,
       },
       { hasPublishPublicCapability }
     );
@@ -276,6 +290,9 @@ const createArtifactSchema = z.object({
   visibility: visibilityZ.optional(),
   tags: z.array(z.string()).optional(),
   sourceRef: contentSourceRefSchema.optional(),
+  // #1705 — which sandbox data-bridge operation the artifact may use. Omitted
+  // leaves the column default (`records`), so existing agents are unaffected.
+  dataAccess: dataAccessZ.optional(),
 });
 
 async function handleCreateArtifact(
@@ -293,12 +310,13 @@ async function handleCreateArtifact(
     visibility,
     tags,
     sourceRef,
+    dataAccess,
   } =
     parsed.data;
   return createContent(
     context,
     "artifact",
-    { title, collection, visibility, tags, sourceRef },
+    { title, collection, visibility, tags, sourceRef, dataAccess },
     { body: code, bodyFormat, codeEncoding }
   );
 }
@@ -324,6 +342,9 @@ async function handleGetContent(
       status: obj.status,
       visibilityLevel: obj.visibilityLevel,
       tags: obj.tags,
+      // #1705 — so an agent can see which sandbox data bridge an artifact holds
+      // before it writes code against `AtriumData`.
+      dataAccess: obj.dataAccess,
       sourceRef: obj.sourceRef,
       currentVersion: obj.version
         ? {
@@ -397,6 +418,8 @@ const updateContentSchema = z.object({
   tags: z.array(z.string()).nullable().optional(),
   collection: z.string().min(1).max(200).nullable().optional(),
   status: z.enum(["draft", "published", "archived"]).optional(),
+  // #1705 — omitted leaves the stored mode untouched (the column is NOT NULL).
+  dataAccess: dataAccessZ.optional(),
 });
 
 async function handleUpdateContent(
@@ -423,6 +446,7 @@ async function handleUpdateContent(
       tags: parsed.data.tags,
       collectionId,
       status: parsed.data.status,
+      dataAccess: parsed.data.dataAccess,
     });
     void recordContentAudit({
       req,

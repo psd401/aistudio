@@ -55,6 +55,10 @@ interface AtriumDataApi {
     namespace: string,
     options?: { limit?: number; scope?: "all" | "mine" }
   ): Promise<{ records: unknown[] }>;
+  query(
+    sql: string,
+    options?: { limit?: number; offset?: number }
+  ): Promise<{ columns: string[]; rows: unknown[][] }>;
 }
 
 interface ParentMessage {
@@ -194,6 +198,7 @@ function testAtriumDataReadyBeforeArtifact(): void {
   const code =
     "<script>window.__ATRIUM_DATA_READY__ = " +
     "typeof window.AtriumData?.submit === 'function' && " +
+    "typeof window.AtriumData?.query === 'function' && " +
     "typeof window.AtriumData?.list === 'function';</" +
     "script>";
   postToHost(window, APP_ORIGIN, { type: "atrium-render", code }, acks);
@@ -255,6 +260,62 @@ async function testBridgeEnvelopes(): Promise<void> {
     data: listed,
   });
   assert.deepEqual(await listPromise, listed);
+}
+
+/**
+ * #1705 — the query envelope. It carries ONLY sql/limit/offset (and never a
+ * namespace): format/export/reason/tool are forced by the parent's Server
+ * Action, so sending them from here would change nothing and they are omitted.
+ */
+async function testQueryEnvelope(): Promise<void> {
+  const { window, parentMessages } = makeHost([APP_ORIGIN]);
+  const api = atriumData(window);
+
+  const queryPromise = api.query("SELECT 1", { limit: 10, offset: 5 });
+  assert.equal(parentMessages.length, 1);
+  assert.equal(parentMessages[0]?.origin, "*");
+  const request = parentMessages[0]?.data;
+  assert.deepEqual(request, {
+    type: "atrium-artifact-data-request",
+    requestId: request?.requestId,
+    op: "query",
+    sql: "SELECT 1",
+    limit: 10,
+    offset: 5,
+  });
+  assert.match(String(request?.requestId), UUID_PATTERN);
+
+  const rows = { columns: ["n"], rows: [[1]] };
+  postDataResponse(window, {
+    type: "atrium-artifact-data-response",
+    requestId: request?.requestId,
+    ok: true,
+    data: rows,
+  });
+  assert.deepEqual(await queryPromise, rows);
+}
+
+/** A query with no options omits limit/offset entirely rather than sending undefined. */
+async function testQueryEnvelopeWithoutOptions(): Promise<void> {
+  const { window, parentMessages } = makeHost([APP_ORIGIN]);
+  const api = atriumData(window);
+
+  const queryPromise = api.query("SELECT 1");
+  const request = parentMessages[0]?.data;
+  assert.deepEqual(request, {
+    type: "atrium-artifact-data-request",
+    requestId: request?.requestId,
+    op: "query",
+    sql: "SELECT 1",
+  });
+
+  postDataResponse(window, {
+    type: "atrium-artifact-data-response",
+    requestId: request?.requestId,
+    ok: false,
+    error: "Artifact data request failed",
+  });
+  await assert.rejects(queryPromise, /Artifact data request failed/);
 }
 
 async function testParentSourceFilter(): Promise<void> {
@@ -457,6 +518,11 @@ async function main(): Promise<void> {
   await check(
     "rejects and cleans up when no response arrives before timeout",
     testDataRequestTimeout
+  );
+  await check("sends a query envelope with only sql/limit/offset", testQueryEnvelope);
+  await check(
+    "omits absent query options and surfaces a rejection",
+    testQueryEnvelopeWithoutOptions
   );
   await check(
     "keeps rendering when UUID generation is unavailable",

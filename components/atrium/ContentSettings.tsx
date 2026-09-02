@@ -55,6 +55,7 @@ import {
   type CollectionOption,
 } from "@/lib/atrium/collection-options";
 import { createLogger } from "@/lib/client-logger";
+import type { ContentDataAccess } from "@/lib/content";
 
 const log = createLogger({ component: "ContentSettings" });
 
@@ -219,6 +220,58 @@ export interface ContentSettingsProps {
   tags: string[];
   collectionId: string | null;
   status: "draft" | "published" | "archived";
+  /** Only `artifact` objects have a sandbox, so only they show the data field. */
+  kind: "document" | "artifact";
+  /** Artifact sandbox data-bridge mode (#1705). */
+  dataAccess: ContentDataAccess;
+}
+
+/**
+ * The artifact sandbox data-bridge selector (#1705). Artifacts only — a document
+ * has no sandbox, so the field is not rendered for one at all.
+ *
+ * The three modes are mutually exclusive by design and the copy says so: an
+ * artifact that reads district data as its viewer must never also be able to
+ * write rows its author can read back. The server re-validates the mode and both
+ * bridge surfaces enforce it independently, so this select is presentation only.
+ */
+function DataAccessField({
+  value,
+  onChange,
+  saving,
+}: {
+  value: ContentDataAccess;
+  onChange: (v: ContentDataAccess) => void;
+  saving: boolean;
+}): React.JSX.Element {
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor="content-settings-data-access">Artifact data access</Label>
+      <Select
+        value={value}
+        onValueChange={(v) => onChange(v as ContentDataAccess)}
+        disabled={saving}
+      >
+        <SelectTrigger id="content-settings-data-access">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent className={meridianPortalClassName}>
+          <SelectItem value="records">
+            Saved responses (AtriumData.submit / list)
+          </SelectItem>
+          <SelectItem value="query">
+            Live PSD data as the viewer (AtriumData.query)
+          </SelectItem>
+          <SelectItem value="none">No data access</SelectItem>
+        </SelectContent>
+      </Select>
+      <p className="text-xs text-muted-foreground">
+        {value === "query"
+          ? "Each person sees only the data their own district permissions allow. Saved responses are turned off for this artifact — an artifact can read live data or collect responses, never both."
+          : "Pick “Live PSD data” for a dashboard that queries the district database on each viewer's behalf. Saved responses and live data are mutually exclusive."}
+      </p>
+    </div>
+  );
 }
 
 /**
@@ -237,6 +290,9 @@ function SettingsFields({
   status,
   saving,
   onStatus,
+  kind,
+  draftDataAccess,
+  onDataAccess,
 }: {
   draftTitle: string;
   onTitle: (v: string) => void;
@@ -248,6 +304,9 @@ function SettingsFields({
   status: "draft" | "published" | "archived";
   saving: boolean;
   onStatus: (next: "draft" | "archived") => void;
+  kind: "document" | "artifact";
+  draftDataAccess: ContentDataAccess;
+  onDataAccess: (v: ContentDataAccess) => void;
 }): React.JSX.Element {
   return (
     <>
@@ -298,6 +357,14 @@ function SettingsFields({
         </p>
       </div>
 
+      {kind === "artifact" && (
+        <DataAccessField
+          value={draftDataAccess}
+          onChange={onDataAccess}
+          saving={saving}
+        />
+      )}
+
       <div className="flex items-center gap-2">
         {status === "archived" ? (
           <>
@@ -329,33 +396,16 @@ function SettingsFields({
   );
 }
 
-export function ContentSettings({
-  objectId,
-  title,
-  tags,
-  collectionId,
-  status,
-}: ContentSettingsProps): React.JSX.Element {
-  const router = useRouter();
-  const [open, setOpen] = useState(false);
-
-  // Draft state, re-seeded from props each time the dialog opens (the server
-  // page re-renders after router.refresh(), so props are the persisted truth).
-  const [draftTitle, setDraftTitle] = useState(title);
-  const [draftTags, setDraftTags] = useState<string[]>(tags);
-  const [draftCollection, setDraftCollection] = useState(
-    collectionId ?? NO_COLLECTION
-  );
-  const [saving, setSaving] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
+/**
+ * Load the collection options while the dialog is open (the same
+ * visibility-filtered source the library sidebar uses).
+ *
+ * No init-guard ref is needed: `open` gates the fetch and a transient failure
+ * simply retries on the next open. The `cancelled` flag drops a late resolve
+ * after close/unmount.
+ */
+function useCollectionOptions(open: boolean): CollectionOption[] {
   const [options, setOptions] = useState<CollectionOption[]>([]);
-
-  // Load the collection options when the dialog opens (same data source as the
-  // library sidebar). No init-guard ref needed: `open` gates the fetch, and a
-  // transient failure retries on the next open. A `cancelled` flag drops a late
-  // resolve after close/unmount.
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
@@ -379,6 +429,35 @@ export function ContentSettings({
       cancelled = true;
     };
   }, [open]);
+  return options;
+}
+
+export function ContentSettings({
+  objectId,
+  title,
+  tags,
+  collectionId,
+  status,
+  kind,
+  dataAccess,
+}: ContentSettingsProps): React.JSX.Element {
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
+
+  // Draft state, re-seeded from props each time the dialog opens (the server
+  // page re-renders after router.refresh(), so props are the persisted truth).
+  const [draftTitle, setDraftTitle] = useState(title);
+  const [draftTags, setDraftTags] = useState<string[]>(tags);
+  const [draftCollection, setDraftCollection] = useState(
+    collectionId ?? NO_COLLECTION
+  );
+  const [draftDataAccess, setDraftDataAccess] =
+    useState<ContentDataAccess>(dataAccess);
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const options = useCollectionOptions(open);
 
   // Reset drafts to the persisted values on open/close so a dismissed dialog
   // never shows stale unsaved edits next time (mirrors VisibilityChip).
@@ -388,11 +467,12 @@ export function ContentSettings({
         setDraftTitle(title);
         setDraftTags(tags);
         setDraftCollection(collectionId ?? NO_COLLECTION);
+        setDraftDataAccess(dataAccess);
         setError(null);
       }
       setOpen(next);
     },
-    [title, tags, collectionId]
+    [title, tags, collectionId, dataAccess]
   );
 
   const save = useCallback(async () => {
@@ -405,10 +485,20 @@ export function ContentSettings({
         title: draftTitle.trim(),
         tags: draftTags,
         collectionId: draftCollection === NO_COLLECTION ? null : draftCollection,
+        // Only artifacts carry a sandbox; never write the field for a document.
+        ...(kind === "artifact" ? { dataAccess: draftDataAccess } : {}),
       },
       { objectId, router, setSaving, setError, setOpen }
     );
-  }, [objectId, draftTitle, draftTags, draftCollection, router]);
+  }, [
+    objectId,
+    draftTitle,
+    draftTags,
+    draftCollection,
+    draftDataAccess,
+    kind,
+    router,
+  ]);
 
   // Archive (with confirm — it removes the object from default library lists)
   // and Restore (back to draft). Archive navigates back to the library
@@ -476,6 +566,9 @@ export function ContentSettings({
             status={status}
             saving={busy}
             onStatus={(next) => void setStatus(next)}
+            kind={kind}
+            draftDataAccess={draftDataAccess}
+            onDataAccess={setDraftDataAccess}
           />
 
           {/* Danger zone — permanent hard delete (extracted sub-component). */}

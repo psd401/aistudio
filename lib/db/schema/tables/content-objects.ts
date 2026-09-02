@@ -48,6 +48,7 @@ import { users } from "./users";
 import { contentCollections } from "./content-collections";
 import {
   actorKindEnum,
+  contentDataAccessEnum,
   contentKindEnum,
   contentStatusEnum,
   visibilityLevelEnum,
@@ -103,6 +104,17 @@ export const contentObjects = pgTable(
     // (no cover band, the kind's default lucide icon on the library card).
     coverGradient: varchar("cover_gradient", { length: 40 }),
     icon: varchar("icon", { length: 32 }),
+    /**
+     * Which sandbox data-bridge operation an artifact may use (migration 179,
+     * #1705): `records` (the #1516 submit/list store — the DEFAULT, so every
+     * pre-existing artifact is unchanged), `query` (viewer-scoped, read-only PSD
+     * Data MCP reads), or `none`. Meaningless for `document` objects, which have
+     * no sandbox. The modes are mutually exclusive BY DESIGN — see the enum's
+     * doc comment and migration 179 for why combining them reopens exfiltration.
+     */
+    dataAccess: contentDataAccessEnum("data_access")
+      .default("records")
+      .notNull(),
     status: contentStatusEnum("status").default("draft").notNull(),
     indexedAt: timestamp("indexed_at"),
     createdAt: timestamp("created_at").defaultNow().notNull(),

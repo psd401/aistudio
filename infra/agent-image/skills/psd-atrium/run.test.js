@@ -464,6 +464,35 @@ test('create-artifact POSTs / with kind=artifact, base64 code→body, and bodyFo
   expect(Buffer.from(body.body, 'base64').toString('utf8')).toBe('<html></html>');
 });
 
+test('create-artifact omits dataAccess unless --data-access is given', async () => {
+  await run('create-artifact', '--title', 'Chart', '--code', '<html></html>', '--body-format', 'html');
+  // Omitted keeps the server default ('records'), so existing artifacts and
+  // callers are unaffected by #1705.
+  expect('dataAccess' in restCalls[0].opts.body).toBe(false);
+});
+
+test('create-artifact --data-access query sends the mode', async () => {
+  await run(
+    'create-artifact', '--title', 'Dashboard', '--code', '<html></html>',
+    '--body-format', 'html', '--data-access', 'query'
+  );
+  expect(restCalls[0].opts.body.dataAccess).toBe('query');
+});
+
+test('create-artifact rejects an unknown --data-access value', async () => {
+  let code;
+  try {
+    await run(
+      'create-artifact', '--title', 'Dashboard', '--code', '<html></html>',
+      '--body-format', 'html', '--data-access', 'both'
+    );
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+  expect(restCalls.length).toBe(0);
+});
+
 test('create-artifact with <script>/<style> produces a WAF-opaque base64 body', async () => {
   const code =
     '<html><style>b{color:red}</style><script>alert(1)</script></html>';

@@ -5,9 +5,14 @@ artifacts. It lets an authenticated artifact append and list small JSON records
 without giving untrusted code network access, cookies, storage, a content id, or
 a reusable credential.
 
-This document describes the implementation shipped by issues #1516–#1520 and
-the agent guidance in #1521. The broader content, sandbox, visibility, and
-publishing design remains in the [Atrium design specification](./atrium-design-spec.md).
+It also carries a second, read-only operation: viewer-scoped PSD data queries
+(#1705), where an artifact asks the district data server for rows **as the
+person viewing the page**, under that viewer's own row-level permissions.
+
+This document describes the implementation shipped by issues #1516–1520, the
+agent guidance in #1521, and the viewer-scoped query bridge in #1705. The
+broader content, sandbox, visibility, and publishing design remains in the
+[Atrium design specification](./atrium-design-spec.md).
 
 ## Architecture
 
@@ -51,6 +56,111 @@ That broker path is not an `/api/v1/` endpoint. It applies the signed workspace
 owner's content visibility, checks that the object is an artifact, and returns
 display names without exposing user ids or email addresses.
 
+## Data access modes
+
+Every content object carries `data_access` (migration 179), which decides which
+bridge operation its artifact may use:
+
+| Mode | Allowed | Notes |
+|---|---|---|
+| `records` | `submit`, `list` | The DEFAULT, including for every object created before migration 179. |
+| `query` | `query` | Viewer-scoped, read-only PSD data. `submit`/`list` are refused. |
+| `none` | nothing | The bridge answers every operation with the generic failure. |
+
+**The modes are mutually exclusive, and that is a security control.** It is the
+single enforcement point of the invariant the query feature rests on: a
+data-connected artifact has *no egress*. Network is closed by the sandbox CSP
+(`connect-src 'none'`, `img-src` with no https wildcard, `form-action 'none'`,
+`base-uri 'none'`, `webrtc 'block'`, and `sandbox="allow-scripts"` with no
+navigation or popups). The data MCP's write tools and CSV export links are closed
+by the server-side tool allowlist. The one remaining channel would be writing
+rows into `content_data_records` and reading them back as the author — which the
+exclusivity closes. With every path shut, a data-connected artifact is a pure
+function from "what this viewer may see" to pixels on this viewer's screen,
+whatever its author intended, so no per-artifact review or admin approval is
+required.
+
+Evaluate every FUTURE bridge operation against that invariant before shipping it.
+
+The mode is owner-settable in the editor's **Content settings** dialog (artifacts
+only) and via the `create_artifact` / `update_content` MCP tools.
+
+## Viewer-scoped data queries (#1705)
+
+```text
+artifact code
+  window.AtriumData.query(sql, { limit, offset })
+        | postMessage {op:"query", sql, limit, offset}
+        v
+sandbox host -> ArtifactSandbox parent (event.source check, trusted contentId)
+        | session-authenticated Server Action
+        v
+queryArtifactData
+  - requires a session WITH a Cognito ID token (fails closed without one)
+  - rate limits per viewer per artifact
+  - contentService.get -> shared 404 mask; kind must be artifact; mode must be query
+  - resolves the PSD data connector from the Nexus router config
+        | getConnectorTools(serverId, viewer, roles, { idToken })  <- cognito_passthrough
+        v
+PSD Data MCP `query_data` (row-level security applied to the VIEWER)
+```
+
+The page supplies **exactly three fields**: `sql`, `limit`, `offset`. Everything
+else is forced server-side and cannot be influenced from the frame:
+
+| Argument | Value | Why |
+|---|---|---|
+| tool name | `query_data`, only | No write tool (`save_lesson`, `delete_lesson`, `rate_lesson`) is reachable. |
+| `format` | `"json"` | Machine-usable rows instead of the chat Markdown table. |
+| `export` | `false` | No CSV download link. The data MCP also rejects export in JSON mode. |
+| `view_results` | `true` | — |
+| `reason` | `atrium artifact <contentId> v<versionId>` | The data MCP audit log reads "this viewer, via artifact X". |
+
+Bounds: SQL is capped at 8,000 characters, `limit` is clamped to 2,000 (the data
+MCP's `JSON_ROW_LIMIT`), `offset` to 1,000,000, and the viewer gets 60 queries
+per artifact per minute. The action allows a query 30s (matching the connector
+service) rather than the records bridge's 10s, because each call is Lambda +
+RDS. `requireUserAccess` runs inside `getConnectorTools`, so a student — or any
+viewer outside the connector's allow list — is refused before any request
+reaches the data MCP.
+
+Every failure, from "not in query mode" to an upstream MCP error, reaches the
+frame as the same generic rejection. Upstream text never leaves the server.
+
+### Data MCP contract
+
+`query_data` takes an optional `format` (default `"markdown"`, unchanged for
+every existing caller). With `format: "json"` the text content is one object:
+
+```json
+{
+  "columns": ["school_name", "enrolled"],
+  "rows": [["Peninsula HS", 1234], ["Gig Harbor HS", 1210]],
+  "total_count": 2,
+  "returned_count": 2,
+  "limit": 2000,
+  "offset": 0,
+  "truncated": false
+}
+```
+
+Rows are arrays in `columns` order. Decimals become plain numbers, dates become
+ISO 8601 strings, and NaN/None become `null`. JSON mode caps at
+`JSON_ROW_LIMIT` (2,000) and `JSON_MAX_BYTES` (1 MiB, trimming rows and setting
+`truncated`). RLS rewriting, the required `reason`, and audit logging run before
+anything format-specific.
+
+### Failure states a page must handle
+
+- **No session / expired ID token.** ID tokens last about an hour; render a
+  "reload the page to refresh your session" state.
+- **No access to a table.** The agent writes the SQL but the viewer's permissions
+  run it — a principal and a district admin see different rows, and a teacher
+  without access to a table gets a rejection.
+- **Rate limited.** Several queries per load is normal; a polling loop is not.
+- **Public/preview surfaces.** `/p/<slug>`, previews, thumbnails, and embeds all
+  omit the bridge props, so `query` fails closed there by construction.
+
 ## Artifact API
 
 The sandbox host installs `window.AtriumData` before it executes artifact
@@ -74,6 +184,21 @@ interface AtriumData {
       createdAt: string;
     }>;
   }>;
+
+  /** Requires data_access = "query". Rejects in every other mode. */
+  query(
+    sql: string,
+    options?: { limit?: number; offset?: number }
+  ): Promise<{
+    columns: string[];
+    /** Row tuples in `columns` order. */
+    rows: unknown[][];
+    totalCount: number;
+    returnedCount: number;
+    limit: number;
+    offset: number;
+    truncated: boolean;
+  }>;
 }
 ```
 
@@ -92,7 +217,7 @@ payload, or implement a profanity filter for names.
 
 ## postMessage protocol
 
-Requests use a UUID request id and one of two operations:
+Requests use a UUID request id and one of three operations:
 
 ```ts
 type ArtifactDataRequest =
@@ -110,6 +235,16 @@ type ArtifactDataRequest =
       namespace: string;
       limit?: number;
       scope?: "all" | "mine";
+    }
+  | {
+      // #1705 - carries no namespace; format/export/reason/tool are forced
+      // server-side, so sending them from the frame changes nothing.
+      type: "atrium-artifact-data-request";
+      requestId: string;
+      op: "query";
+      sql: string;
+      limit?: number;
+      offset?: number;
     };
 ```
 
@@ -131,7 +266,10 @@ type ArtifactDataResponse =
     };
 ```
 
-The host keeps at most 32 pending calls and applies a ten-second timeout. The
+The host keeps at most 32 pending calls and applies a ten-second timeout
+(forty-five seconds for `query`: the action's own 30s budget starts only after
+authorization and the connector handshake, so the host must always outlast it
+or a late server answer is dropped and the page retries a running query). The
 parent independently bounds concurrent work and validates request ids,
 namespaces, list options, JSON structure, and payload size before loading the
 Server Action. The Server Action repeats authoritative validation.
@@ -198,6 +336,10 @@ the authenticated operation into the trusted parent and server.
 | `payload` | JSONB, required | Validated small plain-JSON object |
 | `created_at` | `timestamptz`, required | Server timestamp, newest-first read ordering |
 
+`content_objects.data_access` (migration 179) is a `content_data_access` enum —
+`records` (default) | `query` | `none` — and is NOT NULL, so the backfill of
+existing rows is the default itself.
+
 The lookup index is `(content_id, namespace, created_at DESC)`. A second index on
 `(user_id, content_id, namespace)` supports `scope: "mine"`. There is no update
 column, retention timestamp, or sweep. Records remain until their parent content
@@ -217,6 +359,23 @@ object is deleted; deleting a user preserves records but clears attribution.
 5. Google Apps Script enablement is deferred, not a substitute for this bridge.
    It cannot work as a live source inside the current sandbox and should be
    revisited only for a genuinely Workspace-native use case.
+6. **Records and viewer-scoped queries can never coexist on one artifact
+   (#1705).** Not a UX preference — it is the whole security argument. Records
+   are readable by any viewer and by the author out-of-band, so an artifact that
+   could both query as the viewer and submit records would give a hostile author
+   an exfiltration loop through our own database (~8 KiB x 120/min). Do not relax
+   this to "both for the owner" or "both for trusted authors": the guarantee has
+   to hold regardless of author intent, which is exactly what removes the need
+   for per-artifact review. Enforced by one shared `assertArtifactDataAccess`
+   (`actions/db/atrium/artifact-guards.ts`), called from both
+   `artifact-data.ts` and `artifact-query.ts`, so the two sides cannot drift.
+7. Declared queries (storing SQL on the object with typed parameters) were
+   considered and deferred. With no human reviewer in the loop they add audit
+   legibility but no security, and they make dynamic filters harder to author.
+   They can be layered on later without changing the bridge contract.
+8. There is no admin approval gate for data-connected artifacts. Approval only
+   helps against a malicious author, and with egress closed a malicious author
+   cannot obtain anything the viewer sees.
 
 ## Agent usage
 
@@ -233,3 +392,18 @@ node /opt/psd-skills/psd-atrium/run.js list-data \
 
 Do not create a second client framework and do not route this through Sheets,
 browser storage, or a direct artifact network request.
+
+For a live dashboard, set `dataAccess: "query"` on `create_artifact` and use
+`AtriumData.query()` at runtime:
+
+- **Never embed query results in the artifact source.** Baked-in rows are stale
+  by design and are shown at the AUTHOR's permission level to every viewer — the
+  exact problem this bridge exists to fix. The Code tab shows them verbatim.
+- **Aggregate in SQL** so a chart query returns tens of rows, not a dataset.
+  Each call is Lambda + RDS; do not ship full tables to the browser.
+- **Page detail tables** with `limit`/`offset` instead of one huge read.
+- **Pass filters as query parameters** and re-query when they change, rather than
+  fetching everything once and filtering client-side.
+- **Handle rejection.** A rejected `query()` means no session, an expired ID
+  token, no access to a table, the wrong data-access mode, or a rate limit —
+  render a sign-in / no-access state, never a blank chart.

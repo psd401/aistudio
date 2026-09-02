@@ -135,6 +135,8 @@ export async function ArtifactAuthoringView({
               tags={obj.tags}
               collectionId={obj.collectionId}
               status={obj.status}
+              kind={obj.kind}
+              dataAccess={obj.dataAccess}
             />
           )}
           {/* ONE share surface. The link, the audience, the destinations, and

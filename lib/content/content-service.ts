@@ -344,6 +344,16 @@ function assertValidCreateInput(input: CreateObjectInput): void {
       kind: input.kind,
     });
   }
+  // #1705: documents have no sandbox, so a data-access mode is meaningless for
+  // one. The REST/MCP create surfaces already drop the field for documents;
+  // this is the converged check so no caller can persist a stray `query` that
+  // a later consumer of `content.dataAccess` might trust without re-checking
+  // `kind`. Mirrors the same guard in `update`.
+  if (input.dataAccess !== undefined && input.kind !== "artifact") {
+    throw new ValidationError("dataAccess only applies to artifacts", {
+      kind: input.kind,
+    });
+  }
 }
 
 /**
@@ -706,6 +716,11 @@ export const contentService = {
               createdByAgentId,
               collectionId: input.collectionId ?? null,
               visibilityLevel,
+              // #1705 — omitted leaves the column default (`records`), which is
+              // what every document and every legacy artifact wants.
+              ...(input.dataAccess !== undefined
+                ? { dataAccess: input.dataAccess }
+                : {}),
               status: "draft",
               // Typed JSONB must use the postgres.js cast pattern.
               sourceRef: sql`${safeJsonbStringify(
@@ -947,6 +962,22 @@ export const contentService = {
     };
     applyTitleAndTags(patch, setValues);
     applyStatusChange(patch, setValues);
+    // Artifact sandbox data-bridge mode (#1705). NOT a clearable field — the
+    // column is NOT NULL with a `records` default, so an omitted value leaves
+    // the stored mode alone and an explicit value always writes a valid enum
+    // member (validated at the action/tool boundary).
+    if (patch.dataAccess !== undefined) {
+      // Documents have no sandbox: the create surfaces already refuse to write
+      // a mode for one, and the update surfaces enforce it here so a document
+      // can never carry a stray `query` that a future caller might trust.
+      if (existing.kind !== "artifact") {
+        throw new ValidationError("dataAccess only applies to artifacts", {
+          id,
+          kind: existing.kind,
+        });
+      }
+      setValues.dataAccess = patch.dataAccess;
+    }
     // Slice-F presentation fields (cover gradient + emoji icon), validated at the
     // action boundary and merged as a typed partial (see presentationSetValues).
     Object.assign(setValues, presentationSetValues(patch));

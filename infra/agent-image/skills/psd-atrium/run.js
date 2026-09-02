@@ -30,6 +30,7 @@
  *   node run.js create-artifact --title <t> (--code <src> | --code-file <path>)
  *                    --body-format html|jsx [--collection <slug|id>] [--tags a,b,c]
  *                    [--visibility <level>] [--grants ...]
+ *                    [--data-access records|query|none]
  *   node run.js edit --id <id> (--body <text> | --body-file <path>) [--mode replace|append]
  *                    [--body-format markdown|html|jsx] [--summary <s>]
  *   node run.js archive --id <id>
@@ -92,6 +93,14 @@ const STATUSES = ['draft', 'published', 'archived'];
 const LEVELS = ['private', 'group', 'internal', 'public'];
 const BODY_FORMATS = ['markdown', 'html', 'jsx'];
 const ARTIFACT_FORMATS = ['html', 'jsx'];
+/**
+ * Which `window.AtriumData` operation an artifact may use (#1705).
+ * 'records' (default) = submit/list; 'query' = viewer-scoped PSD data reads;
+ * 'none' = no data bridge. MUTUALLY EXCLUSIVE by design — an artifact that can
+ * read district data as its viewer must never also be able to write records its
+ * author can read back.
+ */
+const DATA_ACCESS_MODES = ['records', 'query', 'none'];
 const PUBLISH_DESTINATIONS = ['intranet', 'public_web', 'schoology', 'google', 'okf'];
 const UNPUBLISH_DESTINATIONS = ['intranet', 'public_web', 'schoology', 'google'];
 const COLLECTION_SCOPES = ['private', 'district'];
@@ -122,6 +131,8 @@ function usage() {
       '  create-artifact --title <t> (--code <src> | --code-file <path>)',
       '                  --body-format html|jsx [--collection <slug|id>] [--tags a,b,c]',
       '                  [--visibility <level>] [--grants k:v,...]',
+      '                  [--data-access records|query|none]  (query = live PSD',
+      '                   data read as the VIEWER; excludes AtriumData.submit/list)',
       '  edit --id <id> (--body <text> | --body-file <path>) [--mode replace|append]',
       '       [--body-format markdown|html|jsx] [--summary <s>]',
       '  archive --id <id>   (soft-remove: status -> archived, stays findable)',
@@ -537,6 +548,12 @@ async function createArtifact(args) {
     fail('--body-format html|jsx is required for create-artifact');
   }
   const visibility = buildVisibility(args);
+  const dataAccess = optEnum(
+    args,
+    'data_access',
+    'data-access',
+    DATA_ACCESS_MODES
+  );
   const body = {
     kind: 'artifact',
     title,
@@ -546,6 +563,9 @@ async function createArtifact(args) {
     visibility,
     tags: parseList(args.tags, 'tags'),
   };
+  // Omitted leaves the server default ('records'), so existing callers are
+  // unaffected and only a deliberate dashboard opts into live data.
+  if (dataAccess) body.dataAccess = dataAccess;
   const { payload } = await restFetch('POST', '', {
     body: withEncodedBody(body),
   });

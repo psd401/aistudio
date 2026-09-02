@@ -168,6 +168,7 @@
     "175-atrium-library-usability.sql",
     "176-openclaw-oauth-client-redirect-repair.sql",
     "177-agent-usage-capture-complete.sql",
-    "178-atrium-ux-overhaul.sql"
+    "178-atrium-ux-overhaul.sql",
+    "179-atrium-artifact-data-access.sql"
   ]
 }

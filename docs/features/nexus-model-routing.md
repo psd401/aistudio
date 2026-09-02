@@ -76,6 +76,14 @@ Assistant Architect reuses the text-model tier/family selection core and this co
 
 For PSD-data, prefer `specialists.psdDataConnectorId` when the server UUID is stable. Otherwise the router normalizes the configured name, so `psd-data`, `PSD Data`, and `psd_data` match the same registered server. Existing connector authorization and Cognito pass-through remain enforced by the connector service.
 
+**This setting is no longer chat-only.** As of #1705 the Atrium artifact data
+bridge resolves the same connector through the same helper
+(`resolvePsdDataConnectorId` in `lib/nexus/model-router/psd-data-connector.ts`),
+so `AtriumData.query()` in a sandboxed dashboard and a `psd-data` chat turn
+always target the same registered server. Repointing this setting therefore also
+repoints every data-connected Atrium artifact; if it resolves to nothing, the
+artifact bridge fails closed rather than falling back to another connector.
+
 For web search, choose an active, Nexus-enabled Google text model whose `capabilities` include `web_search` or `grounding`. Standard mode prefers `specialists.webSearchModels` in order and automatically enables the friendly `webSearch` tool, which the Google adapter materializes as `google_search`. The normal tool-catalog scope gate, resource grants, and any loaded skill's `allowed-tools` pin still apply. If the specialist model or tool is unavailable, the request returns a clear specialist-unavailable response instead of silently answering from model memory.
 
 ## User experience and persistence
