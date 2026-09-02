@@ -389,6 +389,109 @@
   border-radius: 8px;
 }
 
+/* ----------------------------------------------------------------------------
+ * DRAG-AND-DROP (components/atrium/dnd/atrium-dnd.tsx)
+ * A row or group heading lights up while something is dragged over it; the
+ * grip handles appear on hover (always, on touch devices, where there is no
+ * hover); the dragged source dims; the overlay "ghost" follows the pointer.
+ * `touch-action: none` on the handles is what lets the touch sensor take the
+ * gesture instead of the page scrolling.
+ * -------------------------------------------------------------------------- */
+.meridian .mer-navcol [data-drop-over="true"] {
+  background: var(--mer-brand-tint);
+  box-shadow: inset 0 0 0 2px var(--mer-brand);
+  border-radius: 8px;
+}
+/* Reorder target: an insertion line on the edge the dragged section will take
+ * (rows never slide apart during a drag — see TreeRow in CollectionTree.tsx). */
+.meridian .mer-navcol [data-drop-edge] {
+  position: relative;
+}
+.meridian .mer-navcol [data-drop-edge]::before {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--mer-brand);
+  pointer-events: none;
+}
+.meridian .mer-navcol [data-drop-edge="before"]::before {
+  top: -2px;
+}
+.meridian .mer-navcol [data-drop-edge="after"]::before {
+  bottom: -2px;
+}
+.mer-tree-grip {
+  touch-action: none;
+  cursor: grab;
+  color: var(--mer-ink-muted);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.group\/row:hover .mer-tree-grip,
+.mer-tree-grip:focus-visible,
+li[data-dragging="true"] .mer-tree-grip {
+  opacity: 1;
+}
+li[data-dragging="true"] > div {
+  opacity: 0.4;
+}
+.mer-lib-card-grip {
+  position: absolute;
+  top: 10px;
+  left: 40px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--mer-line);
+  border-radius: 6px;
+  background: var(--mer-surface);
+  color: var(--mer-ink-muted);
+  touch-action: none;
+  cursor: grab;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.mer-lib-card-wrap:hover .mer-lib-card-grip,
+.mer-lib-card-grip:focus-visible {
+  opacity: 1;
+}
+.mer-lib-card-wrap[data-dragging="true"] > .mer-lib-card {
+  opacity: 0.4;
+}
+@media (hover: none) {
+  .mer-tree-grip,
+  .mer-lib-card-grip {
+    opacity: 1;
+  }
+}
+.mer-drag-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 260px;
+  padding: 6px 10px;
+  border: 1px solid var(--mer-line);
+  border-radius: 8px;
+  background: var(--mer-surface);
+  color: var(--mer-ink);
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: var(--mer-shadow-card);
+  cursor: grabbing;
+}
+.mer-tree-status[data-tone="ok"] {
+  color: var(--mer-brand);
+}
+.mer-tree-status[data-tone="error"] {
+  color: var(--mer-danger);
+}
+
 /* ============================================================================
  * LIBRARY (slice B) — header, search, filter chips, content card grid
  * ========================================================================== */

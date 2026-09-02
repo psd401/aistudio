@@ -29,6 +29,7 @@ jest.mock("lucide-react", () => {
     ChevronDown: Icon,
     ChevronRight: Icon,
     FolderOpen: Icon,
+    GripVertical: Icon,
     Layers: Icon,
     Lock: Icon,
   };
@@ -74,6 +75,8 @@ function node(
     position: 0,
     navItemId: null,
     selectableForCreate: true,
+    // Manageable, so the drag handle branch renders under test as well.
+    canManage: true,
     visibleObjectCount: 0,
     children,
     // Fields the tree never reads, but the contract requires. Spelled out

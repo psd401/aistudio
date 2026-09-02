@@ -20,6 +20,7 @@ import { usePathname } from "next/navigation";
 import { Home, Library } from "lucide-react";
 import { useBranding } from "@/contexts/branding-context";
 import { useUser } from "@/components/auth/user-provider";
+import { AtriumDndProvider } from "@/components/atrium/dnd/atrium-dnd";
 import { WorkspaceNav } from "./WorkspaceNav";
 
 /** Two-letter initials for the rail avatar, from name or email. */
@@ -59,7 +60,11 @@ export function AtriumShell({
     user?.email
   );
 
+  // One drag-and-drop context over the nav column AND the main region: a card
+  // in the grid is dropped onto a section row in the tree, and those two live
+  // in sibling subtrees here — this is their nearest common ancestor.
   return (
+    <AtriumDndProvider>
     <div className="mer-shell">
       <nav className="mer-rail" aria-label="Atrium">
         <Link
@@ -103,5 +108,6 @@ export function AtriumShell({
 
       <div className="mer-main">{children}</div>
     </div>
+    </AtriumDndProvider>
   );
 }

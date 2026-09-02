@@ -861,6 +861,25 @@ function useLibraryPage(filter: LibraryPageFilter) {
 }
 
 /**
+ * A card dragged into (or out of) a section by `AtriumDndProvider` changes its
+ * filing, so it must leave a section view / the Unfiled view: re-fetch page
+ * one AND drop the multi-select, exactly like a bulk move does — a card that
+ * left the grid must not stay silently selected for the next bulk action.
+ * Its own hook so the listener does not count against `LibraryView`'s
+ * max-lines budget.
+ */
+function useContentMovedRefresh(refresh: () => void, clearSelection: () => void): void {
+  useEffect(() => {
+    const onMoved = () => {
+      clearSelection();
+      refresh();
+    };
+    window.addEventListener("atrium:content-moved", onMoved);
+    return () => window.removeEventListener("atrium:content-moved", onMoved);
+  }, [refresh, clearSelection]);
+}
+
+/**
  * Multi-select state for the bulk-action bar (#1336). The caller clears it
  * whenever the underlying set changes (filter/search/section change or a
  * post-mutation refetch) so a bulk action can never operate on ids the user can
@@ -950,9 +969,7 @@ export function LibraryView({
   // the viewer asked for one section's contents, and answering that with the
   // curated home would ignore the request. (Section links now target
   // /atrium/s/[slug]; this keeps older ?collection= deep links working.)
-  const [view, setView] = useState<LibraryFilterView>(
-    collectionId ? "all" : "home"
-  );
+  const [view, setView] = useState<LibraryFilterView>(collectionId ? "all" : "home");
   const [tag, setTag] = useState("");
   const [search, setSearch] = useState("");
   // Orthogonal to the view chips — see STATUS_FILTERS / ACTOR_FILTERS.
@@ -1042,6 +1059,8 @@ export function LibraryView({
   useFilterChangeReset(fetchPage, clearSelection);
 
   const handleFavoriteChange = useFavoriteViewPrune(favorite === true, removeItem);
+
+  useContentMovedRefresh(refresh, clearSelection);
 
   // `refresh` (re-fetch page one after a bulk mutation, so archived rows leave
   // the default views and moved rows leave a section view) comes from the hook

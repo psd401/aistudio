@@ -51,6 +51,14 @@ export interface CollectionTreeNode {
   navItemId: number | null;
   position: number;
   selectableForCreate: boolean;
+  /**
+   * Whether the requester may move/reorder this collection — the server's
+   * `assertMayManage` rule (administrators: district sections; owners: their
+   * own private collections) computed once here, like `selectableForCreate`,
+   * so the sidebar never re-derives authorization client-side. Presentation
+   * only: every mutation re-asserts the rule on the locked row.
+   */
+  canManage: boolean;
   /** Section hero copy (migration 175); null when the author has not written one. */
   description: string | null;
   /**
@@ -414,6 +422,10 @@ export const collectionService = {
           navItemId: c.navItemId,
           position: c.position,
           selectableForCreate: access.selectableCollectionIds.has(c.id),
+          canManage:
+            c.ownerUserId == null
+              ? principal.isAdmin
+              : principal.userId !== undefined && c.ownerUserId === principal.userId,
           description: c.description,
           landingObjectId: c.landingObjectId,
           hasHeroImage: Boolean(c.heroImageKey),

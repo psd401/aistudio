@@ -170,3 +170,51 @@ export async function updateCollectionAction(
     );
   }
 }
+
+/**
+ * Drag-reorder in the sidebar tree: move one collection to `toIndex` among its
+ * live siblings. The service resolves the group (same parent and owner) and
+ * `assertMayManage`s the row before anything else, so a caller who may not see
+ * it gets the masked "not found" and never learns its neighbours.
+ */
+export async function moveCollectionAction(
+  collectionId: string,
+  toIndex: number
+): Promise<ActionState<null>> {
+  const requestId = generateRequestId();
+  const timer = startTimer("moveCollectionAction");
+  const log = createLogger({ requestId, action: "moveCollectionAction" });
+  try {
+    log.info("Action started: move collection", {
+      collectionId: sanitizeForLogging(collectionId),
+      toIndex,
+    });
+    // Authenticate and capability-gate before branching on caller-controlled
+    // input, for the same reasons as updateCollectionAction.
+    const requester = await authorizedRequester(requestId);
+    if (typeof collectionId !== "string" || !collectionId) {
+      throw ErrorFactories.missingRequiredField("collectionId");
+    }
+    if (!Number.isInteger(toIndex) || toIndex < 0) {
+      throw new ValidationError("toIndex must be a non-negative integer");
+    }
+    await collectionManagementService.move(requester, collectionId, toIndex, {
+      surface: "ui",
+      requestId,
+    });
+    timer({ status: "success" });
+    log.info("Collection moved", { collectionId, toIndex });
+    return createSuccess(null, "Collection moved");
+  } catch (error) {
+    timer({ status: "error" });
+    return handleError(
+      error,
+      error instanceof ContentError ? error.message : "Failed to move collection",
+      {
+        context: "moveCollectionAction",
+        requestId,
+        operation: "moveCollectionAction",
+      }
+    );
+  }
+}

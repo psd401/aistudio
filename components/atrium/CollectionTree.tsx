@@ -20,16 +20,46 @@
  * Expansion starts COLLAPSED and is remembered per viewer (`useExpandedSections`,
  * localStorage). It used to be a per-row `useState(true)`: every section unfolded
  * on every visit, and a collapse survived only until the next route change.
+ *
+ * Drag-and-drop (see `dnd/atrium-dnd.tsx`): every row is a drop target for
+ * library cards and for other rows; the group headings are targets for "move to
+ * the top level". Rows the viewer may manage — `node.canManage`, computed by
+ * the service from the same rule as its `assertMayManage` — also get a grip
+ * handle and take part in sibling reordering. Each sibling list is a
+ * `SortableContext`; a row's `groupIndex` is its index among the siblings that
+ * share its owner, which is the group the server reorders. The provider
+ * performs the moves; this component only registers typed targets, lights them
+ * up, and shows the provider's status line.
  */
 
-import { useCallback, useEffect, useState } from "react";
-import { ChevronDown, ChevronRight, FolderOpen, Layers, Lock } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useDroppable, type Active } from "@dnd-kit/core";
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import {
+  ChevronDown,
+  ChevronRight,
+  FolderOpen,
+  GripVertical,
+  Layers,
+  Lock,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { collectionTreeAction } from "@/actions/db/atrium/collection-tree";
 import type { CollectionTreeNode } from "@/lib/content";
 import { createLogger } from "@/lib/client-logger";
 import { useUser } from "@/components/auth/user-provider";
 import { useExpandedSections } from "./use-expanded-sections";
+import {
+  intoId,
+  rootId,
+  useAtriumDnd,
+  type DragPayload,
+  type DropPayload,
+} from "./dnd/atrium-dnd-context";
 
 const log = createLogger({ component: "CollectionTree" });
 
@@ -46,43 +76,183 @@ interface CollectionTreeProps {
   className?: string;
 }
 
-/** One row in the tree, recursively rendering its kept children. */
-function TreeRow({
-  node,
-  depth,
-  selectedCollectionId,
-  onSelect,
-  expandedIds,
-  onToggle,
-}: {
-  node: CollectionTreeNode;
-  depth: number;
+/** The props every row needs and passes on to its children unchanged. */
+interface RowProps {
   selectedCollectionId: string | null;
-  /**
-   * Receives the whole NODE (not just its id) so callers can route by slug —
-   * the section landing page lives at /atrium/s/[slug], and a readable, stable
-   * URL beats a uuid in the query string. `null` means "All content".
-   */
   onSelect: (node: CollectionTreeNode | null) => void;
   /** Ids the viewer has expanded (tree-level, persisted) — see `useExpandedSections`. */
   expandedIds: ReadonlySet<string>;
   onToggle: (collectionId: string) => void;
+}
+
+/** Every id nested under a node — the set a dragged row may never land in. */
+function descendantIdsOf(node: CollectionTreeNode): string[] {
+  const out: string[] = [];
+  const walk = (n: CollectionTreeNode) => {
+    for (const child of n.children) {
+      out.push(child.id);
+      walk(child);
+    }
+  };
+  walk(node);
+  return out;
+}
+
+/**
+ * Each node's index among the listed nodes that share its owner. A top-level
+ * "My collections" list can hold another owner's collection shared into this
+ * viewer's tree; it is not a sibling of the viewer's own, and the server
+ * reorders per owner — so the index is per owner too.
+ */
+function groupIndices(nodes: CollectionTreeNode[]): Map<string, number> {
+  const next = new Map<number | null, number>();
+  const out = new Map<string, number>();
+  for (const node of nodes) {
+    const i = next.get(node.ownerUserId) ?? 0;
+    out.set(node.id, i);
+    next.set(node.ownerUserId, i + 1);
+  }
+  return out;
+}
+
+/**
+ * A group heading ("Sections" / "My collections") that is also the "move to
+ * the top level" drop target for its scope, and the "un-file" target for cards.
+ */
+function GroupHeading({
+  scope,
+  icon,
+  label,
+  className,
+}: {
+  scope: "district" | "private";
+  icon: React.ReactNode;
+  label: string;
+  className?: string;
 }): React.JSX.Element {
+  const { setNodeRef, isOver } = useDroppable({
+    id: rootId(scope),
+    data: { kind: "root", scope } satisfies DropPayload,
+  });
+  return (
+    <div
+      ref={setNodeRef}
+      data-drop-over={isOver ? "true" : undefined}
+      className={cn(
+        "flex items-center gap-1.5 px-2 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground",
+        className
+      )}
+    >
+      {icon}
+      {label}
+    </div>
+  );
+}
+
+/** One row in the tree, recursively rendering its kept children. */
+/**
+ * When this row is the sortable (reorder) target, which edge the dragged
+ * sibling will take: "before" if it is moving up the group, "after" if down.
+ */
+function slotEdgeFor(
+  isTarget: boolean,
+  active: Active | null,
+  groupIndex: number
+): "before" | "after" | undefined {
+  const drag = active?.data.current as DragPayload | undefined;
+  if (!isTarget || drag?.kind !== "collection") return undefined;
+  return drag.groupIndex > groupIndex ? "before" : "after";
+}
+
+function TreeRow({
+  node,
+  depth,
+  groupIndex,
+  ...rowProps
+}: RowProps & {
+  node: CollectionTreeNode;
+  depth: number;
+  groupIndex: number;
+}): React.JSX.Element {
+  const { selectedCollectionId, onSelect, expandedIds, onToggle } = rowProps;
   const hasChildren = node.children.length > 0;
   const expanded = expandedIds.has(node.id);
   const isSelected = selectedCollectionId === node.id;
 
+  // Node identity is stable until the next tree load, so the subtree walk and
+  // the payloads are computed once per load, not once per render.
+  const descendantIds = useMemo(() => descendantIdsOf(node), [node]);
+  const dragPayload = useMemo<DragPayload>(
+    () => ({
+      kind: "collection",
+      id: node.id,
+      name: node.name,
+      parentId: node.parentId,
+      ownerUserId: node.ownerUserId,
+      scope: node.scope,
+      groupIndex,
+      descendantIds,
+    }),
+    [node, groupIndex, descendantIds]
+  );
+  const dropPayload = useMemo<DropPayload>(
+    () => ({
+      kind: "into",
+      collectionId: node.id,
+      name: node.name,
+      parentId: node.parentId,
+      ownerUserId: node.ownerUserId,
+      scope: node.scope,
+    }),
+    [node]
+  );
+
+  // Sortable (this row as something to drag) — disabled, not hidden, for rows
+  // the viewer may not manage, so they still take part in the list's layout.
+  //
+  // The displacement `transform` dnd-kit offers is deliberately NOT applied:
+  // rows stay put during a drag and the overlay ghost is the only thing that
+  // moves. Sliding rows apart would draw a sibling over the dragged row's
+  // original slot while collision detection keeps working from the original
+  // layout — the visible middle band of the displaced sibling would then map
+  // to the dragged row's own rect, and nesting into that sibling would resolve
+  // as a reorder. Reorder targets get an insertion line instead
+  // (`data-drop-edge`); nest targets keep the row highlight.
+  const {
+    attributes,
+    listeners,
+    setNodeRef: setSortableRef,
+    isDragging,
+    isOver: isSlotTarget,
+    active,
+  } = useSortable({ id: node.id, data: dragPayload, disabled: !node.canManage });
+  const slotEdge = slotEdgeFor(isSlotTarget, active, groupIndex);
+
+  // Droppable (this row as somewhere to land). Registered on the row div, not
+  // the <li>, so the nested children list is never part of the target rect.
+  const { setNodeRef: setDropRef, isOver } = useDroppable({
+    id: intoId(node.id),
+    data: dropPayload,
+  });
+
   return (
-    <li>
+    <li ref={setSortableRef} data-dragging={isDragging ? "true" : undefined}>
       <div
+        ref={setDropRef}
         // `data-selected` is a stable styling hook: the Meridian shell restyles
         // the selected row via `.mer-navcol [data-selected="true"]` (see
         // styles/meridian.css) rather than depending on the Tailwind
         // utility class strings below, which have no compile-time link to that CSS
         // and are shared with the reader sidebar. It is inert everywhere else.
         data-selected={isSelected ? "true" : undefined}
+        // dnd-kit only reports `isOver` while a drag is in progress.
+        data-drop-over={isOver ? "true" : undefined}
+        // A sibling about to take this row's slot: a line above (moving up)
+        // or below (moving down) rather than a highlight.
+        data-drop-edge={slotEdge}
+        data-testid={`section-row-${node.id}`}
         className={cn(
-          "flex items-center gap-1 rounded-md px-2 py-1.5 text-sm",
+          "group/row flex items-center gap-1 rounded-md px-2 py-1.5 text-sm",
           isSelected
             ? "bg-accent text-accent-foreground font-medium"
             : "hover:bg-muted/60"
@@ -134,23 +304,78 @@ function TreeRow({
             </span>
           )}
         </button>
+        {node.canManage && (
+          // The drag handle. Only the handle starts a drag, so clicking the
+          // name still navigates and the chevron still toggles.
+          <button
+            type="button"
+            className="mer-tree-grip shrink-0 rounded p-1 hover:bg-muted"
+            aria-label={`Move ${node.name}`}
+            title="Drag to move or reorder"
+            data-testid={`move-collection-${node.id}`}
+            {...attributes}
+            {...listeners}
+          >
+            <GripVertical className="h-3.5 w-3.5" aria-hidden="true" />
+          </button>
+        )}
       </div>
       {hasChildren && expanded && (
-        <ul id={`section-children-${node.id}`}>
-          {node.children.map((child) => (
-            <TreeRow
-              key={child.id}
-              node={child}
-              depth={depth + 1}
-              selectedCollectionId={selectedCollectionId}
-              onSelect={onSelect}
-              expandedIds={expandedIds}
-              onToggle={onToggle}
-            />
-          ))}
-        </ul>
+        <TreeRows
+          nodes={node.children}
+          depth={depth + 1}
+          listId={`section-children-${node.id}`}
+          rowProps={rowProps}
+        />
       )}
     </li>
+  );
+}
+
+/** One sibling list — a sortable context — for a top-level group or a node's children. */
+function TreeRows({
+  nodes,
+  depth,
+  listId,
+  rowProps,
+}: {
+  nodes: CollectionTreeNode[];
+  depth: number;
+  listId?: string;
+  rowProps: RowProps;
+}): React.JSX.Element {
+  const ids = nodes.map((n) => n.id);
+  const indexById = groupIndices(nodes);
+  return (
+    <SortableContext items={ids} strategy={verticalListSortingStrategy}>
+      <ul id={listId}>
+        {nodes.map((node) => (
+          <TreeRow
+            key={node.id}
+            node={node}
+            depth={depth}
+            groupIndex={indexById.get(node.id) ?? 0}
+            {...rowProps}
+          />
+        ))}
+      </ul>
+    </SortableContext>
+  );
+}
+
+/** The provider's outcome line for the last drop (success or the server's refusal). */
+function DndStatusLine(): React.JSX.Element | null {
+  const { status } = useAtriumDnd();
+  if (!status) return null;
+  return (
+    <p
+      role="status"
+      className="mer-tree-status px-2 py-1 text-xs"
+      data-tone={status.tone}
+      data-testid="tree-dnd-status"
+    >
+      {status.text}
+    </p>
   );
 }
 
@@ -203,16 +428,23 @@ export function CollectionTree({
   // construction, so grouping deeper would just repeat the same label.
   const districtNodes = tree.filter((n) => n.scope !== "private");
   const privateNodes = tree.filter((n) => n.scope === "private");
+  const rowProps: RowProps = {
+    selectedCollectionId,
+    onSelect,
+    expandedIds,
+    onToggle: toggleExpanded,
+  };
 
   return (
     <nav
       aria-label="Content sections"
       className={cn("flex flex-col gap-1 text-sm", className)}
     >
-      <div className="flex items-center gap-1.5 px-2 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        <Layers className="h-3.5 w-3.5" />
-        Sections
-      </div>
+      <GroupHeading
+        scope="district"
+        icon={<Layers className="h-3.5 w-3.5" />}
+        label="Sections"
+      />
       <ul>
         <li>
           <button
@@ -246,19 +478,7 @@ export function CollectionTree({
         </p>
       )}
       {!loading && districtNodes.length > 0 && (
-        <ul>
-          {districtNodes.map((node) => (
-            <TreeRow
-              key={node.id}
-              node={node}
-              depth={0}
-              selectedCollectionId={selectedCollectionId}
-              onSelect={onSelect}
-              expandedIds={expandedIds}
-              onToggle={toggleExpanded}
-            />
-          ))}
-        </ul>
+        <TreeRows nodes={districtNodes} depth={0} rowProps={rowProps} />
       )}
 
       {/* Owner-bound private sections get their OWN group. Intermixed with the
@@ -267,25 +487,17 @@ export function CollectionTree({
           one undifferentiated list. */}
       {!loading && privateNodes.length > 0 && (
         <>
-          <div className="mt-2 flex items-center gap-1.5 px-2 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            <Lock className="h-3.5 w-3.5" />
-            My collections
-          </div>
-          <ul>
-            {privateNodes.map((node) => (
-              <TreeRow
-                key={node.id}
-                node={node}
-                depth={0}
-                selectedCollectionId={selectedCollectionId}
-                onSelect={onSelect}
-                expandedIds={expandedIds}
-                onToggle={toggleExpanded}
-              />
-            ))}
-          </ul>
+          <GroupHeading
+            scope="private"
+            icon={<Lock className="h-3.5 w-3.5" />}
+            label="My collections"
+            className="mt-2"
+          />
+          <TreeRows nodes={privateNodes} depth={0} rowProps={rowProps} />
         </>
       )}
+
+      <DndStatusLine />
     </nav>
   );
 }
