@@ -15,6 +15,7 @@ jest.mock("@/actions/db/atrium/artifact-query", () => ({
 }));
 
 import { ArtifactSandbox } from "@/components/atrium/ArtifactSandbox";
+import type { ContentDataAccess } from "@/lib/content/types";
 
 const SANDBOX_SRC = "https://sandbox.example.test/render";
 const TRUSTED_CONTENT_ID = "trusted-content-id";
@@ -42,6 +43,21 @@ const NARROWING_REQUEST_IDS = [
   "00000000-0000-4000-8000-000000000012",
 ] as const;
 
+/**
+ * Ids for the #1712 loaded-mode pin tests. Separate from both arrays above for
+ * the same reason: the in-flight-cap test counts responses exactly.
+ */
+const MODE_PIN_REQUEST_IDS = [
+  "00000000-0000-4000-8000-000000000020",
+  "00000000-0000-4000-8000-000000000021",
+  "00000000-0000-4000-8000-000000000022",
+  "00000000-0000-4000-8000-000000000023",
+  "00000000-0000-4000-8000-000000000024",
+  "00000000-0000-4000-8000-000000000025",
+  "00000000-0000-4000-8000-000000000026",
+  "00000000-0000-4000-8000-000000000027",
+] as const;
+
 interface PostedDataResponse {
   message: Record<string, unknown>;
   targetOrigin: unknown;
@@ -65,7 +81,15 @@ function dataResponses(postMessage: jest.Mock): PostedDataResponse[] {
   );
 }
 
-function mountSandbox(enabled: boolean): {
+/**
+ * Mount the sandbox with the bridge enabled (pinned to `dataAccess`, #1712) or
+ * structurally disabled. `records` is the default because it is the column
+ * default and the mode the submit/list suites exercise.
+ */
+function mountSandbox(
+  enabled: boolean,
+  dataAccess: ContentDataAccess = "records"
+): {
   frameWindow: Window;
   postMessage: jest.Mock;
 } {
@@ -76,6 +100,7 @@ function mountSandbox(enabled: boolean): {
         src={SANDBOX_SRC}
         dataBridgeEnabled={true}
         contentId={TRUSTED_CONTENT_ID}
+        dataAccess={dataAccess}
       />
     );
   } else {
@@ -243,7 +268,7 @@ describe("ArtifactSandbox artifact data bridge", () => {
  */
 describe("ArtifactSandbox viewer-scoped query bridge", () => {
   it("copies only sql/limit/offset and uses the trusted prop contentId", async () => {
-    const { frameWindow, postMessage } = mountSandbox(true);
+    const { frameWindow, postMessage } = mountSandbox(true, "query");
 
     await sendMessage(
       {
@@ -276,7 +301,7 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
   });
 
   it("drops a query request with no sql without invoking the action", async () => {
-    const { frameWindow, postMessage } = mountSandbox(true);
+    const { frameWindow, postMessage } = mountSandbox(true, "query");
 
     await sendMessage(
       {
@@ -292,7 +317,7 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
   });
 
   it("refuses oversized SQL before serializing a Server Action payload", async () => {
-    const { frameWindow, postMessage } = mountSandbox(true);
+    const { frameWindow, postMessage } = mountSandbox(true, "query");
 
     await sendMessage(
       {
@@ -309,7 +334,7 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
   });
 
   it("drops whitespace-only SQL without invoking the action", async () => {
-    const { frameWindow, postMessage } = mountSandbox(true);
+    const { frameWindow, postMessage } = mountSandbox(true, "query");
 
     await sendMessage(
       {
@@ -326,7 +351,7 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
   });
 
   it("drops a negative limit without invoking the action", async () => {
-    const { frameWindow, postMessage } = mountSandbox(true);
+    const { frameWindow, postMessage } = mountSandbox(true, "query");
 
     await sendMessage(
       {
@@ -344,7 +369,7 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
   });
 
   it("drops a negative offset without invoking the action", async () => {
-    const { frameWindow, postMessage } = mountSandbox(true);
+    const { frameWindow, postMessage } = mountSandbox(true, "query");
 
     await sendMessage(
       {
@@ -388,7 +413,7 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
       isSuccess: false,
       message: "Artifact is not configured for data queries",
     });
-    const { frameWindow, postMessage } = mountSandbox(true);
+    const { frameWindow, postMessage } = mountSandbox(true, "query");
 
     await sendMessage(
       {
@@ -550,5 +575,197 @@ describe("ArtifactSandbox artifact data bridge failure controls", () => {
       await Promise.resolve();
     });
     await waitFor(() => expect(dataResponses(postMessage)).toHaveLength(9));
+  });
+});
+
+/**
+ * Mount with one mode, then re-render the SAME mount with another. Models an
+ * RSC re-render of the reader handing the component a fresher prop; the pin
+ * must stay at the mode the mount started with (#1712).
+ */
+function mountThenRerenderSandbox(
+  initial: ContentDataAccess,
+  later: ContentDataAccess
+): { frameWindow: Window; postMessage: jest.Mock } {
+  const sandbox = (dataAccess: ContentDataAccess) => (
+    <ArtifactSandbox
+      code="<p>artifact</p>"
+      src={SANDBOX_SRC}
+      dataBridgeEnabled={true}
+      contentId={TRUSTED_CONTENT_ID}
+      dataAccess={dataAccess}
+    />
+  );
+  const view = render(sandbox(initial));
+  const frame = screen.getByTestId(
+    "artifact-sandbox-frame"
+  ) as HTMLIFrameElement;
+  const frameWindow = frame.contentWindow;
+  if (!frameWindow) throw new Error("test iframe has no contentWindow");
+  const postMessage = jest.fn();
+  Object.defineProperty(frameWindow, "postMessage", {
+    configurable: true,
+    value: postMessage,
+  });
+  view.rerender(sandbox(later));
+  return { frameWindow, postMessage };
+}
+
+/**
+ * #1712 — the loaded-mode pin. The owner can change `content_objects.data_access`
+ * at any time (settings, REST PATCH, MCP) while a viewer's tab stays open. The
+ * server check runs against the CURRENT value, so on its own it would let a page
+ * loaded in `query` mode (holding queried rows in memory) submit them once the
+ * owner flipped to `records`. The parent therefore refuses any op that does not
+ * match the mode the page was LOADED with, before the action is ever called.
+ */
+describe("ArtifactSandbox loaded-mode pin", () => {
+  it("refuses submit on a page loaded in query mode (the exfiltration loop)", async () => {
+    const { frameWindow, postMessage } = mountSandbox(true, "query");
+
+    await sendMessage(submitRequest(MODE_PIN_REQUEST_IDS[0]), frameWindow);
+
+    expect(submitArtifactRecordMock).not.toHaveBeenCalled();
+    expect(dataResponses(postMessage)).toEqual([
+      {
+        message: {
+          type: "atrium-artifact-data-response",
+          requestId: MODE_PIN_REQUEST_IDS[0],
+          ok: false,
+          error: "Artifact data request failed",
+        },
+        targetOrigin: "*",
+      },
+    ]);
+  });
+
+  it("refuses list on a page loaded in query mode", async () => {
+    const { frameWindow, postMessage } = mountSandbox(true, "query");
+
+    await sendMessage(
+      {
+        type: "atrium-artifact-data-request",
+        requestId: MODE_PIN_REQUEST_IDS[1],
+        op: "list",
+        namespace: "leaderboard",
+      },
+      frameWindow
+    );
+
+    expect(listArtifactRecordsMock).not.toHaveBeenCalled();
+    expect(dataResponses(postMessage)[0]?.message).toEqual({
+      type: "atrium-artifact-data-response",
+      requestId: MODE_PIN_REQUEST_IDS[1],
+      ok: false,
+      error: "Artifact data request failed",
+    });
+  });
+
+  it("refuses query on a page loaded in records mode", async () => {
+    const { frameWindow, postMessage } = mountSandbox(true, "records");
+
+    await sendMessage(
+      {
+        type: "atrium-artifact-data-request",
+        requestId: MODE_PIN_REQUEST_IDS[2],
+        op: "query",
+        sql: "SELECT 1",
+      },
+      frameWindow
+    );
+
+    expect(queryArtifactDataMock).not.toHaveBeenCalled();
+    expect(dataResponses(postMessage)[0]?.message).toEqual({
+      type: "atrium-artifact-data-response",
+      requestId: MODE_PIN_REQUEST_IDS[2],
+      ok: false,
+      error: "Artifact data request failed",
+    });
+  });
+
+  it("keeps the mount's mode when a re-render supplies a wider one", async () => {
+    // An RSC re-render of the reader after the owner flipped `data_access`
+    // would hand this component a fresher prop. The already-running artifact
+    // still holds whatever it queried under the OLD mode, so the pin must be
+    // the mode at mount — only a fresh mount may widen.
+    const { frameWindow, postMessage } = mountThenRerenderSandbox(
+      "query",
+      "records"
+    );
+
+    await sendMessage(submitRequest(MODE_PIN_REQUEST_IDS[6]), frameWindow);
+
+    expect(submitArtifactRecordMock).not.toHaveBeenCalled();
+    expect(dataResponses(postMessage)[0]?.message).toEqual({
+      type: "atrium-artifact-data-response",
+      requestId: MODE_PIN_REQUEST_IDS[6],
+      ok: false,
+      error: "Artifact data request failed",
+    });
+  });
+
+  it("keeps a records-mode pin when a re-render supplies query mode", async () => {
+    // The symmetric direction: a page that loaded with the record store must
+    // not gain live queries from a later, wider prop either.
+    const { frameWindow, postMessage } = mountThenRerenderSandbox(
+      "records",
+      "query"
+    );
+
+    await sendMessage(
+      {
+        type: "atrium-artifact-data-request",
+        requestId: MODE_PIN_REQUEST_IDS[7],
+        op: "query",
+        sql: "SELECT 1",
+      },
+      frameWindow
+    );
+
+    expect(queryArtifactDataMock).not.toHaveBeenCalled();
+    expect(dataResponses(postMessage)[0]?.message).toEqual({
+      type: "atrium-artifact-data-response",
+      requestId: MODE_PIN_REQUEST_IDS[7],
+      ok: false,
+      error: "Artifact data request failed",
+    });
+  });
+
+  it("refuses all three ops on a page loaded in none mode", async () => {
+    const { frameWindow, postMessage } = mountSandbox(true, "none");
+
+    await sendMessage(submitRequest(MODE_PIN_REQUEST_IDS[3]), frameWindow);
+    await sendMessage(
+      {
+        type: "atrium-artifact-data-request",
+        requestId: MODE_PIN_REQUEST_IDS[4],
+        op: "list",
+        namespace: "leaderboard",
+      },
+      frameWindow
+    );
+    await sendMessage(
+      {
+        type: "atrium-artifact-data-request",
+        requestId: MODE_PIN_REQUEST_IDS[5],
+        op: "query",
+        sql: "SELECT 1",
+      },
+      frameWindow
+    );
+
+    expect(submitArtifactRecordMock).not.toHaveBeenCalled();
+    expect(listArtifactRecordsMock).not.toHaveBeenCalled();
+    expect(queryArtifactDataMock).not.toHaveBeenCalled();
+    expect(
+      dataResponses(postMessage).map((response) => response.message)
+    ).toEqual(
+      MODE_PIN_REQUEST_IDS.slice(3, 6).map((requestId) => ({
+        type: "atrium-artifact-data-response",
+        requestId,
+        ok: false,
+        error: "Artifact data request failed",
+      }))
+    );
   });
 });

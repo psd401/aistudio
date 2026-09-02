@@ -79,6 +79,8 @@ import { versionService } from "@/lib/content/version-service";
 import { resolveDocumentParts } from "@/lib/content/embed-resolver";
 import { extractDocumentHeadings } from "@/lib/content/render/headings";
 import { canEdit } from "@/lib/content/helpers";
+import { CONTENT_DATA_ACCESS_MODES } from "@/lib/content/types";
+import type { ContentDataAccess } from "@/lib/content/types";
 import { getOptionalRequester } from "@/actions/db/atrium/requester";
 import { countUnresolvedCommentThreadsAction } from "@/actions/db/atrium/comments";
 import { createLogger } from "@/lib/logger";
@@ -121,6 +123,12 @@ async function loadReaderObject(slug: string): Promise<{
   /** Cover-gradient preset key + emoji icon (slice F) for the reader cover band. */
   coverGradient: string | null;
   icon: string | null;
+  /**
+   * The artifact's data-bridge mode AS OF THIS PAGE LOAD (#1712). Pinned into
+   * `<ArtifactSandbox>` so a mode the owner flips while this page stays open
+   * cannot be used by it — see the ArtifactSandbox header.
+   */
+  dataAccess: ContentDataAccess;
   /** The live intranet publication, or null when the object is not published there. */
   publication: {
     publishedVersionId: string;
@@ -145,6 +153,8 @@ async function loadReaderObject(slug: string): Promise<{
           // Slice F cover band + emoji icon (migration 103).
           coverGradient: contentObjects.coverGradient,
           icon: contentObjects.icon,
+          // #1705 data-bridge mode (migration 179), pinned per page load (#1712).
+          dataAccess: contentObjects.dataAccess,
         })
         .from(contentObjects)
         .leftJoin(
@@ -179,6 +189,13 @@ async function loadReaderObject(slug: string): Promise<{
   return {
     ...obj,
     collectionName: obj.collectionName ?? null,
+    // Fail closed on anything outside the enum (a value predating migration 179,
+    // or a column widened later): unknown means "no bridge operations at all".
+    dataAccess: CONTENT_DATA_ACCESS_MODES.includes(
+      obj.dataAccess as ContentDataAccess
+    )
+      ? (obj.dataAccess as ContentDataAccess)
+      : "none",
     publication: publication
       ? {
           publishedVersionId: publication.publishedVersionId,
@@ -327,10 +344,21 @@ export default async function ReaderPage({
         }
       >
         <ArtifactSandbox
+          // #1712: the mode pin below lives in a ref for the mount's lifetime, so
+          // the mount MUST belong to exactly one artifact. Keying on the id makes
+          // that true by construction — a different artifact is a fresh mount and
+          // a fresh pin — instead of relying on the router remounting the leaf
+          // page on a param change (same pattern as ArtifactCanvas's version key).
+          key={target.id}
           code={code}
           src={getArtifactSandboxRenderUrl()}
           dataBridgeEnabled={true}
           contentId={target.id}
+          // #1712: the mode read for THIS render. The sandbox refuses any op
+          // that does not match it, so an owner flipping `data_access` under an
+          // open page cannot reopen the records/query exfiltration loop; the
+          // Server Actions still re-check the artifact's current mode.
+          dataAccess={target.dataAccess}
           className="atrium-artifact-reader-frame"
         />
       </ReaderFrame>

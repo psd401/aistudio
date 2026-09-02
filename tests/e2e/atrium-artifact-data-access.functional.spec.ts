@@ -14,6 +14,16 @@
  * PSD Data MCP and a live Cognito ID token, neither of which exists in the local
  * harness. That path is covered by the action unit tests
  * (`tests/unit/atrium-artifact-query-action.test.ts`).
+ *
+ * The #1712 loaded-mode pin is likewise NOT exercised here. Driving it end to end
+ * means posting a bridge request from the sandbox frame, and the local harness has
+ * no `ATRIUM_SANDBOX_ORIGIN`, so the reader renders the fail-closed notice instead
+ * of a frame (see `atrium-artifact.guard.spec.ts`). It is covered by
+ * `tests/unit/atrium-artifact-data-bridge.test.tsx` ("loaded-mode pin", both
+ * directions plus `none`) and by the reader-page prop assertions in
+ * `tests/unit/atrium-reader-page-masking.test.tsx`. What this spec does cover is
+ * the precondition the pin exists for: the mode is freely reversible at any time
+ * (the switch-to-query-and-back test below).
  */
 
 import { expect, test } from "./fixtures";
