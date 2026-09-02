@@ -102,9 +102,10 @@ function sameGroup(a: CollectionDrag, t: { parentId: string | null; ownerUserId:
  * May `active` land on `target` at all? Everything the server would refuse
  * on structural grounds is excluded here, so it never highlights: the row
  * itself and its descendants (a cycle), the other scope's rows and heading
- * (private and district hierarchies cannot mix), and — for sibling reorder —
- * rows outside the live group (a shared private collection sitting next to
- * the viewer's own is not a sibling).
+ * (private and district hierarchies cannot mix), another owner's private
+ * collection (never a legal parent, and not a sibling either — a shared
+ * private collection sitting next to the viewer's own is neither), and — for
+ * sibling reorder — rows outside the live group.
  */
 function accepts(active: DragPayload, target: TargetPayload | undefined): boolean {
   if (!target) return false;
@@ -116,7 +117,14 @@ function accepts(active: DragPayload, target: TargetPayload | undefined): boolea
       return (
         target.scope === active.scope &&
         target.collectionId !== active.id &&
-        !active.descendantIds.includes(target.collectionId)
+        !active.descendantIds.includes(target.collectionId) &&
+        // A private hierarchy never crosses owners: `assertParent` masks
+        // another owner's private collection as "Parent collection not
+        // found", so a SHARED private collection sitting alongside the
+        // viewer's own in "My collections" is never a legal parent. Without
+        // this it highlighted as a nest target and the drop always failed.
+        // (`sameGroup` already applies the same rule to sibling reorder.)
+        (active.scope !== "private" || target.ownerUserId === active.ownerUserId)
       );
     case "collection":
       return target.id !== active.id && sameGroup(active, target);
