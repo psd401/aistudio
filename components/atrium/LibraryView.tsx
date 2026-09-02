@@ -882,6 +882,12 @@ function useLibrarySelection() {
  * combine with Docs/Artifacts — so the band's intent is expressed as the pair
  * it always meant: the full grid, filtered to this person's content.
  *
+ * "unfiled" carries the same ownership. Its band is "Not in a section yet" —
+ * `{ filed: "unfiled", owner: "mine" }`, the caller's own to-do list — so
+ * "See all" opens that same list in full, not every unfiled object in the
+ * district (which, for an admin, is exactly the firehose the home page exists
+ * to avoid). The owner select stays live, so widening is one click away.
+ *
  * Extracted from `LibraryView` to keep it under the max-lines lint.
  */
 function useSeeAllHandler(
@@ -895,6 +901,7 @@ function useSeeAllHandler(
         setOwnerFilter("mine");
         return;
       }
+      if (target === "unfiled") setOwnerFilter("mine");
       setView(target);
     },
     [setView, setOwnerFilter]

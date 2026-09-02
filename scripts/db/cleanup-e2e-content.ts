@@ -51,7 +51,7 @@ const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 /** Title shapes the E2E specs generate. Keep in sync with tests/e2e/*.spec.ts. */
 const TITLE_PREFIXES = ["e2e %", "E2E %"] as const;
 const TOKENED_TITLE_REGEX =
-  "^(Quarterly plan|Dashboard|Bulk probe [0-9]+|Comments probe|Cover probe|Sync probe|OAuth PKCE e2e|Starred probe|Plain probe|Filed probe|Loose probe) [0-9]{12,}$";
+  "^(Quarterly plan|Dashboard|Bulk probe [0-9]+|Comments probe|Cover probe|Sync probe|OAuth PKCE e2e|Starred probe|Plain probe|Filed probe|Loose probe|Theirs probe) [0-9]{12,}$";
 
 /** Seeded reference fixtures (tests/e2e/fixtures/*.sql) — never deleted. */
 const FIXTURE_ID_PREFIX = "a7100000-%";
