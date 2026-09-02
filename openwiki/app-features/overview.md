@@ -1,19 +1,24 @@
 ---
 type: Feature Overview
 title: Core Application Features
-description: Multi-model AI chat with automatic routing, no-code assistant builder, agent-native content workspace, and knowledge repositories for K-12 education platform.
+description: Multi-model AI chat with automatic routing, no-code assistant builder, agent-native content workspace with artifact data bridge, and knowledge repositories for K-12 education platform.
 tags: [features, nexus, atrium, assistants, knowledge]
 openwiki:
   roles: [architecture, domain]
   source_paths:
-    - components/atrium/LibraryView.tsx
-    - components/atrium/LibraryList.tsx
-    - tests/e2e/atrium-library-view-filters.functional.spec.ts
+    - actions/db/atrium/artifact-query.ts
+    - actions/db/atrium/artifact-guards.ts
+    - lib/nexus/model-router/psd-data-connector.ts
+    - components/atrium/dnd/atrium-dnd.tsx
+    - components/atrium/use-expanded-sections.ts
+    - lib/atrium/usage-series.ts
+    - lib/atrium/recent-window.ts
   invariants:
-    - Filter identity via JSON.stringify captures all ListFilter fields automatically
+    - Artifact data_access modes (records/query/none) are mutually exclusive — prevents exfiltration loop
+    - Viewer-scoped PSD queries execute as the VIEWER with their row-level security
+    - Sidebar tree starts collapsed; expanded sections persist per-viewer in localStorage
+    - What's New window is 7 days, hour-truncated to prevent render-loop refetches
     - Unfiled view drops collection scope rather than ANDing into empty grid
-    - Instant card removal on star toggle in Favorites view (local removal)
-    - data-results-key set in same state batch as items/error for E2E synchronization
   validation_commands:
     - bun run typecheck
     - bun run lint
@@ -72,6 +77,7 @@ Tools are gated by user capabilities and resource access grants.
 |------|---------|
 | `/lib/nexus/model-router/router.ts` | Automatic model routing logic |
 | `/lib/nexus/model-router/classifier.ts` | Intent classification |
+| `/lib/nexus/model-router/psd-data-connector.ts` | Shared PSD Data MCP server resolution (used by Nexus and Atrium artifact queries) |
 | `/lib/nexus/history-adapter.ts` | Conversation history management |
 | `/lib/nexus/enhanced-attachment-adapters.ts` | File attachment handling |
 
@@ -185,6 +191,12 @@ The `contentSurfaceLink()` function handles this routing automatically. This fix
 
 **Section Landing Pages** (`components/atrium/SectionLanding.tsx`) provide collection-specific navigation with settings dialogs for collection owners.
 
+**What's New Band** — District-wide recently touched content:
+- 7-day rolling window of content with `updated_at` activity
+- Surfaces on Library Home when district has recent activity
+- Links to dedicated "What's new" view with same filter scope
+- Hour-truncated timestamp prevents render-loop refetches (`/lib/atrium/recent-window.ts`)
+
 ### Library View Filters
 
 The library grid provides filter chips that map to server-side `ListFilter` fields:
@@ -205,6 +217,89 @@ The library grid provides filter chips that map to server-side `ListFilter` fiel
 **Section Scope vs. Unfiled** — The `scopedCollectionId` helper drops collection scope when entering the Unfiled view. A `?collection=X` deep link combined with "Unfiled" would otherwise AND `collection_id = X` with `collection_id IS NULL`, resulting in an empty grid by construction.
 
 **Focused Test**: `tests/e2e/atrium-library-view-filters.functional.spec.ts` — Regression guard for Favorites and Unfiled chip filters, including error state handling and legacy `?collection=` scope interactions.
+
+### Sidebar & Navigation
+
+**Expanded Section State** — Per-viewer persistence:
+- Tree starts **collapsed** by default (no more fully-expanded on every visit)
+- Expanded sections stored in `localStorage` per user (`atrium.expandedSections:{userId}`)
+- Survives navigation, reload, and cross-tab updates via `storage` event listeners
+- Hook: `/components/atrium/use-expanded-sections.ts`
+
+**Drag-and-Drop** — Single DndContext over the entire shell (`/components/atrium/dnd/atrium-dnd.tsx`):
+
+| Gesture | Action |
+|---------|--------|
+| Drag card onto section | Move content into collection (`updateContentAction`) |
+| Drag card onto "Sections" heading | Un-file content |
+| Drag section onto another's middle band | Nest collection inside target |
+| Drag section onto sibling's top/bottom edge | Reorder at that position |
+| Drag section onto its group heading | Move to top level |
+
+Permission is enforced server-side on every drop; the client hides handles it knows would be refused (`node.canManage`). Uses @dnd-kit/core with mouse (distance threshold), touch (hold-to-drag), and keyboard sensors.
+
+**Focused Tests**:
+- `tests/e2e/atrium-sidebar-dnd.functional.spec.ts` — drag-and-drop operations
+- `tests/e2e/atrium-sidebar-collapse.functional.spec.ts` — expanded section persistence
+
+### Artifact Data Access
+
+Artifacts can interact with data through a sandbox bridge. The `data_access` mode on each content object determines which operation is allowed.
+
+**Data Access Modes** (mutually exclusive, migration 179):
+
+| Mode | Allowed Operations | Use Case |
+|------|-------------------|----------|
+| `records` | `AtriumData.submit`, `AtriumData.list` | Artifact persists JSON records (default) |
+| `query` | `AtriumData.query` | Viewer-scoped PSD data queries (read-only) |
+| `none` | None | No data bridge operations |
+
+**Security Model**: The modes are mutually exclusive by design to prevent exfiltration. An artifact that can query viewer data cannot also write records, closing the loop where a hostile author could query sensitive data and exfiltrate it through the records store.
+
+**Viewer-Scoped PSD Queries** (`query` mode):
+- Artifact calls `window.AtriumData.query(sql, { limit, offset })`
+- Query executes **as the viewer** with their row-level security
+- Author cannot influence which rows the viewer sees
+- Uses the same PSD Data MCP connector as Nexus chat (resolved via `/lib/nexus/model-router/psd-data-connector.ts`)
+- Rate limit: 60 queries per viewer per artifact per minute
+- SQL capped at 8,000 characters; limit clamped to 2,000 rows
+
+**Artifact API** (installed by sandbox host):
+```typescript
+interface AtriumData {
+  submit(namespace: string, payload: Record<string, unknown>): Promise<{ id: string; createdAt: string }>;
+  list(namespace: string, options?: { limit?: number; scope?: "all" | "mine" }): Promise<{ records: Array<{...}> }>;
+  query(sql: string, options?: { limit?: number; offset?: number }): Promise<{ columns: string[]; rows: unknown[][]; ... }>;
+}
+```
+
+**Source**: `/docs/features/atrium-artifact-data.md` — comprehensive data bridge documentation.
+
+**Focused Tests**:
+- `tests/e2e/atrium-artifact-data-access.functional.spec.ts` — data access modes
+- `tests/unit/atrium-artifact-query-action.test.ts` — query action
+- `tests/unit/atrium-artifact-data-access-migration.test.ts` — migration 179
+
+### Usage Dashboard
+
+Administrators can view aggregate content activity on `/admin/atrium` → Usage tab.
+
+**Source of Truth**: `content_audit_logs` (append-only mutation trail)
+
+**Metrics Available**:
+- Created/Updated/Published counts by time range (7d, 30d, 90d, all)
+- Last 24h and last 7d breakouts
+- Human vs. agent actor breakdown
+- Per-author activity totals
+- Per-section activity totals
+- Daily activity series (zero-filled for contiguous display)
+
+**Key Files**:
+- `/actions/db/atrium/usage-stats.ts` — server action
+- `/lib/atrium/usage-series.ts` — daily series helpers
+- `/components/atrium/admin/atrium-usage-panel.tsx` — UI
+
+**Focused Test**: `tests/e2e/atrium-usage-dashboard.functional.spec.ts`
 
 ### MCP Tools
 
