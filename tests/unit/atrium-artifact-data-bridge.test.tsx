@@ -28,6 +28,15 @@ const REQUEST_IDS = [
   "00000000-0000-4000-8000-000000000007",
   "00000000-0000-4000-8000-000000000008",
   "00000000-0000-4000-8000-000000000009",
+] as const;
+
+/**
+ * Ids for the parent-side narrowing tests below. Deliberately NOT part of
+ * `REQUEST_IDS`: the in-flight-cap test dispatches one request per entry of
+ * that array and asserts an exact response count, so appending to it silently
+ * changes what that test exercises.
+ */
+const NARROWING_REQUEST_IDS = [
   "00000000-0000-4000-8000-000000000010",
   "00000000-0000-4000-8000-000000000011",
   "00000000-0000-4000-8000-000000000012",
@@ -305,7 +314,7 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
     await sendMessage(
       {
         type: "atrium-artifact-data-request",
-        requestId: REQUEST_IDS[9],
+        requestId: NARROWING_REQUEST_IDS[0],
         op: "query",
         sql: "   \n\t ",
       },
@@ -322,7 +331,7 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
     await sendMessage(
       {
         type: "atrium-artifact-data-request",
-        requestId: REQUEST_IDS[10],
+        requestId: NARROWING_REQUEST_IDS[1],
         op: "query",
         sql: "SELECT 1",
         limit: -1,
@@ -340,7 +349,7 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
     await sendMessage(
       {
         type: "atrium-artifact-data-request",
-        requestId: REQUEST_IDS[11],
+        requestId: NARROWING_REQUEST_IDS[2],
         op: "query",
         sql: "SELECT 1",
         offset: -5,
