@@ -198,6 +198,10 @@ test.describe('Atrium drag-and-drop (authenticated)', () => {
       await expect(page.getByTestId('tree-dnd-status')).toHaveText(`Moved “${firstName}”`, {
         timeout: 30_000,
       })
+      // Wait for the nest's re-fetch to land ("one" leaves the parent's direct
+      // children) before expanding "two"; under a loaded machine the expand
+      // click otherwise races the tree's re-render.
+      await expect(children).toHaveCount(1, { timeout: 30_000 })
       await setExpanded(page, parentName, true)
       await setExpanded(page, secondName, true)
       await expect(
