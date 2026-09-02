@@ -5500,7 +5500,11 @@ components:
             must never also be able to write records its author can read back.
             Artifacts only — the value is ignored for documents. Omitting the
             field leaves the stored mode untouched (the column is NOT NULL, so
-            it is not clearable).
+            it is not clearable). A change takes effect for a reader only on
+            their NEXT page load: the reader pins the mode it read when it
+            rendered and the sandbox refuses any operation that does not match
+            that pinned mode, so flipping the mode under an already-open tab
+            cannot re-open the records/query exfiltration channel (#1712).
 
     CreateVersionRequest:
       type: object

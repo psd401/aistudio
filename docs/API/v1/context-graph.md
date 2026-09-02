@@ -1775,6 +1775,12 @@ When `collectionId` changes, the target collection and its effective create
 grants are re-authorized under collection locks in the same transaction as the
 object update.
 
+A `dataAccess` change takes effect for a reader only on their NEXT page load
+(#1712). The reader pins the mode it read when it rendered and the sandbox
+refuses any operation that does not match that pinned mode, so a mode changed
+under an already-open tab is not usable by it — that is what stops a mode flip
+from re-opening the records/query exfiltration channel described above.
+
 **Example request:**
 
 ```bash
