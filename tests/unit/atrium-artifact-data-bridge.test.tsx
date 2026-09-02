@@ -28,6 +28,9 @@ const REQUEST_IDS = [
   "00000000-0000-4000-8000-000000000007",
   "00000000-0000-4000-8000-000000000008",
   "00000000-0000-4000-8000-000000000009",
+  "00000000-0000-4000-8000-000000000010",
+  "00000000-0000-4000-8000-000000000011",
+  "00000000-0000-4000-8000-000000000012",
 ] as const;
 
 interface PostedDataResponse {
@@ -288,6 +291,59 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
         requestId: REQUEST_IDS[4],
         op: "query",
         sql: "a".repeat(8_001),
+      },
+      frameWindow
+    );
+
+    expect(queryArtifactDataMock).not.toHaveBeenCalled();
+    expect(dataResponses(postMessage)).toEqual([]);
+  });
+
+  it("drops whitespace-only SQL without invoking the action", async () => {
+    const { frameWindow, postMessage } = mountSandbox(true);
+
+    await sendMessage(
+      {
+        type: "atrium-artifact-data-request",
+        requestId: REQUEST_IDS[9],
+        op: "query",
+        sql: "   \n\t ",
+      },
+      frameWindow
+    );
+
+    expect(queryArtifactDataMock).not.toHaveBeenCalled();
+    expect(dataResponses(postMessage)).toEqual([]);
+  });
+
+  it("drops a negative limit without invoking the action", async () => {
+    const { frameWindow, postMessage } = mountSandbox(true);
+
+    await sendMessage(
+      {
+        type: "atrium-artifact-data-request",
+        requestId: REQUEST_IDS[10],
+        op: "query",
+        sql: "SELECT 1",
+        limit: -1,
+      },
+      frameWindow
+    );
+
+    expect(queryArtifactDataMock).not.toHaveBeenCalled();
+    expect(dataResponses(postMessage)).toEqual([]);
+  });
+
+  it("drops a negative offset without invoking the action", async () => {
+    const { frameWindow, postMessage } = mountSandbox(true);
+
+    await sendMessage(
+      {
+        type: "atrium-artifact-data-request",
+        requestId: REQUEST_IDS[11],
+        op: "query",
+        sql: "SELECT 1",
+        offset: -5,
       },
       frameWindow
     );

@@ -301,19 +301,29 @@ function isPayloadWithinBridgeBounds(payload: ArtifactDataPayload): boolean {
   }
 }
 
-function isOptionalFiniteNumber(value: unknown): boolean {
+/**
+ * Mirrors `normalizeBoundedInteger` in the query action: an omitted count is
+ * fine, but a supplied one must be a finite, non-negative number. Narrowing
+ * here keeps the bridge fail-fast, so a request the server would reject never
+ * serializes a Server Action payload.
+ */
+function isOptionalCount(value: unknown): boolean {
   return (
-    value === undefined || (typeof value === "number" && Number.isFinite(value))
+    value === undefined ||
+    (typeof value === "number" && Number.isFinite(value) && value >= 0)
   );
 }
 
 function hasValidQueryOptions(candidate: Record<string, unknown>): boolean {
+  // Length is checked before trimming and emptiness after, exactly as
+  // `validateSql` does server-side, so whitespace-only SQL is refused here
+  // rather than travelling to an action that will only reject it later.
   return (
     typeof candidate.sql === "string" &&
-    candidate.sql.length > 0 &&
     candidate.sql.length <= MAX_QUERY_SQL_LENGTH &&
-    isOptionalFiniteNumber(candidate.limit) &&
-    isOptionalFiniteNumber(candidate.offset)
+    candidate.sql.trim().length > 0 &&
+    isOptionalCount(candidate.limit) &&
+    isOptionalCount(candidate.offset)
   );
 }
 

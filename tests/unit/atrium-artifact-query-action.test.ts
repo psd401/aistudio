@@ -203,7 +203,7 @@ describe("queryArtifactData happy path", () => {
     expect(args.reason).toBe(
       `atrium artifact ${CONTENT.id} v${CONTENT.currentVersionId}`
     );
-    expect(Object.keys(mockGetConnectorTools.mock.calls).length).toBe(1);
+    expect(mockGetConnectorTools).toHaveBeenCalledTimes(1);
   });
 
   it("clamps limit to the json row cap and defaults offset to 0", async () => {
@@ -397,6 +397,27 @@ describe("queryArtifactData upstream failures", () => {
     const result = await queryArtifactData(validInput);
 
     expect(result.isSuccess).toBe(false);
+  });
+
+  it("fails on a non-string column name rather than coercing it", async () => {
+    mockExecute.mockResolvedValueOnce({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            ...JSON_BODY,
+            columns: [{ name: "school_name" }, "enrolled"],
+          }),
+        },
+      ],
+    });
+
+    const result = await queryArtifactData(validInput);
+
+    // String() would have handed the page a header reading "[object Object]"
+    // as though the query had succeeded.
+    expect(result.isSuccess).toBe(false);
+    expect(mockClose).toHaveBeenCalledTimes(1);
   });
 
   it("closes the connector when the tool call throws", async () => {

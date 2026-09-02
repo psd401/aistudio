@@ -274,7 +274,16 @@ function parseToolResult(result: unknown): QueryArtifactDataResult {
     throw dataMcpFailure("json body missing columns/rows");
   }
 
-  const columns = body.columns.map((column) => String(column));
+  // Column names must already be strings. Coercing with String() would turn a
+  // contract violation upstream (an object, a null) into a plausible-looking
+  // "[object Object]" header instead of failing closed, which is the opposite
+  // of the never-a-partial-result rule the rest of this parser follows.
+  const columns = body.columns.map((column) => {
+    if (typeof column !== "string") {
+      throw dataMcpFailure("column name is not a string");
+    }
+    return column;
+  });
   // Every row must be a tuple in `columns` order. A row-object or a ragged row
   // would otherwise reach the page as a "successful" result with every cell
   // after the first reading `undefined` -- silent corruption, not a failure.
