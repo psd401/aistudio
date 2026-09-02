@@ -354,6 +354,16 @@ async function loadBreakdown(w: UsageWindow): Promise<Breakdown> {
             .limit(10),
         "atrium.usage.topSections"
       ),
+      // `content_audit_logs.created_at` is `timestamp WITHOUT time zone`, so this
+      // `date_trunc` truncates the stored wall-clock and is session-timezone
+      // independent — matching `dailyWindowStart`/`fillDailySeries`/`dayKey`,
+      // which are all UTC calendar days. Do NOT add `AT TIME ZONE 'UTC'` here: on
+      // a naive column it CASTS to timestamptz, after which `date_trunc` buckets
+      // in the session timezone — introducing the very off-by-one-day drift it
+      // looks like it prevents. (It is correct in agent-telemetry only because
+      // `agent_messages.created_at` IS `timestamptz`.) This rests on rows being
+      // stamped by the column's `now()` default, so the database session timezone
+      // must be UTC — as RDS/Aurora and the local Docker Postgres both default to.
       executeQuery(
         (db) =>
           db.execute(sql`

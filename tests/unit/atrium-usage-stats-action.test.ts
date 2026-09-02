@@ -8,8 +8,10 @@
  *  - The range is validated against the allowlist over the RPC boundary (the
  *    TS type is not enforced there): an unknown value — including a prototype
  *    key like "constructor" — is a validation failure, not a silent 30d.
- *  - For an admin with a valid range, the ten grouped reads are shaped into the
- *    DTO: headline counts land on their tiles, missing breakdown rows become
+ *  - For an admin with a valid range, the eight reads (one headline scan plus
+ *    seven grouped breakdowns) are shaped into the DTO — the count the
+ *    `toHaveBeenCalledTimes(8)` assertion below pins down:
+ *    headline counts land on their tiles, missing breakdown rows become
  *    zeros/empties, and the daily window is zero-filled to its length.
  */
 
