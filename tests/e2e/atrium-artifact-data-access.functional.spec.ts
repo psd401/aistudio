@@ -197,7 +197,9 @@ test.describe("Atrium artifact data access (#1705)", () => {
       // A document has no sandbox, so the control must not be offered at all.
       await page.goto(`/atrium/${documentId}/edit`);
       await page.getByRole("button", { name: "Content settings" }).click();
-      await expect(page.getByLabel("Title")).toBeVisible();
+      // exact: the document editor's heading is labelled "Document title",
+      // which a substring match would also resolve (strict-mode violation).
+      await expect(page.getByLabel("Title", { exact: true })).toBeVisible();
       await expect(page.getByLabel("Artifact data access")).toHaveCount(0);
     } finally {
       await cleanupContent(page, artifactId, artifactTitle);
