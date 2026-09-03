@@ -129,6 +129,49 @@ When AgentCore completion is unconfirmed and a workspace lock is retained, the w
 
 Historical context: six retained-lock events belonged to one user, but correlating requestIds back to spaces required a manual research project. The diagnostic fields make this a log search.
 
+### Cutover Guard (Build-Time Contract Validation)
+
+**Sources**:
+- `/infra/agent-image/workspace_contract.py` — Contract fingerprint extraction
+- `/infra/agent-image/build-and-push.sh` — CI integration
+- `/infra/agent-image/test_workspace_contract.py` — Tests
+
+When deploying a new agent image, a rolling update briefly runs old and new writers simultaneously. This is only dangerous when the two disagree about something **persisted**: the proof string format, the checkpoint manifest or journal shape, the object-key layout, or the generation schema.
+
+The cutover guard fingerprints these contract elements and compares them across the deployed and candidate commits. A change triggers the full cutover procedure (pause ingress, drain writers, ordered redeploy, post-drain inventory audit).
+
+#### What Is Fingerprinted
+
+From `storage-broker.ts`:
+- `WORKSPACE_FINALIZATION_PROOF_VERSION`
+- `WORKSPACE_CHECKPOINT_VERSION`
+- `WORKSPACE_CHECKPOINT_CONTROL_PREFIX`
+- `WORKSPACE_CHECKPOINT_GENERATION_RE`
+- `PUBLIC_CONTENT_TYPES` (content-type map)
+- Type definitions: `WorkspaceCheckpointManifest`, `WorkspaceFinalizationJournal`, `WorkspaceFinalizationProofClaims`
+
+From `workspace_sync.py`:
+- `WORKSPACE_UPLOAD_CONTENT_TYPE`
+- `_SKIP_RELATIVE_PREFIXES`
+
+From migration 171:
+- Whole-file hash of the generation/journal schema
+
+#### What Is NOT Fingerprinted
+
+Comments, log lines, validation logic, and non-contract constants do not move the fingerprint. A version bump, renamed control prefix, changed manifest field, or schema edit all do.
+
+#### Fail-Closed Behavior
+
+If extraction finds no anchors in a file that exists, it raises `ContractExtractionError` and the build treats this as cutover-required. A refactor that renames every constant must not quietly yield an empty fingerprint that compares equal to everything forever.
+
+#### CI Integration
+
+The guard runs during `build-and-push.sh`:
+- **Exit 0**: Contract unchanged — no cutover required
+- **Exit 1**: Contract changed — full cutover procedure required
+- **Exit 2**: Extraction failed — fail closed, treat as cutover required
+
 ---
 
 ## Failure Telemetry Hygiene
