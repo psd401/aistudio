@@ -3982,51 +3982,24 @@ export class AgentPlatformStack extends cdk.Stack {
     });
   }
 
-  private createBaseMonitoring(
-    props: AgentPlatformStackProps,
+  /**
+   * Cron alarms. Split out of createBaseMonitoring purely to keep that
+   * method within the max-lines-per-function budget; these alarms and the
+   * metric filters they consume are one logical unit and must stay in sync.
+   */
+  private createCronAlarms(
+    environment: string,
     resources: AgentPlatformBuildResources,
   ): void {
-    const { environment } = props;
-    // Legacy alias. NOT the notification path any more — notifyAgentAlarm is.
-    resources.alarmTopic = resources.agentAlarmTopic;
-
-    // CloudWatch alarm on the DLQ — fires when any message exhausts the Router
-    // retry budget. Workspace-contention retries are intentionally long-lived
-    // so independent Chat threads are queued instead of dropped.
-    const dlqAlarm = new cloudwatch.Alarm(this, 'RouterDlqAlarm', {
-      alarmName: `psd-agent-router-dlq-${environment}`,
-      alarmDescription: 'Agent Router DLQ received messages — investigate dropped messages',
-      metric: resources.routerDlq.metricApproximateNumberOfMessagesVisible({
-        period: cdk.Duration.minutes(1),
-        statistic: 'Sum',
-      }),
-      threshold: 1,
-      evaluationPeriods: 1,
-      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-    });
-
-    // Lambda error rate alarm — catches transient errors (e.g., Google Chat API 5xx)
-    // that succeed on retry and never reach the DLQ. Without this, invisible failures
-    // go undetected. Fires if ≥5 errors in a 5-minute window.
-    const errorAlarm = new cloudwatch.Alarm(this, 'RouterLambdaErrorAlarm', {
-      alarmName: `psd-agent-router-errors-${environment}`,
-      alarmDescription: 'Agent Router Lambda error rate elevated — investigate transient failures',
-      metric: resources.routerLambda.metricErrors({
-        period: cdk.Duration.minutes(5),
-        statistic: 'Sum',
-      }),
-      threshold: 5,
-      evaluationPeriods: 1,
-      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-    });
-
     const cronErrorAlarm = new cloudwatch.Alarm(this, 'CronLambdaErrorAlarm', {
       alarmName: `psd-agent-cron-errors-${environment}`,
       alarmDescription:
-        'Agent cron Lambda errors detected — scheduled work may be retrying or headed to the DLQ',
-      metric: resources.cronLambda.metricErrors({
+        'Agent cron Lambda failed for a reason that is NOT the expected ' +
+        'workspace lock-contention retry — scheduled work may be stuck or ' +
+        'headed to the DLQ',
+      metric: new cloudwatch.Metric({
+        namespace: resources.failureMetricNamespace,
+        metricName: 'CronUnexpectedInvokeError',
         period: cdk.Duration.minutes(5),
         statistic: 'Sum',
       }),
@@ -4089,6 +4062,49 @@ export class AgentPlatformStack extends cdk.Stack {
     notifyAgentAlarm(cronErrorAlarm, resources);
     notifyAgentAlarm(cronThrottleAlarm, resources);
     notifyAgentAlarm(scheduleReferenceRejectionAlarm, resources);
+  }
+
+  private createBaseMonitoring(
+    props: AgentPlatformStackProps,
+    resources: AgentPlatformBuildResources,
+  ): void {
+    const { environment } = props;
+    // Legacy alias. NOT the notification path any more — notifyAgentAlarm is.
+    resources.alarmTopic = resources.agentAlarmTopic;
+
+    // CloudWatch alarm on the DLQ — fires when any message exhausts the Router
+    // retry budget. Workspace-contention retries are intentionally long-lived
+    // so independent Chat threads are queued instead of dropped.
+    const dlqAlarm = new cloudwatch.Alarm(this, 'RouterDlqAlarm', {
+      alarmName: `psd-agent-router-dlq-${environment}`,
+      alarmDescription: 'Agent Router DLQ received messages — investigate dropped messages',
+      metric: resources.routerDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(1),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // Lambda error rate alarm — catches transient errors (e.g., Google Chat API 5xx)
+    // that succeed on retry and never reach the DLQ. Without this, invisible failures
+    // go undetected. Fires if ≥5 errors in a 5-minute window.
+    const errorAlarm = new cloudwatch.Alarm(this, 'RouterLambdaErrorAlarm', {
+      alarmName: `psd-agent-router-errors-${environment}`,
+      alarmDescription: 'Agent Router Lambda error rate elevated — investigate transient failures',
+      metric: resources.routerLambda.metricErrors({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 5,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    this.createCronAlarms(environment, resources);
 
     // CloudWatch metric filter — emit a metric every time an
     // AGENT_FAILURE_RECORD line lands in the router Lambda log. Combined with
@@ -4104,6 +4120,30 @@ export class AgentPlatformStack extends cdk.Stack {
       metricNamespace: resources.failureMetricNamespace,
       metricName: failureMetricName,
       filterPattern: logs.FilterPattern.literal('AGENT_FAILURE_RECORD'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+
+    // Cron invoke errors that are NOT the deliberate lock-contention retry.
+    //
+    // The alarm used to watch the Lambda's raw Errors metric, but the cron
+    // handler THROWS JobLockAcquisitionError on purpose so Lambda re-invokes
+    // the fire — it is control flow, severity "warn", and the run succeeds on
+    // a later attempt. Measured over 24h of prod: 100% of cron invoke errors
+    // were that throw and zero were genuine, while the alarm fired every five
+    // minutes. Three of one owner's schedules share a `*/15` cron and
+    // serialize through a single workspace lock, so the collisions are
+    // continuous and expected.
+    //
+    // Excluding the one known-benign errorType keeps every other failure —
+    // including a NEW error type — alarming immediately.
+    new logs.MetricFilter(this, 'CronUnexpectedInvokeErrorMetric', {
+      logGroup: resources.cronLogGroup,
+      metricNamespace: resources.failureMetricNamespace,
+      metricName: 'CronUnexpectedInvokeError',
+      filterPattern: logs.FilterPattern.literal(
+        '"Invoke Error" -JobLockAcquisitionError',
+      ),
       metricValue: '1',
       defaultValue: 0,
     });
@@ -4304,12 +4344,24 @@ export class AgentPlatformStack extends cdk.Stack {
       }),
     );
     // Dead-boot detector (the r10 signature): a microVM logged BUILD_MARKER but
-    // never reached BOOT_OK. BuildMarkerBoot counts starts, BootOk counts
-    // serving-ready boots; a positive difference over the window means a boot
-    // died before serving. NOTE: a microVM that boots in the last seconds of a
-    // period can transiently show +1 (BUILD_MARKER this period, BootOk the
-    // next); it self-clears, and this is a rare "investigate" page, not
-    // auto-remediation, so evaluationPeriods stays 1.
+    // never reached BOOT_OK. A SUSTAINED positive difference means boots are
+    // dying before they serve.
+    //
+    // The note that used to sit here predicted the boundary straddle — a boot
+    // logging BUILD_MARKER in one period and BootOk in the next shows +1 —
+    // and called it rare enough to leave at one datapoint. It is not rare.
+    // Boots take ~25s against a 300s period at ~57 boots/hour, so over 48h of
+    // prod 87 of 440 periods (18%) crossed the old threshold: ~52 pages a day.
+    // Over 7 days BuildMarkerBoot and BootOk were 9562 and 9562 — exactly
+    // equal, zero real dead boots — and the difference distribution is
+    // symmetric about zero (-1:48 vs +1:42, -2:17 vs +2:17), which is what a
+    // timing artifact looks like and what a real fault does not.
+    //
+    // A straddle self-corrects in the next period, so requiring the deficit to
+    // persist across three consecutive periods removes it. Simulated against
+    // that same 48h, threshold 2 over 3-of-3 gives ZERO false alarms and still
+    // catches an injected outage. A genuine r10 dead boot is gateway/provider/
+    // model resolution failing outright — every boot in the window, not one.
     iterationAlarms.push(
       new cloudwatch.Alarm(this, 'DeadBootAlarm', {
         alarmName: `psd-agent-dead-boot-${environment}`,
@@ -4324,8 +4376,9 @@ export class AgentPlatformStack extends cdk.Stack {
           },
           period: alarmPeriod,
         }),
-        threshold: 1,
-        evaluationPeriods: 1,
+        threshold: 2,
+        evaluationPeriods: 3,
+        datapointsToAlarm: 3,
         comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       }),

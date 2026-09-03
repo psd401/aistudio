@@ -24,7 +24,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as cdk from 'aws-cdk-lib';
-import { Template } from 'aws-cdk-lib/assertions';
+import { Match, Template } from 'aws-cdk-lib/assertions';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import { AgentPlatformStack, notifyAgentAlarm } from '../lib/agent-platform-stack';
 import { EnvironmentConfig } from '../lib/constructs';
@@ -225,6 +225,39 @@ describe('agent alarm delivery', () => {
     expect(() =>
       notifyAgentAlarm(alarm, {} as never)
     ).toThrow(/before agentAlarmTargets was populated/);
+  });
+
+  it('does not page on a single dead-boot period', () => {
+    // BuildMarkerBoot and BootOk were 9562 and 9562 over 7 days of prod --
+    // zero real dead boots -- while 18% of five-minute periods still crossed
+    // the old threshold of 1 over 1 period, about 52 pages a day. A boot
+    // straddling a period boundary shows +1 and self-corrects in the next
+    // period, so the deficit has to persist to count.
+    const template = buildTemplate('prod', 'alerts@psd401.net');
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: 'psd-agent-dead-boot-prod',
+      Threshold: 2,
+      EvaluationPeriods: 3,
+      DatapointsToAlarm: 3,
+    });
+  });
+
+  it('pages on cron failures that are not the expected retry', () => {
+    // The cron handler throws JobLockAcquisitionError on purpose so Lambda
+    // re-invokes the fire; the run then succeeds. Watching the raw Lambda
+    // Errors metric made that control flow page every five minutes -- 100% of
+    // cron invoke errors over 24h of prod were that throw, and none were real.
+    const template = buildTemplate('prod', 'alerts@psd401.net');
+    template.hasResourceProperties('AWS::Logs::MetricFilter', {
+      FilterPattern: '"Invoke Error" -JobLockAcquisitionError',
+      MetricTransformations: [
+        Match.objectLike({ MetricName: 'CronUnexpectedInvokeError' }),
+      ],
+    });
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: 'psd-agent-cron-errors-prod',
+      MetricName: 'CronUnexpectedInvokeError',
+    });
   });
 
   it('passes the AgentCore runtime id to the router without an SSM lookup', () => {
