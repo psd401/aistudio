@@ -53,11 +53,38 @@ inside `ArtifactCanvas.tsx`**, so the new call site had no importable helper to 
 - Collapsed the WAF rationale (previously restated near-verbatim in ~8 places) into one
   canonical doc comment in `lib/content/code-encoding.ts` with pointers.
 
+## Addendum — the raw markup is often NOT what the user typed
+
+Fixing the sibling surface (the document editor's snapshot) corrected an
+assumption worth writing down, because it changes where you look.
+
+The obvious hypothesis is "a user pastes or types `<script>`/`<style>`". For the
+Tiptap/ProseMirror editor that is **wrong**: typed angle brackets are literal
+text, and the markdown serializer escapes them to `&lt;`/`&gt;` — inert, nothing
+for the rule to match. An E2E written on that premise failed and showed the real
+source.
+
+The raw HTML is emitted by the *editor's own extensions*.
+`lib/content/collab/authored-mark.ts` renders every authored run as a real
+`<span data-atrium-authored="" class="atrium-authored" data-by="human:3">`, and
+`toCleanMarkdown` serializes that verbatim into the markdown body. So **every**
+save of a human-edited document posts unescaped HTML tags with quoted
+attributes, no matter how innocuous the prose is.
+
+Generalize: when auditing a write path for WAF exposure, do not reason only about
+user input. Serialize a realistic body and LOOK AT IT — marks, decorations,
+authorship/attribution spans, embed wrappers and comment anchors all emit real
+tags that the user never typed.
+
 ## Prevention
 
 - Any write surface that can carry `<script>`/`<style>`/inline `style=` markup in a
   request body MUST use the transit encoding (`codeEncoding` + `decodeContentBody`) —
-  never post the raw body.
+  never post the raw body. Decide by SERIALIZING a real body and reading it, not by
+  reasoning about what a user might type (see the addendum above).
+- Pair the encoding with a `catch`. A WAF 403 makes the server-action call REJECT,
+  not resolve, so a path with no catch fails silently — and that half is a bug
+  regardless of the WAF, since any network drop does the same.
 - When adding a new content-write call site, grep for every other caller of the encode
   helper (`toBase64Utf8` / `code-encoding-browser.ts`) and confirm the new one is in
   that set before shipping.
