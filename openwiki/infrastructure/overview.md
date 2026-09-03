@@ -165,6 +165,14 @@ For multi-turn agent architecture, see **[agent-platform/overview.md](../agent-p
 | `agent-mint/` | DWD token broker (isolated security) |
 | `hyperframes-render/` | HTML to video rendering |
 
+### Workspace Contract Validation
+
+**Source**: `/infra/agent-image/workspace_contract.py`
+
+During agent image builds, a cutover guard fingerprints the workspace contract (proof version, checkpoint manifest, journal shapes) and compares it against the deployed image. This prevents false-positive cutover triggers from comment or validation-logic changes.
+
+For details, see **[agent-platform/overview.md → Workspace Checkpoint Recovery → Cutover Guard](../agent-platform/overview.md#cutover-guard-build-time-contract-validation)**.
+
 ### Lambda Optimization
 
 PowerTuning results documented in `/docs/infrastructure/lambda-powertuning-results.md`:
