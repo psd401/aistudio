@@ -121,6 +121,14 @@ The `journaledReplay` option in `verifyWorkspaceFinalizationProof()` relaxes ONL
 
 When a pending checkpoint cannot be replayed, the local changes are quarantined (generation invalidated) and the turn continues with a full restore from the committed manifest. This records at `warn` severity with `recovered: true` and does not trigger alerts—the failure that matters is a restore that cannot be completed, which still raises.
 
+### Session Lock Retention Diagnostics
+
+**Source**: `/infra/lambdas/agent-router/index.ts` — `invokeWithSessionLockLease()`
+
+When AgentCore completion is unconfirmed and a workspace lock is retained, the warning now includes `ownerEmail` and `spaceName` in addition to `sessionId`. A retained lock blocks all turns for that owner until the TTL expires (30 minutes), so identifying the affected user from logs requires owner attribution—`sessionId` alone is a hash that cannot be reversed.
+
+Historical context: six retained-lock events belonged to one user, but correlating requestIds back to spaces required a manual research project. The diagnostic fields make this a log search.
+
 ---
 
 ## Failure Telemetry Hygiene
