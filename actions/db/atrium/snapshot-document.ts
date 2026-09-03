@@ -28,6 +28,10 @@ import { contentService } from "@/lib/content/content-service";
 import { visibilityService } from "@/lib/content/visibility-service";
 import { canEdit } from "@/lib/content/helpers";
 import { NotFoundError, ForbiddenError } from "@/lib/content/errors";
+import {
+  decodeContentBody,
+  type ContentCodeEncoding,
+} from "@/lib/content/code-encoding";
 import type { ContentVersionDTO } from "@/lib/content";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
@@ -36,7 +40,15 @@ import { getUserRequester } from "./requester";
 
 export async function snapshotDocumentAction(
   objectId: string,
-  input: { body: string; summary?: string }
+  input: { body: string; summary?: string },
+  // Optional base64 transit encoding for `input.body`, so a document whose text
+  // contains <script>/<style> (an IT runbook, a pasted code sample) is opaque to
+  // the edge WAF on this server-action POST — the same option
+  // `createVersionAction` takes. Markdown passes inline HTML through untouched,
+  // so a document body trips `CrossSiteScripting_BODY` exactly like artifact code
+  // does (#1714). Rationale lives in `lib/content/code-encoding.ts`. Omitted =
+  // raw text, the pre-existing contract.
+  opts?: { codeEncoding?: ContentCodeEncoding }
 ): Promise<ActionState<ContentVersionDTO>> {
   const requestId = generateRequestId();
   const timer = startTimer("snapshotDocumentAction");
@@ -68,6 +80,7 @@ export async function snapshotDocumentAction(
       objectId,
       input: sanitizeForLogging({
         hasBody: typeof input.body === "string",
+        codeEncoding: opts?.codeEncoding,
         summary: input.summary,
       }),
     });
@@ -94,10 +107,17 @@ export async function snapshotDocumentAction(
       throw new ForbiddenError("Not permitted to edit this content");
     }
 
+    // Decode AFTER both authorization gates (so a decode failure never tells an
+    // unauthorized caller this object exists) and BEFORE the service, so §28.3
+    // screening and the size caps see the real content rather than the inert
+    // wrapper. `input.body` is a required string, so a raw pass-through stays a
+    // string; the base64 branch returns a string or throws a ValidationError.
+    const body = decodeContentBody(input.body, opts?.codeEncoding) ?? input.body;
+
     const version = await versionService.snapshot(
       requester,
       { id: obj.id, kind: "document" },
-      { body: input.body, bodyFormat: "markdown", summary: input.summary }
+      { body, bodyFormat: "markdown", summary: input.summary }
     );
 
     timer({ status: "success" });

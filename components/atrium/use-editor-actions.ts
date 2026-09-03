@@ -27,6 +27,7 @@ import {
 } from "@/actions/db/atrium/publish-document";
 import { unpublishDocumentAction } from "@/actions/db/atrium/unpublish-document";
 import { toCleanMarkdown } from "@/lib/content/collab/suggestions";
+import { toBase64Utf8 } from "@/lib/content/code-encoding-browser";
 import type { ActionState } from "@/types";
 import type { VisibilityLevel } from "@/lib/content";
 
@@ -151,8 +152,22 @@ export function useEditorActions({
   // Run a toolbar action with shared busy/feedback handling: blocks re-entry
   // while one is in flight, records success / error / pending-approval for the
   // caption styling.
+  //
+  // `rejectedText` is the caption for a REJECTED action — one that never
+  // returned an `ActionState` at all. A server action blocked at the edge by the
+  // WAF answers with a CloudFront HTML 403, which the action client cannot parse,
+  // so the `await` THROWS (#1714). Before this catch existed the throw escaped
+  // into `void runAction(...)` as an unhandled rejection: `busy` cleared via the
+  // `finally` and no caption was ever set, so a failed save looked exactly like a
+  // successful one — the dangerous shape for an autosave.
   const runAction = useCallback(
-    async (run: () => Promise<ActionOutcome>, { publishy = false } = {}) => {
+    async (
+      run: () => Promise<ActionOutcome>,
+      {
+        publishy = false,
+        rejectedText = "Something went wrong. Please try again.",
+      } = {},
+    ) => {
       setBusy(true);
       try {
         const outcome = await run();
@@ -165,6 +180,15 @@ export function useEditorActions({
         // Publication state changed (or was attempted) — let watchers re-read
         // it. Bumped even on failure: a partial/idempotent server outcome must
         // not leave the menu asserting stale "Live" badges.
+        if (publishy) setActionSeq((n) => n + 1);
+      } catch {
+        setPendingApproval(false);
+        setActionError(true);
+        setMessage(rejectedText);
+        setMessageUrl(null);
+        // Same reasoning as the success path: a throw does not prove the server
+        // did nothing (it may have committed before the response was lost), so
+        // let watchers re-read rather than trust a stale badge.
         if (publishy) setActionSeq((n) => n + 1);
       } finally {
         setBusy(false);
@@ -183,13 +207,27 @@ export function useEditorActions({
     // removed, deletions applied, comment/suggestion marks stripped — so a snapshot
     // never captures comment or unaccepted-suggestion residue as the canonical body.
     const body = toCleanMarkdown(editor);
-    void runAction(async () => {
-      const result = await snapshotDocumentAction(target, { body });
-      return mapActionResult(result, {
-        successText: "Snapshot saved",
-        failureFallback: "Snapshot failed",
-      });
-    });
+    void runAction(
+      async () => {
+        // Sent base64 (see `code-encoding-browser.ts`): markdown passes inline
+        // HTML through verbatim, so a document quoting <script>/<style> — a
+        // runbook, a pasted code sample — is otherwise blocked at the edge with
+        // a bare 403 that never reaches the app (#1714).
+        const result = await snapshotDocumentAction(
+          target,
+          { body: toBase64Utf8(body) },
+          { codeEncoding: "base64" },
+        );
+        return mapActionResult(result, {
+          successText: "Snapshot saved",
+          failureFallback: "Snapshot failed",
+        });
+      },
+      // Explicit about the consequence: the caller may have just typed a page of
+      // prose, and "something went wrong" would leave them guessing whether it
+      // survived.
+      { rejectedText: "Snapshot failed — your changes are not saved." },
+    );
   }, [editor, idOrSlug, docNameRef, runAction]);
 
   const handlePublish = useCallback(
@@ -227,7 +265,7 @@ export function useEditorActions({
             failureFallback: "Publish failed",
           });
         },
-        { publishy: true },
+        { publishy: true, rejectedText: "Publish failed. Please try again." },
       );
     },
     [idOrSlug, docNameRef, runAction],
@@ -265,7 +303,7 @@ export function useEditorActions({
             failureFallback: "Unpublish failed",
           });
         },
-        { publishy: true },
+        { publishy: true, rejectedText: "Unpublish failed. Please try again." },
       );
     },
     [idOrSlug, docNameRef, runAction],
