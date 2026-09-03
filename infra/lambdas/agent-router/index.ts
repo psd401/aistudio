@@ -544,10 +544,18 @@ const CHAT_DELIVERY_RETRY_VISIBILITY_SECONDS = 60;
 const WORKSPACE_DEFER_ATTRIBUTE = 'PsdWorkspaceDeferV1';
 const WORKSPACE_DEFER_MAX_ATTEMPTS = 180;
 const WORKSPACE_DEFER_MAX_AGE_SECONDS = 3 * 60 * 60;
-// Mirrors the CDK redrive policy on the router queue (maxReceiveCount: 3).
-// Used only to decide whether THIS attempt is the one that sends a record to
-// the dead-letter queue.
-const ROUTER_QUEUE_MAX_RECEIVE_COUNT = 3;
+// The queue's own redrive limit, supplied by the stack that sets it. Used to
+// decide whether THIS attempt is the one that dead-letters the record.
+//
+// This was a hardcoded 3 duplicating `maxReceiveCount: 3` in
+// agent-platform-stack.ts with nothing linking them: raising the stack's value
+// would have made the Lambda emit a false "dead-lettered" row on every attempt
+// from the third onward, and lowering it would have stopped the row being
+// written at all. Every other queue setting already arrives by env var.
+const ROUTER_QUEUE_MAX_RECEIVE_COUNT = parseInt(
+  process.env.ROUTER_QUEUE_MAX_RECEIVE_COUNT || '3',
+  10
+);
 const CHAT_DELIVERY_ENVELOPE_KIND = 'agent-chat-delivery-v1';
 const MAX_CHAT_DELIVERY_ENVELOPE_BYTES = 32 * 1024;
 
@@ -4310,12 +4318,11 @@ export async function handler(
         const messageId = event.Records[idx].messageId;
         if (result.reason instanceof ChatDeliveryRetryError) {
           batchItemFailures.push({ itemIdentifier: messageId });
-          await recordIfHeadedForDlq(
-            event.Records[idx],
-            result.reason,
-            log
-          );
           try {
+            // Shorten visibility BEFORE the telemetry write. This branch
+            // exists to retry promptly, and recordFailure touches the
+            // database — putting it first coupled the retry's latency to
+            // pool health, which this codebase already models as exhaustible.
             await deferChatDeliveryRetry(event.Records[idx], log);
           } catch (error) {
             log.error(
@@ -4328,6 +4335,11 @@ export async function handler(
               }
             );
           }
+          await recordIfHeadedForDlq(
+            event.Records[idx],
+            result.reason,
+            log
+          );
           return;
         }
         if (result.reason instanceof WorkspaceTurnDeferredError) {
@@ -4386,37 +4398,77 @@ export async function handler(
  * attempt is identifiable before the redrive happens. Best-effort by design:
  * a failure to write telemetry must never change how the record is handled.
  */
+/**
+ * Who a dead-lettering record belonged to.
+ *
+ * Without this the failure row says a Chat turn died and nothing else, so
+ * answering "who was affected this week?" still means decoding SQS bodies by
+ * hand — the work this telemetry exists to remove.
+ *
+ * Best-effort: a body we cannot parse must still produce a row, because an
+ * unparseable body is itself a reason a record dead-letters and losing the row
+ * would hide it.
+ */
+async function deadLetterIdentity(
+  record: SQSRecord,
+  log: ReturnType<typeof createLogger>
+): Promise<{ userId: string | null; sessionId: string | null }> {
+  try {
+    const chatEvent = await parseChatEventRecord(record, log);
+    return {
+      userId: chatEvent.message?.sender?.email ?? null,
+      sessionId: chatEvent.space?.name ?? null,
+    };
+  } catch {
+    return { userId: null, sessionId: null };
+  }
+}
+
 async function recordIfHeadedForDlq(
   record: SQSRecord,
   reason: unknown,
-  log: ReturnType<typeof createLogger>
+  log: ReturnType<typeof createLogger>,
+  dependencies: { recordFailure: typeof recordFailure } = { recordFailure }
 ): Promise<void> {
-  const receiveCount = parseInt(
-    record.attributes?.ApproximateReceiveCount ?? '1',
-    10
-  );
-  if (!Number.isFinite(receiveCount)) return;
-  if (receiveCount < ROUTER_QUEUE_MAX_RECEIVE_COUNT) return;
+  const raw = record.attributes?.ApproximateReceiveCount;
+  const receiveCount = parseInt(raw ?? '', 10);
+  // A missing or unparseable count used to default to 1, i.e. "not the last
+  // attempt", so a record with no attributes dead-lettered with no row and no
+  // log — failing silent inside the function written to end silent failure.
+  // Unknown now means RECORD: a spare row costs nothing, a missing one is the
+  // bug. Only a count we can read AND that is below the threshold skips.
+  if (Number.isFinite(receiveCount) &&
+      receiveCount < ROUTER_QUEUE_MAX_RECEIVE_COUNT) {
+    return;
+  }
+  const attempts = Number.isFinite(receiveCount) ? receiveCount : null;
   const classified = classifyError(reason);
+
+  const { userId, sessionId } = await deadLetterIdentity(record, log);
+
   log.error('Chat turn exhausted its retries and is being dead-lettered', {
     messageId: record.messageId,
-    receiveCount,
+    receiveCount: attempts,
+    userId: userId ? sanitizeEmailForLog(userId) : null,
+    spaceName: sessionId,
     errorClass: classified.errorClass,
     error: classified.message,
   });
   try {
-    await recordFailure(
+    await dependencies.recordFailure(
       {
         source: 'router',
         severity: 'error',
+        userId,
+        sessionId,
         errorClass: 'ChatTurnDeadLettered',
         errorMessage:
-          `Chat turn dead-lettered after ${receiveCount} attempts: ` +
-          classified.message,
+          `Chat turn dead-lettered after ${attempts ?? 'an unknown number of'} ` +
+          `attempts: ${classified.message}`,
         stackExcerpt: classified.stack,
         context: {
           messageId: record.messageId,
-          receiveCount,
+          receiveCount: attempts,
           underlyingErrorClass: classified.errorClass,
         },
       },
@@ -5705,6 +5757,7 @@ export const agentRouterTestHelpers = {
   cardClickMessageText,
   parseAgentCoreResult,
   alertableAgentTokens,
+  recordIfHeadedForDlq,
   tryAcquireSessionLock,
   invokeWithSessionLockLease,
   jobPromotionIdentity,

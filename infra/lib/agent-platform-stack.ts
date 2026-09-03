@@ -113,6 +113,14 @@ const RETIRED_BUNDLED_SKILL_NAMES = ['psd-classified-evaluation'] as const;
  * - Aurora cluster via imported ARNs
  * - Guardrails via imported ARN
  */
+/**
+ * Router queue redrive limit. Owned here and passed to the Lambda, which uses
+ * it to tell a retry from the final attempt. Two copies of this number meant
+ * changing one silently mis-reported (or stopped reporting) dead-lettered
+ * Chat turns.
+ */
+const ROUTER_QUEUE_MAX_RECEIVE_COUNT = 3;
+
 class AgentPlatformBuildResources {
   ecrRepository!: ecr.Repository;
   workspaceBucket!: s3.Bucket;
@@ -181,11 +189,23 @@ class AgentPlatformBuildResources {
  * a confirmed subscriber. A site that wires only the dedicated topic is a site
  * that can go quiet without anyone noticing.
  */
-function notifyAgentAlarm(
+export function notifyAgentAlarm(
   alarm: cloudwatch.Alarm,
   resources: AgentPlatformBuildResources,
 ): void {
-  for (const topic of resources.agentAlarmTargets ?? []) {
+  // `?? []` here used to make an alarm created before the targets exist
+  // silently receive NO actions: it synthesized, deployed, and notified
+  // nobody — the precise failure this whole area was rewritten to end. The
+  // list always contains the shared monitoring topic, so empty can only mean
+  // "called too early". Fail at synth instead of in production.
+  if (!resources.agentAlarmTargets?.length) {
+    throw new Error(
+      `notifyAgentAlarm called before agentAlarmTargets was populated ` +
+      `(alarm: ${alarm.node.id}). Alarm wiring must run after ` +
+      `createOAuthSecretsAndAlarmInfrastructure.`,
+    );
+  }
+  for (const topic of resources.agentAlarmTargets) {
     alarm.addAlarmAction(new cloudwatchActions.SnsAction(topic));
   }
 }
@@ -1036,6 +1056,39 @@ export class AgentPlatformStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
     notifyAgentAlarm(agentAsyncDlqAlarm, resources);
+
+    // A CloudWatch alarm whose SNS publish fails reports nothing anywhere —
+    // the alarm still shows ALARM, the mail never arrives, and the only trace
+    // is this metric. That is the same undetectable delivery gap that let the
+    // router DLQ alarm go unheard for 36 days, so watch the shared topic for
+    // it. Deliberately on the SHARED topic: it is the one target every agent
+    // alarm now depends on, and it is imported, so nothing else here would
+    // notice it disappearing or being renamed.
+    const alarmDeliveryFailures = new cloudwatch.Alarm(
+      this,
+      'AgentAlarmDeliveryFailures',
+      {
+        alarmName: `psd-agent-alarm-delivery-failures-${environment}`,
+        alarmDescription:
+          'Agent alarm notifications are failing to publish — alarms are ' +
+          'firing but nobody is being told',
+        metric: new cloudwatch.Metric({
+          namespace: 'AWS/SNS',
+          metricName: 'NumberOfNotificationsFailed',
+          dimensionsMap: {
+            TopicName: `aistudio-${environment}-monitoring-alarms`,
+          },
+          period: cdk.Duration.minutes(15),
+          statistic: 'Sum',
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    notifyAgentAlarm(alarmDeliveryFailures, resources);
   }
 
   private createBedrockKeyManager(
@@ -3146,7 +3199,7 @@ export class AgentPlatformStack extends cdk.Stack {
         // record by the router. Keep ordinary malformed/permanent failures on
         // the standard three-receive path so they reach the DLQ before the
         // four-day source retention expires.
-        maxReceiveCount: 3,
+        maxReceiveCount: ROUTER_QUEUE_MAX_RECEIVE_COUNT,
       },
     });
     cdk.Tags.of(resources.routerQueue).add('Environment', environment);
@@ -3270,6 +3323,10 @@ export class AgentPlatformStack extends cdk.Stack {
         DATABASE_NAME: props.databaseName || 'aistudio',
         GOOGLE_CREDENTIALS_SECRET_ARN: resources.googleCredentialsSecret.secretArn,
         TOKEN_LIMIT_PER_INTERACTION: '100000',
+        // The Lambda decides whether an attempt is the one that dead-letters a
+        // record; it must read that limit from the queue that enforces it
+        // rather than keep its own copy.
+        ROUTER_QUEUE_MAX_RECEIVE_COUNT: String(ROUTER_QUEUE_MAX_RECEIVE_COUNT),
         // Pass the runtime id directly rather than making every cold start pay
         // an SSM GetParameter. The router's own comment claimed the id "is not
         // known at CDK deploy time", but the SSM parameter a few hundred lines

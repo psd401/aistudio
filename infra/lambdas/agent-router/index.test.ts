@@ -40,6 +40,7 @@ const {
   parseDeferredChatDeliveryRecord,
   markPromotedTurnRecoveredWithDependencies,
   btwSlashCommandId,
+  recordIfHeadedForDlq,
 } = agentRouterTestHelpers
 
 type OwnerHuman = Parameters<typeof invokeOwnerAgentWithDependencies>[0]
@@ -2317,5 +2318,119 @@ describe("settling a promoted turn's harness failure row", () => {
         }
       )
     ).resolves.toBeUndefined()
+  })
+})
+
+describe("dead-letter telemetry", () => {
+  const RECORD = (attributes: Record<string, string>, body = "{}") => ({
+    messageId: "msg-1",
+    receiptHandle: "rh",
+    body,
+    attributes,
+    messageAttributes: {},
+    md5OfBody: "",
+    eventSource: "aws:sqs",
+    eventSourceARN: "arn",
+    awsRegion: "us-east-1",
+  }) as unknown as Parameters<typeof recordIfHeadedForDlq>[0]
+
+  const capture = () => {
+    const rows: Record<string, unknown>[] = []
+    const errors: Record<string, unknown>[] = []
+    return {
+      rows,
+      errors,
+      log: {
+        ...createLogger({ action: "test" }),
+        error: (_m: string, meta: Record<string, unknown> = {}) => {
+          errors.push(meta)
+        },
+      },
+      deps: { recordFailure: async (p: Record<string, unknown>) => { rows.push(p) } },
+    }
+  }
+
+  test("says nothing before the final attempt", async () => {
+    const c = capture()
+    await recordIfHeadedForDlq(
+      RECORD({ ApproximateReceiveCount: "1" }),
+      new Error("boom"),
+      c.log,
+      c.deps,
+    )
+    expect(c.rows).toEqual([])
+    expect(c.errors).toEqual([])
+  })
+
+  test("records on the attempt that dead-letters", async () => {
+    const c = capture()
+    await recordIfHeadedForDlq(
+      RECORD({ ApproximateReceiveCount: "3" }),
+      new Error("boom"),
+      c.log,
+      c.deps,
+    )
+    expect(c.rows).toHaveLength(1)
+    expect(c.rows[0].errorClass).toBe("ChatTurnDeadLettered")
+  })
+
+  test("records when the receive count is missing", async () => {
+    // Unknown must mean RECORD. Defaulting to '1' meant a record with no
+    // attributes dead-lettered in silence, which is the bug this exists for.
+    const c = capture()
+    await recordIfHeadedForDlq(RECORD({}), new Error("boom"), c.log, c.deps)
+    expect(c.rows).toHaveLength(1)
+  })
+
+  test("names WHO lost the message", async () => {
+    // A row that cannot answer "whose turn died?" still leaves someone
+    // decoding SQS bodies by hand.
+    const chatEvent = {
+      type: "MESSAGE",
+      eventTime: "2026-09-02T00:00:00Z",
+      message: {
+        name: "spaces/AAA/messages/1",
+        sender: { email: "someone@psd401.net", displayName: "Someone" },
+        text: "hi",
+      },
+      space: { name: "spaces/AAA", type: "DM" },
+    }
+    const body = JSON.stringify({
+      message: { data: Buffer.from(JSON.stringify(chatEvent)).toString("base64") },
+    })
+    const c = capture()
+    await recordIfHeadedForDlq(
+      RECORD({ ApproximateReceiveCount: "3" }, body),
+      new Error("boom"),
+      c.log,
+      c.deps,
+    )
+    expect(c.rows[0].userId).toBe("someone@psd401.net")
+    expect(c.rows[0].sessionId).toBe("spaces/AAA")
+  })
+
+  test("still records when the body cannot be parsed", async () => {
+    const c = capture()
+    await recordIfHeadedForDlq(
+      RECORD({ ApproximateReceiveCount: "3" }, "not json"),
+      new Error("boom"),
+      c.log,
+      c.deps,
+    )
+    expect(c.rows).toHaveLength(1)
+    expect(c.rows[0].userId).toBeNull()
+  })
+
+  test("a telemetry failure never propagates", async () => {
+    // Best-effort by design: losing the row must not change how the record
+    // is handled.
+    const c = capture()
+    await recordIfHeadedForDlq(
+      RECORD({ ApproximateReceiveCount: "3" }),
+      new Error("boom"),
+      c.log,
+      { recordFailure: async () => { throw new Error("pool exhausted") } },
+    )
+    expect(c.errors.length).toBeGreaterThan(0)
   })
 })
