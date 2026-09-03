@@ -125,6 +125,11 @@ class AgentPlatformBuildResources {
   bedrockApiUser!: iam.User;
   bedrockApiKeySecret!: secretsmanager.Secret;
   agentAlarmTopic?: sns.Topic;
+  /**
+   * Every topic an agent alarm must publish to. ALWAYS contains the shared
+   * monitoring topic, which is why it exists separately from agentAlarmTopic.
+   */
+  agentAlarmTargets: sns.ITopic[];
   runtime?: agentcore.Runtime;
   agentCoreExecutionRole!: iam.Role;
   routerLambdaRole!: iam.Role;
@@ -165,6 +170,24 @@ class AgentPlatformBuildResources {
   alarmTopic?: sns.Topic;
   failureMetricNamespace!: string;
   dbSecret!: secretsmanager.ISecret;
+}
+
+/**
+ * Attach every agent-alarm notification target to one alarm.
+ *
+ * Always use this instead of `addAlarmAction(new SnsAction(agentAlarmTopic))`.
+ * The dedicated topic is optional and its email subscription has silently
+ * disappeared in prod before; the shared monitoring topic is the one that has
+ * a confirmed subscriber. A site that wires only the dedicated topic is a site
+ * that can go quiet without anyone noticing.
+ */
+function notifyAgentAlarm(
+  alarm: cloudwatch.Alarm,
+  resources: AgentPlatformBuildResources,
+): void {
+  for (const topic of resources.agentAlarmTargets ?? []) {
+    alarm.addAlarmAction(new cloudwatchActions.SnsAction(topic));
+  }
 }
 
 export class AgentPlatformStack extends cdk.Stack {
@@ -955,6 +978,37 @@ export class AgentPlatformStack extends cdk.Stack {
       cdk.Tags.of(resources.agentAlarmTopic).add('ManagedBy', 'cdk');
     }
 
+    // The dedicated topic above is NOT sufficient on its own, and the comment
+    // block above says why in the abstract. Here is the concrete instance:
+    // prod's subscription was created 2026-07-24, nobody clicked the
+    // confirmation link, SNS deleted it three days later, and CloudFormation
+    // still reports the resource CREATE_COMPLETE today. The router DLQ alarm
+    // went off on 2026-07-29 and published to a topic with zero subscribers
+    // for 36 days while ~14 users' conversations were dropped on the floor.
+    // No deploy fixes that, because there is no drift for CDK to see.
+    //
+    // So every agent alarm also publishes to the monitoring stack's topic,
+    // which carries a CONFIRMED subscription for the same address plus the
+    // intelligent-alerting Lambda, and is maintained independently of this
+    // stack. Imported by ARN rather than by reference: a cross-stack object
+    // reference would add a dependency (and a possible cycle) purely to send
+    // mail. If the monitoring stack is absent the publish fails and the alarm
+    // still fires locally — strictly better than today's silence.
+    resources.agentAlarmTargets = [];
+    if (resources.agentAlarmTopic) {
+      resources.agentAlarmTargets.push(resources.agentAlarmTopic);
+    }
+    resources.agentAlarmTargets.push(
+      sns.Topic.fromTopicArn(
+        this,
+        'SharedMonitoringAlarmTopic',
+        cdk.Arn.format(
+          { service: 'sns', resource: `aistudio-${environment}-monitoring-alarms` },
+          this,
+        ),
+      ),
+    );
+
     // Shared dead-letter queue for the async-invoked agent Lambdas (EventBridge
     // Rules/Scheduler, custom-resource invoke, cross-Lambda async invoke). Without it
     // a failed async invocation is retried twice by Lambda and then DROPPED with no
@@ -981,9 +1035,7 @@ export class AgentPlatformStack extends cdk.Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
-    if (resources.agentAlarmTopic) {
-      agentAsyncDlqAlarm.addAlarmAction(new cloudwatchActions.SnsAction(resources.agentAlarmTopic));
-    }
+    notifyAgentAlarm(agentAsyncDlqAlarm, resources);
   }
 
   private createBedrockKeyManager(
@@ -2724,11 +2776,7 @@ export class AgentPlatformStack extends cdk.Stack {
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       },
     );
-    if (resources.agentAlarmTopic) {
-      untrustedLabelMappingAlarm.addAlarmAction(
-        new cloudwatchActions.SnsAction(resources.agentAlarmTopic),
-      );
-    }
+    notifyAgentAlarm(untrustedLabelMappingAlarm, resources);
 
     resources.triageWorkerRole.addToPolicy(new iam.PolicyStatement({
       sid: 'TriageWorkerLogsCorrectArn',
@@ -2945,9 +2993,7 @@ export class AgentPlatformStack extends cdk.Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
-    if (resources.agentAlarmTopic) {
-      triageWorkDlqAlarm.addAlarmAction(new cloudwatchActions.SnsAction(resources.agentAlarmTopic));
-    }
+    notifyAgentAlarm(triageWorkDlqAlarm, resources);
   }
 
   private createTriageDigest(
@@ -3224,6 +3270,15 @@ export class AgentPlatformStack extends cdk.Stack {
         DATABASE_NAME: props.databaseName || 'aistudio',
         GOOGLE_CREDENTIALS_SECRET_ARN: resources.googleCredentialsSecret.secretArn,
         TOKEN_LIMIT_PER_INTERACTION: '100000',
+        // Pass the runtime id directly rather than making every cold start pay
+        // an SSM GetParameter. The router's own comment claimed the id "is not
+        // known at CDK deploy time", but the SSM parameter a few hundred lines
+        // below is populated from this very token at deploy time, so it plainly
+        // is. 1,345 cold starts in 30 days each did a lookup they did not need.
+        // The SSM fallback stays in the Lambda for out-of-band overrides.
+        ...(resources.runtime
+          ? { AGENTCORE_RUNTIME_ID: resources.runtime.agentRuntimeId }
+          : {}),
         // K-12 safety: fail closed when guardrails are unavailable
         // Only allow messages from configured domain emails
         ALLOWED_DOMAINS: props.allowedDomains || 'psd401.net',
@@ -3875,6 +3930,7 @@ export class AgentPlatformStack extends cdk.Stack {
     resources: AgentPlatformBuildResources,
   ): void {
     const { environment } = props;
+    // Legacy alias. NOT the notification path any more — notifyAgentAlarm is.
     resources.alarmTopic = resources.agentAlarmTopic;
 
     // CloudWatch alarm on the DLQ — fires when any message exhausts the Router
@@ -3973,12 +4029,9 @@ export class AgentPlatformStack extends cdk.Stack {
       },
     );
 
-    if (resources.agentAlarmTopic) {
-      const alarmAction = new cloudwatchActions.SnsAction(resources.agentAlarmTopic);
-      cronErrorAlarm.addAlarmAction(alarmAction);
-      cronThrottleAlarm.addAlarmAction(alarmAction);
-      scheduleReferenceRejectionAlarm.addAlarmAction(alarmAction);
-    }
+    notifyAgentAlarm(cronErrorAlarm, resources);
+    notifyAgentAlarm(cronThrottleAlarm, resources);
+    notifyAgentAlarm(scheduleReferenceRejectionAlarm, resources);
 
     // CloudWatch metric filter — emit a metric every time an
     // AGENT_FAILURE_RECORD line lands in the router Lambda log. Combined with
@@ -4051,13 +4104,11 @@ export class AgentPlatformStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
-    // Wire alarm notifications if SNS topic is configured
-    if (resources.alarmTopic) {
-      const snsAction = new cloudwatchActions.SnsAction(resources.alarmTopic);
-      dlqAlarm.addAlarmAction(snsAction);
-      errorAlarm.addAlarmAction(snsAction);
-      failureRateAlarm.addAlarmAction(snsAction);
-    }
+    // The router DLQ alarm is the one that sat in ALARM for 36 days telling
+    // nobody. It goes through notifyAgentAlarm like everything else now.
+    notifyAgentAlarm(dlqAlarm, resources);
+    notifyAgentAlarm(errorAlarm, resources);
+    notifyAgentAlarm(failureRateAlarm, resources);
   }
 
   private createIterationMonitoring(
@@ -4223,11 +4274,8 @@ export class AgentPlatformStack extends cdk.Stack {
       }),
     );
 
-    if (resources.alarmTopic) {
-      const iterationSnsAction = new cloudwatchActions.SnsAction(resources.alarmTopic);
-      for (const a of iterationAlarms) {
-        a.addAlarmAction(iterationSnsAction);
-      }
+    for (const a of iterationAlarms) {
+      notifyAgentAlarm(a, resources);
     }
   }
 

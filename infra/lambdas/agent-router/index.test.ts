@@ -10,7 +10,7 @@ const {
   normalizeChatEvent,
   cardClickMessageText,
   parseAgentCoreResult,
-  totalAgentTokens,
+  alertableAgentTokens,
   tryAcquireSessionLock,
   invokeWithSessionLockLease,
   jobPromotionIdentity,
@@ -359,7 +359,11 @@ describe("agent router result coercion", () => {
     ])
     expect(result.errorSource).toBe("harness")
     expect(result.workspaceFinalizationConfirmed).toBe(true)
-    expect(totalAgentTokens(result)).toBe(37)
+    // 37 with cache reads included, 17 without. The alert deliberately
+    // excludes them: they are large by design and bill at ~a tenth of input,
+    // and including them made the 100k threshold fire on most prod turns
+    // (30-day p50 was 153,409 against a 100,000 limit).
+    expect(alertableAgentTokens(result)).toBe(17)
   })
 
   test("uses compatibility defaults for older harness responses", () => {
@@ -1441,7 +1445,7 @@ describe("workspace lock lease lifecycle", () => {
     const released: string[] = []
 
     const result = await invokeWithSessionLockLease(
-      "workspace-lock",
+      { sessionId: "workspace-lock" },
       "lock-token",
       TEST_LOG,
       async () => AGENT_RESULT,
@@ -1477,7 +1481,7 @@ describe("workspace lock lease lifecycle", () => {
     const released: string[] = []
 
     await invokeWithSessionLockLease(
-      "workspace-lock",
+      { sessionId: "workspace-lock" },
       "lock-token",
       TEST_LOG,
       async () => ({
@@ -1504,7 +1508,7 @@ describe("workspace lock lease lifecycle", () => {
 
     await expect(
       invokeWithSessionLockLease(
-        "workspace-lock",
+        { sessionId: "workspace-lock" },
         "lock-token",
         TEST_LOG,
         async () => {

@@ -44,6 +44,7 @@
     "test:smoke:auth-edge-production": "node scripts/test/auth-edge-production.smoke.cjs",
     "agent:probe-context": "bun run scripts/agent-workspace/mint-agent-probe-context.ts",
     "test:skill:workspace": "cd infra/agent-image/skills/psd-workspace && bun test common.test.js",
+    "test:lambda:router": "cd infra/lambdas/agent-router && bun test",
     "test:skill:directory": "cd infra/agent-image/skills/psd-directory && bun test run.test.js",
     "test:skill:workflows": "cd infra/agent-image/skills/psd-workflows && node --test",
     "test:skill:schedules": "cd infra/agent-image/skills/psd-schedules && bun test",
