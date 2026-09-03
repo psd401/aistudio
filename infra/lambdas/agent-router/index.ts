@@ -544,6 +544,10 @@ const CHAT_DELIVERY_RETRY_VISIBILITY_SECONDS = 60;
 const WORKSPACE_DEFER_ATTRIBUTE = 'PsdWorkspaceDeferV1';
 const WORKSPACE_DEFER_MAX_ATTEMPTS = 180;
 const WORKSPACE_DEFER_MAX_AGE_SECONDS = 3 * 60 * 60;
+// Mirrors the CDK redrive policy on the router queue (maxReceiveCount: 3).
+// Used only to decide whether THIS attempt is the one that sends a record to
+// the dead-letter queue.
+const ROUTER_QUEUE_MAX_RECEIVE_COUNT = 3;
 const CHAT_DELIVERY_ENVELOPE_KIND = 'agent-chat-delivery-v1';
 const MAX_CHAT_DELIVERY_ENVELOPE_BYTES = 32 * 1024;
 
@@ -619,7 +623,9 @@ let cachedChatAuth: GoogleChatAuth | null = null;
 let cachedChatClient: ReturnType<typeof chatPkg.chat> | null = null;
 
 // Cache SSM lookups at module scope to avoid redundant API calls on every invocation.
-// The Runtime ID is resolved from SSM because it's not known at CDK deploy time.
+// Fallback path only. The stack now sets AGENTCORE_RUNTIME_ID directly; this
+// SSM lookup remains for out-of-band overrides and for any deploy where the
+// runtime is not created in the same stack.
 let cachedRuntimeId: string | null = null;
 let runtimeIdCachedAt: number | null = null;
 const RUNTIME_ID_TTL_MS = 10 * 60 * 1000; // 10 minutes
@@ -2096,13 +2102,21 @@ const sessionLockLeaseDependencies: SessionLockLeaseDependencies = {
  * after this Lambda has stopped receiving bytes.
  */
 async function invokeWithSessionLockLease(
-  sessionId: string,
+  /**
+   * The lock's identity plus who it belongs to. `ownerEmail` and `spaceName`
+   * are diagnostic only: when a lease ends up RETAINED the warning has to say
+   * who is now blocked, and sessionId is a hash that cannot be reversed.
+   * Proving six retained-lock events belonged to one user meant correlating
+   * requestIds back to spaces by hand; this makes it a log search.
+   */
+  lease: { sessionId: string; ownerEmail?: string; spaceName?: string },
   lockToken: string,
   log: ReturnType<typeof createLogger>,
   invocation: () => Promise<AgentCoreResult>,
   dependencies: SessionLockLeaseDependencies =
     sessionLockLeaseDependencies
 ): Promise<AgentCoreResult> {
+  const { sessionId, ownerEmail, spaceName } = lease;
   let renewalInFlight: Promise<void> | undefined;
   const renewOnce = () => {
     if (renewalInFlight) return;
@@ -2147,9 +2161,21 @@ async function invokeWithSessionLockLease(
         log
       );
     } else {
+      // sessionId alone is not enough to act on: identifying the six events
+      // that explained one user's outage meant correlating requestIds back to
+      // spaces by hand. The lock is held for up to SESSION_LOCK_TTL_SECONDS
+      // (30 min), during which every turn for this owner defers, so whoever
+      // reads this needs to know WHO is blocked without a research project.
       log.warn(
         'Retaining workspace lock after unconfirmed AgentCore completion',
-        { sessionId }
+        {
+          sessionId,
+          // The lock is held until its TTL expires, and every turn for this
+          // owner defers meanwhile — so name the owner, not just the hash.
+          lockHeldForSeconds: SESSION_LOCK_TTL_SECONDS,
+          ...(ownerEmail ? { ownerEmail } : {}),
+          ...(spaceName ? { spaceName } : {}),
+        }
       );
     }
   }
@@ -4284,6 +4310,11 @@ export async function handler(
         const messageId = event.Records[idx].messageId;
         if (result.reason instanceof ChatDeliveryRetryError) {
           batchItemFailures.push({ itemIdentifier: messageId });
+          await recordIfHeadedForDlq(
+            event.Records[idx],
+            result.reason,
+            log
+          );
           try {
             await deferChatDeliveryRetry(event.Records[idx], log);
           } catch (error) {
@@ -4308,6 +4339,11 @@ export async function handler(
             )
           ) {
             batchItemFailures.push({ itemIdentifier: messageId });
+            await recordIfHeadedForDlq(
+              event.Records[idx],
+              result.reason,
+              log
+            );
           }
           return;
         }
@@ -4333,6 +4369,65 @@ export async function handler(
   );
 
   return { batchItemFailures };
+}
+
+/**
+ * Record a failure row when a record is about to dead-letter.
+ *
+ * Every path that fails a record eventually lands it in the DLQ, but the two
+ * deferral paths return early without calling recordFailure — so a turn could
+ * exhaust its retries and vanish with NO agent_failures row, no metric, and
+ * nothing on the usage dashboard. In prod that is exactly what happened:
+ * 50 real user messages died between 2026-08-20 and 2026-08-31 across 8 people
+ * while the failure table recorded 2 router-sourced rows all week. The only
+ * thing that noticed was a DLQ alarm publishing to a topic with no subscribers.
+ *
+ * SQS gives ApproximateReceiveCount for the attempt in hand, so the last
+ * attempt is identifiable before the redrive happens. Best-effort by design:
+ * a failure to write telemetry must never change how the record is handled.
+ */
+async function recordIfHeadedForDlq(
+  record: SQSRecord,
+  reason: unknown,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const receiveCount = parseInt(
+    record.attributes?.ApproximateReceiveCount ?? '1',
+    10
+  );
+  if (!Number.isFinite(receiveCount)) return;
+  if (receiveCount < ROUTER_QUEUE_MAX_RECEIVE_COUNT) return;
+  const classified = classifyError(reason);
+  log.error('Chat turn exhausted its retries and is being dead-lettered', {
+    messageId: record.messageId,
+    receiveCount,
+    errorClass: classified.errorClass,
+    error: classified.message,
+  });
+  try {
+    await recordFailure(
+      {
+        source: 'router',
+        severity: 'error',
+        errorClass: 'ChatTurnDeadLettered',
+        errorMessage:
+          `Chat turn dead-lettered after ${receiveCount} attempts: ` +
+          classified.message,
+        stackExcerpt: classified.stack,
+        context: {
+          messageId: record.messageId,
+          receiveCount,
+          underlyingErrorClass: classified.errorClass,
+        },
+      },
+      log
+    );
+  } catch (error) {
+    log.error('Failed to record dead-letter telemetry', {
+      messageId: record.messageId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 async function workspaceDeferredRecordNeedsRetry(
@@ -4773,11 +4868,27 @@ function agentResultTelemetry(
   };
 }
 
-function totalAgentTokens(result: AgentCoreResult): number {
+/**
+ * Tokens for the usage ALERT — deliberately not the same as billed volume.
+ *
+ * This used to add cacheReadInputTokens, which made the alert fire on almost
+ * every turn: measured over 30 days of prod, median total-with-cache was
+ * 153,409 against a 100,000 threshold, p90 was 1,083,781 and the max was
+ * 14.2M. Cache reads are large BY DESIGN — that is prompt caching working —
+ * and they bill at roughly a tenth of input, so they are the last thing an
+ * "unusually expensive turn" alert should be dominated by. 3,485 warnings in
+ * 30 days is not a signal, it is noise that buries the 24 real ones.
+ *
+ * Excluding cache reads, the same 30 days gives p50 597, p90 5,277, p99
+ * 17,856 and a maximum of 42,572 — so the existing 100,000 threshold now
+ * means what it says, and would not have fired once on ordinary traffic.
+ * Cache WRITES stay in: they bill at a premium over input, so a turn writing
+ * a large cache genuinely is expensive.
+ */
+function alertableAgentTokens(result: AgentCoreResult): number {
   return (
     result.inputTokens +
     result.outputTokens +
-    result.cacheReadInputTokens +
     result.cacheWriteInputTokens
   );
 }
@@ -4912,7 +5023,11 @@ async function invokeCrossUserAgent(
     );
   }
   const result = await invokeWithSessionLockLease(
-    workspaceLockId,
+    {
+      sessionId: workspaceLockId,
+      ownerEmail: targetUser.email,
+      spaceName: human.spaceName,
+    },
     lockToken,
     log,
     async () => {
@@ -4938,7 +5053,8 @@ async function invokeCrossUserAgent(
           conversationSessionId
         )
       );
-    }
+    },
+    sessionLockLeaseDependencies,
   );
   return { result, sessionId: conversationSessionId };
 }
@@ -5051,7 +5167,7 @@ async function runCrossUserTurn(
   const turn = await invokeCrossUserAgent(human, invocation, targetUser, log);
   if (!turn) return;
 
-  const totalTokens = totalAgentTokens(turn.result);
+  const totalTokens = alertableAgentTokens(turn.result);
   if (totalTokens > TOKEN_LIMIT) {
     log.warn('Token usage exceeds alerting threshold (cross-user)', {
       invoker: human.senderEmail,
@@ -5273,7 +5389,11 @@ async function invokeOwnerAgentWithDependencies(
     );
   }
   const result = await invokeWithSessionLockLease(
-    workspaceLockId,
+    {
+      sessionId: workspaceLockId,
+      ownerEmail: user.email,
+      spaceName: human.spaceName,
+    },
     lockToken,
     log,
     async () => {
@@ -5301,7 +5421,7 @@ async function invokeOwnerAgentWithDependencies(
       renewSessionLock: dependencies.renewSessionLock,
       releaseSessionLock: dependencies.releaseSessionLock,
       scheduler: dependencies.renewalScheduler,
-    }
+    },
   );
   return {
     result,
@@ -5490,7 +5610,7 @@ async function handleOwnerTurn(
   );
   if (!turn) return;
 
-  const totalTokens = totalAgentTokens(turn.result);
+  const totalTokens = alertableAgentTokens(turn.result);
   if (totalTokens > TOKEN_LIMIT) {
     log.warn('Token usage exceeds alerting threshold', {
       inputTokens: turn.result.inputTokens,
@@ -5584,7 +5704,7 @@ export const agentRouterTestHelpers = {
   normalizeChatEvent,
   cardClickMessageText,
   parseAgentCoreResult,
-  totalAgentTokens,
+  alertableAgentTokens,
   tryAcquireSessionLock,
   invokeWithSessionLockLease,
   jobPromotionIdentity,

@@ -160,6 +160,18 @@ jobs:
       env:
         CI: true
 
+    # agent-router (bun:test). These 131 tests sit BESIDE the source as
+    # *.test.ts, and every runner in this repo missed them: root jest ignores
+    # all of infra/ except one triage path, infra's own `lambdas` project only
+    # matches **/__tests__/**, and they are bun:test files that jest cannot
+    # parse anyway. So the Lambda that handles every Google Chat message had a
+    # full suite that ran nowhere. Caught when a change to its lock-lease and
+    # token-alert code broke two of them locally and no gate noticed.
+    - name: Run agent-router Lambda tests (Bun)
+      run: bun run test:lambda:router
+      env:
+        CI: true
+
     # psd-directory (#1239). Same story as psd-workspace above: plain CJS
     # outside the jest roots, so `test:ci` cannot see it. What these tests
     # guard is identity CORRECTNESS — the exact-address rule that stops a
