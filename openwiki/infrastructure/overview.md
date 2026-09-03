@@ -278,6 +278,16 @@ This pattern exists because SNS email subscriptions can silently disappear. In p
 
 **Tests**: `/infra/test/agent-alarm-delivery.test.ts` validates that every notifying alarm reaches the shared topic and that `notifyAgentAlarm()` refuses to wire before targets exist.
 
+#### Threshold Tuning
+
+Agent platform alarms are tuned to eliminate false positives while preserving real-fault detection:
+
+**Dead-Boot Alarm**: Uses threshold ≥2 across 3 consecutive periods (previously ≥1 over 1 period). A microVM that logs `BUILD_MARKER` just before a period boundary logs `BootOk` just after it, showing a transient +1 difference. Over 7 days of production, `BuildMarkerBoot` and `BootOk` were exactly equal (9562 each) while 18% of periods crossed the old threshold—about 52 pages a day. A straddle self-corrects in the next period, so requiring the deficit to persist across 3 periods eliminates timing artifacts. A genuine r10 dead boot (gateway/provider/model resolution failing outright) affects every boot in the window and crosses immediately.
+
+**Cron Error Alarm**: Watches a filtered metric (`CronUnexpectedInvokeError`) that excludes `JobLockAcquisitionError`. The cron handler intentionally throws this error so Lambda re-invokes the fire—it is control flow, not a failure. Over 24h of production, 100% of cron invoke errors were this retry mechanism, none were genuine. The metric filter `"Invoke Error" -JobLockAcquisitionError` ensures new/unknown error types still alarm immediately.
+
+Neither change makes the platform quieter about real faults: the DLQ, delivery, throttle, and schedule-rejection alarms are untouched, and both alarms still fire on the conditions they were written for.
+
 ### Key Files
 
 | File | Purpose |
