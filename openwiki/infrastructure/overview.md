@@ -288,6 +288,14 @@ Agent platform alarms are tuned to eliminate false positives while preserving re
 
 Neither change makes the platform quieter about real faults: the DLQ, delivery, throttle, and schedule-rejection alarms are untouched, and both alarms still fire on the conditions they were written for.
 
+#### Namespace Assignment Ordering
+
+When adding new alarms or metric filters that depend on `resources.failureMetricNamespace`, the assignment must occur BEFORE any Metric construction reads it. CloudFormation synthesizes successfully when a Metric receives `namespace: undefined`, but deploy fails with "Namespace must not be blank". This class of bug passes synth and unit tests but fails at deploy time.
+
+**Invariant**: `resources.failureMetricNamespace` is set at the start of `createBaseMonitoring()` in `/infra/lib/agent-platform-stack.ts`, before `createCronAlarms()` or any other method that builds Metric objects.
+
+**Test Coverage**: `/infra/test/agent-alarm-delivery.test.ts` includes `'gives every alarm a metric namespace'` which iterates all CloudWatch alarms in the synthesized template and asserts non-math-expression alarms have a Namespace property. This catches the synth-succeeds/deploy-fails class of bug before reaching production.
+
 ### Key Files
 
 | File | Purpose |
