@@ -240,6 +240,24 @@ export interface CreateObjectInput {
 export const CONTENT_DATA_ACCESS_MODES = ["records", "query", "none"] as const;
 export type ContentDataAccess = (typeof CONTENT_DATA_ACCESS_MODES)[number];
 
+/**
+ * Coerce an unvalidated `data_access` value into the enum, FAILING CLOSED.
+ *
+ * Every surface that pins a mode into `<ArtifactSandbox>` (#1712) reads the
+ * column through some projection, and a projection types it as `string` (see
+ * `rowToObjectDTO`) or `unknown`. A value outside the enum — a row predating
+ * migration 179 read through a widened column, or a DB enum that has drifted
+ * ahead of this union — must never be forwarded verbatim to the sandbox: the
+ * pin compares by equality, so an unrecognized string would match no operation
+ * on one code path while looking "set" on another. `none` is the safe answer
+ * because it permits nothing.
+ */
+export function normalizeDataAccess(value: unknown): ContentDataAccess {
+  return CONTENT_DATA_ACCESS_MODES.includes(value as ContentDataAccess)
+    ? (value as ContentDataAccess)
+    : "none";
+}
+
 /** Metadata-only patch for `update`. Body changes go through versionService.snapshot. */
 export interface UpdatePatch {
   title?: string;

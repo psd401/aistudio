@@ -26,6 +26,23 @@
  * iframe (`sandbox="allow-scripts"`, no `allow-same-origin`) served from a separate
  * origin (§19.2 / §28.1). The code never touches app-origin HTML.
  *
+ * ## Artifact data bridge (#1725)
+ * This route ENABLES the sandbox data bridge (`dataBridgeEnabled` + `contentId`
+ * + the `dataAccess` pin). It is the surface an author uses to look at their own
+ * unpublished work, and before #1725 it was the only place a draft could render
+ * — with the bridge absent, so every `AtriumData` call failed and a query-mode
+ * dashboard could not be exercised until after it was published in front of an
+ * audience.
+ *
+ * Enabling it grants nothing new: `queryArtifactData` / `submitArtifactRecord` /
+ * `listArtifactRecords` each independently resolve the session, run
+ * `contentService.get` (the same 404-masking `canView` this page just ran),
+ * re-check `kind === "artifact"`, and re-check the artifact's CURRENT
+ * `data_access` mode. None of them consults publication state, so publication
+ * was never the authorization — it only decided *where* the parent was willing
+ * to forward a request. Thumbnails, embeds, and the anonymous `/p/<slug>` reader
+ * stay fail-closed.
+ *
  * `dynamic = "force-dynamic"`: visibility depends on the caller's session, so the
  * page must never be statically cached or shared across principals.
  */
@@ -89,10 +106,20 @@ export default async function AtriumArtifactViewPage({
       }}
     >
       <ArtifactSandbox
+        // #1712: the loaded-mode pin lives in a ref for the mount's lifetime, so
+        // a mount must belong to exactly one artifact. Keying on the id makes
+        // that true by construction rather than relying on the router remounting
+        // the leaf page on a param change (same as the /c reader).
+        key={obj.id}
         code={code}
         src={getArtifactSandboxRenderUrl()}
         title={obj.title}
         className="atrium-artifact-viewport"
+        dataBridgeEnabled={true}
+        contentId={obj.id}
+        // #1712: the mode as read for THIS load. `rowToObjectDTO` already
+        // fails an out-of-enum value closed to "none".
+        dataAccess={obj.dataAccess}
       />
     </div>
   );

@@ -37,11 +37,40 @@ submitArtifactRecord / listArtifactRecords
 content_data_records (Aurora PostgreSQL)
 ```
 
-The bridge is deliberately enabled only by a trusted authenticated reader that
-has a content id. Preview, thumbnail, embed, full-screen preview, and anonymous
-`/p/<slug>` callers omit the enabling props and therefore fail closed. Artifact
+The bridge is deliberately enabled only by a trusted authenticated caller that
+has already resolved the object server-side and holds its content id. Artifact
 code must catch a rejected bridge call and present a state such as "Sign in to
 see scores."
+
+### Where the bridge is live (#1725)
+
+| Surface | Bridge | Why |
+|---|---|---|
+| `/c/<slug>` intranet reader | **enabled** | Authenticated, `canView`-gated, published. |
+| `/atrium/<id>/view` full-screen viewer | **enabled** | Same `canView` gate; renders the CURRENT head, so it is the one surface a DRAFT can run on. |
+| `/atrium/<id>/edit` canvas preview | **enabled** | Same gate; this is where the artifact is authored. |
+| Nexus workspace panel (`?workspace=`) | **enabled** | The same canvas behind the same `canView`-gated loader. |
+| `ArtifactEmbedBlock` (artifact inside a document) | fail closed | Renders inside somebody else's document, including the anonymous public reader. |
+| Library thumbnails | fail closed | Decorative grid tiles; nothing to interact with. |
+| `/p/<slug>` public reader | fail closed | Anonymous — there is no viewer to scope a query to. |
+
+Publication was **never** the authorization. `queryArtifactData`,
+`submitArtifactRecord`, and `listArtifactRecords` each independently resolve the
+session, run `contentService.get` (the shared 404 mask + `canView`), re-check
+`kind === "artifact"`, and re-check the artifact's CURRENT `data_access` mode;
+none of them reads publication state. Enabling the bridge on the two authoring
+surfaces therefore changes only *where* a request may originate, not *who* may
+run one — and it removes the publish → check → republish loop that used to be the
+only way to find out whether a `query`-mode dashboard worked. The no-egress
+invariant is unchanged: same sandbox, same CSP, same server checks, same
+records/query exclusivity.
+
+Every enabling caller also pins `dataAccess` (#1712). On the authoring surfaces
+the mode is editable in place, so the canvas keys its sandbox on the artifact id
+**and** the mode: flipping the mode in Content settings remounts the frame, which
+is exactly the "fresh load" the pin requires (the old iframe is destroyed, so
+nothing queried under the old mode survives) while still letting an author test
+the mode they just chose without reloading by hand.
 
 Teacher-facing agent workflows use the separate signed-owner broker read:
 
@@ -182,8 +211,10 @@ anything format-specific.
   run it — a principal and a district admin see different rows, and a teacher
   without access to a table gets a rejection.
 - **Rate limited.** Several queries per load is normal; a polling loop is not.
-- **Public/preview surfaces.** `/p/<slug>`, previews, thumbnails, and embeds all
-  omit the bridge props, so `query` fails closed there by construction.
+- **Public/embed/thumbnail surfaces.** `/p/<slug>`, embeds, and library
+  thumbnails omit the bridge props, so `query` fails closed there by
+  construction. The authoring surfaces do NOT (see "Where the bridge is live"):
+  a draft can be exercised by its author before it is published.
 
 ## Artifact API
 

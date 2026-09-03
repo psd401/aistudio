@@ -2,7 +2,8 @@
  * Unit tests for loadWorkspacePanelAction (Epic #1059, spec §17) — the one
  * canView-gated payload behind the Nexus workspace panel. Mirrors the standalone
  * edit page's gate: 404 for absent, 404-MASK for non-viewable (never 403), and the
- * kind-specific fields (sandboxSrc only for artifacts).
+ * kind-specific fields (sandboxSrc and the #1725 `dataAccess` bridge pin only
+ * for artifacts).
  */
 
 const loadByIdOrSlugMock = jest.fn();
@@ -57,16 +58,25 @@ describe("loadWorkspacePanelAction", () => {
       userId: 7,
       canEdit: true,
       sandboxSrc: null,
+      // A document has no sandbox at all, so there is no mode to pin (#1725).
+      dataAccess: null,
     });
   });
 
-  it("returns sandboxSrc for an artifact", async () => {
-    loadByIdOrSlugMock.mockResolvedValue({ ...OBJ, kind: "artifact" });
+  it("returns sandboxSrc and the data-access pin for an artifact", async () => {
+    loadByIdOrSlugMock.mockResolvedValue({
+      ...OBJ,
+      kind: "artifact",
+      dataAccess: "query",
+    });
     const result = await loadWorkspacePanelAction("obj-1");
     expect(result.isSuccess).toBe(true);
     if (!result.isSuccess) return;
     expect(result.data.kind).toBe("artifact");
     expect(result.data.sandboxSrc).toBe("https://sandbox.example/render");
+    // #1725/#1712: the panel pins the mode read on THIS load, resolved
+    // server-side like every other bridge input.
+    expect(result.data.dataAccess).toBe("query");
   });
 
   it("fails for an absent object (404 semantics)", async () => {

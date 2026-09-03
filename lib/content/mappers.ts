@@ -9,9 +9,9 @@
 
 import { pgTimestampAsText, stripJsonQuotes } from "@/lib/db/drizzle-helpers";
 import { contentObjects, type SourceRef } from "@/lib/db/schema";
+import { normalizeDataAccess } from "./types";
 import type {
   BodyFormat,
-  ContentDataAccess,
   ContentKind,
   ContentObjectDTO,
   ContentVersionDTO,
@@ -127,7 +127,10 @@ export function rowToObjectDTO(row: ObjectRowAsText): ContentObjectDTO {
     tags: row.tags ?? [],
     coverGradient: row.coverGradient,
     icon: row.icon,
-    dataAccess: row.dataAccess as ContentDataAccess,
+    // NOT a bare cast like its neighbours: `data_access` is the sandbox
+    // data-bridge pin (#1712), so an out-of-enum value has to fail closed
+    // rather than travel to `<ArtifactSandbox>` as an unrecognized string.
+    dataAccess: normalizeDataAccess(row.dataAccess),
     status: row.status as "draft" | "published" | "archived",
     indexedAt: stripJsonQuotes(row.indexedAt),
     createdAt: stripJsonQuotes(row.createdAt),
