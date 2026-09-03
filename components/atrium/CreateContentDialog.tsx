@@ -45,8 +45,11 @@ interface AgentCreateDialogProps {
    * agent entirely. Optional so surfaces that only offer the agent path can omit
    * it — but the library passes it, because "describe it to a chatbot" was the
    * only way in and that is not how everyone wants to start.
+   *
+   * Same contract as `onSubmit`: resolves to an error message to display, or
+   * null on success (the caller navigates away).
    */
-  onStartBlank?: () => Promise<void>;
+  onStartBlank?: () => Promise<string | null>;
 }
 
 /** A few starter prompts, so an empty field is never a blank wall. */
@@ -75,21 +78,44 @@ export function CreateContentDialog({
     return () => clearTimeout(t);
   }, [open]);
 
+  /**
+   * Shared busy/error lifecycle for both create paths.
+   *
+   * The `try/catch` is load-bearing: a server action that never reaches the app
+   * — e.g. one blocked at the edge by the WAF, whose HTML 403 body is not a
+   * valid action response — REJECTS instead of resolving to an error string.
+   * Without catching it, `creating` stayed true and the button spun forever
+   * (#1714). On success the parent navigates away, so `creating` is
+   * deliberately left set to keep the buttons disabled through the navigation.
+   */
+  const runCreate = useCallback(async (run: () => Promise<string | null>) => {
+    setCreating(true);
+    setError(null);
+    let message: string | null;
+    try {
+      message = await run();
+    } catch {
+      message = "Something went wrong. Please try again.";
+    }
+    if (message) {
+      setError(message);
+      setCreating(false);
+    }
+  }, []);
+
   const submit = useCallback(async () => {
     const trimmed = prompt.trim();
     if (!trimmed) {
       setError("Describe what you'd like the agent to build.");
       return;
     }
-    setCreating(true);
-    setError(null);
-    const message = await onSubmit(trimmed);
-    // On success the parent navigates away; on failure show the message.
-    if (message) {
-      setError(message);
-      setCreating(false);
-    }
-  }, [prompt, onSubmit]);
+    await runCreate(() => onSubmit(trimmed));
+  }, [prompt, onSubmit, runCreate]);
+
+  const startBlank = useCallback(async () => {
+    if (!onStartBlank) return;
+    await runCreate(onStartBlank);
+  }, [onStartBlank, runCreate]);
 
   return (
     <Dialog
@@ -153,7 +179,7 @@ export function CreateContentDialog({
             <button
               type="button"
               className="mer-btn"
-              onClick={() => void onStartBlank()}
+              onClick={() => void startBlank()}
               disabled={creating}
             >
               Start blank

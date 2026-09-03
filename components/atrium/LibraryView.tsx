@@ -32,6 +32,7 @@ import { listContentTagsAction } from "@/actions/db/atrium/list-tags";
 import { createContentAction } from "@/actions/db/atrium/create-content";
 import type { ContentObjectDTO, ContentKind, ListFilter } from "@/lib/content";
 import { ARTIFACT_STARTER_HTML } from "@/lib/content/artifact-starter";
+import { toBase64Utf8 } from "@/lib/content/code-encoding-browser";
 import { recentSince, WHATS_NEW_DAYS } from "@/lib/atrium/recent-window";
 import { createLogger } from "@/lib/client-logger";
 import { LibraryList } from "./LibraryList";
@@ -203,25 +204,44 @@ function useLibraryCreate(collectionId: string | null) {
 
   const handleAgentCreate = useCallback(
     async (promptText: string): Promise<string | null> => {
-      // The starter body is what makes this artifact have a v1. Creating it
-      // bodyless left `currentVersionId` null, and the authoring canvas has
-      // nothing to load — the card in this very grid would open on an error.
-      // The agent replaces this wholesale on its first turn.
-      const res = await createContentAction({
-        kind: "artifact",
-        title: deriveArtifactTitle(promptText),
-        collectionId: collectionId ?? undefined,
-        body: ARTIFACT_STARTER_HTML,
-        bodyFormat: "html",
-      });
-      if (res.isSuccess) {
-        router.push(
-          `/nexus?workspace=${res.data.id}&draft=${encodeURIComponent(promptText)}`
+      try {
+        // The starter body is what makes this artifact have a v1. Creating it
+        // bodyless left `currentVersionId` null, and the authoring canvas has
+        // nothing to load — the card in this very grid would open on an error.
+        // The agent replaces this wholesale on its first turn.
+        const res = await createContentAction(
+          {
+            kind: "artifact",
+            title: deriveArtifactTitle(promptText),
+            collectionId: collectionId ?? undefined,
+            body: toBase64Utf8(ARTIFACT_STARTER_HTML),
+            bodyFormat: "html",
+          },
+          // ARTIFACT_STARTER_HTML carries a <style> block, which the edge WAF's
+          // CrossSiteScripting_BODY rule blocks with a bare 403 when posted raw
+          // (#1714). Encode it; the action decodes before the write.
+          { codeEncoding: "base64" }
         );
-        return null;
+        if (res.isSuccess) {
+          router.push(
+            `/nexus?workspace=${res.data.id}&draft=${encodeURIComponent(promptText)}`
+          );
+          return null;
+        }
+        log.warn("createContentAction (artifact) failed", {
+          message: res.message,
+        });
+        return res.message ?? "Could not create the artifact";
+      } catch (e) {
+        // A server action that never reaches the app (e.g. an edge 403 whose
+        // HTML body is not a valid action response) REJECTS rather than
+        // returning `isSuccess: false`. Without this the dialog's spinner ran
+        // forever.
+        log.error("createContentAction (artifact) threw", {
+          error: e instanceof Error ? e.message : String(e),
+        });
+        return "Could not create the artifact";
       }
-      log.warn("createContentAction (artifact) failed", { message: res.message });
-      return res.message ?? "Could not create the artifact";
     },
     [collectionId, router]
   );
@@ -232,23 +252,40 @@ function useLibraryCreate(collectionId: string | null) {
    * describe it to the agent, which navigated out of Atrium into the Nexus chat
    * with no explanation. The starter body is what gives it a v1 (see
    * ARTIFACT_STARTER_HTML) so the editor never opens on an error.
+   *
+   * Returns an error message for the dialog to show, or null on success — the
+   * same contract as `handleAgentCreate`. It is invoked from INSIDE the open
+   * dialog, so reporting through the library-level `createError` (which renders
+   * behind it) left the click looking like a no-op.
    */
-  const handleBlankArtifact = useCallback(async () => {
-    const res = await createContentAction({
-      kind: "artifact",
-      title: "Untitled page",
-      collectionId: collectionId ?? undefined,
-      body: ARTIFACT_STARTER_HTML,
-      bodyFormat: "html",
-    });
-    if (res.isSuccess) {
-      router.push(`/atrium/${res.data.id}/edit`);
-      return;
+  const handleBlankArtifact = useCallback(async (): Promise<string | null> => {
+    try {
+      const res = await createContentAction(
+        {
+          kind: "artifact",
+          title: "Untitled page",
+          collectionId: collectionId ?? undefined,
+          body: toBase64Utf8(ARTIFACT_STARTER_HTML),
+          bodyFormat: "html",
+        },
+        // See handleAgentCreate: the starter body's <style> block is blocked by
+        // the edge WAF when posted raw (#1714).
+        { codeEncoding: "base64" }
+      );
+      if (res.isSuccess) {
+        router.push(`/atrium/${res.data.id}/edit`);
+        return null;
+      }
+      log.warn("createContentAction (blank artifact) failed", {
+        message: res.message,
+      });
+      return res.message ?? "Could not create the page";
+    } catch (e) {
+      log.error("createContentAction (blank artifact) threw", {
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return "Could not create the page";
     }
-    setCreateError(res.message ?? "Could not create the page");
-    log.warn("createContentAction (blank artifact) failed", {
-      message: res.message,
-    });
   }, [collectionId, router]);
 
   return {

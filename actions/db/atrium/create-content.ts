@@ -23,6 +23,10 @@ import type {
   ContentObjectWithVersion,
   CreateObjectInput,
 } from "@/lib/content";
+import {
+  decodeContentBody,
+  type ContentCodeEncoding,
+} from "@/lib/content/code-encoding";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { getUserRequester } from "./requester";
@@ -32,7 +36,14 @@ import {
 } from "@/lib/atrium/public-publish-policy";
 
 export async function createContentAction(
-  input: CreateObjectInput
+  input: CreateObjectInput,
+  // The library's artifact-create flow base64-encodes `input.body` and passes
+  // `codeEncoding: "base64"` so a starter/seed body containing <script>/<style>
+  // is opaque to the edge WAF (CrossSiteScripting_BODY) on this server-action
+  // POST — without it the request is blocked with a bare 403 that never reaches
+  // the app (#1714). The body is decoded here BEFORE the service screens and
+  // size-caps it. Omit for raw text (the pre-existing contract is unchanged).
+  opts?: { codeEncoding?: ContentCodeEncoding }
 ): Promise<ActionState<ContentObjectWithVersion>> {
   const requestId = generateRequestId();
   const timer = startTimer("createContentAction");
@@ -45,6 +56,7 @@ export async function createContentAction(
         title: input?.title,
         collectionId: input?.collectionId,
         hasBody: input?.body !== undefined,
+        codeEncoding: opts?.codeEncoding,
         visibilityLevel: input?.visibility?.level,
         tags: input?.tags,
       }),
@@ -61,7 +73,13 @@ export async function createContentAction(
     if (!(await hasCapabilityAccess("atrium-content"))) {
       throw ErrorFactories.authzToolAccessDenied("atrium-content");
     }
-    const result = await contentService.create(requester, input, {
+    // Decode a base64 (WAF-opaque) body to real content before it reaches the
+    // service, so §28.3 guardrails/PII screening and the size caps always run on
+    // the real content rather than the inert wrapper. With `codeEncoding`
+    // omitted this is an identity pass-through, so `body: undefined` stays
+    // undefined and the "no v1 snapshot" branch is unaffected.
+    const body = decodeContentBody(input.body, opts?.codeEncoding);
+    const result = await contentService.create(requester, { ...input, body }, {
       // #1336: any author may publish publicly — the same allow-then-notify
       // policy the publish / set-visibility actions apply. Without this the
       // create path still ran the §26.4 "create-as-private" downgrade, so a

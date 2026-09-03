@@ -16,5 +16,8 @@ module.exports = {
   Upload: () => React.createElement('div', { className: 'mock-upload', 'data-testid': 'upload-icon' }),
   Activity: () => React.createElement('div', { className: 'mock-activity', 'data-testid': 'activity-icon' }),
   Save: () => React.createElement('div', { className: 'mock-save', 'data-testid': 'save-icon' }),
+  Sparkles: () => React.createElement('div', { className: 'mock-sparkles', 'data-testid': 'sparkles-icon' }),
+  Search: () => React.createElement('div', { className: 'mock-search', 'data-testid': 'search-icon' }),
+  Plus: () => React.createElement('div', { className: 'mock-plus', 'data-testid': 'plus-icon' }),
   // Add other icons as needed
 };
