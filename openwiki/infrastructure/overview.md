@@ -154,7 +154,14 @@ The `agent-router` Lambda handles agent request routing with automatic failure t
 
 **Promoted Turn Recovery**: When an interactive turn times out (~550s ceiling) or overflows context but is promoted to a job queue, `markPromotedTurnRecovered()` downgrades the failure row from `error` to `warn` with `system:job-promotion` acknowledgment. This preserves latency trending while ensuring the Failures tab shows what actually broke.
 
-**Dead-Letter Telemetry**: When a chat turn exhausts its SQS retries (maxReceiveCount: 3) and is about to dead-letter, `recordIfHeadedForDlq()` writes a failure row *before* the redrive happens. Without this, deferred retries could vanish with no `agent_failures` row, no metric, and nothing on the usage dashboard. In production (2026-08-20 to 2026-08-31), 50 real user messages died across 8 people while the failure table recorded only 2 router-sourced rows that week—the DLQ alarm had been publishing to a topic with no subscribers.
+**Dead-Letter Telemetry**: When a chat turn exhausts its SQS retries and is about to dead-letter, `recordIfHeadedForDlq()` writes a failure row *before* the redrive happens. The function:
+
+- **Extracts owner attribution**: Parses the record body to capture `userId` (sender email) and `sessionId` (space name), so "who was affected?" is answerable from the failure table without decoding SQS bodies by hand
+- **Fails safe on missing attributes**: If `ApproximateReceiveCount` is missing or unparseable, records anyway—the prior default of "skip" meant records with no attributes dead-lettered silently
+- **Receives retry limit via env var**: `ROUTER_QUEUE_MAX_RECEIVE_COUNT` is passed from the stack (line 122 of `/infra/lib/agent-platform-stack.ts`) to ensure Lambda and queue redrive policy stay synchronized
+- **Decouples retry latency from DB health**: Visibility shortening runs before the telemetry write, so a slow or exhausted DB pool cannot block prompt retry
+
+Without this telemetry, deferred retries could vanish with no `agent_failures` row, no metric, and nothing on the usage dashboard. In production (2026-08-20 to 2026-08-31), 50 real user messages died across 8 people while the failure table recorded only 2 router-sourced rows that week—the DLQ alarm had been publishing to a topic with no subscribers.
 
 For multi-turn agent architecture, see **[agent-platform/overview.md](../agent-platform/overview.md)**.
 
@@ -265,9 +272,11 @@ All agent platform alarms use **dual-topic delivery** to prevent silent failures
 
 This pattern exists because SNS email subscriptions can silently disappear. In production (2026-07-24), an email subscription was created but nobody clicked the confirmation link; SNS deleted it after 3 days while CloudFormation still showed `CREATE_COMPLETE`. The router DLQ alarm fired for 36 days with zero subscribers, and 50 user messages died in the DLQ unnoticed.
 
-**Implementation**: The `notifyAgentAlarm()` helper in `/infra/lib/agent-platform-stack.ts` ensures every alarm publishes to both topics. New alarms must use this helper instead of direct `addAlarmAction()` calls.
+**Implementation**: The `notifyAgentAlarm()` helper in `/infra/lib/agent-platform-stack.ts` ensures every alarm publishes to both topics. The helper now throws at synth time if called before `agentAlarmTargets` is populated—preventing the previous `?? []` fallback that could silently produce a valid synth with no alarm actions.
 
-**Tests**: `/infra/test/agent-alarm-delivery.test.ts` validates that every notifying alarm reaches the shared topic.
+**Self-Monitoring**: The `AgentAlarmDeliveryFailures` alarm watches `AWS/SNS NumberOfNotificationsFailed` on the shared monitoring topic. If SNS publish fails, the alarm fires—catching the case where an alarm is in ALARM state but nobody receives notification. This alarm itself publishes to the same dual topics.
+
+**Tests**: `/infra/test/agent-alarm-delivery.test.ts` validates that every notifying alarm reaches the shared topic and that `notifyAgentAlarm()` refuses to wire before targets exist.
 
 ### Key Files
 
