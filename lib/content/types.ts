@@ -253,9 +253,22 @@ export type ContentDataAccess = (typeof CONTENT_DATA_ACCESS_MODES)[number];
  * because it permits nothing.
  */
 export function normalizeDataAccess(value: unknown): ContentDataAccess {
-  return CONTENT_DATA_ACCESS_MODES.includes(value as ContentDataAccess)
-    ? (value as ContentDataAccess)
-    : "none";
+  return isContentDataAccess(value) ? value : "none";
+}
+
+/**
+ * The membership test behind `normalizeDataAccess`, as a type predicate.
+ *
+ * Widening the tuple to `readonly string[]` is what lets an `unknown` be tested
+ * against it at all; doing that here, once, keeps the narrowing on the caller's
+ * return path derived from the runtime check rather than from asserting the very
+ * type the check exists to establish.
+ */
+function isContentDataAccess(value: unknown): value is ContentDataAccess {
+  return (
+    typeof value === "string" &&
+    (CONTENT_DATA_ACCESS_MODES as readonly string[]).includes(value)
+  );
 }
 
 /** Metadata-only patch for `update`. Body changes go through versionService.snapshot. */

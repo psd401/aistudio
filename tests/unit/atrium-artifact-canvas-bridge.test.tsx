@@ -155,7 +155,7 @@ describe("ArtifactCanvas preview data bridge (#1725)", () => {
     expect(screen.getByTestId("sandbox")).not.toBe(first);
   });
 
-  it("remounts the sandbox when the artifact changes without a canvas remount", async () => {
+  it("remounts the sandbox on a content-id change alone, even at an unchanged version", async () => {
     const { rerender } = render(
       <ArtifactCanvas
         {...BASE}
@@ -166,18 +166,22 @@ describe("ArtifactCanvas preview data bridge (#1725)", () => {
     );
     const first = await screen.findByTestId("sandbox");
 
+    // Deliberately the SAME versionId as obj-1: changing the version too would
+    // let `key={versionKey}` alone explain the remount and prove nothing about
+    // the content id. Holding it fixed isolates the id component of the key.
     getCodeMock.mockResolvedValue({
       isSuccess: true,
       data: {
         objectId: "obj-2",
-        versionId: "ver-9",
+        versionId: "ver-1",
         code: "<p>other</p>",
         bodyFormat: "html",
       },
     });
-    // WorkspacePanel swaps artifacts by resetting its own state rather than
-    // remounting this canvas, so a version-only key could leave the previous
-    // artifact's pin attached to a new content id.
+    // No caller reaches this today — every one of them remounts the canvas when
+    // the artifact changes. This pins the id in the key as a LOCAL guarantee, so
+    // a future caller that mounts the canvas unkeyed still cannot leave one
+    // artifact's #1712 pin attached to another artifact's id.
     rerender(
       <ArtifactCanvas
         {...BASE}

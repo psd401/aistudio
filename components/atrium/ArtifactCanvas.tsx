@@ -329,6 +329,11 @@ type CanvasBridge = { contentId: string; dataAccess: ContentDataAccess } | null;
  * alongside the base props inside the component would lose the correlation
  * TypeScript needs to prove the two are present together, so the bridge is read
  * off the whole `props` object and carried as a single nullable value.
+ *
+ * Module-level rather than inlined at its one call site for the same reason
+ * `performRestore` is: `ArtifactCanvas` sits exactly at the 150-line
+ * max-lines-per-function lint, and folding these four lines back into the body
+ * takes it to 154 — a warning, which `--max-warnings 0` turns into a failed gate.
  */
 function resolveCanvasBridge(props: ArtifactCanvasProps): CanvasBridge {
   return props.dataBridgeEnabled === true
@@ -345,9 +350,14 @@ function resolveCanvasBridge(props: ArtifactCanvasProps): CanvasBridge {
  * the long-standing version-switch mechanism — each version renders in a FRESH
  * iframe with no JS state carried over — but it is not enough once the bridge is
  * live:
- *  - contentId: `WorkspacePanel` swaps artifacts WITHOUT remounting the canvas
- *    (it resets its own state during render), so a version-only key could leave
- *    the previous artifact's pin attached to a new content id.
+ *  - contentId: no caller today can actually reach this with a stale mount —
+ *    every one of them already remounts the canvas when the artifact changes
+ *    (`ArtifactAuthoringView` keys it on `obj.id`; the two page mounts are route
+ *    renders; and `WorkspacePanel`'s render-phase reset commits its "loading"
+ *    branch, which unmounts the canvas outright — measured, not reasoned). The
+ *    id stays in the key so that invariant is LOCAL rather than a convention
+ *    every future caller has to remember: a canvas mounted unkeyed still cannot
+ *    leave one artifact's pin attached to another artifact's id.
  *  - dataAccess: flipping the mode in Content settings triggers
  *    `router.refresh()`. A remount is exactly the "fresh load" #1712 requires —
  *    the old iframe is destroyed, so nothing queried under the old mode survives
