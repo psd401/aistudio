@@ -4023,7 +4023,6 @@ export class AgentPlatformStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
-    resources.failureMetricNamespace = `PSD/AgentPlatform/${environment}`;
     const scheduleReferenceRejectionMetricName =
       'ScheduleReferenceRejections';
     new logs.MetricFilter(this, 'CronScheduleReferenceRejectionMetric', {
@@ -4069,6 +4068,13 @@ export class AgentPlatformStack extends cdk.Stack {
     resources: AgentPlatformBuildResources,
   ): void {
     const { environment } = props;
+    // Set BEFORE anything that builds a Metric from it, including the cron
+    // alarms this method delegates to. It used to be assigned midway through
+    // the alarm block, so a Metric created above that line got `undefined` and
+    // synthesized with NO Namespace property at all. CloudFormation rejects
+    // that only at deploy time — "Namespace must not be blank" — so synth and
+    // every unit test passed and the stack failed in front of a deploy.
+    resources.failureMetricNamespace = `PSD/AgentPlatform/${environment}`;
     // Legacy alias. NOT the notification path any more — notifyAgentAlarm is.
     resources.alarmTopic = resources.agentAlarmTopic;
 
