@@ -773,13 +773,50 @@ deployed_commit() {
   printf '%s' "${sha}"
 }
 
+# A cutover is required when old and new writers would disagree about
+# something PERSISTED — the proof format, the manifest or journal shape, the
+# object-key layout, the generation schema. It is NOT required merely because
+# a watched file changed.
+#
+# This used to be `git diff --name-only` on CUTOVER_PATHS, so a comment, a log
+# line or a relaxed validation demanded the same ingress pause and writer
+# drain as a generation rewrite. On 2026-09-02 it did exactly that over a
+# change that only added an optional `journaledReplay` flag to proof
+# verification: no write path touched, workspace_sync.py and migration 171
+# untouched, both fleet directions provably compatible. A guard that fires on
+# every edit is a guard that gets waved through on the build where it matters.
+#
+# workspace_contract.py extracts the declarations that define those persisted
+# shapes and compares their fingerprint. It fails closed: if extraction finds
+# no anchors in a file that exists, it exits 2 and we demand the cutover,
+# because a silent empty fingerprint would compare equal forever.
 CUTOVER_REASON=""
+CONTRACT_DIFF=""
 if DEPLOYED_COMMIT="$(deployed_commit)"; then
   CHANGED="$(git -C "${REPO_ROOT}" diff --name-only \
     "${DEPLOYED_COMMIT}..${SOURCE_COMMIT}" -- "${CUTOVER_PATHS[@]}" 2>/dev/null || true)"
-  if [ -n "${CHANGED}" ]; then
-    CUTOVER_REASON="changed since the deployed image (${DEPLOYED_COMMIT:0:12}):
-$(printf '  - %s\n' ${CHANGED})"
+  CONTRACT_DIFF="$(python3 "${SCRIPT_DIR}/workspace_contract.py" \
+    --rev "${SOURCE_COMMIT}" --compare-to "${DEPLOYED_COMMIT}" 2>&1)"
+  CONTRACT_STATUS=$?
+  case "${CONTRACT_STATUS}" in
+    0) ;;  # contract unchanged — no cutover, whatever the filenames say
+    1)
+      CUTOVER_REASON="the workspace contract changed since the deployed image
+  (${DEPLOYED_COMMIT:0:12}):
+$(printf '%s\n' "${CONTRACT_DIFF}" | sed 's/^/  /')"
+      ;;
+    *)
+      CUTOVER_REASON="the workspace contract could NOT be compared
+  (${CONTRACT_DIFF}). Failing closed."
+      ;;
+  esac
+  if [ -z "${CUTOVER_REASON}" ] && [ -n "${CHANGED}" ]; then
+    echo "Note: watched workspace files changed since ${DEPLOYED_COMMIT:0:12},"
+    echo "but the persisted contract did not, so no cutover is required:"
+    printf '  - %s\n' ${CHANGED}
+    echo "  (proof/manifest/journal shapes, key layout and migration 171 all"
+    echo "   identical — verified by workspace_contract.py)"
+    echo ""
   fi
 else
   CUTOVER_REASON="could not determine the deployed image's commit, so this
