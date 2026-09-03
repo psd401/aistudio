@@ -260,6 +260,29 @@ describe('agent alarm delivery', () => {
     });
   });
 
+  it('gives every alarm a metric namespace', () => {
+    // CloudFormation rejects a blank namespace at DEPLOY time only
+    // ("Namespace must not be blank"), so a Metric built from a field that is
+    // still undefined synthesizes clean, passes every unit test, and fails in
+    // front of whoever is deploying. That is exactly how
+    // CronLambdaErrorAlarm broke: resources.failureMetricNamespace was
+    // assigned 25 lines BELOW the alarm that read it.
+    for (const environment of ['dev', 'prod'] as const) {
+      const alarms = buildTemplate(environment, 'alerts@psd401.net')
+        .findResources('AWS::CloudWatch::Alarm');
+      const missing = Object.entries(alarms)
+        .filter(([, body]) => {
+          const props =
+            (body as { Properties?: Record<string, unknown> }).Properties ?? {};
+          // Math-expression alarms carry their namespaces inside `Metrics`.
+          if (props.Metrics) return false;
+          return props.MetricName !== undefined && !props.Namespace;
+        })
+        .map(([id]) => id);
+      expect(missing).toEqual([]);
+    }
+  });
+
   it('passes the AgentCore runtime id to the router without an SSM lookup', () => {
     const fns = buildTemplate('prod', 'alerts@psd401.net').findResources(
       'AWS::Lambda::Function'
