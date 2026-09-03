@@ -37,12 +37,10 @@ import {
 
 export async function createContentAction(
   input: CreateObjectInput,
-  // The library's artifact-create flow base64-encodes `input.body` and passes
-  // `codeEncoding: "base64"` so a starter/seed body containing <script>/<style>
-  // is opaque to the edge WAF (CrossSiteScripting_BODY) on this server-action
-  // POST — without it the request is blocked with a bare 403 that never reaches
-  // the app (#1714). The body is decoded here BEFORE the service screens and
-  // size-caps it. Omit for raw text (the pre-existing contract is unchanged).
+  // Optional base64 transit encoding for `input.body`, so a body carrying
+  // <script>/<style> is opaque to the edge WAF on this server-action POST
+  // (#1714) — the same option `createVersionAction` takes. Rationale lives in
+  // `lib/content/code-encoding.ts`. Omitted = raw text, the existing contract.
   opts?: { codeEncoding?: ContentCodeEncoding }
 ): Promise<ActionState<ContentObjectWithVersion>> {
   const requestId = generateRequestId();
@@ -73,11 +71,9 @@ export async function createContentAction(
     if (!(await hasCapabilityAccess("atrium-content"))) {
       throw ErrorFactories.authzToolAccessDenied("atrium-content");
     }
-    // Decode a base64 (WAF-opaque) body to real content before it reaches the
-    // service, so §28.3 guardrails/PII screening and the size caps always run on
-    // the real content rather than the inert wrapper. With `codeEncoding`
-    // omitted this is an identity pass-through, so `body: undefined` stays
-    // undefined and the "no v1 snapshot" branch is unaffected.
+    // Decode BEFORE the service so §28.3 screening and the size caps run on the
+    // real content, not the inert wrapper. An omitted encoding is an identity
+    // pass-through: `body: undefined` stays undefined (no v1 snapshot).
     const body = decodeContentBody(input.body, opts?.codeEncoding);
     const result = await contentService.create(requester, { ...input, body }, {
       // #1336: any author may publish publicly — the same allow-then-notify

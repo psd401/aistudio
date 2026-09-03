@@ -59,6 +59,9 @@ const EXAMPLE_PROMPTS: ReadonlyArray<string> = [
   "A one-page budget explainer with a donut chart",
 ];
 
+/** The two create paths the dialog offers; `null` when neither is in flight. */
+type CreatePath = "agent" | "blank";
+
 export function CreateContentDialog({
   open,
   onClose,
@@ -66,7 +69,11 @@ export function CreateContentDialog({
   onStartBlank,
 }: AgentCreateDialogProps): React.JSX.Element {
   const [prompt, setPrompt] = useState("");
-  const [creating, setCreating] = useState(false);
+  // Which create path is in flight, so the button that was clicked is the one
+  // that spins. A disabled-but-static "Start blank" gave no sign the click
+  // registered, which is how the original failure looked like a no-op (#1714).
+  const [creating, setCreating] = useState<CreatePath | null>(null);
+  const busy = creating !== null;
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -84,24 +91,27 @@ export function CreateContentDialog({
    * The `try/catch` is load-bearing: a server action that never reaches the app
    * — e.g. one blocked at the edge by the WAF, whose HTML 403 body is not a
    * valid action response — REJECTS instead of resolving to an error string.
-   * Without catching it, `creating` stayed true and the button spun forever
+   * Without catching it, `creating` stayed set and the button spun forever
    * (#1714). On success the parent navigates away, so `creating` is
    * deliberately left set to keep the buttons disabled through the navigation.
    */
-  const runCreate = useCallback(async (run: () => Promise<string | null>) => {
-    setCreating(true);
-    setError(null);
-    let message: string | null;
-    try {
-      message = await run();
-    } catch {
-      message = "Something went wrong. Please try again.";
-    }
-    if (message) {
-      setError(message);
-      setCreating(false);
-    }
-  }, []);
+  const runCreate = useCallback(
+    async (path: CreatePath, run: () => Promise<string | null>) => {
+      setCreating(path);
+      setError(null);
+      let message: string | null;
+      try {
+        message = await run();
+      } catch {
+        message = "Something went wrong. Please try again.";
+      }
+      if (message) {
+        setError(message);
+        setCreating(null);
+      }
+    },
+    []
+  );
 
   const submit = useCallback(async () => {
     const trimmed = prompt.trim();
@@ -109,12 +119,12 @@ export function CreateContentDialog({
       setError("Describe what you'd like the agent to build.");
       return;
     }
-    await runCreate(() => onSubmit(trimmed));
+    await runCreate("agent", () => onSubmit(trimmed));
   }, [prompt, onSubmit, runCreate]);
 
   const startBlank = useCallback(async () => {
     if (!onStartBlank) return;
-    await runCreate(onStartBlank);
+    await runCreate("blank", onStartBlank);
   }, [onStartBlank, runCreate]);
 
   return (
@@ -145,7 +155,7 @@ export function CreateContentDialog({
             rows={4}
             aria-label="Describe the artifact for the agent to build"
             onKeyDown={(e) => {
-              if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !creating) {
+              if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !busy) {
                 e.preventDefault();
                 void submit();
               }
@@ -157,21 +167,25 @@ export function CreateContentDialog({
                 key={ex}
                 type="button"
                 className="mer-prompt-example"
-                disabled={creating}
+                disabled={busy}
                 onClick={() => setPrompt(ex)}
               >
                 {ex}
               </button>
             ))}
           </div>
-          {error && <p className="text-sm text-destructive">{error}</p>}
+          {error && (
+            <p className="text-sm text-destructive" role="alert">
+              {error}
+            </p>
+          )}
         </div>
         <DialogFooter>
           <button
             type="button"
             className="mer-btn"
             onClick={onClose}
-            disabled={creating}
+            disabled={busy}
           >
             Cancel
           </button>
@@ -180,8 +194,11 @@ export function CreateContentDialog({
               type="button"
               className="mer-btn"
               onClick={() => void startBlank()}
-              disabled={creating}
+              disabled={busy}
             >
+              {creating === "blank" && (
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+              )}
               Start blank
             </button>
           )}
@@ -189,9 +206,9 @@ export function CreateContentDialog({
             type="button"
             className="mer-btn mer-btn-agent"
             onClick={() => void submit()}
-            disabled={creating}
+            disabled={busy}
           >
-            {creating ? (
+            {creating === "agent" ? (
               <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
             ) : (
               <Sparkles className="h-4 w-4" aria-hidden="true" />
