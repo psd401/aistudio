@@ -25,7 +25,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
-import { AgentPlatformStack } from '../lib/agent-platform-stack';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import { AgentPlatformStack, notifyAgentAlarm } from '../lib/agent-platform-stack';
 import { EnvironmentConfig } from '../lib/constructs';
 
 const TEST_ACCOUNT = '123456789012';
@@ -33,7 +34,23 @@ const REGION = 'us-east-1';
 const REAL_VPC_KEY =
   'vpc-provider:account=390844780692:filter.tag:Name=aistudio-dev-vpc:region=us-east-1:returnAsymmetricSubnets=true';
 
+// Each synth builds the whole AgentPlatformStack (~2s). There are only a few
+// distinct configurations under test but one call per test, so memoise them.
+const TEMPLATE_CACHE = new Map<string, Template>();
+
 function buildTemplate(
+  environment: 'dev' | 'prod',
+  alertEmail?: string
+): Template {
+  const cacheKey = `${environment}:${alertEmail ?? 'none'}`;
+  const cached = TEMPLATE_CACHE.get(cacheKey);
+  if (cached) return cached;
+  const built = synthTemplate(environment, alertEmail);
+  TEMPLATE_CACHE.set(cacheKey, built);
+  return built;
+}
+
+function synthTemplate(
   environment: 'dev' | 'prod',
   alertEmail?: string
 ): Template {
@@ -172,6 +189,42 @@ describe('agent alarm delivery', () => {
     const dlq = routerDlqAlarm('prod');
     expect(dlq).toBeDefined();
     expect(reachesSharedTopic(dlq!, 'prod')).toBe(true);
+  });
+
+  it('watches for its own notification-delivery failures', () => {
+    // A publish that fails leaves the alarm in ALARM and tells nobody; this
+    // metric is the only trace, so it needs an alarm of its own.
+    const template = buildTemplate('prod', 'alerts@psd401.net');
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: 'psd-agent-alarm-delivery-failures-prod',
+      MetricName: 'NumberOfNotificationsFailed',
+    });
+    const delivery = alarmsWithActions(template).find(
+      alarm => alarm.name === 'psd-agent-alarm-delivery-failures-prod'
+    );
+    expect(delivery).toBeDefined();
+    expect(reachesSharedTopic(delivery!, 'prod')).toBe(true);
+  });
+
+  it('refuses to wire an alarm before the targets exist', () => {
+    // The previous `?? []` made this case a silent no-op: the alarm
+    // synthesized, deployed, and notified nobody. Empty can only mean "called
+    // too early", because the shared topic is always present, so it must fail
+    // at synth rather than in production.
+    const stack = new cdk.Stack(new cdk.App(), 'T', {
+      env: { account: TEST_ACCOUNT, region: REGION },
+    });
+    const alarm = new cloudwatch.Alarm(stack, 'A', {
+      metric: new cloudwatch.Metric({ namespace: 'X', metricName: 'Y' }),
+      threshold: 1,
+      evaluationPeriods: 1,
+    });
+    expect(() =>
+      notifyAgentAlarm(alarm, { agentAlarmTargets: [] } as never)
+    ).toThrow(/before agentAlarmTargets was populated/);
+    expect(() =>
+      notifyAgentAlarm(alarm, {} as never)
+    ).toThrow(/before agentAlarmTargets was populated/);
   });
 
   it('passes the AgentCore runtime id to the router without an SSM lookup', () => {
