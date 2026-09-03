@@ -32,7 +32,10 @@
  *
  * This helper is the ONE decode point shared by the REST routes
  * (`POST /api/v1/content`, `POST /api/v1/content/:id/versions`), the MCP
- * create/version tools, and the in-app `createVersionAction` server action.
+ * create/version tools, and the in-app `createContentAction` /
+ * `createVersionAction` server actions (the library's artifact create and the
+ * artifact canvas save — #1714 added the former, which had shipped raw). The
+ * browser-side ENCODE half lives in `code-encoding-browser.ts`.
  */
 
 import { ValidationError } from "./errors";
