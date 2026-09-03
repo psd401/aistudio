@@ -98,3 +98,26 @@ module-level helper that accepts setters as parameters (matches the existing
   test — they cover orthogonal failure modes.
 - When extraction is needed to stay under `max-lines-per-function`, prefer a module-level
   helper over an inline disable comment.
+
+## 2026-09-03 Addendum (Issue #1714, Atrium library artifact creation)
+
+Another way to land in "mode 2" (thrown exception, not `isSuccess: false`): a WAF or
+proxy in front of the app returns a non-action HTTP response (CloudFront HTML 403 body)
+for a blocked request. The Next.js server-action client runtime cannot parse that as an
+action response and the `await someAction()` call **rejects** on the client — same
+stranded-UI symptom as a network error or server crash, just with an infra-layer
+trigger instead of an app-layer one. See
+`docs/learnings/security/2026-09-03-alb-waf-crosssitescripting-body-blocks-raw-html-content-writes.md`
+for the root cause of that specific 403.
+
+Two refinements found while fixing this instance:
+- The caught error must render **inside the currently-open dialog** (`role="alert"` on
+  the error `<p>`), not in a parent/library-level state — a parent-level error can
+  render behind an open modal and be invisible even though the state update "worked".
+- Give the busy flag a tri-state shape (e.g. `"agent" | "blank" | null`) instead of a
+  boolean when a dialog has multiple submit buttons, so only the clicked button shows
+  the spinner and the catch block can unambiguously clear it.
+- `max-lines-per-function` (150 lines) applies to a Playwright `test.describe`
+  callback just like a React component; adding two tests to an existing block pushed
+  it to 170. Splitting into a second `describe` block that repeats the same skip/auth
+  gate is a cheap way to stay under the limit without disabling the rule.
