@@ -51,12 +51,28 @@
 -- live) is the state this migration starts from — nothing is unreachable at any
 -- point if it stops between steps.
 
--- 1a. Objects live on `public_web` that ALSO have an `intranet` row (live or
---     not): make that row live. Its own `published_version_id` is kept — it is
---     what `/c/{slug}` was already serving, and for a row that was already live
---     nothing changes at all.
+-- 1a. Objects live on `public_web` whose `intranet` row exists but is NOT live
+--     (`unpublished`, or `failed` — a publish whose transaction committed and
+--     whose post-commit adapter then threw, leaving the row flagged `failed`).
+--
+--     Such a row's `published_version_id` names a version that was NEVER live:
+--     `/c/{slug}` gates on `status = 'live'`, so readers were being served the
+--     `public_web` row's version instead. Flipping the status while keeping the
+--     stale version would silently substitute unreviewed content onto a page
+--     that is about to go live — so the version, publisher and timestamp are
+--     carried over from the row that was actually serving readers.
+--
+--     An `intranet` row that is ALREADY live is untouched by this statement (it
+--     is excluded below) — its version is the one `/c/{slug}` was serving, and
+--     an object live on both keeps it.
 UPDATE content_publications AS ip
 SET status = 'live',
+    published_version_id = pw.published_version_id,
+    published_by = pw.published_by,
+    published_at = pw.published_at,
+    -- The intranet adapter addresses the object by slug and records a NULL
+    -- external_ref by design; carrying the /p/ URL across would be wrong.
+    external_ref = NULL,
     updated_at = NOW()
 FROM content_publications AS pw
 WHERE ip.object_id = pw.object_id

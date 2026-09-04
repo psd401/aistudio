@@ -35,7 +35,7 @@
  * See docs/features/atrium-design-spec.md §15 (publishing) / §26.4 (public gate).
  */
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   executeQuery,
   executeTransaction,
@@ -65,6 +65,8 @@ import {
 } from "./collection-access";
 import {
   isPublicDestination,
+  LIVE_DESTINATION,
+  LIVE_SURFACE_DESTINATIONS,
   normalizeLiveDestination,
   type PublishAdapter,
   type PublishDestination,
@@ -413,6 +415,62 @@ async function runPublishAdapter(args: {
   }
 
   return externalRef;
+}
+
+/**
+ * Post-commit side effects of an unpublish: prune the retrieval index, then run
+ * each retired destination's teardown. Extracted from `publishService.unpublish`
+ * so that method stays within the max-lines / complexity budget; the ORDERING is
+ * load-bearing and unchanged.
+ *
+ * The prune runs FIRST, deliberately. A teardown can throw (and is re-thrown to
+ * the caller), and a retry would idempotently no-op at the `status = 'live'`
+ * filter and never reach a prune placed after it — leaving unpublished content
+ * indefinitely retrievable as assistant context (§16). The prune is itself
+ * best-effort: the transaction has already committed, so a prune failure is
+ * logged, never thrown.
+ *
+ * The teardown runs once per RETIRED row, not once for the requested
+ * destination: taking the live switch off retires every live-surface row, and a
+ * legacy dual-live object has two, each with its own adapter and external ref.
+ */
+async function runUnpublishSideEffects(args: {
+  objectId: string;
+  retired: readonly { destination: string; externalRef: string | null }[];
+  anyLiveRemaining: boolean;
+  log: ReturnType<typeof createLogger>;
+}): Promise<void> {
+  const { objectId, retired, anyLiveRemaining, log } = args;
+
+  if (!anyLiveRemaining) {
+    try {
+      await retrievalService.removeFromIndex(objectId);
+    } catch (pruneError) {
+      log.warn("Failed to prune retrieval index after unpublish", {
+        objectId,
+        error:
+          pruneError instanceof Error ? pruneError.message : String(pruneError),
+      });
+    }
+  }
+
+  for (const pub of retired) {
+    const adapter = adapters[pub.destination as PublishDestination];
+    if (!adapter?.unpublish) continue;
+    try {
+      await adapter.unpublish({ objectId, externalRef: pub.externalRef });
+    } catch (adapterError) {
+      log.error("Unpublish adapter teardown failed", {
+        objectId,
+        destination: pub.destination,
+        error:
+          adapterError instanceof Error
+            ? adapterError.message
+            : String(adapterError),
+      });
+      throw adapterError;
+    }
+  }
 }
 
 // §26.4 — this publish path's two gate sites (the pre-tx public-destination branch
@@ -973,10 +1031,20 @@ export const publishService = {
     const log = createLogger({ action: "publish.unpublish" });
 
     // ONE live row (#1726): "unpublish from public_web" and "unpublish from the
-    // intranet" are the same request — take the object OFF Live. Normalizing here
-    // (as `publish` does) is what stops an Unpublish from leaving a second live
-    // row behind that keeps serving readers.
+    // intranet" are the same request — take the object OFF Live.
     const destination = normalizeLiveDestination(requestedDestination);
+
+    // Which rows this call actually retires. Normalizing the REQUEST is not
+    // enough: an object written before #1726 can be live at `public_web` — alone,
+    // or alongside `intranet` — and every reader gate accepts either
+    // (`LIVE_SURFACE_DESTINATIONS`, so a public page keeps serving across the
+    // deploy). Retiring only the normalized row would tell the author their page
+    // was taken down while `/c/{slug}` and `/p/{slug}` kept serving it from the
+    // row nothing touched, with no UI left that could reach it. Taking the live
+    // switch off means retiring EVERY live-surface row, exactly as
+    // `retractAllPublications` does. A connector retires only itself.
+    const targets: readonly PublishDestination[] =
+      destination === LIVE_DESTINATION ? LIVE_SURFACE_DESTINATIONS : [destination];
 
     const obj = await loadPublishable(objectId);
     if (!obj) {
@@ -1011,7 +1079,7 @@ export const publishService = {
           .where(
             and(
               eq(contentPublications.objectId, objectId),
-              eq(contentPublications.destination, destination),
+              inArray(contentPublications.destination, [...targets]),
               eq(contentPublications.status, "live")
             )
           )
@@ -1026,9 +1094,7 @@ export const publishService = {
     // no-op check above, so an already-offline destination is never gated/queued).
     assertMayUnpublishPublicOrRaise(req, obj, objectId, destination, opts);
 
-    const adapter = adapters[destination];
-
-    // Mark the publication unpublished and revert the object to draft atomically.
+    // Mark the publication(s) unpublished and revert the object to draft atomically.
     // Lock the row FOR UPDATE so a concurrent publish/unpublish serializes here.
     // Resolves to undefined when nothing was live (idempotent no-op), else the
     // removed publication's externalRef plus whether ANY other destination is
@@ -1045,35 +1111,45 @@ export const publishService = {
           throw new NotFoundError("Content not found", { objectId });
         }
 
-        // Find the live publication. No live row → nothing to unpublish; the
-        // status revert is skipped and the caller is told `unpublished: false`.
-        const pub = await tx
+        // Find the live publication(s) this call retires. No live row → nothing
+        // to unpublish; the status revert is skipped and the caller is told
+        // `unpublished: false`.
+        const pubs = await tx
           .select({
             id: contentPublications.id,
+            destination: contentPublications.destination,
             externalRef: contentPublications.externalRef,
           })
           .from(contentPublications)
           .where(
             and(
               eq(contentPublications.objectId, objectId),
-              eq(contentPublications.destination, destination),
+              inArray(contentPublications.destination, [...targets]),
               eq(contentPublications.status, "live")
             )
           )
-          .limit(1);
-        if (!pub[0]) return undefined;
+          // Exactly bounded: `targets` is either the two live-surface aliases or
+          // a single connector, and the table is unique on
+          // (object_id, destination), so this can never truncate a live row.
+          .limit(targets.length);
+        if (pubs.length === 0) return undefined;
 
         await tx
           .update(contentPublications)
           .set({ status: "unpublished", updatedAt: new Date() })
-          .where(eq(contentPublications.id, pub[0].id));
+          .where(
+            inArray(
+              contentPublications.id,
+              pubs.map((pub) => pub.id)
+            )
+          );
 
         // Revert the object to draft ONLY when no OTHER destination is still live.
-        // With `public_web` now a live adapter (Phase 7, #1057), an object can be
-        // live on several destinations at once (e.g. `intranet` + `public_web`);
-        // unpublishing one destination must NOT mark the object a draft while
-        // another reader route still serves it. The row just flipped to
-        // `unpublished` above is excluded by the `status = 'live'` filter.
+        // An object can be live at a CONNECTOR as well as at the live switch (and,
+        // pre-migration-180, at both live-surface aliases). Retiring one must NOT
+        // mark the object a draft while another destination still serves it. The
+        // rows just flipped to `unpublished` above are excluded by the
+        // `status = 'live'` filter.
         // Visibility is intentionally NOT narrowed here — unpublishing removes the
         // live surface, not the grant set; a later republish reuses the same
         // visibility.
@@ -1095,7 +1171,7 @@ export const publishService = {
         }
 
         return {
-          externalRef: pub[0].externalRef,
+          retired: pubs,
           anyLiveRemaining: Boolean(stillLive[0]),
         };
       },
@@ -1106,51 +1182,20 @@ export const publishService = {
       // No live publication existed — idempotent no-op.
       return { unpublished: false, destination };
     }
-    const { externalRef, anyLiveRemaining } = outcome;
+    const { retired, anyLiveRemaining } = outcome;
 
-    // Retrieval-index pruning (§16) FIRST — before the adapter teardown. Once NO
-    // destination is live anywhere, the object must stop surfacing as assistant
-    // context: remove its backing repository_item/chunks/link and clear
-    // indexed_at. This runs BEFORE the teardown deliberately: the teardown can
-    // throw (and re-throws below), and a retry would idempotently no-op at the
-    // `status = 'live'` filter and never reach a prune placed after it — leaving
-    // the index un-pruned indefinitely. Best-effort itself: the unpublish tx has
-    // already committed, so a prune failure is logged, never thrown.
-    if (!anyLiveRemaining) {
-      try {
-        await retrievalService.removeFromIndex(objectId);
-      } catch (pruneError) {
-        log.warn("Failed to prune retrieval index after unpublish", {
-          objectId,
-          destination,
-          error:
-            pruneError instanceof Error ? pruneError.message : String(pruneError),
-        });
-      }
-    }
+    await runUnpublishSideEffects({
+      objectId,
+      retired,
+      anyLiveRemaining,
+      log,
+    });
 
-    // Destination teardown AFTER the transaction commits (external/secondary IO
-    // outside the tx). For the intranet adapter this hides the nav item; a
-    // failure is logged and surfaced (the publication is already marked
-    // unpublished + the index already pruned, so the live surface is gone
-    // regardless).
-    if (adapter.unpublish) {
-      try {
-        await adapter.unpublish({ objectId, externalRef });
-      } catch (adapterError) {
-        log.error("Unpublish adapter teardown failed", {
-          objectId,
-          destination,
-          error:
-            adapterError instanceof Error
-              ? adapterError.message
-              : String(adapterError),
-        });
-        throw adapterError;
-      }
-    }
-
-    log.info("Unpublished content", { objectId, destination });
+    log.info("Unpublished content", {
+      objectId,
+      destination,
+      retiredDestinations: retired.map((pub) => pub.destination),
+    });
 
     // Emit after the commit + adapter teardown, only when a live publication was
     // actually removed (the `unpublished: false` no-op path returned above).

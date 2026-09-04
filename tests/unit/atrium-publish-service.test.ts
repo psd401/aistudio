@@ -89,6 +89,10 @@ jest.mock("@/lib/db/schema", () => ({
 jest.mock("drizzle-orm", () => ({
   and: (...a: unknown[]) => a,
   eq: (...a: unknown[]) => a,
+  // `unpublish` retires EVERY live-surface row (#1726), so its lookups and its
+  // status flip are `inArray`-shaped. Rendered as a plain tuple like `eq`, so
+  // `txWhereClauses` assertions can still scan the flattened conditions.
+  inArray: (...a: unknown[]) => a,
 }));
 
 // publish-service now calls retrievalService.indexObject after a successful
@@ -698,7 +702,7 @@ function definePublishServiceUnpublishSuite2Part1() {
 
   it("marks unpublished and runs the adapter teardown AFTER the tx on the happy path", async () => {
     // tx queue: FOR UPDATE lock row, then a live publication row with externalRef.
-    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
+    txResults = [[{ id: "o1" }], [{ id: "pub1", destination: "intranet", externalRef: null }]];
     const result = await publishService.unpublish(owner, "o1", "intranet");
     expect(result).toEqual({ unpublished: true, destination: "intranet" });
     expect(adapterUnpublishCalls).toBe(1);
@@ -710,7 +714,7 @@ function definePublishServiceUnpublishSuite2Part1() {
     // (a retry would idempotently no-op at the `status='live'` filter and never
     // reach a prune placed after the teardown).
     adapterUnpublishThrows = true;
-    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
+    txResults = [[{ id: "o1" }], [{ id: "pub1", destination: "intranet", externalRef: null }]];
     await expect(
       publishService.unpublish(owner, "o1", "intranet")
     ).rejects.toThrow(/nav hide boom/);
@@ -737,24 +741,42 @@ function definePublishServiceUnpublishSuite2Part1() {
     expect(adapterUnpublishCalls).toBe(0);
   });
 
-  it("`public_web` unpublish takes down the ONE live row, ungated (#1726)", async () => {
-    // The alias must normalize on the unpublish path too. If it did not, an
-    // Unpublish issued as `public_web` would flip a row nothing serves and leave
-    // the real live row up — the object would stay readable after its author was
-    // told it had been taken down. Ungated because going offline changes no
-    // audience.
-    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
+  it("taking the live switch off retires EVERY live-surface row (#1726)", async () => {
+    // Normalizing the REQUEST is not enough. An object written before #1726 can
+    // be live at `public_web` — alone, or alongside `intranet` — and every reader
+    // gate accepts either, so retiring only the normalized row would report
+    // success while `/c/{slug}` and `/p/{slug}` kept serving the object from the
+    // row nothing touched. Both aliases must be in the target set.
+    txResults = [
+      [{ id: "o1" }],
+      [
+        { id: "pub-intranet", destination: "intranet", externalRef: null },
+        { id: "pub-legacy", destination: "public_web", externalRef: null },
+      ],
+    ];
     const result = await publishService.unpublish(owner, "o1", "public_web");
     expect(result).toEqual({ unpublished: true, destination: "intranet" });
     const targeted = txWhereClauses.flat(Infinity);
     expect(targeted).toContain("intranet");
-    expect(targeted).not.toContain("public_web");
+    expect(targeted).toContain("public_web");
+    // Both retired rows are flipped in ONE update, addressed by id.
+    expect(targeted).toContain("pub-intranet");
+    expect(targeted).toContain("pub-legacy");
+  });
+
+  it("is a genuine no-op only when NO live-surface row exists", async () => {
+    // The pre-gate check reads the same target set; a legacy `public_web`-only
+    // object must not be reported as "nothing to do" while it is still serving.
+    liveCheckRows = [];
+    const result = await publishService.unpublish(owner, "o1", "intranet");
+    expect(result).toEqual({ unpublished: false, destination: "intranet" });
+    expect(adapterUnpublishCalls).toBe(0);
   });
 
   }
 
 function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing a connector when the caller has an explicit publish_public capability", async () => {
-    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
+    txResults = [[{ id: "o1" }], [{ id: "pub1", destination: "intranet", externalRef: null }]];
     const result = await publishService.unpublish(owner, "o1", "google", {
       hasPublishPublicCapability: true,
     });
@@ -782,7 +804,7 @@ function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing a c
     // "any other destination still live?" check returns a row (intranet live).
     txResults = [
       [{ id: "o1" }],
-      [{ id: "pub1", externalRef: null }],
+      [{ id: "pub1", destination: "intranet", externalRef: null }],
       [{ id: "pub-intranet" }],
     ];
     const result = await publishService.unpublish(admin, "o1", "public_web");
@@ -800,7 +822,7 @@ function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing a c
   it("prunes the retrieval index only when the last live destination is removed", async () => {
     // tx queue: FOR UPDATE lock, the live row being torn down, then the
     // "any other destination still live?" check returns [] (none remain).
-    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }], []];
+    txResults = [[{ id: "o1" }], [{ id: "pub1", destination: "intranet", externalRef: null }], []];
     const result = await publishService.unpublish(admin, "o1", "public_web");
     expect(result).toEqual({ unpublished: true, destination: "intranet" });
     expect(removeFromIndexMock).toHaveBeenCalledTimes(1);
@@ -816,7 +838,7 @@ function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing a c
 
   it("a prune failure is best-effort: the unpublish still succeeds", async () => {
     removeFromIndexMock.mockRejectedValueOnce(new Error("index prune boom"));
-    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }], []];
+    txResults = [[{ id: "o1" }], [{ id: "pub1", destination: "intranet", externalRef: null }], []];
     const result = await publishService.unpublish(admin, "o1", "public_web");
     // The unpublish already committed; a failed index prune is logged, not thrown.
     expect(result).toEqual({ unpublished: true, destination: "intranet" });
@@ -825,7 +847,7 @@ function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing a c
   it("reverts the object to draft when the unpublished destination was the last live one", async () => {
     // tx queue: FOR UPDATE lock, the live row being torn down, then the
     // "any other destination still live?" check returns [] (none remain).
-    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }], []];
+    txResults = [[{ id: "o1" }], [{ id: "pub1", destination: "intranet", externalRef: null }], []];
     const result = await publishService.unpublish(admin, "o1", "public_web");
     expect(result).toEqual({ unpublished: true, destination: "intranet" });
     const statuses = txSetPayloads.map((p) => p.status);

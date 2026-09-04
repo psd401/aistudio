@@ -37,6 +37,7 @@ import {
   respondApprovalRequired,
 } from "@/lib/content/rest";
 import { assertContentAuthoringCapability } from "@/lib/content/surface-helpers";
+import { normalizeLiveDestination } from "@/lib/content/publish-adapters/types";
 import { createLogger } from "@/lib/logger";
 
 const publishBodySchema = z.object({
@@ -91,7 +92,15 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId, pa
       requestId,
       canonicalRoute: `/api/v1/content/${id}/publish`,
       requestValue: {
-        body: input,
+        // Normalize the destination INTO the idempotency request hash (#1726):
+        // `intranet` and `public_web` are the same request now, so a client
+        // retrying under the same Idempotency-Key with the other alias must not
+        // be rejected as a key reuse for a different request. Fails closed
+        // otherwise — a legitimate retry gets a confusing 409.
+        body: {
+          ...input,
+          destination: normalizeLiveDestination(input.destination),
+        },
         ifMatch:
           precondition.expectedVersionId ??
           (precondition.expectedVersionId === null ? "none" : undefined),

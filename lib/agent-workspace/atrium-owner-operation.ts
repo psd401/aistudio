@@ -735,11 +735,16 @@ async function executePublishWrite(
       { destination: body.destination },
       { hasPublishPublicCapability: false }
     )
+    // Report the destination the service ACTED ON, exactly as the DELETE branch
+    // below does: `public_web` folds onto the single live row (#1726), so echoing
+    // the requested alias would name a row that does not exist — to the agent
+    // relaying it AND in the audit trail.
+    audit.destination = published.destination
     recordAudit(req, audit, input.requestId, "ok")
     return success(
       {
         id: segments[0],
-        destination: body.destination,
+        destination: published.destination,
         publishedVersionId: published.publishedVersionId,
         readerUrl: published.readerUrl,
       },

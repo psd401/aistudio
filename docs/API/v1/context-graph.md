@@ -2176,8 +2176,11 @@ Take the object back to DRAFT: retract its live publication, so its reader page
 unpublishing an object that is not live returns `unpublished: false` rather than
 erroring. `{destination}` is one of `intranet`, `public_web`, `schoology`, `google`
 (no `okf`: an okf publication is a serialized S3 bundle with no live surface to take
-down). `intranet` and `public_web` both address the single live row. Mirrors the MCP
-`unpublish_content` tool. Requires `content:publish_internal`.
+down). `intranet` and `public_web` both mean "take it off Live", and BOTH retire
+every live-surface row the object has — an object written before the single-state
+change can be live under either alias, and retiring only one would report success
+while the other kept serving readers. Mirrors the MCP `unpublish_content` tool.
+Requires `content:publish_internal`.
 
 This does not narrow the object's visibility — a later republish reuses the same
 level and grants.

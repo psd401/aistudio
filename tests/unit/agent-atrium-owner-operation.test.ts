@@ -634,6 +634,9 @@ describe("signed-owner Atrium mutations", () => {
   it("passes the publish readerUrl through to the broker response", async () => {
     publishMock.mockResolvedValue({
       publishedVersionId: "version-7",
+      // The service reports the destination it ACTUALLY wrote (#1726); the
+      // broker response and the audit row both echo THAT, not the alias sent.
+      destination: "intranet",
       readerUrl: "https://app.example/c/staff-handbook",
     })
 
