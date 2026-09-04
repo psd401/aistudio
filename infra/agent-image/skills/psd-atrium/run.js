@@ -51,7 +51,7 @@
  * "base64") so the code is opaque to the edge WAF and decoded server-side before
  * screening. Pass raw code — do not escape or strip tags.
  *   node run.js publish --id <id> [--destination intranet|public_web|schoology|google|okf]
- *   node run.js unpublish --id <id> --destination intranet|public_web|schoology|google
+ *   node run.js unpublish --id <id> [--destination intranet|public_web|schoology|google]
  *
  * Exit codes:
  *   0   success (JSON result printed to stdout; incl. approval_required outcomes)
@@ -161,10 +161,12 @@ function usage() {
       'oversized argv fails the spawn with E2BIG (128 KiB), well below the 4 MiB',
       'the broker itself accepts.',
       '',
-      'Publish (§26.4 — a public destination you may not publish directly returns',
-      'a queued-for-approval result; relay its message verbatim):',
-      '  publish --id <id> [--destination intranet|public_web|schoology|google|okf]',
-      '  unpublish --id <id> --destination intranet|public_web|schoology|google',
+      'Publish / unpublish (Live or Draft; it does NOT change who can read it —',
+      'the visibility level does. A review-gated section returns a',
+      'queued-for-approval result; relay its message verbatim):',
+      '  publish --id <id>            # make it Live',
+      '  unpublish --id <id>          # back to Draft',
+      '  [--destination schoology|google|okf]  # connectors; omit for the live switch',
       '',
     ].join('\n')
   );
@@ -743,15 +745,14 @@ async function publishObject(args) {
 
 async function unpublishObject(args) {
   const id = requireStr(args, 'id', 'id');
-  const destination = optEnum(
-    args,
-    'destination',
-    'destination',
-    UNPUBLISH_DESTINATIONS
-  );
-  if (!destination) {
-    fail('--destination intranet|public_web|schoology|google is required');
-  }
+  // Defaults to the single live state, mirroring `publish` (#1726). Requiring a
+  // destination here made "take this back to draft" — the overwhelmingly common
+  // case — an exit-1 unless the caller happened to name a value that no longer
+  // means anything distinct: `intranet` and `public_web` both address the one
+  // live row. The connectors still need naming.
+  const destination =
+    optEnum(args, 'destination', 'destination', UNPUBLISH_DESTINATIONS) ||
+    'intranet';
   const { approvalRequired, payload } = await restFetch(
     'DELETE',
     `/${encodeURIComponent(id)}/publish/${encodeURIComponent(destination)}`

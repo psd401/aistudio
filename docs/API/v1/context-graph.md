@@ -1317,20 +1317,29 @@ session-cookie path for these endpoints. Every response carries `X-Request-Id` a
 | `content:create` | Create content objects (and their initial version) |
 | `content:update` | Update metadata, create versions, set visibility |
 | `content:delete` | Hard-delete a content object (owner/admin only — service-gated) |
-| `content:publish_internal` | Publish to / unpublish from a destination |
-| `content:publish_public` | Publish to a public-facing destination without approval |
+| `content:publish_internal` | Make an object live / take it back to draft, and push to a connector |
+| `content:publish_public` | Widen visibility to `public`, or push to a connector, without approval |
 | `content:delegate` | Mint short-lived delegated tokens (`POST /api/v1/agents/delegated-token`) — agent-held authority, never present in a minted token |
 
 Staff API keys may hold up to `content:publish_internal`; `content:publish_public`
 is administrator-held. A caller without it that requests a `public`-facing outcome on
 an EXISTING object is not rejected — it returns `202` with `data.status =
 "approval_required"` and enters the review queue (the §26.4 gate):
-`PATCH /content/{id}/visibility` (widen to `public`), `POST /content/{id}/publish`
-(publish to `public_web`), and `DELETE /content/{id}/publish/{destination}`
-(unpublish from `public_web` — taking public content down needs the same authority
-as putting it up). Each of these persists a durable `content_publish_requests` row
-that an admin approves at /admin/atrium; approving a `publish` replays the PINNED
-raise-time version (issue #1118), not a newer edited head.
+`PATCH /content/{id}/visibility` (widen to `public`), and
+`POST`/`DELETE /content/{id}/publish/{connector}` for the `schoology` and `google`
+CONNECTORS (pushing a copy into an external family-facing system is an exposure
+whatever the level says, and taking one back down needs the same authority as
+putting it up).
+
+**Making an object live is NOT one of them.** Publishing pins a version and gives
+the object a reader page; who may open that page is the object's visibility level
+and nothing else, so a Live/Draft change exposes nothing new and is not gated.
+A publish is queued only when the object sits in a section an administrator has
+switched review on for.
+
+Each queued request persists a durable `content_publish_requests` row that an admin
+approves at /admin/atrium; approving a `publish` replays the PINNED raise-time
+version (issue #1118), not a newer edited head.
 
 `POST /content` (create at `visibility.level: "public"`) is the ONE exception: rather
 than block, it uses **create-as-private** (issue #1118) — the object is created
@@ -2025,8 +2034,8 @@ object audience check. They never expose storage keys. The same-origin
 `GET /api/v1/content/assets/{assetId}/bytes` route rechecks authorization on every
 read and masks all denied cases as `404`: authenticated readers must be in the
 current object audience; anonymous readers are admitted only when the asset is
-pinned to the exact version in a live `public_web` publication and the object is
-currently public. Unpublished, private, unready, or unreferenced assets are never
+pinned to the exact version the object is LIVE at and the object's level is
+currently `public` — the same derived gate `/p/{slug}` enforces. Unpublished, private, unready, or unreferenced assets are never
 publicly readable. Responses are `nosniff`, `private, no-store`, and carry an
 ETag derived from the normalized digest.
 
@@ -2073,8 +2082,9 @@ curl -X PATCH -H "Authorization: Bearer sk-your-key" \
 **Response `403`** — `CONTENT_FORBIDDEN` (caller may not edit this object).
 **Response `404`** — `CONTENT_NOT_FOUND`.
 **Response `202`** — approval required: `level: "public"` was requested without
-`content:publish_public` — the same §26.4 gate `POST /content/{id}/publish` enforces,
-so a `content:update`-only caller cannot reach "public" through this endpoint either.
+`content:publish_public`. Since publishing no longer touches the audience, this
+endpoint is the ONLY way an existing object becomes world-readable, so a
+`content:update`-only caller cannot reach "public" at all.
 Body is `{ "data": { "status": "approval_required", "message": ... }, "meta": ... }`.
 
 ---
@@ -2083,21 +2093,28 @@ Body is `{ "data": { "status": "approval_required", "message": ... }, "meta": ..
 
 #### `POST /api/v1/content/{id}/publish`
 
-Publish the object's current version to a destination. Requires `content:publish_internal`.
-Supply the strong ETag from `GET /content/{id}` in `If-Match` to prevent a
-concurrent head change from publishing an unintended version. The service checks
-the precondition again under lock.
+Make the object LIVE: pin its current version, give it a reader page at
+`/c/{slug}`, and add it to the published library and retrieval. Requires
+`content:publish_internal`. Supply the strong ETag from `GET /content/{id}` in
+`If-Match` to prevent a concurrent head change from publishing an unintended
+version. The service checks the precondition again under lock.
+
+**This does not change who can read the object.** That is the visibility level
+(`PATCH /content/{id}/visibility`). The public address at `/p/{slug}` is DERIVED:
+it resolves when the object is live AND its level is `public`.
 
 **Request body:**
 
 | Field | Type | Required | Constraints |
 |-------|------|----------|-------------|
-| `destination` | `intranet` \| `public_web` \| `schoology` \| `google` \| `okf` | yes | `okf` serializes the single object to a portable OKF concept bundle in S3 (internal-publish authority) |
-| `visibility` | object | no | Optional visibility to apply alongside the publish |
+| `destination` | `intranet` \| `public_web` \| `schoology` \| `google` \| `okf` | no | Defaults to `intranet`. `intranet` and `public_web` BOTH mean the single live state and are folded onto one publication row. `schoology`/`google` are connectors (a copy pushed into another system); `okf` serializes the object to a portable OKF concept bundle in S3 |
 
-**Public-publish gate (§26.4):** if `destination`/`visibility` is public-facing and
-the caller lacks `content:publish_public`, the request is **not** published — it
-returns `202` with `data.status = "approval_required"` and enters the review queue.
+There is no `visibility` field.
+
+**Approval (`202`, not an error):** a CONNECTOR publish by a caller lacking
+`content:publish_public`, or any publish out of a section that requires review, is
+**not** performed — it returns `202` with `data.status = "approval_required"` and
+enters the review queue.
 
 **Example request:**
 
@@ -2124,17 +2141,19 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
 }
 ```
 
-`readerUrl` is the publish service's canonical link. It is an absolute `/c/{slug}`
-or `/p/{slug}` URL for deployed Atrium readers and `null` for destinations that
-do not provide a reader URL.
+`readerUrl` is the publish service's canonical link — an absolute `/c/{slug}` URL
+for the live switch, and `null` for a connector, which has no reader page of ours.
+The `/p/{slug}` address is not returned here because it is derived from the level,
+which this call does not decide.
 
-**Response `202`** (approval required — public publish without `content:publish_public`)
+**Response `202`** (approval required — a connector publish without
+`content:publish_public`, or a section that requires review)
 
 ```json
 {
   "data": {
     "status": "approval_required",
-    "message": "Public publishing requires approval; your request has been queued for review."
+    "message": "Publishing to this destination requires approval; your request has been queued for review."
   },
   "meta": { "requestId": "req_abc123" }
 }
@@ -2148,17 +2167,21 @@ do not provide a reader URL.
 
 #### `DELETE /api/v1/content/{id}/publish/{destination}`
 
-Unpublish the object from a destination. **Idempotent:** unpublishing an object that
-is not live at the destination returns `unpublished: false` rather than erroring.
-`{destination}` is one of `intranet`, `public_web`, `schoology`, `google` (no `okf`:
-an okf publication is a serialized S3 bundle with no live surface to take down).
-Mirrors the MCP `unpublish_content` tool. Requires `content:publish_internal`.
+Take the object back to DRAFT: retract its live publication, so its reader page
+(and, if its level is `public`, its public address) stops resolving. **Idempotent:**
+unpublishing an object that is not live returns `unpublished: false` rather than
+erroring. `{destination}` is one of `intranet`, `public_web`, `schoology`, `google`
+(no `okf`: an okf publication is a serialized S3 bundle with no live surface to take
+down). `intranet` and `public_web` both address the single live row. Mirrors the MCP
+`unpublish_content` tool. Requires `content:publish_internal`.
 
-**Public-publish gate (§26.4):** taking any public-facing destination
-(`public_web`, `schoology`, `google`) offline requires the same
-`content:publish_public` authority needed to publish it — `content:publish_internal`
-alone can publish/unpublish `intranet` (the only internal-audience destination) but
-cannot publish to, or tear down a live, public-facing destination.
+This does not narrow the object's visibility — a later republish reuses the same
+level and grants.
+
+**§26.4 gate:** retracting a CONNECTOR push requires the same
+`content:publish_public` authority needed to make it — `content:publish_internal`
+alone can take an object live and back to draft, but cannot push to, or tear down,
+a connector.
 
 **Response `200`**
 
@@ -2175,8 +2198,8 @@ cannot publish to, or tear down a live, public-facing destination.
 
 **Response `400`** — Invalid or missing destination.
 **Response `404`** — `CONTENT_NOT_FOUND`.
-**Response `202`** — approval required: unpublishing `public_web` was requested without
-`content:publish_public`. Body is
+**Response `202`** — approval required: retracting a CONNECTOR push was requested
+without `content:publish_public`. Body is
 `{ "data": { "status": "approval_required", "message": ... }, "meta": ... }`.
 
 ---
