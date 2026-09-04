@@ -124,41 +124,13 @@ describe("in-app publish grants public-publish authority (#1336)", () => {
     expect(result.data.readerUrl).toBe("https://example.test/p/slug-1");
   });
 
-  it("forwards the optional visibility widen the confirm dialog supplies", async () => {
-    await publishDocumentAction("obj-1", {
-      destination: "public_web",
-      visibility: { level: "public" },
-    });
-    const input = publishMock.mock.calls[0][2] as {
-      visibility?: { level: string };
-    };
-    expect(input.visibility?.level).toBe("public");
-  });
-
-  it("forwards `widenOnly` — dropping it silently restores assignment semantics", async () => {
-    // Regression: the action rebuilds `visibility` field-by-field to run the
-    // runtime validators, and an earlier revision omitted this one. The type
-    // still declared it, the UI still sent it, and the whole server-side
-    // narrowing guard was dead with nothing failing.
-    await publishDocumentAction("obj-1", {
-      destination: "intranet",
-      visibility: { level: "internal", widenOnly: true },
-    });
-    const input = publishMock.mock.calls[0][2] as {
-      visibility?: { widenOnly?: boolean };
-    };
-    expect(input.visibility?.widenOnly).toBe(true);
-  });
-
-  it("defaults `widenOnly` to false for a caller that omits it (REST/MCP semantics)", async () => {
-    await publishDocumentAction("obj-1", {
-      destination: "intranet",
-      visibility: { level: "internal" },
-    });
-    const input = publishMock.mock.calls[0][2] as {
-      visibility?: { widenOnly?: boolean };
-    };
-    expect(input.visibility?.widenOnly).toBe(false);
+  it("sends NO visibility payload at all (#1726)", async () => {
+    // The dialog used to bundle a widen into the publish so both committed in
+    // one transaction. That transaction ran `setLevelInTx`, which REPLACES the
+    // grant set — so an author who confirmed the widen lost every person they
+    // had shared the object with.
+    await publishDocumentAction("obj-1", { destination: "public_web" });
+    expect(publishMock.mock.calls[0][2]).toEqual({ destination: "public_web" });
   });
 
   it("passes the same authority to unpublish, so an author can retract", async () => {
@@ -223,8 +195,12 @@ describe("in-app CREATE honours the same policy (#1336, Codex P2)", () => {
 });
 
 describe("allow-then-notify records an admin-visible notification (#1336)", () => {
-  it("writes a public-exposure audit row for a NON-ADMIN public publish", async () => {
-    await publishDocumentAction("obj-1", { destination: "public_web" });
+  it("writes a public-exposure audit row for a NON-ADMIN connector publish", async () => {
+    // Since #1726 the exposure a publish can create is a CONNECTOR push — a copy
+    // landing in an external family-facing system. The live switch exposes
+    // nothing new, so it is not notified here; a widen to `public` is notified by
+    // setVisibilityAction, where the audience is actually written.
+    await publishDocumentAction("obj-1", { destination: "schoology" });
 
     expect(recordContentAuditMock).toHaveBeenCalledTimes(1);
     const entry = recordContentAuditMock.mock.calls[0][0] as {
@@ -240,68 +216,32 @@ describe("allow-then-notify records an admin-visible notification (#1336)", () =
     // on it, so the wrong value here hides the notification.
     expect(entry.surface).toBe("ui");
     expect(entry.objectId).toBe("obj-1");
-    expect(entry.destination).toBe("public_web");
+    expect(entry.destination).toBe("schoology");
     expect(entry.outcome).toBe("ok");
     expect(entry.details.publicExposure).toBe(true);
-    expect(entry.details.note).toContain("public_web");
+    expect(entry.details.note).toContain("schoology");
   });
 
-  it("does NOT notify for an INTERNAL-only publish (no public exposure)", async () => {
+  it("does NOT notify the LIVE SWITCH — it exposes nothing new (#1726)", async () => {
+    // Going live changes no audience: a Live object is readable by exactly the
+    // people its Level already admitted. The notification for an audience change
+    // lives where the audience is written — setVisibilityAction, on the
+    // transition to `public`.
     await publishDocumentAction("obj-1", { destination: "intranet" });
     expect(recordContentAuditMock).not.toHaveBeenCalled();
-  });
-
-  it("DOES notify when an intranet publish bundles a widen that COMMITTED", async () => {
-    publishMock.mockResolvedValueOnce({
-      publicationId: "pub-1",
-      publishedVersionId: "v-1",
-      readerUrl: "/c/slug-1",
-      becamePublic: true,
-    });
-    await publishDocumentAction("obj-1", {
-      destination: "intranet",
-      visibility: { level: "public" },
-    });
-    expect(recordContentAuditMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("does NOT notify when the bundled widen was SKIPPED in the transaction", async () => {
-    // A `widenOnly` offer against an already-public row writes nothing, so the
-    // requested level says "public" while no exposure occurred. Keying the
-    // notice off the request would report an exposure that never happened.
-    publishMock.mockResolvedValueOnce({
-      publicationId: "pub-1",
-      publishedVersionId: "v-1",
-      readerUrl: null,
-      becamePublic: false,
-    });
-    await publishDocumentAction("obj-1", {
-      destination: "intranet",
-      visibility: { level: "public", widenOnly: true },
-    });
+    // Including under its legacy alias, which is the same live row.
+    await publishDocumentAction("obj-1", { destination: "public_web" });
     expect(recordContentAuditMock).not.toHaveBeenCalled();
   });
 
-  it("still notifies a public DESTINATION even when no widen committed", async () => {
-    // Publishing to public_web IS the exposure, regardless of visibility churn.
-    publishMock.mockResolvedValueOnce({
-      publicationId: "pub-1",
-      publishedVersionId: "v-1",
-      readerUrl: "https://example.test/p/slug-1",
-      becamePublic: false,
-    });
-    await publishDocumentAction("obj-1", { destination: "public_web" });
-    expect(recordContentAuditMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("does NOT notify an ADMIN's public publish (they always held the authority)", async () => {
+  it("does NOT notify an ADMIN's connector publish (they always held the authority)", async () => {
     getUserRequesterMock.mockResolvedValue(ADMIN);
-    await publishDocumentAction("obj-1", { destination: "public_web" });
+    await publishDocumentAction("obj-1", { destination: "schoology" });
     expect(recordContentAuditMock).not.toHaveBeenCalled();
   });
 
-  it("notifies on a non-admin public UNPUBLISH too", async () => {
-    await unpublishDocumentAction("obj-1", { destination: "public_web" });
+  it("notifies on a non-admin connector UNPUBLISH too", async () => {
+    await unpublishDocumentAction("obj-1", { destination: "schoology" });
     expect(recordContentAuditMock).toHaveBeenCalledTimes(1);
     const entry = recordContentAuditMock.mock.calls[0][0] as { action: string };
     expect(entry.action).toBe("unpublish");
@@ -309,7 +249,7 @@ describe("allow-then-notify records an admin-visible notification (#1336)", () =
 
   it("does NOT notify an unpublish that removed nothing", async () => {
     unpublishMock.mockResolvedValueOnce({ unpublished: false });
-    await unpublishDocumentAction("obj-1", { destination: "public_web" });
+    await unpublishDocumentAction("obj-1", { destination: "schoology" });
     expect(recordContentAuditMock).not.toHaveBeenCalled();
   });
 

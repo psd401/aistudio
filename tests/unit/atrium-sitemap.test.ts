@@ -2,10 +2,11 @@
  * Unit tests for app/sitemap.ts (Epic #1059 — Atrium public reader SEO).
  *
  * The security-relevant assertion is the complete gate: the query requires
- * visibility_level='public', a live public_web publication, and published
- * lifecycle; the result is then filtered through the anonymous collection
- * snapshot. The sitemap therefore cannot advertise a URL the public reader
- * would 404 (existence leak + crawler soft-404s).
+ * visibility_level='public', a LIVE publication (#1726 — one state, shared with
+ * the reader through `isLivePublicationRow`), and published lifecycle; the result
+ * is then filtered through the anonymous collection snapshot. The sitemap
+ * therefore cannot advertise a URL the public reader would 404 (existence leak +
+ * crawler soft-404s).
  *
  * Also covered: the fail-soft contract (empty sitemap + log.warn on a DB error
  * or a missing ATRIUM_PUBLIC_BASE_URL — never a throw) and the entry mapping
@@ -40,6 +41,10 @@ jest.mock("@/lib/db/schema", () => ({
 jest.mock("drizzle-orm", () => ({
   eq: (a: unknown, b: unknown) => ["eq", a, b],
   and: (...args: unknown[]) => ["and", ...args],
+  // `isLivePublicationRow` builds the destination half of the Live predicate with
+  // inArray; without it the builder throws and the fail-soft path would silently
+  // swallow a broken gate as an empty sitemap.
+  inArray: (a: unknown, b: unknown) => ["inArray", a, b],
 }));
 
 // The real surface-helpers module pulls the DB client; mock the link builder to
@@ -120,14 +125,15 @@ describe("app/sitemap.ts — Atrium public reader sitemap", () => {
 
     // Join: publications keyed to the object.
     expect(joinConditions).toEqual([["eq", "cp.object_id", "co.id"]]);
-    // Gate: strict public visibility + live public_web publication + published
-    // lifecycle — a strict subset of what the reader page renders, so the
-    // sitemap can never name a URL that 404s.
+    // Gate: strict public visibility + LIVE + published lifecycle — a strict
+    // subset of what the reader page renders, so the sitemap can never name a
+    // URL that 404s. The Live half comes from the shared `isLivePublicationRow`,
+    // so the sitemap and the reader cannot drift about what "live" means.
     expect(whereConditions).toEqual([
       [
         "and",
         ["eq", "co.visibility_level", "public"],
-        ["eq", "cp.destination", "public_web"],
+        ["inArray", "cp.destination", ["intranet", "public_web"]],
         ["eq", "cp.status", "live"],
         ["eq", "co.status", "published"],
       ],

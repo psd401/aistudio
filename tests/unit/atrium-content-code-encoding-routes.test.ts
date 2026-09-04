@@ -137,6 +137,9 @@ beforeEach(() => {
   mockCreateVersion.mockResolvedValue({ id: "obj-1", slug: "art", version: { id: "v2" } });
   mockPublish.mockResolvedValue({
     publishedVersionId: "v7",
+    // The service reports the destination it ACTUALLY wrote (#1726) — the route
+    // echoes THAT, not the alias the caller sent.
+    destination: "intranet",
     readerUrl: "https://app.example/c/art",
   });
   mockContentErrorToResponse.mockReturnValue({ __marker: "content-error" });

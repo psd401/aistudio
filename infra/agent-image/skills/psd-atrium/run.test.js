@@ -723,10 +723,21 @@ test('unpublish DELETEs /<id>/publish/<destination>', async () => {
   expect(restCalls[0]).toMatchObject({ method: 'DELETE', path: '/obj-1/publish/intranet' });
 });
 
-test('unpublish requires a valid --destination (exit 1)', async () => {
+test('unpublish defaults to the single live state (#1726)', async () => {
+  // "Take this back to draft" is the common case, and `intranet` / `public_web`
+  // address the same live row — so requiring the caller to name one was an
+  // exit-1 for a choice that no longer means anything distinct.
+  await run('unpublish', '--id', 'obj-1');
+  expect(restCalls[0]).toMatchObject({
+    method: 'DELETE',
+    path: '/obj-1/publish/intranet',
+  });
+});
+
+test('unpublish rejects an UNKNOWN --destination (exit 1)', async () => {
   let code;
   try {
-    await run('unpublish', '--id', 'obj-1');
+    await run('unpublish', '--id', 'obj-1', '--destination', 'frobnicate');
   } catch (err) {
     code = err.code;
   }

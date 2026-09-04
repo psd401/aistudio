@@ -372,21 +372,30 @@ async function handlePublishOp(ctx: PublishOpContext): Promise<NextResponse> {
       // head without this would ship the stale/empty version (Codex review P1).
       await snapshotLiveDocumentForPublish({ req, objectId, kind: loaded.obj.kind, requestId });
       const result = await publishService.publish(req, objectId, { destination });
-      log.info("Agent published object", { objectId, destination });
+      // Report the destination the service ACTED ON: `public_web` folds onto the
+      // single live row (#1726), so echoing the requested alias would name a row
+      // that does not exist.
+      log.info("Agent published object", {
+        objectId,
+        destination: result.destination,
+      });
       return NextResponse.json({
         applied: true,
         op: "publish",
-        destination,
+        destination: result.destination,
         publicationId: result.publicationId,
         publishedVersionId: result.publishedVersionId,
       });
     }
     const result = await publishService.unpublish(req, objectId, destination);
-    log.info("Agent unpublished object", { objectId, destination });
+    log.info("Agent unpublished object", {
+      objectId,
+      destination: result.destination,
+    });
     return NextResponse.json({
       applied: true,
       op: "unpublish",
-      destination,
+      destination: result.destination,
       unpublished: result.unpublished,
     });
   } catch (error) {

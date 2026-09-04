@@ -3242,17 +3242,27 @@ paths:
       tags: [Content]
       summary: Publish a content object
       description: |
-        Publishes the object's current version to a destination. Mirrors the MCP
-        `publish_content` tool. Requires `content:publish_internal`.
+        Makes the object LIVE: pins its current version, gives it a reader page at
+        `/c/{slug}`, and adds it to the published library and retrieval. Mirrors
+        the MCP `publish_content` tool. Requires `content:publish_internal`.
+
+        **Publishing does not change who can read the object.** That is the
+        object's visibility level (`PATCH /content/{id}/visibility`). A live
+        object shared with specific people stays limited to those people; a live
+        object whose level is `public` is additionally served anonymously at
+        `/p/{slug}`. `intranet` and `public_web` are therefore the same request —
+        both mean "make it live" — and the body carries no `visibility` field.
 
         The `okf` destination (Phase 8) serializes the single object to a portable
         Open Knowledge Format concept bundle in S3 (internal-publish authority — not
         a public destination); for a whole collection use `POST /content/export/okf`.
 
-        **Public-publish gate (§26.4):** a public-facing destination/visibility
-        requested by a caller lacking `content:publish_public` is NOT an error —
-        it returns **HTTP 202** with `data.status = "approval_required"` and the
-        request enters the review queue instead of publishing.
+        **Approval (HTTP 202, not an error):** two gates can queue a publish for
+        human review instead of performing it. A CONNECTOR destination
+        (`schoology`/`google`) requested by a caller lacking
+        `content:publish_public` (§26.4 — pushing a copy into an external
+        family-facing system is an exposure whatever the level says), and any
+        publish out of a section whose administrator has switched review on.
 
         Supply the strong ETag returned by `GET /content/{id}` as `If-Match`
         to ensure the same current version is still being published. A stale
@@ -3291,8 +3301,9 @@ paths:
               $ref: "#/components/headers/X-RateLimit-Reset"
         "202":
           description: |
-            Approval required — a public publish was requested without
-            `content:publish_public`. The request is queued for human review.
+            Approval required — a connector publish was requested without
+            `content:publish_public`, or the object sits in a section that
+            requires review. The request is queued for human review.
           content:
             application/json:
               schema:
@@ -5534,13 +5545,19 @@ components:
 
     PublishContentRequest:
       type: object
-      required: [destination]
       properties:
         destination:
           type: string
+          description: |
+            `intranet` and `public_web` BOTH mean the single Live state and are
+            folded onto one publication row; omit the field to get it. The
+            remaining values are connectors — a copy pushed into another system.
+            There is no `visibility` field: publishing never changes who may read
+            the object. Set the audience with
+            `PATCH /content/{id}/visibility`, and the public address at
+            `/p/{slug}` follows from `visibilityLevel: public` plus being live.
           enum: [intranet, public_web, schoology, google, okf]
-        visibility:
-          $ref: "#/components/schemas/ContentVisibility"
+          default: intranet
 
     ContentListResponse:
       type: object
@@ -5833,7 +5850,11 @@ components:
               format: uuid
             destination:
               type: string
-              enum: [intranet, public_web, schoology, google, okf]
+              description: >-
+                The destination actually written, which may differ from the one
+                requested: `public_web` is an alias for the single live state and
+                is reported as `intranet`.
+              enum: [intranet, schoology, google, okf]
             publishedVersionId:
               type: string
               format: uuid
@@ -5842,9 +5863,17 @@ components:
               format: uri-reference
               nullable: true
               description: >-
-                Canonical reader URL returned by the publish service. Deployed
-                intranet/public readers are absolute; destinations without a
-                reader URL return null.
+                Canonical reader URL returned by the publish service, and null
+                for a connector, which has no reader page. Which reader it names
+                follows the object's visibility level, because the public address
+                is DERIVED from level + live: an object whose level is `public`
+                returns its absolute `/p/{slug}` address, since that is the page
+                the world can actually open; every other level returns
+                `/c/{slug}`, which requires a session. Publishing does not CHANGE
+                the level (set it with `PATCH /content/{id}/visibility`), but it
+                does complete the public address for an object already at
+                `public`, so use this value verbatim rather than assembling a
+                link from the slug.
               example: "https://aistudio.example.edu/c/ai-acceptable-use-policy"
         meta:
           type: object

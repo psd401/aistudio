@@ -5,11 +5,17 @@
  * The public reader at `app/(public)/p/[slug]/page.tsx` is the anonymous, world-
  * readable surface. Its security contract is stricter than the internal reader:
  *   - it consults NO session-dependent requester,
- *   - it renders ONLY an object whose `visibility_level === 'public'` AND that has
- *     a LIVE `public_web` publication in a collection open to an anonymous user,
- *   - every other case (absent slug, non-public object, no live public_web
- *     publication, dangling version) resolves to `notFound()` (404) — NEVER 403,
- *     so a probe cannot distinguish "exists but not public" from "absent".
+ *   - it renders ONLY an object whose `visibility_level === 'public'` AND that is
+ *     LIVE, in a collection open to an anonymous user,
+ *   - every other case (absent slug, non-public object, draft, dangling version)
+ *     resolves to `notFound()` (404) — NEVER 403, so a probe cannot distinguish
+ *     "exists but not public" from "absent".
+ *
+ * Since #1726 the public address is DERIVED from that conjunction rather than
+ * from a second `public_web` publication row, so the two cells that used to be
+ * reachable only by disagreeing switches — Public with no publication, and a
+ * publication without Public — are now simply Public+Draft and Internal+Live.
+ * Both still 404, and the cases below are the whole (level, live) matrix.
  *
  * The critical assertion is that a NON-PUBLIC object 404s and its body is never
  * loaded — a public URL must never leak internal/group content, even to a viewer
@@ -157,7 +163,7 @@ describe("Atrium public reader page — anonymous 404 masking", () => {
     expect(getByIdMock).not.toHaveBeenCalled();
   });
 
-  it("404s a NON-PUBLIC object BEFORE the publication lookup (never leaks internal content)", async () => {
+  it("404s Internal + LIVE before the publication lookup (never leaks internal content)", async () => {
     executeQueryMock.mockResolvedValueOnce([INTERNAL_OBJ]); // objectBySlug -> internal
 
     await expect(render()).rejects.toBe(NOT_FOUND_SENTINEL);
@@ -170,7 +176,7 @@ describe("Atrium public reader page — anonymous 404 masking", () => {
     expect(getTextMock).not.toHaveBeenCalled();
   });
 
-  it("404s a public object with no live public_web publication", async () => {
+  it("404s Public + DRAFT (no live publication)", async () => {
     executeQueryMock.mockResolvedValueOnce([PUBLIC_OBJ]); // objectBySlug -> public
     executeQueryMock.mockResolvedValueOnce([]); // livePublication -> none
 
@@ -195,7 +201,7 @@ describe("Atrium public reader page — anonymous 404 masking", () => {
     expect(getByIdMock).not.toHaveBeenCalled();
   });
 
-  it("renders the body for a public, live object (document)", async () => {
+  it("renders the body for Public + LIVE (document) — the one cell that resolves", async () => {
     executeQueryMock.mockResolvedValueOnce([PUBLIC_OBJ]); // objectBySlug -> public
     executeQueryMock.mockResolvedValueOnce([PUBLICATION_ROW]); // livePublication
     getByIdMock.mockResolvedValue({ objectId: "obj-1", versionNumber: 3 });

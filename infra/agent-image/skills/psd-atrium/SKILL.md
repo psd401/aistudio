@@ -1,7 +1,7 @@
 ---
 name: psd-atrium
 summary: Read and write AI Studio Atrium content — PSD's collaborative document + live-artifact workspace with an intranet publishing flow. Find/read/create/edit/archive/delete documents and artifacts, embed images, add first-party artifact persistence with AtriumData, and publish them. Artifacts fully support HTML/CSS/JavaScript (including <script>/<style>).
-description: Use this to work with Atrium, PSD's collaborative content workspace in AI Studio (documents + interactive artifacts, with an internal "intranet" publishing flow). Find and read Atrium documents/artifacts, create new ones, edit them (append or replace), add live artifact persistence with window.AtriumData, archive them, hard-delete ones you own, and publish/unpublish to a destination. Interactive artifacts fully support real HTML, CSS, and JavaScript — including <script>, <style>, and inline style="…" — pass raw code; the skill base64-encodes it in transit so AI Studio cannot mangle it (do NOT work around with legacy attributes like bgcolor/width). That protects the write, NOT the render: `data:` URIs are still stripped when the page is served, so images must be uploaded with upload-asset or referenced by public https URL. Atrium is REAL and live — never say the district has no content workspace. Version-based: reads return the last saved version and edits create a new version; the real-time collaborative editor rail is not reachable from here.
+description: Use this to work with Atrium, PSD's collaborative content workspace in AI Studio (documents + interactive artifacts, with an internal "intranet" publishing flow). Find and read Atrium documents/artifacts, create new ones, edit them (append or replace), add live artifact persistence with window.AtriumData, archive them, hard-delete ones you own, and publish/unpublish them (a Live/Draft state — it does NOT change who can read them; the visibility level does). Interactive artifacts fully support real HTML, CSS, and JavaScript — including <script>, <style>, and inline style="…" — pass raw code; the skill base64-encodes it in transit so AI Studio cannot mangle it (do NOT work around with legacy attributes like bgcolor/width). That protects the write, NOT the render: `data:` URIs are still stripped when the page is served, so images must be uploaded with upload-asset or referenced by public https URL. Atrium is REAL and live — never say the district has no content workspace. Version-based: reads return the last saved version and edits create a new version; the real-time collaborative editor rail is not reachable from here.
 allowed-tools: Bash(node:*)
 ---
 
@@ -474,20 +474,35 @@ Two guardrails the server enforces — relay either refusal verbatim:
 Use `archive` for reversible cleanup and `delete` only for permanent removal of
 throwaway/superseded content you own.
 
-### Publish / unpublish (honor the approval gate)
+### Publish / unpublish (Live or Draft — NOT an audience)
 
 ```bash
-node run.js publish   --id <id> --destination intranet      # internal reader (default)
-node run.js publish   --id <id> --destination public_web    # may return queued-for-approval
-node run.js unpublish --id <id> --destination intranet
+node run.js publish   --id <id>                             # make it Live
+node run.js unpublish --id <id>                             # back to Draft
 ```
 
-`intranet` (and other internal destinations) publish directly with
-`content:publish_internal`. A **public** destination the key may not publish
-directly returns a structured **approval_required** result (HTTP 202) — this is a
-SUCCESS, not an error. **Relay its `message` verbatim** so the user knows the
-request was queued for a human/admin to approve. A completed publish includes
-`readerUrl` when the destination has a reader link.
+**Publishing does not change who can read it.** It makes the object LIVE: pins
+the current version, gives it a page of its own at `/c/{slug}`, and puts it in
+the published library. Who may open that page is the object's **level**, changed
+only with `set-visibility` (below). So:
+
+- Level `group` + Live → a real page that opens for its grantees and 404s for
+  everyone else. That is correct, not a mistake.
+- Level `public` + Live → also served at the anonymous `/p/{slug}`.
+- Level `public` + Draft → `/p/{slug}` 404s. Publish it.
+
+`--destination` still exists for backward compatibility; `intranet` and
+`public_web` both mean the same single Live state, so **omit it**. A completed
+publish includes `readerUrl`. **Hand that value out as-is** — do not build a link
+from the slug. It is the `/c/` link for most content, and the public `/p/` link
+when the object's level is Public, which is the only one an outside recipient can
+open. Guessing `/c/` for a public page sends them to a sign-in wall.
+
+Publishing can still be queued for review — a section whose administrator turned
+review on returns a structured **approval_required** result (HTTP 202). That is a
+SUCCESS, not an error: **relay its `message` verbatim** so the user knows a human
+has to approve it. `set-visibility --level public` can return the same signal when
+the key may not publish publicly.
 
 **Paste every Atrium URL BARE — no backticks, no `[label](url)`, no bold, no
 trailing period.** Put it on its own line.
@@ -502,11 +517,11 @@ was not the URL that was published (agent_failures 7167, 7299).
 Same rule already applies to Workspace consent links, for the same mechanical
 reason. If a URL needs explaining, put the sentence on a SEPARATE line.
 
-**Do not hand out a `/c/` link for an object that is still private.** Create
-starts private+draft, so a link shared before `publish` or `set-visibility`
-404s for the recipient even though the object exists and reads back fine
-(agent_failures 5946, 7233). Either publish first, or say plainly that it is
-still private and not yet viewable.
+**Do not hand out a `/c/` link for an object that is still a draft or still
+private.** Create starts private + draft, so a link shared before BOTH `publish`
+and `set-visibility` 404s for the recipient even though the object exists and
+reads back fine (agent_failures 5946, 7233). Publish it and set a level that
+admits the recipient, or say plainly that it is not yet viewable.
 
 ### Change who can view it
 
@@ -514,6 +529,10 @@ still private and not yet viewable.
 node run.js set-visibility --id <id> --level internal
 node run.js set-visibility --id <id> --level group --grants role:staff,building:GHS
 ```
+
+This is the ONLY thing that changes the audience. Setting a level never
+publishes, and publishing never changes a level — the two are independent, and a
+shareable page needs both (Live, plus a level that admits the recipient).
 
 ## Output contract
 

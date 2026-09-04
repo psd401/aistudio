@@ -9,11 +9,14 @@
  * requests to expose content publicly, the district's highest-governance path.
  *
  * Replay semantics on approve:
- * - `publish`          → `publishService.publish(admin, objectId, context)` —
+ * - `publish`          → `publishService.publish(admin, objectId, context)`, then
+ *   a separate `visibilityService.setLevel` when a pre-#1726 row recorded a
+ *   bundled widen (publishing no longer carries visibility) —
  *   the admin requester passes the §26.4 gate via `isAdmin`, so the exact
  *   blocked publish (destination + any recorded visibility widen) goes through,
  *   PINNED to the raise-time version (`context.versionId`, issue #1118) so the
- *   admin publishes the reviewed content, not a newer unreviewed head.
+ *   admin publishes the reviewed content, not a newer unreviewed head. See
+ *   `replayPublish` for why the widen goes second and is compensated.
  * - `visibility_widen` → `visibilityService.setLevel(admin, objectId, level)`.
  *   Also the row an unauthorized public CREATE lands on (the object was created
  *   private; approve widens it to public).
@@ -27,7 +30,10 @@
  *
  * The replayed call may itself throw (e.g. a destination adapter that is not
  * yet implemented) — that error surfaces to the admin and the row stays
- * `pending` so the decision can be retried later.
+ * `pending` so the decision can be retried later. A retry is only safe because
+ * every replay is all-or-nothing: the single-service kinds are atomic on their
+ * own, and the one kind that writes twice (`publish` + a bundled widen) undoes
+ * its publish when the widen fails.
  */
 
 import { and, desc, eq, inArray } from "drizzle-orm";
@@ -53,7 +59,12 @@ import {
 import { publishService } from "@/lib/content/publish-service";
 import { visibilityService } from "@/lib/content/visibility-service";
 import { isPublishDestination } from "@/lib/content/validators";
-import type { PublishDestination } from "@/lib/content/publish-adapters/types";
+import {
+  isLive,
+  LIVE_DESTINATION,
+  normalizeLiveDestination,
+  type PublishDestination,
+} from "@/lib/content/publish-adapters/types";
 import type { Requester } from "@/lib/content/types";
 import {
   collectionAccessSnapshot,
@@ -225,31 +236,105 @@ function requireRequestObjectId(
 }
 
 /**
- * Replay a `publish` request: publish the recorded destination, applying any
- * recorded visibility widen and — issue #1118 — PINNING the raise-time version
- * (`context.versionId`) so the admin publishes the reviewed content, not a newer
- * head. `versionId` is absent on pre-#1118 rows → publish the current head.
+ * Whether `target` was ALREADY carrying a live publication before a replay wrote
+ * one — the guard on the compensating unpublish in `replayPublish`.
+ *
+ * `unpublish` on the live destination retires every live-surface row
+ * (`LIVE_SURFACE_DESTINATIONS`, so a pre-migration-180 `public_web` row goes with
+ * it), so for that target the question has to be "was the object Live at all",
+ * not "was this exact row present" — otherwise compensating a replay for an
+ * object live only through the legacy alias would take down a page the approval
+ * never put up. A connector destination answers only for itself.
+ */
+function destinationWasLive(
+  liveDestinations: readonly PublishDestination[],
+  target: PublishDestination
+): boolean {
+  return target === LIVE_DESTINATION
+    ? isLive(liveDestinations)
+    : liveDestinations.includes(target);
+}
+
+/**
+ * Replay a `publish` request: publish the recorded destination, and — issue
+ * #1118 — PIN the raise-time version (`context.versionId`) so the admin
+ * publishes the reviewed content, not a newer head. `versionId` is absent on
+ * pre-#1118 rows → publish the current head.
+ *
+ * A pre-#1726 row can also carry a bundled `context.visibility` widen. Publishing
+ * no longer touches visibility, so such a row replays as the TWO writes it always
+ * was — and they are NOT one transaction (`publish` commits, then runs its
+ * adapter outside the tx), so their order and their compensation decide what a
+ * half-failed approval leaves behind. Before #1726 both halves rode inside
+ * `runPublishTx` and a failure left nothing; this restores that.
+ *
+ * PUBLISH FIRST, widen second. Since #1726 going Live changes NO audience — the
+ * Level alone decides who may read, and `/p/{slug}` needs `public` AND Live — so
+ * a publish left standing by a later failure exposes the object to nobody new. A
+ * widen left standing is the opposite: an audience change from a decision that
+ * never completed, on a row that reverts to `pending` with nothing in the
+ * admin's error to say a widen already landed. Widening first stranded exactly
+ * that whenever the paired publish threw — and a publish that throws for a
+ * structural reason (an unresolvable pinned version, an unimplemented adapter)
+ * throws again on every retry, so the strand was permanent.
+ *
+ * If the widen fails, the publish is undone — but only when this call is what
+ * made the object Live, never a publication that was already standing.
+ *
+ * Only `public` is replayable here — that is the only level the §26.4 gate ever
+ * recorded, and it is the level the admin approved.
  */
 async function replayPublish(
   requester: AdminRequester,
-  request: ContentPublishRequestRow
+  request: ContentPublishRequestRow,
+  log: ReturnType<typeof createLogger>
 ): Promise<void> {
   const objectId = requireRequestObjectId(request, "publish");
   const context = request.context ?? {};
   const destination = assertPublishDestination(
     context.destination ?? request.destination
   );
-  const visibility =
-    context.visibility?.level === "public"
-      ? { level: "public" as const }
-      : undefined;
   const versionId =
     typeof context.versionId === "string" ? context.versionId : undefined;
+  const widens = context.visibility?.level === "public";
+  const target = normalizeLiveDestination(destination);
+
+  // Read BEFORE the publish, and only for the rows that can need it: the
+  // compensation must not retire a publication this approval did not create.
+  const wasAlreadyLive = widens
+    ? destinationWasLive(await publishService.liveDestinations(objectId), target)
+    : false;
+
   await publishService.publish(requester, objectId, {
     destination,
-    ...(visibility ? { visibility } : {}),
     ...(versionId ? { versionId } : {}),
   });
+  if (!widens) return;
+
+  try {
+    await visibilityService.setLevel(requester, objectId, { level: "public" });
+  } catch (widenError) {
+    if (!wasAlreadyLive) {
+      try {
+        await publishService.unpublish(requester, objectId, target);
+      } catch (compensationError) {
+        // Best-effort: a failed compensation must not replace the widen failure
+        // in the admin's error, or they would debug the wrong write. What it
+        // leaves behind is Live at the object's EXISTING Level — no audience
+        // change — and the object's own status controls still reach it through
+        // `retractAllPublications`.
+        log.error("Could not undo the publish after a failed widen", {
+          objectId,
+          destination: target,
+          error:
+            compensationError instanceof Error
+              ? compensationError.message
+              : String(compensationError),
+        });
+      }
+    }
+    throw widenError;
+  }
 }
 
 /**
@@ -295,7 +380,7 @@ async function replayApprovedRequest(
 ): Promise<boolean> {
   switch (request.requestKind) {
     case "publish":
-      await replayPublish(requester, request);
+      await replayPublish(requester, request, log);
       return true;
     case "unpublish":
       await replayUnpublish(requester, request);

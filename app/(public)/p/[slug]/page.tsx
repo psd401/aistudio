@@ -2,10 +2,15 @@
  * Atrium public reader page (RSC, anonymous)
  *
  * Issue #1057 (Epic #1059, Atrium Phase 7, spec §20 / §26.4). The world-readable
- * twin of the internal `/c/[slug]` reader. It resolves a slug, confirms a *live*
- * `public_web` publication, enforces `visibility_level = 'public'`, then renders
- * the SAME sanitized markdown (`source.md`) or the SAME cross-origin artifact
- * sandbox as the internal reader, plus a provenance footer.
+ * twin of the internal `/c/[slug]` reader. It resolves a slug, confirms the
+ * object is LIVE, enforces `visibility_level = 'public'`, then renders the SAME
+ * sanitized markdown (`source.md`) or the SAME cross-origin artifact sandbox as
+ * the internal reader, plus a provenance footer.
+ *
+ * ## The public address is DERIVED (#1726)
+ * `Public + Live` IS the public page — there is no separate "publish to the
+ * public web" switch to remember, and therefore no way for the two to disagree.
+ * The gate is the same conjunction it always enforced, minus the second row.
  *
  * ## Anonymous by design — public means public, for EVERYONE
  * This route is in `PUBLIC_PATHS` (middleware) so no session is required. Unlike
@@ -15,15 +20,15 @@
  * session. Rationale: `/p/[slug]` is a public surface; it must serve the SAME
  * thing to an anonymous visitor and to a logged-in staff member. Gating on
  * `canView(session)` here would leak non-public content to authenticated users
- * through the public URL (e.g. an `internal` object that was published to
- * `public_web` while its visibility stayed `internal`). `visibility_level ===
+ * through the public URL (e.g. an `internal` object that is Live but whose Level
+ * is still `internal`). `visibility_level ===
  * 'public'` is the object-level world-readable predicate. A fixed anonymous
  * requester is additionally checked against the object's collection so an
  * archived or grant-restricted district collection cannot remain public through
  * a stale `/p/` publication.
  *
  * ## Visibility gate (always 404, never 403)
- * No object for the slug, no live `public_web` publication, OR a non-`public`
+ * No object for the slug, no live publication, OR a non-`public`
  * object ALL resolve to `notFound()` (404). We never 403 (which would confirm a
  * slug exists and let a probe enumerate private slugs) — the existence-masking
  * contract enforced everywhere else in the content layer.
@@ -40,7 +45,7 @@
  *
  * `dynamic = "force-dynamic"`: the live publication + version are read per request
  * so an unpublish takes effect immediately (a cached page must never outlive the
- * `public_web` publication that authorized it).
+ * publication that authorized it).
  */
 
 import { cache } from "react";
@@ -57,6 +62,7 @@ import { s3Store } from "@/lib/content/storage/s3-store";
 import { versionService } from "@/lib/content/version-service";
 import { resolveDocumentParts } from "@/lib/content/embed-resolver";
 import { requesterMayViewCollection } from "@/lib/content/collection-access";
+import { livePublicationConditions } from "@/lib/content/live-publication";
 import { extractDocumentHeadings } from "@/lib/content/render/headings";
 import type { Requester } from "@/lib/content/types";
 import { createLogger } from "@/lib/logger";
@@ -70,7 +76,7 @@ import "katex/dist/katex.min.css";
 
 /**
  * The live publication + version are read per request; a cached page must never
- * outlive the `public_web` publication (an unpublish must 404 immediately).
+ * outlive the publication that authorized it (an unpublish must 404 immediately).
  */
 export const dynamic = "force-dynamic";
 
@@ -88,9 +94,9 @@ const ANONYMOUS_REQUESTER: Requester = {
 };
 
 /**
- * Load the object + live `public_web` publication for a slug, but ONLY when the
+ * Load the object + its live publication for a slug, but ONLY when the
  * object's visibility is `public`. Returns `null` otherwise (absent slug, no live
- * public_web publication, or a non-public object) — the single "may this be shown
+ * publication, or a non-public object) — the single "may this be shown
  * on the public route?" decision, shared by the page and metadata so the strict
  * public gate is applied exactly once and identically in both.
  *
@@ -110,7 +116,7 @@ const loadPublicObject = cache(async (
   coverGradient: string | null;
   icon: string | null;
   publishedVersionId: string;
-  /** When the live public_web publication went live, for the "Published …" meta. */
+  /** When the object went live, for the "Published …" meta. */
   publishedAt: Date | null;
 } | null> => {
   const [obj] = await executeQuery(
@@ -141,7 +147,7 @@ const loadPublicObject = cache(async (
   if (!obj) return null;
 
   // STRICT public gate: the public route serves ONLY world-readable content.
-  // A non-public object (even one published to public_web while its visibility
+  // A non-public object (even one that is Live while its visibility
   // stayed internal/group) is treated as absent — 404, never 403.
   if (obj.visibilityLevel !== "public") return null;
   if (
@@ -153,6 +159,9 @@ const loadPublicObject = cache(async (
     return null;
   }
 
+  // The public page is DERIVED (#1726): Public + Live, not a second publication
+  // row the author has to remember to create. `livePublicationConditions` is the
+  // one definition of Live, shared with the sitemap / embed / asset gates.
   const [publication] = await executeQuery(
     (db) =>
       db
@@ -164,8 +173,7 @@ const loadPublicObject = cache(async (
         .where(
           and(
             eq(contentPublications.objectId, obj.id),
-            eq(contentPublications.destination, "public_web"),
-            eq(contentPublications.status, "live")
+            ...livePublicationConditions()
           )
         )
         .limit(1),
@@ -199,14 +207,14 @@ const loadPublishedVersion = cache(
 
 /**
  * Page metadata. Title/description/OG tags are resolved ONLY for an object that
- * passes the public gate (public visibility + a live public_web publication) —
+ * passes the public gate (public visibility + Live) —
  * its title and published-version summary are world-readable by definition, so
  * exposing them in the tab/link preview leaks nothing. Anything that fails the
  * gate gets a generic title and NO other metadata, so a probe cannot distinguish
  * a private slug from an absent one via metadata either.
  *
  * This route is intentionally public (spec §20), so robots are explicitly
- * index/follow — the SEO surface for public_web publications (with /sitemap.xml
+ * index/follow — the SEO surface for public pages (with /sitemap.xml
  * enumerating the same gate-passing set).
  */
 export async function generateMetadata({
@@ -248,7 +256,7 @@ export default async function PublicReaderPage({
   const { slug } = await params;
   const log = createLogger({ action: "atrium.publicReaderPage" });
 
-  // Object must exist, be `public`, AND have a live public_web publication, else
+  // Object must exist, be `public`, AND be Live, else
   // 404. No session is consulted — the gate is entirely visibility-based.
   const published = await loadPublicObject(slug);
   if (!published) {

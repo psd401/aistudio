@@ -10,14 +10,21 @@
  * point of showing the link here is to show it NEXT TO the two settings that
  * decide whether it works.
  *
- * The link shown is the one that actually resolves right now, in the same
- * precedence the readers use: a live public page, else the intranet page, else
- * the in-app viewer (which works for unpublished content and any viewer who can
- * already see it — so there is always something honest to hand over).
+ * Since #1726 those two settings are Live/Draft and the Level, and the links are
+ * DERIVED from them rather than from a separate destination choice:
+ *  - Draft            → the in-app viewer, which works for anyone who can already
+ *                       see the object (so there is always an honest link).
+ *  - Live             → `/c/{slug}`, the reader page.
+ *  - Live AND Public  → additionally `/p/{slug}`, the anonymous page.
+ *
+ * Because the public address is derived from the same two values the reader
+ * checks, the #1336 mismatch states (Public with no publication, published-to-web
+ * without Public) cannot be represented at all — there is no second switch left
+ * to disagree with the first.
  */
 
 import { useCallback, useState } from "react";
-import { Check, Copy, Link2, AlertTriangle } from "lucide-react";
+import { Check, Copy, Link2 } from "lucide-react";
 import { serializeArtifactEmbedDirective } from "@/lib/content/embed-directive";
 import { createLogger } from "@/lib/client-logger";
 
@@ -29,24 +36,22 @@ export interface ShareLinkSectionProps {
   /** Slug for the reader routes. */
   slug: string;
   kind: "document" | "artifact";
-  /** A live `public_web` publication exists. */
-  publicLive: boolean;
-  /** A live `intranet` publication exists. */
-  intranetLive: boolean;
+  /** The object has a live publication (#1726: one Live state, not a destination). */
+  isLive: boolean;
   /** The object's SAVED visibility (a draft pick changes nothing yet). */
   savedLevel: "private" | "group" | "internal" | "public";
 }
 
 /** What the recipient of this link needs in order to open it. */
 function audienceLine(
-  target: "public" | "intranet" | "viewer",
+  target: "intranet" | "viewer",
   savedLevel: ShareLinkSectionProps["savedLevel"]
 ): string {
-  if (target === "public") {
-    return "Anyone with this link can open it — no sign-in required.";
-  }
   if (target === "intranet") {
-    return savedLevel === "internal" || savedLevel === "public"
+    if (savedLevel === "public") {
+      return "Anyone signed in to AI Studio can open this link, and the public address below opens for anyone.";
+    }
+    return savedLevel === "internal"
       ? "Anyone signed in to AI Studio can open this link."
       : "Only the specific people you have shared it with can open this link.";
   }
@@ -54,25 +59,21 @@ function audienceLine(
 }
 
 /**
- * Which reader route actually resolves for this object right now.
+ * The CANONICAL link for this object right now — the one to hand a colleague.
  *
- * Precedence mirrors the readers themselves: `/p` requires BOTH a live
- * `public_web` publication and public visibility; `/c` requires a live
- * `intranet` publication. The in-app viewer is the honest fallback — it is the
- * only one of the three that works for unpublished content, so there is always
- * a link that does something rather than a confident 404.
+ * A Live object has a reader page; a Draft has only the in-app viewer, which is
+ * the honest fallback (it is the one link that works for unpublished content, so
+ * there is always something to copy rather than a confident 404). The PUBLIC
+ * address is shown separately rather than replacing this one: an object that is
+ * Live and Public has both, and the internal link is still the right thing to
+ * paste into a district channel.
  */
 function resolveShareTarget(input: {
   objectId: string;
   slug: string;
-  publicLive: boolean;
-  intranetLive: boolean;
-  savedLevel: ShareLinkSectionProps["savedLevel"];
-}): { target: "public" | "intranet" | "viewer"; path: string } {
-  if (input.publicLive && input.savedLevel === "public") {
-    return { target: "public", path: `/p/${input.slug}` };
-  }
-  if (input.intranetLive) {
+  isLive: boolean;
+}): { target: "intranet" | "viewer"; path: string } {
+  if (input.isLive) {
     return { target: "intranet", path: `/c/${input.slug}` };
   }
   return { target: "viewer", path: `/atrium/${input.objectId}/view` };
@@ -82,38 +83,36 @@ export function ShareLinkSection({
   objectId,
   slug,
   kind,
-  publicLive,
-  intranetLive,
+  isLive,
   savedLevel,
 }: ShareLinkSectionProps): React.JSX.Element {
-  const [copied, setCopied] = useState<"none" | "link" | "embed">("none");
+  const [copied, setCopied] = useState<"none" | "link" | "public" | "embed">(
+    "none"
+  );
 
-  const copy = useCallback(async (text: string, which: "link" | "embed") => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(which);
-      window.setTimeout(() => setCopied("none"), 1600);
-    } catch (e) {
-      log.warn("clipboard write failed", {
-        error: e instanceof Error ? e.message : String(e),
-      });
-    }
-  }, []);
+  const copy = useCallback(
+    async (text: string, which: "link" | "public" | "embed") => {
+      try {
+        await navigator.clipboard.writeText(text);
+        setCopied(which);
+        window.setTimeout(() => setCopied("none"), 1600);
+      } catch (e) {
+        log.warn("clipboard write failed", {
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    },
+    []
+  );
 
-  const { target, path } = resolveShareTarget({
-    objectId,
-    slug,
-    publicLive,
-    intranetLive,
-    savedLevel,
-  });
-  const url =
-    typeof window === "undefined" ? path : `${window.location.origin}${path}`;
+  const { target, path } = resolveShareTarget({ objectId, slug, isLive });
+  const origin = typeof window === "undefined" ? "" : window.location.origin;
+  const url = `${origin}${path}`;
 
-  // A public publication that the public route will not serve. Surfaced right
-  // on the link, because this is precisely the state where everything else in
-  // the UI says "published" and the link 404s.
-  const publicMismatch = publicLive && savedLevel !== "public";
+  // The public address, derived from exactly what `/p/[slug]` checks: Live AND
+  // Public. There is no third state to warn about any more.
+  const publicUrl =
+    isLive && savedLevel === "public" ? `${origin}/p/${slug}` : null;
 
   const directive =
     kind === "artifact" ? (serializeArtifactEmbedDirective(objectId) ?? "") : "";
@@ -143,13 +142,25 @@ export function ShareLinkSection({
       </div>
       <p className="mer-share-link-audience">{audienceLine(target, savedLevel)}</p>
 
-      {publicMismatch && (
-        <p className="mer-share-link-warning" role="status" data-testid="share-public-mismatch">
-          <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-          This is published to the public web, but its visibility is not Public,
-          so the public address returns “not found”. Set the level to Public
-          below, or unpublish it from the public web.
-        </p>
+      {publicUrl && (
+        <div className="mer-share-link-row" data-testid="share-public-link">
+          <code className="mer-share-link-url" data-testid="share-public-link-url">
+            {publicUrl}
+          </code>
+          <button
+            type="button"
+            className="mer-btn"
+            onClick={() => void copy(publicUrl, "public")}
+            data-testid="share-copy-public-link"
+          >
+            {copied === "public" ? (
+              <Check className="h-3.5 w-3.5" aria-hidden="true" />
+            ) : (
+              <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
+            {copied === "public" ? "Copied" : "Copy"}
+          </button>
+        </div>
       )}
 
       {kind === "artifact" && directive && (

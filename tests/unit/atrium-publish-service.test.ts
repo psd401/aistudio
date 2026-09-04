@@ -7,13 +7,14 @@
  *  - object exists but not viewable         -> NotFoundError (404, NOT 403 —
  *                                              existence masking for private ids)
  *  - viewable but not editable              -> ForbiddenError (via assertCanEdit)
- *  - public-facing publish, caller lacks publish_public -> ApprovalRequiredError
+ *  - CONNECTOR publish, caller lacks publish_public -> ApprovalRequiredError
  *                                              (§26.4 gate); an admin passes it
+ *  - the live switch NEVER touches visibility (#1726) — the audience is the
+ *    object's Level, written only by visibilityService.setLevel
  *  - unimplemented destination (schoology)  -> ValidationError, hard-blocked
  *                                              BEFORE the tx (no partial write)
  *  - no working head (currentVersionId null) -> ValidationError
- *  - happy path                              -> resolves with ids; applyGrants is
- *                                              only called for group visibility
+ *  - happy path                              -> resolves with ids
  *
  * The permission checks + the publishable load run OUTSIDE the transaction (via
  * executeQuery); the status/publication upsert runs INSIDE executeTransaction.
@@ -38,8 +39,6 @@ let publishableRows: Array<{
 let liveCheckRows: Array<{ id: string }> = [{ id: "pub-live" }];
 
 let setLevelInTxCalls = 0;
-let lastSetLevelVisibility: unknown = null;
-let lastSetLevelExtraSet: unknown = null;
 let canViewResult = true;
 
 jest.mock("@/lib/db/drizzle-client", () => ({
@@ -90,6 +89,10 @@ jest.mock("@/lib/db/schema", () => ({
 jest.mock("drizzle-orm", () => ({
   and: (...a: unknown[]) => a,
   eq: (...a: unknown[]) => a,
+  // `unpublish` retires EVERY live-surface row (#1726), so its lookups and its
+  // status flip are `inArray`-shaped. Rendered as a plain tuple like `eq`, so
+  // `txWhereClauses` assertions can still scan the flattened conditions.
+  inArray: (...a: unknown[]) => a,
 }));
 
 // publish-service now calls retrievalService.indexObject after a successful
@@ -115,22 +118,13 @@ jest.mock("@/lib/content/retrieval-service", () => ({
 jest.mock("@/lib/content/visibility-service", () => ({
   visibilityService: {
     canView: jest.fn(async () => canViewResult),
-    // Publish widens visibility via setLevelInTx (the guarded primitive that
-    // replaces level + grants atomically); track its invocation + the visibility
-    // it received so the happy-path assertions can distinguish "no visibility
-    // change" from "group widening".
-    setLevelInTx: jest.fn(
-      async (
-        _tx: unknown,
-        _id: unknown,
-        visibility: unknown,
-        extraSet: unknown
-      ) => {
-        setLevelInTxCalls += 1;
-        lastSetLevelVisibility = visibility;
-        lastSetLevelExtraSet = extraSet;
-      }
-    ),
+    // `setLevelInTx` is the guarded primitive that replaces an object's level
+    // AND its grants atomically. Publishing must NEVER call it (#1726) — that
+    // call is exactly how publishing used to wipe an author's grant set — so the
+    // assertions only need to know whether it ran at all.
+    setLevelInTx: jest.fn(async () => {
+      setLevelInTxCalls += 1;
+    }),
   },
 }));
 
@@ -156,21 +150,18 @@ jest.mock("@/lib/content/publish-adapters/intranet", () => ({
   },
 }));
 
-// The public_web adapter (Phase 7, #1057) is LIVE and reader-backed: it returns
-// the anonymous reader URL to persist as external_ref. Mock it (instead of loading
-// the real module, which pulls surface-helpers → @/utils/roles) and record the
-// slug it received + the ref it returned so the happy-path assertions can verify
-// the ref round-trips.
-const PUBLIC_WEB_REF = "https://pub.example/p/s1";
+// The public_web adapter is registered but UNREACHABLE since #1726:
+// `normalizeLiveDestination` folds `public_web` onto the live intranet row before
+// the registry is consulted. Mocked (instead of loading the real module, which
+// pulls surface-helpers → @/utils/roles) with a call counter, so a regression
+// that resurrected a second live row would show up as a non-zero count.
 let publicWebPublishCalls = 0;
-let lastPublicWebSlug: string | null = null;
 jest.mock("@/lib/content/publish-adapters/public-web", () => ({
   publicWebAdapter: {
     destination: "public_web",
-    publish: jest.fn(async ({ slug }: { slug: string }) => {
+    publish: jest.fn(async () => {
       publicWebPublishCalls += 1;
-      lastPublicWebSlug = slug;
-      return { externalRef: PUBLIC_WEB_REF };
+      return { externalRef: "https://pub.example/p/s1" };
     }),
   },
 }));
@@ -240,6 +231,12 @@ function nextResult(): unknown {
 // destination flips the publication to `unpublished` but only downgrades the object
 // to `draft` when no other destination is still live (Phase 7, #1057).
 let txSetPayloads: Array<Record<string, unknown>> = [];
+// Records every `.where(...)` condition executed inside the transaction. The
+// drizzle-orm mock renders `eq(col, value)` as a plain `[col, value]` array, so a
+// flattened scan of these is enough to assert WHICH destination a statement
+// targeted — the assertion that `public_web` normalizes onto the one live row
+// rather than flipping a row nothing serves (#1726).
+let txWhereClauses: unknown[] = [];
 const chain: Record<string, unknown> = {};
 const chainHandler: ProxyHandler<Record<string, unknown>> = {
   get(_t, prop: string | symbol) {
@@ -256,30 +253,26 @@ const chainHandler: ProxyHandler<Record<string, unknown>> = {
         txSetPayloads.push(payload);
         return chainProxy;
       };
+    // `.where(condition)` records the condition, then stays fluent.
+    if (prop === "where")
+      return (condition: unknown) => {
+        txWhereClauses.push(condition);
+        return chainProxy;
+      };
     return () => chainProxy;
   },
 };
 const chainProxy = new Proxy(chain, chainHandler);
 const txStub = chainProxy;
 
-// A recording proxy for `executeQuery` builders (which run OUTSIDE the tx, e.g.
-// the persist-external-ref UPDATE). Every builder method stays fluent; `.set`
-// additionally captures its payload so a test can assert the exact value that
-// round-trips into `.set({ externalRef })` — not merely that the labelled call
-// happened. Only the persist-external-ref UPDATE (and, on failure, mark-failed)
-// call `.set` via executeQuery, so `lastSetPayload` unambiguously holds the last
-// such payload.
-let lastSetPayload: Record<string, unknown> | null = null;
+// A fluent proxy the mocked `executeQuery` runs its builder callback against, so
+// a builder that would touch a real client cannot throw. Query RESULTS come from
+// the mock's return value, not from here.
 const setRecorder: unknown = new Proxy(
   {},
   {
     get(_t, prop: string | symbol) {
       if (prop === "then") return undefined;
-      if (prop === "set")
-        return (payload: Record<string, unknown>) => {
-          lastSetPayload = payload;
-          return setRecorder;
-        };
       return () => setRecorder;
     },
   }
@@ -316,15 +309,12 @@ beforeEach(() => {
   canViewResult = true;
   liveCheckRows = [{ id: "pub-live" }];
   setLevelInTxCalls = 0;
-  lastSetLevelVisibility = null;
-  lastSetLevelExtraSet = null;
   adapterPublishCalls = 0;
   adapterUnpublishCalls = 0;
   adapterUnpublishThrows = false;
   publicWebPublishCalls = 0;
-  lastPublicWebSlug = null;
-  lastSetPayload = null;
   txSetPayloads = [];
+  txWhereClauses = [];
   txResults = [];
   jest.clearAllMocks();
 });
@@ -361,13 +351,48 @@ function definePublishServicePublishSuite1Part1() {
     ).rejects.toThrow(ForbiddenError);
   });
 
-  it("throws ApprovalRequiredError for public_web when the caller lacks publish_public (§26.4 gate)", async () => {
-    // The owner is a non-admin staff user with no publish_public capability, so
-    // the public-publish gate blocks them with a structured approval signal
-    // (surfaces map it to 202 / approval_required), not a hard 403.
+  it("does NOT gate the live switch for a caller without publish_public (#1726)", async () => {
+    // Making an object live changes no audience — who may read the page is its
+    // Level, gated by visibilityService.setLevel. Gating the live switch gated
+    // the STATE rather than the exposure, which is what made the old widen
+    // prompt both wrong and bypassable.
+    txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
     await expect(
-      publishService.publish(owner, "o1", { destination: "public_web" })
-    ).rejects.toThrow(ApprovalRequiredError);
+      publishService.publish(owner, "o1", { destination: "intranet" })
+    ).resolves.toMatchObject({ publicationId: "pub1" });
+  });
+
+  it("still gates a CONNECTOR publish for a caller without publish_public (§26.4)", async () => {
+    // schoology/google push a copy into an external family-facing system, which
+    // IS an exposure regardless of Level — so the gate stays, and fires before
+    // the stub's ValidationError only for a caller who could otherwise proceed.
+    await expect(
+      publishService.publish(owner, "o1", { destination: "google" })
+    ).rejects.toThrow();
+  });
+
+  it("`public_web` is a legacy alias: it publishes the ONE live intranet row", async () => {
+    txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
+    const result = await publishService.publish(owner, "o1", {
+      destination: "public_web",
+    });
+    // The intranet reader link, not /p/ — the public address is derived from
+    // Level + Live, not from a second publication row.
+    expect(result.readerUrl).toBe("/c/s1");
+    // The public_web adapter never ran: there is no second row to make live.
+    expect(publicWebPublishCalls).toBe(0);
+  });
+
+  it("NEVER writes visibility, whatever the caller or the locked level (#1726)", async () => {
+    txResults = [
+      [{ id: "o1", visibilityLevel: "group" }],
+      [{ id: "pub1" }],
+    ];
+    await publishService.publish(owner, "o1", { destination: "intranet" });
+    // The regression this replaces: publishing a Group object ran setLevelInTx,
+    // which replaces the grant set — so an author's named people were wiped by
+    // the act of publishing.
+    expect(setLevelInTxCalls).toBe(0);
   });
 
   it("rejects a stale public publish under lock before queuing approval", async () => {
@@ -392,98 +417,76 @@ function definePublishServicePublishSuite1Part1() {
     expect(indexObjectMock).not.toHaveBeenCalled();
   });
 
-  it("throws ApprovalRequiredError when widening visibility to public without publish_public", async () => {
-    // A visibility widen to `public` is gated INSIDE the transaction against the
-    // FOR-UPDATE-locked level (race-free). Seed the lock lookup with a non-public
-    // locked row so the widen is a genuine new exposure and the gate fires.
-    txResults = [[{ id: "o1", visibilityLevel: "internal" }]];
-    await expect(
-      publishService.publish(owner, "o1", {
-        destination: "intranet",
-        visibility: { level: "public" },
-      })
-    ).rejects.toThrow(ApprovalRequiredError);
-    // The gate must reject BEFORE the widen is written — a reorder that ran
-    // setLevelInTx first would still throw here but would have already widened.
-    expect(setLevelInTxCalls).toBe(0);
-  });
-
-  // --- `widenOnly` (#1336, Codex review round 2) -----------------------------
-  // The Share dialog re-reads visibility before confirming a widen, but a re-read is
-  // not a lock. `widenOnly` re-decides the same question INSIDE the transaction,
-  // against the FOR-UPDATE-locked level, so no race window remains.
-
-  it("widenOnly SKIPS the visibility write when the locked level is already broader", async () => {
-    // The doc was Private when the dialog opened (target: internal) but became
-    // Public before the transaction. Applying the level would silently NARROW a
-    // public object — the opposite of what the user confirmed.
-    txResults = [
-      [{ id: "o1", visibilityLevel: "public" }], // FOR UPDATE lock
-      [{ id: "pub1" }], // publication upsert RETURNING
-    ];
-    const result = await publishService.publish(admin, "o1", {
-      destination: "intranet",
-      visibility: { level: "internal", widenOnly: true },
-    });
-    expect(result.publicationId).toBe("pub1");
-    // No visibility write at all — and the publish still proceeds.
-    expect(setLevelInTxCalls).toBe(0);
-  });
-
-  it("widenOnly APPLIES the visibility write when it genuinely widens", async () => {
-    txResults = [[{ id: "o1", visibilityLevel: "private" }], [{ id: "pub1" }]];
-    await publishService.publish(admin, "o1", {
-      destination: "intranet",
-      visibility: { level: "internal", widenOnly: true },
-    });
-    expect(setLevelInTxCalls).toBe(1);
-    expect(lastSetLevelVisibility).toMatchObject({ level: "internal" });
-  });
-
   }
 
-function definePublishServicePublishSuite1Part2() {it("widenOnly is a NO-OP at equal breadth (already exactly at the target)", async () => {
-    txResults = [[{ id: "o1", visibilityLevel: "internal" }], [{ id: "pub1" }]];
-    await publishService.publish(admin, "o1", {
-      destination: "intranet",
-      visibility: { level: "internal", widenOnly: true },
-    });
-    expect(setLevelInTxCalls).toBe(0);
-  });
-
-  it("WITHOUT widenOnly the supplied level is applied verbatim (REST/MCP + approval replay narrow deliberately)", async () => {
-    txResults = [[{ id: "o1", visibilityLevel: "public" }], [{ id: "pub1" }]];
-    await publishService.publish(admin, "o1", {
-      destination: "intranet",
-      visibility: { level: "internal" },
-    });
-    expect(setLevelInTxCalls).toBe(1);
-    expect(lastSetLevelVisibility).toMatchObject({ level: "internal" });
-  });
-
-  it("does NOT gate a no-op re-publish of ALREADY-public content (idempotent, race-safe)", async () => {
-    // The locked row is already public → re-publishing with visibility.level 'public'
-    // changes nothing, so a non-admin owner without publish_public passes WITHOUT
-    // approval (the #1090 regression), and the check reads the level UNDER the lock.
+function definePublishServicePublishSuite1Part2() {it("GATES the live switch on a `public` object behind §26.4", async () => {
+    // `/p/[slug]` resolves on `public` AND Live, so going Live is the half of the
+    // anonymous exposure that publishing controls. #1726 briefly left it ungated
+    // (`public_web` had been dropped from PUBLIC_DESTINATIONS), which let a
+    // caller holding only `content:publish_internal` finish an exposure it could
+    // never have started — widening TO `public` is gated in `setLevel`.
     txResults = [
-      [{ id: "o1", visibilityLevel: "public" }], // FOR UPDATE lock (already public)
+      [{ id: "o1", visibilityLevel: "public" }], // FOR UPDATE lock
+    ];
+    await expect(
+      publishService.publish(owner, "o1", { destination: "intranet" })
+    ).rejects.toThrow(ApprovalRequiredError);
+    // Judged on the LOCKED row, so a concurrent widen cannot slip past it.
+    expect(adapterPublishCalls).toBe(0);
+    expect(indexObjectMock).not.toHaveBeenCalled();
+  });
+
+  it("does NOT gate the live switch on a non-public object", async () => {
+    // The gate is about the anonymous surface, not about publishing. A `group`
+    // object going Live changes nothing about who may read it.
+    txResults = [
+      [{ id: "o1", visibilityLevel: "group" }],
+      [{ id: "pub1" }],
+    ];
+    await expect(
+      publishService.publish(owner, "o1", { destination: "intranet" })
+    ).resolves.toMatchObject({
+      publicationId: "pub1",
+      readerUrl: "/c/s1",
+      becamePubliclyReachable: false,
+    });
+  });
+
+  it("lets an AUTHORIZED caller go live on a public object, and returns the PUBLIC link", async () => {
+    // The reader URL is derived from the locked Level (#1726): a Live `public`
+    // object IS served at /p/{slug}, and handing back /c/{slug} would give an API
+    // caller a sign-in-required link for a page the world can open.
+    txResults = [
+      [{ id: "o1", visibilityLevel: "public" }], // FOR UPDATE lock
+      [], // no live-surface row yet -> this call is the transition
       [{ id: "pub1" }], // publication upsert RETURNING
     ];
     await expect(
-      publishService.publish(owner, "o1", {
-        destination: "intranet",
-        visibility: { level: "public" },
-      })
+      publishService.publish(admin, "o1", { destination: "intranet" })
     ).resolves.toEqual({
       publicationId: "pub1",
       publishedVersionId: "v1",
-      // #1336 C3: the intranet reader link is DERIVED from the slug (that
-      // adapter records a null external_ref by design) and returned so surfaces
-      // can show the author where the content went.
-      readerUrl: "/c/s1",
-      // Already public → re-saving public is NOT a new exposure, so the
-      // allow-then-notify signal stays false.
-      becamePublic: false,
+      destination: "intranet",
+      readerUrl: "/p/s1",
+      becamePubliclyReachable: true,
+    });
+    expect(setLevelInTxCalls).toBe(0);
+  });
+
+  it("republishing an ALREADY-live public object reports no new exposure", async () => {
+    // Keyed off the transition, not the state: otherwise every routine republish
+    // of a public page would file a fresh "went public" notice, the flooding
+    // `becamePublic` avoids on the visibility side.
+    txResults = [
+      [{ id: "o1", visibilityLevel: "public" }],
+      [{ id: "pub-live" }], // already live
+      [{ id: "pub1" }],
+    ];
+    await expect(
+      publishService.publish(admin, "o1", { destination: "intranet" })
+    ).resolves.toMatchObject({
+      readerUrl: "/p/s1",
+      becamePubliclyReachable: false,
     });
   });
 
@@ -499,10 +502,7 @@ function definePublishServicePublishSuite1Part2() {it("widenOnly is a NO-OP at e
     // a stub destination is used to preserve this exact regression guard.)
     txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
     await expect(
-      publishService.publish(admin, "o1", {
-        destination: "schoology",
-        visibility: { level: "public" },
-      })
+      publishService.publish(admin, "o1", { destination: "schoology" })
     ).rejects.toThrow(ValidationError);
     // The exact leak this fix closes: visibility was NEVER widened in a tx...
     expect(setLevelInTxCalls).toBe(0);
@@ -545,37 +545,30 @@ function definePublishServicePublishSuite1Part2() {it("widenOnly is a NO-OP at e
 
   }
 
-function definePublishServicePublishSuite1Part3() {it("publishes public_web LIVE for an admin, runs the adapter, and persists its external_ref (Phase 7)", async () => {
-    // public_web is now a live reader-backed adapter. An admin passes the gate;
-    // the publish commits, the adapter returns the anonymous reader URL, and the
-    // service persists it as external_ref via a follow-up UPDATE.
+function definePublishServicePublishSuite1Part3() {it("the live switch runs the intranet adapter and records no external_ref", async () => {
+    // The intranet adapter addresses the object by slug and deliberately returns
+    // a null external_ref, so no persist-external-ref UPDATE is issued and the
+    // reader link is DERIVED from the same slug the adapter published under.
     txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
     const result = await publishService.publish(admin, "o1", {
-      destination: "public_web",
+      destination: "intranet",
     });
     expect(result).toEqual({
       publicationId: "pub1",
       publishedVersionId: "v1",
-      // #1336 C3: the adapter's external_ref is now also RETURNED, not merely
-      // persisted — previously the public URL was computed and then dropped.
-      readerUrl: PUBLIC_WEB_REF,
-      // No visibility supplied → no transition to report.
-      becamePublic: false,
+      // The destination the service WROTE, not the alias the caller sent (#1726).
+      destination: "intranet",
+      readerUrl: "/c/s1",
+      // The object is `private`, so going Live exposes it to nobody new.
+      becamePubliclyReachable: false,
     });
-    // The public_web adapter ran with the object's slug and returned the URL.
-    expect(publicWebPublishCalls).toBe(1);
-    expect(lastPublicWebSlug).toBe("s1");
-    // The returned external_ref is persisted via a dedicated UPDATE (labelled), so
-    // the publication row records WHERE the version went live.
+    expect(adapterPublishCalls).toBe(1);
+    expect(publicWebPublishCalls).toBe(0);
     expect(
       executeQueryMock.mock.calls.some(
         (call: unknown[]) => call[1] === "publish.persistExternalRef"
       )
-    ).toBe(true);
-    // And the EXACT ref the adapter returned round-trips into the UPDATE payload
-    // (not merely that the labelled call fired) — guards a future regression that
-    // persists a wrong/stale value.
-    expect(lastSetPayload?.externalRef).toBe(PUBLIC_WEB_REF);
+    ).toBe(false);
   });
 
   it("throws ValidationError when there is no working head", async () => {
@@ -603,8 +596,10 @@ function definePublishServicePublishSuite1Part3() {it("publishes public_web LIVE
     expect(result).toEqual({
       publicationId: "pub1",
       publishedVersionId: "v1",
+      // The destination the service WROTE, not the alias the caller sent (#1726).
+      destination: "intranet",
       readerUrl: "/c/s1",
-      becamePublic: false,
+      becamePubliclyReachable: false,
     });
     expect(adapterPublishCalls).toBe(1);
     // No visibility provided -> setLevelInTx must NOT run (publish doesn't widen).
@@ -646,8 +641,9 @@ function definePublishServicePublishSuite1Part3() {it("publishes public_web LIVE
     expect(result).toEqual({
       publicationId: "pub1",
       publishedVersionId: "v-reviewed",
+      destination: "intranet",
       readerUrl: "/c/s1",
-      becamePublic: false,
+      becamePubliclyReachable: false,
     });
     expect(getVersionByIdMock).toHaveBeenCalled();
     // Retrieval must index the PUBLISHED (pinned) version, not the head — else it
@@ -668,24 +664,16 @@ function definePublishServicePublishSuite1Part4() {it("throws ValidationError wh
     ).rejects.toThrow(ValidationError);
   });
 
-  it("widens visibility via setLevelInTx only when visibility is provided", async () => {
-    // tx queue: FOR UPDATE lock row, then the publication upsert RETURNING id.
+  it("marks the object published without ever calling setLevelInTx", async () => {
+    // The status write is now a plain UPDATE on the locked row. Before #1726 it
+    // was folded into `setLevelInTx`'s level UPDATE whenever a visibility was
+    // supplied — the same call that replaces the object's grant set.
     txResults = [[{ id: "o1" }], [{ id: "pub2" }]];
-    await publishService.publish(owner, "o1", {
-      destination: "intranet",
-      visibility: { level: "group", grants: [{ kind: "role", value: "staff" }] },
-    });
-    expect(setLevelInTxCalls).toBe(1);
-    // The full visibility input (level + grants) is forwarded to the guarded
-    // primitive, which replaces the level and grants atomically in the tx.
-    expect(lastSetLevelVisibility).toEqual({
-      level: "group",
-      grants: [{ kind: "role", value: "staff" }],
-    });
-    // The `status: "published"` write is folded into setLevelInTx's single level
-    // UPDATE (via extraSet) rather than issued as a redundant second UPDATE on the
-    // same row in the same transaction.
-    expect(lastSetLevelExtraSet).toEqual({ status: "published" });
+    await publishService.publish(owner, "o1", { destination: "intranet" });
+    expect(setLevelInTxCalls).toBe(0);
+    expect(txSetPayloads).toContainEqual(
+      expect.objectContaining({ status: "published" })
+    );
   });
 
   it("throws ValidationError when the upsert returns no row", async () => {
@@ -743,7 +731,7 @@ function definePublishServiceUnpublishSuite2Part1() {
     // #1118 P2) and returns the no-op WITHOUT opening the transaction.
     liveCheckRows = [];
     const result = await publishService.unpublish(owner, "o1", "intranet");
-    expect(result).toEqual({ unpublished: false });
+    expect(result).toEqual({ unpublished: false, destination: "intranet" });
     expect(adapterUnpublishCalls).toBe(0);
   });
 
@@ -753,7 +741,7 @@ function definePublishServiceUnpublishSuite2Part1() {
     // re-run this same no-op. `owner` is a non-admin without publish_public.
     liveCheckRows = [];
     const result = await publishService.unpublish(owner, "o1", "public_web");
-    expect(result).toEqual({ unpublished: false });
+    expect(result).toEqual({ unpublished: false, destination: "intranet" });
     // Let any fire-and-forget settle, then assert NO approval request was written.
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(
@@ -766,9 +754,9 @@ function definePublishServiceUnpublishSuite2Part1() {
 
   it("marks unpublished and runs the adapter teardown AFTER the tx on the happy path", async () => {
     // tx queue: FOR UPDATE lock row, then a live publication row with externalRef.
-    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
+    txResults = [[{ id: "o1" }], [{ id: "pub1", destination: "intranet", externalRef: null }]];
     const result = await publishService.unpublish(owner, "o1", "intranet");
-    expect(result).toEqual({ unpublished: true });
+    expect(result).toEqual({ unpublished: true, destination: "intranet" });
     expect(adapterUnpublishCalls).toBe(1);
   });
 
@@ -778,7 +766,7 @@ function definePublishServiceUnpublishSuite2Part1() {
     // (a retry would idempotently no-op at the `status='live'` filter and never
     // reach a prune placed after the teardown).
     adapterUnpublishThrows = true;
-    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
+    txResults = [[{ id: "o1" }], [{ id: "pub1", destination: "intranet", externalRef: null }]];
     await expect(
       publishService.unpublish(owner, "o1", "intranet")
     ).rejects.toThrow(/nav hide boom/);
@@ -786,12 +774,12 @@ function definePublishServiceUnpublishSuite2Part1() {
     expect(adapterUnpublishCalls).toBe(1);
   });
 
-  // §26.4 — taking a public destination offline requires the same authority as
-  // putting it up: content:publish_internal alone must not be enough to tear
-  // down already-live public_web content.
-  it("throws ApprovalRequiredError unpublishing public_web without publish_public, PERSISTS a durable request (issue #1118 item 2), and never touches the tx", async () => {
+  // §26.4 — taking a CONNECTOR destination offline requires the same authority
+  // as putting it up: content:publish_internal alone must not be enough to
+  // retract a copy already pushed into an external family-facing system.
+  it("throws ApprovalRequiredError unpublishing a CONNECTOR without publish_public, PERSISTS a durable request (issue #1118 item 2), and never touches the tx", async () => {
     await expect(
-      publishService.unpublish(owner, "o1", "public_web")
+      publishService.unpublish(owner, "o1", "google")
     ).rejects.toThrow(ApprovalRequiredError);
     // Let the fire-and-forget persist settle, then assert the unpublish request was
     // written to the durable queue — previously this gate raw-threw and queued
@@ -805,20 +793,48 @@ function definePublishServiceUnpublishSuite2Part1() {
     expect(adapterUnpublishCalls).toBe(0);
   });
 
-  it("allows unpublishing public_web for an admin", async () => {
-    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
-    const result = await publishService.unpublish(admin, "o1", "public_web");
-    expect(result).toEqual({ unpublished: true });
+  it("taking the live switch off retires EVERY live-surface row (#1726)", async () => {
+    // Normalizing the REQUEST is not enough. An object written before #1726 can
+    // be live at `public_web` — alone, or alongside `intranet` — and every reader
+    // gate accepts either, so retiring only the normalized row would report
+    // success while `/c/{slug}` and `/p/{slug}` kept serving the object from the
+    // row nothing touched. Both aliases must be in the target set.
+    txResults = [
+      [{ id: "o1" }],
+      [
+        { id: "pub-intranet", destination: "intranet", externalRef: null },
+        { id: "pub-legacy", destination: "public_web", externalRef: null },
+      ],
+    ];
+    const result = await publishService.unpublish(owner, "o1", "public_web");
+    expect(result).toEqual({ unpublished: true, destination: "intranet" });
+    const targeted = txWhereClauses.flat(Infinity);
+    expect(targeted).toContain("intranet");
+    expect(targeted).toContain("public_web");
+    // Both retired rows are flipped in ONE update, addressed by id.
+    expect(targeted).toContain("pub-intranet");
+    expect(targeted).toContain("pub-legacy");
+  });
+
+  it("is a genuine no-op only when NO live-surface row exists", async () => {
+    // The pre-gate check reads the same target set; a legacy `public_web`-only
+    // object must not be reported as "nothing to do" while it is still serving.
+    liveCheckRows = [];
+    const result = await publishService.unpublish(owner, "o1", "intranet");
+    expect(result).toEqual({ unpublished: false, destination: "intranet" });
+    expect(adapterUnpublishCalls).toBe(0);
   });
 
   }
 
-function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing public_web when the caller has an explicit publish_public capability", async () => {
-    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
-    const result = await publishService.unpublish(owner, "o1", "public_web", {
+function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing a connector when the caller has an explicit publish_public capability", async () => {
+    txResults = [[{ id: "o1" }], [{ id: "pub1", destination: "intranet", externalRef: null }]];
+    const result = await publishService.unpublish(owner, "o1", "google", {
       hasPublishPublicCapability: true,
     });
-    expect(result).toEqual({ unpublished: true });
+    // A connector is NOT folded onto the live row — only the two live-surface
+    // aliases are.
+    expect(result).toEqual({ unpublished: true, destination: "google" });
   });
 
   // Phase 7 (#1057): schoology & google are public-facing, so unpublishing them
@@ -840,11 +856,11 @@ function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing pub
     // "any other destination still live?" check returns a row (intranet live).
     txResults = [
       [{ id: "o1" }],
-      [{ id: "pub1", externalRef: null }],
+      [{ id: "pub1", destination: "intranet", externalRef: null }],
       [{ id: "pub-intranet" }],
     ];
     const result = await publishService.unpublish(admin, "o1", "public_web");
-    expect(result).toEqual({ unpublished: true });
+    expect(result).toEqual({ unpublished: true, destination: "intranet" });
     const statuses = txSetPayloads.map((p) => p.status);
     // The publication was flipped to unpublished, but the object status was NOT
     // downgraded to draft (intranet remains live).
@@ -855,12 +871,38 @@ function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing pub
     expect(removeFromIndexMock).not.toHaveBeenCalled();
   });
 
+  it("an `okf` bundle does NOT count as still-live: the object drafts and the index prunes", async () => {
+    // `okf` is a portable export bundle in S3, not a reader page — `isLive` and
+    // `livePublicationConditions` both exclude it, so the Share dialog says Draft
+    // and both readers 404 once the live row is retired. An unscoped
+    // "any live row?" check counted the okf row, leaving the object
+    // `status = 'published'` with its retrieval index intact: invisible in every
+    // UI and every reader, still served by assistant retrieval. The tx queue's
+    // third result is the still-live check, which must now find NOTHING because
+    // the only remaining live row is `okf`.
+    txResults = [
+      [{ id: "o1" }],
+      [{ id: "pub1", destination: "intranet", externalRef: null }],
+      [],
+    ];
+    const result = await publishService.unpublish(admin, "o1", "intranet");
+    expect(result).toEqual({ unpublished: true, destination: "intranet" });
+    expect(txSetPayloads.map((p) => p.status)).toContain("draft");
+    expect(removeFromIndexMock).toHaveBeenCalledWith("o1");
+    // The still-live check is scoped to the live-surface destinations, so it can
+    // never be satisfied by an `okf` (or connector) row.
+    const targeted = txWhereClauses.flat(Infinity);
+    expect(targeted).toContain("intranet");
+    expect(targeted).toContain("public_web");
+    expect(targeted).not.toContain("okf");
+  });
+
   it("prunes the retrieval index only when the last live destination is removed", async () => {
     // tx queue: FOR UPDATE lock, the live row being torn down, then the
     // "any other destination still live?" check returns [] (none remain).
-    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }], []];
+    txResults = [[{ id: "o1" }], [{ id: "pub1", destination: "intranet", externalRef: null }], []];
     const result = await publishService.unpublish(admin, "o1", "public_web");
-    expect(result).toEqual({ unpublished: true });
+    expect(result).toEqual({ unpublished: true, destination: "intranet" });
     expect(removeFromIndexMock).toHaveBeenCalledTimes(1);
     expect(removeFromIndexMock).toHaveBeenCalledWith("o1");
   });
@@ -868,24 +910,24 @@ function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing pub
   it("does NOT prune the index on the idempotent no-op path (nothing was live)", async () => {
     txResults = [[{ id: "o1" }], []];
     const result = await publishService.unpublish(owner, "o1", "intranet");
-    expect(result).toEqual({ unpublished: false });
+    expect(result).toEqual({ unpublished: false, destination: "intranet" });
     expect(removeFromIndexMock).not.toHaveBeenCalled();
   });
 
   it("a prune failure is best-effort: the unpublish still succeeds", async () => {
     removeFromIndexMock.mockRejectedValueOnce(new Error("index prune boom"));
-    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }], []];
+    txResults = [[{ id: "o1" }], [{ id: "pub1", destination: "intranet", externalRef: null }], []];
     const result = await publishService.unpublish(admin, "o1", "public_web");
     // The unpublish already committed; a failed index prune is logged, not thrown.
-    expect(result).toEqual({ unpublished: true });
+    expect(result).toEqual({ unpublished: true, destination: "intranet" });
   });
 
   it("reverts the object to draft when the unpublished destination was the last live one", async () => {
     // tx queue: FOR UPDATE lock, the live row being torn down, then the
     // "any other destination still live?" check returns [] (none remain).
-    txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }], []];
+    txResults = [[{ id: "o1" }], [{ id: "pub1", destination: "intranet", externalRef: null }], []];
     const result = await publishService.unpublish(admin, "o1", "public_web");
-    expect(result).toEqual({ unpublished: true });
+    expect(result).toEqual({ unpublished: true, destination: "intranet" });
     const statuses = txSetPayloads.map((p) => p.status);
     expect(statuses).toContain("unpublished");
     expect(statuses).toContain("draft");

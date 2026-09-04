@@ -3,7 +3,8 @@
  * (Issue #1057, Phase 7).
  *
  * Covers:
- *  - `isPublicDestination` / `PUBLIC_DESTINATIONS` — the single source of truth
+ *  - `isPublicDestination` / `PUBLIC_DESTINATIONS` / `normalizeLiveDestination`
+ *    — the single source of truth
  *    the §26.4 gate uses to decide which destinations need publish_public.
  *  - `publicWebAdapter` — LIVE, reader-backed: returns the anonymous `/p/{slug}`
  *    reader URL as external_ref, absolute when ATRIUM_PUBLIC_BASE_URL is set and a
@@ -24,6 +25,9 @@ jest.mock("drizzle-orm", () => ({ eq: (...a: unknown[]) => a }));
 
 import {
   isPublicDestination,
+  normalizeLiveDestination,
+  LIVE_DESTINATION,
+  LIVE_SURFACE_DESTINATIONS,
   PUBLIC_DESTINATIONS,
   type PublishDestination,
 } from "@/lib/content/publish-adapters/types";
@@ -41,9 +45,18 @@ const PUBLISH_INPUT = {
 };
 
 describe("isPublicDestination / PUBLIC_DESTINATIONS", () => {
-  it("classifies intranet/okf as internal and public_web/schoology/google as public", () => {
+  it("classifies ONLY the connectors as public (#1726)", () => {
+    // The live switch changes no audience — who may read a live page is the
+    // object's Level, gated by visibilityService.setLevel. Gating the live
+    // switch gated the STATE rather than the exposure, which is what made the
+    // old widen prompt both wrong (it fired for a group-scoped intranet
+    // publish) and bypassable (narrow one save later).
     expect(isPublicDestination("intranet")).toBe(false);
-    expect(isPublicDestination("public_web")).toBe(true);
+    // `public_web` is now only a legacy ALIAS for the live row, not a second
+    // exposure — `normalizeLiveDestination` folds it before it reaches a gate.
+    expect(isPublicDestination("public_web")).toBe(false);
+    // The connectors push a copy into an external family-facing system, which IS
+    // an exposure whatever the Level says.
     expect(isPublicDestination("schoology")).toBe(true);
     expect(isPublicDestination("google")).toBe(true);
     // OKF export (Phase 8, #1103) is NOT public: a single-object bundle carries the
@@ -52,11 +65,10 @@ describe("isPublicDestination / PUBLIC_DESTINATIONS", () => {
     expect(isPublicDestination("okf")).toBe(false);
   });
 
-  it("PUBLIC_DESTINATIONS is exactly the three family-facing destinations", () => {
+  it("PUBLIC_DESTINATIONS is exactly the two connectors", () => {
     expect([...PUBLIC_DESTINATIONS].sort()).toEqual(
-      ["google", "public_web", "schoology"].sort()
+      ["google", "schoology"].sort()
     );
-    // intranet and okf are the non-public destinations.
     const all: PublishDestination[] = [
       "intranet",
       "public_web",
@@ -64,7 +76,33 @@ describe("isPublicDestination / PUBLIC_DESTINATIONS", () => {
       "google",
       "okf",
     ];
-    expect(all.filter((d) => !isPublicDestination(d))).toEqual(["intranet", "okf"]);
+    expect(all.filter((d) => !isPublicDestination(d))).toEqual([
+      "intranet",
+      "public_web",
+      "okf",
+    ]);
+  });
+});
+
+describe("normalizeLiveDestination", () => {
+  it("folds `public_web` onto the single live row and leaves everything else alone", () => {
+    // One live row is the whole point: a publish and an unpublish issued under
+    // different aliases must touch the SAME row, or an Unpublish leaves a second
+    // live row serving readers after the author was told it was taken down.
+    expect(normalizeLiveDestination("public_web")).toBe("intranet");
+    expect(normalizeLiveDestination("intranet")).toBe("intranet");
+    expect(normalizeLiveDestination("schoology")).toBe("schoology");
+    expect(normalizeLiveDestination("google")).toBe("google");
+    expect(normalizeLiveDestination("okf")).toBe("okf");
+  });
+
+  it("LIVE_SURFACE_DESTINATIONS still accepts a pre-migration public_web row", () => {
+    // Migration 180 folds those rows in, but the reader gates accept either so
+    // the migration and the image deploy can land in any order.
+    expect([...LIVE_SURFACE_DESTINATIONS].sort()).toEqual(
+      ["intranet", "public_web"].sort()
+    );
+    expect(LIVE_DESTINATION).toBe("intranet");
   });
 });
 

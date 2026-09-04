@@ -3,14 +3,13 @@
  *
  * ## Why this exists
  *
- * "Publish to the public web" records a live `public_web` publication. It does
- * NOT, on its own, make `/p/[slug]` render: `app/(public)/p/[slug]/page.tsx`
- * gates that route on THREE independent conditions, and a live publication is
- * only one of them. An object published to the public web while still
- * `internal`, or sitting in a section anonymous visitors cannot enter, gets a
- * publish confirmation, a "Public web · LIVE" badge, a copyable URL — and a 404
- * for everyone who follows it. The failure is silent to the author, who has
- * every visible signal telling them it worked.
+ * The public page is DERIVED (#1726): `/p/[slug]` renders when an object is
+ * `public` AND Live. `app/(public)/p/[slug]/page.tsx` gates that route on THREE
+ * independent conditions, and being Live is only one of them. A Live object
+ * whose Level is still `internal`, or one sitting in a section anonymous
+ * visitors cannot enter, gets a Live badge and a copyable URL — and a 404 for
+ * everyone who follows it. The failure is silent to the author, who has every
+ * visible signal telling them it worked.
  *
  * This computes the same decision the public route makes and NAMES the blockers
  * so authoring surfaces can say which condition is unmet.
@@ -45,7 +44,7 @@ export const ANONYMOUS_REQUESTER: Requester = {
 };
 
 export type PublicBlocker =
-  /** No live `public_web` publication — never published, or taken down. */
+  /** The object is a Draft — never published, or taken back down. */
   | "not_published"
   /** `visibility_level` is not `public`; the route gates strictly on this. */
   | "not_public"
@@ -55,9 +54,9 @@ export type PublicBlocker =
 /** Human-readable explanation + remedy for each blocker. */
 export const PUBLIC_BLOCKER_TEXT: Record<PublicBlocker, string> = {
   not_published:
-    "It has not been published to the public web, so the link goes nowhere.",
+    "It is still a draft, so the link goes nowhere — switch it to Live.",
   not_public:
-    "Its visibility is not Public, and the public page requires that — publish it again and accept the visibility change.",
+    "Its level is not Public, and the public address requires that — set the level to Public.",
   section_restricted:
     "Its section is limited to specific people, and the public page will not show content from a restricted section. Move it to an unrestricted section, or remove the section's view restrictions.",
 };
@@ -67,12 +66,13 @@ export const PUBLIC_BLOCKER_TEXT: Record<PublicBlocker, string> = {
  * them. Empty means the link resolves.
  */
 export async function publicBlockers(input: {
-  hasLivePublicWebPublication: boolean;
+  /** The object has a live publication row (`isLive` over its destinations). */
+  isLive: boolean;
   visibilityLevel: VisibilityLevel;
   collectionId: string | null;
 }): Promise<PublicBlocker[]> {
   const blockers: PublicBlocker[] = [];
-  if (!input.hasLivePublicWebPublication) blockers.push("not_published");
+  if (!input.isLive) blockers.push("not_published");
   if (input.visibilityLevel !== "public") blockers.push("not_public");
   // Evaluated as the ANONYMOUS visitor, not as the caller: an administrator can
   // enter every section, so asking "can I see it?" would always say yes and

@@ -24,6 +24,7 @@ import { ArtifactMetaRail } from "./ArtifactMetaRail";
 import { ContentSettings } from "./ContentSettings";
 import { VisibilityChip } from "./VisibilityChip";
 import { publishService } from "@/lib/content/publish-service";
+import { isLive } from "@/lib/content/publish-adapters/types";
 import {
   publicBlockers,
   PUBLIC_BLOCKER_TEXT,
@@ -50,23 +51,24 @@ export async function ArtifactAuthoringView({
 }: ArtifactAuthoringViewProps): Promise<React.JSX.Element> {
   // Publication state, read here only to decide whether the broken-public-link
   // banner below applies. The Share dialog loads its own copy for the link and
-  // the destination rows.
+  // the Live/Draft row.
   const publications = await publishService.listLive(req, obj.id);
-  const publicPub = publications.find((p) => p.destination === "public_web");
+  const live = isLive(publications.map((p) => p.destination));
 
-  // A live public_web publication is NOT sufficient for /p/[slug] to render —
-  // the route also requires public visibility AND a section an anonymous
-  // visitor can enter. Without this, an author sees "Public web · LIVE", copies
-  // the URL, and everyone who opens it gets a 404 with nothing anywhere saying
-  // why. Only computed when something is actually published publicly; there is
-  // no broken link to warn about otherwise.
-  const publicIssues = publicPub
-    ? await publicBlockers({
-        hasLivePublicWebPublication: true,
-        visibilityLevel: obj.visibilityLevel,
-        collectionId: obj.collectionId,
-      })
-    : [];
+  // Being Live is NOT sufficient for /p/[slug] to render — the route also
+  // requires Public visibility AND a section an anonymous visitor can enter.
+  // Without this, an author who set the level to Public copies the public URL
+  // and everyone who opens it gets a 404 with nothing anywhere saying why. Only
+  // computed for an object whose level actually claims a public address; a
+  // non-public object has no public link to be broken.
+  const publicIssues =
+    obj.visibilityLevel === "public"
+      ? await publicBlockers({
+          isLive: live,
+          visibilityLevel: obj.visibilityLevel,
+          collectionId: obj.collectionId,
+        })
+      : [];
 
   // Rail data (manage-rights only): the current head backs the version number; the
   // backlinks are viewer-filtered documents that embed this artifact.
@@ -83,8 +85,12 @@ export async function ArtifactAuthoringView({
         <div className="mer-public-warning" role="status" data-testid="public-link-warning">
           <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
           <div>
+            {/* The trigger moved with #1726: this used to fire on a live
+                `public_web` publication, so "published publicly" was always
+                true. It now fires on the LEVEL being Public, which includes a
+                Public DRAFT — an object that is not published at all. */}
             <p className="mer-public-warning-title">
-              This page is published publicly, but the public link will not open.
+              This is set to Public, but its public link will not open.
             </p>
             <ul className="mer-public-warning-list">
               {publicIssues.map((issue) => (

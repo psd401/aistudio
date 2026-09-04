@@ -79,6 +79,7 @@ import { versionService } from "@/lib/content/version-service";
 import { resolveDocumentParts } from "@/lib/content/embed-resolver";
 import { extractDocumentHeadings } from "@/lib/content/render/headings";
 import { canEdit } from "@/lib/content/helpers";
+import { livePublicationConditions } from "@/lib/content/live-publication";
 import { normalizeDataAccess } from "@/lib/content/types";
 import type { ContentDataAccess } from "@/lib/content/types";
 import { getOptionalRequester } from "@/actions/db/atrium/requester";
@@ -178,8 +179,14 @@ async function loadReaderObject(slug: string): Promise<{
         .where(
           and(
             eq(contentPublications.objectId, obj.id),
-            eq(contentPublications.destination, "intranet"),
-            eq(contentPublications.status, "live")
+            // The same definition of Live the public reader, the sitemap and the
+            // asset/embed gates use (#1726). Hand-writing
+            // `destination = 'intranet'` here would have left THIS reader alone
+            // in not accepting a pre-migration-180 `public_web` row: an object
+            // live only through that alias would fall through to the dead-link
+            // redirect for its own viewers during the deploy window, while
+            // `/p/{slug}` served it happily.
+            ...livePublicationConditions()
           )
         )
         .limit(1),

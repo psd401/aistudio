@@ -18,10 +18,12 @@ jest.mock("@/actions/db/atrium/requester", () => ({
 
 const publishMock = jest.fn();
 const unpublishMock = jest.fn();
+const liveDestinationsMock = jest.fn();
 jest.mock("@/lib/content/publish-service", () => ({
   publishService: {
     publish: (...a: unknown[]) => publishMock(...a),
     unpublish: (...a: unknown[]) => unpublishMock(...a),
+    liveDestinations: (...a: unknown[]) => liveDestinationsMock(...a),
   },
 }));
 
@@ -105,7 +107,12 @@ beforeEach(() => {
     publicationId: "pub-1",
     publishedVersionId: "v-1",
   });
-  unpublishMock.mockReset().mockResolvedValue({ unpublished: true });
+  unpublishMock
+    .mockReset()
+    .mockResolvedValue({ unpublished: true, destination: "intranet" });
+  // Default: nothing was Live before the replay, so a compensating unpublish is
+  // this call's to make.
+  liveDestinationsMock.mockReset().mockResolvedValue([]);
   setLevelMock.mockReset().mockResolvedValue({ visibilityLevel: "public" });
   executeQueryMock.mockClear();
   // Default: no collection anywhere requires approval, so nobody is a
@@ -246,20 +253,94 @@ describe("authorization gating", () => {
   });
 });
 
+describe("approvePublishRequestAction — bundled-widen compensation", () => {
+  it("UNDOES the publish when the bundled widen fails, so the row replays clean", async () => {
+    // Before #1726 both halves rode inside one `runPublishTx` and a failure left
+    // nothing behind. They are two service calls now, so the compensation has to
+    // put that back: the admin retries or denies from the state they started in,
+    // never from a half-applied approval.
+    setLevelMock.mockRejectedValue(new Error("private collection"));
+
+    const result = await approvePublishRequestAction("req-1");
+    expect(result.isSuccess).toBe(false);
+    expect(publishMock).toHaveBeenCalledTimes(1);
+    expect(unpublishMock).toHaveBeenCalledWith(ADMIN, "obj-1", "intranet");
+    expect(unpublishMock.mock.invocationCallOrder[0]).toBeGreaterThan(
+      setLevelMock.mock.invocationCallOrder[0]
+    );
+    // And the row goes back to pending, as any replay failure does.
+    expect(labelCalls("atrium.approvals.revertClaimOnReplayFailure")).toBe(1);
+  });
+
+  it("does NOT undo a publication that was already standing before the replay", async () => {
+    // `unpublish` on the live destination retires EVERY live-surface row, so
+    // compensating an object that was already Live would take down a page this
+    // approval never put up — a worse outcome than the strand it is fixing.
+    liveDestinationsMock.mockResolvedValue(["public_web"]);
+    setLevelMock.mockRejectedValue(new Error("private collection"));
+
+    const result = await approvePublishRequestAction("req-1");
+    expect(result.isSuccess).toBe(false);
+    expect(unpublishMock).not.toHaveBeenCalled();
+  });
+
+  it("skips the pre-publish live read entirely when the row carries no widen", async () => {
+    queryResults.set("atrium.approvals.load", [
+      {
+        ...BASE_ROW,
+        context: { destination: "intranet", slug: "s" },
+      },
+    ]);
+
+    const result = await approvePublishRequestAction("req-1");
+    expect(result.isSuccess).toBe(true);
+    expect(setLevelMock).not.toHaveBeenCalled();
+    // Only a bundled widen can need the compensation, so only it pays the query.
+    expect(liveDestinationsMock).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the WIDEN failure, not the compensation's, when the undo also fails", async () => {
+    // The admin has to debug the write that actually blocked the approval. The
+    // residual state is Live at the object's existing Level — no audience change.
+    setLevelMock.mockRejectedValue(new Error("widen blew up"));
+    unpublishMock.mockRejectedValue(new Error("undo blew up"));
+
+    const result = await approvePublishRequestAction("req-1");
+    expect(result.isSuccess).toBe(false);
+    expect(unpublishMock).toHaveBeenCalledTimes(1);
+    expect(labelCalls("atrium.approvals.revertClaimOnReplayFailure")).toBe(1);
+  });
+});
+
 describe("approvePublishRequestAction — replay", () => {
-  it("replays a publish request with EXACTLY the recorded context (destination + widen)", async () => {
+  it("replays a pre-#1726 bundled widen as a SEPARATE setLevel after the publish", async () => {
     const result = await approvePublishRequestAction("req-1", "looks good");
     expect(result.isSuccess).toBe(true);
     if (!result.isSuccess) return;
     expect(result.data).toEqual({ id: "req-1", replayed: true });
+    // Publishing no longer carries visibility (#1726), so the two halves of a row
+    // queued before that change replay as the two writes they actually are.
+    expect(setLevelMock).toHaveBeenCalledWith(ADMIN, "obj-1", {
+      level: "public",
+    });
     // The replay runs AS the approving admin requester.
     expect(publishMock).toHaveBeenCalledTimes(1);
     expect(publishMock).toHaveBeenCalledWith(ADMIN, "obj-1", {
       destination: "intranet",
-      visibility: { level: "public" },
     });
+    // PUBLISH FIRST. The two writes are not one transaction, so whichever runs
+    // first is the one a later failure can strand. Going Live changes no
+    // audience since #1726 (the Level alone decides, and `/p/{slug}` needs
+    // `public` AND Live), so a stranded publish exposes nobody; a stranded widen
+    // is an audience change from a decision that never completed.
+    expect(publishMock.mock.invocationCallOrder[0]).toBeLessThan(
+      setLevelMock.mock.invocationCallOrder[0]
+    );
+    // The happy path compensates nothing.
+    expect(unpublishMock).not.toHaveBeenCalled();
     expect(labelCalls("atrium.approvals.claimApprove")).toBe(1);
   });
+
 
   it("replays a public-destination publish WITHOUT inventing a visibility widen", async () => {
     queryResults.set("atrium.approvals.load", [

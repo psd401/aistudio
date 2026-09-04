@@ -9,8 +9,9 @@ import { test, expect } from "./fixtures";
  * routes are wired and auth-gated without needing a token.
  *
  * The authenticated functional flow (mint an sk- key with content:* → create →
- * version → publish_internal; autonomous identity → publish_content(public_web)
- * returns approval_required) is the gated spec + manual runbook.
+ * version → publish_internal; autonomous identity → set_visibility(public)
+ * returns approval_required) is the gated spec + manual runbook. Publishing is a
+ * Live/Draft state change since #1726 and is not itself audience-gated.
  */
 
 const SOME_ID = "00000000-0000-0000-0000-000000000000";

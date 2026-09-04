@@ -175,10 +175,10 @@ These describe how the layers wire at runtime; later sections give the code.
 2. On a query, `retrievalService.search(query, requester)` runs semantic search over indexed chunks **filtered by `canView(requester, object)`** and the scope.
 3. Staff-only content is returned to a staff user; the same query from a student-facing assistant returns nothing staff-only.
 
-**Flow E — Publish to a public page**
-1. User (or agent) requests `publish_content(id, 'public_web')` with `visibility='public'`.
-2. The public-publish gate (§26.4) requires a human-held `content:publish_public` scope or an approval step; autonomous agents are blocked here.
-3. On approval, the public_web adapter renders/export the version to the public route; `external_ref` stores the public URL.
+**Flow E — Publish to a public page** (revised, #1726 — two independent steps, in either order)
+1. User (or agent) requests `set_visibility(id, 'public')`. The public gate (§26.4) requires a human-held `content:publish_public` scope or an approval step; autonomous agents are blocked here.
+2. User (or agent) requests `publish_content(id)` to make the object LIVE. Not gated on audience — it pins a version and gives the object its reader page.
+3. `/p/{slug}` is DERIVED from the two: it resolves when the object is `public` AND live. There is no second publication row to forget, so the "public visibility, no publication" and "published to the web, not public" dead-link states cannot occur.
 
 ---
 
@@ -903,19 +903,23 @@ const adapters: Record<string, PublishAdapter> = {
 };
 
 export const publishService = {
-  async publish(req: Requester, objectId: string, destination: PublishDest, visibility?: VisibilityInput) {
+  // #1726: NO `visibility` parameter. Publishing is a Live/Draft state change and
+  // never reads or writes visibility_level / content_visibility_grants — the
+  // audience is the object's Level, written only by visibilityService.setLevel.
+  // `intranet` and `public_web` both resolve to the ONE live row.
+  async publish(req: Requester, objectId: string, destination: PublishDest) {
     const obj = await loadById(objectId);
     assertCanEdit(req, obj);
-    const vis = visibility ?? { level: obj.visibilityLevel };
 
-    // PUBLIC-PUBLISH GATE (§26.4)
-    if (isPublicFacing(destination, vis) && !canPublishPublic(req)) {
-      throw new ApprovalRequiredError("Public publishing requires a human approver / content:publish_public");
+    // §26.4 GATE — connectors only: a copy pushed into an external
+    // family-facing system is an exposure whatever the Level says. Making an
+    // object live is not gated here; widening to `public` is gated in setLevel.
+    if (isPublicDestination(destination) && !canPublishPublic(req)) {
+      throw new ApprovalRequiredError("Publishing to this destination requires a human approver / content:publish_public");
     }
-    if (visibility) await visibilityService.setLevel(obj.id, vis); // update object visibility if widening/narrowing
 
     const version = await versionService.current(obj);
-    const { externalRef } = await adapters[destination].publish({ object: obj, version, visibility: vis, req });
+    const { externalRef } = await adapters[destination].publish({ object: obj, version, req });
 
     await db.insert(contentPublications).values({
       objectId: obj.id, destination, publishedVersionId: version.id,
@@ -1453,7 +1457,16 @@ function canPublishPublic(req: Requester): boolean {
 ```
 
 ### 26.4 The public-publish gate
-Publishing to a public-facing destination/visibility requires `content:publish_public`, which **autonomous agents do not hold**. When an autonomous run requests it, `publishService` throws `ApprovalRequiredError`; the object enters a review queue (or notifies an approver via the publish event). This closes the failure mode of an unattended agent placing unreviewed content in front of families. Internal publishing stays fluid.
+Reaching a public-facing audience requires `content:publish_public`, which **autonomous agents do not hold**. When an autonomous run requests it, the service throws `ApprovalRequiredError`; the object enters a review queue (or notifies an approver via the publish event). This closes the failure mode of an unattended agent placing unreviewed content in front of families.
+
+**Where the gate bites (revised, #1726).** It bites on the two things that actually change the audience:
+
+1. `visibilityService.setLevel` widening an object to `public` — evaluated against the FOR-UPDATE-locked row, so a concurrent narrow cannot slip past it.
+2. `publishService.publish`/`unpublish` for a CONNECTOR destination (`schoology`, `google`) — pushing a copy into an external family-facing system is an exposure regardless of the object's level.
+
+It does **not** bite on making an object live. Publication is a Live/Draft STATE — it pins a version, gives the object a reader page, and adds it to the published library and retrieval — and who may open that page is decided entirely by the object's Level. `/c/{slug}` runs `canView` before it looks at the publication, so a group-scoped live object opens for its grantees and 404s for everyone else, exactly as intended; `/p/{slug}` is DERIVED from `visibility_level = 'public'` AND being live.
+
+Gating the live switch as well gated the *state* rather than the *exposure*. It produced a "Widen who can see this?" prompt whose premise was false, whose confirmation replaced the author's grant set (the widen ran through `setLevelInTx`), and which the same dialog could walk around by narrowing one save later. Internal publishing stays fluid; a section an administrator has switched review on for still queues its publishes (migration 178, a separate and narrower gate).
 
 ### 26.5 Ownership for autonomous content
 Autonomous objects are owned by a designated **system user** (configurable) and stamped `created_by_actor='agent'`, `created_by_agent_id=<identity>`. They read violet on the rail; a human review before any public publish is the green step.
@@ -1599,7 +1612,7 @@ Index-on-publish via the repository pipeline (§16.1), permission-aware `search`
 4. **Retrieval index** — reuse `knowledge_repositories`/`repository_item_chunks` with a system repository per collection (recommended) vs a dedicated content index; confirm how `repository_access` vs `content_visibility_grants` are reconciled (this spec filters by `canView` at query time regardless).
 5. **Service identity mechanism** — OIDC client-credentials + `agent_identities` (recommended) vs Cognito app clients.
 6. **Artifact JSX rendering** — whether to support `jsx` artifacts (needs an in-sandbox transform/runtime) in v1 or start HTML/JS-only and add JSX later. Recommended: HTML/JS first.
-7. **Public hosting** — CloudFront + S3 static export vs an authenticated-but-anonymous Next public route for `public_web`. **RESOLVED (Phase 7, #1057): the authenticated-but-anonymous Next public route** (`app/(public)/p/[slug]/page.tsx`, in `PUBLIC_PATHS`). It reuses the existing render pipeline + artifact sandbox unchanged, needs no net-new CloudFront/S3 distribution, and enforces the same permission boundary as the rest of the content layer (strict `visibility_level='public'` + a live `public_web` publication). A static-export CDN remains a future optimization behind the same `ATRIUM_PUBLIC_BASE_URL` — only the `public_web` adapter body would change; the reader route and `external_ref` contract stay identical.
+7. **Public hosting** — CloudFront + S3 static export vs an authenticated-but-anonymous Next public route for `public_web`. **RESOLVED (Phase 7, #1057): the authenticated-but-anonymous Next public route** (`app/(public)/p/[slug]/page.tsx`, in `PUBLIC_PATHS`). It reuses the existing render pipeline + artifact sandbox unchanged, needs no net-new CloudFront/S3 distribution, and enforces the same permission boundary as the rest of the content layer (strict `visibility_level='public'` + being live — since #1726 that is the DERIVED gate, not a second `public_web` publication row). A static-export CDN remains a future optimization behind the same `ATRIUM_PUBLIC_BASE_URL`; the reader route and `external_ref` contract stay identical.
 8. **Naming** — §34.
 
 ## 34. Naming

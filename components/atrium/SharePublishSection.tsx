@@ -1,324 +1,216 @@
 "use client";
 
 /**
- * "Where it's published" — the destination rows inside the Share dialog.
+ * "Status" — the Live/Draft switch inside the Share dialog (#1726).
  *
- * ## Why this replaced the Publish ▾ menu
+ * ## What this replaced, and why
  *
- * Sharing was spread across three controls that each owned part of one idea: a
- * "Share" button that silently copied a link, a "Share" dialog that set
- * visibility, and a "Publish ▾" dropdown that created publications. Nothing said
- * they were related — yet a working link requires ALL of them to agree, and the
- * two most common broken states (public visibility with no publication, a
- * publication with non-public visibility) are exactly what you get when you use
- * one control and not the others. Putting the destinations in the same dialog as
- * the audience makes the dependency visible instead of tribal knowledge.
+ * This section used to be "Where it's published": a row for the intranet and a
+ * row for the public web, each with its own Publish/Unpublish buttons. That made
+ * publication a second AUDIENCE control competing with the Level picker directly
+ * above it, and the two had to be reconciled by a "Widen who can see this?"
+ * prompt. Every part of that was wrong:
  *
- * ## What was preserved
+ *  - The prompt's claim was false. `/c/[slug]` runs `visibilityService.canView`
+ *    BEFORE it looks at the publication, so a Group-visibility object published
+ *    to the intranet opens for every grantee and 404s for everyone else. The
+ *    people it warned "cannot open it" were exactly the people the author had
+ *    deliberately excluded.
+ *  - Confirming it DESTROYED the author's work: the widen ran through
+ *    `setLevelInTx`, which replaces the grant set, so a Group object with three
+ *    named people came back with none.
+ *  - The guard was UI-only. The service treated the widen as an optional offer
+ *    and the REST endpoint accepted a publish with no visibility at all, so
+ *    narrowing back to Group one save later produced the very state the prompt
+ *    refused to create.
  *
- * The widen check and its revalidation are carried over verbatim from the old
- * menu, including the reason they exist:
+ * ## The model now
  *
- *  - Publishing to a destination whose audience exceeds the object's visibility
- *    prompts BEFORE publishing. Cancelling publishes nothing — deliberately not
- *    "publish anyway", which is the broken state (a live page its readers cannot
- *    open) this check exists to prevent.
- *  - Confirming RE-READS visibility and recomputes the widen against that fresh
- *    value rather than the snapshot the prompt opened with. The snapshot can go
- *    stale (another tab, or the audience control directly above this section),
- *    and the publish transaction applies whatever visibility it is handed under
- *    its row lock — so confirming what is PRESENTED as a widen could otherwise
- *    silently NARROW an object that had concurrently become Public.
- *  - A failed re-read does NOT fall back to the snapshot; it surfaces an inline
- *    error, because publishing on an unverifiable audience is the whole defect.
+ * Publication is ONE state — Live or Draft. Publishing pins the head version,
+ * gives the object its page, and adds it to the published library and retrieval;
+ * none of that is an audience decision. The Level alone answers "who", so there
+ * is no second switch to reconcile and no prompt to show.
  *
- * The confirmation is an inline STEP in this section rather than a nested
- * dialog: a dialog inside a dialog fights the outer one's dismissable layer, and
- * the confirmation belongs to this section anyway.
+ * In its place the switch STATES its consequence ("Live for the 2 people you've
+ * granted"), computed from the Level and grant count. That is the same sentence
+ * the prompt was trying to ask as a question, except it is true.
+ *
+ * Connectors (Schoology / Google) are a genuinely different concept — "push a
+ * copy into another system" — so they sit in their own "Also send to…" list,
+ * rendered disabled while the adapters still throw `not yet available`.
  */
 
-import { useCallback, useState } from "react";
-import { Globe, Building2, Loader2 } from "lucide-react";
-import { getVisibilityAction } from "@/actions/db/atrium/get-visibility";
-import {
-  widenNeededFor,
-  VISIBILITY_LABELS,
-} from "@/lib/atrium/publish-audience";
-import type { EditorPublishDestination } from "@/actions/db/atrium/publish-document";
+import { Loader2, Globe, Send } from "lucide-react";
 import type { VisibilityLevel } from "@/lib/content";
-import { createLogger } from "@/lib/client-logger";
 import { cn } from "@/lib/utils";
 
-const log = createLogger({ component: "SharePublishSection" });
-
-interface DestinationOption {
-  value: EditorPublishDestination;
-  label: string;
-  short: string;
-  blurb: string;
-  icon: React.ReactNode;
+/**
+ * What goes live, in the author's words, given the audience they chose.
+ *
+ * Deliberately phrased as a CONSEQUENCE, not a question: the dialog's job here is
+ * to tell the author what publishing does, and every one of these states is
+ * legitimate — including a Live object only three named people can open.
+ */
+export function liveConsequence(
+  level: VisibilityLevel,
+  grantCount: number
+): string {
+  switch (level) {
+    case "public":
+      return "Live for anyone with the link, no sign-in.";
+    case "internal":
+      return "Live for everyone signed in.";
+    case "group":
+      // "people" alone would be a lie: a grant can be a role, building,
+      // department, grade or Google group as well as a named person, and the
+      // count is of grants. The point of this line is that it is TRUE for every
+      // state — the prompt it replaced was not.
+      return grantCount === 1
+        ? "Live for the 1 person or group you've granted."
+        : `Live for the ${grantCount} people and groups you've granted.`;
+    case "private":
+      // A `private` object can still carry per-user grants: `setLevelInTx`
+      // PRESERVES them across a group→private round-trip so a colleague's access
+      // is not silently revoked, and `canView` honours them (see
+      // visibility-service's "private + user grants" design note). Claiming
+      // "only you and administrators" over one of those would be exactly the
+      // kind of confident-and-wrong sentence this line replaced.
+      return grantCount === 0
+        ? "Live, but only you and administrators can open it."
+        : grantCount === 1
+          ? "Live for you, administrators, and 1 person who still has access."
+          : `Live for you, administrators, and ${grantCount} people who still have access.`;
+    default:
+      return "Live.";
+  }
 }
 
-const DESTINATIONS: readonly DestinationOption[] = [
-  {
-    value: "intranet",
-    label: "The intranet",
-    short: "the intranet",
-    blurb: "Anyone signed in to AI Studio who can already see it.",
-    icon: <Building2 className="h-4 w-4" aria-hidden="true" />,
-  },
-  {
-    value: "public_web",
-    label: "The public web",
-    short: "the public web",
-    blurb: "Anyone with the link, no sign-in. Requires Public visibility.",
-    icon: <Globe className="h-4 w-4" aria-hidden="true" />,
-  },
+/** What a Draft means, in the same voice. */
+const DRAFT_CONSEQUENCE =
+  "Draft — it has no page of its own yet. Only people who can already see it can open it.";
+
+interface ConnectorOption {
+  value: string;
+  label: string;
+  blurb: string;
+}
+
+/**
+ * Connectors are destinations in the real sense (a copy lands in another system),
+ * which is why they keep `content_publications.destination`. Shown disabled so
+ * enabling one later is a change to the adapter, not to this dialog.
+ */
+const CONNECTORS: readonly ConnectorOption[] = [
+  { value: "schoology", label: "Schoology", blurb: "Coming soon." },
+  { value: "google", label: "Google Classroom", blurb: "Coming soon." },
 ];
 
-/** The inline widen confirmation step. See the file header for why it is inline. */
-function WidenConfirm({
-  current,
-  widenTo,
-  destinationShort,
-  confirming,
-  error,
-  onCancel,
-  onConfirm,
-}: {
-  current: VisibilityLevel;
-  widenTo: VisibilityLevel;
-  destinationShort: string;
-  confirming: boolean;
-  error: string | null;
-  onCancel: () => void;
-  onConfirm: () => void;
-}): React.JSX.Element {
-  return (
-    <div className="mer-share-confirm" data-testid="share-widen-confirm">
-      <p className="mer-share-confirm-title">Widen who can see this?</p>
-      <p className="mer-share-confirm-body">
-        It is currently <strong>{VISIBILITY_LABELS[current]}</strong>. Publishing
-        it to {destinationShort} without changing that would create a live page
-        its readers cannot open. Publishing will also set visibility to{" "}
-        <strong>{VISIBILITY_LABELS[widenTo]}</strong>
-        {widenTo === "public"
-          ? " — anyone on the internet will be able to read it, no sign-in required."
-          : " — anyone signed in to AI Studio will be able to read it."}
-      </p>
-      {error && (
-        <p className="text-sm text-destructive" role="alert">
-          {error}
-        </p>
-      )}
-      <div className="mer-share-confirm-actions">
-        <button type="button" className="mer-btn" disabled={confirming} onClick={onCancel}>
-          Cancel
-        </button>
-        <button
-          type="button"
-          className="mer-btn mer-btn-primary"
-          disabled={confirming}
-          onClick={onConfirm}
-          data-testid="share-widen-confirm-button"
-        >
-          {confirming ? "Checking…" : "Widen and publish"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/** One destination row: what it means, whether it is live, and the actions. */
-function DestinationRow({
-  option,
-  isLive,
-  canEdit,
-  busy,
-  visibilityKnown,
-  onPublish,
-  onUnpublish,
-}: {
-  option: DestinationOption;
-  isLive: boolean;
-  canEdit: boolean;
-  busy: boolean;
-  /** Publishing is blocked until the audience is known — see the header. */
-  visibilityKnown: boolean;
-  onPublish: () => void;
-  onUnpublish: () => void;
-}): React.JSX.Element {
-  return (
-    <div
-      className="mer-share-dest"
-      data-live={isLive ? "true" : "false"}
-      data-testid={`share-dest-${option.value}`}
-    >
-      <span className="mer-share-dest-icon" aria-hidden="true">
-        {option.icon}
-      </span>
-      <div className="mer-share-dest-text">
-        <p className="mer-share-dest-label">
-          {option.label}
-          {isLive && (
-            <span
-              className="mer-badge mer-badge-live"
-              data-testid={`live-${option.value}`}
-            >
-              Live
-            </span>
-          )}
-        </p>
-        <p className="mer-share-dest-blurb">{option.blurb}</p>
-      </div>
-      {canEdit && (
-        <div className="mer-share-dest-actions">
-          <button
-            type="button"
-            className={cn("mer-btn", !isLive && "mer-btn-primary")}
-            disabled={busy || !visibilityKnown}
-            onClick={onPublish}
-            data-testid={`share-publish-${option.value}`}
-          >
-            {!visibilityKnown ? "Checking…" : isLive ? "Republish" : "Publish"}
-          </button>
-          {isLive && (
-            <button
-              type="button"
-              className="mer-btn mer-btn-danger"
-              disabled={busy}
-              onClick={onUnpublish}
-              data-testid={`share-unpublish-${option.value}`}
-            >
-              Unpublish
-            </button>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
 export interface SharePublishSectionProps {
-  /** Destinations with a live publication right now. */
-  live: ReadonlySet<string>;
-  /** The object's saved visibility, or null while it is still unknown. */
+  /** Whether the object currently has a live publication. */
+  isLive: boolean;
+  /** The object's SAVED visibility, or null while it is still unknown. */
   visibility: VisibilityLevel | null;
+  /** How many grants the SAVED `group` visibility carries. */
+  grantCount: number;
   /** A publish/unpublish is in flight upstream. */
   busy: boolean;
   canEdit: boolean;
-  /** Content object id or slug — used to re-read visibility on confirm. */
-  idOrSlug: string;
-  onPublish: (
-    destination: EditorPublishDestination,
-    widenTo?: VisibilityLevel
-  ) => void;
-  onUnpublish: (destination: EditorPublishDestination) => void;
+  onPublish: () => void;
+  onUnpublish: () => void;
 }
 
 export function SharePublishSection({
-  live,
+  isLive,
   visibility,
+  grantCount,
   busy,
   canEdit,
-  idOrSlug,
   onPublish,
   onUnpublish,
 }: SharePublishSectionProps): React.JSX.Element {
-  const [pending, setPending] = useState<{
-    destination: EditorPublishDestination;
-    widenTo: VisibilityLevel;
-  } | null>(null);
-  const [confirming, setConfirming] = useState(false);
-  const [confirmError, setConfirmError] = useState<string | null>(null);
-
-  const requestPublish = useCallback(
-    (destination: EditorPublishDestination) => {
-      // Unreachable with an unknown audience — the buttons are disabled until
-      // visibility resolves. Guarded anyway so a future caller cannot skip the
-      // audience check by accident.
-      if (!visibility) return;
-      const widenTo = widenNeededFor(destination, visibility);
-      if (widenTo) {
-        setPending({ destination, widenTo });
-        setConfirmError(null);
-        return;
-      }
-      onPublish(destination);
-    },
-    [visibility, onPublish]
-  );
-
-  const confirmWiden = useCallback(() => {
-    if (!pending) return;
-    setConfirming(true);
-    setConfirmError(null);
-    void (async () => {
-      try {
-        const vis = await getVisibilityAction(idOrSlug);
-        if (!vis.isSuccess) {
-          log.warn("widen revalidation failed", { message: vis.message });
-          setConfirmError(
-            "Could not confirm who can currently see this. Please try again."
-          );
-          setConfirming(false);
-          return;
-        }
-        // Recompute against the FRESH level — see the file header. This can
-        // never contradict what was confirmed ("make it readable there"), so
-        // there is no second prompt: it is either the same widen, or none
-        // because the object already reaches further.
-        const widenTo = widenNeededFor(pending.destination, vis.data.visibilityLevel);
-        setConfirming(false);
-        const destination = pending.destination;
-        setPending(null);
-        onPublish(destination, widenTo ?? undefined);
-      } catch (e) {
-        log.error("widen revalidation threw", {
-          error: e instanceof Error ? e.message : String(e),
-        });
-        setConfirmError(
-          "Could not confirm who can currently see this. Please try again."
-        );
-        setConfirming(false);
-      }
-    })();
-  }, [pending, idOrSlug, onPublish]);
-
-  if (pending && visibility) {
-    return (
-      <WidenConfirm
-        current={visibility}
-        widenTo={pending.widenTo}
-        destinationShort={
-          DESTINATIONS.find((d) => d.value === pending.destination)?.short ??
-          "that destination"
-        }
-        confirming={confirming}
-        error={confirmError}
-        onCancel={() => {
-          setPending(null);
-          setConfirmError(null);
-        }}
-        onConfirm={confirmWiden}
-      />
-    );
-  }
+  // The consequence line needs the SAVED level. Until it resolves there is
+  // nothing honest to say, so the actions stay disabled rather than describing an
+  // audience that might be wrong.
+  const known = visibility !== null;
+  const consequence = !known
+    ? "Checking who can see this…"
+    : isLive
+      ? liveConsequence(visibility, grantCount)
+      : DRAFT_CONSEQUENCE;
 
   return (
     <div className="mer-share-dests">
-      {DESTINATIONS.map((option) => (
-        <DestinationRow
-          key={option.value}
-          option={option}
-          isLive={live.has(option.value)}
-          canEdit={canEdit}
-          busy={busy}
-          visibilityKnown={visibility !== null}
-          onPublish={() => requestPublish(option.value)}
-          onUnpublish={() => onUnpublish(option.value)}
-        />
-      ))}
+      <div
+        className="mer-share-dest"
+        data-live={isLive ? "true" : "false"}
+        data-testid="share-live-state"
+      >
+        <span className="mer-share-dest-icon" aria-hidden="true">
+          <Globe className="h-4 w-4" />
+        </span>
+        <div className="mer-share-dest-text">
+          <p className="mer-share-dest-label">
+            {isLive ? "Live" : "Draft"}
+            {isLive && (
+              <span className="mer-badge mer-badge-live" data-testid="share-live-badge">
+                Live
+              </span>
+            )}
+          </p>
+          <p className="mer-share-dest-blurb" data-testid="share-consequence">
+            {consequence}
+          </p>
+        </div>
+        {canEdit && (
+          <div className="mer-share-dest-actions">
+            <button
+              type="button"
+              className={cn("mer-btn", !isLive && "mer-btn-primary")}
+              disabled={busy || !known}
+              onClick={onPublish}
+              data-testid="share-publish"
+            >
+              {!known ? "Checking…" : isLive ? "Republish" : "Publish"}
+            </button>
+            {isLive && (
+              <button
+                type="button"
+                className="mer-btn mer-btn-danger"
+                disabled={busy}
+                onClick={onUnpublish}
+                data-testid="share-unpublish"
+              >
+                Unpublish
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="mer-share-connectors" data-testid="share-connectors">
+        <p className="mer-share-section-label">
+          <Send className="h-3.5 w-3.5" aria-hidden="true" /> Also send to…
+        </p>
+        {CONNECTORS.map((connector) => (
+          <div
+            key={connector.value}
+            className="mer-share-dest"
+            data-testid={`share-connector-${connector.value}`}
+            aria-disabled="true"
+          >
+            <div className="mer-share-dest-text">
+              <p className="mer-share-dest-label">{connector.label}</p>
+              <p className="mer-share-dest-blurb">{connector.blurb}</p>
+            </div>
+            <div className="mer-share-dest-actions">
+              <button type="button" className="mer-btn" disabled>
+                Send
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+
       {busy && (
         <p className="mer-share-dest-busy" role="status">
           <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />{" "}

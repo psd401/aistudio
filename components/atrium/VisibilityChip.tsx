@@ -26,10 +26,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { publishDocumentAction } from "@/actions/db/atrium/publish-document";
 import {
-  publishDocumentAction,
-  type EditorPublishDestination,
-} from "@/actions/db/atrium/publish-document";
+  isLive,
+  LIVE_DESTINATION,
+} from "@/lib/content/publish-adapters/types";
 import { unpublishDocumentAction } from "@/actions/db/atrium/unpublish-document";
 import { ShareLinkSection } from "./ShareLinkSection";
 import { SharePublishSection } from "./SharePublishSection";
@@ -58,7 +59,6 @@ import { listGrantOptionsAction } from "@/actions/db/atrium/list-grant-options";
 import { meridianPortalClassName } from "@/lib/meridian/fonts";
 import { listPublicationsAction } from "@/actions/db/atrium/list-publications";
 import { PeoplePicker } from "./PeoplePicker";
-import { CopyableLink } from "./CopyableLink";
 
 /** The visibility levels, in widening order, with their picker labels. */
 const LEVELS = [
@@ -341,63 +341,25 @@ async function performVisibilitySave(
 }
 
 /**
- * The consequence of Public visibility (#1336 C1).
+ * Whether the object is LIVE (#1726 — one publication state, not a set of
+ * destinations). Loaded only while the dialog is open, which keeps the chip's
+ * mount cost at exactly one request.
  *
- * Setting visibility to Public flips ONE of the two switches the anonymous
- * reader requires: `/p/[slug]` needs BOTH `visibility_level = 'public'` AND a
- * live `public_web` publication row. Before #1336 the chip flipped and said
- * nothing, so the owner had no way to learn the link they were about to share
- * still 404s. This surfaces the link when it works and an explicit warning when
- * it does not.
+ * `loaded` stays false on any failure. That distinction is load-bearing: an
+ * UNKNOWN state must render no confident claim about where the object is
+ * readable, because "still a draft" shown over a live page is exactly the
+ * misinformation this dialog exists to remove.
  */
-function PublicLinkNotice({
-  publicUrl,
-  hasLivePublication,
-}: {
-  publicUrl: string | null;
-  hasLivePublication: boolean;
-}): React.JSX.Element {
-  if (!hasLivePublication) {
-    return (
-      <p
-        className="text-sm text-amber-600"
-        role="status"
-        data-testid="public-not-published"
-      >
-        This is set to Public, but it has not been published to the public web
-        yet — the public link will not open for anyone. Use Publish ▾ → Public
-        web to put it live.
-      </p>
-    );
-  }
-  if (!publicUrl) return <></>;
-  return (
-    <p className="text-sm text-muted-foreground" data-testid="public-link-notice">
-      Anyone with this link can read it, no sign-in required:{" "}
-      <CopyableLink url={publicUrl} testId="visibility-public-url" />
-    </p>
-  );
-}
-
-/**
- * Live `public_web` publication state for the Public consequence notice.
- * Loaded only while the dialog is open AND the SAVED level is public — there is
- * no consequence to explain otherwise, and this keeps the chip's mount cost at
- * exactly one request.
- */
-function usePublicPublication(
+function useLivePublication(
   idOrSlug: string,
   active: boolean,
   /** Bumped after every publish/unpublish so the section re-reads live state. */
   refreshKey = 0
 ) {
-  const [state, setState] = useState<{
-    loaded: boolean;
-    url: string | null;
-    live: boolean;
-    /** Every destination with a live publication — drives the Publish section. */
-    liveDestinations: ReadonlySet<string>;
-  }>({ loaded: false, url: null, live: false, liveDestinations: new Set() });
+  const [state, setState] = useState<LivePublicationState>({
+    loaded: false,
+    live: false,
+  });
 
   useEffect(() => {
     if (!active) return;
@@ -409,35 +371,22 @@ function usePublicPublication(
         if (!res.isSuccess) {
           // `isSuccess === false` is the NORMAL error channel (`handleError`
           // returns it; only an exception reaches the catch below). Treating it
-          // as "no publication found" would confidently tell the owner their
-          // live public page "has not been published yet" — a false warning
-          // about the exact thing this notice exists to get right. Stay
-          // UNKNOWN: `loaded` false renders no notice at all.
-          setState({
-            loaded: false,
-            url: null,
-            live: false,
-            liveDestinations: new Set(),
-          });
+          // as "not live" would confidently tell the owner their live page is
+          // still a draft — a false claim about the exact thing this dialog
+          // exists to get right. Stay UNKNOWN: `loaded` false disables the
+          // actions and shows no consequence line.
+          setState({ loaded: false, live: false });
           return;
         }
-        const pub = res.data.find((p) => p.destination === "public_web");
         setState({
           loaded: true,
-          url: pub?.readerUrl ?? null,
-          live: Boolean(pub),
-          liveDestinations: new Set(res.data.map((p) => p.destination)),
+          live: isLive(res.data.map((p) => p.destination)),
         });
       } catch {
         // Leave `loaded` false: an unknown state must not render a confident
-        // "not published yet" warning that might be wrong.
+        // "still a draft" claim that might be wrong.
         if (!cancelled) {
-          setState({
-            loaded: false,
-            url: null,
-            live: false,
-            liveDestinations: new Set(),
-          });
+          setState({ loaded: false, live: false });
         }
       }
     })();
@@ -449,12 +398,12 @@ function usePublicPublication(
   return state;
 }
 
-/** State of the live `public_web` publication, as loaded for the notice. */
-interface PublicNoticeState {
+/** Live-publication state, as loaded for the Share dialog. */
+interface LivePublicationState {
+  /** False until the read lands — and after any failure (see the hook). */
   loaded: boolean;
-  url: string | null;
+  /** The object has a live publication. */
   live: boolean;
-  liveDestinations: ReadonlySet<string>;
 }
 
 /**
@@ -472,12 +421,12 @@ function ShareDialogBody({
   grantLabels,
   roleOptions,
   groupOptions,
-  publicNotice,
+  savedGrantCount,
+  livePublication,
   share,
   publishBusy,
   publishError,
   publishPending,
-  idOrSlug,
   error,
   pendingApproval,
   onChangeLevel,
@@ -496,33 +445,33 @@ function ShareDialogBody({
   grantLabels: Record<string, string>;
   roleOptions: string[];
   groupOptions: GroupOption[];
-  publicNotice: PublicNoticeState;
+  /** Grants on the SAVED `group` level — the consequence line counts these. */
+  savedGrantCount: number;
+  livePublication: LivePublicationState;
   share?: { objectId: string; slug: string; kind: "document" | "artifact" };
   publishBusy: boolean;
   publishError: string | null;
   publishPending: boolean;
-  idOrSlug: string;
   error: string | null;
   pendingApproval: string | null;
   onChangeLevel: (level: Level) => void;
   onAddGrant: (grant: Grant) => void;
   onRemoveGrant: (index: number) => void;
-  onPublish: (destination: EditorPublishDestination, widenTo?: Level) => void;
-  onUnpublish: (destination: EditorPublishDestination) => void;
+  onPublish: () => void;
+  onUnpublish: () => void;
   onCancel: () => void;
   onSave: () => void;
 }): React.JSX.Element {
   return (
     // `wide` (680px), not the 520px default: this dialog gained two sections
-    // (the link row and the destination rows). At 520px a destination's
-    // one-line description wrapped mid-phrase and collided with its
-    // Publish/Unpublish buttons.
+    // (the link row and the Live/Draft row). At 520px the status line wrapped
+    // mid-phrase and collided with its Publish/Unpublish buttons.
     <DialogContent className={meridianPortalClassName} data-mer-size="wide">
       <DialogHeader>
         <DialogTitle>Share</DialogTitle>
         <DialogDescription>
           Everything that decides whether a link works: the link itself, who is
-          allowed to open it, and where it is published.
+          allowed to open it, and whether it is live.
         </DialogDescription>
       </DialogHeader>
 
@@ -535,8 +484,7 @@ function ShareDialogBody({
             objectId={share.objectId}
             slug={share.slug}
             kind={share.kind}
-            publicLive={publicNotice.liveDestinations.has("public_web")}
-            intranetLive={publicNotice.liveDestinations.has("intranet")}
+            isLive={livePublication.live}
             savedLevel={savedLevel}
           />
         )}
@@ -561,30 +509,19 @@ function ShareDialogBody({
           />
         )}
 
-        {/* The Link section above already states the working URL, who can open
-            it, and any mismatch — so this older notice is only rendered for the
-            legacy audience-only chip (no `share` prop), where nothing else
-            explains the consequence of picking Public. */}
-        {!share && savedLevel === "public" && publicNotice.loaded && (
-          <PublicLinkNotice
-            publicUrl={publicNotice.url}
-            hasLivePublication={publicNotice.live}
-          />
-        )}
-
         {share && (
           <>
-            <p className="mer-share-section-label">Where it&apos;s published</p>
+            <p className="mer-share-section-label">Status</p>
             <SharePublishSection
-              live={publicNotice.liveDestinations}
-              // Only the SAVED level governs publishing. An unsaved draft pick
-              // has changed nothing on the server, so evaluating the widen
-              // against it would prompt for a widen that already "happened" in
-              // the form, or skip one that is still needed.
-              visibility={publicNotice.loaded ? savedLevel : null}
+              isLive={livePublication.live}
+              // Only the SAVED level and grants describe what is actually live.
+              // An unsaved draft pick has changed nothing on the server, so
+              // stating its consequence would describe an audience that does not
+              // exist yet.
+              visibility={livePublication.loaded ? savedLevel : null}
+              grantCount={savedGrantCount}
               busy={publishBusy}
               canEdit={canEdit}
-              idOrSlug={idOrSlug}
               onPublish={onPublish}
               onUnpublish={onUnpublish}
             />
@@ -666,16 +603,15 @@ function ShareTriggerButton({
 }
 
 /**
- * Publish / unpublish from inside the Share dialog.
+ * The Live/Draft switch's two server calls.
  *
- * Calls the SAME gated server actions the old Publish ▾ menu did — the §26.4
- * destination gate, the approval-queue path, and the single-transaction widen
- * all live in those actions, not in the UI. This only sequences the calls and
- * tells the dialog to re-read afterwards.
+ * Both go through the SAME gated server actions the old Publish ▾ menu used —
+ * the permission checks and the approval-queue path live there, not in the UI.
+ * Neither call carries visibility any more (#1726): publishing is a state
+ * change, so it cannot widen the audience and cannot wipe the author's grants.
  *
  * `onChanged` fires only when publication state actually changed on the server,
- * so the dialog re-reads both the live destinations AND the audience (a publish
- * can widen visibility in the same transaction).
+ * so the dialog re-reads the live state.
  */
 function useSharePublish(idOrSlug: string, onChanged: () => void) {
   const [publishBusy, setPublishBusy] = useState(false);
@@ -684,21 +620,13 @@ function useSharePublish(idOrSlug: string, onChanged: () => void) {
   const [publishPending, setPublishPending] = useState(false);
 
   const publish = useCallback(
-    (destination: EditorPublishDestination, widenTo?: Level) => {
+    () => {
       setPublishBusy(true);
       setPublishError(null);
       setPublishPending(false);
       void (async () => {
         try {
-          const res = await publishDocumentAction(idOrSlug, {
-            destination,
-            // Rides along as the action's existing `visibility` parameter so the
-            // widen and the publish commit in ONE transaction. `widenOnly` makes
-            // it an OFFER, not an assignment — see use-editor-actions.
-            ...(widenTo
-              ? { visibility: { level: widenTo, widenOnly: true } }
-              : {}),
-          });
+          const res = await publishDocumentAction(idOrSlug);
           if (res.isSuccess) {
             onChanged();
           } else {
@@ -720,13 +648,15 @@ function useSharePublish(idOrSlug: string, onChanged: () => void) {
   );
 
   const unpublish = useCallback(
-    (destination: EditorPublishDestination) => {
+    () => {
       setPublishBusy(true);
       setPublishError(null);
       setPublishPending(false);
       void (async () => {
         try {
-          const res = await unpublishDocumentAction(idOrSlug, { destination });
+          const res = await unpublishDocumentAction(idOrSlug, {
+            destination: LIVE_DESTINATION,
+          });
           if (res.isSuccess) {
             onChanged();
           } else {
@@ -957,7 +887,7 @@ export function VisibilityChip({ idOrSlug, share, onChange }: VisibilityChipProp
   // section needs the live destinations. `pubSeq` re-reads after each
   // publish/unpublish so the section never shows what it loaded on open.
   const [pubSeq, setPubSeq] = useState(0);
-  const publicNotice = usePublicPublication(idOrSlug, open, pubSeq);
+  const livePublication = useLivePublication(idOrSlug, open, pubSeq);
 
   const { publishBusy, publishError, publishPending, publish, unpublish } = useSharePublish(
     idOrSlug,
@@ -987,14 +917,14 @@ export function VisibilityChip({ idOrSlug, share, onChange }: VisibilityChipProp
         grantLabels={grantLabels}
         roleOptions={roleOptions}
         groupOptions={groupOptions}
-        publicNotice={publicNotice}
+        savedGrantCount={savedGrants.length}
+        livePublication={livePublication}
         share={share}
         publishBusy={publishBusy}
         publishError={publishError}
         publishPending={publishPending}
         onPublish={publish}
         onUnpublish={unpublish}
-        idOrSlug={idOrSlug}
         error={error}
         pendingApproval={pendingApproval}
         onChangeLevel={changeLevel}

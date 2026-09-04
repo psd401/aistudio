@@ -166,16 +166,15 @@ const completeAssetSchema = z
  */
 const MAX_ASSET_READ_BYTES = 4 * 1024 * 1024
 
+// No `visibility` (#1726): publishing is a Live/Draft state change and never
+// touches the audience. An agent that wants to widen calls set-visibility, which
+// carries the §26.4 gate. `intranet`/`public_web` both mean the live switch and
+// are folded onto one row by the service; omitted defaults to it.
 const publishSchema = z
   .object({
-    destination: z.enum([
-      "intranet",
-      "public_web",
-      "schoology",
-      "google",
-      "okf",
-    ]),
-    visibility: visibilitySchema.optional(),
+    destination: z
+      .enum(["intranet", "public_web", "schoology", "google", "okf"])
+      .default("intranet"),
   })
   .strict()
 
@@ -733,17 +732,19 @@ async function executePublishWrite(
     const published = await publishService.publish(
       req,
       segments[0],
-      {
-        destination: body.destination,
-        visibility: body.visibility,
-      },
+      { destination: body.destination },
       { hasPublishPublicCapability: false }
     )
+    // Report the destination the service ACTED ON, exactly as the DELETE branch
+    // below does: `public_web` folds onto the single live row (#1726), so echoing
+    // the requested alias would name a row that does not exist — to the agent
+    // relaying it AND in the audit trail.
+    audit.destination = published.destination
     recordAudit(req, audit, input.requestId, "ok")
     return success(
       {
         id: segments[0],
-        destination: body.destination,
+        destination: published.destination,
         publishedVersionId: published.publishedVersionId,
         readerUrl: published.readerUrl,
       },
@@ -767,11 +768,11 @@ async function executePublishWrite(
       destination,
       { hasPublishPublicCapability: false }
     )
+    // The service reports the destination it ACTED ON: `public_web` folds onto
+    // the single live row (#1726), so the path segment can name a different one.
+    audit.destination = unpublished.destination
     recordAudit(req, audit, input.requestId, "ok")
-    return success(
-      { id: segments[0], destination, ...unpublished },
-      input.requestId
-    )
+    return success({ id: segments[0], ...unpublished }, input.requestId)
   }
 
   return null

@@ -5,6 +5,12 @@
  * Mirrors the MCP publish_content tool. Requires content:publish_internal; the
  * public-publish gate is enforced in publishService and surfaces here as a
  * structured 202 `approval_required` when the caller lacks content:publish_public.
+ *
+ * Publication is a single Live state (#1726): `destination` still names a
+ * CONNECTOR (`schoology`/`google`/`okf`), but `intranet` and `public_web` both
+ * mean "make it Live" and the service folds them onto one row. The body no longer
+ * accepts `visibility` — publishing never changes who may read the object; that
+ * is the Level, set through PATCH /api/v1/content/{id}/visibility.
  */
 
 import { NextRequest } from "next/server";
@@ -29,16 +35,19 @@ import {
   contentIdempotentMutationErrorToResponse,
   resolveRestRequester,
   respondApprovalRequired,
-  restVisibilitySchema,
 } from "@/lib/content/rest";
 import { assertContentAuthoringCapability } from "@/lib/content/surface-helpers";
+import { normalizeLiveDestination } from "@/lib/content/publish-adapters/types";
 import { createLogger } from "@/lib/logger";
 
 const publishBodySchema = z.object({
   // `okf` serializes the single object to a portable OKF concept bundle in S3
   // (Phase 8, #1103) — internal-publish authority, not a public destination.
-  destination: z.enum(["intranet", "public_web", "schoology", "google", "okf"]),
-  visibility: restVisibilitySchema.optional(),
+  // `intranet`/`public_web` are both accepted and both mean the live switch
+  // (#1726); omitted defaults to it.
+  destination: z
+    .enum(["intranet", "public_web", "schoology", "google", "okf"])
+    .default("intranet"),
 });
 
 export const POST = withApiAuth(async (request: NextRequest, auth, requestId, params) => {
@@ -83,7 +92,15 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId, pa
       requestId,
       canonicalRoute: `/api/v1/content/${id}/publish`,
       requestValue: {
-        body: input,
+        // Normalize the destination INTO the idempotency request hash (#1726):
+        // `intranet` and `public_web` are the same request now, so a client
+        // retrying under the same Idempotency-Key with the other alias must not
+        // be rejected as a key reuse for a different request. Fails closed
+        // otherwise — a legitimate retry gets a confusing 409.
+        body: {
+          ...input,
+          destination: normalizeLiveDestination(input.destination),
+        },
         ifMatch:
           precondition.expectedVersionId ??
           (precondition.expectedVersionId === null ? "none" : undefined),
@@ -96,30 +113,34 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId, pa
         const result = await publishService.publish(
           req,
           id,
-          { destination: input.destination, visibility: input.visibility },
+          { destination: input.destination },
           {
             hasPublishPublicCapability,
             expectedVersionId: precondition.expectedVersionId,
           }
         );
+        // Echo the destination the service actually WROTE, not the alias the
+        // caller sent: `public_web` folds onto the live row (#1726), and a
+        // response or audit row naming a row that does not exist is exactly the
+        // kind of quiet disagreement this issue removes.
         void recordContentAudit({
           req,
           action: "publish",
           surface: "rest",
           objectId: id,
-          destination: input.destination,
+          destination: result.destination,
           outcome: "ok",
           requestId,
         });
         log.info("Published via REST", {
           objectId: id,
-          destination: input.destination,
+          destination: result.destination,
         });
         const response = createApiResponse(
           {
             data: {
               id,
-              destination: input.destination,
+              destination: result.destination,
               publishedVersionId: result.publishedVersionId,
               readerUrl: result.readerUrl,
             },
