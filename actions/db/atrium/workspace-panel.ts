@@ -24,6 +24,7 @@ import { visibilityService } from "@/lib/content/visibility-service";
 import { canEdit as canEditOf } from "@/lib/content/helpers";
 import { getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
 import { NotFoundError } from "@/lib/content/errors";
+import type { ContentDataAccess } from "@/lib/content/types";
 import type { ActionState } from "@/types";
 
 /** Everything the WorkspacePanel needs to mount the right editor. */
@@ -38,6 +39,13 @@ export interface WorkspacePanelData {
   canEdit: boolean;
   /** Artifact sandbox render URL (null for documents / unconfigured sandbox). */
   sandboxSrc: string | null;
+  /**
+   * The artifact's data-bridge mode as of THIS load (#1725), pinned into the
+   * panel's `<ArtifactSandbox>` (#1712). `null` for documents, which have no
+   * sandbox at all. Carrying it here rather than letting the client read it
+   * keeps the pin server-resolved, like every other bridge input.
+   */
+  dataAccess: ContentDataAccess | null;
 }
 
 export async function loadWorkspacePanelAction(
@@ -84,6 +92,8 @@ export async function loadWorkspacePanelAction(
         canEdit: canEditOf(requester, obj.ownerUserId),
         sandboxSrc:
           obj.kind === "artifact" ? getArtifactSandboxRenderUrl() : null,
+        // `rowToObjectDTO` already fails an out-of-enum value closed to "none".
+        dataAccess: obj.kind === "artifact" ? obj.dataAccess : null,
       },
       "Workspace loaded"
     );

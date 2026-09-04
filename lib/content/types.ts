@@ -240,6 +240,37 @@ export interface CreateObjectInput {
 export const CONTENT_DATA_ACCESS_MODES = ["records", "query", "none"] as const;
 export type ContentDataAccess = (typeof CONTENT_DATA_ACCESS_MODES)[number];
 
+/**
+ * Coerce an unvalidated `data_access` value into the enum, FAILING CLOSED.
+ *
+ * Every surface that pins a mode into `<ArtifactSandbox>` (#1712) reads the
+ * column through some projection, and a projection types it as `string` (see
+ * `rowToObjectDTO`) or `unknown`. A value outside the enum — a row predating
+ * migration 179 read through a widened column, or a DB enum that has drifted
+ * ahead of this union — must never be forwarded verbatim to the sandbox: the
+ * pin compares by equality, so an unrecognized string would match no operation
+ * on one code path while looking "set" on another. `none` is the safe answer
+ * because it permits nothing.
+ */
+export function normalizeDataAccess(value: unknown): ContentDataAccess {
+  return isContentDataAccess(value) ? value : "none";
+}
+
+/**
+ * The membership test behind `normalizeDataAccess`, as a type predicate.
+ *
+ * Widening the tuple to `readonly string[]` is what lets an `unknown` be tested
+ * against it at all; doing that here, once, keeps the narrowing on the caller's
+ * return path derived from the runtime check rather than from asserting the very
+ * type the check exists to establish.
+ */
+function isContentDataAccess(value: unknown): value is ContentDataAccess {
+  return (
+    typeof value === "string" &&
+    (CONTENT_DATA_ACCESS_MODES as readonly string[]).includes(value)
+  );
+}
+
 /** Metadata-only patch for `update`. Body changes go through versionService.snapshot. */
 export interface UpdatePatch {
   title?: string;

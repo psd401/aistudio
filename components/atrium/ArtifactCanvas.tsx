@@ -30,7 +30,7 @@ import { getArtifactCodeAction } from "@/actions/db/atrium/get-artifact-code";
 import { listVersionsAction, type VersionSummary } from "@/actions/db/atrium/list-versions";
 import { createVersionAction } from "@/actions/db/atrium/create-version";
 import { rollbackVersionAction } from "@/actions/db/atrium/rollback-version";
-import type { BodyFormat } from "@/lib/content";
+import type { BodyFormat, ContentDataAccess } from "@/lib/content";
 import { toBase64Utf8 } from "@/lib/content/code-encoding-browser";
 import { ArtifactSandbox } from "./ArtifactSandbox";
 import { CodeEditor } from "./CodeEditor";
@@ -223,7 +223,7 @@ function CanvasToolbar({
   );
 }
 
-export interface ArtifactCanvasProps {
+interface ArtifactCanvasBaseProps {
   /** Content object id or slug for the artifact. */
   idOrSlug: string;
   /** Whether the current user may edit (save new versions). */
@@ -235,6 +235,31 @@ export interface ArtifactCanvasProps {
    */
   sandboxSrc?: string | null;
 }
+
+/**
+ * The preview's artifact data bridge (#1725).
+ *
+ * Mirrors `ArtifactSandboxProps`: the bridge is absent unless a caller that has
+ * already resolved the object SERVER-SIDE hands over both the trusted content id
+ * and the `dataAccess` mode read for this load. Modelling it as a discriminated
+ * union rather than two optional props means a caller cannot enable the bridge
+ * without pinning a mode, and every caller that stays silent (thumbnails, embeds)
+ * keeps failing closed at the type boundary.
+ *
+ * `contentId` is deliberately NOT derived from `idOrSlug`: that prop may be a
+ * slug, and the bridge's whole authority boundary is that the id comes from
+ * trusted props rather than anything the artifact or the URL can influence.
+ */
+type ArtifactCanvasBridgeProps =
+  | {
+      dataBridgeEnabled: true;
+      contentId: string;
+      dataAccess: ContentDataAccess;
+    }
+  | { dataBridgeEnabled?: false; contentId?: never; dataAccess?: never };
+
+export type ArtifactCanvasProps = ArtifactCanvasBaseProps &
+  ArtifactCanvasBridgeProps;
 
 /**
  * The standing hint under the canvas. Both routes are real — the agent rebuilds
@@ -278,7 +303,89 @@ function EmptyDraftPanel({ canEdit }: { canEdit: boolean }): React.JSX.Element {
   );
 }
 
-export function ArtifactCanvas({ idOrSlug, canEdit = false, sandboxSrc = null }: ArtifactCanvasProps) {
+/** The narrowed bridge inputs the preview frame needs, or null when disabled. */
+type CanvasBridge = { contentId: string; dataAccess: ContentDataAccess } | null;
+
+/**
+ * Narrow the props union ONCE, here: destructuring `contentId`/`dataAccess`
+ * alongside the base props inside the component would lose the correlation
+ * TypeScript needs to prove the two are present together, so the bridge is read
+ * off the whole `props` object and carried as a single nullable value.
+ *
+ * Module-level rather than inlined at its one call site for the same reason
+ * `performRestore` is: `ArtifactCanvas` sits exactly at the 150-line
+ * max-lines-per-function lint, and folding these four lines back into the body
+ * takes it to 154 — a warning, which `--max-warnings 0` turns into a failed gate.
+ */
+function resolveCanvasBridge(props: ArtifactCanvasProps): CanvasBridge {
+  return props.dataBridgeEnabled === true
+    ? { contentId: props.contentId, dataAccess: props.dataAccess }
+    : null;
+}
+
+/**
+ * The preview frame, extracted so the sandbox's two contracts live in one place.
+ *
+ * KEY (the reason this is not a plain element): the loaded-mode pin (#1712)
+ * lives in a ref for the sandbox mount's lifetime, so a mount must belong to
+ * exactly one artifact in exactly one mode. `key={selectedVersionId}` alone is
+ * the long-standing version-switch mechanism — each version renders in a FRESH
+ * iframe with no JS state carried over — but it is not enough once the bridge is
+ * live:
+ *  - contentId: no caller today can actually reach this with a stale mount —
+ *    every one of them already remounts the canvas when the artifact changes
+ *    (`ArtifactAuthoringView` keys it on `obj.id`; the two page mounts are route
+ *    renders; and `WorkspacePanel`'s render-phase reset commits its "loading"
+ *    branch, which unmounts the canvas outright — measured, not reasoned). The
+ *    id stays in the key so that invariant is LOCAL rather than a convention
+ *    every future caller has to remember: a canvas mounted unkeyed still cannot
+ *    leave one artifact's pin attached to another artifact's id.
+ *  - dataAccess: flipping the mode in Content settings triggers
+ *    `router.refresh()`. A remount is exactly the "fresh load" #1712 requires —
+ *    the old iframe is destroyed, so nothing queried under the old mode survives
+ *    into the new one — and without it the author would have to reload the page
+ *    by hand to test the mode they just chose, which is the loop #1725 removes.
+ *
+ * The two explicit branches are deliberate: `ArtifactSandboxProps` is a
+ * discriminated union, and a spread of an optional-property object satisfies
+ * neither arm of it.
+ */
+function ArtifactPreviewFrame({
+  code,
+  sandboxSrc,
+  versionKey,
+  bridge,
+}: {
+  code: string;
+  sandboxSrc: string | null;
+  versionKey: string;
+  bridge: CanvasBridge;
+}): React.JSX.Element {
+  if (!bridge) {
+    return (
+      <ArtifactSandbox
+        key={versionKey}
+        code={code}
+        src={sandboxSrc}
+        className="atrium-artifact-preview"
+      />
+    );
+  }
+  return (
+    <ArtifactSandbox
+      key={`${bridge.contentId}:${bridge.dataAccess}:${versionKey}`}
+      code={code}
+      src={sandboxSrc}
+      className="atrium-artifact-preview"
+      dataBridgeEnabled={true}
+      contentId={bridge.contentId}
+      dataAccess={bridge.dataAccess}
+    />
+  );
+}
+
+export function ArtifactCanvas(props: ArtifactCanvasProps) {
+  const { idOrSlug, canEdit = false, sandboxSrc = null } = props;
   const [tab, setTab] = useState<Tab>("preview");
   const [state, setState] = useState<LoadState>("loading");
   const [message, setMessage] = useState<string | null>(null);
@@ -506,14 +613,9 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false, sandboxSrc = null }:
       ) : isEmptyDraft(selectedVersionId, code) && tab === "preview" ? (
         <EmptyDraftPanel canEdit={canEdit} />
       ) : tab === "preview" ? (
-        // `key={selectedVersionId}` is the intentional version-switch mechanism:
-        // it remounts <ArtifactSandbox> on every version change so each version
-        // renders in a FRESH iframe with a clean JS execution environment (no
-        // state leaking from the previously-previewed version). The brief reload
-        // flash is the deliberate trade for execution isolation between versions.
-        // ArtifactSandbox does not implement an in-place re-post path (see its
-        // header) — remounting via key is how code changes are delivered here.
-        <ArtifactSandbox key={selectedVersionId ?? ""} code={code} src={sandboxSrc} className="atrium-artifact-preview" />
+        // See ArtifactPreviewFrame for the version-remount and data-bridge
+        // (#1725) contracts this one element carries.
+        <ArtifactPreviewFrame code={code} sandboxSrc={sandboxSrc} versionKey={selectedVersionId ?? ""} bridge={resolveCanvasBridge(props)} />
       ) : (
         <CodeEditor
           value={code}

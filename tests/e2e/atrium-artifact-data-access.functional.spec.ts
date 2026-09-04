@@ -217,4 +217,73 @@ test.describe("Atrium artifact data access (#1705)", () => {
       await context.close();
     }
   });
+
+  /**
+   * #1725. The bridge itself cannot be driven end to end in this harness: it
+   * needs a real `ATRIUM_SANDBOX_ORIGIN` (the local host server has none, so the
+   * sandbox renders its fail-closed notice — see `atrium-artifact.guard.spec.ts`)
+   * plus a live Cognito ID token and a deployed PSD Data MCP. The prop wiring is
+   * covered by `tests/unit/atrium-artifact-view-page-bridge.test.tsx` and
+   * `tests/unit/atrium-artifact-canvas-bridge.test.tsx`.
+   *
+   * What only a running app can prove is the precondition #1725 exists for: a
+   * `query`-mode artifact that has never been published is REACHABLE by its
+   * owner on a surface that renders it. Before this change `/c/<slug>` bounced a
+   * draft here and this route mounted a bridge-less sandbox, so there was
+   * nowhere to exercise the artifact at all.
+   */
+  test("a query-mode draft is reachable on the full-screen viewer for its owner", async ({
+    browser,
+  }) => {
+    const title = `E2E data-access draft view ${crypto.randomUUID()}`;
+    const context = await browser.newContext();
+    let page: import("@playwright/test").Page | undefined;
+    let contentId: string | undefined;
+
+    try {
+      await authenticateContext(context, SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB);
+      page = await context.newPage();
+      const id = await createContent(page, "artifact", title, (v) => {
+        contentId = v;
+      });
+
+      const patched = await page.request.patch("/api/v1/content/" + id, {
+        data: { dataAccess: "query" },
+      });
+      expect(patched.ok()).toBe(true);
+
+      // Never published: no publication is created anywhere in this test, which
+      // is exactly the state the issue reported as a dead end.
+      const draft = (await (
+        await page.request.get("/api/v1/content/" + id)
+      ).json()) as ContentResponse;
+      expect(draft.data?.dataAccess).toBe("query");
+
+      const response = await page.goto(`/atrium/${id}/view`);
+      // A 200, not the 404 an existence mask would produce for a non-viewable
+      // object — the owner passes canView on their own draft.
+      expect(response?.status()).toBe(200);
+      await expect(page.getByTestId("artifact-viewport")).toBeVisible();
+
+      // The viewer resolves to exactly one of the sandbox's three states. The
+      // fail-closed notice is CORRECT here when ATRIUM_SANDBOX_ORIGIN is unset;
+      // what matters is that the route renders the artifact surface instead of
+      // bouncing or 404ing.
+      await expect(
+        page
+          .getByTestId("artifact-sandbox-frame")
+          .or(page.getByTestId("artifact-sandbox-unavailable"))
+          .or(page.getByTestId("artifact-sandbox-frame-error"))
+          .first()
+      ).toBeVisible({ timeout: 30000 });
+
+      await page.screenshot({
+        path: ".verification/atrium-artifact-query-draft-view.png",
+        fullPage: true,
+      });
+    } finally {
+      await cleanupContent(page, contentId, title);
+      await context.close();
+    }
+  });
 });

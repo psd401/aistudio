@@ -250,6 +250,13 @@ Rules — follow all of them:
 - **Page detail tables** with `limit` / `offset` instead of one huge read.
 - **Pass filters as query parameters** and re-query when the user changes them —
   do not fetch everything once and filter in JavaScript.
+- **Test it before you publish it.** The bridge is live on the authoring
+  surfaces — the full-screen viewer (`/atrium/<id>/view`, which the create/edit
+  response links to), the editor canvas, and the "Open beside chat" panel — so
+  open the returned link and confirm the query actually returns rows before you
+  tell anyone the dashboard is ready. It stays OFF for embeds inside a document,
+  library thumbnails, and the anonymous public reader `/p/<slug>`; a query-mode
+  artifact is not usable on those surfaces at all.
 - **Handle rejection.** Wrap every call in `try`/`catch` and render a sign-in /
   no-access state. A rejection means no session, an expired ID token (they last
   about an hour — tell the viewer to reload), no access to a table, the wrong

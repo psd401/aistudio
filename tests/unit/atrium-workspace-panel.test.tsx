@@ -50,16 +50,30 @@ jest.mock("@/components/atrium/DocumentEditor", () => ({
   ),
 }));
 jest.mock("@/components/atrium/ArtifactCanvas", () => ({
+  // The bridge props (#1725) are echoed too: "Open beside chat" is where most
+  // artifacts are actually built, so a query-mode dashboard has to be
+  // exercisable here and not only on the full edit page.
   ArtifactCanvas: ({
     idOrSlug,
     canEdit,
     sandboxSrc,
+    dataBridgeEnabled,
+    contentId,
+    dataAccess,
   }: {
     idOrSlug: string;
     canEdit?: boolean;
     sandboxSrc?: string | null;
+    dataBridgeEnabled?: boolean;
+    contentId?: string;
+    dataAccess?: string;
   }) => (
-    <div data-testid="artifact-canvas">{`art:${idOrSlug}:${canEdit}:${sandboxSrc}`}</div>
+    <div
+      data-testid="artifact-canvas"
+      data-bridge-enabled={String(dataBridgeEnabled ?? "absent")}
+      data-content-id={String(contentId ?? "absent")}
+      data-data-access={String(dataAccess ?? "absent")}
+    >{`art:${idOrSlug}:${canEdit}:${sandboxSrc}`}</div>
   ),
 }));
 
@@ -71,6 +85,7 @@ const DOC = {
   userId: 7,
   canEdit: true,
   sandboxSrc: null,
+  dataAccess: null as string | null,
 };
 
 beforeEach(() => {
@@ -98,6 +113,41 @@ describe("WorkspacePanel", () => {
     await waitFor(() =>
       expect(screen.getByTestId("artifact-canvas")).toHaveTextContent(
         "art:obj-1:false:https://sb/render"
+      )
+    );
+  });
+
+  it("enables the data bridge with the action's id and mode pin (#1725)", async () => {
+    loadMock.mockResolvedValue({
+      isSuccess: true,
+      data: {
+        ...DOC,
+        kind: "artifact",
+        sandboxSrc: "https://sb/render",
+        dataAccess: "query",
+      },
+    });
+    render(<WorkspacePanel idOrSlug="obj-1" onClose={jest.fn()} />);
+    await waitFor(() => {
+      const canvas = screen.getByTestId("artifact-canvas");
+      expect(canvas).toHaveAttribute("data-bridge-enabled", "true");
+      expect(canvas).toHaveAttribute("data-content-id", "obj-1");
+      expect(canvas).toHaveAttribute("data-data-access", "query");
+    });
+  });
+
+  it("falls back to the no-op mode when the payload carries none", async () => {
+    // `dataAccess` is null only for documents, which never reach this branch —
+    // but the fallback must not widen anything if that ever changes.
+    loadMock.mockResolvedValue({
+      isSuccess: true,
+      data: { ...DOC, kind: "artifact", sandboxSrc: "https://sb/render" },
+    });
+    render(<WorkspacePanel idOrSlug="obj-1" onClose={jest.fn()} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("artifact-canvas")).toHaveAttribute(
+        "data-data-access",
+        "none"
       )
     );
   });
