@@ -1,15 +1,14 @@
 /**
- * Unit tests for publishDocumentAction grant.kind validation (PR #1062 review #10)
- * and destination validation / §26.4 pending-approval mapping (Epic #1059
- * completion).
+ * Unit tests for publishDocumentAction destination validation, the #1726
+ * no-visibility contract, and §26.4 pending-approval mapping.
  *
- * The action receives `visibility.grants[].kind` AND `destination` as plain
- * `string`s (widened for the API surface) and narrows each with a RUNTIME guard
- * (`assertGrantKind` / `assertEditorDestination`) before handing them to
- * `publishService.publish`. These tests assert:
- *  - an invalid `kind` returns an error ActionState and NEVER reaches the service
- *  - every valid `kind` passes through to the service unchanged
- *  - publishing with no visibility passes through (guard not exercised)
+ * The action receives `destination` as a plain `string` (widened for the API
+ * surface) and narrows it with a RUNTIME guard (`assertEditorDestination`) before
+ * handing it to `publishService.publish`. These tests assert:
+ *  - the action NEVER forwards a visibility payload (#1726) — publishing is a
+ *    Live/Draft state change, so it cannot widen the audience and cannot replace
+ *    the author's grants, which is what the old bundled widen did
+ *  - `destination` is optional and defaults to the live switch
  *  - every editor destination (intranet/public_web/schoology/google) forwards;
  *    `okf` (API/MCP-only by design) and garbage are rejected pre-service
  *  - a service ApprovalRequiredError maps to `{ isSuccess: false,
@@ -58,72 +57,22 @@ beforeEach(() => {
   });
 });
 
-describe("publishDocumentAction — grant.kind runtime validation", () => {
-  it("rejects an invalid grant kind without calling the service", async () => {
-    const result = await publishDocumentAction("o1", {
-      destination: "intranet",
-      visibility: {
-        level: "group",
-        // `__evil__` is not a DB enum value; the runtime guard must reject it.
-        grants: [{ kind: "__evil__", value: "x" }],
-      },
-    });
-    expect(result.isSuccess).toBe(false);
-    expect(publishMock).not.toHaveBeenCalled();
-  });
-
-  it.each(["role", "building", "department", "grade", "user", "group"])(
-    "accepts the valid grant kind %s and forwards it to the service",
-    async (kind) => {
-      const result = await publishDocumentAction("o1", {
-        destination: "intranet",
-        visibility: { level: "group", grants: [{ kind, value: "x" }] },
-      });
-      expect(result.isSuccess).toBe(true);
-      expect(publishMock).toHaveBeenCalledTimes(1);
-      const passedInput = publishMock.mock.calls[0][2] as {
-        visibility?: { grants: { kind: string }[] };
-      };
-      expect(passedInput.visibility?.grants[0].kind).toBe(kind);
-    }
-  );
-
-  it("publishes with no visibility (guard not exercised)", async () => {
+describe("publishDocumentAction — publishing never touches visibility (#1726)", () => {
+  it("forwards ONLY the destination to the service", async () => {
     const result = await publishDocumentAction("o1", { destination: "intranet" });
     expect(result.isSuccess).toBe(true);
     expect(publishMock).toHaveBeenCalledTimes(1);
+    // The regression this guards: the action used to forward a `visibility`
+    // payload straight into the publish transaction, where `setLevelInTx`
+    // replaces the object's grant set — so publishing a Group document deleted
+    // the author's named people.
+    expect(publishMock.mock.calls[0][2]).toEqual({ destination: "intranet" });
   });
 
-  it("does not crash when visibility is present but grants is omitted", async () => {
-    // A REST/MCP caller (or a future action) can send `{ visibility: { level } }`
-    // with no `grants`. Without the `?? []` guard, `grants.map()` throws a
-    // TypeError. The action must coalesce to an empty list and forward it.
-    const result = await publishDocumentAction("o1", {
-      destination: "intranet",
-      visibility: { level: "internal" },
-    });
+  it("defaults to the live switch when no destination is given", async () => {
+    const result = await publishDocumentAction("o1");
     expect(result.isSuccess).toBe(true);
-    expect(publishMock).toHaveBeenCalledTimes(1);
-    const passedInput = publishMock.mock.calls[0][2] as {
-      visibility?: { level: string; grants: unknown[] };
-    };
-    expect(passedInput.visibility?.level).toBe("internal");
-    expect(passedInput.visibility?.grants).toEqual([]);
-  });
-
-  it("rejects when only some grants are invalid (fails on the bad one)", async () => {
-    const result = await publishDocumentAction("o1", {
-      destination: "intranet",
-      visibility: {
-        level: "group",
-        grants: [
-          { kind: "role", value: "staff" },
-          { kind: "nonsense", value: "y" },
-        ],
-      },
-    });
-    expect(result.isSuccess).toBe(false);
-    expect(publishMock).not.toHaveBeenCalled();
+    expect(publishMock.mock.calls[0][2]).toEqual({ destination: "intranet" });
   });
 });
 

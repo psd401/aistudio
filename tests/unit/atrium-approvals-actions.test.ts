@@ -247,17 +247,26 @@ describe("authorization gating", () => {
 });
 
 describe("approvePublishRequestAction — replay", () => {
-  it("replays a publish request with EXACTLY the recorded context (destination + widen)", async () => {
+  it("replays a pre-#1726 bundled widen as a SEPARATE setLevel before the publish", async () => {
     const result = await approvePublishRequestAction("req-1", "looks good");
     expect(result.isSuccess).toBe(true);
     if (!result.isSuccess) return;
     expect(result.data).toEqual({ id: "req-1", replayed: true });
+    // Publishing no longer carries visibility (#1726), so the two halves of a row
+    // queued before that change replay as the two writes they actually are.
+    expect(setLevelMock).toHaveBeenCalledWith(ADMIN, "obj-1", {
+      level: "public",
+    });
     // The replay runs AS the approving admin requester.
     expect(publishMock).toHaveBeenCalledTimes(1);
     expect(publishMock).toHaveBeenCalledWith(ADMIN, "obj-1", {
       destination: "intranet",
-      visibility: { level: "public" },
     });
+    // Widen FIRST: if the widen is what the approver was gating and it fails,
+    // nothing should go live.
+    expect(setLevelMock.mock.invocationCallOrder[0]).toBeLessThan(
+      publishMock.mock.invocationCallOrder[0]
+    );
     expect(labelCalls("atrium.approvals.claimApprove")).toBe(1);
   });
 

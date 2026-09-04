@@ -425,7 +425,6 @@ function ShareDialogBody({
   publishBusy,
   publishError,
   publishPending,
-  idOrSlug,
   error,
   pendingApproval,
   onChangeLevel,
@@ -451,7 +450,6 @@ function ShareDialogBody({
   publishBusy: boolean;
   publishError: string | null;
   publishPending: boolean;
-  idOrSlug: string;
   error: string | null;
   pendingApproval: string | null;
   onChangeLevel: (level: Level) => void;
@@ -925,7 +923,6 @@ export function VisibilityChip({ idOrSlug, share, onChange }: VisibilityChipProp
         publishPending={publishPending}
         onPublish={publish}
         onUnpublish={unpublish}
-        idOrSlug={idOrSlug}
         error={error}
         pendingApproval={pendingApproval}
         onChangeLevel={changeLevel}

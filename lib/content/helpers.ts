@@ -22,10 +22,7 @@ import { ErrorFactories } from "@/lib/error-utils";
 import { createLogger } from "@/lib/logger";
 import { ApprovalRequiredError, ForbiddenError } from "./errors";
 import { contentEvents } from "./events";
-import {
-  isPublicDestination,
-  type PublishDestination,
-} from "./publish-adapters/types";
+import type { PublishDestination } from "./publish-adapters/types";
 import type { Principal, Requester } from "./types";
 
 /**
@@ -407,12 +404,10 @@ export interface PublishApprovalRequestFields {
  * - publishService pre-tx PUBLISH gate: a PUBLIC destination (`isPublicDestination`)
  *   is itself the exposure. → `publish`. The raise-time head is pinned via
  *   `errorContext.versionId` so approve replays the REVIEWED version (issue
- *   #1118); the bundled visibility widen is recorded when the caller also asked
- *   to widen (`errorContext.wantsPublicWiden`).
- * - publishService in-tx PUBLISH gate: reachable only when the destination is NOT
- *   public (a public one throws pre-tx first), so the gated part was the bundled
- *   `visibility.level === "public"` widen — recorded for replay. → `publish` with
- *   `context.visibility` (and the pinned `versionId`).
+ *   #1118). NO visibility widen is recorded: since #1726 publishing never
+ *   changes the audience, so a publish request has nothing to widen. (Rows
+ *   queued BEFORE #1726 can still carry `context.visibility`; the replay applies
+ *   it as a separate `setLevel` call — see `actions/db/atrium/approvals.ts`.)
  * - visibilityService.setLevel gate (and the create-as-private widen queue): no
  *   destination at all; the level being widened to is always `public`. →
  *   `visibility_widen`, destination `'public'` (the exposure target — recorded so
@@ -435,8 +430,6 @@ export function approvalRequestFieldsOf(
     typeof errorContext.versionId === "string"
       ? errorContext.versionId
       : undefined;
-  const wantsPublicWiden = errorContext.wantsPublicWiden === true;
-
   if (destination === "okf" && !objectId) {
     const collectionId =
       typeof errorContext.collectionId === "string"
@@ -465,10 +458,10 @@ export function approvalRequestFieldsOf(
   }
 
   if (destination) {
-    // Record the visibility widen when the caller bundled one (in-tx gate, or a
-    // public destination whose caller ALSO asked to widen) — a non-public
-    // destination only ever reaches the gate via the widen, so it always records.
-    const recordWiden = wantsPublicWiden || !isPublicDestination(destination);
+    // No `context.visibility` (#1726): a publish gate is only ever reached by a
+    // CONNECTOR destination now, and publishing carries no audience change to
+    // record. Widening to `public` raises its own `visibility_widen` request from
+    // `visibilityService.setLevel`.
     return {
       objectId,
       requestKind: "publish",
@@ -477,7 +470,6 @@ export function approvalRequestFieldsOf(
         destination,
         ...(slug ? { slug } : {}),
         ...(versionId ? { versionId } : {}),
-        ...(recordWiden ? { visibility: { level: "public" as const } } : {}),
       },
     };
   }

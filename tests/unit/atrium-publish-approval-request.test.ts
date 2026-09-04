@@ -104,10 +104,10 @@ describe("approvalRequestFieldsOf — raise-site classification", () => {
     });
   });
 
-  it("classifies a non-public-destination gate as publish WITH the bundled widen", () => {
-    // The in-tx gate is only reachable when the destination is NOT public (a
-    // public one throws pre-tx first), so the gated part was the visibility
-    // widen to public — recorded for replay.
+  it("classifies a collection-review gate on the live switch as a plain publish", () => {
+    // The per-collection review gate (migration 178) is the one way the live
+    // switch still reaches the approval queue. It records the destination and the
+    // pinned version — and no visibility, because publishing does not widen.
     const fields = approvalRequestFieldsOf(
       { objectId: "o1", slug: "s", destination: "intranet" },
       { destination: "intranet", objectId: "o1" }
@@ -117,7 +117,6 @@ describe("approvalRequestFieldsOf — raise-site classification", () => {
     expect(fields.context).toEqual({
       destination: "intranet",
       slug: "s",
-      visibility: { level: "public" },
     });
   });
 
@@ -128,7 +127,7 @@ describe("approvalRequestFieldsOf — raise-site classification", () => {
     );
     expect(fields.requestKind).toBe("publish");
     expect(fields.objectId).toBe("o1");
-    expect(fields.context.visibility).toEqual({ level: "public" });
+    expect(fields.context.visibility).toBeUndefined();
   });
 
   it("classifies the destination-less setLevel gate as visibility_widen -> public", () => {
@@ -165,23 +164,18 @@ describe("approvalRequestFieldsOf — raise-site classification", () => {
     expect(fields.context.versionId).toBe("ver-42");
   });
 
-  it("records the bundled widen for a PUBLIC destination when wantsPublicWiden (issue #1118 item 5)", () => {
-    // A public_web publish that ALSO bundled visibility.level='public' must record
-    // the widen so approve applies it and the queue reflects it — previously the
-    // pre-tx public gate dropped the widen intent.
-    const fields = approvalRequestFieldsOf(
-      { objectId: "o1", slug: "s", destination: "public_web" },
-      { destination: "public_web", objectId: "o1", wantsPublicWiden: true }
-    );
-    expect(fields.context.visibility).toEqual({ level: "public" });
-  });
-
-  it("does NOT record a widen for a public destination WITHOUT wantsPublicWiden", () => {
-    const fields = approvalRequestFieldsOf(
-      { objectId: "o1", slug: "s", destination: "public_web" },
-      { destination: "public_web", objectId: "o1" }
-    );
-    expect(fields.context.visibility).toBeUndefined();
+  it("NEVER records a visibility widen on a publish request (#1726)", () => {
+    // Publishing no longer changes the audience, so a queued publish has nothing
+    // to widen — an approver replays a publish, full stop. Recording one here
+    // would make approving a connector push silently make the object public.
+    for (const destination of ["schoology", "google", "public_web"] as const) {
+      const fields = approvalRequestFieldsOf(
+        { objectId: "o1", slug: "s", destination },
+        { destination, objectId: "o1" }
+      );
+      expect(fields.requestKind).toBe("publish");
+      expect(fields.context.visibility).toBeUndefined();
+    }
   });
 
   it("classifies an explicit unpublish gate as kind 'unpublish' (issue #1118 item 2)", () => {
