@@ -493,7 +493,10 @@ only with `set-visibility` (below). So:
 
 `--destination` still exists for backward compatibility; `intranet` and
 `public_web` both mean the same single Live state, so **omit it**. A completed
-publish includes `readerUrl` (the `/c/` link).
+publish includes `readerUrl`. **Hand that value out as-is** — do not build a link
+from the slug. It is the `/c/` link for most content, and the public `/p/` link
+when the object's level is Public, which is the only one an outside recipient can
+open. Guessing `/c/` for a public page sends them to a sign-in wall.
 
 Publishing can still be queued for review — a section whose administrator turned
 review on returns a structured **approval_required** result (HTTP 202). That is a

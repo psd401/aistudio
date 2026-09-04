@@ -5863,11 +5863,17 @@ components:
               format: uri-reference
               nullable: true
               description: >-
-                Canonical reader URL returned by the publish service — the
-                absolute `/c/{slug}` reader link for the live state, and null for
-                a connector, which has no reader page. The anonymous `/p/{slug}`
-                address is not returned here because it is derived from the
-                object's visibility level, which this call does not set.
+                Canonical reader URL returned by the publish service, and null
+                for a connector, which has no reader page. Which reader it names
+                follows the object's visibility level, because the public address
+                is DERIVED from level + live: an object whose level is `public`
+                returns its absolute `/p/{slug}` address, since that is the page
+                the world can actually open; every other level returns
+                `/c/{slug}`, which requires a session. Publishing does not CHANGE
+                the level (set it with `PATCH /content/{id}/visibility`), but it
+                does complete the public address for an object already at
+                `public`, so use this value verbatim rather than assembling a
+                link from the slug.
               example: "https://aistudio.example.edu/c/ai-acceptable-use-policy"
         meta:
           type: object

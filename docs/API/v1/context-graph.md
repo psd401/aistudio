@@ -2145,10 +2145,14 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
 alias for the single live state and comes back as `intranet`, so the body never
 names a publication row that does not exist.
 
-`readerUrl` is the publish service's canonical link — an absolute `/c/{slug}` URL
-for the live switch, and `null` for a connector, which has no reader page of ours.
-The `/p/{slug}` address is not returned here because it is derived from the level,
-which this call does not decide.
+`readerUrl` is the publish service's canonical link, and `null` for a connector,
+which has no reader page of ours. Which reader it names follows the object's
+LEVEL, because the public address is derived from level + live: an object at
+`public` comes back with its absolute `/p/{slug}` address — the page anonymous
+visitors can open — and every other level comes back with `/c/{slug}`, which
+requires a session. Publishing does not decide the level, but for an object
+already at `public` it is what completes the public address, so relay this value
+verbatim instead of building a link from the slug.
 
 **Response `202`** (approval required — a connector publish without
 `content:publish_public`, or a section that requires review)
