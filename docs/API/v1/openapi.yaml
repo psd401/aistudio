@@ -5850,7 +5850,11 @@ components:
               format: uuid
             destination:
               type: string
-              enum: [intranet, public_web, schoology, google, okf]
+              description: >-
+                The destination actually written, which may differ from the one
+                requested: `public_web` is an alias for the single live state and
+                is reported as `intranet`.
+              enum: [intranet, schoology, google, okf]
             publishedVersionId:
               type: string
               format: uuid
@@ -5859,9 +5863,11 @@ components:
               format: uri-reference
               nullable: true
               description: >-
-                Canonical reader URL returned by the publish service. Deployed
-                intranet/public readers are absolute; destinations without a
-                reader URL return null.
+                Canonical reader URL returned by the publish service — the
+                absolute `/c/{slug}` reader link for the live state, and null for
+                a connector, which has no reader page. The anonymous `/p/{slug}`
+                address is not returned here because it is derived from the
+                object's visibility level, which this call does not set.
               example: "https://aistudio.example.edu/c/ai-acceptable-use-policy"
         meta:
           type: object

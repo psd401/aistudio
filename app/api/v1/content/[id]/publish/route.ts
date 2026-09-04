@@ -110,24 +110,28 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId, pa
             expectedVersionId: precondition.expectedVersionId,
           }
         );
+        // Echo the destination the service actually WROTE, not the alias the
+        // caller sent: `public_web` folds onto the live row (#1726), and a
+        // response or audit row naming a row that does not exist is exactly the
+        // kind of quiet disagreement this issue removes.
         void recordContentAudit({
           req,
           action: "publish",
           surface: "rest",
           objectId: id,
-          destination: input.destination,
+          destination: result.destination,
           outcome: "ok",
           requestId,
         });
         log.info("Published via REST", {
           objectId: id,
-          destination: input.destination,
+          destination: result.destination,
         });
         const response = createApiResponse(
           {
             data: {
               id,
-              destination: input.destination,
+              destination: result.destination,
               publishedVersionId: result.publishedVersionId,
               readerUrl: result.readerUrl,
             },

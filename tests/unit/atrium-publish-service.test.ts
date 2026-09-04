@@ -428,6 +428,8 @@ function definePublishServicePublishSuite1Part2() {it("republishing an ALREADY-p
     ).resolves.toEqual({
       publicationId: "pub1",
       publishedVersionId: "v1",
+      // The destination the service WROTE, not the alias the caller sent (#1726).
+      destination: "intranet",
       // #1336 C3: the intranet reader link is DERIVED from the slug (that
       // adapter records a null external_ref by design) and returned so surfaces
       // can show the author where the content went.
@@ -502,6 +504,8 @@ function definePublishServicePublishSuite1Part3() {it("the live switch runs the 
     expect(result).toEqual({
       publicationId: "pub1",
       publishedVersionId: "v1",
+      // The destination the service WROTE, not the alias the caller sent (#1726).
+      destination: "intranet",
       readerUrl: "/c/s1",
     });
     expect(adapterPublishCalls).toBe(1);
@@ -538,6 +542,8 @@ function definePublishServicePublishSuite1Part3() {it("the live switch runs the 
     expect(result).toEqual({
       publicationId: "pub1",
       publishedVersionId: "v1",
+      // The destination the service WROTE, not the alias the caller sent (#1726).
+      destination: "intranet",
       readerUrl: "/c/s1",
     });
     expect(adapterPublishCalls).toBe(1);
@@ -580,6 +586,7 @@ function definePublishServicePublishSuite1Part3() {it("the live switch runs the 
     expect(result).toEqual({
       publicationId: "pub1",
       publishedVersionId: "v-reviewed",
+      destination: "intranet",
       readerUrl: "/c/s1",
     });
     expect(getVersionByIdMock).toHaveBeenCalled();
@@ -668,7 +675,7 @@ function definePublishServiceUnpublishSuite2Part1() {
     // #1118 P2) and returns the no-op WITHOUT opening the transaction.
     liveCheckRows = [];
     const result = await publishService.unpublish(owner, "o1", "intranet");
-    expect(result).toEqual({ unpublished: false });
+    expect(result).toEqual({ unpublished: false, destination: "intranet" });
     expect(adapterUnpublishCalls).toBe(0);
   });
 
@@ -678,7 +685,7 @@ function definePublishServiceUnpublishSuite2Part1() {
     // re-run this same no-op. `owner` is a non-admin without publish_public.
     liveCheckRows = [];
     const result = await publishService.unpublish(owner, "o1", "public_web");
-    expect(result).toEqual({ unpublished: false });
+    expect(result).toEqual({ unpublished: false, destination: "intranet" });
     // Let any fire-and-forget settle, then assert NO approval request was written.
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(
@@ -693,7 +700,7 @@ function definePublishServiceUnpublishSuite2Part1() {
     // tx queue: FOR UPDATE lock row, then a live publication row with externalRef.
     txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
     const result = await publishService.unpublish(owner, "o1", "intranet");
-    expect(result).toEqual({ unpublished: true });
+    expect(result).toEqual({ unpublished: true, destination: "intranet" });
     expect(adapterUnpublishCalls).toBe(1);
   });
 
@@ -738,7 +745,7 @@ function definePublishServiceUnpublishSuite2Part1() {
     // audience.
     txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }]];
     const result = await publishService.unpublish(owner, "o1", "public_web");
-    expect(result).toEqual({ unpublished: true });
+    expect(result).toEqual({ unpublished: true, destination: "intranet" });
     const targeted = txWhereClauses.flat(Infinity);
     expect(targeted).toContain("intranet");
     expect(targeted).not.toContain("public_web");
@@ -751,7 +758,9 @@ function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing a c
     const result = await publishService.unpublish(owner, "o1", "google", {
       hasPublishPublicCapability: true,
     });
-    expect(result).toEqual({ unpublished: true });
+    // A connector is NOT folded onto the live row — only the two live-surface
+    // aliases are.
+    expect(result).toEqual({ unpublished: true, destination: "google" });
   });
 
   // Phase 7 (#1057): schoology & google are public-facing, so unpublishing them
@@ -777,7 +786,7 @@ function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing a c
       [{ id: "pub-intranet" }],
     ];
     const result = await publishService.unpublish(admin, "o1", "public_web");
-    expect(result).toEqual({ unpublished: true });
+    expect(result).toEqual({ unpublished: true, destination: "intranet" });
     const statuses = txSetPayloads.map((p) => p.status);
     // The publication was flipped to unpublished, but the object status was NOT
     // downgraded to draft (intranet remains live).
@@ -793,7 +802,7 @@ function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing a c
     // "any other destination still live?" check returns [] (none remain).
     txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }], []];
     const result = await publishService.unpublish(admin, "o1", "public_web");
-    expect(result).toEqual({ unpublished: true });
+    expect(result).toEqual({ unpublished: true, destination: "intranet" });
     expect(removeFromIndexMock).toHaveBeenCalledTimes(1);
     expect(removeFromIndexMock).toHaveBeenCalledWith("o1");
   });
@@ -801,7 +810,7 @@ function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing a c
   it("does NOT prune the index on the idempotent no-op path (nothing was live)", async () => {
     txResults = [[{ id: "o1" }], []];
     const result = await publishService.unpublish(owner, "o1", "intranet");
-    expect(result).toEqual({ unpublished: false });
+    expect(result).toEqual({ unpublished: false, destination: "intranet" });
     expect(removeFromIndexMock).not.toHaveBeenCalled();
   });
 
@@ -810,7 +819,7 @@ function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing a c
     txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }], []];
     const result = await publishService.unpublish(admin, "o1", "public_web");
     // The unpublish already committed; a failed index prune is logged, not thrown.
-    expect(result).toEqual({ unpublished: true });
+    expect(result).toEqual({ unpublished: true, destination: "intranet" });
   });
 
   it("reverts the object to draft when the unpublished destination was the last live one", async () => {
@@ -818,7 +827,7 @@ function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing a c
     // "any other destination still live?" check returns [] (none remain).
     txResults = [[{ id: "o1" }], [{ id: "pub1", externalRef: null }], []];
     const result = await publishService.unpublish(admin, "o1", "public_web");
-    expect(result).toEqual({ unpublished: true });
+    expect(result).toEqual({ unpublished: true, destination: "intranet" });
     const statuses = txSetPayloads.map((p) => p.status);
     expect(statuses).toContain("unpublished");
     expect(statuses).toContain("draft");

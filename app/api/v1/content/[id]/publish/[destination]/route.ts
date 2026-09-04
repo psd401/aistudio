@@ -77,17 +77,20 @@ export const DELETE = withApiAuth(async (request: NextRequest, auth, requestId, 
     const result = await publishService.unpublish(req, id, destination, {
       hasPublishPublicCapability,
     });
+    // `result.destination` is the destination the service ACTED ON — the
+    // `public_web` alias folds onto the live row (#1726), so echoing the path
+    // parameter would name a row that was not touched.
     void recordContentAudit({
       req,
       action: "unpublish",
       surface: "rest",
       objectId: id,
-      destination,
+      destination: result.destination,
       outcome: "ok",
       requestId,
     });
-    log.info("Unpublished via REST", { objectId: id, destination, ...result });
-    return createApiResponse({ data: { id, destination, ...result }, meta: { requestId } }, requestId);
+    log.info("Unpublished via REST", { objectId: id, ...result });
+    return createApiResponse({ data: { id, ...result }, meta: { requestId } }, requestId);
   } catch (err) {
     if (err instanceof ApprovalRequiredError) {
       log.info("Public unpublish requires approval", { objectId: id, destination });

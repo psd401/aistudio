@@ -125,7 +125,12 @@ describe("unpublish_content handler", () => {
   const handler = CONTENT_TOOL_HANDLERS.unpublish_content;
 
   it("calls publishService.unpublish with the REST DELETE's exact contract and audits ok", async () => {
-    mockUnpublish.mockResolvedValue({ unpublished: true });
+    mockUnpublish.mockResolvedValue({
+      unpublished: true,
+      // The destination the service ACTED ON (#1726: `public_web` folds onto the
+      // live row), which is what the handler reports back.
+      destination: "intranet",
+    });
 
     const result = await handler(
       { id: "obj-1", destination: "intranet" },
@@ -154,7 +159,10 @@ describe("unpublish_content handler", () => {
   });
 
   it("surfaces the idempotent no-op (`unpublished: false`) like the REST route", async () => {
-    mockUnpublish.mockResolvedValue({ unpublished: false });
+    mockUnpublish.mockResolvedValue({
+      unpublished: false,
+      destination: "intranet",
+    });
 
     const result = await handler(
       { id: "obj-1", destination: "intranet" },
@@ -167,7 +175,12 @@ describe("unpublish_content handler", () => {
 
   it("passes the explicit content:publish_public authority through to the service", async () => {
     mockHasPublishPublicScope.mockReturnValue(true);
-    mockUnpublish.mockResolvedValue({ unpublished: true });
+    mockUnpublish.mockResolvedValue({
+      unpublished: true,
+      // The destination the service ACTED ON (#1726: `public_web` folds onto the
+      // live row), which is what the handler reports back.
+      destination: "intranet",
+    });
 
     await handler({ id: "obj-1", destination: "public_web" }, context());
 

@@ -103,14 +103,20 @@ export interface PublishInput {
 }
 
 /**
- * The destination adapter registry (Phase 7, #1057). Two live, reader-backed
- * destinations — `intranet` (`/c/[slug]`) and `public_web` (`/p/[slug]`) — plus
- * the `schoology` / `google` connector STUBS (`implemented: false`), which are
- * explicit v1 non-goals beyond a governed path (§2). A stub's adapter throws
- * BEFORE the publish transaction (see the `implemented === false` guard below),
- * so a not-yet-wired connector fails loudly rather than committing a publication
- * row with no live side effect. All three non-intranet destinations are
- * public-facing (`isPublicDestination`) and sit behind the §26.4 gate.
+ * The destination adapter registry (Phase 7, #1057).
+ *
+ * `intranet` backs the single live state (#1726) and is the only reader-backed
+ * adapter that still runs: `public_web` is registered for completeness but is
+ * UNREACHABLE, because `normalizeLiveDestination` folds that alias onto
+ * `intranet` before the registry is consulted. `/p/{slug}` is derived from the
+ * object's Level plus the live row, not from a second publication.
+ *
+ * `schoology` / `google` are connector STUBS (`implemented: false`), explicit v1
+ * non-goals beyond a governed path (§2). A stub's adapter throws BEFORE the
+ * publish transaction (see the `implemented === false` guard below), so a
+ * not-yet-wired connector fails loudly rather than committing a publication row
+ * with no live side effect. Those two are the only public-facing destinations
+ * (`isPublicDestination`) and the only ones behind the §26.4 gate.
  */
 const adapters: Record<PublishDestination, PublishAdapter> = {
   intranet: intranetAdapter,
@@ -733,6 +739,15 @@ export const publishService = {
     publicationId: string;
     publishedVersionId: string;
     /**
+     * The destination actually written, AFTER `normalizeLiveDestination` (#1726).
+     * Returned so a caller that echoes a destination back — the REST response
+     * body, the audit row, the MCP tool result — names the row that exists rather
+     * than the alias the caller happened to send. A response saying `public_web`
+     * over a row saying `intranet` is the kind of small disagreement the whole
+     * issue is about.
+     */
+    destination: PublishDestination;
+    /**
      * The destination's READER URL (#1336 C3) — `/c/{slug}` for the live switch,
      * or null for a destination with no reader (the connector stubs). Callers
      * surface it so the author can actually copy the link they just created;
@@ -919,6 +934,7 @@ export const publishService = {
     return {
       publicationId,
       publishedVersionId,
+      destination,
       readerUrl: externalRef ?? derivedReaderUrl(destination, obj.slug),
     };
   },
@@ -946,7 +962,14 @@ export const publishService = {
     objectId: string,
     requestedDestination: PublishDestination,
     opts: { hasPublishPublicCapability?: boolean } = {}
-  ): Promise<{ unpublished: boolean }> {
+  ): Promise<{
+    unpublished: boolean;
+    /**
+     * The destination actually acted on, AFTER `normalizeLiveDestination`
+     * (#1726) — see `publish`'s field of the same name.
+     */
+    destination: PublishDestination;
+  }> {
     const log = createLogger({ action: "publish.unpublish" });
 
     // ONE live row (#1726): "unpublish from public_web" and "unpublish from the
@@ -996,7 +1019,7 @@ export const publishService = {
       "publish.unpublish.liveCheck"
     );
     if (!liveNow[0]) {
-      return { unpublished: false };
+      return { unpublished: false, destination };
     }
 
     // §26.4 gate (only reached when a live publication actually exists — see the
@@ -1081,7 +1104,7 @@ export const publishService = {
 
     if (outcome === undefined) {
       // No live publication existed — idempotent no-op.
-      return { unpublished: false };
+      return { unpublished: false, destination };
     }
     const { externalRef, anyLiveRemaining } = outcome;
 
@@ -1140,7 +1163,7 @@ export const publishService = {
       agentLabel: req.kind === "user" ? null : req.agentLabel,
     });
 
-    return { unpublished: true };
+    return { unpublished: true, destination };
   },
 
   /**

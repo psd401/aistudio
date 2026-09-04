@@ -763,11 +763,11 @@ async function executePublishWrite(
       destination,
       { hasPublishPublicCapability: false }
     )
+    // The service reports the destination it ACTED ON: `public_web` folds onto
+    // the single live row (#1726), so the path segment can name a different one.
+    audit.destination = unpublished.destination
     recordAudit(req, audit, input.requestId, "ok")
-    return success(
-      { id: segments[0], destination, ...unpublished },
-      input.requestId
-    )
+    return success({ id: segments[0], ...unpublished }, input.requestId)
   }
 
   return null

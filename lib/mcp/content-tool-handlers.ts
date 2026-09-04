@@ -602,18 +602,21 @@ async function handlePublishContent(
       { destination },
       { hasPublishPublicCapability }
     );
+    // Report the destination the service ACTED ON: `public_web` folds onto the
+    // single live row (#1726), so echoing the requested alias would name a row
+    // that does not exist and mislead the agent relaying it.
     void recordContentAudit({
       req,
       action: "publish",
       surface: "mcp",
       objectId: parsed.data.id,
-      destination,
+      destination: result.destination,
       outcome: "ok",
       requestId: context.requestId,
     });
     return ok({
       id: parsed.data.id,
-      destination,
+      destination: result.destination,
       publishedVersionId: result.publishedVersionId,
     });
   } catch (err) {
@@ -661,7 +664,7 @@ async function handleUnpublishContent(
       action: "unpublish",
       surface: "mcp",
       objectId: parsed.data.id,
-      destination,
+      destination: result.destination,
       outcome: "ok",
       requestId: context.requestId,
     });
@@ -669,7 +672,7 @@ async function handleUnpublishContent(
     // the REST DELETE response shape.
     return ok({
       id: parsed.data.id,
-      destination,
+      destination: result.destination,
       unpublished: result.unpublished,
     });
   } catch (err) {

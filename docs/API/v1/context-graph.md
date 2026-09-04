@@ -2141,6 +2141,10 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
 }
 ```
 
+`destination` in the response is the one actually WRITTEN — `public_web` is an
+alias for the single live state and comes back as `intranet`, so the body never
+names a publication row that does not exist.
+
 `readerUrl` is the publish service's canonical link — an absolute `/c/{slug}` URL
 for the live switch, and `null` for a connector, which has no reader page of ours.
 The `/p/{slug}` address is not returned here because it is derived from the level,
