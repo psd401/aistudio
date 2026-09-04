@@ -115,12 +115,22 @@ test.describe("Atrium §26.4 approval replay (issue #1118)", () => {
       {
         data: {
           name: `E2E review section ${nonce}`,
-          requiresApproval: true,
+          // `district` so the staff author can file into it; a `private` section
+          // belongs to its creator alone.
+          scope: "district",
+          defaultVisibilityLevel: "internal",
         },
       }
     );
     expect(collectionRes.status()).toBe(201);
     const collection = (await collectionRes.json()).data;
+    // `requiresApproval` is UPDATE-only on the REST surface: review is switched
+    // on for a section that already exists, so create does not accept it.
+    const gateRes = await adminCtx.request.patch(
+      `/api/v1/content/collections/${collection.id}`,
+      { data: { requiresApproval: true } }
+    );
+    expect(gateRes.ok()).toBeTruthy();
 
     // Staff creates a doc IN that section whose head is the to-be-reviewed body.
     const staff = await staffApi(browser);

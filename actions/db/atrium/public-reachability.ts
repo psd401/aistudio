@@ -19,7 +19,7 @@ import {
 import { createSuccess, handleError } from "@/lib/error-utils";
 import { contentService } from "@/lib/content";
 import { publishService } from "@/lib/content/publish-service";
-import { isLive } from "@/lib/content/live-publication";
+import { isLive } from "@/lib/content/publish-adapters/types";
 import {
   publicBlockers,
   type PublicBlocker,
