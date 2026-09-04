@@ -40,9 +40,23 @@ existed (even as an empty/untracked file) before the run started.
 appear in `PRE_DIRTY_SHOTS` as already-untracked, which exempts them from the
 `rm -f` branch and lets the run's real content survive.
 
+**Update (issue #1726 / PR #1732): `touch` alone is NOT enough for a screenshot that
+is already TRACKED in git.** `git status --porcelain` determines the `??` vs. `M`
+code from content, not mtime — `touch`ing a tracked file whose bytes don't change
+still reports clean, so it never enters `PRE_DIRTY_SHOTS`. When the run then
+overwrites it, its status becomes `M` and, because that filename isn't in the
+pre-run snapshot, `restore_untouched_shots` hits the `git checkout -- "$f"` branch
+and discards the run's real output. For a tracked screenshot, dirty its CONTENT
+before the run (`: > path/to/shot.png` or any byte-level change) so `git status`
+already reports it as modified pre-run and the loop skips it.
+
 ## Prevention
 
 - Before running `scripts/test/e2e-local.sh` when you need to keep screenshots the run
-  produces as evidence, `touch` each target path first.
+  produces as evidence:
+  - New/untracked file: `touch` the target path first.
+  - Already-tracked file: truncate or otherwise dirty its content first
+    (`: > path`) — `touch` alone does not change git's `??`/`M` status and will not
+    protect it from the `git checkout --` branch.
 - Files already tracked and dirty before the run are always preserved as-is — only
   fresh (`??`) or newly-modified-by-this-run files are cleaned up.
