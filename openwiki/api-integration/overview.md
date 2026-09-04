@@ -30,6 +30,30 @@ The REST API provides programmatic access to AI Studio's core capabilities:
 | **Tools** | `/api/v1/tools` | Tool catalog inspection |
 | **Voice** | `/api/nexus/voice` | Real-time voice via WebSocket with Gemini Live API |
 
+#### Content Publishing API
+
+**Endpoint**: `POST /api/v1/content/{id}/publish`
+
+The publish endpoint makes content LIVE (pins version, gives it a reader page, adds to retrieval). **Publishing does not change audience** — that is controlled by the object's visibility level.
+
+**Request Changes** (#1726):
+- `destination` is **optional** (defaults to `intranet`)
+- `visibility` parameter removed — use `PATCH /content/{id}/visibility` instead
+- `intranet` and `public_web` are aliases for the same live state
+
+**Response**:
+- `readerUrl` returns `/p/{slug}` for public objects, `/c/{slug}` otherwise — relay verbatim
+- `destination` reports the normalized value (always `intranet` for live surface)
+
+**Approval Gates** (HTTP 202):
+- Connector destination (`schoology`/`google`) without `content:publish_public` scope
+- Object in a section requiring review
+
+**Key Sources**:
+- `/docs/API/v1/openapi.yaml` — full schema
+- `/docs/API/v1/context-graph.md` — §26.4 gate explanation
+- `/lib/content/publish-service.ts` — implementation
+
 ### Authentication
 
 Two authentication methods are supported:
