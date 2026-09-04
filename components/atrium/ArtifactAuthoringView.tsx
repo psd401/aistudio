@@ -85,8 +85,12 @@ export async function ArtifactAuthoringView({
         <div className="mer-public-warning" role="status" data-testid="public-link-warning">
           <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
           <div>
+            {/* The trigger moved with #1726: this used to fire on a live
+                `public_web` publication, so "published publicly" was always
+                true. It now fires on the LEVEL being Public, which includes a
+                Public DRAFT — an object that is not published at all. */}
             <p className="mer-public-warning-title">
-              This page is published publicly, but the public link will not open.
+              This is set to Public, but its public link will not open.
             </p>
             <ul className="mer-public-warning-list">
               {publicIssues.map((issue) => (
