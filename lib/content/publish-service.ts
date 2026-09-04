@@ -1104,8 +1104,9 @@ export const publishService = {
     // Mark the publication(s) unpublished and revert the object to draft atomically.
     // Lock the row FOR UPDATE so a concurrent publish/unpublish serializes here.
     // Resolves to undefined when nothing was live (idempotent no-op), else the
-    // removed publication's externalRef plus whether ANY other destination is
-    // still live (drives the retrieval-index pruning below).
+    // rows this call retired — each with its own destination and external ref, so
+    // the post-commit teardown can run per row — plus whether any LIVE-SURFACE row
+    // survives (which drives both the draft revert and the retrieval-index prune).
     const outcome = await executeTransaction(
       async (tx: DbTransaction) => {
         const locked = await tx
