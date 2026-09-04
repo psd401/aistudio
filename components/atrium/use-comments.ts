@@ -11,9 +11,24 @@
  * anchoring/scrolling is the editor's concern and stays in CommentSidebar. Every
  * mutation refetches from the server so the panel reflects the authoritative
  * ordering (unresolved-first is applied in the component).
+ *
+ * FAILURE CONTRACT (#1714). Every mutation reports failure by RETURN VALUE —
+ * `null`/`false` — never by throwing, and each one catches. A server action that
+ * never reaches the app (blocked at the edge by the WAF, whose HTML 403 is not a
+ * valid action response) REJECTS, and an escaping rejection here is not merely a
+ * missing message: `CommentSidebar.addComment` sets the anchor mark BEFORE
+ * awaiting `createThread` and removes it again only on a falsy result, so a throw
+ * would strand a highlighted span with no backing thread in the shared Y.Doc —
+ * visible to every collaborator — and leave the composer spinner stuck.
+ *
+ * Bodies are sent base64-encoded for the same reason the document and artifact
+ * write paths do: the composer is a plain textarea, so a comment quoting
+ * `<script>`/`<style>` reaches the POST body verbatim. See
+ * `lib/content/code-encoding.ts`.
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { toBase64Utf8 } from "@/lib/content/code-encoding-browser";
 import {
   listCommentThreadsAction,
   createCommentThreadAction,
@@ -79,46 +94,74 @@ export function useComments(idOrSlug: string): UseComments {
 
   const createThread = useCallback(
     async (input: { threadId: string; body: string }): Promise<CommentThreadDTO | null> => {
-      const result = await createCommentThreadAction(idOrSlug, input);
-      if (result.isSuccess) {
-        setThreads((prev) => [...prev, result.data]);
-        setError(null);
-        return result.data;
+      try {
+        const result = await createCommentThreadAction(
+          idOrSlug,
+          { ...input, body: toBase64Utf8(input.body) },
+          { codeEncoding: "base64" }
+        );
+        if (result.isSuccess) {
+          setThreads((prev) => [...prev, result.data]);
+          setError(null);
+          return result.data;
+        }
+        setError(result.message ?? "Failed to add comment");
+        return null;
+      } catch {
+        // Returning null (rather than rethrowing) is what lets the caller strip
+        // the orphaned anchor mark — see the failure contract above.
+        setError("Failed to add comment");
+        return null;
       }
-      setError(result.message ?? "Failed to add comment");
-      return null;
     },
     [idOrSlug]
   );
 
   const reply = useCallback(
     async (threadId: string, body: string): Promise<boolean> => {
-      const result = await replyToCommentAction(idOrSlug, { threadId, body });
-      if (result.isSuccess) {
-        setThreads((prev) =>
-          prev.map((t) => (t.threadId === threadId ? result.data : t))
+      try {
+        const result = await replyToCommentAction(
+          idOrSlug,
+          { threadId, body: toBase64Utf8(body) },
+          { codeEncoding: "base64" }
         );
-        setError(null);
-        return true;
+        if (result.isSuccess) {
+          setThreads((prev) =>
+            prev.map((t) => (t.threadId === threadId ? result.data : t))
+          );
+          setError(null);
+          return true;
+        }
+        setError(result.message ?? "Failed to post reply");
+        return false;
+      } catch {
+        setError("Failed to post reply");
+        return false;
       }
-      setError(result.message ?? "Failed to post reply");
-      return false;
     },
     [idOrSlug]
   );
 
+  // No body, so nothing to encode — but it still needs the catch: a rejected
+  // resolve would otherwise leave the row's checkbox asserting the old state
+  // with no error shown.
   const resolve = useCallback(
     async (threadId: string, resolved: boolean): Promise<boolean> => {
-      const result = await resolveCommentThreadAction(idOrSlug, { threadId, resolved });
-      if (result.isSuccess) {
-        setThreads((prev) =>
-          prev.map((t) => (t.threadId === threadId ? { ...t, resolved: result.data.resolved } : t))
-        );
-        setError(null);
-        return true;
+      try {
+        const result = await resolveCommentThreadAction(idOrSlug, { threadId, resolved });
+        if (result.isSuccess) {
+          setThreads((prev) =>
+            prev.map((t) => (t.threadId === threadId ? { ...t, resolved: result.data.resolved } : t))
+          );
+          setError(null);
+          return true;
+        }
+        setError(result.message ?? "Failed to update thread");
+        return false;
+      } catch {
+        setError("Failed to update thread");
+        return false;
       }
-      setError(result.message ?? "Failed to update thread");
-      return false;
     },
     [idOrSlug]
   );

@@ -42,6 +42,10 @@ import { contentService } from "@/lib/content/content-service";
 import { visibilityService } from "@/lib/content/visibility-service";
 import { assertCanEdit, authorUserIdOf } from "@/lib/content/helpers";
 import { NotFoundError } from "@/lib/content/errors";
+import {
+  decodeContentBody,
+  type ContentCodeEncoding,
+} from "@/lib/content/code-encoding";
 import type { ContentObjectDTO, Requester } from "@/lib/content/types";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { getServerSession } from "@/lib/auth/server-session";
@@ -365,7 +369,15 @@ export async function countUnresolvedCommentThreadsAction(
  */
 export async function createCommentThreadAction(
   idOrSlug: string,
-  input: { threadId: string; body: string }
+  input: { threadId: string; body: string },
+  // Optional base64 transit encoding for the comment body (#1714). The composer
+  // is a PLAIN textarea, so unlike the document editor — which escapes typed
+  // angle brackets during markdown serialization — whatever is typed here reaches
+  // the POST body verbatim. A comment quoting `<script>` or `<style>` (reviewing
+  // an artifact's code, discussing a web page) is therefore raw markup on the
+  // wire. Rationale lives in `lib/content/code-encoding.ts`; omitted = raw text,
+  // the pre-existing contract.
+  opts?: { codeEncoding?: ContentCodeEncoding }
 ): Promise<ActionState<CommentThreadDTO>> {
   const requestId = generateRequestId();
   const timer = startTimer("createCommentThreadAction");
@@ -374,6 +386,7 @@ export async function createCommentThreadAction(
   try {
     log.info("Action started: create comment thread", {
       idOrSlug: sanitizeForLogging(idOrSlug),
+      codeEncoding: opts?.codeEncoding,
     });
 
     const { requester, obj } = await resolveGatedObject(requestId, idOrSlug, {
@@ -381,7 +394,12 @@ export async function createCommentThreadAction(
       requireEdit: true,
     });
     const threadId = normalizeThreadId(input?.threadId);
-    const body = normalizeBody(input?.body);
+    // Decode AFTER the gate (so a malformed body never reveals that this object
+    // exists) and BEFORE normalizeBody, so the length cap measures the real
+    // comment rather than the ~33%-larger base64 wrapper.
+    const body = normalizeBody(
+      decodeContentBody(input?.body, opts?.codeEncoding) ?? input?.body
+    );
 
     // Idempotent on the caller-supplied threadId: the uq_adc_thread_root partial
     // unique index guarantees one root per (object, thread), so a retried create
@@ -425,7 +443,9 @@ export async function createCommentThreadAction(
  */
 export async function replyToCommentAction(
   idOrSlug: string,
-  input: { threadId: string; body: string }
+  input: { threadId: string; body: string },
+  /** See `createCommentThreadAction` — same optional transit encoding (#1714). */
+  opts?: { codeEncoding?: ContentCodeEncoding }
 ): Promise<ActionState<CommentThreadDTO>> {
   const requestId = generateRequestId();
   const timer = startTimer("replyToCommentAction");
@@ -434,6 +454,7 @@ export async function replyToCommentAction(
   try {
     log.info("Action started: reply to comment", {
       idOrSlug: sanitizeForLogging(idOrSlug),
+      codeEncoding: opts?.codeEncoding,
     });
 
     const { requester, obj } = await resolveGatedObject(requestId, idOrSlug, {
@@ -441,7 +462,10 @@ export async function replyToCommentAction(
       requireEdit: true,
     });
     const threadId = normalizeThreadId(input?.threadId);
-    const body = normalizeBody(input?.body);
+    // See createCommentThreadAction: decode after the gate, before the cap.
+    const body = normalizeBody(
+      decodeContentBody(input?.body, opts?.codeEncoding) ?? input?.body
+    );
 
     const rootRows = await executeQuery(
       (db) =>
