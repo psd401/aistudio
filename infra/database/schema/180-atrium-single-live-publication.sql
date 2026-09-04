@@ -28,6 +28,16 @@
 -- EITHER destination (`LIVE_SURFACE_DESTINATIONS`), so a public page keeps
 -- serving whether this migration lands before or after the new image.
 --
+-- NOT symmetric on ROLLBACK. The OLD image's `/p/[slug]` requires a live
+-- `public_web` row specifically, and step 2 retires those — so rolling the image
+-- back after this has run would 404 the public pages it folded (the internal
+-- `/c/{slug}` reader is unaffected, since every one of them gained a live
+-- `intranet` row in step 1). Fix forward. To undo deliberately, re-flip the
+-- retired rows: UPDATE content_publications SET status = 'live' WHERE
+-- destination = 'public_web' AND status = 'unpublished' AND object_id IN
+-- (SELECT object_id FROM content_publications WHERE destination = 'intranet'
+-- AND status = 'live').
+--
 -- The `destination` column and the `publish_destination` enum are unchanged:
 -- connector destinations (`schoology`, `google`, `okf`) genuinely are
 -- destinations — "push a copy into another system" — and keep using them.

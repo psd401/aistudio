@@ -48,15 +48,19 @@ function atriumSurfaceLink(id: string, kind: "document" | "artifact"): string {
  * authoring surface, which renders the head version for anyone who can view it.
  *
  * Known mismatch, covered downstream: this keys off `status === "published"`,
- * but the reader requires a live INTRANET publication — an object published
- * only to `public_web`, or whose intranet publication was retracted without a
- * status change, still gets a `/c/` link here. Making this function
- * publication-aware would force a per-object publications query into every
- * list-decorating call site, so instead the reader page itself backstops the
- * gap: `/c/[slug]` redirects a `canView`-passing viewer of an unpublished
- * object to the authoring surface (see `app/(protected)/c/[slug]/page.tsx`).
- * Every `/c/` link this function emits therefore resolves for anyone allowed
- * to see the object.
+ * but the reader requires a live publication. #1726 closed most of the gap —
+ * "published only to `public_web`" is no longer a state, because that alias and
+ * `intranet` are the one live row — but not all of it. `unpublish` reverts the
+ * object to `draft` only when NO other destination is still live, and an `okf`
+ * export bundle counts: an object with one keeps `status = "published"` after
+ * its live row is retracted, and still gets a `/c/` link here.
+ *
+ * Making this function publication-aware would force a per-object publications
+ * query into every list-decorating call site, so instead the reader page itself
+ * backstops the gap: `/c/[slug]` redirects a `canView`-passing viewer of an
+ * unpublished object to the authoring surface (see
+ * `app/(protected)/c/[slug]/page.tsx`). Every `/c/` link this function emits
+ * therefore resolves for anyone allowed to see the object.
  */
 export function contentSurfaceLink(object: {
   id: string;
