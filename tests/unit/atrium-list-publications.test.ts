@@ -147,7 +147,13 @@ describe("listPublicationsAction results", () => {
     expect(res.data[0].publishedAt).toBeNull();
   });
 
-  it("DERIVES the public_web reader URL when the ref never persisted", async () => {
+  it("DERIVES a legacy public_web row's reader URL from the LEVEL, not the destination", async () => {
+    // `runPublishAdapter` catches a failure to PERSIST external_ref and leaves
+    // the publication live rather than unwinding a working page, so a null ref on
+    // a live row does not mean "no reader". Which reader it is, though, is the
+    // object's Level: `/p/{slug}` gates strictly on `visibility_level = 'public'`,
+    // so deriving `/p/` off the destination alone handed the Share dialog a
+    // copyable link that 404s for everyone — this fixture's object is `private`.
     queryResults.set("publish.listLive", [
       {
         destination: "public_web",
@@ -159,12 +165,27 @@ describe("listPublicationsAction results", () => {
     const res = await listPublicationsAction("obj-1");
     expect(res.isSuccess).toBe(true);
     if (!res.isSuccess) return;
-    // `runPublishAdapter` catches a failure to PERSIST external_ref and leaves
-    // the publication live rather than unwinding a working /p/{slug} page, so a
-    // null ref on a live public row does not mean "no reader". Returning null
-    // here made the Share dialog omit the copyable public link for a page that
-    // was serving fine — and did the same for legacy rows written before the
-    // ref was recorded.
+    expect(res.data[0].readerUrl).toBe("/c/my-doc");
+  });
+
+  it("DERIVES the PUBLIC reader URL for a live row on a public object", async () => {
+    // The other half of the same rule: the public address is derived from Level +
+    // Live (#1726), so a live row on a `public` object resolves at /p/{slug} —
+    // whichever of the two live-surface destinations the row carries.
+    queryResults.set("publish.loadPublishable", [
+      { ...PUBLISHABLE, visibilityLevel: "public" },
+    ]);
+    queryResults.set("publish.listLive", [
+      {
+        destination: "intranet",
+        externalRef: null,
+        publishedVersionId: "v1",
+        publishedAt: null,
+      },
+    ]);
+    const res = await listPublicationsAction("obj-1");
+    expect(res.isSuccess).toBe(true);
+    if (!res.isSuccess) return;
     expect(res.data[0].readerUrl).toBe("/p/my-doc");
   });
 

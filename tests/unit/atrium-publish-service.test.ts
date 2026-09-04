@@ -419,27 +419,75 @@ function definePublishServicePublishSuite1Part1() {
 
   }
 
-function definePublishServicePublishSuite1Part2() {it("republishing an ALREADY-public object is an ordinary idempotent publish", async () => {
-    // Previously the §26.4 in-transaction gate had to special-case this so a
-    // no-op re-save of public content was not treated as a new exposure. With
-    // publishing detached from visibility there is no case to special-case.
+function definePublishServicePublishSuite1Part2() {it("GATES the live switch on a `public` object behind §26.4", async () => {
+    // `/p/[slug]` resolves on `public` AND Live, so going Live is the half of the
+    // anonymous exposure that publishing controls. #1726 briefly left it ungated
+    // (`public_web` had been dropped from PUBLIC_DESTINATIONS), which let a
+    // caller holding only `content:publish_internal` finish an exposure it could
+    // never have started — widening TO `public` is gated in `setLevel`.
     txResults = [
       [{ id: "o1", visibilityLevel: "public" }], // FOR UPDATE lock
-      [{ id: "pub1" }], // publication upsert RETURNING
     ];
     await expect(
       publishService.publish(owner, "o1", { destination: "intranet" })
+    ).rejects.toThrow(ApprovalRequiredError);
+    // Judged on the LOCKED row, so a concurrent widen cannot slip past it.
+    expect(adapterPublishCalls).toBe(0);
+    expect(indexObjectMock).not.toHaveBeenCalled();
+  });
+
+  it("does NOT gate the live switch on a non-public object", async () => {
+    // The gate is about the anonymous surface, not about publishing. A `group`
+    // object going Live changes nothing about who may read it.
+    txResults = [
+      [{ id: "o1", visibilityLevel: "group" }],
+      [{ id: "pub1" }],
+    ];
+    await expect(
+      publishService.publish(owner, "o1", { destination: "intranet" })
+    ).resolves.toMatchObject({
+      publicationId: "pub1",
+      readerUrl: "/c/s1",
+      becamePubliclyReachable: false,
+    });
+  });
+
+  it("lets an AUTHORIZED caller go live on a public object, and returns the PUBLIC link", async () => {
+    // The reader URL is derived from the locked Level (#1726): a Live `public`
+    // object IS served at /p/{slug}, and handing back /c/{slug} would give an API
+    // caller a sign-in-required link for a page the world can open.
+    txResults = [
+      [{ id: "o1", visibilityLevel: "public" }], // FOR UPDATE lock
+      [], // no live-surface row yet -> this call is the transition
+      [{ id: "pub1" }], // publication upsert RETURNING
+    ];
+    await expect(
+      publishService.publish(admin, "o1", { destination: "intranet" })
     ).resolves.toEqual({
       publicationId: "pub1",
       publishedVersionId: "v1",
-      // The destination the service WROTE, not the alias the caller sent (#1726).
       destination: "intranet",
-      // #1336 C3: the intranet reader link is DERIVED from the slug (that
-      // adapter records a null external_ref by design) and returned so surfaces
-      // can show the author where the content went.
-      readerUrl: "/c/s1",
+      readerUrl: "/p/s1",
+      becamePubliclyReachable: true,
     });
     expect(setLevelInTxCalls).toBe(0);
+  });
+
+  it("republishing an ALREADY-live public object reports no new exposure", async () => {
+    // Keyed off the transition, not the state: otherwise every routine republish
+    // of a public page would file a fresh "went public" notice, the flooding
+    // `becamePublic` avoids on the visibility side.
+    txResults = [
+      [{ id: "o1", visibilityLevel: "public" }],
+      [{ id: "pub-live" }], // already live
+      [{ id: "pub1" }],
+    ];
+    await expect(
+      publishService.publish(admin, "o1", { destination: "intranet" })
+    ).resolves.toMatchObject({
+      readerUrl: "/p/s1",
+      becamePubliclyReachable: false,
+    });
   });
 
   it("admin past the gate to an unimplemented (stub) public destination fails BEFORE any write (no visibility leak)", async () => {
@@ -511,6 +559,8 @@ function definePublishServicePublishSuite1Part3() {it("the live switch runs the 
       // The destination the service WROTE, not the alias the caller sent (#1726).
       destination: "intranet",
       readerUrl: "/c/s1",
+      // The object is `private`, so going Live exposes it to nobody new.
+      becamePubliclyReachable: false,
     });
     expect(adapterPublishCalls).toBe(1);
     expect(publicWebPublishCalls).toBe(0);
@@ -549,6 +599,7 @@ function definePublishServicePublishSuite1Part3() {it("the live switch runs the 
       // The destination the service WROTE, not the alias the caller sent (#1726).
       destination: "intranet",
       readerUrl: "/c/s1",
+      becamePubliclyReachable: false,
     });
     expect(adapterPublishCalls).toBe(1);
     // No visibility provided -> setLevelInTx must NOT run (publish doesn't widen).
@@ -592,6 +643,7 @@ function definePublishServicePublishSuite1Part3() {it("the live switch runs the 
       publishedVersionId: "v-reviewed",
       destination: "intranet",
       readerUrl: "/c/s1",
+      becamePubliclyReachable: false,
     });
     expect(getVersionByIdMock).toHaveBeenCalled();
     // Retrieval must index the PUBLISHED (pinned) version, not the head — else it

@@ -576,22 +576,48 @@ async function raiseCollectionReviewApproval(args: {
  * `visibilityService.setLevel`, which carries its own §26.4 gate. The lock is
  * still taken so two concurrent publishes of the same object serialize here
  * rather than racing on the publication upsert.
+ *
+ * It DOES read the locked Level, for two decisions that depend on it:
+ *
+ *  - the §26.4 gate below, because going Live is half of the anonymous exposure
+ *    of a `public` object, and
+ *  - `becamePubliclyReachable`, the transition the allow-then-notify policy
+ *    records.
+ *
+ * Both are evaluated against the FOR-UPDATE-locked row rather than the pre-tx
+ * load, exactly as `visibilityService.setLevel` evaluates its own widen gate, so
+ * a concurrent widen to `public` cannot slip an ungated publish past either one.
  */
 async function runPublishTx(
   tx: DbTransaction,
   args: {
+    req: Requester;
     objectId: string;
+    slug: string;
     destination: PublishDestination;
     publishedVersionId: string;
     publishedBy: number | null;
+    mayPublishPublic: boolean;
     expectedVersionId?: string | null;
   }
-): Promise<{ publicationId: string }> {
+): Promise<{
+  publicationId: string;
+  becamePubliclyReachable: boolean;
+  /**
+   * The Level as read under the row lock. Returned so the caller derives the
+   * reader URL from the same value the gate above judged, rather than from the
+   * pre-tx load a concurrent `setLevel` could have moved underneath it.
+   */
+  visibilityLevel: VisibilityLevel;
+}> {
   const {
+    req,
     objectId,
+    slug,
     destination,
     publishedVersionId,
     publishedBy,
+    mayPublishPublic,
     expectedVersionId,
   } = args;
 
@@ -608,6 +634,7 @@ async function runPublishTx(
     .select({
       id: contentObjects.id,
       currentVersionId: contentObjects.currentVersionId,
+      visibilityLevel: contentObjects.visibilityLevel,
     })
     .from(contentObjects)
     .where(eq(contentObjects.id, objectId))
@@ -617,6 +644,56 @@ async function runPublishTx(
     throw new NotFoundError("Content not found", { objectId });
   }
   assertVersionPrecondition(expectedVersionId, locked[0].currentVersionId);
+
+  // §26.4 — the live switch on a `public` object.
+  //
+  // `/p/[slug]` resolves on `public` AND Live, so for an object whose Level is
+  // already `public` this write is the half of the anonymous exposure that
+  // publishing controls: before it the world gets a 404, after it the page is
+  // served and the sitemap advertises it. #1726 dropped `public_web` from
+  // `PUBLIC_DESTINATIONS` on the reasoning that being Live "changes no
+  // audience" — true for every other Level, and false for this one, which left
+  // a caller holding `content:publish_internal` alone able to finish an
+  // exposure the same caller could never have started (widening TO `public` is
+  // gated in `setLevel`, and `public_web` used to be gated here).
+  //
+  // Gated on the RESULT, not on a transition: a republish pins a new version
+  // onto a page the world is already reading, which is the same authority
+  // question. `raisePublishApprovalRequired` is safe to call under this lock —
+  // it queues the durable row on its own connection and throws, and the throw
+  // rolls this transaction back (see its docblock on why it cannot be awaited).
+  const visibilityLevel = locked[0].visibilityLevel as VisibilityLevel;
+  const publiclyReachable =
+    destination === LIVE_DESTINATION && visibilityLevel === "public";
+  if (publiclyReachable && !mayPublishPublic) {
+    raisePublishApprovalRequired(
+      req,
+      "Making public content live requires approval",
+      { objectId, slug, destination },
+      { destination, objectId, versionId: publishedVersionId }
+    );
+  }
+
+  // Whether the object was ALREADY Live, read under the same lock. Drives
+  // `becamePubliclyReachable`, which the in-app surface notifies on: keyed off
+  // `publiclyReachable` alone, every routine republish of a public page would
+  // file a fresh "went public" notice, the same flooding `becamePublic` avoids
+  // in `setLevel`.
+  const liveBefore = publiclyReachable
+    ? await tx
+        .select({ id: contentPublications.id })
+        .from(contentPublications)
+        .where(
+          and(
+            eq(contentPublications.objectId, objectId),
+            inArray(contentPublications.destination, [
+              ...LIVE_SURFACE_DESTINATIONS,
+            ]),
+            eq(contentPublications.status, "live")
+          )
+        )
+        .limit(1)
+    : [];
 
   await tx
     .update(contentObjects)
@@ -650,7 +727,11 @@ async function runPublishTx(
     // INSERT ... RETURNING should always yield a row; guard rather than crash.
     throw new ValidationError("Failed to record publication", { objectId });
   }
-  return { publicationId: row.id };
+  return {
+    publicationId: row.id,
+    becamePubliclyReachable: publiclyReachable && !liveBefore[0],
+    visibilityLevel,
+  };
 }
 
 /** One live publication of an object, as surfaced to authoring UIs (#1336). */
@@ -691,13 +772,25 @@ export interface LivePublicationDTO {
  */
 function derivedReaderUrl(
   destination: PublishDestination,
-  slug: string
+  slug: string,
+  visibilityLevel: VisibilityLevel
 ): string | null {
   switch (destination) {
-    case "intranet":
-      return contentDeepLink(slug);
+    case LIVE_DESTINATION:
     case "public_web":
-      return publicReaderLink(slug);
+      // The public address is DERIVED (#1726): a Live object whose Level is
+      // `public` IS served at `/p/{slug}`, and that is the link its author means
+      // to hand out. Returning `/c/{slug}` for it — which every publish did once
+      // `public_web` stopped being a destination anything writes — gives an API
+      // caller or an agent a sign-in-required URL for a page the world can open,
+      // the same dead-link class PR #1699 fixed for agent-authored messages.
+      //
+      // Level, not destination, decides. A legacy `public_web` row on a
+      // non-public object is the live row of a NON-public object, so it takes
+      // the internal link too.
+      return visibilityLevel === "public"
+        ? publicReaderLink(slug)
+        : contentDeepLink(slug);
     default:
       return null;
   }
@@ -765,7 +858,8 @@ export const publishService = {
       // regardless of what external_ref holds.
       const readerUrl =
         destination === "intranet" || destination === "public_web"
-          ? (row.externalRef ?? derivedReaderUrl(destination, obj.slug))
+          ? (row.externalRef ??
+            derivedReaderUrl(destination, obj.slug, obj.visibilityLevel))
           : null;
       return {
         destination,
@@ -822,11 +916,24 @@ export const publishService = {
      * Derived, not merely echoed: the intranet adapter deliberately records a
      * NULL `external_ref` (it addresses the object by slug, not by an external
      * id), so its reader link is computed here from the same slug the adapter
-     * published under. The PUBLIC `/p/{slug}` address is not returned here
-     * because it is derived (#1726) — it resolves whenever the object is Live
-     * AND its Level is `public`, which this call does not decide.
+     * published under. For an object whose Level is `public` that derivation
+     * yields `/p/{slug}` — the address the world can actually open — because the
+     * public page IS this live row plus that Level (#1726).
      */
     readerUrl: string | null;
+    /**
+     * The object went from not-Live to Live while its Level was `public` — i.e.
+     * THIS call is what put the page in front of anonymous visitors. Observed
+     * inside the transaction, against the locked row, so it reports what
+     * happened rather than what the caller asked for.
+     *
+     * The in-app surface notifies admins on it (allow-then-notify, #1336): the
+     * audience half of that policy is recorded by `setVisibilityAction` on the
+     * transition to `public`, and this is the publish half. Without it an author
+     * who set Public first and went Live second produced a world-readable page
+     * that no notification covered.
+     */
+    becamePubliclyReachable: boolean;
   }> {
     const log = createLogger({ action: "publish.publish" });
 
@@ -901,9 +1008,12 @@ export const publishService = {
     // §26.4 gate (destination), evaluated pre-transaction because it does NOT
     // depend on the object's current visibility: a CONNECTOR destination pushes a
     // copy into an external family-facing system, which is always an exposure
-    // regardless of Level. The live switch is not gated here (#1726) — it changes
-    // no audience, and widening the Level to `public` carries its own §26.4 gate
-    // inside `visibilityService.setLevel`, evaluated against the locked row there.
+    // regardless of Level.
+    //
+    // The live switch is NOT gated here, because whether it exposes anything
+    // depends on the object's Level — a question that has to be asked of the
+    // locked row, not of the pre-tx load a concurrent widen can invalidate. It is
+    // gated inside `runPublishTx` instead.
     if (isPublicDestination(destination) && !mayPublishPublic) {
       // If the caller supplied If-Match, make the approval decision against a
       // locked head too. Otherwise a version could advance after preflight but
@@ -952,13 +1062,20 @@ export const publishService = {
     // `published_by` is nullable, so a null here is persisted as "system".
     const publishedBy = authorUserIdOf(req);
 
-    const { publicationId } = await executeTransaction(
+    const {
+      publicationId,
+      becamePubliclyReachable,
+      visibilityLevel: publishedLevel,
+    } = await executeTransaction(
       (tx: DbTransaction) =>
         runPublishTx(tx, {
+          req,
           objectId,
+          slug: obj.slug,
           destination,
           publishedVersionId,
           publishedBy,
+          mayPublishPublic,
           expectedVersionId: opts.expectedVersionId,
         }),
       "publish.publish"
@@ -1000,7 +1117,9 @@ export const publishService = {
       publicationId,
       publishedVersionId,
       destination,
-      readerUrl: externalRef ?? derivedReaderUrl(destination, obj.slug),
+      readerUrl:
+        externalRef ?? derivedReaderUrl(destination, obj.slug, publishedLevel),
+      becamePubliclyReachable,
     };
   },
 

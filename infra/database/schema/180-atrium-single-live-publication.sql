@@ -18,11 +18,43 @@
 --      published version carried over when it had no intranet row of its own).
 --   2. Those `public_web` rows are then marked `unpublished`, so exactly one live
 --      row remains per object.
+--   3. Objects the DEPLOY (not this migration) newly exposed to anonymous
+--      visitors get a `publicExposure` audit row, so the widening is visible to
+--      administrators. Runs before step 2, while a live `public_web` row still
+--      distinguishes "was already public" from "just became public".
 --
 -- An object that was live on BOTH becomes one live row (its intranet row, whose
 -- published version is kept — the same version `/c/{slug}` was already serving).
 -- An object live ONLY on `public_web` becomes Live + Public, which it already had
 -- to be to pass the `/p/[slug]` gate.
+--
+-- THE DEPLOY ALSO WIDENS IN THE OTHER DIRECTION, and step 3 records it.
+--
+-- Folding rows forward is only half the data story. The old `/p/[slug]` gate was
+-- `visibility_level = 'public'` AND a live `public_web` row; the new one is
+-- `public` AND live at EITHER destination. That is strictly wider, and it widens
+-- at IMAGE DEPLOY, before this migration runs. Under the old UI the Level picker
+-- and the publish destination were independent switches — that is what #1336
+-- documented — so "Level = Public, published to the intranet only" was an
+-- ordinary state, and publishing to the intranet needed only `internal`, so
+-- nothing ever prompted about it. Every such object 404'd at `/p/{slug}` before
+-- and is served anonymously after, and `app/sitemap.ts` applies the same
+-- predicate on a route whose robots directive is index/follow, so crawlers are
+-- handed the URLs too.
+--
+-- Nothing here narrows them: the author DID choose Public, and un-Living them
+-- would break the internal reader they are legitimately serving. What was
+-- missing was that the change was SILENT. Step 3 files the same
+-- `publicExposure` audit row the in-app allow-then-notify policy files, so the
+-- set shows up in the /admin/atrium Audit tab instead of nowhere.
+--
+-- To see the list BEFORE deploying (this is exactly step 3's SELECT):
+--   SELECT o.id, o.slug, o.title FROM content_objects o
+--   WHERE o.visibility_level = 'public'
+--     AND EXISTS (SELECT 1 FROM content_publications p WHERE p.object_id = o.id
+--                 AND p.destination = 'intranet' AND p.status = 'live')
+--     AND NOT EXISTS (SELECT 1 FROM content_publications p WHERE p.object_id = o.id
+--                     AND p.destination = 'public_web' AND p.status = 'live');
 --
 -- DEPLOY ORDER — run this AFTER the new image is fully rolled out.
 --
@@ -120,6 +152,63 @@ WHERE pw.destination = 'public_web'
       AND ip.destination = 'intranet'
   )
 ON CONFLICT (object_id, destination) DO NOTHING;
+
+-- 3. Record the objects the DEPLOY made anonymously readable (see the header).
+--
+--    MUST run before step 2: the "was it already reachable at /p/?" test is the
+--    presence of a live `public_web` row, and step 2 retires exactly those.
+--
+--    Attributed to the object's owner — the person who chose Public — with the
+--    same `publicExposure` flag and `ui` surface the in-app notification uses, so
+--    these rows land in the filter administrators already read rather than in a
+--    channel nobody is watching. `content_audit_logs` is append-only and its
+--    `object_id` carries no FK, so this cannot fail on a concurrent delete.
+--
+--    Idempotent: an object that already carries a live-switch `publicExposure`
+--    row has had its exposure reported once, which is the point — re-running adds
+--    nothing.
+INSERT INTO content_audit_logs (
+  object_id,
+  action,
+  surface,
+  actor_kind,
+  actor_user_id,
+  destination,
+  outcome,
+  details
+)
+SELECT
+  o.id,
+  'publish',
+  'ui',
+  -- `actor_kind` is NOT NULL and has no "system" member; an agent-owned object
+  -- has no owner_user_id to attribute, so it is recorded as the agent write it
+  -- originally was.
+  (CASE WHEN o.owner_user_id IS NOT NULL THEN 'human' ELSE 'agent' END)::actor_kind,
+  o.owner_user_id,
+  'intranet'::publish_destination,
+  'ok',
+  jsonb_build_object(
+    'publicExposure', true,
+    'note',
+    'Already Public and live on the intranet, so it became readable without signing in when the public address became derived (#1726).'
+  )
+FROM content_objects AS o
+WHERE o.visibility_level = 'public'
+  AND EXISTS (
+    SELECT 1 FROM content_publications AS p
+    WHERE p.object_id = o.id AND p.destination = 'intranet' AND p.status = 'live'
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM content_publications AS p
+    WHERE p.object_id = o.id AND p.destination = 'public_web' AND p.status = 'live'
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM content_audit_logs AS a
+    WHERE a.object_id = o.id
+      AND a.destination = 'intranet'
+      AND a.details ->> 'publicExposure' = 'true'
+  );
 
 -- 2. Retire the `public_web` rows. Every object above now has its live intranet
 --    row, and the public address is derived from Level + Live, so nothing that

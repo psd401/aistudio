@@ -29,6 +29,15 @@ jest.mock("@/lib/content/publish-service", () => ({
   publishService: { publish: (...args: unknown[]) => publishMock(...args) },
 }));
 
+const notifyPublicExposureMock = jest.fn(async () => {});
+jest.mock("@/lib/atrium/public-publish-policy", () => ({
+  // Unchanged (#1336 allow-then-notify): every in-app author may expose
+  // publicly, so the action's job is to RECORD it, not to block it.
+  IN_APP_PUBLISH_PUBLIC_CAPABILITY: true,
+  notifyPublicExposure: (...args: unknown[]) =>
+    notifyPublicExposureMock(...(args as [])),
+}));
+
 jest.mock("@/utils/roles", () => ({
   hasCapabilityAccess: jest.fn(async () => true),
 }));
@@ -51,9 +60,56 @@ import { ApprovalRequiredError } from "@/lib/content/errors";
 
 beforeEach(() => {
   publishMock.mockClear();
+  notifyPublicExposureMock.mockClear();
   publishMock.mockResolvedValue({
     publicationId: "pub1",
     publishedVersionId: "v1",
+  });
+});
+
+describe("publishDocumentAction — allow-then-notify covers BOTH switches", () => {
+  it("notifies when going Live is what made a public object world-readable", async () => {
+    // The gap this closes: `setVisibilityAction` notifies on the transition TO
+    // `public`, so an author who set Public FIRST and went Live second produced a
+    // page anonymous visitors could read with no notification anywhere — the same
+    // end state as the reverse order, recorded only in one of them.
+    publishMock.mockResolvedValue({
+      publicationId: "pub1",
+      publishedVersionId: "v1",
+      becamePubliclyReachable: true,
+    });
+
+    const result = await publishDocumentAction("o1", { destination: "intranet" });
+    expect(result.isSuccess).toBe(true);
+    expect(notifyPublicExposureMock).toHaveBeenCalledTimes(1);
+    expect(notifyPublicExposureMock.mock.calls[0][0]).toMatchObject({
+      action: "publish",
+      objectId: "o1",
+      destination: "intranet",
+    });
+  });
+
+  it("does NOT notify when the publish exposed nothing new", async () => {
+    // Reported from the COMMITTED transition, not the request, so a republish of
+    // an already-live public page files nothing.
+    publishMock.mockResolvedValue({
+      publicationId: "pub1",
+      publishedVersionId: "v1",
+      becamePubliclyReachable: false,
+    });
+
+    const result = await publishDocumentAction("o1", { destination: "intranet" });
+    expect(result.isSuccess).toBe(true);
+    expect(notifyPublicExposureMock).not.toHaveBeenCalled();
+  });
+
+  it("still notifies for a CONNECTOR destination, which is its own exposure", async () => {
+    const result = await publishDocumentAction("o1", { destination: "schoology" });
+    expect(result.isSuccess).toBe(true);
+    expect(notifyPublicExposureMock).toHaveBeenCalledTimes(1);
+    expect(notifyPublicExposureMock.mock.calls[0][0]).toMatchObject({
+      destination: "schoology",
+    });
   });
 });
 

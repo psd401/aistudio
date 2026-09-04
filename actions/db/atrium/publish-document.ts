@@ -124,14 +124,26 @@ export async function publishDocumentAction(
       },
     );
 
-    // Allow-then-NOTIFY: record the admin-visible notification for a non-admin
-    // exposure through a CONNECTOR destination, which pushes a copy into an
-    // external family-facing system. Best-effort and post-commit, so it can
-    // never fail or roll back the publish the author just completed.
+    // Allow-then-NOTIFY. Best-effort and post-commit, so it can never fail or
+    // roll back the publish the author just completed. Two things are notified:
     //
-    // The live switch is deliberately NOT notified (#1726): it changes no
-    // audience. The notification for an audience change lives where the audience
-    // is written — `setVisibilityAction`, on the transition to `public`.
+    //  - a CONNECTOR destination, which pushes a copy into an external
+    //    family-facing system, and
+    //  - `becamePubliclyReachable` — this publish took a `public` object from
+    //    Draft to Live, which is the moment `/p/{slug}` starts serving anonymous
+    //    visitors and the sitemap starts advertising it.
+    //
+    // The second arm is not redundant with `setVisibilityAction`, which notifies
+    // on the transition TO `public`. Public and Live are independent switches and
+    // the exposure happens when the SECOND of them lands, so notifying only on
+    // the visibility write covered "Live first, then Public" and silently missed
+    // "Public first, then Live" — the same end state, recorded or not depending
+    // on which order the author happened to click.
+    //
+    // Both read the COMMITTED outcome rather than the request:
+    // `becamePubliclyReachable` is observed under the row lock inside the publish
+    // transaction, so a republish of an already-live public page — which exposes
+    // nothing new — files nothing.
     if (isPublicDestination(destination)) {
       await notifyPublicExposure({
         req: requester,
@@ -139,6 +151,15 @@ export async function publishDocumentAction(
         objectId,
         destination,
         note: `Published to ${destination} without administrator approval (allow-then-notify policy)`,
+        requestId,
+      });
+    } else if (result.becamePubliclyReachable) {
+      await notifyPublicExposure({
+        req: requester,
+        action: "publish",
+        objectId,
+        destination,
+        note: "Made live while Public, so it is now readable by anyone without signing in (allow-then-notify policy)",
         requestId,
       });
     }
