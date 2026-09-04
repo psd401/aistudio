@@ -19,7 +19,13 @@
  */
 
 const publishMock = jest.fn(
-  async (..._args: unknown[]) => ({
+  async (
+    ..._args: unknown[]
+  ): Promise<{
+    publicationId: string;
+    publishedVersionId: string;
+    becamePubliclyReachable?: boolean;
+  }> => ({
     publicationId: "pub1",
     publishedVersionId: "v1",
   })
@@ -29,13 +35,22 @@ jest.mock("@/lib/content/publish-service", () => ({
   publishService: { publish: (...args: unknown[]) => publishMock(...args) },
 }));
 
-const notifyPublicExposureMock = jest.fn(async () => {});
+const notifyPublicExposureMock = jest.fn(
+  async (_args: {
+    action: string;
+    objectId: string;
+    destination?: string | null;
+    note: string;
+  }): Promise<void> => {}
+);
 jest.mock("@/lib/atrium/public-publish-policy", () => ({
   // Unchanged (#1336 allow-then-notify): every in-app author may expose
   // publicly, so the action's job is to RECORD it, not to block it.
   IN_APP_PUBLISH_PUBLIC_CAPABILITY: true,
   notifyPublicExposure: (...args: unknown[]) =>
-    notifyPublicExposureMock(...(args as [])),
+    notifyPublicExposureMock(
+      ...(args as Parameters<typeof notifyPublicExposureMock>)
+    ),
 }));
 
 jest.mock("@/utils/roles", () => ({
