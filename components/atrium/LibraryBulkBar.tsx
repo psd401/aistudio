@@ -155,7 +155,7 @@ function BulkControls({
           data-testid="bulk-publish"
         >
           <Globe className="h-4 w-4" aria-hidden="true" />
-          Publish to intranet
+          Publish
         </Button>
       )}
 
@@ -284,19 +284,19 @@ export function LibraryBulkBar({
   );
 
   /**
-   * Bulk publish to the internal reader.
+   * Bulk publish — flip a selection from Draft to Live.
    *
    * The motivating case: a whole section authored as drafts (the staff
    * intranet, the SOP set) has to go live at once. One-at-a-time publishing
    * through each object's Share dialog is the only route that existed, which
    * for a 48-page section is 48 round trips through a modal.
    *
-   * `widenOnly: true` is what makes this safe to fan out over a mixed
-   * selection. Publishing to the intranet requires `internal` visibility, but
-   * assignment semantics would NARROW anything already public down to
-   * internal. As a widen OFFER it is applied only where it actually broadens
-   * the object's locked audience, and skipped everywhere else — so a public
-   * page in the selection stays public.
+   * Safe to fan out over a MIXED selection because publishing no longer touches
+   * the audience (#1726): every item keeps whatever level and grants it already
+   * has. This used to bundle a `widenOnly` offer to Internal, which even as an
+   * offer was the worst place in the app to change visibility — one click could
+   * widen dozens of group-scoped items and, because the widen ran through
+   * `setLevelInTx`, replace each of their grant sets with none.
    *
    * Still a per-object server call, so every visibility and permission gate
    * runs unchanged; an object the user may not publish fails on its own and is
@@ -306,21 +306,18 @@ export function LibraryBulkBar({
     if (
       typeof window !== "undefined" &&
       !window.confirm(
-        `Publish ${count} ${count === 1 ? "item" : "items"} to the staff intranet?\n\n` +
-          "Anything not already visible to staff will be widened to Internal so " +
-          "it can be read there. Items that are already more widely published " +
-          "keep their current audience. Items you cannot publish are skipped and " +
-          "reported."
+        `Publish ${count} ${count === 1 ? "item" : "items"}?\n\n` +
+          "Each one gets a page of its own. Who can open that page does not " +
+          "change — that stays whatever each item's level already says. Items " +
+          "you cannot publish are skipped and reported."
       )
     ) {
       return;
     }
-    void run("Published", (id) =>
-      publishDocumentAction(id, {
-        destination: "intranet",
-        visibility: { level: "internal", widenOnly: true },
-      })
-    );
+    // No visibility argument (#1726): publishing is a state change. Bulk-widening
+    // an unknown selection to Internal was the worst possible place to do it —
+    // one click could strip the grants off dozens of group-scoped items at once.
+    void run("Published", (id) => publishDocumentAction(id));
   }, [count, run]);
 
   const remove = useCallback(() => {

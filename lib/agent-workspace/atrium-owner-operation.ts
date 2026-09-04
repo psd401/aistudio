@@ -166,16 +166,15 @@ const completeAssetSchema = z
  */
 const MAX_ASSET_READ_BYTES = 4 * 1024 * 1024
 
+// No `visibility` (#1726): publishing is a Live/Draft state change and never
+// touches the audience. An agent that wants to widen calls set-visibility, which
+// carries the §26.4 gate. `intranet`/`public_web` both mean the live switch and
+// are folded onto one row by the service; omitted defaults to it.
 const publishSchema = z
   .object({
-    destination: z.enum([
-      "intranet",
-      "public_web",
-      "schoology",
-      "google",
-      "okf",
-    ]),
-    visibility: visibilitySchema.optional(),
+    destination: z
+      .enum(["intranet", "public_web", "schoology", "google", "okf"])
+      .default("intranet"),
   })
   .strict()
 
@@ -733,10 +732,7 @@ async function executePublishWrite(
     const published = await publishService.publish(
       req,
       segments[0],
-      {
-        destination: body.destination,
-        visibility: body.visibility,
-      },
+      { destination: body.destination },
       { hasPublishPublicCapability: false }
     )
     recordAudit(req, audit, input.requestId, "ok")

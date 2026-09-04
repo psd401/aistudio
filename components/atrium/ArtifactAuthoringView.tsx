@@ -24,6 +24,7 @@ import { ArtifactMetaRail } from "./ArtifactMetaRail";
 import { ContentSettings } from "./ContentSettings";
 import { VisibilityChip } from "./VisibilityChip";
 import { publishService } from "@/lib/content/publish-service";
+import { isLive } from "@/lib/content/live-publication";
 import {
   publicBlockers,
   PUBLIC_BLOCKER_TEXT,
@@ -50,23 +51,24 @@ export async function ArtifactAuthoringView({
 }: ArtifactAuthoringViewProps): Promise<React.JSX.Element> {
   // Publication state, read here only to decide whether the broken-public-link
   // banner below applies. The Share dialog loads its own copy for the link and
-  // the destination rows.
+  // the Live/Draft row.
   const publications = await publishService.listLive(req, obj.id);
-  const publicPub = publications.find((p) => p.destination === "public_web");
+  const live = isLive(publications.map((p) => p.destination));
 
-  // A live public_web publication is NOT sufficient for /p/[slug] to render —
-  // the route also requires public visibility AND a section an anonymous
-  // visitor can enter. Without this, an author sees "Public web · LIVE", copies
-  // the URL, and everyone who opens it gets a 404 with nothing anywhere saying
-  // why. Only computed when something is actually published publicly; there is
-  // no broken link to warn about otherwise.
-  const publicIssues = publicPub
-    ? await publicBlockers({
-        hasLivePublicWebPublication: true,
-        visibilityLevel: obj.visibilityLevel,
-        collectionId: obj.collectionId,
-      })
-    : [];
+  // Being Live is NOT sufficient for /p/[slug] to render — the route also
+  // requires Public visibility AND a section an anonymous visitor can enter.
+  // Without this, an author who set the level to Public copies the public URL
+  // and everyone who opens it gets a 404 with nothing anywhere saying why. Only
+  // computed for an object whose level actually claims a public address; a
+  // non-public object has no public link to be broken.
+  const publicIssues =
+    obj.visibilityLevel === "public"
+      ? await publicBlockers({
+          isLive: live,
+          visibilityLevel: obj.visibilityLevel,
+          collectionId: obj.collectionId,
+        })
+      : [];
 
   // Rail data (manage-rights only): the current head backs the version number; the
   // backlinks are viewer-filtered documents that embed this artifact.

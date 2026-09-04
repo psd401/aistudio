@@ -3,13 +3,20 @@
 /**
  * Atrium publish-document server action
  *
- * Issue #1051 (Epic #1059, Atrium Phase 1; destinations widened for Epic #1059
- * completion). Thin wrapper over `publishService.publish` — publishes an
- * object's working head to a destination for the logged-in human surface:
- * `intranet` (`/c/[slug]`), `public_web` (`/p/[slug]`, §26.4-gated), or the
- * `schoology`/`google` connector stubs (their adapters throw
- * `implemented:false` until wired). View + edit permission is enforced in the
- * service; the surface adds the feature-capability gate.
+ * Issue #1051 (Epic #1059, Atrium Phase 1; single Live state per #1726). Thin
+ * wrapper over `publishService.publish` — flips the object LIVE for the logged-in
+ * human surface. View + edit permission is enforced in the service; the surface
+ * adds the feature-capability gate.
+ *
+ * It takes NO visibility input (#1726). Publishing is a state change; who may read
+ * the page is the object's Level, saved separately through `setVisibilityAction`.
+ * The old bundled widen existed to reconcile a second "where it's published"
+ * audience switch that no longer exists, and its one visible effect on this
+ * surface was replacing the author's grants with none.
+ *
+ * `destination` is still accepted (the connector stubs are real destinations, and
+ * `public_web` remains a legacy alias the service folds onto the live row) but the
+ * Share dialog no longer offers a choice.
  *
  * See docs/features/atrium-design-spec.md §15 (publishing) / §26.4.
  */
@@ -23,11 +30,7 @@ import {
 import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { publishService } from "@/lib/content/publish-service";
 import { ApprovalRequiredError } from "@/lib/content/errors";
-import {
-  assertEditorDestination,
-  assertGrantKind,
-  assertLevel,
-} from "@/lib/content/validators";
+import { assertEditorDestination } from "@/lib/content/validators";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { getServerSession } from "@/lib/auth/server-session";
@@ -36,7 +39,10 @@ import {
   IN_APP_PUBLISH_PUBLIC_CAPABILITY,
   notifyPublicExposure,
 } from "@/lib/atrium/public-publish-policy";
-import { isPublicDestination } from "@/lib/content/publish-adapters/types";
+import {
+  isPublicDestination,
+  LIVE_DESTINATION,
+} from "@/lib/content/publish-adapters/types";
 
 /**
  * The editor destination union (excludes `okf` — API/MCP-only by design),
@@ -52,39 +58,22 @@ export async function publishDocumentAction(
   input: {
     /**
      * Widened to `string` (the action/REST-style input contract) and narrowed at
-     * runtime via `assertEditorDestination`. `intranet` publishes to the internal
-     * reader; `public_web`/`schoology`/`google` are §26.4 public destinations —
-     * a caller without public-publish authority gets the pending-approval
-     * outcome, not a failure (see the ApprovalRequiredError branch below).
+     * runtime via `assertEditorDestination`. `intranet` (and its legacy alias
+     * `public_web`) flip the live switch; `schoology`/`google` are §26.4 connector
+     * destinations — a caller without public-publish authority gets the
+     * pending-approval outcome, not a failure (see the ApprovalRequiredError
+     * branch below). Defaults to the live switch when omitted.
      */
-    destination: string;
-    /**
-     * Optional visibility-widening applied in the publish transaction. `level`
-     * arrives as a plain `string` (the action/REST/MCP input contract) and is
-     * narrowed via `assertLevel` before reaching the service — matching the
-     * service's full `VisibilityLevel` capability rather than narrowing to
-     * `group` only at the type boundary. `grants` are only meaningful (and only
-     * accepted by the service) for `level: "group"`.
-     */
-    visibility?: {
-      level: string;
-      grants?: { kind: string; value: string }[];
-      /**
-       * Treat the level as a WIDEN OFFER rather than an assignment (#1336):
-       * applied only if it actually broadens the object's locked current
-       * audience. Set by the editor's confirm dialog.
-       */
-      widenOnly?: boolean;
-    };
-  },
+    destination?: string;
+  } = {},
 ): Promise<
   ActionState<{
     publicationId: string;
     publishedVersionId: string;
     /**
-     * The reader URL the content is now served at (#1336 C3) — `/p/{slug}` for
-     * public web, `/c/{slug}` for the intranet. Surfaced so the success caption
-     * can offer a copyable link instead of a bare "Published to …".
+     * The reader URL the content is now served at (#1336 C3) — `/c/{slug}` for
+     * the live switch. Surfaced so the success caption can offer a copyable link
+     * instead of a bare "Published".
      */
     readerUrl: string | null;
   }>
@@ -111,53 +100,22 @@ export async function publishDocumentAction(
       throw ErrorFactories.authzToolAccessDenied("atrium-content");
     }
 
-    if (!input) {
-      throw ErrorFactories.missingRequiredField("input");
-    }
-
     log.info("Action started: publish document", {
       objectId,
-      input: sanitizeForLogging({
-        destination: input.destination,
-        visibilityLevel: input.visibility?.level,
-        grantCount: input.visibility?.grants?.length ?? 0,
-      }),
+      input: sanitizeForLogging({ destination: input.destination }),
     });
 
     // Narrow the widened `string` destination at runtime BEFORE it reaches the
     // service's adapter registry (rejects `okf` and any unexpected value).
-    const destination = assertEditorDestination(input.destination, "publish");
+    const destination = assertEditorDestination(
+      input.destination ?? LIVE_DESTINATION,
+      "publish"
+    );
 
-    // `input.visibility` carries a widened `level` and `grant.kind` (plain
-    // `string`). `assertLevel` / `assertGrantKind` narrow each via a RUNTIME
-    // check (throwing ValidationError on an unexpected value) before they reach
-    // the service — the DB enum is the last line of defense, not the first.
     const result = await publishService.publish(
       requester,
       objectId,
-      {
-        destination,
-        visibility: input.visibility
-          ? {
-              level: assertLevel(input.visibility.level),
-              // `?? []` guard: `grants` is optional on the input contract (a REST/MCP
-              // caller, or a future action passing `{ visibility: { level: "internal" } }`,
-              // can omit it). Without the guard `undefined.map()` throws a TypeError —
-              // mirrors the `(input.grants ?? []).map(...)` guard in set-visibility.ts.
-              grants: (input.visibility.grants ?? []).map((g) => ({
-                kind: assertGrantKind(g.kind),
-                value: g.value,
-              })),
-              // MUST be forwarded: dropping it silently restores assignment
-              // semantics, so a doc another tab widened between the dialog's
-              // re-read and the transaction gets NARROWED back — the exact
-              // defect `widenOnly` exists to prevent. A plain boolean intent
-              // flag needing no runtime narrowing beyond coercion, and it can
-              // only ever make the change LESS impactful.
-              widenOnly: input.visibility.widenOnly === true,
-            }
-          : undefined,
-      },
+      { destination },
       {
         // #1336: any author may publish publicly — no admin approval gate. See
         // lib/atrium/public-publish-policy.ts for why this is supplied
@@ -167,15 +125,14 @@ export async function publishDocumentAction(
     );
 
     // Allow-then-NOTIFY: record the admin-visible notification for a non-admin
-    // public exposure. Best-effort and post-commit, so it can never fail or roll
-    // back the publish the author just completed.
-    // Gated on the COMMITTED outcome, not the request. A public-facing
-    // DESTINATION is always a real exposure, but a bundled visibility widen may
-    // have been skipped inside the transaction (a `widenOnly` offer against an
-    // already-public row writes nothing), so that arm reads `becamePublic` —
-    // the transition the locked transaction actually observed — rather than the
-    // level the caller asked for.
-    if (isPublicDestination(destination) || result.becamePublic) {
+    // exposure through a CONNECTOR destination, which pushes a copy into an
+    // external family-facing system. Best-effort and post-commit, so it can
+    // never fail or roll back the publish the author just completed.
+    //
+    // The live switch is deliberately NOT notified (#1726): it changes no
+    // audience. The notification for an audience change lives where the audience
+    // is written — `setVisibilityAction`, on the transition to `public`.
+    if (isPublicDestination(destination)) {
       await notifyPublicExposure({
         req: requester,
         action: "publish",
@@ -195,10 +152,9 @@ export async function publishDocumentAction(
     return createSuccess(result, "Document published");
   } catch (error) {
     timer({ status: "error" });
-    // §26.4 gate: a public-destination publish without approval is a
+    // §26.4 gate: a connector-destination publish without approval is a
     // pending-approval outcome (approval-queue event emitted), not a failure.
-    // Surface it distinctly — the editor's destination picker exposes
-    // `public_web`, so a non-admin caller routinely lands here.
+    // Surface it distinctly rather than as a red error.
     if (error instanceof ApprovalRequiredError) {
       log.info("Publish requires approval", { requestId });
       return {

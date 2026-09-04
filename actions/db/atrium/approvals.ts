@@ -9,7 +9,9 @@
  * requests to expose content publicly, the district's highest-governance path.
  *
  * Replay semantics on approve:
- * - `publish`          → `publishService.publish(admin, objectId, context)` —
+ * - `publish`          → `publishService.publish(admin, objectId, context)`, plus
+ *   a separate `visibilityService.setLevel` first when a pre-#1726 row recorded a
+ *   bundled widen (publishing no longer carries visibility) —
  *   the admin requester passes the §26.4 gate via `isAdmin`, so the exact
  *   blocked publish (destination + any recorded visibility widen) goes through,
  *   PINNED to the raise-time version (`context.versionId`, issue #1118) so the
@@ -225,10 +227,20 @@ function requireRequestObjectId(
 }
 
 /**
- * Replay a `publish` request: publish the recorded destination, applying any
- * recorded visibility widen and — issue #1118 — PINNING the raise-time version
- * (`context.versionId`) so the admin publishes the reviewed content, not a newer
- * head. `versionId` is absent on pre-#1118 rows → publish the current head.
+ * Replay a `publish` request: publish the recorded destination, and — issue
+ * #1118 — PIN the raise-time version (`context.versionId`) so the admin
+ * publishes the reviewed content, not a newer head. `versionId` is absent on
+ * pre-#1118 rows → publish the current head.
+ *
+ * A recorded `context.visibility` widen is replayed as a SEPARATE
+ * `visibilityService.setLevel` call, before the publish. Since #1726 publishing
+ * never touches visibility, so the two halves of a pre-#1726 queued row (which
+ * were raised as one bundled request) are replayed as the two writes they
+ * actually are. Ordering matters: widen first, so that if the widen is what the
+ * approver was gating and it fails, nothing goes live.
+ *
+ * Only `public` is replayable here — that is the only level the §26.4 gate ever
+ * recorded, and it is the level the admin approved.
  */
 async function replayPublish(
   requester: AdminRequester,
@@ -239,15 +251,13 @@ async function replayPublish(
   const destination = assertPublishDestination(
     context.destination ?? request.destination
   );
-  const visibility =
-    context.visibility?.level === "public"
-      ? { level: "public" as const }
-      : undefined;
   const versionId =
     typeof context.versionId === "string" ? context.versionId : undefined;
+  if (context.visibility?.level === "public") {
+    await visibilityService.setLevel(requester, objectId, { level: "public" });
+  }
   await publishService.publish(requester, objectId, {
     destination,
-    ...(visibility ? { visibility } : {}),
     ...(versionId ? { versionId } : {}),
   });
 }

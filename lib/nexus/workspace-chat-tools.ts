@@ -414,16 +414,17 @@ function buildPublishTool(args: {
   return tool({
     description:
       `${verb} the document or artifact open in the workspace panel. ` +
-      `destination 'intranet' (default) is the internal reader everyone in the district can reach. ` +
-      `destination 'public_web' is the public site and REQUIRES administrator approval — if this user is not permitted, ` +
-      `the tool returns queuedForApproval:true and you MUST tell the user it is pending approval, not that it is live.`,
+      `${op === "publish" ? "Publishing" : "Unpublishing"} changes only whether it is LIVE — it gives the object its own reader page (or takes that page away). ` +
+      `It does NOT change who may read it: that is the object's visibility level, changed with the visibility tool. ` +
+      `A Live object whose level is Public is also served at the anonymous public address; a Live object shared with specific people stays limited to those people.`,
     inputSchema: jsonSchema<{ destination?: "intranet" | "public_web" }>({
       type: "object",
       properties: {
         destination: {
           type: "string",
           enum: ["intranet", "public_web"],
-          description: "intranet (default) = internal reader; public_web = public site (needs approval).",
+          description:
+            "Legacy field — both values mean the same single Live state. Omit it.",
         },
       },
       additionalProperties: false,

@@ -3,25 +3,34 @@
  *
  * Issue #1051 (Epic #1059, Atrium Phase 1). Owns the canonical
  * `content_publications` row — the durable record that "version V of object O is
- * live at destination D" — and the visibility-widening that publishing implies.
+ * live".
+ *
+ * ## Publication is a STATE, not an audience (#1726)
+ *
+ * Publishing pins the head version, gives the object its `/c/{slug}` page, the
+ * reader chrome, and a place in retrieval/library views — every one of which is
+ * "this is finished and findable", never "who may read it". WHO may read it is
+ * the object's visibility Level, written only by `visibilityService.setLevel`.
+ * So this service NEVER reads or writes `visibility_level` or
+ * `content_visibility_grants`, and `intranet`/`public_web` both fold onto the one
+ * live row (`normalizeLiveDestination`). `/p/{slug}` is DERIVED: it resolves when
+ * the object is Live and its Level is `public`.
  *
  * Flow (`publish`):
  *  1. Load the object's owner / visibility / current head / slug.
  *  2. `canView` gate FIRST (mask existence: a non-viewable object 404s, never
  *     403s, so private ids cannot be enumerated), then `assertCanEdit`.
- *  3. Destination gate (`public_web` is a later phase; see below).
+ *  3. Connector-destination gate (§26.4) + per-collection review gate.
  *  4. Require a working head (`current_version_id`); nothing to publish otherwise.
- *  5. In a single transaction: optionally apply visibility grants + widen the
- *     object's visibility and mark it `published`, then upsert the publication
- *     row (idempotent on `(object_id, destination)`).
+ *  5. In a single transaction: mark the object `published` and upsert the
+ *     publication row (idempotent on `(object_id, destination)`).
  *  6. AFTER the transaction commits, call the destination adapter for any
  *     external side effect (drizzle-client anti-pattern: external IO inside a tx).
  *
  * The adapter (`./publish-adapters`) abstracts *where a published version becomes
- * live*. As of Phase 7 (#1057) two reader-backed adapters are live — `intranet`
- * (`/c/[slug]`) and `public_web` (`/p/[slug]`) — and `schoology` / `google` are
- * governed connector stubs that throw until wired. Every non-intranet destination
- * is public-facing (`isPublicDestination`) and sits behind the §26.4 gate.
+ * live*. `intranet` backs the live switch; `schoology` / `google` are governed
+ * connector stubs that throw until wired, and are the only destinations that are
+ * still public-facing (`isPublicDestination`) and behind the §26.4 gate.
  *
  * See docs/features/atrium-design-spec.md §15 (publishing) / §26.4 (public gate).
  */
@@ -56,6 +65,7 @@ import {
 } from "./collection-access";
 import {
   isPublicDestination,
+  normalizeLiveDestination,
   type PublishAdapter,
   type PublishDestination,
 } from "./publish-adapters/types";
@@ -65,42 +75,23 @@ import { schoologyAdapter } from "./publish-adapters/schoology";
 import { googleAdapter } from "./publish-adapters/google";
 import { okfAdapter } from "./publish-adapters/okf";
 import { contentDeepLink, publicReaderLink } from "./reader-links";
-import { reachesAtLeast } from "./audience-rank";
-import type {
-  Requester,
-  VisibilityGrant,
-  VisibilityLevel,
-} from "./types";
+import type { Requester, VisibilityLevel } from "./types";
 
-/** Per-publish input: the destination plus optional visibility widening. */
+/**
+ * Per-publish input: the destination, and (for an approval replay) a pinned
+ * version.
+ *
+ * There is deliberately NO `visibility` field (#1726). Publishing is a STATE
+ * change — "this is finished and findable" — and never reads or writes
+ * `visibility_level` or `content_visibility_grants`. Who may read the published
+ * page is decided entirely by the object's Level, gated by
+ * `visibilityService.setLevel`. The old bundled widen existed to reconcile a
+ * second audience switch that no longer exists, and its one visible effect on
+ * the authoring surface was wiping the author's grants
+ * (`setLevelInTx` -> `applyGrantsInTx(tx, objectId, [])` for any non-group level).
+ */
 export interface PublishInput {
   destination: PublishDestination;
-  /**
-   * When provided, the object's visibility is set to `level` (and, for `group`,
-   * its grants replaced with `grants`) inside the publish transaction and the
-   * object is marked `published`. Omit to publish without changing visibility.
-   */
-  visibility?: {
-    level: VisibilityLevel;
-    grants?: VisibilityGrant[];
-    /**
-     * Treat the level as a WIDEN OFFER rather than an assignment (#1336). When
-     * set, it is applied only if it actually broadens the object's CURRENT
-     * (FOR-UPDATE-locked) audience; if the object already reaches at least that
-     * far, the visibility is left untouched and the publish proceeds unchanged.
-     *
-     * Set by the editor's confirm dialog. That dialog already re-reads
-     * visibility before submitting, but a re-read is not a lock: a change
-     * landing between it and this transaction would still be overwritten, and
-     * "confirming a widen silently NARROWS a concurrently-public object" is too
-     * sharp an edge to leave to a narrowed race window. This is the same
-     * decision made in the one place that actually holds the row lock.
-     *
-     * Omitted (the default) preserves assignment semantics — REST/MCP and the
-     * §26.4 approval replay narrow deliberately.
-     */
-    widenOnly?: boolean;
-  };
   /**
    * Publish a SPECIFIC version rather than the object's current head. Used by
    * the §26.4 approval replay (issue #1118): a request pins the raise-time head
@@ -164,7 +155,6 @@ async function raiseDestinationPublishApproval(
     slug: string;
     destination: PublishDestination;
     publishedVersionId: string;
-    wantsPublicWiden: boolean;
   },
   expectedVersionId: string | null | undefined
 ): Promise<never> {
@@ -181,7 +171,6 @@ async function raiseDestinationPublishApproval(
         destination: txInput.destination,
         objectId: txInput.objectId,
         versionId: txInput.publishedVersionId,
-        wantsPublicWiden: txInput.wantsPublicWiden,
       }
     );
 
@@ -506,170 +495,91 @@ async function raiseCollectionReviewApproval(args: {
 }
 
 /**
- * The publish transaction body: lock the object row, evaluate §26.4 gate PART 2
- * against the LOCKED visibility, apply any widen + the `published` status, and
- * upsert the publication row. Extracted verbatim from `publishService.publish`
- * so that method stays under the max-lines-per-function lint — the ordering,
- * locking and gate semantics are unchanged.
+ * The publish transaction body: lock the object row, mark the object
+ * `published`, and upsert its publication row. Extracted from
+ * `publishService.publish` so that method stays under the max-lines-per-function
+ * lint — the ordering and locking semantics are unchanged.
+ *
+ * It does NOT touch visibility (#1726). Publishing is a state change; the
+ * audience is the object's Level and is only ever written by
+ * `visibilityService.setLevel`, which carries its own §26.4 gate. The lock is
+ * still taken so two concurrent publishes of the same object serialize here
+ * rather than racing on the publication upsert.
  */
 async function runPublishTx(
   tx: DbTransaction,
   args: {
-    req: Requester;
     objectId: string;
-    slug: string;
-    input: PublishInput;
+    destination: PublishDestination;
     publishedVersionId: string;
     publishedBy: number | null;
-    mayPublishPublic: boolean;
     expectedVersionId?: string | null;
   }
-): Promise<{
-  publicationId: string;
-  /**
-   * Whether this transaction actually TRANSITIONED the object to public, judged
-   * against the FOR-UPDATE-locked previous level (#1336). Distinct from "the
-   * caller asked for public": a `widenOnly` request against an already-public
-   * row writes nothing, and the allow-then-notify policy must not report an
-   * exposure that did not occur.
-   */
-  becamePublic: boolean;
-}> {
+): Promise<{ publicationId: string }> {
   const {
-    req,
     objectId,
-    slug,
-    input,
+    destination,
     publishedVersionId,
     publishedBy,
-    mayPublishPublic,
     expectedVersionId,
   } = args;
 
-        // Lock the content row FOR UPDATE at the start of the transaction so two
-        // concurrent publishes of the same object serialize here rather than racing
-        // through `applyGrantsInTx`'s DELETE (no contention) and both reaching the
-        // grant INSERT — where the second would hit the `uq_cvg` unique constraint
-        // and roll back as an opaque 500. The standalone `visibilityService.setLevel`
-        // acquires the same lock; mirror it here. The row was confirmed to exist via
-        // `loadPublishable` above, but re-select inside the tx (a concurrent delete
-        // could have removed it between the load and this lock); a missing row 404s.
-        const locked = await tx
-          .select({
-            id: contentObjects.id,
-            visibilityLevel: contentObjects.visibilityLevel,
-            currentVersionId: contentObjects.currentVersionId,
-          })
-          .from(contentObjects)
-          .where(eq(contentObjects.id, objectId))
-          .for("update")
-          .limit(1);
-        if (!locked[0]) {
-          throw new NotFoundError("Content not found", { objectId });
-        }
-        assertVersionPrecondition(
-          expectedVersionId,
-          locked[0].currentVersionId
-        );
+  // Lock the content row FOR UPDATE at the start of the transaction so two
+  // concurrent publishes of the same object serialize here rather than both
+  // reaching the publication upsert. The standalone `visibilityService.setLevel`
+  // acquires the same lock, so a publish and a visibility save of the same object
+  // also serialize — the two writes touch different columns, but ordering them
+  // keeps the status/level pair consistent for any reader that loads both. The
+  // row was confirmed to exist via `loadPublishable` above, but re-select inside
+  // the tx (a concurrent delete could have removed it between the load and this
+  // lock); a missing row 404s.
+  const locked = await tx
+    .select({
+      id: contentObjects.id,
+      currentVersionId: contentObjects.currentVersionId,
+    })
+    .from(contentObjects)
+    .where(eq(contentObjects.id, objectId))
+    .for("update")
+    .limit(1);
+  if (!locked[0]) {
+    throw new NotFoundError("Content not found", { objectId });
+  }
+  assertVersionPrecondition(expectedVersionId, locked[0].currentVersionId);
 
-        // §26.4 gate — PART 2 (visibility widen), evaluated HERE against the locked
-        // row's CURRENT visibility so it is race-free: a widen to `public` is gated
-        // iff the locked row is not ALREADY public. A concurrent narrow can no
-        // longer slip between the check and the widen (both hold this lock), so an
-        // unauthorized caller can never widen-back-to-public un-approved. A no-op
-        // re-save of already-public content is not a new exposure and passes.
-        // Throwing here rolls the transaction back, so nothing is widened/published.
-        if (
-          input.visibility?.level === "public" &&
-          locked[0].visibilityLevel !== "public" &&
-          !mayPublishPublic
-        ) {
-          raisePublishApprovalRequired(
-            req,
-            "Publishing to a public destination requires approval",
-            { objectId, slug: slug, destination: input.destination },
-            {
-              destination: input.destination,
-              objectId,
-              // Pin the raise-time head for the replay (#1118 item 1); the widen
-              // is recorded automatically (this branch fires only for a non-public
-              // destination bundling a public widen).
-              versionId: publishedVersionId,
-            }
-          );
-        }
+  await tx
+    .update(contentObjects)
+    .set({ status: "published", updatedAt: new Date() })
+    .where(eq(contentObjects.id, objectId));
 
-        // Optionally widen visibility in the same tx so the status change and
-        // any grant updates are atomic. `setLevelInTx` replaces the level + (for
-        // group) its grants, enforcing the group-needs-grants guard. When a
-        // visibility change is requested, fold `status: "published"` into its
-        // single level UPDATE (via `extraSet`) so the row is touched once;
-        // otherwise issue a standalone status-only UPDATE.
-        // A `widenOnly` request is an OFFER: applied only when it genuinely
-        // broadens the LOCKED current audience. Evaluated here, inside the
-        // lock, so no client-side race window remains (#1336). When skipped it
-        // falls through to the status-only UPDATE below, exactly as if no
-        // visibility had been supplied.
-        const widenIsNoOp =
-          input.visibility?.widenOnly === true &&
-          reachesAtLeast(
-            locked[0].visibilityLevel as VisibilityLevel,
-            input.visibility.level
-          );
+  // Idempotent upsert: republishing the same destination updates the live
+  // version + status in place (unique on (object_id, destination)).
+  const upserted = await tx
+    .insert(contentPublications)
+    .values({
+      objectId,
+      destination,
+      publishedVersionId,
+      status: "live",
+      publishedBy,
+    })
+    .onConflictDoUpdate({
+      target: [contentPublications.objectId, contentPublications.destination],
+      set: {
+        publishedVersionId,
+        status: "live",
+        publishedBy,
+        updatedAt: new Date(),
+      },
+    })
+    .returning({ id: contentPublications.id });
 
-        if (input.visibility && !widenIsNoOp) {
-          await visibilityService.setLevelInTx(tx, objectId, input.visibility, {
-            status: "published",
-          });
-        } else {
-          await tx
-            .update(contentObjects)
-            .set({
-              status: "published",
-              updatedAt: new Date(),
-            })
-            .where(eq(contentObjects.id, objectId));
-        }
-
-        // Idempotent upsert: republishing the same destination updates the live
-        // version + status in place (unique on (object_id, destination)).
-        const upserted = await tx
-          .insert(contentPublications)
-          .values({
-            objectId,
-            destination: input.destination,
-            publishedVersionId,
-            status: "live",
-            publishedBy,
-          })
-          .onConflictDoUpdate({
-            target: [
-              contentPublications.objectId,
-              contentPublications.destination,
-            ],
-            set: {
-              publishedVersionId,
-              status: "live",
-              publishedBy,
-              updatedAt: new Date(),
-            },
-          })
-          .returning({ id: contentPublications.id });
-
-        const row = upserted[0];
-        if (!row) {
-          // INSERT ... RETURNING should always yield a row; guard rather than crash.
-          throw new ValidationError("Failed to record publication", { objectId });
-        }
-        return {
-          publicationId: row.id,
-          // A real transition: the visibility write actually ran, it targeted
-          // `public`, and the locked previous level was not already public.
-          becamePublic:
-            !widenIsNoOp &&
-            input.visibility?.level === "public" &&
-            locked[0].visibilityLevel !== "public",
-        };
+  const row = upserted[0];
+  if (!row) {
+    // INSERT ... RETURNING should always yield a row; guard rather than crash.
+    throw new ValidationError("Failed to record publication", { objectId });
+  }
+  return { publicationId: row.id };
 }
 
 /** One live publication of an object, as surfaced to authoring UIs (#1336). */
@@ -799,6 +709,11 @@ export const publishService = {
    * Publish (or republish) an object's working head to a destination. Idempotent
    * on `(object_id, destination)`: republishing updates the live version in
    * place. Returns the publication row id and the version that is now live.
+   *
+   * Since #1726 this NEVER reads or writes `visibility_level` or
+   * `content_visibility_grants`. `intranet` and `public_web` both resolve to the
+   * single live row (`normalizeLiveDestination`), so "published" is one state
+   * with one audience — the object's Level.
    */
   async publish(
     req: Requester,
@@ -818,28 +733,20 @@ export const publishService = {
     publicationId: string;
     publishedVersionId: string;
     /**
-     * The destination's READER URL (#1336 C3) — `/p/{slug}` for `public_web`,
-     * `/c/{slug}` for `intranet` — or null for a destination with no reader
-     * (the connector stubs). Callers surface it so the author can actually copy
-     * the link they just created; before #1336 the public URL was persisted to
-     * `content_publications.external_ref` and then dropped on the floor, so no
-     * surface could ever show it.
+     * The destination's READER URL (#1336 C3) — `/c/{slug}` for the live switch,
+     * or null for a destination with no reader (the connector stubs). Callers
+     * surface it so the author can actually copy the link they just created;
+     * before #1336 the URL was persisted to `content_publications.external_ref`
+     * and then dropped on the floor, so no surface could ever show it.
      *
      * Derived, not merely echoed: the intranet adapter deliberately records a
      * NULL `external_ref` (it addresses the object by slug, not by an external
      * id), so its reader link is computed here from the same slug the adapter
-     * published under.
+     * published under. The PUBLIC `/p/{slug}` address is not returned here
+     * because it is derived (#1726) — it resolves whenever the object is Live
+     * AND its Level is `public`, which this call does not decide.
      */
     readerUrl: string | null;
-    /**
-     * Whether this publish actually TRANSITIONED the object to public, judged
-     * inside the transaction against the FOR-UPDATE-locked previous level
-     * (#1336). Surfaces use it for the allow-then-notify notification: a
-     * `widenOnly` request against an already-public row writes nothing, so
-     * keying the notice off the REQUESTED level would report an exposure that
-     * never occurred.
-     */
-    becamePublic: boolean;
   }> {
     const log = createLogger({ action: "publish.publish" });
 
@@ -880,7 +787,11 @@ export const publishService = {
       opts.hasPublishPublicCapability ?? false
     );
 
-    const adapter = adapters[input.destination];
+    // ONE live row (#1726): `public_web` is a legacy alias for the live switch,
+    // so it is folded here — at the single point every surface funnels through —
+    // rather than at each caller, where the two could drift back apart.
+    const destination = normalizeLiveDestination(input.destination);
+    const adapter = adapters[destination];
 
     // Resolve the version to publish (the current head, or the specific version an
     // approval replay pinned — issue #1118). This CHEAP business validation runs
@@ -897,37 +808,33 @@ export const publishService = {
     // phases) must fail BEFORE any write, and — issue #1118 item 6 — BEFORE the
     // §26.4 gate so an unauthorized schoology/google publish (doomed: the adapter
     // throws on approve too) is not queued. The revealed fact ("destination not
-    // yet wired") is static and non-sensitive. Otherwise the status/visibility
-    // widening below would commit, the post-commit adapter call would throw, and
-    // the object would be left flagged `public` with no live publication — a
-    // "failed" publish that silently exposed content.
+    // yet wired") is static and non-sensitive. Otherwise the status change below
+    // would commit, the post-commit adapter call would throw, and the object would
+    // be left flagged `published` with no live publication.
     if (adapter.implemented === false) {
       throw new ValidationError(
-        `Publishing to '${input.destination}' is not yet available`,
-        { destination: input.destination }
+        `Publishing to '${destination}' is not yet available`,
+        { destination }
       );
     }
 
-    // §26.4 gate — PART 1 (destination), evaluated pre-transaction because it does
-    // NOT depend on the object's current visibility (a public-facing destination —
-    // public_web/schoology/google, `isPublicDestination` — is ALWAYS a public
-    // exposure) and so is race-free here. PART 2 — widening visibility to `public`
-    // — DOES depend on the current level, so it is evaluated inside the transaction
-    // against the FOR-UPDATE-locked row (see below), closing the TOCTOU hole where
-    // a concurrent narrow (public → internal) between a pre-read and the locked
-    // write would skip the gate on a real widen-back.
-    if (isPublicDestination(input.destination) && !mayPublishPublic) {
+    // §26.4 gate (destination), evaluated pre-transaction because it does NOT
+    // depend on the object's current visibility: a CONNECTOR destination pushes a
+    // copy into an external family-facing system, which is always an exposure
+    // regardless of Level. The live switch is not gated here (#1726) — it changes
+    // no audience, and widening the Level to `public` carries its own §26.4 gate
+    // inside `visibilityService.setLevel`, evaluated against the locked row there.
+    if (isPublicDestination(destination) && !mayPublishPublic) {
       // If the caller supplied If-Match, make the approval decision against a
       // locked head too. Otherwise a version could advance after preflight but
       // before the durable request is raised.
       await raiseDestinationPublishApproval(
         {
           req,
-          destination: input.destination,
+          destination,
           objectId,
           slug: obj.slug,
           publishedVersionId,
-          wantsPublicWiden: input.visibility?.level === "public",
         },
         opts.expectedVersionId
       );
@@ -957,7 +864,7 @@ export const publishService = {
       req,
       obj,
       objectId,
-      destination: input.destination,
+      destination,
       publishedVersionId,
     });
 
@@ -965,16 +872,13 @@ export const publishService = {
     // `published_by` is nullable, so a null here is persisted as "system".
     const publishedBy = authorUserIdOf(req);
 
-    const { publicationId, becamePublic } = await executeTransaction(
+    const { publicationId } = await executeTransaction(
       (tx: DbTransaction) =>
         runPublishTx(tx, {
-          req,
           objectId,
-          slug: obj.slug,
-          input,
+          destination,
           publishedVersionId,
           publishedBy,
-          mayPublishPublic,
           expectedVersionId: opts.expectedVersionId,
         }),
       "publish.publish"
@@ -991,13 +895,13 @@ export const publishService = {
       title: obj.title,
       collectionId: obj.collectionId,
       publicationId,
-      destination: input.destination,
+      destination,
       log,
     });
 
     log.info("Published content", {
       objectId,
-      destination: input.destination,
+      destination,
       publishedVersionId,
     });
 
@@ -1008,16 +912,14 @@ export const publishService = {
       objectId,
       slug: obj.slug,
       publishedVersionId,
-      destination: input.destination,
+      destination,
       log,
     });
 
     return {
       publicationId,
       publishedVersionId,
-      becamePublic,
-      readerUrl:
-        externalRef ?? derivedReaderUrl(input.destination, obj.slug),
+      readerUrl: externalRef ?? derivedReaderUrl(destination, obj.slug),
     };
   },
 
@@ -1042,10 +944,16 @@ export const publishService = {
   async unpublish(
     req: Requester,
     objectId: string,
-    destination: PublishDestination,
+    requestedDestination: PublishDestination,
     opts: { hasPublishPublicCapability?: boolean } = {}
   ): Promise<{ unpublished: boolean }> {
     const log = createLogger({ action: "publish.unpublish" });
+
+    // ONE live row (#1726): "unpublish from public_web" and "unpublish from the
+    // intranet" are the same request — take the object OFF Live. Normalizing here
+    // (as `publish` does) is what stops an Unpublish from leaving a second live
+    // row behind that keeps serving readers.
+    const destination = normalizeLiveDestination(requestedDestination);
 
     const obj = await loadPublishable(objectId);
     if (!obj) {

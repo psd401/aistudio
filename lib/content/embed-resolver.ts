@@ -18,7 +18,7 @@
  *   `visibilityService.canView(requester, …)` — the SAME gate every internal read
  *   uses. Expand links target `/c/<slug>`.
  * - `public` (the anonymous `/p/[slug]` reader) gates STRICTLY on
- *   `visibility_level === 'public'` AND a LIVE `public_web` publication, and
+ *   `visibility_level === 'public'` AND the artifact being LIVE, and
  *   admits the fixed anonymous principal to the containing collection. It
  *   consults NO session — matching the public reader's own contract (a public
  *   surface must serve the same thing to everyone, and an unpublish/archive must
@@ -38,6 +38,7 @@ import { contentObjects, contentPublications } from "@/lib/db/schema";
 import { createLogger } from "@/lib/logger";
 import { versionService } from "./version-service";
 import { visibilityService } from "./visibility-service";
+import { isLivePublicationRow } from "./live-publication";
 import {
   collectionAccessSnapshot,
   requesterMayViewCollection,
@@ -153,11 +154,11 @@ async function resolveEmbedForReaderWithAccess(
   const visible = await canResolveEmbed(obj, opts, collectionAccess);
   if (!visible) return unavailable(artifactId);
 
-  // The PUBLIC audience is held to the public reader's stricter contract: only an
-  // artifact with a LIVE `public_web` publication may render, and it renders the
-  // PUBLISHED version — never unpublished head edits — so a retraction masks the
-  // embed immediately, exactly like the top-level `/p/<slug>` route. (Internal
-  // audiences see the current head: the "live artifact" the mockup describes.)
+  // The PUBLIC audience is held to the public reader's stricter contract: only a
+  // LIVE artifact may render, and it renders the PUBLISHED version — never
+  // unpublished head edits — so a retraction masks the embed immediately, exactly
+  // like the top-level `/p/<slug>` route. (Internal audiences see the current
+  // head: the "live artifact" the mockup describes.)
   let publishedVersionId: string | null = null;
   if (opts.audience === "public") {
     const [publication] = await executeQuery(
@@ -168,8 +169,7 @@ async function resolveEmbedForReaderWithAccess(
           .where(
             and(
               eq(contentPublications.objectId, obj.id),
-              eq(contentPublications.destination, "public_web"),
-              eq(contentPublications.status, "live")
+              isLivePublicationRow()
             )
           )
           .limit(1),

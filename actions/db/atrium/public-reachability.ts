@@ -19,6 +19,7 @@ import {
 import { createSuccess, handleError } from "@/lib/error-utils";
 import { contentService } from "@/lib/content";
 import { publishService } from "@/lib/content/publish-service";
+import { isLive } from "@/lib/content/live-publication";
 import {
   publicBlockers,
   type PublicBlocker,
@@ -48,9 +49,7 @@ export async function publicReachabilityAction(
 
     const publications = await publishService.listLive(requester, obj.id);
     const blockers = await publicBlockers({
-      hasLivePublicWebPublication: publications.some(
-        (p) => p.destination === "public_web"
-      ),
+      isLive: isLive(publications.map((p) => p.destination)),
       visibilityLevel: obj.visibilityLevel,
       collectionId: obj.collectionId,
     });

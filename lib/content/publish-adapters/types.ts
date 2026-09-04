@@ -42,28 +42,79 @@ export const PUBLISH_DESTINATIONS = [
 export type PublishDestination = (typeof PUBLISH_DESTINATIONS)[number];
 
 /**
- * The destinations that expose content to a PUBLIC / family-facing audience and
- * therefore require the §26.4 `content:publish_public` authority (Phase 7, #1057).
+ * The ONE destination that carries an object's LIVE state (#1726).
  *
- * `intranet` is the ONLY internal-audience destination (`content:publish_internal`
- * suffices for it). `public_web` renders at an anonymous reader route; `schoology`
- * / `google` push into external family-facing systems (§26.2 — "publish to
- * public_web / family-facing destinations"). All three are the highest-governance
- * paths: an unauthorized caller (including EVERY autonomous agent) is routed
- * through the approval gate before the destination adapter ever runs.
+ * Publication used to be an *audience* choice — `intranet` vs `public_web` —
+ * which put "where it's published" in direct competition with the object's
+ * visibility Level. Reconciling the two needed a widen prompt that was false
+ * (`/c/[slug]` runs `canView` before it looks at the publication, so a
+ * group-scoped published object opens fine for its grantees), UI-only (the same
+ * dialog could narrow one save later), and destructive (it wiped the author's
+ * grants).
+ *
+ * The two axes are now separated: **Level alone decides the audience**, and
+ * publication is a single Live/Draft state. That state is recorded as ONE
+ * `content_publications` row, at this destination. The reader URL is derived
+ * from the two — `/c/{slug}` for any Live object, plus `/p/{slug}` when the
+ * object is also `public`.
+ */
+export const LIVE_DESTINATION = "intranet" satisfies PublishDestination;
+
+/**
+ * The destinations that count as "this object is Live".
+ *
+ * `intranet` is the one the live switch writes. `public_web` is here only for
+ * rows written BEFORE #1726 (migration 180 folds them into an `intranet` row);
+ * accepting it keeps a legacy row serving its readers even if the migration and
+ * the deploy land out of order. Nothing writes `public_web` any more.
+ */
+export const LIVE_SURFACE_DESTINATIONS: readonly PublishDestination[] = [
+  LIVE_DESTINATION,
+  "public_web",
+];
+
+/**
+ * Collapse the two legacy live destinations onto the single live row (#1726).
+ *
+ * Every surface (server action, REST, MCP, agent bridge) still ACCEPTS
+ * `public_web` — it is a published API value — but both mean the same thing now:
+ * flip the live switch. Normalizing here, at the one point every surface funnels
+ * through, is what keeps "Live" a single row rather than two that can disagree.
+ * Connector destinations pass through untouched.
+ */
+export function normalizeLiveDestination(
+  destination: PublishDestination
+): PublishDestination {
+  return destination === "public_web" ? LIVE_DESTINATION : destination;
+}
+
+/**
+ * The destinations that push content into an EXTERNAL, family-facing system and
+ * therefore require the §26.4 `content:publish_public` authority.
+ *
+ * Since #1726 this is the connector set ONLY. Making an object live no longer
+ * changes who may read it — the Level does, and `visibilityService.setLevel`
+ * carries the unchanged §26.4 gate for widening to `public`. Gating the live
+ * switch as well would gate the *state*, not the *exposure*, which is what made
+ * the old flow both wrong (it fired for a group-scoped intranet publish) and
+ * bypassable (visibility could be narrowed one save later).
+ *
+ * `public_web` is deliberately absent: it is no longer a distinct exposure, only
+ * a legacy alias for the live row (`normalizeLiveDestination`). `okf` is a
+ * portable bundle carrying internal-publish authority (the §26.4 gate for OKF
+ * lives on the COLLECTION exporter's `public` audience, not the destination).
  *
  * Single source of truth so the publish service, unpublish path, and any future
  * gate site classify destinations identically rather than hand-listing them.
  */
 export const PUBLIC_DESTINATIONS: readonly PublishDestination[] = [
-  "public_web",
   "schoology",
   "google",
 ];
 
 /**
  * Whether publishing to (or unpublishing from) `destination` requires the §26.4
- * public-publish authority. `intranet` → false; every destination in
+ * public-publish authority. The live switch and `okf` → false; every connector in
  * `PUBLIC_DESTINATIONS` → true.
  */
 export function isPublicDestination(destination: PublishDestination): boolean {
