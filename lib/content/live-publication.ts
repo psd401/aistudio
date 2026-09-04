@@ -25,7 +25,7 @@
  * which is dependency-free and therefore safe in a client bundle.
  */
 
-import { and, eq, inArray, type SQL } from "drizzle-orm";
+import { eq, inArray, type SQL } from "drizzle-orm";
 import { contentPublications } from "@/lib/db/schema";
 import {
   LIVE_SURFACE_DESTINATIONS,
@@ -33,17 +33,24 @@ import {
 } from "./publish-adapters/types";
 
 /**
- * Drizzle condition: this `content_publications` row is the object's LIVE row.
+ * Drizzle conditions: this `content_publications` row is the object's LIVE row.
+ * Spread into the call site's `and(...)` alongside its own `objectId` (or join)
+ * predicate — this covers only the destination + status half, which is the half
+ * that was duplicated.
  *
- * Combine with an `objectId` (or join) predicate at the call site — this covers
- * only the destination + status half, which is the half that was duplicated.
+ * Returns a TUPLE of non-optional `SQL`, deliberately, rather than one pre-`and`ed
+ * `SQL | undefined`. Drizzle's `and()` SKIPS undefined operands, so a helper typed
+ * `SQL | undefined` can silently contribute nothing to a `where` — and every
+ * caller here is a gate on what anonymous visitors may read. A dropped condition
+ * would fail OPEN: the public reader would serve any object with any publication
+ * row, and the sitemap would advertise them. The tuple makes that unrepresentable.
  */
-export function isLivePublicationRow(): SQL | undefined {
-  return and(
+export function livePublicationConditions(): readonly [SQL, SQL] {
+  return [
     inArray(
       contentPublications.destination,
       LIVE_SURFACE_DESTINATIONS as PublishDestination[]
     ),
-    eq(contentPublications.status, "live")
-  );
+    eq(contentPublications.status, "live"),
+  ];
 }

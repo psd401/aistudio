@@ -5,7 +5,7 @@
  * mirroring the `/p/[slug]` gate exactly (plus the `status = 'published'`
  * lifecycle filter, a strict subset of that gate):
  *   - `content_objects.visibility_level = 'public'`  (the strict public gate)
- *   - the object is LIVE                              (`isLivePublicationRow`)
+ *   - the object is LIVE                          (`livePublicationConditions`)
  *   - `content_objects.status = 'published'`
  *   - the anonymous requester may enter the active containing collection
  *
@@ -30,7 +30,7 @@ import { executeQuery } from "@/lib/db/drizzle-client";
 import { contentObjects, contentPublications } from "@/lib/db/schema";
 import { publicReaderLink } from "@/lib/content/surface-helpers";
 import { collectionAccessSnapshot } from "@/lib/content/collection-access";
-import { isLivePublicationRow } from "@/lib/content/live-publication";
+import { livePublicationConditions } from "@/lib/content/live-publication";
 import type { Requester } from "@/lib/content/types";
 import { createLogger } from "@/lib/logger";
 
@@ -74,7 +74,7 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
               and(
                 // The /p/[slug] strict public gate, exactly: Public + Live (#1726).
                 eq(contentObjects.visibilityLevel, "public"),
-                isLivePublicationRow(),
+                ...livePublicationConditions(),
                 // Lifecycle subset guard (publish sets it; unpublish reverts it):
                 eq(contentObjects.status, "published")
               )

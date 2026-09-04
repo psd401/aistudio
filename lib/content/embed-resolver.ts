@@ -38,7 +38,7 @@ import { contentObjects, contentPublications } from "@/lib/db/schema";
 import { createLogger } from "@/lib/logger";
 import { versionService } from "./version-service";
 import { visibilityService } from "./visibility-service";
-import { isLivePublicationRow } from "./live-publication";
+import { livePublicationConditions } from "./live-publication";
 import {
   collectionAccessSnapshot,
   requesterMayViewCollection,
@@ -169,7 +169,7 @@ async function resolveEmbedForReaderWithAccess(
           .where(
             and(
               eq(contentPublications.objectId, obj.id),
-              isLivePublicationRow()
+              ...livePublicationConditions()
             )
           )
           .limit(1),

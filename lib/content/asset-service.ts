@@ -29,7 +29,7 @@ import {
   type ContentAssetContentType,
 } from "./asset-image";
 import { contentService } from "./content-service";
-import { isLivePublicationRow } from "./live-publication";
+import { livePublicationConditions } from "./live-publication";
 import { actorKindOf, agentIdOf, authorUserIdOf } from "./helpers";
 import {
   ConflictError,
@@ -714,7 +714,7 @@ export const contentAssetService = {
                 eq(contentVersionAssets.assetId, asset.id),
                 eq(contentPublications.objectId, object.id),
                 // Public + Live, the same derived gate `/p/[slug]` enforces (#1726).
-                isLivePublicationRow(),
+                ...livePublicationConditions(),
                 eq(contentObjects.visibilityLevel, "public"),
               ),
             )

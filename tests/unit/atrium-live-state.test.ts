@@ -20,6 +20,7 @@
  */
 
 import { isLive } from "@/lib/content/publish-adapters/types";
+import { livePublicationConditions } from "@/lib/content/live-publication";
 import { liveConsequence } from "@/components/atrium/SharePublishSection";
 
 describe("isLive", () => {
@@ -48,6 +49,22 @@ describe("isLive", () => {
 
   it("is true when a live row sits alongside connector rows", () => {
     expect(isLive(["okf", "intranet"])).toBe(true);
+  });
+});
+
+describe("livePublicationConditions", () => {
+  it("yields TWO defined conditions — a dropped one would fail OPEN", () => {
+    // Drizzle's `and()` SILENTLY SKIPS undefined operands, so a helper typed
+    // `SQL | undefined` can contribute nothing to a `where` and leave a gate
+    // matching every row. Every caller of this helper gates what ANONYMOUS
+    // visitors may read (the public reader, the sitemap, the public asset-bytes
+    // route, the public embed resolver), so a dropped condition would serve any
+    // object carrying any publication row.
+    const conditions = livePublicationConditions();
+    expect(conditions).toHaveLength(2);
+    for (const condition of conditions) {
+      expect(condition).toBeDefined();
+    }
   });
 });
 

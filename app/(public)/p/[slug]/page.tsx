@@ -62,7 +62,7 @@ import { s3Store } from "@/lib/content/storage/s3-store";
 import { versionService } from "@/lib/content/version-service";
 import { resolveDocumentParts } from "@/lib/content/embed-resolver";
 import { requesterMayViewCollection } from "@/lib/content/collection-access";
-import { isLivePublicationRow } from "@/lib/content/live-publication";
+import { livePublicationConditions } from "@/lib/content/live-publication";
 import { extractDocumentHeadings } from "@/lib/content/render/headings";
 import type { Requester } from "@/lib/content/types";
 import { createLogger } from "@/lib/logger";
@@ -160,8 +160,8 @@ const loadPublicObject = cache(async (
   }
 
   // The public page is DERIVED (#1726): Public + Live, not a second publication
-  // row the author has to remember to create. `isLivePublicationRow` is the one
-  // definition of Live, shared with the sitemap / embed / asset gates.
+  // row the author has to remember to create. `livePublicationConditions` is the
+  // one definition of Live, shared with the sitemap / embed / asset gates.
   const [publication] = await executeQuery(
     (db) =>
       db
@@ -173,7 +173,7 @@ const loadPublicObject = cache(async (
         .where(
           and(
             eq(contentPublications.objectId, obj.id),
-            isLivePublicationRow()
+            ...livePublicationConditions()
           )
         )
         .limit(1),

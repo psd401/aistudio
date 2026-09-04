@@ -133,11 +133,8 @@ describe("app/sitemap.ts — Atrium public reader sitemap", () => {
       [
         "and",
         ["eq", "co.visibility_level", "public"],
-        [
-          "and",
-          ["inArray", "cp.destination", ["intranet", "public_web"]],
-          ["eq", "cp.status", "live"],
-        ],
+        ["inArray", "cp.destination", ["intranet", "public_web"]],
+        ["eq", "cp.status", "live"],
         ["eq", "co.status", "published"],
       ],
     ]);
