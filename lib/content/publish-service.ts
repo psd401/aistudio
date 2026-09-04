@@ -454,6 +454,12 @@ async function runUnpublishSideEffects(args: {
     }
   }
 
+  // Every retired row's teardown is ATTEMPTED even when an earlier one throws:
+  // they address different destinations, and skipping the rest would leave a
+  // second live surface's external state up for a reason that has nothing to do
+  // with it. The first failure is still surfaced to the caller afterwards, so a
+  // teardown failure is never silent.
+  let teardownError: unknown;
   for (const pub of retired) {
     const adapter = adapters[pub.destination as PublishDestination];
     if (!adapter?.unpublish) continue;
@@ -468,9 +474,10 @@ async function runUnpublishSideEffects(args: {
             ? adapterError.message
             : String(adapterError),
       });
-      throw adapterError;
+      teardownError ??= adapterError;
     }
   }
+  if (teardownError !== undefined) throw teardownError;
 }
 
 // §26.4 — this publish path's two gate sites (the pre-tx public-destination branch
@@ -1144,12 +1151,22 @@ export const publishService = {
             )
           );
 
-        // Revert the object to draft ONLY when no OTHER destination is still live.
-        // An object can be live at a CONNECTOR as well as at the live switch (and,
-        // pre-migration-180, at both live-surface aliases). Retiring one must NOT
-        // mark the object a draft while another destination still serves it. The
+        // Revert the object to draft ONLY when no LIVE-SURFACE row is left. The
         // rows just flipped to `unpublished` above are excluded by the
-        // `status = 'live'` filter.
+        // `status = 'live'` filter, and — pre-migration-180 — an object can be
+        // live at both aliases, so this is what stops a partial retire from
+        // drafting an object another row still serves.
+        //
+        // Scoped to `LIVE_SURFACE_DESTINATIONS`, the SAME definition of Live the
+        // readers use (#1726). An unscoped check counted an `okf` row — a
+        // portable export bundle in S3, with no reader page — as "still live",
+        // which left an unpublished object at `status = 'published'` with its
+        // retrieval index intact. The Share dialog said Draft (it asks `isLive`,
+        // which excludes `okf`) and `/c/{slug}` and `/p/{slug}` both 404'd, while
+        // assistant retrieval kept serving the content the author had just taken
+        // down. Three predicates over one table have to agree, or the disagreement
+        // shows up as content that is invisible everywhere except RAG.
+        //
         // Visibility is intentionally NOT narrowed here — unpublishing removes the
         // live surface, not the grant set; a later republish reuses the same
         // visibility.
@@ -1159,6 +1176,9 @@ export const publishService = {
           .where(
             and(
               eq(contentPublications.objectId, objectId),
+              inArray(contentPublications.destination, [
+                ...LIVE_SURFACE_DESTINATIONS,
+              ]),
               eq(contentPublications.status, "live")
             )
           )

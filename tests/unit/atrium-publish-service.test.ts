@@ -819,6 +819,32 @@ function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing a c
     expect(removeFromIndexMock).not.toHaveBeenCalled();
   });
 
+  it("an `okf` bundle does NOT count as still-live: the object drafts and the index prunes", async () => {
+    // `okf` is a portable export bundle in S3, not a reader page — `isLive` and
+    // `livePublicationConditions` both exclude it, so the Share dialog says Draft
+    // and both readers 404 once the live row is retired. An unscoped
+    // "any live row?" check counted the okf row, leaving the object
+    // `status = 'published'` with its retrieval index intact: invisible in every
+    // UI and every reader, still served by assistant retrieval. The tx queue's
+    // third result is the still-live check, which must now find NOTHING because
+    // the only remaining live row is `okf`.
+    txResults = [
+      [{ id: "o1" }],
+      [{ id: "pub1", destination: "intranet", externalRef: null }],
+      [],
+    ];
+    const result = await publishService.unpublish(admin, "o1", "intranet");
+    expect(result).toEqual({ unpublished: true, destination: "intranet" });
+    expect(txSetPayloads.map((p) => p.status)).toContain("draft");
+    expect(removeFromIndexMock).toHaveBeenCalledWith("o1");
+    // The still-live check is scoped to the live-surface destinations, so it can
+    // never be satisfied by an `okf` (or connector) row.
+    const targeted = txWhereClauses.flat(Infinity);
+    expect(targeted).toContain("intranet");
+    expect(targeted).toContain("public_web");
+    expect(targeted).not.toContain("okf");
+  });
+
   it("prunes the retrieval index only when the last live destination is removed", async () => {
     // tx queue: FOR UPDATE lock, the live row being torn down, then the
     // "any other destination still live?" check returns [] (none remain).

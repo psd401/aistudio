@@ -24,19 +24,27 @@
 -- An object live ONLY on `public_web` becomes Live + Public, which it already had
 -- to be to pass the `/p/[slug]` gate.
 --
--- Deploy-order safety: the application's `/p/[slug]` gate accepts a live row at
--- EITHER destination (`LIVE_SURFACE_DESTINATIONS`), so a public page keeps
--- serving whether this migration lands before or after the new image.
+-- DEPLOY ORDER — run this AFTER the new image is fully rolled out.
 --
--- NOT symmetric on ROLLBACK. The OLD image's `/p/[slug]` requires a live
--- `public_web` row specifically, and step 2 retires those — so rolling the image
--- back after this has run would 404 the public pages it folded (the internal
--- `/c/{slug}` reader is unaffected, since every one of them gained a live
--- `intranet` row in step 1). Fix forward. To undo deliberately, re-flip the
--- retired rows: UPDATE content_publications SET status = 'live' WHERE
--- destination = 'public_web' AND status = 'unpublished' AND object_id IN
--- (SELECT object_id FROM content_publications WHERE destination = 'intranet'
--- AND status = 'live').
+-- The NEW image is order-insensitive: `/p/[slug]` and `/c/[slug]` both accept a
+-- live row at EITHER destination (`LIVE_SURFACE_DESTINATIONS`), so a page keeps
+-- serving whether it has been folded yet or not.
+--
+-- The OLD image is NOT. Its `/p/[slug]` requires a live `public_web` row
+-- specifically, and step 2 retires those. During a ROLLING ECS deploy the old
+-- tasks keep taking traffic until they drain, so running this migration before
+-- or alongside task replacement 404s the anonymous page of any object that was
+-- live only through `public_web`, for as long as an old task is still serving.
+-- (Its internal `/c/{slug}` page is unaffected either way: the old reader looks
+-- for a live `intranet` row, and step 1 gives every such object one BEFORE step
+-- 2 retires anything.)
+--
+-- The same asymmetry makes an image ROLLBACK after this has run 404 those public
+-- pages. Fix forward. To undo deliberately, re-flip the retired rows:
+--   UPDATE content_publications SET status = 'live'
+--   WHERE destination = 'public_web' AND status = 'unpublished'
+--     AND object_id IN (SELECT object_id FROM content_publications
+--                       WHERE destination = 'intranet' AND status = 'live');
 --
 -- The `destination` column and the `publish_destination` enum are unchanged:
 -- connector destinations (`schoology`, `google`, `okf`) genuinely are
