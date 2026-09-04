@@ -79,7 +79,7 @@ import { versionService } from "@/lib/content/version-service";
 import { resolveDocumentParts } from "@/lib/content/embed-resolver";
 import { extractDocumentHeadings } from "@/lib/content/render/headings";
 import { canEdit } from "@/lib/content/helpers";
-import { CONTENT_DATA_ACCESS_MODES } from "@/lib/content/types";
+import { normalizeDataAccess } from "@/lib/content/types";
 import type { ContentDataAccess } from "@/lib/content/types";
 import { getOptionalRequester } from "@/actions/db/atrium/requester";
 import { countUnresolvedCommentThreadsAction } from "@/actions/db/atrium/comments";
@@ -191,11 +191,8 @@ async function loadReaderObject(slug: string): Promise<{
     collectionName: obj.collectionName ?? null,
     // Fail closed on anything outside the enum (a value predating migration 179,
     // or a column widened later): unknown means "no bridge operations at all".
-    dataAccess: CONTENT_DATA_ACCESS_MODES.includes(
-      obj.dataAccess as ContentDataAccess
-    )
-      ? (obj.dataAccess as ContentDataAccess)
-      : "none",
+    // This raw-row read bypasses `rowToObjectDTO`, so it normalizes here.
+    dataAccess: normalizeDataAccess(obj.dataAccess),
     publication: publication
       ? {
           publishedVersionId: publication.publishedVersionId,

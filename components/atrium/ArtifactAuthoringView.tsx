@@ -172,6 +172,16 @@ export async function ArtifactAuthoringView({
             idOrSlug={obj.id}
             canEdit={userCanEdit}
             sandboxSrc={getArtifactSandboxRenderUrl()}
+            // #1725: the editor preview runs the artifact data bridge, so a
+            // `query`-mode dashboard can be exercised before it is published.
+            // The page that renders this view already ran the 404-masking
+            // canView gate, and every bridge action repeats it — publication
+            // was never the authorization for a data call.
+            dataBridgeEnabled={true}
+            contentId={obj.id}
+            // The mode as read for THIS render; the sandbox pins it for the
+            // life of its mount (#1712).
+            dataAccess={obj.dataAccess}
           />
         </div>
         {userCanEdit && (

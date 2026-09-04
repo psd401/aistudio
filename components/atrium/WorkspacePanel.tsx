@@ -138,6 +138,18 @@ export function WorkspacePanel({ idOrSlug, onClose }: WorkspacePanelProps) {
               idOrSlug={state.data.id}
               canEdit={state.data.canEdit}
               sandboxSrc={state.data.sandboxSrc}
+              // #1725: the same authoring bridge the full edit page enables —
+              // "Open beside chat" is where most artifacts are actually built,
+              // so a query-mode dashboard has to be exercisable here too. The
+              // loader ran the same 404-masking canView gate as the edit page,
+              // and every bridge action repeats it.
+              //
+              // `dataAccess` is null only for documents, which never reach this
+              // branch; the fallback keeps the union total without widening
+              // anything (an unknown mode already normalizes to "none").
+              dataBridgeEnabled={true}
+              contentId={state.data.id}
+              dataAccess={state.data.dataAccess ?? "none"}
             />
           ))}
       </div>
