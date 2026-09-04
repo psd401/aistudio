@@ -9,12 +9,17 @@ openwiki:
     - actions/db/atrium/artifact-query.ts
     - actions/db/atrium/artifact-guards.ts
     - actions/db/atrium/workspace-panel.ts
+    - actions/db/atrium/create-content.ts
+    - actions/db/atrium/snapshot-document.ts
+    - actions/db/atrium/comments.ts
     - lib/nexus/model-router/psd-data-connector.ts
     - components/atrium/dnd/atrium-dnd.tsx
     - components/atrium/use-expanded-sections.ts
     - components/atrium/ArtifactSandbox.tsx
     - components/atrium/ArtifactCanvas.tsx
     - lib/content/types.ts
+    - lib/content/code-encoding.ts
+    - lib/content/code-encoding-browser.ts
     - lib/atrium/usage-series.ts
     - lib/atrium/recent-window.ts
   invariants:
@@ -27,9 +32,29 @@ openwiki:
     - Sidebar tree starts collapsed; expanded sections persist per-viewer in localStorage
     - What's New window is 7 days, hour-truncated to prevent render-loop refetches
     - Unfiled view drops collection scope rather than ANDing into empty grid
+    - Content bodies that may contain HTML tags MUST use base64 transit encoding — raw posts trip WAF CrossSiteScripting_BODY with a silent 403 (#1714)
+    - Server-action callers MUST catch — a WAF-blocked POST rejects instead of resolving, and without catch the spinner runs forever
   validation_commands:
     - bun run typecheck
     - bun run lint
+  test_paths:
+    - tests/e2e/atrium-artifact-data-access.functional.spec.ts
+    - tests/unit/atrium-artifact-query-action.test.ts
+    - tests/unit/atrium-artifact-data-access-migration.test.ts
+    - tests/unit/atrium-artifact-data-bridge.test.tsx
+    - tests/unit/atrium-reader-page-masking.test.tsx
+    - tests/unit/atrium-artifact-view-page-bridge.test.tsx
+    - tests/unit/atrium-artifact-canvas-bridge.test.tsx
+    - tests/unit/atrium-artifact-bridge-fail-closed.test.tsx
+    - tests/unit/atrium-data-access-normalize.test.ts
+    - tests/unit/atrium-workspace-panel-action.test.ts
+    - tests/unit/atrium-workspace-panel.test.tsx
+    - tests/unit/atrium-create-content-code-encoding.test.ts
+    - tests/unit/atrium-snapshot-document-action.test.ts
+    - tests/unit/atrium-comments-actions.test.ts
+    - tests/unit/atrium-create-content-dialog.test.tsx
+    - tests/unit/atrium-library-artifact-create.test.tsx
+    - tests/e2e/atrium-document-snapshot-waf.functional.spec.ts
 ---
 
 # Core Application Features
@@ -177,6 +202,36 @@ Content links resolve based on publication status:
 
 The `contentSurfaceLink()` function handles this routing automatically. This fix resolved dead links for unpublished content (e.g., psd-morning-brief artifacts that are never published) where the reader link would 404 for both recipients and owners.
 
+### Content Body Transit Encoding
+
+**Problem**: The ALB WAF's `CrossSiteScripting_BODY` rule (AWS-managed rule set) blocks any POST body containing `<script>`, `<style>`, or similar XSS-like markup with a bare 403—no app logs, no error message. This silently broke artifact creation, document saves with authorship markup, and comments discussing HTML code.
+
+**Solution**: Content bodies that may contain raw HTML are sent base64-encoded, making them opaque to the WAF's XSS inspection. The server decodes at the transport boundary before any validation or screening runs.
+
+**Encoding Modules**:
+- `lib/content/code-encoding-browser.ts` — Browser encoder (`toBase64Utf8`), Web APIs only
+- `lib/content/code-encoding.ts` — Server decoder (`decodeContentBody`), Node Buffer-based
+
+**Supported Actions** (all accept `opts: { codeEncoding?: "base64" }`):
+- `createContentAction` — Library artifact creation (both "Build it for me" and "Start blank")
+- `createVersionAction` — Document canvas save
+- `createCommentThreadAction` / `replyToCommentAction` — Comment submission
+
+**Key Insight**: The raw HTML is often NOT what the user typed. The Tiptap editor's authorship marks render as real `<span data-atrium-authored>` tags during serialization. Every human-edited document carries unescaped HTML that the WAF would block. **Always serialize and inspect before assuming a write path is safe** from the WAF.
+
+**When Adding New Write Surfaces**:
+1. Check if the body can contain `<script>`, `<style>`, or inline `style=`/`onerror=` attributes
+2. If yes, use `toBase64Utf8` on the client and pass `{ codeEncoding: "base64" }` to the action
+3. Wrap the action call in `try/catch`—a WAF 403 makes the action REJECT, not resolve with `isSuccess: false`
+
+**Source**: `/docs/learnings/security/2026-09-03-alb-waf-crosssitescripting-body-blocks-raw-html-content-writes.md` — comprehensive WAF documentation.
+
+**Focused Tests**:
+- `tests/unit/atrium-create-content-code-encoding.test.ts` — encoding/decoding roundtrip
+- `tests/unit/atrium-snapshot-document-action.test.ts` — document save with encoding
+- `tests/unit/atrium-comments-actions.test.ts` — comments with encoded bodies
+- `tests/e2e/atrium-document-snapshot-waf.functional.spec.ts` — full save path with realistic markup
+
 ### Visibility & Publishing
 
 - **Private** — Only author
@@ -204,6 +259,12 @@ The `contentSurfaceLink()` function handles this routing automatically. This fix
 - Surfaces on Library Home when district has recent activity
 - Links to dedicated "What's new" view with same filter scope
 - Hour-truncated timestamp prevents render-loop refetches (`/lib/atrium/recent-window.ts`)
+
+**Artifact Creation Dialog** (`components/atrium/CreateContentDialog.tsx`):
+- Two paths: "Build it for me" (agent) or "Start blank" (empty canvas)
+- Per-path load indicators — the clicked button spins, not both (#1714)
+- Both paths encode the starter body via `toBase64Utf8` to bypass WAF XSS inspection
+- Wrapped in `try/catch` so WAF 403s surface as error messages instead of infinite spinners
 
 ### Library View Filters
 
