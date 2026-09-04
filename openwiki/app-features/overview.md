@@ -8,15 +8,21 @@ openwiki:
   source_paths:
     - actions/db/atrium/artifact-query.ts
     - actions/db/atrium/artifact-guards.ts
+    - actions/db/atrium/workspace-panel.ts
     - lib/nexus/model-router/psd-data-connector.ts
     - components/atrium/dnd/atrium-dnd.tsx
     - components/atrium/use-expanded-sections.ts
     - components/atrium/ArtifactSandbox.tsx
+    - components/atrium/ArtifactCanvas.tsx
+    - lib/content/types.ts
     - lib/atrium/usage-series.ts
     - lib/atrium/recent-window.ts
   invariants:
     - Artifact data_access modes (records/query/none) are mutually exclusive — prevents exfiltration loop
     - Mode is enforced twice (client-side pin + server-side check) and changes only take effect on fresh page load (#1712)
+    - Bridge enabled on authoring surfaces (view page, editor canvas, workspace panel); embeds/thumbnails/public reader stay fail-closed (#1725)
+    - Canvas sandbox keys on contentId:dataAccess:versionId — one mount belongs to one artifact in one mode
+    - normalizeDataAccess fails unrecognized values closed to 'none'
     - Viewer-scoped PSD queries execute as the VIEWER with their row-level security
     - Sidebar tree starts collapsed; expanded sections persist per-viewer in localStorage
     - What's New window is 7 days, hour-truncated to prevent render-loop refetches
@@ -258,14 +264,30 @@ Artifacts can interact with data through a sandbox bridge. The `data_access` mod
 
 **Security Model**: The modes are mutually exclusive by design to prevent exfiltration. An artifact that can query viewer data cannot also write records, closing the loop where a hostile author could query sensitive data and exfiltrate it through the records store.
 
+**Where the Bridge is Live** (#1725):
+
+| Surface | Bridge | Why |
+|---------|--------|-----|
+| `/c/<slug>` intranet reader | **enabled** | Authenticated, `canView`-gated, published |
+| `/atrium/<id>/view` full-screen viewer | **enabled** | Renders CURRENT head — the one surface a draft can run on |
+| `/atrium/<id>/edit` canvas preview | **enabled** | Where the artifact is authored |
+| Nexus workspace panel (`?workspace=`) | **enabled** | Same canvas behind same `canView`-gated loader |
+| `ArtifactEmbedBlock` (artifact inside document) | fail closed | Renders inside somebody else's document, including anonymous reader |
+| Library thumbnails | fail closed | Decorative grid tiles; nothing to interact with |
+| `/p/<slug>` public reader | fail closed | Anonymous — no viewer to scope a query to |
+
+**Publication was never the authorization** — `queryArtifactData`, `submitArtifactRecord`, and `listArtifactRecords` each independently resolve the session, run `contentService.get` (the shared 404 mask + `canView`), re-check `kind === "artifact"`, and re-check the artifact's CURRENT `data_access` mode. None reads publication state. Enabling the bridge on authoring surfaces changes only *where* a request may originate, not *who* may run one — and removes the publish → test → republish loop where an author could not exercise a query-mode dashboard until it was in front of an audience.
+
 **Dual-Layer Enforcement** (#1712): Each mode is enforced twice, and both layers must agree. The reader page pins the mode it read when it rendered, and the sandbox refuses any operation that does not match that pinned mode. The Server Actions independently re-check the artifact's current mode. A mode change (settings, REST `PATCH`, MCP) only takes effect on a fresh page load, which starts with no queried data in memory. This prevents the owner from loading a viewer with `query` mode, then flipping to `records` to let that page submit queried rows back into the records store—exactly the exfiltration loop the mutual exclusivity is meant to close.
 
 **Pinning Mechanism**:
 - Reader page (`app/(protected)/c/[slug]/page.tsx`) reads `data_access` during render and passes it to `<ArtifactSandbox dataAccess=…>`
+- Full-screen viewer (`app/(protected)/atrium/[id]/view/page.tsx`) does the same for drafts — keyed on `obj.id` so one mount is one artifact
+- Workspace panel action (`loadWorkspacePanelAction`) returns `dataAccess` for artifacts, so the pin is server-resolved like every other bridge input
 - `ArtifactSandbox` stores the mode in a ref for the mount's lifetime—re-renders cannot widen what an already-running artifact may do
 - `isOpAllowedByLoadedMode()` rejects ops before the Server Action is called
-- Unrecognized values collapse to `"none"` (fail closed)
-- The component key on `target.id` ensures one mount is always one artifact
+- `normalizeDataAccess()` in `/lib/content/types.ts` collapses unrecognized values to `"none"` (fail closed)
+- Canvas sandbox keys on `contentId:dataAccess:versionId` — flipping the mode in Content settings remounts the frame (the "fresh load" the pin requires), and an artifact change also remounts
 
 **Viewer-Scoped PSD Queries** (`query` mode):
 - Artifact calls `window.AtriumData.query(sql, { limit, offset })`
@@ -287,11 +309,17 @@ interface AtriumData {
 **Source**: `/docs/features/atrium-artifact-data.md` — comprehensive data bridge documentation.
 
 **Focused Tests**:
-- `tests/e2e/atrium-artifact-data-access.functional.spec.ts` — data access modes
+- `tests/e2e/atrium-artifact-data-access.functional.spec.ts` — data access modes including draft query on view page
 - `tests/unit/atrium-artifact-query-action.test.ts` — query action
 - `tests/unit/atrium-artifact-data-access-migration.test.ts` — migration 179
 - `tests/unit/atrium-artifact-data-bridge.test.tsx` — loaded-mode pin (#1712, both directions plus `none`)
 - `tests/unit/atrium-reader-page-masking.test.tsx` — reader page prop assertions including unrecognized mode pinning
+- `tests/unit/atrium-artifact-view-page-bridge.test.tsx` — view page enables bridge for drafts (#1725)
+- `tests/unit/atrium-artifact-canvas-bridge.test.tsx` — canvas props threading and sandbox keying
+- `tests/unit/atrium-artifact-bridge-fail-closed.test.tsx` — embed block and thumbnails remain fail-closed
+- `tests/unit/atrium-data-access-normalize.test.ts` — `normalizeDataAccess` helper
+- `tests/unit/atrium-workspace-panel-action.test.ts` — action returns `dataAccess` pin
+- `tests/unit/atrium-workspace-panel.test.tsx` — panel threads `dataAccess` to canvas
 
 ### Usage Dashboard
 
