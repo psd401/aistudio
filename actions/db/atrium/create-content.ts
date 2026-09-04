@@ -23,6 +23,10 @@ import type {
   ContentObjectWithVersion,
   CreateObjectInput,
 } from "@/lib/content";
+import {
+  decodeContentBody,
+  type ContentCodeEncoding,
+} from "@/lib/content/code-encoding";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
 import { getUserRequester } from "./requester";
@@ -32,7 +36,12 @@ import {
 } from "@/lib/atrium/public-publish-policy";
 
 export async function createContentAction(
-  input: CreateObjectInput
+  input: CreateObjectInput,
+  // Optional base64 transit encoding for `input.body`, so a body carrying
+  // <script>/<style> is opaque to the edge WAF on this server-action POST
+  // (#1714) — the same option `createVersionAction` takes. Rationale lives in
+  // `lib/content/code-encoding.ts`. Omitted = raw text, the existing contract.
+  opts?: { codeEncoding?: ContentCodeEncoding }
 ): Promise<ActionState<ContentObjectWithVersion>> {
   const requestId = generateRequestId();
   const timer = startTimer("createContentAction");
@@ -45,6 +54,7 @@ export async function createContentAction(
         title: input?.title,
         collectionId: input?.collectionId,
         hasBody: input?.body !== undefined,
+        codeEncoding: opts?.codeEncoding,
         visibilityLevel: input?.visibility?.level,
         tags: input?.tags,
       }),
@@ -61,7 +71,11 @@ export async function createContentAction(
     if (!(await hasCapabilityAccess("atrium-content"))) {
       throw ErrorFactories.authzToolAccessDenied("atrium-content");
     }
-    const result = await contentService.create(requester, input, {
+    // Decode BEFORE the service so §28.3 screening and the size caps run on the
+    // real content, not the inert wrapper. An omitted encoding is an identity
+    // pass-through: `body: undefined` stays undefined (no v1 snapshot).
+    const body = decodeContentBody(input.body, opts?.codeEncoding);
+    const result = await contentService.create(requester, { ...input, body }, {
       // #1336: any author may publish publicly — the same allow-then-notify
       // policy the publish / set-visibility actions apply. Without this the
       // create path still ran the §26.4 "create-as-private" downgrade, so a

@@ -31,31 +31,13 @@ import { listVersionsAction, type VersionSummary } from "@/actions/db/atrium/lis
 import { createVersionAction } from "@/actions/db/atrium/create-version";
 import { rollbackVersionAction } from "@/actions/db/atrium/rollback-version";
 import type { BodyFormat, ContentDataAccess } from "@/lib/content";
+import { toBase64Utf8 } from "@/lib/content/code-encoding-browser";
 import { ArtifactSandbox } from "./ArtifactSandbox";
 import { CodeEditor } from "./CodeEditor";
 import "@/styles/atrium-content.css";
 
 type Tab = "preview" | "code";
 type LoadState = "loading" | "ready" | "error";
-
-/**
- * UTF-8-safe base64 encode of artifact code for the save request. The edge WAF
- * (CrossSiteScripting_BODY) blocks a raw request body containing <script>/<style>
- * — the exact markup a legitimate artifact carries — so the code is sent
- * base64-encoded (an inert `[A-Za-z0-9+/=]` string) and decoded server-side
- * before screening. `btoa` only accepts Latin-1, so encode to UTF-8 bytes first,
- * chunking to stay clear of the String.fromCharCode argument-count limit on large
- * artifacts.
- */
-function toBase64Utf8(text: string): string {
-  const bytes = new TextEncoder().encode(text);
-  let binary = "";
-  const CHUNK = 0x8000;
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-  }
-  return btoa(binary);
-}
 
 /** Label for a version in the dropdown: "v3 · AI (current)". */
 function versionLabel(v: VersionSummary): string {

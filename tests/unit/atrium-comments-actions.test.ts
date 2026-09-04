@@ -9,6 +9,10 @@
  * services (loadByIdOrSlug / canView) and the session/capability/requester
  * resolvers are mocked; the edit gate (`assertCanEdit`) and author-id resolver
  * (`authorUserIdOf`) use the REAL helpers so the gate is exercised, not stubbed.
+ *
+ * Also covers the #1714 base64 transit encoding. `decodeContentBody` is NOT
+ * mocked, so those cases exercise the real validation, and each is chosen to FAIL
+ * if the decode were dropped rather than merely to pass when it is present.
  */
 
 const getUserRequesterMock = jest.fn();
@@ -282,6 +286,101 @@ describe("listCommentThreadsAction", () => {
     expect(result.isSuccess).toBe(true);
     if (!result.isSuccess) return;
     expect(result.data).toEqual([]);
+  });
+});
+
+describe("comment bodies — base64 transit encoding (#1714)", () => {
+  const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
+
+  it("measures the EMPTY check against the decoded body, not the wrapper", async () => {
+    // The discriminating case: base64("   ") is "ICAg" — a non-empty 4-char
+    // string that sails through `normalizeBody` if the decode never ran. Only a
+    // real decode sees whitespace and rejects it.
+    const result = await createCommentThreadAction(
+      "obj-1",
+      { threadId: THREAD_ID, body: b64("   ") },
+      { codeEncoding: "base64" }
+    );
+
+    expect(result.isSuccess).toBe(false);
+    expect(labelCalls("atrium.comments.insertRoot")).toBe(0);
+  });
+
+  it("measures the LENGTH cap against the decoded body, not the wrapper", async () => {
+    // 4000 chars of comment encodes to ~5336 — over the 5000 cap. If the cap were
+    // applied to the wrapper this legitimate comment would be refused.
+    const comment = "a".repeat(4000);
+    expect(b64(comment).length).toBeGreaterThan(5000);
+
+    const result = await createCommentThreadAction(
+      "obj-1",
+      { threadId: THREAD_ID, body: b64(comment) },
+      { codeEncoding: "base64" }
+    );
+
+    expect(result.isSuccess).toBe(true);
+    expect(labelCalls("atrium.comments.insertRoot")).toBe(1);
+  });
+
+  it("still enforces the cap on genuinely oversized decoded content", async () => {
+    const result = await createCommentThreadAction(
+      "obj-1",
+      { threadId: THREAD_ID, body: b64("a".repeat(5001)) },
+      { codeEncoding: "base64" }
+    );
+
+    expect(result.isSuccess).toBe(false);
+    expect(labelCalls("atrium.comments.insertRoot")).toBe(0);
+  });
+
+  it("rejects an invalid base64 body without inserting", async () => {
+    const result = await createCommentThreadAction(
+      "obj-1",
+      { threadId: THREAD_ID, body: "not valid base64 !!" },
+      { codeEncoding: "base64" }
+    );
+
+    expect(result.isSuccess).toBe(false);
+    expect(labelCalls("atrium.comments.insertRoot")).toBe(0);
+  });
+
+  it("decodes only AFTER the authorization gate", async () => {
+    // Were the decode ordered first, a malformed body would fail before the
+    // object was ever loaded — making it a distinct, existence-revealing signal.
+    canViewMock.mockResolvedValue(false);
+    const result = await createCommentThreadAction(
+      "obj-1",
+      { threadId: THREAD_ID, body: "not valid base64 !!" },
+      { codeEncoding: "base64" }
+    );
+
+    expect(result.isSuccess).toBe(false);
+    expect(loadByIdOrSlugMock).toHaveBeenCalled();
+    expect(canViewMock).toHaveBeenCalled();
+    expect(labelCalls("atrium.comments.insertRoot")).toBe(0);
+  });
+
+  it("applies the same decode to a reply", async () => {
+    const result = await replyToCommentAction(
+      "obj-1",
+      { threadId: THREAD_ID, body: b64("   ") },
+      { codeEncoding: "base64" }
+    );
+
+    expect(result.isSuccess).toBe(false);
+    expect(labelCalls("atrium.comments.insertReply")).toBe(0);
+  });
+
+  it("leaves an un-encoded body byte-for-byte alone", async () => {
+    // No encoding declared: a body that merely LOOKS like base64 is stored as
+    // typed, so no existing caller changes behaviour.
+    const result = await createCommentThreadAction("obj-1", {
+      threadId: THREAD_ID,
+      body: "SGVsbG8=",
+    });
+
+    expect(result.isSuccess).toBe(true);
+    expect(labelCalls("atrium.comments.insertRoot")).toBe(1);
   });
 });
 

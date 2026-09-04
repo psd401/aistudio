@@ -14,6 +14,12 @@
  *    NEVER called
  *  - a viewer who cannot edit → error ActionState, snapshot NEVER called
  *  - a valid owner edit → snapshot called with the resolved UUID + markdown body
+ *
+ * Plus (#1714) the base64 transit encoding: a document body containing literal
+ * <script>/<style> is blocked at the edge WAF when posted raw, so the editor
+ * sends it base64-encoded and this action decodes it BEFORE the service screens
+ * and size-caps it. `decodeContentBody` is deliberately NOT mocked, so these
+ * exercise the real validation.
  */
 
 type LoadedObj = {
@@ -131,5 +137,75 @@ describe("snapshotDocumentAction — write", () => {
     expect(payload.body).toBe("# Hello");
     expect(payload.bodyFormat).toBe("markdown");
     expect(payload.summary).toBe("first save");
+  });
+});
+
+/** The body the service received on the most recent snapshot call. */
+function snapshotBody(): string {
+  return (snapshotMock.mock.calls[0][2] as { body: string }).body;
+}
+
+describe("snapshotDocumentAction — base64 transit encoding (#1714)", () => {
+  it("decodes a base64 body before the service sees it", async () => {
+    // Real markdown carrying the exact markup the WAF matches on.
+    const markdown = "# Runbook\n\n```html\n<style>.a{}</style>\n```";
+    const result = await snapshotDocumentAction(
+      "some-slug",
+      { body: Buffer.from(markdown, "utf8").toString("base64") },
+      { codeEncoding: "base64" }
+    );
+
+    expect(result.isSuccess).toBe(true);
+    expect(snapshotBody()).toBe(markdown);
+  });
+
+  it("round-trips a multi-byte body", async () => {
+    const markdown = "# 日本語 — émoji 🎉\n\n<style>.b{}</style>";
+    const result = await snapshotDocumentAction(
+      "some-slug",
+      { body: Buffer.from(markdown, "utf8").toString("base64") },
+      { codeEncoding: "base64" }
+    );
+
+    expect(result.isSuccess).toBe(true);
+    expect(snapshotBody()).toBe(markdown);
+  });
+
+  it("passes the body through untouched when no encoding is declared", async () => {
+    // The pre-existing contract: every caller that never opts in is unaffected,
+    // including one whose raw markdown happens to look like base64.
+    const result = await snapshotDocumentAction("some-slug", { body: "SGVsbG8=" });
+
+    expect(result.isSuccess).toBe(true);
+    expect(snapshotBody()).toBe("SGVsbG8=");
+  });
+
+  it("rejects an invalid base64 body and never calls the service", async () => {
+    const result = await snapshotDocumentAction(
+      "some-slug",
+      { body: "not valid base64 !!" },
+      { codeEncoding: "base64" }
+    );
+
+    expect(result.isSuccess).toBe(false);
+    expect(snapshotMock).not.toHaveBeenCalled();
+  });
+
+  it("decodes only AFTER the authorization gates", async () => {
+    // Ordering matters: were the decode first, a malformed body would throw
+    // before the object was ever loaded, making "bad base64" a distinct signal
+    // from "not viewable" — and that difference is observable to a caller
+    // probing whether a UUID exists. Both gates running first is the proof.
+    canViewMock.mockResolvedValueOnce(false);
+    const result = await snapshotDocumentAction(
+      "some-slug",
+      { body: "not valid base64 !!" },
+      { codeEncoding: "base64" }
+    );
+
+    expect(result.isSuccess).toBe(false);
+    expect(loadByIdOrSlugMock).toHaveBeenCalled();
+    expect(canViewMock).toHaveBeenCalled();
+    expect(snapshotMock).not.toHaveBeenCalled();
   });
 });
