@@ -12,6 +12,7 @@ openwiki:
     - actions/db/atrium/create-content.ts
     - actions/db/atrium/snapshot-document.ts
     - actions/db/atrium/comments.ts
+    - actions/db/atrium/publish-document.ts
     - lib/nexus/model-router/psd-data-connector.ts
     - components/atrium/dnd/atrium-dnd.tsx
     - components/atrium/use-expanded-sections.ts
@@ -20,6 +21,9 @@ openwiki:
     - lib/content/types.ts
     - lib/content/code-encoding.ts
     - lib/content/code-encoding-browser.ts
+    - lib/content/live-publication.ts
+    - lib/content/publish-service.ts
+    - lib/content/reader-links.ts
     - lib/atrium/usage-series.ts
     - lib/atrium/recent-window.ts
   invariants:
@@ -34,6 +38,9 @@ openwiki:
     - Unfiled view drops collection scope rather than ANDing into empty grid
     - Content bodies that may contain HTML tags MUST use base64 transit encoding — raw posts trip WAF CrossSiteScripting_BODY with a silent 403 (#1714)
     - Server-action callers MUST catch — a WAF-blocked POST rejects instead of resolving, and without catch the spinner runs forever
+    - Publication is a single Live/Draft state — Level alone decides audience (#1726)
+    - Public address /p/{slug} is derived from Level=public AND Live — not a separate destination
+    - Making content live does not change audience — it only pins a version and adds to retrieval
   validation_commands:
     - bun run typecheck
     - bun run lint
@@ -55,6 +62,10 @@ openwiki:
     - tests/unit/atrium-create-content-dialog.test.tsx
     - tests/unit/atrium-library-artifact-create.test.tsx
     - tests/e2e/atrium-document-snapshot-waf.functional.spec.ts
+    - tests/e2e/atrium-publish-share.functional.spec.ts
+    - tests/unit/atrium-live-state.test.ts
+    - tests/unit/atrium-publish-service.test.ts
+    - tests/unit/atrium-publish-document-action.test.ts
 ---
 
 # Core Application Features
@@ -195,12 +206,21 @@ All surfaces are clients of the content API—there is no UI-only creation path.
 
 **Source**: `/lib/content/reader-links.ts`
 
-Content links resolve based on publication status:
+Content links resolve based on the conjunction of Level and Live:
 
-- **Published** → Canonical reader link (`/c/{slug}`) — accessible to anyone with visibility
-- **Draft/Archived** → Authoring surface link (`/atrium/{id}/view` or `/edit`) — requires `canView`, renders head version
+- **Live + Public** → `/p/{slug}` (public reader, anonymous access)
+- **Live + Internal/Private** → `/c/{slug}` (intranet reader, authenticated)
+- **Draft** → `/atrium/{id}/view` or `/edit` (authoring surface, requires `canView`, renders head version)
+
+**Derivation**: The public address is derived from Level + Live, not from a separate publication destination. An object has exactly one live publication row (`destination = 'intranet'`), and the `/p/{slug}` route gates on `visibility_level = 'public'` AND a live row.
+
+**Exceptions**:
+- Objects with `status = 'published'` but no live surface row (e.g., only an OKF export bundle) still get `/c/{slug}` — the known mismatch case
+- Connector destinations (`schoology`, `google`) have no reader URL — they push copies to external systems
 
 The `contentSurfaceLink()` function handles this routing automatically. This fix resolved dead links for unpublished content (e.g., psd-morning-brief artifacts that are never published) where the reader link would 404 for both recipients and owners.
+
+**Key Source**: `derivedReaderUrl()` in `/lib/content/publish-service.ts` returns `/p/{slug}` for public objects, `/c/{slug}` otherwise — relayed verbatim to prevent dead links.
 
 ### Content Body Transit Encoding
 
@@ -232,12 +252,42 @@ The `contentSurfaceLink()` function handles this routing automatically. This fix
 - `tests/unit/atrium-comments-actions.test.ts` — comments with encoded bodies
 - `tests/e2e/atrium-document-snapshot-waf.functional.spec.ts` — full save path with realistic markup
 
-### Visibility & Publishing
+### Publication Model: Live/Draft + Level
 
-- **Private** — Only author
-- **Intranet** — Staff with visibility grants
-- **Public** — External web with approval queue
-- **Group grants** — Share with specific Google groups
+**Publication is a single Live/Draft state** — not a destination choice. The Level alone decides who can read the content:
+
+- **Private** — Only author and administrators (plus any preserved user grants)
+- **Internal** — Staff with visibility grants (specific users, groups, roles, buildings, departments, grades)
+- **Public** — Anyone with the link, including anonymous visitors
+
+**Reader URLs are derived from Level + Live**:
+- **Draft** → `/c/{slug}` (authoring surface, requires authentication)
+- **Live** → `/c/{slug}` for Internal/Private, `/p/{slug}` for Public
+- The public address `/p/{slug}` resolves only when object is **Public AND Live**
+
+**Publishing does NOT change audience** — it only pins a version, makes content live and discoverable, and adds it to retrieval. The Level decides who can open it. This removes the previous "Widen who can see this?" prompt which was false and destructive.
+
+**Migration 180** (#1726): Existing live `public_web` rows were folded into live `intranet` rows. Objects that were Level=Public but only published to intranet became anonymously readable at `/p/{slug}` (the deploy widened exposure before the migration ran). Migration also filed `publicExposure` audit rows for objects newly exposed by the deploy.
+
+**§26.4 Public-publish gate** now applies to:
+1. Widening an object to `public` level (requires `content:publish_public` scope)
+2. Publishing to connector destinations (`schoology`, `google`)
+3. Publishing live for an object whose level is already `public`
+
+Making an object live is **not** gated — it changes only state, not audience.
+
+**Key Sources**:
+- `/docs/features/atrium-design-spec.md` §26.4 — gate explained
+- `/lib/content/live-publication.ts` — shared "is this live?" predicate
+- `/infra/database/schema/180-atrium-single-live-publication.sql` — migration with full context
+- `/lib/content/publish-service.ts` — publish service implementation
+- `/actions/db/atrium/publish-document.ts` — server action
+
+**Focused Tests**:
+- `tests/e2e/atrium-publish-share.functional.spec.ts` — end-to-end Live/Draft switch
+- `tests/unit/atrium-live-state.test.ts` — live predicate and consequence lines
+- `tests/unit/atrium-publish-service.test.ts` — publish service unit tests
+- `tests/unit/atrium-publish-document-action.test.ts` — action tests
 
 ### Library & Favorites
 
