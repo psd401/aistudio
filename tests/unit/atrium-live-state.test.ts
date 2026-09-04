@@ -87,4 +87,17 @@ describe("liveConsequence", () => {
       "Live, but only you and administrators can open it."
     );
   });
+
+  it("counts the per-user grants a PRIVATE object still honours", () => {
+    // `setLevelInTx` preserves `user` grants across a group -> private
+    // round-trip so a colleague is not silently cut off, and `canView` honours
+    // them. "Only you and administrators" would be false for such an object —
+    // and a line that replaced a false prompt cannot itself be false.
+    expect(liveConsequence("private", 1)).toBe(
+      "Live for you, administrators, and 1 person who still has access."
+    );
+    expect(liveConsequence("private", 3)).toBe(
+      "Live for you, administrators, and 3 people who still have access."
+    );
+  });
 });

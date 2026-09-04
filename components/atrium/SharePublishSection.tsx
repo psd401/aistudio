@@ -69,7 +69,17 @@ export function liveConsequence(
         ? "Live for the 1 person or group you've granted."
         : `Live for the ${grantCount} people and groups you've granted.`;
     case "private":
-      return "Live, but only you and administrators can open it.";
+      // A `private` object can still carry per-user grants: `setLevelInTx`
+      // PRESERVES them across a group→private round-trip so a colleague's access
+      // is not silently revoked, and `canView` honours them (see
+      // visibility-service's "private + user grants" design note). Claiming
+      // "only you and administrators" over one of those would be exactly the
+      // kind of confident-and-wrong sentence this line replaced.
+      return grantCount === 0
+        ? "Live, but only you and administrators can open it."
+        : grantCount === 1
+          ? "Live for you, administrators, and 1 person who still has access."
+          : `Live for you, administrators, and ${grantCount} people who still have access.`;
     default:
       return "Live.";
   }
