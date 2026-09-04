@@ -14,7 +14,7 @@ import { mkdirSync } from 'node:fs'
  * The defect this pins: agents and API callers handed out `/c/{slug}` links for
  * content with no live intranet publication (unconditionally before PR #1699;
  * still possible for `status='published'` objects whose only publication is
- * `public_web` or whose intranet publication was retracted). The reader
+ * a connector, or whose live publication was retracted). The reader
  * existence-masks, so those links 404'd for everyone — including the owner.
  *
  * The backstop (app/(protected)/c/[slug]/page.tsx): an unpublished object whose

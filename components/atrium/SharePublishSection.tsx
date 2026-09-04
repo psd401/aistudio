@@ -61,9 +61,13 @@ export function liveConsequence(
     case "internal":
       return "Live for everyone signed in.";
     case "group":
+      // "people" alone would be a lie: a grant can be a role, building,
+      // department, grade or Google group as well as a named person, and the
+      // count is of grants. The point of this line is that it is TRUE for every
+      // state — the prompt it replaced was not.
       return grantCount === 1
-        ? "Live for the 1 person you've granted."
-        : `Live for the ${grantCount} people you've granted.`;
+        ? "Live for the 1 person or group you've granted."
+        : `Live for the ${grantCount} people and groups you've granted.`;
     case "private":
       return "Live, but only you and administrators can open it.";
     default:

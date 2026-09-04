@@ -27,8 +27,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { publishDocumentAction } from "@/actions/db/atrium/publish-document";
-import { LIVE_DESTINATION } from "@/lib/content/publish-adapters/types";
-import { isLive } from "@/lib/content/live-publication";
+import {
+  isLive,
+  LIVE_DESTINATION,
+} from "@/lib/content/publish-adapters/types";
 import { unpublishDocumentAction } from "@/actions/db/atrium/unpublish-document";
 import { ShareLinkSection } from "./ShareLinkSection";
 import { SharePublishSection } from "./SharePublishSection";

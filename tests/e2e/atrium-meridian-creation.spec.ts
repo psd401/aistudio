@@ -149,12 +149,12 @@ test.describe("Atrium Meridian creation flow (authenticated)", () => {
         timeout: 60000,
       });
 
-      // The single Share control opens a dialog that houses every destination
-      // with its own publish/unpublish actions. The usability pass replaced the
+      // The single Share control opens a dialog holding the link, the audience,
+      // and ONE Live/Draft switch (#1726). The usability pass replaced the
       // Publish ▾ split control and its dropdown with this one entry point.
       await page.getByTestId("share-control").click();
-      await expect(page.getByTestId("share-dest-intranet")).toBeVisible();
-      await expect(page.getByTestId("share-publish-intranet")).toBeVisible();
+      await expect(page.getByTestId("share-live-state")).toBeVisible();
+      await expect(page.getByTestId("share-publish")).toBeVisible();
       // Both the old naked native destination select and the Publish ▾ trigger
       // it lived behind are gone.
       await expect(

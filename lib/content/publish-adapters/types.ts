@@ -74,6 +74,25 @@ export const LIVE_SURFACE_DESTINATIONS: readonly PublishDestination[] = [
 ];
 
 /**
+ * Whether a set of an object's live publication destinations means the object is
+ * LIVE. The list form of the question, for surfaces that read publications
+ * through `publishService.listLive` rather than the database.
+ *
+ * Lives here, beside the destination constants, rather than in
+ * `lib/content/live-publication.ts`: that module imports drizzle and the schema
+ * to build the SQL half of the same predicate, and the Share dialog — a client
+ * component — would otherwise pull both into the browser bundle to ask a
+ * question that is pure set membership.
+ */
+export function isLive(destinations: Iterable<string>): boolean {
+  const live = new Set<string>(LIVE_SURFACE_DESTINATIONS);
+  for (const destination of destinations) {
+    if (live.has(destination)) return true;
+  }
+  return false;
+}
+
+/**
  * Collapse the two legacy live destinations onto the single live row (#1726).
  *
  * Every surface (server action, REST, MCP, agent bridge) still ACCEPTS

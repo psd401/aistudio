@@ -18,6 +18,11 @@
  * `LIVE_SURFACE_DESTINATIONS` (rather than a bare `intranet`) also keeps a
  * pre-#1726 `public_web` row serving its readers until migration 180 folds it in,
  * so the migration and the image deploy can land in either order.
+ *
+ * SERVER-ONLY (it imports drizzle + the schema). The surfaces that ask the same
+ * question of a list of destinations — the Share dialog, the artifact authoring
+ * view, the reachability action — use `isLive` from `publish-adapters/types`,
+ * which is dependency-free and therefore safe in a client bundle.
  */
 
 import { and, eq, inArray, type SQL } from "drizzle-orm";
@@ -41,17 +46,4 @@ export function isLivePublicationRow(): SQL | undefined {
     ),
     eq(contentPublications.status, "live")
   );
-}
-
-/**
- * Whether a set of live destinations (as returned by `publishService.listLive`)
- * means the object is Live. Used by the authoring surfaces, which read
- * publications through the action rather than the DB.
- */
-export function isLive(destinations: Iterable<string>): boolean {
-  const live = new Set<string>(LIVE_SURFACE_DESTINATIONS);
-  for (const destination of destinations) {
-    if (live.has(destination)) return true;
-  }
-  return false;
 }

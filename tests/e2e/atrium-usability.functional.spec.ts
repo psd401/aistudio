@@ -178,10 +178,14 @@ test.describe("Atrium usability pass — share and section settings", () => {
       // All three concerns in one dialog.
       await expect(page.getByTestId("share-link-url")).toBeVisible();
       await expect(page.getByTestId("share-copy-link")).toBeVisible();
-      await expect(page.getByTestId("share-dest-intranet")).toBeVisible();
-      await expect(page.getByTestId("share-dest-public_web")).toBeVisible();
-      // The public destination is live for this seed.
-      await expect(page.getByTestId("live-public_web")).toBeVisible();
+      // ONE Live/Draft state (#1726), not a row per destination — publication is
+      // a state and the audience is the Level, so there is nothing to reconcile.
+      await expect(page.getByTestId("share-live-state")).toBeVisible();
+      await expect(page.getByTestId("share-consequence")).toBeVisible();
+      // This seed is live, and Public — so the derived public address is offered
+      // alongside the reader link.
+      await expect(page.getByTestId("share-live-badge")).toBeVisible();
+      await expect(page.getByTestId("share-public-link-url")).toBeVisible();
       // Artifacts can be embedded in a document; that moved in here too.
       await expect(page.getByTestId("share-copy-embed")).toBeVisible();
 

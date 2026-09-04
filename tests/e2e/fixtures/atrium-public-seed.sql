@@ -12,10 +12,12 @@
 -- the blob is absent, which does not affect the visibility (200 vs 404) assertions.
 --
 -- Two objects:
---   (A) a PUBLIC document published live to public_web  -> /p/atrium-public-welcome renders (200)
---   (B) an INTERNAL document ALSO published live to public_web (the strict-gate
+--   (A) a PUBLIC document that is LIVE                   -> /p/atrium-public-welcome renders (200)
+--   (B) an INTERNAL document that is ALSO live (the strict-gate
 --       case) -> /p/atrium-internal-not-public 404s, because the public reader
---       gates on visibility_level='public', NOT merely on a live public_web row.
+--       gates on visibility_level='public', NOT merely on being live (#1726:
+--       the public address is DERIVED from Public + Live, so this is the cell
+--       that must still 404).
 
 -- (A) Public document ---------------------------------------------------------
 INSERT INTO content_objects (
@@ -48,15 +50,15 @@ INSERT INTO content_publications (
   object_id, destination, published_version_id, status, published_by, external_ref
 )
 SELECT
-  'a7700000-0000-4000-8000-000000000001', 'public_web',
+  'a7700000-0000-4000-8000-000000000001', 'intranet',
   'a7700000-0000-4000-8000-0000000001a1', 'live',
   (SELECT id FROM users WHERE cognito_sub = 'e2e-test-user'),
-  '/p/atrium-public-welcome'
+  NULL
 ON CONFLICT (object_id, destination) DO UPDATE
   SET published_version_id = EXCLUDED.published_version_id, status = 'live',
       external_ref = EXCLUDED.external_ref;
 
--- (C) Public ARTIFACT published live to public_web ----------------------------
+-- (C) Public ARTIFACT, live ---------------------------------------------------
 -- Exercises the no-chrome public artifact render: /p/atrium-public-artifact must
 -- return the sandbox alone — no intranet nav, no title bar, no provenance foot.
 -- The body is INLINE (body_location='inline'), so no S3 object is needed for the
@@ -93,15 +95,15 @@ INSERT INTO content_publications (
   object_id, destination, published_version_id, status, published_by, external_ref
 )
 SELECT
-  'a7700000-0000-4000-8000-000000000003', 'public_web',
+  'a7700000-0000-4000-8000-000000000003', 'intranet',
   'a7700000-0000-4000-8000-0000000003a1', 'live',
   (SELECT id FROM users WHERE cognito_sub = 'e2e-test-user'),
-  '/p/atrium-public-artifact'
+  NULL
 ON CONFLICT (object_id, destination) DO UPDATE
   SET published_version_id = EXCLUDED.published_version_id, status = 'live',
       external_ref = EXCLUDED.external_ref;
 
--- (B) Internal document, live on public_web but NOT public (strict-gate case) --
+-- (B) Internal document, LIVE but NOT public (strict-gate case) ----------------
 INSERT INTO content_objects (
   id, kind, title, slug, owner_user_id, created_by_actor,
   visibility_level, status
@@ -132,7 +134,7 @@ INSERT INTO content_publications (
   object_id, destination, published_version_id, status, published_by
 )
 SELECT
-  'a7700000-0000-4000-8000-000000000002', 'public_web',
+  'a7700000-0000-4000-8000-000000000002', 'intranet',
   'a7700000-0000-4000-8000-0000000002a1', 'live',
   (SELECT id FROM users WHERE cognito_sub = 'e2e-test-user')
 ON CONFLICT (object_id, destination) DO UPDATE

@@ -24,7 +24,7 @@ import { ArtifactMetaRail } from "./ArtifactMetaRail";
 import { ContentSettings } from "./ContentSettings";
 import { VisibilityChip } from "./VisibilityChip";
 import { publishService } from "@/lib/content/publish-service";
-import { isLive } from "@/lib/content/live-publication";
+import { isLive } from "@/lib/content/publish-adapters/types";
 import {
   publicBlockers,
   PUBLIC_BLOCKER_TEXT,

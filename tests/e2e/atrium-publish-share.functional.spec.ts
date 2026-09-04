@@ -8,26 +8,27 @@ import {
 import { mkdirSync } from 'node:fs'
 
 /**
- * E2E functional coverage for the #1336 sharing/publish cluster.
+ * E2E functional coverage for the Atrium sharing/publish cluster (#1336, #1726).
  *
  * Flows: `atrium-publish-visibility`, `atrium-share-url`,
  * `atrium-share-grants`.
  *
- * The core defect these cover: visibility and publication were two independent
- * switches with nothing tying them together, so a Private doc could reach a
- * cheerful "Published to intranet" whose link opened for nobody, and a Public
- * doc's `/p/{slug}` 404'd because no publication existed.
+ * The defect #1726 closes: visibility ("Level") and publication ("Where it's
+ * published") were two independent AUDIENCE switches reconciled by a "Widen who
+ * can see this?" prompt. The prompt's claim was false — `/c/[slug]` runs
+ * `canView` before it looks at the publication — and confirming it replaced the
+ * author's grant set with none. Publication is now one Live/Draft state and the
+ * Level alone decides the audience.
  *
- *  - PUBLISH + WIDEN (C2/C3). Publishing a Private doc to the intranet must
- *    open the confirm dialog, and confirming must widen to Internal in the SAME
- *    gated action and surface the copyable `/c/{slug}` reader URL. A SECOND
- *    seeded user then loads that URL and gets 200 with the body rendered — the
- *    assertion that actually proves the widen took effect.
- *  - PUBLIC SHARE (C1). Publishing to the public web widens to Public, the
- *    success caption shows `/p/{slug}`, an ANONYMOUS context loads it 200, and
- *    the Share dialog shows the public link. Under the #1336 allow-then-notify
- *    policy this completes immediately with no approval gate, and an
- *    admin-visible notification lands on /admin/atrium.
+ *  - LIVE + GRANTS. A Group document with one person grant is published. The
+ *    grantee opens `/c/{slug}` and gets 200; a non-grantee gets 404; and the
+ *    owner's grant list is INTACT afterwards — the assertion that would have
+ *    failed under the old widen. Toggling back to Draft sends the grantee to the
+ *    authoring surface instead.
+ *  - PUBLIC IS DERIVED. Setting the Level to Public on a Live document makes
+ *    `/p/{slug}` resolve for an ANONYMOUS context with no second switch to
+ *    throw, and the Share dialog offers the public link. An admin-visible
+ *    notification lands on /admin/atrium.
  *  - GRANTS (C5). The Share affordance is labelled (not a bare status badge),
  *    the people picker finds a user by name/email, and the resulting grant lets
  *    that user read `/c/{slug}`.
@@ -58,9 +59,6 @@ async function cleanup(
       await page.request.post(`/api/v1/content/${id}/unpublish`, {
         data: { destination: 'intranet' },
       })
-      await page.request.post(`/api/v1/content/${id}/unpublish`, {
-        data: { destination: 'public_web' },
-      })
       await page.request.delete(`/api/v1/content/${id}`)
     } catch {
       // Ignored on purpose — see the docblock.
@@ -89,22 +87,28 @@ async function seedDoc(
   return { id: data.id as string, slug: data.slug as string }
 }
 
-/** Open the Share control and publish to one destination. */
-async function openPublishAnd(
-  page: import('@playwright/test').Page,
-  destination: 'intranet' | 'public_web'
-) {
-  // The usability pass replaced the publish menu (one trigger, a destination
-  // radio, then a single Publish item) with a Share dialog that gives each
-  // destination its own row and its own Publish/Unpublish buttons — so there is
-  // no separate destination-selection step any more.
+/** Open the Share control and flip the object Live. */
+async function openAndPublish(page: import('@playwright/test').Page) {
+  // One switch, no destination step (#1726): publication is a state, so the
+  // dialog offers Publish / Republish / Unpublish and nothing else.
   await page.getByTestId('share-control').click()
   // The button stays disabled ("Checking…") until the dialog has resolved the
-  // object's current visibility — without it the audience check cannot run.
-  // Waiting for it to enable is the honest readiness signal.
-  const publishButton = page.getByTestId(`share-publish-${destination}`)
+  // object's live state and level — the consequence line cannot be written
+  // truthfully before then. Waiting for it to enable is the honest readiness
+  // signal.
+  const publishButton = page.getByTestId('share-publish')
   await expect(publishButton).toBeEnabled({ timeout: 60000 })
   await publishButton.click()
+}
+
+/** Set the Level in the open Share dialog and save. */
+async function setLevel(
+  page: import('@playwright/test').Page,
+  label: 'Private' | 'Group' | 'Internal' | 'Public'
+) {
+  await page.getByLabel('Level').click()
+  await page.getByRole('option', { name: label, exact: true }).click()
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
 }
 
 function defineAtriumPublishShareAuthenticatedSuite1Part1() {
@@ -122,7 +126,7 @@ function defineAtriumPublishShareAuthenticatedSuite1Part1() {
     mkdirSync(SHOT_DIR, { recursive: true })
   })
 
-  test('atrium-publish-visibility: publishing a Private doc to the intranet offers the widen, and a second user can then read /c/{slug}', async ({
+  test('atrium-publish-visibility: a Group document goes Live WITHOUT losing its grants, and only its grantees can read /c/{slug}', async ({
     browser,
   }) => {
     const context = await browser.newContext({
@@ -132,58 +136,61 @@ function defineAtriumPublishShareAuthenticatedSuite1Part1() {
     try {
       const page = await context.newPage()
       const token = runToken()
-      const { id, slug } = await seedDoc(page, `Intranet publish ${token}`)
+      const { id, slug } = await seedDoc(page, `Group publish ${token}`)
+
+      // Group visibility with ONE grant, set through the API so the test starts
+      // from the exact state #1726 is about.
+      const scoped = await page.request.patch(
+        `/api/v1/content/${id}/visibility`,
+        {
+          data: {
+            level: 'group',
+            // A ROLE grant, so the fixture needs no numeric user id: the seeded
+            // student holds `student` and nothing else.
+            grants: [{ kind: 'role', value: 'student' }],
+          },
+        }
+      )
+      expect([200, 201]).toContain(scoped.status())
 
       await page.goto(`/atrium/${id}/edit`)
       await expect(page.getByTestId('share-control')).toBeVisible({
         timeout: 30000,
       })
 
-      // The Schoology/Google "coming soon" rows are gone (#1336 C6).
       await page.getByTestId('share-control').click()
-      await expect(page.getByText(/Schoology/)).toHaveCount(0)
-      await expect(page.getByText(/Google Classroom/)).toHaveCount(0)
-      // The Publish button is gated on the visibility read landing.
-      await expect(page.getByTestId('share-publish-intranet')).toBeEnabled({
-        timeout: 60000,
-      })
-      // Nothing is live yet, so the destination is not marked live and offers
-      // no Unpublish at all (#1336 B8) — the dialog renders that button only
-      // for a live destination rather than rendering it disabled.
-      await expect(page.getByTestId('share-dest-intranet')).toHaveAttribute(
+      // Draft to begin with: no Live badge and no Unpublish button at all (the
+      // dialog renders that action only for a live object rather than disabling
+      // it).
+      await expect(page.getByTestId('share-live-state')).toHaveAttribute(
         'data-live',
         'false'
       )
-      await expect(page.getByTestId('share-unpublish-intranet')).toHaveCount(0)
+      await expect(page.getByTestId('share-unpublish')).toHaveCount(0)
+      // The connectors are a separate concept and are disabled, not offered as
+      // publish destinations.
+      await expect(page.getByTestId('share-connector-schoology')).toBeVisible()
       await page.keyboard.press('Escape')
 
-      // Publish to intranet from a PRIVATE doc → the confirm dialog offers the
-      // atomic widen to Internal.
-      await openPublishAnd(page, 'intranet')
-      const confirm = page.getByTestId('share-widen-confirm-button')
-      await expect(confirm).toBeVisible({ timeout: 15000 })
-      // The confirm title is a paragraph inside the share dialog, not a
-      // heading element — assert on the panel's own text.
-      await expect(
-        page.getByTestId('share-widen-confirm')
-      ).toContainText('Widen who can see this?')
-      await page.screenshot({
-        path: `${SHOT_DIR}/atrium-publish-visibility.png`,
-        fullPage: false,
-      })
-      await confirm.click()
+      // Publish. There is NO widen prompt: the old dialog claimed a Group
+      // document published to the intranet would be "a live page its readers
+      // cannot open" and offered to fix it by wiping the grants.
+      await openAndPublish(page)
+      await expect(page.getByTestId('share-widen-confirm')).toHaveCount(0)
 
-      // The success caption shows the copyable /c/{slug} reader URL.
-      // The usability pass moved the canonical URL out of the editor status
-      // caption and into the Share dialog's Link row, which stays open on the
-      // now-live destination after the widen completes. The Link row is also
-      // present before publishing with the private in-app viewer URL, so wait
-      // for the live destination before asserting that it has switched to /c.
-      await expect(page.getByTestId('share-dest-intranet')).toHaveAttribute(
+      await expect(page.getByTestId('share-live-state')).toHaveAttribute(
         'data-live',
         'true',
         { timeout: 60000 }
       )
+      // The switch STATES its consequence instead of asking a question, and the
+      // sentence is true: one grantee.
+      await expect(page.getByTestId('share-consequence')).toContainText(
+        /Live for the 1 person or group you've granted/
+      )
+      await expect(page.getByTestId('share-live-badge')).toBeVisible()
+      await expect(page.getByTestId('share-unpublish')).toBeEnabled()
+
       const readerLink = page.getByTestId('share-link-url')
       await expect
         .poll(
@@ -192,42 +199,58 @@ function defineAtriumPublishShareAuthenticatedSuite1Part1() {
           { timeout: 60000 }
         )
         .toBe(true)
+      // Not Public, so no public address is offered — the link section derives
+      // it from Level + Live rather than from a second switch.
+      await expect(page.getByTestId('share-public-link')).toHaveCount(0)
+      await page.screenshot({
+        path: `${SHOT_DIR}/atrium-publish-visibility.png`,
+        fullPage: false,
+      })
 
-      // The widen actually took effect: a SECOND seeded user (no grant, no
-      // ownership) loads the intranet reader and gets 200 with the body.
-      const otherContext = await browser.newContext({
+      // THE ASSERTION #1726 EXISTS FOR: the grant survived the publish, and so
+      // did the Level. Confirming the old widen set the level to Internal and ran
+      // it through `setLevelInTx`, which REPLACES the grant set — so this chip
+      // was gone and the picker was back to Everyone signed in.
+      await expect(page.getByLabel('Level')).toContainText('Group')
+      await expect(page.getByText('role', { exact: true })).toBeVisible()
+      await expect(
+        page.locator('span', { hasText: /^student$/ }).first()
+      ).toBeVisible()
+
+      // The grantee can read the reader page; the audience really is the Level.
+      const granteeContext = await browser.newContext({
         viewport: { width: 1440, height: 900 },
       })
       await authenticateContext(
-        otherContext,
+        granteeContext,
         SEEDED_NO_CAPABILITY_EMAIL,
         'e2e-student-user'
       )
       try {
-        const otherPage = await otherContext.newPage()
-        const resp = await otherPage.goto(`/c/${slug}`)
+        const granteePage = await granteeContext.newPage()
+        const resp = await granteePage.goto(`/c/${slug}`)
         expect(resp?.status()).toBe(200)
         await expect(
-          otherPage.getByText(`Body text for Intranet publish ${token}`)
+          granteePage.getByText(`Body text for Group publish ${token}`)
         ).toBeVisible({ timeout: 60000 })
-        await otherPage.screenshot({
+        await granteePage.screenshot({
           path: `${SHOT_DIR}/atrium-publish-visibility-reader.png`,
           fullPage: false,
         })
-      } finally {
-        await otherContext.close()
-      }
 
-      // The Share dialog stays open after publishing. The destination is now
-      // badged LIVE and the Unpublish button is rendered for it (#1336 B8).
-      await expect(page.getByTestId('live-intranet')).toBeVisible({
-        timeout: 15000,
-      })
-      await expect(page.getByTestId('share-dest-intranet')).toHaveAttribute(
-        'data-live',
-        'true'
-      )
-      await expect(page.getByTestId('share-unpublish-intranet')).toBeEnabled()
+        // Back to Draft: the reader page stops existing for the grantee, who is
+        // redirected to the authoring surface rather than shown a 404.
+        await page.getByTestId('share-unpublish').click()
+        await expect(page.getByTestId('share-live-state')).toHaveAttribute(
+          'data-live',
+          'false',
+          { timeout: 60000 }
+        )
+        await granteePage.goto(`/c/${slug}`)
+        await expect(granteePage).toHaveURL(/\/atrium\//, { timeout: 60000 })
+      } finally {
+        await granteeContext.close()
+      }
 
       await cleanup(page, [id])
     } finally {
@@ -237,7 +260,7 @@ function defineAtriumPublishShareAuthenticatedSuite1Part1() {
 
   }
 
-function defineAtriumPublishShareAuthenticatedSuite1Part2() {test('atrium-share-url: publishing to the public web widens to Public, shows /p/{slug}, resolves anonymously, and records an admin notification', async ({
+function defineAtriumPublishShareAuthenticatedSuite1Part2() {test('atrium-share-url: Public + Live derives the /p/{slug} address, it resolves anonymously, and the exposure is recorded', async ({
     browser,
   }) => {
     const context = await browser.newContext({
@@ -254,42 +277,42 @@ function defineAtriumPublishShareAuthenticatedSuite1Part2() {test('atrium-share-
         timeout: 30000,
       })
 
-      await openPublishAnd(page, 'public_web')
-      const confirm = page.getByTestId('share-widen-confirm-button')
-      await expect(confirm).toBeVisible({ timeout: 15000 })
-      // The dialog is explicit that this reaches the open internet.
-      await expect(
-        page.getByText(/anyone on the internet will be able to read it/i)
-      ).toBeVisible()
-      await confirm.click()
-
-      // #1336: no approval gate — the publish completes immediately and the
-      // caption carries the public URL.
-      // The usability pass moved the canonical URL out of the editor status
-      // caption and into the Share dialog's Link row, which stays open on the
-      // now-live destination after the widen completes. Wait for the live row
-      // because the same Link element initially contains the private viewer URL.
-      await expect(page.getByTestId('share-dest-public_web')).toHaveAttribute(
+      // Publish first — while the level is still Private, which the old dialog
+      // would have blocked behind the widen prompt.
+      await openAndPublish(page)
+      await expect(page.getByTestId('share-live-state')).toHaveAttribute(
         'data-live',
         'true',
         { timeout: 60000 }
       )
-      const readerLink = page.getByTestId('share-link-url')
+      // Live but Private: no public address yet, and the consequence line says
+      // exactly that rather than implying a broader audience.
+      await expect(page.getByTestId('share-public-link')).toHaveCount(0)
+      await expect(page.getByTestId('share-consequence')).toContainText(
+        /only you and administrators/i
+      )
+
+      // Now the ONLY switch that changes the audience: the Level.
+      await setLevel(page, 'Public')
+
+      // The public address is DERIVED — no second "publish to the public web"
+      // step, so the #1336 dead-link states cannot occur.
+      await page.getByTestId('share-control').click()
+      const publicLink = page.getByTestId('share-public-link-url')
       await expect
         .poll(
           async () =>
-            (await readerLink.textContent())?.trim().endsWith(`/p/${slug}`),
+            (await publicLink.textContent())?.trim().endsWith(`/p/${slug}`),
           { timeout: 60000 }
         )
         .toBe(true)
+      await expect(page.getByTestId('share-consequence')).toContainText(
+        /no sign-in/i
+      )
       await page.screenshot({
         path: `${SHOT_DIR}/atrium-share-url.png`,
         fullPage: false,
       })
-
-      // The still-open Share dialog shows the destination as live alongside
-      // the public Link row asserted above.
-      await expect(page.getByTestId('live-public_web')).toBeVisible()
       await page.keyboard.press('Escape')
 
       // An ANONYMOUS context (no session at all) can read it.
