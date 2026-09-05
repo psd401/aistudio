@@ -194,6 +194,21 @@ _IMAGE_WORKSPACE_SEEDS = {
 # hitting one can no longer fail a restore. See pull_workspace().
 MAX_SYNC_FILE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_SYNC_TOTAL_BYTES = 64 * 1024 * 1024 * 1024
+# The ceiling the BROKER enforces (MAX_PRIVATE_UPLOAD_BYTES in
+# lib/agent-workspace/storage-broker.ts). Distinct from MAX_SYNC_FILE_BYTES
+# above, which is a runaway-traversal backstop four times larger.
+#
+# Keeping only the backstop meant the agent happily built batches the broker
+# could never accept, with no client-side detection at all: the refusal arrived
+# per-file from the web tier as a generic staging error, the finalization
+# aborted, and the user was told to "retry after the agent service is repaired"
+# — advice that can never work, because the same oversized file is rebuilt on
+# every subsequent turn. One owner was hard-down for a day that way
+# (prod 2026-09-05). Detect it here, before the batch is built, and say which
+# file and how big it is.
+#
+# Keep in sync with MAX_PRIVATE_UPLOAD_BYTES.
+BROKER_PRIVATE_UPLOAD_MAX_BYTES = 512 * 1024 * 1024
 # Raised from 1,000 (#1353) after that cap silently destroyed a user's agent
 # memory on 2026-07-27. Real workspaces already exceed it: two of the 38 live
 # prefixes hold ~5,000 objects each. The cap is a runaway-traversal backstop,
@@ -2506,13 +2521,236 @@ def _is_managed_openclaw_sqlite(relative: str) -> bool:
     )
 
 
+# ── OpenClaw transcript-database pruning ──────────────────────────────────────
+#
+# `agents/<id>/agent/openclaw-agent.sqlite` is OpenClaw's own database and it
+# grows monotonically: nothing in OpenClaw, and nothing here, ever removed a
+# row. On 2026-09-05 one owner's file reached 268,390,400 bytes — 45,056 bytes
+# under the broker's then-256 MiB upload cap — and the workspace could never be
+# saved again. Every turn and all three of that owner's 15-minute schedules
+# failed at finalization, and two more owners were within 30 % of the same wall.
+#
+# Profiling that real database: `trajectory_runtime_events` held 128.1 MB of the
+# 268 MB in only 3,468 rows (~37 KB of `event_json` each) — 48 % of the file.
+# `transcript_events`, the table the product actually reads back, was 20.3 MB.
+# VACUUM alone reclaimed nothing (23 free pages). Deleting the runtime-event
+# rows of CLOSED sessions and vacuuming took the same file to 153,149,440 bytes
+# with `integrity_check` ok, `foreign_key_check` clean and WAL mode intact.
+#
+# So: prune ONLY `trajectory_runtime_events`, ONLY for sessions with no activity
+# in the retention window, and only once the file is actually large.
+# `transcript_events`, `session_windows`, `memory_index_chunks` and
+# `memory_embedding_cache` are never touched — they are durable history and
+# recall, not per-turn runtime tracing.
+def _positive_int_env(name: str, default: int) -> int:
+    """Read a positive integer override, falling back on anything malformed."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+TRANSCRIPT_DB_FILENAME = "openclaw-agent.sqlite"
+TRAJECTORY_EVENTS_TABLE = "trajectory_runtime_events"
+# Prune only once the file is big enough to be worth the VACUUM. Comfortably
+# under the old 256 MiB cliff, so a workspace approaching trouble is trimmed
+# well before it can reach the current 512 MiB ceiling.
+TRAJECTORY_PRUNE_MIN_DB_BYTES = _positive_int_env(
+    "OPENCLAW_TRAJECTORY_PRUNE_MIN_DB_BYTES", 192 * 1024 * 1024
+)
+# Keep every session that did anything inside this window, including the one
+# this very turn belongs to. Two days was the value validated against the real
+# database above.
+TRAJECTORY_PRUNE_KEEP_DAYS = _positive_int_env(
+    "OPENCLAW_TRAJECTORY_PRUNE_KEEP_DAYS", 2
+)
+# Pruning is an optimization on the finalization path, which is already inside a
+# hard flush deadline. Bound it so a pathological VACUUM cannot eat the budget
+# that the actual upload needs.
+TRAJECTORY_PRUNE_TIMEOUT_SECONDS = 60
+# Candidate activity columns, most authoritative first. The column set is
+# DISCOVERED rather than assumed: an OpenClaw upgrade that renames or drops one
+# must make this skip, never make it delete the wrong rows.
+_TRAJECTORY_SESSION_COLUMNS = ("session_id", "sessionId")
+_TRAJECTORY_TIME_COLUMNS = ("created_at", "createdAt", "timestamp", "ts")
+
+
+def _first_present(candidates: tuple, available: set) -> str | None:
+    for name in candidates:
+        if name in available:
+            return name
+    return None
+
+
+def _trajectory_cutoff_value(newest: object, keep_days: int) -> int | None:
+    """Convert the table's own newest timestamp into a cutoff in its own units.
+
+    The column is an integer epoch, but OpenClaw has shipped both seconds and
+    milliseconds. Rather than guess from a constant, derive the unit from the
+    magnitude of the newest value the table actually holds, and refuse to prune
+    anything that is not a plain positive integer.
+    """
+    if isinstance(newest, bool) or not isinstance(newest, int) or newest <= 0:
+        return None
+    if newest >= 10**12:
+        window = keep_days * 86_400_000
+    elif newest >= 10**9:
+        window = keep_days * 86_400
+    else:
+        # Neither a seconds nor a milliseconds epoch. Unknown unit: do nothing.
+        return None
+    return newest - window
+
+
+def _prune_trajectory_runtime_events(
+    database: Path,
+    keep_days: int = TRAJECTORY_PRUNE_KEEP_DAYS,
+) -> int:
+    """Delete closed sessions' runtime-event rows, then VACUUM. Best-effort.
+
+    Returns the number of rows deleted (0 when nothing was eligible or the
+    schema did not match what this function knows how to prune safely).
+
+    The gateway MUST already be stopped — this runs from
+    prepare_sqlite_snapshot(), after adapter.shutdown().
+    """
+    with closing(
+        sqlite3.connect(
+            f"{database.as_uri()}?mode=rw",
+            uri=True,
+            timeout=TRAJECTORY_PRUNE_TIMEOUT_SECONDS,
+        )
+    ) as connection:
+        table = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (TRAJECTORY_EVENTS_TABLE,),
+        ).fetchone()
+        if table is None:
+            return 0
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                f'PRAGMA table_info("{TRAJECTORY_EVENTS_TABLE}")'
+            ).fetchall()
+        }
+        session_column = _first_present(_TRAJECTORY_SESSION_COLUMNS, columns)
+        time_column = _first_present(_TRAJECTORY_TIME_COLUMNS, columns)
+        if session_column is None or time_column is None:
+            logger.info(
+                "trajectory prune skipped — %s lacks a session/time column",
+                TRAJECTORY_EVENTS_TABLE,
+            )
+            return 0
+
+        # Identifiers are interpolated; every one of them came from
+        # sqlite_master/table_info and was matched against a fixed tuple of
+        # literals above, so no caller-controlled text reaches the SQL text.
+        newest = connection.execute(
+            f'SELECT MAX("{time_column}") FROM "{TRAJECTORY_EVENTS_TABLE}"'
+        ).fetchone()[0]
+        cutoff = _trajectory_cutoff_value(newest, keep_days)
+        if cutoff is None:
+            logger.info(
+                "trajectory prune skipped — %s.%s is not an epoch integer",
+                TRAJECTORY_EVENTS_TABLE,
+                time_column,
+            )
+            return 0
+
+        # Foreign keys ON so a row some other table depends on makes this raise
+        # and abandon the prune, rather than silently orphaning a reference.
+        connection.execute("PRAGMA foreign_keys=ON")
+        # Delete by SESSION, not by row age: a long-running session's early
+        # events stay with its recent ones, and any session that did anything
+        # inside the window is kept whole.
+        cursor = connection.execute(
+            f'DELETE FROM "{TRAJECTORY_EVENTS_TABLE}" '
+            f'WHERE "{session_column}" IN ('
+            f'  SELECT "{session_column}" FROM "{TRAJECTORY_EVENTS_TABLE}"'
+            f'  GROUP BY "{session_column}"'
+            f'  HAVING MAX("{time_column}") < ?'
+            f")",
+            (cutoff,),
+        )
+        deleted = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+        connection.commit()
+        if deleted == 0:
+            return 0
+        violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError(
+                f"trajectory prune left {len(violations)} foreign-key violation(s)"
+            )
+        # Reclaim the pages. Without this the DELETE only moves bytes onto the
+        # freelist and the FILE — which is what the upload cap measures — does
+        # not shrink at all.
+        connection.isolation_level = None
+        connection.execute("VACUUM")
+        mode = connection.execute("PRAGMA journal_mode").fetchone()
+        if mode is None or str(mode[0]).lower() != "wal":
+            raise RuntimeError(
+                "trajectory prune did not preserve WAL journal mode"
+            )
+    return deleted
+
+
+def _prune_oversized_transcript_databases() -> None:
+    """Trim any agent transcript database that has grown large. Never raises."""
+    for relative in _iter_workspace_files():
+        if os.path.basename(relative) != TRANSCRIPT_DB_FILENAME:
+            continue
+        database = WORKSPACE_DIR / relative
+        try:
+            size_before = database.stat().st_size
+        except OSError:
+            continue
+        if size_before < TRAJECTORY_PRUNE_MIN_DB_BYTES:
+            continue
+        try:
+            deleted = _prune_trajectory_runtime_events(database)
+        except Exception as exc:  # noqa: BLE001
+            # A prune failure must never block the save it exists to protect.
+            # The checkpoint + integrity_check below still gate the push.
+            logger.warning(
+                "trajectory prune failed for %s: %s", relative, exc
+            )
+            continue
+        if deleted == 0:
+            logger.info(
+                "trajectory prune found nothing eligible in %s (%d bytes)",
+                relative,
+                size_before,
+            )
+            continue
+        try:
+            size_after = database.stat().st_size
+        except OSError:
+            size_after = size_before
+        logger.info(
+            "trajectory prune %s: rows=%d bytes %d -> %d",
+            relative,
+            deleted,
+            size_before,
+            size_after,
+        )
+
+
 def prepare_sqlite_snapshot() -> int:
     """Checkpoint and validate every persisted OpenClaw database.
 
     The gateway MUST be stopped before this runs. A failed checkpoint or
     integrity check aborts the subsequent push, preserving the last known-good
     remote database rather than replacing it with a torn generation.
+
+    Oversized transcript databases are pruned FIRST, so the checkpoint and
+    integrity check below validate the file that is actually about to be
+    uploaded rather than the pre-prune one.
     """
+    _prune_oversized_transcript_databases()
     candidates = sorted(
         WORKSPACE_DIR / relative
         for relative in _iter_workspace_files()
@@ -2900,6 +3138,58 @@ def _legacy_finalize_pending_atomic_workspace(
     return current_generation
 
 
+# One release call carries at most this many ids, matching the broker's
+# MAX_RELEASE_UPLOAD_ITEMS. A larger batch is chunked rather than rejected.
+RELEASE_RESERVATION_BATCH = 250
+
+
+def _release_staged_reservations(
+    staged: list,
+    deadline_monotonic: float | None = None,
+) -> None:
+    """Abandon the reservations of a finalization batch that will not commit.
+
+    A workspace push is atomic: every changed file is reserved and staged, then
+    the whole set is committed together. When one file is refused the batch is
+    dead — but its SIBLINGS' rows stay `reserved` for the full five-minute
+    lease, and the broker's partial unique index
+    `uq_workspace_upload_target_active (owner_key, target_key)` then rejects the
+    retry's reservation for those very same paths. The natural recovery — run
+    the turn again — therefore failed in ~30 ms with an opaque `Failed query`
+    until the TTL ran out (prod 2026-09-05).
+
+    Best-effort by contract. The reservations expire on their own regardless, so
+    a failure here must never replace the real, actionable push error with a
+    cleanup error.
+    """
+    reservation_ids = [
+        prepared.reservation_id
+        for _pair, prepared in staged
+        if getattr(prepared, "reservation_id", None)
+        and prepared.unchanged_e_tag is None
+    ]
+    if not reservation_ids:
+        return
+    for start in range(0, len(reservation_ids), RELEASE_RESERVATION_BATCH):
+        chunk = reservation_ids[start:start + RELEASE_RESERVATION_BATCH]
+        try:
+            _broker_request(
+                {"operation": "release-upload", "reservationIds": chunk},
+                deadline_monotonic,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "workspace push could not release %d staged reservation(s): %s",
+                len(chunk),
+                exc,
+            )
+            return
+    logger.info(
+        "workspace push released %d staged reservation(s) after abort",
+        len(reservation_ids),
+    )
+
+
 def push_workspace(
     prefix: str,
     deadline_monotonic: float | None = None,
@@ -2940,6 +3230,21 @@ def push_workspace(
         except OSError as exc:
             logger.warning("workspace push skip unsafe file %s: %s", relative, exc)
             preparation_errors.append(f"{relative}: {exc}")
+            continue
+        if metadata.st_size > BROKER_PRIVATE_UPLOAD_MAX_BYTES:
+            source.close()
+            # Named and sized deliberately: this error text is what reaches the
+            # user, and "retry later" is wrong advice for a file that will be
+            # exactly as large next turn.
+            logger.warning(
+                "workspace push skip file over broker cap %s (%d bytes)",
+                relative,
+                metadata.st_size,
+            )
+            preparation_errors.append(
+                f"{relative}: {metadata.st_size} bytes exceeds the "
+                f"{BROKER_PRIVATE_UPLOAD_MAX_BYTES}-byte workspace upload limit"
+            )
             continue
         if metadata.st_size > MAX_SYNC_FILE_BYTES:
             source.close()
@@ -2999,9 +3304,14 @@ def push_workspace(
             to_upload.append(upload)
 
     if preparation_errors:
+        # Carry the per-file detail, not just a count. The count alone is what
+        # produced the unactionable "retry after the agent service is repaired"
+        # message an owner saw for a day while one over-cap file blocked every
+        # save (prod 2026-09-05).
         raise WorkspacePushIncomplete(
             f"workspace push incomplete ({len(preparation_errors)} file "
-            f"error(s)) for prefix {prefix}"
+            f"error(s)) for prefix {prefix}: "
+            + "; ".join(preparation_errors[:5])
         )
 
     current_generation = expected_generation
@@ -3338,9 +3648,10 @@ def push_workspace(
                 logger.warning("workspace push stage skip %s", error)
                 stage_errors.append(error)
     if stage_errors:
+        _release_staged_reservations(staged, deadline_monotonic)
         raise WorkspacePushIncomplete(
             f"workspace push incomplete ({len(stage_errors)} file error(s)) "
-            f"for prefix {prefix}"
+            f"for prefix {prefix}: " + "; ".join(stage_errors[:5])
         )
     # Stage the migration marker last. Atomic-capable brokers promote this
     # reservation in the same checkpoint as every database/state object; the
@@ -3350,6 +3661,7 @@ def push_workspace(
             marker_upload
         )
         if marker_error is not None or marker_prepared is None:
+            _release_staged_reservations(staged, deadline_monotonic)
             raise WorkspacePushIncomplete(
                 "workspace push incomplete (migration marker stage failed) "
                 f"for prefix {prefix}: {marker_error or 'unknown error'}"

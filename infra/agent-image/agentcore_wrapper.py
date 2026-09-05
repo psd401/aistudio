@@ -388,11 +388,39 @@ def _restart_mantle_proxy() -> None:
     start_mantle_proxy()
 
 
+# Why a module global rather than a richer return type: this function's bool
+# result is patched by five existing wrapper tests, and widening the signature
+# would break every one of them for a diagnostic. A caller that patches the
+# function simply sees no detail and falls back to the generic message.
+#
+# Set to a short, user-safe description of WHY the workspace could not be
+# saved — currently only for WorkspacePushIncomplete, whose message is built
+# from workspace-relative paths and byte counts (no credentials, no model
+# text). Every other failure class keeps the generic wording.
+_last_workspace_finalization_detail: str | None = None
+MAX_WORKSPACE_FINALIZATION_DETAIL_CHARS = 400
+
+
+def _describe_workspace_push_failure(exc: BaseException) -> str | None:
+    """Return user-safe detail for a push failure, or None to stay generic."""
+    # Matched by class NAME, not isinstance: the wrapper's own test suite
+    # replaces the `workspace_sync` module object with a stub, so
+    # `workspace_sync.WorkspacePushIncomplete` is not always a class here.
+    if type(exc).__name__ != "WorkspacePushIncomplete":
+        return None
+    message = str(exc).strip()
+    if not message:
+        return None
+    return message[:MAX_WORKSPACE_FINALIZATION_DETAIL_CHARS]
+
+
 async def _finalize_invocation_authority(
     proxy_drain_seconds: int = INTERACTIVE_PROXY_FINALIZATION_DRAIN_SECONDS,
 ) -> bool:
     """Stop OpenClaw, checkpoint SQLite, flush, then revoke turn authority."""
     global _workspace_local_clean, _workspace_turn_writable
+    global _last_workspace_finalization_detail
+    _last_workspace_finalization_detail = None
     loop = asyncio.get_running_loop()
     proxy_finalizing = False
     proxy_needs_recovery = False
@@ -482,6 +510,9 @@ async def _finalize_invocation_authority(
                 logger.warning("turn-final workspace push exceeded deadline")
             except Exception as exc:  # noqa: BLE001
                 logger.warning("turn-final workspace push failed: %s", exc)
+                _last_workspace_finalization_detail = (
+                    _describe_workspace_push_failure(exc)
+                )
         elif gateway_stopped:
             finalization_confirmed = True
     finally:
@@ -612,13 +643,33 @@ def _serialize_invocations(function):
                             terminal_metadata[
                                 "error_class"
                             ] = "WorkspaceFinalizationFailed"
+                            detail = _last_workspace_finalization_detail
+                            if detail:
+                                terminal_metadata[
+                                    "workspace_finalization_detail"
+                                ] = detail
                             event = {
                                 **event,
+                                # When the cause is a specific file the broker
+                                # will not accept, say so and say how big it is.
+                                # The old text told every such user to "retry
+                                # after the agent service is repaired", which is
+                                # advice that can never work: the file is the
+                                # same size on the next turn, and one owner
+                                # followed it for a day (prod 2026-09-05).
                                 "result": (
                                     "I completed the work but couldn't safely "
                                     "save this agent's workspace. Your prior "
-                                    "history is preserved; please retry after "
-                                    "the agent service is repaired."
+                                    "history is preserved. "
+                                    + (
+                                        f"Cause: {detail} Retrying will not "
+                                        "clear this on its own — the same file "
+                                        "is rebuilt each turn; report it so the "
+                                        "workspace can be trimmed."
+                                        if detail
+                                        else "Please retry after the agent "
+                                        "service is repaired."
+                                    )
                                 ),
                                 "metadata": terminal_metadata,
                             }

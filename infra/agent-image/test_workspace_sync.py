@@ -3291,5 +3291,300 @@ class SQLitePersistenceTests(unittest.TestCase):
         )
 
 
+class BrokerUploadCapTests(unittest.TestCase):
+    """A file the broker will never accept is caught here, by name and size."""
+
+    def setUp(self):
+        td = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, td, ignore_errors=True)
+        self.root = Path(td).resolve()
+        workspace_sync._uploaded_state.clear()
+        self.addCleanup(workspace_sync._uploaded_state.clear)
+
+    def test_a_file_over_the_broker_cap_names_itself_and_its_size(self):
+        oversized = self.root / "memory" / "huge.bin"
+        oversized.parent.mkdir(parents=True)
+        oversized.write_bytes(b"x")
+        fake_size = workspace_sync.BROKER_PRIVATE_UPLOAD_MAX_BYTES + 1
+        real_stat = os.stat
+
+        def stat_with_inflated_size(fileno):
+            result = real_stat(fileno)
+
+            class _Inflated:
+                st_size = fake_size
+                st_mode = result.st_mode
+                st_mtime_ns = result.st_mtime_ns
+                st_ctime_ns = result.st_ctime_ns
+                st_uid = result.st_uid
+                st_gid = result.st_gid
+                st_ino = result.st_ino
+                st_dev = result.st_dev
+                st_nlink = result.st_nlink
+
+            return _Inflated()
+
+        prepared = []
+
+        def open_no_follow(relative):
+            source, metadata = original_open(relative)
+            if relative == "memory/huge.bin":
+                return source, stat_with_inflated_size(source.fileno())
+            return source, metadata
+
+        original_open = workspace_sync._open_regular_no_follow
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync,
+            "_open_regular_no_follow",
+            side_effect=open_no_follow,
+        ), mock.patch.object(
+            workspace_sync, "_upload_spec", side_effect=lambda *a: prepared.append(a)
+        ):
+            with self.assertRaises(
+                workspace_sync.WorkspacePushIncomplete
+            ) as caught:
+                workspace_sync.push_workspace("owner")
+
+        message = str(caught.exception)
+        self.assertIn("memory/huge.bin", message)
+        self.assertIn(str(fake_size), message)
+        self.assertIn("workspace upload limit", message)
+        # Detected BEFORE the batch is built, so nothing was reserved.
+        self.assertEqual(prepared, [])
+
+    def test_the_client_cap_matches_the_broker_constant(self):
+        broker = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "lib"
+            / "agent-workspace"
+            / "storage-broker.ts"
+        )
+        self.assertIn(
+            "export const MAX_PRIVATE_UPLOAD_BYTES = 512 * 1024 * 1024",
+            broker.read_text(encoding="utf-8"),
+            "BROKER_PRIVATE_UPLOAD_MAX_BYTES drifted from the broker's cap",
+        )
+        self.assertEqual(
+            workspace_sync.BROKER_PRIVATE_UPLOAD_MAX_BYTES,
+            512 * 1024 * 1024,
+        )
+
+
+class StagedReservationReleaseTests(unittest.TestCase):
+    """An aborted batch gives its siblings' reservations back immediately."""
+
+    def test_a_staging_failure_releases_the_reservations_that_succeeded(self):
+        staged = [
+            (("/p/a", "a", 1, 0, 0, "c"), workspace_sync._PreparedWorkspaceUpload(
+                upload_url="https://example.invalid/a",
+                reservation_id="11111111-1111-4111-8111-111111111111",
+                required_headers={},
+            )),
+            (("/p/b", "b", 1, 0, 0, "c"), workspace_sync._PreparedWorkspaceUpload(
+                upload_url=None,
+                reservation_id=None,
+                required_headers={},
+                unchanged_e_tag='"unchanged"',
+            )),
+        ]
+        calls = []
+        with mock.patch.object(
+            workspace_sync,
+            "_broker_request",
+            side_effect=lambda payload, *a, **k: calls.append(payload) or {},
+        ):
+            workspace_sync._release_staged_reservations(staged)
+
+        self.assertEqual(
+            calls,
+            [
+                {
+                    "operation": "release-upload",
+                    # The unchanged entry holds no reservation, so it is not sent.
+                    "reservationIds": [
+                        "11111111-1111-4111-8111-111111111111"
+                    ],
+                }
+            ],
+        )
+
+    def test_a_release_failure_never_masks_the_real_push_error(self):
+        staged = [
+            (("/p/a", "a", 1, 0, 0, "c"), workspace_sync._PreparedWorkspaceUpload(
+                upload_url="https://example.invalid/a",
+                reservation_id="11111111-1111-4111-8111-111111111111",
+                required_headers={},
+            )),
+        ]
+        with mock.patch.object(
+            workspace_sync,
+            "_broker_request",
+            side_effect=RuntimeError("broker down"),
+        ):
+            workspace_sync._release_staged_reservations(staged)
+
+
+class TrajectoryPruneTests(unittest.TestCase):
+    """Prune only closed sessions' runtime events, and only from that table."""
+
+    def setUp(self):
+        td = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, td, ignore_errors=True)
+        self.root = Path(td).resolve()
+        self.database = self.root / "agents" / "main" / "agent" / (
+            workspace_sync.TRANSCRIPT_DB_FILENAME
+        )
+        self.database.parent.mkdir(parents=True)
+
+    def _build(self, newest_ms):
+        day_ms = 86_400_000
+        connection = sqlite3.connect(self.database)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute(
+            "CREATE TABLE trajectory_runtime_events ("
+            "  session_id TEXT NOT NULL,"
+            "  seq INTEGER NOT NULL,"
+            "  event_json TEXT NOT NULL,"
+            "  created_at INTEGER NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE transcript_events ("
+            "  session_id TEXT NOT NULL,"
+            "  event_json TEXT NOT NULL,"
+            "  created_at INTEGER NOT NULL)"
+        )
+        rows = []
+        # `stale` last touched 10 days ago; `live` touched at `newest_ms`.
+        for seq in range(50):
+            rows.append(("stale", seq, "x" * 2048, newest_ms - 10 * day_ms))
+        for seq in range(5):
+            rows.append(("live", seq, "y" * 2048, newest_ms))
+        connection.executemany(
+            "INSERT INTO trajectory_runtime_events VALUES (?, ?, ?, ?)", rows
+        )
+        connection.executemany(
+            "INSERT INTO transcript_events VALUES (?, ?, ?)",
+            [("stale", "durable", newest_ms - 10 * day_ms)],
+        )
+        connection.commit()
+        connection.close()
+
+    def test_closed_sessions_are_pruned_and_recent_ones_are_kept(self):
+        newest = 1_757_000_000_000
+        self._build(newest)
+        deleted = workspace_sync._prune_trajectory_runtime_events(self.database)
+        self.assertEqual(deleted, 50)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        self.assertEqual(
+            connection.execute(
+                "SELECT DISTINCT session_id FROM trajectory_runtime_events"
+            ).fetchall(),
+            [("live",)],
+        )
+        # The durable table is untouched, including for the pruned session.
+        self.assertEqual(
+            connection.execute(
+                "SELECT COUNT(*) FROM transcript_events"
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            str(
+                connection.execute("PRAGMA journal_mode").fetchone()[0]
+            ).lower(),
+            "wal",
+        )
+        self.assertEqual(
+            connection.execute("PRAGMA integrity_check").fetchall(),
+            [("ok",)],
+        )
+        self.assertEqual(
+            connection.execute("PRAGMA foreign_key_check").fetchall(), []
+        )
+
+    def test_a_missing_table_or_unknown_schema_prunes_nothing(self):
+        connection = sqlite3.connect(self.database)
+        connection.execute("CREATE TABLE unrelated (value TEXT)")
+        connection.commit()
+        connection.close()
+        self.assertEqual(
+            workspace_sync._prune_trajectory_runtime_events(self.database), 0
+        )
+
+        other = self.root / "agents" / "two" / "agent" / (
+            workspace_sync.TRANSCRIPT_DB_FILENAME
+        )
+        other.parent.mkdir(parents=True)
+        connection = sqlite3.connect(other)
+        connection.execute(
+            "CREATE TABLE trajectory_runtime_events (blob TEXT)"
+        )
+        connection.commit()
+        connection.close()
+        self.assertEqual(
+            workspace_sync._prune_trajectory_runtime_events(other), 0
+        )
+
+    def test_a_small_database_is_left_alone_entirely(self):
+        self._build(1_757_000_000_000)
+        calls = []
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync,
+            "_prune_trajectory_runtime_events",
+            side_effect=lambda *a, **k: calls.append(a) or 0,
+        ):
+            workspace_sync._prune_oversized_transcript_databases()
+        self.assertEqual(calls, [])
+
+    def test_an_oversized_database_is_pruned_by_the_finalization_sweep(self):
+        self._build(1_757_000_000_000)
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync, "TRAJECTORY_PRUNE_MIN_DB_BYTES", 1
+        ):
+            workspace_sync._prune_oversized_transcript_databases()
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        self.assertEqual(
+            connection.execute(
+                "SELECT DISTINCT session_id FROM trajectory_runtime_events"
+            ).fetchall(),
+            [("live",)],
+        )
+
+    def test_a_prune_failure_never_breaks_the_snapshot(self):
+        self._build(1_757_000_000_000)
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync, "TRAJECTORY_PRUNE_MIN_DB_BYTES", 1
+        ), mock.patch.object(
+            workspace_sync,
+            "_prune_trajectory_runtime_events",
+            side_effect=RuntimeError("locked"),
+        ):
+            workspace_sync._prune_oversized_transcript_databases()
+
+    def test_a_seconds_epoch_column_is_handled_as_seconds(self):
+        self.assertEqual(
+            workspace_sync._trajectory_cutoff_value(1_757_000_000, 2),
+            1_757_000_000 - 2 * 86_400,
+        )
+        self.assertEqual(
+            workspace_sync._trajectory_cutoff_value(1_757_000_000_000, 2),
+            1_757_000_000_000 - 2 * 86_400_000,
+        )
+        for unusable in (None, 0, -1, True, "2026-09-05", 12345):
+            self.assertIsNone(
+                workspace_sync._trajectory_cutoff_value(unusable, 2)
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

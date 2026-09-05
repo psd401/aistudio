@@ -12,10 +12,12 @@ import {
   ensureWorkspaceCheckpoint,
   finalizeWorkspaceCheckpoint,
   listWorkspaceObjects,
+  releaseWorkspaceUploads,
   WorkspaceStorageAdmissionError,
   WorkspaceStorageCompletionError,
 } from "@/lib/agent-workspace/storage-broker"
 import { workspaceRelativePathRejectionReason } from "@/lib/agent-workspace/path-policy"
+import { describeQueryErrorCause } from "@/lib/db/query-error"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
 
 const log = createLogger({ module: "agent-workspace-storage" })
@@ -41,11 +43,17 @@ const STORAGE_OPERATIONS = new Set([
   "publish",
   "download-public",
   "complete-upload",
+  "release-upload",
   "ensure-checkpoint",
   "commit-checkpoint",
   "finalize-checkpoint",
   "delete",
 ])
+// An abort carries only the ids it is abandoning. Keeping the field set as
+// tight as finalize-checkpoint's means a release can never smuggle a path, a
+// generation, or a proof past the parser.
+const RELEASE_UPLOAD_FIELDS = new Set(["operation", "reservationIds"])
+const MAX_RELEASE_UPLOAD_ITEMS = 250
 const FINALIZE_CHECKPOINT_FIELDS = new Set([
   "operation",
   "baseWorkspaceGeneration",
@@ -67,6 +75,7 @@ type StorageRequest = {
     | "publish"
     | "download-public"
     | "complete-upload"
+    | "release-upload"
     | "ensure-checkpoint"
     | "commit-checkpoint"
     | "finalize-checkpoint"
@@ -183,6 +192,21 @@ function hasValidFinalizeCheckpointFields(
   )
 }
 
+function hasValidReleaseUploadFields(
+  body: Record<string, unknown>,
+): boolean {
+  return (
+    !Object.keys(body).some((field) => !RELEASE_UPLOAD_FIELDS.has(field)) &&
+    isOrderedUniqueStringArray(
+      body.reservationIds,
+      (item) => UUID_RE.test(item),
+      (item) => item.toLowerCase(),
+    ) &&
+    body.reservationIds.length > 0 &&
+    body.reservationIds.length <= MAX_RELEASE_UPLOAD_ITEMS
+  )
+}
+
 function parseRequest(value: unknown): StorageRequest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null
   const body = value as Record<string, unknown>
@@ -194,6 +218,8 @@ function parseRequest(value: unknown): StorageRequest | null {
   ) return null
   if (body.operation === "finalize-checkpoint") {
     if (!hasValidFinalizeCheckpointFields(body)) return null
+  } else if (body.operation === "release-upload") {
+    if (!hasValidReleaseUploadFields(body)) return null
   } else if (
     body.reservationIds !== undefined ||
     body.deletedPaths !== undefined ||
@@ -237,6 +263,10 @@ async function executeStorageOperation(
             context.workspacePrefix,
             input.workspaceGeneration,
           )
+        : null
+    case "release-upload":
+      return input.reservationIds
+        ? releaseWorkspaceUploads(context.ownerEmail, input.reservationIds)
         : null
     case "ensure-checkpoint":
       return ensureWorkspaceCheckpoint(context.workspacePrefix, {
@@ -369,7 +399,13 @@ export async function POST(request: NextRequest) {
       sanitizeForLogging({
         requestId,
         ownerEmail: context.ownerEmail,
+        operation: input.operation,
+        path: input.path,
         error: error instanceof Error ? error.message : String(error),
+        // A Drizzle failure's own message is only `Failed query: insert into
+        // "workspace_upload_reservations" …`; the SQLSTATE and the violated
+        // constraint live on `.cause` and were being swallowed here.
+        ...describeQueryErrorCause(error),
       })
     )
     return NextResponse.json(

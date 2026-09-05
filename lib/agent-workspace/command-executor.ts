@@ -984,7 +984,7 @@ const DOWNLOAD_CONTENT_TYPES: Record<string, string> = {
 /**
  * Cap on a rescued download.
  *
- * Deliberately tighter than storage-broker's MAX_PRIVATE_UPLOAD_BYTES (256 MB),
+ * Deliberately tighter than storage-broker's MAX_PRIVATE_UPLOAD_BYTES (512 MB),
  * which bounds what an agent may deliberately upload. This bounds a file the
  * agent did NOT choose the size of — whatever a caller happened to attach in
  * Drive — and the whole thing is buffered in the web tier's memory on its way

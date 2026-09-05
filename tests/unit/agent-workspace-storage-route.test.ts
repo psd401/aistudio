@@ -13,6 +13,7 @@ const ensureWorkspaceCheckpointMock = jest.fn()
 const commitWorkspaceCheckpointMock = jest.fn()
 const finalizeWorkspaceCheckpointMock = jest.fn()
 const deleteWorkspacePathMock = jest.fn()
+const releaseWorkspaceUploadsMock = jest.fn()
 
 jest.mock("@/lib/agent-workspace/invocation-context", () => ({
   verifyAgentInvocationContext: (...args: unknown[]) =>
@@ -41,6 +42,8 @@ jest.mock("@/lib/agent-workspace/storage-broker", () => ({
     finalizeWorkspaceCheckpointMock(...args),
   deleteWorkspacePath: (...args: unknown[]) =>
     deleteWorkspacePathMock(...args),
+  releaseWorkspaceUploads: (...args: unknown[]) =>
+    releaseWorkspaceUploadsMock(...args),
 }))
 jest.mock("@/lib/logger", () => ({
   createLogger: () => ({
@@ -94,6 +97,7 @@ beforeEach(() => {
     checkpointCommitted: true,
     workspaceGeneration: "2".repeat(64),
   })
+  releaseWorkspaceUploadsMock.mockResolvedValue({ released: 2 })
   deleteWorkspacePathMock.mockResolvedValue({
     deleted: true,
     workspaceGeneration: "3".repeat(64),
@@ -528,6 +532,58 @@ describe("POST /api/agent/workspace-storage", () => {
 
     expect(response.status).toBe(400)
     expect(finalizeWorkspaceCheckpointMock).not.toHaveBeenCalled()
+  })
+
+  it("releases an aborted batch's sibling reservations for the signed owner", async () => {
+    const response = await POST(
+      request({
+        operation: "release-upload",
+        reservationIds: [
+          "11111111-2222-4333-8444-555555555555",
+          "66666666-7777-4888-8999-aaaaaaaaaaaa",
+        ],
+      }),
+    )
+
+    expect(response.status).toBe(200)
+    expect(releaseWorkspaceUploadsMock).toHaveBeenCalledWith(
+      "owner@example.com",
+      [
+        "11111111-2222-4333-8444-555555555555",
+        "66666666-7777-4888-8999-aaaaaaaaaaaa",
+      ],
+    )
+  })
+
+  it("rejects a release that carries anything but reservation ids", async () => {
+    const response = await POST(
+      request({
+        operation: "release-upload",
+        reservationIds: ["11111111-2222-4333-8444-555555555555"],
+        path: "memory/notes.md",
+      }),
+    )
+
+    expect(response.status).toBe(400)
+    expect(releaseWorkspaceUploadsMock).not.toHaveBeenCalled()
+  })
+
+  it("rejects an empty, malformed, or duplicated release batch", async () => {
+    for (const reservationIds of [
+      [],
+      ["not-a-uuid"],
+      [
+        "11111111-2222-4333-8444-555555555555",
+        "11111111-2222-4333-8444-555555555555",
+      ],
+      Array.from({ length: 251 }, () => "11111111-2222-4333-8444-555555555555"),
+    ]) {
+      const response = await POST(
+        request({ operation: "release-upload", reservationIds }),
+      )
+      expect(response.status).toBe(400)
+    }
+    expect(releaseWorkspaceUploadsMock).not.toHaveBeenCalled()
   })
 
   it("generation-fences deletes inside the signed prefix", async () => {
