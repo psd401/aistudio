@@ -296,6 +296,7 @@ jobs:
           infra/agent-image/skills/psd-html-artifact/a11y-audit.test.js
           infra/agent-image/skills/psd-learning-page/run.test.js
           infra/agent-image/skills/psd-plaud/common.test.js
+          infra/agent-image/skills/psd-publish-file/publish.test.js
           infra/agent-image/skills/psd-plaud/run.test.js
           infra/agent-image/skills/psd-skills-meta/authority.test.js
           infra/agent-image/skills/psd-summarize/run.test.js
@@ -305,6 +306,17 @@ jobs:
           bun test "${test_file}"
           echo "::endgroup::"
         done
+      env:
+        CI: true
+
+    # agent-cron (Bun). Root jest ignores all of /infra/ except the triage-poll
+    # boundary tests, so this Lambda's suite had no runner at all — the same
+    # gap the psd-schedules and psd-atrium steps above were added to close.
+    # It covers the scheduled-run telemetry, including the contention-row
+    # settle path and the upsert that must RE-OPEN a settled row when the same
+    # fire_key later fails for real.
+    - name: Run agent-cron Lambda tests (Bun)
+      run: bun run test:lambda:cron
       env:
         CI: true
 
