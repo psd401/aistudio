@@ -289,23 +289,41 @@ function defineVerifiedWorkspaceUploadReservationsSuite1Part1() {
     expect(acquireMock).not.toHaveBeenCalled()
   })
 
-  it("accepts the UTF-8 HTML MIME used by the artifact publishers", async () => {
-    const prepared = await createPublicArtifactUpload({
-                             ownerEmail: OWNER,
-                             fileName: "report.html",
-                             contentType: "text/html; charset=utf-8",
-                             contentLength: 4,
-                             contextKey: "session:nonce",
-                             idempotencyKey: "idempotency-html",
-                             checksumSha256: CHECKSUM,
-                           })
-    expect(prepared.requiredHeaders["Content-Type"]).toBe(
-      "text/html; charset=utf-8",
-    )
-    const put = signedUrlMock.mock.calls[0]?.[1] as {
-      input: Record<string, unknown>
+  // Reversed deliberately. This used to assert that the UTF-8 HTML MIME was
+  // accepted, back when psd-html-artifact dropped `text/html` into the
+  // unsigned, public-by-link `public-images/` prefix. HTML pages are district
+  // documents and now go to Atrium, where they carry an owner, a visibility
+  // level and a publication record — so `.html` is gone from PUBLIC_EXTENSIONS
+  // and the broker is what enforces that, not the skill's good behaviour.
+  it("refuses HTML entirely — those go to Atrium, not the public prefix", async () => {
+    for (const contentType of ["text/html", "text/html; charset=utf-8"]) {
+      await expect(
+        createPublicArtifactUpload({
+          ownerEmail: OWNER,
+          fileName: "report.html",
+          contentType,
+          contentLength: 4,
+          contextKey: "session:nonce",
+          idempotencyKey: "idempotency-html",
+          checksumSha256: CHECKSUM,
+        }),
+      ).rejects.toThrow("Public artifact type is not allowed")
     }
-    expect(put.input.ContentType).toBe("text/html; charset=utf-8")
+    expect(executeQueryMock).not.toHaveBeenCalled()
+    expect(acquireMock).not.toHaveBeenCalled()
+  })
+
+  it("still accepts every non-HTML public artifact type", async () => {
+    const prepared = await createPublicArtifactUpload({
+      ownerEmail: OWNER,
+      fileName: "chart.png",
+      contentType: "image/png",
+      contentLength: 4,
+      contextKey: "session:nonce",
+      idempotencyKey: "idempotency-png",
+      checksumSha256: CHECKSUM,
+    })
+    expect(prepared.requiredHeaders["Content-Type"]).toBe("image/png")
   })
 
   it("uncharges an old public commit only after exact-version absence is proven", async () => {

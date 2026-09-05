@@ -163,9 +163,20 @@ export function workspaceReservationCountsAsRetained(
   )
 }
 const SAFE_PUBLIC_ARTIFACT_NAME = /^[A-Za-z0-9._@+= -]+$/
+// `.html` is deliberately ABSENT.
+//
+// HTML artifacts go to Atrium, never S3. `public-images/` is unsigned and
+// public-by-link, so an HTML page delivered there is a district document
+// readable by anyone who ever receives the URL, with no owner, no visibility
+// level and no publication record. psd-html-artifact was the last skill still
+// doing that; it now publishes through psd-atrium (create-artifact --body-format
+// html, then publish --destination intranet). Removing the extension and its
+// content type here is what makes that a rule the broker enforces rather than a
+// convention a skill can drift away from.
+//
+// Every other file type still goes to S3 — see the psd-publish-file skill.
 const PUBLIC_EXTENSIONS = new Set([
   ".csv",
-  ".html",
   ".jpeg",
   ".jpg",
   ".json",
@@ -180,7 +191,7 @@ const PUBLIC_EXTENSIONS = new Set([
 ])
 const PUBLIC_CONTENT_TYPES = new Map<string, ReadonlySet<string>>([
   [".csv", new Set(["text/csv"])],
-  [".html", new Set(["text/html"])],
+  // No ".html" — see PUBLIC_EXTENSIONS above.
   [".jpeg", new Set(["image/jpeg"])],
   [".jpg", new Set(["image/jpeg"])],
   [".json", new Set(["application/json"])],

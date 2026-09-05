@@ -87,10 +87,16 @@ describe("helper verbs and their canonical operations travel together", () => {
   // is what the skill documents. The canonical form is what gws implements.
   // Allowing one without the other means the capability exists but the
   // documented way to use it is refused — the `+draft` failure exactly.
+  //
+  // `drive +upload` is deliberately NOT in this pairing any more. It is the one
+  // helper whose canonical form the agent can reach and whose helper form it
+  // cannot: gws runs in an empty mkdtemp on the web tier, so no local path
+  // exists for it to upload. Pairing them would demand we re-allow a spelling
+  // that cannot execute. It is refused explicitly instead, pointing at
+  // psd-publish-file — see workspace-allowlist-gaps.test.ts.
   const HELPERS: Array<[string, string]> = [
     ["gmail +draft", "gmail users drafts create"],
     ["sheets +append", "sheets spreadsheets values append"],
-    ["drive +upload", "drive files create"],
   ]
 
   it.each(HELPERS)("allows %s and %s together", (helper, canonical) => {
