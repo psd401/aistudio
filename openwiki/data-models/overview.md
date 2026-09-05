@@ -54,6 +54,27 @@ await executeTransaction(
 
 **Critical Pattern**: Never nest `db.transaction()` inside `executeQuery()`. Use `executeTransaction()` directly.
 
+### Error Diagnostics
+
+**Source**: `/lib/db/query-error.ts`
+
+Drizzle wraps driver failures with `Failed query: <SQL>` messages, hiding the SQLSTATE code and constraint name in `.cause`. Use `describeQueryErrorCause()` to surface the real error for logging:
+
+```typescript
+import { describeQueryErrorCause } from "@/lib/db/query-error";
+
+try {
+  await executeQuery(/* ... */);
+} catch (error) {
+  log.error("Database operation failed", {
+    error: error instanceof Error ? error.message : String(error),
+    ...describeQueryErrorCause(error), // causeCode, causeConstraint, causeTable
+  });
+}
+```
+
+The function safely extracts `causeCode`, `causeConstraint`, and `causeTable` without logging raw row values from Postgres DETAIL lines.
+
 ---
 
 ## Schema Organization

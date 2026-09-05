@@ -147,6 +147,7 @@ Migrations run via Lambda function:
 | `group-sync/` | Google Directory synchronization |
 | `atrium-content-key-bootstrap/` | Atrium key provisioning |
 | `agent-router/` | Agent request routing with promoted turn recovery |
+| `agent-cron/` | Scheduled run telemetry including contention settlement |
 
 ### Agent Router
 

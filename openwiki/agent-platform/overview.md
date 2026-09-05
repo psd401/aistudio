@@ -28,9 +28,9 @@ infra/agent-image/skills/{skill-name}/
 
 **Administrative & District Operations**
 - `psd-atrium` — Read/search/create content in Atrium; artifact data persistence (list-data, submit); viewer-scoped PSD data queries from artifacts via shared connector resolution with Nexus
-- `psd-freshservice` — IT service desk integration
+- `psd-freshservice` — Freshservice tickets, service catalog items, approvals, and team summaries using each caller's own API key; create catalog request forms with field validation
 - `psd-email-triage` — Automated email response drafting
-- `psd-schedules` — Schedule management
+- `psd-schedules` — Scheduled agent tasks (cron/rate/at) with read access for scheduled-mode turns; reply IS the delivery — never hunt for DM
 - `psd-rules` — Tier-1 governance rules for agent behavior
 - `psd-conversation-coach` — Crucial Conversations framework coaching for difficult conversations
 - `psd-morning-brief` — Personalized daily newspaper/podcast delivered through private Atrium artifacts
@@ -41,11 +41,12 @@ infra/agent-image/skills/{skill-name}/
 - `psd-aistudio` — Live capability discovery + authenticated actions in AI Studio
 - `psd-learning-page` — Multimodal UDL learning page generation
 - `psd-hyperframes` — HTML/CSS/JS to MP4 video rendering
-- `psd-html-artifact` — Accessible HTML artifact delivery with a11y audit
-- `psd-pdf-to-markdown` — Document conversion
+- `psd-html-artifact` — HTML artifacts published to Atrium with WCAG 2.2 AA audit, delivered as internal reader pages (not S3)
+- `psd-pdf-to-markdown` — PDF to Markdown conversion; scanned/image-only PDFs rendered to page images via `--rasterize-pages`
 - `psd-image-gen` — Image generation
 - `psd-sop-creator` — PSD Standard Operating Procedure document creation
 - `psd-instructional-vision` — PSD instructional framework (Instructional Essentials, UDL, MTSS) from live repository
+- `psd-publish-file` — Publish generated local files (PDF, PNG, CSV, MP3, MP4) to public-by-link S3 URLs
 
 **Data & Integration**
 - `psd-data` — District data queries (PowerSchool, spreadsheets)
@@ -95,6 +96,33 @@ The skill initializer (`infra/lambdas/agent-skill-initializer/`) handles both re
 ## Workspace Checkpoint Recovery
 
 Agent workspaces use journal-based finalization proofs to survive invocation failures and resume idempotently.
+
+### Workspace Size Limits & Pruning
+
+**Source**: `/lib/agent-workspace/storage-broker.ts`, `/infra/agent-image/workspace_sync.py`
+
+The maximum workspace upload size is **512 MiB** (raised from 256 MiB on 2026-09-05). This is an application constant, not an S3 limit (single PUT accepts 5 GB). The prior ceiling became a hard outage when OpenClaw's transcript database (`openclaw-agent.sqlite`) grew monotonically without pruning, blocking all saves for affected owners.
+
+**Prune Mechanics**: `prepare_sqlite_snapshot()` now prunes closed-session `trajectory_runtime_events` rows for any `openclaw-agent.sqlite` over 192 MiB:
+- Deletes rows for sessions with no activity in the last 2 days
+- VACUUMs after delete (driven by `freelist_count`, not just delete success)
+- Preserves `transcript_events`, `session_windows`, `memory_index_chunks`, and `memory_embedding_cache`
+- Schema-resilient: column names discovered via `table_info`, unknown schema prunes nothing
+- Deadline enforced via progress handler with single budget spanning snapshot + push
+
+Both the size increase and the prune are required—the prune cannot run until the workspace can be written again.
+
+**Deploy Order**: The web tier (`storage-broker.ts`) must deploy before the agent image (`workspace_sync.py`). The agent's client-side cap check (`BROKER_PRIVATE_UPLOAD_MAX_BYTES`) must match the broker's `MAX_PRIVATE_UPLOAD_BYTES` or the pre-check passes a file the broker refuses.
+
+### Reservation Release on Abort
+
+**Source**: `/lib/agent-workspace/storage-broker.ts` — `releaseWorkspaceUploads()`
+
+When one file in a batch is refused, siblings' reservation rows stay `reserved` for the 5-minute lease. The unique index `uq_workspace_upload_target_active` then rejects the retry's reservation for those paths. The `releaseWorkspaceUploads()` function lets the agent return the batch on abort, removing the dead window.
+
+- Owner-scoped and `reserved`-only: never touches another owner's rows, committed uploads, or `verifying` entries
+- Idempotent: unknown or already-settled IDs are silently skipped
+- Best-effort lease return: dropLease failures do not fail the abort
 
 ### Journal-Based Finalization
 
@@ -201,6 +229,16 @@ When an interactive turn times out or overflows but is promoted to a job queue, 
 
 This preserves latency and overflow trending data while ensuring the Failures tab shows what actually broke. In the week of 2026-08-21, 14 of 35 hard-error rows described turns the user got answered via job promotion.
 
+### Schedule Contention Settlement
+
+**Source**: `/infra/lambdas/agent-cron/run-telemetry.ts`
+
+Every schedule an owner has shares ONE workspace lock, so same-cadence schedules contend by design. When a fire finds the lock held, it records a `warn` row and retries. `settleCronFireFailure()` acknowledges that row once the fire succeeds, preventing contention warnings from burying real failures.
+
+- **Best-effort**: A settle failure never turns a successful run into a reported failure
+- **Re-opens on late failure**: If the same `fire_key` fails after the retry succeeded, the upsert clears `acknowledged` so the real failure surfaces
+- **No time window needed**: `fire_key` is a unique Scheduler occurrence identity, not a reused session ID
+
 ---
 
 ## Google Workspace Integration
@@ -258,13 +296,23 @@ Google Workspace operations are classified into allowlist categories:
 | `ALLOWED_WRITES` | User-slot permitted mutations | `gmail users settings filters`, `tasks tasks move` |
 | `AGENT_ONLY_WRITES` | Agent-slot mutations only | `tasks tasks patch`, `tasks tasks update` |
 
-The allowlist evolves based on production failure patterns. Recent additions:
+**Removed Operations**: `drive +upload` is explicitly refused (both `ALLOWED_WRITES` and `AGENT_ONLY_WRITES`) because the Workspace CLI runs in an empty temp directory where container paths don't exist. Use `psd-publish-file` for publishing generated files to public URLs, or share via Drive manually.
+
+The allowlist evolves based on production failure patterns.
 
 | Operation | Reason |
 |-----------|--------|
 | `spaces.findDirectMessage` | DM lookup sends nothing; was refusing scheduled digests with no way to find target DM |
 | `gmail users settings filters` | Inbox filter management; requires separate `gmail.settings.basic` scope |
 | `tasks tasks move` | Task reordering within lists the user-slot can already insert into |
+
+#### HTML Content Routing
+
+**Source**: `/lib/agent-workspace/storage-broker.ts`
+
+HTML files (`.html`) are **absent** from `PUBLIC_EXTENSIONS`. HTML artifacts go to Atrium—where they get an owner, visibility level, and publication record—never to public-by-link S3. This is enforced at the broker level, not just skill convention.
+
+For HTML artifacts, use `psd-html-artifact` skill which creates an Atrium artifact with `--body-format html` and publishes to the internal reader surface.
 
 #### Scope Gap Handling
 
@@ -275,6 +323,28 @@ gmail.modify ≠ gmail.settings.basic
 ```
 
 When a user attempts Gmail filter operations without `gmail.settings.basic`, they receive a prompt to re-authorize with the additional scope rather than an opaque Google 403.
+
+---
+
+## Schedule Management
+
+**Source**: `/app/api/agent/schedules/route.ts`
+
+Schedule management routes use a **read/write split** for authorization:
+- **Read operations** (`list`, `runs`): Accept both `owner` and `scheduled` mode
+- **Write operations** (`create`, `update`, `delete`): Owner-only
+
+This allows scheduled runs to audit their own schedules without mutating them. A scheduled-mode turn that attempts `create`, `update`, or `delete` receives a 403 after the same cryptographic verification as owner-mode requests.
+
+The `SCHEDULED_READ_OPERATIONS` allowlist ensures new write operations default to owner-only rather than silently inheriting scheduled access.
+
+### Scheduled Run Authoring Rules
+
+**Source**: `/infra/agent-image/skills/psd-schedules/SKILL.md`
+
+1. **Never hunt for the owner's own DM** — A scheduled run's reply IS the delivery. The platform delivers to the owner's Google Chat DM automatically; the model never chooses the destination and cannot change it. Prompts that instruct the agent to run `chat spaces.findDirectMessage` then `chat spaces list` then `chat +send` are dead code.
+
+2. **Posting to shared spaces is legitimate** — While DM hunting is forbidden, `chat +send` to a shared space (team room, project channel) is correct when the schedule intends to notify a group.
 
 ---
 
