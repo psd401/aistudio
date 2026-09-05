@@ -131,6 +131,18 @@ describe('type gate', () => {
     expect(result.json.error).toBe('bad_args');
   });
 
+  test('a valueless --content-type is refused, not silently ignored', () => {
+    // parseArgs yields boolean true for a flag with no value. That used to fall
+    // straight through the `typeof requested === 'string'` gate, so a caller who
+    // typed --content-type and forgot the value got a publish that quietly
+    // ignored the flag. CodeQL surfaced the dead `requested !== true` clause
+    // that was standing in for this check from inside the string guard.
+    const result = run(['--file', write('rows3.csv', 'a,b\n1,2\n'), '--content-type']);
+    expect(result.code).toBe(1);
+    expect(result.json.error).toBe('bad_args');
+    expect(result.json.message).toContain('needs a value');
+  });
+
   test('a matching content type is accepted, charset and all', () => {
     // Reaches the broker hop, which is unstubbed here — so this asserts only
     // that the type gate let it through, not that the upload succeeded.

@@ -129,9 +129,21 @@ function resolveContentType(file, requested) {
       'unsupported_type'
     );
   }
+  // `parseArgs` yields boolean true for a valueless flag. Refuse that rather
+  // than letting it fall through a `typeof === 'string'` guard, which silently
+  // ignored a flag the caller deliberately typed. (The old guard also carried a
+  // `requested !== true` clause that could never be reached from inside the
+  // string check — CodeQL flagged it as a comparison between inconvertible
+  // types, and it was hiding exactly this gap.)
+  if (requested === true) {
+    fail(
+      '--content-type needs a value, e.g. --content-type application/pdf. ' +
+        'Omit the flag entirely to use the type implied by the extension.',
+      'bad_args'
+    );
+  }
   if (
     typeof requested === 'string' &&
-    requested !== true &&
     requested.split(';')[0].trim().toLowerCase() !== known
   ) {
     fail(
