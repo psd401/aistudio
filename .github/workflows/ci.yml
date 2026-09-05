@@ -74,6 +74,15 @@ jobs:
       working-directory: infra/lambdas/agent-router
       run: bun install --frozen-lockfile
 
+    # agent-cron resolves its AWS SDK deps from its OWN package.json, exactly
+    # like agent-router above, so its tests cannot import index.ts without this.
+    # Keep --frozen-lockfile: no lockfile is committed in either Lambda dir, so
+    # this resolves fresh WITHOUT writing one — a plain install would drop a
+    # local bun.lock that silently pins CI while nothing pins developers.
+    - name: Install agent-cron dependencies
+      working-directory: infra/lambdas/agent-cron
+      run: bun install --frozen-lockfile
+
     - name: Run linter
       run: bun run lint
 
