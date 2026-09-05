@@ -1222,6 +1222,34 @@ const FRESHSERVICE_ROUTES: ReadonlyArray<{
     build: (id) => `/workspaces/${id}`,
   },
   { method: "GET", pattern: /^\/approvals$/, build: () => "/approvals" },
+  // Service Catalog. A caller asked the agent to create a catalog item
+  // ("Student Travel — Hotel Reservations", with custom required fields) on
+  // 2026-08-31; the skill covered only tickets, notes and approvals, so the
+  // agent searched, found nothing, and offered a plain ticket instead.
+  //
+  // Note the path asymmetry, which is Freshservice's and not a typo here:
+  // reads live under `/service_catalog/...` while the create verb is the
+  // top-level `/service_catalog_items`. Each is written out literally below.
+  {
+    method: "GET",
+    pattern: /^\/service_catalog\/items$/,
+    build: () => "/service_catalog/items",
+  },
+  {
+    method: "GET",
+    pattern: /^\/service_catalog\/items\/(\d+)$/,
+    build: (id) => `/service_catalog/items/${id}`,
+  },
+  {
+    method: "GET",
+    pattern: /^\/service_catalog\/categories$/,
+    build: () => "/service_catalog/categories",
+  },
+  {
+    method: "POST",
+    pattern: /^\/service_catalog_items$/,
+    build: () => "/service_catalog_items",
+  },
 ]
 
 /** Query keys the skill actually sends, with the value charset each may use. */
@@ -1238,6 +1266,9 @@ const FRESHSERVICE_QUERY_KEYS = new Set([
   "workspace_id",
   "filter",
   "query",
+  // Service-catalog browsing: narrow items to one category, or search by name.
+  "category_id",
+  "search_term",
 ])
 const FRESHSERVICE_VALUE_CHARS = /^[A-Za-z0-9_.,:+@ -]*$/
 const FRESHSERVICE_FILTER_QUERY_CHARS = /^[A-Za-z0-9_.,:+@()'<>"= -]*$/

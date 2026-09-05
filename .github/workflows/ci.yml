@@ -74,6 +74,15 @@ jobs:
       working-directory: infra/lambdas/agent-router
       run: bun install --frozen-lockfile
 
+    # agent-cron resolves its AWS SDK deps from its OWN package.json, exactly
+    # like agent-router above, so its tests cannot import index.ts without this.
+    # Keep --frozen-lockfile: no lockfile is committed in either Lambda dir, so
+    # this resolves fresh WITHOUT writing one — a plain install would drop a
+    # local bun.lock that silently pins CI while nothing pins developers.
+    - name: Install agent-cron dependencies
+      working-directory: infra/lambdas/agent-cron
+      run: bun install --frozen-lockfile
+
     - name: Run linter
       run: bun run lint
 
@@ -296,6 +305,7 @@ jobs:
           infra/agent-image/skills/psd-html-artifact/a11y-audit.test.js
           infra/agent-image/skills/psd-learning-page/run.test.js
           infra/agent-image/skills/psd-plaud/common.test.js
+          infra/agent-image/skills/psd-publish-file/publish.test.js
           infra/agent-image/skills/psd-plaud/run.test.js
           infra/agent-image/skills/psd-skills-meta/authority.test.js
           infra/agent-image/skills/psd-summarize/run.test.js
@@ -305,6 +315,17 @@ jobs:
           bun test "${test_file}"
           echo "::endgroup::"
         done
+      env:
+        CI: true
+
+    # agent-cron (Bun). Root jest ignores all of /infra/ except the triage-poll
+    # boundary tests, so this Lambda's suite had no runner at all — the same
+    # gap the psd-schedules and psd-atrium steps above were added to close.
+    # It covers the scheduled-run telemetry, including the contention-row
+    # settle path and the upsert that must RE-OPEN a settled row when the same
+    # fire_key later fails for real.
+    - name: Run agent-cron Lambda tests (Bun)
+      run: bun run test:lambda:cron
       env:
         CI: true
 

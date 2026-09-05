@@ -1,7 +1,7 @@
 ---
 name: psd-pdf-to-markdown
-summary: Convert a PDF (from a URL, workspace S3 key, or container path) into clean Markdown with tables preserved — text-only by default, or with the embedded images extracted to disk on request. No model download.
-description: Convert a PDF to clean Markdown with tables preserved. Images are dropped by default; pass --extract-images DIR to write them out as PNGs and keep their references, which is what you want when the images must survive into whatever you build next. Use when the user wants to turn a PDF into Markdown or extract a PDF's text/tables/figures for further processing. Input is a public URL, a workspace S3 key, or a container file path.
+summary: Convert a PDF (from a URL, workspace S3 key, or container path) into clean Markdown with tables preserved — text-only by default, embedded images extracted on request, and scanned/image-only PDFs rendered to page images you can read. No model download.
+description: Convert a PDF to clean Markdown with tables preserved. Images are dropped by default; pass --extract-images DIR to write them out as PNGs and keep their references, which is what you want when the images must survive into whatever you build next. Use when the user wants to turn a PDF into Markdown or extract a PDF's text/tables/figures for further processing. A scanned/image-only PDF has no text to extract: pass --rasterize-pages DIR to render the pages as PNGs and read them directly (no OCR engine needed). Input is a public URL, a workspace S3 key, or a container file path.
 allowed-tools: Bash(/opt/agentcore-venv/bin/python3:*)
 ---
 
@@ -44,6 +44,7 @@ Options:
 | `--out <path>` | Output `.md` path (default `/tmp/<stem>.md`) |
 | `--pages "0,5-10"` | Convert specific **0-based** pages only |
 | `--extract-images <dir>` | Write embedded images into `<dir>` as PNGs and **keep** their `![](abs/path)` references in the Markdown. The directory must be empty. Capped at 50 images. |
+| `--rasterize-pages <dir>` | Render whole **pages** into `<dir>` as PNGs (150 DPI). The answer for a scanned PDF — read the images. Empty directory, different from `--extract-images`. Capped at 30 pages. |
 
 ## Output
 
@@ -66,11 +67,41 @@ document whose image links point at nothing.
 Use `--extract-images` whenever the pictures matter downstream — a procedure's screenshots
 belong in the document you build, not summarized as "a screenshot of the control panel".
 
+## Scanned PDFs — read the pages, don't give up
+
+A scan is a photograph of paper: it has no text layer, so there is nothing to extract
+and Markdown conversion returns nothing. That is not a broken document and it is not a
+dead end.
+
+**There is no OCR engine in the agent runtime, and you do not need one — you can read
+images.** Render the pages and read them:
+
+```bash
+python3 /opt/psd-skills/psd-pdf-to-markdown/scripts/convert.py \
+  --path /tmp/scan.pdf --rasterize-pages /tmp/pdf-pages
+```
+
+The result carries `pages_rendered` (absolute PNG paths, one per page, 150 DPI) plus
+`text_layer: "none"`. **Read those images and answer the question from them.** Do not
+report that the PDF could not be processed — one caller was told exactly that about a
+scanned PDF, and the turn ended there with nothing delivered.
+
+`--rasterize-pages` also works alongside a normal conversion, when you want both the
+extracted text and a look at the actual page layout. It must be a different, empty
+directory from `--extract-images`.
+
+Bounded at 30 pages. For a longer scan, narrow it with `--pages` (e.g. `--pages 0-9`)
+and work through it in batches.
+
+**Why rendering beats `--extract-images` for a scan:** a scanned page's embedded raster
+may be tiled into strips, inverted, CMYK, or absent entirely. Rendering the page always
+produces exactly what a human would see.
+
 ## Notes & limits
 
-- **No OCR in v1.** A scanned / image-only PDF yields little or no text and returns
-  `empty_output`. (Amazon Textract is wired elsewhere in the platform and is the future
-  fallback for scanned documents.)
+- **No OCR engine.** See "Scanned PDFs" above — the working route is `--rasterize-pages`
+  plus your own reading, not an OCR pass. (Amazon Textract remains a possible future
+  addition for bulk, unattended extraction.)
 - Images are intentionally omitted — this produces pure Markdown text suitable for feeding
   to other tools or summarizing (e.g. pipe into `psd-summarize`).
 - Max input size is 100 MB.
@@ -84,4 +115,6 @@ belong in the document you build, not summarized as "a screenshot of the control
 - **`upstream_error`** — the URL fetch or brokered artifact download failed.
 - **`convert_error`** — the PDF could not be parsed (corrupt or unsupported).
 - **`too_large`** — the input exceeds 100 MB.
-- **`empty_output`** — no extractable text (likely a scanned PDF needing OCR).
+- **`scanned_pdf`** — no extractable text because the PDF is a scan. The message reports
+  how many pages carry text and gives the exact `--rasterize-pages` command to re-run.
+  This is a routing instruction, not a failure to relay: follow it.

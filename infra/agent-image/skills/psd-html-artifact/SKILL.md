@@ -1,17 +1,17 @@
 ---
 name: psd-html-artifact
-summary: Beautiful, anti-slop single-page HTML artifacts uploaded to S3 as a shareable link — specs, reports, dashboards, interactive editors, design explorations; optional PSD branding.
-description: Generate a beautiful, self-contained single-page HTML artifact (spec, report, code-review explainer, dashboard, interactive editor, or design exploration) and return a shareable HTTPS URL. Use when asked to make an HTML page/artifact/report, turn a spec or plan into readable HTML, or build an interactive HTML editor.
+summary: Beautiful, anti-slop single-page HTML artifacts published to Atrium as a shareable PSD intranet page — specs, reports, dashboards, interactive editors, design explorations; optional PSD branding.
+description: Generate a beautiful, self-contained single-page HTML artifact (spec, report, code-review explainer, dashboard, interactive editor, or design exploration), publish it into Atrium, and return the intranet reader URL. Use when asked to make an HTML page/artifact/report, turn a spec or plan into readable HTML, or build an interactive HTML editor.
 allowed-tools: Bash(node:*)
 ---
 
 # psd-html-artifact
 
 Produce a single, self-contained HTML file with impeccable taste, then deliver it as a
-shareable link. HTML beats Markdown for specs, reports, reviews, and explorations: it is
-denser, more readable, more shareable, and people actually read it. This skill makes HTML
-that does not look like a machine made it — and hands the user a URL they can open in any
-browser (Google Chat renders it as a link).
+published Atrium page. HTML beats Markdown for specs, reports, reviews, and
+explorations: it is denser, more readable, more shareable, and people actually read it.
+This skill makes HTML that does not look like a machine made it — and hands the user an
+intranet URL they can open in any browser (Google Chat renders it as a link).
 
 This is PSD's standard artifact format: when the user asks for a spec, plan, report,
 mockup, dashboard, or review writeup, default to an HTML artifact delivered by this skill
@@ -122,7 +122,7 @@ from the scaffold. Report a one-line pass summary, e.g.:
 **Accessibility is enforced, not advisory.** These pages are district web content, so
 they must meet **WCAG 2.2 Level AA** (the DOJ ADA Title II legal floor is 2.1 AA; 2.2 AA
 is a backward-compatible superset). `deliver.js` runs the shared **axe-core** gate
-automatically and **refuses to upload** any artifact with critical/serious violations.
+automatically and **refuses to publish** any artifact with critical/serious violations.
 Run it yourself before delivering and fix anything it flags:
 
 ```bash
@@ -136,17 +136,30 @@ is a property of this shared generator that every artifact-producing skill inher
 
 ### 8. Deliver and hand off
 
-Upload the finished file and get a shareable URL:
+Publish the finished file into Atrium and get its intranet reader URL:
 
 ```bash
-node /opt/psd-skills/psd-html-artifact/deliver.js --user <email> --file /tmp/<name>.html
+node /opt/psd-skills/psd-html-artifact/deliver.js --user <email> --file /tmp/<name>.html [--title "<title>"]
 ```
 
-Returns JSON: `{ "url": "...", "s3Key": "public-images/.../<uuid>.html", "bytes": N, "contentType": "text/html; charset=utf-8", "sharing": "public-by-link" }`.
+Returns JSON: `{ "url": "https://psd401.ai/c/<slug>", "artifactId": N, "slug": "...",
+"title": "...", "bytes": N, "destination": "atrium-intranet", "visibility": "internal",
+"sharing": "psd-internal" }`.
 
-The URL is uploaded to the workspace S3 bucket under the public `public-images/` prefix
-(same bucket policy and unguessable-UUID model as `psd-image-gen`) and is an unsigned,
-public-by-link HTTPS URL that does not expire — anyone who receives it can open the page.
+`--title` is optional — it defaults to the page's `<title>`.
+
+**HTML artifacts go to Atrium, never S3.** Atrium gives the page an owner, a visibility
+level, a publication record and an audit trail; the old S3 path gave it an unsigned URL
+that was public to anyone who ever received it. `.html` is no longer an accepted public
+artifact extension in the broker, so this is enforced, not just documented. Every other
+file type (`.png`, `.pdf`, `.csv`, …) still goes to S3 — see `psd-publish-file`.
+
+The command does both Atrium steps for you: `create-artifact --body-format html
+--visibility internal`, then `publish --destination intranet`. It never reports a URL for
+a draft that failed to publish, and it refuses outright if the widen to `internal` is
+pending admin approval (the page would be invisible to its audience). Both failures print
+the artifact id and the exact retry command — retry the publish step, do not re-run the
+whole skill, or you leave duplicate drafts behind.
 
 ## Required Reply Format
 
@@ -156,14 +169,15 @@ value on a line by itself**.
 - ✅ Correct:
   ```
   Here's the spec as a page:
-  https://psd-agents-dev-390844780692.s3.us-east-1.amazonaws.com/public-images/<email>/<uuid>.html
+  https://psd401.ai/c/quarterly-enrollment-review
   ```
 - ❌ Wrong: describing the artifact in prose without pasting the URL. The user cannot see
   the tool result — if the URL is not in your chat reply, the user got nothing.
-- ❌ Wrong: wrapping the URL in `[label](url)` or `**bold**` — Google Chat's renderer
-  corrupts these for long S3 URLs. Bare URL only.
-- ❌ Wrong: re-uploading or presigning the returned URL. It is already public-by-link with
-  HTTP 200; do not touch it.
+- ❌ Wrong: wrapping the URL in `[label](url)`, `**bold**`, or backticks. A trailing
+  backtick percent-encodes to `%60` and the page 404s — that has happened in production
+  twice. Bare URL on its own line, nothing around it.
+- ❌ Wrong: re-publishing the returned URL, or handing back the `/atrium/{id}/view` editor
+  link instead. `url` is the reader link; use it as-is.
 
 You may add one short sentence of context above the URL line, plus the one-line audit
 summary from step 7. The one real tradeoff worth noting once: HTML diffs are noisier than

@@ -1,0 +1,9 @@
+{
+  "name": "psd-publish-file",
+  "version": "1.0.0",
+  "description": "OpenClaw skill: publish a local file the agent produced to the workspace S3 public-images/ prefix and return an unsigned shareable URL",
+  "private": true,
+  "scripts": {
+    "test": "bun test"
+  }
+}
