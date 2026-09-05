@@ -1,0 +1,15 @@
+id: freshservice-create-catalog-item
+skill: psd-freshservice
+level: L1
+workspace: pure
+suite: regression
+prompt: "Add a new Service Catalog item to Freshservice named exactly \"Student Travel - Hotel Reservations\" under the Student Travel category. Create it — do not open a ticket instead."
+trials: 3
+fixtures:
+  - fixtures/create-catalog-item.json
+graders:
+  # It must look up the category id rather than inventing one.
+  - {"type":"broker_request","route":"/api/agent/credentials","method":"POST","body":{"operation":{"exact":"freshservice"},"path":{"exact":"/service_catalog/categories"},"method":{"exact":"GET"}}}
+  # And then actually create the item, at the create-verb path.
+  - {"type":"broker_request","route":"/api/agent/credentials","method":"POST","body":{"operation":{"exact":"freshservice"},"path":{"exact":"/service_catalog_items"},"method":{"exact":"POST"},"body.name":{"exact":"Student Travel - Hotel Reservations"},"body.category_id":{"numeric_equals":12}}}
+  - {"type":"output_match","pattern":"90210|77"}
