@@ -551,6 +551,51 @@ export async function settlePromotedTurnFailure(
   });
 }
 
+/**
+ * Settle the contention row a fire left behind once that same fire succeeds.
+ *
+ * Every schedule an owner has shares ONE workspace lock, so schedules on the
+ * same cadence contend by design: `schedule-fire.ts` records
+ * "Owner workspace is active for another schedule; retrying this fire" and the
+ * retry then works. One owner with three schedules all firing every 15 minutes
+ * produced ~192 of those warn rows a day, which buried the real failures they
+ * sit next to in the operator feed.
+ *
+ * The failure insert already upserts on `(source, fire_key)`, so there is at
+ * most one row per Scheduler occurrence: when that occurrence finally
+ * succeeds, this acknowledges exactly that row. Contention that never resolves
+ * writes a row that nothing settles, so it stays visible — which is the whole
+ * point of recording it.
+ *
+ * Deliberately NOT bounded by a time window, unlike settlePromotedTurnFailure:
+ * `fire_key` is a unique Scheduler occurrence identity, not a reused session
+ * id, so it cannot match an unrelated failure however long the retries took.
+ */
+export async function settleCronFireFailure(
+  config: RunTelemetryConfig,
+  rdsDataClient: RunTelemetryRdsClient,
+  params: { fireKey: string },
+): Promise<void> {
+  if (!config.databaseResourceArn || !config.databaseSecretArn) {
+    throw new Error('Cron failure telemetry database is not configured');
+  }
+  await rdsDataClient.execute({
+    resourceArn: config.databaseResourceArn,
+    secretArn: config.databaseSecretArn,
+    database: config.databaseName,
+    sql: `UPDATE agent_failures
+             SET acknowledged = TRUE,
+                 acknowledged_by = 'system:fire-succeeded',
+                 acknowledged_at = NOW(),
+                 context = COALESCE(context, '{}'::jsonb)
+                           || '{"settledByLaterSuccess":true}'::jsonb
+           WHERE source = 'cron'
+             AND fire_key = :fire_key
+             AND acknowledged = FALSE`,
+    parameters: [{ name: 'fire_key', value: { stringValue: params.fireKey } }],
+  });
+}
+
 type CronFailureRecorder = (
   params: CronFailureRecord,
   log: CronTelemetryLogger,
@@ -674,6 +719,34 @@ export function createRunTelemetry(
     recordCronFailure,
   );
 
+  /**
+   * Acknowledge this fire's own failure row now that the fire has succeeded.
+   *
+   * Best-effort: a settle that cannot run leaves a stale warn row, which is a
+   * noisy feed, not a broken run. It must never turn a successful scheduled
+   * turn into a reported failure.
+   */
+  async function settleSucceededFire(
+    params: ScheduledRunRecord,
+    log: CronTelemetryLogger,
+  ): Promise<void> {
+    if (!databaseConfigured) return;
+    if (params.status === 'error' || params.failure) return;
+    if (!params.fireKey) return;
+    try {
+      await settleCronFireFailure(config, rdsDataClient, {
+        fireKey: params.fireKey,
+      });
+    } catch (error) {
+      log.warn('Failed to settle the contention row for a succeeded fire', {
+        scheduleId: params.scheduleId,
+        error: sanitizeDiagnostic(
+          error instanceof Error ? error.message : String(error),
+        ),
+      });
+    }
+  }
+
   async function recordRun(
     params: ScheduledRunRecord,
     log: CronTelemetryLogger,
@@ -714,6 +787,7 @@ export function createRunTelemetry(
       }
     }
 
+    await settleSucceededFire(params, log);
   }
 
   async function recordRunStrict(
@@ -736,6 +810,9 @@ export function createRunTelemetry(
       );
     }
     await writeScheduledRun(config, rdsDataClient, params);
+    // Strict callers still get a best-effort settle: the run itself succeeded,
+    // and a stale contention row must not fail it.
+    await settleSucceededFire(params, log);
   }
 
   return {

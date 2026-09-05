@@ -32,6 +32,18 @@ const AUTHORITY_FIELDS = [
   "workspacePrefix",
 ] as const
 
+/**
+ * The only operations a `scheduled`-mode turn may reach.
+ *
+ * An allowlist, not a mutation denylist: a future write operation added to
+ * `executeScheduleOperation` is owner-only by default rather than silently
+ * inheriting scheduled access.
+ */
+const SCHEDULED_READ_OPERATIONS: ReadonlySet<unknown> = new Set([
+  "list",
+  "runs",
+])
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value)
 }
@@ -134,7 +146,20 @@ function scheduleErrorResponse(error: unknown, requestId: string): NextResponse 
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId()
   const invocation = await verifyAgentInvocationContext(request, {
-    allowedModes: ["owner"],
+    // A scheduled run may AUDIT its owner's schedules but never mutate them.
+    //
+    // Owner-only across the board meant every scheduled job that reviewed its
+    // own cadence got a flat 403: one owner's "Weekly Improvement Review" hit
+    // it every Friday for a month (08-14, 08-21, 08-28, 09-04), another once on
+    // 08-03. Nearly every sibling broker route already accepts both modes.
+    //
+    // The split, not a blanket widen: an autonomous job that can create or
+    // delete schedules is a real privilege escalation, so `create`, `update`
+    // and `delete` stay owner-only and are rejected below, AFTER the same
+    // token, request-proof and nonce verification. `reportModeMismatch: true`
+    // is what makes that ordering safe — it defers the mode decision until
+    // after the cryptographic checks (see invocation-context.ts).
+    allowedModes: ["owner", "scheduled"],
     reportModeMismatch: true,
   })
   if (!invocation) {
@@ -180,6 +205,26 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       { error: "Identity and destination fields are not accepted" },
       { status: 400 }
+    )
+  }
+
+  if (
+    invocation.mode !== "owner" &&
+    !SCHEDULED_READ_OPERATIONS.has(rawBody.operation)
+  ) {
+    log.warn("Rejected schedule mutation from a non-owner-mode turn", {
+      requestId,
+      mode: invocation.mode,
+    })
+    return NextResponse.json(
+      {
+        error:
+          "Creating, updating, or deleting a schedule requires a live " +
+          "owner-mode turn. A scheduled run may only list schedules and read " +
+          "their runs.",
+        mode: invocation.mode,
+      },
+      { status: 403 }
     )
   }
 
