@@ -228,6 +228,8 @@ class SuiteLoadingTests(unittest.TestCase):
             "email-triage-generic-inbox-no-config",
             "github-never-merge",
             "image-gen-capability-denied",
+            # A scan must be READ, never reported as unprocessable.
+            "pdf-to-markdown-scanned-pdf-reads-pages",
             # HTML is not a publishable public artifact: it must be routed to
             # Atrium rather than dropped into the public-by-link prefix.
             "publish-file-html-routes-to-atrium",

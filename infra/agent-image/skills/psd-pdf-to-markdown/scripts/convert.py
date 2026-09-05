@@ -62,6 +62,18 @@ MAX_PDF_BYTES = 100 * 1024 * 1024
 # embedded rasters; writing them all would fill the container's ephemeral disk
 # and hand the caller more images than any document should embed.
 MAX_EXTRACTED_IMAGES = 50
+# --rasterize-pages ceilings. A rendered page is a full-bleed PNG, much larger
+# than an embedded figure, so this cap is tighter than MAX_EXTRACTED_IMAGES and
+# the DPI is deliberately modest: the images exist to be READ by a multimodal
+# model, not printed. 150 DPI renders 8.5x11in at 1275x1650, which is legible
+# for ordinary document type and stays a few hundred KB per page.
+MAX_RASTERIZED_PAGES = 30
+RASTERIZE_DPI = 150
+# A page carrying fewer than this many extractable characters has no usable text
+# layer. Not zero: a scanned page routinely carries a stray ligature, a page
+# number stamped by the scanner, or an OCR watermark, and calling that "has
+# text" is what let a pure scan fall through to a bare `empty_output`.
+MIN_TEXT_CHARS_PER_PAGE = 12
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -266,6 +278,74 @@ def convert_to_markdown(pdf_path: Path, pages, image_dir: Path = None) -> str:
     return absolutize_image_references(markdown, image_dir)
 
 
+def diagnose_text_layer(pdf_path: Path, pages=None) -> dict:
+    """Report whether this PDF actually has a text layer, page by page.
+
+    `empty_output` on its own is a dead end: it says the conversion produced
+    nothing but not WHY, and a caller who was handed a scan has no way to tell
+    "this PDF is a photograph of paper" from "the converter is broken". One user
+    hit exactly that on a scanned, image-only PDF and the turn ended there.
+
+    Counting text characters and images per page separates the two cases
+    cheaply, and the numbers are what make the follow-up message specific
+    ("12 of 12 pages are images with no text layer") instead of a guess.
+    """
+    import pymupdf
+
+    total = 0
+    text_pages = 0
+    image_pages = 0
+    with pymupdf.open(str(pdf_path)) as document:
+        selected = pages if pages else range(document.page_count)
+        for index in selected:
+            if index < 0 or index >= document.page_count:
+                continue
+            total += 1
+            page = document[index]
+            if len(page.get_text().strip()) >= MIN_TEXT_CHARS_PER_PAGE:
+                text_pages += 1
+            if page.get_images(full=True):
+                image_pages += 1
+    return {
+        "pages": total,
+        "pages_with_text": text_pages,
+        "pages_with_images": image_pages,
+        # "Every page we looked at is a picture and none of them carry text."
+        "image_only": total > 0 and text_pages == 0 and image_pages == total,
+    }
+
+
+def rasterize_pages(pdf_path: Path, out_dir: Path, pages=None):
+    """Render pages to PNG so a multimodal reader can read a scan directly.
+
+    This is the OCR answer that needs no OCR engine. The agent image cannot
+    carry Tesseract (the AgentCore overlay-mount snapshotter will not take that
+    native stack — see infra/agent-image/Dockerfile), but the MODEL reading the
+    output is multimodal: handed page images, it can read a scanned memo
+    perfectly well. Rendering the page beats extracting its embedded images,
+    which for a scan may be tiled, inverted, CMYK, or absent entirely.
+
+    Returns (written, dropped_count). Bounded by MAX_RASTERIZED_PAGES so a
+    300-page scan cannot fill the container's ephemeral disk.
+    """
+    import pymupdf
+
+    written = []
+    dropped = 0
+    with pymupdf.open(str(pdf_path)) as document:
+        selected = list(pages) if pages else list(range(document.page_count))
+        for index in selected:
+            if index < 0 or index >= document.page_count:
+                continue
+            if len(written) >= MAX_RASTERIZED_PAGES:
+                dropped += 1
+                continue
+            target = out_dir / f"page-{index + 1:04d}.png"
+            document[index].get_pixmap(dpi=RASTERIZE_DPI).save(str(target))
+            written.append(target)
+    return written, dropped
+
+
 def absolutize_image_references(markdown: str, image_dir: Path) -> str:
     """Rewrite pymupdf4llm's image references to ABSOLUTE paths.
 
@@ -331,6 +411,74 @@ def drop_image_references(markdown: str, dropped) -> str:
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
+def _rerun_command_with_rasterize(args) -> str:
+    """The exact command that turns this dead end into a readable result."""
+    if args.url:
+        source = f'--url "{args.url}"'
+    elif args.s3_key:
+        source = f'--s3-key "{args.s3_key}" --user "{args.user}"'
+    else:
+        source = f'--path "{args.path}"'
+    return (
+        "python3 /opt/psd-skills/psd-pdf-to-markdown/scripts/convert.py "
+        f"{source} --rasterize-pages /tmp/pdf-pages"
+    )
+
+
+def _fail_no_text_layer(local, pages, raster_dir, rasterized, args):
+    """Explain an empty conversion, and say what to do about it.
+
+    The old behaviour was a bare `empty_output` reading "OCR is not enabled in
+    v1" — accurate, and a dead end: a user with a scanned PDF got nothing and
+    the turn stopped. There IS a route that works today, and it needs no OCR
+    engine: render the pages and let the multimodal model read them.
+    """
+    try:
+        diagnosis = diagnose_text_layer(local, pages)
+    except Exception:
+        # Diagnosis is a nicety; never let it replace the real failure.
+        diagnosis = {}
+
+    if rasterized:
+        # The caller already asked for page images, so this is not a failure at
+        # all — the document is readable, just as pictures rather than text.
+        _emit({
+            "status": "ok",
+            "text_layer": "none",
+            "markdown": "",
+            "chars": 0,
+            "pages_rendered": [str(p) for p in rasterized],
+            "page_image_dir": str(raster_dir),
+            **diagnosis,
+            "note": (
+                "This PDF is a scan: it has no text layer, so there is nothing "
+                "to convert to Markdown. The pages were rendered as images "
+                "instead — READ THEM to answer the question. Do not report "
+                "that the document could not be processed."
+            ),
+        })
+        sys.exit(0)
+
+    detail = ""
+    if diagnosis.get("image_only"):
+        detail = (
+            f"All {diagnosis['pages']} page(s) are images with no text layer — "
+            "this is a scan or a photograph of paper, not a text PDF. "
+        )
+    elif diagnosis.get("pages"):
+        detail = (
+            f"{diagnosis['pages_with_text']} of {diagnosis['pages']} page(s) "
+            "carry any extractable text. "
+        )
+    _fail(
+        detail
+        + "There is no OCR engine in the agent runtime, but you do not need "
+        "one: render the pages and read them yourself. Re-run with "
+        f"--rasterize-pages, e.g. {_rerun_command_with_rasterize(args)}",
+        "scanned_pdf",
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Convert a PDF to clean Markdown (tables preserved).")
     src = parser.add_mutually_exclusive_group(required=True)
@@ -344,6 +492,15 @@ def main():
         "--extract-images",
         dest="extract_images",
         help="Directory to write embedded images into; their ![](path) references are KEPT in the Markdown",
+    )
+    parser.add_argument(
+        "--rasterize-pages",
+        dest="rasterize_pages",
+        help=(
+            "Directory to render whole PAGES into as PNGs. Use for a scanned / "
+            "image-only PDF: there is no text to extract, so read the page "
+            "images instead"
+        ),
     )
     args = parser.parse_args()
 
@@ -367,6 +524,31 @@ def main():
             # A non-empty target would make collect_extracted_images report
             # pre-existing files as though this PDF produced them.
             _fail("--extract-images directory must be empty", "bad_args")
+
+    raster_dir = None
+    if args.rasterize_pages:
+        raster_dir = Path(args.rasterize_pages).expanduser()
+        try:
+            raster_dir.mkdir(parents=True, exist_ok=True)
+            raster_dir = raster_dir.resolve()
+        except OSError as exc:
+            _fail(f"--rasterize-pages directory is not usable: {exc}", "bad_args")
+        # Compare RESOLVED paths, and only after both exist. Comparing the raw
+        # arguments silently passes whenever the two spellings differ but the
+        # directory is the same — on macOS `/var/x` and `/private/var/x` are one
+        # directory, and the un-resolved check let that through, producing a
+        # result that listed each rendered page twice, once as a page render and
+        # once as an "embedded image" it never was.
+        if image_dir is not None and raster_dir == image_dir:
+            _fail(
+                "--rasterize-pages and --extract-images must be different "
+                "directories (both resolved to "
+                f"{raster_dir}); page renders and embedded figures would be "
+                "reported as each other.",
+                "bad_args",
+            )
+        if any(raster_dir.iterdir()):
+            _fail("--rasterize-pages directory must be empty", "bad_args")
 
     with tempfile.TemporaryDirectory() as tmp:
         # Resolve the input PDF to a local path.
@@ -406,8 +588,19 @@ def main():
         except Exception as exc:
             _fail(f"conversion failed: {exc}", "convert_error")
 
-    if not markdown.strip():
-        _fail("conversion produced no text (scanned/image-only PDF? OCR is not enabled in v1)", "empty_output")
+        # Both of these read the PDF, so they must run before the temporary
+        # directory holding a --url / --s3-key download is torn down.
+        rasterized, rasterized_dropped = ([], 0)
+        if raster_dir is not None:
+            try:
+                rasterized, rasterized_dropped = rasterize_pages(
+                    local, raster_dir, pages
+                )
+            except Exception as exc:
+                _fail(f"page rasterization failed: {exc}", "convert_error")
+
+        if not markdown.strip():
+            _fail_no_text_layer(local, pages, raster_dir, rasterized, args)
 
     kept, dropped = ([], [])
     if image_dir is not None:
@@ -430,6 +623,16 @@ def main():
         "output_path": str(out_path),
         "chars": len(markdown),
     }
+    if raster_dir is not None:
+        result["pages_rendered"] = [str(p) for p in rasterized]
+        result["page_image_dir"] = str(raster_dir)
+        if rasterized_dropped:
+            result["pages_rendered_dropped"] = rasterized_dropped
+            result["page_render_note"] = (
+                f"{rasterized_dropped} page(s) beyond the "
+                f"{MAX_RASTERIZED_PAGES}-page cap were not rendered. Re-run "
+                "with --pages to select the range you need."
+            )
     if image_dir is not None:
         result["images"] = [str(p) for p in kept]
         result["image_dir"] = str(image_dir)
