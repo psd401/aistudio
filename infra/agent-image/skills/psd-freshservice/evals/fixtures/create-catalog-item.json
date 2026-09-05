@@ -1,0 +1,52 @@
+[
+  {
+    "route": "/api/agent/credentials",
+    "method": "POST",
+    "request_body": {
+      "operation": "freshservice",
+      "path": "/service_catalog/categories",
+      "method": "GET"
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "ok": true,
+        "status": 200,
+        "data": {
+          "service_categories": [
+            { "id": 12, "name": "Student Travel", "description": "Trips and transportation" },
+            { "id": 13, "name": "Facilities", "description": "Buildings and grounds" }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "route": "/api/agent/credentials",
+    "method": "POST",
+    "request_body": {
+      "operation": "freshservice",
+      "path": "/service_catalog_items",
+      "method": "POST",
+      "body": {
+        "name": "Student Travel - Hotel Reservations",
+        "category_id": 12
+      }
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "ok": true,
+        "status": 201,
+        "data": {
+          "service_item": {
+            "id": 90210,
+            "display_id": 77,
+            "name": "Student Travel - Hotel Reservations",
+            "category_id": 12
+          }
+        }
+      }
+    }
+  }
+]

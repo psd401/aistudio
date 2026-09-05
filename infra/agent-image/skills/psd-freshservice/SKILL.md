@@ -1,7 +1,7 @@
 ---
 name: psd-freshservice
-summary: Manage Freshservice tickets, approvals, and team summaries — uses each caller's own personal API key, stored per-user in Secrets Manager.
-description: Manage PSD Freshservice tickets — list/search/create/update, notes, approvals, and Technology-workspace summaries. Use for helpdesk/IT tickets, approvals, or ticket lookups.
+summary: Manage Freshservice tickets, service catalog items, approvals, and team summaries — uses each caller's own personal API key, stored per-user in Secrets Manager.
+description: Manage PSD Freshservice — list/search/create/update tickets, add notes, read approvals, browse and CREATE Service Catalog items (request forms), and Technology-workspace summaries. Use for helpdesk/IT tickets, approvals, ticket lookups, or adding a new service request form to the catalog.
 allowed-tools: Bash(node:*)
 ---
 
@@ -103,6 +103,50 @@ have. A 403 from them is normal and says nothing about the caller's key — do
 not run them to check whether a key works. There is no endpoint that every
 valid key can reach, so a newly stored key needs no verification step at all:
 run the command the user actually asked for and let it report.
+
+## Service Catalog
+
+A **ticket** is a request. A **catalog item** is the form people fill in to
+make that request. When someone asks you to "add X to the service catalog",
+"create a request form", or "set up a new service request type", they want a
+catalog item — offering a ticket instead does not do it.
+
+```bash
+# Browse categories (a catalog item must belong to one)
+node list_catalog_categories.js --user <email>
+
+# Look before you build: does this item already exist?
+node list_catalog_categories.js --user <email> --search "hotel"
+node list_catalog_categories.js --user <email> --category-id <id>
+
+# Create the item
+node create_catalog_item.js --user <email> \
+  --data '{"name":"Student Travel — Hotel Reservations","category_id":12,"short_description":"Request a hotel booking for approved student travel","description":"<p>Use this form for overnight student travel.</p>","delivery_time":5}'
+```
+
+**Always search first.** Catalog duplicates are worse than missing items:
+people pick the wrong one and requests land in the wrong queue.
+
+**Custom fields.** Most real catalog items exist for their custom required
+fields (trip dates, building, number of rooms, funding code). Pass them as
+`custom_fields`, and confirm the exact field set with the user before creating
+— editing them afterwards is a Freshservice UI job.
+
+**Two things this cannot do**, so say them plainly rather than failing quietly:
+
+- **No icon and no attachments.** Freshservice takes those as multipart upload;
+  the owner-bound broker sends JSON only, deliberately, so no file bytes from
+  the agent runtime are ever signed with someone's credential. Create the
+  fields here, add an icon in the UI.
+- **No editing or deleting.** Only create and read are wired. To change an
+  existing item, hand the user its id and the Freshservice link.
+
+**A 403 here means catalog-admin, not a bad key.** This skill acts as the
+caller, so creating catalog items requires *their* Freshservice role to include
+catalog administration — most agents' does not. The command says so explicitly
+and reports `catalog_admin_required`. Do not tell the user their key is
+invalid, and do not ask them to re-issue it: relay that they need catalog-admin
+granted, or that an admin has to create the item.
 
 ## Approvals
 

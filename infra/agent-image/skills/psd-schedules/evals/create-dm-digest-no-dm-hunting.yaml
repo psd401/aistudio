@@ -1,0 +1,28 @@
+id: schedules-create-dm-digest-no-dm-hunting
+skill: psd-schedules
+level: L1
+workspace: pure
+suite: regression
+# The behavioural half of the authoring rule. authoring-rules.test.js only
+# proves the SENTENCE is still in SKILL.md; it cannot prove a model asked to
+# build a "DM me daily" schedule actually complies. This does: it grades the
+# `prompt` field the model writes into the create call.
+#
+# The real failure it guards (rushj, prod, 2026-08-28..09-04): the authored
+# prompt told the scheduled run to find the owner's DM space with
+# `chat spaces.findDirectMessage` / `chat spaces list` and deliver with
+# `chat +send`. Six days of failures for a digest the reply path was already
+# delivering — cron posts every scheduled reply to schedule.dmSpaceName.
+prompt: "Set up a schedule that sends me a digest of my unread email every weekday at 8am Pacific, delivered to me as a Google Chat DM."
+trials: 3
+fixtures:
+  - fixtures/create-dm-digest.json
+graders:
+  # It must actually create the schedule.
+  - {"type":"broker_request","route":"/api/agent/schedules","method":"POST","body":{"operation":{"exact":"create"}}}
+  # The authored prompt must NOT tell the run to go hunting for the owner's DM
+  # space. Both matchers must hold for this to trip, so it fires only on a
+  # create whose prompt carries one of these calls.
+  - {"type":"no_route_called","route":"/api/agent/schedules","method":"POST","body":{"operation":{"exact":"create"},"prompt":{"matches_any":["(?i)findDirectMessage","(?i)chat\\s+spaces\\s+list","(?i)spaces\\.setup","(?i)chat\\s+\\+send"]}}}
+  # And it should tell the user how delivery actually happens.
+  - {"type":"output_match","pattern":"(?i)(repl(y|ies)|DM|direct message)"}

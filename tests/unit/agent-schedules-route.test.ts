@@ -1,5 +1,9 @@
 let context:
-  | { actorEmail: string; ownerEmail: string; mode: "owner" | "scheduled" }
+  | {
+      actorEmail: string
+      ownerEmail: string
+      mode: "owner" | "scheduled" | "consultation" | "email-task"
+    }
   | null = {
   actorEmail: "owner@psd401.net",
   ownerEmail: "owner@psd401.net",
@@ -10,11 +14,13 @@ const listMock = jest.fn()
 const createMock = jest.fn()
 const updateMock = jest.fn()
 const deleteMock = jest.fn()
+const runsMock = jest.fn()
 const serviceFactoryMock = jest.fn(() => ({
   list: listMock,
   create: createMock,
   update: updateMock,
   delete: deleteMock,
+  runs: runsMock,
 }))
 
 jest.mock("@/lib/agent-workspace/invocation-context", () => ({
@@ -88,6 +94,7 @@ beforeEach(() => {
   createMock.mockReset().mockResolvedValue({ scheduleId: "schedule-1" })
   updateMock.mockReset().mockResolvedValue({ scheduleId: "schedule-1" })
   deleteMock.mockReset().mockResolvedValue("schedule-1")
+  runsMock.mockReset().mockResolvedValue([])
 })
 
 describe("POST /api/agent/schedules", () => {
@@ -100,8 +107,8 @@ describe("POST /api/agent/schedules", () => {
     expect(serviceFactoryMock).not.toHaveBeenCalled()
   })
 
-  it.each(["create", "list", "update", "delete"])(
-    "names the schedule management gate for verified non-owner %s requests",
+  it.each(["create", "update", "delete"])(
+    "refuses %s from a scheduled run without weakening the crypto ordering",
     async (operation) => {
       context = {
         actorEmail: "owner@psd401.net",
@@ -112,13 +119,66 @@ describe("POST /api/agent/schedules", () => {
 
       expect(response.status).toBe(403)
       await expect(response.json()).resolves.toEqual({
-        error: "Schedule management requires a live owner-mode turn",
-        reason: "mode_not_allowed",
+        error:
+          "Creating, updating, or deleting a schedule requires a live " +
+          "owner-mode turn. A scheduled run may only list schedules and read " +
+          "their runs.",
         mode: "scheduled",
       })
       expect(serviceFactoryMock).not.toHaveBeenCalled()
     }
   )
+
+  it.each(["list", "runs"])(
+    "lets a scheduled run audit its own schedules via %s",
+    async (operation) => {
+      context = {
+        actorEmail: "owner@psd401.net",
+        ownerEmail: "owner@psd401.net",
+        mode: "scheduled",
+      }
+      const response = await POST(request({ operation }))
+
+      expect(response.status).toBe(200)
+      expect(serviceFactoryMock).toHaveBeenCalled()
+    }
+  )
+
+  it.each(["consultation", "email-task"])(
+    "still reports a plain mode mismatch for %s",
+    async (mode) => {
+      context = {
+        actorEmail: "owner@psd401.net",
+        ownerEmail: "owner@psd401.net",
+        mode: mode as "consultation" | "email-task",
+      }
+      const response = await POST(request({ operation: "list" }))
+
+      expect(response.status).toBe(403)
+      await expect(response.json()).resolves.toEqual({
+        error: "Schedule management requires a live owner-mode turn",
+        reason: "mode_not_allowed",
+        mode,
+      })
+      expect(serviceFactoryMock).not.toHaveBeenCalled()
+    }
+  )
+
+  it("rejects a scheduled mutation before any authority selector is read", async () => {
+    context = {
+      actorEmail: "owner@psd401.net",
+      ownerEmail: "owner@psd401.net",
+      mode: "scheduled",
+    }
+    // The authority-selector guard runs first and is unchanged: a scheduled
+    // turn cannot use a rejected mutation to probe for it either way.
+    const response = await POST(
+      request({ operation: "delete", ownerEmail: "victim@psd401.net" })
+    )
+
+    expect(response.status).toBe(400)
+    expect(deleteMock).not.toHaveBeenCalled()
+  })
 
   it.each([
     "ownerEmail",

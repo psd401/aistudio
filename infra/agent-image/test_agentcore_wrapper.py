@@ -639,6 +639,79 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_an_oversized_file_is_named_in_the_terminal_message(self):
+        async def invocation():
+            yield {"result": "model said done"}
+
+        serialized = agentcore_wrapper._serialize_invocations(invocation)
+
+        async def failing_finalize(_drain):
+            agentcore_wrapper._last_workspace_finalization_detail = (
+                "workspace push incomplete (1 file error(s)) for prefix p: "
+                "agents/main/agent/openclaw-agent.sqlite: 600000000 bytes "
+                "exceeds the 536870912-byte workspace upload limit"
+            )
+            return False
+
+        self.addCleanup(
+            setattr,
+            agentcore_wrapper,
+            "_last_workspace_finalization_detail",
+            None,
+        )
+        with mock.patch.object(
+            agentcore_wrapper,
+            "_finalize_invocation_authority",
+            new=failing_finalize,
+        ):
+            events = [event async for event in serialized()]
+
+        result = events[0]["result"]
+        self.assertIn("openclaw-agent.sqlite", result)
+        self.assertIn("600000000 bytes", result)
+        # The old text told the user to retry, which can never help here.
+        self.assertNotIn("retry after the agent service is repaired", result)
+        self.assertIn(
+            "openclaw-agent.sqlite",
+            events[0]["metadata"]["workspace_finalization_detail"],
+        )
+
+    async def test_a_generic_finalization_failure_keeps_the_retry_wording(self):
+        async def invocation():
+            yield {"result": "model said done"}
+
+        serialized = agentcore_wrapper._serialize_invocations(invocation)
+        agentcore_wrapper._last_workspace_finalization_detail = None
+        with mock.patch.object(
+            agentcore_wrapper,
+            "_finalize_invocation_authority",
+            new=mock.AsyncMock(return_value=False),
+        ):
+            events = [event async for event in serialized()]
+
+        self.assertIn(
+            "retry after the agent service is repaired", events[0]["result"]
+        )
+        self.assertNotIn(
+            "workspace_finalization_detail", events[0]["metadata"]
+        )
+
+    def test_only_a_push_incomplete_error_is_shown_to_the_user(self):
+        import workspace_sync
+
+        self.assertEqual(
+            agentcore_wrapper._describe_workspace_push_failure(
+                workspace_sync.WorkspacePushIncomplete("big.bin: too large")
+            ),
+            "big.bin: too large",
+        )
+        # Any other class may carry arbitrary text; keep the generic message.
+        self.assertIsNone(
+            agentcore_wrapper._describe_workspace_push_failure(
+                RuntimeError("s3://bucket?X-Amz-Signature=deadbeef")
+            )
+        )
+
     async def test_gateway_quiescence_failure_suppresses_workspace_snapshot(self):
         with mock.patch.multiple(
             agentcore_wrapper,
@@ -919,7 +992,17 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
                     await anext(stream)
 
             shutdown.assert_called_once_with()
-            prepare.assert_called_once_with()
+            # The snapshot now shares ONE budget with the push that follows
+            # it: it can VACUUM a large SQLite file, and a deadline computed
+            # after it returns would not actually bound the turn. Assert the
+            # deadline is passed, and that the push is held to the same one.
+            prepare.assert_called_once()
+            (prepare_deadline,) = prepare.call_args.args
+            self.assertIsInstance(prepare_deadline, float)
+            self.assertEqual(
+                prepare_deadline,
+                push.call_args.kwargs["deadline_monotonic"],
+            )
             self.assertEqual(push.call_args.args, ("owner-prefix",))
             self.assertGreater(
                 push.call_args.kwargs["deadline_monotonic"],
@@ -1150,7 +1233,7 @@ class TestShutdownFinalization(unittest.TestCase):
         ), mock.patch.object(
             agentcore_wrapper.workspace_sync,
             "prepare_sqlite_snapshot",
-            side_effect=lambda: events.append("prepare"),
+            side_effect=lambda deadline: events.append("prepare"),
         ), mock.patch.object(
             agentcore_wrapper.workspace_sync,
             "workspace_generation",
@@ -1234,7 +1317,7 @@ class TestShutdownFinalization(unittest.TestCase):
         ), mock.patch.object(
             agentcore_wrapper.workspace_sync,
             "prepare_sqlite_snapshot",
-            side_effect=lambda: events.append("prepare"),
+            side_effect=lambda deadline: events.append("prepare"),
         ), mock.patch.object(
             agentcore_wrapper.workspace_sync,
             "workspace_generation",

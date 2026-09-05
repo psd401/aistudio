@@ -1,0 +1,53 @@
+[
+  {
+    "route": "/api/agent/credentials",
+    "method": "POST",
+    "request_body": {
+      "operation": "freshservice",
+      "path": "/service_catalog/categories",
+      "method": "GET"
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "ok": true,
+        "status": 200,
+        "data": {
+          "service_categories": [
+            { "id": 12, "name": "Student Travel", "description": "Trips and transportation" }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "route": "/api/agent/credentials",
+    "method": "POST",
+    "request_body": {
+      "operation": "freshservice",
+      "path": "/service_catalog_items",
+      "method": "POST",
+      "body": {
+        "name": "Student Travel - Hotel Reservations",
+        "category_id": 12
+      }
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "ok": false,
+        "status": 403,
+        "data": {
+          "description": "Access denied. You are not authorized to perform this action.",
+          "errors": [
+            {
+              "field": "requester",
+              "message": "Requester does not have permission to manage service catalog items",
+              "code": "access_denied"
+            }
+          ]
+        }
+      }
+    }
+  }
+]

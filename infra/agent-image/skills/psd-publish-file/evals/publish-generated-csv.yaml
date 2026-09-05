@@ -1,0 +1,13 @@
+id: publish-file-generated-csv
+skill: psd-publish-file
+level: L0
+workspace: mutating
+suite: regression
+prompt: "Write a small CSV to /tmp/eval-publish-file.csv with a header row and two data rows, then give me a shareable link to it. Paste the link in your reply."
+trials: 3
+graders:
+  # The whole point of the skill: a real, bare, fetchable URL lands in the
+  # reply. A description of the file without a link is the failure it fixes.
+  - {"type":"output_match","pattern":"https://[^\\s`)\\]]+\\.csv"}
+  # And the URL must not be wrapped — a trailing backtick becomes %60 and 404s.
+  - {"type":"output_match","pattern":"(?m)^\\s*https://\\S+\\.csv\\s*$"}

@@ -51,7 +51,17 @@ export interface WorkspaceMediaHandoff {
   contentType?: string
 }
 
-export type WorkspaceCommandRejectionReason = "operation_not_allowed"
+/**
+ * Machine-readable rejection reasons the skill layer branches on.
+ *
+ * `drive_upload_use_publish` is distinct from `operation_not_allowed` on
+ * purpose: it is not "you may not do this", it is "this can never work; here
+ * is the thing that does". Collapsing it into the generic reason would put it
+ * back in the bucket the agent already knows to give up on.
+ */
+export type WorkspaceCommandRejectionReason =
+  | "operation_not_allowed"
+  | "drive_upload_use_publish"
 
 export class WorkspaceCommandValidationError extends Error {
   constructor(
@@ -168,11 +178,12 @@ const ALLOWED_WRITES = new Set([
   // operation_not_allowed while its canonical twin was allowed, so the
   // capability existed and only the documented spelling of it did not
   // (agent_failures 5979, 7728). `sheets +append` is
-  // `sheets spreadsheets values append`; `drive +upload` is a
-  // `drive files create` carrying media, and is held to the same agent-only
-  // boundary below so it cannot author a file owned by the user.
+  // `sheets spreadsheets values append`.
+  //
+  // `drive +upload` was allowlisted here alongside it and is NOT reachable —
+  // see refuseDriveUploadWithPublishGuidance below for why, and for the
+  // refusal that now points at the path that does work.
   "sheets +append",
-  "drive +upload",
   // `tasks tasks insert` was allowed but creating the LIST to put tasks in was
   // not, so a request for one list per person failed on all five calls
   // (agent_failures 7134). Same resource family, same slot rules.
@@ -245,11 +256,8 @@ const AGENT_ONLY_WRITES = new Set([
   "drive comments create",
   "drive files copy",
   "drive files create",
-  // The helper form of `drive files create` with media attached. It authors
-  // file CONTENT, so it sits on the same side of the impersonation boundary as
-  // the canonical create: on the user slot the file would be owned by the
-  // user, which is the thing that boundary exists to prevent.
-  "drive +upload",
+  // `drive +upload` was here too, and is removed with its ALLOWED_WRITES twin:
+  // it could never execute either way. See refuseDriveUploadWithPublishGuidance.
   "drive permissions create",
   "drive accessproposals resolve",
   // A Form is authored content in exactly the sense a Doc, Sheet or Slides deck
@@ -680,6 +688,45 @@ function carriesDriveContent(argv: readonly string[]): boolean {
   return false
 }
 
+/**
+ * Refuse `drive +upload` with the instruction that actually works.
+ *
+ * The operation was allowlisted (in both ALLOWED_WRITES and AGENT_ONLY_WRITES)
+ * and could never run, for two independent reasons:
+ *
+ *  1. `operationTokens()` folds LEADING POSITIONAL tokens into the operation
+ *     string, so `drive +upload /home/node/report.pdf` produces the operation
+ *     `drive +upload /home/node/report.pdf`, which never equals the allowlist
+ *     entry `drive +upload`. Only the flag spelling (`drive +upload --upload
+ *     <path>`) stopped at a `-` and matched — which is exactly why the existing
+ *     allowlist-gap test never caught this: it asserts on the flag form.
+ *  2. Past validation it still could not work. `gws` runs in a fresh empty
+ *     `mkdtemp` on the WEB tier, so a container path simply does not exist
+ *     there. There is a download hand-off (`handOffDownloadedMedia`) but no
+ *     upload counterpart, and `--json-file`/`--body-file`/`--text-file` inline
+ *     their target with `readFileSync(path, 'utf8')` — text only, never binary.
+ *
+ * A user who asked for "a link to this PDF" therefore dead-ended on a bare
+ * `operation_not_allowed` that named an operation the allowlist appeared to
+ * contain. Removing the entries alone would keep that dead end; this replaces
+ * it with the route that does exist.
+ */
+function refuseDriveUploadWithPublishGuidance(argv: readonly string[]): void {
+  const tokens = operationTokens(argv)
+  if (tokens[0] !== "drive" || tokens[1] !== "+upload") return
+  throw new WorkspaceCommandValidationError(
+    "`drive +upload` cannot move a container file into Drive: the Workspace " +
+      "CLI runs in an empty temporary directory on the web tier, so a local " +
+      "path does not exist there. To hand someone a link to a file you " +
+      "generated, publish it instead: " +
+      "`node /opt/psd-skills/psd-publish-file/publish.js --file <path>`, " +
+      "which returns a shareable HTTPS URL. For an HTML page, use " +
+      "psd-html-artifact, which publishes to Atrium.",
+    "drive_upload_use_publish",
+    "drive +upload"
+  )
+}
+
 function validateUserDriveFolderCreate(argv: readonly string[]): void {
   const resource = jsonResource(argv)
   const mimeType =
@@ -984,7 +1031,7 @@ const DOWNLOAD_CONTENT_TYPES: Record<string, string> = {
 /**
  * Cap on a rescued download.
  *
- * Deliberately tighter than storage-broker's MAX_PRIVATE_UPLOAD_BYTES (256 MB),
+ * Deliberately tighter than storage-broker's MAX_PRIVATE_UPLOAD_BYTES (512 MB),
  * which bounds what an agent may deliberately upload. This bounds a file the
  * agent did NOT choose the size of — whatever a caller happened to attach in
  * Drive — and the whole thing is buffered in the web tier's memory on its way
@@ -1088,6 +1135,7 @@ function validateWorkspaceMutation(
     }
     return
   }
+  refuseDriveUploadWithPublishGuidance(argv)
   if (scope === "user" && operation === "drive files create") {
     validateUserDriveFolderCreate(argv)
     return

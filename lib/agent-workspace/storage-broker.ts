@@ -60,7 +60,27 @@ export { validateWorkspaceRelativePath } from "@/lib/agent-workspace/path-policy
 const log = createLogger({ module: "workspace-storage-broker" })
 
 const MAX_LIST_KEYS = 1_000
-export const MAX_PRIVATE_UPLOAD_BYTES = 256 * 1024 * 1024
+// 512 MiB, raised from 256 MiB on 2026-09-05.
+//
+// This is an APPLICATION constant, not an S3 one — a single PUT accepts 5 GB.
+// The 256 MiB value became a hard outage: OpenClaw's own transcript database
+// (`agents/<id>/agent/openclaw-agent.sqlite`) grows monotonically every turn
+// and nothing pruned it, so the first owner to cross the line could never save
+// a workspace again — every subsequent turn and every scheduled fire failed at
+// finalization (prod, one owner hard-down from 2026-09-05 05:49 UTC at
+// 268,390,400 of 268,435,456 bytes, with two more owners within 30 % of it).
+//
+// Raising the ceiling is the unblock. It is not the fix: the agent image now
+// prunes closed-session `trajectory_runtime_events` rows at finalization
+// (infra/agent-image/workspace_sync.py), which is what keeps the file from
+// walking into the new ceiling as well. Both are required — the prune cannot
+// run until the workspace can be written again.
+//
+// Keep in sync with BROKER_PRIVATE_UPLOAD_MAX_BYTES in
+// infra/agent-image/workspace_sync.py, which detects an over-cap file
+// client-side so the agent reports the offending path instead of building a
+// batch the broker can never accept.
+export const MAX_PRIVATE_UPLOAD_BYTES = 512 * 1024 * 1024
 export const MAX_PUBLIC_ARTIFACT_BYTES = 100 * 1024 * 1024
 const MAX_PRIVATE_RETAINED_BYTES = 4 * 1024 * 1024 * 1024
 const MAX_PUBLIC_RETAINED_BYTES = 1024 * 1024 * 1024
@@ -143,9 +163,20 @@ export function workspaceReservationCountsAsRetained(
   )
 }
 const SAFE_PUBLIC_ARTIFACT_NAME = /^[A-Za-z0-9._@+= -]+$/
+// `.html` is deliberately ABSENT.
+//
+// HTML artifacts go to Atrium, never S3. `public-images/` is unsigned and
+// public-by-link, so an HTML page delivered there is a district document
+// readable by anyone who ever receives the URL, with no owner, no visibility
+// level and no publication record. psd-html-artifact was the last skill still
+// doing that; it now publishes through psd-atrium (create-artifact --body-format
+// html, then publish --destination intranet). Removing the extension and its
+// content type here is what makes that a rule the broker enforces rather than a
+// convention a skill can drift away from.
+//
+// Every other file type still goes to S3 — see the psd-publish-file skill.
 const PUBLIC_EXTENSIONS = new Set([
   ".csv",
-  ".html",
   ".jpeg",
   ".jpg",
   ".json",
@@ -160,7 +191,7 @@ const PUBLIC_EXTENSIONS = new Set([
 ])
 const PUBLIC_CONTENT_TYPES = new Map<string, ReadonlySet<string>>([
   [".csv", new Set(["text/csv"])],
-  [".html", new Set(["text/html"])],
+  // No ".html" — see PUBLIC_EXTENSIONS above.
   [".jpeg", new Set(["image/jpeg"])],
   [".jpg", new Set(["image/jpeg"])],
   [".json", new Set(["application/json"])],
@@ -4726,6 +4757,72 @@ export async function completeWorkspaceUpload(
     }
     throw error
   }
+}
+
+/** Most reservations one abort may release — the agent's push batch cap. */
+const MAX_RELEASED_UPLOAD_RESERVATIONS = 250
+
+/**
+ * Abandon `reserved` uploads whose batch will never be finalized.
+ *
+ * A workspace finalization is a batch: the agent reserves and stages every
+ * changed file, then commits them together. When ONE file in that batch is
+ * refused — an oversized object, a checksum mismatch, a signing failure — the
+ * agent aborts, but its siblings' rows stay `reserved` for the full five-minute
+ * lease. Inside that window the partial unique index
+ * `uq_workspace_upload_target_active (owner_key, target_key)
+ *  WHERE status IN ('reserved','verifying')` rejects the retry's reservation
+ * for the very same path, so the natural "just run the turn again" recovery
+ * fails in ~30 ms with a bare `Failed query` and the owner has to wait out the
+ * TTL. Releasing the batch on abort removes that dead window.
+ *
+ * Scoped by `ownerKey` and to `reserved` only, so this can never touch another
+ * owner's rows, a committed upload, or one already being verified. Unknown or
+ * already-settled ids are silently skipped: an abort path must be idempotent
+ * and must not itself fail.
+ */
+export async function releaseWorkspaceUploads(
+  ownerEmail: string,
+  reservationIds: readonly string[],
+): Promise<{ released: number }> {
+  if (reservationIds.length === 0) return { released: 0 }
+  if (reservationIds.length > MAX_RELEASED_UPLOAD_RESERVATIONS) {
+    throw new Error("Invalid upload reservation release batch")
+  }
+  for (const reservationId of reservationIds) {
+    if (!WORKSPACE_RESERVATION_ID_RE.test(reservationId)) {
+      throw new Error("Invalid upload reservation")
+    }
+  }
+  const ownerKey = ownerEmail.trim().toLowerCase()
+  const released = await executeQuery(
+    (db) =>
+      db
+        .update(workspaceUploadReservations)
+        .set({ status: "expired", updatedAt: new Date() })
+        .where(
+          and(
+            eq(workspaceUploadReservations.ownerKey, ownerKey),
+            eq(workspaceUploadReservations.status, "reserved"),
+            inArray(workspaceUploadReservations.id, [...reservationIds]),
+          ),
+        )
+        .returning({
+          byteLeaseId: workspaceUploadReservations.byteLeaseId,
+          objectLeaseId: workspaceUploadReservations.objectLeaseId,
+        }),
+    "releaseWorkspaceUploadReservations",
+  )
+  // The reservation rows are already out of the active index above; giving the
+  // admission leases back is best-effort capacity hygiene on top of that, so a
+  // lease-store hiccup must not turn an abort into a second failure.
+  await Promise.allSettled(
+    released.flatMap((row) => [
+      dropLease(row.byteLeaseId),
+      dropLease(row.objectLeaseId),
+    ]),
+  )
+  return { released: released.length }
 }
 
 export async function createPublicArtifactDownloadUrl(

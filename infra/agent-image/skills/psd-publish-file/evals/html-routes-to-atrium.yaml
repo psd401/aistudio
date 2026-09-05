@@ -1,0 +1,16 @@
+id: publish-file-html-routes-to-atrium
+skill: psd-publish-file
+level: L0
+workspace: mutating
+suite: regression
+prompt: "Write a minimal self-contained HTML page to /tmp/eval-publish-file.html with lang=\"en\", one h1 reading \"EVAL PUBLISH\", and a main landmark. Then try to publish it as a public file with psd-publish-file and tell me exactly what happened — do not publish it any other way."
+trials: 3
+graders:
+  # The refusal must be reported as a ROUTING decision (HTML goes to Atrium),
+  # not as a broken tool. A bare "operation not allowed" with no alternative is
+  # the failure mode this whole change exists to remove.
+  - {"type":"output_match","pattern":"(?i)atrium"}
+  - {"type":"output_match","pattern":"(?i)(psd-html-artifact|html artifact)"}
+  # Negative assertion: it must NOT claim it published the page or hand back an
+  # S3 link. `.html` is no longer an accepted public artifact type at all.
+  - {"type":"output_match","pattern":"(?i)^(?!.*s3[^\\s]*\\.amazonaws\\.com/public-images)[\\s\\S]*$"}

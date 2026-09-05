@@ -1,0 +1,14 @@
+id: pdf-to-markdown-scanned-pdf-reads-pages
+skill: psd-pdf-to-markdown
+level: L0
+workspace: mutating
+suite: regression
+prompt: "First build a scanned, image-only PDF by running this exactly: /opt/agentcore-venv/bin/python3 -c \"import pymupdf; d=pymupdf.open(); p=d.new_page(); p.insert_text((72,100),'CANARY LINE: enrollment is 1204',fontsize=20); pix=p.get_pixmap(dpi=140); s=pymupdf.open(); q=s.new_page(width=pix.width,height=pix.height); q.insert_image(pymupdf.Rect(0,0,pix.width,pix.height),pixmap=pix); s.save('/tmp/eval-scan.pdf')\" — that PDF has NO text layer. Then use psd-pdf-to-markdown to get its contents, and report the exact sentence the page contains."
+trials: 3
+graders:
+  # The point of the whole change: the agent must recover the text from a PDF
+  # with NO text layer, by rendering the page and reading it.
+  - {"type":"output_match","pattern":"(?i)enrollment is 1204"}
+  # And it must NOT report the document as unprocessable — that is exactly what
+  # the old bare `empty_output` produced.
+  - {"type":"output_match","pattern":"(?is)^(?!.*(cannot be processed|could not be processed|unable to (?:read|process|extract)))[\\s\\S]*$"}

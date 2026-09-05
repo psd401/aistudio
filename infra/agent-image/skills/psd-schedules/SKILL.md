@@ -69,6 +69,50 @@ node /opt/psd-skills/psd-schedules/delete.js \
   --schedule-id <id>
 ```
 
+## The reply IS the delivery — never hunt for the owner's own DM
+
+A scheduled run always delivers to the owner's Google Chat DM. The platform
+does that itself, using the destination on the authoritative schedule row; the
+model never chooses it and cannot change it. **Your final reply in the fired
+turn is the message the owner receives.**
+
+So: **never write DM-space discovery into a schedule prompt.** A prompt that
+tells future-you to run `chat spaces.findDirectMessage`, then `chat spaces
+list`, then `chat +send`, is instructing it to re-deliver something the reply
+path already delivered — and to fail the whole run when that lookup does not
+resolve. One "ParentSquare Daily Summary" failed six days straight on exactly
+that, for a digest the reply path was sending the entire time.
+
+Bad — do not write this into a prompt:
+
+> Find my DM space with `chat spaces.findDirectMessage`; if that fails, run
+> `chat spaces list` and match my name; if that fails, just reply.
+
+Good:
+
+> Produce the digest and reply with it. That reply is the delivery.
+
+**`chat +send` to a SHARED space stays completely legitimate.** A schedule
+whose job is to post into a team space, a project room, or any space other
+than the owner's own DM should absolutely use it. The rule is narrow: do not
+go looking for the owner's own DM, because you are already in it.
+
+## What a scheduled run may do to schedules
+
+A fired schedule runs in `scheduled` mode, and the broker splits read from
+write:
+
+| Command | In a scheduled run |
+|---|---|
+| `list.js`, `runs.js` | **Allowed** — audit your own cadence and history |
+| `create.js`, `update.js`, `delete.js` | **Refused (403)** — owner-mode only |
+
+So a "review my schedules" job can read everything it needs and report what
+should change, but it cannot mutate anything on its own — an autonomous job
+that could create or delete schedules is a privilege escalation, not a
+convenience. Report the recommended change to the owner and let them ask for
+it in a live turn.
+
 ## Cron translation cheat sheet
 
 Cron is **5 fields**: `minute hour day-of-month month day-of-week`. The skill

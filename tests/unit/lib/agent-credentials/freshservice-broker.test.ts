@@ -100,6 +100,15 @@ describe("Freshservice broker allowlist", () => {
     ["GET", "/workspaces"],
     ["GET", "/workspaces/2"],
     ["GET", "/approvals?approver_id=5&status=pending&parent=true"],
+    // Service Catalog. Note the path asymmetry — reads under
+    // `/service_catalog/...`, the create verb at top-level
+    // `/service_catalog_items` — which is Freshservice's own shape.
+    ["GET", "/service_catalog/categories"],
+    ["GET", "/service_catalog/items"],
+    ["GET", "/service_catalog/items?category_id=12&per_page=50"],
+    ["GET", "/service_catalog/items?search_term=hotel"],
+    ["GET", "/service_catalog/items/4242"],
+    ["POST", "/service_catalog_items"],
   ])("allows %s %s (used by the skill)", async (method, path) => {
     await expect(call(path, method)).resolves.toBeDefined()
     expect(fetchMock).toHaveBeenCalledTimes(1)
@@ -124,6 +133,15 @@ describe("Freshservice broker allowlist", () => {
     ["GET", "/tickets/abc"],
     // Absolute URLs must not escape the fixed host.
     ["GET", "//evil.example/tickets"],
+    // Catalog: only create and read are wired. Editing or deleting a live
+    // catalog item is a UI action, not something an agent turn may reach.
+    ["PUT", "/service_catalog_items/4242"],
+    ["DELETE", "/service_catalog_items/4242"],
+    // The two spellings do not interchange — each route is its own literal.
+    ["POST", "/service_catalog/items"],
+    ["GET", "/service_catalog_items"],
+    ["GET", "/service_catalog/items/abc"],
+    ["GET", "/service_catalog/categories/12"],
   ])("rejects %s %s", async (method, path) => {
     await expect(call(path, method)).rejects.toThrow(/not allowed|Invalid/)
     expect(fetchMock).not.toHaveBeenCalled()

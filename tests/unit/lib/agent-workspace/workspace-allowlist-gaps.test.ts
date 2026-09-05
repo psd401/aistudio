@@ -32,24 +32,31 @@ describe("allowlist gaps closed from 2026-08-13 prod failures", () => {
     ).not.toThrow()
   })
 
-  it("permits drive +upload on the agent slot", () => {
-    expect(() =>
-      validateWorkspaceCommand(
-        agent(["drive", "+upload", "--upload", "/opt/logo.png"]),
-        "hagelk@psd401.net"
-      )
-    ).not.toThrow()
-  })
-
-  it("still refuses drive +upload on the user slot (impersonation boundary)", () => {
-    // Authoring file CONTENT as the user is the exact thing the boundary
-    // exists to prevent — the helper form must not be a way around it.
-    expect(() =>
-      validateWorkspaceCommand(
-        user(["drive", "+upload", "--upload", "/opt/logo.png"]),
-        "hagelk@psd401.net"
-      )
-    ).toThrow(/agent-owned/)
+  // `drive +upload` was allowlisted and could never execute — see
+  // refuseDriveUploadWithPublishGuidance in command-executor.ts. It is now
+  // refused deliberately, on BOTH slots, with the route that does work.
+  //
+  // This test used to assert the opposite ("permits drive +upload on the agent
+  // slot"), and passed, because it used the FLAG spelling. That is the whole
+  // bug: operationTokens() folds leading positionals into the operation, so
+  // only `--upload <path>` ever matched the allowlist entry, while the natural
+  // `drive +upload <path>` did not — and neither form could reach a container
+  // file from the web tier's empty mkdtemp anyway.
+  it.each([
+    ["agent", agent],
+    ["user", user],
+  ])("refuses drive +upload on the %s slot with the publish route", (
+    _slot,
+    invocation,
+  ) => {
+    for (const argv of [
+      ["drive", "+upload", "--upload", "/opt/logo.png"],
+      ["drive", "+upload", "/home/node/report.pdf"],
+    ]) {
+      expect(() =>
+        validateWorkspaceCommand(invocation(argv), "hagelk@psd401.net")
+      ).toThrow(/psd-publish-file/)
+    }
   })
 
   it("still refuses the send helpers", () => {

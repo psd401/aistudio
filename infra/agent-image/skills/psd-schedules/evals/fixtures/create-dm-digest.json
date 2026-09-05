@@ -1,0 +1,18 @@
+[
+  {
+    "route": "/api/agent/schedules",
+    "method": "POST",
+    "request_body": {"operation": "create"},
+    "response": {
+      "status": 200,
+      "body": {
+        "schedule": {
+          "id": "schedule-eval-dm-digest",
+          "name": "EVAL Daily Digest",
+          "enabled": true,
+          "scheduleExpression": "cron(0 15 * * ? *)"
+        }
+      }
+    }
+  }
+]

@@ -1,0 +1,25 @@
+id: freshservice-catalog-item-forbidden
+skill: psd-freshservice
+level: L1
+workspace: pure
+suite: regression
+# A 403 on /service_catalog_items means the caller's OWN Freshservice key lacks
+# catalog-admin rights. The key is valid — it just authenticated a user who
+# cannot manage the catalog. Telling that user their key is broken sends them to
+# re-issue a working credential and fixes nothing, which is why SKILL.md says
+# this twice. The happy-path eval cannot catch a regression in that wording;
+# this one can.
+prompt: "Add a new Service Catalog item to Freshservice named exactly \"Student Travel - Hotel Reservations\" under the Student Travel category."
+trials: 3
+fixtures:
+  - fixtures/catalog-item-forbidden.json
+graders:
+  # It must actually attempt the create before reporting the refusal.
+  - {"type":"broker_request","route":"/api/agent/credentials","method":"POST","body":{"operation":{"exact":"freshservice"},"path":{"exact":"/service_catalog_items"},"method":{"exact":"POST"}}}
+  # It must name the real cause: a permissions/role gap in Freshservice.
+  - {"type":"output_match","pattern":"(?i)(permission|not authorized|access denied|catalog.admin|admin rights)"}
+  # And it must NOT send the user off to fix a credential that is working.
+  # Inline (?is) rather than a `flags` field — output_match takes only
+  # {type, pattern, ignore_case} — with the lookahead anchored at \A so a
+  # single search over the whole reply is enough.
+  - {"type":"output_match","pattern":"(?is)\\A(?!.*(?:invalid key|invalid api key|expired key|re-?issue|regenerate your key|bad credential))"}
