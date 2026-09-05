@@ -459,6 +459,20 @@ def _fail_no_text_layer(local, pages, raster_dir, rasterized, args):
         })
         sys.exit(0)
 
+    if getattr(args, "rasterize_pages", False):
+        # --rasterize-pages was already given and still produced no images, so
+        # telling the caller to re-run with it is a loop. The only way to reach
+        # here is a --pages selection in which every index is out of range;
+        # rasterize_pages() skips those silently, so say THAT instead.
+        _fail(
+            "--rasterize-pages produced no page images: every index in "
+            "--pages is outside this document, which has "
+            f"{diagnosis.get('pages', 'an unknown number of')} page(s). "
+            "Re-run with a valid selection, or omit --pages to render the "
+            "whole document.",
+            "pages_out_of_range",
+        )
+
     detail = ""
     if diagnosis.get("image_only"):
         detail = (

@@ -208,6 +208,14 @@ MAX_SYNC_TOTAL_BYTES = 64 * 1024 * 1024 * 1024
 # file and how big it is.
 #
 # Keep in sync with MAX_PRIVATE_UPLOAD_BYTES.
+#
+# DEPLOY ORDER IS LOAD-BEARING: the web tier must ship a raise BEFORE this image
+# does. These are two independently deployed units, and this value is only ever
+# safe when it is <= the broker's. Ship the agent first and the pre-check below
+# passes a file the broker still refuses at the old ceiling — reproducing the
+# exact opaque outage this constant exists to prevent, for the whole rollout
+# window. Lowering works in the other order: a stale, smaller value here is
+# merely conservative and rejects early with a clear message.
 BROKER_PRIVATE_UPLOAD_MAX_BYTES = 512 * 1024 * 1024
 # Raised from 1,000 (#1353) after that cap silently destroyed a user's agent
 # memory on 2026-07-27. Real workspaces already exceed it: two of the 38 live
@@ -2570,8 +2578,14 @@ TRAJECTORY_PRUNE_KEEP_DAYS = _positive_int_env(
 )
 # Pruning is an optimization on the finalization path, which is already inside a
 # hard flush deadline. Bound it so a pathological VACUUM cannot eat the budget
-# that the actual upload needs.
+# that the actual upload needs. This is enforced with a progress handler, NOT
+# with sqlite3.connect(timeout=...) — that argument only bounds how long a
+# statement waits to acquire a lock, never how long one runs.
 TRAJECTORY_PRUNE_TIMEOUT_SECONDS = 60
+# Only rewrite the whole file when there is real space to win. VACUUM copies the
+# database, so running it to reclaim a few pages costs far more (time, and
+# transient disk equal to the file's own size) than it returns.
+TRAJECTORY_VACUUM_MIN_FREE_BYTES = 16 * 1024 * 1024
 # Candidate activity columns, most authoritative first. The column set is
 # DISCOVERED rather than assumed: an OpenClaw upgrade that renames or drops one
 # must make this skip, never make it delete the wrong rows.
@@ -2609,6 +2623,7 @@ def _trajectory_cutoff_value(newest: object, keep_days: int) -> int | None:
 def _prune_trajectory_runtime_events(
     database: Path,
     keep_days: int = TRAJECTORY_PRUNE_KEEP_DAYS,
+    deadline_monotonic: float | None = None,
 ) -> int:
     """Delete closed sessions' runtime-event rows, then VACUUM. Best-effort.
 
@@ -2661,8 +2676,8 @@ def _prune_trajectory_runtime_events(
             )
             return 0
 
-        # Foreign keys ON so a row some other table depends on makes this raise
-        # and abandon the prune, rather than silently orphaning a reference.
+        # Foreign keys ON so a row some other table depends on aborts the prune
+        # rather than silently orphaning a reference.
         connection.execute("PRAGMA foreign_keys=ON")
         # Delete by SESSION, not by row age: a long-running session's early
         # events stay with its recent ones, and any session that did anything
@@ -2677,19 +2692,62 @@ def _prune_trajectory_runtime_events(
             (cutoff,),
         )
         deleted = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
-        connection.commit()
-        if deleted == 0:
-            return 0
+        # Check BEFORE committing. Run after commit this proves nothing: the
+        # rows are already durably gone, so raising can only stop the VACUUM,
+        # not undo the damage it is supposed to be protecting against.
         violations = connection.execute("PRAGMA foreign_key_check").fetchall()
         if violations:
+            connection.rollback()
             raise RuntimeError(
-                f"trajectory prune left {len(violations)} foreign-key violation(s)"
+                f"trajectory prune would leave {len(violations)} "
+                "foreign-key violation(s); rolled back"
             )
-        # Reclaim the pages. Without this the DELETE only moves bytes onto the
-        # freelist and the FILE — which is what the upload cap measures — does
-        # not shrink at all.
+        connection.commit()
+
+        # VACUUM on its own schedule, NOT gated on `deleted`. The delete is
+        # already committed by this point, so a VACUUM that fails once (disk
+        # pressure, a lock, an exhausted deadline) must not strand the file
+        # forever: on the next turn the same rows are already gone, `deleted`
+        # comes back 0, and an early return here would skip the VACUUM for
+        # good — leaving the bloated file that this whole function exists to
+        # shrink. Freelist pages are the real signal that bytes are reclaimable.
+        page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+        free_pages = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+        if free_pages * page_size < TRAJECTORY_VACUUM_MIN_FREE_BYTES:
+            return deleted
+
+        # Bound the VACUUM for real. `sqlite3.connect(timeout=...)` is the
+        # BUSY-handler timeout — how long a statement waits to ACQUIRE a lock —
+        # and places no cap whatever on how long VACUUM runs once it starts.
+        # The progress handler is the only in-process way to abort a running
+        # statement, so the deadline is enforced there.
+        vacuum_deadline = time.monotonic() + _remaining_timeout(
+            deadline_monotonic, TRAJECTORY_PRUNE_TIMEOUT_SECONDS
+        )
+
+        def _abort_when_out_of_time() -> int:
+            # Non-zero aborts the running statement with sqlite3.OperationalError.
+            return 1 if time.monotonic() > vacuum_deadline else 0
+
         connection.isolation_level = None
-        connection.execute("VACUUM")
+        connection.set_progress_handler(_abort_when_out_of_time, 10_000)
+        try:
+            connection.execute("VACUUM")
+        except sqlite3.OperationalError as exc:
+            # Out of budget, or the file could not be rewritten. The delete
+            # stands and is durable; the file simply keeps its freelist until
+            # a later turn reaches this point with more time. Deliberately not
+            # fatal — the caller still has an upload to get through.
+            connection.set_progress_handler(None, 0)
+            logger.warning(
+                "trajectory prune deleted %d row(s) but could not VACUUM %s: %s",
+                deleted,
+                database.name,
+                exc,
+            )
+            return deleted
+        finally:
+            connection.set_progress_handler(None, 0)
         mode = connection.execute("PRAGMA journal_mode").fetchone()
         if mode is None or str(mode[0]).lower() != "wal":
             raise RuntimeError(
@@ -2698,20 +2756,33 @@ def _prune_trajectory_runtime_events(
     return deleted
 
 
-def _prune_oversized_transcript_databases() -> None:
+def _prune_oversized_transcript_databases(
+    deadline_monotonic: float | None = None,
+) -> None:
     """Trim any agent transcript database that has grown large. Never raises."""
+    workspace_root = WORKSPACE_DIR.resolve()
     for relative in _iter_workspace_files():
-        if os.path.basename(relative) != TRANSCRIPT_DB_FILENAME:
+        # Match the SAME predicate prepare_sqlite_snapshot() uses, not just the
+        # basename. A basename match would open and rewrite any file called
+        # openclaw-agent.sqlite anywhere in the tree — including under
+        # attachments/, which _iter_workspace_files does traverse — rather than
+        # only the managed agents/<id>/agent/ database this knows how to prune.
+        if not _is_managed_openclaw_sqlite(relative):
             continue
         database = WORKSPACE_DIR / relative
         try:
+            # Re-resolve and re-anchor before opening rw, the same way
+            # prepare_sqlite_snapshot does for this file class.
+            database.resolve().relative_to(workspace_root)
             size_before = database.stat().st_size
-        except OSError:
+        except (OSError, ValueError):
             continue
         if size_before < TRAJECTORY_PRUNE_MIN_DB_BYTES:
             continue
         try:
-            deleted = _prune_trajectory_runtime_events(database)
+            deleted = _prune_trajectory_runtime_events(
+                database, deadline_monotonic=deadline_monotonic
+            )
         except Exception as exc:  # noqa: BLE001
             # A prune failure must never block the save it exists to protect.
             # The checkpoint + integrity_check below still gate the push.
@@ -2719,17 +2790,14 @@ def _prune_oversized_transcript_databases() -> None:
                 "trajectory prune failed for %s: %s", relative, exc
             )
             continue
-        if deleted == 0:
-            logger.info(
-                "trajectory prune found nothing eligible in %s (%d bytes)",
-                relative,
-                size_before,
-            )
-            continue
         try:
             size_after = database.stat().st_size
         except OSError:
             size_after = size_before
+        # Reported even when deleted == 0: a run that deletes nothing can still
+        # have reclaimed a previous run's freelist, and "0 rows but 40 MB
+        # smaller" is exactly the recovery-after-a-failed-VACUUM case that is
+        # worth being able to see in the logs.
         logger.info(
             "trajectory prune %s: rows=%d bytes %d -> %d",
             relative,
@@ -2739,7 +2807,7 @@ def _prune_oversized_transcript_databases() -> None:
         )
 
 
-def prepare_sqlite_snapshot() -> int:
+def prepare_sqlite_snapshot(deadline_monotonic: float | None = None) -> int:
     """Checkpoint and validate every persisted OpenClaw database.
 
     The gateway MUST be stopped before this runs. A failed checkpoint or
@@ -2749,8 +2817,13 @@ def prepare_sqlite_snapshot() -> int:
     Oversized transcript databases are pruned FIRST, so the checkpoint and
     integrity check below validate the file that is actually about to be
     uploaded rather than the pre-prune one.
+
+    `deadline_monotonic` MUST be the same deadline the following push is held
+    to. The prune runs before the upload but inside the one flush budget, so
+    passing None here lets a slow VACUUM spend time the push then no longer
+    has — the caller computes the deadline first and threads it through.
     """
-    _prune_oversized_transcript_databases()
+    _prune_oversized_transcript_databases(deadline_monotonic)
     candidates = sorted(
         WORKSPACE_DIR / relative
         for relative in _iter_workspace_files()
@@ -3178,8 +3251,18 @@ def _release_staged_reservations(
                 deadline_monotonic,
             )
         except Exception as exc:  # noqa: BLE001
+            # Stop after the first failing chunk rather than hammering a broker
+            # that is already refusing, and rather than spending a finalization
+            # deadline that the real error still has to be reported within.
+            # A 400 here specifically means the web tier predates `release-upload`
+            # (same two-unit deploy-order note as BROKER_PRIVATE_UPLOAD_MAX_BYTES):
+            # harmless, but until it catches up the siblings hold their rows for
+            # the full lease, which is the behaviour this call exists to shorten.
+            # Anything unreleased simply expires on its own five-minute lease,
+            # which is the pre-existing behaviour this is an improvement on.
             logger.warning(
-                "workspace push could not release %d staged reservation(s): %s",
+                "workspace push could not release %d staged reservation(s); "
+                "abandoning the rest to their lease: %s",
                 len(chunk),
                 exc,
             )

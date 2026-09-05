@@ -138,6 +138,55 @@ describe('recordRun contention settling', () => {
     ]);
   });
 
+  it('does not settle a skipped or promoted fire', async () => {
+    // Neither status is proof this occurrence did the work: `skipped` is a
+    // coalesced fire and `promoted` was handed to the job runner. Settling on
+    // either would acknowledge a live contention row for a fire that never ran.
+    for (const status of ['skipped', 'promoted'] as const) {
+      const client = recordingClient();
+
+      await createRunTelemetry(CONFIG, client).recordRun(
+        run({ status }),
+        logger(),
+      );
+
+      expect(settleStatements(client)).toHaveLength(0);
+    }
+  });
+
+  it('re-opens a settled row when the same fire later fails for real', async () => {
+    // One fire_key can be delivered twice: Scheduler retries while a slow
+    // invocation still holds the owner workspace lock. The retry can succeed
+    // and settle the row BEFORE the original invocation fails for real. If the
+    // upsert then overwrote the row's error text without clearing the
+    // acknowledgement, the new failure would be written into a row that stays
+    // acknowledged = TRUE and never appears in an unacknowledged-failures view
+    // again -- the exact burial the settle path exists to prevent.
+    const client = recordingClient();
+    const telemetry = createRunTelemetry(CONFIG, client);
+
+    await telemetry.recordRun(run(), logger());
+    expect(settleStatements(client)).toHaveLength(1);
+
+    await telemetry.recordRun(
+      run({
+        status: 'error',
+        errorMessage: 'workspace finalization failed',
+        failure: { severity: 'error', context: { phase: 'scheduled-run' } },
+      }),
+      logger(),
+    );
+
+    const upserts = client.statements.filter((statement) =>
+      statement.sql.includes('ON CONFLICT (source, fire_key)'),
+    );
+    expect(upserts).not.toHaveLength(0);
+    const reopening = upserts.at(-1)!.sql;
+    expect(reopening).toContain('acknowledged = FALSE');
+    expect(reopening).toContain('acknowledged_by = NULL');
+    expect(reopening).toContain('acknowledged_at = NULL');
+  });
+
   it('settles from the strict recorder too', async () => {
     const client = recordingClient();
 

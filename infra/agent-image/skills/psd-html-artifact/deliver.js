@@ -188,6 +188,7 @@ function createAtriumArtifact(buffer, title, run) {
   const codeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'html-artifact-'));
   const codePath = path.join(codeDir, 'artifact.html');
   let createRes;
+  let stagingError;
   try {
     // --code-file, never argv: MAX_ARG_STRLEN is 128 KiB and an inline page
     // that exceeds it fails with E2BIG rather than a readable error.
@@ -206,13 +207,23 @@ function createAtriumArtifact(buffer, title, run) {
       'internal',
     ]);
   } catch (err) {
-    fail(`could not stage the artifact for publish: ${err.message}`, 'publish_failed');
+    // Capture, do NOT fail() here. fail() ends in process.exit(), which in Node
+    // terminates immediately WITHOUT unwinding pending finally blocks — so
+    // calling it from this catch would skip the cleanup below and leave the
+    // model-authored page sitting in /tmp. Fail after the finally has run.
+    stagingError = err;
   } finally {
     try {
       fs.rmSync(codeDir, { recursive: true, force: true });
     } catch {
       /* best-effort cleanup */
     }
+  }
+  if (stagingError) {
+    fail(
+      `could not stage the artifact for publish: ${stagingError.message}`,
+      'publish_failed'
+    );
   }
   const created = lastJson(createRes.stdout);
   if (createRes.code !== 0 || !created || !created.id) {

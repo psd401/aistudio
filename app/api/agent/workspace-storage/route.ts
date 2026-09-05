@@ -402,9 +402,7 @@ export async function POST(request: NextRequest) {
         operation: input.operation,
         path: input.path,
         error: error instanceof Error ? error.message : String(error),
-        // A Drizzle failure's own message is only `Failed query: insert into
-        // "workspace_upload_reservations" …`; the SQLSTATE and the violated
-        // constraint live on `.cause` and were being swallowed here.
+        // See lib/db/query-error.ts — Drizzle swallows the driver's real cause.
         ...describeQueryErrorCause(error),
       })
     )

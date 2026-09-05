@@ -4,7 +4,7 @@ import { describe, expect, it } from "@jest/globals"
 import { describeQueryErrorCause } from "@/lib/db/query-error"
 
 describe("describeQueryErrorCause", () => {
-  it("pulls the postgres detail out from behind Drizzle's wrapper", () => {
+  it("pulls the postgres cause out from behind Drizzle's wrapper, without its row values", () => {
     const driverError = Object.assign(
       new Error(
         'duplicate key value violates unique constraint ' +
@@ -29,8 +29,11 @@ describe("describeQueryErrorCause", () => {
       causeCode: "23505",
       causeConstraint: "uq_workspace_upload_target_active",
       causeTable: "workspace_upload_reservations",
-      causeDetail: "Key (owner_key, target_key)=(a, b) already exists.",
     })
+    // The driver error above CARRIES a `detail` line holding the literal row
+    // values that collided. It must never reach the log payload — the code and
+    // constraint above already identify what failed.
+    expect(describeQueryErrorCause(wrapped)).not.toHaveProperty("causeDetail")
   })
 
   it("returns nothing when there is no cause to report", () => {
@@ -51,7 +54,7 @@ describe("describeQueryErrorCause", () => {
     })
   })
 
-  it("bounds a driver detail line so it cannot flood the log", () => {
+  it("bounds a driver message so it cannot flood the log", () => {
     const wrapped = new Error("Failed query", {
       cause: Object.assign(new Error("x".repeat(5_000)), {
         detail: "y".repeat(5_000),
@@ -60,6 +63,5 @@ describe("describeQueryErrorCause", () => {
     const described = describeQueryErrorCause(wrapped)
 
     expect(described?.causeMessage).toHaveLength(500)
-    expect(described?.causeDetail).toHaveLength(500)
   })
 })

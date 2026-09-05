@@ -25,7 +25,11 @@ interface DriverErrorShape {
   constraint?: unknown
   table_name?: unknown
   table?: unknown
-  detail?: unknown
+  // `detail` is deliberately NOT read. Postgres DETAIL lines embed the literal
+  // row values that violated the constraint — `Key (owner_key, target_key)=
+  // (someone@psd401.net, …) already exists.` — and this object is logged.
+  // `code` + `constraint_name` already answer WHICH constraint fired, which is
+  // the whole diagnostic need, without putting user data in CloudWatch.
 }
 
 const MAX_CAUSE_DEPTH = 4
@@ -41,7 +45,6 @@ export interface QueryErrorCause {
   causeCode?: string
   causeConstraint?: string
   causeTable?: string
-  causeDetail?: string
 }
 
 /**
@@ -65,12 +68,10 @@ export function describeQueryErrorCause(
     const constraint =
       boundedString(shape.constraint_name) ?? boundedString(shape.constraint)
     const table = boundedString(shape.table_name) ?? boundedString(shape.table)
-    const detail = boundedString(shape.detail)
     if (message) candidate.causeMessage = message
     if (code) candidate.causeCode = code
     if (constraint) candidate.causeConstraint = constraint
     if (table) candidate.causeTable = table
-    if (detail) candidate.causeDetail = detail
     if (Object.keys(candidate).length > 0) described = candidate
     current = (current as { cause?: unknown }).cause
   }

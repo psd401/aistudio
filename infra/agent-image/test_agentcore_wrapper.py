@@ -992,7 +992,17 @@ class TestSerializedInvocationCleanup(unittest.IsolatedAsyncioTestCase):
                     await anext(stream)
 
             shutdown.assert_called_once_with()
-            prepare.assert_called_once_with()
+            # The snapshot now shares ONE budget with the push that follows
+            # it: it can VACUUM a large SQLite file, and a deadline computed
+            # after it returns would not actually bound the turn. Assert the
+            # deadline is passed, and that the push is held to the same one.
+            prepare.assert_called_once()
+            (prepare_deadline,) = prepare.call_args.args
+            self.assertIsInstance(prepare_deadline, float)
+            self.assertEqual(
+                prepare_deadline,
+                push.call_args.kwargs["deadline_monotonic"],
+            )
             self.assertEqual(push.call_args.args, ("owner-prefix",))
             self.assertGreater(
                 push.call_args.kwargs["deadline_monotonic"],
@@ -1223,7 +1233,7 @@ class TestShutdownFinalization(unittest.TestCase):
         ), mock.patch.object(
             agentcore_wrapper.workspace_sync,
             "prepare_sqlite_snapshot",
-            side_effect=lambda: events.append("prepare"),
+            side_effect=lambda deadline: events.append("prepare"),
         ), mock.patch.object(
             agentcore_wrapper.workspace_sync,
             "workspace_generation",
@@ -1307,7 +1317,7 @@ class TestShutdownFinalization(unittest.TestCase):
         ), mock.patch.object(
             agentcore_wrapper.workspace_sync,
             "prepare_sqlite_snapshot",
-            side_effect=lambda: events.append("prepare"),
+            side_effect=lambda deadline: events.append("prepare"),
         ), mock.patch.object(
             agentcore_wrapper.workspace_sync,
             "workspace_generation",

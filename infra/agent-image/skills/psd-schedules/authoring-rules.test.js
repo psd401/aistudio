@@ -71,7 +71,7 @@ describe('scheduled-run capability documentation', () => {
   test('matches the broker route it describes', () => {
     const route = fs.readFileSync(ROUTE, 'utf8');
     const declared = route.match(
-      /SCHEDULED_READ_OPERATIONS: ReadonlySet<unknown> = new Set\(\[([^\]]*)\]\)/
+      /SCHEDULED_READ_OPERATIONS = new Set<ScheduledReadOperation>\(\[([^\]]*)\]\)/
     );
     expect(declared).not.toBeNull();
     const operations = declared[1]

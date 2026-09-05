@@ -39,10 +39,24 @@ const AUTHORITY_FIELDS = [
  * `executeScheduleOperation` is owner-only by default rather than silently
  * inheriting scheduled access.
  */
-const SCHEDULED_READ_OPERATIONS: ReadonlySet<unknown> = new Set([
+type ScheduledReadOperation = "list" | "runs"
+
+const SCHEDULED_READ_OPERATIONS = new Set<ScheduledReadOperation>([
   "list",
   "runs",
 ])
+
+/**
+ * Typed so a typo in the set above ("lst", "run") is a compile error rather
+ * than a silently broken allowlist that only shows up as a 403 in production.
+ * The cast is confined to this predicate; `Set.prototype.has` is safe for any
+ * runtime value.
+ */
+function isScheduledReadOperation(
+  operation: unknown
+): operation is ScheduledReadOperation {
+  return SCHEDULED_READ_OPERATIONS.has(operation as ScheduledReadOperation)
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value)
@@ -210,7 +224,7 @@ export async function POST(request: NextRequest) {
 
   if (
     invocation.mode !== "owner" &&
-    !SCHEDULED_READ_OPERATIONS.has(rawBody.operation)
+    !isScheduledReadOperation(rawBody.operation)
   ) {
     log.warn("Rejected schedule mutation from a non-owner-mode turn", {
       requestId,

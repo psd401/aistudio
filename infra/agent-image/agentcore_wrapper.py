@@ -485,11 +485,16 @@ async def _finalize_invocation_authority(
                 )
                 return False
             try:
+                # One budget spans the snapshot AND the push — see the same
+                # ordering in handle_shutdown. The snapshot can VACUUM a large
+                # SQLite file, which has no inherent time bound, so a deadline
+                # computed after it returns does not actually bound the turn.
+                deadline = time.monotonic() + FINAL_WORKSPACE_FLUSH_SECONDS
                 await loop.run_in_executor(
                     None,
                     workspace_sync.prepare_sqlite_snapshot,
+                    deadline,
                 )
-                deadline = time.monotonic() + FINAL_WORKSPACE_FLUSH_SECONDS
                 push = functools.partial(
                     workspace_sync.push_workspace,
                     _current_workspace_prefix,
@@ -1223,10 +1228,17 @@ def handle_shutdown(signum, frame):
             and _invocation_authority_is_installed()
         ):
             try:
-                workspace_sync.prepare_sqlite_snapshot()
+                # Start the clock BEFORE the snapshot, not after. The snapshot
+                # now prunes and can VACUUM a large SQLite file, and a VACUUM
+                # has no inherent time bound — computing the deadline after it
+                # returns hands the push a full budget on paper while the
+                # host's own SIGTERM grace period has already been spent, so
+                # the turn is SIGKILLed with nothing pushed. One budget covers
+                # both halves.
                 deadline = (
                     time.monotonic() + FINAL_WORKSPACE_FLUSH_SECONDS
                 )
+                workspace_sync.prepare_sqlite_snapshot(deadline)
                 workspace_sync.push_workspace(
                     _current_workspace_prefix,
                     deadline_monotonic=deadline,

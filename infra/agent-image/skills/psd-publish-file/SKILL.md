@@ -7,7 +7,16 @@ allowed-tools: Bash(node:*)
 
 # psd-publish-file
 
-You generated a file. The user needs a link to it. That is the whole skill.
+You generated a file. The user needs a link to it. That is the whole skill —
+with one thing to decide BEFORE you run the command.
+
+**The link is unsigned, public-by-link, and never expires.** Anyone who has the
+URL can open it, with no sign-in. So: would you hand this file to a stranger who
+found the URL? A board packet, agenda, chart or recording — yes, publish it. A
+student record, an IEP, a personnel file, anything FERPA-covered — **no**, do
+not publish it; attach it to the reply or share it through Drive with named
+people instead. `publish.js` cannot make this judgement for you: it checks size
+and extension, never contents.
 
 ```bash
 node /opt/psd-skills/psd-publish-file/publish.js --file /tmp/<name>.pdf
@@ -39,15 +48,15 @@ a publication record — not to a public-by-link bucket. Use
 
 ## Sharing model — say this out loud
 
-The URL is **unsigned, public-by-link, and does not expire**. The UUID makes it
-unguessable, the same model as a Google Drive "anyone with the link" share. It
-is fine for a board packet, an agenda, a chart, a recording. It is **not** fine
-for anything you would not hand to a stranger who found the URL — student
-records, IEPs, personnel files, anything FERPA-covered. For those, attach the
-file to the reply or share it through Drive with named people.
+Restating the rule at the top, because this is the one that matters: the URL is
+**unsigned, public-by-link, and does not expire**. The UUID makes it
+unguessable, the same model as a Google Drive "anyone with the link" share —
+unguessable is not the same as protected.
 
-If the file's contents are sensitive, say so in the same message as the link so
-the user knows not to forward it.
+If you publish something even mildly sensitive, say so in the same message as
+the link, so the user knows not to forward it. If it is FERPA-covered, do not
+publish it at all — offer the attachment or a named-person Drive share and
+explain why in one sentence.
 
 ## Pasting the link
 

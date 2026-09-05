@@ -485,7 +485,19 @@ export async function writeCronFailure(
               session_id = EXCLUDED.session_id,
               schedule_name = EXCLUDED.schedule_name,
               error_message = EXCLUDED.error_message,
-              context = EXCLUDED.context`,
+              context = EXCLUDED.context,
+              -- Re-open a row that settleCronFireFailure already acknowledged.
+              -- One fire_key can be delivered twice (Scheduler retries while a
+              -- slow invocation is still holding the owner workspace lock), so
+              -- the order success-then-real-failure is reachable: the retry
+              -- succeeds and settles the row, then the original invocation
+              -- fails for real and lands here. Without this reset the new error
+              -- text is written into a row that stays acknowledged = TRUE, and
+              -- every "unacknowledged failures" view silently loses it — the
+              -- exact burial this settle path was added to prevent.
+              acknowledged = FALSE,
+              acknowledged_by = NULL,
+              acknowledged_at = NULL`,
       parameters: [
         { name: 'severity', value: { stringValue: severity } },
         { name: 'user_id', value: { stringValue: params.userEmail } },
@@ -731,7 +743,13 @@ export function createRunTelemetry(
     log: CronTelemetryLogger,
   ): Promise<void> {
     if (!databaseConfigured) return;
-    if (params.status === 'error' || params.failure) return;
+    // Positive test, not "anything that isn't an error". `skipped` (coalesced
+    // fire) and `promoted` (handed off to the job runner) are BOTH reachable
+    // without a `failure` object, and neither is proof this occurrence did the
+    // work — settling on them would acknowledge a live contention row for a
+    // fire that never actually ran.
+    if (params.status !== 'success') return;
+    if (params.failure) return;
     if (!params.fireKey) return;
     try {
       await settleCronFireFailure(config, rdsDataClient, {

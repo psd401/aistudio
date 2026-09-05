@@ -20,6 +20,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -3570,6 +3571,93 @@ class TrajectoryPruneTests(unittest.TestCase):
             side_effect=RuntimeError("locked"),
         ):
             workspace_sync._prune_oversized_transcript_databases()
+
+    def test_a_skipped_vacuum_does_not_strand_the_file_forever(self):
+        """The delete commits; a later run must still be able to reclaim.
+
+        The regression this guards: VACUUM used to be gated on `deleted > 0`.
+        The DELETE is already committed by the time VACUUM runs, so any run
+        where VACUUM does not happen — it failed, or the budget ran out, or
+        (here) the freelist was not yet worth rewriting the file for — left
+        every LATER run finding 0 eligible rows, returning early, and never
+        vacuuming again. The bloated file the function exists to shrink would
+        survive forever.
+        """
+        newest = 1_757_000_000_000
+        self._build(newest)
+
+        # First run: rows are deleted, but the freelist gate declines to VACUUM.
+        with mock.patch.object(
+            workspace_sync, "TRAJECTORY_VACUUM_MIN_FREE_BYTES", 1 << 40
+        ):
+            deleted = workspace_sync._prune_trajectory_runtime_events(
+                self.database
+            )
+        self.assertEqual(deleted, 50)
+        stranded = self.database.stat().st_size
+
+        # Second run deletes nothing — the rows are already gone — but the
+        # freelist is now worth reclaiming, so it must still VACUUM and shrink.
+        with mock.patch.object(
+            workspace_sync, "TRAJECTORY_VACUUM_MIN_FREE_BYTES", 1
+        ):
+            again = workspace_sync._prune_trajectory_runtime_events(
+                self.database
+            )
+        self.assertEqual(again, 0)
+        self.assertLess(self.database.stat().st_size, stranded)
+
+    def test_an_exhausted_deadline_stops_vacuum_without_losing_the_delete(self):
+        newest = 1_757_000_000_000
+        self._build(newest)
+        # A deadline already in the past. _remaining_timeout raises TimeoutError
+        # rather than letting an unbounded VACUUM spend budget the push still
+        # needs — the prune is an optimization, the upload is the job.
+        with mock.patch.object(
+            workspace_sync, "TRAJECTORY_VACUUM_MIN_FREE_BYTES", 1
+        ), self.assertRaises(TimeoutError):
+            workspace_sync._prune_trajectory_runtime_events(
+                self.database,
+                deadline_monotonic=time.monotonic() - 1,
+            )
+        # The delete is durable regardless — it committed before the VACUUM —
+        # and the caller swallows this exception, so the turn still pushes.
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        self.assertEqual(
+            connection.execute(
+                "SELECT DISTINCT session_id FROM trajectory_runtime_events"
+            ).fetchall(),
+            [("live",)],
+        )
+
+    def test_only_the_managed_agent_database_path_is_pruned(self):
+        """A basename match would rewrite look-alike files elsewhere."""
+        newest = 1_757_000_000_000
+        self._build(newest)
+        stray = self.root / "attachments" / workspace_sync.TRANSCRIPT_DB_FILENAME
+        stray.parent.mkdir(parents=True)
+        shutil.copyfile(self.database, stray)
+        before = stray.stat().st_size
+
+        opened = []
+        real_prune = workspace_sync._prune_trajectory_runtime_events
+
+        def record(database, *args, **kwargs):
+            opened.append(Path(database).resolve())
+            return real_prune(database, *args, **kwargs)
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync, "TRAJECTORY_PRUNE_MIN_DB_BYTES", 1
+        ), mock.patch.object(
+            workspace_sync, "_prune_trajectory_runtime_events", record
+        ):
+            workspace_sync._prune_oversized_transcript_databases()
+
+        self.assertEqual(opened, [self.database.resolve()])
+        self.assertEqual(stray.stat().st_size, before)
 
     def test_a_seconds_epoch_column_is_handled_as_seconds(self):
         self.assertEqual(
