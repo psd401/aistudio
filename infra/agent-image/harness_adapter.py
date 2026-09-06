@@ -1565,6 +1565,23 @@ class OpenClawAdapter(HarnessAdapter):
         agent inventing an abort they never performed. They were right that
         they never aborted anything; we did, on every turn.
 
+        THAT FIX NEVER WORKED, AND `ask_user` IS NOW DENIED.
+        The resolve targets a question held in the gateway's memory, and this
+        runtime stops the gateway after every turn — so by the time the answer
+        arrives the question is gone. Prod 2026-08-31..09-05: nineteen
+        attempts, nineteen `ok=False`, every one
+        `errorCode=INVALID_REQUEST errorMessage=question '<id>' was not found`.
+        Zero successes in the retained history. `ask_user` is therefore in
+        `tools.deny` (openclaw.json) — see test_openclaw_tool_policy.py for the
+        full failure chain, including the synthetic transcript-repair result
+        that made the model tell users they had interrupted it.
+
+        This path is kept, not deleted: the gateway can raise questions from
+        sources other than `ask_user` (see _build_question_answers), and it is
+        the only correct handling if the denial is ever lifted. It should now
+        be effectively unreachable — a `question.resolve` line in the logs is a
+        signal that something re-introduced a question-asking tool.
+
         Params are exactly QuestionResolveParamsSchema:
             { id, answers: { answers: { <questionId>: [<text>] } }, resolvedBy }
         which is the same shape OpenClaw's own plain-text claim path sends.

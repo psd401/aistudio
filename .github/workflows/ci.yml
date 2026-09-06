@@ -119,6 +119,7 @@ jobs:
           infra/agent-image/test_workspace_contract.py \
           infra/agent-image/test_check_bootstrap_budget.py \
           infra/agent-image/test_check_config_consistency.py \
+          infra/agent-image/test_openclaw_tool_policy.py \
           infra/agent-image/test_candidate_matrix.py \
           infra/agent-image/test_workspace_sync.py \
           infra/agent-image/test_chat_format.py \

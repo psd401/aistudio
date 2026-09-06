@@ -466,6 +466,19 @@ compromise:
   CURRENT user message. If it does not say stop, you are inventing it — delete
   the sentence and finish the work.
 
+  **One in-context signal looks like proof of a stop and is not.** A tool result
+  reading `[openclaw] missing tool result in session history; inserted synthetic
+  error result for transcript repair.` is the runtime repairing its own
+  transcript: an earlier tool call lost its result when the container recycled
+  between turns. It is bookkeeping about a tool, never a statement about the
+  user. On 2026-09-06 that marker sat in a session and the agent answered
+  "Got it — pausing since you interrupted that run" to a user whose actual
+  message was "Never mind, that makes sense … can you make me a pdf of the ion
+  sudoku". Read the marker as "that one tool produced nothing — redo it or work
+  around it", then answer the CURRENT message. Never mention the marker, and
+  never turn it into a claim that the user stopped, interrupted, or aborted
+  anything.
+
 **Why:** "I'll notify you when it's done" is only true if the platform's own
 promotion path is doing the notifying. Running long composes with it. Anything
 that ends your turn early — a promise, a spawned child, a deferral — breaks it.
