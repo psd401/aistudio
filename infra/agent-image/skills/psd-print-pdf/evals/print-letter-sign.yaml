@@ -1,0 +1,15 @@
+id: print-pdf-letter-sign
+skill: psd-print-pdf
+level: L2
+workspace: mutating
+suite: capability
+# Reproduces the request that failed on 2026-09-01: an 8.5x11 sign saved as a
+# printable PDF. The old fallback returned a valid PDF at the WRONG size, so a
+# grader that only checked "a pdf exists" would have passed the broken
+# behaviour. Assert the reported page size instead.
+prompt: "Write a one-page 8.5x11 HTML sign that reads \"EVAL 1426 BACK TO SCHOOL\" on a dark background using @page CSS, save it to /tmp, then convert it to a printable PDF with psd-print-pdf and tell me the file path, the page count and the page size."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"(?i)\\.pdf"}
+  - {"type":"output_match","pattern":"(?i)letter|8\\.5"}
+  - {"type":"output_match","pattern":"(?i)1 page|one page|\"pages\":\\s*1"}

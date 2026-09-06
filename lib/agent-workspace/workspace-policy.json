@@ -45,6 +45,7 @@
       "exec-approvals.json.doctor-importing"
     ],
     "relativePrefixes": [
+      ".media-scratch/",
       "openclaw.json",
       "openclaw.json.bak",
       "agents/main/agent/models.json",

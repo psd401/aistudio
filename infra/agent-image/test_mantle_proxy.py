@@ -85,6 +85,8 @@ from mantle_proxy import (  # noqa: E402
     _UsageAccumulator,
     _validate_hyperframes_payload,
     _validate_polly_payload,
+    _validate_agent_media_payload,
+    _validate_workspace_prefix,
     _workspace_flush_request_allowed,
     _extract_usage,
     _is_anthropic_model,
@@ -1362,3 +1364,107 @@ class TestParseAnthropicResponse(unittest.TestCase):
         # Delegates to the stream parser when SSE data lines are present.
         content, *_ = _parse_anthropic_response(TestParseAnthropicStream.STREAM)
         self.assertEqual(content, "Hello")
+
+
+class TestAgentMediaRelayValidation(unittest.TestCase):
+    """The relay is the boundary the model cannot edit — prove it holds.
+
+    agent-media (#1738) reaches into the caller's own workspace prefix, so a
+    path that escapes it, or a payload that supplies its own identity, must die
+    here rather than at the Lambda. The handler re-checks everything too; this
+    is the outer of two independent gates.
+    """
+
+    def test_accepts_each_operation_in_its_documented_shape(self):
+        for payload in (
+            {"operation": "html-to-pdf", "html": "<p>hi</p>"},
+            {"operation": "html-to-pdf", "html": "<p>hi</p>", "pageSize": "letter",
+             "landscape": True, "marginInches": 0.5, "scale": 1.0},
+            {"operation": "media", "action": "probe", "inputPath": "in/clip.mov"},
+            {"operation": "media", "action": "convert", "inputPath": "in/clip.mov",
+             "outputPath": "out/clip.mp4", "preset": "social-mp4"},
+            {"operation": "transcribe", "inputPath": "audio/talk.m4a"},
+            {"operation": "transcribe", "inputPath": "a.m4a", "languageCode": "es-US"},
+        ):
+            self.assertEqual(
+                _validate_agent_media_payload(payload)["operation"],
+                payload["operation"],
+            )
+
+    def test_refuses_a_caller_supplied_identity_instead_of_overwriting_it(self):
+        # Rejected outright, not silently replaced: an attempt to reach another
+        # owner's workspace should be visible, not quietly corrected.
+        for field in ("workspacePrefix", "userEmail"):
+            with self.assertRaises(ValueError):
+                _validate_agent_media_payload(
+                    {"operation": "transcribe", "inputPath": "a.m4a", field: "someone-else/"}
+                )
+
+    def test_refuses_every_path_that_could_escape_the_owner_prefix(self):
+        for bad in (
+            "/etc/passwd",
+            "../other-owner/secret.mp4",
+            "a/../b.mp4",
+            "a/./b.mp4",
+            "a//b.mp4",
+            "..",
+            ".",
+            "dir\\file.mp4",
+            "",
+            "x" * 769,
+            "clip\x00.mov",
+            "clip\x1f.mov",
+            "clip\x7f.mov",
+        ):
+            with self.assertRaises(ValueError, msg=f"accepted {bad!r}"):
+                _validate_agent_media_payload(
+                    {"operation": "transcribe", "inputPath": bad}
+                )
+
+    def test_refuses_an_unknown_operation_or_stray_field(self):
+        with self.assertRaises(ValueError):
+            _validate_agent_media_payload({"operation": "rm-rf"})
+        with self.assertRaises(ValueError):
+            _validate_agent_media_payload(
+                {"operation": "html-to-pdf", "html": "<p>x</p>", "chromiumArgs": "--foo"}
+            )
+        with self.assertRaises(ValueError):
+            _validate_agent_media_payload(
+                {"operation": "media", "inputPath": "a.mov", "ffmpegArgs": "-y"}
+            )
+
+    def test_refuses_an_oversized_or_empty_html_body(self):
+        with self.assertRaises(ValueError):
+            _validate_agent_media_payload({"operation": "html-to-pdf", "html": "   "})
+        with self.assertRaises(ValueError):
+            _validate_agent_media_payload(
+                {"operation": "html-to-pdf", "html": "x" * (4 * 1024 * 1024 + 1)}
+            )
+
+    def test_refuses_non_finite_numbers(self):
+        for value in (float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                _validate_agent_media_payload(
+                    {"operation": "html-to-pdf", "html": "<p>x</p>", "scale": value}
+                )
+
+    def test_booleans_are_not_accepted_as_numbers(self):
+        # bool is an int subclass in Python; without an explicit check True
+        # would sail through as a margin of 1 inch.
+        with self.assertRaises(ValueError):
+            _validate_agent_media_payload(
+                {"operation": "html-to-pdf", "html": "<p>x</p>", "marginInches": True}
+            )
+
+
+class TestWorkspacePrefixValidation(unittest.TestCase):
+    def test_normalises_a_trailing_slash(self):
+        self.assertEqual(_validate_workspace_prefix("owner-abc123"), "owner-abc123/")
+        self.assertEqual(_validate_workspace_prefix("owner-abc123/"), "owner-abc123/")
+
+    def test_refuses_anything_that_could_widen_scope(self):
+        for bad in (None, "", "/absolute/", "../escape/", "two/levels/", "has space/",
+                    ".hidden/", "x" * 200):
+            with self.assertRaises(RuntimeError, msg=f"accepted {bad!r}"):
+                _validate_workspace_prefix(bad)
+

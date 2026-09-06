@@ -136,6 +136,26 @@ HYPERFRAMES_RELAY_TIMEOUT_SECONDS = (
 # the relay ceiling; workspace flushing retains its separate 120-second budget
 # in agentcore_wrapper.py.
 FINALIZATION_DRAIN_TIMEOUT_SECONDS = HYPERFRAMES_RELAY_TIMEOUT_SECONDS + 5
+# agent-media (#1738). Same relay shape as HyperFrames — one fixed function, no
+# caller-selected target — with its own caps because the payloads differ: an
+# HTML page in, or a workspace-relative media path in and a bounded result out.
+AGENT_MEDIA_OPERATIONS = ("html-to-pdf", "media", "transcribe")
+AGENT_MEDIA_HTTP_REQUEST_MAX_BYTES = 6 * 1024 * 1024
+AGENT_MEDIA_INVOKE_PAYLOAD_MAX_BYTES = 6 * 1024 * 1024
+AGENT_MEDIA_RESPONSE_MAX_BYTES = 8 * 1024 * 1024
+AGENT_MEDIA_HTML_MAX_BYTES = 4 * 1024 * 1024
+AGENT_MEDIA_LAMBDA_READ_TIMEOUT_SECONDS = 780
+AGENT_MEDIA_RELAY_TIMEOUT_SECONDS = (
+    HYPERFRAMES_IDENTITY_TIMEOUT_SECONDS
+    + HYPERFRAMES_LAMBDA_CONNECT_TIMEOUT_SECONDS
+    + AGENT_MEDIA_LAMBDA_READ_TIMEOUT_SECONDS
+    + HYPERFRAMES_RELAY_TRANSPORT_MARGIN_SECONDS
+)
+# Mirrors the handler's own path rule. Validated HERE too so a malformed path
+# never reaches the function: the relay is the trust boundary the model cannot
+# edit, and re-proving it costs nothing.
+AGENT_MEDIA_PATH_RE = re.compile(r"^(?!/)(?!.*//)(?!.*(?:^|/)\.\.?(?:/|$))[^\\\x00-\x1f\x7f]{1,768}$")
+
 HYPERFRAMES_MAX_DURATION_SECONDS = 180
 HYPERFRAMES_MAX_FRAMES = 3_600
 HYPERFRAMES_MIN_DIMENSION = 16
@@ -258,6 +278,141 @@ def _read_bounded_aws_stream(stream, max_bytes: int) -> bytes:
         if callable(close):
             close()
     return bytes(body)
+
+
+def _validate_agent_media_payload(payload: object) -> dict:
+    """Constrain the media relay independently of both the skill and the Lambda.
+
+    Identity fields are deliberately absent from the allowlist: the caller never
+    states who it is, and `workspacePrefix`/`userEmail` are injected below from
+    the freshly verified invocation context. A payload that tries to supply
+    either is rejected outright rather than quietly overwritten, so an attempt to
+    reach another owner's workspace is visible instead of silently corrected.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("invalid media request")
+    operation = payload.get("operation")
+    if operation not in AGENT_MEDIA_OPERATIONS:
+        raise ValueError("invalid media operation")
+
+    if operation == "html-to-pdf":
+        allowed = {"operation", "html", "pageSize", "landscape", "marginInches", "scale",
+                   "printBackground"}
+        if set(payload) - allowed:
+            raise ValueError("invalid media fields")
+        html = payload.get("html")
+        if not isinstance(html, str) or not html.strip():
+            raise ValueError("invalid media html")
+        if len(html.encode("utf-8")) > AGENT_MEDIA_HTML_MAX_BYTES:
+            raise ValueError("media html exceeds the configured limit")
+        for key in ("landscape", "printBackground"):
+            if key in payload and not isinstance(payload[key], bool):
+                raise ValueError(f"invalid media {key}")
+        for key in ("marginInches", "scale"):
+            if key in payload:
+                value = payload[key]
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError(f"invalid media {key}")
+                if not math.isfinite(value):
+                    raise ValueError(f"invalid media {key}")
+        if "pageSize" in payload and not isinstance(payload["pageSize"], str):
+            raise ValueError("invalid media pageSize")
+        return dict(payload)
+
+    if operation == "media":
+        allowed = {"operation", "action", "inputPath", "outputPath", "preset"}
+        if set(payload) - allowed:
+            raise ValueError("invalid media fields")
+        for key in ("inputPath", "outputPath"):
+            if key in payload:
+                value = payload[key]
+                if not isinstance(value, str) or not AGENT_MEDIA_PATH_RE.fullmatch(value):
+                    raise ValueError(f"invalid media {key}")
+        for key in ("action", "preset"):
+            if key in payload and not isinstance(payload[key], str):
+                raise ValueError(f"invalid media {key}")
+        return dict(payload)
+
+    allowed = {"operation", "inputPath", "languageCode"}
+    if set(payload) - allowed:
+        raise ValueError("invalid media fields")
+    input_path = payload.get("inputPath")
+    if not isinstance(input_path, str) or not AGENT_MEDIA_PATH_RE.fullmatch(input_path):
+        raise ValueError("invalid media inputPath")
+    if "languageCode" in payload and not isinstance(payload["languageCode"], str):
+        raise ValueError("invalid media languageCode")
+    return dict(payload)
+
+
+def _validate_workspace_prefix(value: object) -> str:
+    """Accept only the prefix shape the workspace actually uses."""
+    if (
+        not isinstance(value, str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}/?", value)
+    ):
+        raise RuntimeError("Invocation workspace prefix is invalid")
+    return value if value.endswith("/") else f"{value}/"
+
+
+async def _resolve_invocation_identity() -> tuple[str, str]:
+    """Resolve the signed owner AND workspace prefix for a media invocation.
+
+    Unlike _resolve_invocation_owner there is deliberately NO old-tier fallback.
+    The prefix decides which owner's objects the function may touch, so if the
+    web tier is too old to return it this fails closed and media stays
+    unavailable until the deploy catches up — the same web-tier-first ordering
+    every other cross-unit change in this repo follows.
+    """
+    try:
+        status, response_body = await asyncio.wait_for(
+            _post_signed_identity_request(INVOCATION_IDENTITY_ROUTE),
+            timeout=HYPERFRAMES_IDENTITY_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError("Invocation identity verification timed out") from exc
+    if status != 200:
+        raise RuntimeError("Invocation identity verification failed")
+    try:
+        result = json.loads(response_body)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Invocation identity response is invalid") from exc
+    if not isinstance(result, dict):
+        raise RuntimeError("Invocation identity response is invalid")
+    owner = _validate_invocation_owner(result.get("ownerEmail"))
+    prefix = _validate_workspace_prefix(result.get("workspacePrefix"))
+    return owner, prefix
+
+
+def _serialize_agent_media_payload(payload: dict) -> bytes:
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(body) > AGENT_MEDIA_INVOKE_PAYLOAD_MAX_BYTES:
+        raise ValueError("media serialized payload exceeds the configured limit")
+    return body
+
+
+def _invoke_agent_media(payload: dict) -> dict:
+    """Invoke only the configured media Lambda with root-owned AWS authority."""
+    function_name = os.environ.get("AGENT_MEDIA_FUNCTION", "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", function_name):
+        raise RuntimeError("Agent media function is not configured")
+    response = _new_lambda_client().invoke(
+        FunctionName=function_name,
+        InvocationType="RequestResponse",
+        Payload=_serialize_agent_media_payload(payload),
+    )
+    stream = response.get("Payload")
+    if stream is None:
+        raise RuntimeError("Agent media returned no payload")
+    body = _read_bounded_aws_stream(stream, AGENT_MEDIA_RESPONSE_MAX_BYTES)
+    if response.get("FunctionError"):
+        raise RuntimeError("Agent media Lambda reported a function error")
+    try:
+        result = json.loads(body)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Agent media returned invalid JSON") from exc
+    if not isinstance(result, dict):
+        raise RuntimeError("Agent media returned an invalid response")
+    return result
 
 
 def _validate_polly_payload(payload: object) -> dict:
@@ -1724,6 +1879,34 @@ async def handle_hyperframes_invoke(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+async def handle_agent_media_invoke(request: web.Request) -> web.Response:
+    """Invoke only the configured media function; never accept an ARN or identity."""
+    if not _invocation_authority_is_available():
+        return web.json_response({"error": "Invocation authority is unavailable"}, status=503)
+    try:
+        payload = _validate_agent_media_payload(
+            await _read_fixed_aws_request(
+                request, max_bytes=AGENT_MEDIA_HTTP_REQUEST_MAX_BYTES
+            )
+        )
+    except ValueError:
+        return web.json_response({"error": "Invalid media request"}, status=400)
+    try:
+        owner_email, workspace_prefix = await _resolve_invocation_identity()
+        # Injected AFTER validation so a caller-supplied value cannot survive:
+        # the allowlist above already rejects these keys outright.
+        bound = {
+            **payload,
+            "userEmail": owner_email,
+            "workspacePrefix": workspace_prefix,
+        }
+        result = await asyncio.to_thread(_invoke_agent_media, bound)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(j("agent_media_invoke_failed", error=type(exc).__name__))
+        return web.json_response({"error": "Media invocation failed"}, status=502)
+    return web.json_response(result)
+
+
 AGENT_BROKER_RESPONSE_MAX_BYTES = 64 * 1024 * 1024
 
 
@@ -2360,6 +2543,7 @@ def main() -> None:
     )
     app.router.add_post("/aws-skill/polly/synthesize", handle_polly_synthesize)
     app.router.add_post("/aws-skill/hyperframes/invoke", handle_hyperframes_invoke)
+    app.router.add_post("/aws-skill/media/invoke", handle_agent_media_invoke)
     app.router.add_route("*", "/agent-broker/{route:.*}", handle_agent_broker)
     app.router.add_route("*", "/{path:.*}", handle_proxy)
     log.info(

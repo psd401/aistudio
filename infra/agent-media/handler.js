@@ -1,5 +1,5 @@
 'use strict';
-const { validatedFs } = require('../validated-fs.cjs');
+const { validatedFs, validatedFsPromises } = require('../validated-fs.cjs');
 
 /**
  * agent-media — AWS Lambda handler (container image).
@@ -41,7 +41,6 @@ const { validatedFs } = require('../validated-fs.cjs');
 
 const { execFile } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
-const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { promisify } = require('node:util');
@@ -184,7 +183,7 @@ function relativeWorkspacePath(value, field) {
   // wrong. DEL (\u007f) is included too — it is a control character that the
   // common \x00-\x1f range misses.
   // eslint-disable-next-line no-control-regex
-  const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/
+  const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F]/
   if (
     value.startsWith('/') ||
     value.includes('\\') ||
@@ -229,8 +228,8 @@ async function downloadToFile(key, destination) {
       `input is ${declared} bytes, over the ${MAX_INPUT_MEDIA_BYTES}-byte limit`,
     );
   }
-  await fs.promises.writeFile(destination, response.Body);
-  const { size } = await fs.promises.stat(destination);
+  await validatedFsPromises.writeFile(destination, response.Body);
+  const { size } = await validatedFsPromises.stat(destination);
   if (size === 0) throw new BadRequest('input file is empty');
   // Re-check after the fact: ContentLength is advisory and a lying header must
   // not let an oversized object through.
@@ -248,17 +247,23 @@ async function runBinary(binary, args, timeoutMs, label) {
     });
   } catch (error) {
     if (error && error.killed) {
-      throw new Error(`${label} exceeded its ${Math.round(timeoutMs / 1000)}s budget`);
+      throw new Error(
+        `${label} exceeded its ${Math.round(timeoutMs / 1000)}s budget`,
+        { cause: error },
+      );
     }
     // ffmpeg/chromium put the useful diagnosis on stderr, not in the message.
     const detail = String(error?.stderr || error?.message || '').trim().slice(-600);
-    throw new Error(`${label} failed: ${detail || 'no diagnostic output'}`);
+    throw new Error(`${label} failed: ${detail || 'no diagnostic output'}`, {
+      cause: error,
+    });
   }
 }
 
 // ── html-to-pdf ──────────────────────────────────────────────────────────────
 
-async function htmlToPdf(event, scratch) {
+/** Validate and default every print option. Split out to keep htmlToPdf flat. */
+function printOptions(event) {
   const html = event.html;
   if (typeof html !== 'string' || html.trim() === '') {
     throw new BadRequest('html is required');
@@ -269,26 +274,36 @@ async function htmlToPdf(event, scratch) {
   }
   const pageSize = event.pageSize === undefined ? 'letter' : event.pageSize;
   if (!PAGE_SIZES.has(pageSize)) {
-    throw new BadRequest(
-      `pageSize must be one of ${[...PAGE_SIZES.keys()].join(', ')}`,
-    );
+    throw new BadRequest(`pageSize must be one of ${[...PAGE_SIZES.keys()].join(', ')}`);
   }
-  const landscape = event.landscape === true;
-  const margin = event.marginInches === undefined ? 0 : Number(event.marginInches);
-  if (!Number.isFinite(margin) || margin < 0 || margin > 3) {
-    throw new BadRequest('marginInches must be between 0 and 3');
-  }
-  const scale = event.scale === undefined ? 1 : Number(event.scale);
-  if (!Number.isFinite(scale) || scale < 0.1 || scale > 2) {
-    throw new BadRequest('scale must be between 0.1 and 2');
-  }
+  return {
+    html,
+    pageSize,
+    landscape: event.landscape === true,
+    printBackground: event.printBackground !== false,
+    marginInches: boundedNumber(event.marginInches, 0, 3, 0, 'marginInches'),
+    scale: boundedNumber(event.scale, 0.1, 2, 1, 'scale'),
+  };
+}
 
+/** One numeric option, defaulted and range-checked. */
+function boundedNumber(raw, minimum, maximum, fallback, field) {
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < minimum || value > maximum) {
+    throw new BadRequest(`${field} must be between ${minimum} and ${maximum}`);
+  }
+  return value;
+}
+
+async function htmlToPdf(event, scratch) {
+  const { html, pageSize, landscape, printBackground } = printOptions(event);
   const [pageWidth, pageHeight] = PAGE_SIZES.get(pageSize);
   const [width, height] = landscape ? [pageHeight, pageWidth] : [pageWidth, pageHeight];
 
   const source = path.join(scratch, 'page.html');
   const target = path.join(scratch, 'page.pdf');
-  await fs.promises.writeFile(source, html, 'utf8');
+  await validatedFsPromises.writeFile(source, html, 'utf8');
 
   // --no-pdf-header-footer suppresses Chromium's default URL/date furniture,
   // which otherwise prints over a design that was laid out to the page edge.
@@ -303,7 +318,7 @@ async function htmlToPdf(event, scratch) {
       '--disable-dev-shm-usage',
       '--no-pdf-header-footer',
       `--print-to-pdf-page-size=${width}x${height}`,
-      ...(event.printBackground === false ? [] : ['--print-to-pdf-background']),
+      ...(printBackground ? ['--print-to-pdf-background'] : []),
       `--print-to-pdf=${target}`,
       source,
     ],
@@ -311,7 +326,7 @@ async function htmlToPdf(event, scratch) {
     'Chromium print-to-PDF',
   );
 
-  const pdf = await fs.promises.readFile(target);
+  const pdf = await validatedFsPromises.readFile(target);
   if (pdf.length === 0 || !pdf.subarray(0, 5).equals(Buffer.from('%PDF-'))) {
     throw new Error('Chromium produced a file that is not a PDF');
   }
@@ -347,32 +362,45 @@ function summariseProbe(raw) {
   const video = streams.find((s) => s.codec_type === 'video') || null;
   const audio = streams.find((s) => s.codec_type === 'audio') || null;
   const format = parsed.format || {};
-  const rate = video && typeof video.avg_frame_rate === 'string'
-    ? video.avg_frame_rate.split('/')
-    : null;
-  const fps = rate && rate.length === 2 && Number(rate[1]) !== 0
-    ? Math.round((Number(rate[0]) / Number(rate[1])) * 100) / 100
-    : null;
   return {
-    durationSeconds: format.duration ? Math.round(Number(format.duration) * 100) / 100 : null,
-    bytes: format.size ? Number(format.size) : null,
+    // Presence checks, not truthiness: ffprobe reports these as STRINGS, and a
+    // legitimate "0" would be discarded by a truthy test on a numeric field.
+    durationSeconds:
+      format.duration === undefined
+        ? null
+        : Math.round(Number(format.duration) * 100) / 100,
+    bytes: format.size === undefined ? null : Number(format.size),
     formatName: format.format_name || null,
-    video: video
-      ? {
-          codec: video.codec_name || null,
-          width: video.width || null,
-          height: video.height || null,
-          fps,
-          pixelFormat: video.pix_fmt || null,
-        }
-      : null,
-    audio: audio
-      ? {
-          codec: audio.codec_name || null,
-          channels: audio.channels || null,
-          sampleRate: audio.sample_rate ? Number(audio.sample_rate) : null,
-        }
-      : null,
+    video: summariseVideoStream(video),
+    audio: summariseAudioStream(audio),
+  };
+}
+
+/** ffprobe reports frame rate as a rational string; stills come back as `0/0`. */
+function frameRateOf(stream) {
+  if (!stream || typeof stream.avg_frame_rate !== 'string') return null;
+  const [numerator, denominator] = stream.avg_frame_rate.split('/');
+  if (denominator === undefined || Number(denominator) === 0) return null;
+  return Math.round((Number(numerator) / Number(denominator)) * 100) / 100;
+}
+
+function summariseVideoStream(video) {
+  if (!video) return null;
+  return {
+    codec: video.codec_name || null,
+    width: video.width || null,
+    height: video.height || null,
+    fps: frameRateOf(video),
+    pixelFormat: video.pix_fmt || null,
+  };
+}
+
+function summariseAudioStream(audio) {
+  if (!audio) return null;
+  return {
+    codec: audio.codec_name || null,
+    channels: audio.channels || null,
+    sampleRate: audio.sample_rate ? Number(audio.sample_rate) : null,
   };
 }
 
@@ -438,7 +466,7 @@ async function mediaOperation(event, scratch, prefix) {
     FFMPEG_TIMEOUT_MS,
     'ffmpeg',
   );
-  const body = await fs.promises.readFile(outputFile);
+  const body = await validatedFsPromises.readFile(outputFile);
   if (body.length === 0) throw new Error('ffmpeg produced an empty file');
 
   await s3().send(
@@ -469,6 +497,40 @@ async function mediaOperation(event, scratch, prefix) {
 // ── transcribe ───────────────────────────────────────────────────────────────
 
 const LANGUAGE_RE = /^[a-z]{2}-[A-Z]{2}$/;
+
+/** Poll one job to a terminal state inside the configured budget. */
+async function awaitTranscriptionJob(jobName) {
+  const deadline = Date.now() + TRANSCRIBE_TIMEOUT_MS;
+  while (Date.now() <= deadline) {
+    await new Promise((resolve) => setTimeout(resolve, TRANSCRIBE_POLL_INTERVAL_MS));
+    const described = await transcribe().send(
+      new GetTranscriptionJobCommand({ TranscriptionJobName: jobName }),
+    );
+    const job = described.TranscriptionJob;
+    const state = job?.TranscriptionJobStatus;
+    if (state === 'COMPLETED') return;
+    if (state === 'FAILED') {
+      throw new Error(`transcription failed: ${job?.FailureReason || 'no reason given'}`);
+    }
+  }
+  throw new Error(
+    `transcription did not finish within ${Math.round(TRANSCRIBE_TIMEOUT_MS / 1000)}s`,
+  );
+}
+
+/** Read Transcribe's own JSON result and pull the plain transcript out of it. */
+async function readTranscriptText(bucket, outputKey) {
+  const result = await s3().send(
+    new GetObjectCommand({ Bucket: bucket, Key: outputKey }),
+  );
+  const rawBody = await result.Body.transformToString();
+  try {
+    const parsed = JSON.parse(rawBody);
+    return String(parsed?.results?.transcripts?.[0]?.transcript || '');
+  } catch (error) {
+    throw new Error('Transcribe returned a result that is not JSON', { cause: error });
+  }
+}
 
 async function transcribeOperation(event, prefix) {
   const inputPath = relativeWorkspacePath(event.inputPath, 'inputPath');
@@ -501,37 +563,8 @@ async function transcribeOperation(event, prefix) {
     }),
   );
 
-  const deadline = Date.now() + TRANSCRIBE_TIMEOUT_MS;
-  let job = null;
-  for (;;) {
-    if (Date.now() > deadline) {
-      throw new Error(
-        `transcription did not finish within ${Math.round(TRANSCRIBE_TIMEOUT_MS / 1000)}s`,
-      );
-    }
-    await new Promise((resolve) => setTimeout(resolve, TRANSCRIBE_POLL_INTERVAL_MS));
-    const described = await transcribe().send(
-      new GetTranscriptionJobCommand({ TranscriptionJobName: jobName }),
-    );
-    job = described.TranscriptionJob || null;
-    const state = job?.TranscriptionJobStatus;
-    if (state === 'COMPLETED') break;
-    if (state === 'FAILED') {
-      throw new Error(`transcription failed: ${job?.FailureReason || 'no reason given'}`);
-    }
-  }
-
-  const result = await s3().send(
-    new GetObjectCommand({ Bucket: bucket, Key: outputKey }),
-  );
-  const rawBody = await result.Body.transformToString();
-  let transcript = '';
-  try {
-    const parsed = JSON.parse(rawBody);
-    transcript = String(parsed?.results?.transcripts?.[0]?.transcript || '');
-  } catch {
-    throw new Error('Transcribe returned a result that is not JSON');
-  }
+  await awaitTranscriptionJob(jobName);
+  const transcript = await readTranscriptText(bucket, outputKey);
   // Best-effort cleanup. A retained scratch object is untidy, not a failure, and
   // must never turn a successful transcription into an error.
   try {
@@ -576,7 +609,7 @@ exports.handler = async function handler(event) {
     }
     const prefix = workspacePrefixOf(event);
 
-    scratch = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'agent-media-'));
+    scratch = await validatedFsPromises.mkdtemp(path.join(os.tmpdir(), 'agent-media-'));
     if (operation === 'html-to-pdf') return await htmlToPdf(event, scratch);
     if (operation === 'media') return await mediaOperation(event, scratch, prefix);
     return await transcribeOperation(event, prefix);
@@ -590,7 +623,7 @@ exports.handler = async function handler(event) {
     return fail('media_failed', String(error?.message || error).slice(0, 900));
   } finally {
     if (scratch) {
-      await fs.promises.rm(scratch, { recursive: true, force: true }).catch(() => {});
+      await validatedFsPromises.rm(scratch, { recursive: true, force: true }).catch(() => {});
     }
   }
 };
@@ -605,9 +638,5 @@ exports.testables = {
   PAGE_SIZES,
   TRANSCRIBABLE,
   MAX_INLINE_PDF_BYTES,
+  validatedFs,
 };
-
-// validated-fs is required for parity with the other container Lambdas, whose
-// handlers all route filesystem access through the shared wrapper. Referenced
-// here so a future refactor cannot silently drop the import.
-void validatedFs;

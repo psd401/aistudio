@@ -1,0 +1,14 @@
+id: transcribe-spoken-canary
+skill: psd-transcribe
+level: L2
+workspace: mutating
+suite: capability
+# demontek's shape: a recording in, readable text out. The canary phrase can
+# only appear if speech recognition actually ran, so this cannot be satisfied
+# by a model that merely describes the skill.
+prompt: "Use psd-tts to synthesize the sentence \"The enrollment count is one thousand two hundred four.\" to an audio file in /tmp, then transcribe that audio back to text with psd-transcribe and report exactly what the transcript says. This is synthetic test data."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"(?i)enrollment"}
+  - {"type":"output_match","pattern":"(?i)(1,?204|one thousand two hundred (and )?four|twelve oh four)"}
+  - {"type":"output_match","pattern":"(?is)\\A(?!.*(cannot be transcribed|no speech-to-text|not available))"}

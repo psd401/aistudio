@@ -46,6 +46,7 @@
     "test:skill:workspace": "cd infra/agent-image/skills/psd-workspace && bun test common.test.js",
     "test:lambda:router": "cd infra/lambdas/agent-router && bun test",
     "test:lambda:cron": "cd infra/lambdas/agent-cron && bun test",
+    "test:lambda:media": "cd infra/agent-media && bun test",
     "test:skill:publish-file": "cd infra/agent-image/skills/psd-publish-file && bun test",
     "test:skill:directory": "cd infra/agent-image/skills/psd-directory && bun test run.test.js",
     "test:skill:workflows": "cd infra/agent-image/skills/psd-workflows && node --test",

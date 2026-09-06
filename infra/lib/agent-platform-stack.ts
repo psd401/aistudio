@@ -40,6 +40,7 @@ import {
 import { ServiceRoleFactory, usGuardrailProfileArns } from './constructs/security';
 import { AGENT_LAMBDA_RUNTIME } from './constructs/compute/lambda-construct';
 import { HyperframesRenderFunction } from './constructs/compute/hyperframes-render-function';
+import { AgentMediaFunction } from './constructs/compute/agent-media-function';
 import { validatedFs } from "./validated-fs";
 import { parseBundledSkillFrontmatter } from './bundled-skill-manifest';
 
@@ -125,6 +126,7 @@ class AgentPlatformBuildResources {
   ecrRepository!: ecr.Repository;
   workspaceBucket!: s3.Bucket;
   hyperframesRenderFunction!: HyperframesRenderFunction;
+  agentMediaFunction!: AgentMediaFunction;
   usersTable!: dynamodb.Table;
   signalsTable!: dynamodb.Table;
   messageDedupTable!: dynamodb.Table;
@@ -217,6 +219,7 @@ export class AgentPlatformStack extends cdk.Stack {
   public readonly workspaceBucket: s3.Bucket;
   /** Container-image Lambda that renders HyperFrames compositions to MP4 (#1175) */
   public readonly hyperframesRenderFunction: HyperframesRenderFunction;
+  public readonly agentMediaFunction: AgentMediaFunction;
   /** DynamoDB table for user identity mapping */
   public readonly usersTable: dynamodb.Table;
   /** DynamoDB table for organizational signals (Nervous System) */
@@ -316,6 +319,7 @@ export class AgentPlatformStack extends cdk.Stack {
     this.ecrRepository = resources.ecrRepository;
     this.workspaceBucket = resources.workspaceBucket;
     this.hyperframesRenderFunction = resources.hyperframesRenderFunction;
+    this.agentMediaFunction = resources.agentMediaFunction;
     this.usersTable = resources.usersTable;
     this.signalsTable = resources.signalsTable;
     this.messageDedupTable = resources.messageDedupTable;
@@ -500,6 +504,20 @@ export class AgentPlatformStack extends cdk.Stack {
     resources.hyperframesRenderFunction = new HyperframesRenderFunction(this, 'HyperframesRender', {
       environment,
       functionName: `psd-hyperframes-render-${environment}`,
+      workspaceBucket: resources.workspaceBucket,
+      region: this.region,
+      account: this.account,
+    });
+
+    // agent-media (#1738): HTML-to-PDF, ffmpeg transcode/probe and Transcribe.
+    // A SEPARATE function from the renderer above even though both carry
+    // Chromium and FFmpeg — the renderer's role may write only to
+    // public-images/, while this one reads and writes owners' PRIVATE workspace
+    // prefixes and is explicitly denied public-images/. Merging them would
+    // widen a production role to save an image.
+    resources.agentMediaFunction = new AgentMediaFunction(this, 'AgentMedia', {
+      environment,
+      functionName: `psd-agent-media-${environment}`,
       workspaceBucket: resources.workspaceBucket,
       region: this.region,
       account: this.account,
@@ -1667,6 +1685,18 @@ export class AgentPlatformStack extends cdk.Stack {
       resources: [resources.hyperframesRenderFunction.function.functionArn],
     }));
 
+    // agent-media invocation (#1738). Same shape as the render grant above:
+    // scoped to one function ARN, invoked only by the root-owned loopback
+    // relay, which never hands credential material to the model UID and never
+    // accepts a caller-selected target. The media function owns its own S3
+    // access, so the model-facing role gains none.
+    resources.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'AgentMediaInvoke',
+      effect: iam.Effect.ALLOW,
+      actions: ['lambda:InvokeFunction'],
+      resources: [resources.agentMediaFunction.function.functionArn],
+    }));
+
     // ECR pull for agent images
     resources.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
       sid: 'ECRPullAccess',
@@ -1998,6 +2028,7 @@ export class AgentPlatformStack extends cdk.Stack {
       // select a function; the grant is the HyperframesRenderInvoke statement
       // on the AgentCore execution role.
       HYPERFRAMES_RENDER_FUNCTION: resources.hyperframesRenderFunction.function.functionName,
+      AGENT_MEDIA_FUNCTION: resources.agentMediaFunction.function.functionName,
       GUARDRAIL_ARN: props.guardrailArn,
       SKILL_BUILDER_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:${resources.skillBuilderFunctionName}`,
       APP_BASE_URL: props.appBaseUrl ?? '',

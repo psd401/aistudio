@@ -56,7 +56,7 @@ describe('workspace path boundary', () => {
   });
 
   test('refuses control characters, including DEL', () => {
-    for (const code of [0x00, 0x09, 0x0a, 0x1f, 0x7f]) {
+    for (const code of [0x00, 0x09, 0x0A, 0x1F, 0x7F]) {
       const value = `clip${String.fromCharCode(code)}.mov`;
       expect(() => relativeWorkspacePath(value, 'inputPath')).toThrow(BadRequest);
     }

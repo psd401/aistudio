@@ -1,0 +1,9 @@
+{
+  "name": "psd-transcribe",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenClaw skill: speech-to-text over a workspace recording via the agent-media Lambda and Amazon Transcribe (#1738).",
+  "scripts": {
+    "test": "bun test"
+  }
+}
