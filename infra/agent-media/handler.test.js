@@ -32,7 +32,7 @@ const {
   PRESETS,
   PAGE_SIZES,
   TRANSCRIBABLE,
-  CHROMIUM_SANDBOX_FLAGS,
+  CHROMIUM_BASE_FLAGS,
 } = testables;
 
 describe('Chromium can start inside a Lambda sandbox', () => {
@@ -44,14 +44,13 @@ describe('Chromium can start inside a Lambda sandbox', () => {
     '--in-process-gpu': 'GPU process launch failed: error_code=1002 (FATAL)',
     '--disable-software-rasterizer': 'no SwiftShader fallback process either',
     '--no-zygote': 'Zygote could not fork: child_pid -1',
-    '--single-process': 'belt to the --no-zygote braces',
     '--disable-crash-reporter': 'crashpad ptrace: Operation not permitted',
     '--disable-dev-shm-usage': '/dev/shm is too small to render into',
   };
 
   for (const [flag, why] of Object.entries(REQUIRED)) {
     test(`${flag} — ${why}`, () => {
-      expect(CHROMIUM_SANDBOX_FLAGS).toContain(flag);
+      expect(CHROMIUM_BASE_FLAGS).toContain(flag);
     });
   }
 
@@ -59,12 +58,19 @@ describe('Chromium can start inside a Lambda sandbox', () => {
     // The original build had --disable-gpu and still died: it disables GPU
     // RENDERING, not the GPU process spawn. This asserts the pairing rather
     // than the flag, because the flag on its own is what shipped broken.
-    expect(CHROMIUM_SANDBOX_FLAGS).toContain('--disable-gpu');
-    expect(CHROMIUM_SANDBOX_FLAGS).toContain('--in-process-gpu');
+    expect(CHROMIUM_BASE_FLAGS).toContain('--disable-gpu');
+    expect(CHROMIUM_BASE_FLAGS).toContain('--in-process-gpu');
+  });
+
+  test('--single-process is NOT a base flag', () => {
+    // It answers no line of the captured stderr, it breaks
+    // `@font-face { src: local(...) }`, and the build carrying it exited 0 and
+    // wrote no PDF. It belongs to htmlToPdf's fallback attempt, not here.
+    expect(CHROMIUM_BASE_FLAGS).not.toContain('--single-process');
   });
 
   test('the set is frozen so a caller cannot mutate it between invocations', () => {
-    expect(Object.isFrozen(CHROMIUM_SANDBOX_FLAGS)).toBe(true);
+    expect(Object.isFrozen(CHROMIUM_BASE_FLAGS)).toBe(true);
   });
 });
 

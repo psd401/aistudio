@@ -82,14 +82,18 @@ const CHROMIUM_TIMEOUT_MS = 120_000;
 // captured stderr each one answers. Kept as a named constant so a test can
 // assert they survive, because losing any one of them fails at runtime only,
 // in production only, with no local reproduction.
-const CHROMIUM_SANDBOX_FLAGS = Object.freeze([
+//
+// --single-process is deliberately NOT here. It belongs to the fallback
+// attempt in htmlToPdf: it answers no line of the captured stderr, it breaks
+// `@font-face { src: local(...) }`, and on 2026-09-06 a build carrying it
+// exited 0 and wrote no PDF at all.
+const CHROMIUM_BASE_FLAGS = Object.freeze([
   '--headless',
   '--no-sandbox',
   '--disable-gpu',
   '--disable-software-rasterizer',
   '--in-process-gpu',
   '--no-zygote',
-  '--single-process',
   '--disable-crash-reporter',
   '--disable-dev-shm-usage',
 ]);
@@ -256,9 +260,35 @@ async function downloadToFile(key, destination) {
   return size;
 }
 
+// Chromium writes these on every headless run in a container: there is no
+// system dbus and no UPower. They are not diagnostic and they are ~2 KB per
+// invocation, which is enough noise to bury the one line that matters. Narrow
+// on purpose — anything not matching is kept, so a new failure mode still
+// shows up rather than being filtered into silence.
+const BENIGN_STDERR = /(dbus\/(bus|object_proxy)\.cc|UPower|font_unique_name_lookup)/;
+
+/** Drop known-benign chatter; return what is left, or '' if nothing is. */
+function notableStderr(stderr) {
+  return String(stderr || '')
+    .split('\n')
+    .filter((line) => line.trim() && !BENIGN_STDERR.test(line))
+    .join('\n')
+    .trim();
+}
+
+/** Does the artifact exist? Chromium exiting 0 is not evidence that it does. */
+async function fileExists(target) {
+  try {
+    await validatedFsPromises.stat(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function runBinary(binary, args, timeoutMs, label, extraEnv) {
   try {
-    return await execFileAsync(binary, args, {
+    const result = await execFileAsync(binary, args, {
       timeout: timeoutMs,
       maxBuffer: 16 * 1024 * 1024,
       // Only when a caller asks. Chromium needs HOME and the XDG paths pointed
@@ -266,29 +296,41 @@ async function runBinary(binary, args, timeoutMs, label, extraEnv) {
       // ffmpeg needs nothing and inherits the ambient environment.
       ...(extraEnv ? { env: { ...process.env, ...extraEnv } } : {}),
     });
+    // Logged on SUCCESS too, not only on throw. The 2026-09-06 deploy exited 0
+    // and wrote no PDF: runBinary's catch never fired, so nothing Chromium said
+    // about why reached CloudWatch and the next step had to be a guess. A clean
+    // exit is not evidence that the work happened.
+    const notable = notableStderr(result?.stderr);
+    if (notable) console.error(`[agent-media] ${label} stderr:`, notable.slice(-2000));
+    return result;
   } catch (error) {
-    if (error && error.killed) {
-      console.error(
-        `[agent-media] ${label} exceeded ${Math.round(timeoutMs / 1000)}s`,
-      );
-      throw new Error(
-        `${label} exceeded its ${Math.round(timeoutMs / 1000)}s budget`,
-        { cause: error },
-      );
-    }
-    // ffmpeg/chromium put the useful diagnosis on stderr, not in the message.
-    const detail = String(error?.stderr || error?.message || '').trim().slice(-600);
-    // CloudWatch, not just the caller. The 2026-09-06 Chromium failure returned
-    // this text to the agent, which relayed it to the user in chat — and the
-    // function's own log group held nothing but START/END/REPORT, so the only
-    // record of why production was broken was a screenshot of a chat message.
-    // Logged at full length; the throw below is what gets truncated for the
-    // user-facing reply.
-    console.error(`[agent-media] ${label} failed:`, String(error?.stderr || error?.message || ''));
-    throw new Error(`${label} failed: ${detail || 'no diagnostic output'}`, {
-      cause: error,
-    });
+    throw describeBinaryFailure(error, label, timeoutMs);
   }
+}
+
+/**
+ * Log a child-process failure to CloudWatch and shape the error the caller sees.
+ *
+ * Split out of runBinary only to keep it under the complexity cap; the logging
+ * is the point. The 2026-09-06 Chromium failure returned its diagnosis to the
+ * agent, which relayed it to the user in chat, while the function's own log
+ * group held nothing but START/END/REPORT — so the only record of why
+ * production was broken was a screenshot of a chat message. Logged at full
+ * length here; the thrown message is what gets truncated for the reply.
+ */
+function describeBinaryFailure(error, label, timeoutMs) {
+  const seconds = Math.round(timeoutMs / 1000);
+  if (error && error.killed) {
+    console.error(`[agent-media] ${label} exceeded ${seconds}s`);
+    return new Error(`${label} exceeded its ${seconds}s budget`, { cause: error });
+  }
+  // ffmpeg/chromium put the useful diagnosis on stderr, not in the message.
+  const raw = String(error?.stderr || error?.message || '');
+  console.error(`[agent-media] ${label} failed:`, raw);
+  const detail = raw.trim().slice(-600);
+  return new Error(`${label} failed: ${detail || 'no diagnostic output'}`, {
+    cause: error,
+  });
 }
 
 // ── html-to-pdf ──────────────────────────────────────────────────────────────
@@ -373,22 +415,61 @@ async function htmlToPdf(event, scratch) {
   // the build probe and the RIE smoke test passed a build that could not print
   // a single page in production. Verify a change here by invoking the deployed
   // function; local runs prove output quality only.
-  await runBinary(
-    CHROMIUM,
-    [
-      ...CHROMIUM_SANDBOX_FLAGS,
-      `--user-data-dir=${userDataDir}`,
-      `--crash-dumps-dir=${scratch}`,
-      '--no-pdf-header-footer',
-      `--print-to-pdf-page-size=${width}x${height}`,
-      ...(printBackground ? ['--print-to-pdf-background'] : []),
-      `--print-to-pdf=${target}`,
-      source,
-    ],
-    CHROMIUM_TIMEOUT_MS,
-    'Chromium print-to-PDF',
-    { HOME: scratch, XDG_CONFIG_HOME: scratch, XDG_CACHE_HOME: scratch },
-  );
+  // TWO ATTEMPTS, ORDERED BY WHAT THE EVIDENCE ACTUALLY SAID.
+  //
+  // The captured stderr named exactly two refused spawns — the GPU process and
+  // the zygote — which --in-process-gpu and --no-zygote answer directly.
+  // --single-process was added as a belt, and it is the flag with a known
+  // interaction with --print-to-pdf: on the 2026-09-06 deploy Chromium exited
+  // 0 and wrote no file at all, which is the shape that failure takes. It also
+  // costs `@font-face { src: local(...) }`, which needs the browser process's
+  // font service.
+  //
+  // So: try without it first (full fidelity, no known print interaction), and
+  // fall back to it only if that produces nothing. The fallback exists because
+  // --no-zygote alone is unproven against the sandbox, and a second bounded
+  // attempt is cheaper than another deploy cycle to find out. The log line says
+  // which one won, so the next reader does not have to guess.
+  const printArgs = (extra) => [
+    ...CHROMIUM_BASE_FLAGS,
+    ...extra,
+    `--user-data-dir=${userDataDir}`,
+    `--crash-dumps-dir=${scratch}`,
+    '--no-pdf-header-footer',
+    `--print-to-pdf-page-size=${width}x${height}`,
+    ...(printBackground ? ['--print-to-pdf-background'] : []),
+    `--print-to-pdf=${target}`,
+    source,
+  ];
+  const chromiumEnv = { HOME: scratch, XDG_CONFIG_HOME: scratch, XDG_CACHE_HOME: scratch };
+
+  const attempts = [
+    { label: 'Chromium print-to-PDF', extra: [] },
+    { label: 'Chromium print-to-PDF (single-process fallback)', extra: ['--single-process'] },
+  ];
+  let printed = false;
+  let lastFailure = null;
+  for (const attempt of attempts) {
+    try {
+      await runBinary(CHROMIUM, printArgs(attempt.extra), CHROMIUM_TIMEOUT_MS, attempt.label, chromiumEnv);
+    } catch (error) {
+      lastFailure = error;
+      console.error(`[agent-media] ${attempt.label}: ${error.message}`);
+      continue;
+    }
+    // Chromium can exit 0 and write nothing — that is not an error it reports,
+    // so the artifact is the only thing worth believing.
+    if (await fileExists(target)) {
+      console.error(`[agent-media] ${attempt.label}: produced ${target}`);
+      printed = true;
+      break;
+    }
+    lastFailure = new Error(`${attempt.label} exited cleanly without writing a PDF`);
+    console.error(`[agent-media] ${lastFailure.message}`);
+  }
+  if (!printed) {
+    throw lastFailure ?? new Error('Chromium print-to-PDF produced no output');
+  }
 
   const pdf = await validatedFsPromises.readFile(target);
   if (pdf.length === 0 || !pdf.subarray(0, 5).equals(Buffer.from('%PDF-'))) {
@@ -705,6 +786,6 @@ exports.testables = {
   PAGE_SIZES,
   TRANSCRIBABLE,
   MAX_INLINE_PDF_BYTES,
-  CHROMIUM_SANDBOX_FLAGS,
+  CHROMIUM_BASE_FLAGS,
   validatedFs,
 };
