@@ -163,6 +163,72 @@ A `question.resolve` line in the logs is now a signal that something re-introduc
 
 ---
 
+## Fused Chat Final Recovery
+
+**Source**: `/infra/agent-image/harness_adapter.py` — `_prefer_terminal_segment()`
+
+The live OpenClaw gateway fuses a turn's assistant text blocks into a single `final` payload. This section documents how the harness prevents that fusion from shipping narration to the user.
+
+### Gateway Fusion Behavior
+
+The chat channel's `final` payload carries **every assistant text block the turn produced**, concatenated into one string with **no separator**. A turn with six assistant messages (five ending with `stopReason=toolUse`) arrives as a single fused message.
+
+**Production Evidence**: Run `a33a3f92` on 2026-09-06 produced a 54-tool-call turn with six assistant messages. The final payload was 1630 chars—the exact sum of all six blocks—reading:
+
+> "...fix that written file.Let me just avoid the script entirely and use jq.Bad literal newline. Let me repair it.None of the 18 items match…"
+
+The boundary-aware accumulator had already isolated the terminal segment, but the `final` payload overwrote it, delivering the fused scratchpad to the user.
+
+### Terminal Segment Preference
+
+The `_prefer_terminal_segment()` static method undoes the fusion when the signature is unambiguous:
+
+**Trigger conditions (ALL required)**:
+- Chat text is non-empty
+- Accumulator is non-empty
+- Chat text ≠ accumulator
+- Chat text **ends with** the accumulator (strict suffix)
+
+When these conditions match, the method returns the accumulator (terminal segment) instead of the fused chat text. Otherwise, the gateway's final wins—even when richer than the accumulator.
+
+**Why narrow**: The method fires ONLY on the fusion signature. A clean final, an equal string, or text that merely contains the segment elsewhere is returned untouched.
+
+### Historical Context
+
+**Problem Measurement**: Across this workspace's history, **56% of turns ship more than one text block**. On those turns, a median **51% of what the user reads is narration**. In the worst case, it was 98%.
+
+This was invisible to `ReplyIsTheAnswerOnly` tests for two years because `FakeGateway`'s final carries no message text—the test never reached the problematic assignment. The production gateway does carry text, and it overwrote the accumulator.
+
+**Recommended Agent Behavior**: Write **no text until writing the answer**. Think in reasoning, act with tools, and stay silent between them. The first character of visible text should be the first character of the finished reply. This follows `psd-rules` Rule 1 guidance.
+
+### Test Validation
+
+**Source**: `/infra/agent-image/test_reply_replay.py`
+
+The `FusedChatFinalDoesNotOverrideTheTerminalSegment` test suite validates:
+
+- Only the terminal segment is delivered (not narration)
+- No narration blocks survive in the reply
+- The fusion signature is eliminated
+- Clean finals still win (gateway authoritative when not fused)
+- A final matching the accumulator is unchanged
+
+The `TerminalSegmentPreferenceIsNarrow` test suite validates the method's narrow trigger:
+
+- Strict superset ending in segment → trimmed
+- Equal string → untouched
+- Segment appearing mid-string → untouched
+- Empty accumulator → chat text wins
+- Empty chat text → returned as-is
+
+**Test Command**:
+```bash
+cd infra/agent-image && python -m pytest test_reply_replay.py::FusedChatFinalDoesNotOverrideTheTerminalSegment -v
+cd infra/agent-image && python -m pytest test_reply_replay.py::TerminalSegmentPreferenceIsNarrow -v
+```
+
+---
+
 ## Workspace Checkpoint Recovery
 
 Agent workspaces use journal-based finalization proofs to survive invocation failures and resume idempotently.
