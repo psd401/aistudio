@@ -2681,6 +2681,9 @@ class OpenClawAdapter(HarnessAdapter):
                                 and not tool_activity_since_text
                             ):
                                 response_text = agent_assistant_accum
+                            response_text = self._prefer_terminal_segment(
+                                response_text, agent_assistant_accum
+                            )
                             got_final = True
                             break
 
@@ -3557,6 +3560,49 @@ class OpenClawAdapter(HarnessAdapter):
         if boundary_pending:
             return increment
         return accum + increment
+
+    @staticmethod
+    def _prefer_terminal_segment(chat_text: str, accum: str) -> str:
+        """Undo the gateway's fusion of a turn's assistant text blocks.
+
+        The accumulator above already isolates the terminal segment. The chat
+        channel's `final` payload does not: it carries EVERY assistant text
+        block the turn produced, concatenated into one string with no
+        separator, and `state == "final"` assigns it over the accumulator.
+
+        Measured 2026-09-06, dev run a33a3f92 — a 54-tool-call turn whose six
+        assistant messages (five ending stopReason=toolUse) arrived as one
+        1630-char reply that read
+        "...fix that written file.Let me just avoid the script...". resp_len
+        matched the sum of all six blocks exactly.
+
+        This was invisible to ReplyIsTheAnswerOnly for two years' worth of
+        replays because FakeGateway's final carries no message text, so those
+        tests never reached this assignment at all — see
+        FusedChatFinalDoesNotOverrideTheTerminalSegment, which scripts the
+        production shape.
+
+        Deliberately narrow: it fires ONLY when the chat text is a strict
+        superset that ENDS WITH the accumulated terminal segment, which is
+        what fusion looks like and what nothing else does. An empty
+        accumulator, an equal string, or any text that merely contains the
+        segment elsewhere is returned untouched, so a gateway that sends a
+        clean final — or one whose final is genuinely richer than what we
+        accumulated — keeps winning.
+        """
+        if not chat_text or not accum:
+            return chat_text
+        if chat_text == accum:
+            return chat_text
+        if not chat_text.endswith(accum):
+            return chat_text
+        logger.info(
+            "chat final was the turn's fused assistant text (%d chars); "
+            "delivering the terminal segment only (%d chars)",
+            len(chat_text),
+            len(accum),
+        )
+        return accum
 
     @staticmethod
     def _render_questions(payload: object) -> str:
