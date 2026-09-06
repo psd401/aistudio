@@ -76,6 +76,23 @@ const MAX_HTML_BYTES = 4 * 1024 * 1024;
 const MAX_INPUT_MEDIA_BYTES = 512 * 1024 * 1024;
 const MAX_TRANSCRIPT_CHARS = 600_000;
 const CHROMIUM_TIMEOUT_MS = 120_000;
+
+// What it takes to start Chromium inside a Lambda sandbox. Every entry after
+// --headless is load-bearing; see the block comment in htmlToPdf for the
+// captured stderr each one answers. Kept as a named constant so a test can
+// assert they survive, because losing any one of them fails at runtime only,
+// in production only, with no local reproduction.
+const CHROMIUM_SANDBOX_FLAGS = Object.freeze([
+  '--headless',
+  '--no-sandbox',
+  '--disable-gpu',
+  '--disable-software-rasterizer',
+  '--in-process-gpu',
+  '--no-zygote',
+  '--single-process',
+  '--disable-crash-reporter',
+  '--disable-dev-shm-usage',
+]);
 const FFPROBE_TIMEOUT_MS = 60_000;
 const FFMPEG_TIMEOUT_MS = Number(process.env.MEDIA_FFMPEG_TIMEOUT_MS || 600_000);
 const TRANSCRIBE_POLL_INTERVAL_MS = 5_000;
@@ -239,14 +256,21 @@ async function downloadToFile(key, destination) {
   return size;
 }
 
-async function runBinary(binary, args, timeoutMs, label) {
+async function runBinary(binary, args, timeoutMs, label, extraEnv) {
   try {
     return await execFileAsync(binary, args, {
       timeout: timeoutMs,
       maxBuffer: 16 * 1024 * 1024,
+      // Only when a caller asks. Chromium needs HOME and the XDG paths pointed
+      // at /tmp because Lambda's filesystem is read-only everywhere else;
+      // ffmpeg needs nothing and inherits the ambient environment.
+      ...(extraEnv ? { env: { ...process.env, ...extraEnv } } : {}),
     });
   } catch (error) {
     if (error && error.killed) {
+      console.error(
+        `[agent-media] ${label} exceeded ${Math.round(timeoutMs / 1000)}s`,
+      );
       throw new Error(
         `${label} exceeded its ${Math.round(timeoutMs / 1000)}s budget`,
         { cause: error },
@@ -254,6 +278,13 @@ async function runBinary(binary, args, timeoutMs, label) {
     }
     // ffmpeg/chromium put the useful diagnosis on stderr, not in the message.
     const detail = String(error?.stderr || error?.message || '').trim().slice(-600);
+    // CloudWatch, not just the caller. The 2026-09-06 Chromium failure returned
+    // this text to the agent, which relayed it to the user in chat — and the
+    // function's own log group held nothing but START/END/REPORT, so the only
+    // record of why production was broken was a screenshot of a chat message.
+    // Logged at full length; the throw below is what gets truncated for the
+    // user-facing reply.
+    console.error(`[agent-media] ${label} failed:`, String(error?.stderr || error?.message || ''));
     throw new Error(`${label} failed: ${detail || 'no diagnostic output'}`, {
       cause: error,
     });
@@ -303,19 +334,51 @@ async function htmlToPdf(event, scratch) {
 
   const source = path.join(scratch, 'page.html');
   const target = path.join(scratch, 'page.pdf');
+  const userDataDir = path.join(scratch, 'chrome-user-data');
+  await validatedFsPromises.mkdir(userDataDir, { recursive: true });
   await validatedFsPromises.writeFile(source, html, 'utf8');
 
   // --no-pdf-header-footer suppresses Chromium's default URL/date furniture,
   // which otherwise prints over a design that was laid out to the page edge.
   // The page's own @page CSS still wins over these dimensions when it sets one,
   // which is exactly what the 8.5x11 sign relies on.
+  //
+  // EVERY OTHER FLAG HERE EXISTS BECAUSE OF ONE STDERR, captured 2026-09-06 by
+  // invoking the DEPLOYED psd-agent-media-dev rather than a local container:
+  //
+  //   GPU process launch failed: error_code=1002
+  //   FATAL: GPU process isn't usable. Goodbye.
+  //   ptrace: Operation not permitted (1)
+  //   Zygote could not fork: process_type utility numfds 6 child_pid -1
+  //
+  // Three separate subprocess spawns that Lambda's sandbox refuses, so:
+  //   --in-process-gpu           `--disable-gpu` disables GPU RENDERING; the
+  //                              GPU process is still spawned, and its failure
+  //                              is FATAL. This keeps it in-process.
+  //   --disable-software-rasterizer  no SwiftShader fallback process either.
+  //   --no-zygote                the zygote cannot fork here; let the browser
+  //                              fork children directly.
+  //   --single-process           belt to the --no-zygote braces. print-to-PDF
+  //                              is a one-shot non-interactive load, which is
+  //                              the workload single-process is safe for.
+  //   --disable-crash-reporter   crashpad's ptrace attach is denied; the only
+  //                              thing it produces here is noise in the error
+  //                              the user reads.
+  //   --user-data-dir/--crash-dumps-dir + HOME/XDG_* below: the filesystem is
+  //                              read-only except /tmp, and Chromium's default
+  //                              profile path is $HOME/.config/chromium.
+  //
+  // None of this reproduces locally. Docker Desktop still renders a correct PDF
+  // with `--cap-drop=ALL --security-opt no-new-privileges`, which is why both
+  // the build probe and the RIE smoke test passed a build that could not print
+  // a single page in production. Verify a change here by invoking the deployed
+  // function; local runs prove output quality only.
   await runBinary(
     CHROMIUM,
     [
-      '--headless',
-      '--no-sandbox',
-      '--disable-gpu',
-      '--disable-dev-shm-usage',
+      ...CHROMIUM_SANDBOX_FLAGS,
+      `--user-data-dir=${userDataDir}`,
+      `--crash-dumps-dir=${scratch}`,
       '--no-pdf-header-footer',
       `--print-to-pdf-page-size=${width}x${height}`,
       ...(printBackground ? ['--print-to-pdf-background'] : []),
@@ -324,6 +387,7 @@ async function htmlToPdf(event, scratch) {
     ],
     CHROMIUM_TIMEOUT_MS,
     'Chromium print-to-PDF',
+    { HOME: scratch, XDG_CONFIG_HOME: scratch, XDG_CACHE_HOME: scratch },
   );
 
   const pdf = await validatedFsPromises.readFile(target);
@@ -619,7 +683,10 @@ exports.handler = async function handler(event) {
     }
     // Deliberately surfaced rather than swallowed: the agent has to be able to
     // tell the user WHY, and an opaque failure here is what sent three separate
-    // callers away empty-handed in the first place.
+    // callers away empty-handed in the first place. Also logged, because the
+    // caller's copy lives in a chat message and CloudWatch is where anyone
+    // debugging this will actually look.
+    console.error('[agent-media] operation failed:', error?.stack || String(error));
     return fail('media_failed', String(error?.message || error).slice(0, 900));
   } finally {
     if (scratch) {
@@ -638,5 +705,6 @@ exports.testables = {
   PAGE_SIZES,
   TRANSCRIBABLE,
   MAX_INLINE_PDF_BYTES,
+  CHROMIUM_SANDBOX_FLAGS,
   validatedFs,
 };
