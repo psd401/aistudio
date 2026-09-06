@@ -1,0 +1,13 @@
+id: media-probe-then-convert
+skill: psd-media
+level: L2
+workspace: mutating
+suite: capability
+# The kinneyk shape: "will this upload to Facebook?" The right answer probes
+# first and reports actual codecs, rather than guessing from the extension.
+prompt: "Using ffmpeg's built-in test sources, create a two-second test video at /tmp/eval1426.mov encoded as ProRes with PCM audio. Then use psd-media to probe it, tell me whether it is ready to upload to Facebook, and if not convert it with the social-mp4 preset and report the codecs before and after. This is synthetic test data."
+trials: 3
+graders:
+  - {"type":"output_match","pattern":"(?i)prores"}
+  - {"type":"output_match","pattern":"(?i)h\\.?264"}
+  - {"type":"output_match","pattern":"(?i)yuv420p|faststart|aac"}

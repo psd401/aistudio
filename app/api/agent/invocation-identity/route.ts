@@ -22,5 +22,15 @@ export async function POST(request: NextRequest) {
     log.warn("Invocation identity verification failed", { requestId })
     return NextResponse.json({ error: "Forbidden" }, { status: 403 })
   }
-  return NextResponse.json({ ownerEmail: invocation.ownerEmail })
+  // `workspacePrefix` is returned alongside the owner because agent-media
+  // (#1738) reads and writes objects inside the caller's own private workspace
+  // prefix, and that prefix must come from the SIGNED context rather than from
+  // the model. Both fields are verified claims from the same token; neither is
+  // selectable by the skill that triggered the call. Additive — the existing
+  // relay consumer reads only `ownerEmail`, so a rolling deploy is safe in
+  // either order.
+  return NextResponse.json({
+    ownerEmail: invocation.ownerEmail,
+    workspacePrefix: invocation.workspacePrefix,
+  })
 }

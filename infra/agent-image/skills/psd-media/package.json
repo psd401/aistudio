@@ -1,0 +1,9 @@
+{
+  "name": "psd-media",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenClaw skill: ffprobe inspection and ffmpeg preset conversion via the agent-media Lambda (#1738).",
+  "scripts": {
+    "test": "bun test"
+  }
+}

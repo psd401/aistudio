@@ -1,0 +1,9 @@
+{
+  "name": "psd-print-pdf",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenClaw skill: render a local HTML file to a real PDF via the agent-media Lambda's headless Chromium (#1738).",
+  "scripts": {
+    "test": "bun test"
+  }
+}

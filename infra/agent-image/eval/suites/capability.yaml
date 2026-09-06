@@ -10,6 +10,9 @@ tasks:
   - ../../skills/psd-email-triage/evals/generic-inbox-no-config.yaml
   - ../../skills/psd-freshservice/evals/search-open-urgent-tickets.yaml
   - ../../skills/psd-hyperframes/evals/synthetic-title-card.yaml
+  - ../../skills/psd-print-pdf/evals/print-letter-sign.yaml
+  - ../../skills/psd-media/evals/probe-then-convert.yaml
+  - ../../skills/psd-transcribe/evals/transcribe-spoken-canary.yaml
   - ../../skills/psd-image-gen/evals/capability-denied.yaml
   - ../../skills/psd-last30days/evals/keyless-eval-reliability-brief.yaml
   - ../../skills/psd-learning-page/evals/accessibility-contract.yaml

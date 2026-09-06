@@ -329,6 +329,19 @@ jobs:
       env:
         CI: true
 
+    # agent-media (#1738). Root jest ignores /infra/, so like agent-cron above
+    # this container Lambda's suite would otherwise never run. It needs its own
+    # install: the handler resolves @aws-sdk/client-s3 and client-transcribe
+    # from agent-media/package.json, not the root manifest.
+    - name: Install agent-media dependencies
+      working-directory: infra/agent-media
+      run: bun install --frozen-lockfile
+
+    - name: Run agent-media Lambda tests (Bun)
+      run: bun run test:lambda:media
+      env:
+        CI: true
+
     # Freshservice's tests use node:test mock timing and intentionally run
     # under Node rather than Bun's test runner.
     - name: Run psd-freshservice skill tests (Node)
