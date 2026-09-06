@@ -109,6 +109,60 @@ The skill initializer (`infra/lambdas/agent-skill-initializer/`) handles both re
 
 ---
 
+## OpenClaw Tool Policy
+
+**Sources**: `/infra/agent-image/openclaw.json`, `/infra/agent-image/test_openclaw_tool_policy.py`, `/infra/agent-image/harness_adapter.py`
+
+The OpenClaw gateway configuration enforces tool denial policies that prevent runtime failures from poisoning the agent's context. The most critical denial is `ask_user`.
+
+### `ask_user` Tool Denial
+
+**Configuration**: `openclaw.json` → `tools.deny`
+
+The `ask_user` tool is **permanently denied** in the OpenClaw configuration. This is not a preference—it is a structural requirement of the AgentCore runtime:
+
+1. **Gateway Lifecycle**: AgentCore provides one container per invocation. The harness stops the OpenClaw gateway ~3ms after the final event and starts a fresh one for the next message.
+2. **Question Lifetime**: `ask_user` registers a question on the gateway and waits for `question.resolve`. When the gateway stops, the question dies.
+3. **Resolution Failure**: On the next turn, the resolve attempt fails with `question '<id>' was not found`. Production logs from 2026-08-31 to 2026-09-05 show 19 attempts, 19 failures, zero successes.
+4. **Context Poisoning**: The orphaned `toolCall` receives a synthetic `isError: true` result reading:
+   ```
+   [openclaw] missing tool result in session history; inserted synthetic error result for transcript repair.
+   ```
+
+The model interprets this error as the user interrupting it. In a real session, the agent responded "Got it — pausing since you interrupted that run" four turns after asking a question, even though the user had never stopped anything.
+
+### Synthetic Repair Marker
+
+**Source**: `/infra/agent-image/skills/psd-rules/SKILL.md`
+
+The `psd-rules` skill contains a rule that names the synthetic repair marker verbatim. This teaches the model that the marker is **bookkeeping about a tool**, never a statement about the user.
+
+The rule instructs the agent to read the marker as "that one tool produced nothing — redo it or work around it" and to never turn it into a claim that the user stopped, interrupted, or aborted anything.
+
+### Contract Validation
+
+**Source**: `/infra/agent-image/test_openclaw_tool_policy.py`
+
+The `test_openclaw_tool_policy.py` test suite validates:
+
+- `ask_user` is in the `tools.deny` list
+- The denial name matches the normalized tool name (`ask_user`, not `askUser` or `ask-user`)
+- The existing denials (`cron`, `nodes`, `gateway`, `sessions`, `agents`) survive
+- `psd-rules/SKILL.md` quotes the synthetic repair marker verbatim
+
+**Test Command**:
+```bash
+cd infra/agent-image && python -m pytest test_openclaw_tool_policy.py -v
+```
+
+### Historical Context
+
+The `_resolve_pending_question()` function in `harness_adapter.py` is **kept but unreachable**. The function was written to resolve questions on subsequent turns, but the gateway restart invalidates the question before resolution is possible. Its docstring now records that it has never succeeded and why, so future readers do not re-derive the same broken solution.
+
+A `question.resolve` line in the logs is now a signal that something re-introduced a question-asking tool.
+
+---
+
 ## Workspace Checkpoint Recovery
 
 Agent workspaces use journal-based finalization proofs to survive invocation failures and resume idempotently.
