@@ -172,6 +172,25 @@ For multi-turn agent architecture, see **[agent-platform/overview.md](../agent-p
 |--------|---------|
 | `agent-mint/` | DWD token broker (isolated security) |
 | `hyperframes-render/` | HTML to video rendering |
+| `agent-media/` | HTML-to-PDF, ffmpeg transcode/probe, and Amazon Transcribe |
+
+### Agent Media Function
+
+**Source**: `/infra/lib/constructs/compute/agent-media-function.ts`, `/infra/agent-media/`
+
+A container-image Lambda providing three capabilities the agent kept having to refuse (issue #1738):
+
+| Operation | Purpose |
+|-----------|---------|
+| `html-to-pdf` | Headless Chromium print-to-PDF, honouring `@page` CSS |
+| `media` | ffprobe inspection + ffmpeg transcode via named presets |
+| `transcribe` | Amazon Transcribe over audio in owner's private workspace |
+
+**Why separate from hyperframes-render**: IAM isolation. That role may write only to `public-images/`; this one reads/writes owners' private workspace prefixes and carries an explicit DENY on `public-images/`. A scanned IEP or staff recording must never become a public-by-link object.
+
+**Security model**: The function never accepts an identity from its caller. The relay injects `workspacePrefix` after the web-verified invocation context; the caller supplies only workspace-relative paths, validated against traversal, backslashes, and control characters. Publishing stays a separate act through `psd-publish-file`.
+
+**Configuration**: x86_64 container (Chromium + FFmpeg cannot live in agent image), 4096 MB memory, 900s timeout, 6144 MB ephemeral storage, reserved concurrency 5. Amazon Transcribe scoped to `agent-media-*` job name prefix so this role cannot disturb other account jobs.
 
 ### Workspace Contract Validation
 

@@ -1,7 +1,7 @@
 ---
 type: Platform Overview
 title: Agent Platform & Skills System
-description: Extensible agent skill system with 36 domain-specific capabilities, Google Workspace integration, Cedar governance, and MCP tool exposure for K-12 AI assistants.
+description: Extensible agent skill system with 39 domain-specific capabilities including media processing (HTML-to-PDF, ffmpeg, transcription), Google Workspace integration, Cedar governance, and MCP tool exposure for K-12 AI assistants.
 tags: [agents, skills, mcp, workspace, governance]
 ---
 
@@ -42,6 +42,9 @@ infra/agent-image/skills/{skill-name}/
 - `psd-learning-page` — Multimodal UDL learning page generation
 - `psd-hyperframes` — HTML/CSS/JS to MP4 video rendering
 - `psd-html-artifact` — HTML artifacts published to Atrium with WCAG 2.2 AA audit, delivered as internal reader pages (not S3)
+- `psd-print-pdf` — HTML to printable PDF with headless Chromium (8.5×11, letter, A4, landscape), honouring `@page` CSS, flexbox, and web fonts; routes through agent-media Lambda
+- `psd-media` — ffprobe inspection + ffmpeg transcode via named presets (`social-mp4`, `web-mp4`, `audio-mp3`); routes through agent-media Lambda
+- `psd-transcribe` — Speech-to-text using Amazon Transcribe over audio/video in owner's private workspace; routes through agent-media Lambda
 - `psd-pdf-to-markdown` — PDF to Markdown conversion; scanned/image-only PDFs rendered to page images via `--rasterize-pages`
 - `psd-image-gen` — Image generation
 - `psd-sop-creator` — PSD Standard Operating Procedure document creation
@@ -79,6 +82,19 @@ Skills run in the agent container defined by `/infra/agent-image/Dockerfile`. Th
 2. Validates governance policies via Cedar
 3. Executes skill logic with requested capabilities
 4. Audits all credential reads and tool invocations
+
+### Media Relay Transport
+
+**Source**: `/infra/agent-image/skills/_shared/media-relay.js`, `/infra/agent-image/mantle_proxy.py`
+
+The `psd-print-pdf`, `psd-media`, and `psd-transcribe` skills route through a shared transport that:
+
+- Uploads workspace objects to `.media-scratch/` via the workspace broker (added to checkpoint exclusions in workspace-policy.json)
+- Invokes the agent-media Lambda through the root-owned loopback relay
+- Validates workspace-relative paths against traversal, backslashes, and control characters
+- Removes scratch objects on all exit paths (important for transcription: the transport copy is someone's voice)
+
+The relay injects `workspacePrefix` from the web-verified invocation context — the caller never states who it is, preventing cross-owner access. Publishing stays separate through `psd-publish-file` and its sensitivity gate.
 
 ### Bundled Skill Manifest
 
