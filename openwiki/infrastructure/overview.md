@@ -194,9 +194,9 @@ A container-image Lambda providing three capabilities the agent kept having to r
 
 #### Chromium Lambda Sandbox Compatibility
 
-**Source**: `/infra/agent-media/handler.js` — `CHROMIUM_SANDBOX_FLAGS`
+**Source**: `/infra/agent-media/handler.js` — `CHROMIUM_BASE_FLAGS`
 
-Chromium requires a specific set of flags to start inside Lambda's sandbox. The `CHROMIUM_SANDBOX_FLAGS` constant (frozen array) captures the flags that answer each stderr failure from the 2026-09-06 production incident:
+Chromium requires a specific set of flags to start inside Lambda's sandbox. The `CHROMIUM_BASE_FLAGS` constant (frozen array) captures the flags that answer each stderr failure from the 2026-09-06 production incident:
 
 | Flag | Answers |
 |------|---------|
@@ -205,11 +205,23 @@ Chromium requires a specific set of flags to start inside Lambda's sandbox. The 
 | `--in-process-gpu` | GPU process launch failure (FATAL) |
 | `--disable-software-rasterizer` | SwiftShader fallback process blocked |
 | `--no-zygote` | Zygote fork failure |
-| `--single-process` | Belt to `--no-zygote` braces |
 | `--disable-crash-reporter` | crashpad ptrace denied |
 | `--disable-dev-shm-usage` | `/dev/shm` too small |
 
+**`--single-process` is deliberately NOT a base flag.** On 2026-09-06, a build carrying it exited 0 and wrote no PDF at all—the shape that failure takes when the flag interacts with `--print-to-pdf`. It also breaks `@font-face { src: local(...) }`, which needs the browser process's font service.
+
 **Critical: Local tests do not prove Lambda compatibility.** On 2026-09-06, Docker Desktop smoke tests passed (correct 612×792pt PDF geometry) while the deployed function could not print a single page. Lambda's sandbox refuses the GPU-process spawn, zygote fork, and crashpad ptrace attach—none of which reproduce locally, even with `--cap-drop=ALL --security-opt no-new-privileges`. Local runs prove output quality (geometry, layout, codecs); they prove nothing about whether the binary can start where it has to.
+
+#### Two-Attempt Execution and Artifact Gating
+
+The `htmlToPdf` function uses a two-attempt strategy ordered by what the captured stderr actually said:
+
+1. **Primary attempt**: `CHROMIUM_BASE_FLAGS` only — full fidelity, no known print interaction
+2. **Fallback attempt**: Adds `--single-process` only if primary produces nothing — addresses remaining sandbox uncertainty without another deploy cycle
+
+Each attempt gates success on `fileExists(target)` rather than the exit code. Chromium can exit 0 and write nothing; the artifact is the only thing worth believing. The log line reports which attempt won so the next reader does not have to guess.
+
+The handler also logs Chromium stderr on success (not just on failure), filtered through `notableStderr()` to drop the ~2KB of benign dbus/UPower/font-lookup chatter each headless run emits. Anything not matching the filter is kept, so new failure modes still surface rather than being silenced.
 
 **Required post-deploy check** (after any Dockerfile, Chromium flag, or base image change):
 
@@ -221,7 +233,7 @@ aws lambda invoke --function-name psd-agent-media-dev --cli-read-timeout 200 \
 
 `ok <bytes>` means Chromium started and printed. Anything else prints the real diagnostic. Since 2026-09-06, errors are also logged to CloudWatch (previously the log group held only `START`/`END`/`REPORT`).
 
-**Focused Tests**: `/infra/agent-media/handler.test.js` — `CHROMIUM_SANDBOX_FLAGS` frozen set validation
+**Focused Tests**: `/infra/agent-media/handler.test.js` — validates that `--single-process` is NOT in `CHROMIUM_BASE_FLAGS`, confirms required flag pairing, and asserts the set is frozen
 
 ### Workspace Contract Validation
 
