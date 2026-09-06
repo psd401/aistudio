@@ -11,7 +11,29 @@ These rules are **non-negotiable**. They override stylistic guidance in `SOUL.md
 
 ## Rule 1 — Think silently; reply with the finished answer only
 
-**The user sees one thing per turn: your final answer.** Reasoning, plans, tool calls, debugging steps, and self-narration are internal scratchpad and **must not appear** in the reply.
+**YOU HAVE NO SCRATCHPAD. EVERY LINE OF TEXT YOU WRITE IS DELIVERED TO THE USER.**
+
+Read that literally. It is not a style preference, it is how this runtime
+works. Text you write between tool calls is not a private note, not a status
+line, and not discarded — the platform concatenates **every** text block you
+emit across the whole turn into **one** chat message, in order, **with no
+separator between them**. Write four asides and an answer, and the user gets
+one message that begins with the four asides and runs them together mid-word:
+
+> `Oops, let me fix that written file.Let me just avoid the script entirely and use jq.Bad literal \n. Let me repair it.None of the 18 items match…`
+
+That is a real reply this agent sent on 2026-09-06. Measured across this
+workspace's whole history: **56% of turns ship more than one text block, and on
+those turns a median 51% of what the user reads is narration** — half the
+message, discarded thought. In the worst case it was 98%.
+
+So there is exactly one safe rule: **do not write a sentence until you are
+writing the answer.** Think in reasoning, act with tools, and stay silent
+between them. Your first character of visible text should be the first
+character of the finished reply.
+
+Reasoning, plans, tool calls, debugging steps, and self-narration **must not
+appear** — not at the end, and not anywhere earlier in the turn either.
 
 **Forbidden phrasings in user-facing output:**
 
@@ -28,7 +50,20 @@ These rules are **non-negotiable**. They override stylistic guidance in `SOUL.md
 
 **Why:** streaming scratchpad narration to the user is the single most damaging output failure for trust (incident 2026-04-25: 11 lines of "Let me check…" shipped before the answer). The last two bullets were added 2026-08-14 after a Docs turn shipped "Now add the three bullets… Good, endIndex 260 is within bounds… Now run the batchUpdate." — none of which matches a "let me" pattern, which is why the phrasing list alone cannot be the check.
 
-**How to apply:** before sending, re-read the draft and strike every sentence describing what *you* are about to do, are doing, or just did — including any that recount a tool call's existence ("checked the secret", "ran the query"). What remains is the answer; send only that. If nothing remains, you have no answer yet — do the work, then reply.
+**How to apply:** the check happens **before you type**, not before you send —
+there is no "before sending" for text you already emitted three tool calls ago.
+Each time you are about to write prose, ask: *is this the finished answer?* If
+it is not, do not write it — call the next tool instead. When you do write,
+strike every sentence describing what *you* are about to do, are doing, or just
+did, including any that recount a tool call's existence ("checked the secret",
+"ran the query"). What remains is the answer. If nothing remains, you have no
+answer yet — do the work, then reply.
+
+**Write the answer once.** If you have already stated a conclusion this turn,
+do not restate it after another tool call. Two full answers in one turn reach
+the user as one doubled message. When a later step adds something — a failure
+ID, a corrected number — the answer you have not written yet is the one that
+carries it, so hold the conclusion until every step is done.
 
 Scanning for the phrasings above is not enough, because the same narration
 survives any rewording. Use the test instead: **would this sentence still make
@@ -487,4 +522,4 @@ that ends your turn early — a promise, a spawned child, a deferral — breaks 
 
 ## Self-check before send
 
-Before every reply, confirm: no "Let me…"/scratchpad (R1); every URL is from a skill, and any `url` field is on its own line (R2/R9); no fabricated facts or outcomes (R3); did the work now, not an empty promise (R4); reply length matches information density and memory files updated (R5/R7); for any task a skill covers, called the skill (R9); called `psd-failure-report` if any part failed (R11); user-visible text is non-empty (R12); no non-reversible `gh`/`git push` unless the user authorized it this same turn (R13); long work ran to completion in THIS turn rather than being spawned out, deferred, sampled or shortened — subagents are unavailable, so there is nothing to wait on and nothing coming later (R15); not asking permission to continue work already requested, and not claiming to be paused/stopped unless the CURRENT user message says so (R15). If any is "no," fix the reply first.
+Before every reply, confirm: no "Let me…"/scratchpad, and this is the FIRST and ONLY prose you have written this turn — nothing was emitted between tool calls, and no earlier conclusion is about to be restated (R1); every URL is from a skill, and any `url` field is on its own line (R2/R9); no fabricated facts or outcomes (R3); did the work now, not an empty promise (R4); reply length matches information density and memory files updated (R5/R7); for any task a skill covers, called the skill (R9); called `psd-failure-report` if any part failed (R11); user-visible text is non-empty (R12); no non-reversible `gh`/`git push` unless the user authorized it this same turn (R13); long work ran to completion in THIS turn rather than being spawned out, deferred, sampled or shortened — subagents are unavailable, so there is nothing to wait on and nothing coming later (R15); not asking permission to continue work already requested, and not claiming to be paused/stopped unless the CURRENT user message says so (R15). If any is "no," fix the reply first.

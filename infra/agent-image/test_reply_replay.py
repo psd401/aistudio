@@ -410,6 +410,114 @@ class ReplyIsTheAnswerOnly(unittest.TestCase):
         self.assertEqual(text, "It's the Q3 planning doc.")
 
 
+def chat_final(text, run_id=TURN_RUN_ID):
+    """A chat `final` that CARRIES message text, the way the live gateway sends it.
+
+    Every other test in this file relies on FakeGateway's bare
+    `{"state": "final"}`, which has no `message` — so the adapter's
+    `state == "final": if text: response_text = text` assignment is never
+    reached and the boundary-aware accumulator always supplies the reply.
+    Production is not like that: dev run a33a3f92 on 2026-09-06 carried 19
+    `event:chat` frames and a final whose message held the whole turn's
+    assistant text. This helper is what makes that path testable.
+    """
+    return {
+        "type": "event",
+        "event": "chat",
+        "payload": {
+            "state": "final",
+            "runId": run_id,
+            "stopReason": "stop",
+            "message": {"content": [{"type": "text", "text": text}]},
+        },
+    }
+
+
+class FusedChatFinalDoesNotOverrideTheTerminalSegment(unittest.TestCase):
+    """The gateway fuses a turn's assistant blocks; the reply must not.
+
+    2026-09-06, dev run a33a3f92: a 54-tool-call turn produced six assistant
+    messages, five of them ending stopReason=toolUse. The user received one
+    1630-char message — the exact sum of all six — that opened with three
+    lines of scratchpad and stated the same answer three times, running
+    together mid-word as "...fix that written file.Let me just avoid...".
+
+    The accumulator had it right. The chat final overwrote it.
+    """
+
+    NARRATION = [
+        "Oops, let me fix that written file.",
+        "Let me just avoid the script entirely and use jq.",
+        "Bad literal newline. Let me repair it.",
+    ]
+    ANSWER = "I couldn't find that artifact in Atrium. Failure ID: 1123"
+
+    def _production_shape(self):
+        events = []
+        for line in self.NARRATION:
+            events.append(says(line))
+            events.extend(uses_tool("exec"))
+        events.append(says(self.ANSWER))
+        events.append(chat_final("".join(self.NARRATION) + self.ANSWER))
+        return events
+
+    def test_only_the_terminal_segment_is_delivered(self):
+        self.assertEqual(replay(self._production_shape()), self.ANSWER)
+
+    def test_no_narration_survives(self):
+        text = replay(self._production_shape())
+        for line in self.NARRATION:
+            self.assertNotIn(line, text)
+
+    def test_the_fusion_signature_is_gone(self):
+        # Two sentences run together with no separator is what the user sees.
+        self.assertNotIn("file.Let me", replay(self._production_shape()))
+
+    def test_a_clean_final_still_wins(self):
+        # The gateway's final is authoritative whenever it is NOT the fused
+        # superset — including when it says more than we accumulated.
+        text = replay(
+            [
+                says("Partial"),
+                *uses_tool("exec"),
+                chat_final("The gateway's own, richer answer."),
+            ]
+        )
+        self.assertEqual(text, "The gateway's own, richer answer.")
+
+    def test_a_final_matching_the_accumulator_is_unchanged(self):
+        text = replay([says("Done."), chat_final("Done.")])
+        self.assertEqual(text, "Done.")
+
+
+class TerminalSegmentPreferenceIsNarrow(unittest.TestCase):
+    """`_prefer_terminal_segment` must fire on fusion and nothing else."""
+
+    @staticmethod
+    def _prefer(chat_text, accum):
+        return OpenClawAdapter._prefer_terminal_segment(chat_text, accum)
+
+    def test_a_strict_superset_ending_in_the_segment_is_trimmed(self):
+        self.assertEqual(self._prefer("narration.answer", "answer"), "answer")
+
+    def test_an_equal_string_is_untouched(self):
+        self.assertEqual(self._prefer("answer", "answer"), "answer")
+
+    def test_a_segment_appearing_mid_string_is_untouched(self):
+        # Only a SUFFIX means "the terminal block was appended last".
+        self.assertEqual(
+            self._prefer("answer then more", "answer"), "answer then more"
+        )
+
+    def test_an_empty_accumulator_never_wins(self):
+        self.assertEqual(self._prefer("the answer", ""), "the answer")
+
+    def test_empty_chat_text_is_returned_as_is(self):
+        # The empty-final fallback above this call already handled that case;
+        # this must not resurrect anything.
+        self.assertEqual(self._prefer("", "accumulated"), "")
+
+
 class AbortedTurnDoesNotShipScratchpad(unittest.TestCase):
     """A turn that dies mid-tool must not deliver the narration that preceded it.
 
