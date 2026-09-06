@@ -192,6 +192,37 @@ A container-image Lambda providing three capabilities the agent kept having to r
 
 **Configuration**: x86_64 container (Chromium + FFmpeg cannot live in agent image), 4096 MB memory, 900s timeout, 6144 MB ephemeral storage, reserved concurrency 5. Amazon Transcribe scoped to `agent-media-*` job name prefix so this role cannot disturb other account jobs.
 
+#### Chromium Lambda Sandbox Compatibility
+
+**Source**: `/infra/agent-media/handler.js` — `CHROMIUM_SANDBOX_FLAGS`
+
+Chromium requires a specific set of flags to start inside Lambda's sandbox. The `CHROMIUM_SANDBOX_FLAGS` constant (frozen array) captures the flags that answer each stderr failure from the 2026-09-06 production incident:
+
+| Flag | Answers |
+|------|---------|
+| `--no-sandbox` | setuid sandbox unavailable |
+| `--disable-gpu` | GPU rendering disabled |
+| `--in-process-gpu` | GPU process launch failure (FATAL) |
+| `--disable-software-rasterizer` | SwiftShader fallback process blocked |
+| `--no-zygote` | Zygote fork failure |
+| `--single-process` | Belt to `--no-zygote` braces |
+| `--disable-crash-reporter` | crashpad ptrace denied |
+| `--disable-dev-shm-usage` | `/dev/shm` too small |
+
+**Critical: Local tests do not prove Lambda compatibility.** On 2026-09-06, Docker Desktop smoke tests passed (correct 612×792pt PDF geometry) while the deployed function could not print a single page. Lambda's sandbox refuses the GPU-process spawn, zygote fork, and crashpad ptrace attach—none of which reproduce locally, even with `--cap-drop=ALL --security-opt no-new-privileges`. Local runs prove output quality (geometry, layout, codecs); they prove nothing about whether the binary can start where it has to.
+
+**Required post-deploy check** (after any Dockerfile, Chromium flag, or base image change):
+
+```bash
+aws lambda invoke --function-name psd-agent-media-dev --cli-read-timeout 200 \
+  --payload '{"operation":"html-to-pdf","workspacePrefix":"probe/","userEmail":"probe@psd401.net","html":"<!doctype html><h1>probe</h1>","pageSize":"letter"}' \
+  /tmp/agent-media-probe.json >/dev/null && python3 -c "import json;d=json.load(open('/tmp/agent-media-probe.json'));print(d['status'], d.get('bytes') or d.get('message'))"
+```
+
+`ok <bytes>` means Chromium started and printed. Anything else prints the real diagnostic. Since 2026-09-06, errors are also logged to CloudWatch (previously the log group held only `START`/`END`/`REPORT`).
+
+**Focused Tests**: `/infra/agent-media/handler.test.js` — `CHROMIUM_SANDBOX_FLAGS` frozen set validation
+
 ### Workspace Contract Validation
 
 **Source**: `/infra/agent-image/workspace_contract.py`
