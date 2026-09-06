@@ -36,9 +36,18 @@ act through `psd-publish-file`, which carries its own sensitivity gate.
 
 ## Local smoke test (pre-deploy)
 
-The build itself proves the two native tools work — `RUN` probes fail the build
-if Chromium can't emit a `%PDF-` or if the static ffmpeg/ffprobe can't execute.
-To exercise the handler the way Lambda does:
+**A local pass does not mean it works in Lambda.** On 2026-09-06 the build
+probes passed, the smoke test below returned a correct 612x792pt PDF, and the
+deployed function could not print a single page: Lambda's sandbox refuses
+Chromium's GPU-process spawn, its zygote fork, and crashpad's ptrace attach.
+None of that reproduces in Docker Desktop — not even with `--cap-drop=ALL
+--security-opt no-new-privileges`. Local runs prove **output quality**
+(geometry, layout, codecs). They prove nothing about whether the binary can
+start where it has to. For that, see *Post-deploy check* below, and run it.
+
+With that understood — the build itself proves the two native tools can execute
+(`RUN` probes fail the build if Chromium can't emit a `%PDF-` or the static
+ffmpeg/ffprobe can't run). To exercise the handler the way Lambda does:
 
 ```bash
 cd infra && docker build --platform linux/amd64 -f agent-media/Dockerfile -t agent-media:smoke .
@@ -79,6 +88,22 @@ Verified on 2026-09-05 against this image: a ProRes `.mov` through the
 at byte 36, ahead of `mdat` at 3591 — `+faststart` doing its job. That ordering
 is what stops Facebook and Instagram rejecting an upload as corrupt, so it is
 worth re-checking whenever the preset changes.
+
+## Post-deploy check (the one that actually proves Chromium starts)
+
+Required after every deploy that touches the Dockerfile, the Chromium flags, or
+the base image. It is the only test that runs inside the sandbox that broke
+this function once already, and it takes seconds:
+
+```bash
+aws lambda invoke --function-name psd-agent-media-dev --cli-read-timeout 200 \
+  --payload '{"operation":"html-to-pdf","workspacePrefix":"probe/","userEmail":"probe@psd401.net","html":"<!doctype html><h1>probe</h1>","pageSize":"letter"}' \
+  /tmp/agent-media-probe.json >/dev/null && python3 -c "import json;d=json.load(open('/tmp/agent-media-probe.json'));print(d['status'], d.get('bytes') or d.get('message'))"
+```
+
+`ok <bytes>` means Chromium started and printed. Anything else prints the real
+diagnostic — and since 2026-09-06 the same text is also in the function's
+CloudWatch log group, which until then held nothing but `START`/`END`/`REPORT`.
 
 ## Caps
 
