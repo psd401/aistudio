@@ -325,6 +325,47 @@ When AgentCore completion is unconfirmed and a workspace lock is retained, the w
 
 Historical context: six retained-lock events belonged to one user, but correlating requestIds back to spaces required a manual research project. The diagnostic fields make this a log search.
 
+### Front-Door Rejection and Mutex Release
+
+**Source**: `/infra/lambdas/agent-router/index.ts` — `FRONT_DOOR_REJECTION_STATUSES`, `agentCoreHttpFailure()`
+
+Not all HTTP failures indicate a potential in-flight write. The `FRONT_DOOR_REJECTION_STATUSES` constant defines status codes that prove AgentCore rejected the call at its front door, before any microVM was started:
+
+| Status | Meaning | Why Safe to Release |
+|--------|---------|---------------------|
+| **429** | Throttle refused before scheduling | No container was allocated |
+| **502** | Edge failure (nginx error page) | Call never reached AgentCore runtime — body is nginx HTML, not an AgentCore response |
+| **503** | Service unavailable at front door | Request refused before scheduling |
+
+When one of these statuses occurs, `agentCoreHttpFailure()` sets `workspaceFinalizationConfirmed: true`, signaling to `invokeWithSessionLockLease()` that the mutex can be released immediately. The same contract already applied to `AgentNotDeployed` (local rejection before any runtime call).
+
+**Deliberately absent from the set:**
+
+- **504** — The gateway can return this while a microVM is still working. Turns of 80–200 seconds are normal, so a gateway timeout is precisely the "may still be finalizing" case the lock retention exists to protect.
+- **424** — By the time readiness fails ("An error occurred when starting the runtime"), the wrapper has already booted and restored the workspace. Runtime logs show `BUILD_MARKER`, the Mantle proxy, and workspace restore all completing before the readiness check fails. A container that reached that point may have written to the workspace.
+- **500** — An opaque server error proves nothing about the runtime state.
+
+#### Historical Context (2026-09-10 Incident)
+
+An edge 502 (nginx failure in ~1.2s) retained the workspace lock for its full 30-minute TTL. Every subsequent turn for that owner deferred on `workspace-contended` until the TTL lapsed. Two users' threads were silently frozen for 30 minutes each, with no signal beyond one generic error.
+
+The fix ensures that status codes proving "no microVM ever started" immediately release the lease, while statuses where a container may still be finalizing conservatively retain it.
+
+#### Test Coverage
+
+**Source**: `/infra/lambdas/agent-router/index.test.ts` — `describe("front-door rejections and the owner workspace mutex")`
+
+- 429, 502, 503 release the workspace lock (`workspaceFinalizationConfirmed: true`)
+- 504, 424, 500 retain the workspace lock (`workspaceFinalizationConfirmed: false`)
+- Throttle (503) and edge failure (502) have distinct error classes
+- Edge 502 actually frees the lease via `releaseSessionLock`
+- Gateway timeout (504) retains the lease to avoid racing a finalizing microVM
+
+**Test Command**:
+```bash
+cd infra/lambdas/agent-router && bun test --test-name-pattern="front-door rejections"
+```
+
 ### Cutover Guard (Build-Time Contract Validation)
 
 **Sources**:
