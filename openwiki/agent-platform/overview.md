@@ -161,6 +161,38 @@ The `_resolve_pending_question()` function in `harness_adapter.py` is **kept but
 
 A `question.resolve` line in the logs is now a signal that something re-introduced a question-asking tool.
 
+### Update Channel Configuration
+
+**Source**: `/infra/agent-image/openclaw.json` — `update.channel`
+
+The `update.channel` setting pins plugin resolution to the host version, preventing upstream npm dist-tag moves from breaking agent cold starts.
+
+**Problem (2026-09-10 Production Incident)**:
+
+OpenClaw's startup doctor treats plugins named in `plugins.entries` as "missing configured plugins" and npm-installs them on every container cold start into `~/.openclaw/npm/projects/`. This install is dead weight—the loader immediately discards it and uses the vendored copies—but the install's *failure* is fatal.
+
+Without an explicit update channel, the running beta core version (2026.7.2-beta.5) forced the `beta` channel via `resolveRegistryUpdateChannel()`, which rewrote bare specs to `<name>@beta`. On 2026-09-08, both `@beta` dist-tags moved to version 2026.9.3, which declares `compat.pluginApi >=2026.9.3`. The digest-pinned base image exposes plugin API 2026.7.2-beta.5.
+
+The doctor refused to report the gateway ready. AgentCore returned 424 to every request. 1,849 of 1,926 prod cold starts failed (96%) with no code deploy—the running image was unchanged.
+
+**Fix**:
+
+`update.channel: "extended-stable"` takes an alternate branch in `resolveNpmInstallSpecsForUpdateChannel()`. For trusted official plugins (both `amazon-bedrock` and `parallel` are in the official catalog), it resolves `<name>@<coreVersion>` — the exact host version.
+
+This matches the vendored copies in `/opt/openclaw-plugins/`, so the doctor's throwaway install always succeeds. Future upstream tag moves cannot reach the agent.
+
+**Resolution comparison**:
+
+| Channel | Resolution | Outcome |
+|---------|------------|---------|
+| (unset, beta core) | `<name>@beta` | Broke when @beta moved to 2026.9.3 |
+| `stable` / `dev` | `<name>@latest` | Also 2026.9.3 — would still break |
+| `extended-stable` | `<name>@2026.7.2-beta.5` | Matches vendored copies, always works |
+
+**Security note**: `update.auto` remains disabled (`update.auto.enabled` is false when unset). This setting affects plugin resolution only, not core self-updates.
+
+**Test**: The `check_config_consistency.py` validation passes with this configuration.
+
 ---
 
 ## Fused Chat Final Recovery
