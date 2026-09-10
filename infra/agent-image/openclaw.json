@@ -101,6 +101,9 @@
       }
     }
   },
+  "update": {
+    "channel": "extended-stable"
+  },
   "gateway": {
     "port": 3100,
     "mode": "local",
