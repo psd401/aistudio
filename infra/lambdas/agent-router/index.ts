@@ -2326,6 +2326,31 @@ async function fetchAgentCoreResponse(
   });
 }
 
+/**
+ * Statuses that prove AgentCore rejected the call at its front door, before
+ * any microVM was started.
+ *
+ * 429 and 503 are refusals to schedule the invocation at all. 502 is an edge
+ * failure: the body is an nginx error page rather than an AgentCore response,
+ * and the call never appears in the runtime's own Invocations metric — the
+ * 2026-09-10 incident produced two of these, each failing in ~1.2s, and
+ * AgentCore counted neither as an invocation.
+ *
+ * Deliberately absent:
+ *
+ *  - 504, which the gateway can return while a microVM is still working. Turns
+ *    of 80-200s are normal here, so a gateway timeout is precisely the "may
+ *    still be finalizing" case the lock retention exists to protect.
+ *  - 424 ("An error occurred when starting the runtime"). By the time
+ *    readiness fails the wrapper has already booted and restored the
+ *    workspace: the 2026-09-10 runtime logs show BUILD_MARKER, the Mantle
+ *    proxy, and workspace restore all completing first. A container that
+ *    reached that point may have written to the workspace.
+ */
+const FRONT_DOOR_REJECTION_STATUSES: ReadonlySet<number> = new Set([
+  429, 502, 503,
+]);
+
 async function agentCoreHttpFailure(
   response: Awaited<ReturnType<typeof undiciFetch>>,
   log: ReturnType<typeof createLogger>
@@ -2336,13 +2361,25 @@ async function agentCoreHttpFailure(
     body: errorBody.substring(0, 500),
   });
   const throttled = response.status === 503 || response.status === 429;
+  // A front-door rejection never reached a microVM, so no workspace write can
+  // be in flight and the owner's mutex must not be held for its full 30-minute
+  // TTL. This is the `workspaceFinalizationConfirmed` contract's own "a local
+  // rejection before any runtime call is also safe" branch, the same one
+  // AgentNotDeployed already takes. Before this, a 1.2s edge 502 retained the
+  // lock and every later turn for that owner deferred on `workspace-contended`
+  // until the TTL lapsed — on 2026-09-10 that silently froze two users' threads
+  // for 30 minutes each, with no signal beyond one generic error.
+  const rejectedAtFrontDoor = FRONT_DOOR_REJECTION_STATUSES.has(
+    response.status
+  );
   return failedAgentCoreResult(
     throttled
       ? "I'm temporarily busy. Please try again in a moment."
       : 'I encountered an error processing your message. Please try again.',
     throttled
       ? `AgentCoreThrottled_${response.status}`
-      : `AgentCoreHttpError_${response.status}`
+      : `AgentCoreHttpError_${response.status}`,
+    rejectedAtFrontDoor
   );
 }
 
@@ -5751,6 +5788,7 @@ async function processRecord(
 }
 
 export const agentRouterTestHelpers = {
+  agentCoreHttpFailure,
   dmSpaceForUserRecord,
   userActivityUpdate,
   normalizeChatEvent,

@@ -41,6 +41,7 @@ const {
   markPromotedTurnRecoveredWithDependencies,
   btwSlashCommandId,
   recordIfHeadedForDlq,
+  agentCoreHttpFailure,
 } = agentRouterTestHelpers
 
 type OwnerHuman = Parameters<typeof invokeOwnerAgentWithDependencies>[0]
@@ -2432,5 +2433,98 @@ describe("dead-letter telemetry", () => {
       { recordFailure: async () => { throw new Error("pool exhausted") } },
     )
     expect(c.errors.length).toBeGreaterThan(0)
+  })
+})
+
+describe("front-door rejections and the owner workspace mutex", () => {
+  const httpFailure = (status: number, body = "") =>
+    agentCoreHttpFailure(
+      {
+        status,
+        text: async () => body,
+      } as unknown as Parameters<typeof agentCoreHttpFailure>[0],
+      TEST_LOG
+    )
+
+  // A status in this set never reached a microVM, so nothing can be writing to
+  // the workspace and the owner's mutex must be dropped immediately. Retaining
+  // it made every later turn for that owner defer on `workspace-contended`
+  // until the 30-minute TTL lapsed.
+  test.each([
+    [502, "an edge failure that never reaches the runtime"],
+    [429, "a throttle refused before scheduling"],
+    [503, "an unavailable front door"],
+  ])("releases the workspace lock after %i (%s)", async status => {
+    const result = await httpFailure(status)
+
+    expect(result.failed).toBe(true)
+    expect(result.workspaceFinalizationConfirmed).toBe(true)
+  })
+
+  // The other half of the contract: these may have left a microVM mid-write,
+  // so the conservative retention has to survive.
+  test.each([
+    [504, "the gateway can time out while a long turn is still running"],
+    [424, "the wrapper boots and restores the workspace before readiness fails"],
+    [500, "an opaque server error proves nothing about the runtime"],
+  ])("retains the workspace lock after %i (%s)", async status => {
+    const result = await httpFailure(status)
+
+    expect(result.failed).toBe(true)
+    expect(result.workspaceFinalizationConfirmed).toBe(false)
+  })
+
+  test("keeps the 502 error class distinct from a throttle", async () => {
+    const throttle = await httpFailure(503)
+    const edge = await httpFailure(502)
+
+    expect(throttle.errorClass).toBe("AgentCoreThrottled_503")
+    expect(edge.errorClass).toBe("AgentCoreHttpError_502")
+  })
+
+  test("an edge 502 actually frees the lease rather than only reporting it safe", async () => {
+    const released: string[] = []
+
+    await invokeWithSessionLockLease(
+      { sessionId: "workspace-lock", ownerEmail: "owner@psd401.net" },
+      "lock-token",
+      TEST_LOG,
+      async () => httpFailure(502),
+      {
+        renewSessionLock: async () => true,
+        releaseSessionLock: async sessionId => {
+          released.push(sessionId)
+        },
+        scheduler: {
+          start: () => "renewal-timer",
+          stop: () => {},
+        },
+      }
+    )
+
+    expect(released).toEqual(["workspace-lock"])
+  })
+
+  test("a 504 still retains the lease so a finalizing microVM is not raced", async () => {
+    const released: string[] = []
+
+    await invokeWithSessionLockLease(
+      { sessionId: "workspace-lock", ownerEmail: "owner@psd401.net" },
+      "lock-token",
+      TEST_LOG,
+      async () => httpFailure(504),
+      {
+        renewSessionLock: async () => true,
+        releaseSessionLock: async sessionId => {
+          released.push(sessionId)
+        },
+        scheduler: {
+          start: () => "renewal-timer",
+          stop: () => {},
+        },
+      }
+    )
+
+    expect(released).toEqual([])
   })
 })
