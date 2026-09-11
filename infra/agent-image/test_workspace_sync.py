@@ -3615,7 +3615,16 @@ class StaleFinalizationProofRecoveryTests(unittest.TestCase):
             calls,
         )
 
-    def test_a_non_conflict_finalize_failure_frees_its_rows(self):
+    def test_an_ambiguous_finalize_failure_keeps_its_rows_replayable(self):
+        """A 502 may follow a partial commit, so the batch must stay resumable.
+
+        `/workspace-storage` answers any unclassified error with 502, including
+        one raised after the broker wrote its pending finalization journal and
+        promoted an object or issued a delete. The broker resets those claims
+        to `reserved` so the retained batch can replay idempotently; releasing
+        them expires the rows, `claimUploadCompletion` can no longer claim
+        them, and the push is lost instead of resumed.
+        """
         def broker(payload):
             if payload.get("operation") == "finalize-checkpoint":
                 return workspace_sync._WorkspaceBrokerHttpError(
@@ -3634,12 +3643,58 @@ class StaleFinalizationProofRecoveryTests(unittest.TestCase):
             "ensure-checkpoint",
             [call.get("operation") for call in calls],
         )
-        self.assertIn(
-            {
-                "operation": "release-upload",
-                "reservationIds": [self.RESERVATION],
-            },
-            calls,
+        self.assertNotIn(
+            "release-upload",
+            [call.get("operation") for call in calls],
+        )
+        # The batch is retained under its original proof for the resume path.
+        pending = workspace_sync._pending_atomic_workspace_finalizations[
+            "owner"
+        ]
+        self.assertEqual(
+            [completion.reservation_id for completion in pending.uploads],
+            [self.RESERVATION],
+        )
+        self.assertEqual(pending.base_generation, self.base_generation)
+
+    def test_a_second_refusal_after_reproofing_keeps_its_rows(self):
+        """One re-proof is the allowance; the retry is ambiguous like the rest."""
+        def broker(payload):
+            operation = payload.get("operation")
+            if operation == "ensure-checkpoint":
+                return {
+                    "checkpointReady": True,
+                    "workspaceGeneration": self.base_generation,
+                    "atomicCheckpointCommitVersion": 1,
+                    "checkpointFinalizationProof": "fresh-proof",
+                }
+            if operation == "finalize-checkpoint":
+                return self._conflict()
+            return {}
+
+        count, error, calls = self._push(broker)
+
+        self.assertIsNone(count)
+        self.assertIsInstance(error, workspace_sync._WorkspaceBrokerHttpError)
+        finalizes = [
+            call for call in calls
+            if call.get("operation") == "finalize-checkpoint"
+        ]
+        self.assertEqual(len(finalizes), 2)
+        self.assertEqual(
+            finalizes[1]["checkpointFinalizationProof"], "fresh-proof"
+        )
+        self.assertNotIn(
+            "release-upload",
+            [call.get("operation") for call in calls],
+        )
+        # The retained batch carries the re-minted proof, so a resume replays
+        # the capability the broker last saw rather than the stale one.
+        self.assertEqual(
+            workspace_sync._pending_atomic_workspace_finalizations[
+                "owner"
+            ].proof,
+            "fresh-proof",
         )
 
     def test_cleanup_does_not_inherit_the_exhausted_turn_deadline(self):
