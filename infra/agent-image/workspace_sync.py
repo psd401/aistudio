@@ -49,7 +49,7 @@ import urllib.error
 import urllib.request
 import uuid
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from pathlib import Path
 from typing import Optional
 
@@ -1926,6 +1926,34 @@ def _finalize_workspace_checkpoint(
     )
 
 
+def _is_completion_conflict_rejection(error: BaseException) -> bool:
+    """Return whether finalize was refused with a checkpoint-completion 409.
+
+    The broker answers every `WorkspaceStorageCompletionError` with a bare 409
+    and the generic body `{"error": "Workspace storage operation failed"}` — the
+    specific reason ("Workspace finalization proof is invalid", "Workspace
+    generation changed …") is logged server-side and never reaches the client.
+    So this only narrows the error to "the checkpoint was refused", and the
+    caller has to disambiguate by re-reading the checkpoint.
+
+    The case worth recovering is the stale proof. The broker mints
+    `checkpointFinalizationProof` per invocation and binds it to that
+    invocation's nonce and expiry, but the client caches the capability in
+    `_atomic_checkpoint_finalization_capabilities`, keyed only by prefix. A warm
+    microVM that serves a second invocation without re-running
+    `refresh_workspace` finalizes with the PREVIOUS invocation's proof, and the
+    binding check refuses it — deterministically, for the rest of that microVM's
+    life (prod 2026-09-11, bahrk).
+
+    A 409 is raised before the broker writes a journal entry or promotes a
+    reservation, so no partial commit can be outstanding when we see one.
+    """
+    return (
+        isinstance(error, _WorkspaceBrokerHttpError)
+        and error.status == 409
+    )
+
+
 def _is_side_effect_free_finalize_rejection(error: BaseException) -> bool:
     """Return whether the first wire attempt was rejected before dispatch.
 
@@ -3216,6 +3244,71 @@ def _legacy_finalize_pending_atomic_workspace(
 RELEASE_RESERVATION_BATCH = 250
 
 
+# Cleanup must not inherit the budget whose exhaustion caused the failure.
+# The 2026-09-11 timeout spent its turn deadline getting the reservations, so
+# `_remaining_timeout` raised before the release could be attempted and the rows
+# held their paths for the full lease. Cleanup is cheap and bounded; give it its
+# own small allowance, still well inside the Lambda's remaining wall time.
+CLEANUP_BUDGET_SECONDS = 15
+
+
+def _cleanup_deadline() -> float:
+    """Return a small deadline for post-failure cleanup, independent of the turn."""
+    return time.monotonic() + CLEANUP_BUDGET_SECONDS
+
+
+def _reproof_pending_atomic_finalization(
+    prefix: str,
+    pending_atomic: _PendingAtomicWorkspaceFinalization,
+    deadline_monotonic: float | None = None,
+) -> Optional[_PendingAtomicWorkspaceFinalization]:
+    """Re-mint a finalization proof for an already-staged batch.
+
+    Returns the batch rebound to a freshly issued proof, or None when the
+    workspace generation has moved since the batch was staged — in which case
+    the refusal was a genuine conflict and the caller must not retry.
+    """
+    try:
+        checkpoint = _ensure_workspace_checkpoint(prefix, deadline_monotonic)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "workspace push could not re-mint a finalization proof "
+            "for prefix %s: %s",
+            prefix,
+            exc,
+        )
+        return None
+    proof = checkpoint.checkpoint_finalization_proof
+    if (
+        checkpoint.atomic_checkpoint_commit_version != 1
+        or not proof
+        or not _is_valid_checkpoint_finalization_proof(proof)
+    ):
+        return None
+    if checkpoint.generation != pending_atomic.base_generation:
+        logger.warning(
+            "workspace push will not re-proof prefix %s: generation moved "
+            "from %s to %s while the batch was staged",
+            prefix,
+            pending_atomic.base_generation[:12],
+            checkpoint.generation[:12],
+        )
+        return None
+    if proof == pending_atomic.proof:
+        # The broker handed back the same capability, so the refusal was not a
+        # stale proof and retrying it would just fail identically.
+        return None
+    _atomic_checkpoint_finalization_capabilities[prefix] = (
+        _AtomicCheckpointFinalizationCapability(version=1, proof=proof)
+    )
+    logger.info(
+        "workspace push re-minted a finalization proof for prefix %s "
+        "after a checkpoint conflict",
+        prefix,
+    )
+    return dataclass_replace(pending_atomic, proof=proof)
+
+
 def _release_staged_reservations(
     staged: list,
     deadline_monotonic: float | None = None,
@@ -3731,7 +3824,7 @@ def push_workspace(
                 logger.warning("workspace push stage skip %s", error)
                 stage_errors.append(error)
     if stage_errors:
-        _release_staged_reservations(staged, deadline_monotonic)
+        _release_staged_reservations(staged, _cleanup_deadline())
         raise WorkspacePushIncomplete(
             f"workspace push incomplete ({len(stage_errors)} file error(s)) "
             f"for prefix {prefix}: " + "; ".join(stage_errors[:5])
@@ -3744,7 +3837,7 @@ def push_workspace(
             marker_upload
         )
         if marker_error is not None or marker_prepared is None:
-            _release_staged_reservations(staged, deadline_monotonic)
+            _release_staged_reservations(staged, _cleanup_deadline())
             raise WorkspacePushIncomplete(
                 "workspace push incomplete (migration marker stage failed) "
                 f"for prefix {prefix}: {marker_error or 'unknown error'}"
@@ -3808,6 +3901,11 @@ def push_workspace(
             )
             _pending_atomic_workspace_finalizations[prefix] = pending_atomic
             atomic_committed = True
+            # Whether the BROKER accepted the batch, as opposed to the local
+            # apply that follows. Only an unaccepted batch leaves rows stranded
+            # in `reserved`; once the broker commits them, releasing is both
+            # pointless and a wasted call on an already-degraded path.
+            finalize_accepted = False
             try:
                 finalized = _finalize_workspace_checkpoint(
                     pending_atomic.base_generation,
@@ -3819,22 +3917,95 @@ def push_workspace(
                     pending_atomic.deleted_paths,
                     deadline_monotonic,
                 )
+                finalize_accepted = True
                 current_generation = _apply_atomic_workspace_finalization(
                     prefix,
                     pending_atomic,
                     finalized,
                 )
             except Exception as exc:
-                if not _is_side_effect_free_finalize_rejection(exc):
-                    raise
-                atomic_committed = False
-                current_generation = (
-                    _legacy_finalize_pending_atomic_workspace(
+                if not finalize_accepted and _is_completion_conflict_rejection(
+                    exc
+                ):
+                    # Re-mint the finalization proof against the CURRENT
+                    # invocation and try once more. `ensure-checkpoint` is the
+                    # same call `refresh_workspace` uses, so this adds no
+                    # authority the invocation did not already hold — the
+                    # broker still verifies the fresh proof in full.
+                    #
+                    # Only safe while the workspace has not moved underneath the
+                    # staged batch: every upload was prepared against
+                    # `base_generation`. If the re-read checkpoint reports a
+                    # different generation the 409 was a real conflict, not a
+                    # stale proof, so the original error stands.
+                    pending_atomic = _reproof_pending_atomic_finalization(
                         prefix,
                         pending_atomic,
                         deadline_monotonic,
                     )
-                )
+                    if pending_atomic is None:
+                        _release_staged_reservations(
+                            staged,
+                            _cleanup_deadline(),
+                        )
+                        raise
+                    _pending_atomic_workspace_finalizations[prefix] = (
+                        pending_atomic
+                    )
+                    try:
+                        finalized = _finalize_workspace_checkpoint(
+                            pending_atomic.base_generation,
+                            pending_atomic.proof,
+                            tuple(
+                                completion.reservation_id
+                                for completion in pending_atomic.uploads
+                            ),
+                            pending_atomic.deleted_paths,
+                            deadline_monotonic,
+                        )
+                    except Exception:
+                        # One re-proof is the whole allowance. A second refusal
+                        # is not a stale capability, so free the rows before
+                        # giving up rather than leaving them to block the next
+                        # push for the rest of the lease.
+                        _release_staged_reservations(
+                            staged,
+                            _cleanup_deadline(),
+                        )
+                        raise
+                    current_generation = (
+                        _apply_atomic_workspace_finalization(
+                            prefix,
+                            pending_atomic,
+                            finalized,
+                        )
+                    )
+                elif not _is_side_effect_free_finalize_rejection(exc):
+                    if not finalize_accepted:
+                        # The batch is dead but its rows stay `reserved` for the
+                        # full five-minute lease, and the partial unique index
+                        # `uq_workspace_upload_target_active` then refuses the
+                        # next push's reservation for those same paths — so the
+                        # retry 502s against this run's own leftovers (prod
+                        # 2026-09-11, bahrk: finalize failed 12:00:27, retry
+                        # died 12:04:29, lease held until 12:05:25).
+                        #
+                        # Releasing only clears rows still in `reserved`, so it
+                        # stays safe even on this deliberately ambiguous path.
+                        _release_staged_reservations(
+                            staged,
+                            _cleanup_deadline(),
+                        )
+                    raise
+                else:
+                    atomic_committed = False
+                    current_generation = (
+                        _legacy_finalize_pending_atomic_workspace(
+                            prefix,
+                            pending_atomic,
+                            deadline_monotonic,
+                        )
+                    )
             count = len(to_delete) + len(staged)
             elapsed = time.monotonic() - started
             logger.info(

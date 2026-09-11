@@ -3427,6 +3427,230 @@ class StagedReservationReleaseTests(unittest.TestCase):
             workspace_sync._release_staged_reservations(staged)
 
 
+class StaleFinalizationProofRecoveryTests(unittest.TestCase):
+    """A 409'd checkpoint re-mints its proof instead of losing the turn.
+
+    Prod 2026-09-11 (bahrk): a warm microVM finalized with the previous
+    invocation's cached proof, the broker refused the binding with a bare 409,
+    and the push died leaving its reservations `reserved` — so the retry four
+    minutes later collided with its own rows on
+    `uq_workspace_upload_target_active` and surfaced as an opaque 502.
+    """
+
+    RESERVATION = "36bb0456-1c51-4fb8-97d1-4e87d02765ce"
+
+    def setUp(self):
+        td = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, td, ignore_errors=True)
+        self.root = (Path(td) / "workspace").resolve()
+        self.root.mkdir()
+        for cache in (
+            workspace_sync._uploaded_state,
+            workspace_sync._remote_workspace_snapshots,
+            workspace_sync._committed_workspace_generations,
+            workspace_sync._atomic_checkpoint_finalization_capabilities,
+            workspace_sync._pending_workspace_generations,
+            workspace_sync._pending_workspace_completions,
+            workspace_sync._pending_atomic_workspace_finalizations,
+        ):
+            cache.clear()
+            self.addCleanup(cache.clear)
+        workspace_sync._force_exact_workspace_restores.clear()
+        self.addCleanup(workspace_sync._force_exact_workspace_restores.clear)
+
+        self.local = self.root / "state.sqlite"
+        self.local.write_bytes(b"new-history")
+        self.metadata = self.local.stat()
+        self.base_generation = workspace_sync._generation_for_entries({})
+        self.final_generation = workspace_sync._generation_for_entries({
+            "state.sqlite": (self.metadata.st_size, '"new"'),
+        })
+        workspace_sync._remote_workspace_snapshots["owner"] = (
+            workspace_sync._RemoteWorkspaceSnapshot(
+                paths=(),
+                sizes={},
+                e_tags={},
+                generation=self.base_generation,
+            )
+        )
+        workspace_sync._committed_workspace_generations["owner"] = (
+            self.base_generation
+        )
+        workspace_sync._atomic_checkpoint_finalization_capabilities[
+            "owner"
+        ] = workspace_sync._AtomicCheckpointFinalizationCapability(
+            version=1,
+            proof="stale-proof",
+        )
+        self.prepared = workspace_sync._PreparedWorkspaceUpload(
+            upload_url="https://upload.invalid/state",
+            reservation_id=self.RESERVATION,
+            required_headers={},
+        )
+
+    def _conflict(self):
+        return workspace_sync._WorkspaceBrokerHttpError(
+            409,
+            '{"error":"Workspace storage operation failed"}',
+            {"error": "Workspace storage operation failed"},
+        )
+
+    def _finalized(self):
+        return {
+            "checkpointCommitted": True,
+            "workspaceGeneration": self.final_generation,
+            "uploads": [{
+                "reservationId": self.RESERVATION,
+                "key": "owner/state.sqlite",
+                "eTag": '"new"',
+            }],
+            "deletions": [],
+        }
+
+    def _push(self, broker_side_effect):
+        calls = []
+
+        def broker(payload, *args, **kwargs):
+            calls.append(payload)
+            outcome = broker_side_effect(payload)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+        with mock.patch.object(
+            workspace_sync, "WORKSPACE_DIR", self.root
+        ), mock.patch.object(
+            workspace_sync, "_upload_spec", return_value=self.prepared
+        ), mock.patch.object(
+            workspace_sync, "_stream_upload"
+        ), mock.patch.object(
+            workspace_sync, "_broker_request", side_effect=broker
+        ):
+            try:
+                return workspace_sync.push_workspace(
+                    "owner",
+                    expected_generation=self.base_generation,
+                    require_generation=True,
+                ), None, calls
+            except Exception as exc:  # noqa: BLE001
+                return None, exc, calls
+
+    def test_a_stale_proof_is_reminted_and_the_push_completes(self):
+        state = {"finalizes": 0}
+
+        def broker(payload):
+            operation = payload.get("operation")
+            if operation == "ensure-checkpoint":
+                return {
+                    "checkpointReady": True,
+                    "workspaceGeneration": self.base_generation,
+                    "atomicCheckpointCommitVersion": 1,
+                    "checkpointFinalizationProof": "fresh-proof",
+                }
+            if operation == "finalize-checkpoint":
+                state["finalizes"] += 1
+                if state["finalizes"] == 1:
+                    return self._conflict()
+                return self._finalized()
+            return {}
+
+        count, error, calls = self._push(broker)
+
+        self.assertIsNone(error)
+        self.assertEqual(count, 1)
+        finalizes = [
+            call for call in calls
+            if call.get("operation") == "finalize-checkpoint"
+        ]
+        self.assertEqual(len(finalizes), 2)
+        self.assertEqual(
+            finalizes[0]["checkpointFinalizationProof"], "stale-proof"
+        )
+        # The retry carries the freshly minted capability, not the cached one.
+        self.assertEqual(
+            finalizes[1]["checkpointFinalizationProof"], "fresh-proof"
+        )
+        # Recovered pushes must not leave the reservations behind.
+        self.assertNotIn(
+            "release-upload",
+            [call.get("operation") for call in calls],
+        )
+        self.assertEqual(
+            workspace_sync.workspace_generation("owner"),
+            self.final_generation,
+        )
+
+    def test_a_moved_generation_is_not_reproofed_and_frees_its_rows(self):
+        """A 409 with a changed generation is a real conflict, not staleness."""
+        moved = "a" * 64
+
+        def broker(payload):
+            operation = payload.get("operation")
+            if operation == "ensure-checkpoint":
+                return {
+                    "checkpointReady": True,
+                    "workspaceGeneration": moved,
+                    "atomicCheckpointCommitVersion": 1,
+                    "checkpointFinalizationProof": "fresh-proof",
+                }
+            if operation == "finalize-checkpoint":
+                return self._conflict()
+            return {}
+
+        count, error, calls = self._push(broker)
+
+        self.assertIsNone(count)
+        self.assertIsInstance(error, workspace_sync._WorkspaceBrokerHttpError)
+        finalizes = [
+            call for call in calls
+            if call.get("operation") == "finalize-checkpoint"
+        ]
+        # Exactly one attempt: the re-proof is refused before it is retried.
+        self.assertEqual(len(finalizes), 1)
+        self.assertIn(
+            {
+                "operation": "release-upload",
+                "reservationIds": [self.RESERVATION],
+            },
+            calls,
+        )
+
+    def test_a_non_conflict_finalize_failure_frees_its_rows(self):
+        def broker(payload):
+            if payload.get("operation") == "finalize-checkpoint":
+                return workspace_sync._WorkspaceBrokerHttpError(
+                    502,
+                    '{"error":"Workspace storage operation failed"}',
+                    {"error": "Workspace storage operation failed"},
+                )
+            return {}
+
+        count, error, calls = self._push(broker)
+
+        self.assertIsNone(count)
+        self.assertIsInstance(error, workspace_sync._WorkspaceBrokerHttpError)
+        # A 502 is not a binding refusal, so no proof is re-minted.
+        self.assertNotIn(
+            "ensure-checkpoint",
+            [call.get("operation") for call in calls],
+        )
+        self.assertIn(
+            {
+                "operation": "release-upload",
+                "reservationIds": [self.RESERVATION],
+            },
+            calls,
+        )
+
+    def test_cleanup_does_not_inherit_the_exhausted_turn_deadline(self):
+        """The 11:06 timeout spent its budget, so the release never ran."""
+        deadline = workspace_sync._cleanup_deadline()
+        self.assertGreater(
+            deadline - time.monotonic(),
+            workspace_sync.CLEANUP_BUDGET_SECONDS - 1,
+        )
+
+
 class TrajectoryPruneTests(unittest.TestCase):
     """Prune only closed sessions' runtime events, and only from that table."""
 

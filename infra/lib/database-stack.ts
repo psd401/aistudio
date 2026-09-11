@@ -304,8 +304,23 @@ export class DatabaseStack extends cdk.Stack {
           scaling: {
             businessHoursMin: 1.0,  // M-F 7am-5pm PT: 1-6 ACU
             businessHoursMax: 6.0,  // max=6 covers observed 6.0 ACU peak (see environment-config.ts)
-            offHoursMin: 0.5,       // Nights and weekends: 0.5-2 ACU
-            offHoursMax: 2.0,
+            offHoursMin: 0.5,       // Nights and weekends: 0.5-6 ACU
+            // The CEILING, not the floor. Serverless v2 bills actual usage, so
+            // a higher max costs nothing while the cluster is idle — it only
+            // buys headroom for the work that genuinely runs off-hours.
+            //
+            // This was 2.0 and starved prod every night. Scheduled agent runs
+            // fire at 4-5am PT (11:00/12:00 UTC), deep inside the off-hours
+            // window, and a long autovacuum on a 173 GB table shares the same
+            // ACUs. Held at 2 ACU the cluster sat at ~62% average CPU for the
+            // whole window (vs ~20-32% at 6 ACU); workspace-broker reservation
+            // calls that normally answer in <1s took 12-17s, past the agent's
+            // client timeout, and scheduled briefs lost their workspace push.
+            //
+            // WeekendMinimalScale also reads offHoursMax, so this is the cap
+            // for all day Saturday and Sunday too — when those same agent
+            // schedules still run.
+            offHoursMax: 6.0,
           },
         }),
       });
