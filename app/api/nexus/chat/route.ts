@@ -87,6 +87,7 @@ import {
 } from '@/lib/skills/skill-tool-enforcement';
 import { readSkillMarkdown } from '@/lib/skills/skill-publish-pipeline';
 import { buildWorkspaceChatTools } from '@/lib/nexus/workspace-chat-tools';
+import { resolveMaxSteps } from "@/lib/nexus/chat-step-budget";
 import { resolveNexusMemoryContext } from '@/lib/nexus/memory/memory-context';
 import { scheduleNexusMemoryAutoExtraction } from '@/lib/nexus/memory/auto-extraction';
 import { buildNexusSystemPrompt } from '@/lib/nexus/system-prompt';
@@ -510,9 +511,9 @@ async function executeStreaming(params: {
     enabledConnectors,
     tools: mergedTools,
     // maxSteps enables multi-step tool use (agent loop). Needed when MCP,
-    // workspace, repository, or memory tools are active. Ten is the hard bound
-    // for a save/forget/read→edit→confirm chain.
-    maxSteps: multiStepToolsActive ? 10 : undefined,
+    // workspace, repository, or memory tools are active. See
+    // `lib/nexus/chat-step-budget.ts` for why a workspace turn gets a wider bound.
+    maxSteps: resolveMaxSteps({ multiStepToolsActive, hasWorkspaceTools }),
     options: { reasoningEffort, responseMode },
     callbacks: {
       onFinish: createOnFinishCallback({

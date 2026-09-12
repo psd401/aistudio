@@ -18,13 +18,17 @@
  * duplicated; the full-page experience stays one click away.
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { X, ExternalLink } from "lucide-react";
 import {
   loadWorkspacePanelAction,
   type WorkspacePanelData,
 } from "@/actions/db/atrium/workspace-panel";
+import {
+  onWorkspaceChanged,
+  workspaceChangeMatches,
+} from "@/lib/atrium/workspace-change-event";
 import { DocumentEditor } from "./DocumentEditor";
 import { ArtifactCanvas } from "./ArtifactCanvas";
 
@@ -52,11 +56,29 @@ export function WorkspacePanel({ idOrSlug, onClose }: WorkspacePanelProps) {
     setState({ status: "loading" });
   }
 
+  // The resolved object UUID of the payload currently rendered (`idOrSlug` may be
+  // a slug). Read by the change listener to decide whether an event that names an
+  // objectId is about THIS panel.
+  const loadedObjectIdRef = useRef<string | null>(null);
+  // The id the panel is currently loading/showing, written by the load effect
+  // below (a ref cannot be assigned during render — react-hooks/refs). A
+  // `refresh()` reads it when it resolves to tell whether it is stale: the mount
+  // effect has its own `cancelled` flag, but `refresh()` fires from an event
+  // listener that outlives the id it was created for.
+  const currentIdRef = useRef(idOrSlug);
+  // Bumped after a SUCCESSFUL refresh to tell `ArtifactCanvas` to reload — see
+  // its `refreshSignal` prop. The panel refetches first (it owns the `dataAccess`
+  // pin) and only then signals the canvas, so the two never land out of order.
+  const [refreshSignal, setRefreshSignal] = useState(0);
+
   useEffect(() => {
     let cancelled = false;
+    currentIdRef.current = idOrSlug;
+    loadedObjectIdRef.current = null;
     void loadWorkspacePanelAction(idOrSlug).then((result) => {
       if (cancelled) return;
       if (result.isSuccess) {
+        loadedObjectIdRef.current = result.data.id;
         setState({ status: "ready", data: result.data });
       } else {
         setState({
@@ -69,6 +91,40 @@ export function WorkspacePanel({ idOrSlug, onClose }: WorkspacePanelProps) {
       cancelled = true;
     };
   }, [idOrSlug]);
+
+  // #1749: a chat tool that edits the open object (or flips its `dataAccess`)
+  // must be reflected here without a page reload — the pinned mode this panel
+  // hands `ArtifactCanvas` comes from THIS payload, so a stale one renders the
+  // new code under the old mode and a query-mode dashboard shows no data.
+  //
+  // Deliberately does NOT reset to "loading": that would tear the panel's subtree
+  // down and remount `ArtifactCanvas` / `DocumentEditor` mid-conversation. A
+  // failed refresh keeps the currently-rendered payload rather than replacing a
+  // working panel with an error.
+  const refresh = useCallback(() => {
+    const startedFor = idOrSlug;
+    void loadWorkspacePanelAction(idOrSlug).then((result) => {
+      // The panel may have been switched to another object while this was in
+      // flight; without this check a slow refresh for the OLD id overwrites the
+      // NEW id's panel with the wrong object's payload and pins the wrong mode.
+      if (currentIdRef.current !== startedFor) return;
+      if (!result.isSuccess) return;
+      loadedObjectIdRef.current = result.data.id;
+      setState({ status: "ready", data: result.data });
+      // Only after this panel's own payload (and with it the `dataAccess` pin)
+      // has landed does the canvas reload — never in parallel with it.
+      setRefreshSignal((n) => n + 1);
+    });
+  }, [idOrSlug]);
+
+  useEffect(
+    () =>
+      onWorkspaceChanged((detail) => {
+        if (!workspaceChangeMatches(detail, loadedObjectIdRef.current)) return;
+        refresh();
+      }),
+    [refresh]
+  );
 
   return (
     <aside
@@ -150,6 +206,10 @@ export function WorkspacePanel({ idOrSlug, onClose }: WorkspacePanelProps) {
               dataBridgeEnabled={true}
               contentId={state.data.id}
               dataAccess={state.data.dataAccess ?? "none"}
+              // #1749: the canvas reloads its code/version list when THIS panel
+              // has already refetched — one refresh owner, so the new code and
+              // the mode it was written for can never arrive out of order.
+              refreshSignal={refreshSignal}
             />
           ))}
       </div>

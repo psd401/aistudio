@@ -434,6 +434,20 @@ object is deleted; deleting a user preserves records but clears attribution.
 
 ## Agent usage
 
+There are **three** agent-facing author surfaces, and the contract they describe
+lives in ONE place (`lib/content/atrium-data-contract.ts` — `DATA_ACCESS_DESC`
+plus `ATRIUM_DATA_AUTHORING_GUIDANCE`) so they cannot drift into telling a model
+something the others do not. The two TypeScript surfaces import
+`DATA_ACCESS_DESC` from it; the skill keeps a hand-maintained Markdown copy, so a
+change to the contract has to update the skill as well:
+
+1. the **MCP content tools** (`create_artifact` / `update_content`);
+2. the PSD Agent's **`psd-atrium` skill**;
+3. the **Nexus workspace chat** (#1749) — `update_workspace_artifact` carries the
+   guidance and takes an optional `dataAccess`, and `read_workspace_content`
+   returns the artifact's current mode. See
+   `docs/features/nexus-workspace-chat-editing.md`.
+
 Artifact source uses `AtriumData.submit()` and `AtriumData.list()`. The PSD Agent
 loads the `psd-atrium` skill for a complete leaderboard pattern and uses the
 small command adapter for teacher-facing reads:
@@ -457,8 +471,11 @@ For a live dashboard, set `dataAccess: "query"` on `create_artifact` and use
 - **Aggregate in SQL** so a chart query returns tens of rows, not a dataset.
   Each call is Lambda + RDS; do not ship full tables to the browser.
 - **Page detail tables** with `limit`/`offset` instead of one huge read.
-- **Pass filters as query parameters** and re-query when they change, rather than
-  fetching everything once and filtering client-side.
+- **There are no bound parameters.** `query()` takes the SQL string plus
+  `{ limit, offset }` and nothing else, so a user-typed value must never be
+  concatenated into the SQL. Either fetch an aggregated/bounded result set once
+  and filter it in JavaScript, or build the SQL from a fixed set of
+  author-written predicates chosen by a dropdown of known values.
 - **Handle rejection.** A rejected `query()` means no session, an expired ID
   token, no access to a table, the wrong data-access mode, or a rate limit —
   render a sign-in / no-access state, never a blank chart.
