@@ -102,12 +102,27 @@ branding only when the user asks, or the audience is clearly PSD/internal/distri
 
 Start from `assets/base-scaffold.html` (structural only — reset, a11y, reduced-motion,
 print CSS, an embedded pre-flight comment). Keep everything self-contained: inline CSS,
-inline vanilla JS. Fonts may load via a Google Fonts `<link>` (the file is opened from an
-HTTPS URL, so the CDN link resolves in the user's browser). The file must work opened
+inline vanilla JS. The file must work opened
 directly by URL with no build step, no bundler, and no `<script src="local.js">`. Apply
 the taste rules and the chosen aesthetic. For interactive editors, always end with an
 export button ("copy as JSON / markdown / prompt") so the user can paste state back into
 the agent.
+
+> **No external assets (#1750).** This page is published to Atrium, where it renders
+> inside a sandbox whose CSP is `default-src 'none'` with `connect-src 'none'` and
+> `font-src data:`. Anything fetched from another origin is dropped **silently** — the
+> page renders and the missing piece just never appears:
+>
+> - **No Google Fonts `<link>`** (and no webfont `@import`). The stylesheet is blocked by
+>   `style-src` and the font files by `font-src`, so the page falls back to the system
+>   stack anyway. Use a real system font stack from the start, or embed a font as a
+>   `data:` URL if a specific face is essential.
+> - **No `<script src>` / `<link rel=stylesheet>` to any origin except
+>   `https://cdnjs.cloudflare.com`**, and pin an exact version there — never `latest`.
+>   Prefer inline SVG or a `<canvas>` painted by inline code for charts.
+> - **No `fetch`/`XHR`/WebSocket** at runtime. Bake the data into the page, or use
+>   `window.AtriumData` (see the `psd-atrium` skill) for live data.
+> - **Images**: `data:` URLs, or the same allowlisted CDN origin. Nothing else loads.
 
 **Write the file to `/tmp/`** with a short, descriptive, kebab-case filename, e.g.
 `/tmp/onboarding-plan.html`. `/tmp` is writable; the skills directory is read-only.

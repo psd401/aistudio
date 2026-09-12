@@ -3,7 +3,9 @@
   chart-snippets.html — REFERENCE scaffold for the data register.
   Copy the patterns, not the styling. Charts are hand-built inline SVG, data-driven from an
   inline JSON block, taste-correct (zero baseline, light grid, direct labels, accent ramp,
-  role/aria, reduced-motion). For complex/interactive charts use a CDN lib (see data-viz.md).
+  role/aria, reduced-motion). For complex/interactive charts a library is allowed ONLY from an
+  exact-version https://cdnjs.cloudflare.com URL — every other origin is blocked by the Atrium
+  sandbox CSP, silently, leaving a blank chart with no error (#1750). See data-viz.md.
   Helpers below are intentionally tiny and dependency-free.
 -->
 <html lang="en">
