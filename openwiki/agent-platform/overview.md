@@ -311,6 +311,51 @@ The `journaledReplay` option in `verifyWorkspaceFinalizationProof()` relaxes ONL
 
 **Why it's safe**: The caller only passes `journaledReplay` when a journal entry on the same prefix matches the request byte for byte. Cross-generation and cross-owner replay remain blocked by the retained generation claim and manifest-generation check.
 
+### Stale Proof Recovery
+
+**Source**: `/infra/agent-image/workspace_sync.py`
+
+When a warm microVM serves a second invocation without re-running `refresh_workspace`, it may finalize with the previous invocation's cached proof. The broker binds proofs to a specific invocation's nonce and expiry, so it refuses stale proofs with a 409.
+
+**Historical context (prod 2026-09-11)**: A warm microVM finalized with a stale proof, the broker refused with a bare 409, and the push died leaving reservations `reserved`. The retry four minutes later collided with its own rows on `uq_workspace_upload_target_active` and surfaced as an opaque 502.
+
+#### Re-Proof Flow
+
+**Source**: `/infra/agent-image/workspace_sync.py` — `_is_completion_conflict_rejection()`, `_reproof_pending_atomic_finalization()`
+
+When `finalize-checkpoint` returns 409:
+
+1. **Detect conflict**: `_is_completion_conflict_rejection()` identifies finalize 409 (vs other errors)
+2. **Re-mint proof**: `_reproof_pending_atomic_finalization()` calls `_ensure_workspace_checkpoint()` to get fresh proof
+3. **Validate generation unchanged**: If workspace generation moved, the 409 was a real conflict—release reservations and raise
+4. **One retry allowed**: Re-attempt finalize with fresh proof; second refusal keeps batch for resume path
+5. **Ambiguous failures (502)**: Do NOT release reservations—broker may have partially committed, and claims reset to `reserved` precisely so replay can complete
+
+**Why re-proof is bounded**: `ensure-checkpoint` is the same call `refresh_workspace` uses, so this adds no authority the invocation did not already hold. The broker still verifies the fresh proof in full.
+
+#### Cleanup Budget Independence
+
+**Source**: `/infra/agent-image/workspace_sync.py` — `CLEANUP_BUDGET_SECONDS`, `_cleanup_deadline()`
+
+Cleanup (`_release_staged_reservations`) gets its own budget independent of the turn deadline. The 2026-09-11 timeout spent its turn deadline getting reservations, so `_remaining_timeout` raised before the release could be attempted. `CLEANUP_BUDGET_SECONDS = 15` is enough for the bounded release loop while staying inside Lambda wall time.
+
+#### Test Validation
+
+**Source**: `/infra/agent-image/test_workspace_sync.py` — `StaleFinalizationProofRecoveryTests`
+
+The test suite covers:
+
+- Stale proof is re-minted and push completes (verifies fresh proof used on retry)
+- Generation-moved conflict releases reservations (can never replay)
+- Ambiguous 502 keeps rows for resume path (no release, batch retained)
+- Second refusal after re-proof keeps rows (re-proofed attempt crossed ambiguity boundary)
+- Cleanup does not inherit exhausted turn deadline
+
+**Test Command**:
+```bash
+cd infra/agent-image && python -m pytest test_workspace_sync.py::StaleFinalizationProofRecoveryTests -v
+```
+
 ### Checkpoint Retry Recovery
 
 **Source**: `/infra/agent-image/agentcore_wrapper.py`
@@ -447,6 +492,58 @@ Every schedule an owner has shares ONE workspace lock, so same-cadence schedules
 - **Best-effort**: A settle failure never turns a successful run into a reported failure
 - **Re-opens on late failure**: If the same `fire_key` fails after the retry succeeded, the upsert clears `acknowledged` so the real failure surfaces
 - **No time window needed**: `fire_key` is a unique Scheduler occurrence identity, not a reused session ID
+
+### Owner Workspace Contention Wait
+
+**Source**: `/infra/lambdas/agent-cron/index.ts` — `isOwnerWorkspaceContention()`, `runLockedScheduleTurnAwaitingOwner()`
+
+EventBridge Scheduler spends its 5 retries in ~3 minutes (observed: +59s, +115s, then nothing). An agent turn runs 4–15 minutes. A fire that loses the owner workspace lock therefore burned its whole budget before the holder could possibly finish, and was dropped to the DLQ—247 dead fires by 2026-09-12, plus the superintendent's Weekly Brief on 2026-09-11 which vanished with no error to the user.
+
+#### Wait Mechanism
+
+Instead of racing the lock and failing, the invocation now polls until the holder releases or the budget exhausts:
+
+- **Wait budget**: `OWNER_CONTENTION_WAIT_BUDGET_MS = 5` minutes
+- **Poll interval**: `OWNER_CONTENTION_POLL_MS = 15` seconds
+- **Reserve for turn**: `OWNER_CONTENTION_REMAINING_RESERVE_MS = 10` minutes (leaves enough Lambda wall time for the turn + reply + workspace flush)
+
+If the budget or Lambda remaining time runs out, the fire falls through to exactly the previous behavior (DLQ). The wait can only convert drops into runs.
+
+#### When to Wait
+
+`isOwnerWorkspaceContention()` returns `true` only when ALL conditions hold:
+
+| Condition | Why |
+|-----------|-----|
+| Phase is `lock-contention` | Config/renewal faults cannot be waited out |
+| Holder is identified (`ownerFireKey: string`) | Unidentified holder might be this fire meeting its own lock |
+| Holder key ≠ fire's own key | Same key is duplicate delivery, must coalesce immediately |
+| `resolveScheduleLockContention()` returns `retry` action | `coalesce` action means earlier fire of same schedule—must not delay |
+
+#### What NOT to Wait For
+
+- **Same fire key on both sides**: One fire meeting its own lock is a duplicate delivery. Waiting would run the same occurrence twice.
+- **Same schedule, earlier fire**: High-frequency schedules catching their predecessor must coalesce immediately.
+- **Config faults (`lock-config`)**: No amount of waiting fixes a missing `SESSION_LOCKS_TABLE`.
+- **Unidentified holder**: If the key is missing or null, `resolveScheduleLockContention` treats it as this fire meeting its own lock.
+
+#### Test Validation
+
+**Source**: `/infra/lambdas/agent-cron/owner-contention-wait.test.ts`
+
+The test suite validates:
+
+- Wait when another schedule of the same owner holds the workspace
+- Do NOT wait for duplicate delivery (same fire key)
+- Do NOT wait without a fire claim (legacy/unclaimed contention)
+- Do NOT wait on `lock-config` phase failures
+- Do NOT wait when holder is unidentified
+- Do NOT wait for earlier fire of same schedule (coalescing case)
+
+**Test Command**:
+```bash
+cd infra/lambdas/agent-cron && bun test owner-contention-wait.test.ts
+```
 
 ---
 
