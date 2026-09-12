@@ -15,7 +15,29 @@ jest.mock("@aws-sdk/client-sqs", () => ({
 }))
 
 import type { APIGatewayProxyEventV2 } from "aws-lambda"
-import { handler } from "../../lambdas/agent-chat-bridge/index"
+
+// The lambda throws at MODULE level when its four env vars are missing, so it
+// must not be imported until the assignments above have run. A static `import`
+// cannot express that: ES import declarations are hoisted, and the CommonJS
+// emit jest runs hoists the `require` with them — under SWC (the transform
+// since ts-jest stopped working on TypeScript 7) the require would execute
+// first and the module would throw before a single test ran. Load it lazily
+// instead, which is correct under any transform rather than relying on one
+// compiler's statement ordering.
+type BridgeHandler = (
+  event: APIGatewayProxyEventV2
+) => Promise<{ statusCode: number; body: string }>
+let handler: BridgeHandler
+
+// Indirect specifier: under `moduleResolution: nodenext` a literal relative
+// `import()` must carry a `.js` extension (TS2835), but jest resolves the real
+// `index.ts` and would not find `index.js`. Going through a variable keeps the
+// runtime path jest can resolve, with the shape pinned by the cast below.
+const BRIDGE_MODULE = "../../lambdas/agent-chat-bridge/index"
+
+beforeAll(async () => {
+  ;({ handler } = (await import(BRIDGE_MODULE)) as { handler: BridgeHandler })
+})
 
 function event(
   claims: Record<string, string | boolean>,

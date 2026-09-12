@@ -324,13 +324,22 @@ describe('Agent schedule reliability infrastructure', () => {
   });
 
   it('alarms cron errors and throttles through the agent alarm topic', () => {
-    for (const [alarmName, metricName] of [
-      [`psd-agent-cron-errors-${ENV}`, 'Errors'],
-      [`psd-agent-cron-throttles-${ENV}`, 'Throttles'],
+    // The errors alarm deliberately does NOT watch AWS/Lambda `Errors`: #1722
+    // moved it onto the custom `CronUnexpectedInvokeError` metric so that an
+    // expected workspace lock-contention retry stops paging, while a genuine
+    // failure still does. This assertion still named AWS/Lambda `Errors`
+    // because the suite could not run at all between the TypeScript 7 bump
+    // (#1209) and the @swc/jest switch. Throttles remain a stock Lambda metric.
+    //
+    // Intent is unchanged: both alarms fire at threshold 1 into the agent
+    // alarm topic.
+    for (const [alarmName, namespace, metricName] of [
+      [`psd-agent-cron-errors-${ENV}`, `PSD/AgentPlatform/${ENV}`, 'CronUnexpectedInvokeError'],
+      [`psd-agent-cron-throttles-${ENV}`, 'AWS/Lambda', 'Throttles'],
     ]) {
       template.hasResourceProperties('AWS::CloudWatch::Alarm', {
         AlarmName: alarmName,
-        Namespace: 'AWS/Lambda',
+        Namespace: namespace,
         MetricName: metricName,
         Threshold: 1,
         AlarmActions: Match.anyValue(),

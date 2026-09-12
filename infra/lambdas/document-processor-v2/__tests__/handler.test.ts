@@ -47,7 +47,21 @@ jest.mock('../processors/factory', () => ({
   },
 }));
 
-import { handler } from '../index';
+// Loaded lazily, NOT via a static import. `../index` constructs its AWS clients
+// at module scope, so the `jest.mock` factories above run during its import and
+// close over `dynamoSend` — which must already be initialized. A static import
+// cannot guarantee that: ES import declarations are hoisted, and the CommonJS
+// emit jest runs hoists the `require` with them, so under SWC (the transform
+// since ts-jest stopped working on TypeScript 7) `../index` loaded before
+// `const dynamoSend` and the factory hit its temporal dead zone. Deferring the
+// load is correct under any transform instead of depending on one compiler's
+// statement ordering.
+type Handler = typeof import('../index').handler;
+let handler: Handler;
+
+beforeAll(async () => {
+  ({ handler } = await import('../index'));
+});
 
 function recordWithBody(messageId: string, body: string): SQSRecord {
   return {
