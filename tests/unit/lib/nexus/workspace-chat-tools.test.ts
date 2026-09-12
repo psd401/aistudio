@@ -166,6 +166,31 @@ function defineBuildWorkspaceChatToolsSuite1Part1() {
     );
   });
 
+  // #1750 — the chat is an artifact-authoring surface, so it must carry the same
+  // sandbox CSP rule the MCP content tools carry. Without it the model reaches
+  // for a chart library on a CDN, the script is blocked with no error, and the
+  // user gets a dashboard with blank charts.
+  it("puts the sandbox CSP rule on update_workspace_artifact and flags it in the system prompt", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    const result = await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" });
+    // No cast: `Tool.description` is declared on every member of the ToolSet
+    // union, so reading it directly keeps the compiler checking that the AI SDK
+    // still has the field. A `{ description?: string }` cast would keep
+    // compiling and silently read undefined if the SDK ever renamed it.
+    const description = result!.tools.update_workspace_artifact.description;
+    expect(description).toContain("SANDBOX CSP:");
+    expect(description).toContain("connect-src 'none'");
+    expect(result!.systemPromptFragment).toContain("locked-down sandbox");
+  });
+
+  it("does NOT put the artifact CSP rule on a DOCUMENT's system prompt (documents are not sandboxed code)", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    const result = await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" });
+    expect(result!.systemPromptFragment).not.toContain("locked-down sandbox");
+  });
+
   it("does NOT bind delete_workspace_content when canDelete is false even if canEdit is true (decoupling)", async () => {
     getMock.mockResolvedValue(DOC);
     canEditMock.mockReturnValue(true);

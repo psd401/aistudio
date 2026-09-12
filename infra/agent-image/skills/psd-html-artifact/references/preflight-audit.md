@@ -106,8 +106,12 @@ enforces are also listed here so you build them in from the start:
 - [ ] At most one marquee on the page.
 
 ## Self-containment
-- [ ] Single file: inline CSS, inline vanilla JS, fonts via CDN `<link>`. No `<script src>` to a
-      local file. Opens and works via `file://`.
+- [ ] Single file: inline CSS, inline vanilla JS. No `<script src>` to a local file. Opens and
+      works via `file://`.
+- [ ] **No external assets except an exact-version `https://cdnjs.cloudflare.com` URL (#1750).**
+      No webfont `<link>`/`@import` (`font-src data:` blocks it), no `fetch`/XHR/WebSocket
+      (`connect-src 'none'`), no `<img src>` to an outside host. The Atrium sandbox CSP drops
+      each of these SILENTLY — the page renders and the feature is simply dead.
 - [ ] The scaffold's pre-flight comment block has been **deleted** from the delivered file.
 
 ## Pass summary (report to the user)

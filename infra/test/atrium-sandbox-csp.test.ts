@@ -81,3 +81,69 @@ describe('AtriumSandboxStack CSP media-src', () => {
     expect(() => cspOf({ allowedMediaOrigins: ['ftp://evil.example'] })).toThrow();
   });
 });
+
+/**
+ * #1750 — the CDN allowlist. The allowlist plumbing already existed but the
+ * `atriumAllowedArtifactCdns` context key was never set, so `script-src` stayed
+ * inline-only and every artifact that loaded Chart.js/D3/Tailwind from a CDN got
+ * the script dropped with no visible error. These lock in the directive SHAPE the
+ * authoring guidance promises: `'unsafe-inline'` plus exactly the configured
+ * origins, on script-src AND style-src, with no widening of the egress gate.
+ */
+describe('AtriumSandboxStack CSP script-src/style-src (CDN allowlist, #1750)', () => {
+  const CDN = 'https://cdnjs.cloudflare.com';
+  const directive = (csp: string, name: string): string | undefined =>
+    csp.split('; ').find((d: string) => d.startsWith(`${name} `) || d === name);
+
+  it('is inline-only on both script-src and style-src when no CDN is allowlisted', () => {
+    const csp = cspOf({ allowedArtifactCdns: [] });
+    expect(directive(csp, 'script-src')).toBe("script-src 'unsafe-inline'");
+    expect(directive(csp, 'style-src')).toBe("style-src 'unsafe-inline'");
+  });
+
+  it("is 'unsafe-inline' plus EXACTLY the configured origins", () => {
+    const csp = cspOf({ allowedArtifactCdns: [CDN] });
+    expect(directive(csp, 'script-src')).toBe(`script-src 'unsafe-inline' ${CDN}`);
+    expect(directive(csp, 'style-src')).toBe(`style-src 'unsafe-inline' ${CDN}`);
+  });
+
+  it('extends img-src to the same origins (a CDN stylesheet pulls its sprites)', () => {
+    const csp = cspOf({ allowedArtifactCdns: [CDN] });
+    expect(directive(csp, 'img-src')).toBe(`img-src data: ${CDN}`);
+  });
+
+  it('normalizes an entry with a path or trailing slash to a bare origin', () => {
+    // A raw "https://cdnjs.cloudflare.com/ajax/libs/" entry in the CSP would be a
+    // path-prefixed source, which is legal CSP but not what the docs promise.
+    const csp = cspOf({ allowedArtifactCdns: ['https://cdnjs.cloudflare.com/ajax/libs/'] });
+    expect(directive(csp, 'script-src')).toBe(`script-src 'unsafe-inline' ${CDN}`);
+  });
+
+  it('rejects a non-http(s) CDN entry at synth rather than widening the CSP with junk', () => {
+    expect(() => cspOf({ allowedArtifactCdns: ['ftp://evil.example'] })).toThrow();
+    expect(() => cspOf({ allowedArtifactCdns: ['not-a-url'] })).toThrow();
+  });
+
+  it('names the OFFENDING prop in the synth failure, not allowedParentOrigins', () => {
+    // The normalizer is shared by three lists. It used to blame
+    // allowedParentOrigins for every bad entry, sending an operator who typo'd a
+    // cdk.json CDN origin to the wrong key.
+    expect(() => cspOf({ allowedArtifactCdns: ['not-a-url'] })).toThrow(
+      /allowedArtifactCdns/
+    );
+    expect(() => cspOf({ allowedMediaOrigins: ['ftp://evil.example'] })).toThrow(
+      /allowedMediaOrigins/
+    );
+  });
+
+  it('never lets the CDN allowlist reopen the egress gate', () => {
+    // The whole reason a CDN allowlist is acceptable: an allowlisted script still
+    // cannot phone home. If this ever regresses, the security review in
+    // docs/DEPLOYMENT.md is no longer true.
+    const csp = cspOf({ allowedArtifactCdns: [CDN] });
+    expect(csp).toContain("connect-src 'none'");
+    expect(csp).toContain("webrtc 'block'");
+    expect(directive(csp, 'script-src')).not.toContain('*');
+    expect(directive(csp, 'script-src')).not.toContain("'unsafe-eval'");
+  });
+});

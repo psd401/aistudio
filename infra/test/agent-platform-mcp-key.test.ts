@@ -83,6 +83,22 @@ function buildTemplate(): Template {
 
 let template: Template;
 
+/**
+ * Every direct `bedrock:InvokeModel` grant must name explicit model ARNs and
+ * never a wildcard. Lives at module scope rather than inline so the assertion
+ * callback stays under the complexity budget.
+ */
+function expectModelResourcesPinned(grants: { Resource?: unknown }[]): void {
+  const resources = grants.flatMap((grant) =>
+    Array.isArray(grant.Resource) ? grant.Resource : [grant.Resource]
+  );
+  expect(resources.length).toBeGreaterThan(0);
+  for (const resource of resources) {
+    expect(typeof resource).toBe('string');
+    expect(resource).not.toContain('*');
+  }
+}
+
 function defineAgentPlatformStackAIStudioMCPKeyProvisioning1100Suite1Part1() {
 
 
@@ -281,10 +297,25 @@ function defineAgentPlatformStackAIStudioMCPKeyProvisioning1100Suite1Part2() {it
         : [statement.Action];
       return statement.Effect === 'Allow' && actions.includes('bedrock:InvokeModel');
     });
-    expect(directModelInvocations).toHaveLength(1);
-    expect(directModelInvocations[0].Sid).toBe('BedrockMemoryEmbeddingOnly');
-    expect(JSON.stringify(directModelInvocations[0].Resource))
+    // Two direct-invoke grants are expected, and only these two: the memory
+    // embedding model, and the chat model pinned by #1384 (SigV4 Bedrock).
+    // This assertion used to require exactly one — it was written before #1384
+    // and went stale unnoticed, because ts-jest could not run this suite at all
+    // between the TypeScript 7 bump (#1209) and the @swc/jest switch.
+    //
+    // The intent is unchanged: every direct bedrock:InvokeModel grant must be
+    // pinned to explicit model ARNs, never a wildcard.
+    expect(
+      directModelInvocations.map((statement) => statement.Sid).sort()
+    ).toEqual(['BedrockChatModelInvoke', 'BedrockMemoryEmbeddingOnly']);
+
+    const embeddingGrant = directModelInvocations.find(
+      (statement) => statement.Sid === 'BedrockMemoryEmbeddingOnly'
+    );
+    expect(JSON.stringify(embeddingGrant?.Resource))
       .toContain('amazon.titan-embed-text-v2:0');
+
+    expectModelResourcesPinned(directModelInvocations);
   });
 
   }

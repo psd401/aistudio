@@ -207,7 +207,7 @@
     {
       "identifier": "content.create_artifact",
       "name": "create_artifact",
-      "description": "Create an interactive artifact (HTML/JS or JSX) content object. Does not publish. Returns the object id, slug, and reader link.",
+      "description": "Create an interactive artifact (HTML/JS or JSX) content object. Does not publish. Returns the object id, slug, and reader link. SANDBOX CSP: the artifact runs under a strict Content-Security-Policy. Write your own JavaScript and CSS INLINE in the artifact — inline <script> and <style> are allowed and are the intended way to build one — but the artifact can never reach the network from code (connect-src 'none', so fetch/XHR/WebSocket are blocked). The only external scripts and styles it may load are from these origins: https://cdnjs.cloudflare.com — pin an exact version in the URL (never \"latest\"), because an allowlisted CDN serves code with the artifact's own privileges. Anything loaded from another origin is blocked silently (the page renders, the feature is just dead), so prefer inline SVG or a <canvas> painted by inline code when a library is not worth the dependency.",
       "surfaces": [
         "mcp",
         "internal"
@@ -251,7 +251,7 @@
     {
       "identifier": "content.create_version",
       "name": "create_version",
-      "description": "Add a new version with new body content and an optional change summary.",
+      "description": "Add a new version with new body content and an optional change summary. For an ARTIFACT body: SANDBOX CSP: the artifact runs under a strict Content-Security-Policy. Write your own JavaScript and CSS INLINE in the artifact — inline <script> and <style> are allowed and are the intended way to build one — but the artifact can never reach the network from code (connect-src 'none', so fetch/XHR/WebSocket are blocked). The only external scripts and styles it may load are from these origins: https://cdnjs.cloudflare.com — pin an exact version in the URL (never \"latest\"), because an allowlisted CDN serves code with the artifact's own privileges. Anything loaded from another origin is blocked silently (the page renders, the feature is just dead), so prefer inline SVG or a <canvas> painted by inline code when a library is not worth the dependency.",
       "surfaces": [
         "mcp",
         "internal"

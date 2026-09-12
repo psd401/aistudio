@@ -16,11 +16,14 @@
  */
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import {
   normalizeOrigin,
   getArtifactSandboxOrigin,
   getArtifactSandboxRenderUrl,
   parseAllowedArtifactCdns,
+  buildArtifactCspGuidance,
 } from "@/lib/content/artifact-sandbox-config";
 
 let passed = 0;
@@ -53,6 +56,20 @@ function withEnv(overrides: Partial<Record<(typeof ENV_KEYS)[number], string | u
       else process.env[k] = saved[k];
     }
   }
+}
+
+// Every `https://…` origin a guidance sentence names, in order of appearance.
+//
+// Asserting on this rather than `guidance.includes("https://some.cdn")` is both
+// the stronger check — the guidance must name the allowlisted origins and NO
+// others, so it can never promise one the CSP blocks — and the one CodeQL is
+// happy with: a substring/regex test against a URL constant is an incomplete
+// host check (js/incomplete-url-substring-sanitization,
+// js/regex/missing-regexp-anchor), because the constant can appear anywhere in
+// the subject. The pattern here carries no hostname of its own; it just
+// tokenizes, and the comparison that decides the test is an exact one.
+function originsNamedIn(guidance: string): string[] {
+  return (guidance.match(/https:\/\/[^\s,)'"`]+/g) ?? []).map((o) => o.replace(/[.,;:]+$/, ""));
 }
 
 // --- normalizeOrigin -------------------------------------------------------
@@ -145,6 +162,91 @@ check("parseAllowedArtifactCdns normalizes, dedupes, drops invalid", () => {
   );
   assert.deepEqual(parseAllowedArtifactCdns(""), []);
   assert.deepEqual(parseAllowedArtifactCdns(undefined), []);
+});
+
+// --- CDN allowlist DEPLOY WIRING (#1750) -----------------------------------
+// The bug this guards: `atriumAllowedArtifactCdns` existed as a CDK context key
+// and the stack knew how to bake it into the CSP, but the key was never SET, so
+// the deployed allowlist was empty and every CDN-loaded chart library was blocked
+// with no error anyone could see. The key's default now lives in infra/cdk.json;
+// this check fails the build if it is removed or made unparseable, rather than
+// letting the regression reappear silently in a viewer's browser.
+check("infra/cdk.json sets a parseable atriumAllowedArtifactCdns default", () => {
+  const cdkJson = JSON.parse(
+    fs.readFileSync(path.join(process.cwd(), "infra", "cdk.json"), "utf8")
+  ) as { context?: Record<string, unknown> };
+  const raw = cdkJson.context?.atriumAllowedArtifactCdns;
+  // assert.ok narrows (`asserts value`); assert.equal does not, so this avoids a
+  // `raw as string` cast that the compiler would not actually be checking.
+  assert.ok(
+    typeof raw === "string",
+    "infra/cdk.json context.atriumAllowedArtifactCdns must be a comma-separated string"
+  );
+  const entries = raw.split(",").filter((s) => s.trim().length > 0);
+  assert.ok(
+    entries.length > 0,
+    "infra/cdk.json context.atriumAllowedArtifactCdns must list at least one origin"
+  );
+  // Every raw entry must survive normalization — a typo'd origin would be
+  // silently dropped from the CSP while still reading as "configured". Checked
+  // per entry rather than by comparing counts: parseAllowedArtifactCdns also
+  // dedupes, so a duplicated-but-valid origin would otherwise be misreported as
+  // a typo and send whoever debugs it hunting for one that isn't there.
+  for (const entry of entries) {
+    assert.equal(
+      parseAllowedArtifactCdns(entry).length,
+      1,
+      `atriumAllowedArtifactCdns entry "${entry.trim()}" is not a valid http(s) origin and would be dropped from the CSP`
+    );
+  }
+});
+
+// --- buildArtifactCspGuidance (#1750) --------------------------------------
+check("buildArtifactCspGuidance tells an author to inline everything when no CDN is allowed", () => {
+  const s = buildArtifactCspGuidance([]);
+  assert.match(s, /SANDBOX CSP:/);
+  assert.match(s, /connect-src 'none'/);
+  assert.match(s, /no external scripts or styles at all/);
+  assert.match(s, /inline SVG/);
+  // Must never name an origin the CSP does not actually permit.
+  assert.doesNotMatch(s, /https:\/\//);
+});
+
+check("buildArtifactCspGuidance names the allowed origins and demands a pinned version", () => {
+  const s = buildArtifactCspGuidance(["https://cdnjs.cloudflare.com"]);
+  assert.deepEqual(
+    originsNamedIn(s),
+    ["https://cdnjs.cloudflare.com"],
+    "guidance must name the allowlisted origin and no other"
+  );
+  assert.match(s, /pin an exact version/);
+  assert.match(s, /blocked silently/);
+});
+
+// A model reading only "external scripts are blocked EXCEPT from <cdn>" can
+// conclude its own script has to come from that CDN. Both branches must say
+// outright that inline script/style is the normal way to build an artifact.
+check("buildArtifactCspGuidance says inline script and style are allowed in both branches", () => {
+  for (const s of [
+    buildArtifactCspGuidance([]),
+    buildArtifactCspGuidance(["https://cdnjs.cloudflare.com"]),
+  ]) {
+    assert.match(s, /INLINE/);
+    assert.match(s, /<script> and <style> are allowed/);
+  }
+});
+
+check("buildArtifactCspGuidance defaults to the process env allowlist", () => {
+  withEnv({ ATRIUM_ALLOWED_ARTIFACT_CDNS: "https://cdn.example.com" }, () => {
+    assert.deepEqual(
+      originsNamedIn(buildArtifactCspGuidance()),
+      ["https://cdn.example.com"],
+      "guidance must read the allowlist from the environment"
+    );
+  });
+  withEnv({}, () => {
+    assert.match(buildArtifactCspGuidance(), /no external scripts or styles at all/);
+  });
 });
 
 console.log(`\nartifact-sandbox-config smoke: ${passed} checks passed`);

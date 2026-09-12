@@ -34,10 +34,14 @@ const retireLegacyContent =
   app.node.tryGetContext('retireLegacyContent') === true ||
   app.node.tryGetContext('retireLegacyContent') === 'true';
 
-// Atrium artifact sandbox (#1052): comma-separated CDN origins the sandbox CSP
-// permits for artifact script-src/style-src (e.g. "https://cdnjs.cloudflare.com").
-// Empty => inline-only artifacts. Same value should be set as
-// ATRIUM_ALLOWED_ARTIFACT_CDNS on the app for parity.
+// Atrium artifact sandbox (#1052, #1750): comma-separated CDN origins the sandbox
+// CSP permits for artifact script-src/style-src (e.g. "https://cdnjs.cloudflare.com").
+// Empty => inline-only artifacts. The DEFAULT lives in infra/cdk.json context so a
+// deploy that forgets a --context flag cannot silently ship an empty allowlist (the
+// failure mode #1750 documents: CDN scripts blocked with no visible error).
+// The SAME value is injected into the app task as ATRIUM_ALLOWED_ARTIFACT_CDNS
+// (frontend stack, below) so the authoring guidance the app hands a model can never
+// promise an origin the sandbox CSP then blocks.
 const atriumAllowedArtifactCdns: string[] = String(
   app.node.tryGetContext('atriumAllowedArtifactCdns') || ''
 )
@@ -428,6 +432,7 @@ if (baseDomain) {
     scheduleTargetBackfillFunction:
       devAgentPlatformStack.scheduleTargetBackfillFunction,
     atriumSandboxOrigin: devAtriumSandboxStack.sandboxOrigin, // #1052
+    atriumAllowedArtifactCdns: atriumAllowedArtifactCdns.join(','), // #1750
     atriumEventsTopicArn: devAtriumEventsStack.topicArn, // #1055
     useExistingVpc: setupDns, // Use VPC sharing in real deployments, create new VPC for CI validation
     setupDns, // Enable DNS/certificate setup (false for CI validation with example.com)
@@ -456,6 +461,7 @@ if (baseDomain) {
     scheduleTargetBackfillFunction:
       prodAgentPlatformStack.scheduleTargetBackfillFunction,
     atriumSandboxOrigin: prodAtriumSandboxStack.sandboxOrigin, // #1052
+    atriumAllowedArtifactCdns: atriumAllowedArtifactCdns.join(','), // #1750
     atriumEventsTopicArn: prodAtriumEventsStack.topicArn, // #1055
     useExistingVpc: setupDns, // Use VPC sharing in real deployments, create new VPC for CI validation
     setupDns, // Enable DNS/certificate setup (false for CI validation with example.com)

@@ -27,10 +27,12 @@
   <title>TITLE</title>
 
   <!--
-    Fonts: load the distinctive pair you chose for THIS brief. Example pattern:
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=...&display=swap" rel="stylesheet">
+    Fonts: NO webfont <link> (#1750). This page renders in the Atrium artifact
+    sandbox, whose CSP is `style-src 'unsafe-inline' <allowlisted CDN>` and
+    `font-src data:` — a Google Fonts stylesheet and its font files are both
+    blocked, silently, and the page falls back to the system stack with no error.
+    Pick a distinctive SYSTEM font stack for this brief instead and set it in the
+    tokens below, or embed a face as a `data:` URL if it is essential.
   -->
 
   <style>
