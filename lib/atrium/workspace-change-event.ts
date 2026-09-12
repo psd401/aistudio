@@ -9,11 +9,15 @@
  * surface tell them "refetch" without either side importing the other.
  *
  * Emitted by the Nexus tool-call renderer when a workspace-mutating tool result
- * lands; consumed by the panel (re-runs `loadWorkspacePanelAction`, which is
- * where the pinned `dataAccess` comes from) and the canvas (refreshes the version
- * list and loads the new head). Without it the chat writes a new version, flips
- * the mode, says "done", and the panel keeps rendering the OLD version under the
- * OLD pinned mode until the user reloads the page.
+ * lands; consumed by `WorkspacePanel` ALONE, which re-runs
+ * `loadWorkspacePanelAction` (where the pinned `dataAccess` comes from) and then
+ * bumps `ArtifactCanvas`'s `refreshSignal` prop. The canvas deliberately does NOT
+ * subscribe here: two independent listeners meant two independently-timed,
+ * independently-fallible fetches, and a panel fetch that failed while the canvas
+ * one succeeded left the new code pinned to the OLD mode for the rest of the
+ * session. One owner, one order. Without the signal at all, the chat writes a new
+ * version, flips the mode, says "done", and the panel keeps rendering the OLD
+ * version under the OLD pinned mode until the user reloads the page.
  */
 
 /** The `window` event name. Namespaced so it cannot collide with app events. */
@@ -52,13 +56,21 @@ export function onWorkspaceChanged(
 }
 
 /**
- * True when `detail` concerns the object this listener is rendering. An event
- * with no `objectId` matches everything (see `WorkspaceChangedDetail.objectId`).
+ * True when `detail` concerns the object this listener is rendering.
+ *
+ * Two distinct "unknown"s, deliberately NOT treated the same:
+ *  - the EVENT names no object (`detail.objectId` absent) → match, because the
+ *    tool that fired it is bound server-side to whatever the panel has open.
+ *  - the LISTENER has not resolved its own object yet (`objectId` null, the
+ *    first load still in flight) → do NOT match. Its mount load is already
+ *    fetching current server state, so refreshing on an event it cannot
+ *    attribute is duplicate work racing that load — and every workspace-mutating
+ *    tool result carries an `objectId` (#1749).
  */
 export function workspaceChangeMatches(
   detail: WorkspaceChangedDetail,
   objectId: string | null | undefined
 ): boolean {
   if (!detail.objectId) return true;
-  return !objectId || detail.objectId === objectId;
+  return detail.objectId === objectId;
 }

@@ -47,28 +47,47 @@ before #1749 it had none of them:
 1. **The contract.** `lib/content/atrium-data-contract.ts` holds the ONE copy of
    `DATA_ACCESS_DESC` (what the modes mean) and `ATRIUM_DATA_AUTHORING_GUIDANCE`
    (the operations, the `query()` return shape — rows are tuples in `columns`
-   order — and the authoring rules). Both the MCP content tools and these
-   workspace tools import it, so the two surfaces cannot drift apart; a unit test
-   fails if either redefines the strings locally.
+   order — and the authoring rules). `DATA_ACCESS_DESC` is imported by both the
+   MCP content tools and these workspace tools, so those two surfaces cannot
+   drift apart; `ATRIUM_DATA_AUTHORING_GUIDANCE` has one consumer today (this
+   surface). A unit test fails if either file redefines the strings locally. The
+   `psd-atrium` agent skill keeps a hand-maintained Markdown copy of the same
+   contract — it does not read these constants, so a contract change has to
+   update both.
 2. **Visibility of the mode.** `read_workspace_content` returns `dataAccess` for
    artifacts, matching what the MCP `get_content` handler already returns.
 3. **The ability to change it.** `update_workspace_artifact` takes an optional
    `dataAccess` and applies it through `contentService.update` — the same
    canView/canEdit gate the Content settings dialog uses, under the session
-   user's requester, so this is no new privilege. It runs **before**
-   `createVersion` so the canvas (keyed on
-   `${contentId}:${dataAccess}:${versionKey}`) remounts on the new mode and the
-   new version renders under it. An invalid mode changes nothing at all; a failed
-   mode change aborts before any version is written.
+   user's requester, so this is no new privilege. An invalid mode changes nothing
+   at all (it is rejected before the screen even runs).
+
+   **Write order: version first, mode second.** The two writes are not in one
+   transaction, so one can land alone — and the two partial states are not
+   equally bad. Saving the code first means a failed mode flip leaves the new
+   code under the mode the artifact *already had*: its data capability never
+   widens past what it was already granted, and the tool result says so with a
+   `warning` instead of reporting an effective mode it did not set. The reverse
+   order left the OLD code — authored and screened for the OLD mode — running
+   under a WIDER new mode (e.g. `records` → `query`) while the error message
+   claimed nothing had changed. A `createVersion` failure now writes nothing at
+   all: the mode flip has not run yet.
 
 **The panel refreshes without a reload.** When a mutating workspace tool result
 lands, the Nexus tool-call renderer dispatches the `atrium:workspace-changed`
-window event (`lib/atrium/workspace-change-event.ts`). `WorkspacePanel` re-runs
-its loader — which is where the pinned `dataAccess` comes from — and
-`ArtifactCanvas` reloads the version list and head. A DOM event keeps both
-components decoupled from the conversation runtime they must never touch. The
-signal fires once per tool call and never for a call replayed from history or an
-error result.
+window event (`lib/atrium/workspace-change-event.ts`). A DOM event keeps the
+panel decoupled from the conversation runtime it must never touch. The signal
+fires once per tool call and never for a call replayed from history or an error
+result, and it is scoped by the `objectId` every mutating tool result carries.
+
+**One refresh owner.** `WorkspacePanel` alone subscribes. It re-runs its loader —
+which is where the pinned `dataAccess` comes from — and only then bumps
+`ArtifactCanvas`'s `refreshSignal` prop, which reloads the version list and head.
+Two independent subscribers meant two independently-timed, independently-fallible
+fetches: whichever landed first rendered a mixed state, and a panel fetch that
+failed while the canvas fetch succeeded pinned the new code to the OLD mode for
+the rest of the session. A refresh also re-checks the id it started for, so a
+slow one cannot land on a panel the user has since switched to another object.
 
 **Step budget.** A build turn explores the data before it writes code, so
 `lib/nexus/chat-step-budget.ts` raises `maxSteps` to 20 when workspace tools are

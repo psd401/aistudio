@@ -434,10 +434,12 @@ object is deleted; deleting a user preserves records but clears attribution.
 
 ## Agent usage
 
-There are **three** agent-facing author surfaces, and they share ONE contract
-string (`lib/content/atrium-data-contract.ts` — `DATA_ACCESS_DESC` plus
-`ATRIUM_DATA_AUTHORING_GUIDANCE`), so none of them can drift into telling a model
-something the others do not:
+There are **three** agent-facing author surfaces, and the contract they describe
+lives in ONE place (`lib/content/atrium-data-contract.ts` — `DATA_ACCESS_DESC`
+plus `ATRIUM_DATA_AUTHORING_GUIDANCE`) so they cannot drift into telling a model
+something the others do not. The two TypeScript surfaces import
+`DATA_ACCESS_DESC` from it; the skill keeps a hand-maintained Markdown copy, so a
+change to the contract has to update the skill as well:
 
 1. the **MCP content tools** (`create_artifact` / `update_content`);
 2. the PSD Agent's **`psd-atrium` skill**;

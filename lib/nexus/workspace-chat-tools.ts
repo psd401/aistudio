@@ -252,7 +252,7 @@ async function screenAndApplyDocEdit(
   mode: "append" | "replace",
   requestId: string,
   log: ReturnType<typeof createLogger>
-): Promise<{ ok: true; mode: string } | { error: string }> {
+): Promise<{ ok: true; objectId: string; mode: string } | { error: string }> {
   if (!markdown.trim()) return { error: "No markdown provided to write." };
   if (Buffer.byteLength(markdown, "utf8") > MAX_EDIT_BYTES) {
     return { error: "That edit is too large to apply in one step." };
@@ -271,7 +271,12 @@ async function screenAndApplyDocEdit(
   }
   try {
     await applyAgentEdit({ objectId, markdown, agentId: NEXUS_CHAT_AGENT_LABEL, mode });
-    return { ok: true, mode };
+    // #1749: echo the id the edit actually landed on. `atrium:workspace-changed`
+    // is scoped by this id, and an event WITHOUT one matches every listener
+    // (`workspaceChangeMatches` treats a missing id as "about you") — so an
+    // id-less success here would make a document edit refresh whatever panel
+    // happens to be open, including one the user switched to mid-stream.
+    return { ok: true, objectId, mode };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log.error("workspace doc edit apply failed", { objectId, error: message });
@@ -313,7 +318,7 @@ function buildDocumentEditTool(
       required: ["markdown"],
       additionalProperties: false,
     }),
-    execute: async (args): Promise<{ ok: true; mode: string } | { error: string }> => {
+    execute: async (args): Promise<{ ok: true; objectId: string; mode: string } | { error: string }> => {
       const markdown = typeof args?.markdown === "string" ? args.markdown : "";
       const mode = args?.mode === "replace" ? "replace" : "append";
       // Edit rights were confirmed at bind time (this tool is only bound for an
@@ -370,6 +375,44 @@ function parseArtifactUpdateArgs(
   };
 }
 
+/**
+ * Flip the artifact's sandbox data-bridge mode AFTER its new code version landed
+ * (#1749), returning the fields that describe what actually happened.
+ *
+ * `contentService.update` runs the same canView (404-mask) → canEdit gate the
+ * Content settings dialog uses, under the SESSION user's requester: no new
+ * privilege. A failure here is NOT fatal — the code is already saved — so it is
+ * reported rather than thrown: the result carries `dataAccess` only when the mode
+ * really changed (silence means "unchanged", never "records"), and a `warning`
+ * when it did not, so a half-applied call can never read as a clean success.
+ *
+ * Extracted from `execute` to keep it inside the complexity budget.
+ */
+async function applyDataAccessAfterVersion(args: {
+  req: NonNullable<Awaited<ReturnType<typeof requesterForUserId>>>;
+  objectId: string;
+  dataAccess: ContentDataAccess | null;
+  versionNumber: number;
+  log: ReturnType<typeof createLogger>;
+}): Promise<{ dataAccess?: ContentDataAccess; warning?: string }> {
+  const { req, objectId, dataAccess, versionNumber, log } = args;
+  if (dataAccess === null) return {};
+  try {
+    await contentService.update(req, objectId, { dataAccess });
+    return { dataAccess };
+  } catch (err) {
+    log.warn("update_workspace_artifact data-access change failed", {
+      objectId,
+      dataAccess,
+      versionNumber,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return {
+      warning: `The new code was saved, but the data access mode could NOT be changed to '${dataAccess}' — the artifact still has its previous mode, so any AtriumData call the new code makes for '${dataAccess}' will be rejected by the sandbox until the mode is changed. Tell the user that the code landed and the mode did not, and offer to retry.`,
+    };
+  }
+}
+
 /** Build the artifact-version tool (artifacts only). */
 function buildArtifactUpdateTool(
   objectId: string,
@@ -412,7 +455,13 @@ function buildArtifactUpdateTool(
     execute: async (
       args
     ): Promise<
-      | { ok: true; objectId: string; versionNumber: number; dataAccess?: ContentDataAccess }
+      | {
+          ok: true;
+          objectId: string;
+          versionNumber: number;
+          dataAccess?: ContentDataAccess;
+          warning?: string;
+        }
       | { error: string }
     > => {
       const parsed = parseArtifactUpdateArgs(args);
@@ -438,45 +487,30 @@ function buildArtifactUpdateTool(
             "That content was blocked by the safety screen and was not saved.",
         };
       }
-      // #1749: flip the mode FIRST, so the canvas — keyed on
-      // `${contentId}:${dataAccess}:${versionKey}` — remounts on the new mode and
-      // the new version renders under it. `contentService.update` runs the same
-      // canView (404-mask) → canEdit gate the Content settings dialog uses, under
-      // the SESSION user's requester: no new privilege. Its own try/catch keeps a
-      // mode failure from being reported as the version-save conflict below.
-      if (dataAccess !== null) {
-        try {
-          await contentService.update(req, objectId, { dataAccess });
-        } catch (err) {
-          log.warn("update_workspace_artifact data-access change failed", {
-            objectId,
-            dataAccess,
-            error: err instanceof Error ? err.message : String(err),
-          });
-          return {
-            error:
-              "The artifact's data access mode could not be changed, so no new version was saved. Nothing was modified.",
-          };
-        }
-      }
+      // #1749: the code and the mode are TWO independent writes — there is no
+      // transaction spanning `createVersion` and `update`, so one of them can
+      // land alone. Write the CODE first and flip the mode only once it is
+      // saved, because the two partial states are not equally bad:
+      //   - version first (here): a mode failure leaves the new code running
+      //     under the mode the artifact ALREADY had. The artifact's data
+      //     capability never widens past what it was already granted, and the
+      //     call reports the mismatch (`warning`) rather than implying success.
+      //   - mode first (the original order): a version failure leaves the OLD
+      //     code — authored and screened for the OLD mode — running under a
+      //     WIDER new mode (e.g. `records` → `query`), and the version-save
+      //     error message said nothing about the mode having changed.
+      // Ordering is safe for the canvas because the panel refetches only AFTER
+      // this tool result resolves (`useWorkspaceChangeSignal`), so the remount
+      // key `${contentId}:${dataAccess}:${versionKey}` always reads both facts
+      // from the same post-write payload.
+      let result: Awaited<ReturnType<typeof contentService.createVersion>>;
       try {
         // createVersion enforces canView/canEdit (screening already done above).
-        const result = await contentService.createVersion(req, objectId, {
+        result = await contentService.createVersion(req, objectId, {
           body: code,
           bodyFormat: bodyFormat === "jsx" ? "jsx" : "html",
           summary,
         });
-        return {
-          ok: true,
-          // #1749: the client tool-result renderer forwards this id on the
-          // `atrium:workspace-changed` signal so the panel/canvas refresh the
-          // object that actually changed.
-          objectId,
-          versionNumber: result.version?.versionNumber ?? 0,
-          // Report the EFFECTIVE mode only when this call set it — silence means
-          // "unchanged", never "records".
-          ...(dataAccess !== null ? { dataAccess } : {}),
-        };
       } catch (err) {
         log.warn("update_workspace_artifact failed", {
           objectId,
@@ -486,11 +520,29 @@ function buildArtifactUpdateTool(
         // confirmed before this tool was bound, so this catch is a save failure
         // (a concurrent-version conflict or storage error) — NOT a screening
         // block or a permission problem. Do not claim either (PR #1136 review).
+        // Nothing was written: the mode flip below has not run yet.
         return {
           error:
-            "The new artifact version could not be saved right now (another change may have been saved at the same time). Please try again.",
+            "The new artifact version could not be saved right now (another change may have been saved at the same time). Nothing was changed — please try again.",
         };
       }
+      // The code is saved; the mode flip (if any) runs next and reports itself.
+      const versionNumber = result.version?.versionNumber ?? 0;
+      return {
+        ok: true,
+        // #1749: the client tool-result renderer forwards this id on the
+        // `atrium:workspace-changed` signal so the panel/canvas refresh the
+        // object that actually changed.
+        objectId,
+        versionNumber,
+        ...(await applyDataAccessAfterVersion({
+          req,
+          objectId,
+          dataAccess,
+          versionNumber,
+          log,
+        })),
+      };
     },
   });
 }
@@ -731,7 +783,7 @@ function buildEditDocumentByIdTool(
       required: ["documentId", "markdown"],
       additionalProperties: false,
     }),
-    execute: async (args): Promise<{ ok: true; mode: string } | { error: string }> => {
+    execute: async (args): Promise<{ ok: true; objectId: string; mode: string } | { error: string }> => {
       const documentId = typeof args?.documentId === "string" ? args.documentId.trim() : "";
       const markdown = typeof args?.markdown === "string" ? args.markdown : "";
       const mode = args?.mode === "replace" ? "replace" : "append";

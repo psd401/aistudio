@@ -49,14 +49,30 @@ function isResolved(result: unknown): boolean {
   return result !== undefined && result !== null;
 }
 
-export function useWorkspaceChangeSignal(toolName: string, result: unknown): void {
+export function useWorkspaceChangeSignal(
+  toolName: string,
+  result: unknown,
+  /**
+   * The part's `toolCallId`. Scopes the fire-once guards to ONE call: if the
+   * renderer ever reuses this component instance for a different tool call
+   * (index-based reconciliation rather than a stable per-call key), the second
+   * call would otherwise inherit `emittedRef` from the first and never signal.
+   */
+  toolCallId?: string
+): void {
   // Whether this call was ever observed WITHOUT a result — i.e. we watched it run
   // live, rather than arriving already-complete from conversation history.
   const sawPendingRef = useRef(false);
   const emittedRef = useRef(false);
+  const callIdRef = useRef(toolCallId);
 
   useEffect(() => {
     if (!WORKSPACE_MUTATING_TOOLS.has(toolName)) return;
+    if (callIdRef.current !== toolCallId) {
+      callIdRef.current = toolCallId;
+      sawPendingRef.current = false;
+      emittedRef.current = false;
+    }
     if (!isResolved(result)) {
       sawPendingRef.current = true;
       return;
@@ -66,5 +82,5 @@ export function useWorkspaceChangeSignal(toolName: string, result: unknown): voi
     if (typeof result === "object" && result !== null && "error" in result) return;
     emittedRef.current = true;
     emitWorkspaceChanged({ objectId: objectIdOf(result) });
-  }, [toolName, result]);
+  }, [toolName, result, toolCallId]);
 }

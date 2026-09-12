@@ -383,13 +383,13 @@ function getPreviewText(parsed: ParsedResult[]): string {
  * Falls through to the generic ToolFallback for non-connector tools.
  */
 export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
-  const { toolName, argsText, result } = props;
+  const { toolName, argsText, result, toolCallId } = props;
   // #1749: this is the single `toolFallback` every workspace tool call renders
   // through, so it is where a completed workspace edit becomes the
   // `atrium:workspace-changed` signal the panel/canvas refetch on. Called BEFORE
   // the non-connector early return below (hooks may not sit after a conditional
   // return) — workspace tools are not connector tools and take that branch.
-  useWorkspaceChangeSignal(toolName, result);
+  useWorkspaceChangeSignal(toolName, result, toolCallId);
   const connectorCtx = useConnectorToolsOptional();
   const connectorInfo = connectorCtx?.getConnectorInfo(toolName);
 

@@ -1,15 +1,25 @@
 /**
- * The ONE description of the Atrium artifact sandbox data bridge (`window.AtriumData`)
- * shared by every surface that lets a model author artifact code (#1749).
+ * The Atrium artifact sandbox data bridge (`window.AtriumData`) as described to
+ * the models that author artifact code (#1749).
  *
- * Three author surfaces exist — the MCP content tools (`lib/mcp/content-tools.ts`),
- * the PSD Agent's `psd-atrium` skill, and the Nexus workspace chat
- * (`lib/nexus/workspace-chat-tools.ts`). Before #1749 only the first two carried
- * the contract, which is why the same "build me a live dashboard" request worked
- * through the MCP tools and failed in the workspace chat: the model was never told
- * `window.AtriumData` existed, invented a helper, saw it fail, and baked a stale
- * snapshot of the data into the source — the exact anti-pattern the mode exists to
- * prevent. Both strings live here so the surfaces cannot drift apart again.
+ * Three surfaces let a model author an artifact: the MCP content tools
+ * (`lib/mcp/content-tools.ts`), the PSD Agent's `psd-atrium` skill, and the Nexus
+ * workspace chat (`lib/nexus/workspace-chat-tools.ts`). Before #1749 the workspace
+ * chat said nothing about the bridge, which is why the same "build me a live
+ * dashboard" request worked through the MCP tools and failed in the workspace chat:
+ * the model was never told `window.AtriumData` existed, invented a helper, saw it
+ * fail, and baked a stale snapshot of the data into the source — the exact
+ * anti-pattern the mode exists to prevent.
+ *
+ * What this module does and does NOT guarantee:
+ * - `DATA_ACCESS_DESC` is imported by both TypeScript surfaces (MCP content tools
+ *   and workspace chat), so those two cannot drift apart.
+ * - `ATRIUM_DATA_AUTHORING_GUIDANCE` currently has ONE consumer — the workspace
+ *   chat. The MCP tools do not carry it today; add the import here if they should.
+ * - The `psd-atrium` skill is a hand-maintained Markdown copy
+ *   (`infra/agent-image/skills/psd-atrium/SKILL.md`, "Live PSD data inside an
+ *   artifact"). It does NOT read these constants, so editing this file does not
+ *   update the skill — change both when the bridge contract changes.
  *
  * These are MODEL-FACING prompt/description text, not user-facing copy.
  */

@@ -239,7 +239,8 @@ function defineBuildWorkspaceChatToolsSuite1Part2() {it("edit_workspace_document
     expect(applyAgentEditMock).toHaveBeenCalledWith(
       expect.objectContaining({ objectId: "doc-1", markdown: "## New section", mode: "append" })
     );
-    expect(out).toEqual({ ok: true, mode: "append" });
+    // #1749: the id the edit landed on — the change signal is scoped by it.
+    expect(out).toEqual({ ok: true, objectId: "doc-1", mode: "append" });
   });
 
   it("edit_workspace_document refuses (and does NOT apply) when screening blocks", async () => {
@@ -314,12 +315,12 @@ function defineBuildWorkspaceChatToolsSuite1Part2() {it("edit_workspace_document
 
   // --- #1749: setting the data-access mode alongside the code ----------------
 
-  it("update_workspace_artifact sets dataAccess through contentService.update BEFORE createVersion", async () => {
+  it("update_workspace_artifact saves the version BEFORE flipping dataAccess", async () => {
     getMock.mockResolvedValue(ART);
     canEditMock.mockReturnValue(true);
-    createVersionMock.mockResolvedValue({ version: { versionNumber: 4 } });
-    // Order guard: the canvas is keyed on the mode, so the mode must be committed
-    // before the version that is meant to render under it.
+    // Order guard: the two writes are not transactional, so the CODE lands first.
+    // A mode failure then leaves the new code under the mode the artifact already
+    // had; the reverse order could leave OLD code under a WIDER new mode.
     const order: string[] = [];
     updateMock.mockImplementation(async () => { order.push("update"); return { id: "art-1" }; });
     createVersionMock.mockImplementation(async () => { order.push("createVersion"); return { version: { versionNumber: 4 } }; });
@@ -329,7 +330,7 @@ function defineBuildWorkspaceChatToolsSuite1Part2() {it("edit_workspace_document
       dataAccess: "query",
     });
     expect(updateMock).toHaveBeenCalledWith(REQ, "art-1", { dataAccess: "query" });
-    expect(order).toEqual(["update", "createVersion"]);
+    expect(order).toEqual(["createVersion", "update"]);
     expect(out).toEqual({
       ok: true,
       objectId: "art-1",
@@ -353,18 +354,38 @@ function defineBuildWorkspaceChatToolsSuite1Part2() {it("edit_workspace_document
     expect(screenMock).not.toHaveBeenCalled();
   });
 
-  it("update_workspace_artifact does NOT save a version when the mode change fails", async () => {
+  it("update_workspace_artifact reports the code-saved/mode-unchanged split instead of a clean success", async () => {
     getMock.mockResolvedValue(ART);
     canEditMock.mockReturnValue(true);
+    createVersionMock.mockResolvedValue({ version: { versionNumber: 5 } });
     updateMock.mockRejectedValue(new ForbiddenError("no edit access"));
     const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
     const out = (await exec(tools.update_workspace_artifact, {
       code: "<div/>",
       dataAccess: "query",
+    })) as { ok: true; versionNumber: number; dataAccess?: string; warning?: string };
+    // The version DID land, so the call is not an error — but the mode did not,
+    // and the result must say so rather than reporting an effective mode.
+    expect(out.ok).toBe(true);
+    expect(out.versionNumber).toBe(5);
+    expect(out.dataAccess).toBeUndefined();
+    expect(out.warning).toMatch(/mode could NOT be changed to 'query'/);
+  });
+
+  it("update_workspace_artifact leaves the mode alone when the version save fails", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    createVersionMock.mockRejectedValue(new ConflictError("version conflict"));
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.update_workspace_artifact, {
+      code: "<div/>",
+      dataAccess: "query",
     })) as { error: string };
-    expect(createVersionMock).not.toHaveBeenCalled();
-    // The message must not be the version-save conflict wording.
-    expect(out.error).toMatch(/data access mode could not be changed/i);
+    // Nothing was written: the OLD code must never be left running under a NEW,
+    // wider mode it was not authored or screened for.
+    expect(updateMock).not.toHaveBeenCalled();
+    expect(out.error).toMatch(/could not be saved right now/i);
+    expect(out.error).toMatch(/nothing was changed/i);
   });
 
 }
@@ -632,7 +653,7 @@ function defineBuildWorkspaceChatToolsSuite1Part4() {it("unpublish_workspace_con
     expect(applyAgentEditMock).toHaveBeenCalledWith(
       expect.objectContaining({ objectId: "other-doc", markdown: "## Added", mode: "append" })
     );
-    expect(out).toEqual({ ok: true, mode: "append" });
+    expect(out).toEqual({ ok: true, objectId: "other-doc", mode: "append" });
   });
 
   it("edit_atrium_document DENIES a non-editor (canEdit false) and does NOT apply", async () => {

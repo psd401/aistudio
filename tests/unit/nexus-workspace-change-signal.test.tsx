@@ -31,12 +31,13 @@ afterEach(() => {
 });
 
 /** Render the hook as a streaming call would: pending first, then resolved. */
-function renderStreamed(toolName: string, result: unknown) {
+function renderStreamed(toolName: string, result: unknown, toolCallId = "call-1") {
   const view = renderHook(
-    ({ name, res }: { name: string; res: unknown }) => useWorkspaceChangeSignal(name, res),
-    { initialProps: { name: toolName, res: undefined as unknown } }
+    ({ name, res, id }: { name: string; res: unknown; id: string }) =>
+      useWorkspaceChangeSignal(name, res, id),
+    { initialProps: { name: toolName, res: undefined as unknown, id: toolCallId } }
   );
-  view.rerender({ name: toolName, res: result });
+  view.rerender({ name: toolName, res: result, id: toolCallId });
   return view;
 }
 
@@ -52,8 +53,29 @@ describe("useWorkspaceChangeSignal", () => {
 
   it("does not fire again on a re-render of the same resolved call", () => {
     const view = renderStreamed("update_workspace_artifact", { ok: true, objectId: "obj-1" });
-    view.rerender({ name: "update_workspace_artifact", res: { ok: true, objectId: "obj-1" } });
+    view.rerender({
+      name: "update_workspace_artifact",
+      res: { ok: true, objectId: "obj-1" },
+      id: "call-1",
+    });
     expect(fired).toHaveLength(1);
+  });
+
+  it("fires again for a DIFFERENT toolCallId on the same hook instance", () => {
+    // If the renderer reconciles tool parts by index rather than by a stable
+    // per-call key, one instance sees two logically different calls. The
+    // fire-once guards must reset per call id, or the second edit never
+    // refreshes the panel.
+    const view = renderStreamed("update_workspace_artifact", { ok: true, objectId: "obj-1" });
+    expect(fired).toHaveLength(1);
+    // The next call starts pending, then resolves — under a new id.
+    view.rerender({ name: "update_workspace_artifact", res: undefined, id: "call-2" });
+    view.rerender({
+      name: "update_workspace_artifact",
+      res: { ok: true, objectId: "obj-1", versionNumber: 3 },
+      id: "call-2",
+    });
+    expect(fired).toEqual([{ objectId: "obj-1" }, { objectId: "obj-1" }]);
   });
 
   it("does NOT fire for a call that arrived already-resolved (history replay)", () => {
@@ -76,13 +98,14 @@ describe("useWorkspaceChangeSignal", () => {
   });
 
   it("fires for the document-edit and publish/unpublish tools", () => {
-    renderStreamed("edit_workspace_document", { ok: true, mode: "append" });
+    renderStreamed("edit_workspace_document", { ok: true, objectId: "doc-9", mode: "append" });
     renderStreamed("publish_workspace_content", { ok: true, objectId: "obj-2", published: true });
     renderStreamed("unpublish_workspace_content", { ok: true, objectId: "obj-2" });
     expect(fired).toEqual([
-      // No objectId on the shared doc-edit result — listeners then refresh
-      // unconditionally, which is correct: the tool is bound to the open object.
-      { objectId: undefined },
+      // Every mutating tool result carries the id it changed, so the event is
+      // always scoped — an id-less event matches EVERY listener, which would
+      // refresh a panel the user switched to mid-stream.
+      { objectId: "doc-9" },
       { objectId: "obj-2" },
       { objectId: "obj-2" },
     ]);

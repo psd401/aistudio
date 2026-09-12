@@ -32,10 +32,6 @@ import { createVersionAction } from "@/actions/db/atrium/create-version";
 import { rollbackVersionAction } from "@/actions/db/atrium/rollback-version";
 import type { BodyFormat, ContentDataAccess } from "@/lib/content";
 import { toBase64Utf8 } from "@/lib/content/code-encoding-browser";
-import {
-  onWorkspaceChanged,
-  workspaceChangeMatches,
-} from "@/lib/atrium/workspace-change-event";
 import { ArtifactSandbox } from "./ArtifactSandbox";
 import { CodeEditor } from "./CodeEditor";
 import "@/styles/atrium-content.css";
@@ -269,6 +265,15 @@ interface ArtifactCanvasBaseProps {
    * the sandbox is unconfigured → the preview frame fails closed. (#1052)
    */
   sandboxSrc?: string | null;
+  /**
+   * Monotonic counter an OWNER bumps once it has refetched this artifact itself
+   * (#1749 — `WorkspacePanel` after a Nexus chat tool edits the open artifact).
+   * Every change refreshes the version list and reloads the head version; the
+   * mount value never fires. Owners that never change it (the full edit page,
+   * thumbnails) simply never refresh. See `useOwnerRefreshSignal` for why this
+   * is a prop rather than a second `atrium:workspace-changed` subscription.
+   */
+  refreshSignal?: number;
 }
 
 /**
@@ -420,8 +425,9 @@ function ArtifactPreviewFrame({
 }
 
 /**
- * Refetch the canvas when a Nexus workspace chat tool reports it changed this
- * artifact (#1749).
+ * Refetch the canvas when its OWNER says the artifact changed underneath it
+ * (#1749) — `WorkspacePanel` bumps `refreshSignal` after a Nexus workspace chat
+ * tool edits the open artifact.
  *
  * A chat edit creates a new version SERVER-side and nothing about that reaches
  * this component, so without the signal the canvas keeps rendering the version it
@@ -431,36 +437,41 @@ function ArtifactPreviewFrame({
  * `loadCode` owns the staleness token, so `refreshVersions` runs untokened here
  * for exactly the reason it does at mount.
  *
- * The mode pin lives on `WorkspacePanel`, which refetches on the same event; its
- * new `dataAccess` remounts the sandbox through the frame key.
+ * Driven by a PROP rather than by subscribing to `atrium:workspace-changed`
+ * directly: the mode pin (`dataAccess`) comes from the panel's payload, so two
+ * independent subscribers meant two independently-fallible fetches — whichever
+ * landed first rendered a mixed state, and a panel fetch that failed while this
+ * one succeeded pinned the new code to the OLD mode until a page reload. The
+ * panel refetches first and only then bumps the signal, so the new code and the
+ * mode it was written for always arrive together.
  *
  * Extracted from the component body to keep it inside the 150-line lint budget.
  */
-function useWorkspaceChangeRefresh(
-  objectIdRef: React.RefObject<string | null>,
+function useOwnerRefreshSignal(
+  refreshSignal: number | undefined,
   refreshVersions: (seq?: number) => Promise<VersionSummary[] | null>,
   loadCode: (versionId: string | null) => Promise<string | null>
 ): void {
-  useEffect(
-    () =>
-      onWorkspaceChanged((detail) => {
-        if (!workspaceChangeMatches(detail, objectIdRef.current)) return;
-        void (async () => {
-          try {
-            await Promise.all([refreshVersions(), loadCode(null)]);
-          } catch {
-            // A failed refresh leaves the currently-rendered version in place —
-            // never replace a working preview with an error because a background
-            // refetch hiccuped. `loadCode` already surfaces its own load errors.
-          }
-        })();
-      }),
-    [objectIdRef, refreshVersions, loadCode]
-  );
+  // Seeded with the mount-time value so the first run is a no-op: the mount
+  // effect is already loading, and a duplicate fetch would race it.
+  const seenSignalRef = useRef(refreshSignal);
+  useEffect(() => {
+    if (refreshSignal === seenSignalRef.current) return;
+    seenSignalRef.current = refreshSignal;
+    void (async () => {
+      try {
+        await Promise.all([refreshVersions(), loadCode(null)]);
+      } catch {
+        // A failed refresh leaves the currently-rendered version in place —
+        // never replace a working preview with an error because a background
+        // refetch hiccuped. `loadCode` already surfaces its own load errors.
+      }
+    })();
+  }, [refreshSignal, refreshVersions, loadCode]);
 }
 
 export function ArtifactCanvas(props: ArtifactCanvasProps) {
-  const { idOrSlug, canEdit = false, sandboxSrc = null } = props;
+  const { idOrSlug, canEdit = false, sandboxSrc = null, refreshSignal } = props;
   const [tab, setTab] = useState<Tab>("preview");
   const [state, setState] = useState<LoadState>("loading");
   const [message, setMessage] = useState<string | null>(null);
@@ -572,7 +583,7 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
     };
   }, [refreshVersions, loadCode]);
 
-  useWorkspaceChangeRefresh(objectIdRef, refreshVersions, loadCode);
+  useOwnerRefreshSignal(refreshSignal, refreshVersions, loadCode);
   const handleSelectVersion = useCallback(
     (versionId: string) =>
       performSelectVersion({ versionId, loadCode, setState, setMessage, setRestoreNotice }),
