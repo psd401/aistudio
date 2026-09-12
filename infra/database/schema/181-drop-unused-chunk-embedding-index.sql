@@ -1,0 +1,45 @@
+-- Migration 181: drop the unused ivfflat embedding index on repository_item_chunks
+--
+-- `idx_repository_item_chunks_embedding` (migration 010) is 81 GB — 47% of the
+-- 173 GB table, and the single largest object in the production database. Its
+-- lifetime `idx_scan` is 0. That zero is trustworthy: `pg_stat_database.stats_reset`
+-- is NULL, so the counter has never been reset since the cluster was created.
+--
+-- It has never been scanned because it CANNOT be. The only queries that touch
+-- the embedding column (`lib/repositories/search-service.ts`) rank with
+--
+--     ORDER BY 1 - (c.embedding <=> $vec) DESC
+--
+-- and pgvector can only answer an index-ordered scan for the bare distance
+-- operator ascending (`ORDER BY c.embedding <=> $vec`). A computed expression
+-- over the operator, ordered DESC, is not a form the index can serve, so the
+-- planner always falls back to a filter + sort — in practice driven by
+-- `idx_repository_chunks_generation`, which has taken >1.2 billion scans to this
+-- index's zero. Separately, `lists = 100` over 9.2M rows was far too coarse to
+-- have been useful even if the ordering had matched.
+--
+-- The cost of keeping it is not just disk. VACUUM must sweep every index on the
+-- table, so this one dead index dominates autovacuum on a table that is already
+-- in continuous vacuum. On 2026-09-11 a single autovacuum ran 16.7 hours while
+-- prod Aurora sat at its 2 ACU off-hours ceiling, starving the agent workspace
+-- broker badly enough that two of the superintendent's scheduled briefs could
+-- not save their workspace (PR #1756).
+--
+-- Dropping it is reversible and loses no data: it is a derived structure, and
+-- the embeddings themselves live in the table. If vector search is ever moved to
+-- true index-ordered ranking, the replacement should be a correctly sized HNSW
+-- index built against the query shape that will actually use it — not this one.
+--
+-- NOT CONCURRENTLY, deliberately. The migration runner executes through the RDS
+-- Data API and `validateStatements` in `infra/database/lambda/db-init-handler.ts`
+-- rejects the CONCURRENTLY keyword outright, because it needs autocommit and
+-- multiple internal transactions that the Data API cannot provide.
+--
+-- A plain DROP INDEX takes ACCESS EXCLUSIVE on repository_item_chunks. For a
+-- DROP that lock is held only while the catalog row is removed and the storage
+-- is unlinked — seconds, not the minutes a rebuild would take — but it does
+-- block the table for that window, so expect a brief stall in the content
+-- pipeline. The table is also in near-continuous autovacuum; Postgres cancels an
+-- autovacuum that blocks a DDL lock request, so the drop will not queue behind
+-- it. Dropping this index is what stops that autovacuum being so long.
+DROP INDEX IF EXISTS idx_repository_item_chunks_embedding;
