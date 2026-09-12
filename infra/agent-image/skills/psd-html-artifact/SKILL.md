@@ -123,6 +123,10 @@ the agent.
 > - **No `fetch`/`XHR`/WebSocket** at runtime. Bake the data into the page, or use
 >   `window.AtriumData` (see the `psd-atrium` skill) for live data.
 > - **Images**: `data:` URLs, or the same allowlisted CDN origin. Nothing else loads.
+> - **The allowlist is per deployment** (`atriumAllowedArtifactCdns`); this page is
+>   static text in the agent image and can only state the default. Where the Atrium
+>   artifact tool descriptions name a different set of origins — or none — they are
+>   generated from the deployment's real value, so follow them and inline everything.
 
 **Write the file to `/tmp/`** with a short, descriptive, kebab-case filename, e.g.
 `/tmp/onboarding-plan.html`. `/tmp` is writable; the skills directory is read-only.
