@@ -61,23 +61,33 @@ export interface AtriumSandboxStackProps extends cdk.StackProps {
   allowedMediaOrigins?: string[];
 }
 
-function normalizeAtriumOrigin(raw: string): string {
+/**
+ * Normalize one origin entry, throwing at synth on anything that is not a valid
+ * absolute http(s) origin.
+ *
+ * `field` names the prop the entry came from so the synth failure points an
+ * operator at the right cdk.json key. It used to say "allowedParentOrigins"
+ * unconditionally, which sent anyone who typo'd a CDN or a media origin to the
+ * wrong list (#1750 — `atriumAllowedArtifactCdns` is now an operator-edited
+ * cdk.json value, so a wrong-key error message costs real debugging time).
+ */
+function normalizeAtriumOrigin(raw: string, field: string): string {
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
     throw new Error(
-      `AtriumSandboxStack: allowedParentOrigins entry is not a valid absolute URL: "${raw}"`
+      `AtriumSandboxStack: ${field} entry is not a valid absolute URL: "${raw}"`
     );
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') {
     throw new Error(
-      `AtriumSandboxStack: allowedParentOrigins entry must be an http(s) origin: "${raw}"`
+      `AtriumSandboxStack: ${field} entry must be an http(s) origin: "${raw}"`
     );
   }
   if (url.origin === 'null') {
     throw new Error(
-      `AtriumSandboxStack: allowedParentOrigins entry resolves to an opaque origin: "${raw}"`
+      `AtriumSandboxStack: ${field} entry resolves to an opaque origin: "${raw}"`
     );
   }
   return url.origin;
@@ -102,17 +112,23 @@ export class AtriumSandboxStack extends cdk.Stack {
     // synth on an invalid entry rather than baking the raw string in — a
     // misconfiguration must fail the deploy loudly, not produce a dead sandbox.
     const normalizedParentOrigins =
-      props.allowedParentOrigins.map(normalizeAtriumOrigin);
+      props.allowedParentOrigins.map((o) =>
+        normalizeAtriumOrigin(o, 'allowedParentOrigins')
+      );
     // CDN allowlist entries are baked verbatim into the sandbox CSP script-src/
     // style-src/img-src. Run them through the SAME normalizer (protocol + opaque-
     // origin guard) so a non-http(s) cdk.json entry (e.g. "file://…", "ftp://…")
     // fails synth loudly instead of silently widening the CSP with a bogus source.
     const normalizedCdns =
-      (props.allowedArtifactCdns ?? []).map(normalizeAtriumOrigin);
+      (props.allowedArtifactCdns ?? []).map((o) =>
+        normalizeAtriumOrigin(o, 'allowedArtifactCdns')
+      );
     // media-src origins (workspace media bucket for agent-generated MP3/MP4).
     // Same normalizer so a bogus cdk.json entry fails synth loudly.
     const normalizedMediaOrigins =
-      (props.allowedMediaOrigins ?? []).map(normalizeAtriumOrigin);
+      (props.allowedMediaOrigins ?? []).map((o) =>
+        normalizeAtriumOrigin(o, 'allowedMediaOrigins')
+      );
 
     // Fail-closed is correct (an empty allowlist → frame-ancestors 'none' + the
     // host accepts no render messages), but a SILENT empty allowlist almost always
