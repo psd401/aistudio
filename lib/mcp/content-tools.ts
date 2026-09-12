@@ -15,6 +15,9 @@
 
 import type { McpToolDefinition } from "./types";
 import { CONTENT_DATA_ACCESS_MODES } from "@/lib/content/types";
+// #1749: the bridge contract is shared with the Nexus workspace chat tools so the
+// two artifact-authoring surfaces cannot drift apart.
+import { DATA_ACCESS_DESC } from "@/lib/content/atrium-data-contract";
 import type { ApiScope } from "@/lib/api-keys/scopes";
 
 const VISIBILITY_DESC =
@@ -23,8 +26,6 @@ const GRANTS_DESC =
   "Group grants: [{ kind: 'role'|'building'|'department'|'grade'|'user'|'group', value: string }]";
 const CODE_ENCODING_DESC =
   "Transit encoding for the body. Set 'base64' when the body/code contains HTML/JS/CSS (<script>, <style>, style=\"…\") — the edge WAF blocks that markup in a raw request body, so send the body base64-encoded and the server decodes it before screening. Omit for plain text/markdown.";
-const DATA_ACCESS_DESC =
-  "Artifact sandbox data bridge mode. 'records' (default) allows AtriumData.submit/list, the per-artifact record store. 'query' allows AtriumData.query — read-only PSD data queries run as the PERSON VIEWING the page, under their own row-level permissions — and is what a live dashboard needs. 'none' disables the bridge. The modes are MUTUALLY EXCLUSIVE for security: an artifact that can query district data must never also be able to write records its author can read back. Never embed query results in the artifact source; aggregate in SQL and call AtriumData.query at runtime. Changing the mode takes effect for a reader only on their NEXT page load — an already-open reader keeps the mode it loaded with.";
 const SOURCE_REF_DESC =
   "Create-only structured provenance. Capture clients use { type: 'capture', provider, externalId, clientSurface: 'browser'|'mac', clientVersion, capturedAt, sourceOrigins? }. Source origins are normalized to scheme+host+port; arbitrary telemetry is rejected.";
 

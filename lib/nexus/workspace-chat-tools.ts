@@ -28,6 +28,15 @@
 
 import { tool, jsonSchema, type Tool, type ToolSet } from "ai";
 import { contentService } from "@/lib/content/content-service";
+import { versionService } from "@/lib/content/version-service";
+import {
+  CONTENT_DATA_ACCESS_MODES,
+  type ContentDataAccess,
+} from "@/lib/content/types";
+import {
+  ATRIUM_DATA_AUTHORING_GUIDANCE,
+  DATA_ACCESS_DESC,
+} from "@/lib/content/atrium-data-contract";
 import { canDelete, canEdit } from "@/lib/content/helpers";
 import { requesterForUserId } from "@/lib/content/requester-from-auth";
 import { applyAgentEdit, readAgentDocMarkdown } from "@/lib/content/collab/apply-agent-edit";
@@ -93,6 +102,18 @@ interface ReadResult {
    * conservatively (append/targeted) rather than assume an empty item.
    */
   bodyUnavailable?: boolean;
+  /**
+   * Artifacts only (#1749): the sandbox data-bridge mode the artifact is pinned
+   * to. Without it the model cannot discover which `window.AtriumData`
+   * operations its code is allowed to call, so a "live dashboard" request
+   * silently produced `records`-mode code the host then rejected.
+   */
+  dataAccess?: ContentDataAccess;
+  /**
+   * True when `body` is the LEADING `MAX_EDIT_BYTES` of a larger source. The
+   * model must not treat a truncated body as the complete file.
+   */
+  truncated?: true;
 }
 
 /**
@@ -105,14 +126,16 @@ interface ReadResult {
  *   the (possibly stale) projection, then the version snapshot. An empty live
  *   document is a real state (`body: ""`, NOT unavailable) so the model writes an
  *   intro rather than narrating a permission error.
- * - artifacts store small source inline (`bodyInline`); a large artifact's source
- *   lives at `bodyLocation` with `bodyInline` null — report `bodyUnavailable`
- *   rather than telling the model the item is empty (which would let a rewrite
- *   clobber it).
+ * - artifacts store small source inline (`bodyInline`); anything larger lives in
+ *   S3 at `bodyLocation`. #1749 loads that S3 body too (capped at
+ *   `MAX_EDIT_BYTES`), because a real dashboard is far over the 4 KiB inline
+ *   threshold and the model cannot edit code it cannot see. `bodyUnavailable`
+ *   now means only that the load FAILED — never "the item is empty", which would
+ *   let a rewrite clobber it.
  */
 async function resolveReadBody(
   obj: Awaited<ReturnType<typeof contentService.get>>
-): Promise<{ body: string | null; bodyUnavailable: boolean }> {
+): Promise<{ body: string | null; bodyUnavailable: boolean; truncated?: true }> {
   if (obj.kind === "document") {
     // 1. Live read from the Yjs doc — the current on-screen text. `""` is a
     //    genuinely empty (new / title-only) document, NOT unavailable: reporting
@@ -133,11 +156,43 @@ async function resolveReadBody(
     if (md !== null) return { body: md, bodyUnavailable: false };
     return { body: null, bodyUnavailable: true };
   }
-  // artifact: small source is inline; a large artifact's source lives at
-  // `bodyLocation` (bodyInline null) — report unavailable, never empty.
-  const inline = obj.version?.bodyInline ?? null;
-  if (inline !== null) return { body: inline, bodyUnavailable: false };
-  return { body: null, bodyUnavailable: obj.version != null };
+  // artifact: small source is inline; anything over INLINE_ARTIFACT_MAX_BYTES
+  // (4 KiB) lives in S3 with `bodyInline` null. #1749: load that S3-backed source
+  // instead of reporting it unavailable — a real dashboard is 30-60 KB, so the
+  // old behaviour blinded the model to the code it was being asked to edit from
+  // the SECOND turn onward, forcing a rewrite-from-scratch. `loadArtifactCode` is
+  // the same loader the canvas uses (`get-artifact-code.ts`).
+  const version = obj.version;
+  if (!version) return { body: null, bodyUnavailable: false };
+  const inline = version.bodyInline ?? null;
+  if (inline !== null) return truncateBody(inline);
+  try {
+    return truncateBody(await versionService.loadArtifactCode(version));
+  } catch {
+    // Genuinely unreadable (S3 NoSuchKey / read failure). Report unavailable —
+    // never "" — so a rewrite cannot clobber content that is still there.
+    return { body: null, bodyUnavailable: true };
+  }
+}
+
+/**
+ * Cap a body at `MAX_EDIT_BYTES` so a pathological artifact cannot blow the
+ * model's context, flagging `truncated` when it did. Cuts on a UTF-8 BYTE
+ * boundary; `toString` replaces any multi-byte sequence split at the edge, so the
+ * result is always valid UTF-8.
+ */
+function truncateBody(body: string): {
+  body: string;
+  bodyUnavailable: boolean;
+  truncated?: true;
+} {
+  const buf = Buffer.from(body, "utf8");
+  if (buf.byteLength <= MAX_EDIT_BYTES) return { body, bodyUnavailable: false };
+  return {
+    body: buf.subarray(0, MAX_EDIT_BYTES).toString("utf8"),
+    bodyUnavailable: false,
+    truncated: true,
+  };
 }
 
 /** Build the read tool (always available for an editable, viewable object). */
@@ -148,7 +203,8 @@ function buildReadTool(
 ): Tool {
   return tool({
     description:
-      "Read the current content of the document or artifact open in the workspace panel beside this chat. Call this before editing so your changes build on the current content. If it returns bodyUnavailable, the item has content that could not be loaded — prefer appending or targeted edits over a full rewrite.",
+      "Read the current content of the document or artifact open in the workspace panel beside this chat. Call this before editing so your changes build on the current content. If it returns bodyUnavailable, the item has content that could not be loaded — prefer appending or targeted edits over a full rewrite; if it returns truncated, the body shown is only the beginning of a larger file. For an ARTIFACT it also returns dataAccess, the sandbox data-bridge mode its code runs under — check it before writing code that uses window.AtriumData. " +
+      DATA_ACCESS_DESC,
     inputSchema: jsonSchema<Record<string, never>>({
       type: "object",
       properties: {},
@@ -159,13 +215,18 @@ function buildReadTool(
       if (!req) return { error: "Could not resolve your identity." };
       try {
         const obj = await contentService.get(req, idOrSlug);
-        const { body, bodyUnavailable } = await resolveReadBody(obj);
+        const { body, bodyUnavailable, truncated } = await resolveReadBody(obj);
+        const kind = obj.kind as "document" | "artifact";
         return {
           title: obj.title,
-          kind: obj.kind as "document" | "artifact",
+          kind,
           bodyFormat: obj.version?.bodyFormat ?? null,
           body,
           ...(bodyUnavailable ? { bodyUnavailable: true } : {}),
+          ...(truncated ? { truncated: true } : {}),
+          // #1749: artifacts only — a document has no sandbox bridge. The DTO
+          // value is already enum-normalized by `rowToObjectDTO`.
+          ...(kind === "artifact" ? { dataAccess: obj.dataAccess } : {}),
         };
       } catch (err) {
         log.warn("read_workspace_content failed", {
@@ -262,6 +323,20 @@ function buildDocumentEditTool(
   });
 }
 
+/**
+ * Runtime-narrow a model-supplied data-access mode, returning null (not throwing)
+ * for anything outside the enum — a tool reports a bad argument back to the model
+ * as an error result, it does not blow up the turn. Mirrors `assertDataAccess` in
+ * `actions/db/atrium/update-content.ts`, which is the server-action surface's
+ * equivalent guard against a Postgres enum violation deeper in.
+ */
+function narrowDataAccess(value: unknown): ContentDataAccess | null {
+  return typeof value === "string" &&
+    (CONTENT_DATA_ACCESS_MODES as readonly string[]).includes(value)
+    ? (value as ContentDataAccess)
+    : null;
+}
+
 /** Build the artifact-version tool (artifacts only). */
 function buildArtifactUpdateTool(
   objectId: string,
@@ -272,8 +347,14 @@ function buildArtifactUpdateTool(
 ): Tool {
   return tool({
     description:
-      "Update the ARTIFACT open in the workspace panel by creating a new version with the given full source code. The new version appears in the artifact's version dropdown. Provide the COMPLETE code (it replaces the current version's code), not a diff.",
-    inputSchema: jsonSchema<{ code: string; summary?: string }>({
+      "Update the ARTIFACT open in the workspace panel by creating a new version with the given full source code. The new version appears in the artifact's version dropdown. Provide the COMPLETE code (it replaces the current version's code), not a diff. " +
+      "Pass dataAccess to also switch the artifact's sandbox data-bridge mode in the same call — do that whenever the user asks for a LIVE dashboard, because code written against the wrong mode is rejected by the sandbox at runtime. " +
+      ATRIUM_DATA_AUTHORING_GUIDANCE,
+    inputSchema: jsonSchema<{
+      code: string;
+      summary?: string;
+      dataAccess?: ContentDataAccess;
+    }>({
       type: "object",
       properties: {
         code: {
@@ -284,16 +365,38 @@ function buildArtifactUpdateTool(
           type: "string",
           description: "A short summary of what changed (optional).",
         },
+        dataAccess: {
+          type: "string",
+          enum: [...CONTENT_DATA_ACCESS_MODES],
+          description:
+            "Optional — set the artifact's sandbox data bridge mode alongside the new code. Omit to leave it unchanged. " +
+            DATA_ACCESS_DESC,
+        },
       },
       required: ["code"],
       additionalProperties: false,
     }),
-    execute: async (args): Promise<{ ok: true; versionNumber: number } | { error: string }> => {
+    execute: async (
+      args
+    ): Promise<
+      { ok: true; versionNumber: number; dataAccess?: ContentDataAccess } | { error: string }
+    > => {
       const code = typeof args?.code === "string" ? args.code : "";
       const summary = typeof args?.summary === "string" ? args.summary : undefined;
       if (!code.trim()) return { error: "No code provided for the new version." };
       if (Buffer.byteLength(code, "utf8") > MAX_EDIT_BYTES) {
         return { error: "That artifact is too large to save in one step." };
+      }
+      // Narrow the optional mode BEFORE any write so an invalid value changes
+      // nothing at all (neither the mode nor the version).
+      let dataAccess: ContentDataAccess | null = null;
+      if (args?.dataAccess !== undefined) {
+        dataAccess = narrowDataAccess(args.dataAccess);
+        if (dataAccess === null) {
+          return {
+            error: `Invalid data access mode: ${String(args.dataAccess)}. Use one of ${CONTENT_DATA_ACCESS_MODES.join(", ")}.`,
+          };
+        }
       }
       const req = await requesterForUserId(userId);
       if (!req) return { error: "Could not resolve your identity." };
@@ -315,6 +418,27 @@ function buildArtifactUpdateTool(
             "That content was blocked by the safety screen and was not saved.",
         };
       }
+      // #1749: flip the mode FIRST, so the canvas — keyed on
+      // `${contentId}:${dataAccess}:${versionKey}` — remounts on the new mode and
+      // the new version renders under it. `contentService.update` runs the same
+      // canView (404-mask) → canEdit gate the Content settings dialog uses, under
+      // the SESSION user's requester: no new privilege. Its own try/catch keeps a
+      // mode failure from being reported as the version-save conflict below.
+      if (dataAccess !== null) {
+        try {
+          await contentService.update(req, objectId, { dataAccess });
+        } catch (err) {
+          log.warn("update_workspace_artifact data-access change failed", {
+            objectId,
+            dataAccess,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return {
+            error:
+              "The artifact's data access mode could not be changed, so no new version was saved. Nothing was modified.",
+          };
+        }
+      }
       try {
         // createVersion enforces canView/canEdit (screening already done above).
         const result = await contentService.createVersion(req, objectId, {
@@ -322,7 +446,13 @@ function buildArtifactUpdateTool(
           bodyFormat: bodyFormat === "jsx" ? "jsx" : "html",
           summary,
         });
-        return { ok: true, versionNumber: result.version?.versionNumber ?? 0 };
+        return {
+          ok: true,
+          versionNumber: result.version?.versionNumber ?? 0,
+          // Report the EFFECTIVE mode only when this call set it — silence means
+          // "unchanged", never "records".
+          ...(dataAccess !== null ? { dataAccess } : {}),
+        };
       } catch (err) {
         log.warn("update_workspace_artifact failed", {
           objectId,
@@ -678,6 +808,11 @@ export async function buildWorkspaceChatTools(params: {
         " You can also publish or unpublish it with publish_workspace_content / unpublish_workspace_content." +
         " If the user EXPLICITLY asks to permanently delete it (not archive), use delete_workspace_content — it is irreversible and refused while the document is published."
       : " You can update it with the update_workspace_artifact tool (provide the complete new code)." +
+        // #1749: the bridge is the whole reason a "live dashboard" request can
+        // succeed here; without this sentence the model does not know
+        // `window.AtriumData` exists and invents a helper that does not.
+        " The artifact runs in a sandbox that exposes `window.AtriumData`; check the `dataAccess` field returned by read_workspace_content before writing code that uses it, and set `dataAccess` on update_workspace_artifact (to `query` for a live PSD-data dashboard) in the SAME call that writes the code. " +
+        ATRIUM_DATA_AUTHORING_GUIDANCE +
         " You can also publish or unpublish it with publish_workspace_content / unpublish_workspace_content." +
         " If the user EXPLICITLY asks to permanently delete it (not archive), use delete_workspace_content — it is irreversible and refused while the artifact is published."
     : " It is read-only for this user.";
