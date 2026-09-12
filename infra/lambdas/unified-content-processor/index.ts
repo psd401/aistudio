@@ -35,6 +35,7 @@ import {
 } from "@aws-sdk/client-cloudwatch";
 import { and, asc, eq, gt, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { executeQuery } from "../../../lib/db/drizzle-client";
+import { describeQueryErrorCause } from "../../../lib/db/query-error";
 import {
   repositoryIndexGenerations,
   repositoryItemChunks,
@@ -2178,6 +2179,15 @@ export async function handler(
         log.error("Unified content maintenance stage failed", {
           taskName,
           error: error instanceof Error ? error.message : String(error),
+          // Drizzle's message is only the "Failed query: …" text plus the bound
+          // params; the driver's real reason (SQLSTATE, constraint, table) hangs
+          // off `error.cause` and was never logged here. See lib/db/query-error.ts
+          // — the same gap the workspace-storage route already closed.
+          //
+          // This mattered: `superseded-generation-retention` has failed on EVERY
+          // run while repository_item_chunks grew to 173 GB with 97.4% of its
+          // chunks in superseded generations, and the logs could not say why.
+          ...describeQueryErrorCause(error),
         });
       }
     );

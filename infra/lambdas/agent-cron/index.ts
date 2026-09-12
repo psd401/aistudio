@@ -2030,6 +2030,114 @@ async function handleScheduleLockContention(
   return result;
 }
 
+// Every schedule for one owner shares the workspace lock, so schedules that
+// fire close together contend by design. The problem was never the contention —
+// it was the budget. EventBridge Scheduler spends its 5 retries in ~3 minutes
+// (observed: +59s, +115s, then nothing), while an agent turn runs 4-15. A fire
+// that loses the lock therefore burned its whole budget before the holder could
+// possibly have finished, and was dropped to the DLQ: 247 dead fires by
+// 2026-09-12, ~192/day from one owner's three co-scheduled jobs, plus the
+// superintendent's Weekly Brief on 2026-09-11, which vanished with no error to
+// the user at all.
+//
+// So wait for the holder instead of racing it. The invocation is already alive
+// and holds nothing while it polls — it just re-attempts the lock until the
+// owner's workspace frees up. If the budget runs out we fall through to exactly
+// the previous behaviour, so this can only convert drops into runs.
+const OWNER_CONTENTION_WAIT_BUDGET_MS = 5 * 60_000;
+const OWNER_CONTENTION_POLL_MS = 15_000;
+// Leave enough Lambda wall time for the turn this wait exists to enable, plus
+// its reply and workspace flush. Waiting a fire to death inside the Lambda
+// would be a worse failure than the DLQ, because it consumes the fire.
+const OWNER_CONTENTION_REMAINING_RESERVE_MS = 10 * 60_000;
+
+/**
+ * Whether a lost lock is a DIFFERENT schedule of the same owner still running.
+ *
+ * That is the only case worth waiting out, and the exclusions all matter:
+ *
+ * - A phase other than `lock-contention` is a config or renewal fault. No
+ *   amount of waiting fixes it, and waiting would burn the Lambda instead.
+ * - An unidentified holder, or one carrying THIS fire's own key, is the first
+ *   branch of `resolveScheduleLockContention`: one fire meeting its own lock, a
+ *   duplicate delivery. Waiting for that to finish and then proceeding would
+ *   run the same occurrence twice — the replay marker exists to stop exactly
+ *   that, so the fire must fall through to it.
+ * - A different fire of the SAME schedule resolves to `coalesce`, which must
+ *   happen immediately so a high-frequency schedule does not burst stale
+ *   prompts behind its own predecessor.
+ */
+export function isOwnerWorkspaceContention(
+  failure: JobLockFailure,
+  fireClaim: OwnedScheduleFireClaim | null,
+): boolean {
+  if (!fireClaim) return false;
+  if (failure.phase !== 'lock-contention') return false;
+  const holder = failure.ownerFireKey;
+  if (typeof holder !== 'string') return false;
+  if (holder === fireClaim.identity.key) return false;
+  return resolveScheduleLockContention(failure, fireClaim).action === 'retry';
+}
+
+/**
+ * Run the locked turn, waiting out another schedule of the same owner.
+ *
+ * Re-attempts on the SAME fire claim, so the replay marker and coalescing rules
+ * are unchanged — this only stops the fire being abandoned while the workspace
+ * is legitimately busy. Falls through to the caller's contention handling once
+ * the budget or the Lambda's remaining time runs out, which is exactly the
+ * behaviour that existed before the wait.
+ */
+async function runLockedScheduleTurnAwaitingOwner(
+  context: LockedScheduleContext,
+  fireClaim: OwnedScheduleFireClaim | null,
+  onFireExecutionStarted: () => void,
+): Promise<LockedJobResult<HandlerResult>> {
+  let locked = await runLockedScheduleTurn(
+    context,
+    fireClaim,
+    onFireExecutionStarted,
+  );
+  const waitUntil = Date.now() + OWNER_CONTENTION_WAIT_BUDGET_MS;
+  let waitedMs = 0;
+  while (
+    !locked.executed
+    && isOwnerWorkspaceContention(locked.lock, fireClaim)
+    && Date.now() < waitUntil
+    && context.lambdaContext.getRemainingTimeInMillis()
+      > OWNER_CONTENTION_REMAINING_RESERVE_MS
+  ) {
+    await new Promise((resolve) =>
+      setTimeout(resolve, OWNER_CONTENTION_POLL_MS),
+    );
+    waitedMs += OWNER_CONTENTION_POLL_MS;
+    locked = await runLockedScheduleTurn(
+      context,
+      fireClaim,
+      onFireExecutionStarted,
+    );
+  }
+  if (waitedMs > 0) {
+    const detail = {
+      scheduleId: context.schedule.scheduleId,
+      scheduleName: context.scheduleName,
+      waitedMs,
+    };
+    if (locked.executed) {
+      context.log.info(
+        'Scheduled fire ran after waiting out the owner workspace',
+        detail,
+      );
+    } else {
+      context.log.warn(
+        'Owner workspace stayed busy for the whole contention wait',
+        detail,
+      );
+    }
+  }
+  return locked;
+}
+
 async function runGuardedScheduleTurn(
   context: LockedScheduleContext,
   fireClaim: OwnedScheduleFireClaim | null,
@@ -2037,7 +2145,7 @@ async function runGuardedScheduleTurn(
   let locked: LockedJobResult<HandlerResult>;
   let fireExecutionStarted = false;
   try {
-    locked = await runLockedScheduleTurn(
+    locked = await runLockedScheduleTurnAwaitingOwner(
       context,
       fireClaim,
       () => {
