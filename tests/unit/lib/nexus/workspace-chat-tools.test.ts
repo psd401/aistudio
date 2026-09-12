@@ -22,6 +22,8 @@ jest.mock("@/lib/content/render/html-sanitize", () => ({ sanitizeHtml: jest.fn()
 
 const getMock = jest.fn();
 const createVersionMock = jest.fn();
+const updateMock = jest.fn();
+const loadArtifactCodeMock = jest.fn();
 const deleteMock = jest.fn();
 const listMock = jest.fn();
 const canEditMock = jest.fn();
@@ -39,8 +41,14 @@ jest.mock("@/lib/content/content-service", () => ({
   contentService: {
     get: (...a: unknown[]) => getMock(...a),
     createVersion: (...a: unknown[]) => createVersionMock(...a),
+    update: (...a: unknown[]) => updateMock(...a),
     delete: (...a: unknown[]) => deleteMock(...a),
     list: (...a: unknown[]) => listMock(...a),
+  },
+}));
+jest.mock("@/lib/content/version-service", () => ({
+  versionService: {
+    loadArtifactCode: (...a: unknown[]) => loadArtifactCodeMock(...a),
   },
 }));
 jest.mock("@/lib/content/publish-service", () => ({
@@ -79,10 +87,16 @@ import {
   ConflictError,
   ForbiddenError,
 } from "@/lib/content/errors";
+import {
+  ATRIUM_DATA_AUTHORING_GUIDANCE,
+  DATA_ACCESS_DESC,
+} from "@/lib/content/atrium-data-contract";
 
 const REQ = { kind: "user", userId: 7, isAdmin: false };
 const DOC = { id: "doc-1", kind: "document", title: "My Doc", ownerUserId: 7, version: { bodyFormat: "markdown", bodyInline: "# Hi", versionNumber: 3 } };
-const ART = { id: "art-1", kind: "artifact", title: "My Art", ownerUserId: 7, version: { bodyFormat: "jsx", bodyInline: "<div/>", versionNumber: 2 } };
+const ART = { id: "art-1", kind: "artifact", title: "My Art", ownerUserId: 7, dataAccess: "records", version: { bodyFormat: "jsx", bodyInline: "<div/>", versionNumber: 2 } };
+/** A large artifact: source lives in S3, `bodyInline` is null (#1749 barrier B). */
+const BIG_ART = { ...ART, version: { bodyFormat: "jsx", bodyInline: null, bodyLocation: "s3://k", versionNumber: 2 } };
 
 // Minimal shim to invoke an AI SDK tool's execute in tests.
 type ExecTool = { execute: (args: unknown, opts?: unknown) => Promise<unknown> };
@@ -104,6 +118,8 @@ beforeEach(() => {
   unpublishMock.mockResolvedValue({ unpublished: true });
   snapshotBeforePublishMock.mockResolvedValue(undefined);
   listMock.mockResolvedValue([]);
+  updateMock.mockResolvedValue({ id: "art-1" });
+  loadArtifactCodeMock.mockResolvedValue("<div>from s3</div>");
   deleteMock.mockResolvedValue({ id: "doc-1", slug: "my-doc", title: "My Doc", kind: "document", versionsDeleted: 3 });
 });
 
@@ -291,7 +307,95 @@ function defineBuildWorkspaceChatToolsSuite1Part2() {it("edit_workspace_document
       "art-1",
       expect.objectContaining({ body: "<div>new</div>", bodyFormat: "jsx", summary: "tweak" })
     );
-    expect(out).toEqual({ ok: true, versionNumber: 3 });
+    expect(out).toEqual({ ok: true, objectId: "art-1", versionNumber: 3 });
+    // No dataAccess argument → the mode is NOT touched.
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+
+  // --- #1749: setting the data-access mode alongside the code ----------------
+
+  it("update_workspace_artifact sets dataAccess through contentService.update BEFORE createVersion", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    createVersionMock.mockResolvedValue({ version: { versionNumber: 4 } });
+    // Order guard: the canvas is keyed on the mode, so the mode must be committed
+    // before the version that is meant to render under it.
+    const order: string[] = [];
+    updateMock.mockImplementation(async () => { order.push("update"); return { id: "art-1" }; });
+    createVersionMock.mockImplementation(async () => { order.push("createVersion"); return { version: { versionNumber: 4 } }; });
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = await exec(tools.update_workspace_artifact, {
+      code: "<div>live</div>",
+      dataAccess: "query",
+    });
+    expect(updateMock).toHaveBeenCalledWith(REQ, "art-1", { dataAccess: "query" });
+    expect(order).toEqual(["update", "createVersion"]);
+    expect(out).toEqual({
+      ok: true,
+      objectId: "art-1",
+      versionNumber: 4,
+      dataAccess: "query",
+    });
+  });
+
+  it("update_workspace_artifact rejects an invalid dataAccess and writes NOTHING", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.update_workspace_artifact, {
+      code: "<div/>",
+      dataAccess: "everything",
+    })) as { error: string };
+    expect(out.error).toMatch(/invalid data access mode/i);
+    expect(updateMock).not.toHaveBeenCalled();
+    expect(createVersionMock).not.toHaveBeenCalled();
+    // Rejected before any service call at all — not even the screen ran.
+    expect(screenMock).not.toHaveBeenCalled();
+  });
+
+  it("update_workspace_artifact does NOT save a version when the mode change fails", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    updateMock.mockRejectedValue(new ForbiddenError("no edit access"));
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.update_workspace_artifact, {
+      code: "<div/>",
+      dataAccess: "query",
+    })) as { error: string };
+    expect(createVersionMock).not.toHaveBeenCalled();
+    // The message must not be the version-save conflict wording.
+    expect(out.error).toMatch(/data access mode could not be changed/i);
+  });
+
+}
+
+/** #1749 contract + screening assertions (split out for max-lines-per-function). */
+function defineBuildWorkspaceChatToolsSuite1Part2b() {
+  it("the artifact tool description and editHint carry the SHARED AtriumData contract", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    const result = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const artifactTool = result.tools.update_workspace_artifact as {
+      description?: string;
+      inputSchema?: unknown;
+    };
+    // Guards against the MCP tools and this surface drifting apart again (#1749).
+    expect(artifactTool.description).toContain(ATRIUM_DATA_AUTHORING_GUIDANCE);
+    // The mode contract rides on the dataAccess INPUT (what the model reads when
+    // it decides which mode to pass), not on the tool description.
+    expect(JSON.stringify(artifactTool.inputSchema)).toContain(
+      JSON.stringify(DATA_ACCESS_DESC).slice(1, -1)
+    );
+    expect(result.systemPromptFragment).toContain(ATRIUM_DATA_AUTHORING_GUIDANCE);
+    expect(result.systemPromptFragment).toContain("window.AtriumData");
+  });
+
+  it("the READ tool description carries the mode contract so the model can interpret dataAccess", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const description = (tools.read_workspace_content as { description?: string }).description ?? "";
+    expect(description).toContain(DATA_ACCESS_DESC);
   });
 
   it("update_workspace_artifact refuses (and does NOT createVersion) when screening blocks", async () => {
@@ -366,9 +470,28 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
     expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: null, bodyUnavailable: true });
   });
 
-  it("read_workspace_content flags bodyUnavailable for a large artifact (bodyInline null)", async () => {
-    getMock.mockResolvedValue({ ...ART, version: { bodyFormat: "jsx", bodyInline: null, versionNumber: 2 } });
+  // #1749 barrier B: an artifact over the 4 KiB inline threshold lives in S3.
+  // Reading it is what makes a SECOND turn ("change the default date range")
+  // possible; the old contract reported bodyUnavailable and forced a rewrite.
+  it("read_workspace_content loads the S3-backed body for a large artifact", async () => {
+    getMock.mockResolvedValue(BIG_ART);
     canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = await exec(tools.read_workspace_content, {});
+    expect(loadArtifactCodeMock).toHaveBeenCalledWith(BIG_ART.version);
+    expect(out).toEqual({
+      title: "My Art",
+      kind: "artifact",
+      bodyFormat: "jsx",
+      body: "<div>from s3</div>",
+      dataAccess: "records",
+    });
+  });
+
+  it("read_workspace_content flags bodyUnavailable ONLY when the S3 load fails", async () => {
+    getMock.mockResolvedValue(BIG_ART);
+    canEditMock.mockReturnValue(true);
+    loadArtifactCodeMock.mockRejectedValue(new Error("NoSuchKey"));
     const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
     const out = await exec(tools.read_workspace_content, {});
     // Must NOT report body "" (which would let the model rewrite from nothing).
@@ -378,7 +501,39 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
       bodyFormat: "jsx",
       body: null,
       bodyUnavailable: true,
+      dataAccess: "records",
     });
+  });
+
+  it("read_workspace_content truncates a pathologically large body and flags it", async () => {
+    getMock.mockResolvedValue(BIG_ART);
+    canEditMock.mockReturnValue(true);
+    loadArtifactCodeMock.mockResolvedValue("x".repeat(512 * 1024 + 10));
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.read_workspace_content, {})) as {
+      body: string;
+      truncated?: true;
+    };
+    expect(out.truncated).toBe(true);
+    expect(Buffer.byteLength(out.body, "utf8")).toBe(512 * 1024);
+  });
+
+  // --- #1749: the model must be able to SEE and SET the data-access mode ------
+
+  it("read_workspace_content returns dataAccess for an artifact", async () => {
+    getMock.mockResolvedValue({ ...ART, dataAccess: "query" });
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.read_workspace_content, {})) as { dataAccess?: string };
+    expect(out.dataAccess).toBe("query");
+  });
+
+  it("read_workspace_content OMITS dataAccess for a document (no sandbox bridge)", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.read_workspace_content, {})) as Record<string, unknown>;
+    expect(out).not.toHaveProperty("dataAccess");
   });
 
   // --- ITEM 2: publish / unpublish the OPEN object ---------------------------
@@ -398,7 +553,13 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
     );
     expect(order).toEqual(["snapshot", "publish"]);
     expect(publishMock).toHaveBeenCalledWith(REQ, "doc-1", { destination: "intranet" });
-    expect(out).toEqual({ ok: true, published: true, destination: "intranet", publicationId: "pub-1" });
+    expect(out).toEqual({
+      ok: true,
+      objectId: "doc-1",
+      published: true,
+      destination: "intranet",
+      publicationId: "pub-1",
+    });
   });
 
   it("unpublish_workspace_content does NOT snapshot (nothing to advance when taking a page offline)", async () => {
@@ -439,7 +600,7 @@ function defineBuildWorkspaceChatToolsSuite1Part4() {it("unpublish_workspace_con
     const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
     const out = await exec(tools.unpublish_workspace_content, {});
     expect(unpublishMock).toHaveBeenCalledWith(REQ, "doc-1", "intranet");
-    expect(out).toEqual({ ok: true, unpublished: true, destination: "intranet" });
+    expect(out).toEqual({ ok: true, objectId: "doc-1", unpublished: true, destination: "intranet" });
   });
 
   // --- ITEM 3: find + edit an EXISTING document by id -----------------------
@@ -510,6 +671,7 @@ function defineBuildWorkspaceChatToolsSuite1Part4() {it("unpublish_workspace_con
 const defineBuildWorkspaceChatToolsSuite1 = () => {
   defineBuildWorkspaceChatToolsSuite1Part1()
   defineBuildWorkspaceChatToolsSuite1Part2()
+  defineBuildWorkspaceChatToolsSuite1Part2b()
   defineBuildWorkspaceChatToolsSuite1Part3()
   defineBuildWorkspaceChatToolsSuite1Part4()
 };

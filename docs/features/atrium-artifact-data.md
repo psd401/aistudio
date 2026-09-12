@@ -434,6 +434,18 @@ object is deleted; deleting a user preserves records but clears attribution.
 
 ## Agent usage
 
+There are **three** agent-facing author surfaces, and they share ONE contract
+string (`lib/content/atrium-data-contract.ts` — `DATA_ACCESS_DESC` plus
+`ATRIUM_DATA_AUTHORING_GUIDANCE`), so none of them can drift into telling a model
+something the others do not:
+
+1. the **MCP content tools** (`create_artifact` / `update_content`);
+2. the PSD Agent's **`psd-atrium` skill**;
+3. the **Nexus workspace chat** (#1749) — `update_workspace_artifact` carries the
+   guidance and takes an optional `dataAccess`, and `read_workspace_content`
+   returns the artifact's current mode. See
+   `docs/features/nexus-workspace-chat-editing.md`.
+
 Artifact source uses `AtriumData.submit()` and `AtriumData.list()`. The PSD Agent
 loads the `psd-atrium` skill for a complete leaderboard pattern and uses the
 small command adapter for teacher-facing reads:

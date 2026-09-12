@@ -28,13 +28,51 @@ chat surface, so asking the chat to change the open item did nothing.
 
 | Tool | When | Effect |
 |------|------|--------|
-| `read_workspace_content` | always (viewable object) | Returns the current title/kind/body so the model edits from the current content. |
+| `read_workspace_content` | always (viewable object) | Returns the current title/kind/body so the model edits from the current content. For an **artifact** it also returns `dataAccess` (the sandbox data-bridge mode) and, for a body over the 4 KiB inline threshold, loads the S3-backed source (capped at 512 KiB with `truncated: true`). |
 | `edit_workspace_document` | editable **document** | §28.3-screens the markdown, then writes it into the live Yjs doc via the agent bridge (`applyAgentEdit`) — it appears **immediately** in the panel with agent (purple-rail) attribution. `mode: append` (default) or `replace`. |
-| `update_workspace_artifact` | editable **artifact** | Creates a new version via `contentService.createVersion` (which canView/canEdit-gates and §28.3-screens the body); the new version appears in the artifact's version dropdown. |
+| `update_workspace_artifact` | editable **artifact** | Creates a new version via `contentService.createVersion` (which canView/canEdit-gates and §28.3-screens the body); the new version appears in the artifact's version dropdown. Optional `dataAccess` (`records` \| `query` \| `none`) also sets the sandbox data-bridge mode, applied through `contentService.update` **before** the version. |
 
 A caller who can view but not edit gets only `read_workspace_content`. An
 unknown/unviewable `?workspace=` yields **no** tools — a bad param never breaks
 chat.
+
+### Live-data artifacts (#1749)
+
+An artifact runs in a sandbox that installs `window.AtriumData`; which of its
+three operations the code may call is pinned by the object's `dataAccess` mode
+(`records` — `submit`/`list`; `query` — read-only PSD data queries run **as the
+viewer**; `none`). The chat needs three things to build a live dashboard, and
+before #1749 it had none of them:
+
+1. **The contract.** `lib/content/atrium-data-contract.ts` holds the ONE copy of
+   `DATA_ACCESS_DESC` (what the modes mean) and `ATRIUM_DATA_AUTHORING_GUIDANCE`
+   (the operations, the `query()` return shape — rows are tuples in `columns`
+   order — and the authoring rules). Both the MCP content tools and these
+   workspace tools import it, so the two surfaces cannot drift apart; a unit test
+   fails if either redefines the strings locally.
+2. **Visibility of the mode.** `read_workspace_content` returns `dataAccess` for
+   artifacts, matching what the MCP `get_content` handler already returns.
+3. **The ability to change it.** `update_workspace_artifact` takes an optional
+   `dataAccess` and applies it through `contentService.update` — the same
+   canView/canEdit gate the Content settings dialog uses, under the session
+   user's requester, so this is no new privilege. It runs **before**
+   `createVersion` so the canvas (keyed on
+   `${contentId}:${dataAccess}:${versionKey}`) remounts on the new mode and the
+   new version renders under it. An invalid mode changes nothing at all; a failed
+   mode change aborts before any version is written.
+
+**The panel refreshes without a reload.** When a mutating workspace tool result
+lands, the Nexus tool-call renderer dispatches the `atrium:workspace-changed`
+window event (`lib/atrium/workspace-change-event.ts`). `WorkspacePanel` re-runs
+its loader — which is where the pinned `dataAccess` comes from — and
+`ArtifactCanvas` reloads the version list and head. A DOM event keeps both
+components decoupled from the conversation runtime they must never touch. The
+signal fires once per tool call and never for a call replayed from history or an
+error result.
+
+**Step budget.** A build turn explores the data before it writes code, so
+`lib/nexus/chat-step-budget.ts` raises `maxSteps` to 20 when workspace tools are
+bound; every other multi-step path keeps 10.
 
 ### Safety & correctness invariants (PR #1136 review)
 
@@ -43,12 +81,12 @@ chat.
   before `createVersion` — because the tool runs under a `kind:"user"` (human)
   requester and `createVersion`'s internal screening only covers *agent*
   requesters, so relying on it would persist model code unscreened.
-- **`read_workspace_content` never claims empty.** Documents read the
-  `atrium_doc_state.markdown` projection (the live text is in Yjs, not
-  `version.bodyInline`); when the current content can't be loaded (empty
-  projection, or a large artifact whose source lives at `bodyLocation`) it
-  returns `bodyUnavailable: true` so the model appends/edits conservatively
-  instead of rewriting from nothing.
+- **`read_workspace_content` never claims empty.** Documents read the live Yjs
+  doc, falling back to the `atrium_doc_state.markdown` projection then the
+  version snapshot. Artifacts read `bodyInline`, or load the S3-backed source
+  when the body is over the inline threshold. `bodyUnavailable: true` now means
+  only that the load FAILED — never "the item is empty", which would let a
+  rewrite clobber it.
 - **A bound skill's `allowed-tools` pin applies to workspace tools too** — a
   restrictive skill can't be widened just by opening a workspace.
 - **Provider-native tools survive.** When workspace (or connector) tools are
@@ -68,9 +106,16 @@ are inherited, not reimplemented.
 ## Verified
 
 - Unit: `tests/unit/lib/nexus/workspace-chat-tools.test.ts` (gating, read-only
-  vs editable, kind-specific tool, screening-refusal).
+  vs editable, kind-specific tool, screening-refusal, `dataAccess` read/set +
+  ordering, S3 body load + truncation, shared-contract presence).
+- Unit: `tests/unit/lib/content/atrium-data-contract.test.ts` (one source of
+  truth), `tests/unit/lib/nexus/chat-step-budget.test.ts` (the widened bound),
+  `tests/unit/nexus-workspace-change-signal.test.tsx` and
+  `tests/unit/atrium-workspace-change-refresh.test.tsx` (the refresh signal).
 - E2E: `tests/e2e/nexus-workspace-chat-tools.spec.ts` (the chat request carries
-  `workspaceId`, preserved across a model change).
+  `workspaceId`, preserved across a model change) and
+  `tests/e2e/nexus-workspace-artifact-refresh.spec.ts` (the open artifact
+  refetches on the signal with no reload).
 - Manually proven end-to-end on the :3100 collab server: a chat message drove
   `read_workspace_content` → `edit_workspace_document` and the text appeared live
   in the open editor with the purple agent rail; an artifact chat edit created a
@@ -79,6 +124,9 @@ are inherited, not reimplemented.
 ## Files
 
 - `lib/nexus/workspace-chat-tools.ts` — the tool set + system-prompt fragment
+- `lib/content/atrium-data-contract.ts` — the shared `AtriumData` contract strings
+- `lib/nexus/chat-step-budget.ts` — the multi-step bound
+- `lib/atrium/workspace-change-event.ts` — the panel-refresh signal
 - `app/api/nexus/chat/route.ts` — `workspaceId` schema field + `bindWorkspaceTools` + tool merge
 - `app/(protected)/nexus/page.tsx` — client `workspaceId` plumbing + model-change param preservation
 - `lib/content/collab/apply-agent-edit.ts` — the live document bridge (reused)
