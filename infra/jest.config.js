@@ -16,6 +16,16 @@
 // Consequence, matching the root gate: these tests are no longer type-checked
 // as a side effect of running. `bun run typecheck` (tsc -p infra/tsconfig.json)
 // remains the type gate.
+//
+// RUN SERIALLY — `bun run test` passes `--runInBand`, and that is load-bearing,
+// not a preference. The CDK suites synthesize stacks, which stages Lambda assets
+// into shared directories; with jest's default worker pool several workers stage
+// the same assets at once and the run DEADLOCKS — every worker sleeping at 0%
+// CPU, no test output, forever. It does not reproduce in a tree that already has
+// staged assets and nested lambda node_modules, which is why it only shows up on
+// a clean checkout (i.e. CI). Verified on a fresh clone with only the two
+// installs CI performs: parallel hung past 40 minutes, `--runInBand` finished
+// all 58 suites in ~97s.
 const swcTransform = (target) => [
   '@swc/jest',
   {
