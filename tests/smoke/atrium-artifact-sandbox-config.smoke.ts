@@ -16,11 +16,14 @@
  */
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import {
   normalizeOrigin,
   getArtifactSandboxOrigin,
   getArtifactSandboxRenderUrl,
   parseAllowedArtifactCdns,
+  buildArtifactCspGuidance,
 } from "@/lib/content/artifact-sandbox-config";
 
 let passed = 0;
@@ -145,6 +148,64 @@ check("parseAllowedArtifactCdns normalizes, dedupes, drops invalid", () => {
   );
   assert.deepEqual(parseAllowedArtifactCdns(""), []);
   assert.deepEqual(parseAllowedArtifactCdns(undefined), []);
+});
+
+// --- CDN allowlist DEPLOY WIRING (#1750) -----------------------------------
+// The bug this guards: `atriumAllowedArtifactCdns` existed as a CDK context key
+// and the stack knew how to bake it into the CSP, but the key was never SET, so
+// the deployed allowlist was empty and every CDN-loaded chart library was blocked
+// with no error anyone could see. The key's default now lives in infra/cdk.json;
+// this check fails the build if it is removed or made unparseable, rather than
+// letting the regression reappear silently in a viewer's browser.
+check("infra/cdk.json sets a parseable atriumAllowedArtifactCdns default", () => {
+  const cdkJson = JSON.parse(
+    fs.readFileSync(path.join(process.cwd(), "infra", "cdk.json"), "utf8")
+  ) as { context?: Record<string, unknown> };
+  const raw = cdkJson.context?.atriumAllowedArtifactCdns;
+  assert.equal(
+    typeof raw,
+    "string",
+    "infra/cdk.json context.atriumAllowedArtifactCdns must be a comma-separated string"
+  );
+  const parsed = parseAllowedArtifactCdns(raw as string);
+  assert.ok(
+    parsed.length > 0,
+    "every entry in atriumAllowedArtifactCdns must normalize to a valid http(s) origin"
+  );
+  // Every raw entry must survive normalization — a typo'd origin would be
+  // silently dropped from the CSP while still reading as "configured".
+  assert.equal(
+    parsed.length,
+    (raw as string).split(",").filter((s) => s.trim().length > 0).length,
+    "an entry in atriumAllowedArtifactCdns is not a valid origin and would be dropped"
+  );
+});
+
+// --- buildArtifactCspGuidance (#1750) --------------------------------------
+check("buildArtifactCspGuidance tells an author to inline everything when no CDN is allowed", () => {
+  const s = buildArtifactCspGuidance([]);
+  assert.match(s, /SANDBOX CSP:/);
+  assert.match(s, /connect-src 'none'/);
+  assert.match(s, /no external scripts or styles at all/);
+  assert.match(s, /inline SVG/);
+  // Must never name an origin the CSP does not actually permit.
+  assert.doesNotMatch(s, /https:\/\//);
+});
+
+check("buildArtifactCspGuidance names the allowed origins and demands a pinned version", () => {
+  const s = buildArtifactCspGuidance(["https://cdnjs.cloudflare.com"]);
+  assert.match(s, /https:\/\/cdnjs\.cloudflare\.com/);
+  assert.match(s, /pin an exact version/);
+  assert.match(s, /blocked silently/);
+});
+
+check("buildArtifactCspGuidance defaults to the process env allowlist", () => {
+  withEnv({ ATRIUM_ALLOWED_ARTIFACT_CDNS: "https://cdn.example.com" }, () => {
+    assert.match(buildArtifactCspGuidance(), /https:\/\/cdn\.example\.com/);
+  });
+  withEnv({}, () => {
+    assert.match(buildArtifactCspGuidance(), /no external scripts or styles at all/);
+  });
 });
 
 console.log(`\nartifact-sandbox-config smoke: ${passed} checks passed`);

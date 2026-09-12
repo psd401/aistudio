@@ -110,3 +110,38 @@ export function parseAllowedArtifactCdns(
   }
   return out;
 }
+
+/**
+ * One-sentence authoring rule describing what the sandbox CSP permits, built
+ * from the SAME allowlist the CDK stack bakes into `script-src`/`style-src`
+ * (#1750).
+ *
+ * Why this exists: the sandbox CSP is `default-src 'none'` + inline-only, so a
+ * `<script src="https://…cdn…/chart.js">` is blocked with no visible error — the
+ * page renders and the charts are simply empty. Nothing on any authoring path
+ * (Nexus workspace chat, the MCP `create_artifact`/`create_version` tools, the
+ * `psd-atrium` skill) used to state the rule, so the default move for a model
+ * asked to "build a dashboard" — reach for a chart library on a CDN — failed
+ * silently. This string is the single source of truth for that rule; every
+ * authoring surface appends it to what the model reads before it writes code.
+ *
+ * Exported as a builder (not a constant) so the sentence always reflects the
+ * deployment's real allowlist rather than a hardcoded origin that could drift
+ * from the CSP the browser actually enforces.
+ */
+export function buildArtifactCspGuidance(
+  allowedCdns: SandboxOrigin[] = parseAllowedArtifactCdns()
+): string {
+  const base =
+    "SANDBOX CSP: the artifact runs under a strict Content-Security-Policy with no network access at all (connect-src 'none', so fetch/XHR/WebSocket are blocked).";
+  if (allowedCdns.length === 0) {
+    return (
+      `${base} It also permits no external scripts or styles at all — a <script src> or <link href> to any origin is blocked silently (the page renders, the feature is just dead). ` +
+      "Write every script and style inline, and draw charts with inline SVG or a <canvas> painted by inline code."
+    );
+  }
+  return (
+    `${base} External scripts and styles are blocked EXCEPT from these origins: ${allowedCdns.join(", ")} — pin an exact version in the URL (never "latest"), because an allowlisted CDN serves code with the artifact's own privileges. ` +
+    "Anything loaded from another origin is blocked silently (the page renders, the feature is just dead), so prefer inline SVG or a <canvas> painted by inline code when a library is not worth the dependency."
+  );
+}

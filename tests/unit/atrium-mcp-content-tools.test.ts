@@ -24,6 +24,7 @@ jest.mock("@/lib/content/render/html-sanitize", () => ({
 import { CONTENT_MCP_TOOLS, CONTENT_TOOL_SCOPE_MAP } from "@/lib/mcp/content-tools";
 import { CONTENT_TOOL_HANDLERS } from "@/lib/mcp/content-tool-handlers";
 import { TOOL_MANIFEST } from "@/lib/tools/catalog/manifest";
+import { buildArtifactCspGuidance } from "@/lib/content/artifact-sandbox-config";
 
 const EXPECTED = [
   "create_document",
@@ -165,5 +166,61 @@ describe("Atrium MCP content tools registry", () => {
       expect(tool?.inputSchema.required ?? []).not.toContain("sourceRef");
       expect(manifestEntry?.version).toBe("v3");
     }
+  });
+
+});
+
+// #1750 — the sandbox CSP blocks external scripts/styles SILENTLY: the page
+// renders, the charts are empty, and no error reaches the author. The only thing
+// standing between a model and that failure is this sentence in the tool
+// description, so guard that it is actually there.
+describe("Atrium MCP content tools — sandbox CSP authoring rule (#1750)", () => {
+  const CSP_MARKER = "SANDBOX CSP:";
+
+  it("carries the CSP rule on every artifact-authoring surface", () => {
+    const createArtifact = CONTENT_MCP_TOOLS.find((t) => t.name === "create_artifact");
+    expect(createArtifact?.description).toContain(CSP_MARKER);
+    // The `code` property description too: some clients surface only the
+    // per-argument help when the model is filling the call in.
+    expect(createArtifact?.inputSchema.properties.code?.description).toContain(CSP_MARKER);
+
+    const createVersion = CONTENT_MCP_TOOLS.find((t) => t.name === "create_version");
+    expect(createVersion?.description).toContain(CSP_MARKER);
+  });
+
+  it("states the no-network rule, not just the script rule", () => {
+    const createArtifact = CONTENT_MCP_TOOLS.find((t) => t.name === "create_artifact");
+    expect(createArtifact?.description).toContain("connect-src 'none'");
+  });
+});
+
+// #1750 — the sentence itself. Tested with explicit arguments (not the ambient
+// env) so both deployment shapes are covered regardless of what CI exports.
+describe("buildArtifactCspGuidance (#1750)", () => {
+  it("tells the author to inline everything when no CDN is allowlisted", () => {
+    const s = buildArtifactCspGuidance([]);
+    expect(s).toContain("SANDBOX CSP:");
+    expect(s).toContain("connect-src 'none'");
+    expect(s).toContain("no external scripts or styles at all");
+    expect(s).toContain("inline SVG");
+    // Must not name an origin it does not actually permit.
+    expect(s).not.toContain("https://");
+  });
+
+  it("names the allowlisted origins and demands a pinned version", () => {
+    const s = buildArtifactCspGuidance(["https://cdnjs.cloudflare.com"]);
+    expect(s).toContain("https://cdnjs.cloudflare.com");
+    expect(s).toContain("pin an exact version");
+    // The silent-failure warning is the whole point of the issue.
+    expect(s).toContain("blocked silently");
+  });
+
+  it("lists every configured origin", () => {
+    const s = buildArtifactCspGuidance([
+      "https://cdnjs.cloudflare.com",
+      "https://cdn.jsdelivr.net",
+    ]);
+    expect(s).toContain("https://cdnjs.cloudflare.com");
+    expect(s).toContain("https://cdn.jsdelivr.net");
   });
 });

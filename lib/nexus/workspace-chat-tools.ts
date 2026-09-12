@@ -43,6 +43,7 @@ import {
   NotFoundError,
   ValidationError,
 } from "@/lib/content/errors";
+import { buildArtifactCspGuidance } from "@/lib/content/artifact-sandbox-config";
 import { createLogger } from "@/lib/logger";
 
 /** Free-form attribution label stamped on the purple rail for chat-driven edits. */
@@ -272,7 +273,13 @@ function buildArtifactUpdateTool(
 ): Tool {
   return tool({
     description:
-      "Update the ARTIFACT open in the workspace panel by creating a new version with the given full source code. The new version appears in the artifact's version dropdown. Provide the COMPLETE code (it replaces the current version's code), not a diff.",
+      "Update the ARTIFACT open in the workspace panel by creating a new version with the given full source code. The new version appears in the artifact's version dropdown. Provide the COMPLETE code (it replaces the current version's code), not a diff. " +
+      // #1750 — same CSP rule the MCP content tools carry, from the same
+      // allowlist the sandbox host's CSP is built from. A blocked CDN script
+      // produces a rendered page with dead features and no error, so the model
+      // must be told before it writes code, not after the user reports a blank
+      // chart.
+      buildArtifactCspGuidance(),
     inputSchema: jsonSchema<{ code: string; summary?: string }>({
       type: "object",
       properties: {
@@ -678,6 +685,10 @@ export async function buildWorkspaceChatTools(params: {
         " You can also publish or unpublish it with publish_workspace_content / unpublish_workspace_content." +
         " If the user EXPLICITLY asks to permanently delete it (not archive), use delete_workspace_content — it is irreversible and refused while the document is published."
       : " You can update it with the update_workspace_artifact tool (provide the complete new code)." +
+        // #1750: the full CSP rule lives on the update tool's own description
+        // (where the code is written). Flag it here too so the model does not
+        // promise the user a CDN-backed chart library before it reads that.
+        " The artifact runs in a locked-down sandbox that blocks network calls and most external scripts/styles silently — read the update_workspace_artifact description for exactly what it may load before you write code." +
         " You can also publish or unpublish it with publish_workspace_content / unpublish_workspace_content." +
         " If the user EXPLICITLY asks to permanently delete it (not archive), use delete_workspace_content — it is irreversible and refused while the artifact is published."
     : " It is read-only for this user.";
