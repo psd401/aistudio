@@ -200,7 +200,13 @@ check("buildArtifactCspGuidance tells an author to inline everything when no CDN
 
 check("buildArtifactCspGuidance names the allowed origins and demands a pinned version", () => {
   const s = buildArtifactCspGuidance(["https://cdnjs.cloudflare.com"]);
-  assert.match(s, /https:\/\/cdnjs\.cloudflare\.com/);
+  // `includes`, not a regex: an unanchored URL pattern is a host-check bypass
+  // in real code, and CodeQL flags it (js/regex/missing-regexp-anchor) even in
+  // a test. A substring check is what is meant here anyway.
+  assert.ok(
+    s.includes("https://cdnjs.cloudflare.com"),
+    "guidance must name the allowlisted origin"
+  );
   assert.match(s, /pin an exact version/);
   assert.match(s, /blocked silently/);
 });
@@ -220,7 +226,10 @@ check("buildArtifactCspGuidance says inline script and style are allowed in both
 
 check("buildArtifactCspGuidance defaults to the process env allowlist", () => {
   withEnv({ ATRIUM_ALLOWED_ARTIFACT_CDNS: "https://cdn.example.com" }, () => {
-    assert.match(buildArtifactCspGuidance(), /https:\/\/cdn\.example\.com/);
+    assert.ok(
+      buildArtifactCspGuidance().includes("https://cdn.example.com"),
+      "guidance must read the allowlist from the environment"
+    );
   });
   withEnv({}, () => {
     assert.match(buildArtifactCspGuidance(), /no external scripts or styles at all/);
