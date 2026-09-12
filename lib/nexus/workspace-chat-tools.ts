@@ -337,6 +337,39 @@ function narrowDataAccess(value: unknown): ContentDataAccess | null {
     : null;
 }
 
+/**
+ * Validate `update_workspace_artifact`'s arguments BEFORE any write, so a bad
+ * argument changes nothing at all — neither the data-access mode nor the version.
+ * Returns `{ error }` (never throws): a tool reports a bad argument back to the
+ * model as a result, it does not blow up the turn. Extracted to keep `execute`
+ * inside the complexity budget.
+ */
+function parseArtifactUpdateArgs(
+  args: { code?: unknown; summary?: unknown; dataAccess?: unknown } | undefined
+):
+  | { code: string; summary: string | undefined; dataAccess: ContentDataAccess | null }
+  | { error: string } {
+  const code = typeof args?.code === "string" ? args.code : "";
+  if (!code.trim()) return { error: "No code provided for the new version." };
+  if (Buffer.byteLength(code, "utf8") > MAX_EDIT_BYTES) {
+    return { error: "That artifact is too large to save in one step." };
+  }
+  let dataAccess: ContentDataAccess | null = null;
+  if (args?.dataAccess !== undefined) {
+    dataAccess = narrowDataAccess(args.dataAccess);
+    if (dataAccess === null) {
+      return {
+        error: `Invalid data access mode: ${String(args.dataAccess)}. Use one of ${CONTENT_DATA_ACCESS_MODES.join(", ")}.`,
+      };
+    }
+  }
+  return {
+    code,
+    summary: typeof args?.summary === "string" ? args.summary : undefined,
+    dataAccess,
+  };
+}
+
 /** Build the artifact-version tool (artifacts only). */
 function buildArtifactUpdateTool(
   objectId: string,
@@ -379,25 +412,12 @@ function buildArtifactUpdateTool(
     execute: async (
       args
     ): Promise<
-      { ok: true; versionNumber: number; dataAccess?: ContentDataAccess } | { error: string }
+      | { ok: true; objectId: string; versionNumber: number; dataAccess?: ContentDataAccess }
+      | { error: string }
     > => {
-      const code = typeof args?.code === "string" ? args.code : "";
-      const summary = typeof args?.summary === "string" ? args.summary : undefined;
-      if (!code.trim()) return { error: "No code provided for the new version." };
-      if (Buffer.byteLength(code, "utf8") > MAX_EDIT_BYTES) {
-        return { error: "That artifact is too large to save in one step." };
-      }
-      // Narrow the optional mode BEFORE any write so an invalid value changes
-      // nothing at all (neither the mode nor the version).
-      let dataAccess: ContentDataAccess | null = null;
-      if (args?.dataAccess !== undefined) {
-        dataAccess = narrowDataAccess(args.dataAccess);
-        if (dataAccess === null) {
-          return {
-            error: `Invalid data access mode: ${String(args.dataAccess)}. Use one of ${CONTENT_DATA_ACCESS_MODES.join(", ")}.`,
-          };
-        }
-      }
+      const parsed = parseArtifactUpdateArgs(args);
+      if ("error" in parsed) return parsed;
+      const { code, summary, dataAccess } = parsed;
       const req = await requesterForUserId(userId);
       if (!req) return { error: "Could not resolve your identity." };
       // §28.3: this tool runs under a `kind: "user"` (human) requester, and
@@ -448,6 +468,10 @@ function buildArtifactUpdateTool(
         });
         return {
           ok: true,
+          // #1749: the client tool-result renderer forwards this id on the
+          // `atrium:workspace-changed` signal so the panel/canvas refresh the
+          // object that actually changed.
+          objectId,
           versionNumber: result.version?.versionNumber ?? 0,
           // Report the EFFECTIVE mode only when this call set it — silence means
           // "unchanged", never "records".
@@ -506,10 +530,16 @@ async function runWorkspacePublishOp(args: WorkspacePublishArgs): Promise<Record
       // without this would ship the stale/empty version (Codex review P1).
       await snapshotLiveDocumentForPublish({ req, objectId, kind, requestId });
       const result = await publishService.publish(req, objectId, { destination });
-      return { ok: true, published: true, destination, publicationId: result.publicationId };
+      return {
+        ok: true,
+        objectId,
+        published: true,
+        destination,
+        publicationId: result.publicationId,
+      };
     }
     const result = await publishService.unpublish(req, objectId, destination);
-    return { ok: true, unpublished: result.unpublished, destination };
+    return { ok: true, objectId, unpublished: result.unpublished, destination };
   } catch (err) {
     // §26.4: a public destination this user may not publish/unpublish directly is a
     // pending-approval outcome, not a failure — report it honestly so the model tells

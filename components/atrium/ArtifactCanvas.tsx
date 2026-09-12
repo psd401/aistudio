@@ -32,6 +32,10 @@ import { createVersionAction } from "@/actions/db/atrium/create-version";
 import { rollbackVersionAction } from "@/actions/db/atrium/rollback-version";
 import type { BodyFormat, ContentDataAccess } from "@/lib/content";
 import { toBase64Utf8 } from "@/lib/content/code-encoding-browser";
+import {
+  onWorkspaceChanged,
+  workspaceChangeMatches,
+} from "@/lib/atrium/workspace-change-event";
 import { ArtifactSandbox } from "./ArtifactSandbox";
 import { CodeEditor } from "./CodeEditor";
 import "@/styles/atrium-content.css";
@@ -123,6 +127,37 @@ async function performRestore(args: {
     );
   } finally {
     setRestoring(false);
+  }
+}
+
+/**
+ * Preview a selected version's code. Module-level (setters threaded in) for the
+ * same reason `performRestore` is — it keeps the component body under the
+ * max-lines-per-function lint.
+ */
+async function performSelectVersion(args: {
+  versionId: string;
+  loadCode: (versionId: string | null) => Promise<string | null>;
+  setState: React.Dispatch<React.SetStateAction<LoadState>>;
+  setMessage: (v: string | null) => void;
+  setRestoreNotice: (v: string | null) => void;
+}): Promise<void> {
+  const { versionId, loadCode, setState, setMessage, setRestoreNotice } = args;
+  setState("loading");
+  // A stale restore caption for a previously-selected version would mislead once
+  // a different version is being previewed.
+  setRestoreNotice(null);
+  try {
+    // loadCode's own seq token makes the latest selection win.
+    await loadCode(versionId);
+  } catch (err) {
+    // loadCode handles `isSuccess: false` internally, but a throw from the server
+    // action itself (non-2xx / network failure) escapes it. Without this catch the
+    // rejection is unhandled and the canvas stays stuck in "loading" with no error
+    // surfaced — mirror the initial useEffect's try/catch. Token-guard so a stale
+    // selection doesn't clobber a newer one.
+    setState((prev) => (prev === "loading" ? "error" : prev));
+    setMessage(err instanceof Error ? err.message : "Failed to load version");
   }
 }
 
@@ -384,6 +419,46 @@ function ArtifactPreviewFrame({
   );
 }
 
+/**
+ * Refetch the canvas when a Nexus workspace chat tool reports it changed this
+ * artifact (#1749).
+ *
+ * A chat edit creates a new version SERVER-side and nothing about that reaches
+ * this component, so without the signal the canvas keeps rendering the version it
+ * loaded at mount until the user reloads the page — for a chat-built dashboard
+ * that reads as "I don't see any data". Re-runs the SAME pair the mount effect
+ * runs: refresh the version list, then load the new head (`loadCode` selects it).
+ * `loadCode` owns the staleness token, so `refreshVersions` runs untokened here
+ * for exactly the reason it does at mount.
+ *
+ * The mode pin lives on `WorkspacePanel`, which refetches on the same event; its
+ * new `dataAccess` remounts the sandbox through the frame key.
+ *
+ * Extracted from the component body to keep it inside the 150-line lint budget.
+ */
+function useWorkspaceChangeRefresh(
+  objectIdRef: React.RefObject<string | null>,
+  refreshVersions: (seq?: number) => Promise<VersionSummary[] | null>,
+  loadCode: (versionId: string | null) => Promise<string | null>
+): void {
+  useEffect(
+    () =>
+      onWorkspaceChanged((detail) => {
+        if (!workspaceChangeMatches(detail, objectIdRef.current)) return;
+        void (async () => {
+          try {
+            await Promise.all([refreshVersions(), loadCode(null)]);
+          } catch {
+            // A failed refresh leaves the currently-rendered version in place —
+            // never replace a working preview with an error because a background
+            // refetch hiccuped. `loadCode` already surfaces its own load errors.
+          }
+        })();
+      }),
+    [objectIdRef, refreshVersions, loadCode]
+  );
+}
+
 export function ArtifactCanvas(props: ArtifactCanvasProps) {
   const { idOrSlug, canEdit = false, sandboxSrc = null } = props;
   const [tab, setTab] = useState<Tab>("preview");
@@ -497,25 +572,10 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
     };
   }, [refreshVersions, loadCode]);
 
+  useWorkspaceChangeRefresh(objectIdRef, refreshVersions, loadCode);
   const handleSelectVersion = useCallback(
-    async (versionId: string) => {
-      setState("loading");
-      // A stale restore caption for a previously-selected version would mislead
-      // once a different version is being previewed.
-      setRestoreNotice(null);
-      try {
-        // loadCode's own seq token makes the latest selection win.
-        await loadCode(versionId);
-      } catch (err) {
-        // loadCode handles `isSuccess: false` internally, but a throw from the
-        // server action itself (non-2xx / network failure) escapes it. Without
-        // this catch the rejection is unhandled and the canvas stays stuck in
-        // "loading" with no error surfaced — mirror the initial useEffect's
-        // try/catch. Token-guard so a stale selection doesn't clobber a newer one.
-        setState((prev) => (prev === "loading" ? "error" : prev));
-        setMessage(err instanceof Error ? err.message : "Failed to load version");
-      }
-    },
+    (versionId: string) =>
+      performSelectVersion({ versionId, loadCode, setState, setMessage, setRestoreNotice }),
     [loadCode]
   );
 

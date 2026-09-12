@@ -20,6 +20,7 @@ import {
   useConnectorToolsOptional,
   type ConnectorServerInfo,
 } from "./connector-tool-context";
+import { useWorkspaceChangeSignal } from "./use-workspace-change-signal";
 import type { McpToolResult } from "@/lib/mcp/types";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { ToolArgsRecoveryBoundary } from "@/components/assistant-ui/tool-args-recovery-boundary";
@@ -383,6 +384,12 @@ function getPreviewText(parsed: ParsedResult[]): string {
  */
 export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
   const { toolName, argsText, result } = props;
+  // #1749: this is the single `toolFallback` every workspace tool call renders
+  // through, so it is where a completed workspace edit becomes the
+  // `atrium:workspace-changed` signal the panel/canvas refetch on. Called BEFORE
+  // the non-connector early return below (hooks may not sit after a conditional
+  // return) — workspace tools are not connector tools and take that branch.
+  useWorkspaceChangeSignal(toolName, result);
   const connectorCtx = useConnectorToolsOptional();
   const connectorInfo = connectorCtx?.getConnectorInfo(toolName);
 

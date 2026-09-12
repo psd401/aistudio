@@ -18,13 +18,17 @@
  * duplicated; the full-page experience stays one click away.
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { X, ExternalLink } from "lucide-react";
 import {
   loadWorkspacePanelAction,
   type WorkspacePanelData,
 } from "@/actions/db/atrium/workspace-panel";
+import {
+  onWorkspaceChanged,
+  workspaceChangeMatches,
+} from "@/lib/atrium/workspace-change-event";
 import { DocumentEditor } from "./DocumentEditor";
 import { ArtifactCanvas } from "./ArtifactCanvas";
 
@@ -52,11 +56,18 @@ export function WorkspacePanel({ idOrSlug, onClose }: WorkspacePanelProps) {
     setState({ status: "loading" });
   }
 
+  // The resolved object UUID of the payload currently rendered (`idOrSlug` may be
+  // a slug). Read by the change listener to decide whether an event that names an
+  // objectId is about THIS panel.
+  const loadedObjectIdRef = useRef<string | null>(null);
+
   useEffect(() => {
     let cancelled = false;
+    loadedObjectIdRef.current = null;
     void loadWorkspacePanelAction(idOrSlug).then((result) => {
       if (cancelled) return;
       if (result.isSuccess) {
+        loadedObjectIdRef.current = result.data.id;
         setState({ status: "ready", data: result.data });
       } else {
         setState({
@@ -69,6 +80,32 @@ export function WorkspacePanel({ idOrSlug, onClose }: WorkspacePanelProps) {
       cancelled = true;
     };
   }, [idOrSlug]);
+
+  // #1749: a chat tool that edits the open object (or flips its `dataAccess`)
+  // must be reflected here without a page reload — the pinned mode this panel
+  // hands `ArtifactCanvas` comes from THIS payload, so a stale one renders the
+  // new code under the old mode and a query-mode dashboard shows no data.
+  //
+  // Deliberately does NOT reset to "loading": that would tear the panel's subtree
+  // down and remount `ArtifactCanvas` / `DocumentEditor` mid-conversation. A
+  // failed refresh keeps the currently-rendered payload rather than replacing a
+  // working panel with an error.
+  const refresh = useCallback(() => {
+    void loadWorkspacePanelAction(idOrSlug).then((result) => {
+      if (!result.isSuccess) return;
+      loadedObjectIdRef.current = result.data.id;
+      setState({ status: "ready", data: result.data });
+    });
+  }, [idOrSlug]);
+
+  useEffect(
+    () =>
+      onWorkspaceChanged((detail) => {
+        if (!workspaceChangeMatches(detail, loadedObjectIdRef.current)) return;
+        refresh();
+      }),
+    [refresh]
+  );
 
   return (
     <aside

@@ -389,6 +389,15 @@ function buildStreamingResponseHeaders(params: {
   return headers;
 }
 
+
+/**
+ * Multi-step (agent-loop) bounds. Ten steps is the bound for a
+ * save/forget/read→edit→confirm chain; a workspace BUILD turn additionally has to
+ * explore the data before it writes any code, so it gets twenty (#1749).
+ */
+const DEFAULT_MAX_STEPS = 10;
+const WORKSPACE_MAX_STEPS = 20;
+
 /**
  * Execute streaming and return response
  */
@@ -512,7 +521,17 @@ async function executeStreaming(params: {
     // maxSteps enables multi-step tool use (agent loop). Needed when MCP,
     // workspace, repository, or memory tools are active. Ten is the hard bound
     // for a save/forget/read→edit→confirm chain.
-    maxSteps: multiStepToolsActive ? 10 : undefined,
+    //
+    // #1749: a workspace BUILD turn is a different shape. "Build a dashboard
+    // connected to the data MCP" explores the data with several connector calls
+    // BEFORE it reads the artifact and writes the code, so one failed query and a
+    // retry exhausted ten steps and the turn ended with prose promising work that
+    // never happened. Workspace tools raise the bound to twenty.
+    maxSteps: multiStepToolsActive
+      ? hasWorkspaceTools
+        ? WORKSPACE_MAX_STEPS
+        : DEFAULT_MAX_STEPS
+      : undefined,
     options: { reasoningEffort, responseMode },
     callbacks: {
       onFinish: createOnFinishCallback({
