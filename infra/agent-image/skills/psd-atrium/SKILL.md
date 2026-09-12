@@ -202,6 +202,10 @@ node run.js create-artifact --title "Chart" --code "<html><style>…</style><scr
 >   only sanctioned data path.
 > - `img-src` allows `data:` URLs and the same allowlisted CDN origin; images from
 >   any other host are blocked the same silent way.
+> - `font-src` allows **only** `data:` — it is never widened by the CDN allowlist.
+>   A Google Fonts `<link>` (or any webfont URL) silently fails and the page falls
+>   back to a system font. Use a system font stack, or embed the face as a
+>   `data:` URI inside your inline `<style>`.
 
 ### Persist data inside an artifact (`window.AtriumData`)
 

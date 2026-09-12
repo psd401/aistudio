@@ -162,23 +162,29 @@ check("infra/cdk.json sets a parseable atriumAllowedArtifactCdns default", () =>
     fs.readFileSync(path.join(process.cwd(), "infra", "cdk.json"), "utf8")
   ) as { context?: Record<string, unknown> };
   const raw = cdkJson.context?.atriumAllowedArtifactCdns;
-  assert.equal(
-    typeof raw,
-    "string",
+  // assert.ok narrows (`asserts value`); assert.equal does not, so this avoids a
+  // `raw as string` cast that the compiler would not actually be checking.
+  assert.ok(
+    typeof raw === "string",
     "infra/cdk.json context.atriumAllowedArtifactCdns must be a comma-separated string"
   );
-  const parsed = parseAllowedArtifactCdns(raw as string);
+  const entries = raw.split(",").filter((s) => s.trim().length > 0);
   assert.ok(
-    parsed.length > 0,
-    "every entry in atriumAllowedArtifactCdns must normalize to a valid http(s) origin"
+    entries.length > 0,
+    "infra/cdk.json context.atriumAllowedArtifactCdns must list at least one origin"
   );
   // Every raw entry must survive normalization — a typo'd origin would be
-  // silently dropped from the CSP while still reading as "configured".
-  assert.equal(
-    parsed.length,
-    (raw as string).split(",").filter((s) => s.trim().length > 0).length,
-    "an entry in atriumAllowedArtifactCdns is not a valid origin and would be dropped"
-  );
+  // silently dropped from the CSP while still reading as "configured". Checked
+  // per entry rather than by comparing counts: parseAllowedArtifactCdns also
+  // dedupes, so a duplicated-but-valid origin would otherwise be misreported as
+  // a typo and send whoever debugs it hunting for one that isn't there.
+  for (const entry of entries) {
+    assert.equal(
+      parseAllowedArtifactCdns(entry).length,
+      1,
+      `atriumAllowedArtifactCdns entry "${entry.trim()}" is not a valid http(s) origin and would be dropped from the CSP`
+    );
+  }
 });
 
 // --- buildArtifactCspGuidance (#1750) --------------------------------------
@@ -197,6 +203,19 @@ check("buildArtifactCspGuidance names the allowed origins and demands a pinned v
   assert.match(s, /https:\/\/cdnjs\.cloudflare\.com/);
   assert.match(s, /pin an exact version/);
   assert.match(s, /blocked silently/);
+});
+
+// A model reading only "external scripts are blocked EXCEPT from <cdn>" can
+// conclude its own script has to come from that CDN. Both branches must say
+// outright that inline script/style is the normal way to build an artifact.
+check("buildArtifactCspGuidance says inline script and style are allowed in both branches", () => {
+  for (const s of [
+    buildArtifactCspGuidance([]),
+    buildArtifactCspGuidance(["https://cdnjs.cloudflare.com"]),
+  ]) {
+    assert.match(s, /INLINE/);
+    assert.match(s, /<script> and <style> are allowed/);
+  }
 });
 
 check("buildArtifactCspGuidance defaults to the process env allowlist", () => {

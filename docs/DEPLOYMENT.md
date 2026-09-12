@@ -8,6 +8,7 @@ This guide explains how to deploy the AI Studio infrastructure using AWS CDK wit
 - [Cost Allocation Tags](#cost-allocation-tags-for-billing)
 - [Initial Setup](#initial-setup)
 - [Environment Variables](#environment-variables)
+  - [CDK Context Values](#cdk-context-values)
 - [Stack Deployment](#stack-deployment)
 - [DNS and Certificate Configuration](#dns-and-certificate-configuration)
 - [Database Initialization](#database-initialization)
@@ -193,7 +194,7 @@ sandbox stack and the frontend stack together:
 
 ```bash
 cd infra
-bunx cdk deploy AIStudio-AtriumSandboxStack-Dev AIStudio-FrontendStack-Dev \
+bunx cdk deploy AIStudio-AtriumSandboxStack-Dev AIStudio-FrontendStack-ECS-Dev \
   --context baseDomain=aistudio.psd401.ai
 ```
 
@@ -404,7 +405,7 @@ mcp__awslabs-postgres-mcp-server__run_query --sql \
 # expect status = 'completed' before proceeding
 
 # 2. Only then deploy the app code
-cd infra && bunx cdk deploy AIStudio-FrontendStack-Dev
+cd infra && bunx cdk deploy AIStudio-FrontendStack-ECS-Dev
 ```
 
 For destructive migrations, also run any orphan-detection query the migration's

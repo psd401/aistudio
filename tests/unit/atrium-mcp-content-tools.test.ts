@@ -180,12 +180,18 @@ describe("Atrium MCP content tools — sandbox CSP authoring rule (#1750)", () =
   it("carries the CSP rule on every artifact-authoring surface", () => {
     const createArtifact = CONTENT_MCP_TOOLS.find((t) => t.name === "create_artifact");
     expect(createArtifact?.description).toContain(CSP_MARKER);
-    // The `code` property description too: some clients surface only the
-    // per-argument help when the model is filling the call in.
-    expect(createArtifact?.inputSchema.properties.code?.description).toContain(CSP_MARKER);
 
     const createVersion = CONTENT_MCP_TOOLS.find((t) => t.name === "create_version");
     expect(createVersion?.description).toContain(CSP_MARKER);
+  });
+
+  // The rule is ~500 characters and rides in every turn these tools are bound.
+  // It belongs on the tool description (which every MCP client surfaces) once —
+  // repeating it on the `code` argument doubled the cost for no added reach,
+  // since the input schema and the description reach the model together.
+  it("states the rule once per tool, not once per argument", () => {
+    const createArtifact = CONTENT_MCP_TOOLS.find((t) => t.name === "create_artifact");
+    expect(createArtifact?.inputSchema.properties.code?.description).not.toContain(CSP_MARKER);
   });
 
   it("states the no-network rule, not just the script rule", () => {
@@ -213,6 +219,20 @@ describe("buildArtifactCspGuidance (#1750)", () => {
     expect(s).toContain("pin an exact version");
     // The silent-failure warning is the whole point of the issue.
     expect(s).toContain("blocked silently");
+  });
+
+  // A model that reads only "external scripts are blocked EXCEPT from <cdn>"
+  // can conclude its OWN script must come from that CDN too. Both branches have
+  // to say outright that inline script/style is allowed — that is the normal way
+  // to build an artifact, and the CDN is the exception.
+  it("says inline script and style are allowed in both branches", () => {
+    for (const s of [
+      buildArtifactCspGuidance([]),
+      buildArtifactCspGuidance(["https://cdnjs.cloudflare.com"]),
+    ]) {
+      expect(s).toContain("INLINE");
+      expect(s).toContain("<script> and <style> are allowed");
+    }
   });
 
   it("lists every configured origin", () => {

@@ -174,8 +174,11 @@ function defineBuildWorkspaceChatToolsSuite1Part1() {
     getMock.mockResolvedValue(ART);
     canEditMock.mockReturnValue(true);
     const result = await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" });
-    const description = (result!.tools.update_workspace_artifact as { description?: string })
-      .description;
+    // No cast: `Tool.description` is declared on every member of the ToolSet
+    // union, so reading it directly keeps the compiler checking that the AI SDK
+    // still has the field. A `{ description?: string }` cast would keep
+    // compiling and silently read undefined if the SDK ever renamed it.
+    const description = result!.tools.update_workspace_artifact.description;
     expect(description).toContain("SANDBOX CSP:");
     expect(description).toContain("connect-src 'none'");
     expect(result!.systemPromptFragment).toContain("locked-down sandbox");

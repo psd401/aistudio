@@ -125,23 +125,25 @@ export function parseAllowedArtifactCdns(
  * silently. This string is the single source of truth for that rule; every
  * authoring surface appends it to what the model reads before it writes code.
  *
- * Exported as a builder (not a constant) so the sentence always reflects the
- * deployment's real allowlist rather than a hardcoded origin that could drift
- * from the CSP the browser actually enforces.
+ * Defaults to the deployment's real allowlist (`ATRIUM_ALLOWED_ARTIFACT_CDNS`,
+ * the same value the CSP is rendered from) so the sentence can never name an
+ * origin the browser does not actually permit. The explicit `allowedCdns`
+ * parameter exists so tests can cover both deployment shapes without mutating
+ * the environment.
  */
 export function buildArtifactCspGuidance(
   allowedCdns: SandboxOrigin[] = parseAllowedArtifactCdns()
 ): string {
   const base =
-    "SANDBOX CSP: the artifact runs under a strict Content-Security-Policy with no network access at all (connect-src 'none', so fetch/XHR/WebSocket are blocked).";
+    "SANDBOX CSP: the artifact runs under a strict Content-Security-Policy. Write your own JavaScript and CSS INLINE in the artifact — inline <script> and <style> are allowed and are the intended way to build one — but the artifact can never reach the network from code (connect-src 'none', so fetch/XHR/WebSocket are blocked).";
   if (allowedCdns.length === 0) {
     return (
       `${base} It also permits no external scripts or styles at all — a <script src> or <link href> to any origin is blocked silently (the page renders, the feature is just dead). ` +
-      "Write every script and style inline, and draw charts with inline SVG or a <canvas> painted by inline code."
+      "Draw charts with inline SVG or a <canvas> painted by inline code."
     );
   }
   return (
-    `${base} External scripts and styles are blocked EXCEPT from these origins: ${allowedCdns.join(", ")} — pin an exact version in the URL (never "latest"), because an allowlisted CDN serves code with the artifact's own privileges. ` +
+    `${base} The only external scripts and styles it may load are from these origins: ${allowedCdns.join(", ")} — pin an exact version in the URL (never "latest"), because an allowlisted CDN serves code with the artifact's own privileges. ` +
     "Anything loaded from another origin is blocked silently (the page renders, the feature is just dead), so prefer inline SVG or a <canvas> painted by inline code when a library is not worth the dependency."
   );
 }

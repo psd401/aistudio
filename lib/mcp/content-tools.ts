@@ -32,6 +32,12 @@ const DATA_ACCESS_DESC =
 // also reads). Without this in the tool description a model asked for a dashboard
 // reaches for a chart library on an arbitrary CDN, the script is blocked with no
 // error, and the artifact renders with empty charts that nobody can diagnose.
+//
+// Read once at module load, which is deliberate: this module is a static tool
+// manifest and the env var is fixed for an ECS task's lifetime, so a per-call
+// read would buy nothing. If the allowlist ever moves to a hot-reloadable source
+// (e.g. settings-manager's DB cache), this const is the line that has to change —
+// it would keep serving the boot-time value while per-call readers moved on.
 const ARTIFACT_CSP_DESC = buildArtifactCspGuidance();
 const SOURCE_REF_DESC =
   "Create-only structured provenance. Capture clients use { type: 'capture', provider, externalId, clientSurface: 'browser'|'mac', clientVersion, capturedAt, sourceOrigins? }. Source origins are normalized to scheme+host+port; arbitrary telemetry is rejected.";
@@ -92,10 +98,7 @@ export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
       properties: {
         title: { type: "string", description: "Artifact title" },
         collection: { type: "string", description: "Collection slug or id (optional)" },
-        code: {
-          type: "string",
-          description: "Artifact source (HTML/JS or JSX). " + ARTIFACT_CSP_DESC,
-        },
+        code: { type: "string", description: "Artifact source (HTML/JS or JSX)" },
         bodyFormat: { type: "string", enum: ["html", "jsx"], description: "Body format" },
         codeEncoding: {
           type: "string",
