@@ -15,8 +15,13 @@ import { authenticateContext } from "./helpers/session-auth";
  * DETERMINISTIC: the browser-side signal is dispatched directly rather than
  * waiting on a live model to decide to call a tool. What is proven here is the
  * half that only a real browser can prove — that the mounted panel and canvas
- * actually refetch on the event, with no page reload. That the TOOL emits the
- * signal is unit-covered (tests/unit/nexus-workspace-change-signal.test.tsx).
+ * actually refetch on the event, with no page reload.
+ *
+ * The other half — that a completed tool call EMITS the signal from a tool card
+ * the user never expanded — is unit-covered by
+ * tests/unit/nexus-tool-group-workspace-signal.test.tsx (the collapsed-card
+ * regression) and tests/unit/nexus-workspace-change-signal.test.tsx (the
+ * fire-once / history-replay / error-result contract).
  *
  * Uses the seeded private artifact from tests/e2e/fixtures/atrium-editor-seed.sql
  * on the authed host :3100 server (see docs/guides/e2e-authenticated-testing.md).

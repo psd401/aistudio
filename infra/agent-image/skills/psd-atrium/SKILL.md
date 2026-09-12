@@ -248,8 +248,11 @@ Rules — follow all of them:
 - **Aggregate in SQL.** A chart query should return tens of rows, not a dataset.
   Every call is a Lambda + database round trip.
 - **Page detail tables** with `limit` / `offset` instead of one huge read.
-- **Pass filters as query parameters** and re-query when the user changes them —
-  do not fetch everything once and filter in JavaScript.
+- **There are no bound parameters.** `query()` accepts the SQL string plus
+  `{ limit, offset }` and nothing else — never concatenate a user-typed value
+  into the SQL. Fetch an aggregated/bounded result set and filter it in
+  JavaScript, or pick between a fixed set of predicates you wrote (a dropdown of
+  known values), re-querying when the choice changes.
 - **Test it before you publish it.** The bridge is live on the authoring
   surfaces — the full-screen viewer (`/atrium/<id>/view`, which the create/edit
   response links to), the editor canvas, and the "Open beside chat" panel — so

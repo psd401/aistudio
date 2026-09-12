@@ -183,6 +183,90 @@ describe("ArtifactCanvas reloads on its owner's refreshSignal", () => {
   });
 });
 
+describe("ArtifactCanvas stages the data-access pin with the code", () => {
+  const canvas = (dataAccess: string, refreshSignal: number) => (
+    <ArtifactCanvas
+      idOrSlug="obj-1"
+      canEdit
+      sandboxSrc="https://s.test/render"
+      dataBridgeEnabled={true}
+      contentId="obj-1"
+      dataAccess={dataAccess as "records" | "query" | "none"}
+      refreshSignal={refreshSignal}
+    />
+  );
+
+  it("keeps the OLD mode until the new code has loaded", async () => {
+    const { rerender } = render(canvas("records", 0));
+    await waitFor(() =>
+      expect(screen.getByTestId("sandbox").getAttribute("data-data-access")).toBe("records")
+    );
+
+    // The chat saved new query-mode code; the panel refetched and now hands down
+    // BOTH the new mode and a bumped signal in one commit.
+    let releaseCode: (v: unknown) => void = () => {};
+    getCodeMock.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        releaseCode = resolve;
+      })
+    );
+    await act(async () => {
+      rerender(canvas("query", 1));
+      await Promise.resolve();
+    });
+
+    // The frame key contains the mode: adopting it now would remount the OLD
+    // code under the NEW bridge capability for the length of the fetch.
+    expect(screen.getByTestId("sandbox").getAttribute("data-data-access")).toBe("records");
+
+    await act(async () => {
+      releaseCode({
+        isSuccess: true,
+        data: { objectId: "obj-1", versionId: "ver-2", code: "<p>v2</p>", bodyFormat: "html" },
+      });
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("sandbox").getAttribute("data-data-access")).toBe("query")
+    );
+  });
+
+  it("keeps the old mode AND the working preview when the reload fails", async () => {
+    const { rerender } = render(canvas("records", 0));
+    await waitFor(() => expect(screen.getByTestId("sandbox")).toBeInTheDocument());
+
+    getCodeMock.mockResolvedValueOnce({ isSuccess: false, message: "boom" });
+    await act(async () => {
+      rerender(canvas("query", 1));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(getCodeMock).toHaveBeenCalledTimes(2));
+    // A background refetch that hiccuped must never blank a working preview, and
+    // the pin stays on the mode the rendered version was authored for.
+    expect(screen.getByTestId("sandbox").getAttribute("data-data-access")).toBe("records");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("applies a mode change that arrives WITHOUT a refresh (Content settings)", async () => {
+    const { rerender } = render(canvas("records", 0));
+    await waitFor(() =>
+      expect(screen.getByTestId("sandbox").getAttribute("data-data-access")).toBe("records")
+    );
+
+    // `router.refresh()` after a Content-settings flip re-renders this instance
+    // with a new mode and no new code — #1712 requires it to apply at once.
+    await act(async () => {
+      rerender(canvas("query", 0));
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId("sandbox").getAttribute("data-data-access")).toBe("query");
+    // ...and no reload was triggered: the signal did not change.
+    expect(getCodeMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("WorkspacePanel refetches on atrium:workspace-changed", () => {
   it("re-runs the panel loader so a changed dataAccess reaches the canvas", async () => {
     render(<WorkspacePanel idOrSlug="obj-1" onClose={() => {}} />);
