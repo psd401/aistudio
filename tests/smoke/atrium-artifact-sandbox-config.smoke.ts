@@ -58,6 +58,20 @@ function withEnv(overrides: Partial<Record<(typeof ENV_KEYS)[number], string | u
   }
 }
 
+// Every `https://…` origin a guidance sentence names, in order of appearance.
+//
+// Asserting on this rather than `guidance.includes("https://some.cdn")` is both
+// the stronger check — the guidance must name the allowlisted origins and NO
+// others, so it can never promise one the CSP blocks — and the one CodeQL is
+// happy with: a substring/regex test against a URL constant is an incomplete
+// host check (js/incomplete-url-substring-sanitization,
+// js/regex/missing-regexp-anchor), because the constant can appear anywhere in
+// the subject. The pattern here carries no hostname of its own; it just
+// tokenizes, and the comparison that decides the test is an exact one.
+function originsNamedIn(guidance: string): string[] {
+  return (guidance.match(/https:\/\/[^\s,)'"`]+/g) ?? []).map((o) => o.replace(/[.,;:]+$/, ""));
+}
+
 // --- normalizeOrigin -------------------------------------------------------
 check("normalizeOrigin strips path + trailing slash to canonical origin", () => {
   assert.equal(normalizeOrigin("https://a.example.com/render/"), "https://a.example.com");
@@ -200,12 +214,10 @@ check("buildArtifactCspGuidance tells an author to inline everything when no CDN
 
 check("buildArtifactCspGuidance names the allowed origins and demands a pinned version", () => {
   const s = buildArtifactCspGuidance(["https://cdnjs.cloudflare.com"]);
-  // `includes`, not a regex: an unanchored URL pattern is a host-check bypass
-  // in real code, and CodeQL flags it (js/regex/missing-regexp-anchor) even in
-  // a test. A substring check is what is meant here anyway.
-  assert.ok(
-    s.includes("https://cdnjs.cloudflare.com"),
-    "guidance must name the allowlisted origin"
+  assert.deepEqual(
+    originsNamedIn(s),
+    ["https://cdnjs.cloudflare.com"],
+    "guidance must name the allowlisted origin and no other"
   );
   assert.match(s, /pin an exact version/);
   assert.match(s, /blocked silently/);
@@ -226,8 +238,9 @@ check("buildArtifactCspGuidance says inline script and style are allowed in both
 
 check("buildArtifactCspGuidance defaults to the process env allowlist", () => {
   withEnv({ ATRIUM_ALLOWED_ARTIFACT_CDNS: "https://cdn.example.com" }, () => {
-    assert.ok(
-      buildArtifactCspGuidance().includes("https://cdn.example.com"),
+    assert.deepEqual(
+      originsNamedIn(buildArtifactCspGuidance()),
+      ["https://cdn.example.com"],
       "guidance must read the allowlist from the environment"
     );
   });
