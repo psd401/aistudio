@@ -129,6 +129,13 @@ test.describe("Atrium content v1 endpoints — unauthenticated 401 (always-run)"
     ).toBe(404);
   });
 
+  // #1763: the grant list names every principal with access, so the read is
+  // editor-gated. Anonymous must not get as far as the 404 mask.
+  test("GET /api/v1/content/[id]/visibility -> 401", async ({ request }) => {
+    const res = await request.get(`/api/v1/content/${SOME_ID}/visibility`);
+    expect(res.status()).toBe(401);
+  });
+
   test("PATCH /api/v1/content/[id]/visibility -> 401", async ({ request }) => {
     const res = await request.patch(`/api/v1/content/${SOME_ID}/visibility`, {
       data: { level: "internal" },

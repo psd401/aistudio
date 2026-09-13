@@ -3,6 +3,7 @@
 const getUserByEmailMock = jest.fn()
 const requesterForUserIdMock = jest.fn()
 const assertContentAuthoringCapabilityMock = jest.fn()
+const readVisibilityForEditMock = jest.fn()
 const resolveCollectionIdMock = jest.fn()
 const contentListMock = jest.fn()
 const contentCreateMock = jest.fn()
@@ -20,6 +21,8 @@ const collectionManageableListMock = jest.fn()
 const collectionCreateMock = jest.fn()
 const collectionUpdateMock = jest.fn()
 const contentGetMock = jest.fn()
+const contentLoadForEditMock = jest.fn()
+const grantsForMock = jest.fn()
 
 const dataLimitMock = jest.fn()
 const dataOrderByMock = jest.fn(() => ({ limit: dataLimitMock }))
@@ -64,6 +67,10 @@ jest.mock("@/lib/content/surface-helpers", () => ({
       ? `/c/${object.slug}`
       : `/atrium/${object.id}/${object.kind === "artifact" ? "view" : "edit"}`,
   resolveCollectionId: (...args: unknown[]) => resolveCollectionIdMock(...args),
+}))
+jest.mock("@/lib/content/visibility-read", () => ({
+  readVisibilityForEdit: (...args: unknown[]) =>
+    readVisibilityForEditMock(...args),
 }))
 jest.mock("@/lib/content", () => {
   class MockContentError extends Error {
@@ -115,7 +122,7 @@ jest.mock("@/lib/content", () => {
       get: (...args: unknown[]) => contentGetMock(...args),
       update: jest.fn(),
       createVersion: jest.fn(),
-      loadForEdit: jest.fn(),
+      loadForEdit: (...args: unknown[]) => contentLoadForEditMock(...args),
       delete: (...args: unknown[]) => contentDeleteMock(...args),
     },
     collectionManagementService: {
@@ -137,7 +144,10 @@ jest.mock("@/lib/content", () => {
       initiate: (...args: unknown[]) => assetInitiateMock(...args),
       complete: (...args: unknown[]) => assetCompleteMock(...args),
     },
-    visibilityService: { setLevel: jest.fn() },
+    visibilityService: {
+      setLevel: jest.fn(),
+      grantsFor: (...args: unknown[]) => grantsForMock(...args),
+    },
     publishService: {
       publish: (...args: unknown[]) => publishMock(...args),
       unpublish: jest.fn(),
@@ -660,6 +670,69 @@ describe("signed-owner Atrium mutations", () => {
         meta: { requestId: "request-publish-reader" },
       },
     })
+  })
+})
+
+describe("signed-owner Atrium visibility reads (#1763)", () => {
+  // The edit gate and the read's shape live in `readVisibilityForEdit`, shared
+  // with the REST v1 route so the two surfaces cannot drift apart on who may
+  // enumerate an audience; both are pinned in
+  // `atrium-visibility-read.test.ts`. What the BROKER owns is routing
+  // this path to that helper as the signed owner, and staying off the authoring
+  // gate while doing it.
+  it("returns the actual grant entries for an editor, not just a count (#1763)", async () => {
+    readVisibilityForEditMock.mockResolvedValue({
+      id: "content-1",
+      visibility: {
+        visibilityLevel: "group",
+        grants: [
+          { kind: "role", value: "staff" },
+          { kind: "building", value: "GHS" },
+        ],
+      },
+    })
+    await expect(
+      executeOwnerAtriumOperation({
+        ownerEmail: "owner@psd401.net",
+        requestId: "request-visibility",
+        method: "GET",
+        path: "/content-1/visibility",
+      })
+    ).resolves.toEqual({
+      httpStatus: 200,
+      payload: {
+        data: {
+          id: "content-1",
+          visibility: {
+            visibilityLevel: "group",
+            grants: [
+              { kind: "role", value: "staff" },
+              { kind: "building", value: "GHS" },
+            ],
+          },
+        },
+        meta: { requestId: "request-visibility" },
+      },
+    })
+    expect(readVisibilityForEditMock).toHaveBeenCalledWith(
+      requester,
+      "content-1"
+    )
+    // Reading your own audience is not authoring.
+    expect(assertContentAuthoringCapabilityMock).not.toHaveBeenCalled()
+  })
+
+  it("masks a grant read the requester may not edit", async () => {
+    readVisibilityForEditMock.mockRejectedValueOnce(
+      new NotFoundError("Content not found")
+    )
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "request-visibility-masked",
+      method: "GET",
+      path: "/content-1/visibility",
+    })
+    expect(result.httpStatus).toBe(404)
   })
 })
 

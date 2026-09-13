@@ -24,6 +24,7 @@ import {
   contentSurfaceLink,
   resolveCollectionId,
 } from "@/lib/content/surface-helpers"
+import { readVisibilityForEdit } from "@/lib/content/visibility-read"
 import { contentSourceRefSchema } from "@/lib/content/source-ref"
 import {
   createCollectionBodySchema,
@@ -351,6 +352,19 @@ async function executeTwoSegmentRead(
   if (operation === "assets") {
     const assets = await contentAssetService.list(req, contentId)
     return success(assets, input.requestId)
+  }
+
+  // Current audience: level + the ACTUAL grant entries (#1763). `GET /<id>`
+  // returns only a `grantCount` integer, and `PATCH /<id>/visibility`
+  // REPLACES the grant set — so without this read an agent narrowing or
+  // widening an object has to guess what the existing grants were, and a wrong
+  // guess silently destroys access nobody can recover (there is no grant
+  // history). `readVisibilityForEdit` holds the edit gate and the response
+  // shape so this branch and the REST v1 GET cannot drift apart on who may see
+  // an audience. Reading your own audience is not authoring, so this stays on
+  // the near side of the authoring-capability assert alongside `source`.
+  if (operation === "visibility") {
+    return success(await readVisibilityForEdit(req, contentId), input.requestId)
   }
 
   if (operation !== "data") return null

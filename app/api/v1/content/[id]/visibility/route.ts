@@ -1,5 +1,6 @@
 /**
  * Atrium Content Visibility Endpoint (Issue #1055, Phase 5 §23, §26.4)
+ * GET   /api/v1/content/:id/visibility — read visibility level + group grants
  * PATCH /api/v1/content/:id/visibility — set visibility level + group grants
  *
  * Mirrors the MCP set_visibility tool. The route loads the object (enforces
@@ -31,7 +32,46 @@ import {
   restVisibilitySchema,
 } from "@/lib/content/rest";
 import { assertContentAuthoringCapability } from "@/lib/content/surface-helpers";
+import { readVisibilityForEdit } from "@/lib/content/visibility-read";
 import { createLogger } from "@/lib/logger";
+
+/**
+ * GET — the CURRENT level plus the actual grant entries (#1763).
+ *
+ * `GET /api/v1/content/:id` exposes only a `grantCount` integer, and the PATCH
+ * below REPLACES the grant set rather than merging into it. Without a read the
+ * only way to narrow or widen an object is to re-send a guessed grant list, and
+ * a wrong guess silently drops access that no audit trail can restore.
+ *
+ * The load, the edit gate and the response shape live in
+ * `readVisibilityForEdit` so this route and the agent broker cannot drift apart
+ * on who may see an audience; see that helper for why the gate is EDIT rather
+ * than view, and why the authoring capability deliberately does not apply.
+ *
+ * `content:read` is the right scope: this is a read, and it matches every other
+ * GET on this surface. The paired PATCH keeps `content:update` because it
+ * writes.
+ */
+export const GET = withApiAuth(async (request: NextRequest, auth, requestId, params) => {
+  const scopeError = requireScope(auth, "content:read", requestId);
+  if (scopeError) return scopeError;
+
+  const id = params.id;
+  if (!id) {
+    return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Missing content id");
+  }
+
+  const resolved = await resolveRestRequester(auth, requestId);
+  if ("response" in resolved) return resolved.response;
+  const { req } = resolved;
+
+  try {
+    const data = await readVisibilityForEdit(req, id);
+    return createApiResponse({ data, meta: { requestId } }, requestId);
+  } catch (err) {
+    return contentErrorToResponse(err, requestId);
+  }
+});
 
 export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId, params) => {
   const scopeError = requireScope(auth, "content:update", requestId);

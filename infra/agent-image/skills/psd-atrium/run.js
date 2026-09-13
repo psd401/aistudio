@@ -35,8 +35,11 @@
  *                    [--body-format markdown|html|jsx] [--summary <s>]
  *   node run.js archive --id <id>
  *   node run.js delete --id <id>
- *   node run.js set-visibility --id <id> --level private|group|internal|public
- *                    [--grants role:staff,building:GHS]
+ *   node run.js read-grants --id <idOrSlug>
+ *   node run.js set-visibility --id <id> [--level private|group|internal|public]
+ *                    [--grants role:staff,building:GHS]           (REPLACES the list)
+ *                    [--add-grants k:v,...] [--remove-grants k:v,...]  (merge; keeps
+ *                     the stored level — --level is required only when NOT merging)
  *   node run.js list-collections
  *   node run.js create-collection --name <name> [--scope private|district]
  *                    [--parent <uuid|root>] [--position <n>]
@@ -118,6 +121,8 @@ function usage() {
       '  list-data --id <idOrSlug> --namespace <name> [--limit <1-200>]',
       '            (artifact records for teacher-facing dashboards)',
       '  list-assets --id <idOrSlug>',
+      "  read-grants --id <idOrSlug>   (who can see it: level + the ACTUAL grants;",
+      "                                 `read` shows only a grantCount integer)",
       '',
       'Images (authored assets — the canonical way to put a picture in a document):',
       '  upload-asset --id <id> --file <png|jpeg|webp> [--alt <text>] [--filename <name>]',
@@ -138,8 +143,13 @@ function usage() {
       '  archive --id <id>   (soft-remove: status -> archived, stays findable)',
       '  delete  --id <id>   (HARD delete: permanent; owner/admin only; refused',
       '                       while published — unpublish everywhere first)',
-      '  set-visibility --id <id> --level private|group|internal|public',
-      '                 [--grants role:staff,building:GHS]',
+      '  set-visibility --id <id> [--level private|group|internal|public]',
+      '                 [--grants role:staff,building:GHS]  REPLACES every grant',
+      '                 [--add-grants k:v,...] [--remove-grants k:v,...]  merge into',
+      '                 the stored list instead (keeps the current level; --level',
+      '                 is required only when NOT merging)',
+      '                 kinds: role|building|department|grade|group|user — `group`',
+      '                 takes a group email, `user` a numeric id (never an email)',
       '',
       'Collections (private for every owner; district requires administrator):',
       '  list-collections',
@@ -713,17 +723,137 @@ async function deleteObject(args) {
   emit({ ...payload, deleted: true });
 }
 
+/** Identity of a grant for dedupe: the (kind, value) pair IS the grant. */
+function grantKey(grant) {
+  return `${grant.kind}:${grant.value}`;
+}
+
+/**
+ * Read the CURRENT audience of an object: its level plus the ACTUAL grant
+ * entries (#1763).
+ *
+ * `read` reports only a `grantCount` integer, and `set-visibility --grants`
+ * REPLACES the grant list. Before #1763 an agent narrowing or widening an
+ * object had to guess the entries behind that count, and a wrong guess silently
+ * dropped access that no audit trail could restore. Always read here first
+ * (or use --add-grants/--remove-grants, which read for you).
+ *
+ * Requires EDIT rights on the object: the grant list names every principal with
+ * access, so a viewer cannot enumerate it.
+ */
+async function readGrants(args) {
+  const id = requireStr(args, 'id', 'id');
+  const { id: objectId, level, grants } = await fetchVisibility(id);
+  emit({
+    id: objectId,
+    visibilityLevel: level,
+    grants,
+    grantCount: grants.length,
+    note:
+      'These are the exact audience entries stored for this object. ' +
+      '`set-visibility --grants` REPLACES this list — pass --add-grants / ' +
+      '--remove-grants instead to change it without dropping the rest.',
+  });
+}
+
+/**
+ * The one GET of an object's stored audience: used both by `read-grants` (which
+ * formats it for the caller) and by the merge path (which computes against it).
+ */
+async function fetchVisibility(id) {
+  const { payload } = await restFetch(
+    'GET',
+    `/${encodeURIComponent(id)}/visibility`
+  );
+  const visibility = (payload && payload.visibility) || {};
+  return {
+    id: payload && payload.id,
+    level: visibility.visibilityLevel,
+    grants: Array.isArray(visibility.grants) ? visibility.grants : [],
+  };
+}
+
+/**
+ * Read-modify-write the stored grant list for --add-grants/--remove-grants.
+ *
+ * Returns the level to send with it: the caller's --level when given, otherwise
+ * the STORED level, so a pure grant edit can never move the audience level as a
+ * side effect.
+ */
+async function mergeGrants(id, requestedLevel, addGrants, removeGrants) {
+  const current = await fetchVisibility(id);
+  const level = requestedLevel || current.level;
+  const removeKeys = new Set((removeGrants || []).map(grantKey));
+  const merged = new Map();
+  for (const grant of current.grants) {
+    if (!removeKeys.has(grantKey(grant))) merged.set(grantKey(grant), grant);
+  }
+  for (const grant of addGrants || []) {
+    // A grant named in BOTH --add-grants and --remove-grants is kept: an
+    // explicit add is the more specific instruction, and dropping it would
+    // silently discard the access the caller just asked for.
+    merged.set(grantKey(grant), grant);
+  }
+  const grants = [...merged.values()];
+  // Both server rules (lib/content/visibility-service.ts assertWritableLevel)
+  // would reject the merge result with a 400 whose remedy is a DIFFERENT flag,
+  // so say what to do instead rather than spending the write on a certain 400.
+  if (grants.length > 0 && level !== 'group') {
+    // Say what --level group COSTS. From `private` (owner plus any preserved
+    // user grant) it is a real widen, not a syntax fix: group admits everyone
+    // matching ANY entry in the merged list, not just the one being added.
+    fail(
+      `grants only apply to group visibility, but this object is "${level}" — ` +
+        'pass --level group to apply them, which WIDENS the audience to ' +
+        'everyone matching any entry in the merged list, not only the grant ' +
+        'you are adding'
+    );
+  }
+  if (grants.length === 0 && level === 'group') {
+    fail(
+      'that would leave a group object with no grants, which is visible to ' +
+        'nobody but its owner — pass --level internal (or private) to narrow ' +
+        'it instead of emptying the grant list'
+    );
+  }
+  return { level, grants };
+}
+
 async function setVisibility(args) {
   const id = requireStr(args, 'id', 'id');
-  const level = optEnum(args, 'level', 'level', LEVELS);
-  if (!level) fail('--level private|group|internal|public is required');
-  const grants = parseGrants(args.grants, 'grants');
+  const requestedLevel = optEnum(args, 'level', 'level', LEVELS);
+  const replaceGrants = parseGrants(args.grants, 'grants');
+  const addGrants = parseGrants(args.add_grants, 'add-grants');
+  const removeGrants = parseGrants(args.remove_grants, 'remove-grants');
+  const merging = Boolean(addGrants || removeGrants);
+
+  // --grants is a wholesale replace; --add-grants/--remove-grants are a
+  // read-modify-write of the same field. Accepting both would make the result
+  // depend on an ordering the caller never stated, so it is a usage error.
+  if (replaceGrants && merging) {
+    fail('pass either --grants (replace) or --add-grants/--remove-grants (merge), not both');
+  }
+  if (!merging && !requestedLevel) {
+    fail('--level private|group|internal|public is required');
+  }
+
+  const resolved = merging
+    ? await mergeGrants(id, requestedLevel, addGrants, removeGrants)
+    : { level: requestedLevel, grants: replaceGrants };
+  const { level, grants } = resolved;
+
   const { approvalRequired, payload } = await restFetch(
     'PATCH',
     `/${encodeURIComponent(id)}/visibility`,
     { body: grants ? { level, grants } : { level } }
   );
-  emit(approvalRequired ? { ...payload, approvalRequired: true } : payload);
+  if (approvalRequired) {
+    emit({ ...payload, approvalRequired: true });
+    return;
+  }
+  // Echo the grants that were actually written so a merge caller can see the
+  // resulting list without a second read.
+  emit(grants ? { ...payload, grants } : payload);
 }
 
 async function publishObject(args) {
@@ -785,6 +915,7 @@ const COMMANDS = {
   'restore-collection': (args) => setCollectionArchived(args, false),
   delete: deleteObject,
   'set-visibility': setVisibility,
+  'read-grants': readGrants,
   publish: publishObject,
   unpublish: unpublishObject,
 };

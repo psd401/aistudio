@@ -3164,6 +3164,55 @@ paths:
     parameters:
       - $ref: "#/components/parameters/contentIdPath"
 
+    get:
+      operationId: getContentVisibility
+      tags: [Content]
+      summary: Read content visibility and grants
+      description: |
+        Returns the object's current visibility `level` and the actual `grants`
+        entries. `GET /content/{id}` exposes only a `grantCount` integer, and the
+        `PATCH` below REPLACES the grant set rather than merging into it — so
+        without this read the only way to narrow or widen an object is to re-send
+        a guessed grant list, and a wrong guess silently drops access that no
+        audit trail can restore (issue #1763). Read it before every PATCH that
+        changes grants.
+
+        Gated on **edit**, not view: the route loads the object through
+        `loadForEdit` (404-masking a non-viewable object before the 403). The
+        grant set names every principal with access — including the numeric user
+        id behind a `user` grant — so a caller who can only VIEW the object
+        cannot enumerate its audience. Requires `content:read`.
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Current visibility level and grants
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentVisibilityReadResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
     patch:
       operationId: setContentVisibility
       tags: [Content]
@@ -3173,6 +3222,11 @@ paths:
         route loads the object (enforcing view permission, 404-masked) and gates
         edit before mutating. Mirrors the MCP `set_visibility` tool. Requires
         `content:update`.
+
+        **`grants` REPLACES the stored grant set — it does not append.** Read the
+        current entries with `GET /content/{id}/visibility` first and send the
+        full intended list; a partial list silently revokes the grants it omits,
+        and there is no grant history to restore them from (issue #1763).
 
         **Public-publish gate (§26.4):** widening to `level: "public"` without
         `content:publish_public` is NOT an error — it returns **HTTP 202** with
@@ -4950,6 +5004,14 @@ components:
           enum: [role, building, department, grade, user, group]
         value:
           type: string
+          description: >-
+            Matched against the principal's own attribute for that kind. Two
+            kinds constrain the format and are rejected with a 400 otherwise:
+            `user` is the numeric AI Studio user id (never an email), and
+            `group` is a synced group email. `role` is a role NAME (e.g.
+            "staff"), never a role id. The rest (building, department, grade)
+            carry the attribute string verbatim.
+          example: staff
 
     CollectionDiscoveryNode:
       type: object
@@ -5846,6 +5908,39 @@ components:
                 visibilityLevel:
                   type: string
                   enum: [private, group, internal, public]
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId:
+              type: string
+
+    ContentVisibilityReadResponse:
+      type: object
+      required: [data, meta]
+      description: |
+        The stored visibility level plus the ACTUAL grant entries. `grants` is
+        empty for every level other than `group` (only group visibility is
+        grant-keyed).
+      properties:
+        data:
+          type: object
+          required: [id, visibility]
+          properties:
+            id:
+              type: string
+              format: uuid
+            visibility:
+              type: object
+              required: [visibilityLevel, grants]
+              properties:
+                visibilityLevel:
+                  type: string
+                  enum: [private, group, internal, public]
+                grants:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/VisibilityGrant"
         meta:
           type: object
           required: [requestId]
