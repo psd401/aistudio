@@ -3,6 +3,14 @@ type: Infrastructure Overview
 title: AWS CDK Infrastructure
 description: AWS CDK infrastructure with ECS Fargate, Aurora Serverless v2, Cognito authentication, and modular construct library for K-12 AI platform deployment.
 tags: [infrastructure, cdk, aws, deployment, ecs]
+openwiki:
+  roles: [infrastructure, operations]
+  source_paths:
+    - infra/test/agent-skill-cdn-allowlist.test.ts
+    - infra/test/atrium-sandbox-csp.test.ts
+    - infra/lib/atrium-sandbox-stack.ts
+  test_paths:
+    - infra/test/agent-skill-cdn-allowlist.test.ts
 ---
 
 # Infrastructure
@@ -400,6 +408,36 @@ The allowlist is:
 
 **Invariant**: Every origin in the allowlist enlarges the trusted surface for ALL artifacts. Keep the list minimal and add origins only on request. The `connect-src` directive remains `'none'`, so the no-egress invariant holds regardless of CDN entries.
 
+### Agent-Skill CDN Drift Guard (#1764)
+
+**Source**: `/infra/test/agent-skill-cdn-allowlist.test.ts`
+
+Agent skills are static prose documents baked into the agent image, built and deployed separately from the app. Without a gate, a skill can confidently instruct a model to load a library from an origin the CSP then blocks silently—the page renders, the feature is dead, and nothing errors. This is the exact failure mode that #1750 fixed, relocated to a surface with no automated link to the source of truth.
+
+The drift guard test prevents this by asserting alignment between `atriumAllowedArtifactCdns` and the guidance files:
+
+**Default-Deny Host Detection**: Every absolute URL extracted from `.md`/`.html` files under `/infra/agent-image/skills/` must have its host classified into one of three categories:
+
+| Category | Meaning | Example |
+|----------|---------|---------|
+| **Allowlisted** | Origins in `atriumAllowedArtifactCdns` | `cdnjs.cloudflare.com` |
+| **Documented-as-blocked** | Counter-examples steering models away from known failures | `fonts.googleapis.com` (font-src is hardcoded `data:`) |
+| **Non-asset reference** | Documentation links, API endpoints, PSD properties—exempt from script/style checks | `github.com`, `docs.google.com` |
+
+**Key Invariants**:
+
+1. **No unclassified hosts**: Every extracted host must appear in one of the three sets—default-deny catches unpredicted origins
+2. **Allowlist documents all usable CDNs**: If an origin is in the CSP, the skills must name it
+3. **Blocked and allowlisted sets stay disjoint**: A host cannot be both usable and documented as blocked
+4. **Known CDN vendors flagged even as bare hosts**: "just use unpkg.com" without scheme is still caught
+5. **Non-asset exemption cannot waive through CDNs**: The exemption list is for documentation hosts only; a real CDN can never be parked there
+
+**Why predetermined lists cannot work**: The risk is a skill naming an origin nobody predicted. A shortlist of known CDN hosts would pass exactly the drift it should catch. Default-deny is structural.
+
+**Focused Tests**: `/infra/test/agent-skill-cdn-allowlist.test.ts`
+
+**CI Integration**: Runs in the same "Validate CDK Infrastructure" job as other infrastructure tests (`.github/workflows/ci.yml`).
+
 ### Deployment Requirement
 
 When changing `atriumAllowedArtifactCdns`, both stacks must be deployed together:
@@ -414,6 +452,7 @@ This ensures the CSP enforced by the sandbox matches the guidance the app provid
 
 **Focused Tests**:
 - `/infra/test/atrium-sandbox-csp.test.ts` — validates CSP construction from allowlist
+- `/infra/test/agent-skill-cdn-allowlist.test.ts` — gates agent skill guidance against CSP allowlist (#1764)
 - `/tests/smoke/atrium-artifact-sandbox-config.smoke.ts` — smoke test for runtime CSP config
 - `/tests/unit/atrium-mcp-content-tools.test.ts` — validates CSP guidance in MCP tools
 
@@ -494,6 +533,7 @@ Infrastructure uses Jest with @swc/jest transformer (migrated from ts-jest for T
 | Lambda tests | `/infra/**/__tests__/*.test.ts` | Unit tests for Lambda handlers |
 | CSP validation | `/infra/test/atrium-sandbox-csp.test.ts` | Artifact sandbox CSP construction |
 | Alarm routing | `/infra/test/agent-alarm-delivery.test.ts` | Dual-topic alarm delivery validation |
+| CDN drift guard | `/infra/test/agent-skill-cdn-allowlist.test.ts` | Agent skill guidance vs. sandbox CSP allowlist consistency |
 
 **Execution**:
 
