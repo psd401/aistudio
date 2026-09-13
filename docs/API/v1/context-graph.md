@@ -2043,11 +2043,61 @@ ETag derived from the normalized digest.
 
 ### Visibility
 
+#### `GET /api/v1/content/{id}/visibility`
+
+Read the object's current visibility `level` **and the actual `grants` entries**.
+`GET /content/{id}` exposes only a `grantCount` integer, and the `PATCH` below
+REPLACES the grant set rather than merging into it — so without this read the only
+way to narrow or widen an object is to re-send a guessed grant list, and a wrong
+guess silently drops access that no audit trail can restore (issue #1763). Read it
+before every `PATCH` that changes grants. Requires `content:read`.
+
+Gated on **edit**, not view: the route loads the object through `loadForEdit`
+(404-masking a non-viewable object before the 403). The grant set names every
+principal with access — including the numeric user id behind a `user` grant — so a
+caller who can only VIEW the object cannot enumerate its audience.
+
+**Example request:**
+
+```bash
+curl -H "Authorization: Bearer sk-your-key" \
+  "https://your-domain/api/v1/content/a1b2c3d4-e5f6-7890-abcd-ef1234567890/visibility"
+```
+
+**Response `200`**
+
+```json
+{
+  "data": {
+    "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "visibility": {
+      "visibilityLevel": "group",
+      "grants": [
+        { "kind": "role", "value": "staff" },
+        { "kind": "building", "value": "HS" }
+      ]
+    }
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+`grants` is empty for every level other than `group` — only group visibility is
+grant-keyed.
+
+**Response `403`** — `CONTENT_FORBIDDEN` (caller may view but not edit this object).
+**Response `404`** — `CONTENT_NOT_FOUND` (also the mask for a non-viewable object).
+
 #### `PATCH /api/v1/content/{id}/visibility`
 
 Set the visibility `level` and (for `group`) the widening `grants`. The route loads
 the object (enforcing view permission, 404-masked) and gates edit before mutating.
 Requires `content:update`.
+
+**`grants` REPLACES the stored grant set — it does not append.** Read the current
+entries with `GET /content/{id}/visibility` first and send the full intended list;
+a partial list silently revokes the grants it omits, and there is no grant history
+to restore them from (issue #1763).
 
 **Request body** (the Visibility object):
 

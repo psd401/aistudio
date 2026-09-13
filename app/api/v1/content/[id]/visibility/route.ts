@@ -1,5 +1,6 @@
 /**
  * Atrium Content Visibility Endpoint (Issue #1055, Phase 5 §23, §26.4)
+ * GET   /api/v1/content/:id/visibility — read visibility level + group grants
  * PATCH /api/v1/content/:id/visibility — set visibility level + group grants
  *
  * Mirrors the MCP set_visibility tool. The route loads the object (enforces
@@ -32,6 +33,57 @@ import {
 } from "@/lib/content/rest";
 import { assertContentAuthoringCapability } from "@/lib/content/surface-helpers";
 import { createLogger } from "@/lib/logger";
+
+/**
+ * GET — the CURRENT level plus the actual grant entries (#1763).
+ *
+ * `GET /api/v1/content/:id` exposes only a `grantCount` integer, and the PATCH
+ * below REPLACES the grant set rather than merging into it. Without a read the
+ * only way to narrow or widen an object is to re-send a guessed grant list, and
+ * a wrong guess silently drops access that no audit trail can restore.
+ *
+ * Gated on EDIT, not view, via `loadForEdit` (404-masks a non-viewable object
+ * before the 403). The grant set names every principal with access — including
+ * the numeric `users.id` behind a `user` grant — which an owner never intended
+ * to expose to grantees, so a caller who can only VIEW the object must not be
+ * able to enumerate its grants. This mirrors `getVisibilityAction`, which also
+ * returns grants to editors only.
+ *
+ * Deliberately does NOT call `assertContentAuthoringCapability`: that gate
+ * exists for authoring writes, and reading back an object you already own is
+ * not authoring. Adding it here would hide an owner's own audience from them
+ * over a capability that only governs mutation.
+ */
+export const GET = withApiAuth(async (request: NextRequest, auth, requestId, params) => {
+  const scopeError = requireScope(auth, "content:read", requestId);
+  if (scopeError) return scopeError;
+
+  const id = params.id;
+  if (!id) {
+    return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Missing content id");
+  }
+
+  const resolved = await resolveRestRequester(auth, requestId);
+  if ("response" in resolved) return resolved.response;
+  const { req } = resolved;
+
+  try {
+    const obj = await contentService.loadForEdit(req, id);
+    const grants = await visibilityService.grantsFor(obj.id);
+    return createApiResponse(
+      {
+        data: {
+          id: obj.id,
+          visibility: { visibilityLevel: obj.visibilityLevel, grants },
+        },
+        meta: { requestId },
+      },
+      requestId
+    );
+  } catch (err) {
+    return contentErrorToResponse(err, requestId);
+  }
+});
 
 export const PATCH = withApiAuth(async (request: NextRequest, auth, requestId, params) => {
   const scopeError = requireScope(auth, "content:update", requestId);

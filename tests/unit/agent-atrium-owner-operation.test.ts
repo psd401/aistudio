@@ -20,6 +20,8 @@ const collectionManageableListMock = jest.fn()
 const collectionCreateMock = jest.fn()
 const collectionUpdateMock = jest.fn()
 const contentGetMock = jest.fn()
+const contentLoadForEditMock = jest.fn()
+const grantsForMock = jest.fn()
 
 const dataLimitMock = jest.fn()
 const dataOrderByMock = jest.fn(() => ({ limit: dataLimitMock }))
@@ -115,7 +117,7 @@ jest.mock("@/lib/content", () => {
       get: (...args: unknown[]) => contentGetMock(...args),
       update: jest.fn(),
       createVersion: jest.fn(),
-      loadForEdit: jest.fn(),
+      loadForEdit: (...args: unknown[]) => contentLoadForEditMock(...args),
       delete: (...args: unknown[]) => contentDeleteMock(...args),
     },
     collectionManagementService: {
@@ -137,7 +139,10 @@ jest.mock("@/lib/content", () => {
       initiate: (...args: unknown[]) => assetInitiateMock(...args),
       complete: (...args: unknown[]) => assetCompleteMock(...args),
     },
-    visibilityService: { setLevel: jest.fn() },
+    visibilityService: {
+      setLevel: jest.fn(),
+      grantsFor: (...args: unknown[]) => grantsForMock(...args),
+    },
     publishService: {
       publish: (...args: unknown[]) => publishMock(...args),
       unpublish: jest.fn(),
@@ -660,6 +665,62 @@ describe("signed-owner Atrium mutations", () => {
         meta: { requestId: "request-publish-reader" },
       },
     })
+  })
+})
+
+describe("signed-owner Atrium visibility reads (#1763)", () => {
+  it("returns the actual grant entries for an editor, not just a count (#1763)", async () => {
+    contentLoadForEditMock.mockResolvedValue({
+      id: "content-1",
+      visibilityLevel: "group",
+    })
+    grantsForMock.mockResolvedValue([
+      { kind: "role", value: "staff" },
+      { kind: "building", value: "GHS" },
+    ])
+    await expect(
+      executeOwnerAtriumOperation({
+        ownerEmail: "owner@psd401.net",
+        requestId: "request-visibility",
+        method: "GET",
+        path: "/content-1/visibility",
+      })
+    ).resolves.toEqual({
+      httpStatus: 200,
+      payload: {
+        data: {
+          id: "content-1",
+          visibility: {
+            visibilityLevel: "group",
+            grants: [
+              { kind: "role", value: "staff" },
+              { kind: "building", value: "GHS" },
+            ],
+          },
+        },
+        meta: { requestId: "request-visibility" },
+      },
+    })
+    // Editor-gated: the grant list names every principal with access, so it
+    // goes through loadForEdit (404-mask then edit gate), never a bare view.
+    expect(contentLoadForEditMock).toHaveBeenCalledWith(requester, "content-1")
+    expect(grantsForMock).toHaveBeenCalledWith("content-1")
+    // Reading your own audience is not authoring.
+    expect(assertContentAuthoringCapabilityMock).not.toHaveBeenCalled()
+  })
+
+  it("masks a grant read the requester may not edit and loads no grants", async () => {
+    contentLoadForEditMock.mockRejectedValueOnce(
+      new NotFoundError("Content not found")
+    )
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "request-visibility-masked",
+      method: "GET",
+      path: "/content-1/visibility",
+    })
+    expect(result.httpStatus).toBe(404)
+    expect(grantsForMock).not.toHaveBeenCalled()
   })
 })
 

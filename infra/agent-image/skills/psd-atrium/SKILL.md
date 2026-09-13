@@ -65,6 +65,10 @@ node run.js read --id <uuid-or-slug>
 
 # Read a DOCUMENT's committed body text. This is the one command that returns it.
 node run.js read-source --id <uuid-or-slug>
+
+# Read who can see it: the level plus the ACTUAL grant entries. `read` reports
+# only a grantCount integer, and set-visibility --grants REPLACES the list.
+node run.js read-grants --id <uuid-or-slug>
 ```
 
 `find` filters: `--kind document|artifact`, `--collection <slug|id>`, `--tag <t>`,
@@ -558,13 +562,35 @@ admits the recipient, or say plainly that it is not yet viewable.
 ### Change who can view it
 
 ```bash
+node run.js read-grants --id <id>                      # READ the audience FIRST
 node run.js set-visibility --id <id> --level internal
+node run.js set-visibility --id <id> --add-grants user:cabinet@psd401.net
+node run.js set-visibility --id <id> --remove-grants building:GHS
 node run.js set-visibility --id <id> --level group --grants role:staff,building:GHS
 ```
 
 This is the ONLY thing that changes the audience. Setting a level never
 publishes, and publishing never changes a level — the two are independent, and a
 shareable page needs both (Live, plus a level that admits the recipient).
+
+**`--grants` REPLACES the whole grant list — it does not append.** `read` shows
+only a `grantCount` integer, so before #1763 an object with `grantCount: 1` gave
+you no way to learn what that one grant was; re-sending a guessed list silently
+destroyed access nobody could restore (Atrium keeps no grant history). Two rules
+follow:
+
+- To ADD or DROP one grant, use `--add-grants` / `--remove-grants`. They read the
+  stored list, merge your change into it, and keep the object's current level
+  unless you also pass `--level`. Entries are `kind:value`, comma-separated,
+  deduplicated — safe to re-run.
+- Only use `--grants` when you intend the list to be EXACTLY what you pass, and
+  run `read-grants` first so you know what you are replacing.
+
+`read-grants --id <id>` returns the level plus the actual `grants: [{kind,
+value}]` entries. It needs EDIT rights on the object — the list names every
+principal with access, so someone who can merely view the object cannot
+enumerate its audience. Grants apply only to level `group`: on any other level
+the stored list is empty, and adding a grant requires `--level group` too.
 
 ## Output contract
 

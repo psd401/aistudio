@@ -115,6 +115,10 @@ describe("POST /api/agent/atrium", () => {
     ["POST", "/collections"],
     ["PATCH", "/collections/f9999999-9999-4999-8999-999999999999"],
     ["GET", "/content-1/source"],
+    // #1763 — the grant-list read. Its PATCH counterpart replaces the grant
+    // set, so the GET has to be reachable or an agent narrows an audience by
+    // guessing what it is overwriting.
+    ["GET", "/content-1/visibility"],
     ["GET", "/content-1/assets"],
     ["GET", "/content-1/assets/asset-1/bytes"],
     ["POST", "/content-1/assets"],
@@ -158,6 +162,11 @@ describe("POST /api/agent/atrium", () => {
     ["POST", "/content-1/assets/asset-1"],
     ["POST", "/content-1/assets/asset-1/complete/extra"],
     ["POST", "/content-1/source"],
+    // The visibility read is exact: no deeper nesting, and the write verb
+    // stays PATCH (a POST/DELETE on it is not an agent-reachable operation).
+    ["GET", "/content-1/visibility/grants"],
+    ["POST", "/content-1/visibility"],
+    ["DELETE", "/content-1/visibility"],
     ["DELETE", "/content-1/assets/asset-1"],
     ["PATCH", "/content-1/assets"],
     ["DELETE", "/collections/content-1"],

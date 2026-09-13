@@ -10,7 +10,8 @@
  *   create-artifact → POST   /            (kind=artifact, code→body)
  *   edit (replace)  → POST   /<id>/versions
  *   edit (append)   → GET /<id> then POST /<id>/versions (concatenated body)
- *   set-visibility  → PATCH  /<id>/visibility
+ *   read-grants     → GET    /<id>/visibility  (#1763 — the ACTUAL grant list)
+ *   set-visibility  → PATCH  /<id>/visibility  (+ --add-grants/--remove-grants merge)
  *   publish         → POST   /<id>/publish     (+ approval_required relay)
  *   unpublish       → DELETE /<id>/publish/<destination>
  *
@@ -675,6 +676,154 @@ test('set-visibility PATCHes /<id>/visibility with level + grants', async () => 
   await run('set-visibility', '--id', 'obj-1', '--level', 'group', '--grants', 'role:staff');
   expect(restCalls[0]).toMatchObject({ method: 'PATCH', path: '/obj-1/visibility' });
   expect(restCalls[0].opts.body).toEqual({ level: 'group', grants: [{ kind: 'role', value: 'staff' }] });
+});
+
+test('read-grants GETs /<id>/visibility and emits the actual grant entries', async () => {
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: {
+      id: 'obj-1',
+      visibility: {
+        visibilityLevel: 'group',
+        grants: [{ kind: 'role', value: 'staff' }, { kind: 'building', value: 'GHS' }],
+      },
+    },
+  });
+  await run('read-grants', '--id', 'obj-1');
+  expect(restCalls[0]).toMatchObject({ method: 'GET', path: '/obj-1/visibility' });
+  expect(emitted[0]).toMatchObject({
+    id: 'obj-1',
+    visibilityLevel: 'group',
+    grants: [{ kind: 'role', value: 'staff' }, { kind: 'building', value: 'GHS' }],
+    grantCount: 2,
+  });
+  // The replace-vs-merge warning is the whole point of #1763 — an agent that
+  // reads the list must be told that --grants would overwrite it.
+  expect(emitted[0].note).toContain('REPLACES');
+});
+
+test('read-grants tolerates a payload with no grant list', async () => {
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: { id: 'obj-1', visibility: { visibilityLevel: 'internal' } },
+  });
+  await run('read-grants', '--id', 'obj-1');
+  expect(emitted[0]).toMatchObject({ visibilityLevel: 'internal', grants: [], grantCount: 0 });
+});
+
+test('set-visibility --add-grants merges into the stored grants instead of replacing', async () => {
+  restResponder = (call) =>
+    call.method === 'GET'
+      ? {
+          approvalRequired: false,
+          status: 200,
+          payload: {
+            id: 'obj-1',
+            visibility: {
+              visibilityLevel: 'group',
+              grants: [{ kind: 'role', value: 'staff' }],
+            },
+          },
+        }
+      : { approvalRequired: false, status: 200, payload: { id: 'obj-1' } };
+  await run('set-visibility', '--id', 'obj-1', '--add-grants', 'user:cabinet@psd401.net');
+  expect(restCalls[0]).toMatchObject({ method: 'GET', path: '/obj-1/visibility' });
+  expect(restCalls[1]).toMatchObject({ method: 'PATCH', path: '/obj-1/visibility' });
+  // The pre-existing grant SURVIVES, and the stored level is reused so a grant
+  // edit cannot silently move the audience level.
+  expect(restCalls[1].opts.body).toEqual({
+    level: 'group',
+    grants: [
+      { kind: 'role', value: 'staff' },
+      { kind: 'user', value: 'cabinet@psd401.net' },
+    ],
+  });
+});
+
+test('set-visibility --remove-grants drops only the named grant', async () => {
+  restResponder = (call) =>
+    call.method === 'GET'
+      ? {
+          approvalRequired: false,
+          status: 200,
+          payload: {
+            id: 'obj-1',
+            visibility: {
+              visibilityLevel: 'group',
+              grants: [
+                { kind: 'role', value: 'staff' },
+                { kind: 'building', value: 'GHS' },
+              ],
+            },
+          },
+        }
+      : { approvalRequired: false, status: 200, payload: { id: 'obj-1' } };
+  await run('set-visibility', '--id', 'obj-1', '--remove-grants', 'building:GHS');
+  expect(restCalls[1].opts.body).toEqual({
+    level: 'group',
+    grants: [{ kind: 'role', value: 'staff' }],
+  });
+});
+
+test('set-visibility --add-grants de-duplicates a grant that already exists', async () => {
+  restResponder = (call) =>
+    call.method === 'GET'
+      ? {
+          approvalRequired: false,
+          status: 200,
+          payload: {
+            id: 'obj-1',
+            visibility: {
+              visibilityLevel: 'group',
+              grants: [{ kind: 'role', value: 'staff' }],
+            },
+          },
+        }
+      : { approvalRequired: false, status: 200, payload: { id: 'obj-1' } };
+  await run('set-visibility', '--id', 'obj-1', '--add-grants', 'role:staff');
+  expect(restCalls[1].opts.body).toEqual({
+    level: 'group',
+    grants: [{ kind: 'role', value: 'staff' }],
+  });
+});
+
+test('set-visibility rejects mixing --grants with --add-grants', async () => {
+  await expect(
+    run('set-visibility', '--id', 'obj-1', '--level', 'group', '--grants', 'role:staff', '--add-grants', 'building:GHS')
+  ).rejects.toMatchObject({ code: 1 });
+  expect(restCalls).toHaveLength(0);
+});
+
+test('set-visibility refuses --add-grants on a non-group object without --level group', async () => {
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: { id: 'obj-1', visibility: { visibilityLevel: 'internal', grants: [] } },
+  });
+  await expect(
+    run('set-visibility', '--id', 'obj-1', '--add-grants', 'building:GHS')
+  ).rejects.toMatchObject({ code: 1 });
+  // Read only — nothing was written on a request the server would 400 anyway.
+  expect(restCalls).toHaveLength(1);
+  expect(restCalls[0].method).toBe('GET');
+});
+
+test('set-visibility --add-grants honors an explicit --level group on a non-group object', async () => {
+  restResponder = (call) =>
+    call.method === 'GET'
+      ? {
+          approvalRequired: false,
+          status: 200,
+          payload: { id: 'obj-1', visibility: { visibilityLevel: 'internal', grants: [] } },
+        }
+      : { approvalRequired: false, status: 200, payload: { id: 'obj-1' } };
+  await run('set-visibility', '--id', 'obj-1', '--level', 'group', '--add-grants', 'building:GHS');
+  expect(restCalls[1].opts.body).toEqual({
+    level: 'group',
+    grants: [{ kind: 'building', value: 'GHS' }],
+  });
 });
 
 test('publish POSTs /<id>/publish with the destination (default intranet)', async () => {
