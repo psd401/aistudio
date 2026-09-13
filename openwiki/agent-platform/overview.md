@@ -27,7 +27,7 @@ infra/agent-image/skills/{skill-name}/
 ### Skill Categories
 
 **Administrative & District Operations**
-- `psd-atrium` — Read/search/create content in Atrium; artifact data persistence (list-data, submit); viewer-scoped PSD data queries from artifacts via shared connector resolution with Nexus
+- `psd-atrium` — Read/search/create content in Atrium; artifact data persistence (list-data, submit); viewer-scoped PSD data queries from artifacts via shared connector resolution with Nexus; CSP guidance for artifact scripts/styles (inline preferred, CDN allowlist enforced)
 - `psd-freshservice` — Freshservice tickets, service catalog items, approvals, and team summaries using each caller's own API key; create catalog request forms with field validation
 - `psd-email-triage` — Automated email response drafting
 - `psd-schedules` — Scheduled agent tasks (cron/rate/at) with read access for scheduled-mode turns; reply IS the delivery — never hunt for DM
@@ -41,7 +41,7 @@ infra/agent-image/skills/{skill-name}/
 - `psd-aistudio` — Live capability discovery + authenticated actions in AI Studio
 - `psd-learning-page` — Multimodal UDL learning page generation
 - `psd-hyperframes` — HTML/CSS/JS to MP4 video rendering
-- `psd-html-artifact` — HTML artifacts published to Atrium with WCAG 2.2 AA audit, delivered as internal reader pages (not S3)
+- `psd-html-artifact` — HTML artifacts published to Atrium with WCAG 2.2 AA audit, delivered as internal reader pages (not S3); enforces strict CSP — inline scripts/styles only, external CDN limited to allowlist (default: cdnjs.cloudflare.com), connect-src blocked
 - `psd-print-pdf` — HTML to printable PDF with headless Chromium (8.5×11, letter, A4, landscape), honouring `@page` CSS, flexbox, and web fonts; routes through agent-media Lambda
 - `psd-media` — ffprobe inspection + ffmpeg transcode via named presets (`social-mp4`, `web-mp4`, `audio-mp3`); routes through agent-media Lambda
 - `psd-transcribe` — Speech-to-text using Amazon Transcribe over audio/video in owner's private workspace; routes through agent-media Lambda
@@ -95,6 +95,37 @@ The `psd-print-pdf`, `psd-media`, and `psd-transcribe` skills route through a sh
 - Removes scratch objects on all exit paths (important for transcription: the transport copy is someone's voice)
 
 The relay injects `workspacePrefix` from the web-verified invocation context — the caller never states who it is, preventing cross-owner access. Publishing stays separate through `psd-publish-file` and its sensitivity gate.
+
+### Artifact Content Security Policy (#1750)
+
+**Problem**: Atrium artifact CSP allowlist (`atriumAllowedArtifactCdns`) existed but was never set, so deployments shipped with an empty list. External `<script src>` from any CDN was silently dropped with no visible error—the page renders but charts and interactive features are dead.
+
+**Solution**: The default now lives in `infra/cdk.json` under `atriumAllowedArtifactCdns` context key (defaults to `https://cdnjs.cloudflare.com`). This single value feeds both:
+1. **Enforcement** — CSP baked into sandbox host page by `AtriumSandboxStack`
+2. **Guidance** — `ATRIUM_ALLOWED_ARTIFACT_CDNS` env var on ECS task, surfaced via `buildArtifactCspGuidance()` in tool descriptions
+
+Guidance and enforcement can never disagree because both read from the same CDK context key.
+
+**Skill-Level Guidance**: Agent skills (`psd-atrium`, `psd-html-artifact`) carry hand-written CSP guidance stating the default CDN origin and inline-script policy. These ride the agent image, not the app deploy. When updating the allowlist, grep skill files for the old origin and rebuild the agent image.
+
+**Authoring Rules for Artifacts**:
+- **Inline scripts/styles are permitted** — This is the intended way to build artifacts
+- **External scripts**: Only from allowlisted CDN (`https://cdnjs.cloudflare.com` by default); pin an exact version (not `latest`)
+- **No network requests**: `connect-src` is `'none'` — fetch/XHR/WebSocket blocked
+- **Fonts**: `font-src` allows only `data:` URIs; Google Fonts `<link>` silently fails, use system fonts or embedded data URIs
+- **Images**: `img-src` allows `data:` URLs and the CDN allowlist; other origins blocked
+- **Silent failures**: Non-allowlisted external resources load with no error—the feature is dead
+
+**Key Sources**:
+- `/infra/cdk.json` — `atriumAllowedArtifactCdns` context key
+- `/infra/lib/atrium-sandbox-stack.ts` — CSP construction from allowlist
+- `/lib/content/artifact-sandbox-config.ts` — `buildArtifactCspGuidance()` function
+- `/infra/agent-image/skills/psd-atrium/SKILL.md` — Skill-level CSP guidance
+- `/infra/agent-image/skills/psd-html-artifact/SKILL.md` — Skill-level CSP guidance
+
+**Focused Tests**:
+- `/infra/test/atrium-sandbox-csp.test.ts` — CSP construction from allowlist
+- `/tests/unit/atrium-mcp-content-tools.test.ts` — CSP guidance in MCP tool descriptions
 
 ### Bundled Skill Manifest
 
