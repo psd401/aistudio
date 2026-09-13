@@ -131,18 +131,32 @@ const ABSOLUTE_URL_HOST = /https?:\/\/([A-Za-z0-9._-]+)/g;
  * Hosts named in a chunk of guidance.
  *
  * Trailing separators are trimmed, and anything without a plausible TLD is
- * dropped: a placeholder like `https://psd-agents-dev-…​.s3.amazonaws.com` is
- * truncated by the extractor at the ellipsis, and a bare fragment is not an
- * origin a model can load from.
+ * dropped: a bucket placeholder written with an ellipsis in the hostname is
+ * truncated by the extractor at that character, and the bare fragment left over
+ * is not an origin a model can load from.
  */
 function extractHosts(contents: string): string[] {
   const hosts = new Set<string>();
   for (const match of contents.matchAll(ABSOLUTE_URL_HOST)) {
     const host = match[1].replace(/[.-]+$/, '').toLowerCase();
-    if (!/^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/.test(host)) continue;
+    if (!isPlausibleDomain(host)) continue;
     hosts.add(host);
   }
   return [...hosts];
+}
+
+/**
+ * A dotted name ending in an alphabetic TLD.
+ *
+ * Validated label-by-label rather than with one domain-shaped pattern: the
+ * natural regex for this nests a quantifier inside a repeated group, which is
+ * ambiguous enough to trip `security/detect-unsafe-regex`.
+ */
+function isPlausibleDomain(host: string): boolean {
+  const labels = host.split('.');
+  if (labels.length < 2) return false;
+  if (!labels.every((label) => /^[a-z0-9-]+$/.test(label))) return false;
+  return /^[a-z]{2,}$/.test(labels[labels.length - 1]);
 }
 
 function isDeclaredNonAsset(host: string): boolean {
