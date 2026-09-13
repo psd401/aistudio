@@ -526,6 +526,23 @@ jobs:
     - name: Build CDK TypeScript
       run: cd infra && bun run build
 
+    # 58 jest suites (~540 tests) across infra/test and infra/lambdas. These ran
+    # NOWHERE before: the root jest config ignores /infra/, and this job only ever
+    # did `bun run build` + `cdk synth`. They were also silently broken from
+    # 2026-07-27 to 2026-09-12 — the TypeScript 7 bump (#1209) removed the compiler
+    # JS API ts-jest calls — and two assertions drifted past shipped behaviour in
+    # the meantime with nothing to catch them.
+    #
+    # `bun run test` passes --runInBand; see infra/jest.config.js for why that is
+    # required rather than preferred (parallel workers deadlock on a clean
+    # checkout while staging CDK Lambda assets). Runtime is ~100s.
+    #
+    # No nested `bun install` is needed: verified on a fresh clone carrying only
+    # the two installs above, all 24 lambdas-project suites resolve their imports
+    # from the root/infra installs.
+    - name: Run infra and Lambda jest suites
+      run: cd infra && bun run test
+
     - name: Synthesize CDK stacks
       run: |
         cd infra

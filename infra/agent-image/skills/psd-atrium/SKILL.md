@@ -183,6 +183,35 @@ node run.js create-artifact --title "Chart" --code "<html><style>…</style><scr
 > JS/CSS is the intended way to build an artifact. Artifacts render only inside a
 > cross-origin sandboxed iframe, never on the app origin.
 
+> **But that JS/CSS must be INLINE. External scripts and styles are blocked by the
+> sandbox CSP, silently.** The sandbox serves `default-src 'none'` with an
+> inline-only `script-src`/`style-src`, widened for one CDN origin and nothing
+> else: **`https://cdnjs.cloudflare.com`**. A `<script src>` or `<link href>`
+> pointing anywhere else is dropped with no error a viewer or an author can see —
+> the page renders and the feature is simply dead, which is exactly how a
+> Chart.js/D3/Tailwind dashboard ends up with blank charts. Rules:
+>
+> - Put your own JS and CSS **inline** (`<script>…</script>`, `<style>…</style>`).
+> - If you need a library, load it from `https://cdnjs.cloudflare.com` and **pin an
+>   exact version in the URL** — never `latest`. An allowlisted script runs with the
+>   artifact's own privileges, so the pinned version is the mitigation.
+> - Prefer **inline SVG** or a `<canvas>` painted by inline code for charts. It has
+>   no dependency, no version to pin, and cannot be blocked.
+> - `connect-src` stays `'none'` regardless, so a library that wants to fetch data
+>   over the network cannot work here — see the `AtriumData` sections below for the
+>   only sanctioned data path.
+> - `img-src` allows `data:` URLs and the same allowlisted CDN origin; images from
+>   any other host are blocked the same silent way.
+> - **The allowlist is per deployment** (`atriumAllowedArtifactCdns`), and this
+>   file is static text baked into the agent image, so it can only state the
+>   default. The `create_artifact` / `create_version` tool descriptions are
+>   generated from the deployment's real value: if they name a different set of
+>   origins — or none — **believe them over this page** and inline everything.
+> - `font-src` allows **only** `data:` — it is never widened by the CDN allowlist.
+>   A Google Fonts `<link>` (or any webfont URL) silently fails and the page falls
+>   back to a system font. Use a system font stack, or embed the face as a
+>   `data:` URI inside your inline `<style>`.
+
 ### Persist data inside an artifact (`window.AtriumData`)
 
 Use the first-party `window.AtriumData` bridge whenever an artifact must remember
@@ -572,3 +601,8 @@ shareable page needs both (Live, plus a level that admits the recipient).
    appropriate; it is attributed to, and gated by, that user's permissions.
 7. **Persist artifact data only with `AtriumData`.** Never substitute Sheets,
    Apps Script, direct network calls, or browser storage for live artifact data.
+8. **Inline every script and style.** The sandbox CSP silently blocks external
+   scripts/styles from every origin except `https://cdnjs.cloudflare.com` (pin an
+   exact version there). Draw charts with inline SVG or `<canvas>` unless a
+   pinned cdnjs library is genuinely worth the dependency — a blocked script
+   shows up as a rendered page with a dead feature, never as an error.

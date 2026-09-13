@@ -36,6 +36,15 @@ export interface EcsServiceConstructProps {
    */
   atriumSandboxOrigin: string;
   /**
+   * Atrium artifact sandbox CDN allowlist (#1750) — comma-separated origins,
+   * the SAME value AtriumSandboxStack bakes into the sandbox CSP
+   * `script-src`/`style-src`. Injected as `ATRIUM_ALLOWED_ARTIFACT_CDNS`; the
+   * app parses it to build the one-sentence authoring rule the MCP content
+   * tools and the Nexus workspace chat hand to the model. Empty string means
+   * inline-only artifacts, which is what the guidance then says.
+   */
+  atriumAllowedArtifactCdns?: string;
+  /**
    * Atrium content events SNS topic ARN (#1055). Injected as
    * `ATRIUM_EVENTS_TOPIC_ARN`; the task role is granted `sns:Publish` on it. The
    * app's events publisher is best-effort and no-ops when unset, so this is
@@ -1117,6 +1126,11 @@ export class EcsServiceConstruct extends Construct {
       // from it and pass it down as a prop, and the middleware builds the CSP
       // frame-src from it at request time. Sourced from AtriumSandboxStack.
       ATRIUM_SANDBOX_ORIGIN: props.atriumSandboxOrigin,
+      // Atrium artifact sandbox CDN allowlist (#1750). Parity with the CSP the
+      // sandbox host actually serves: both are rendered from the same CDK
+      // context key (`atriumAllowedArtifactCdns`), so the authoring guidance the
+      // app gives a model can never promise an origin the browser then blocks.
+      ATRIUM_ALLOWED_ARTIFACT_CDNS: props.atriumAllowedArtifactCdns ?? '',
       // Atrium content events SNS topic (#1055). The app publishes content
       // lifecycle events here; the publisher no-ops when this is empty.
       ATRIUM_EVENTS_TOPIC_ARN: props.atriumEventsTopicArn ?? '',

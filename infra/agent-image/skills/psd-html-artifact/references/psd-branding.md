@@ -27,15 +27,24 @@ below; the values here are a convenience snapshot and may drift.
 
 ## Snapshot (verify against brand-config.json)
 
-**Fonts** — load via Google Fonts:
+**Fonts** — brand faces, with the fallbacks that actually render in Atrium:
 - Headings & logo text: **Josefin Sans** (Bold). Fallback `Arial, sans-serif`.
 - Body: **Josefin Slab**. Fallback `Georgia, serif`.
 
-```html
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Josefin+Sans:wght@400;700&family=Josefin+Slab:wght@400;600&display=swap" rel="stylesheet">
+> **Do NOT add a Google Fonts `<link>` to an Atrium artifact (#1750).** The
+> sandbox CSP serves `style-src 'unsafe-inline' <allowlisted CDN>` and
+> `font-src data:`, so the fonts.googleapis.com stylesheet AND the
+> fonts.gstatic.com font files are both blocked — silently. The page renders in
+> the fallback with no error, so the link buys nothing and hides the real
+> typography decision. Declare the fallbacks directly:
+
+```css
+--font-display: "Josefin Sans", Arial, Helvetica, sans-serif;
+--font-body: "Josefin Slab", Georgia, "Times New Roman", serif;
 ```
+
+The brand faces still apply anywhere they are installed locally; everywhere else
+the fallback is what the reader sees, which is why it must be chosen on purpose.
 
 **Colors** (Pacific Northwest / Puget Sound palette):
 

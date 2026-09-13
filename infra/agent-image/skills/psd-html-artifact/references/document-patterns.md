@@ -22,7 +22,9 @@ Pair with `taste-core.md` and `anti-slop-bans.md`.
 - **Mockups** of the proposed UI inline (real HTML/CSS mockups, not described in prose).
 - **Data-flow / architecture as SVG**: boxes + arrows beat an ASCII diagram. Label edges.
 - **Annotated code snippets** for the few bits the reader should review — syntax-highlight
-  (Prism/highlight.js via CDN is fine) and add margin notes for the important lines.
+  (Prism/highlight.js is fine loaded from an exact-version `https://cdnjs.cloudflare.com`
+  URL — the only origin the Atrium sandbox CSP allows; anywhere else it is blocked silently)
+  and add margin notes for the important lines.
 - End with an **Open questions** list so the reader knows the decision points.
 
 ## Code-review / PR explainer

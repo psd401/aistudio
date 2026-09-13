@@ -36,6 +36,14 @@ has data-driven SVG bar + line + sparkline + KPI patterns to copy.
 time series, many series with zoom/brush, cross-filtering, maps, or large datasets. Tasteful,
 `file://`-safe choices (loaded via CDN `<script>`/ESM):
 
+> **One origin only: `https://cdnjs.cloudflare.com`, with an exact version pinned in the URL
+> (#1750).** The Atrium sandbox CSP allows that origin and nothing else; a `<script src>` to
+> jsDelivr, unpkg, esm.sh, or a vendor's own CDN is blocked SILENTLY — the page renders and
+> the chart is simply blank, with no error for the author or the reader. Pin the version
+> (never `latest`): an allowlisted script runs with the artifact's own privileges, so the pin
+> is what keeps a CDN change from changing your page. Confirm the library is actually on
+> cdnjs before choosing it; if it is not, hand-build the chart as inline SVG.
+
 | Library | Use it for | Note |
 |---------|-----------|------|
 | Observable Plot | concise statistical charts with good defaults | least config, great taste baseline |
@@ -44,8 +52,9 @@ time series, many series with zoom/brush, cross-filtering, maps, or large datase
 | Chart.js | quick standard charts | easy; restyle away from defaults |
 | D3 | bespoke / novel visualizations | most effort, most control |
 
-When you use a library: still apply every chart-taste rule below, still inline the data, and
-remember a CDN dependency needs network when the file is opened. Avoid full dashboard
+When you use a library: still apply every chart-taste rule below, still inline the data
+(`connect-src 'none'` means the library cannot fetch anything at runtime), and remember a CDN
+dependency needs network when the file is opened. Avoid full dashboard
 frameworks — they convert a portable artifact into an app.
 
 ## Chart-taste rules (what separates a real chart from a default one)
