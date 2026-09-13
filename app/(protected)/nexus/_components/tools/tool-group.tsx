@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { ChevronDown, ChevronUp, Wrench, Loader2, Plug } from "lucide-react";
 import { useMessage } from "@assistant-ui/react";
 import { useConnectorToolsOptional } from "./connector-tool-context";
+import { useWorkspaceChangeSignals } from "./use-workspace-change-signal";
 
 interface ToolGroupProps {
   startIndex: number;
@@ -194,6 +195,13 @@ export function ToolGroup({
       .slice(startIndex, endIndex + 1)
       .filter((part) => part.type === "tool-call");
   }, [message.content, startIndex, endIndex]);
+
+  // #1749: a completed workspace edit becomes the `atrium:workspace-changed`
+  // signal HERE, not in the tool renderer. This component renders whether or not
+  // the card is expanded, while `children` (and therefore the renderer) mount
+  // only while expanded — and the card starts collapsed, so a renderer-mounted
+  // observer never saw the call run and never fired (PR #1760, Codex P1).
+  useWorkspaceChangeSignals(toolCalls);
 
   // Extract stable callback reference — avoids re-running memos when unrelated
   // context state (e.g. failedServerIds) changes.

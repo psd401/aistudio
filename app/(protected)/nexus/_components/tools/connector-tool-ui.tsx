@@ -383,6 +383,10 @@ function getPreviewText(parsed: ParsedResult[]): string {
  */
 export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
   const { toolName, argsText, result } = props;
+  // #1749: the `atrium:workspace-changed` signal is NOT emitted here. This
+  // renderer mounts only while the enclosing tool card is expanded, and the card
+  // starts collapsed — so a workspace edit would never be observed running. It
+  // lives in `ToolGroup`, which renders regardless of expansion.
   const connectorCtx = useConnectorToolsOptional();
   const connectorInfo = connectorCtx?.getConnectorInfo(toolName);
 

@@ -126,6 +126,37 @@ async function performRestore(args: {
   }
 }
 
+/**
+ * Preview a selected version's code. Module-level (setters threaded in) for the
+ * same reason `performRestore` is — it keeps the component body under the
+ * max-lines-per-function lint.
+ */
+async function performSelectVersion(args: {
+  versionId: string;
+  loadCode: (versionId: string | null) => Promise<string | null>;
+  setState: React.Dispatch<React.SetStateAction<LoadState>>;
+  setMessage: (v: string | null) => void;
+  setRestoreNotice: (v: string | null) => void;
+}): Promise<void> {
+  const { versionId, loadCode, setState, setMessage, setRestoreNotice } = args;
+  setState("loading");
+  // A stale restore caption for a previously-selected version would mislead once
+  // a different version is being previewed.
+  setRestoreNotice(null);
+  try {
+    // loadCode's own seq token makes the latest selection win.
+    await loadCode(versionId);
+  } catch (err) {
+    // loadCode handles `isSuccess: false` internally, but a throw from the server
+    // action itself (non-2xx / network failure) escapes it. Without this catch the
+    // rejection is unhandled and the canvas stays stuck in "loading" with no error
+    // surfaced — mirror the initial useEffect's try/catch. Token-guard so a stale
+    // selection doesn't clobber a newer one.
+    setState((prev) => (prev === "loading" ? "error" : prev));
+    setMessage(err instanceof Error ? err.message : "Failed to load version");
+  }
+}
+
 /** The canvas header: Preview|Code toggle, version dropdown, restore, status. */
 function CanvasToolbar({
   tab,
@@ -234,6 +265,15 @@ interface ArtifactCanvasBaseProps {
    * the sandbox is unconfigured → the preview frame fails closed. (#1052)
    */
   sandboxSrc?: string | null;
+  /**
+   * Monotonic counter an OWNER bumps once it has refetched this artifact itself
+   * (#1749 — `WorkspacePanel` after a Nexus chat tool edits the open artifact).
+   * Every change refreshes the version list and reloads the head version; the
+   * mount value never fires. Owners that never change it (the full edit page,
+   * thumbnails) simply never refresh. See `useOwnerRefreshSignal` for why this
+   * is a prop rather than a second `atrium:workspace-changed` subscription.
+   */
+  refreshSignal?: number;
 }
 
 /**
@@ -384,6 +424,82 @@ function ArtifactPreviewFrame({
   );
 }
 
+/**
+ * Refetch the canvas when its OWNER says the artifact changed underneath it
+ * (#1749) — `WorkspacePanel` bumps `refreshSignal` after a Nexus workspace chat
+ * tool edits the open artifact.
+ *
+ * A chat edit creates a new version SERVER-side and nothing about that reaches
+ * this component, so without the signal the canvas keeps rendering the version it
+ * loaded at mount until the user reloads the page — for a chat-built dashboard
+ * that reads as "I don't see any data". Re-runs the SAME pair the mount effect
+ * runs: refresh the version list, then load the new head (`loadCode` selects it).
+ * `loadCode` owns the staleness token, so `refreshVersions` runs untokened here
+ * for exactly the reason it does at mount.
+ *
+ * Driven by a PROP rather than by subscribing to `atrium:workspace-changed`
+ * directly: the mode pin (`dataAccess`) comes from the panel's payload, so two
+ * independent subscribers meant two independently-fallible fetches — whichever
+ * landed first rendered a mixed state, and a panel fetch that failed while this
+ * one succeeded pinned the new code to the OLD mode until a page reload. The
+ * panel refetches first and only then bumps the signal, so the new code and the
+ * mode it was written for always arrive together.
+ *
+ * Extracted from the component body to keep it inside the 150-line lint budget.
+ */
+function useCanvasBridgePin(
+  props: ArtifactCanvasProps,
+  refreshVersions: (seq?: number) => Promise<VersionSummary[] | null>,
+  loadCode: (
+    versionId: string | null,
+    opts?: { preserveOnError?: boolean }
+  ) => Promise<string | null>
+): CanvasBridge {
+  const target = resolveCanvasBridge(props);
+  const mode = target?.dataAccess;
+  const refreshSignal = props.refreshSignal;
+  // The mode the sandbox stays pinned to WHILE an owner-signalled reload is in
+  // flight, remembered together with the signal it was settled for. The two must
+  // commit together: the frame key contains the mode, so adopting a new mode
+  // while the previous version's code is still in state remounts the OLD code
+  // under the NEW bridge capability for as long as the reload takes (PR #1760,
+  // Codex P2). `settledFor === refreshSignal` means nothing is in flight, and the
+  // live prop is used directly — so a mode change arriving on its OWN (Content
+  // settings + `router.refresh()` on this instance, #1712/#1725) still applies
+  // immediately, with no effect and no extra render.
+  const [pin, setPin] = useState({ mode, settledFor: refreshSignal });
+  const seenSignalRef = useRef(refreshSignal);
+
+  useEffect(() => {
+    // The mount value never fires: the mount effect is already loading, and a
+    // duplicate fetch would race it.
+    if (refreshSignal === seenSignalRef.current) return;
+    seenSignalRef.current = refreshSignal;
+    void (async () => {
+      try {
+        const [, loaded] = await Promise.all([
+          refreshVersions(),
+          loadCode(null, { preserveOnError: true }),
+        ]);
+        // A failed or superseded reload leaves the currently-rendered version in
+        // place — never replace a working preview with an error because a
+        // background refetch hiccuped, and never move the pin off the mode that
+        // version was authored for. The pin then stays where it is until the
+        // next successful reload (or a page load), which fails toward the
+        // artifact's PREVIOUS capability, never a wider one.
+        if (loaded === null) return;
+        setPin({ mode, settledFor: refreshSignal });
+      } catch {
+        // Same contract for a thrown server action.
+      }
+    })();
+  }, [refreshSignal, mode, refreshVersions, loadCode]);
+
+  const effectiveMode = pin.settledFor === refreshSignal ? mode : pin.mode;
+  if (!target || !effectiveMode) return null;
+  return { contentId: target.contentId, dataAccess: effectiveMode };
+}
+
 export function ArtifactCanvas(props: ArtifactCanvasProps) {
   const { idOrSlug, canEdit = false, sandboxSrc = null } = props;
   const [tab, setTab] = useState<Tab>("preview");
@@ -414,15 +530,24 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
   // Returns the resolved version id so callers can sync selection, or null if a
   // newer load superseded this one (its writes were discarded).
   const loadCode = useCallback(
-    async (versionId: string | null): Promise<string | null> => {
+    async (
+      versionId: string | null,
+      // `preserveOnError`: a BACKGROUND reload (the owner-signal refresh) must
+      // not replace a working preview with the error state when its fetch fails
+      // — the version already on screen is still valid. Mount and version-select
+      // loads leave it false: there, a failure IS the canvas's state.
+      opts?: { preserveOnError?: boolean }
+    ): Promise<string | null> => {
       const seq = ++loadSeqRef.current;
       const result = await getArtifactCodeAction(idOrSlug, versionId ?? undefined);
       // Discard if a newer load started (rapid select) or the component/object
       // changed (the effect bumps the token on cleanup) while we awaited.
       if (seq !== loadSeqRef.current) return null;
       if (!result.isSuccess) {
-        setState("error");
-        setMessage(result.message ?? "Failed to load artifact");
+        if (!opts?.preserveOnError) {
+          setState("error");
+          setMessage(result.message ?? "Failed to load artifact");
+        }
         return null;
       }
       objectIdRef.current = result.data.objectId;
@@ -497,25 +622,10 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
     };
   }, [refreshVersions, loadCode]);
 
+  const bridge = useCanvasBridgePin(props, refreshVersions, loadCode);
   const handleSelectVersion = useCallback(
-    async (versionId: string) => {
-      setState("loading");
-      // A stale restore caption for a previously-selected version would mislead
-      // once a different version is being previewed.
-      setRestoreNotice(null);
-      try {
-        // loadCode's own seq token makes the latest selection win.
-        await loadCode(versionId);
-      } catch (err) {
-        // loadCode handles `isSuccess: false` internally, but a throw from the
-        // server action itself (non-2xx / network failure) escapes it. Without
-        // this catch the rejection is unhandled and the canvas stays stuck in
-        // "loading" with no error surfaced — mirror the initial useEffect's
-        // try/catch. Token-guard so a stale selection doesn't clobber a newer one.
-        setState((prev) => (prev === "loading" ? "error" : prev));
-        setMessage(err instanceof Error ? err.message : "Failed to load version");
-      }
-    },
+    (versionId: string) =>
+      performSelectVersion({ versionId, loadCode, setState, setMessage, setRestoreNotice }),
     [loadCode]
   );
 
@@ -615,7 +725,7 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
       ) : tab === "preview" ? (
         // See ArtifactPreviewFrame for the version-remount and data-bridge
         // (#1725) contracts this one element carries.
-        <ArtifactPreviewFrame code={code} sandboxSrc={sandboxSrc} versionKey={selectedVersionId ?? ""} bridge={resolveCanvasBridge(props)} />
+        <ArtifactPreviewFrame code={code} sandboxSrc={sandboxSrc} versionKey={selectedVersionId ?? ""} bridge={bridge} />
       ) : (
         <CodeEditor
           value={code}
