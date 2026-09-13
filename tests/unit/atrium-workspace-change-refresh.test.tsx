@@ -313,6 +313,45 @@ describe("WorkspacePanel refetches on atrium:workspace-changed", () => {
     expect(loadPanelMock).toHaveBeenCalledTimes(1);
   });
 
+  it("refreshes after the first load when the event arrived while it was in flight", async () => {
+    // The payload in flight may have been read BEFORE the edit landed, so it can
+    // already be stale on arrival — and no second event is coming.
+    let releaseFirstLoad: (v: unknown) => void = () => {};
+    loadPanelMock.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        releaseFirstLoad = resolve;
+      })
+    );
+    render(<WorkspacePanel idOrSlug="obj-1" onClose={() => {}} />);
+    await waitFor(() => expect(loadPanelMock).toHaveBeenCalledTimes(1));
+
+    // The chat's edit finishes first: the panel does not know its own id yet.
+    await emitAndSettle({ objectId: "obj-1" });
+    expect(loadPanelMock).toHaveBeenCalledTimes(1);
+
+    // The stale payload lands, and the queued change is honoured.
+    loadPanelMock.mockResolvedValue(panelPayload("query"));
+    await act(async () => {
+      releaseFirstLoad(panelPayload("records"));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(loadPanelMock).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByTestId("sandbox").getAttribute("data-data-access")).toBe("query")
+    );
+  });
+
+  it("does not queue a refresh for an event that arrives after the load resolved", async () => {
+    render(<WorkspacePanel idOrSlug="obj-1" onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByTestId("sandbox")).toBeInTheDocument());
+
+    // Resolved listener + an event for another object = no fetch, and nothing
+    // left queued that a later load could act on.
+    await emitAndSettle({ objectId: "some-other-object" });
+    expect(loadPanelMock).toHaveBeenCalledTimes(1);
+  });
+
   it("drops a refresh that resolves after the panel switched objects", async () => {
     const { rerender } = render(<WorkspacePanel idOrSlug="obj-1" onClose={() => {}} />);
     await waitFor(() => expect(screen.getByText("My Dashboard")).toBeInTheDocument());

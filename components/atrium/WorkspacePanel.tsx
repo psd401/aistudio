@@ -70,27 +70,13 @@ export function WorkspacePanel({ idOrSlug, onClose }: WorkspacePanelProps) {
   // its `refreshSignal` prop. The panel refetches first (it owns the `dataAccess`
   // pin) and only then signals the canvas, so the two never land out of order.
   const [refreshSignal, setRefreshSignal] = useState(0);
-
-  useEffect(() => {
-    let cancelled = false;
-    currentIdRef.current = idOrSlug;
-    loadedObjectIdRef.current = null;
-    void loadWorkspacePanelAction(idOrSlug).then((result) => {
-      if (cancelled) return;
-      if (result.isSuccess) {
-        loadedObjectIdRef.current = result.data.id;
-        setState({ status: "ready", data: result.data });
-      } else {
-        setState({
-          status: "error",
-          message: result.message ?? "This item could not be opened.",
-        });
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [idOrSlug]);
+  // A change signal that arrived while the FIRST load was still in flight. The
+  // listener cannot attribute it then (this panel does not know its own object id
+  // yet), and dropping it is not safe: the in-flight request may have read the
+  // object BEFORE the edit and resolve after it, leaving a payload — and with it
+  // the `dataAccess` pin — that is already stale, with no second event coming
+  // (PR #1760, Codex P2). Queue it and refresh once the load lands.
+  const queuedRefreshRef = useRef(false);
 
   // #1749: a chat tool that edits the open object (or flips its `dataAccess`)
   // must be reflected here without a page reload — the pinned mode this panel
@@ -103,6 +89,7 @@ export function WorkspacePanel({ idOrSlug, onClose }: WorkspacePanelProps) {
   // working panel with an error.
   const refresh = useCallback(() => {
     const startedFor = idOrSlug;
+    queuedRefreshRef.current = false;
     void loadWorkspacePanelAction(idOrSlug).then((result) => {
       // The panel may have been switched to another object while this was in
       // flight; without this check a slow refresh for the OLD id overwrites the
@@ -117,9 +104,41 @@ export function WorkspacePanel({ idOrSlug, onClose }: WorkspacePanelProps) {
     });
   }, [idOrSlug]);
 
+  useEffect(() => {
+    let cancelled = false;
+    currentIdRef.current = idOrSlug;
+    loadedObjectIdRef.current = null;
+    queuedRefreshRef.current = false;
+    void loadWorkspacePanelAction(idOrSlug).then((result) => {
+      if (cancelled) return;
+      if (result.isSuccess) {
+        loadedObjectIdRef.current = result.data.id;
+        setState({ status: "ready", data: result.data });
+        // This payload may predate an edit that landed while it was in flight.
+        if (queuedRefreshRef.current) refresh();
+      } else {
+        queuedRefreshRef.current = false;
+        setState({
+          status: "error",
+          message: result.message ?? "This item could not be opened.",
+        });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [idOrSlug, refresh]);
+
   useEffect(
     () =>
       onWorkspaceChanged((detail) => {
+        // Still loading: the panel cannot tell whether the event is about its own
+        // object, so it remembers that SOMETHING changed and re-checks once it
+        // knows. A redundant refetch is much cheaper than a permanently stale pin.
+        if (loadedObjectIdRef.current === null) {
+          queuedRefreshRef.current = true;
+          return;
+        }
         if (!workspaceChangeMatches(detail, loadedObjectIdRef.current)) return;
         refresh();
       }),

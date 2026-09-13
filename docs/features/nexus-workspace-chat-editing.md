@@ -30,7 +30,7 @@ chat surface, so asking the chat to change the open item did nothing.
 |------|------|--------|
 | `read_workspace_content` | always (viewable object) | Returns the current title/kind/body so the model edits from the current content. For an **artifact** it also returns `dataAccess` (the sandbox data-bridge mode) and, for a body over the 4 KiB inline threshold, loads the S3-backed source (capped at 512 KiB with `truncated: true`). |
 | `edit_workspace_document` | editable **document** | §28.3-screens the markdown, then writes it into the live Yjs doc via the agent bridge (`applyAgentEdit`) — it appears **immediately** in the panel with agent (purple-rail) attribution. `mode: append` (default) or `replace`. |
-| `update_workspace_artifact` | editable **artifact** | Creates a new version via `contentService.createVersion` (which canView/canEdit-gates and §28.3-screens the body); the new version appears in the artifact's version dropdown. Optional `dataAccess` (`records` \| `query` \| `none`) also sets the sandbox data-bridge mode, applied through `contentService.update` **before** the version. |
+| `update_workspace_artifact` | editable **artifact** | Creates a new version via `contentService.createVersion` (which canView/canEdit-gates and §28.3-screens the body); the new version appears in the artifact's version dropdown. Optional `dataAccess` (`records` \| `query` \| `none`) also sets the sandbox data-bridge mode, applied through `contentService.update` **after** the version is saved (see the write order below). |
 
 A caller who can view but not edit gets only `read_workspace_content`. An
 unknown/unviewable `?workspace=` yields **no** tools — a bad param never breaks
