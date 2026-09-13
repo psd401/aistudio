@@ -8,6 +8,7 @@ This guide explains how to deploy the AI Studio infrastructure using AWS CDK wit
 - [Cost Allocation Tags](#cost-allocation-tags-for-billing)
 - [Initial Setup](#initial-setup)
 - [Environment Variables](#environment-variables)
+  - [CDK Context Values](#cdk-context-values)
 - [Stack Deployment](#stack-deployment)
 - [DNS and Certificate Configuration](#dns-and-certificate-configuration)
 - [Database Initialization](#database-initialization)
@@ -150,6 +151,59 @@ The ECS tasks automatically receive environment variables from:
    - Database name
    - Queue URLs from stack exports
    - Public Cognito configuration
+
+### CDK Context Values
+
+Context values live in `infra/cdk.json` under `"context"` and can be overridden
+per-deploy with `--context <key>=<value>`. Keeping the default in `cdk.json`
+matters: a deploy that forgets a `--context` flag otherwise ships the *empty*
+value silently.
+
+| Key | Default (`infra/cdk.json`) | Effect |
+|-----|---------------------------|--------|
+| `baseDomain` | unset — pass per deploy | Root domain for the app + sandbox DNS/certs |
+| `chatIngress` | per-environment object | Google Chat Pub/Sub ingress; gates the `/chat` route |
+| `atriumAllowedArtifactCdns` | `https://cdnjs.cloudflare.com` | Atrium artifact sandbox CDN allowlist (see below) |
+
+#### `atriumAllowedArtifactCdns` (Atrium artifact sandbox)
+
+A comma-separated list of origins. It is consumed in two places, both from this
+one key, so they can never disagree:
+
+1. `AtriumSandboxStack` bakes each origin into the sandbox host page's
+   `Content-Security-Policy` response header — `script-src`, `style-src`, and
+   `img-src`. Entries are normalized and a non-`http(s)` entry **fails synth**.
+2. The frontend stack injects the same value into the ECS task as
+   `ATRIUM_ALLOWED_ARTIFACT_CDNS`. The app parses it to build the one-sentence
+   authoring rule handed to every artifact author — the MCP `create_artifact` /
+   `create_version` tool descriptions and the Nexus workspace chat's
+   `update_workspace_artifact` tool.
+
+**Security note — every entry widens `script-src` for every artifact.** A script
+loaded from an allowlisted CDN runs with the same privileges as the artifact's
+own inline code. It still cannot make network calls (`connect-src 'none'`,
+`webrtc 'block'`) and still cannot reach the app origin, so the no-egress
+invariant holds; what changes is that a compromised CDN could serve different
+code to viewers. The mitigation is pinning exact versions in the URL, which the
+authoring guidance instructs authors to do. Keep the list minimal and add
+origins only on request.
+
+Changing this value is a CloudFront/S3 change (the CSP is a static response
+header on the host page) **plus** an app redeploy (the env var). Deploy the
+sandbox stack and the frontend stack together:
+
+```bash
+cd infra
+bunx cdk deploy AIStudio-AtriumSandboxStack-Dev AIStudio-FrontendStack-ECS-Dev \
+  --context baseDomain=aistudio.psd401.ai
+```
+
+Verify the served header lists the origin:
+
+```bash
+curl -sI https://<sandbox-domain>/render | grep -i content-security-policy
+# expect: ... script-src 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'unsafe-inline' https://cdnjs.cloudflare.com; ...
+```
 
 ### Required Secrets in AWS Secrets Manager
 
@@ -351,7 +405,7 @@ mcp__awslabs-postgres-mcp-server__run_query --sql \
 # expect status = 'completed' before proceeding
 
 # 2. Only then deploy the app code
-cd infra && bunx cdk deploy AIStudio-FrontendStack-Dev
+cd infra && bunx cdk deploy AIStudio-FrontendStack-ECS-Dev
 ```
 
 For destructive migrations, also run any orphan-detection query the migration's

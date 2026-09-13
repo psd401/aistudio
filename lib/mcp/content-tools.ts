@@ -18,6 +18,7 @@ import { CONTENT_DATA_ACCESS_MODES } from "@/lib/content/types";
 // #1749: the bridge contract is shared with the Nexus workspace chat tools so the
 // two artifact-authoring surfaces cannot drift apart.
 import { DATA_ACCESS_DESC } from "@/lib/content/atrium-data-contract";
+import { buildArtifactCspGuidance } from "@/lib/content/artifact-sandbox-config";
 import type { ApiScope } from "@/lib/api-keys/scopes";
 
 const VISIBILITY_DESC =
@@ -26,6 +27,19 @@ const GRANTS_DESC =
   "Group grants: [{ kind: 'role'|'building'|'department'|'grade'|'user'|'group', value: string }]";
 const CODE_ENCODING_DESC =
   "Transit encoding for the body. Set 'base64' when the body/code contains HTML/JS/CSS (<script>, <style>, style=\"…\") — the edge WAF blocks that markup in a raw request body, so send the body base64-encoded and the server decodes it before screening. Omit for plain text/markdown.";
+// #1750 — the sandbox CSP rule, built from the SAME allowlist the sandbox host's
+// CSP is rendered from (ATRIUM_ALLOWED_ARTIFACT_CDNS, injected into the app task
+// from the `atriumAllowedArtifactCdns` CDK context key that AtriumSandboxStack
+// also reads). Without this in the tool description a model asked for a dashboard
+// reaches for a chart library on an arbitrary CDN, the script is blocked with no
+// error, and the artifact renders with empty charts that nobody can diagnose.
+//
+// Read once at module load, which is deliberate: this module is a static tool
+// manifest and the env var is fixed for an ECS task's lifetime, so a per-call
+// read would buy nothing. If the allowlist ever moves to a hot-reloadable source
+// (e.g. settings-manager's DB cache), this const is the line that has to change —
+// it would keep serving the boot-time value while per-call readers moved on.
+const ARTIFACT_CSP_DESC = buildArtifactCspGuidance();
 const SOURCE_REF_DESC =
   "Create-only structured provenance. Capture clients use { type: 'capture', provider, externalId, clientSurface: 'browser'|'mac', clientVersion, capturedAt, sourceOrigins? }. Source origins are normalized to scheme+host+port; arbitrary telemetry is rejected.";
 
@@ -78,7 +92,8 @@ export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
   {
     name: "create_artifact",
     description:
-      "Create an interactive artifact (HTML/JS or JSX) content object. Does not publish. Returns the object id, slug, and reader link.",
+      "Create an interactive artifact (HTML/JS or JSX) content object. Does not publish. Returns the object id, slug, and reader link. " +
+      ARTIFACT_CSP_DESC,
     inputSchema: {
       type: "object",
       properties: {
@@ -171,7 +186,8 @@ export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
   {
     name: "create_version",
     description:
-      "Add a new version with new body content and an optional change summary.",
+      "Add a new version with new body content and an optional change summary. For an ARTIFACT body: " +
+      ARTIFACT_CSP_DESC,
     inputSchema: {
       type: "object",
       properties: {

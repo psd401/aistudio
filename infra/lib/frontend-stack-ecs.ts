@@ -26,6 +26,15 @@ export interface FrontendStackEcsProps extends cdk.StackProps {
   documentsBucketName?: string; // Optional for backward compatibility
   agentWorkspaceBucketName?: string; // Optional for backward compatibility (#925)
   atriumSandboxOrigin?: string; // Optional; falls back to SSM (#1052)
+  /**
+   * Atrium artifact sandbox CDN allowlist (#1750) — the comma-separated origin
+   * list ALSO baked into the sandbox host's CSP `script-src`/`style-src` by
+   * AtriumSandboxStack. Injected as `ATRIUM_ALLOWED_ARTIFACT_CDNS` so the app
+   * can tell every artifact author (Nexus chat, the MCP content tools) exactly
+   * which origins a `<script src>` may use. Both sides read the same CDK
+   * context key, so the guidance can never drift from the enforced CSP.
+   */
+  atriumAllowedArtifactCdns?: string;
   atriumEventsTopicArn?: string; // Optional; SNS topic for content events (#1055)
   /**
    * Agent-platform migration Lambda. When supplied, this stack invokes it only
@@ -128,6 +137,7 @@ export class FrontendStackEcs extends cdk.Stack {
       documentsBucketName,
       agentWorkspaceBucketName,
       atriumSandboxOrigin,
+      atriumAllowedArtifactCdns: props.atriumAllowedArtifactCdns ?? '',
       atriumEventsTopicArn,
       enableContainerInsights: true,
       enableFargateSpot: true, // Enable Fargate Spot for cost optimization

@@ -460,6 +460,24 @@ Atrium exposes content tools via `/lib/mcp/content-tools.ts`:
 - `publish_document`, `list_documents`
 - Permission-aware retrieval for grounded responses
 
+**CSP Guidance for Artifacts** (#1750):
+
+MCP content tools append a CSP guidance sentence to `create_artifact` and `create_version` descriptions based on the runtime environment variable `ATRIUM_ALLOWED_ARTIFACT_CDNS`. This tells artifact authors exactly which external origins they may load scripts from:
+
+- **Non-empty allowlist** → "Inline `<script>` and `<style>` are permitted; external scripts/styles are blocked except from: [origins]"
+- **Empty allowlist** → "Inline `<script>` and `<style>` are permitted; external scripts/styles are blocked"
+- **Inline scripting is explicitly permitted** because leaving it ambiguous led models to assume they must load from CDN instead of using inline scripts
+
+The guidance is sourced from `/lib/content/artifact-sandbox-config.ts` → `buildArtifactCspGuidance()` which parses `ATRIUM_ALLOWED_ARTIFACT_CDNS` from the environment. The environment variable is injected from `infra/cdk.json` → `atriumAllowedArtifactCdns`, ensuring guidance and enforcement never disagree. For infrastructure deployment details, see **[infrastructure/overview.md](../infrastructure/overview.md#atrium-sandbox-configuration)**.
+
+**Key Sources**:
+- `/lib/mcp/content-tools.ts` — MCP tool descriptions with CSP guidance
+- `/lib/content/artifact-sandbox-config.ts` — CSP guidance builder
+- `/lib/nexus/workspace-chat-tools.ts` — Nexus workspace artifact tool guidance
+
+**Focused Tests**:
+- `/tests/unit/atrium-mcp-content-tools.test.ts` — validates CSP guidance in tool descriptions
+
 ### Key Source Files
 
 | File | Purpose |

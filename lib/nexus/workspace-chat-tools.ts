@@ -52,6 +52,7 @@ import {
   NotFoundError,
   ValidationError,
 } from "@/lib/content/errors";
+import { buildArtifactCspGuidance } from "@/lib/content/artifact-sandbox-config";
 import { createLogger } from "@/lib/logger";
 
 /** Free-form attribution label stamped on the purple rail for chat-driven edits. */
@@ -425,7 +426,14 @@ function buildArtifactUpdateTool(
     description:
       "Update the ARTIFACT open in the workspace panel by creating a new version with the given full source code. The new version appears in the artifact's version dropdown. Provide the COMPLETE code (it replaces the current version's code), not a diff. " +
       "Pass dataAccess to also switch the artifact's sandbox data-bridge mode in the same call — do that whenever the user asks for a LIVE dashboard, because code written against the wrong mode is rejected by the sandbox at runtime. " +
-      ATRIUM_DATA_AUTHORING_GUIDANCE,
+      ATRIUM_DATA_AUTHORING_GUIDANCE +
+      // #1750 — same CSP rule the MCP content tools carry, from the same
+      // allowlist the sandbox host's CSP is built from. A blocked CDN script
+      // produces a rendered page with dead features and no error, so the model
+      // must be told before it writes code, not after the user reports a blank
+      // chart.
+      " " +
+      buildArtifactCspGuidance(),
     inputSchema: jsonSchema<{
       code: string;
       summary?: string;
@@ -893,7 +901,13 @@ export async function buildWorkspaceChatTools(params: {
         // #1749: the bridge is the whole reason a "live dashboard" request can
         // succeed here; without this sentence the model does not know
         // `window.AtriumData` exists and invents a helper that does not.
-        " The artifact runs in a sandbox that exposes `window.AtriumData`; check the `dataAccess` field returned by read_workspace_content before writing code that uses it, and set `dataAccess` on update_workspace_artifact (to `query` for a live PSD-data dashboard) in the SAME call that writes the code. " +
+        //
+        // #1750: the full CSP rule lives on the update tool's own description
+        // (where the code is written). Flag it here too so the model does not
+        // promise the user a CDN-backed chart library before it reads that. The
+        // two are complementary — the bridge is how an artifact reaches DATA,
+        // the CSP is what it may LOAD — and a dashboard request needs both.
+        " The artifact runs in a locked-down sandbox: it blocks network calls and most external scripts/styles silently (read the update_workspace_artifact description for exactly what it may load), and it exposes `window.AtriumData` as the only way to reach data. Check the `dataAccess` field returned by read_workspace_content before writing code that uses it, and set `dataAccess` on update_workspace_artifact (to `query` for a live PSD-data dashboard) in the SAME call that writes the code. " +
         ATRIUM_DATA_AUTHORING_GUIDANCE +
         " You can also publish or unpublish it with publish_workspace_content / unpublish_workspace_content." +
         " If the user EXPLICITLY asks to permanently delete it (not archive), use delete_workspace_content — it is irreversible and refused while the artifact is published."

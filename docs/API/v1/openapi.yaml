@@ -5441,6 +5441,15 @@ components:
             omitted, no v1 is created. If `codeEncoding` is `base64`, this field
             is the base64-encoded body and is decoded server-side before
             screening and size caps.
+
+            ARTIFACT bodies render in a cross-origin sandbox under a strict CSP:
+            inline `<script>`/`<style>` are allowed and are the intended way to
+            build one, `connect-src` is `'none'` (fetch/XHR/WebSocket blocked),
+            and an external `<script src>`/`<link href>` loads only from the
+            deployment's configured CDN allowlist — pin an exact version. Any
+            other origin is blocked SILENTLY: the page renders and the feature is
+            simply dead. The `create_artifact` MCP tool description carries the
+            live origin list for this deployment.
         bodyFormat:
           type: string
           enum: [markdown, html, jsx]
@@ -5527,6 +5536,13 @@ components:
           description: >-
             New body. If `codeEncoding` is `base64`, this is the base64-encoded
             body, decoded server-side before screening and the size cap.
+
+            For an ARTIFACT body the sandbox CSP applies: inline
+            `<script>`/`<style>` are allowed, `connect-src` is `'none'`, and an
+            external `<script src>`/`<link href>` loads only from the
+            deployment's configured CDN allowlist (pin an exact version).
+            Anything else is blocked SILENTLY — the page renders with the feature
+            dead.
         bodyFormat:
           type: string
           enum: [markdown, html, jsx]
