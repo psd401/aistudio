@@ -36,9 +36,10 @@
  *   node run.js archive --id <id>
  *   node run.js delete --id <id>
  *   node run.js read-grants --id <idOrSlug>
- *   node run.js set-visibility --id <id> --level private|group|internal|public
+ *   node run.js set-visibility --id <id> [--level private|group|internal|public]
  *                    [--grants role:staff,building:GHS]           (REPLACES the list)
- *                    [--add-grants k:v,...] [--remove-grants k:v,...]  (merge)
+ *                    [--add-grants k:v,...] [--remove-grants k:v,...]  (merge; keeps
+ *                     the stored level — --level is required only when NOT merging)
  *   node run.js list-collections
  *   node run.js create-collection --name <name> [--scope private|district]
  *                    [--parent <uuid|root>] [--position <n>]
@@ -120,6 +121,8 @@ function usage() {
       '  list-data --id <idOrSlug> --namespace <name> [--limit <1-200>]',
       '            (artifact records for teacher-facing dashboards)',
       '  list-assets --id <idOrSlug>',
+      "  read-grants --id <idOrSlug>   (who can see it: level + the ACTUAL grants;",
+      "                                 `read` shows only a grantCount integer)",
       '',
       'Images (authored assets — the canonical way to put a picture in a document):',
       '  upload-asset --id <id> --file <png|jpeg|webp> [--alt <text>] [--filename <name>]',
@@ -140,10 +143,11 @@ function usage() {
       '  archive --id <id>   (soft-remove: status -> archived, stays findable)',
       '  delete  --id <id>   (HARD delete: permanent; owner/admin only; refused',
       '                       while published — unpublish everywhere first)',
-      '  read-grants --id <idOrSlug>',
-      '  set-visibility --id <id> --level private|group|internal|public',
+      '  set-visibility --id <id> [--level private|group|internal|public]',
       '                 [--grants role:staff,building:GHS]  REPLACES every grant',
-      '                 [--add-grants k:v,...] [--remove-grants k:v,...]  merge instead',
+      '                 [--add-grants k:v,...] [--remove-grants k:v,...]  merge into',
+      '                 the stored list instead (keeps the current level; --level',
+      '                 is required only when NOT merging)',
       '',
       'Collections (private for every owner; district requires administrator):',
       '  list-collections',
@@ -793,12 +797,20 @@ async function mergeGrants(id, requestedLevel, addGrants, removeGrants) {
     merged.set(grantKey(grant), grant);
   }
   const grants = [...merged.values()];
-  // The server accepts grants only for `group` and would reject this with a
-  // 400 the caller cannot act on; say what to do instead.
+  // Both server rules (lib/content/visibility-service.ts assertWritableLevel)
+  // would reject the merge result with a 400 whose remedy is a DIFFERENT flag,
+  // so say what to do instead rather than spending the write on a certain 400.
   if (grants.length > 0 && level !== 'group') {
     fail(
       `grants only apply to group visibility, but this object is "${level}" — ` +
         'pass --level group to scope it to these grants'
+    );
+  }
+  if (grants.length === 0 && level === 'group') {
+    fail(
+      'that would leave a group object with no grants, which is visible to ' +
+        'nobody but its owner — pass --level internal (or private) to narrow ' +
+        'it instead of emptying the grant list'
     );
   }
   return { level, grants };

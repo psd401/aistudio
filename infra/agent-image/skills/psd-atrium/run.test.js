@@ -789,6 +789,27 @@ test('set-visibility --add-grants de-duplicates a grant that already exists', as
   });
 });
 
+test('set-visibility refuses a merge that would empty a group object\'s grants', async () => {
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: {
+      id: 'obj-1',
+      visibility: {
+        visibilityLevel: 'group',
+        grants: [{ kind: 'building', value: 'GHS' }],
+      },
+    },
+  });
+  await expect(
+    run('set-visibility', '--id', 'obj-1', '--remove-grants', 'building:GHS')
+  ).rejects.toMatchObject({ code: 1 });
+  // A grantless group object is visible to nobody but its owner, which the
+  // server rejects too — the remedy is a different LEVEL, so no write is sent.
+  expect(restCalls).toHaveLength(1);
+  expect(restCalls[0].method).toBe('GET');
+});
+
 test('set-visibility rejects mixing --grants with --add-grants', async () => {
   await expect(
     run('set-visibility', '--id', 'obj-1', '--level', 'group', '--grants', 'role:staff', '--add-grants', 'building:GHS')
