@@ -24,8 +24,13 @@ openwiki:
     - lib/content/live-publication.ts
     - lib/content/publish-service.ts
     - lib/content/reader-links.ts
+    - lib/content/atrium-data-contract.ts
     - lib/atrium/usage-series.ts
     - lib/atrium/recent-window.ts
+    - lib/atrium/workspace-change-event.ts
+    - lib/nexus/workspace-chat-tools.ts
+    - lib/nexus/chat-step-budget.ts
+    - app/(protected)/nexus/_components/tools/use-workspace-change-signal.ts
   invariants:
     - Artifact data_access modes (records/query/none) are mutually exclusive — prevents exfiltration loop
     - Mode is enforced twice (client-side pin + server-side check) and changes only take effect on fresh page load (#1712)
@@ -41,6 +46,11 @@ openwiki:
     - Publication is a single Live/Draft state — Level alone decides audience (#1726)
     - Public address /p/{slug} is derived from Level=public AND Live — not a separate destination
     - Making content live does not change audience — it only pins a version and adds to retrieval
+    - WorkspacePanel and ArtifactCanvas are pure layout siblings of the Nexus conversation tree — DOM events (atrium:workspace-changed) are the ONLY communication path, never shared state or runtime imports (#1749)
+    - One refresh owner — WorkspacePanel alone subscribes to the change event; it refetches then bumps ArtifactCanvas.refreshSignal; two independent subscribers would race and render mixed state
+    - Step budget varies by tool presence — 20 steps when workspace tools bound (explore-then-build), 10 otherwise (#1749)
+    - Shared data contract — DATA_ACCESS_DESC is imported by both MCP content tools and workspace chat tools so artifact-authoring surfaces cannot drift
+    - psd-atrium skill's "Live PSD data inside an artifact" section is hand-maintained Markdown — editing lib/content/atrium-data-contract.ts does NOT update the skill automatically
   validation_commands:
     - bun run typecheck
     - bun run lint
@@ -66,6 +76,13 @@ openwiki:
     - tests/unit/atrium-live-state.test.ts
     - tests/unit/atrium-publish-service.test.ts
     - tests/unit/atrium-publish-document-action.test.ts
+    - tests/unit/atrium-workspace-change-refresh.test.tsx
+    - tests/unit/nexus-workspace-change-signal.test.tsx
+    - tests/unit/nexus-tool-group-workspace-signal.test.tsx
+    - tests/unit/lib/content/atrium-data-contract.test.ts
+    - tests/unit/lib/nexus/chat-step-budget.test.ts
+    - tests/unit/lib/nexus/workspace-chat-tools.test.ts
+    - tests/e2e/nexus-workspace-artifact-refresh.spec.ts
 ---
 
 # Core Application Features
@@ -115,6 +132,47 @@ Model Context Protocol tools integrated via:
 
 Tools are gated by user capabilities and resource access grants.
 
+### Workspace Chat Editing (#1087)
+
+When an Atrium document or artifact is open beside the chat (`?workspace=<id>`), Nexus can read and edit that object directly — the "re-prompt via adjacent chat" workflow where "add a section about X" or "change the button color" acts on the panel, not just the chat.
+
+**How it works**:
+1. Client sends `workspaceId` on each chat request (via ref so opening/closing/switching mid-conversation always sends current value)
+2. Server builds AI SDK tools for THAT object and injects system-prompt context (server-side, never from client tool list)
+3. Object resolved through `contentService` (canView 404-mask → canEdit 403) against session user
+
+**Bound Tools**:
+
+| Tool | When | Effect |
+|------|------|--------|
+| `read_workspace_content` | viewable object | Returns title/kind/body; for artifacts also returns `dataAccess` mode |
+| `edit_workspace_document` | editable document | §28.3-screens markdown, writes via agent bridge — appears **live** in panel |
+| `update_workspace_artifact` | editable artifact | Creates new version via `contentService.createVersion`; optional `dataAccess` sets mode |
+
+A view-only caller gets only the read tool; an unviewable `?workspace=` yields no tools (bad param never breaks chat).
+
+**Live-Data Artifacts (#1749)**: The chat now understands the `window.AtriumData` bridge:
+- `read_workspace_content` returns `dataAccess` for artifacts so the model knows which operations are allowed
+- `update_workspace_artifact` can change the mode alongside the code
+- `lib/content/atrium-data-contract.ts` holds the ONE copy of `DATA_ACCESS_DESC` and `ATRIUM_DATA_AUTHORING_GUIDANCE`, imported by both MCP and workspace tools
+
+**Step Budget**: A build turn explores data before writing code, so `lib/nexus/chat-step-budget.ts` raises `maxSteps` to 20 when workspace tools are bound; every other multi-step path keeps 10.
+
+**Panel Refresh Without Reload**: When a mutating workspace tool result lands, the Nexus tool-call renderer fires `atrium:workspace-changed` (a DOM event). `WorkspacePanel` alone subscribes, refetches its loader (where pinned `dataAccess` comes from), then bumps `ArtifactCanvas.refreshSignal`. Two independent subscribers would race; one owner ensures consistent order.
+
+**Key Sources**:
+- `/docs/features/nexus-workspace-chat-editing.md` — full documentation
+- `/lib/nexus/workspace-chat-tools.ts` — tool definitions
+- `/lib/atrium/workspace-change-event.ts` — DOM event contract
+- `/app/(protected)/nexus/_components/tools/use-workspace-change-signal.ts` — hook for emitting events
+
+**Focused Tests**:
+- `tests/unit/lib/nexus/workspace-chat-tools.test.ts` — gating, read vs edit, `dataAccess` read/set
+- `tests/unit/lib/nexus/chat-step-budget.test.ts` — step budget derivation
+- `tests/unit/atrium-workspace-change-refresh.test.tsx` — panel refresh on signal
+- `tests/unit/nexus-workspace-change-signal.test.tsx` — signal emission from tool calls
+- `tests/e2e/nexus-workspace-artifact-refresh.spec.ts` — end-to-end refresh without reload
+
 ### Key Source Files
 
 | File | Purpose |
@@ -124,6 +182,10 @@ Tools are gated by user capabilities and resource access grants.
 | `/lib/nexus/model-router/psd-data-connector.ts` | Shared PSD Data MCP server resolution (used by Nexus and Atrium artifact queries) |
 | `/lib/nexus/history-adapter.ts` | Conversation history management |
 | `/lib/nexus/enhanced-attachment-adapters.ts` | File attachment handling |
+| `/lib/nexus/workspace-chat-tools.ts` | Workspace panel editing tools |
+| `/lib/nexus/chat-step-budget.ts` | Multi-step budget (10 vs 20 steps) |
+| `/lib/atrium/workspace-change-event.ts` | DOM event for panel refresh |
+| `/app/(protected)/nexus/_components/tools/use-workspace-change-signal.ts` | Hook to emit workspace change events |
 
 ---
 
@@ -419,18 +481,50 @@ interface AtriumData {
 
 **Source**: `/docs/features/atrium-artifact-data.md` — comprehensive data bridge documentation.
 
+### Shared Data Contract (#1749)
+
+The `AtriumData` bridge contract is defined in `/lib/content/atrium-data-contract.ts` and shared across all artifact-authoring surfaces:
+
+- **`DATA_ACCESS_DESC`** — What the three modes mean (imported by both MCP content tools and workspace chat tools)
+- **`ATRIUM_DATA_AUTHORING_GUIDANCE`** — How to write artifact code against the bridge (the operations, return shapes, authoring rules)
+
+**Why shared**: Before #1749, the workspace chat knew nothing about the bridge. A "build me a live dashboard" request worked through MCP tools and failed in workspace chat — the model was never told `window.AtriumData` existed, invented a helper, saw it fail, and baked a stale snapshot into the source.
+
+**Synchronization required**: The `psd-atrium` agent skill keeps a hand-maintained Markdown copy of the same guidance (`infra/agent-image/skills/psd-atrium/SKILL.md`, "Live PSD data inside an artifact" section). Editing `atrium-data-contract.ts` does NOT update the skill automatically — change both when the contract changes.
+
+### Workspace Change Event (#1749)
+
+When a Nexus workspace tool mutates the open object, the panel must refresh. A DOM event provides this communication without coupling:
+
+**Event**: `atrium:workspace-changed` (`CustomEvent` dispatched on `window`)
+
+**Why DOM event** (not React context or conversation subscription):
+- `WorkspacePanel` and `ArtifactCanvas` are pure layout siblings of the Nexus conversation tree
+- They must stay completely unaware of the conversation runtime (see `/docs/features/nexus-conversation-architecture.md`)
+- A DOM event lets the tool surface tell them "refetch" without either side importing the other
+
+**One refresh owner**: `WorkspacePanel` alone subscribes. It:
+1. Re-runs `loadWorkspacePanelAction` (where pinned `dataAccess` comes from)
+2. Then bumps `ArtifactCanvas.refreshSignal` (reloads version list and head)
+
+Two independent subscribers would race — whichever fetch landed first would render mixed state, and a panel fetch that failed while the canvas succeeded would pin the new code to the OLD mode.
+
+**Emission rules**:
+- Fires ONCE per tool call (tracked by `toolCallId`)
+- Only for calls observed going from "running" to "resolved" (not history replay)
+- Only for mutating tools (`update_workspace_artifact`, `edit_workspace_document`, `publish_workspace_content`, `unpublish_workspace_content`)
+- Never for error results
+- Scopes by `objectId` when the result carried one
+
+**Key Sources**:
+- `/lib/atrium/workspace-change-event.ts` — event contract (`emitWorkspaceChanged`, `onWorkspaceChanged`, `workspaceChangeMatches`)
+- `/app/(protected)/nexus/_components/tools/use-workspace-change-signal.ts` — hook for tool-group emission
+
 **Focused Tests**:
-- `tests/e2e/atrium-artifact-data-access.functional.spec.ts` — data access modes including draft query on view page
-- `tests/unit/atrium-artifact-query-action.test.ts` — query action
-- `tests/unit/atrium-artifact-data-access-migration.test.ts` — migration 179
-- `tests/unit/atrium-artifact-data-bridge.test.tsx` — loaded-mode pin (#1712, both directions plus `none`)
-- `tests/unit/atrium-reader-page-masking.test.tsx` — reader page prop assertions including unrecognized mode pinning
-- `tests/unit/atrium-artifact-view-page-bridge.test.tsx` — view page enables bridge for drafts (#1725)
-- `tests/unit/atrium-artifact-canvas-bridge.test.tsx` — canvas props threading and sandbox keying
-- `tests/unit/atrium-artifact-bridge-fail-closed.test.tsx` — embed block and thumbnails remain fail-closed
-- `tests/unit/atrium-data-access-normalize.test.ts` — `normalizeDataAccess` helper
-- `tests/unit/atrium-workspace-panel-action.test.ts` — action returns `dataAccess` pin
-- `tests/unit/atrium-workspace-panel.test.tsx` — panel threads `dataAccess` to canvas
+- `tests/unit/atrium-workspace-change-refresh.test.tsx` — panel refresh on signal
+- `tests/unit/nexus-workspace-change-signal.test.tsx` — emission from tool results
+- `tests/unit/nexus-tool-group-workspace-signal.test.tsx` — tool-group integration
+- `tests/e2e/nexus-workspace-artifact-refresh.spec.ts` — end-to-end refresh without reload
 
 ### Usage Dashboard
 
