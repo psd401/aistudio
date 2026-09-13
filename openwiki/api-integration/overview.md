@@ -54,6 +54,17 @@ The publish endpoint makes content LIVE (pins version, gives it a reader page, a
 - `/docs/API/v1/context-graph.md` — §26.4 gate explanation
 - `/lib/content/publish-service.ts` — implementation
 
+#### Artifact Content CSP
+
+When creating artifacts via the REST API (`POST /api/v1/content` with `kind: "artifact"`), the body renders in a cross-origin sandbox with a strict Content Security Policy:
+
+- **Inline scripts/styles**: Permitted and are the intended way to build artifacts
+- **External scripts**: Only allowed from deployment's configured CDN allowlist (`atriumAllowedArtifactCdns` in `infra/cdk.json`)
+- **Network requests**: `connect-src` is `'none'` — no fetch/XHR/WebSocket
+- **Silent failures**: External scripts from non-allowlisted origins load silently — the page renders with the feature dead
+
+**Pin exact versions**: The OpenAPI spec deliberately omits the actual origin list to avoid stale documentation. For the live allowlist, see the `create_artifact` MCP tool description or check `infra/cdk.json` → `atriumAllowedArtifactCdns`. For infrastructure configuration details, see **[infrastructure/overview.md](../infrastructure/overview.md#atrium-sandbox-configuration)**.
+
 ### Authentication
 
 Two authentication methods are supported:

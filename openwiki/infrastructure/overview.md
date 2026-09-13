@@ -370,6 +370,55 @@ When adding new alarms or metric filters that depend on `resources.failureMetric
 
 ---
 
+## Atrium Sandbox Configuration
+
+### Content Security Policy Configuration (#1750)
+
+**Source**: `/infra/lib/atrium-sandbox-stack.ts`, `/infra/lib/frontend-stack-ecs.ts`, `/infra/cdk.json`
+
+The Atrium artifact sandbox enforces a Content Security Policy that restricts external script and style sources. The CSP allowlist is configured in **`infra/cdk.json`** under the `atriumAllowedArtifactCdns` context key, ensuring:
+
+1. **Single source of truth**: The same comma-separated origin list feeds both the sandbox CSP (enforcement) and the ECS task environment (guidance)
+2. **No silent empty allowlist**: The default lives in `cdk.json` instead of a `--context` flag, preventing deployments from accidentally shipping an empty allowlist
+3. **Deterministic catalog generation**: The capability catalog snapshot (`docs/API/v1/generated/capability-catalog.json`) pins the allowlist from `cdk.json` for byte-identical output across environments
+
+**Configuration Location**: `/infra/cdk.json` → `context.atriumAllowedArtifactCdns`
+
+Example:
+```json
+{
+  "context": {
+    "atriumAllowedArtifactCdns": "https://cdnjs.cloudflare.com"
+  }
+}
+```
+
+The allowlist is:
+- Baked into the sandbox CSP by `AtriumSandboxStack` (`script-src`/`style-src`/`img-src`)
+- Injected as `ATRIUM_ALLOWED_ARTIFACT_CDNS` on the ECS task
+- Dynamically appended to MCP tool descriptions and agent skill guidance
+
+**Invariant**: Every origin in the allowlist enlarges the trusted surface for ALL artifacts. Keep the list minimal and add origins only on request. The `connect-src` directive remains `'none'`, so the no-egress invariant holds regardless of CDN entries.
+
+### Deployment Requirement
+
+When changing `atriumAllowedArtifactCdns`, both stacks must be deployed together:
+
+```bash
+cd infra && bunx cdk deploy AIStudio-AtriumSandboxStack-Dev AIStudio-FrontendStack-ECS-Dev
+```
+
+This ensures the CSP enforced by the sandbox matches the guidance the app provides to artifact authors.
+
+**CSP Guidance**: The `ATRIUM_ALLOWED_ARTIFACT_CDNS` environment variable is consumed by `/lib/content/artifact-sandbox-config.ts` → `buildArtifactCspGuidance()` to generate a one-sentence CSP note for artifact authors. This guidance is appended to MCP tool descriptions and agent skills. See **[app-features/overview.md](../app-features/overview.md#atrium--content-workspace)** for the feature-level CSP documentation.
+
+**Focused Tests**:
+- `/infra/test/atrium-sandbox-csp.test.ts` — validates CSP construction from allowlist
+- `/tests/smoke/atrium-artifact-sandbox-config.smoke.ts` — smoke test for runtime CSP config
+- `/tests/unit/atrium-mcp-content-tools.test.ts` — validates CSP guidance in MCP tools
+
+---
+
 ## Security
 
 ### K-12 Content Safety
@@ -431,17 +480,31 @@ bunx cdk deploy --hotswap
 
 ## Testing Infrastructure
 
-### Infrastructure Tests
+### Infrastructure Jest Tests
 
-**Location**: `/infra/test/`
+**Location**: `/infra/test/`, `/infra/**/__tests__/`
 
-| Test File | Purpose |
-|-----------|---------|
-| `*stack*.test.ts` | Stack synthesis tests |
-| `*lambda*.test.ts` | Lambda configuration tests |
-| `*vpc*.test.ts` | Network topology tests |
+Infrastructure uses Jest with @swc/jest transformer (migrated from ts-jest for TypeScript 7 compatibility). Tests validate stack synthesis, IAM policies, Lambda configurations, and CSP constructions.
 
-Run: `cd infra && bun test`
+**Test Categories**:
+
+| Category | Location | Purpose |
+|----------|----------|---------|
+| Stack synthesis | `/infra/test/*stack*.test.ts` | Validate stack outputs, resources |
+| Lambda tests | `/infra/**/__tests__/*.test.ts` | Unit tests for Lambda handlers |
+| CSP validation | `/infra/test/atrium-sandbox-csp.test.ts` | Artifact sandbox CSP construction |
+| Alarm routing | `/infra/test/agent-alarm-delivery.test.ts` | Dual-topic alarm delivery validation |
+
+**Execution**:
+
+```bash
+cd infra && bun test                    # Run all infrastructure tests (serial)
+cd infra && bun test --testPathPattern=atrium-sandbox-csp  # Run specific test file
+```
+
+**Serial execution required**: Infrastructure tests must run with `--runInBand` (enforced by jest.config.js) because concurrent workers deadlocking on CDK Lambda asset staging. The serial run completes 58 suites / 543 tests in ~95s.
+
+**CI Integration**: Infrastructure jest runs in the "Validate CDK Infrastructure" job (`.github/workflows/ci.yml`), gated alongside the root test suite.
 
 ---
 
