@@ -27,7 +27,7 @@ infra/agent-image/skills/{skill-name}/
 ### Skill Categories
 
 **Administrative & District Operations**
-- `psd-atrium` — Read/search/create content in Atrium; artifact data persistence (list-data, submit); viewer-scoped PSD data queries from artifacts via shared connector resolution with Nexus; CSP guidance for artifact scripts/styles (inline preferred, CDN allowlist enforced); "Live PSD data inside an artifact" section mirrors `lib/content/atrium-data-contract.ts` guidance but is hand-maintained — change both when the bridge contract changes (#1749)
+- `psd-atrium` — Read/search/create content in Atrium; artifact data persistence (list-data, submit); viewer-scoped PSD data queries from artifacts via shared connector resolution with Nexus; CSP guidance for artifact scripts/styles (inline preferred, CDN allowlist enforced); visibility/grant management with `read-grants` command and merge mode (`--add-grants`/`--remove-grants`) for safe audience changes (#1763); "Live PSD data inside an artifact" section mirrors `lib/content/atrium-data-contract.ts` guidance but is hand-maintained — change both when the bridge contract changes (#1749)
 - `psd-freshservice` — Freshservice tickets, service catalog items, approvals, and team summaries using each caller's own API key; create catalog request forms with field validation
 - `psd-email-triage` — Automated email response drafting
 - `psd-schedules` — Scheduled agent tasks (cron/rate/at) with read access for scheduled-mode turns; reply IS the delivery — never hunt for DM

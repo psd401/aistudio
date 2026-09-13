@@ -58,6 +58,7 @@ AI Studio is an open-source platform that provides K-12 educators and students w
 4. **Git Flow**: PRs target `dev` branch, never `main`
 5. **Nexus Conversations**: Read `/docs/features/nexus-conversation-architecture.md` before modifying conversation code
 6. **API Changes**: Update both `docs/API/v1/openapi.yaml` and `docs/API/v1/context-graph.md` for API v1 modifications
+7. **Visibility Changes**: Read grants before modifying — `PATCH /content/:id/visibility` replaces the grant list, use `--add-grants`/`--remove-grants` for merge operations (#1763)
 
 ## Development Quick Start
 
