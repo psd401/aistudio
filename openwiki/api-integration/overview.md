@@ -26,6 +26,7 @@ The REST API provides programmatic access to AI Studio's core capabilities:
 | **Assistants** | `/api/v1/assistants` | List and execute assistants via API |
 | **Jobs** | `/api/v1/jobs` | Async job polling and cancellation |
 | **Content** | `/api/v1/content` | Atrium content objects, versions, publishing (Issue #1055) |
+| **Content Visibility** | `/api/v1/content/:id/visibility` | Read object's visibility level and grant entries (#1763) |
 | **Agents** | `/api/v1/agents` | Delegated token minting for autonomous agents (Epic #1059) |
 | **Tools** | `/api/v1/tools` | Tool catalog inspection |
 | **Voice** | `/api/nexus/voice` | Real-time voice via WebSocket with Gemini Live API |
@@ -53,6 +54,50 @@ The publish endpoint makes content LIVE (pins version, gives it a reader page, a
 - `/docs/API/v1/openapi.yaml` — full schema
 - `/docs/API/v1/context-graph.md` — §26.4 gate explanation
 - `/lib/content/publish-service.ts` — implementation
+
+#### Content Visibility API (#1763)
+
+**Endpoint**: `GET /api/v1/content/{id}/visibility`
+
+Returns an object's visibility level plus the actual grant entries, enabling safe audience management.
+
+**Request**:
+- Scope: `content:read`
+- Authorization: Requires EDIT permission on the object (not just VIEW)
+
+**Response**:
+```json
+{
+  "id": "uuid",
+  "visibility": {
+    "visibilityLevel": "group",
+    "grants": [
+      { "kind": "role", "value": "staff" },
+      { "kind": "building", "value": "GHS" }
+    ]
+  }
+}
+```
+
+**Editor Gate Rationale**: The grant list names every principal with access, including numeric user IDs behind `user` grants. Someone who can merely VIEW an object must not be able to enumerate its audience. This matches the UI's `getVisibilityAction` behavior.
+
+**Why This Exists**: The `grants` parameter on `PATCH /content/{id}/visibility` REPLACES the entire list — it does not append. Before #1763, API consumers had to guess the grant list, and a wrong guess silently revoked access. The GET endpoint lets agents and scripts read before modifying.
+
+**Grant Types in Detail**:
+
+| Kind | Value Format | Validation |
+|------|--------------|------------|
+| `role` | Role name | Must be valid role |
+| `building` | Building code | Alphanumeric |
+| `department` | Department name | String |
+| `grade` | Grade level | String |
+| `group` | Group email | Email format required |
+| `user` | Numeric user ID | Positive integer, NOT email |
+
+**Key Sources**:
+- `/app/api/v1/content/[id]/visibility/route.ts` — GET and PATCH implementations
+- `/lib/content/visibility-read.ts` — shared `readVisibilityForEdit()` helper
+- `/docs/API/v1/openapi.yaml` — `getContentVisibility` operation schema
 
 #### Artifact Content CSP
 

@@ -351,6 +351,77 @@ Making an object live is **not** gated — it changes only state, not audience.
 - `tests/unit/atrium-publish-service.test.ts` — publish service unit tests
 - `tests/unit/atrium-publish-document-action.test.ts` — action tests
 
+### Visibility & Grant Management (#1763)
+
+**Sources**: `/lib/content/visibility-read.ts`, `/lib/agent-workspace/atrium-owner-operation.ts`, `/app/api/v1/content/[id]/visibility/route.ts`, `/infra/agent-image/skills/psd-atrium/SKILL.md`
+
+Atrium objects have both a **visibility level** (who can access) and a **grant list** (specific principals). Agents and API callers must understand both to manage audience safely.
+
+#### Visibility Levels
+
+- **Private** — Only author and administrators (plus any preserved user grants)
+- **Group** — Staff matching ANY grant entry (union of all grants)
+- **Internal** — Staff with visibility grants (specific users, groups, roles, buildings, departments, grades)
+- **Public** — Anyone with the link, including anonymous visitors
+
+#### Grant Types
+
+Each grant is `kind:value` where `kind` determines the value format:
+
+| Kind | Value Format | Example |
+|------|--------------|---------|
+| `role` | Role name | `role:staff` |
+| `building` | Building code | `building:GHS` |
+| `department` | Department name | `department:Curriculum` |
+| `grade` | Grade level | `grade:12` |
+| `group` | Group email address | `group:cabinet@psd401.net` |
+| `user` | Numeric user ID (NOT email) | `user:42` |
+
+**Critical**: `user` grants require the numeric AI Studio user ID. Email addresses are rejected with a 400. This skill cannot resolve an email to an ID—use the web visibility editor's people picker for named individuals.
+
+#### Replace vs. Merge Mode
+
+**Replace mode** (`--grants`):
+- REPLACES the entire grant list — does not append
+- Read-first rule: Call `read-grants` before `set-visibility --grants` to avoid destroying access
+- Required when you want the list to be EXACTLY what you pass
+
+**Merge mode** (`--add-grants`, `--remove-grants`):
+- Reads the stored list, applies the change, writes the union
+- Keeps the object's current level unless `--level` is also passed
+- Deduplicates by `kind:value` — safe to re-run
+- Fails with actionable error for non-group objects (grants apply only to `level: group`)
+
+#### Read Grants Before Modifying
+
+The `read-grants` command returns the level plus the actual grants array:
+
+```bash
+# Agent skill
+node run.js read-grants --id <uuid-or-slug>
+
+# REST v1 API
+GET /api/v1/content/:id/visibility
+```
+
+**Editor gate**: Grant reads require EDIT permission, not just VIEW. The grant list names every principal with access, so someone who can merely view an object cannot enumerate its audience. This prevents information disclosure (e.g., exposing user IDs behind `user` grants).
+
+**Shared implementation**: Both the agent broker and REST v1 API use `readVisibilityForEdit()` from `/lib/content/visibility-read.ts`, ensuring authorization and response shape stay identical across surfaces.
+
+**Why this matters**: Before #1763, `read` returned only `grantCount` (an integer). An agent narrowing or widening an object had to guess the grant list, and a wrong guess silently revoked access with no audit trail to restore it. The `read-grants` command and merge mode eliminate this hazard.
+
+**Key Sources**:
+- `/lib/content/visibility-read.ts` — shared grant-read helper
+- `/lib/agent-workspace/atrium-owner-operation.ts` — agent broker `GET /<id>/visibility`
+- `/app/api/v1/content/[id]/visibility/route.ts` — REST v1 GET endpoint
+- `/infra/agent-image/skills/psd-atrium/SKILL.md` — skill documentation
+
+**Focused Tests**:
+- `tests/unit/atrium-visibility-read.test.ts` — shared helper behavior
+- `tests/unit/atrium-content-visibility-read-route.test.ts` — REST v1 route
+- `tests/unit/agent-atrium-owner-operation.test.ts` — broker branch
+- `tests/e2e/atrium-content-api.functional.spec.ts` — grant round-trip and denial shapes
+
 ### Library & Favorites
 
 **Library Home** provides a curated landing experience:
