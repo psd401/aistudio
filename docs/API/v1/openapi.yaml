@@ -5004,6 +5004,14 @@ components:
           enum: [role, building, department, grade, user, group]
         value:
           type: string
+          description: >-
+            Matched against the principal's own attribute for that kind. Two
+            kinds constrain the format and are rejected with a 400 otherwise:
+            `user` is the numeric AI Studio user id (never an email), and
+            `group` is a synced group email. `role` is a role NAME (e.g.
+            "staff"), never a role id. The rest (building, department, grade)
+            carry the attribute string verbatim.
+          example: staff
 
     CollectionDiscoveryNode:
       type: object

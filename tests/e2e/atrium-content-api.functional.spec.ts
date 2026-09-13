@@ -8,6 +8,8 @@ import {
   SEEDED_ADMIN_SUB,
   SEEDED_NO_CAPABILITY_EMAIL,
   SEEDED_NO_CAPABILITY_SUB,
+  SEEDED_STAFF_EMAIL,
+  SEEDED_STAFF_SUB,
 } from './helpers/session-auth'
 
 const authoredAssetPng = Buffer.from(
@@ -372,11 +374,112 @@ function defineAtriumContentV1SessionCapabilityGateAuthenticatedSuite1Part4() {t
   })
 }
 
+function defineAtriumContentV1SessionCapabilityGateAuthenticatedSuite1Part5() {
+  /**
+   * #1763 — the grant-list read. `GET /content/:id` reports only a
+   * `grantCount`, so before this route the only way to change an audience was
+   * to re-send a GUESSED grant list, and a wrong guess silently dropped access
+   * no audit trail could restore. Proves the round trip an agent actually
+   * makes (write grants → read them back verbatim) and the editor gate that
+   * keeps the list — which names every principal with access — off a viewer.
+   */
+  test('grant list written by PATCH reads back verbatim, and is editor-gated', async ({
+    page,
+    request,
+  }) => {
+    await authenticateContext(page.context(), SEEDED_ADMIN_EMAIL, SEEDED_ADMIN_SUB)
+    const created = await page.request.post('/api/v1/content', {
+      data: {
+        kind: 'document',
+        title: `e2e grant read ${Date.now()}`,
+        body: '# Grant read',
+        bodyFormat: 'markdown',
+      },
+    })
+    expect(created.status()).toBe(201)
+    const objectId = (await created.json()).data.id as string
+
+    const grants = [
+      { kind: 'role', value: 'staff' },
+      { kind: 'building', value: 'GHS' },
+    ]
+    expect(
+      (
+        await page.request.patch(`/api/v1/content/${objectId}/visibility`, {
+          data: { level: 'group', grants },
+        })
+      ).status()
+    ).toBe(200)
+
+    // The ENTRIES come back, not just a count — the whole point of #1763.
+    const read = await page.request.get(
+      `/api/v1/content/${objectId}/visibility`
+    )
+    expect(read.status()).toBe(200)
+    const body = (await read.json()).data
+    expect(body.id).toBe(objectId)
+    expect(body.visibility.visibilityLevel).toBe('group')
+    expect(body.visibility.grants).toEqual(expect.arrayContaining(grants))
+    expect(body.visibility.grants).toHaveLength(grants.length)
+
+    // Anonymous is refused before the object is ever resolved.
+    expect(
+      (await request.get(`/api/v1/content/${objectId}/visibility`)).status()
+    ).toBe(401)
+
+    // A second, PRIVATE object proves the two denial shapes are distinct.
+    const privateCreated = await page.request.post('/api/v1/content', {
+      data: {
+        kind: 'document',
+        title: `e2e grant read private ${Date.now()}`,
+        body: '# Private',
+        bodyFormat: 'markdown',
+      },
+    })
+    expect(privateCreated.status()).toBe(201)
+    const privateId = (await privateCreated.json()).data.id as string
+
+    const staff = await page.context().browser()?.newContext()
+    if (staff) {
+      // Seeded staff holds `content:read`, so it clears the scope gate and is
+      // judged on the object itself — the case that matters for #1763.
+      await authenticateContext(staff, SEEDED_STAFF_EMAIL, SEEDED_STAFF_SUB)
+
+      // Staff MATCHES the `role:staff` grant, so it can VIEW this object — and
+      // still must not enumerate the audience it is part of. Not a 404: hiding
+      // an object staff can already read would be a lie, and the grant list is
+      // withheld on the edit gate instead.
+      const viewerRead = await staff.request.get(
+        `/api/v1/content/${objectId}/visibility`
+      )
+      expect(viewerRead.status()).toBe(403)
+      expect(await viewerRead.text()).not.toContain('GHS')
+
+      // On the private object staff cannot view at all, the same route
+      // 404-masks first, so the denial confirms nothing about existence.
+      expect(
+        (await staff.request.get(`/api/v1/content/${privateId}/visibility`))
+          .status()
+      ).toBe(404)
+      await staff.close()
+    }
+
+    for (const id of [objectId, privateId]) {
+      expect(
+        [200, 204].includes(
+          (await page.request.delete(`/api/v1/content/${id}`)).status()
+        )
+      ).toBe(true)
+    }
+  })
+}
+
 const defineAtriumContentV1SessionCapabilityGateAuthenticatedSuite1 = () => {
   defineAtriumContentV1SessionCapabilityGateAuthenticatedSuite1Part1()
   defineAtriumContentV1SessionCapabilityGateAuthenticatedSuite1Part2()
   defineAtriumContentV1SessionCapabilityGateAuthenticatedSuite1Part3()
   defineAtriumContentV1SessionCapabilityGateAuthenticatedSuite1Part4()
+  defineAtriumContentV1SessionCapabilityGateAuthenticatedSuite1Part5()
 };
 
 test.describe('Atrium content v1 — session capability gate (authenticated)', defineAtriumContentV1SessionCapabilityGateAuthenticatedSuite1)

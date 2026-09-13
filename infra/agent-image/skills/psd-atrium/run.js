@@ -148,6 +148,8 @@ function usage() {
       '                 [--add-grants k:v,...] [--remove-grants k:v,...]  merge into',
       '                 the stored list instead (keeps the current level; --level',
       '                 is required only when NOT merging)',
+      '                 kinds: role|building|department|grade|group|user — `group`',
+      '                 takes a group email, `user` a numeric id (never an email)',
       '',
       'Collections (private for every owner; district requires administrator):',
       '  list-collections',
@@ -741,15 +743,10 @@ function grantKey(grant) {
  */
 async function readGrants(args) {
   const id = requireStr(args, 'id', 'id');
-  const { payload } = await restFetch(
-    'GET',
-    `/${encodeURIComponent(id)}/visibility`
-  );
-  const visibility = (payload && payload.visibility) || {};
-  const grants = Array.isArray(visibility.grants) ? visibility.grants : [];
+  const { id: objectId, level, grants } = await fetchVisibility(id);
   emit({
-    id: payload && payload.id,
-    visibilityLevel: visibility.visibilityLevel,
+    id: objectId,
+    visibilityLevel: level,
     grants,
     grantCount: grants.length,
     note:
@@ -760,8 +757,8 @@ async function readGrants(args) {
 }
 
 /**
- * Fetch the stored level + grants for a merge. Separate from `readGrants` so the
- * merge path reuses the one read instead of re-deriving the emitted shape.
+ * The one GET of an object's stored audience: used both by `read-grants` (which
+ * formats it for the caller) and by the merge path (which computes against it).
  */
 async function fetchVisibility(id) {
   const { payload } = await restFetch(
@@ -770,6 +767,7 @@ async function fetchVisibility(id) {
   );
   const visibility = (payload && payload.visibility) || {};
   return {
+    id: payload && payload.id,
     level: visibility.visibilityLevel,
     grants: Array.isArray(visibility.grants) ? visibility.grants : [],
   };
@@ -801,9 +799,14 @@ async function mergeGrants(id, requestedLevel, addGrants, removeGrants) {
   // would reject the merge result with a 400 whose remedy is a DIFFERENT flag,
   // so say what to do instead rather than spending the write on a certain 400.
   if (grants.length > 0 && level !== 'group') {
+    // Say what --level group COSTS. From `private` (owner plus any preserved
+    // user grant) it is a real widen, not a syntax fix: group admits everyone
+    // matching ANY entry in the merged list, not just the one being added.
     fail(
       `grants only apply to group visibility, but this object is "${level}" — ` +
-        'pass --level group to scope it to these grants'
+        'pass --level group to apply them, which WIDENS the audience to ' +
+        'everyone matching any entry in the merged list, not only the grant ' +
+        'you are adding'
     );
   }
   if (grants.length === 0 && level === 'group') {

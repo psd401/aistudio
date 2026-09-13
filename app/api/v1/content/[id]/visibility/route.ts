@@ -32,6 +32,7 @@ import {
   restVisibilitySchema,
 } from "@/lib/content/rest";
 import { assertContentAuthoringCapability } from "@/lib/content/surface-helpers";
+import { readVisibilityForEdit } from "@/lib/content/visibility-read";
 import { createLogger } from "@/lib/logger";
 
 /**
@@ -42,17 +43,14 @@ import { createLogger } from "@/lib/logger";
  * only way to narrow or widen an object is to re-send a guessed grant list, and
  * a wrong guess silently drops access that no audit trail can restore.
  *
- * Gated on EDIT, not view, via `loadForEdit` (404-masks a non-viewable object
- * before the 403). The grant set names every principal with access — including
- * the numeric `users.id` behind a `user` grant — which an owner never intended
- * to expose to grantees, so a caller who can only VIEW the object must not be
- * able to enumerate its grants. This mirrors `getVisibilityAction`, which also
- * returns grants to editors only.
+ * The load, the edit gate and the response shape live in
+ * `readVisibilityForEdit` so this route and the agent broker cannot drift apart
+ * on who may see an audience; see that helper for why the gate is EDIT rather
+ * than view, and why the authoring capability deliberately does not apply.
  *
- * Deliberately does NOT call `assertContentAuthoringCapability`: that gate
- * exists for authoring writes, and reading back an object you already own is
- * not authoring. Adding it here would hide an owner's own audience from them
- * over a capability that only governs mutation.
+ * `content:read` is the right scope: this is a read, and it matches every other
+ * GET on this surface. The paired PATCH keeps `content:update` because it
+ * writes.
  */
 export const GET = withApiAuth(async (request: NextRequest, auth, requestId, params) => {
   const scopeError = requireScope(auth, "content:read", requestId);
@@ -68,18 +66,8 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId, par
   const { req } = resolved;
 
   try {
-    const obj = await contentService.loadForEdit(req, id);
-    const grants = await visibilityService.grantsFor(obj.id);
-    return createApiResponse(
-      {
-        data: {
-          id: obj.id,
-          visibility: { visibilityLevel: obj.visibilityLevel, grants },
-        },
-        meta: { requestId },
-      },
-      requestId
-    );
+    const data = await readVisibilityForEdit(req, id);
+    return createApiResponse({ data, meta: { requestId } }, requestId);
   } catch (err) {
     return contentErrorToResponse(err, requestId);
   }

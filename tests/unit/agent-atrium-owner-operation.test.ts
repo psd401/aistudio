@@ -3,6 +3,7 @@
 const getUserByEmailMock = jest.fn()
 const requesterForUserIdMock = jest.fn()
 const assertContentAuthoringCapabilityMock = jest.fn()
+const readVisibilityForEditMock = jest.fn()
 const resolveCollectionIdMock = jest.fn()
 const contentListMock = jest.fn()
 const contentCreateMock = jest.fn()
@@ -66,6 +67,10 @@ jest.mock("@/lib/content/surface-helpers", () => ({
       ? `/c/${object.slug}`
       : `/atrium/${object.id}/${object.kind === "artifact" ? "view" : "edit"}`,
   resolveCollectionId: (...args: unknown[]) => resolveCollectionIdMock(...args),
+}))
+jest.mock("@/lib/content/visibility-read", () => ({
+  readVisibilityForEdit: (...args: unknown[]) =>
+    readVisibilityForEditMock(...args),
 }))
 jest.mock("@/lib/content", () => {
   class MockContentError extends Error {
@@ -669,15 +674,23 @@ describe("signed-owner Atrium mutations", () => {
 })
 
 describe("signed-owner Atrium visibility reads (#1763)", () => {
+  // The edit gate and the read's shape live in `readVisibilityForEdit`, shared
+  // with the REST v1 route so the two surfaces cannot drift apart on who may
+  // enumerate an audience; both are pinned in
+  // `atrium-visibility-read.test.ts`. What the BROKER owns is routing
+  // this path to that helper as the signed owner, and staying off the authoring
+  // gate while doing it.
   it("returns the actual grant entries for an editor, not just a count (#1763)", async () => {
-    contentLoadForEditMock.mockResolvedValue({
+    readVisibilityForEditMock.mockResolvedValue({
       id: "content-1",
-      visibilityLevel: "group",
+      visibility: {
+        visibilityLevel: "group",
+        grants: [
+          { kind: "role", value: "staff" },
+          { kind: "building", value: "GHS" },
+        ],
+      },
     })
-    grantsForMock.mockResolvedValue([
-      { kind: "role", value: "staff" },
-      { kind: "building", value: "GHS" },
-    ])
     await expect(
       executeOwnerAtriumOperation({
         ownerEmail: "owner@psd401.net",
@@ -701,16 +714,16 @@ describe("signed-owner Atrium visibility reads (#1763)", () => {
         meta: { requestId: "request-visibility" },
       },
     })
-    // Editor-gated: the grant list names every principal with access, so it
-    // goes through loadForEdit (404-mask then edit gate), never a bare view.
-    expect(contentLoadForEditMock).toHaveBeenCalledWith(requester, "content-1")
-    expect(grantsForMock).toHaveBeenCalledWith("content-1")
+    expect(readVisibilityForEditMock).toHaveBeenCalledWith(
+      requester,
+      "content-1"
+    )
     // Reading your own audience is not authoring.
     expect(assertContentAuthoringCapabilityMock).not.toHaveBeenCalled()
   })
 
-  it("masks a grant read the requester may not edit and loads no grants", async () => {
-    contentLoadForEditMock.mockRejectedValueOnce(
+  it("masks a grant read the requester may not edit", async () => {
+    readVisibilityForEditMock.mockRejectedValueOnce(
       new NotFoundError("Content not found")
     )
     const result = await executeOwnerAtriumOperation({
@@ -720,7 +733,6 @@ describe("signed-owner Atrium visibility reads (#1763)", () => {
       path: "/content-1/visibility",
     })
     expect(result.httpStatus).toBe(404)
-    expect(grantsForMock).not.toHaveBeenCalled()
   })
 })
 

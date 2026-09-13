@@ -564,7 +564,7 @@ admits the recipient, or say plainly that it is not yet viewable.
 ```bash
 node run.js read-grants --id <id>                      # READ the audience FIRST
 node run.js set-visibility --id <id> --level internal
-node run.js set-visibility --id <id> --add-grants user:cabinet@psd401.net
+node run.js set-visibility --id <id> --add-grants group:cabinet@psd401.net
 node run.js set-visibility --id <id> --remove-grants building:GHS
 node run.js set-visibility --id <id> --level group --grants role:staff,building:GHS
 ```
@@ -585,6 +585,14 @@ follow:
   deduplicated — safe to re-run.
 - Only use `--grants` when you intend the list to be EXACTLY what you pass, and
   run `read-grants` first so you know what you are replacing.
+
+A grant is `kind:value`. Valid kinds are `role`, `building`, `department`,
+`grade`, `group` and `user`. Two of them constrain the value and reject anything
+else with a 400: `group` takes a group EMAIL (`group:cabinet@psd401.net`), and
+`user` takes the numeric AI Studio user id, never an email (`user:42`). Nothing
+in this skill resolves a person's email to that id — to grant one named person,
+read an existing `user` grant off another object, or use the web visibility
+editor's people picker.
 
 `read-grants --id <id>` returns the level plus the actual `grants: [{kind,
 value}]` entries. It needs EDIT rights on the object — the list names every

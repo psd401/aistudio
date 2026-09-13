@@ -728,7 +728,7 @@ test('set-visibility --add-grants merges into the stored grants instead of repla
           },
         }
       : { approvalRequired: false, status: 200, payload: { id: 'obj-1' } };
-  await run('set-visibility', '--id', 'obj-1', '--add-grants', 'user:cabinet@psd401.net');
+  await run('set-visibility', '--id', 'obj-1', '--add-grants', 'group:cabinet@psd401.net');
   expect(restCalls[0]).toMatchObject({ method: 'GET', path: '/obj-1/visibility' });
   expect(restCalls[1]).toMatchObject({ method: 'PATCH', path: '/obj-1/visibility' });
   // The pre-existing grant SURVIVES, and the stored level is reused so a grant
@@ -737,7 +737,7 @@ test('set-visibility --add-grants merges into the stored grants instead of repla
     level: 'group',
     grants: [
       { kind: 'role', value: 'staff' },
-      { kind: 'user', value: 'cabinet@psd401.net' },
+      { kind: 'group', value: 'cabinet@psd401.net' },
     ],
   });
 });

@@ -24,6 +24,7 @@ import {
   contentSurfaceLink,
   resolveCollectionId,
 } from "@/lib/content/surface-helpers"
+import { readVisibilityForEdit } from "@/lib/content/visibility-read"
 import { contentSourceRefSchema } from "@/lib/content/source-ref"
 import {
   createCollectionBodySchema,
@@ -358,23 +359,12 @@ async function executeTwoSegmentRead(
   // REPLACES the grant set — so without this read an agent narrowing or
   // widening an object has to guess what the existing grants were, and a wrong
   // guess silently destroys access nobody can recover (there is no grant
-  // history). Editor-gated via `loadForEdit`: the grant set names every
-  // principal with access (including a `user` grant's numeric user id), which
-  // an owner never intended to expose to grantees, so a viewer who can only
-  // SEE the object must not be able to enumerate its grants. `loadForEdit`
-  // 404-masks a non-viewable object before that 403, matching every other read
-  // here. Reading your own audience is not authoring, so this stays on the near
-  // side of the authoring-capability assert alongside `source`.
+  // history). `readVisibilityForEdit` holds the edit gate and the response
+  // shape so this branch and the REST v1 GET cannot drift apart on who may see
+  // an audience. Reading your own audience is not authoring, so this stays on
+  // the near side of the authoring-capability assert alongside `source`.
   if (operation === "visibility") {
-    const object = await contentService.loadForEdit(req, contentId)
-    const grants = await visibilityService.grantsFor(object.id)
-    return success(
-      {
-        id: object.id,
-        visibility: { visibilityLevel: object.visibilityLevel, grants },
-      },
-      input.requestId
-    )
+    return success(await readVisibilityForEdit(req, contentId), input.requestId)
   }
 
   if (operation !== "data") return null
