@@ -923,7 +923,14 @@ _SKILL_GUIDANCE_SUFFIXES = (".md", ".html")
 # scheme ("the fonts.googleapis.com stylesheet ... is blocked"), and those are
 # counter-examples, not instructions. Requiring `https://` keeps them out
 # without having to read intent from the surrounding prose.
-_SKILL_HTTPS_ORIGIN_RE = re.compile(r"https://[A-Za-z0-9.-]+")
+#
+# The port is part of the match because it is part of the ORIGIN: a browser
+# treats https://cdn.example.com:8443 and https://cdn.example.com as different
+# origins, and `normalizeAtriumOrigin()` in infra/lib/atrium-sandbox-stack.ts
+# keeps non-default ports for exactly that reason. Dropping it here would let a
+# port-specific URL match a portless allowlist entry and pass a gate the CSP
+# then blocks.
+_SKILL_HTTPS_ORIGIN_RE = re.compile(r"https://[A-Za-z0-9.-]+(?::\d+)?")
 
 """Hosts these skills name for reasons other than loading a sandboxed asset.
 
@@ -986,6 +993,25 @@ def check_skill_cdn_allowlist(cdk_json_path: str, skills_dir: str) -> List[str]:
 
     allowed = [entry.strip().rstrip("/") for entry in raw.split(",")]
     allowed = [entry for entry in allowed if entry]
+
+    # An origin cannot be both loadable and a declared non-asset reference. Say
+    # so directly: otherwise making one loadable would fail the reverse check
+    # below for an unrelated-looking reason ("no skill names it"), sending the
+    # reader to the wrong file.
+    contradictions = [
+        origin
+        for origin in allowed
+        if origin[len("https://"):].split(":", 1)[0] in _NON_LOADABLE_SKILL_HOSTS
+    ]
+    if contradictions:
+        return [
+            f"{origin} is in atriumAllowedArtifactCdns but is also declared a "
+            f"non-loadable reference host in check_config_consistency.py — "
+            f"remove it from _NON_LOADABLE_SKILL_HOSTS and say in the skills "
+            f"that artifacts may load from it"
+            for origin in contradictions
+        ]
+
     if not allowed:
         return [
             "infra/cdk.json context.atriumAllowedArtifactCdns is empty, but the "
@@ -1013,9 +1039,14 @@ def check_skill_cdn_allowlist(cdk_json_path: str, skills_dir: str) -> List[str]:
 
         for match in _SKILL_HTTPS_ORIGIN_RE.finditer(contents):
             origin = match.group(0).rstrip(".-")
+            host = origin[len("https://"):].split(":", 1)[0]
+            # A non-loadable reference link is NOT documentation that an origin
+            # may be used for scripts or styles, so it must not satisfy the
+            # reverse check below. Classify before recording.
+            if host in _NON_LOADABLE_SKILL_HOSTS:
+                continue
             seen.add(origin)
-            host = origin[len("https://"):]
-            if origin in allowed or host in _NON_LOADABLE_SKILL_HOSTS:
+            if origin in allowed:
                 continue
             violations.append(
                 f"{os.path.relpath(path, skills_dir)} names {origin}, which is "

@@ -775,6 +775,49 @@ class SkillCdnAllowlistTests(unittest.TestCase):
         )
         self.assertEqual(ccc.check_skill_cdn_allowlist(cdk, skills), [])
 
+    def test_port_specific_url_does_not_match_a_portless_allowlist_entry(self):
+        # A browser treats https://cdn.example.com:8443 as a DIFFERENT origin
+        # from https://cdn.example.com, and the CDK normalizer keeps the port.
+        # Dropping it here would pass a gate the CSP then blocks (Codex #1771).
+        cdk, skills = self._tree(
+            "https://cdn.example.com",
+            {
+                "psd-atrium/SKILL.md": (
+                    "Use https://cdn.example.com. Also "
+                    "https://cdn.example.com:8443/lib.js works."
+                )
+            },
+        )
+        violations = ccc.check_skill_cdn_allowlist(cdk, skills)
+        self.assertTrue(
+            any("cdn.example.com:8443" in v for v in violations), violations
+        )
+
+    def test_port_specific_allowlist_entry_is_honoured(self):
+        cdk, skills = self._tree(
+            "https://cdn.example.com:8443",
+            {"psd-atrium/SKILL.md": "Load from https://cdn.example.com:8443 only."},
+        )
+        self.assertEqual(ccc.check_skill_cdn_allowlist(cdk, skills), [])
+
+    def test_reference_link_does_not_document_an_allowlisted_origin(self):
+        # psd401.ai is exempt because artifacts link to it, not load from it.
+        # Allowlisting it must not be satisfied by those existing links: the
+        # skills still describe only cdnjs as a loadable source (Codex #1771).
+        cdk, skills = self._tree(
+            "https://cdnjs.cloudflare.com,https://psd401.ai",
+            {
+                "psd-atrium/SKILL.md": (
+                    "Use https://cdnjs.cloudflare.com. Your page appears at "
+                    "https://psd401.ai/c/my-slug."
+                )
+            },
+        )
+        violations = ccc.check_skill_cdn_allowlist(cdk, skills)
+        self.assertTrue(
+            any("psd401.ai" in v for v in violations), violations
+        )
+
     def test_repo_skills_match_the_repo_allowlist(self):
         # Guards the live files, not a fixture.
         here = os.path.dirname(os.path.abspath(__file__))
