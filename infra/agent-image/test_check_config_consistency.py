@@ -3,7 +3,9 @@
 Run: uv run --with pytest python3 -m pytest infra/agent-image/test_check_config_consistency.py
 """
 
+import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -672,6 +674,114 @@ class RealFilesTests(unittest.TestCase):
         version, violations = ccc.parse_pinned_parallel_plugin_version(
             os.path.join(here, "Dockerfile"))
         self.assertEqual(version, "2026.7.2-beta.5")
+        self.assertEqual(violations, [])
+
+
+class SkillCdnAllowlistTests(unittest.TestCase):
+    """#1761 — skill prose must not outlive the CSP allowlist it describes."""
+
+    def _tree(self, cdn_json_value, skill_files):
+        """Build a throwaway cdk.json + skills tree; return (cdk_path, skills)."""
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+
+        cdk_path = os.path.join(root, "cdk.json")
+        with open(cdk_path, "w", encoding="utf-8") as fh:
+            context = {} if cdn_json_value is None else {
+                "atriumAllowedArtifactCdns": cdn_json_value
+            }
+            json.dump({"context": context}, fh)
+
+        skills = os.path.join(root, "skills")
+        for relpath, text in skill_files.items():
+            full = os.path.join(skills, relpath)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        return cdk_path, skills
+
+    def test_agreement_passes(self):
+        cdk, skills = self._tree(
+            "https://cdnjs.cloudflare.com",
+            {"psd-atrium/SKILL.md": "Load it from https://cdnjs.cloudflare.com only."},
+        )
+        self.assertEqual(ccc.check_skill_cdn_allowlist(cdk, skills), [])
+
+    def test_allowlist_swapped_under_the_skills_is_caught(self):
+        # The drift that matters: config moved, prose did not, and the CSP now
+        # drops the origin the skill still recommends.
+        cdk, skills = self._tree(
+            "https://cdn.jsdelivr.net",
+            {"psd-atrium/SKILL.md": "Load it from https://cdnjs.cloudflare.com only."},
+        )
+        violations = ccc.check_skill_cdn_allowlist(cdk, skills)
+        self.assertTrue(
+            any("cdnjs.cloudflare.com" in v for v in violations), violations
+        )
+        self.assertTrue(
+            any("cdn.jsdelivr.net" in v and "no " in v for v in violations), violations
+        )
+
+    def test_rogue_origin_in_skill_is_caught(self):
+        cdk, skills = self._tree(
+            "https://cdnjs.cloudflare.com",
+            {
+                "psd-atrium/SKILL.md": "Use https://cdnjs.cloudflare.com.",
+                "psd-html-artifact/references/data-viz.md": (
+                    "Grab it from https://cdn.tailwindcss.com/3.4.0/tailwind.min.css"
+                ),
+            },
+        )
+        violations = ccc.check_skill_cdn_allowlist(cdk, skills)
+        self.assertTrue(
+            any("cdn.tailwindcss.com" in v for v in violations), violations
+        )
+
+    def test_emptied_allowlist_is_caught(self):
+        cdk, skills = self._tree(
+            "", {"psd-atrium/SKILL.md": "Use https://cdnjs.cloudflare.com."}
+        )
+        self.assertTrue(ccc.check_skill_cdn_allowlist(cdk, skills))
+
+    def test_missing_key_is_caught(self):
+        cdk, skills = self._tree(
+            None, {"psd-atrium/SKILL.md": "Use https://cdnjs.cloudflare.com."}
+        )
+        self.assertTrue(ccc.check_skill_cdn_allowlist(cdk, skills))
+
+    def test_allowlisted_origin_no_skill_mentions_is_caught(self):
+        cdk, skills = self._tree(
+            "https://cdnjs.cloudflare.com",
+            {"psd-atrium/SKILL.md": "Inline everything; no CDNs here."},
+        )
+        self.assertTrue(ccc.check_skill_cdn_allowlist(cdk, skills))
+
+    def test_empty_skills_tree_fails_rather_than_checking_nothing(self):
+        # A moved/renamed skills directory must not turn the gate into a no-op.
+        cdk, skills = self._tree("https://cdnjs.cloudflare.com", {})
+        self.assertTrue(ccc.check_skill_cdn_allowlist(cdk, skills))
+
+    def test_blocked_counter_examples_without_a_scheme_are_not_flagged(self):
+        # psd-branding.md names fonts.googleapis.com as something that FAILS.
+        # Scheme-anchored matching is what keeps that out without reading intent.
+        cdk, skills = self._tree(
+            "https://cdnjs.cloudflare.com",
+            {
+                "psd-atrium/SKILL.md": (
+                    "Use https://cdnjs.cloudflare.com. A fonts.googleapis.com "
+                    "stylesheet is blocked silently, as is unpkg.com."
+                )
+            },
+        )
+        self.assertEqual(ccc.check_skill_cdn_allowlist(cdk, skills), [])
+
+    def test_repo_skills_match_the_repo_allowlist(self):
+        # Guards the live files, not a fixture.
+        here = os.path.dirname(os.path.abspath(__file__))
+        violations = ccc.check_skill_cdn_allowlist(
+            os.path.normpath(os.path.join(here, "..", "cdk.json")),
+            os.path.join(here, "skills"),
+        )
         self.assertEqual(violations, [])
 
 
