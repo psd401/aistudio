@@ -110,11 +110,17 @@ interface ReadResult {
    * silently produced `records`-mode code the host then rejected.
    */
   dataAccess?: ContentDataAccess;
+  /** Byte offset of `body` within the full source (0 for the first page). */
+  byteOffset?: number;
+  /** Size of the FULL source in bytes, whether or not it all fits in this page. */
+  totalBytes?: number;
   /**
-   * True when `body` is the LEADING `MAX_EDIT_BYTES` of a larger source. The
-   * model must not treat a truncated body as the complete file.
+   * True when the source continues past this page. `body` is then a SLICE, not
+   * the whole file — a rewrite based on it would delete everything after it.
    */
-  truncated?: true;
+  hasMore?: true;
+  /** The `offset` to pass to the next `read_workspace_content` call. */
+  nextOffset?: number;
 }
 
 /**
@@ -128,15 +134,17 @@ interface ReadResult {
  *   document is a real state (`body: ""`, NOT unavailable) so the model writes an
  *   intro rather than narrating a permission error.
  * - artifacts store small source inline (`bodyInline`); anything larger lives in
- *   S3 at `bodyLocation`. #1749 loads that S3 body too (capped at
- *   `MAX_EDIT_BYTES`), because a real dashboard is far over the 4 KiB inline
- *   threshold and the model cannot edit code it cannot see. `bodyUnavailable`
- *   now means only that the load FAILED — never "the item is empty", which would
- *   let a rewrite clobber it.
+ *   S3 at `bodyLocation`. #1749 loads that S3 body too, because a real dashboard
+ *   is far over the 4 KiB inline threshold and the model cannot edit code it
+ *   cannot see. `bodyUnavailable` now means only that the load FAILED — never
+ *   "the item is empty", which would let a rewrite clobber it.
+ *
+ * Returns the COMPLETE body; `sliceBodyForRead` pages it for the tool result, so
+ * nothing here is capped and no content is unreachable.
  */
 async function resolveReadBody(
   obj: Awaited<ReturnType<typeof contentService.get>>
-): Promise<{ body: string | null; bodyUnavailable: boolean; truncated?: true }> {
+): Promise<{ body: string | null; bodyUnavailable: boolean }> {
   if (obj.kind === "document") {
     // 1. Live read from the Yjs doc — the current on-screen text. `""` is a
     //    genuinely empty (new / title-only) document, NOT unavailable: reporting
@@ -166,9 +174,9 @@ async function resolveReadBody(
   const version = obj.version;
   if (!version) return { body: null, bodyUnavailable: false };
   const inline = version.bodyInline ?? null;
-  if (inline !== null) return truncateBody(inline);
+  if (inline !== null) return { body: inline, bodyUnavailable: false };
   try {
-    return truncateBody(await versionService.loadArtifactCode(version));
+    return { body: await versionService.loadArtifactCode(version), bodyUnavailable: false };
   } catch {
     // Genuinely unreadable (S3 NoSuchKey / read failure). Report unavailable —
     // never "" — so a rewrite cannot clobber content that is still there.
@@ -177,22 +185,64 @@ async function resolveReadBody(
 }
 
 /**
- * Cap a body at `MAX_EDIT_BYTES` so a pathological artifact cannot blow the
- * model's context, flagging `truncated` when it did. Cuts on a UTF-8 BYTE
- * boundary; `toString` replaces any multi-byte sequence split at the edge, so the
- * result is always valid UTF-8.
+ * How much source a SINGLE read returns. Not a limit on what the model can see —
+ * it pages with `offset` until `hasMore` is absent, so the whole file is always
+ * reachable — but a bound on what one tool result injects into the context.
+ *
+ * The read budget used to be `MAX_EDIT_BYTES` (512 KiB), a WRITE-size limit doing
+ * double duty. 512 KiB of source is 130k+ tokens: on its own more than a 128k
+ * context window, so a read-before-edit turn on a large artifact failed outright
+ * with a context-length error. 96 KiB is ~24k tokens — a real dashboard (30-60 KB)
+ * still arrives in one call, and anything bigger arrives in order across calls
+ * instead of killing the turn. The `maxSteps` budget for workspace turns is 20,
+ * so even a 512 KiB artifact pages in with steps to spare.
  */
-function truncateBody(body: string): {
+const MAX_READ_CHUNK_BYTES = 96 * 1024;
+
+/** True for a UTF-8 continuation byte (`10xxxxxx`) — never a character start. */
+function isContinuationByte(byte: number): boolean {
+  return (byte & 0xC0) === 0x80;
+}
+
+/**
+ * Take one page of `body` starting at `offset` BYTES in.
+ *
+ * Both edges land on a character boundary. Cutting mid-sequence would hand the
+ * model a U+FFFD at the seam of every page and, because the two halves are
+ * decoded separately, silently corrupt that character in a rewrite — the class of
+ * bug that poisoned a batch of generations elsewhere in this codebase. Offsets
+ * stay BYTE-exact and contiguous (`nextOffset` is the next page's first byte), so
+ * the concatenated pages reproduce the source exactly.
+ */
+function sliceBodyForRead(
+  body: string,
+  offset: number
+): {
   body: string;
-  bodyUnavailable: boolean;
-  truncated?: true;
+  byteOffset: number;
+  totalBytes: number;
+  hasMore?: true;
+  nextOffset?: number;
 } {
   const buf = Buffer.from(body, "utf8");
-  if (buf.byteLength <= MAX_EDIT_BYTES) return { body, bodyUnavailable: false };
+  const totalBytes = buf.byteLength;
+  // A model-supplied offset is not trusted to be in range or aligned: clamp it,
+  // then walk forward off any continuation byte so the page starts on a character.
+  let start = Number.isFinite(offset) ? Math.max(0, Math.trunc(offset)) : 0;
+  if (start > totalBytes) start = totalBytes;
+  while (start < totalBytes && isContinuationByte(buf[start])) start += 1;
+
+  let end = Math.min(start + MAX_READ_CHUNK_BYTES, totalBytes);
+  // Walk BACK off a partial sequence at the tail (max 3 bytes; a character is at
+  // most 4). Never past `start`, which would make an empty page and stall paging.
+  while (end > start && end < totalBytes && isContinuationByte(buf[end])) end -= 1;
+
+  const hasMore = end < totalBytes;
   return {
-    body: buf.subarray(0, MAX_EDIT_BYTES).toString("utf8"),
-    bodyUnavailable: false,
-    truncated: true,
+    body: buf.subarray(start, end).toString("utf8"),
+    byteOffset: start,
+    totalBytes,
+    ...(hasMore ? { hasMore: true as const, nextOffset: end } : {}),
   };
 }
 
@@ -204,27 +254,45 @@ function buildReadTool(
 ): Tool {
   return tool({
     description:
-      "Read the current content of the document or artifact open in the workspace panel beside this chat. Call this before editing so your changes build on the current content. If it returns bodyUnavailable, the item has content that could not be loaded — prefer appending or targeted edits over a full rewrite; if it returns truncated, the body shown is only the beginning of a larger file. For an ARTIFACT it also returns dataAccess, the sandbox data-bridge mode its code runs under — check it before writing code that uses window.AtriumData. " +
+      "Read the current content of the document or artifact open in the workspace panel beside this chat. Call this before editing so your changes build on the current content. If it returns bodyUnavailable, the item has content that could not be loaded — prefer appending or targeted edits over a full rewrite. " +
+      "LARGE ITEMS ARE PAGED: when the result has hasMore, the body is only the slice starting at byteOffset — call this tool again with offset set to the returned nextOffset and concatenate the pages until hasMore is absent. Never rewrite an item from a partial read: everything past the slice you hold would be deleted. " +
+      "For an ARTIFACT it also returns dataAccess, the sandbox data-bridge mode its code runs under — check it before writing code that uses window.AtriumData. " +
       DATA_ACCESS_DESC,
-    inputSchema: jsonSchema<Record<string, never>>({
+    inputSchema: jsonSchema<{ offset?: number }>({
       type: "object",
-      properties: {},
+      properties: {
+        offset: {
+          type: "number",
+          description:
+            "Byte offset to read from. Omit for the start of the item; pass the nextOffset from a previous call to continue a paged read.",
+        },
+      },
       additionalProperties: false,
     }),
-    execute: async (): Promise<ReadResult | { error: string }> => {
+    execute: async (args): Promise<ReadResult | { error: string }> => {
       const req = await requesterForUserId(userId);
       if (!req) return { error: "Could not resolve your identity." };
+      const offset = typeof args?.offset === "number" ? args.offset : 0;
       try {
         const obj = await contentService.get(req, idOrSlug);
-        const { body, bodyUnavailable, truncated } = await resolveReadBody(obj);
+        const { body, bodyUnavailable } = await resolveReadBody(obj);
         const kind = obj.kind as "document" | "artifact";
+        // A null body has nothing to page; only a real string is sliced, so an
+        // unavailable/absent body can never be reported as an empty first page.
+        const page = body === null ? null : sliceBodyForRead(body, offset);
         return {
           title: obj.title,
           kind,
           bodyFormat: obj.version?.bodyFormat ?? null,
-          body,
+          body: page === null ? null : page.body,
           ...(bodyUnavailable ? { bodyUnavailable: true } : {}),
-          ...(truncated ? { truncated: true } : {}),
+          ...(page === null
+            ? {}
+            : {
+                byteOffset: page.byteOffset,
+                totalBytes: page.totalBytes,
+                ...(page.hasMore ? { hasMore: true as const, nextOffset: page.nextOffset } : {}),
+              }),
           // #1749: artifacts only — a document has no sandbox bridge. The DTO
           // value is already enum-normalized by `rowToObjectDTO`.
           ...(kind === "artifact" ? { dataAccess: obj.dataAccess } : {}),
