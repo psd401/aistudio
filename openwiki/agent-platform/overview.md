@@ -108,6 +108,12 @@ Guidance and enforcement can never disagree because both read from the same CDK 
 
 **Skill-Level Guidance**: Agent skills (`psd-atrium`, `psd-html-artifact`) carry hand-written CSP guidance stating the default CDN origin and inline-script policy. These ride the agent image, not the app deploy. When updating the allowlist, grep skill files for the old origin and rebuild the agent image.
 
+**Drift Protection**: Two gates prevent skill prose and CSP allowlist from drifting:
+1. **PR-level** — `/infra/test/agent-skill-cdn-allowlist.test.ts` gates the pull-request path
+2. **BUILD-level** — `/infra/agent-image/check_config_consistency.py` → `check_skill_cdn_allowlist()` gates the build path
+
+Both are required because the skills ride the agent image (separate deploy pipeline) while the allowlist lives in `cdk.json` (app deploy pipeline). See **[infrastructure/overview.md → Agent-Skill CDN Drift Guard](../infrastructure/overview.md#agent-skill-cdn-drift-guard-1764)** for the full guard documentation.
+
 **Authoring Rules for Artifacts**:
 - **Inline scripts/styles are permitted** — This is the intended way to build artifacts
 - **External scripts**: Only from allowlisted CDN (`https://cdnjs.cloudflare.com` by default); pin an exact version (not `latest`)
