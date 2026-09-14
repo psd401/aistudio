@@ -49,13 +49,14 @@ Consequences for external agents:
 
    | Tool | Required scope | Notes |
    |---|---|---|
-   | `get_content` | `content:read` | Object + last saved version |
+   | `get_content` | `content:read` | Object + last saved version. Reports only a `grantCount` integer for the audience — use `get_visibility` for the entries |
+   | `get_visibility` | `content:read` | Level + the ACTUAL grant entries (#1763). Gated on **edit** rights, not view: the list names every principal with access. Call it before `set_visibility`, which REPLACES the list |
    | `list_content` | `content:read` | |
    | `create_document` | `content:create` | Markdown documents; created **private + draft** |
    | `create_artifact` | `content:create` | Created **private + draft** |
    | `update_content` | `content:update` | Metadata |
    | `create_version` | `content:update` | The version-based "edit" |
-   | `set_visibility` | `content:update` | |
+   | `set_visibility` | `content:update` | `grants` REPLACES the whole list, it does not append — read it with `get_visibility` first. A grant's `value` is format-checked per kind: `user` is the numeric user id (never an email), `group` a group email, `role` a role name |
    | `publish_content` | `content:publish_internal` | Public destinations additionally require the human/admin-held `content:publish_public` — the tool surfaces a structured `approval_required` signal instead of publishing |
    | `unpublish_content` | `content:publish_internal` | Taking down a **public** destination is gated the same as putting it up (§26.4) |
    | `export_okf` | `content:read` | `--audience public` additionally needs `content:publish_public` |

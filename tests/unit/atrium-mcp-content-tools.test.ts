@@ -2,12 +2,12 @@
  * Registry-parity tests for the Atrium content MCP tools (Issue #1055, §24).
  *
  * Guards the wiring invariants that a typo would otherwise leak to runtime: every
- * content tool is listed, scoped, and has a handler; the set is exactly the eleven
+ * content tool is listed, scoped, and has a handler; the set is exactly the twelve
  * atomic primitives (no generate_and_publish); publish AND unpublish map to
  * publish_internal (the §26.4 gate, not the scope, blocks public in both
  * directions). The set includes the Phase 8 OKF interoperability tools
- * (export_okf / import_okf, #1103) and unpublish_content (REST-DELETE parity,
- * Epic #1059 completion).
+ * (export_okf / import_okf, #1103), unpublish_content (REST-DELETE parity,
+ * Epic #1059 completion) and get_visibility (the grant-list read, #1763).
  */
 
 // The handlers module imports the content barrel, which transitively pulls the
@@ -30,6 +30,7 @@ const EXPECTED = [
   "create_document",
   "create_artifact",
   "get_content",
+  "get_visibility",
   "list_content",
   "update_content",
   "create_version",
@@ -41,7 +42,7 @@ const EXPECTED = [
 ] as const;
 
 describe("Atrium MCP content tools registry", () => {
-  it("exposes exactly the eleven atomic primitives (no generate_and_publish)", () => {
+  it("exposes exactly the twelve atomic primitives (no generate_and_publish)", () => {
     const names = CONTENT_MCP_TOOLS.map((t) => t.name).sort();
     expect(names).toEqual([...EXPECTED].sort());
     expect(names).not.toContain("generate_and_publish");
@@ -65,6 +66,10 @@ describe("Atrium MCP content tools registry", () => {
   it("scopes reads to content:read, mutations to create/update, publish to publish_internal", () => {
     expect(CONTENT_TOOL_SCOPE_MAP.get_content).toBe("content:read");
     expect(CONTENT_TOOL_SCOPE_MAP.list_content).toBe("content:read");
+    // #1763 — a READ, so content:read, not the paired write's content:update.
+    // The grant list is withheld from a non-editor by the service's edit gate
+    // (readVisibilityForEdit), not by requiring a write scope to read.
+    expect(CONTENT_TOOL_SCOPE_MAP.get_visibility).toBe("content:read");
     expect(CONTENT_TOOL_SCOPE_MAP.create_document).toBe("content:create");
     expect(CONTENT_TOOL_SCOPE_MAP.create_artifact).toBe("content:create");
     expect(CONTENT_TOOL_SCOPE_MAP.update_content).toBe("content:update");

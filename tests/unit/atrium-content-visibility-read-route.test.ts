@@ -34,6 +34,8 @@ jest.mock("@/lib/content", () => ({
   ApprovalRequiredError: class ApprovalRequiredError extends Error {},
   contentService: { loadForEdit: jest.fn() },
   hasPublishPublicScope: () => false,
+  readVisibilityForEdit: (...args: unknown[]) =>
+    mockReadVisibilityForEdit(...args),
   recordContentAudit: jest.fn(),
   visibilityService: { grantsFor: jest.fn(), setLevel: jest.fn() },
 }));
@@ -46,10 +48,6 @@ jest.mock("@/lib/content/rest", () => ({
 }));
 jest.mock("@/lib/content/surface-helpers", () => ({
   assertContentAuthoringCapability: jest.fn(),
-}));
-jest.mock("@/lib/content/visibility-read", () => ({
-  readVisibilityForEdit: (...args: unknown[]) =>
-    mockReadVisibilityForEdit(...args),
 }));
 jest.mock("@/lib/logger", () => ({
   createLogger: () => ({

@@ -18,6 +18,8 @@ export {
   ifNoneMatchIncludes,
 } from "./source-read";
 export { visibilityService } from "./visibility-service";
+export { readVisibilityForEdit } from "./visibility-read";
+export type { VisibilityRead } from "./visibility-read";
 export { collectionService } from "./collection-service";
 export type { CollectionTreeNode } from "./collection-service";
 export { collectionManagementService } from "./collection-management-service";

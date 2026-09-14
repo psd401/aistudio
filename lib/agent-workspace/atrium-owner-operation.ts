@@ -10,6 +10,7 @@ import {
   contentSourceService,
   isContentError,
   publishService,
+  readVisibilityForEdit,
   recordContentAudit,
   ValidationError,
   visibilityService,
@@ -24,7 +25,6 @@ import {
   contentSurfaceLink,
   resolveCollectionId,
 } from "@/lib/content/surface-helpers"
-import { readVisibilityForEdit } from "@/lib/content/visibility-read"
 import { contentSourceRefSchema } from "@/lib/content/source-ref"
 import {
   createCollectionBodySchema,

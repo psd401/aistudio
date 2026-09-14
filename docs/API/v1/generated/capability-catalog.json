@@ -1,9 +1,9 @@
 {
   "summary": {
-    "actions": 32,
+    "actions": 33,
     "features": 10,
     "scopes": 33,
-    "agentInvocableActions": 25
+    "agentInvocableActions": 26
   },
   "actions": [
     {
@@ -315,6 +315,28 @@
       "agentInvocable": true
     },
     {
+      "identifier": "content.get_visibility",
+      "name": "get_visibility",
+      "description": "Read who can currently view the object: its level plus the ACTUAL grant entries. Call this BEFORE set_visibility — get_content reports only a grantCount integer, and set_visibility REPLACES the grant list, so changing an audience without reading it first means guessing the existing entries, and a wrong guess silently drops access no audit trail can restore (#1763). Requires EDIT rights on the object: the grant list names every principal with access, so a caller who can merely view it cannot enumerate its audience.",
+      "surfaces": [
+        "mcp",
+        "internal"
+      ],
+      "requiredScopes": [
+        "content:read"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "content:read"
+        ],
+        "internal": [
+          "content:read"
+        ]
+      },
+      "destructive": false,
+      "agentInvocable": true
+    },
+    {
       "identifier": "content.import_okf",
       "name": "import_okf",
       "description": "Import an Open Knowledge Format bundle (the { files: [{ path, content }] } shape export_okf returns) into Atrium content. Reconstructs the collection tree from the bundle directories and creates one content object per concept file. Imported objects are agent-authored (actor_kind='agent') and created private + draft. Returns the created object + collection ids.",
@@ -383,7 +405,7 @@
     {
       "identifier": "content.set_visibility",
       "name": "set_visibility",
-      "description": "Set who can view the object (level + group grants).",
+      "description": "Set who can view the object (level + group grants). `grants` REPLACES the whole list — it does not append — so read the current entries with get_visibility first and send the full list you intend, or you will drop access that cannot be restored (#1763).",
       "surfaces": [
         "mcp",
         "internal"
