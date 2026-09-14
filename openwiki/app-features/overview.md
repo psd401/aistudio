@@ -406,18 +406,20 @@ GET /api/v1/content/:id/visibility
 
 **Editor gate**: Grant reads require EDIT permission, not just VIEW. The grant list names every principal with access, so someone who can merely view an object cannot enumerate its audience. This prevents information disclosure (e.g., exposing user IDs behind `user` grants).
 
-**Shared implementation**: Both the agent broker and REST v1 API use `readVisibilityForEdit()` from `/lib/content/visibility-read.ts`, ensuring authorization and response shape stay identical across surfaces.
+**Shared implementation**: The agent broker, REST v1 API, and MCP `get_visibility` tool all use `readVisibilityForEdit()` from `/lib/content/visibility-read.ts`, ensuring authorization and response shape stay identical across surfaces.
 
-**Why this matters**: Before #1763, `read` returned only `grantCount` (an integer). An agent narrowing or widening an object had to guess the grant list, and a wrong guess silently revoked access with no audit trail to restore it. The `read-grants` command and merge mode eliminate this hazard.
+**Why this matters**: Before #1763, `read` and `get_content` returned only `grantCount` (an integer). An agent narrowing or widening an object had to guess the grant list, and a wrong guess silently revoked access with no audit trail to restore it. The `read-grants` command, `get_visibility` MCP tool, and merge mode eliminate this hazard.
 
 **Key Sources**:
 - `/lib/content/visibility-read.ts` — shared grant-read helper
+- `/lib/mcp/content-tool-handlers.ts` — MCP `get_visibility` handler (#1763, #1769)
 - `/lib/agent-workspace/atrium-owner-operation.ts` — agent broker `GET /<id>/visibility`
 - `/app/api/v1/content/[id]/visibility/route.ts` — REST v1 GET endpoint
 - `/infra/agent-image/skills/psd-atrium/SKILL.md` — skill documentation
 
 **Focused Tests**:
 - `tests/unit/atrium-visibility-read.test.ts` — shared helper behavior
+- `tests/unit/atrium-mcp-get-visibility-handler.test.ts` — MCP handler (#1763, #1769)
 - `tests/unit/atrium-content-visibility-read-route.test.ts` — REST v1 route
 - `tests/unit/agent-atrium-owner-operation.test.ts` — broker branch
 - `tests/e2e/atrium-content-api.functional.spec.ts` — grant round-trip and denial shapes
@@ -621,9 +623,18 @@ Administrators can view aggregate content activity on `/admin/atrium` → Usage 
 ### MCP Tools
 
 Atrium exposes content tools via `/lib/mcp/content-tools.ts`:
-- `create_document`, `update_document`
-- `publish_document`, `list_documents`
+- `create_document`, `create_artifact` — Create content objects (private + draft by default)
+- `get_content` — Read object + last saved version (returns `grantCount` integer only)
+- `get_visibility` — Read visibility level + actual grant entries (#1763, #1769); requires EDIT permission on object
+- `list_content` — List accessible content
+- `update_content`, `create_version` — Metadata and version-based edits
+- `set_visibility` — Replace grant list (call `get_visibility` first to avoid dropping access)
+- `publish_content`, `unpublish_content` — Publication controls with approval gates
+- `export_okf`, `import_okf` — Open Knowledge Format import/export
 - Permission-aware retrieval for grounded responses
+
+<!-- openwiki: broken internal link [#visibility-grant-management] heading anchor "visibility-grant-management" does not exist in /openwiki/app-features/overview.md. Fix the href or restore the target, then delete this comment. -->
+**Why `get_visibility` exists** (#1763, #1769): The `grants` parameter on `set_visibility` REPLACES the entire list — it does not append. Before #1769, MCP callers had to guess the existing grants, and a wrong guess silently revoked access. `get_visibility` lets agents read before modifying. See **[Visibility & Grant Management](#visibility-grant-management)** for detailed grant types and merge mode.
 
 **CSP Guidance for Artifacts** (#1750):
 
