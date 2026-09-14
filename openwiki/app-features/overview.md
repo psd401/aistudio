@@ -51,6 +51,9 @@ openwiki:
     - Step budget varies by tool presence — 20 steps when workspace tools bound (explore-then-build), 10 otherwise (#1749)
     - Shared data contract — DATA_ACCESS_DESC is imported by both MCP content tools and workspace chat tools so artifact-authoring surfaces cannot drift
     - psd-atrium skill's "Live PSD data inside an artifact" section is hand-maintained Markdown — editing lib/content/atrium-data-contract.ts does NOT update the skill automatically
+    - read_workspace_content is paged, never truncated — one call returns at most 96 KiB with byteOffset/totalBytes/hasMore/nextOffset; model pages with offset until hasMore is absent (#1770)
+    - Page edges land on UTF-8 character boundaries — concatenated pages reproduce source byte-for-byte with no replacement characters (#1770)
+    - No read ceiling exists — resolveReadBody returns complete body; sliceBodyForRead pages it so nothing is unreachable (#1770)
   validation_commands:
     - bun run typecheck
     - bun run lint
@@ -145,7 +148,7 @@ When an Atrium document or artifact is open beside the chat (`?workspace=<id>`),
 
 | Tool | When | Effect |
 |------|------|--------|
-| `read_workspace_content` | viewable object | Returns title/kind/body; for artifacts also returns `dataAccess` mode |
+| `read_workspace_content` | viewable object | Returns title/kind/body; for artifacts also returns `dataAccess` mode. **Paged**: one call returns at most 96 KiB (`byteOffset`/`totalBytes`, plus `hasMore` + `nextOffset` when more remains) — model pages with `offset: nextOffset` until `hasMore` is absent |
 | `edit_workspace_document` | editable document | §28.3-screens markdown, writes via agent bridge — appears **live** in panel |
 | `update_workspace_artifact` | editable artifact | Creates new version via `contentService.createVersion`; optional `dataAccess` sets mode |
 
@@ -155,6 +158,13 @@ A view-only caller gets only the read tool; an unviewable `?workspace=` yields n
 - `read_workspace_content` returns `dataAccess` for artifacts so the model knows which operations are allowed
 - `update_workspace_artifact` can change the mode alongside the code
 - `lib/content/atrium-data-contract.ts` holds the ONE copy of `DATA_ACCESS_DESC` and `ATRIUM_DATA_AUTHORING_GUIDANCE`, imported by both MCP and workspace tools
+
+**Paged Reads (#1770)**: `read_workspace_content` never truncates or hits a hard-cap:
+- One call returns at most 96 KiB (~24k tokens) with `byteOffset` and `totalBytes`
+- When more remains, the result includes `hasMore: true` and `nextOffset` — the model calls again with `offset: nextOffset` and concatenates pages until `hasMore` is absent
+- Previous 512 KiB cap (a *write* limit doing double duty) either blew a 128k context window in one tool result or silently truncated, making rewrites from partial content dangerous
+- Page edges land on UTF-8 character boundaries — concatenated pages reproduce the source byte-for-byte with no replacement characters at seams
+- A partial read is explicitly flagged as unsafe to rewrite from, because everything past that slice would be deleted
 
 **Step Budget**: A build turn explores data before writing code, so `lib/nexus/chat-step-budget.ts` raises `maxSteps` to 20 when workspace tools are bound; every other multi-step path keeps 10.
 
@@ -167,7 +177,7 @@ A view-only caller gets only the read tool; an unviewable `?workspace=` yields n
 - `/app/(protected)/nexus/_components/tools/use-workspace-change-signal.ts` — hook for emitting events
 
 **Focused Tests**:
-- `tests/unit/lib/nexus/workspace-chat-tools.test.ts` — gating, read vs edit, `dataAccess` read/set
+- `tests/unit/lib/nexus/workspace-chat-tools.test.ts` — gating, read vs edit, `dataAccess` read/set, pagination and UTF-8 boundary safety
 - `tests/unit/lib/nexus/chat-step-budget.test.ts` — step budget derivation
 - `tests/unit/atrium-workspace-change-refresh.test.tsx` — panel refresh on signal
 - `tests/unit/nexus-workspace-change-signal.test.tsx` — signal emission from tool calls
@@ -633,8 +643,8 @@ Atrium exposes content tools via `/lib/mcp/content-tools.ts`:
 - `export_okf`, `import_okf` — Open Knowledge Format import/export
 - Permission-aware retrieval for grounded responses
 
-<!-- openwiki: broken internal link [#visibility-grant-management] heading anchor "visibility-grant-management" does not exist in /openwiki/app-features/overview.md. Fix the href or restore the target, then delete this comment. -->
-**Why `get_visibility` exists** (#1763, #1769): The `grants` parameter on `set_visibility` REPLACES the entire list — it does not append. Before #1769, MCP callers had to guess the existing grants, and a wrong guess silently revoked access. `get_visibility` lets agents read before modifying. See **[Visibility & Grant Management](#visibility-grant-management)** for detailed grant types and merge mode.
+<!-- openwiki: broken internal link [#visibility--grant-management] heading anchor "visibility--grant-management" does not exist in /openwiki/app-features/overview.md. Fix the href or restore the target, then delete this comment. -->
+**Why `get_visibility` exists** (#1763, #1769): The `grants` parameter on `set_visibility` REPLACES the entire list — it does not append. Before #1769, MCP callers had to guess the existing grants, and a wrong guess silently revoked access. `get_visibility` lets agents read before modifying. See **[Visibility & Grant Management](#visibility--grant-management)** for detailed grant types and merge mode.
 
 **CSP Guidance for Artifacts** (#1750):
 
