@@ -9,8 +9,10 @@ openwiki:
     - infra/test/agent-skill-cdn-allowlist.test.ts
     - infra/test/atrium-sandbox-csp.test.ts
     - infra/lib/atrium-sandbox-stack.ts
+    - infra/agent-image/check_config_consistency.py
   test_paths:
     - infra/test/agent-skill-cdn-allowlist.test.ts
+    - infra/agent-image/test_check_config_consistency.py
 ---
 
 # Infrastructure
@@ -438,6 +440,37 @@ The drift guard test prevents this by asserting alignment between `atriumAllowed
 
 **CI Integration**: Runs in the same "Validate CDK Infrastructure" job as other infrastructure tests (`.github/workflows/ci.yml`).
 
+### Build-Time Drift Guard (#1771)
+
+**Source**: `/infra/agent-image/check_config_consistency.py` — `check_skill_cdn_allowlist()`
+
+The PR-level drift guard protects the pull-request path, but `build-and-push.sh` builds from the working tree. An image can be built and pushed from a checkout that never saw a PR. The build-time gate provides equivalent protection for this path.
+
+**How it works**:
+
+1. Extracts `atriumAllowedArtifactCdns` from `infra/cdk.json`
+2. Scans `.md`/`.html` files under `psd-atrium` and `psd-html-artifact` skills
+3. Extracts `https://` origins (scheme-anchored to exclude blocked-origin counter-examples without scheme)
+4. Validates bidirectional agreement:
+   - Every named origin is in the allowlist (skill never recommends blocked CDN)
+   - Every allowlisted origin is named by some skill (CSP never grants unseen capability)
+5. Rejects contradictions where a non-loadable reference host is allowlisted
+
+**Key invariants**:
+
+- **Port-sensitive matching**: `https://cdn.example.com:8443` and `https://cdn.example.com` are different origins; the regex preserves ports to match CSP normalization
+- **Non-loadable exemption**: Hosts like `psd401.ai` (documentation links) and `app.example` (RFC 2606 placeholders) are exempt from CDN checks—they're never in `<script src>`
+- **Scheme-anchored matching**: Counter-examples like "fonts.googleapis.com is blocked" (no scheme) are excluded without prose intent analysis
+
+**Focused Tests**: `/infra/agent-image/test_check_config_consistency.py` — `SkillCdnAllowlistTests`
+
+**Test Command**:
+```bash
+cd infra/agent-image && python -m pytest test_check_config_consistency.py::SkillCdnAllowlistTests -v
+```
+
+**Why two gates**: The PR test catches drift before merge; the build check catches drift in direct builds. Both are required because the skills ride the agent image (separate deploy pipeline) while the allowlist lives in `cdk.json` (app deploy pipeline).
+
 ### Deployment Requirement
 
 When changing `atriumAllowedArtifactCdns`, both stacks must be deployed together:
@@ -452,7 +485,8 @@ This ensures the CSP enforced by the sandbox matches the guidance the app provid
 
 **Focused Tests**:
 - `/infra/test/atrium-sandbox-csp.test.ts` — validates CSP construction from allowlist
-- `/infra/test/agent-skill-cdn-allowlist.test.ts` — gates agent skill guidance against CSP allowlist (#1764)
+- `/infra/test/agent-skill-cdn-allowlist.test.ts` — gates agent skill guidance against CSP allowlist (PR path, #1764)
+- `/infra/agent-image/test_check_config_consistency.py` — gates agent skill guidance against CSP allowlist (build path, #1771)
 - `/tests/smoke/atrium-artifact-sandbox-config.smoke.ts` — smoke test for runtime CSP config
 - `/tests/unit/atrium-mcp-content-tools.test.ts` — validates CSP guidance in MCP tools
 
