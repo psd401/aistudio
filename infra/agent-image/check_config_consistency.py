@@ -909,11 +909,170 @@ def check_apikey_hydration(config: dict, wrapper_path: str) -> List[str]:
     return violations
 
 
+"""Skills that author artifacts rendered in the Atrium sandbox (#1761).
+
+Only these two trees state the CDN allowlist as prose. Other skills either do
+not publish to Atrium at all (psd-hyperframes renders through headless Chromium)
+or name no origin a model could load from.
+"""
+_ATRIUM_AUTHORING_SKILLS = ("psd-atrium", "psd-html-artifact")
+
+_SKILL_GUIDANCE_SUFFIXES = (".md", ".html")
+
+# Scheme-anchored on purpose: the skills also name blocked origins WITHOUT a
+# scheme ("the fonts.googleapis.com stylesheet ... is blocked"), and those are
+# counter-examples, not instructions. Requiring `https://` keeps them out
+# without having to read intent from the surrounding prose.
+#
+# The port is part of the match because it is part of the ORIGIN: a browser
+# treats https://cdn.example.com:8443 and https://cdn.example.com as different
+# origins, and `normalizeAtriumOrigin()` in infra/lib/atrium-sandbox-stack.ts
+# keeps non-default ports for exactly that reason. Dropping it here would let a
+# port-specific URL match a portless allowlist entry and pass a gate the CSP
+# then blocks.
+_SKILL_HTTPS_ORIGIN_RE = re.compile(r"https://[A-Za-z0-9.-]+(?::\d+)?")
+
+"""Hosts these skills name for reasons other than loading a sandboxed asset.
+
+Deliberately tiny — that is the payoff for scoping to the two authoring skills
+rather than the whole skills tree. A host added here is a statement that no model
+will put it in a `<script src>`; a host meant to be loadable belongs in
+`atriumAllowedArtifactCdns` in infra/cdk.json instead.
+"""
+_NON_LOADABLE_SKILL_HOSTS = frozenset(
+    {
+        "psd401.ai",        # PSD's own site, cited as a link
+        "app.example",      # RFC 2606 placeholders in worked examples
+        "s3.example",
+        "app.test",
+    }
+)
+
+
+def _skill_guidance_files(skills_dir: str) -> List[str]:
+    found: List[str] = []
+    for skill in _ATRIUM_AUTHORING_SKILLS:
+        root = os.path.join(skills_dir, skill)
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for name in sorted(filenames):
+                if name.endswith(_SKILL_GUIDANCE_SUFFIXES):
+                    found.append(os.path.join(dirpath, name))
+    return sorted(found)
+
+
+def check_skill_cdn_allowlist(cdk_json_path: str, skills_dir: str) -> List[str]:
+    """Fail the BUILD when skill prose and the CSP allowlist disagree (#1761).
+
+    The sandbox CSP permits `<script src>` / `<link href>` only from the origins
+    in `atriumAllowedArtifactCdns`, and the app renders its authoring guidance
+    from that same key, so those two cannot drift. The agent skills can: they are
+    static prose copied verbatim into this image, shipped by a build that does
+    not go through the app's CI. Change the key without changing the skills and a
+    skill confidently points a model at an origin the CSP then drops SILENTLY —
+    the page renders, the feature is dead, nothing errors.
+
+    #1764 added the equivalent assertion to the infra jest suite, which gates the
+    PULL REQUEST path. This one gates the BUILD path: build-and-push.sh builds
+    from the working tree, so an image can be built and pushed from a checkout
+    that never saw a PR. Both paths need a gate; this is the one the image build
+    actually runs.
+    """
+    try:
+        with open(cdk_json_path, "r", encoding="utf-8") as fh:
+            cdk = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return [f"cannot read cdk.json {cdk_json_path}: {exc}"]
+
+    raw = (cdk.get("context") or {}).get("atriumAllowedArtifactCdns")
+    if not isinstance(raw, str):
+        return [
+            "infra/cdk.json context.atriumAllowedArtifactCdns must be a "
+            "comma-separated string; without it the sandbox ships an empty "
+            "allowlist and every CDN script is blocked silently (#1750)"
+        ]
+
+    allowed = [entry.strip().rstrip("/") for entry in raw.split(",")]
+    allowed = [entry for entry in allowed if entry]
+
+    # An origin cannot be both loadable and a declared non-asset reference. Say
+    # so directly: otherwise making one loadable would fail the reverse check
+    # below for an unrelated-looking reason ("no skill names it"), sending the
+    # reader to the wrong file.
+    contradictions = [
+        origin
+        for origin in allowed
+        if origin[len("https://"):].split(":", 1)[0] in _NON_LOADABLE_SKILL_HOSTS
+    ]
+    if contradictions:
+        return [
+            f"{origin} is in atriumAllowedArtifactCdns but is also declared a "
+            f"non-loadable reference host in check_config_consistency.py — "
+            f"remove it from _NON_LOADABLE_SKILL_HOSTS and say in the skills "
+            f"that artifacts may load from it"
+            for origin in contradictions
+        ]
+
+    if not allowed:
+        return [
+            "infra/cdk.json context.atriumAllowedArtifactCdns is empty, but the "
+            "skills still name CDN origins as loadable"
+        ]
+
+    guidance_files = _skill_guidance_files(skills_dir)
+    if not guidance_files:
+        return [
+            f"no skill guidance found under {skills_dir} for "
+            f"{', '.join(_ATRIUM_AUTHORING_SKILLS)} — the drift gate would "
+            f"silently check nothing"
+        ]
+
+    violations: List[str] = []
+    seen: set = set()
+
+    for path in guidance_files:
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                contents = fh.read()
+        except OSError as exc:
+            violations.append(f"cannot read skill guidance {path}: {exc}")
+            continue
+
+        for match in _SKILL_HTTPS_ORIGIN_RE.finditer(contents):
+            origin = match.group(0).rstrip(".-")
+            host = origin[len("https://"):].split(":", 1)[0]
+            # A non-loadable reference link is NOT documentation that an origin
+            # may be used for scripts or styles, so it must not satisfy the
+            # reverse check below. Classify before recording.
+            if host in _NON_LOADABLE_SKILL_HOSTS:
+                continue
+            seen.add(origin)
+            if origin in allowed:
+                continue
+            violations.append(
+                f"{os.path.relpath(path, skills_dir)} names {origin}, which is "
+                f"not in atriumAllowedArtifactCdns ({', '.join(allowed)}) — the "
+                f"sandbox CSP drops it silently. Add the origin to "
+                f"infra/cdk.json, or fix the skill text."
+            )
+
+    for origin in allowed:
+        if origin not in seen:
+            violations.append(
+                f"{origin} is allowlisted in infra/cdk.json but no "
+                f"{'/'.join(_ATRIUM_AUTHORING_SKILLS)} guidance names it — a "
+                f"model would never know it may load from there"
+            )
+
+    return violations
+
+
 def run_checks(
     config_path: str,
     wrapper_path: str,
     dockerfile_path: str,
     verify_upstream: bool = False,
+    cdk_json_path: Optional[str] = None,
+    skills_dir: Optional[str] = None,
 ) -> Tuple[List[str], dict]:
     config = _load(config_path)
     violations = (
@@ -926,6 +1085,11 @@ def run_checks(
         + check_settled_tool_recovery(dockerfile_path)
         + check_plugin_runtime_assertions(dockerfile_path)
     )
+    # Opt-in by path so callers that synthesize a temp config/Dockerfile
+    # (test_candidate_matrix) are not silently coupled to skill prose. main()
+    # always supplies both, so the CLI and build-and-push.sh always run it.
+    if cdk_json_path and skills_dir:
+        violations += check_skill_cdn_allowlist(cdk_json_path, skills_dir)
     if verify_upstream:
         violations += check_upstream_pins(dockerfile_path)
     # parse_pinned_plugin_version runs in both Dockerfile checks, so the same
@@ -939,6 +1103,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--config", default=os.path.join(here, "openclaw.json"))
     parser.add_argument("--wrapper", default=os.path.join(here, "agentcore_wrapper.py"))
     parser.add_argument("--dockerfile", default=os.path.join(here, "Dockerfile"))
+    parser.add_argument(
+        "--cdk-json",
+        default=os.path.normpath(os.path.join(here, "..", "cdk.json")),
+        help="infra/cdk.json, source of truth for atriumAllowedArtifactCdns (#1761).",
+    )
+    parser.add_argument(
+        "--skills",
+        default=os.path.join(here, "skills"),
+        help="Skills tree whose Atrium authoring prose must match that allowlist.",
+    )
     parser.add_argument(
         "--verify-upstream",
         action="store_true",
@@ -955,6 +1129,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         violations, _ = run_checks(
             args.config, args.wrapper, args.dockerfile, args.verify_upstream,
+            args.cdk_json, args.skills,
         )
     except (OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -970,7 +1145,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         "OK — openclaw.json context windows + apiKey hydration paths + "
         "prompt-caching reachability + host/plugin compatibility + web-search "
         "provider readiness + settled-tool recovery + tier-eval schema + "
-        "runtime plugin registration contracts consistent."
+        "runtime plugin registration contracts + Atrium skill CDN prose "
+        "consistent."
     )
     return 0
 
