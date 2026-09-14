@@ -28,7 +28,7 @@ chat surface, so asking the chat to change the open item did nothing.
 
 | Tool | When | Effect |
 |------|------|--------|
-| `read_workspace_content` | always (viewable object) | Returns the current title/kind/body so the model edits from the current content. For an **artifact** it also returns `dataAccess` (the sandbox data-bridge mode) and, for a body over the 4 KiB inline threshold, loads the S3-backed source (capped at 512 KiB with `truncated: true`). |
+| `read_workspace_content` | always (viewable object) | Returns the current title/kind/body so the model edits from the current content. For an **artifact** it also returns `dataAccess` (the sandbox data-bridge mode) and, for a body over the 4 KiB inline threshold, loads the S3-backed source. **Paged**: one call returns at most 96 KiB (`byteOffset` / `totalBytes`, plus `hasMore` + `nextOffset` when more remains) — see below. |
 | `edit_workspace_document` | editable **document** | §28.3-screens the markdown, then writes it into the live Yjs doc via the agent bridge (`applyAgentEdit`) — it appears **immediately** in the panel with agent (purple-rail) attribution. `mode: append` (default) or `replace`. |
 | `update_workspace_artifact` | editable **artifact** | Creates a new version via `contentService.createVersion` (which canView/canEdit-gates and §28.3-screens the body); the new version appears in the artifact's version dropdown. Optional `dataAccess` (`records` \| `query` \| `none`) also sets the sandbox data-bridge mode, applied through `contentService.update` **after** the version is saved (see the write order below). |
 
@@ -106,6 +106,17 @@ bound; every other multi-step path keeps 10.
   when the body is over the inline threshold. `bodyUnavailable: true` now means
   only that the load FAILED — never "the item is empty", which would let a
   rewrite clobber it.
+- **`read_workspace_content` is paged, and never truncates.** One call returns at
+  most 96 KiB (~24k tokens) of source with `byteOffset` and `totalBytes`; when
+  more remains it adds `hasMore: true` and `nextOffset`, and the model calls again
+  with `offset: nextOffset` until `hasMore` is absent. The read budget used to be
+  `MAX_EDIT_BYTES` (512 KiB) — a *write*-size limit doing double duty — so a large
+  artifact either blew a 128k context in one tool result or came back silently
+  truncated. Page edges land on UTF-8 character boundaries, so the concatenated
+  pages reproduce the source byte-for-byte: no replacement characters at the
+  seams, which would corrupt exactly the character a rewrite then re-emits. A
+  partial read is explicitly flagged as unsafe to rewrite from, because everything
+  past the slice would be deleted.
 - **A bound skill's `allowed-tools` pin applies to workspace tools too** — a
   restrictive skill can't be widened just by opening a workspace.
 - **Provider-native tools survive.** When workspace (or connector) tools are

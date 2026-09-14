@@ -468,6 +468,8 @@ function defineBuildWorkspaceChatToolsSuite1Part2b() {
       kind: "document",
       bodyFormat: "markdown",
       body: "# Live edits\n\nfresh text",
+      byteOffset: 0,
+      totalBytes: Buffer.byteLength("# Live edits\n\nfresh text", "utf8"),
     });
   });
 
@@ -481,7 +483,7 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
     const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
     const out = await exec(tools.read_workspace_content, {});
     expect(loadDocStateMock).not.toHaveBeenCalled();
-    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: "" });
+    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: "", byteOffset: 0, totalBytes: 0 });
   });
 
   it("read_workspace_content falls back to the projection when the live read is unavailable (null)", async () => {
@@ -493,7 +495,7 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
     const out = await exec(tools.read_workspace_content, {});
     expect(readAgentDocMarkdownMock).toHaveBeenCalledWith("doc-1");
     expect(loadDocStateMock).toHaveBeenCalledWith("doc-1");
-    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: "# Projection" });
+    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: "# Projection", byteOffset: 0, totalBytes: 12 });
   });
 
   it("read_workspace_content falls back to version.bodyInline when live read AND projection are empty", async () => {
@@ -503,7 +505,7 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
     loadDocStateMock.mockResolvedValue({ markdown: "", revision: 5 });
     const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
     const out = await exec(tools.read_workspace_content, {});
-    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: "# Snapshot" });
+    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: "# Snapshot", byteOffset: 0, totalBytes: 10 });
   });
 
   it("read_workspace_content flags bodyUnavailable only when live read, projection AND snapshot are all empty", async () => {
@@ -530,6 +532,8 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
       kind: "artifact",
       bodyFormat: "jsx",
       body: "<div>from s3</div>",
+      byteOffset: 0,
+      totalBytes: Buffer.byteLength("<div>from s3</div>", "utf8"),
       dataAccess: "records",
     });
   });
@@ -551,18 +555,6 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
     });
   });
 
-  it("read_workspace_content truncates a pathologically large body and flags it", async () => {
-    getMock.mockResolvedValue(BIG_ART);
-    canEditMock.mockReturnValue(true);
-    loadArtifactCodeMock.mockResolvedValue("x".repeat(512 * 1024 + 10));
-    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
-    const out = (await exec(tools.read_workspace_content, {})) as {
-      body: string;
-      truncated?: true;
-    };
-    expect(out.truncated).toBe(true);
-    expect(Buffer.byteLength(out.body, "utf8")).toBe(512 * 1024);
-  });
 
   // --- #1749: the model must be able to SEE and SET the data-access mode ------
 
@@ -639,6 +631,92 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
   });
 
   }
+
+/** #1749 paged reads (split out for max-lines-per-function). */
+function defineBuildWorkspaceChatToolsReadPagingSuite() {
+  type ReadPage = {
+    body: string;
+    byteOffset?: number;
+    totalBytes?: number;
+    hasMore?: true;
+    nextOffset?: number;
+  };
+
+  it("read_workspace_content pages a large body instead of truncating it", async () => {
+    // 512 KiB of source is 130k+ tokens — more than a 128k context on its own, so
+    // returning it in one tool result failed the turn outright.
+    const source = "x".repeat(512 * 1024 + 10);
+    getMock.mockResolvedValue(BIG_ART);
+    canEditMock.mockReturnValue(true);
+    loadArtifactCodeMock.mockResolvedValue(source);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+
+    const first = (await exec(tools.read_workspace_content, {})) as ReadPage;
+    expect(first.hasMore).toBe(true);
+    expect(first.byteOffset).toBe(0);
+    expect(first.totalBytes).toBe(source.length);
+    expect(Buffer.byteLength(first.body, "utf8")).toBe(96 * 1024);
+    expect(first.nextOffset).toBe(96 * 1024);
+
+    // Page to the end; the concatenation must reproduce the source EXACTLY.
+    let assembled = first.body;
+    let next = first.nextOffset;
+    let guard = 0;
+    while (next !== undefined && guard++ < 20) {
+      const page = (await exec(tools.read_workspace_content, { offset: next })) as ReadPage;
+      expect(page.byteOffset).toBe(next);
+      assembled += page.body;
+      next = page.hasMore ? page.nextOffset : undefined;
+    }
+    expect(assembled).toBe(source);
+  });
+
+  it("read_workspace_content reports a small body as a complete single page", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.read_workspace_content, {})) as ReadPage;
+    // No hasMore/nextOffset: the model must not think a complete read is partial.
+    expect(out.hasMore).toBeUndefined();
+    expect(out.nextOffset).toBeUndefined();
+    expect(out.byteOffset).toBe(0);
+    expect(out.totalBytes).toBe(Buffer.byteLength("<div/>", "utf8"));
+  });
+
+  it("read_workspace_content never splits a multi-byte character across pages", async () => {
+    // Every page boundary lands inside a 4-byte emoji unless the slicer walks
+    // back off the partial sequence: a split would hand the model U+FFFD at both
+    // seams and silently corrupt that character on a rewrite.
+    const source = "😀".repeat(40 * 1024); // 160 KiB, no character on a 96 KiB edge
+    getMock.mockResolvedValue(BIG_ART);
+    canEditMock.mockReturnValue(true);
+    loadArtifactCodeMock.mockResolvedValue(source);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+
+    let assembled = "";
+    let next: number | undefined = 0;
+    let guard = 0;
+    while (next !== undefined && guard++ < 20) {
+      const page: ReadPage = (await exec(tools.read_workspace_content, { offset: next })) as ReadPage;
+      expect(page.body).not.toContain("�");
+      assembled += page.body;
+      next = page.hasMore ? page.nextOffset : undefined;
+    }
+    expect(assembled).toBe(source);
+  });
+
+  it("read_workspace_content clamps an out-of-range offset instead of failing", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.read_workspace_content, { offset: 10_000_000 })) as ReadPage;
+    // Past the end is an empty final page, not an error and not a silent restart
+    // at 0 (which would loop the model forever).
+    expect(out.body).toBe("");
+    expect(out.hasMore).toBeUndefined();
+    expect(out.byteOffset).toBe(Buffer.byteLength("<div/>", "utf8"));
+  });
+}
 
 function defineBuildWorkspaceChatToolsSuite1Part4() {it("unpublish_workspace_content takes the object offline via publishService", async () => {
     getMock.mockResolvedValue(DOC);
@@ -719,6 +797,7 @@ const defineBuildWorkspaceChatToolsSuite1 = () => {
   defineBuildWorkspaceChatToolsSuite1Part2()
   defineBuildWorkspaceChatToolsSuite1Part2b()
   defineBuildWorkspaceChatToolsSuite1Part3()
+  defineBuildWorkspaceChatToolsReadPagingSuite()
   defineBuildWorkspaceChatToolsSuite1Part4()
 };
 
