@@ -179,6 +179,9 @@ Tools are cataloged in `/lib/tools/catalog/` and exposed on the `mcp` surface:
 | `mcp:list_assistants` | `list_assistants` | List available assistants |
 | `mcp:get_decision_graph` | `get_decision_graph` | Get decision node details |
 
+<!-- openwiki: broken internal link [../app-features/overview.md#visibility-grant-management] heading anchor "visibility-grant-management" does not exist in "../app-features/overview.md". Fix the href or restore the target, then delete this comment. -->
+**Atrium content tools** (`create_document`, `create_artifact`, `get_content`, `get_visibility`, `list_content`, `update_content`, `create_version`, `set_visibility`, `publish_content`, `unpublish_content`, `export_okf`, `import_okf`) are registered alongside these, scoped via `content:*`. See **[app-features/overview.md](../app-features/overview.md#mcp-tools)** for the full tool list and **[app-features/overview.md](../app-features/overview.md#visibility-grant-management)** for visibility/grant management details (#1763).
+
 ### MCP OAuth Flow
 
 Per-user MCP connector tokens are stored in `nexus_mcp_user_tokens` table with encryption:
