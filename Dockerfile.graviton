@@ -18,8 +18,17 @@ COPY patches/ ./patches/
 
 # Install ALL dependencies with BuildKit cache mount
 # Native modules will be compiled for ARM64
+# `--network-concurrency 8` (bun defaults to 48) is load-bearing, not tuning.
+# At the default the ARM64 build failed repeatedly inside Docker with a
+# DIFFERENT package each run — "Integrity check failed for tarball: sharp",
+# then "Fail extracting tarball for mermaid" — on a cleared cache mount, while
+# the same lockfile installed fine on the host. Ruled out: the lockfile (the
+# published sharp tarball hash matches bun.lock exactly), VM disk (347 GB free),
+# VM network, memory (11.6 GB available, no OOM) and disk I/O (clean kernel
+# log). What is left is truncation under bun's parallel fetch, which surfaces
+# as an integrity or extract failure on whichever package was in flight.
 RUN --mount=type=cache,target=/root/.bun/install/cache,id=bun-arm64 \
-    bun install --frozen-lockfile
+    bun install --frozen-lockfile --network-concurrency 8
 
 # ============================================================================
 # Stage 2: Builder
