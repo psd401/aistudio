@@ -22,6 +22,7 @@ import {
   okfExportService,
   okfImportService,
   publishService,
+  readVisibilityForEdit,
   recordContentAudit,
   requesterFromApiAuth,
   visibilityService,
@@ -527,6 +528,52 @@ const setVisibilitySchema = z.object({
   grants: z.array(grantZ).optional(),
 });
 
+const getVisibilitySchema = z.object({ id: z.string().min(1) });
+
+/**
+ * Read the object's level + the ACTUAL grant entries (#1763).
+ *
+ * `get_content` reports only a `grantCount` integer and `set_visibility`
+ * REPLACES the grant list, so without this an MCP caller changing an audience
+ * has to guess the existing entries — and a wrong guess silently drops access
+ * no audit trail can restore. Shares `readVisibilityForEdit` with the REST v1
+ * GET and the agent broker so all three stay authorization- and
+ * shape-identical.
+ *
+ * Two deliberate differences from `handleSetVisibility` below:
+ *
+ *  - No `assertContentAuthoringCapability`. That gate governs authoring writes;
+ *    reading back an audience you already own is not authoring, and gating it
+ *    would hide an owner's own grants from them. Matches `handleGetContent`.
+ *  - No audit row, and `failRead` rather than `fail` — §27 does not audit
+ *    reads, same as `get_content`/`list_content`.
+ *
+ * The EDIT gate inside the helper is what keeps the grant list — which names
+ * every principal with access — away from a caller who can merely view the
+ * object.
+ */
+async function handleGetVisibility(
+  args: Record<string, unknown>,
+  context: McpToolContext
+): Promise<McpToolResult> {
+  const parsed = getVisibilitySchema.safeParse(args);
+  if (!parsed.success) return zodFail(parsed.error);
+  const resolved = await resolveReq(context);
+  if ("result" in resolved) return resolved.result;
+  const { req } = resolved;
+  try {
+    const read = await readVisibilityForEdit(req, parsed.data.id);
+    return ok({
+      id: read.id,
+      visibilityLevel: read.visibility.visibilityLevel,
+      grants: read.visibility.grants,
+      grantCount: read.visibility.grants.length,
+    });
+  } catch (err) {
+    return failRead(err);
+  }
+}
+
 async function handleSetVisibility(
   args: Record<string, unknown>,
   context: McpToolContext
@@ -809,6 +856,7 @@ export const CONTENT_TOOL_HANDLERS: Record<string, McpToolHandler> = {
   create_document: handleCreateDocument,
   create_artifact: handleCreateArtifact,
   get_content: handleGetContent,
+  get_visibility: handleGetVisibility,
   list_content: handleListContent,
   update_content: handleUpdateContent,
   create_version: handleCreateVersion,

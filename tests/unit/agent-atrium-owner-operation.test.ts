@@ -68,10 +68,6 @@ jest.mock("@/lib/content/surface-helpers", () => ({
       : `/atrium/${object.id}/${object.kind === "artifact" ? "view" : "edit"}`,
   resolveCollectionId: (...args: unknown[]) => resolveCollectionIdMock(...args),
 }))
-jest.mock("@/lib/content/visibility-read", () => ({
-  readVisibilityForEdit: (...args: unknown[]) =>
-    readVisibilityForEditMock(...args),
-}))
 jest.mock("@/lib/content", () => {
   class MockContentError extends Error {
     readonly code: string
@@ -148,6 +144,8 @@ jest.mock("@/lib/content", () => {
       setLevel: jest.fn(),
       grantsFor: (...args: unknown[]) => grantsForMock(...args),
     },
+    readVisibilityForEdit: (...args: unknown[]) =>
+      readVisibilityForEditMock(...args),
     publishService: {
       publish: (...args: unknown[]) => publishMock(...args),
       unpublish: jest.fn(),

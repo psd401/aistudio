@@ -23,8 +23,16 @@ import type { ApiScope } from "@/lib/api-keys/scopes";
 
 const VISIBILITY_DESC =
   "Visibility object: { level: 'private'|'group'|'internal'|'public', grants?: [{ kind: 'role'|'building'|'department'|'grade'|'user'|'group', value: string }] }";
+// The per-kind value rules are spelled out because `value: string` alone invites
+// the one shape that can never work: #1763 shipped a worked example using
+// `user:<email>`, which `assertValidGrant` rejects outright, and no tool on this
+// surface resolves an email to a numeric id.
 const GRANTS_DESC =
-  "Group grants: [{ kind: 'role'|'building'|'department'|'grade'|'user'|'group', value: string }]";
+  "Group grants: [{ kind: 'role'|'building'|'department'|'grade'|'user'|'group', value: string }]. " +
+  "Two kinds constrain the value and are rejected otherwise: 'user' is the numeric AI Studio user " +
+  "id (NEVER an email — nothing on this surface resolves an email to one), and 'group' is a synced " +
+  "group email. 'role' is a role NAME (e.g. 'staff'), not an id. Grants apply only to level " +
+  "'group'; every other level stores an empty list.";
 const CODE_ENCODING_DESC =
   "Transit encoding for the body. Set 'base64' when the body/code contains HTML/JS/CSS (<script>, <style>, style=\"…\") — the edge WAF blocks that markup in a raw request body, so send the body base64-encoded and the server decodes it before screening. Omit for plain text/markdown.";
 // #1750 — the sandbox CSP rule, built from the SAME allowlist the sandbox host's
@@ -47,6 +55,7 @@ export const CONTENT_TOOL_SCOPE_MAP: Record<string, ApiScope> = {
   create_document: "content:create",
   create_artifact: "content:create",
   get_content: "content:read",
+  get_visibility: "content:read",
   list_content: "content:read",
   update_content: "content:update",
   create_version: "content:update",
@@ -209,8 +218,21 @@ export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
     },
   },
   {
+    name: "get_visibility",
+    description:
+      "Read who can currently view the object: its level plus the ACTUAL grant entries. Call this BEFORE set_visibility — get_content reports only a grantCount integer, and set_visibility REPLACES the grant list, so changing an audience without reading it first means guessing the existing entries, and a wrong guess silently drops access no audit trail can restore (#1763). Requires EDIT rights on the object: the grant list names every principal with access, so a caller who can merely view it cannot enumerate its audience.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Object id or slug" },
+      },
+      required: ["id"],
+    },
+  },
+  {
     name: "set_visibility",
-    description: "Set who can view the object (level + group grants).",
+    description:
+      "Set who can view the object (level + group grants). `grants` REPLACES the whole list — it does not append — so read the current entries with get_visibility first and send the full list you intend, or you will drop access that cannot be restored (#1763).",
     inputSchema: {
       type: "object",
       properties: {

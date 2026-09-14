@@ -22,6 +22,7 @@ import {
   ApprovalRequiredError,
   contentService,
   hasPublishPublicScope,
+  readVisibilityForEdit,
   recordContentAudit,
   visibilityService,
 } from "@/lib/content";
@@ -32,7 +33,6 @@ import {
   restVisibilitySchema,
 } from "@/lib/content/rest";
 import { assertContentAuthoringCapability } from "@/lib/content/surface-helpers";
-import { readVisibilityForEdit } from "@/lib/content/visibility-read";
 import { createLogger } from "@/lib/logger";
 
 /**

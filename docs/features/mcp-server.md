@@ -34,7 +34,7 @@ Three auth paths supported:
 | `fork_assistant` | `mcp:fork_assistant` | Fork a visible assistant into a caller-owned pending-approval copy |
 | `get_decision_graph` | `mcp:get_decision_graph` | Get node details + connections |
 
-**Atrium content tools** (`create_document`, `create_artifact`, `get_content`, `list_content`, `update_content`, `create_version`, `set_visibility`, `publish_content`, `unpublish_content`, `export_okf`, `import_okf`) are registered alongside these, scoped via `content:*` — see [atrium-agent-access.md](./atrium-agent-access.md) for the per-tool scope table, semantics (version-based, private+draft, §28.3-screened), and agent integration guide.
+**Atrium content tools** (`create_document`, `create_artifact`, `get_content`, `get_visibility`, `list_content`, `update_content`, `create_version`, `set_visibility`, `publish_content`, `unpublish_content`, `export_okf`, `import_okf`) are registered alongside these, scoped via `content:*` — see [atrium-agent-access.md](./atrium-agent-access.md) for the per-tool scope table, semantics (version-based, private+draft, §28.3-screened), and agent integration guide.
 
 ## Protocol Methods
 

@@ -323,6 +323,14 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     requiredScope: "content:read",
     internalScopes: ["content:read"],
   },
+  // The grant-list read (#1763). NOT `destructive` — it is a read — but it is
+  // gated on EDIT rights inside the service, because the grant list names every
+  // principal with access.
+  get_visibility: {
+    identifier: "content.get_visibility",
+    requiredScope: "content:read",
+    internalScopes: ["content:read"],
+  },
   list_content: {
     identifier: "content.list",
     requiredScope: "content:read",
@@ -349,8 +357,13 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     requiredScope: "content:update",
     internalScopes: ["content:update"],
     destructive: true,
+    // v3: the grants description gained the per-kind value rules ('user' is a
+    // numeric id, not an email — #1763). The sync freezes a published version's
+    // inputSchema by deep JSON compare, and a property description is part of
+    // it, so a description-only edit still needs the bump (same as v2, which was
+    // itself a grants-description change).
     // v2: grants description gained the 'group' kind (directory groups, #1206).
-    version: "v2",
+    version: "v3",
   },
   publish_content: {
     identifier: "content.publish",
