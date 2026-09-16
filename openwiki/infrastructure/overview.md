@@ -6,6 +6,7 @@ tags: [infrastructure, cdk, aws, deployment, ecs]
 openwiki:
   roles: [infrastructure, operations]
   source_paths:
+    - Dockerfile.graviton
     - infra/test/agent-skill-cdn-allowlist.test.ts
     - infra/test/atrium-sandbox-csp.test.ts
     - infra/lib/atrium-sandbox-stack.ts
@@ -101,6 +102,25 @@ CDK constructs provide consistent, secure patterns:
 | `/Dockerfile.dev` | Development container |
 | `/Dockerfile.graviton` | ARM64 support |
 | `/infra/lib/constructs/ecs-service.ts` | Service definition |
+
+#### ARM64 Build Requirements
+
+**Source**: `/Dockerfile.graviton` lines 19–31
+
+The Graviton (ARM64) Dockerfile requires a capped network concurrency for `bun install` to prevent build failures:
+
+```bash
+bun install --frozen-lockfile --network-concurrency 8
+```
+
+**Why this is required**: At the default concurrency (48), ARM64 builds inside Docker fail intermittently with tarball integrity errors on different packages each run (e.g., sharp, mermaid). The `--network-concurrency 8` flag prevents parallel fetch truncation that surfaces as:
+
+- `Integrity check failed for tarball: sharp`
+- `Fail extracting tarball for mermaid`
+
+**Root cause**: Bun's parallel fetch under high concurrency causes tarball truncation inside Docker builds. This was isolated by ruling out lockfile integrity, VM disk space, network issues, memory, and disk I/O.
+
+**Critical**: This flag is load-bearing, not tuning. Removing it will cause inconsistent ARM64 builds even when the same lockfile installs successfully on the host.
 
 ### Auto-Pause (Dev)
 
