@@ -37,6 +37,7 @@ import {
 } from "./helpers";
 import { objectSelectFields, rowToObjectDTO, type ObjectRowAsText } from "./mappers";
 import { NotFoundError, ValidationError } from "./errors";
+import { assertGrantTargetsExist } from "./grant-targets";
 import {
   GRANT_KIND_SET,
   GROUP_EMAIL_RE,
@@ -355,6 +356,10 @@ async function applyGrantsInTx(
     value: normalizeGrantValue(g.kind, g.value),
   }));
   for (const grant of normalized) assertValidGrant(grant);
+  // Shape is valid; now confirm the `user`/`group` targets actually exist, so a
+  // grant that can never match anybody is refused here rather than stored as a
+  // silent no-op. Runs on the normalized values (lowercased group emails).
+  await assertGrantTargetsExist(tx, normalized);
   // Deduplicate on (kind, value) before INSERT — the uq_cvg constraint enforces
   // uniqueness at the DB level, but a duplicate in the caller's input would throw
   // a 23505 unique_violation and roll back the transaction with a confusing error.

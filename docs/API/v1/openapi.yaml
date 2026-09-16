@@ -3233,6 +3233,28 @@ paths:
         `data.status = "approval_required"`, the same gate `POST /content/{id}/publish`
         enforces (a `content:update`-only caller cannot reach "public" through
         this endpoint either).
+
+        **Grant targets must exist (400).** Beyond the format rules on
+        `VisibilityGrant.value`, a `user` grant whose id matches no user and a
+        `group` grant naming a group that is not an ACTIVE synced group are both
+        rejected — the whole request, with nothing applied, so a partial grant
+        set is never written. The message names every offending value:
+
+        ```
+        {"isSuccess":false,"message":"Unknown user id(s): 113772684364830001020.
+         A 'user' grant takes the AI Studio users.id, not a Google directory personId.
+         Group(s) not synced: cabinet@psd401.net. Only groups matching a rule in
+         Admin → Groups are synced; add a 'pick' rule for the group, then retry once
+         the hourly sync has run."}
+        ```
+
+        Distinguish it from the format 400s by the message: a format failure says
+        the value must be a positive-integer id / a group email, while this one
+        says the id is *unknown* or the group is *not synced*. The corrective
+        action differs accordingly — fix the value vs. get the group synced (or
+        grant a different principal). Such a grant used to be accepted, stored,
+        and returned by `GET /content/{id}/visibility` while authorizing nobody,
+        which surfaced only as a 404 for the reader it was meant to admit.
       security:
         - BearerAuth: []
       requestBody:
@@ -5011,6 +5033,16 @@ components:
             `group` is a synced group email. `role` is a role NAME (e.g.
             "staff"), never a role id. The rest (building, department, grade)
             carry the attribute string verbatim.
+
+
+            Those two kinds must also EXIST, not merely parse: a `user` value
+            with no matching `users.id` and a `group` value that is not an
+            ACTIVE synced group are both rejected with a 400 naming the offending
+            values. A grant naming a target that does not exist would be stored,
+            read back intact, and authorize nobody — so it is refused at the
+            write instead. `role`/`building`/`department`/`grade` are NOT
+            existence-checked: `role` matches by name and the rest are free-text
+            user attributes with no authoritative list.
           example: staff
 
     CollectionDiscoveryNode:
@@ -5103,6 +5135,17 @@ components:
           type: string
           minLength: 1
           maxLength: 255
+          description: >-
+            Same contract as `VisibilityGrant.value`, enforced on the collection
+            ACL: `user` is the numeric AI Studio user id (never an email),
+            `group` is a synced group email, `role` is a role NAME. A `user` or
+            `group` value must also EXIST — an unknown user id or a group that is
+            not an ACTIVE synced group is rejected with a 400 naming the offending
+            values, rather than stored as a grant that authorizes nobody.
+            Collection and object ACLs are checked independently (a reader must be
+            admitted by the collection AND granted on the object), so the same
+            rule applies at both levels.
+          example: staff
 
     CreateCollectionRequest:
       type: object

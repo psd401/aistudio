@@ -1465,6 +1465,14 @@ scope-based. `scope: "private"` creates an owner-bound hierarchy for the acting
 human. `scope: "district"` requires administrator
 authority.
 
+A `grants[]` entry whose `kind` is `user` or `group` must name a target that
+EXISTS: an unknown `users.id`, or a group that is not an **active synced** group,
+is rejected with a `400` naming every offending value and nothing is applied.
+Collection and object ACLs are enforced independently — a reader must be admitted
+by the collection AND granted on the object — so the same rule applies at both
+levels. See `PATCH /api/v1/content/{id}/visibility` for the message shapes and
+how to tell this apart from a format `400`.
+
 ```json
 {
   "name": "Human Resources",
@@ -1542,7 +1550,14 @@ use the same top-level name.
 Crossing district/private ownership boundaries, moving under a descendant,
 restoring under an archived parent, or conflicting concurrent hierarchy writes
 is rejected (`400`/`409`). A resulting `group` default without any effective
-`view` grant is also rejected. The response uses the same management shape as
+`view` grant is also rejected.
+A `grants[]` entry whose `kind` is `user` or `group` must name a target that
+EXISTS: an unknown `users.id`, or a group that is not an **active synced** group,
+is rejected with a `400` naming every offending value and nothing is applied.
+Collection and object ACLs are enforced independently — a reader must be admitted
+by the collection AND granted on the object — so the same rule applies at both
+levels. See `PATCH /api/v1/content/{id}/visibility` for the message shapes and
+how to tell this apart from a format `400`. The response uses the same management shape as
 create.
 
 Content counts have explicit semantics: `directContentCount` counts only rows
@@ -1741,6 +1756,10 @@ internal reader `url` (`/c/{slug}`).
 ```
 
 **Response `400`** — Validation error, or `CONTENT_VALIDATION` (e.g. unknown collection slug).
+Also returned when a supplied `visibility.grants[]` entry of kind `user` or `group`
+names a target that does not exist (unknown `users.id`, or a group that is not an
+**active synced** group). Nothing is created. See
+`PATCH /api/v1/content/{id}/visibility` for the message shapes.
 **Response `403`** — API key lacks `content:create`.
 **Response `409`** — `CONTENT_CONFLICT` (slug collision).
 
@@ -2108,6 +2127,17 @@ to restore them from (issue #1763).
 
 `grants[].kind` is one of `role`, `building`, `department`, `grade`, `user`, `group`; `value` is the matching identifier (for `group`, the synced Google group's lowercase email).
 
+**`user` and `group` targets must EXIST, not just parse.** A `user` value with no
+matching `users.id`, or a `group` value that is not an **active synced** group, is
+rejected with a `400` — the whole request, with nothing applied, so a partial grant
+set is never written. `role`, `building`, `department` and `grade` are not
+existence-checked (`role` matches by name; the rest are free-text user attributes
+with no authoritative list).
+
+This exists because such a grant used to be accepted, stored, and returned intact by
+`GET /content/{id}/visibility` while authorizing nobody — the only symptom was a `404`
+for the reader it was meant to admit.
+
 **Example request:**
 
 ```bash
@@ -2128,6 +2158,24 @@ curl -X PATCH -H "Authorization: Bearer sk-your-key" \
   "meta": { "requestId": "req_abc123" }
 }
 ```
+
+**Response `400`** — a grant target does not exist. The message names every
+offending value, so one round trip is enough to fix the whole batch:
+
+```json
+{
+  "isSuccess": false,
+  "message": "Unknown user id(s): 113772684364830001020. A 'user' grant takes the AI Studio users.id, not a Google directory personId. Group(s) not synced: cabinet@psd401.net. Only groups matching a rule in Admin → Groups are synced; add a 'pick' rule for the group, then retry once the hourly sync has run."
+}
+```
+
+Tell it apart from the *format* `400` by the wording, because the fix differs:
+
+| Message says | Cause | Corrective action |
+|---|---|---|
+| must be a positive-integer id / must be a group email | wrong shape | correct the value |
+| `Unknown user id(s): …` | parses, but no such user — typically a Google directory personId (21 digits) rather than the AI Studio `users.id` | look the user up and send their `users.id` |
+| `Group(s) not synced: …` | real group, never ingested by the group sync | add a `pick` rule in Admin → Groups, wait for the hourly sync, retry — or grant a different principal |
 
 **Response `403`** — `CONTENT_FORBIDDEN` (caller may not edit this object).
 **Response `404`** — `CONTENT_NOT_FOUND`.

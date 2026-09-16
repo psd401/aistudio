@@ -41,6 +41,7 @@ import {
   NotFoundError,
   ValidationError,
 } from "./errors";
+import { assertGrantTargetsExist } from "./grant-targets";
 import {
   GRANT_KIND_SET,
   GROUP_EMAIL_RE,
@@ -450,6 +451,17 @@ async function replaceGrants(
   collectionId: string,
   grants: CollectionGrant[]
 ): Promise<void> {
+  // Confirm every `user`/`group` target exists BEFORE the delete. `normalizeGrants`
+  // validates only the SHAPE of a value, so a Google personId or an unsynced group
+  // email passed and was stored as a grant that authorized nobody — the same defect
+  // `applyGrantsInTx` had, in the other grant table (see `grant-targets.ts`). It
+  // matters at BOTH levels: Atrium requires the collection to admit the requester
+  // AND the object to grant them, so a silent no-op here denies access on its own.
+  //
+  // Ordered before the delete so the failure cannot be read as "the roster was
+  // cleared" — the surrounding transaction would roll it back either way, but a
+  // caller inspecting a half-applied state should never see the old grants gone.
+  await assertGrantTargetsExist(tx, grants);
   await tx
     .delete(contentCollectionGrants)
     .where(eq(contentCollectionGrants.collectionId, collectionId));
@@ -561,6 +573,9 @@ export const collectionManagementInternals = {
   nextPosition,
   nextSlug,
   normalizeGrants,
+  // Exported for tests: the single grant-write path for BOTH create and update,
+  // and therefore the only place the target-existence check has to hold.
+  replaceGrants,
 };
 
 async function auditCollectionMutation(input: {
