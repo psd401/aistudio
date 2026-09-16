@@ -19,6 +19,9 @@ jest.mock("@/lib/db/schema", () => ({
   contentVisibilityGrants: {},
   // listVisible LEFT JOINs users to project the owner display name (#1052).
   users: { id: {}, firstName: {}, lastName: {}, email: {} },
+  // `assertGrantTargetsExist` checks a `group` grant against the synced groups.
+  // Tagged so fakeTx's `select` can tell the two target lookups apart.
+  groups: { __table: "groups", groupEmail: {}, isActive: {} },
 }));
 jest.mock("@/lib/content/collection-access", () => ({
   requesterMayViewCollection: (...args: unknown[]) =>
@@ -35,6 +38,7 @@ jest.mock("drizzle-orm", () => ({
   and: (...a: unknown[]) => a,
   desc: (a: unknown) => a,
   eq: (...a: unknown[]) => a,
+  inArray: (...a: unknown[]) => a,
   ne: (...a: unknown[]) => a,
   // `sql` is a tagged-template fn with a `.join` helper (used by buildVisibilitySql).
   sql: Object.assign((..._a: unknown[]) => ({}), {
@@ -268,24 +272,47 @@ describe("canView — unauthenticated", () => {
   });
 });
 
+/**
+ * Minimal tx whose delete/insert builders resolve and record inserted rows.
+ *
+ * `select` backs `assertGrantTargetsExist`, which confirms every `user`/`group`
+ * grant names something that exists before the insert. Callers declare the
+ * universe of known targets; the defaults cover the ids and group emails the
+ * value-validation cases use, so those keep asserting value handling rather than
+ * existence.
+ *
+ * Module scope so both the value-validation and target-existence blocks share it.
+ */
+function fakeTx(known: { userIds?: number[]; groupEmails?: string[] } = {}) {
+  const userIds = known.userIds ?? [42, 7, 496];
+  const groupEmails = known.groupEmails ?? [
+    "hs-staff@psd401.net",
+    "cabinet@psd401.net",
+  ];
+  const inserted: unknown[] = [];
+  const tx = {
+    delete: () => ({ where: async () => undefined }),
+    insert: () => ({
+      values: async (rows: unknown) => {
+        inserted.push(rows);
+      },
+    }),
+    select: () => ({
+      from: (table: { __table?: string }) => ({
+        where: async () =>
+          table?.__table === "groups"
+            ? groupEmails.map((email) => ({ email }))
+            : userIds.map((id) => ({ id })),
+      }),
+    }),
+  };
+  return { tx: tx as never, inserted };
+}
+
 describe("applyGrantsForLevel — grant value validation (group level)", () => {
   // The public grant-write surface is `applyGrantsForLevel`; for `group` it routes
   // every supplied grant through the same value validation/dedup/trim logic the
   // (now-internal) applyGrantsInTx primitive runs. These cases drive that path.
-
-  /** Minimal tx whose delete/insert builders resolve and record inserted rows. */
-  function fakeTx() {
-    const inserted: unknown[] = [];
-    const tx = {
-      delete: () => ({ where: async () => undefined }),
-      insert: () => ({
-        values: async (rows: unknown) => {
-          inserted.push(rows);
-        },
-      }),
-    };
-    return { tx: tx as never, inserted };
-  }
 
   const apply = (tx: never, grants: Grant[]) =>
     visibilityService.applyGrantsForLevel(
@@ -388,6 +415,7 @@ describe("applyGrantsForLevel — grant value validation (group level)", () => {
     ).rejects.toThrow(/group email/i);
   });
 
+
   it("rejects a whitespace-only grant value (trims to empty → required)", async () => {
     // "   " is a non-empty string but trims to "" — it could never equal a real
     // attribute, so it must be rejected as missing rather than stored inert.
@@ -415,6 +443,81 @@ describe("applyGrantsForLevel — grant value validation (group level)", () => {
     ]);
     expect(inserted).toHaveLength(1);
     expect((inserted[0] as unknown[]).length).toBe(1);
+  });
+});
+
+describe("applyGrantsForLevel — grant TARGET existence", () => {
+  // Existence of the grant TARGET, not just the shape of its value. Prod
+  // 2026-09-15: all 34 group grants named groups the sync had never ingested,
+  // and an agent's "fix" granted a 21-digit Google personId as a user id. Every
+  // one passed shape validation, stored cleanly, read back intact, and authorized
+  // nobody — the 404 the reader saw was the only symptom.
+
+  const apply = (tx: never, grants: Grant[]) =>
+    visibilityService.applyGrantsForLevel(tx, "obj-1", "group", grants as never);
+
+  it("rejects a group that is not in the synced groups table", async () => {
+    // Shape-valid and correctly lowercased, but the group-sync selection rules
+    // never ingested it, so it can never enter `principal.groups`.
+    const { tx, inserted } = fakeTx({ groupEmails: ["psd-staff@psd401.net"] });
+    await expect(
+      apply(tx, [{ kind: "group", value: "cabinet@psd401.net" }])
+    ).rejects.toThrow(/not synced.*cabinet@psd401\.net/is);
+    expect(inserted).toHaveLength(0);
+  });
+
+  it("names every unsynced group, and rejects the batch as a whole", async () => {
+    // Partial application would leave the object half-shared with no signal which
+    // half landed, so one bad target must abort the entire replace.
+    const { tx, inserted } = fakeTx({ groupEmails: ["psd-staff@psd401.net"] });
+    await expect(
+      apply(tx, [
+        { kind: "group", value: "psd-staff@psd401.net" },
+        { kind: "group", value: "phs-staff@psd401.net" },
+        { kind: "group", value: "cabinet@psd401.net" },
+      ])
+    ).rejects.toThrow(/phs-staff@psd401\.net, cabinet@psd401\.net/);
+    expect(inserted).toHaveLength(0);
+  });
+
+  it("rejects a Google directory personId supplied as a user grant", async () => {
+    // A 21-digit personId satisfies POSITIVE_INT_RE exactly as a users.id does.
+    // This is the value an agent actually wrote in prod; the real id was 496.
+    const { tx, inserted } = fakeTx({ userIds: [496] });
+    await expect(
+      apply(tx, [
+        { kind: "group", value: "cabinet@psd401.net" },
+        { kind: "user", value: "113772684364830001020" },
+      ])
+    ).rejects.toThrow(/Unknown user id.*personId/is);
+    expect(inserted).toHaveLength(0);
+  });
+
+  it("accepts a user grant whose id exists", async () => {
+    const { tx, inserted } = fakeTx({
+      userIds: [496],
+      groupEmails: ["cabinet@psd401.net"],
+    });
+    await apply(tx, [
+      { kind: "group", value: "cabinet@psd401.net" },
+      { kind: "user", value: "496" },
+    ]);
+    expect(inserted[0]).toEqual([
+      { objectId: "obj-1", grantKind: "group", grantValue: "cabinet@psd401.net" },
+      { objectId: "obj-1", grantKind: "user", grantValue: "496" },
+    ]);
+  });
+
+  it("does not existence-check role or building grants", async () => {
+    // `role` matches by NAME and building/department/grade are free-text user
+    // attributes — neither has an authoritative table, and over-validating `role`
+    // is the Phase 0 bug that made role grants unmatchable end-to-end.
+    const { tx, inserted } = fakeTx({ userIds: [], groupEmails: [] });
+    await apply(tx, [
+      { kind: "role", value: "administrator" },
+      { kind: "building", value: "Peninsula High School" },
+    ]);
+    expect(inserted).toHaveLength(1);
   });
 });
 
