@@ -23,7 +23,6 @@ import {
   contentCollections,
   contentObjects,
   contentVisibilityGrants,
-  groups,
   users,
 } from "@/lib/db/schema";
 import {
@@ -38,6 +37,7 @@ import {
 } from "./helpers";
 import { objectSelectFields, rowToObjectDTO, type ObjectRowAsText } from "./mappers";
 import { NotFoundError, ValidationError } from "./errors";
+import { assertGrantTargetsExist } from "./grant-targets";
 import {
   GRANT_KIND_SET,
   GROUP_EMAIL_RE,
@@ -326,83 +326,6 @@ export interface ViewableObject {
   ownerUserId: number;
   collectionId: string | null;
   visibilityLevel: "private" | "group" | "internal" | "public";
-}
-
-/**
- * Reject `user` / `group` grants whose target does not exist, so a grant that
- * could never match anybody is refused at the write instead of being stored and
- * silently authorizing no one.
- *
- * WHY THIS EXISTS (prod, 2026-09-15): `assertValidGrant` checks only the SHAPE of
- * a value, and both shapes are trivially satisfiable by a wrong-namespace id:
- *   - `group` only had to look like an email. The group-sync selection rules were
- *     a single `prefix = psd-`, so `cabinet@psd401.net` was never synced and could
- *     never enter `principal.groups`. ALL 34 group grants in production resolved to
- *     nobody, leaving 17 of 20 `group`-level objects visible only to their owner.
- *   - `user` only had to match `POSITIVE_INT_RE`, which a 21-digit Google directory
- *     personId satisfies as readily as a `users.id`. An agent "fixed" the above by
- *     granting personId 113772684364830001020 to a user whose real id was 496.
- * In both cases the PATCH returned 200 and `read-grants` faithfully echoed a grant
- * the ACL could never match — the failure was invisible from every read surface,
- * and only a reader reporting a 404 surfaced it.
- *
- * Deliberately limited to `user` and `group`, the two kinds with an authoritative
- * table to check against. `role` is NOT validated here: it matches by NAME, and the
- * Phase 0 bug called out above `assertValidGrant` was caused by over-validating it.
- * `building` / `department` / `grade` are free-text user attributes with no
- * canonical list to check.
- *
- * One batched query per kind, and only for the kinds actually present.
- */
-async function assertGrantTargetsExist(
-  tx: DbTransaction,
-  grants: readonly VisibilityGrant[]
-): Promise<void> {
-  const userIds = [
-    ...new Set(grants.filter((g) => g.kind === "user").map((g) => g.value)),
-  ];
-  const groupEmails = [
-    ...new Set(grants.filter((g) => g.kind === "group").map((g) => g.value)),
-  ];
-
-  if (userIds.length > 0) {
-    // Values already passed POSITIVE_INT_RE, so Number() is safe here; a value
-    // beyond int range simply matches no row and is reported as unknown.
-    const found = await tx
-      .select({ id: users.id })
-      .from(users)
-      .where(inArray(users.id, userIds.map(Number)));
-    const known = new Set(found.map((r) => String(r.id)));
-    const missing = userIds.filter((id) => !known.has(id));
-    if (missing.length > 0) {
-      throw new ValidationError(
-        `Unknown user id(s): ${missing.join(", ")}. A 'user' grant takes the AI Studio users.id, not a Google directory personId.`,
-        { kind: "user", value: missing.join(",") }
-      );
-    }
-  }
-
-  if (groupEmails.length > 0) {
-    // Values are lowercased by `normalizeGrantValue`, and `groups.group_email` is
-    // stored lowercase, so this is an exact match.
-    const found = await tx
-      .select({ email: groups.groupEmail })
-      .from(groups)
-      .where(
-        and(
-          inArray(groups.groupEmail, groupEmails),
-          eq(groups.isActive, true)
-        )
-      );
-    const known = new Set(found.map((r) => r.email.toLowerCase()));
-    const missing = groupEmails.filter((e) => !known.has(e));
-    if (missing.length > 0) {
-      throw new ValidationError(
-        `Group(s) not synced: ${missing.join(", ")}. Only groups matching a rule in Admin → Groups are synced; add a 'pick' rule for the group, then retry once the hourly sync has run.`,
-        { kind: "group", value: missing.join(",") }
-      );
-    }
-  }
 }
 
 /**

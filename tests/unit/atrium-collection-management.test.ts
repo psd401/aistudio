@@ -400,3 +400,119 @@ describe("collection management group defaults", () => {
     ).not.toThrow();
   });
 });
+
+describe("replaceGrants — grant TARGET existence (collection level)", () => {
+  // Atrium keeps grants in TWO tables and checks BOTH boundaries: the collection
+  // must admit the requester AND the object must grant them. Prod 2026-09-15
+  // proved the collection table had the same defect as the object table — a
+  // Google personId and an unsynced group email both passed `normalizeGrants`
+  // (shape only), stored cleanly, and authorized nobody. `replaceGrants` is the
+  // single write path for create AND update, so the check belongs here.
+
+  /**
+   * Minimal tx recording the delete/insert, with a `select` standing in for the
+   * two target lookups in `assertGrantTargetsExist`.
+   *
+   * Keyed on the PROJECTION (`{ id }` for users, `{ email }` for groups) rather
+   * than on call order: the helper skips the query for a kind that is absent, so
+   * a group-only payload makes the groups lookup the FIRST call.
+   */
+  function fakeTx(known: { userIds?: number[]; groupEmails?: string[] } = {}) {
+    const userIds = known.userIds ?? [7, 215];
+    const groupEmails = known.groupEmails ?? ["cabinet@psd401.net"];
+    const calls: string[] = [];
+    const inserted: unknown[] = [];
+    const tx = {
+      delete: () => ({
+        where: async () => {
+          calls.push("delete");
+        },
+      }),
+      insert: () => ({
+        values: async (rows: unknown) => {
+          calls.push("insert");
+          inserted.push(rows);
+        },
+      }),
+      select: (columns: Record<string, unknown>) => ({
+        from: () => ({
+          where: async () =>
+            "email" in columns
+              ? groupEmails.map((email) => ({ email }))
+              : userIds.map((id) => ({ id })),
+        }),
+      }),
+    };
+    return { tx: tx as never, calls, inserted };
+  }
+
+  const replace = (tx: never, grants: unknown[]) =>
+    collectionManagementInternals.replaceGrants(
+      tx,
+      "2a07b463-920a-4341-b9e9-2e085bd65def",
+      grants as never
+    );
+
+  it("rejects a Google personId supplied as a collection user grant", async () => {
+    // The exact value written to content_collection_grants in prod.
+    const { tx, calls } = fakeTx({ userIds: [215] });
+    await expect(
+      replace(tx, [
+        { access: "view", kind: "user", value: "113772684364830001020" },
+      ])
+    ).rejects.toThrow(/Unknown user id.*personId/is);
+    // Ordered BEFORE the delete, so a bad grant never clears the live roster.
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects a group the sync has never ingested", async () => {
+    const { tx, calls } = fakeTx({ groupEmails: ["psd-staff@psd401.net"] });
+    await expect(
+      replace(tx, [{ access: "view", kind: "group", value: "cabinet@psd401.net" }])
+    ).rejects.toThrow(/not synced.*cabinet@psd401\.net/is);
+    expect(calls).toEqual([]);
+  });
+
+  it("writes grants whose targets all exist", async () => {
+    const { tx, calls, inserted } = fakeTx({
+      userIds: [215],
+      groupEmails: ["cabinet@psd401.net"],
+    });
+    await replace(tx, [
+      { access: "view", kind: "user", value: "215" },
+      { access: "view", kind: "group", value: "cabinet@psd401.net" },
+    ]);
+    expect(calls).toEqual(["delete", "insert"]);
+    expect(inserted[0]).toEqual([
+      {
+        collectionId: "2a07b463-920a-4341-b9e9-2e085bd65def",
+        access: "view",
+        grantKind: "user",
+        grantValue: "215",
+      },
+      {
+        collectionId: "2a07b463-920a-4341-b9e9-2e085bd65def",
+        access: "view",
+        grantKind: "group",
+        grantValue: "cabinet@psd401.net",
+      },
+    ]);
+  });
+
+  it("still clears grants when handed an empty set (no lookup, delete only)", async () => {
+    // Un-sharing a personal collection calls replaceGrants(tx, id, []) — the
+    // existence check must not turn that into a no-op or an error.
+    const { tx, calls } = fakeTx();
+    await replace(tx, []);
+    expect(calls).toEqual(["delete"]);
+  });
+
+  it("does not existence-check role or building collection grants", async () => {
+    const { tx, calls } = fakeTx({ userIds: [], groupEmails: [] });
+    await replace(tx, [
+      { access: "create", kind: "role", value: "administrator" },
+      { access: "view", kind: "building", value: "Peninsula High School" },
+    ]);
+    expect(calls).toEqual(["delete", "insert"]);
+  });
+});
