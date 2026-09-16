@@ -290,6 +290,9 @@ function fakeTx(known: { userIds?: number[]; groupEmails?: string[] } = {}) {
     "cabinet@psd401.net",
   ];
   const inserted: unknown[] = [];
+  // Which target tables were actually queried, so a test can assert that an
+  // out-of-range id never reached the database at all.
+  const queried: string[] = [];
   const tx = {
     delete: () => ({ where: async () => undefined }),
     insert: () => ({
@@ -298,15 +301,18 @@ function fakeTx(known: { userIds?: number[]; groupEmails?: string[] } = {}) {
       },
     }),
     select: () => ({
-      from: (table: { __table?: string }) => ({
-        where: async () =>
-          table?.__table === "groups"
-            ? groupEmails.map((email) => ({ email }))
-            : userIds.map((id) => ({ id })),
-      }),
+      from: (table: { __table?: string }) => {
+        queried.push(table?.__table === "groups" ? "groups" : "users");
+        return {
+          where: async () =>
+            table?.__table === "groups"
+              ? groupEmails.map((email) => ({ email }))
+              : userIds.map((id) => ({ id })),
+        };
+      },
     }),
   };
-  return { tx: tx as never, inserted };
+  return { tx: tx as never, inserted, queried };
 }
 
 describe("applyGrantsForLevel — grant value validation (group level)", () => {
@@ -518,6 +524,63 @@ describe("applyGrantsForLevel — grant TARGET existence", () => {
       { kind: "building", value: "Peninsula High School" },
     ]);
     expect(inserted).toHaveLength(1);
+  });
+
+  it("never sends an out-of-range id to the query (int4 overflow is a 500, not a 400)", async () => {
+    // `users.id` is int4 and the parameter is resolved to int4 from the
+    // comparison, so Postgres raises 22003 `value "…" is out of range for type
+    // integer` rather than matching nothing. Verified against the real drizzle
+    // stack: `inArray(users.id, [1.1e20])` THROWS. The personId is exactly the
+    // value this check exists to catch, so the headline case is the one that
+    // would have 500'd. It must be rejected without touching the database.
+    const { tx, queried } = fakeTx({ userIds: [496] });
+    await expect(
+      apply(tx, [{ kind: "user", value: "113772684364830001020" }])
+    ).rejects.toThrow(/Unknown user id.*113772684364830001020/is);
+    expect(queried).not.toContain("users");
+  });
+
+  it("still queries when an in-range id accompanies an out-of-range one", async () => {
+    // The out-of-range value is filtered out, not the whole batch: a real id in
+    // the same payload must still be resolved so it is not falsely reported.
+    const { tx, queried } = fakeTx({ userIds: [496] });
+    await expect(
+      apply(tx, [
+        { kind: "user", value: "496" },
+        { kind: "user", value: "113772684364830001020" },
+      ])
+    ).rejects.toThrow(/Unknown user id\(s\): 113772684364830001020\./);
+    expect(queried).toContain("users");
+  });
+
+  it("accepts INT4_MAX and rejects INT4_MAX+1 at the boundary", async () => {
+    const { tx: txMax, queried: qMax } = fakeTx({ userIds: [2147483647] });
+    await apply(txMax, [{ kind: "user", value: "2147483647" }]);
+    expect(qMax).toContain("users");
+
+    const { tx: txOver, queried: qOver } = fakeTx({ userIds: [496] });
+    await expect(
+      apply(txOver, [{ kind: "user", value: "2147483648" }])
+    ).rejects.toThrow(/2147483648/);
+    expect(qOver).not.toContain("users");
+  });
+
+  it("names a bad user AND a bad group in a single error", async () => {
+    // Throwing after the user check made a caller fix the id, retry, and only
+    // then discover the group was wrong too — and these callers are usually
+    // agents retrying unattended.
+    const { tx, inserted } = fakeTx({
+      userIds: [496],
+      groupEmails: ["psd-staff@psd401.net"],
+    });
+    const err = await apply(tx, [
+      { kind: "user", value: "113772684364830001020" },
+      { kind: "group", value: "cabinet@psd401.net" },
+    ]).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/Unknown user id.*113772684364830001020/s);
+    expect((err as Error).message).toMatch(/Group\(s\) not synced: cabinet@psd401\.net/);
+    expect(inserted).toHaveLength(0);
   });
 });
 

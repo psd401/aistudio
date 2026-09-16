@@ -45,6 +45,12 @@ export interface GrantTarget {
 }
 
 /**
+ * Upper bound of `users.id` (int4). A candidate above this is reported as unknown
+ * WITHOUT being sent to Postgres — see the note in `assertGrantTargetsExist`.
+ */
+const INT4_MAX = 2147483647n;
+
+/**
  * Throw a `ValidationError` naming every `user`/`group` grant whose target does
  * not exist. Runs inside the caller's transaction, on values that have ALREADY
  * been normalized (group emails lowercased, values trimmed) so the comparison
@@ -66,20 +72,34 @@ export async function assertGrantTargetsExist(
     ...new Set(grants.filter((g) => g.kind === "group").map((g) => g.value)),
   ];
 
+  // Both kinds are resolved BEFORE anything is thrown, so one rejection names
+  // every bad target. Throwing at the first kind would make a caller fix a user
+  // id, retry, and only then discover the group was wrong too — and the callers
+  // here are usually agents retrying unattended.
+  const missingUsers: string[] = [];
+  const missingGroups: string[] = [];
+
   if (userIds.length > 0) {
-    // Values already passed POSITIVE_INT_RE, so Number() is safe here; a value
-    // beyond int range simply matches no row and is reported as unknown.
-    const found = await tx
-      .select({ id: users.id })
-      .from(users)
-      .where(inArray(users.id, userIds.map(Number)));
-    const known = new Set(found.map((r) => String(r.id)));
-    const missing = userIds.filter((id) => !known.has(id));
-    if (missing.length > 0) {
-      throw new ValidationError(
-        `Unknown user id(s): ${missing.join(", ")}. A 'user' grant takes the AI Studio users.id, not a Google directory personId.`,
-        { kind: "user", value: missing.join(",") }
-      );
+    // `users.id` is int4. A value past its range must NOT reach the query: the
+    // parameter is resolved to int4 from the comparison and Postgres raises
+    // `value "…" is out of range for type integer` (22003), which surfaces as a
+    // 500 instead of this ValidationError. That is not a hypothetical edge — a
+    // 21-digit Google directory personId is exactly the value this check exists
+    // to catch, so the headline case is precisely the one that would have blown
+    // up. `POSITIVE_INT_RE` has already guaranteed digits-only, so `BigInt` is
+    // safe and exact where `Number` would silently lose precision.
+    const inRange: string[] = [];
+    for (const id of userIds) {
+      if (BigInt(id) <= INT4_MAX) inRange.push(id);
+      else missingUsers.push(id);
+    }
+    if (inRange.length > 0) {
+      const found = await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(inArray(users.id, inRange.map(Number)));
+      const known = new Set(found.map((r) => String(r.id)));
+      missingUsers.push(...inRange.filter((id) => !known.has(id)));
     }
   }
 
@@ -91,12 +111,24 @@ export async function assertGrantTargetsExist(
       .from(groups)
       .where(and(inArray(groups.groupEmail, groupEmails), eq(groups.isActive, true)));
     const known = new Set(found.map((r) => r.email.toLowerCase()));
-    const missing = groupEmails.filter((e) => !known.has(e));
-    if (missing.length > 0) {
-      throw new ValidationError(
-        `Group(s) not synced: ${missing.join(", ")}. Only groups matching a rule in Admin → Groups are synced; add a 'pick' rule for the group, then retry once the hourly sync has run.`,
-        { kind: "group", value: missing.join(",") }
-      );
-    }
+    missingGroups.push(...groupEmails.filter((e) => !known.has(e)));
   }
+
+  if (missingUsers.length === 0 && missingGroups.length === 0) return;
+
+  const parts: string[] = [];
+  if (missingUsers.length > 0) {
+    parts.push(
+      `Unknown user id(s): ${missingUsers.join(", ")}. A 'user' grant takes the AI Studio users.id, not a Google directory personId.`
+    );
+  }
+  if (missingGroups.length > 0) {
+    parts.push(
+      `Group(s) not synced: ${missingGroups.join(", ")}. Only groups matching a rule in Admin → Groups are synced; add a 'pick' rule for the group, then retry once the hourly sync has run.`
+    );
+  }
+  throw new ValidationError(parts.join(" "), {
+    kind: missingUsers.length > 0 ? "user" : "group",
+    value: [...missingUsers, ...missingGroups].join(","),
+  });
 }
