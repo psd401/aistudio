@@ -1,9 +1,25 @@
 # Dependabot configuration for automated dependency updates
 # Helps keep dependencies up-to-date and secure
+#
+# Managed per PSD standards. Notes:
+# - bun repos use package-ecosystem "bun" (npm entries edit package.json
+#   without bun.lock -> psd-ci's frozen-lockfile install correctly refuses;
+#   found by discipline's maintainer, 2026-08-18). Trade-off: bun ecosystem
+#   has no security-UPDATE PRs (alerts unaffected; weekly digest tracks them).
+# - Majors are ignored by default: major bumps are migration work humans
+#   schedule (standards/03; auto-remediation matrix). Ignore rules do not
+#   suppress Dependabot ALERTS.
+# - Do NOT use YAML anchors/aliases here: Dependabot's parser rejects them
+#   ("YAML aliases are not supported") and the config check fails.
+# - infra/lambdas/agent-router is deliberately NOT listed: it ships no
+#   committed lockfile on purpose (installed with --frozen-lockfile so it
+#   resolves fresh without writing one -- see CLAUDE.md). Adding a Dependabot
+#   entry there would reintroduce exactly the package.json/lockfile drift
+#   this config exists to prevent.
 version: 2
 updates:
-  # JavaScript/TypeScript dependencies (root package.json)
-  - package-ecosystem: "npm"
+  # JavaScript/TypeScript dependencies (root package.json + bun.lock)
+  - package-ecosystem: "bun"
     directory: "/"
     target-branch: "dev"
     schedule:
@@ -20,11 +36,14 @@ updates:
         update-types:
           - "minor"
           - "patch"
-    # Security updates are always created immediately
-    # regardless of schedule
-    
+    # Majors are human-scheduled migration work (does not affect alerts)
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+
   # CDK Infrastructure dependencies
-  - package-ecosystem: "npm"
+  - package-ecosystem: "bun"
     directory: "/infra"
     target-branch: "dev"
     schedule:
@@ -54,8 +73,16 @@ updates:
         update-types:
           - "minor"
           - "patch"
-  
+    # Majors are human-scheduled migration work (does not affect alerts)
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+
   # GitHub Actions
+  # No major-version ignore here on purpose: Actions majors are pinned-tag
+  # bumps (actions/checkout@v4 -> @v5), not dependency migrations, and they
+  # carry the runner/security fixes we want picked up promptly.
   - package-ecosystem: "github-actions"
     directory: "/"
     target-branch: "dev"
