@@ -33,7 +33,7 @@
  *     canonical list.
  */
 
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { groups, users } from "@/lib/db/schema";
 import type { DbTransaction } from "@/lib/db/drizzle-client";
 import { ValidationError } from "./errors";
@@ -104,13 +104,29 @@ export async function assertGrantTargetsExist(
   }
 
   if (groupEmails.length > 0) {
-    // Callers lowercase `group` values, and `groups.group_email` is stored
-    // lowercase, so this is an exact match.
+    // Compare on `lower(group_email)`, NOT on the stored value.
+    //
+    // Nothing forces `groups.group_email` to be stored lowercase: the only
+    // constraint is `uq_groups_group_email ON (lower(group_email))`, which
+    // enforces case-insensitive UNIQUENESS, not lowercase STORAGE. The matcher
+    // this check protects — `listUserGroupEmailsByUserId` — deliberately selects
+    // `lower(groups.group_email)` for the same reason, so a mixed-case row still
+    // produces a lowercase entry in `principal.groups` and its grant resolves.
+    //
+    // An exact comparison here would therefore reject a lowercased grant value
+    // as "not synced" for a group that actually works — the write side and the
+    // read side disagreeing about whether a grant resolves, which is precisely
+    // the failure this module exists to prevent, just inverted. Matching
+    // `lower()` on both sides keeps them equivalent by construction, and also
+    // uses the existing functional index rather than defeating it.
+    const loweredEmail = sql<string>`lower(${groups.groupEmail})`;
     const found = await tx
-      .select({ email: groups.groupEmail })
+      .select({ email: loweredEmail })
       .from(groups)
-      .where(and(inArray(groups.groupEmail, groupEmails), eq(groups.isActive, true)));
-    const known = new Set(found.map((r) => r.email.toLowerCase()));
+      .where(and(inArray(loweredEmail, groupEmails), eq(groups.isActive, true)));
+    // Callers have already lowercased the grant value, and the projection is
+    // lowered, so both sides of this comparison are lowercase.
+    const known = new Set(found.map((r) => r.email));
     missingGroups.push(...groupEmails.filter((e) => !known.has(e)));
   }
 
