@@ -25,6 +25,9 @@ openwiki:
     - lib/content/publish-service.ts
     - lib/content/reader-links.ts
     - lib/content/atrium-data-contract.ts
+    - lib/content/grant-targets.ts
+    - lib/content/visibility-service.ts
+    - lib/content/collection-management-service.ts
     - lib/atrium/usage-series.ts
     - lib/atrium/recent-window.ts
     - lib/atrium/workspace-change-event.ts
@@ -54,6 +57,11 @@ openwiki:
     - read_workspace_content is paged, never truncated — one call returns at most 96 KiB with byteOffset/totalBytes/hasMore/nextOffset; model pages with offset until hasMore is absent (#1770)
     - Page edges land on UTF-8 character boundaries — concatenated pages reproduce source byte-for-byte with no replacement characters (#1770)
     - No read ceiling exists — resolveReadBody returns complete body; sliceBodyForRead pages it so nothing is unreachable (#1770)
+    - Grant target existence is validated before storing — user grants must reference existing users.id, group grants must reference synced groups.group_email (#1777)
+    - Only user/group are existence-checked — role matches by NAME, building/department/grade are free-text with no canonical list (#1777)
+    - Group comparison uses lower(group_email) on both sides, matching the read path and handling mixed-case storage (#1777)
+    - Out-of-range user IDs (>2147483647) are rejected without hitting database — prevents int4 overflow from surfacing as 500 (#1777)
+    - Both user and group queries resolve before throwing — a single 400 names every invalid target (#1777)
   validation_commands:
     - bun run typecheck
     - bun run lint
@@ -85,6 +93,8 @@ openwiki:
     - tests/unit/lib/content/atrium-data-contract.test.ts
     - tests/unit/lib/nexus/chat-step-budget.test.ts
     - tests/unit/lib/nexus/workspace-chat-tools.test.ts
+    - tests/unit/atrium-visibility.test.ts
+    - tests/unit/atrium-collection-management.test.ts
     - tests/e2e/nexus-workspace-artifact-refresh.spec.ts
 ---
 
@@ -389,6 +399,33 @@ Each grant is `kind:value` where `kind` determines the value format:
 
 **Critical**: `user` grants require the numeric AI Studio user ID. Email addresses are rejected with a 400. This skill cannot resolve an email to an ID—use the web visibility editor's people picker for named individuals.
 
+#### Grant Target Existence Validation (#1777)
+
+**Source**: `/lib/content/grant-targets.ts`
+
+Both object-level grants (`content_visibility_grants`) and collection-level grants (`content_collection_grants`) now validate that `user` and `group` targets exist before storing. Previously, grants naming non-existent users or unsynced groups were accepted, stored, and echoed back by read surfaces while authorizing nobody — the only symptom was a reader getting a 404 on content they appeared to be granted.
+
+**Scope**: Only `user` and `group` are existence-checked; `role` matches by NAME (not numeric id), and `building`/`department`/`grade` are free-text user attributes with no canonical list.
+
+**Validation behavior**:
+- `user` grants: Value must be an existing `users.id` (int4 range). Out-of-range IDs (>2147483647) are rejected without hitting the database. Google directory personIds (21-digit) are explicitly rejected with a message pointing at the correct `users.id` field.
+- `group` grants: Value must match a synced `groups.group_email` (case-insensitive `lower()` comparison, matching the read path). Groups not yet ingested by the sync are rejected with a message pointing at Admin → Groups pick rules.
+- Both kinds resolve before any error is thrown, so one rejection names every invalid target — callers (usually agents retrying unattended) see the complete fix in one 400 response.
+
+**Error messages are actionable**:
+- Unknown user id: Points to `users.id` vs Google personId distinction
+- Group not synced: Points to Admin → Groups `pick` rule and hourly sync cadence
+
+**Key Sources**:
+- `/lib/content/grant-targets.ts` — `assertGrantTargetsExist()` shared by both grant paths
+- `/lib/content/visibility-service.ts` — `applyGrantsInTx` calls the check after normalization
+- `/lib/content/collection-management-service.ts` — `replaceGrants` calls the check before delete-then-insert
+- `/docs/API/v1/context-graph.md` — API contract documentation
+
+**Focused Tests**:
+- `tests/unit/atrium-visibility.test.ts` — object-level grant target existence block
+- `tests/unit/atrium-collection-management.test.ts` — collection-level grant target existence block
+
 #### Replace vs. Merge Mode
 
 **Replace mode** (`--grants`):
@@ -643,8 +680,7 @@ Atrium exposes content tools via `/lib/mcp/content-tools.ts`:
 - `export_okf`, `import_okf` — Open Knowledge Format import/export
 - Permission-aware retrieval for grounded responses
 
-<!-- openwiki: broken internal link [#visibility--grant-management] heading anchor "visibility--grant-management" does not exist in /openwiki/app-features/overview.md. Fix the href or restore the target, then delete this comment. -->
-**Why `get_visibility` exists** (#1763, #1769): The `grants` parameter on `set_visibility` REPLACES the entire list — it does not append. Before #1769, MCP callers had to guess the existing grants, and a wrong guess silently revoked access. `get_visibility` lets agents read before modifying. See **[Visibility & Grant Management](#visibility--grant-management)** for detailed grant types and merge mode.
+**Why `get_visibility` exists** (#1763, #1769): The `grants` parameter on `set_visibility` REPLACES the entire list — it does not append. Before #1769, MCP callers had to guess the existing grants, and a wrong guess silently revoked access. `get_visibility` lets agents read before modifying. See **[Visibility & Grant Management](#visibility--grant-management-1763)** for detailed grant types and merge mode, and **[Grant Target Existence Validation](#grant-target-existence-validation-1777)** for the existence check added in #1777.
 
 **CSP Guidance for Artifacts** (#1750):
 
