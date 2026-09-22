@@ -7,11 +7,14 @@ openwiki:
   roles: [infrastructure, operations]
   source_paths:
     - Dockerfile.graviton
+    - infra/lib/frontend-stack-ecs.ts
+    - infra/test/frontend-waf-body-signatures.test.ts
     - infra/test/agent-skill-cdn-allowlist.test.ts
     - infra/test/atrium-sandbox-csp.test.ts
     - infra/lib/atrium-sandbox-stack.ts
     - infra/agent-image/check_config_consistency.py
   test_paths:
+    - infra/test/frontend-waf-body-signatures.test.ts
     - infra/test/agent-skill-cdn-allowlist.test.ts
     - infra/agent-image/test_check_config_consistency.py
 ---
@@ -540,6 +543,63 @@ Amazon Bedrock Guardrails provide:
 
 See `/docs/diagrams/02-vpc-network-topology.md` for network diagram.
 
+### Web Application Firewall (WAF)
+
+**Source**: `/infra/lib/frontend-stack-ecs.ts`, `/infra/test/frontend-waf-body-signatures.test.ts`
+
+#### Body Signature Handling for AI Paths
+
+AWS WAF protects the ALB with managed rule groups, but body-inspection signatures were blocking legitimate AI traffic:
+
+**Problem** (2026-09-22):
+- `CrossSiteScripting_BODY` blocked Nexus chat when conversation history contained Gemini Google Search grounding HTML (`<style>…` markup in tool results)
+- `SQLi_BODY` blocked agent runtime credential fetches during scheduled briefs
+- Requests returned HTTP 403 without reaching the app, making attribution impossible
+
+**Solution**: Label-based pattern for AI body paths:
+
+| Path | Why Exempt | Traffic Type |
+|------|------------|--------------|
+| `/api/nexus/chat` | Re-sends full conversation history each turn, including model output | Authenticated user prose |
+| `/api/agent/*` | Server-to-server agent runtime calls with proxy-signed context | Authenticated internal traffic |
+
+**Implementation**:
+- Managed rule groups run once for all traffic with body rules overridden to COUNT
+- Rules still add labels and maintain per-rule CloudWatch metrics
+- Custom `BodySignaturesBlock` rule (priority 5) BLOCKs on those labels for NON-AI paths
+- Maintains blocking behavior everywhere else while counting only on AI paths
+
+**Body Signatures Covered**:
+- Core: `CrossSiteScripting_BODY`, `GenericLFI_BODY`, `EC2MetaDataSSRF_BODY`
+- Known Bad Inputs: `JavaDeserializationRCE_BODY`, `Log4JRCE_BODY`, `ReactJSRCE_BODY`
+- SQLi: `SQLi_BODY`
+
+**Long-standing COUNT rules**: `SizeRestrictions_BODY` and `GenericRFI_BODY` remain COUNT-only everywhere (8 KB cap breaks uploads, RFI fires on normal prompts). These are NOT re-blocked.
+
+#### WAF Logging Configuration
+
+Full WAF request logging to CloudWatch Logs for forensic attribution:
+
+**Log Group**: `aws-waf-logs-aistudio-{env}`
+- **Retention**: 30 days (prod), 7 days (dev)
+- **ManagedBy**: `cdk` tag for governance consistency
+
+**Logged Data**: Terminating rule, all labels, URI path, headers, client IP
+
+**Redacted Fields**:
+- **Credential headers** (`WAF_LOG_REDACTED_HEADERS`): authorization, cookie, x-agent-invocation-context, x-agent-request-proof-version/timestamp/nonce/signature, x-goog-channel-token, mcp-session-id
+- **Query string**: Protects `?token=` in collab WebSocket connects and agent-connect consent links
+
+**Why logging matters**: Before this change, the only record of a block was the per-rule metric plus `get-sampled-requests` (keeps 3 hours, no body). HTTP 403 reports from morning could not be attributed by afternoon.
+
+#### Security Invariants
+
+1. **All credential headers MUST be redacted** — any header that authenticates a request must not appear in logs
+2. **Body signatures block on non-AI paths** — XSS, SQLi, LFI, SSRF protections remain enforced for form posts
+3. **Label strings are exact** — wrong label name silently disables that signature everywhere, so test pins verbatim strings from `aws wafv2 describe-managed-rule-group`
+
+**Focused Tests**: `/infra/test/frontend-waf-body-signatures.test.ts` — 7 tests validating rule configuration, AI path exemptions, credential header redaction, and label names
+
 ---
 
 ## Deployment Safety
@@ -586,6 +646,7 @@ Infrastructure uses Jest with @swc/jest transformer (migrated from ts-jest for T
 | Stack synthesis | `/infra/test/*stack*.test.ts` | Validate stack outputs, resources |
 | Lambda tests | `/infra/**/__tests__/*.test.ts` | Unit tests for Lambda handlers |
 | CSP validation | `/infra/test/atrium-sandbox-csp.test.ts` | Artifact sandbox CSP construction |
+| WAF rule validation | `/infra/test/frontend-waf-body-signatures.test.ts` | Body signature handling, AI path exemptions, credential redaction |
 | Alarm routing | `/infra/test/agent-alarm-delivery.test.ts` | Dual-topic alarm delivery validation |
 | CDN drift guard | `/infra/test/agent-skill-cdn-allowlist.test.ts` | Agent skill guidance vs. sandbox CSP allowlist consistency |
 
