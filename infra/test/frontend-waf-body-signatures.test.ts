@@ -24,6 +24,7 @@ import {
   ALWAYS_COUNTED_CORE_RULES,
   BODY_SIGNATURE_RULES,
   NEXUS_CHAT_PREFIX,
+  WAF_LOG_REDACTED_HEADERS,
   bodySignatureLabels,
   buildWebAclRules,
 } from '../lib/frontend-stack-ecs';
@@ -167,6 +168,28 @@ describe('ALB WAF body signatures on AI paths', () => {
     const visibility = rule.visibilityConfig as wafv2.CfnWebACL.VisibilityConfigProperty;
     expect(visibility.metricName).toBe('BodySignaturesBlock');
     expect(visibility.cloudWatchMetricsEnabled).toBe(true);
+  });
+
+  it('redacts every credential-bearing header from the WAF log', () => {
+    // Session/API-key bearer tokens, the proxy-signed agent invocation
+    // context + proof set (lib/agent-workspace/invocation-context.ts), the
+    // Drive push-channel secret, and the MCP session handle. Header names
+    // must be lowercase for WAF's SingleHeader match.
+    const required = [
+      'authorization',
+      'cookie',
+      'x-agent-invocation-context',
+      'x-agent-request-proof-signature',
+      'x-agent-request-proof-nonce',
+      'x-goog-channel-token',
+      'mcp-session-id',
+    ];
+    for (const header of required) {
+      expect(WAF_LOG_REDACTED_HEADERS).toContain(header);
+    }
+    for (const header of WAF_LOG_REDACTED_HEADERS) {
+      expect(header).toBe(header.toLowerCase());
+    }
   });
 
   it('keeps the browser rate limit scoped off /api/agent/', () => {

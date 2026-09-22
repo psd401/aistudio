@@ -15,6 +15,32 @@ import { EcsServiceConstruct } from './constructs/ecs-service';
 import { VPCProvider, EnvironmentConfig } from './constructs';
 import { ServiceRoleFactory } from './constructs/security';
 
+/**
+ * Request headers the WAF log must never record. WAF logs every header of
+ * every request the web ACL evaluates, so anything a caller authenticates
+ * with would otherwise sit in CloudWatch for the retention period:
+ * - `authorization` / `cookie`: session JWT, API-key bearer tokens.
+ * - `x-agent-invocation-context` + the `x-agent-request-proof-*` set: the
+ *   proxy-signed invocation context that authenticates `/api/agent/*`
+ *   (lib/agent-workspace/invocation-context.ts); the context carries identity
+ *   claims and the signature/nonce are the replay-protected credential.
+ * - `x-goog-channel-token`: the Google Drive push-notification channel secret.
+ * - `mcp-session-id`: the MCP transport's session handle.
+ * The query string is redacted separately (see WebAclLogging): collab
+ * WebSocket connects and the agent-connect consent links carry `?token=`.
+ */
+export const WAF_LOG_REDACTED_HEADERS = [
+  'authorization',
+  'cookie',
+  'x-agent-invocation-context',
+  'x-agent-request-proof-version',
+  'x-agent-request-proof-timestamp',
+  'x-agent-request-proof-nonce',
+  'x-agent-request-proof-signature',
+  'x-goog-channel-token',
+  'mcp-session-id',
+] as const;
+
 export interface FrontendStackEcsProps extends cdk.StackProps {
   environment: 'dev' | 'prod';
   baseDomain: string;
@@ -527,10 +553,10 @@ export class FrontendStackEcs extends cdk.Stack {
     // from the morning could not be attributed by the afternoon. The log
     // carries the terminating rule, every label the managed groups added
     // (including the counted body signatures), the URI, headers and client
-    // IP. Cookie and Authorization headers are redacted; WAF never logs
-    // request bodies. WAF requires the log-group name to start with
-    // `aws-waf-logs-`, and rejects the `:*` suffix CDK appends to log-group
-    // ARNs, hence the split.
+    // IP. Every credential-bearing header (WAF_LOG_REDACTED_HEADERS) and the
+    // whole query string are redacted; WAF never logs request bodies. WAF
+    // requires the log-group name to start with `aws-waf-logs-`, and rejects
+    // the `:*` suffix CDK appends to log-group ARNs, hence the split.
     const wafLogGroup = new logs.LogGroup(this, 'WebAclLogGroup', {
       logGroupName: `aws-waf-logs-aistudio-${environment}`,
       retention: environment === 'prod'
@@ -540,14 +566,18 @@ export class FrontendStackEcs extends cdk.Stack {
         ? cdk.RemovalPolicy.RETAIN
         : cdk.RemovalPolicy.DESTROY,
     });
+    cdk.Tags.of(wafLogGroup).add('ManagedBy', 'cdk');
     new wafv2.CfnLoggingConfiguration(this, 'WebAclLogging', {
       resourceArn: webAcl.attrArn,
       logDestinationConfigs: [
         cdk.Fn.select(0, cdk.Fn.split(':*', wafLogGroup.logGroupArn)),
       ],
       redactedFields: [
-        { singleHeader: { Name: 'authorization' } },
-        { singleHeader: { Name: 'cookie' } },
+        ...WAF_LOG_REDACTED_HEADERS.map((name) => ({ singleHeader: { Name: name } })),
+        // `?token=` on collab WebSocket connects and agent-connect consent
+        // links. Costs the query-argument attribution for
+        // *_QUERYARGUMENTS blocks; the rule name and URI path stay logged.
+        { queryString: {} },
       ],
     });
 
