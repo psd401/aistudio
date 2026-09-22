@@ -2,14 +2,30 @@
 # Multi-stage Dockerfile for Next.js AI Studio Application
 # Optimized for ECS Fargate deployment with streaming support and graceful shutdown
 
+# Base images are pinned to their multi-arch index digests (one digest covers
+# linux/amd64 and linux/arm64). A floating tag re-resolves whenever upstream
+# retags, which silently invalidates every cached layer and forces the apk /
+# install steps to run again against the network on the next deploy — that is
+# how a routine `cdk deploy` on 2026-09-22 ended up depending on the Alpine
+# mirror being healthy at that minute. Bump deliberately:
+#   docker buildx imagetools inspect oven/bun:1.3-alpine   # -> Digest: sha256:…
+#   docker buildx imagetools inspect node:22-alpine
+# and update every FROM below (and the sibling Dockerfiles) in one commit.
 # ============================================================================
 # Stage 1: Dependencies
 # ============================================================================
-FROM oven/bun:1.3-alpine AS deps
+FROM oven/bun:1.3-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0 AS deps
 WORKDIR /app
 
 # Install dependencies for native packages
-RUN apk add --no-cache libc6-compat
+# apk refetches the package index from dl-cdn.alpinelinux.org on every run; a
+# transient mirror error makes every package look nonexistent. Retry before
+# failing the build (2026-09-22 deploy failure).
+RUN for i in 1 2 3 4 5; do \
+      apk add --no-cache libc6-compat && break; \
+      [ "$i" = 5 ] && exit 1; \
+      echo "apk add failed (attempt $i/5), retrying in 10s"; sleep 10; \
+    done
 
 # Copy package files and patches (see patches/README.md)
 COPY package.json bun.lock ./
@@ -23,11 +39,18 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
 # ============================================================================
 # Stage 2: Builder
 # ============================================================================
-FROM node:22-alpine AS builder
+FROM node:22-alpine@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85 AS builder
 WORKDIR /app
 
 # Install build dependencies for native modules
-RUN apk add --no-cache python3 make g++
+# apk refetches the package index from dl-cdn.alpinelinux.org on every run; a
+# transient mirror error makes every package look nonexistent. Retry before
+# failing the build (2026-09-22 deploy failure).
+RUN for i in 1 2 3 4 5; do \
+      apk add --no-cache python3 make g++ && break; \
+      [ "$i" = 5 ] && exit 1; \
+      echo "apk add failed (attempt $i/5), retrying in 10s"; sleep 10; \
+    done
 
 # Copy dependencies from deps stage
 COPY --from=deps /app/node_modules ./node_modules
@@ -75,12 +98,19 @@ RUN node scripts/build-voice-ws-handler.mjs \
 # ============================================================================
 # Stage 3: Production Runner
 # ============================================================================
-FROM node:22-alpine AS runner
+FROM node:22-alpine@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85 AS runner
 WORKDIR /app
 
 # Install curl for health checks and su-exec for user switching in entrypoint
 # su-exec is Alpine's lightweight alternative to gosu for switching users
-RUN apk add --no-cache curl su-exec
+# apk refetches the package index from dl-cdn.alpinelinux.org on every run; a
+# transient mirror error makes every package look nonexistent. Retry before
+# failing the build (2026-09-22 deploy failure).
+RUN for i in 1 2 3 4 5; do \
+      apk add --no-cache curl su-exec && break; \
+      [ "$i" = 5 ] && exit 1; \
+      echo "apk add failed (attempt $i/5), retrying in 10s"; sleep 10; \
+    done
 
 # Create non-root user for security
 RUN addgroup --system --gid 1001 nodejs && \
