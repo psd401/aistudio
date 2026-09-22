@@ -500,116 +500,7 @@ export class FrontendStackEcs extends cdk.Stack {
       scope: 'REGIONAL', // ALB uses REGIONAL, CloudFront uses CLOUDFRONT
       defaultAction: { allow: {} },
       description: `WAF for AIStudio ${environment} environment`,
-      rules: [
-        // Per-IP rate limiting for BROWSER traffic.
-        //
-        // scopeDownStatement excludes /api/agent/* — server-to-server calls
-        // from the agent runtime. Those arrive from a handful of NAT egress
-        // IPs, so a per-IP browser budget counts an entire fleet as one
-        // client. #1353 routed every agent LLM call through
-        // /api/agent/model-proxy, and an agentic turn makes many calls per
-        // user message; on 2026-07-27 that produced 4,849 blocked requests in
-        // a single 5-minute window and the dev agent could not answer at all.
-        // The rule itself (added #306, 2025-10-03) is unchanged and still
-        // correct for the browser traffic it was written for.
-        //
-        // Excluding this prefix does not remove authentication: /api/agent/*
-        // is gated by a proxy-signed invocation context
-        // (verifyAgentInvocationContext) and, in the deployed runtime, by the
-        // Cedar egress allowlist. The WAF was never what protected it.
-        {
-          name: 'RateLimitRule',
-          priority: 1,
-          statement: {
-            rateBasedStatement: {
-              limit: 2000, // 2000 requests per 5 minutes per IP
-              aggregateKeyType: 'IP',
-              scopeDownStatement: {
-                notStatement: {
-                  statement: {
-                    byteMatchStatement: {
-                      fieldToMatch: { uriPath: {} },
-                      positionalConstraint: 'STARTS_WITH',
-                      searchString: '/api/agent/',
-                      textTransformations: [
-                        { priority: 0, type: 'NONE' },
-                      ],
-                    },
-                  },
-                },
-              },
-            },
-          },
-          action: {
-            block: {
-              customResponse: {
-                responseCode: 429,
-                customResponseBodyKey: 'RateLimitBody',
-              },
-            },
-          },
-          visibilityConfig: {
-            sampledRequestsEnabled: true,
-            cloudWatchMetricsEnabled: true,
-            metricName: 'RateLimitRule',
-          },
-        },
-        // AWS Managed Core Rule Set
-        {
-          name: 'AWSManagedRulesCommonRuleSet',
-          priority: 2,
-          overrideAction: { none: {} },
-          statement: {
-            managedRuleGroupStatement: {
-              vendorName: 'AWS',
-              name: 'AWSManagedRulesCommonRuleSet',
-              excludedRules: [
-                { name: 'SizeRestrictions_BODY' }, // Allow larger payloads
-                { name: 'GenericRFI_BODY' }, // May trigger on AI prompts
-              ],
-            },
-          },
-          visibilityConfig: {
-            sampledRequestsEnabled: true,
-            cloudWatchMetricsEnabled: true,
-            metricName: 'CommonRuleSet',
-          },
-        },
-        // Known bad inputs
-        {
-          name: 'AWSManagedRulesKnownBadInputsRuleSet',
-          priority: 3,
-          overrideAction: { none: {} },
-          statement: {
-            managedRuleGroupStatement: {
-              vendorName: 'AWS',
-              name: 'AWSManagedRulesKnownBadInputsRuleSet',
-            },
-          },
-          visibilityConfig: {
-            sampledRequestsEnabled: true,
-            cloudWatchMetricsEnabled: true,
-            metricName: 'KnownBadInputs',
-          },
-        },
-        // SQL injection protection
-        {
-          name: 'AWSManagedRulesSQLiRuleSet',
-          priority: 4,
-          overrideAction: { none: {} },
-          statement: {
-            managedRuleGroupStatement: {
-              vendorName: 'AWS',
-              name: 'AWSManagedRulesSQLiRuleSet',
-            },
-          },
-          visibilityConfig: {
-            sampledRequestsEnabled: true,
-            cloudWatchMetricsEnabled: true,
-            metricName: 'SQLiRuleSet',
-          },
-        },
-      ],
+      rules: buildWebAclRules(),
       visibilityConfig: {
         sampledRequestsEnabled: true,
         cloudWatchMetricsEnabled: true,
@@ -679,4 +570,186 @@ export class FrontendStackEcs extends cdk.Stack {
     });
   }
 
+}
+
+/** Nexus chat endpoint (and its job sub-routes) — see the NexusChat WAF rule. */
+export const NEXUS_CHAT_PATH = '/api/nexus/chat';
+
+/**
+ * Matches requests whose URI path starts with the Nexus chat endpoint. Used
+ * twice: negated on the general Core rule set and positive on the chat-scoped
+ * copy, so every request is evaluated by exactly one copy of the rule group.
+ */
+function nexusChatPathStatement(): wafv2.CfnWebACL.StatementProperty {
+  return {
+    byteMatchStatement: {
+      fieldToMatch: { uriPath: {} },
+      positionalConstraint: 'STARTS_WITH',
+      searchString: NEXUS_CHAT_PATH,
+      textTransformations: [{ priority: 0, type: 'NONE' }],
+    },
+  };
+}
+
+/**
+ * The ALB WebACL rule list. Kept as a pure function (no stack state) so the
+ * rule shape can be asserted in `infra/test/frontend-waf-nexus-chat.test.ts`
+ * without synthesizing the whole frontend stack.
+ */
+export function buildWebAclRules(): wafv2.CfnWebACL.RuleProperty[] {
+  return [
+    // Per-IP rate limiting for BROWSER traffic.
+    //
+    // scopeDownStatement excludes /api/agent/* — server-to-server calls
+    // from the agent runtime. Those arrive from a handful of NAT egress
+    // IPs, so a per-IP browser budget counts an entire fleet as one
+    // client. #1353 routed every agent LLM call through
+    // /api/agent/model-proxy, and an agentic turn makes many calls per
+    // user message; on 2026-07-27 that produced 4,849 blocked requests in
+    // a single 5-minute window and the dev agent could not answer at all.
+    // The rule itself (added #306, 2025-10-03) is unchanged and still
+    // correct for the browser traffic it was written for.
+    //
+    // Excluding this prefix does not remove authentication: /api/agent/*
+    // is gated by a proxy-signed invocation context
+    // (verifyAgentInvocationContext) and, in the deployed runtime, by the
+    // Cedar egress allowlist. The WAF was never what protected it.
+    {
+      name: 'RateLimitRule',
+      priority: 1,
+      statement: {
+        rateBasedStatement: {
+          limit: 2000, // 2000 requests per 5 minutes per IP
+          aggregateKeyType: 'IP',
+          scopeDownStatement: {
+            notStatement: {
+              statement: {
+                byteMatchStatement: {
+                  fieldToMatch: { uriPath: {} },
+                  positionalConstraint: 'STARTS_WITH',
+                  searchString: '/api/agent/',
+                  textTransformations: [
+                    { priority: 0, type: 'NONE' },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      },
+      action: {
+        block: {
+          customResponse: {
+            responseCode: 429,
+            customResponseBodyKey: 'RateLimitBody',
+          },
+        },
+      },
+      visibilityConfig: {
+        sampledRequestsEnabled: true,
+        cloudWatchMetricsEnabled: true,
+        metricName: 'RateLimitRule',
+      },
+    },
+    // AWS Managed Core Rule Set — every path EXCEPT the Nexus chat body,
+    // which gets its own copy below with the body XSS rule in COUNT mode.
+    {
+      name: 'AWSManagedRulesCommonRuleSet',
+      priority: 2,
+      overrideAction: { none: {} },
+      statement: {
+        managedRuleGroupStatement: {
+          vendorName: 'AWS',
+          name: 'AWSManagedRulesCommonRuleSet',
+          excludedRules: [
+            { name: 'SizeRestrictions_BODY' }, // Allow larger payloads
+            { name: 'GenericRFI_BODY' }, // May trigger on AI prompts
+          ],
+          scopeDownStatement: {
+            notStatement: { statement: nexusChatPathStatement() },
+          },
+        },
+      },
+      visibilityConfig: {
+        sampledRequestsEnabled: true,
+        cloudWatchMetricsEnabled: true,
+        metricName: 'CommonRuleSet',
+      },
+    },
+    // Known bad inputs
+    {
+      name: 'AWSManagedRulesKnownBadInputsRuleSet',
+      priority: 3,
+      overrideAction: { none: {} },
+      statement: {
+        managedRuleGroupStatement: {
+          vendorName: 'AWS',
+          name: 'AWSManagedRulesKnownBadInputsRuleSet',
+        },
+      },
+      visibilityConfig: {
+        sampledRequestsEnabled: true,
+        cloudWatchMetricsEnabled: true,
+        metricName: 'KnownBadInputs',
+      },
+    },
+    // SQL injection protection
+    {
+      name: 'AWSManagedRulesSQLiRuleSet',
+      priority: 4,
+      overrideAction: { none: {} },
+      statement: {
+        managedRuleGroupStatement: {
+          vendorName: 'AWS',
+          name: 'AWSManagedRulesSQLiRuleSet',
+        },
+      },
+      visibilityConfig: {
+        sampledRequestsEnabled: true,
+        cloudWatchMetricsEnabled: true,
+        metricName: 'SQLiRuleSet',
+      },
+    },
+    // AWS Managed Core Rule Set for the Nexus chat body only, with the
+    // body-inspection XSS rule in COUNT mode.
+    //
+    // POST /api/nexus/chat re-sends the whole conversation on every turn.
+    // A prior assistant turn can legitimately carry raw HTML — on
+    // 2026-09-22 it was Gemini's Google Search grounding results
+    // (`search_suggestions: "<style>…"`, 12 tool results in one reply) —
+    // and CrossSiteScripting_BODY then BLOCKED every follow-up with a bare
+    // 403 that never reached the app. The client shows "Chat request
+    // failed (HTTP 403)" and the conversation is stuck for good. Same rule,
+    // same shape as the Atrium artifact block fixed in #1199.
+    //
+    // The chat body is authenticated user/model prose that the app never
+    // renders as HTML, so the XSS body signature protects nothing here.
+    // Everything else in the Core rule set (headers, URI, query string,
+    // cookies, the LFI/SSRF body checks) still runs on this path, and the
+    // KnownBadInputs + SQLi rule groups are untouched. COUNT (not exclude)
+    // keeps the per-rule CloudWatch metric, so the false-positive rate on
+    // real conversations stays visible.
+    {
+      name: 'AWSManagedRulesCommonRuleSetNexusChat',
+      priority: 5,
+      overrideAction: { none: {} },
+      statement: {
+        managedRuleGroupStatement: {
+          vendorName: 'AWS',
+          name: 'AWSManagedRulesCommonRuleSet',
+          scopeDownStatement: nexusChatPathStatement(),
+          ruleActionOverrides: [
+            { name: 'SizeRestrictions_BODY', actionToUse: { count: {} } },
+            { name: 'GenericRFI_BODY', actionToUse: { count: {} } },
+            { name: 'CrossSiteScripting_BODY', actionToUse: { count: {} } },
+          ],
+        },
+      },
+      visibilityConfig: {
+        sampledRequestsEnabled: true,
+        cloudWatchMetricsEnabled: true,
+        metricName: 'CommonRuleSetNexusChat',
+      },
+    },
+  ];
 }
