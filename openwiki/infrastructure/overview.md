@@ -6,6 +6,8 @@ tags: [infrastructure, cdk, aws, deployment, ecs]
 openwiki:
   roles: [infrastructure, operations]
   source_paths:
+    - Dockerfile
+    - Dockerfile.dev
     - Dockerfile.graviton
     - infra/lib/frontend-stack-ecs.ts
     - infra/test/frontend-waf-body-signatures.test.ts
@@ -124,6 +126,51 @@ bun install --frozen-lockfile --network-concurrency 8
 **Root cause**: Bun's parallel fetch under high concurrency causes tarball truncation inside Docker builds. This was isolated by ruling out lockfile integrity, VM disk space, network issues, memory, and disk I/O.
 
 **Critical**: This flag is load-bearing, not tuning. Removing it will cause inconsistent ARM64 builds even when the same lockfile installs successfully on the host.
+
+#### Build Reliability
+
+**Source**: `/Dockerfile` lines 5–28, `/Dockerfile.dev`, `/Dockerfile.graviton`
+
+All Dockerfiles implement two reliability measures to prevent build failures during deployment:
+
+**Base Image Digest Pinning**
+
+All `FROM` directives are pinned to their multi-arch index digest:
+
+```dockerfile
+FROM oven/bun:1.3-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0
+FROM node:22-alpine@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85
+```
+
+**Why this is required**: A floating tag (`oven/bun:1.3-alpine` without `@sha256:...`) re-resolves whenever upstream retags the image. This silently invalidates every cached layer and forces all `apk add` and install steps to run against the network on the next deploy. On 2026-09-22, a routine `cdk deploy` failed because the floating tag triggered a full cache rebuild during an Alpine mirror outage.
+
+**Update procedure** (when bumping base images):
+
+```bash
+# 1. Inspect current multi-arch digest
+docker buildx imagetools inspect oven/bun:1.3-alpine
+docker buildx imagetools inspect node:22-alpine
+
+# 2. Update ALL Dockerfiles in one commit (Dockerfile, Dockerfile.dev, Dockerfile.graviton)
+```
+
+**Alpine Package Install Retry**
+
+Every `apk add` command includes a retry loop:
+
+```bash
+RUN for i in 1 2 3 4 5; do \
+      apk add --no-cache <packages> && break; \
+      [ "$i" = 5 ] && exit 1; \
+      echo "apk add failed (attempt $i/5), retrying in 10s"; sleep 10; \
+    done
+```
+
+**Why this is required**: Alpine's `apk` refetches the package index from `dl-cdn.alpinelinux.org` on every run. A transient mirror error makes every package look nonexistent, causing builds to fail with "package not found" errors even though the packages exist. The retry logic (5 attempts with 10s delays) allows the build to survive brief mirror outages.
+
+**Affected stages**: deps (libc6-compat), builder (python3, make, g++), runner (curl, su-exec)
+
+**Historical context**: The 2026-09-22 deploy failure occurred because both issues happened simultaneously—floating tag caused cache invalidation, and Alpine mirror was experiencing transient issues. The combination made the build dependent on network availability at deploy time.
 
 ### Auto-Pause (Dev)
 
