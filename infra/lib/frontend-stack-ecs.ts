@@ -9,6 +9,7 @@ import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as targets from 'aws-cdk-lib/aws-route53-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as customResources from 'aws-cdk-lib/custom-resources';
 import { EcsServiceConstruct } from './constructs/ecs-service';
 import { VPCProvider, EnvironmentConfig } from './constructs';
@@ -520,6 +521,36 @@ export class FrontendStackEcs extends cdk.Stack {
       webAclArn: webAcl.attrArn,
     });
 
+    // Full WAF logging to CloudWatch Logs. Until 2026-09-22 the only record of
+    // a block was the per-rule metric plus `get-sampled-requests`, which keeps
+    // three hours and never shows the body — so a user's "HTTP 403" report
+    // from the morning could not be attributed by the afternoon. The log
+    // carries the terminating rule, every label the managed groups added
+    // (including the counted body signatures), the URI, headers and client
+    // IP. Cookie and Authorization headers are redacted; WAF never logs
+    // request bodies. WAF requires the log-group name to start with
+    // `aws-waf-logs-`, and rejects the `:*` suffix CDK appends to log-group
+    // ARNs, hence the split.
+    const wafLogGroup = new logs.LogGroup(this, 'WebAclLogGroup', {
+      logGroupName: `aws-waf-logs-aistudio-${environment}`,
+      retention: environment === 'prod'
+        ? logs.RetentionDays.ONE_MONTH
+        : logs.RetentionDays.ONE_WEEK,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+    new wafv2.CfnLoggingConfiguration(this, 'WebAclLogging', {
+      resourceArn: webAcl.attrArn,
+      logDestinationConfigs: [
+        cdk.Fn.select(0, cdk.Fn.split(':*', wafLogGroup.logGroupArn)),
+      ],
+      redactedFields: [
+        { singleHeader: { Name: 'authorization' } },
+        { singleHeader: { Name: 'cookie' } },
+      ],
+    });
+
     return webAcl;
   }
 
@@ -572,28 +603,99 @@ export class FrontendStackEcs extends cdk.Stack {
 
 }
 
-/** Nexus chat endpoint (and its job sub-routes) — see the NexusChat WAF rule. */
-export const NEXUS_CHAT_PATH = '/api/nexus/chat';
+/**
+ * Request paths whose BODY is authenticated AI traffic rather than a form
+ * post: Nexus chat (the whole conversation, re-sent every turn, including
+ * tool results and model output) and the agent runtime's server-to-server
+ * calls (model proxy, credentials, workspace storage — proxy-signed, see the
+ * rate-limit rule). The managed body-inspection signatures are COUNTED, not
+ * blocked, on these paths; see BODY_SIGNATURE_RULES.
+ */
+export const NEXUS_CHAT_PREFIX = '/api/nexus/chat';
+export const AGENT_API_PREFIX = '/api/agent/';
+export const AI_BODY_PATH_PREFIXES = [NEXUS_CHAT_PREFIX, AGENT_API_PREFIX] as const;
 
 /**
- * Matches requests whose URI path starts with the Nexus chat endpoint. Used
- * twice: negated on the general Core rule set and positive on the chat-scoped
- * copy, so every request is evaluated by exactly one copy of the rule group.
+ * Every managed rule that inspects the request body, per rule group, with the
+ * namespace of the label it adds. Names come from
+ * `aws wafv2 describe-managed-rule-group` (2026-09-22); the label is the rule
+ * name with `_BODY` written `_Body`, e.g.
+ * `awswaf:managed:aws:core-rule-set:CrossSiteScripting_Body`.
+ *
+ * Why not just exclude these rules on the AI paths with a scope-down? A
+ * managed rule group cannot be scoped per rule, and running a second copy of
+ * each group for the AI paths costs its full capacity again (Core alone is
+ * 700 WCU; the ACL sits at ~1,100 of the 1,500 WCU included before
+ * surcharges). The documented alternative is the label pattern used here: each
+ * group runs once for everyone with its body rules set to COUNT (they still
+ * add their labels and keep their per-rule metrics), and one cheap custom rule
+ * after the groups BLOCKS on those labels for every path that is NOT an AI
+ * body path. Net effect: identical blocking everywhere else, counting only on
+ * the AI paths, and the per-signature metric survives so false positives on
+ * real conversations stay visible.
+ *
+ * Context: on 2026-09-22 `CrossSiteScripting_BODY` blocked every follow-up in
+ * a Nexus conversation whose history carried Gemini Google Search grounding
+ * HTML (`search_suggestions: "<style>…"`) with a bare 403 that never reached
+ * the app, and `SQLi_BODY` blocked the agent runtime's
+ * `POST /api/agent/credentials` during scheduled morning briefs. Same rule
+ * family as the Atrium artifact block fixed in #1199.
  */
-function nexusChatPathStatement(): wafv2.CfnWebACL.StatementProperty {
+export const BODY_SIGNATURE_RULES = {
+  AWSManagedRulesCommonRuleSet: {
+    labelNamespace: 'awswaf:managed:aws:core-rule-set:',
+    rules: ['CrossSiteScripting_BODY', 'GenericLFI_BODY', 'EC2MetaDataSSRF_BODY'],
+  },
+  AWSManagedRulesKnownBadInputsRuleSet: {
+    labelNamespace: 'awswaf:managed:aws:known-bad-inputs:',
+    rules: ['JavaDeserializationRCE_BODY', 'Log4JRCE_BODY', 'ReactJSRCE_BODY'],
+  },
+  AWSManagedRulesSQLiRuleSet: {
+    labelNamespace: 'awswaf:managed:aws:sql-database:',
+    rules: ['SQLi_BODY'],
+  },
+} as const;
+
+/**
+ * Core rules that have been COUNT-only everywhere since the WAF was added
+ * (#306): the 8 KB body cap breaks every upload, and the RFI body check fires
+ * on ordinary AI prompts. They are NOT re-blocked by BodySignaturesBlock.
+ */
+export const ALWAYS_COUNTED_CORE_RULES = ['SizeRestrictions_BODY', 'GenericRFI_BODY'] as const;
+
+/** The label a managed body rule adds when it matches, e.g. `…:SQLi_Body`. */
+export function bodySignatureLabel(labelNamespace: string, ruleName: string): string {
+  return `${labelNamespace}${ruleName.replace(/_BODY$/, '_Body')}`;
+}
+
+/** Every label BodySignaturesBlock blocks on, in rule-group order. */
+export function bodySignatureLabels(): string[] {
+  return Object.values(BODY_SIGNATURE_RULES).flatMap((group) =>
+    group.rules.map((rule) => bodySignatureLabel(group.labelNamespace, rule))
+  );
+}
+
+/** URI path starts with `prefix` (no text transformation). */
+function pathPrefixStatement(prefix: string): wafv2.CfnWebACL.StatementProperty {
   return {
     byteMatchStatement: {
       fieldToMatch: { uriPath: {} },
       positionalConstraint: 'STARTS_WITH',
-      searchString: NEXUS_CHAT_PATH,
+      searchString: prefix,
       textTransformations: [{ priority: 0, type: 'NONE' }],
     },
   };
 }
 
+function countOverrides(
+  ruleNames: readonly string[]
+): wafv2.CfnWebACL.RuleActionOverrideProperty[] {
+  return ruleNames.map((name) => ({ name, actionToUse: { count: {} } }));
+}
+
 /**
  * The ALB WebACL rule list. Kept as a pure function (no stack state) so the
- * rule shape can be asserted in `infra/test/frontend-waf-nexus-chat.test.ts`
+ * rule shape can be asserted in `infra/test/frontend-waf-body-signatures.test.ts`
  * without synthesizing the whole frontend stack.
  */
 export function buildWebAclRules(): wafv2.CfnWebACL.RuleProperty[] {
@@ -622,18 +724,7 @@ export function buildWebAclRules(): wafv2.CfnWebACL.RuleProperty[] {
           limit: 2000, // 2000 requests per 5 minutes per IP
           aggregateKeyType: 'IP',
           scopeDownStatement: {
-            notStatement: {
-              statement: {
-                byteMatchStatement: {
-                  fieldToMatch: { uriPath: {} },
-                  positionalConstraint: 'STARTS_WITH',
-                  searchString: '/api/agent/',
-                  textTransformations: [
-                    { priority: 0, type: 'NONE' },
-                  ],
-                },
-              },
-            },
+            notStatement: { statement: pathPrefixStatement(AGENT_API_PREFIX) },
           },
         },
       },
@@ -651,8 +742,9 @@ export function buildWebAclRules(): wafv2.CfnWebACL.RuleProperty[] {
         metricName: 'RateLimitRule',
       },
     },
-    // AWS Managed Core Rule Set — every path EXCEPT the Nexus chat body,
-    // which gets its own copy below with the body XSS rule in COUNT mode.
+    // AWS Managed Core Rule Set. Its body rules are COUNT here and re-blocked
+    // outside the AI paths by BodySignaturesBlock below (see
+    // BODY_SIGNATURE_RULES for why).
     {
       name: 'AWSManagedRulesCommonRuleSet',
       priority: 2,
@@ -661,13 +753,10 @@ export function buildWebAclRules(): wafv2.CfnWebACL.RuleProperty[] {
         managedRuleGroupStatement: {
           vendorName: 'AWS',
           name: 'AWSManagedRulesCommonRuleSet',
-          excludedRules: [
-            { name: 'SizeRestrictions_BODY' }, // Allow larger payloads
-            { name: 'GenericRFI_BODY' }, // May trigger on AI prompts
-          ],
-          scopeDownStatement: {
-            notStatement: { statement: nexusChatPathStatement() },
-          },
+          ruleActionOverrides: countOverrides([
+            ...ALWAYS_COUNTED_CORE_RULES,
+            ...BODY_SIGNATURE_RULES.AWSManagedRulesCommonRuleSet.rules,
+          ]),
         },
       },
       visibilityConfig: {
@@ -676,7 +765,7 @@ export function buildWebAclRules(): wafv2.CfnWebACL.RuleProperty[] {
         metricName: 'CommonRuleSet',
       },
     },
-    // Known bad inputs
+    // Known bad inputs (same body-rule treatment).
     {
       name: 'AWSManagedRulesKnownBadInputsRuleSet',
       priority: 3,
@@ -685,6 +774,9 @@ export function buildWebAclRules(): wafv2.CfnWebACL.RuleProperty[] {
         managedRuleGroupStatement: {
           vendorName: 'AWS',
           name: 'AWSManagedRulesKnownBadInputsRuleSet',
+          ruleActionOverrides: countOverrides(
+            BODY_SIGNATURE_RULES.AWSManagedRulesKnownBadInputsRuleSet.rules
+          ),
         },
       },
       visibilityConfig: {
@@ -693,7 +785,7 @@ export function buildWebAclRules(): wafv2.CfnWebACL.RuleProperty[] {
         metricName: 'KnownBadInputs',
       },
     },
-    // SQL injection protection
+    // SQL injection protection (same body-rule treatment).
     {
       name: 'AWSManagedRulesSQLiRuleSet',
       priority: 4,
@@ -702,6 +794,9 @@ export function buildWebAclRules(): wafv2.CfnWebACL.RuleProperty[] {
         managedRuleGroupStatement: {
           vendorName: 'AWS',
           name: 'AWSManagedRulesSQLiRuleSet',
+          ruleActionOverrides: countOverrides(
+            BODY_SIGNATURE_RULES.AWSManagedRulesSQLiRuleSet.rules
+          ),
         },
       },
       visibilityConfig: {
@@ -710,45 +805,41 @@ export function buildWebAclRules(): wafv2.CfnWebACL.RuleProperty[] {
         metricName: 'SQLiRuleSet',
       },
     },
-    // AWS Managed Core Rule Set for the Nexus chat body only, with the
-    // body-inspection XSS rule in COUNT mode.
-    //
-    // POST /api/nexus/chat re-sends the whole conversation on every turn.
-    // A prior assistant turn can legitimately carry raw HTML — on
-    // 2026-09-22 it was Gemini's Google Search grounding results
-    // (`search_suggestions: "<style>…"`, 12 tool results in one reply) —
-    // and CrossSiteScripting_BODY then BLOCKED every follow-up with a bare
-    // 403 that never reached the app. The client shows "Chat request
-    // failed (HTTP 403)" and the conversation is stuck for good. Same rule,
-    // same shape as the Atrium artifact block fixed in #1199.
-    //
-    // The chat body is authenticated user/model prose that the app never
-    // renders as HTML, so the XSS body signature protects nothing here.
-    // Everything else in the Core rule set (headers, URI, query string,
-    // cookies, the LFI/SSRF body checks) still runs on this path, and the
-    // KnownBadInputs + SQLi rule groups are untouched. COUNT (not exclude)
-    // keeps the per-rule CloudWatch metric, so the false-positive rate on
-    // real conversations stays visible.
+    // Re-apply the counted body signatures as a BLOCK everywhere except the
+    // AI body paths. Must run AFTER the managed groups: a label match only
+    // sees labels added by rules evaluated earlier in the web ACL.
     {
-      name: 'AWSManagedRulesCommonRuleSetNexusChat',
+      name: 'BodySignaturesBlock',
       priority: 5,
-      overrideAction: { none: {} },
+      action: { block: {} },
       statement: {
-        managedRuleGroupStatement: {
-          vendorName: 'AWS',
-          name: 'AWSManagedRulesCommonRuleSet',
-          scopeDownStatement: nexusChatPathStatement(),
-          ruleActionOverrides: [
-            { name: 'SizeRestrictions_BODY', actionToUse: { count: {} } },
-            { name: 'GenericRFI_BODY', actionToUse: { count: {} } },
-            { name: 'CrossSiteScripting_BODY', actionToUse: { count: {} } },
+        andStatement: {
+          statements: [
+            {
+              orStatement: {
+                statements: bodySignatureLabels().map((label) => ({
+                  labelMatchStatement: { scope: 'LABEL', key: label },
+                })),
+              },
+            },
+            {
+              notStatement: {
+                statement: {
+                  orStatement: {
+                    statements: AI_BODY_PATH_PREFIXES.map((prefix) =>
+                      pathPrefixStatement(prefix)
+                    ),
+                  },
+                },
+              },
+            },
           ],
         },
       },
       visibilityConfig: {
         sampledRequestsEnabled: true,
         cloudWatchMetricsEnabled: true,
-        metricName: 'CommonRuleSetNexusChat',
+        metricName: 'BodySignaturesBlock',
       },
     },
   ];
