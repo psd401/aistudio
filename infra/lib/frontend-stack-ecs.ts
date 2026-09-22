@@ -642,15 +642,18 @@ export const AI_BODY_PATH_PREFIXES = [NEXUS_CHAT_PREFIX, AGENT_API_PREFIX] as co
  * family as the Atrium artifact block fixed in #1199.
  */
 export const BODY_SIGNATURE_RULES = {
-  AWSManagedRulesCommonRuleSet: {
+  // AWSManagedRulesCommonRuleSet
+  core: {
     labelNamespace: 'awswaf:managed:aws:core-rule-set:',
     rules: ['CrossSiteScripting_BODY', 'GenericLFI_BODY', 'EC2MetaDataSSRF_BODY'],
   },
-  AWSManagedRulesKnownBadInputsRuleSet: {
+  // AWSManagedRulesKnownBadInputsRuleSet
+  knownBadInputs: {
     labelNamespace: 'awswaf:managed:aws:known-bad-inputs:',
     rules: ['JavaDeserializationRCE_BODY', 'Log4JRCE_BODY', 'ReactJSRCE_BODY'],
   },
-  AWSManagedRulesSQLiRuleSet: {
+  // AWSManagedRulesSQLiRuleSet
+  sqli: {
     labelNamespace: 'awswaf:managed:aws:sql-database:',
     rules: ['SQLi_BODY'],
   },
@@ -723,8 +726,22 @@ export function buildWebAclRules(): wafv2.CfnWebACL.RuleProperty[] {
         rateBasedStatement: {
           limit: 2000, // 2000 requests per 5 minutes per IP
           aggregateKeyType: 'IP',
+          // Written out literally (not via pathPrefixStatement) because
+          // tests/unit/waf-agent-api-scope-down.test.ts asserts on this
+          // exact source text; root CI runs that test, not the infra suite.
           scopeDownStatement: {
-            notStatement: { statement: pathPrefixStatement(AGENT_API_PREFIX) },
+            notStatement: {
+              statement: {
+                byteMatchStatement: {
+                  fieldToMatch: { uriPath: {} },
+                  positionalConstraint: 'STARTS_WITH',
+                  searchString: '/api/agent/',
+                  textTransformations: [
+                    { priority: 0, type: 'NONE' },
+                  ],
+                },
+              },
+            },
           },
         },
       },
@@ -755,7 +772,7 @@ export function buildWebAclRules(): wafv2.CfnWebACL.RuleProperty[] {
           name: 'AWSManagedRulesCommonRuleSet',
           ruleActionOverrides: countOverrides([
             ...ALWAYS_COUNTED_CORE_RULES,
-            ...BODY_SIGNATURE_RULES.AWSManagedRulesCommonRuleSet.rules,
+            ...BODY_SIGNATURE_RULES.core.rules,
           ]),
         },
       },
@@ -775,7 +792,7 @@ export function buildWebAclRules(): wafv2.CfnWebACL.RuleProperty[] {
           vendorName: 'AWS',
           name: 'AWSManagedRulesKnownBadInputsRuleSet',
           ruleActionOverrides: countOverrides(
-            BODY_SIGNATURE_RULES.AWSManagedRulesKnownBadInputsRuleSet.rules
+            BODY_SIGNATURE_RULES.knownBadInputs.rules
           ),
         },
       },
@@ -795,7 +812,7 @@ export function buildWebAclRules(): wafv2.CfnWebACL.RuleProperty[] {
           vendorName: 'AWS',
           name: 'AWSManagedRulesSQLiRuleSet',
           ruleActionOverrides: countOverrides(
-            BODY_SIGNATURE_RULES.AWSManagedRulesSQLiRuleSet.rules
+            BODY_SIGNATURE_RULES.sqli.rules
           ),
         },
       },
