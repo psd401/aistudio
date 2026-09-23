@@ -137,6 +137,36 @@ export function isRepositorySearchable(
   )
 }
 
+/**
+ * An intentionally empty repository — lifecycle active, zero active items,
+ * nothing pending, nothing failed — carries no index to be stale about.
+ * Searching it is a no-op that yields zero results, so it must not block the
+ * turn that binds it. Blocking on `"empty"` made every freshly created Nexus
+ * project chat-dead until a document finished indexing (FS#165251 / #1733).
+ *
+ * The gate still fails closed for `processing`, `failed` and `disconnected`,
+ * which is where a stale, half-built or revoked index actually hides.
+ */
+export function blocksRepositorySearch(
+  snapshot: RepositoryReadinessSnapshot
+): boolean {
+  return !isRepositorySearchable(snapshot) && snapshot.readiness !== "empty"
+}
+
+/**
+ * Narrow a validated readiness set to the repositories that can actually serve
+ * results. Callers building a retrieval tool must use this rather than the full
+ * bound set, so an empty repository never widens or misrepresents the tool's
+ * scope.
+ */
+export function searchableRepositoryIds(
+  snapshots: RepositoryReadinessSnapshot[]
+): number[] {
+  return snapshots
+    .filter(isRepositorySearchable)
+    .map((snapshot) => snapshot.repositoryId)
+}
+
 // eslint-disable-next-line max-lines-per-function -- One query derives all readiness evidence from a single PostgreSQL snapshot.
 export async function getRepositoryReadiness(
   repositoryIds: number[]
@@ -327,9 +357,7 @@ export async function assertRepositoriesSearchable(
       disconnected
     )
   }
-  const notReady = snapshots.filter(
-    (snapshot) => !isRepositorySearchable(snapshot)
-  )
+  const notReady = snapshots.filter(blocksRepositorySearch)
   if (notReady.length > 0) {
     throw new RepositoryReadinessError(
       "REPOSITORY_NOT_READY",

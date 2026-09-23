@@ -2536,9 +2536,9 @@ async function prepareConversationRepositories(params: {
         })
       : {};
   const conversationTools =
-    durableContext.repositoryIds.length > 0
+    durableContext.searchableRepositoryIds.length > 0
       ? createNexusRepositorySearchTools({
-          repositoryIds: durableContext.repositoryIds,
+          repositoryIds: durableContext.searchableRepositoryIds,
           userCognitoSub: prepared.session.sub,
           toolName: "searchConversationRepositories",
           description:
@@ -2556,7 +2556,7 @@ async function prepareConversationRepositories(params: {
       attachmentTools,
       projectTools,
       conversationTools,
-      durableRepositoryIds: durableContext.repositoryIds,
+      durableRepositoryIds: durableContext.searchableRepositoryIds,
     },
   };
 }

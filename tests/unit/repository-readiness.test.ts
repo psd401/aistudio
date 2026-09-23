@@ -1,6 +1,8 @@
 import {
+  blocksRepositorySearch,
   deriveRepositoryReadiness,
   isRepositorySearchable,
+  searchableRepositoryIds,
 } from "@/lib/repositories/readiness-service"
 
 function row(
@@ -97,5 +99,45 @@ describe("repository readiness", () => {
     )
     expect(readiness.readiness).toBe("degraded")
     expect(isRepositorySearchable(readiness)).toBe(true)
+  })
+
+  it("does not block a turn on an intentionally empty repository (#1733)", () => {
+    const empty = deriveRepositoryReadiness(row())
+    expect(empty.readiness).toBe("empty")
+    expect(isRepositorySearchable(empty)).toBe(false)
+    expect(blocksRepositorySearch(empty)).toBe(false)
+  })
+
+  it("still blocks on processing, failed and disconnected repositories", () => {
+    const processing = deriveRepositoryReadiness(
+      row({ active_item_count: 1, building_generation_count: 1 })
+    )
+    const failed = deriveRepositoryReadiness(row({ active_item_count: 7 }))
+    const disconnected = deriveRepositoryReadiness(
+      row({
+        unavailable_item_count: 7,
+        connector_count: 1,
+        revoked_connector_count: 1,
+      })
+    )
+    expect(blocksRepositorySearch(processing)).toBe(true)
+    expect(blocksRepositorySearch(failed)).toBe(true)
+    expect(blocksRepositorySearch(disconnected)).toBe(true)
+  })
+
+  it("scopes retrieval to repositories that can serve results", () => {
+    const empty = deriveRepositoryReadiness(row({ repository_id: 11 }))
+    const ready = deriveRepositoryReadiness(
+      row({
+        repository_id: 12,
+        active_generation_id: "49095154-b9e7-49e2-a707-ac8454e364cf",
+        active_generation_status: "active",
+        active_item_count: 7,
+        indexed_item_count: 7,
+        segment_count: 926,
+      })
+    )
+    expect(searchableRepositoryIds([empty, ready])).toEqual([12])
+    expect(searchableRepositoryIds([empty])).toEqual([])
   })
 })
