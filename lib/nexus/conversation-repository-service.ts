@@ -9,7 +9,7 @@ import { getAccessibleRepositoryIds } from "@/lib/db/drizzle";
 import {
   assertRepositoriesSearchable,
   RepositoryReadinessError,
-  searchableRepositoryIds,
+  selectSearchableRepositoryIds,
   type RepositoryReadinessSnapshot,
 } from "@/lib/repositories/readiness-service";
 
@@ -251,7 +251,7 @@ export async function loadValidatedConversationRepositoryContext(input: {
   return {
     bindings,
     repositoryIds,
-    searchableRepositoryIds: searchableRepositoryIds(readiness),
+    searchableRepositoryIds: selectSearchableRepositoryIds(readiness),
     readiness,
   };
 }

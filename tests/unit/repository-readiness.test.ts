@@ -2,7 +2,7 @@ import {
   blocksRepositorySearch,
   deriveRepositoryReadiness,
   isRepositorySearchable,
-  searchableRepositoryIds,
+  selectSearchableRepositoryIds,
 } from "@/lib/repositories/readiness-service"
 
 function row(
@@ -137,7 +137,7 @@ describe("repository readiness", () => {
         segment_count: 926,
       })
     )
-    expect(searchableRepositoryIds([empty, ready])).toEqual([12])
-    expect(searchableRepositoryIds([empty])).toEqual([])
+    expect(selectSearchableRepositoryIds([empty, ready])).toEqual([12])
+    expect(selectSearchableRepositoryIds([empty])).toEqual([])
   })
 })

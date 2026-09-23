@@ -159,7 +159,7 @@ export function blocksRepositorySearch(
  * bound set, so an empty repository never widens or misrepresents the tool's
  * scope.
  */
-export function searchableRepositoryIds(
+export function selectSearchableRepositoryIds(
   snapshots: RepositoryReadinessSnapshot[]
 ): number[] {
   return snapshots
@@ -330,6 +330,13 @@ export async function getRepositoryReadiness(
   )
 }
 
+/**
+ * The shared pre-run gate for every repository-bound entry point (Nexus chat,
+ * Assistant Architect execute, v1 assistants, MCP catalog search). Fails closed
+ * on missing, disconnected, processing and failed repositories. An `"empty"`
+ * repository passes for every caller (see `blocksRepositorySearch`): it has no
+ * items, so retrieval over it is a no-op, never stale context.
+ */
 export async function assertRepositoriesSearchable(
   repositoryIds: number[]
 ): Promise<RepositoryReadinessSnapshot[]> {

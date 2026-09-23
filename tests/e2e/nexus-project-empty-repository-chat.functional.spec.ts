@@ -75,13 +75,8 @@ test.describe("Nexus project chat with an empty project repository", () => {
     await sendMessage(page, "In one sentence, what is this project for?");
     const response = await chatResponse;
 
-    if (response.status() === 409) {
-      const body = await response.text();
-      expect(
-        body,
-        "the empty project repository must not block the turn"
-      ).not.toContain("REPOSITORY_NOT_READY");
-    }
+    // On failure the message carries the body, so a REPOSITORY_NOT_READY 409
+    // (the #1733 regression) is named directly in the report.
     expect(response.status(), await response.text().catch(() => "")).toBe(200);
     await expect(page.getByText("Repository not ready")).toHaveCount(0);
 

@@ -27,25 +27,23 @@ jest.mock("@/lib/db/drizzle", () => ({
 }))
 
 import { loadValidatedConversationRepositoryContext } from "@/lib/nexus/conversation-repository-service"
-import { RepositoryReadinessError } from "@/lib/repositories/readiness-service"
+import {
+  deriveRepositoryReadiness,
+  RepositoryReadinessError,
+} from "@/lib/repositories/readiness-service"
 
 const CONVERSATION_ID = "f96ad581-7b5a-4611-9c24-ca75ae92ca97"
 const USER_ID = 42
 const PROJECT_REPOSITORY_ID = 501
 const CONNECTED_REPOSITORY_ID = 502
 
-interface ReadinessRowOverrides {
-  repository_id: number
-  active_generation_id?: string | null
-  active_generation_status?: string | null
-  active_item_count?: number
-  indexed_item_count?: number
-  segment_count?: number
-  pending_item_count?: number
-  building_generation_count?: number
-}
+// Derived from the production signature so a renamed or added readiness column
+// fails to compile here instead of drifting silently behind untyped mocks.
+type ReadinessRow = Parameters<typeof deriveRepositoryReadiness>[0]
 
-function readinessRow(overrides: ReadinessRowOverrides) {
+function readinessRow(
+  overrides: Partial<ReadinessRow> & Pick<ReadinessRow, "repository_id">
+): ReadinessRow {
   return {
     lifecycle_status: "active",
     active_generation_id: null,
