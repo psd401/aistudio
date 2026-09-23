@@ -32,6 +32,7 @@ import { versionService } from "@/lib/content/version-service";
 import {
   CONTENT_DATA_ACCESS_MODES,
   type ContentDataAccess,
+  type Requester,
 } from "@/lib/content/types";
 import {
   ATRIUM_DATA_AUTHORING_GUIDANCE,
@@ -902,22 +903,37 @@ export async function buildWorkspaceChatTools(params: {
   workspaceIdOrSlug: string;
   userId: number;
   requestId: string;
+  /**
+   * The same object already resolved earlier in THIS request (#1786 routing
+   * resolves it before the classifier runs). Reused verbatim to avoid a second
+   * `requesterForUserId` + `contentService.get` per turn; it was produced by the
+   * identical calls against the identical session user, so the gates are the
+   * same ones this function would apply.
+   */
+  preloaded?: {
+    requester: Requester;
+    object: Awaited<ReturnType<typeof contentService.get>>;
+  };
 }): Promise<WorkspaceChatTools | null> {
   const { workspaceIdOrSlug, userId, requestId } = params;
   const log = createLogger({ requestId, module: "nexus-workspace-tools" });
 
-  const req = await requesterForUserId(userId);
+  const req = params.preloaded?.requester ?? (await requesterForUserId(userId));
   if (!req) return null;
 
   // Resolve + canView-gate (contentService.get 404-masks a non-viewable object).
   let obj: Awaited<ReturnType<typeof contentService.get>>;
-  try {
-    obj = await contentService.get(req, workspaceIdOrSlug);
-  } catch (err) {
-    log.info("No viewable workspace object to bind chat tools", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return null;
+  if (params.preloaded) {
+    obj = params.preloaded.object;
+  } else {
+    try {
+      obj = await contentService.get(req, workspaceIdOrSlug);
+    } catch (err) {
+      log.info("No viewable workspace object to bind chat tools", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
   }
 
   const kind = obj.kind as "document" | "artifact";

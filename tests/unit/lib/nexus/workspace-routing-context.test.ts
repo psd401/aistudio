@@ -3,7 +3,7 @@
  *
  * This is the input that lets the model router know an artifact is open beside
  * the chat before the classifier runs. Two properties matter:
- *   - it reports kind/editable/dataAccess for a viewable object; and
+ *   - it reports the resolved id, kind and editability of a viewable object; and
  *   - it NEVER throws — an unknown, unviewable or unresolvable `?workspace=`
  *     must route the turn exactly as it does today rather than break chat.
  */
@@ -59,12 +59,11 @@ describe("resolveWorkspaceRoutingContext", () => {
     });
   });
 
-  it("reports the resolved id, kind, editability and data-bridge mode", async () => {
+  it("reports the resolved id, kind and editability", async () => {
     await expect(resolve("device-repairs")).resolves.toEqual({
       objectId: ARTIFACT_ID,
       kind: "artifact",
       editable: true,
-      dataAccess: "query",
     });
     // Resolved through the service, so the caller's slug is never trusted as an id.
     expect(getMock).toHaveBeenCalledWith({ kind: "user", userId: 7 }, "device-repairs");

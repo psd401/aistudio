@@ -23,16 +23,12 @@
  * importing it just to read three fields.
  */
 
-import type { ContentDataAccess } from "@/lib/content/types";
-
 export interface NexusWorkspaceRoutingContext {
   /** Resolved content object id (never the caller's raw slug). */
   objectId: string;
   kind: "document" | "artifact";
   /** Whether the SESSION user may edit it — a read-only viewer cannot author. */
   editable: boolean;
-  /** Artifacts only: the sandbox data-bridge mode the artifact is pinned to. */
-  dataAccess: ContentDataAccess;
 }
 
 /**

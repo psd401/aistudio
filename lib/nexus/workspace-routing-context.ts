@@ -18,31 +18,50 @@ import { contentService } from "@/lib/content/content-service";
 import { canEdit } from "@/lib/content/helpers";
 import { requesterForUserId } from "@/lib/content/requester-from-auth";
 import { createLogger } from "@/lib/logger";
+import type { ContentObjectWithVersion, Requester } from "@/lib/content/types";
 import type { NexusWorkspaceRoutingContext } from "./workspace-routing-contract";
+
+/**
+ * The resolved workspace object, kept whole so the SAME request can bind the
+ * §1087 content tools from it later without a second `requesterForUserId` +
+ * `contentService.get` round trip. Routing runs before the classifier and the
+ * tools are built near the end of the turn, so without this the request would
+ * pay for that resolution twice, serially, on every workspace message.
+ */
+export interface ResolvedWorkspace {
+  requester: Requester;
+  object: ContentObjectWithVersion;
+  context: NexusWorkspaceRoutingContext;
+}
 
 /**
  * Resolve the open workspace object, or null when there is nothing viewable to
  * resolve.
  */
-export async function resolveWorkspaceRoutingContext(params: {
+export async function resolveWorkspace(params: {
   workspaceIdOrSlug: string | undefined;
   userId: number;
   requestId: string;
-}): Promise<NexusWorkspaceRoutingContext | null> {
+}): Promise<ResolvedWorkspace | null> {
   const { workspaceIdOrSlug, userId, requestId } = params;
   if (!workspaceIdOrSlug) return null;
   const log = createLogger({ requestId, module: "nexus-workspace-routing" });
 
   try {
-    const req = await requesterForUserId(userId);
-    if (!req) return null;
+    const requester = await requesterForUserId(userId);
+    if (!requester) return null;
     // 404-masks an object this user cannot view, so this also gates the id.
-    const obj = await contentService.get(req, workspaceIdOrSlug);
+    const object = await contentService.get(requester, workspaceIdOrSlug);
     return {
-      objectId: obj.id,
-      kind: obj.kind as "document" | "artifact",
-      editable: canEdit(req, obj.ownerUserId),
-      dataAccess: obj.dataAccess,
+      requester,
+      object,
+      context: {
+        objectId: object.id,
+        // No cast: if a third ContentKind is ever added, this must fail to
+        // compile so the PSD-data rule is revisited, not silently widened.
+        kind: object.kind,
+        editable: canEdit(requester, object.ownerUserId),
+      },
     };
   } catch (error) {
     // Routing must survive a bad/unviewable workspace id — info, not warn, for
@@ -52,4 +71,13 @@ export async function resolveWorkspaceRoutingContext(params: {
     });
     return null;
   }
+}
+
+/** The routing view alone, for callers that do not go on to bind tools. */
+export async function resolveWorkspaceRoutingContext(params: {
+  workspaceIdOrSlug: string | undefined;
+  userId: number;
+  requestId: string;
+}): Promise<NexusWorkspaceRoutingContext | null> {
+  return (await resolveWorkspace(params))?.context ?? null;
 }

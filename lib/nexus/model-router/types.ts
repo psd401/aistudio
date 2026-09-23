@@ -109,15 +109,25 @@ export interface NexusRoutingMetadata {
 export interface NexusRouteResult {
   modelId: string
   connectorIds: string[]
+  /**
+   * Connectors the turn REQUIRES because the user's own message asked for them
+   * (`intent === "psd-data"`). The chat route fails the whole turn when one of
+   * these cannot be connected — so a connector attached only because a
+   * workspace artifact happens to be open never belongs here (#1786).
+   */
   automaticConnectorIds: string[]
   automaticToolNames: string[]
   /**
-   * #1786: an editable workspace ARTIFACT is open beside the chat (so this turn
-   * may author data-backed code) but the PSD Data connector is NOT in
-   * `connectorIds`. The chat route turns this into a system-prompt line telling
-   * the model not to guess column names, instead of letting it invent a schema
-   * and report success. Always false when the router is off.
+   * #1786: the PSD Data connector that carries the data tools for this
+   * workspace-artifact turn, or null when the turn is not one / the connector
+   * cannot be resolved at all.
+   *
+   * Deliberately an IDENTITY, not an "is it available" boolean. Connector
+   * access control, a downed MCP server and a skill's `allowed-tools` pin all
+   * bite after routing, so only the chat route can see whether those tools
+   * reached the model — and it is the route that appends the do-not-guess
+   * guidance when they did not.
    */
-  workspacePsdDataUnavailable: boolean
+  workspacePsdDataConnectorId: string | null
   metadata: NexusRoutingMetadata
 }

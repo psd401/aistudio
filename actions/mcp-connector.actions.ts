@@ -14,9 +14,7 @@ import {
 } from "@/lib/db/schema"
 import type { ActionState } from "@/types/actions-types"
 import type { McpAuthType, McpConnectionStatus } from "@/lib/mcp/connector-types"
-import { getNexusRouterConfig } from "@/lib/nexus/model-router/config"
-import { resolvePsdDataConnectorId } from "@/lib/nexus/model-router/psd-data-connector"
-import { workspaceNeedsPsdData } from "@/lib/nexus/workspace-routing-contract"
+import { previewWorkspaceAutoConnectorIds } from "@/lib/nexus/model-router/workspace-auto-connector"
 import { resolveWorkspaceRoutingContext } from "@/lib/nexus/workspace-routing-context"
 
 /** Token expiry buffer — proactively mark tokens expiring within 60 seconds as expired */
@@ -45,43 +43,27 @@ export interface ConnectorWithStatus {
 }
 
 /**
- * Which connector the model router will attach on its own for the open
- * workspace object, or null when it will not attach one (#1786).
+ * The connectors the model router will attach on its own for the open workspace
+ * object (#1786).
  *
- * Deliberately built from the SAME three pieces the chat route uses — the
- * workspace resolver, `workspaceNeedsPsdData`, and `resolvePsdDataConnectorId`
- * — so the popover cannot claim something the router will not do. Re-deriving
- * "which connector is PSD Data" by name here would be exactly the drift
- * `psd-data-connector.ts` exists to prevent.
- *
- * Only `active` routing attaches connectors: in `shadow` and `off` the turn's
- * connectors are exactly what the user switched on, so the popover makes no
- * claim. Never throws — a Connect popover must open even when this lookup
- * cannot answer.
+ * The decision itself lives beside the router
+ * (`lib/nexus/model-router/workspace-auto-connector.ts`) and is pinned against
+ * the live routing path by `router.test.ts`, so the popover cannot claim
+ * something the router will not do. All this adds is resolving the id/slug the
+ * caller passed into the object that decision is made about.
  */
-async function resolveWorkspaceAutoAttachedConnectorId(params: {
+async function resolveWorkspaceAutoAttachedIds(params: {
   workspaceId?: string
   userId: number
   requestId: string
-}): Promise<string | null> {
-  if (!params.workspaceId) return null
-  const log = createLogger({ requestId: params.requestId, action: "workspaceAutoConnector" })
-  try {
-    const { config, mode } = await getNexusRouterConfig()
-    if (mode !== "active") return null
-    const workspace = await resolveWorkspaceRoutingContext({
-      workspaceIdOrSlug: params.workspaceId,
-      userId: params.userId,
-      requestId: params.requestId,
-    })
-    if (!workspaceNeedsPsdData(workspace)) return null
-    return await resolvePsdDataConnectorId(config)
-  } catch (error) {
-    log.info("Could not determine the workspace auto-attached connector", {
-      error: error instanceof Error ? error.message : String(error),
-    })
-    return null
-  }
+}): Promise<Set<string>> {
+  if (!params.workspaceId) return new Set()
+  const workspace = await resolveWorkspaceRoutingContext({
+    workspaceIdOrSlug: params.workspaceId,
+    userId: params.userId,
+    requestId: params.requestId,
+  })
+  return new Set(await previewWorkspaceAutoConnectorIds(workspace))
 }
 
 /**
@@ -179,7 +161,7 @@ export async function getConnectorsWithStatus(
     )
 
     const bufferThreshold = new Date(Date.now() + TOKEN_EXPIRY_BUFFER_MS)
-    const autoAttachedId = await resolveWorkspaceAutoAttachedConnectorId({
+    const autoAttachedIds = await resolveWorkspaceAutoAttachedIds({
       workspaceId: params.workspaceId,
       userId,
       requestId,
@@ -215,7 +197,7 @@ export async function getConnectorsWithStatus(
         name: row.name,
         authType,
         status,
-        autoAttachedForWorkspace: autoAttachedId !== null && row.id === autoAttachedId,
+        autoAttachedForWorkspace: autoAttachedIds.has(row.id),
       }
     })
 

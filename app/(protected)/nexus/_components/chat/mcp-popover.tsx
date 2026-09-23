@@ -69,21 +69,44 @@ const ConnectorItem = memo(function ConnectorItem({
   // #1786: the router attaches this connector to every turn while the workspace
   // object is open, so the user's toggle cannot turn it off. Render it as on and
   // say why, rather than showing "off" beside tools the model is using.
-  const autoAttached = connector.autoAttachedForWorkspace
+  //
+  // Only when the connector can actually be reached: attaching a connector whose
+  // token is missing or expired binds no tools, so claiming "On for this
+  // workspace" over a `token_expired` row would be the same lie in the other
+  // direction — and would bury the Reconnect link that fixes it.
+  const autoAttached =
+    connector.autoAttachedForWorkspace && connector.status === 'connected'
   const locked = isAuthenticating || autoAttached
   const checked = isEnabled || autoAttached
 
+  // A silent no-op is indistinguishable from a bug — especially with a keyboard
+  // or a screen reader, where `cursor-default` conveys nothing. Say why instead.
+  const explainLock = useCallback(() => {
+    toast.info(`${connector.name} stays on while this workspace is open`, {
+      description:
+        'The assistant needs it to read the real data schema for the open item, so it cannot be switched off here.',
+    })
+  }, [connector.name])
+
   const handleClick = useCallback(() => {
-    if (locked) return
+    if (isAuthenticating) return
+    if (autoAttached) {
+      explainLock()
+      return
+    }
     onToggle(connector.id)
-  }, [connector.id, locked, onToggle])
+  }, [autoAttached, connector.id, explainLock, isAuthenticating, onToggle])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault()
-      if (!locked) onToggle(connector.id)
+    if (e.key !== 'Enter' && e.key !== ' ') return
+    e.preventDefault()
+    if (isAuthenticating) return
+    if (autoAttached) {
+      explainLock()
+      return
     }
-  }, [connector.id, locked, onToggle])
+    onToggle(connector.id)
+  }, [autoAttached, connector.id, explainLock, isAuthenticating, onToggle])
 
   const handleReconnect = useCallback((e: React.MouseEvent) => {
     e.stopPropagation()
@@ -97,14 +120,16 @@ const ConnectorItem = memo(function ConnectorItem({
       aria-disabled={autoAttached || undefined}
       aria-label={
         autoAttached
-          ? `${connector.name} connector — on for this workspace`
+          ? `${connector.name} connector — ${STATUS_LABELS[connector.status]}, on for this workspace and cannot be switched off`
           : `${connector.name} connector — ${STATUS_LABELS[connector.status]}`
       }
       tabIndex={0}
       data-testid={`nexus-connector-${connector.id}`}
       className={cn(
-        'flex items-center justify-between p-2 rounded-md hover:bg-muted/50',
-        autoAttached ? 'cursor-default' : 'cursor-pointer'
+        'flex items-center justify-between p-2 rounded-md',
+        // No hover highlight on a row that cannot be actioned — it would read as
+        // a button and contradict the locked switch beside it.
+        autoAttached ? 'cursor-default' : 'cursor-pointer hover:bg-muted/50'
       )}
       onClick={handleClick}
       onKeyDown={handleKeyDown}
@@ -121,8 +146,11 @@ const ConnectorItem = memo(function ConnectorItem({
           </div>
           <div className="flex items-center gap-1">
             <p className="text-xs text-muted-foreground truncate">
+              {/* Append, never replace: the connection status still drives the
+                  dot beside the name and the Reconnect link below, so dropping
+                  it would leave "Reconnect" with nothing explaining why. */}
               {autoAttached
-                ? 'On for this workspace'
+                ? `${STATUS_LABELS[connector.status]} · On for this workspace`
                 : STATUS_LABELS[connector.status]}
             </p>
             {connector.status === 'token_expired' && !isAuthenticating && (

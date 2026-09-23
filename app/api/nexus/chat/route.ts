@@ -87,9 +87,13 @@ import {
 } from '@/lib/skills/skill-tool-enforcement';
 import { readSkillMarkdown } from '@/lib/skills/skill-publish-pipeline';
 import { buildWorkspaceChatTools } from '@/lib/nexus/workspace-chat-tools';
-import { resolveWorkspaceRoutingContext } from '@/lib/nexus/workspace-routing-context';
+import {
+  resolveWorkspace,
+  type ResolvedWorkspace,
+} from '@/lib/nexus/workspace-routing-context';
 import {
   WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE,
+  workspaceNeedsPsdData,
   type NexusWorkspaceRoutingContext,
 } from '@/lib/nexus/workspace-routing-contract';
 import { resolveMaxSteps } from "@/lib/nexus/chat-step-budget";
@@ -1948,9 +1952,20 @@ function filterWorkspaceToolsBySkillPin(
 async function bindWorkspaceTools(
   workspaceId: string | undefined,
   userId: number,
-  requestId: string
+  requestId: string,
+  resolved: ResolvedWorkspace | null
 ): Promise<Awaited<ReturnType<typeof buildWorkspaceChatTools>>> {
   if (!workspaceId) return null;
+  // `resolved` is this same object, already fetched for routing earlier in the
+  // request (#1786). Reused so a workspace turn resolves it once, not twice.
+  if (resolved) {
+    return buildWorkspaceChatTools({
+      workspaceIdOrSlug: workspaceId,
+      userId,
+      requestId,
+      preloaded: { requester: resolved.requester, object: resolved.object },
+    });
+  }
   return buildWorkspaceChatTools({ workspaceIdOrSlug: workspaceId, userId, requestId });
 }
 
@@ -1964,8 +1979,14 @@ async function bindWorkspaceToolsForChat(args: {
   userId: number;
   requestId: string;
   skillAllowedTools: string[];
+  resolvedWorkspace: ResolvedWorkspace | null;
 }): Promise<{ workspaceTools: ToolSet | undefined; workspacePromptFragment: string | undefined }> {
-  const workspace = await bindWorkspaceTools(args.workspaceId, args.userId, args.requestId);
+  const workspace = await bindWorkspaceTools(
+    args.workspaceId,
+    args.userId,
+    args.requestId,
+    args.resolvedWorkspace
+  );
   const workspaceTools = filterWorkspaceToolsBySkillPin(workspace?.tools, args.skillAllowedTools);
   // Drop the prompt fragment when the pin filtered every workspace tool away.
   const hasTools = !!workspaceTools && Object.keys(workspaceTools).length > 0;
@@ -2051,11 +2072,11 @@ interface PreparedChatRequest {
   skillId?: string;
   workspaceId?: string;
   /**
-   * The open workspace object resolved for ROUTING (#1786), or null when none
-   * is open / it is not viewable. Separate from `workspaceTools`, which are
-   * bound later against the same gates.
+   * The open workspace object, resolved once for ROUTING (#1786) and reused to
+   * bind the §1087 content tools later in the same request. Null when none is
+   * open or it is not viewable.
    */
-  workspace: NexusWorkspaceRoutingContext | null;
+  workspace: ResolvedWorkspace | null;
   userId: number;
   userRoleNames: string[];
   session: ChatSession;
@@ -2230,8 +2251,10 @@ async function prepareChatRequest(params: {
     requestedRepositoryIds: data.repositoryIds ?? [],
   });
   // #1786: routing needs to know an artifact is open BEFORE the classifier runs,
-  // so a follow-up like "add a school dropdown" keeps the PSD Data tools.
-  const workspace = await resolveWorkspaceRoutingContext({
+  // so a follow-up like "add a school dropdown" keeps the PSD Data tools. The
+  // whole resolution is kept so the §1087 tool binding later in this same
+  // request reuses it instead of resolving the object a second time.
+  const workspace = await resolveWorkspace({
     workspaceIdOrSlug: data.workspaceId,
     userId: auth.userId,
     requestId: params.requestId,
@@ -2319,7 +2342,7 @@ async function resolveChatModel(params: {
     userId: prepared.userId,
     sessionId: prepared.session.sub,
     existingConversationId: prepared.conversationIdValue,
-    workspace: prepared.workspace,
+    workspace: prepared.workspace?.context ?? null,
   });
   const modelId = routing.modelId;
   const catalogScopedEnabledTools = await scopeRoutedEnabledTools({
@@ -2602,6 +2625,29 @@ function buildRepositoryPromptFragment(params: {
   return fragments.join("\n\n---\n\n") || undefined;
 }
 
+/**
+ * True when this turn can author a data-backed artifact but ended up with no PSD
+ * Data tools (#1786).
+ *
+ * Asked of the tool set that will actually reach the model, not of the router's
+ * intent: the connector can still be lost to the caller's connector access, to a
+ * failed MCP handshake, or to a skill's `allowed-tools` pin — all of which
+ * happen after routing. A connector that bound zero tools counts as missing.
+ */
+function workspacePsdDataToolsMissing(params: {
+  workspace: NexusWorkspaceRoutingContext | null;
+  connectorId: string | null;
+  connectorToolResults: McpConnectorToolsResult[];
+}): boolean {
+  if (!workspaceNeedsPsdData(params.workspace)) return false;
+  if (!params.connectorId) return true;
+  return !params.connectorToolResults.some(
+    (result) =>
+      result.serverId === params.connectorId &&
+      Object.keys(result.tools).length > 0,
+  );
+}
+
 async function resolveToolsAndStream(params: {
   prepared: PreparedChatRequest;
   resolved: ResolvedChatRequest;
@@ -2664,14 +2710,25 @@ async function resolveToolsAndStream(params: {
       userId: prepared.userId,
       requestId: params.requestId,
       skillAllowedTools: skillBinding.skillAllowedTools,
+      resolvedWorkspace: prepared.workspace,
     });
   // #1786: the artifact-authoring guidance tells the model to explore the data
-  // first. When this turn has no PSD Data tools, say so in the same breath so it
-  // does not invent a schema and report success.
-  const effectiveWorkspacePromptFragment =
-    workspacePromptFragment && resolved.routing.workspacePsdDataUnavailable
-      ? workspacePromptFragment + WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE
-      : workspacePromptFragment;
+  // first. When this turn ended up with no PSD Data tools, say so in the same
+  // breath so it does not invent a schema and report success.
+  //
+  // Decided HERE, not in the router, and only once every later gate has run:
+  // connector access control, a failed/downed MCP server and the skill's
+  // `allowed-tools` pin can each strip those tools after routing chose them.
+  // Ungated by `workspacePromptFragment` on purpose — a skill pin that filters
+  // every workspace tool away drops that fragment, and dropping the warning
+  // with it is exactly how the model ends up guessing column names again.
+  const effectiveWorkspacePromptFragment = workspacePsdDataToolsMissing({
+    workspace: prepared.workspace?.context ?? null,
+    connectorId: resolved.routing.workspacePsdDataConnectorId,
+    connectorToolResults: skillBinding.effectiveConnectorToolResults,
+  })
+    ? (workspacePromptFragment ?? "") + WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE
+    : workspacePromptFragment;
   const memoryToolCallingSupported = modelSupportsFunctionCalling({
     provider: resolved.modelConfig.provider,
     providerMetadata: resolved.modelConfig.providerMetadata,
