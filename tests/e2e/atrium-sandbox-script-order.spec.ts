@@ -1,6 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { test, expect, type Page } from "@playwright/test";
+import {
+  buildAtriumSandboxCsp,
+  renderAtriumSandboxHostPage,
+} from "@/infra/lib/atrium-sandbox-host-page";
 
 /**
  * Atrium sandbox host — real-browser script semantics (#1785). Always-run, CI-safe.
@@ -46,29 +50,35 @@ function hostHtml(): string {
     path.join(process.cwd(), "infra", "sandbox-host", "render.html"),
     "utf8"
   );
-  // Mirrors the shape the CDK stack assembles (infra/lib/atrium-sandbox-stack.ts):
-  // inline script/style plus the one allowlisted CDN, and no network egress.
-  const csp = [
-    "default-src 'none'",
-    "script-src 'unsafe-inline' https://cdnjs.cloudflare.com",
-    "style-src 'unsafe-inline' https://cdnjs.cloudflare.com",
-    "img-src data:",
-    "font-src data:",
-    "connect-src 'none'",
-    "base-uri 'none'",
-    "form-action 'none'",
-    "worker-src 'none'",
-  ].join("; ");
-  return template
-    .replaceAll("__ALLOWED_PARENT_ORIGINS__", JSON.stringify([SANDBOX_ORIGIN]))
-    .replaceAll("__CSP_POLICY__", csp);
+  // The same builder the CDK stack deploys with, allowlisting the one CDN.
+  const parentOrigins = [SANDBOX_ORIGIN];
+  const csp = buildAtriumSandboxCsp({
+    parentOrigins,
+    cdns: ["https://cdnjs.cloudflare.com"],
+  });
+  return renderAtriumSandboxHostPage(template, parentOrigins, csp);
 }
 
-async function openHost(page: Page): Promise<void> {
+/** Observations of the stubbed CDN, for syncing on it instead of sleeping. */
+interface CdnStub {
+  /** Resolves when the first library request reaches the stub. */
+  requested: Promise<void>;
+  /** How many library requests reached the stub. */
+  requestCount: () => number;
+}
+
+async function openHost(page: Page): Promise<CdnStub> {
+  let requestCount = 0;
+  let markRequested: () => void = () => {};
+  const requested = new Promise<void>((resolve) => {
+    markRequested = resolve;
+  });
   await page.route(HOST_URL, (route) =>
     route.fulfill({ status: 200, contentType: "text/html", body: hostHtml() })
   );
   await page.route(CHART_CDN_URL, async (route) => {
+    requestCount += 1;
+    markRequested();
     await new Promise((resolve) => setTimeout(resolve, CDN_DELAY_MS));
     await route.fulfill({
       status: 200,
@@ -79,6 +89,7 @@ async function openHost(page: Page): Promise<void> {
   });
   await page.goto(HOST_URL);
   await page.waitForLoadState("load");
+  return { requested, requestCount: () => requestCount };
 }
 
 /** Post a render message the way the app's ArtifactSandbox does. */
@@ -92,6 +103,11 @@ function readLog(page: Page): Promise<string[]> {
   return page.evaluate(
     () => (window as unknown as { __artifactLog?: string[] }).__artifactLog ?? []
   );
+}
+
+/** `typeof window.Chart` in the page — "function" once the stub library ran. */
+function chartType(page: Page): Promise<string> {
+  return page.evaluate(() => typeof (window as { Chart?: unknown }).Chart);
 }
 
 /** Records DOMContentLoaded/load — the bootstrap habit #1785 rendered blank. */
@@ -159,7 +175,7 @@ test.describe("Atrium sandbox host — script order and lifecycle events (#1785)
   test("a render that supersedes one still waiting on a CDN abandons the stale chain", async ({
     page,
   }) => {
-    await openHost(page);
+    const cdn = await openHost(page);
     await page.evaluate(() => {
       (window as unknown as { __artifactLog: string[] }).__artifactLog = [];
     });
@@ -173,8 +189,9 @@ test.describe("Atrium sandbox host — script order and lifecycle events (#1785)
         CLOSE_SCRIPT +
         LIFECYCLE_SCRIPT
     );
-    // Supersede it while the stubbed CDN is still "in flight".
-    await page.waitForTimeout(CDN_DELAY_MS / 3);
+    // Supersede it once the library request is provably in flight: the stub
+    // has received it and holds the response for CDN_DELAY_MS.
+    await cdn.requested;
     await render(
       page,
       '<div id="out"></div><script>window.__artifactLog.push("second artifact");' +
@@ -186,8 +203,10 @@ test.describe("Atrium sandbox host — script order and lifecycle events (#1785)
       .poll(() => readLog(page), { timeout: 10_000 })
       .toEqual(["second artifact", "DOMContentLoaded", "load"]);
 
-    // Let the stale CDN answer; its chain must stay dead.
-    await page.waitForTimeout(CDN_DELAY_MS * 3);
+    // Let the stale CDN answer — the library running proves it did — then give
+    // any (incorrect) resumed stale chain time to act; it must stay dead.
+    await expect.poll(() => chartType(page)).toBe("function");
+    await page.waitForTimeout(500);
     expect(await readLog(page)).toEqual([
       "second artifact",
       "DOMContentLoaded",
@@ -219,5 +238,33 @@ test.describe("Atrium sandbox host — script order and lifecycle events (#1785)
     await expect
       .poll(() => readLog(page), { timeout: 10_000 })
       .toEqual(["inline ran, Chart=undefined", "DOMContentLoaded", "load"]);
+  });
+
+  test("a classic nomodule script is skipped without stalling the chain", async ({
+    page,
+  }) => {
+    const cdn = await openHost(page);
+    await page.evaluate(() => {
+      (window as unknown as { __artifactLog: string[] }).__artifactLog = [];
+    });
+
+    await render(
+      page,
+      '<div id="out"></div>' +
+        `<script nomodule src="${CHART_CDN_URL}">` +
+        CLOSE_SCRIPT +
+        "<script>" +
+        'window.__artifactLog.push("inline ran, Chart=" + typeof window.Chart);' +
+        CLOSE_SCRIPT +
+        LIFECYCLE_SCRIPT
+    );
+
+    // Well inside the host's 60s per-script timeout: a chain that waited on the
+    // nomodule script (which fires neither load nor error) would miss this.
+    await expect
+      .poll(() => readLog(page), { timeout: 10_000 })
+      .toEqual(["inline ran, Chart=undefined", "DOMContentLoaded", "load"]);
+    // Chromium never even fetched it — the premise the host relies on.
+    expect(cdn.requestCount()).toBe(0);
   });
 });

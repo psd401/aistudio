@@ -117,6 +117,13 @@
         var EventCtor = window.Event;
         var dispatchOnDocument = document.dispatchEvent.bind(document);
         var dispatchOnWindow = window.dispatchEvent.bind(window);
+        // Likewise for what the script chain calls when it resumes after an
+        // external script: by then artifact code has run and could have
+        // replaced document.createElement or Node.prototype.replaceChild.
+        var createElement = document.createElement.bind(document);
+        var replaceChild = Node.prototype.replaceChild;
+        var now = Date.now.bind(Date);
+        var logError = window.console.error.bind(window.console);
 
         function handleDataResponse(event) {
           // Match the exact parent WindowProxy rather than trusting any window
@@ -288,22 +295,42 @@
         // bootstrap from those events would never start. After the last script
         // we dispatch them synthetically, exactly once per render.
 
-        /** Executable script types; an unknown type never runs and fires nothing. */
+        /**
+         * Executable script types: "", "module", and the WHATWG "JavaScript MIME
+         * type" essences. An unknown type never runs and fires nothing.
+         */
         var EXECUTABLE_SCRIPT_TYPES = [
           "",
           "module",
-          "text/javascript",
-          "application/javascript",
-          "text/ecmascript",
           "application/ecmascript",
-          "text/jscript",
-          "text/x-javascript",
+          "application/javascript",
+          "application/x-ecmascript",
           "application/x-javascript",
+          "text/ecmascript",
+          "text/javascript",
+          "text/javascript1.0",
+          "text/javascript1.1",
+          "text/javascript1.2",
+          "text/javascript1.3",
+          "text/javascript1.4",
+          "text/javascript1.5",
+          "text/jscript",
+          "text/livescript",
+          "text/x-ecmascript",
+          "text/x-javascript",
         ];
         // Last-resort release if a browser fires neither `load` nor `error`;
         // without it the chain would stall and the synthetic DOMContentLoaded
-        // would never reach the artifact.
-        var SCRIPT_LOAD_TIMEOUT_MS = 15000;
+        // would never reach the artifact. Generous on purpose: releasing a
+        // script that is merely SLOW lets the next one run before it — the very
+        // ordering bug this chain exists to prevent — and a network failure
+        // fires `error` on its own well before this.
+        var SCRIPT_LOAD_TIMEOUT_MS = 60000;
+        // Bound on the whole chain's waiting, so an artifact with many slow
+        // scripts cannot hold its preview for N × SCRIPT_LOAD_TIMEOUT_MS. Past
+        // it, remaining scripts are still inserted (async = false keeps the
+        // external ones in order among themselves) but no longer waited on.
+        var SCRIPT_CHAIN_DEADLINE_MS = 90000;
         // Only the newest render's chain may keep running: the parent re-posts
         // the artifact code until it is acked, so a second render can land while
         // an earlier chain is still waiting on a CDN.
@@ -314,13 +341,17 @@
          * on insertion? External classic scripts must be fetched, and module
          * scripts (even inline ones) are always deferred. Both fire load/error.
          * A non-executable type (e.g. `text/template`, `application/json`) fires
-         * neither, so waiting on one would just burn the timeout.
+         * neither, so waiting on one would just burn the timeout — and so does
+         * a classic `nomodule` script, which every module-capable browser skips
+         * without fetching it.
          */
         function isDeferredScript(node) {
           var type = (node.getAttribute("type") || "").split(";")[0];
           type = type.replace(/^\s+|\s+$/g, "").toLowerCase();
           if (EXECUTABLE_SCRIPT_TYPES.indexOf(type) === -1) return false;
-          return type === "module" || node.hasAttribute("src");
+          if (type === "module") return true;
+          if (node.hasAttribute("nomodule")) return false;
+          return node.hasAttribute("src");
         }
 
         function executeScripts(container) {
@@ -331,6 +362,7 @@
           renderGeneration += 1;
           var generation = renderGeneration;
           var index = 0;
+          var deadline = now() + SCRIPT_CHAIN_DEADLINE_MS;
 
           function finish() {
             // Listener exceptions do not propagate out of dispatchEvent, so a
@@ -359,7 +391,7 @@
               var old = nodes[index];
               index += 1;
 
-              var s = document.createElement("script");
+              var s = createElement("script");
               for (var a = 0; a < old.attributes.length; a++) {
                 s.setAttribute(old.attributes[a].name, old.attributes[a].value);
               }
@@ -368,41 +400,54 @@
               // attribute: document order is what the artifact's code assumes.
               s.async = false;
 
-              // Guard against a null parent: an earlier recreated script that
-              // runs synchronously could remove a later sibling from the DOM
-              // before the chain reaches it (the node list was captured before
-              // any script ran). Without this guard, `null.replaceChild` would
-              // throw, the catch in the message handler would ack { ok:false },
-              // and the preview would sit blank with no surfaced error.
-              if (!old.parentNode) continue;
+              // Skip a script that is no longer in the document: an earlier
+              // recreated script that runs synchronously could remove it — or
+              // an ancestor of it — before the chain reaches it (the node list
+              // was captured before any script ran). A detached script never
+              // runs and never fires load/error, so waiting on one would burn
+              // the timeout, and a removed one has no parent to replace it in.
+              if (!old.isConnected) continue;
 
-              if (!isDeferredScript(old)) {
-                // Runs synchronously on insertion; carry straight on.
-                old.parentNode.replaceChild(s, old);
+              var remainingMs = deadline - now();
+              if (!isDeferredScript(old) || remainingMs <= 0) {
+                // Runs synchronously on insertion (or the chain is out of
+                // waiting time); carry straight on.
+                replaceChild.call(old.parentNode, s, old);
                 continue;
               }
 
-              wireAndInsert(s, old);
+              wireAndInsert(s, old, Math.min(SCRIPT_LOAD_TIMEOUT_MS, remainingMs));
               return;
             }
           }
 
           /** Insert a script the chain must wait for, and resume on its result. */
-          function wireAndInsert(s, old) {
+          function wireAndInsert(s, old, waitMs) {
             var advanced = false;
             var timeoutId = null;
             var advance = function () {
               if (advanced) return;
               advanced = true;
               if (timeoutId !== null) cancelTimeout(timeoutId);
-              step();
+              // This resumes from a load/error/timer callback, outside the
+              // message handler's try/catch, and the render was already acked.
+              // A throw here (e.g. an artifact broke a DOM method the chain
+              // uses) would otherwise escape as an uncaught error; stop the
+              // chain and say why instead.
+              try {
+                step();
+              } catch (err) {
+                logError("Atrium sandbox: artifact script chain stopped:", err);
+              }
             };
             s.addEventListener("load", advance);
             // A CSP-blocked, 404'd or empty-`src` script fires `error`. The rest
             // of the artifact still runs — one dead CDN must not blank the page.
             s.addEventListener("error", advance);
-            timeoutId = scheduleTimeout(advance, SCRIPT_LOAD_TIMEOUT_MS);
-            old.parentNode.replaceChild(s, old);
+            // Set before insertion: the listeners cannot fire until the node is
+            // connected, so timeoutId is always assigned by then.
+            timeoutId = scheduleTimeout(advance, waitMs);
+            replaceChild.call(old.parentNode, s, old);
           }
 
           step();

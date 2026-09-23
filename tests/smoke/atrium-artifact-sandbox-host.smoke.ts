@@ -43,13 +43,23 @@ import fs from "node:fs";
 import path from "node:path";
 import * as jsdomModule from "jsdom";
 import { JSDOM, VirtualConsole, type ConstructorOptions } from "jsdom";
+import {
+  buildAtriumSandboxCsp,
+  renderAtriumSandboxHostPage,
+} from "@/infra/lib/atrium-sandbox-host-page";
 
 /**
- * jsdom still EXPORTS `ResourceLoader` at runtime, but @types/jsdom 28 dropped
- * the declaration when jsdom 26 moved subresource control to undici dispatchers.
- * Subclassing the loader is still the smallest way to serve a stubbed script
- * body with no network, so it is reached through a narrow local type rather than
- * pulling undici mocking into a smoke.
+ * jsdom still EXPORTS `ResourceLoader`, and still accepts an instance of it as
+ * the `resources` option (it checks `instanceof ResourceLoader`), but
+ * @types/jsdom 28 no longer declares either: the typings only describe the
+ * undici-dispatcher `ResourcesOptions`, which jsdom added ALONGSIDE the loader
+ * rather than in place of it. Subclassing the loader is still the smallest way
+ * to serve a stubbed script body with no network, so it is reached through a
+ * narrow local type rather than pulling undici mocking into a smoke.
+ *
+ * The real contract also expects the promise `fetch` returns to carry an
+ * `abort()` (jsdom calls it when it tears a request down); this interface does
+ * not model that, so StubScriptLoader attaches one by hand.
  */
 interface JsdomResourceLoader {
   fetch(url: string, options?: unknown): Promise<Buffer> | null;
@@ -121,11 +131,9 @@ function renderHostHtml(allowedParentOrigins: string[]): string {
   // committed host template) — no external input. The lint rule cannot see that.
 
   const template = fs.readFileSync(templatePath, "utf8");
-  // Mirror atrium-sandbox-stack.ts substitution.
-  const csp = "default-src 'none'; script-src 'unsafe-inline'; connect-src 'none'; worker-src 'none'; img-src data:";
-  return template
-    .replaceAll("__ALLOWED_PARENT_ORIGINS__", JSON.stringify(allowedParentOrigins))
-    .replaceAll("__CSP_POLICY__", csp);
+  // The same builder atrium-sandbox-stack.ts deploys with.
+  const csp = buildAtriumSandboxCsp({ parentOrigins: allowedParentOrigins });
+  return renderAtriumSandboxHostPage(template, allowedParentOrigins, csp);
 }
 
 /** How a stubbed external `<script src>` resolves. */
@@ -162,6 +170,10 @@ function makeHost(
     disableRandomUuid?: boolean;
     postMessageFailures?: number;
     externalScripts?: Record<string, StubScript>;
+    /** Replaces the page's Date.now before the host script captures it. */
+    fakeNow?: () => number;
+    /** Receives the page's console.error calls instead of the test output. */
+    consoleErrors?: unknown[][];
   } = {}
 ): {
   window: Window & typeof globalThis;
@@ -208,6 +220,18 @@ function makeHost(
           value: (handler: TimerHandler) =>
             nativeSetTimeout(handler, options.timeoutDelayMs),
         });
+      }
+      if (options.fakeNow) {
+        Object.defineProperty(hostWindow.Date, "now", {
+          configurable: true,
+          value: options.fakeNow,
+        });
+      }
+      if (options.consoleErrors) {
+        const sink = options.consoleErrors;
+        hostWindow.console.error = (...args: unknown[]) => {
+          sink.push(args);
+        };
       }
       if (options.disableRandomUuid) {
         Object.defineProperty(hostWindow.crypto, "randomUUID", {
@@ -582,9 +606,13 @@ async function waitFor(
   }
 }
 
-/** Give any (incorrect) extra async work a chance to land before asserting. */
+/**
+ * Give any (incorrect) extra async work a chance to land before asserting. Kept
+ * well above a scheduler tick so a loaded CI runner cannot hide a late
+ * duplicate lifecycle event — the regression these checks exist to catch.
+ */
 async function settle(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await new Promise((resolve) => setTimeout(resolve, 250));
 }
 
 /**
@@ -711,6 +739,185 @@ async function testNonExecutableScriptTypeDoesNotStall(): Promise<void> {
   ]);
 }
 
+/**
+ * Never stubbed, so StubScriptLoader returns null and jsdom neither loads it nor
+ * fires load/error — a script the host must not wait on. (A never-settling stub
+ * would not do: jsdom queues later inline scripts behind a pending fetch, so it
+ * would block the page whatever the host decided.)
+ */
+const SILENT_CDN_URL = "https://cdnjs.cloudflare.com/ajax/libs/never/1.0/never.js";
+
+/**
+ * A classic `nomodule` script is skipped by every module-capable browser: never
+ * fetched, never run, no load/error. The chain must not wait on it, or every
+ * artifact using the module/nomodule pattern would stall for the full timeout.
+ * (SILENT_CDN_URL fires nothing, so a chain that waited would stall.)
+ */
+async function testNomoduleScriptDoesNotStall(): Promise<void> {
+  const { window, acks } = makeHost([APP_ORIGIN], {
+    externalScripts: {},
+  });
+  await whenHostLoaded(window);
+  seedArtifactLog(window);
+
+  const code =
+    '<script nomodule src="' +
+    SILENT_CDN_URL +
+    '">' +
+    CLOSE_SCRIPT +
+    "<script>" +
+    'window.__artifactLog.push("after nomodule");' +
+    CLOSE_SCRIPT;
+
+  postToHost(window, APP_ORIGIN, { type: "atrium-render", code }, acks);
+  await waitFor(
+    () => artifactLog(window).length > 0,
+    "the chain to skip a nomodule script"
+  );
+  assert.deepEqual(artifactLog(window), ["after nomodule"]);
+}
+
+/**
+ * An earlier script can remove an ANCESTOR of a later one. The later script
+ * still has a parent (the detached wrapper), but it is out of the document, so
+ * a recreated copy never runs and never fires load/error. The chain must skip
+ * it rather than wait.
+ */
+async function testDetachedAncestorDoesNotStall(): Promise<void> {
+  const { window, acks } = makeHost([APP_ORIGIN], {
+    externalScripts: {},
+  });
+  await whenHostLoaded(window);
+  seedArtifactLog(window);
+
+  const code =
+    '<script>document.getElementById("wrapper").remove();' +
+    CLOSE_SCRIPT +
+    '<div id="wrapper"><script src="' +
+    SILENT_CDN_URL +
+    '">' +
+    CLOSE_SCRIPT +
+    "</div>" +
+    "<script>" +
+    'window.__artifactLog.push("after detached");' +
+    CLOSE_SCRIPT;
+
+  postToHost(window, APP_ORIGIN, { type: "atrium-render", code }, acks);
+  await waitFor(
+    () => artifactLog(window).length > 0,
+    "the chain to skip a script whose ancestor was removed"
+  );
+  assert.deepEqual(artifactLog(window), ["after detached"]);
+}
+
+/**
+ * The chain's total waiting is bounded: once past the deadline, remaining
+ * external scripts are inserted without being waited on. The page clock jumps
+ * past the deadline after the chain starts; both scripts are silent, so without the
+ * bound the inline script would wait behind them for minutes.
+ */
+async function testChainDeadlineBoundsTotalWait(): Promise<void> {
+  let nowCalls = 0;
+  const { window, acks } = makeHost([APP_ORIGIN], {
+    externalScripts: {},
+    // First read sets the deadline; every later read is well past it.
+    fakeNow: () => (nowCalls++ === 0 ? 0 : 10 * 60 * 1000),
+  });
+  await whenHostLoaded(window);
+  seedArtifactLog(window);
+
+  const silent = '<script src="' + SILENT_CDN_URL + '">' + CLOSE_SCRIPT;
+  const code =
+    silent +
+    silent +
+    "<script>" +
+    'window.__artifactLog.push("after deadline");' +
+    CLOSE_SCRIPT +
+    LIFECYCLE_ARTIFACT_SCRIPT;
+
+  postToHost(window, APP_ORIGIN, { type: "atrium-render", code }, acks);
+  await waitFor(
+    () => artifactLog(window).includes("load"),
+    "the chain to stop waiting once past its deadline"
+  );
+  assert.deepEqual(artifactLog(window), [
+    "after deadline",
+    "DOMContentLoaded",
+    "load",
+  ]);
+}
+
+/**
+ * When the chain resumes after an external script, artifact code has already
+ * run. Replacing document.createElement / Node.prototype.replaceChild must not
+ * break it (the host captured both first), and anything else that makes the
+ * resumed chain throw must be caught and logged — the render was acked long
+ * ago, so an escaped exception would leave a silently half-run artifact.
+ *
+ * The external script itself breaks Element#setAttribute (which the host does
+ * not capture): it runs before its own `load` fires, so the resumed chain
+ * reaches it already broken. (Tampering from an inline script inserted on
+ * resume would not work here — jsdom runs those on a later task.)
+ */
+async function testResumedChainSurvivesTamperedGlobals(): Promise<void> {
+  const consoleErrors: unknown[][] = [];
+  const { window, acks } = makeHost([APP_ORIGIN], {
+    externalScripts: {
+      [CHART_CDN_URL]: {
+        kind: "ok",
+        source:
+          CHART_STUB_SOURCE +
+          'window.__artifactLog.push("external ran");' +
+          'Element.prototype.setAttribute = function () { throw new Error("tampered setAttribute"); };',
+      },
+    },
+    consoleErrors,
+  });
+  await whenHostLoaded(window);
+  const uncaught: unknown[] = [];
+  window.addEventListener("error", (event) => {
+    uncaught.push(event.error ?? event.message);
+  });
+  seedArtifactLog(window);
+
+  const code =
+    "<script>" +
+    'document.createElement = function () { throw new Error("tampered createElement"); };' +
+    'Node.prototype.replaceChild = function () { throw new Error("tampered replaceChild"); };' +
+    CLOSE_SCRIPT +
+    '<script src="' +
+    CHART_CDN_URL +
+    '">' +
+    CLOSE_SCRIPT +
+    // No attributes, so recreating it needs only the captured createElement +
+    // replaceChild — it must survive the first script's tampering.
+    "<script>" +
+    'window.__artifactLog.push("resumed, Chart=" + typeof Chart);' +
+    CLOSE_SCRIPT +
+    // Has an attribute, so recreating it calls the broken setAttribute.
+    '<script id="never-recreated">' +
+    'window.__artifactLog.push("must not run");' +
+    CLOSE_SCRIPT;
+
+  postToHost(window, APP_ORIGIN, { type: "atrium-render", code }, acks);
+  assert.deepEqual(acks[0]?.data, { type: "atrium-artifact-rendered", ok: true });
+
+  await waitFor(
+    () => consoleErrors.length > 0,
+    "the host to log the stopped chain"
+  );
+  await settle();
+  assert.deepEqual(artifactLog(window), [
+    "external ran",
+    "resumed, Chart=function",
+  ]);
+  assert.match(String(consoleErrors[0]?.[0]), /script chain stopped/);
+  // The stop came from setAttribute, not createElement/replaceChild: the
+  // captured primitives held.
+  assert.match(String(consoleErrors[0]?.[1]), /tampered setAttribute/);
+  assert.deepEqual(uncaught, [], "the resumed chain's error escaped uncaught");
+}
+
 async function main(): Promise<void> {
   await check("renders artifact markup for an allowlisted parent origin", () => {
     const { window, acks } = makeHost([APP_ORIGIN]);
@@ -809,6 +1016,22 @@ async function main(): Promise<void> {
   await check(
     "#1785 a non-executable script type does not stall the chain",
     testNonExecutableScriptTypeDoesNotStall
+  );
+  await check(
+    "#1785 a classic nomodule script does not stall the chain",
+    testNomoduleScriptDoesNotStall
+  );
+  await check(
+    "#1785 a script whose ancestor was removed does not stall the chain",
+    testDetachedAncestorDoesNotStall
+  );
+  await check(
+    "#1785 the chain stops waiting once past its overall deadline",
+    testChainDeadlineBoundsTotalWait
+  );
+  await check(
+    "#1785 the resumed chain survives tampered globals and never throws uncaught",
+    testResumedChainSurvivesTamperedGlobals
   );
 
   await check("the deployed host page hard-codes no allow-same-origin and embeds the allowlist", () => {

@@ -7,6 +7,10 @@ import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
+import {
+  buildAtriumSandboxCsp,
+  renderAtriumSandboxHostPage,
+} from './atrium-sandbox-host-page';
 
 /**
  * Atrium artifact sandbox origin (#1052, Epic #1059, Phase 2, spec §19.2 / §30.2)
@@ -144,57 +148,13 @@ export class AtriumSandboxStack extends cdk.Stack {
       );
     }
 
-    // STRICT CSP for the sandbox host. connect-src 'none' blocks first-party API
-    // calls / exfiltration; script-src/style-src widen ONLY for allowlisted CDNs.
-    // img-src is intentionally restricted to data: only (no https: wildcard) to
-    // prevent artifact code from using pixel-tracker images for data exfiltration
-    // to arbitrary HTTPS hosts. Artifacts that need to display images must embed
-    // them inline (data URLs) or load from an explicitly allowlisted CDN.
-    // media-src likewise stays data: + explicitly allowlisted media origins (the
-    // workspace media bucket for agent-generated MP3/MP4) — never a wildcard, and
-    // connect-src stays 'none', so a single trusted media origin is not a general
-    // exfiltration channel.
-    // frame-ancestors restricts who can embed the host to the allowed parent origins.
-    const scriptSrc = ["'unsafe-inline'", ...normalizedCdns].join(' ');
-    // style-src mirrors script-src: an allowlisted CDN (e.g. a Bootstrap/Tailwind
-    // stylesheet on cdnjs) must be loadable for an artifact that opts into it,
-    // matching the documented behavior that the CDN allowlist governs BOTH
-    // script-src and style-src. Without this, an operator who allowlists a CDN
-    // sees stylesheets silently blocked and may "fix" it by widening to https:/*,
-    // which would defeat the tight img-src/exfiltration controls.
-    const styleSrc = ["'unsafe-inline'", ...normalizedCdns].join(' ');
-    const imgSrc = normalizedCdns.length > 0
-      ? `data: ${normalizedCdns.join(' ')}`  // allowlisted CDN images + data URLs
-      : "data:";                             // data URIs only when no CDNs configured
-    // media-src: always allow data: (inline VTT captions + dry-run placeholder
-    // clips) plus any configured workspace media origin(s) for real MP3/MP4 URLs.
-    const mediaSrc = normalizedMediaOrigins.length > 0
-      ? `data: ${normalizedMediaOrigins.join(' ')}`
-      : "data:";
-    const frameAncestors =
-      normalizedParentOrigins.length > 0
-        ? normalizedParentOrigins.join(' ')
-        : "'none'";
-    const cspPolicy = [
-      "default-src 'none'",
-      `script-src ${scriptSrc}`,
-      `style-src ${styleSrc}`,
-      `img-src ${imgSrc}`,
-      `media-src ${mediaSrc}`,
-      'font-src data:',
-      "connect-src 'none'",
-      `frame-ancestors ${frameAncestors}`,
-      "base-uri 'none'",
-      "form-action 'none'",
-      "worker-src 'none'",
-      // WebRTC is the one network channel CSP's fetch directives do NOT govern:
-      // an RTCPeerConnection can carry data out of the frame even under
-      // `connect-src 'none'`. Low bandwidth, but the whole no-egress invariant
-      // that lets viewer-scoped data queries ship without per-artifact review
-      // (#1705) depends on there being no channel at all, so block it
-      // explicitly. Browsers without `webrtc` support ignore the directive.
-      "webrtc 'block'",
-    ].join('; ');
+    // STRICT CSP for the sandbox host — assembled in atrium-sandbox-host-page.ts
+    // so the sandbox tests load the page with exactly this policy.
+    const cspPolicy = buildAtriumSandboxCsp({
+      parentOrigins: normalizedParentOrigins,
+      cdns: normalizedCdns,
+      mediaOrigins: normalizedMediaOrigins,
+    });
 
     // Render the static host page with deploy-time substitutions: the parent
     // origin allowlist (JSON) and the CSP meta fallback. Generating the file
@@ -205,11 +165,11 @@ export class AtriumSandboxStack extends cdk.Stack {
     // template) — no external input. The lint rule cannot prove that statically.
 
     const template = fs.readFileSync(templatePath, 'utf8');
-    // replaceAll (not replace): guard against a future edit reintroducing the
-    // token elsewhere in the template — replace() would substitute only the first.
-    const renderedHtml = template
-      .replaceAll('__ALLOWED_PARENT_ORIGINS__', JSON.stringify(normalizedParentOrigins))
-      .replaceAll('__CSP_POLICY__', cspPolicy);
+    const renderedHtml = renderAtriumSandboxHostPage(
+      template,
+      normalizedParentOrigins,
+      cspPolicy
+    );
 
     // Private bucket; CloudFront reads it via Origin Access Control. No public
     // ACLs — the only way to reach the host page is through the distribution
