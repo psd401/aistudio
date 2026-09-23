@@ -291,6 +291,28 @@ function selectedRuntimeModel(
   return selection.model
 }
 
+/**
+ * The classifier's own reason codes plus what routing added on top of them, so
+ * the stored per-message metadata explains the turn's tools after the fact.
+ */
+function buildReasonCodes(options: {
+  decision: NexusClassifierDecision
+  requiredTools: string[]
+  workspaceWantsPsdData: boolean
+  workspacePsdDataUnavailable: boolean
+}): string[] {
+  const reasonCodes = [...options.decision.reasonCodes]
+  if (options.requiredTools.length > 0) reasonCodes.push("required_tools_enforced")
+  if (options.workspaceWantsPsdData) {
+    reasonCodes.push(
+      options.workspacePsdDataUnavailable
+        ? "workspace_psd_data_unavailable"
+        : "workspace_artifact_psd_data"
+    )
+  }
+  return reasonCodes
+}
+
 function buildRoutedResult(options: {
   args: RouteNexusRequestArgs
   config: NexusRouterConfig
@@ -333,15 +355,12 @@ function buildRoutedResult(options: {
   const workspacePsdDataUnavailable =
     workspaceWantsPsdData
     && !(psdConnectorId !== null && connectorIds.includes(psdConnectorId))
-  const reasonCodes = [...decision.reasonCodes]
-  if (requiredTools.length > 0) reasonCodes.push("required_tools_enforced")
-  if (workspaceWantsPsdData) {
-    reasonCodes.push(
-      workspacePsdDataUnavailable
-        ? "workspace_psd_data_unavailable"
-        : "workspace_artifact_psd_data"
-    )
-  }
+  const reasonCodes = buildReasonCodes({
+    decision,
+    requiredTools,
+    workspaceWantsPsdData,
+    workspacePsdDataUnavailable,
+  })
 
   return {
     modelId: selected.modelId,
