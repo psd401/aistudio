@@ -134,6 +134,9 @@ interface ThreadProps {
   // Connector selection
   enabledConnectors?: string[];
   onConnectorsChange?: (connectors: string[]) => void;
+  /** Open workspace object id/slug (`?workspace=`). The Connect popover uses it to
+   *  show a connector the router auto-attaches for that workspace as on (#1786). */
+  workspaceId?: string;
   onReconnectSuccess?: (serverId: string) => void;
   // Custom suggested actions (pass [] to hide, undefined for defaults)
   suggestedActions?: SuggestedAction[];
@@ -159,6 +162,7 @@ export const Thread: FC<ThreadProps> = ({
   enabledConnectors = EMPTY_CONNECTORS_ARRAY,
   onConnectorsChange,
   onReconnectSuccess,
+  workspaceId,
   suggestedActions,
   toolFallback,
   composerExtraActions,
@@ -220,6 +224,7 @@ export const Thread: FC<ThreadProps> = ({
                 enabledConnectors={enabledConnectors}
                 onConnectorsChange={onConnectorsChange}
                 onReconnectSuccess={onReconnectSuccess}
+                workspaceId={workspaceId}
                 suggestedActions={suggestedActions}
                 composerExtraActions={composerExtraActions}
               />
@@ -336,6 +341,9 @@ interface ComposerProps {
   onToolsChange?: (tools: string[]) => void;
   enabledConnectors?: string[];
   onConnectorsChange?: (connectors: string[]) => void;
+  /** Open workspace object id/slug (`?workspace=`). The Connect popover uses it to
+   *  show a connector the router auto-attaches for that workspace as on (#1786). */
+  workspaceId?: string;
   onReconnectSuccess?: (serverId: string) => void;
   suggestedActions?: SuggestedAction[];
   composerExtraActions?: React.ReactNode;
@@ -354,6 +362,7 @@ const Composer: FC<ComposerProps> = ({
   enabledConnectors = EMPTY_CONNECTORS_ARRAY,
   onConnectorsChange,
   onReconnectSuccess,
+  workspaceId,
   suggestedActions,
   composerExtraActions,
 }) => {
@@ -385,6 +394,7 @@ const Composer: FC<ComposerProps> = ({
             enabledConnectors={enabledConnectors}
             onConnectorsChange={onConnectorsChange}
             onReconnectSuccess={onReconnectSuccess}
+            workspaceId={workspaceId}
           />
         )}
         <ComposerAttachments processingAttachments={processingAttachments} />

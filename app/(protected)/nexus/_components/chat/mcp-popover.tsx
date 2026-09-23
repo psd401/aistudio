@@ -27,6 +27,15 @@ interface MCPPopoverProps {
   /** Called after successful OAuth reconnect — used to dismiss reconnect prompt.
    *  TODO: Consider React Context to avoid prop drilling through thread → composer → popover. */
   onReconnectSuccess?: (serverId: string) => void
+  /**
+   * The object open in the workspace panel (`?workspace=`), when there is one.
+   * #1786: passed to the server so a connector the model router auto-attaches
+   * for that workspace renders as on instead of as an off toggle. A prop rather
+   * than `useSearchParams`, because this popover also renders on the
+   * prompt-library pages, where that hook would need its own Suspense boundary
+   * to keep the production build working.
+   */
+  workspaceId?: string
 }
 
 /** Status indicator dot colors */
@@ -57,17 +66,24 @@ const ConnectorItem = memo(function ConnectorItem({
   onToggle,
   onReconnect,
 }: ConnectorItemProps) {
+  // #1786: the router attaches this connector to every turn while the workspace
+  // object is open, so the user's toggle cannot turn it off. Render it as on and
+  // say why, rather than showing "off" beside tools the model is using.
+  const autoAttached = connector.autoAttachedForWorkspace
+  const locked = isAuthenticating || autoAttached
+  const checked = isEnabled || autoAttached
+
   const handleClick = useCallback(() => {
-    if (isAuthenticating) return
+    if (locked) return
     onToggle(connector.id)
-  }, [connector.id, isAuthenticating, onToggle])
+  }, [connector.id, locked, onToggle])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault()
-      if (!isAuthenticating) onToggle(connector.id)
+      if (!locked) onToggle(connector.id)
     }
-  }, [connector.id, isAuthenticating, onToggle])
+  }, [connector.id, locked, onToggle])
 
   const handleReconnect = useCallback((e: React.MouseEvent) => {
     e.stopPropagation()
@@ -77,10 +93,19 @@ const ConnectorItem = memo(function ConnectorItem({
   return (
     <div
       role="switch"
-      aria-checked={isEnabled}
-      aria-label={`${connector.name} connector — ${STATUS_LABELS[connector.status]}`}
+      aria-checked={checked}
+      aria-disabled={autoAttached || undefined}
+      aria-label={
+        autoAttached
+          ? `${connector.name} connector — on for this workspace`
+          : `${connector.name} connector — ${STATUS_LABELS[connector.status]}`
+      }
       tabIndex={0}
-      className="flex items-center justify-between p-2 rounded-md hover:bg-muted/50 cursor-pointer"
+      data-testid={`nexus-connector-${connector.id}`}
+      className={cn(
+        'flex items-center justify-between p-2 rounded-md hover:bg-muted/50',
+        autoAttached ? 'cursor-default' : 'cursor-pointer'
+      )}
       onClick={handleClick}
       onKeyDown={handleKeyDown}
     >
@@ -96,7 +121,9 @@ const ConnectorItem = memo(function ConnectorItem({
           </div>
           <div className="flex items-center gap-1">
             <p className="text-xs text-muted-foreground truncate">
-              {STATUS_LABELS[connector.status]}
+              {autoAttached
+                ? 'On for this workspace'
+                : STATUS_LABELS[connector.status]}
             </p>
             {connector.status === 'token_expired' && !isAuthenticating && (
               <button
@@ -117,10 +144,10 @@ const ConnectorItem = memo(function ConnectorItem({
         )}
         {/* Visual toggle indicator — row handles interaction via role="switch" */}
         <Switch
-          checked={isEnabled}
+          checked={checked}
           tabIndex={-1}
           aria-hidden="true"
-          disabled={isAuthenticating}
+          disabled={locked}
           className="shrink-0 pointer-events-none"
         />
       </div>
@@ -153,7 +180,13 @@ function MCPPopoverView({
   onToggle: (connectorId: string) => void
   onReconnect: (connectorId: string) => void
 }) {
-  const enabledCount = enabledConnectors.length
+  // #1786: count what the turn will actually carry, not just the user's own
+  // toggles — a workspace-attached connector is on whether or not it was picked.
+  const effectivelyOnIds = new Set(enabledConnectors)
+  for (const connector of connectors) {
+    if (connector.autoAttachedForWorkspace) effectivelyOnIds.add(connector.id)
+  }
+  const enabledCount = effectivelyOnIds.size
   let content: React.ReactNode
   if (isLoading) {
     content = (
@@ -239,6 +272,7 @@ export function MCPPopover({
   onConnectorsChange,
   disabled = false,
   onReconnectSuccess,
+  workspaceId,
 }: MCPPopoverProps) {
   const [connectors, setConnectors] = useState<ConnectorWithStatus[]>([])
   const [isLoading, setIsLoading] = useState(false)
@@ -264,7 +298,7 @@ export function MCPPopover({
     setIsLoading(true)
     setLoadError(false)
 
-    getConnectorsWithStatus().then((result) => {
+    getConnectorsWithStatus({ workspaceId }).then((result) => {
       if (cancelled) return
       if (result.isSuccess) {
         setConnectors(result.data)
@@ -284,7 +318,7 @@ export function MCPPopover({
     })
 
     return () => { cancelled = true }
-  }, [open, retryCount])
+  }, [open, retryCount, workspaceId])
 
   /**
    * Shared OAuth flow — used by both toggle-on and reconnect.

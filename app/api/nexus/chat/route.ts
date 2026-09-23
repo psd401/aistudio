@@ -87,11 +87,11 @@ import {
 } from '@/lib/skills/skill-tool-enforcement';
 import { readSkillMarkdown } from '@/lib/skills/skill-publish-pipeline';
 import { buildWorkspaceChatTools } from '@/lib/nexus/workspace-chat-tools';
+import { resolveWorkspaceRoutingContext } from '@/lib/nexus/workspace-routing-context';
 import {
-  resolveWorkspaceRoutingContext,
   WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE,
   type NexusWorkspaceRoutingContext,
-} from '@/lib/nexus/workspace-routing-context';
+} from '@/lib/nexus/workspace-routing-contract';
 import { resolveMaxSteps } from "@/lib/nexus/chat-step-budget";
 import { resolveNexusMemoryContext } from '@/lib/nexus/memory/memory-context';
 import { scheduleNexusMemoryAutoExtraction } from '@/lib/nexus/memory/auto-extraction';

@@ -21,6 +21,8 @@ interface ComposerControlsProps {
   enabledConnectors?: string[]
   onConnectorsChange?: (connectors: string[]) => void
   onReconnectSuccess?: (serverId: string) => void
+  /** Open workspace object id/slug (`?workspace=`), for the Connect popover (#1786). */
+  workspaceId?: string
 }
 
 /**
@@ -39,6 +41,7 @@ export function ComposerControls({
   enabledConnectors = [],
   onConnectorsChange,
   onReconnectSuccess,
+  workspaceId,
 }: ComposerControlsProps) {
   return (
     <div className="flex items-center gap-1 px-2 py-1.5 border-b border-border">
@@ -59,6 +62,7 @@ export function ComposerControls({
             onConnectorsChange={onConnectorsChange ?? (() => undefined)}
             disabled={!onConnectorsChange || !selectedModel}
             onReconnectSuccess={onReconnectSuccess}
+            workspaceId={workspaceId}
           />
         </>
       )}

@@ -672,6 +672,7 @@ function NexusRuntimeWrapper({
           enabledConnectors={enabledConnectors}
           onConnectorsChange={onConnectorsChange}
           onReconnectSuccess={removeFailedServerId}
+          workspaceId={workspaceId}
           routingMode={routingMode}
           modelFamily={modelFamily}
           onRoutingModeChange={onRoutingModeChange}

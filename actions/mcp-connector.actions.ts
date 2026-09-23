@@ -14,6 +14,10 @@ import {
 } from "@/lib/db/schema"
 import type { ActionState } from "@/types/actions-types"
 import type { McpAuthType, McpConnectionStatus } from "@/lib/mcp/connector-types"
+import { getNexusRouterConfig } from "@/lib/nexus/model-router/config"
+import { resolvePsdDataConnectorId } from "@/lib/nexus/model-router/psd-data-connector"
+import { workspaceNeedsPsdData } from "@/lib/nexus/workspace-routing-contract"
+import { resolveWorkspaceRoutingContext } from "@/lib/nexus/workspace-routing-context"
 
 /** Token expiry buffer — proactively mark tokens expiring within 60 seconds as expired */
 const TOKEN_EXPIRY_BUFFER_MS = 60_000
@@ -30,6 +34,54 @@ export interface ConnectorWithStatus {
   name: string
   authType: McpAuthType
   status: McpConnectionStatus
+  /**
+   * #1786: the model router will attach this connector to every turn sent while
+   * the caller's workspace object is open, whatever the user's own toggle says.
+   * The popover renders it as on and explains why, instead of showing an off
+   * toggle beside a connector the model is actually using. Always false when no
+   * `workspaceId` was passed.
+   */
+  autoAttachedForWorkspace: boolean
+}
+
+/**
+ * Which connector the model router will attach on its own for the open
+ * workspace object, or null when it will not attach one (#1786).
+ *
+ * Deliberately built from the SAME three pieces the chat route uses — the
+ * workspace resolver, `workspaceNeedsPsdData`, and `resolvePsdDataConnectorId`
+ * — so the popover cannot claim something the router will not do. Re-deriving
+ * "which connector is PSD Data" by name here would be exactly the drift
+ * `psd-data-connector.ts` exists to prevent.
+ *
+ * Only `active` routing attaches connectors: in `shadow` and `off` the turn's
+ * connectors are exactly what the user switched on, so the popover makes no
+ * claim. Never throws — a Connect popover must open even when this lookup
+ * cannot answer.
+ */
+async function resolveWorkspaceAutoAttachedConnectorId(params: {
+  workspaceId?: string
+  userId: number
+  requestId: string
+}): Promise<string | null> {
+  if (!params.workspaceId) return null
+  const log = createLogger({ requestId: params.requestId, action: "workspaceAutoConnector" })
+  try {
+    const { config, mode } = await getNexusRouterConfig()
+    if (mode !== "active") return null
+    const workspace = await resolveWorkspaceRoutingContext({
+      workspaceIdOrSlug: params.workspaceId,
+      userId: params.userId,
+      requestId: params.requestId,
+    })
+    if (!workspaceNeedsPsdData(workspace)) return null
+    return await resolvePsdDataConnectorId(config)
+  } catch (error) {
+    log.info("Could not determine the workspace auto-attached connector", {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return null
+  }
 }
 
 /**
@@ -44,7 +96,9 @@ export interface ConnectorWithStatus {
  *
  * Combines connector listing + per-user token status in a single JOIN.
  */
-export async function getConnectorsWithStatus(): Promise<ActionState<ConnectorWithStatus[]>> {
+export async function getConnectorsWithStatus(
+  params: { workspaceId?: string } = {}
+): Promise<ActionState<ConnectorWithStatus[]>> {
   const requestId = generateRequestId()
   const timer = startTimer("getConnectorsWithStatus")
   const log = createLogger({ requestId, action: "getConnectorsWithStatus" })
@@ -125,6 +179,11 @@ export async function getConnectorsWithStatus(): Promise<ActionState<ConnectorWi
     )
 
     const bufferThreshold = new Date(Date.now() + TOKEN_EXPIRY_BUFFER_MS)
+    const autoAttachedId = await resolveWorkspaceAutoAttachedConnectorId({
+      workspaceId: params.workspaceId,
+      userId,
+      requestId,
+    })
 
     const connectors: ConnectorWithStatus[] = rows.map((row) => {
       let status: McpConnectionStatus = "no_token"
@@ -151,7 +210,13 @@ export async function getConnectorsWithStatus(): Promise<ActionState<ConnectorWi
         authType = "none"
       }
 
-      return { id: row.id, name: row.name, authType, status }
+      return {
+        id: row.id,
+        name: row.name,
+        authType,
+        status,
+        autoAttachedForWorkspace: autoAttachedId !== null && row.id === autoAttachedId,
+      }
     })
 
     timer({ status: "success", count: connectors.length })

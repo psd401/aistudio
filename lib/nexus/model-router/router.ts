@@ -11,9 +11,10 @@ import {
 import { classifyNexusRequest } from "./classifier"
 import { getNexusRouterConfig } from "./config"
 import { resolvePsdDataConnectorId } from "./psd-data-connector"
-// Type-only on purpose: the resolver pulls in the whole content service, and
-// routing must not take a runtime dependency on it to read three fields.
-import type { NexusWorkspaceRoutingContext } from "../workspace-routing-context"
+import {
+  workspaceNeedsPsdData,
+  type NexusWorkspaceRoutingContext,
+} from "../workspace-routing-contract"
 import { NexusSpecialistUnavailableError } from "./errors"
 import type {
   NexusClassifierDecision,
@@ -134,24 +135,6 @@ function selectModel(args: {
     throw new Error(`No accessible Nexus model is available in the ${args.family} family`)
   }
   throw new Error("No accessible Nexus model is available")
-}
-
-/**
- * True when a turn taken against the open workspace object needs the PSD Data
- * tools attached regardless of how the user's sentence classifies (#1786).
- *
- * Editable ARTIFACTS, unconditionally — not only `dataAccess === "query"`. An
- * artifact in `records` mode is one `update_workspace_artifact` call away from
- * `query` mode (that tool sets `dataAccess` in the same call that writes the
- * code), and "make this chart use real data" is exactly the turn that flips it,
- * so gating on the CURRENT mode would leave the first live-data turn blind.
- * Documents have no sandbox and no data bridge, and a read-only viewer authors
- * nothing, so neither gets the connector.
- */
-function workspaceNeedsPsdData(
-  workspace: NexusWorkspaceRoutingContext | null | undefined
-): boolean {
-  return workspace?.kind === "artifact" && workspace.editable
 }
 
 /**
