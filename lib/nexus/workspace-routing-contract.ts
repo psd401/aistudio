@@ -23,6 +23,8 @@
  * importing it just to read three fields.
  */
 
+import type { McpConnectorToolsResult } from "@/lib/mcp/connector-types";
+
 export interface NexusWorkspaceRoutingContext {
   /** Resolved content object id (never the caller's raw slug). */
   objectId: string;
@@ -47,6 +49,34 @@ export function workspaceNeedsPsdData(
   workspace: NexusWorkspaceRoutingContext | null | undefined
 ): boolean {
   return workspace?.kind === "artifact" && workspace.editable;
+}
+
+/**
+ * True when this turn can author a data-backed artifact but ended up with no PSD
+ * Data tools — the trigger for the do-not-guess guidance below.
+ *
+ * Asked of the connector results that will ACTUALLY reach the model, never of
+ * the router's intent. The router choosing a connector is not the same as its
+ * tools binding: the caller's connector access, a failed MCP handshake and a
+ * skill's `allowed-tools` pin all bite after routing. A connector that bound
+ * ZERO tools therefore counts as missing — it is the tools the model needs, not
+ * the connector row.
+ *
+ * @param connectorId the connector the router meant to carry the data tools, or
+ *   null when it could not resolve one at all.
+ */
+export function workspacePsdDataToolsMissing(params: {
+  workspace: NexusWorkspaceRoutingContext | null | undefined;
+  connectorId: string | null;
+  connectorToolResults: McpConnectorToolsResult[];
+}): boolean {
+  if (!workspaceNeedsPsdData(params.workspace)) return false;
+  if (!params.connectorId) return true;
+  return !params.connectorToolResults.some(
+    (result) =>
+      result.serverId === params.connectorId &&
+      Object.keys(result.tools).length > 0
+  );
 }
 
 /**
