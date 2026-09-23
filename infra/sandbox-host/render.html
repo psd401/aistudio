@@ -26,7 +26,10 @@
 
   The injected artifact may include inline <script> tags; setting innerHTML does
   not execute them, so we recreate each <script> node (allowed by the host CSP's
-  script-src 'unsafe-inline'). We render only ONE message (the first valid one
+  script-src 'unsafe-inline'). Those nodes are recreated ONE AT A TIME in
+  document order, each external/module script is awaited before the next node
+  runs, and a synthetic DOMContentLoaded + load is fired once after the last one
+  (#1785 — see executeScripts). We render only ONE message (the first valid one
   is replaced on each subsequent valid message) and never eval arbitrary strings
   ourselves beyond reconstructing the author's own script nodes.
 
@@ -258,29 +261,158 @@
         // allowlist or the load is blocked. (Inline-only mode = `'unsafe-inline'`
         // with no host expression, which blocks all external `src` loads.) The CSP
         // is the mitigation; this function does not sanitize.
+        //
+        // ORDERING (#1785). Recreating every script in one synchronous loop ran
+        // artifact code out of document order, because of two browser rules:
+        //   * a script created by `createElement` that has a `src` is
+        //     "force-async" — it runs whenever its download finishes, not where
+        //     it sits in the markup;
+        //   * a recreated INLINE script runs synchronously the instant it is
+        //     inserted — i.e. before any earlier external script has loaded.
+        // So `<script src=…/chart.umd.min.js>` followed by an inline
+        // `new Chart(...)` threw `ReferenceError: Chart is not defined`, with no
+        // error surfaced to the author or the viewer. The chain below recreates
+        // ONE script at a time in document order and holds the next one until an
+        // external/module script has fired `load` or `error`; `async = false`
+        // restores insertion-order execution for the external ones.
+        //
+        // The host document's own DOMContentLoaded/load fired long before
+        // render() runs (it is driven by a `message` handler), so artifacts that
+        // bootstrap from those events would never start. After the last script
+        // we dispatch them synthetically, exactly once per render.
+
+        /** Executable script types; an unknown type never runs and fires nothing. */
+        var EXECUTABLE_SCRIPT_TYPES = [
+          "",
+          "module",
+          "text/javascript",
+          "application/javascript",
+          "text/ecmascript",
+          "application/ecmascript",
+          "text/jscript",
+          "text/x-javascript",
+          "application/x-javascript",
+        ];
+        // Last-resort release if a browser fires neither `load` nor `error`;
+        // without it the chain would stall and the synthetic DOMContentLoaded
+        // would never reach the artifact.
+        var SCRIPT_LOAD_TIMEOUT_MS = 15000;
+        // Only the newest render's chain may keep running: the parent re-posts
+        // the artifact code until it is acked, so a second render can land while
+        // an earlier chain is still waiting on a CDN.
+        var renderGeneration = 0;
+
+        /**
+         * Does the chain have to WAIT for this script, rather than assume it ran
+         * on insertion? External classic scripts must be fetched, and module
+         * scripts (even inline ones) are always deferred. Both fire load/error.
+         * A non-executable type (e.g. `text/template`, `application/json`) fires
+         * neither, so waiting on one would just burn the timeout.
+         */
+        function isDeferredScript(node) {
+          var type = (node.getAttribute("type") || "").split(";")[0];
+          type = type.replace(/^\s+|\s+$/g, "").toLowerCase();
+          if (EXECUTABLE_SCRIPT_TYPES.indexOf(type) === -1) return false;
+          return type === "module" || node.hasAttribute("src");
+        }
+
         function executeScripts(container) {
-          var scripts = container.querySelectorAll("script");
-          for (var i = 0; i < scripts.length; i++) {
-            var old = scripts[i];
-            var s = document.createElement("script");
-            for (var a = 0; a < old.attributes.length; a++) {
-              s.setAttribute(old.attributes[a].name, old.attributes[a].value);
-            }
-            s.textContent = old.textContent;
-            // Guard against a null parent: an earlier recreated script that runs
-            // synchronously could remove a later sibling from the DOM before this
-            // loop reaches it (the NodeList was captured before any script ran).
-            // Without this guard, `null.replaceChild` would throw, the catch in
-            // the message handler would ack { ok:false }, and the preview would
-            // sit blank with no surfaced error.
-            if (old.parentNode) old.parentNode.replaceChild(s, old);
+          var found = container.querySelectorAll("script");
+          var nodes = [];
+          for (var i = 0; i < found.length; i++) nodes.push(found[i]);
+
+          renderGeneration += 1;
+          var generation = renderGeneration;
+          var index = 0;
+
+          function finish() {
+            // Listener exceptions do not propagate out of dispatchEvent, so a
+            // broken artifact bootstrap cannot break the host here. Listeners a
+            // PREVIOUS artifact registered on window/document also still exist
+            // (innerHTML cannot unregister them, exactly as it cannot undo any
+            // other global it set) and will see this pair too.
+            document.dispatchEvent(
+              new Event("DOMContentLoaded", { bubbles: true })
+            );
+            window.dispatchEvent(new Event("load"));
           }
+
+          // Runs synchronously through consecutive inline scripts (a loop, not
+          // recursion, so an artifact with thousands of them cannot overflow the
+          // stack) and returns as soon as it has to wait for one.
+          function step() {
+            for (;;) {
+              // A newer render superseded this one — abandon the chain so it
+              // neither touches the new artifact's DOM nor fires a second pair
+              // of lifecycle events.
+              if (generation !== renderGeneration) return;
+              if (index >= nodes.length) {
+                finish();
+                return;
+              }
+
+              var old = nodes[index];
+              index += 1;
+
+              var s = document.createElement("script");
+              for (var a = 0; a < old.attributes.length; a++) {
+                s.setAttribute(old.attributes[a].name, old.attributes[a].value);
+              }
+              s.textContent = old.textContent;
+              // Clears BOTH the force-async flag and any author `async`
+              // attribute: document order is what the artifact's code assumes.
+              s.async = false;
+
+              // Guard against a null parent: an earlier recreated script that
+              // runs synchronously could remove a later sibling from the DOM
+              // before the chain reaches it (the node list was captured before
+              // any script ran). Without this guard, `null.replaceChild` would
+              // throw, the catch in the message handler would ack { ok:false },
+              // and the preview would sit blank with no surfaced error.
+              if (!old.parentNode) continue;
+
+              if (!isDeferredScript(old)) {
+                // Runs synchronously on insertion; carry straight on.
+                old.parentNode.replaceChild(s, old);
+                continue;
+              }
+
+              wireAndInsert(s, old);
+              return;
+            }
+          }
+
+          /** Insert a script the chain must wait for, and resume on its result. */
+          function wireAndInsert(s, old) {
+            var advanced = false;
+            var timeoutId = null;
+            var advance = function () {
+              if (advanced) return;
+              advanced = true;
+              if (timeoutId !== null) cancelTimeout(timeoutId);
+              step();
+            };
+            s.addEventListener("load", advance);
+            // A CSP-blocked, 404'd or empty-`src` script fires `error`. The rest
+            // of the artifact still runs — one dead CDN must not blank the page.
+            s.addEventListener("error", advance);
+            timeoutId = scheduleTimeout(advance, SCRIPT_LOAD_TIMEOUT_MS);
+            old.parentNode.replaceChild(s, old);
+          }
+
+          step();
         }
 
         function render(code) {
-          // Replace the entire root subtree with the artifact markup, then
-          // execute any inline scripts. The CSP confines what those scripts can
+          // Replace the entire root subtree with the artifact markup, then start
+          // the ordered script chain. The CSP confines what those scripts can
           // reach; the cross-origin + sandbox confinement does the rest.
+          //
+          // executeScripts() STARTS the chain and returns; it does not wait for
+          // external scripts. The ack below therefore still goes out
+          // immediately, which is required: the parent re-posts the code on an
+          // interval until it is acked, so deferring the ack until a CDN
+          // answered would make it re-render the artifact from scratch.
           //
           // CodeQL flags the innerHTML assignment below as client-side XSS. This
           // is the INTENTIONAL untrusted-execution sink — rendering untrusted

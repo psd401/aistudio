@@ -211,6 +211,13 @@ node run.js create-artifact --title "Chart" --code "<html><style>…</style><scr
 >   default. The `create_artifact` / `create_version` tool descriptions are
 >   generated from the deployment's real value: if they name a different set of
 >   origins — or none — **believe them over this page** and inline everything.
+> - **Script order is guaranteed, and `DOMContentLoaded`/`load` DO fire.** The
+>   sandbox host runs your `<script>` tags in document order and holds each one
+>   until the external script before it has finished loading, so inline code may
+>   use a library the previous tag pulled in. After the last script it fires a
+>   `DOMContentLoaded` on `document` and a `load` on `window`, exactly once, so a
+>   `document.addEventListener("DOMContentLoaded", init)` bootstrap runs normally.
+>   A library that fails to load does not stall the rest of the page.
 > - `font-src` allows **only** `data:` — it is never widened by the CDN allowlist.
 >   A Google Fonts `<link>` (or any webfont URL) silently fails and the page falls
 >   back to a system font. Use a system font stack, or embed the face as a
