@@ -110,6 +110,13 @@
             : null;
         var scheduleTimeout = window.setTimeout.bind(window);
         var cancelTimeout = window.clearTimeout.bind(window);
+        // The synthetic lifecycle events (#1785) are dispatched AFTER artifact
+        // code has run, so capture their primitives here too: an artifact that
+        // assigns window.Event or its own document.dispatchEvent would otherwise
+        // make the dispatch throw and strand the rest of the chain.
+        var EventCtor = window.Event;
+        var dispatchOnDocument = document.dispatchEvent.bind(document);
+        var dispatchOnWindow = window.dispatchEvent.bind(window);
 
         function handleDataResponse(event) {
           // Match the exact parent WindowProxy rather than trusting any window
@@ -331,10 +338,8 @@
             // PREVIOUS artifact registered on window/document also still exist
             // (innerHTML cannot unregister them, exactly as it cannot undo any
             // other global it set) and will see this pair too.
-            document.dispatchEvent(
-              new Event("DOMContentLoaded", { bubbles: true })
-            );
-            window.dispatchEvent(new Event("load"));
+            dispatchOnDocument(new EventCtor("DOMContentLoaded", { bubbles: true }));
+            dispatchOnWindow(new EventCtor("load"));
           }
 
           // Runs synchronously through consecutive inline scripts (a loop, not
