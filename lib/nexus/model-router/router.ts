@@ -11,6 +11,9 @@ import {
 import { classifyNexusRequest } from "./classifier"
 import { getNexusRouterConfig } from "./config"
 import { resolvePsdDataConnectorId } from "./psd-data-connector"
+// Type-only on purpose: the resolver pulls in the whole content service, and
+// routing must not take a runtime dependency on it to read three fields.
+import type { NexusWorkspaceRoutingContext } from "../workspace-routing-context"
 import { NexusSpecialistUnavailableError } from "./errors"
 import type {
   NexusClassifierDecision,
@@ -133,11 +136,37 @@ function selectModel(args: {
   throw new Error("No accessible Nexus model is available")
 }
 
+/**
+ * True when a turn taken against the open workspace object needs the PSD Data
+ * tools attached regardless of how the user's sentence classifies (#1786).
+ *
+ * Editable ARTIFACTS, unconditionally — not only `dataAccess === "query"`. An
+ * artifact in `records` mode is one `update_workspace_artifact` call away from
+ * `query` mode (that tool sets `dataAccess` in the same call that writes the
+ * code), and "make this chart use real data" is exactly the turn that flips it,
+ * so gating on the CURRENT mode would leave the first live-data turn blind.
+ * Documents have no sandbox and no data bridge, and a read-only viewer authors
+ * nothing, so neither gets the connector.
+ */
+function workspaceNeedsPsdData(
+  workspace: NexusWorkspaceRoutingContext | null | undefined
+): boolean {
+  return workspace?.kind === "artifact" && workspace.editable
+}
+
+/**
+ * Resolve the PSD Data connector id when this turn needs it, or null.
+ *
+ * `needed` is deliberately NOT just `intent === "psd-data"` (#1786): a turn
+ * against an editable workspace artifact needs the data tools however its
+ * sentence classifies, because "add a school dropdown" asked of an open live
+ * dashboard is a schema question wearing a UI question's clothes.
+ */
 async function resolveAutomaticPsdConnector(
-  intent: NexusRouterIntent,
+  needed: boolean,
   config: NexusRouterConfig
 ): Promise<string | null> {
-  if (intent !== "psd-data") return null
+  if (!needed) return null
   try {
     const connectorId = await resolvePsdDataConnectorId(config)
     if (!connectorId) {
@@ -178,6 +207,11 @@ interface RouteNexusRequestArgs {
   userId: number
   hasImageInput?: boolean
   hasPreviousGeneratedImage?: boolean
+  /**
+   * The object open in the workspace panel beside the chat, already resolved
+   * and view-gated (#1786). Null/absent when no workspace is open.
+   */
+  workspace?: NexusWorkspaceRoutingContext | null
 }
 
 function addRequiredWebSearchTool(
@@ -224,6 +258,10 @@ function buildRouterOffResult(options: {
     connectorIds: args.enabledConnectorIds,
     automaticConnectorIds: [],
     automaticToolNames: [],
+    // With the router off nothing is automatic and the turn's connectors are
+    // exactly what the user switched on, so the route makes no claim about the
+    // PSD Data tools either way (#1786) rather than risk a false "unavailable".
+    workspacePsdDataUnavailable: false,
     metadata: {
       version: config.version,
       runtimeMode: "off",
@@ -288,6 +326,22 @@ function buildRoutedResult(options: {
   const autoEnabledWebSearch =
     mode === "active" && decision.intent === "web-search"
   const autoAttachedPsdData = mode === "active" && Boolean(psdConnectorId)
+  // #1786: an editable workspace artifact is a data-authoring surface, so the
+  // turn is only honest about its tools when the connector actually landed in
+  // the turn's connector list (shadow mode never mutates it).
+  const workspaceWantsPsdData = workspaceNeedsPsdData(args.workspace)
+  const workspacePsdDataUnavailable =
+    workspaceWantsPsdData
+    && !(psdConnectorId !== null && connectorIds.includes(psdConnectorId))
+  const reasonCodes = [...decision.reasonCodes]
+  if (requiredTools.length > 0) reasonCodes.push("required_tools_enforced")
+  if (workspaceWantsPsdData) {
+    reasonCodes.push(
+      workspacePsdDataUnavailable
+        ? "workspace_psd_data_unavailable"
+        : "workspace_artifact_psd_data"
+    )
+  }
 
   return {
     modelId: selected.modelId,
@@ -295,6 +349,7 @@ function buildRoutedResult(options: {
     automaticConnectorIds:
       autoAttachedPsdData && psdConnectorId ? [psdConnectorId] : [],
     automaticToolNames: autoEnabledWebSearch ? ["webSearch"] : [],
+    workspacePsdDataUnavailable,
     metadata: {
       version: config.version,
       runtimeMode: mode,
@@ -304,10 +359,7 @@ function buildRoutedResult(options: {
       intent: decision.intent,
       tier: decision.tier,
       confidence: decision.confidence,
-      reasonCodes:
-        requiredTools.length > 0
-          ? [...decision.reasonCodes, "required_tools_enforced"]
-          : decision.reasonCodes,
+      reasonCodes,
       decisionSource: decision.source,
       selectedModelId: selected.modelId,
       proposedModelId:
@@ -358,7 +410,14 @@ async function routeWithConfiguredRouter(options: {
   const selection = requiredTools.length > 0
     ? selectModel(selectionArgs)
     : selectModelForRuntime(selectionArgs, mode, fallback)
-  const psdConnectorId = await resolveAutomaticPsdConnector(decision.intent, config)
+  const workspaceWantsPsdData = workspaceNeedsPsdData(args.workspace)
+  const psdConnectorId = await resolveAutomaticPsdConnector(
+    decision.intent === "psd-data" || workspaceWantsPsdData,
+    config
+  )
+  // Only an explicit psd-data REQUEST fails closed. A workspace-artifact turn
+  // asked for something else too ("add a dropdown"), so an unavailable
+  // connector degrades to the do-not-guess guidance instead of a hard error.
   if (mode === "active" && decision.intent === "psd-data" && !psdConnectorId) {
     throw new NexusSpecialistUnavailableError(
       "psd-data",

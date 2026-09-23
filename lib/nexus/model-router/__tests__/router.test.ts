@@ -351,6 +351,141 @@ const defineNexusModelRouterSuite1 = () => {
 
 describe("Nexus model router", defineNexusModelRouterSuite1)
 
+/**
+ * #1786: while a live-data artifact is open beside the chat, follow-up turns
+ * ("add a school dropdown") classify as `general` and used to lose the PSD Data
+ * tools — the model then wrote SQL against guessed column names and reported
+ * success. The open ARTIFACT, not the sentence, is the routing signal.
+ */
+describe("Nexus model router workspace attachment", () => {
+  const PSD_CONNECTOR_ID = "54f0f531-f7ab-485e-bd6b-65a95c4bc871"
+  const editableArtifact = {
+    objectId: "441910f0-9e0e-4633-acf1-62415e388db4",
+    kind: "artifact" as const,
+    editable: true,
+    dataAccess: "query" as const,
+  }
+  const followUp = {
+    text: "Add a school dropdown at the top that filters every card and chart",
+    fallbackModelId: "gpt-terra",
+    experienceMode: "standard" as const,
+    requestedFamily: "auto" as const,
+    enabledConnectorIds: [],
+    userId: 7,
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockGetNexusEnabledModels.mockResolvedValue(models)
+    mockFilterAccessibleResourceIds.mockResolvedValue(models.map(model => String(model.id)))
+    mockGetConfig.mockResolvedValue({ config, mode: "active" })
+    mockGetConfiguredChatProviders.mockResolvedValue(
+      new Set(["openai", "google", "amazon-bedrock", "azure", "latimer"])
+    )
+    mockExecuteQuery.mockResolvedValue([{ id: PSD_CONNECTOR_ID, name: "PSD Data" }])
+    // The exact misclassification from the reproduction: a UI-sounding edit.
+    mockClassify.mockResolvedValue({
+      intent: "general", tier: "medium", confidence: 0.9,
+      reasonCodes: ["normal_request"], source: "classifier",
+    })
+  })
+
+  it("attaches PSD Data for an editable artifact even when the turn classifies as general", async () => {
+    const result = await routeNexusRequest({ ...followUp, workspace: editableArtifact })
+
+    expect(result.connectorIds).toEqual([PSD_CONNECTOR_ID])
+    expect(result.automaticConnectorIds).toEqual([PSD_CONNECTOR_ID])
+    expect(result.metadata.autoAttachedPsdData).toBe(true)
+    expect(result.metadata.reasonCodes).toContain("workspace_artifact_psd_data")
+    expect(result.workspacePsdDataUnavailable).toBe(false)
+  })
+
+  it("attaches PSD Data for a records-mode artifact, which the next turn may flip to query", async () => {
+    const result = await routeNexusRequest({
+      ...followUp,
+      workspace: { ...editableArtifact, dataAccess: "records" as const },
+    })
+
+    expect(result.connectorIds).toEqual([PSD_CONNECTOR_ID])
+  })
+
+  it("does not duplicate a manually enabled PSD Data connector", async () => {
+    const result = await routeNexusRequest({
+      ...followUp,
+      enabledConnectorIds: [PSD_CONNECTOR_ID],
+      workspace: editableArtifact,
+    })
+
+    expect(result.connectorIds).toEqual([PSD_CONNECTOR_ID])
+  })
+
+  it("leaves a document workspace turn exactly as it was", async () => {
+    const result = await routeNexusRequest({
+      ...followUp,
+      workspace: { ...editableArtifact, kind: "document" as const, dataAccess: "records" as const },
+    })
+
+    expect(result.connectorIds).toEqual([])
+    expect(result.metadata.autoAttachedPsdData).toBe(false)
+    expect(result.workspacePsdDataUnavailable).toBe(false)
+    // No connector lookup at all — a document turn must not pay for one.
+    expect(mockExecuteQuery).not.toHaveBeenCalled()
+  })
+
+  it("does not attach for a read-only viewer, who authors nothing", async () => {
+    const result = await routeNexusRequest({
+      ...followUp,
+      workspace: { ...editableArtifact, editable: false },
+    })
+
+    expect(result.connectorIds).toEqual([])
+    expect(mockExecuteQuery).not.toHaveBeenCalled()
+  })
+
+  it("leaves a turn with no workspace open exactly as it was", async () => {
+    const result = await routeNexusRequest({ ...followUp, workspace: null })
+
+    expect(result.connectorIds).toEqual([])
+    expect(result.workspacePsdDataUnavailable).toBe(false)
+    expect(mockExecuteQuery).not.toHaveBeenCalled()
+  })
+
+  it("degrades to the do-not-guess flag instead of failing the turn when the connector is unavailable", async () => {
+    // Unlike an explicit psd-data REQUEST (which fails closed), the user asked
+    // for a dropdown — the turn still has work to do, just not data work.
+    mockExecuteQuery.mockRejectedValue(new Error("database unavailable"))
+
+    const result = await routeNexusRequest({ ...followUp, workspace: editableArtifact })
+
+    expect(result.connectorIds).toEqual([])
+    expect(result.metadata.autoAttachedPsdData).toBe(false)
+    expect(result.workspacePsdDataUnavailable).toBe(true)
+    expect(result.metadata.reasonCodes).toContain("workspace_psd_data_unavailable")
+  })
+
+  it("reports unavailable in shadow mode, which never mutates the turn's connectors", async () => {
+    mockGetConfig.mockResolvedValue({ config, mode: "shadow" })
+
+    const result = await routeNexusRequest({ ...followUp, workspace: editableArtifact })
+
+    expect(result.connectorIds).toEqual([])
+    expect(result.workspacePsdDataUnavailable).toBe(true)
+  })
+
+  it("makes no PSD Data claim when the router is off", async () => {
+    mockGetConfig.mockResolvedValue({ config, mode: "off" })
+
+    const result = await routeNexusRequest({
+      ...followUp,
+      enabledConnectorIds: [PSD_CONNECTOR_ID],
+      workspace: editableArtifact,
+    })
+
+    expect(result.connectorIds).toEqual([PSD_CONNECTOR_ID])
+    expect(result.workspacePsdDataUnavailable).toBe(false)
+  })
+})
+
 describe("Nexus model router credential filtering", () => {
   beforeEach(() => {
     jest.clearAllMocks()

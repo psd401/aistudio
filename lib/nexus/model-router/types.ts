@@ -111,5 +111,13 @@ export interface NexusRouteResult {
   connectorIds: string[]
   automaticConnectorIds: string[]
   automaticToolNames: string[]
+  /**
+   * #1786: an editable workspace ARTIFACT is open beside the chat (so this turn
+   * may author data-backed code) but the PSD Data connector is NOT in
+   * `connectorIds`. The chat route turns this into a system-prompt line telling
+   * the model not to guess column names, instead of letting it invent a schema
+   * and report success. Always false when the router is off.
+   */
+  workspacePsdDataUnavailable: boolean
   metadata: NexusRoutingMetadata
 }

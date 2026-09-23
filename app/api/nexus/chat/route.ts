@@ -87,6 +87,11 @@ import {
 } from '@/lib/skills/skill-tool-enforcement';
 import { readSkillMarkdown } from '@/lib/skills/skill-publish-pipeline';
 import { buildWorkspaceChatTools } from '@/lib/nexus/workspace-chat-tools';
+import {
+  resolveWorkspaceRoutingContext,
+  WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE,
+  type NexusWorkspaceRoutingContext,
+} from '@/lib/nexus/workspace-routing-context';
 import { resolveMaxSteps } from "@/lib/nexus/chat-step-budget";
 import { resolveNexusMemoryContext } from '@/lib/nexus/memory/memory-context';
 import { scheduleNexusMemoryAutoExtraction } from '@/lib/nexus/memory/auto-extraction';
@@ -1336,6 +1341,7 @@ async function resolveRequestRouting(args: {
   userId: number;
   sessionId: string;
   existingConversationId?: string;
+  workspace: NexusWorkspaceRoutingContext | null;
 }): Promise<{
   routing: Awaited<ReturnType<typeof routeNexusRequest>>;
   specialRouteMessages: z.infer<typeof ChatRequestSchema>['messages'];
@@ -1360,6 +1366,7 @@ async function resolveRequestRouting(args: {
     userId: args.userId,
     hasImageInput: imageContext.hasImageInput,
     hasPreviousGeneratedImage: imageContext.hasPreviousGeneratedImage,
+    workspace: args.workspace,
   });
   return {
     routing,
@@ -2043,6 +2050,12 @@ interface PreparedChatRequest {
   manuallyEnabledConnectors: string[];
   skillId?: string;
   workspaceId?: string;
+  /**
+   * The open workspace object resolved for ROUTING (#1786), or null when none
+   * is open / it is not viewable. Separate from `workspaceTools`, which are
+   * bound later against the same gates.
+   */
+  workspace: NexusWorkspaceRoutingContext | null;
   userId: number;
   userRoleNames: string[];
   session: ChatSession;
@@ -2216,6 +2229,13 @@ async function prepareChatRequest(params: {
     hasSkillBinding: !!data.skillId,
     requestedRepositoryIds: data.repositoryIds ?? [],
   });
+  // #1786: routing needs to know an artifact is open BEFORE the classifier runs,
+  // so a follow-up like "add a school dropdown" keeps the PSD Data tools.
+  const workspace = await resolveWorkspaceRoutingContext({
+    workspaceIdOrSlug: data.workspaceId,
+    userId: auth.userId,
+    requestId: params.requestId,
+  });
   return {
     ok: true,
     context: {
@@ -2225,6 +2245,7 @@ async function prepareChatRequest(params: {
       manuallyEnabledConnectors: data.enabledConnectors ?? [],
       skillId: data.skillId,
       workspaceId: data.workspaceId,
+      workspace,
       userId: auth.userId,
       userRoleNames: auth.userRoleNames,
       session: auth.session,
@@ -2298,6 +2319,7 @@ async function resolveChatModel(params: {
     userId: prepared.userId,
     sessionId: prepared.session.sub,
     existingConversationId: prepared.conversationIdValue,
+    workspace: prepared.workspace,
   });
   const modelId = routing.modelId;
   const catalogScopedEnabledTools = await scopeRoutedEnabledTools({
@@ -2643,6 +2665,13 @@ async function resolveToolsAndStream(params: {
       requestId: params.requestId,
       skillAllowedTools: skillBinding.skillAllowedTools,
     });
+  // #1786: the artifact-authoring guidance tells the model to explore the data
+  // first. When this turn has no PSD Data tools, say so in the same breath so it
+  // does not invent a schema and report success.
+  const effectiveWorkspacePromptFragment =
+    workspacePromptFragment && resolved.routing.workspacePsdDataUnavailable
+      ? workspacePromptFragment + WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE
+      : workspacePromptFragment;
   const memoryToolCallingSupported = modelSupportsFunctionCalling({
     provider: resolved.modelConfig.provider,
     providerMetadata: resolved.modelConfig.providerMetadata,
@@ -2677,7 +2706,7 @@ async function resolveToolsAndStream(params: {
     skillInstructions: skillBinding.skillInstructions,
     skillName: skillBinding.skillName,
     workspaceTools,
-    workspacePromptFragment,
+    workspacePromptFragment: effectiveWorkspacePromptFragment,
     attachmentTools: repositoryTools,
     repositoryPromptFragment: buildRepositoryPromptFragment({
       projectBinding: prepared.projectBinding,
