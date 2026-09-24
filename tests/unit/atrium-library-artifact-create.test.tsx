@@ -56,7 +56,7 @@ jest.mock("@/actions/db/atrium/list-tags", () => ({
  * decide between "show this error" and "the caller navigated away".
  */
 const dialogProps: {
-  onSubmit?: (p: string) => Promise<string | null>;
+  onSubmit?: (p: string, liveData?: boolean) => Promise<string | null>;
   onStartBlank?: () => Promise<string | null>;
 } = {};
 
@@ -67,7 +67,7 @@ jest.mock("@/components/atrium/CreateContentDialog", () => ({
     onStartBlank,
   }: {
     open: boolean;
-    onSubmit: (p: string) => Promise<string | null>;
+    onSubmit: (p: string, liveData?: boolean) => Promise<string | null>;
     onStartBlank?: () => Promise<string | null>;
   }) => {
     dialogProps.onSubmit = onSubmit;
@@ -81,11 +81,11 @@ import { ARTIFACT_STARTER_HTML } from "@/lib/content/artifact-starter";
 
 /** The `(input, opts)` pair handed to the create action. */
 function createCall(): [
-  { body?: string; bodyFormat?: string; kind?: string },
+  { body?: string; bodyFormat?: string; kind?: string; dataAccess?: string },
   { codeEncoding?: string } | undefined,
 ] {
   return createContentActionMock.mock.calls[0] as [
-    { body?: string; bodyFormat?: string; kind?: string },
+    { body?: string; bodyFormat?: string; kind?: string; dataAccess?: string },
     { codeEncoding?: string } | undefined,
   ];
 }
@@ -141,6 +141,38 @@ describe("library artifact create sends a WAF-opaque body (#1714)", () => {
 
     expect(createContentActionMock).toHaveBeenCalledTimes(1);
     expectWafOpaqueArtifactCreate();
+  });
+
+  /**
+   * #1791 finding 5: "Use live PSD data" must reach the create as
+   * `dataAccess: "query"`, so a live dashboard works from the first turn instead
+   * of depending on the model inferring the mode from the prompt. Unticked, the
+   * field is ABSENT (not `"records"`), so the column default applies unchanged.
+   */
+  it('creates the starter in query mode when "Use live PSD data" is ticked', async () => {
+    await openCreateDialog();
+
+    await expect(dialogProps.onSubmit?.("a repairs dashboard", true)).resolves.toBeNull();
+
+    expect(createCall()[0].dataAccess).toBe("query");
+    // Still WAF-opaque: the live-data flag must not change the transit encoding.
+    expectWafOpaqueArtifactCreate();
+  });
+
+  it("omits dataAccess entirely when the opt-in is not ticked", async () => {
+    await openCreateDialog();
+
+    await expect(dialogProps.onSubmit?.("a plain page")).resolves.toBeNull();
+
+    expect(createCall()[0]).not.toHaveProperty("dataAccess");
+  });
+
+  it('"Start blank" never opts into live data', async () => {
+    await openCreateDialog();
+
+    await expect(dialogProps.onStartBlank?.()).resolves.toBeNull();
+
+    expect(createCall()[0]).not.toHaveProperty("dataAccess");
   });
 
   it("resolves to an error message (never hangs) when the create action REJECTS", async () => {

@@ -1507,6 +1507,30 @@ li[data-dragging="true"] > div {
   border-color: var(--mer-agent);
   box-shadow: 0 0 0 3px rgba(109, 79, 194, 0.12);
 }
+/* #1791 finding 5 — the live-PSD-data opt-in on the create dialog. */
+.mer-prompt-livedata {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--mer-ink-secondary);
+  cursor: pointer;
+}
+.mer-prompt-livedata input[type="checkbox"] {
+  /* Nudged down so the box sits on the first line's baseline, not above it. */
+  margin-top: 2px;
+  accent-color: var(--mer-agent);
+  cursor: pointer;
+}
+.mer-prompt-livedata input[type="checkbox"]:disabled,
+.mer-prompt-livedata:has(input:disabled) {
+  opacity: 0.6;
+  cursor: default;
+}
+.mer-prompt-livedata-hint {
+  color: var(--mer-ink-muted);
+}
 .mer-prompt-examples {
   display: flex;
   flex-direction: column;

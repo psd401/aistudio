@@ -75,12 +75,12 @@ export function consumeDraftAutoSend(
   const store = storage();
   if (!store) return false;
   const key = KEY_PREFIX + nonce;
-  let stored: string | null = null;
   try {
-    stored = store.getItem(key);
+    const stored = store.getItem(key);
+    // Removed unconditionally, so a mismatched or replayed nonce cannot linger.
     store.removeItem(key);
+    return stored !== null && stored === draft;
   } catch {
     return false;
   }
-  return stored !== null && stored === draft;
 }

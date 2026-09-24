@@ -124,11 +124,11 @@ export function pruneStaleWorkspaceToolPayloads(
   // Locate the newest workspace source part; everything before it is stale.
   let latestMessageIndex = -1;
   let latestPartIndex = -1;
-  for (let m = 0; m < messages.length; m += 1) {
-    const parts = messages[m]?.parts;
+  for (const [m, message] of messages.entries()) {
+    const parts = message?.parts;
     if (!Array.isArray(parts)) continue;
-    for (let p = 0; p < parts.length; p += 1) {
-      if (isWorkspaceSourceToolPart(parts[p])) {
+    for (const [p, part] of parts.entries()) {
+      if (isWorkspaceSourceToolPart(part)) {
         latestMessageIndex = m;
         latestPartIndex = p;
       }
