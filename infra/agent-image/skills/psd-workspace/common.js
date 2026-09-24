@@ -208,8 +208,10 @@ function readPayloadFile(filePath, fileFlag, kind, reject) {
  *   }
  *
  * Fails (exit 1) on: relative path, unreadable file, invalid JSON in a
- * --json-file, duplicate use of the same flag, or --json-file alongside an
- * inline --json (ambiguous — exactly one payload source allowed).
+ * --json-file, duplicate use of the same flag, --json-file alongside an
+ * inline --json (ambiguous — exactly one payload source allowed), a file flag
+ * that also appears inside another argument's value, and a command that
+ * already carries one of the reserved placeholder tokens.
  */
 function resolvePayloadFiles(commandString, options = {}) {
   if (!commandString || typeof commandString !== 'string') return null;
