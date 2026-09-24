@@ -93,15 +93,25 @@ const DEFAULT_QUERY_LIMIT = 200;
 const MAX_QUERY_LIMIT = 2_000;
 const MAX_QUERY_OFFSET = 1_000_000;
 /**
+ * ONE overall budget for the connector handshake AND the query (#1788).
+ *
  * Each query is Lambda + RDS behind an MCP round trip. Chat's connector path
  * already budgets 30s, so the bridge uses the same ceiling rather than the
  * records bridge's 10s (which would time out legitimate aggregates).
  *
- * This clock starts only at `execute()`, after the session/rate/visibility
- * checks and the connector handshake. The sandbox host's own clock starts when
- * the page posts the request, so the host allows 45s (render.html) -- the
- * server must always lose the race, or a late server answer is dropped and the
- * page retries a query that is still running.
+ * This clock used to start only at `execute()`, which meant the real server-side
+ * worst case was the handshake (`MCP_CLIENT_TIMEOUT_MS` for the client, plus
+ * tools/list) PLUS 30s — comfortably past the sandbox host's 45s, so a slow
+ * handshake made the host give up on a query that was still running and the
+ * page retried it.
+ *
+ * It is now armed at the TOP of `queryArtifactData` and threaded down, so it
+ * spans the preflight (session resolution, the `contentService.get` visibility
+ * check, the version lookup, the connector config read), the handshake, AND the
+ * execution. Covering only part of the server's work left the same hole in a
+ * smaller form: a 15s preflight plus a full 30s execution still exceeds the
+ * host's 45s. The server now always loses that race BY CONSTRUCTION rather than
+ * by assuming any stage is fast.
  */
 const QUERY_TIMEOUT_MS = 30_000;
 /**
@@ -271,8 +281,18 @@ async function authorizeQueryRequest(contentId: string): Promise<{
 }
 
 /** Resolve "the PSD data server", failing closed when it is not configured. */
-async function requirePsdDataConnectorId(): Promise<string> {
+async function requirePsdDataConnectorId(
+  /**
+   * Called between this helper's OWN two async stages (#1788). The caller
+   * checks its deadline before entering, but the config read and the connector
+   * lookup are two sequential awaits: a config read that starts inside the
+   * budget and finishes outside it would otherwise go on to start a fresh
+   * database query for a caller that has already been answered `timeout`.
+   */
+  stopIfExpired: () => void = () => {}
+): Promise<string> {
   const { config } = await getNexusRouterConfig();
+  stopIfExpired();
   const connectorId = await resolvePsdDataConnectorId(config);
   if (!connectorId) {
     throw ErrorFactories.sysConfigurationError(
@@ -533,7 +553,61 @@ function classifyQueryFailure(error: unknown): ClassifiedQueryFailure {
  * Invoke `query_data` on the resolved connector with the forced arguments and a
  * hard timeout, always closing the MCP client.
  */
+/**
+ * Reject as soon as `signal` aborts, even when `work` never settles (#1788).
+ *
+ * `getConnectorTools` takes no AbortSignal, so the handshake could otherwise run
+ * past the whole budget. A connector that arrives AFTER the deadline is closed
+ * rather than leaked — the caller has already given up on it.
+ */
+function withDeadline<T>(
+  work: Promise<T>,
+  signal: AbortSignal,
+  onLateSettle: (value: T) => void
+): Promise<T> {
+  if (signal.aborted) {
+    void work.then(onLateSettle, () => {});
+    return Promise.reject(signal.reason);
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const onAbort = () => {
+      settled = true;
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        if (settled) {
+          onLateSettle(value);
+          return;
+        }
+        settled = true;
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        if (settled) return;
+        settled = true;
+        reject(error);
+      }
+    );
+  });
+}
+
 async function callQueryData(args: {
+  /**
+   * The caller's end-to-end budget, already running (#1788). It covers the
+   * PREFLIGHT as well as the handshake and the execution, so the three cannot
+   * add up to more than the sandbox host's own clock allows. Armed by
+   * `queryArtifactData` rather than here, because the preflight it must cover
+   * happens before this function is reached.
+   *
+   * `AbortSignal.timeout` aborts with a DOMException named TimeoutError, which
+   * `classifyQueryFailure` already maps to the `timeout` bridge code.
+   */
+  deadline: AbortSignal;
   connectorId: string;
   userId: number;
   roles: string[];
@@ -543,11 +617,21 @@ async function callQueryData(args: {
   offset: number;
   reason: string;
 }): Promise<QueryArtifactDataResult> {
-  const connector = await getConnectorTools(
-    args.connectorId,
-    args.userId,
-    args.roles,
-    { idToken: args.idToken }
+  const { deadline } = args;
+  // Already out of budget before any connector work: fail here rather than
+  // opening an MCP client we have given up on. `withDeadline` would handle a
+  // pre-aborted signal safely (it closes a connector that arrives late), but
+  // the handshake would still have been STARTED -- a Lambda invocation and a
+  // tools/list round trip for an answer nobody can receive.
+  if (deadline.aborted) throw deadline.reason;
+  const connector = await withDeadline(
+    getConnectorTools(args.connectorId, args.userId, args.roles, {
+      idToken: args.idToken,
+    }),
+    deadline,
+    (late) => {
+      void late.close().catch(() => {});
+    }
   );
   try {
     const tool = connector.tools[QUERY_TOOL_NAME];
@@ -571,7 +655,9 @@ async function callQueryData(args: {
       {
         toolCallId: `atrium-artifact-query-${Date.now()}`,
         messages: [],
-        abortSignal: AbortSignal.timeout(QUERY_TIMEOUT_MS),
+        // The SAME signal the handshake raced: what is left of the 30s budget,
+        // never a fresh one (#1788).
+        abortSignal: deadline,
       }
     );
     return parseToolResult(result);
@@ -696,6 +782,18 @@ export async function queryArtifactData(
   // it must default to false: every failure BEFORE the object is resolved (no
   // session, rate limited, not viewable) is answered without upstream text.
   let mayEdit = false;
+  // ONE end-to-end server budget, armed BEFORE any preflight work (#1788).
+  //
+  // This used to be armed inside `callQueryData`, so session resolution, the
+  // `contentService.get` visibility check, the version lookup and the connector
+  // config read all ran outside it. The sandbox host's clock, by contrast,
+  // covers everything from the moment the request is dispatched — so a slow
+  // preflight plus a full 30s execution could exceed the host's 45s, and the
+  // host would discard an answer for a query that was still running. The server
+  // must always lose that race BY CONSTRUCTION, not by assuming preflight is
+  // fast, so the deadline starts here and what remains of it is what the
+  // handshake and the execution get.
+  const deadline = AbortSignal.timeout(QUERY_TIMEOUT_MS);
 
   try {
     // #1787: logged BEFORE authorization, so a session/rate-limit/validation
@@ -706,24 +804,87 @@ export async function queryArtifactData(
       contentId: sanitizeForLogging(contentId),
     });
 
-    const { session, idToken } = await authorizeQueryRequest(contentId);
-    const params = validateQueryParams(input);
+    // Every preflight await RACES the deadline as one unit (#1788). Arming the
+    // clock is not enough on its own: none of these calls takes an
+    // AbortSignal, so without the race a single hung dependency (a wedged DB
+    // pool, a stalled connector-config read) would leave this route pending
+    // long after the frame had discarded the request — and the page would retry
+    // while the original preflight was still running. Racing here bounds the
+    // whole turn, whatever any one dependency does.
+    //
+    // `mayEdit` is assigned inside, so an abort leaves it at its fail-closed
+    // `false` and the catch withholds upstream text, exactly as for any other
+    // pre-object failure.
+    // None of the preflight calls is cancellable, so the race bounds what the
+    // CALLER waits for but cannot stop a stage that has already begun. Checking
+    // between stages stops the closure from starting the NEXT one once the
+    // budget is gone — otherwise a dependency slowdown leaves every abandoned
+    // request still running version and connector-config lookups in the
+    // background, and retries pile that work up behind the failures.
+    const stopIfExpired = (): void => {
+      if (deadline.aborted) throw deadline.reason;
+    };
 
-    // Same session instance the gate above validated — never a second resolve.
-    const requester = await getUserRequester(requestId, session);
-    // Keep the boundary fail-closed if requester resolution ever broadens.
-    if (requester.kind !== "user" || requester.userId == null) {
-      throw ErrorFactories.authNoSession();
-    }
+    const preflight = await withDeadline(
+      (async () => {
+        const { session, idToken } = await authorizeQueryRequest(contentId);
+        const params = validateQueryParams(input);
+        stopIfExpired();
 
-    // Shared 404 mask for missing/non-viewable content, exactly as the record
-    // actions do — a viewer who cannot see the artifact learns nothing.
-    const content = await contentService.get(requester, contentId);
-    mayEdit = canEdit(requester, content.ownerUserId);
-    // The exclusivity gate: `records` and `none` artifacts never reach the
-    // data MCP (see the artifact-data.ts header for why).
-    assertQueryMode(content);
-    const auditVersionId = await resolveAuditVersionId(content, input?.versionId, log);
+        // Same session instance the gate above validated — never a second
+        // resolve.
+        const requester = await getUserRequester(requestId, session);
+        // Keep the boundary fail-closed if requester resolution ever broadens.
+        if (requester.kind !== "user" || requester.userId == null) {
+          throw ErrorFactories.authNoSession();
+        }
+
+        // Shared 404 mask for missing/non-viewable content, exactly as the
+        // record actions do — a viewer who cannot see the artifact learns
+        // nothing.
+        stopIfExpired();
+
+        const content = await contentService.get(requester, contentId);
+        mayEdit = canEdit(requester, content.ownerUserId);
+        // The exclusivity gate: `records` and `none` artifacts never reach the
+        // data MCP (see the artifact-data.ts header for why).
+        assertQueryMode(content);
+        stopIfExpired();
+
+        const auditVersionId = await resolveAuditVersionId(
+          content,
+          input?.versionId,
+          log
+        );
+        stopIfExpired();
+
+        const connectorId = await requirePsdDataConnectorId(stopIfExpired);
+        return {
+          idToken,
+          params,
+          // Returned narrowed: the `!= null` check above does not survive the
+          // trip out of this closure, and the caller needs a plain number.
+          userId: requester.userId,
+          roles: requester.roles ?? [],
+          content,
+          auditVersionId,
+          connectorId,
+        };
+      })(),
+      deadline,
+      // Nothing to release: preflight opens no connector. A late settle is
+      // simply discarded.
+      () => {}
+    );
+    const {
+      idToken,
+      params,
+      userId,
+      roles,
+      content,
+      auditVersionId,
+      connectorId,
+    } = preflight;
 
     log.debug("Artifact data query accepted", {
       contentId: content.id,
@@ -737,9 +898,10 @@ export async function queryArtifactData(
     // staff/administrator), so a student or an out-of-list viewer is refused
     // BEFORE any request reaches the data MCP.
     const result = await callQueryData({
-      connectorId: await requirePsdDataConnectorId(),
-      userId: requester.userId,
-      roles: requester.roles ?? [],
+      deadline,
+      connectorId,
+      userId,
+      roles,
       idToken,
       sql: params.sql,
       limit: params.limit,
@@ -752,7 +914,7 @@ export async function queryArtifactData(
     timer({ status: "success" });
     log.info("Artifact data query completed", {
       contentId: content.id,
-      userId: requester.userId,
+      userId,
       returnedCount: result.returnedCount,
       truncated: result.truncated,
     });

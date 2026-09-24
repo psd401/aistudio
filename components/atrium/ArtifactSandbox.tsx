@@ -85,6 +85,13 @@ import {
   isArtifactBridgeErrorCode,
   type ArtifactBridgeErrorCode,
 } from "@/lib/content/artifact-bridge-errors";
+import {
+  artifactQueryCodeForStatus,
+  artifactQueryRoutePath,
+  isArtifactQueryFailureBody,
+  type ArtifactQueryRequestBody,
+} from "@/lib/content/artifact-query-transport";
+import { toBase64Utf8 } from "@/lib/content/code-encoding-browser";
 import type { ContentDataAccess } from "@/lib/content/types";
 import type { ArtifactDataPayload } from "@/lib/db/types/jsonb";
 
@@ -116,8 +123,54 @@ const RENDER_RETRY_MS = 300;
  * failure notice rather than a perpetual "Waiting for artifact…".
  */
 const RENDER_MAX_ATTEMPTS = 40;
-/** Keep a hostile artifact from queueing unbounded server-action work. */
-const MAX_IN_FLIGHT_DATA_REQUESTS = 8;
+/**
+ * How many bridge requests the parent will have in flight at once (#1788).
+ *
+ * This used to be a hard cap of 8 that REJECTED the 9th call outright, which was
+ * the wrong shape twice over: a dashboard with nine panels got a generic failure
+ * on one of them for no reason a viewer could act on, and the cap never bought
+ * anything anyway because Server Actions were dispatched one at a time — the
+ * real concurrency was 1. Now `query` goes over `fetch` (see
+ * `lib/content/artifact-query-transport.ts`), so requests genuinely overlap, and
+ * excess work QUEUES behind this limit instead of being refused.
+ */
+const MAX_CONCURRENT_DATA_REQUESTS = 6;
+/**
+ * Record ops (`submit` / `list`) run strictly one at a time.
+ *
+ * They still travel over Server Actions, which the App Router dispatches one at
+ * a time regardless — so a higher limit here would not make them overlap. It
+ * would only create a SECOND, invisible queue after the dispatch ack, and the
+ * ack's whole job is to tell the frame "your request has started" so it can
+ * time the server rather than the wait. Acking six record ops that are really
+ * queued in Next would restart the frame's 10s clock on requests that have not
+ * begun: a later `submit` would time out in the frame, write anyway, and the
+ * author's retry would duplicate the record.
+ *
+ * Queries do not have this problem — they go over `fetch`, which genuinely runs
+ * them in parallel (see `fetchArtifactQuery`).
+ */
+const MAX_CONCURRENT_RECORD_REQUESTS = 1;
+/**
+ * The sandbox host's `MAX_PENDING_DATA_REQUESTS` (infra/sandbox-host/render.html),
+ * mirrored here so the parent's total capacity is derived from it rather than
+ * guessed alongside it. The frame is the binding constraint: it refuses to hold
+ * more than this many promises open at once, whatever the parent would accept.
+ */
+const MAX_PENDING_DATA_REQUESTS_IN_FRAME = 32;
+/**
+ * The most requests this parent will hold at once, in flight AND queued.
+ *
+ * Deliberately a TOTAL rather than a queue depth, and deliberately the host's
+ * own number. The two layers count different things — the frame counts every
+ * promise it is holding open, the parent could count only what waits behind the
+ * active slots — so any queue-depth constant has to be reconciled against the
+ * concurrency limit that happens to apply, and gets it wrong the moment there
+ * is more than one such limit. Capping the total instead is correct for every
+ * lane by construction: a query-mode mount reaches 6 + 26 and a records-mode
+ * mount reaches 1 + 31, and both refuse exactly the request the frame would.
+ */
+const MAX_OUTSTANDING_DATA_REQUESTS = MAX_PENDING_DATA_REQUESTS_IN_FRAME;
 const MAX_DATA_PAYLOAD_BYTES = 8 * 1024;
 const MAX_DATA_PAYLOAD_VALUES = 8_192;
 const MAX_DATA_PAYLOAD_STRING_CODE_UNITS = MAX_DATA_PAYLOAD_BYTES;
@@ -586,6 +639,41 @@ function isOpAllowedByLoadedMode(
   return false;
 }
 
+/**
+ * The message the parent posts when a queued request is actually DISPATCHED
+ * (#1788). It carries nothing but the id: it exists so the frame can restart its
+ * own timeout at the moment work begins, rather than counting queue time against
+ * a budget the server never saw.
+ */
+const DATA_DISPATCH_ACK_TYPE = "atrium-artifact-data-ack";
+
+/** One accepted request waiting behind the concurrency limit (#1788). */
+interface QueuedBridgeRequest {
+  request: ArtifactDataRequest;
+  frameWindow: Window;
+  /** `Date.now()` when this was accepted, for the queue-wait deadline below. */
+  enqueuedAt: number;
+}
+
+/**
+ * How long the parent will let a request WAIT before it refuses to dispatch it
+ * at all (#1788).
+ *
+ * Deliberately SHORTER than the frame's own pre-ack budget
+ * (`QUEUED_DISPATCH_TIMEOUT_MS`, 315s in render.html). The frame arms a clock
+ * when the artifact posts and rejects the artifact's promise when it expires —
+ * at which point the pending entry is gone and any later answer is discarded.
+ * If the parent were still willing to dispatch after that, a queued `submit`
+ * would COMMIT after the artifact had been told it timed out, and the author's
+ * retry would create a duplicate record.
+ *
+ * So the parent must always give up first, by a margin wide enough to cover the
+ * dispatch itself. A request past this deadline is answered `timeout` here
+ * instead — which also reaches the artifact sooner than the frame's own clock
+ * would have.
+ */
+const MAX_QUEUE_WAIT_MS = 300_000;
+
 /** The outcome of one routed bridge action: data, or a typed failure. */
 type BridgeActionOutcome =
   | { ok: true; data: unknown }
@@ -626,14 +714,148 @@ function queryActionFailure(result: {
 }
 
 /**
- * Route one validated request to its Server Action, copying ONLY the fields the
- * op is allowed to influence. `contentId` always comes from the trusted prop.
+ * A failure body from the route whose `code` is missing or unrecognized — an
+ * older/newer build, or a proxy that rewrote it. Still a body THIS route
+ * produced, so it is answered as one (generically) rather than from the status.
+ */
+function isUncodedFailureBody(body: unknown): body is { message?: unknown } {
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    (body as { isSuccess?: unknown }).isSuccess === false
+  );
+}
+
+/** A 2xx body from the query route: the action's own success envelope. */
+function isQuerySuccessBody(body: unknown): body is { data: unknown } {
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    (body as { isSuccess?: unknown }).isSuccess === true &&
+    "data" in (body as object)
+  );
+}
+
+/**
+ * Run one `query` over `fetch` instead of a Server Action (#1788).
  *
- * The dynamic imports keep the server-only action graph out of fail-closed and
- * preview-only clients: Next resolves these `use server` modules to action
- * references only when an enabled bridge request reaches the authenticated
- * parent. The record actions and the query action are imported separately so a
- * records-only artifact never pulls in the data-connector action reference.
+ * The App Router dispatches Server Actions strictly one at a time, so six
+ * `Promise.all` queries used to run back to back (~6.5s on prod for what took
+ * ~1.2s of actual work). `fetch` has no such queue, so the parent's own
+ * concurrency limit is the only thing pacing them.
+ *
+ * The SQL travels base64 because the edge WAF's `SQLi_BODY` rule blocks request
+ * bodies that look like SQL with a bare 403 — see the transport module.
+ *
+ * Both arms of the response are parsed: a non-2xx still carries the typed
+ * `{ code, message }` body, and only when that body is missing or unparseable
+ * (a WAF block, an ALB 502, middleware's own 401) is the code derived from the
+ * status. A bare `response.json().catch(() => fallback)` would collapse those
+ * into one indistinguishable failure.
+ */
+async function fetchArtifactQuery(
+  request: QueryDataRequest,
+  contentId: string,
+  versionId: string | undefined
+): Promise<BridgeActionOutcome> {
+  const body: ArtifactQueryRequestBody = {
+    sqlBase64: toBase64Utf8(request.sql),
+    ...(request.limit !== undefined ? { limit: request.limit } : {}),
+    ...(request.offset !== undefined ? { offset: request.offset } : {}),
+    // Trusted prop, never a request field: it only names the version in the
+    // data MCP's audit line (#1787).
+    ...(versionId ? { versionId } : {}),
+  };
+  const response = await fetch(artifactQueryRoutePath(contentId), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    // The session cookie is what authenticates this call; it is a same-origin
+    // request from the trusted parent, never from the opaque-origin frame.
+    credentials: "same-origin",
+    cache: "no-store",
+  });
+
+  let parsed: unknown;
+  try {
+    parsed = await response.json();
+  } catch {
+    parsed = null;
+  }
+
+  if (response.ok) {
+    return isQuerySuccessBody(parsed)
+      ? { ok: true, data: parsed.data }
+      : { ok: false, failure: { code: "unavailable", error: DATA_BRIDGE_ERROR_MESSAGE } };
+  }
+  // A body the route produced is answered by the body, even when its `code` is
+  // one this build does not know: `queryActionFailure` already degrades that to
+  // the pre-#1787 generic answer WITHOUT forwarding the unvetted message. Only
+  // a response with no typed body at all falls back to the status.
+  if (isArtifactQueryFailureBody(parsed) || isUncodedFailureBody(parsed)) {
+    return { ok: false, failure: queryActionFailure(parsed) };
+  }
+  return {
+    ok: false,
+    failure: codedFailure(artifactQueryCodeForStatus(response.status)),
+  };
+}
+
+/**
+ * The record Server Action module, loaded once and remembered (#1788).
+ *
+ * The dynamic import keeps the server-only action graph out of fail-closed and
+ * preview-only clients, but it also means the FIRST record op pays a chunk
+ * download before anything can run. That download must happen BEFORE the parent
+ * acknowledges dispatch: the ack restarts the frame's 10s clock, and on a slow
+ * connection the chunk can land after that clock has already rejected the
+ * artifact's promise — at which point `submitArtifactRecord` still runs, the
+ * write commits, and the author's retry duplicates the record.
+ *
+ * Memoizing the promise is what lets the pump await readiness before acking
+ * while `invokeBridgeAction` awaits the same settled promise for free.
+ */
+let recordActionsPromise: Promise<
+  typeof import("@/actions/db/atrium/artifact-data")
+> | null = null;
+
+function loadRecordActions(): Promise<
+  typeof import("@/actions/db/atrium/artifact-data")
+> {
+  // A FAILED import must not be remembered: the next attempt should retry the
+  // chunk rather than replay a stale rejection for the life of the page.
+  recordActionsPromise ??= import("@/actions/db/atrium/artifact-data").catch(
+    (error: unknown) => {
+      recordActionsPromise = null;
+      throw error;
+    }
+  );
+  return recordActionsPromise;
+}
+
+/**
+ * Wait until the transport for this op can actually START work, so the dispatch
+ * ack means what it says (#1788). Queries go over `fetch`, which needs nothing
+ * loaded; record ops need their action chunk.
+ */
+async function awaitTransportReady(op: ArtifactDataRequest["op"]): Promise<void> {
+  if (op === "query") return;
+  await loadRecordActions();
+}
+
+/**
+ * Route one validated request to its transport, copying ONLY the fields the op
+ * is allowed to influence. `contentId` always comes from the trusted prop.
+ *
+ * `query` goes over `fetch` (#1788, above). The record ops stay on their Server
+ * Actions: they are fired one at a time by an artifact reacting to a click, so
+ * the action queue costs them nothing, and moving them would add a second
+ * authenticated route for no measured benefit.
+ *
+ * The dynamic import keeps the server-only action graph out of fail-closed and
+ * preview-only clients: Next resolves the `use server` module to action
+ * references only when an enabled record request reaches the authenticated
+ * parent, so a query-mode artifact never pulls in the record action references.
  */
 async function invokeBridgeAction(
   request: ArtifactDataRequest,
@@ -641,26 +863,10 @@ async function invokeBridgeAction(
   versionId: string | undefined
 ): Promise<BridgeActionOutcome> {
   if (request.op === "query") {
-    const { queryArtifactData } = await import(
-      "@/actions/db/atrium/artifact-query"
-    );
-    const result = await queryArtifactData({
-      contentId,
-      sql: request.sql,
-      limit: request.limit,
-      offset: request.offset,
-      // Trusted prop, never a request field: it only names the version in the
-      // data MCP's audit line (#1787).
-      versionId,
-    });
-    return result.isSuccess
-      ? { ok: true, data: result.data }
-      : { ok: false, failure: queryActionFailure(result) };
+    return fetchArtifactQuery(request, contentId, versionId);
   }
 
-  const { listArtifactRecords, submitArtifactRecord } = await import(
-    "@/actions/db/atrium/artifact-data"
-  );
+  const { listArtifactRecords, submitArtifactRecord } = await loadRecordActions();
   if (request.op === "submit") {
     const result = await submitArtifactRecord({
       contentId,
@@ -708,7 +914,8 @@ function parentSideRefusal(args: {
   contentId: string | undefined;
   request: ArtifactDataRequest;
   loadedDataAccess: ContentDataAccess | undefined;
-  inFlight: number;
+  /** In flight PLUS queued — what the frame is holding open for this mount. */
+  outstanding: number;
 }): ArtifactDataFailure | null {
   const isQuery = args.request.op === "query";
   if (!args.dataBridgeEnabled || !args.contentId) {
@@ -731,10 +938,204 @@ function parentSideRefusal(args: {
     // of its own (see RECORD_OP_FAILURE), so it keeps its pre-#1787 answer.
     return isQuery ? MALFORMED_QUERY_FAILURE : RECORD_OP_FAILURE;
   }
-  if (args.inFlight >= MAX_IN_FLIGHT_DATA_REQUESTS) {
+  // #1788: only a FULL queue is refused now. Work beyond the concurrency limit
+  // waits its turn instead of failing, which is what a dashboard with more
+  // panels than the limit actually wants. The cap is the TOTAL outstanding, so
+  // it lands on the same request the frame's own cap would, in either lane.
+  if (args.outstanding >= MAX_OUTSTANDING_DATA_REQUESTS) {
     return codedFailure("too_many_requests");
   }
   return null;
+}
+
+/**
+ * Dispatch queued requests up to the concurrency limit (#1788).
+ *
+ * Each dispatch also posts an `atrium-artifact-data-ack` to the frame. The
+ * host's 45s query clock used to start when the page POSTED, so a request
+ * that waited behind five others could time out having never run; the ack
+ * restarts that clock at DISPATCH, which is the only moment the parent knows
+ * the server is actually being asked.
+ */
+function useBridgePump(
+  runBridgeRequest: (
+    request: ArtifactDataRequest,
+    frameWindow: Window
+  ) => Promise<void>,
+  inFlightDataRequestsRef: React.RefObject<number>,
+  queuedDataRequestsRef: React.RefObject<QueuedBridgeRequest[]>,
+  onDispatchAbandoned: (
+    entry: QueuedBridgeRequest,
+    code: ArtifactBridgeErrorCode
+  ) => void
+): () => void {
+  return useCallback((): void => {
+    // `step` recurses LEXICALLY rather than through a ref: a ref assigned in
+    // the render body is a rules-of-hooks violation, and one assigned in an
+    // effect leaves a window where a completing request reads a stale pump.
+    // Everything `runBridgeRequest` closes over is fixed for the mount anyway
+    // (the canvas keys the sandbox on contentId + version), so a drain started
+    // by an earlier render can safely finish the queue it is draining.
+    const step = (): void => {
+      for (;;) {
+        purgeExpiredQueued(queuedDataRequestsRef.current, onDispatchAbandoned);
+        // Peek before taking: the limit depends on what is at the head. A
+        // record op still travels over a Server Action, and the App Router
+        // dispatches those ONE AT A TIME — the very serialization this issue is
+        // about. Running six of them "concurrently" here would buy nothing and
+        // would make the dispatch ack a lie: the parent would restart the
+        // frame's 10s clock on five requests that are still sitting in Next's
+        // client-side action queue, so a later `submit` could time out in the
+        // frame and then write anyway, and the author's retry would create a
+        // DUPLICATE record. One at a time makes "dispatched" mean "started".
+        //
+        // Query and record ops never mix on one mount: `isOpAllowedByLoadedMode`
+        // pins the mount to a single mode, so this is one lane either way, not
+        // two competing ones.
+        const head = queuedDataRequestsRef.current[0];
+        if (!head) break;
+        const limit =
+          head.request.op === "query"
+            ? MAX_CONCURRENT_DATA_REQUESTS
+            : MAX_CONCURRENT_RECORD_REQUESTS;
+        if (inFlightDataRequestsRef.current >= limit) break;
+        const next = queuedDataRequestsRef.current.shift();
+        if (!next) break;
+        // The slot is taken synchronously, so capacity accounting cannot race
+        // with the await below.
+        inFlightDataRequestsRef.current += 1;
+        void (async () => {
+          // Ack only once the transport can actually begin. The record path
+          // lazily imports its Server Action chunk; acking first would restart
+          // the frame's 10s clock while that download is still in flight, and a
+          // slow chunk would let the frame reject the artifact's promise before
+          // `submitArtifactRecord` had even been called -- the write would then
+          // land anyway and a retry would duplicate it. Until the ack the frame
+          // is still on its queue-tolerant pre-ack budget, which is the right
+          // clock for "not started yet".
+          try {
+            await awaitTransportReady(next.request.op);
+          } catch {
+            // The chunk failed to load. Do NOT ack and do NOT run: acking would
+            // start the frame's 10s post-dispatch clock, and `loadRecordActions`
+            // has already cleared its memo on this rejection, so
+            // `invokeBridgeAction` would kick off a SECOND import behind that
+            // clock — a slow retry would then let the frame reject the promise
+            // before the write ran, and the write would land anyway. Answer
+            // now, leave the retry to a later request the artifact makes.
+            onDispatchAbandoned(next, "unavailable");
+            return;
+          }
+          try {
+            next.frameWindow.postMessage(
+              { type: DATA_DISPATCH_ACK_TYPE, requestId: next.request.requestId },
+              "*"
+            );
+          } catch {
+            // A gone frame still gets its request run; the response post is
+            // what actually fails, and it fails the same way it always has.
+          }
+          await runBridgeRequest(next.request, next.frameWindow);
+        })().finally(() => {
+          inFlightDataRequestsRef.current -= 1;
+          step();
+        });
+      }
+    };
+    step();
+  }, [
+    runBridgeRequest,
+    inFlightDataRequestsRef,
+    queuedDataRequestsRef,
+    onDispatchAbandoned,
+  ]);
+}
+
+/**
+ * Answer a request the pump decided NOT to dispatch (#1788).
+ *
+ * Two cases, both of which must never reach the transport:
+ *  - `timeout`: it waited past the parent's queue deadline, so the frame is
+ *    about to give up (or already has).
+ *  - `unavailable`: its transport chunk failed to load.
+ *
+ * Answering here rather than letting the frame's own clock expire keeps the
+ * artifact's rejection prompt AND — the reason this exists — guarantees the
+ * work is never started, so a `submit` cannot commit after its promise has
+ * already been rejected.
+ */
+function useDispatchAbandonedHandler(
+  reportDiagnostic: (
+    request: ArtifactDataRequest,
+    failure: ArtifactDataFailure
+  ) => void
+): (entry: QueuedBridgeRequest, code: ArtifactBridgeErrorCode) => void {
+  return useCallback(
+    (entry: QueuedBridgeRequest, code: ArtifactBridgeErrorCode) => {
+      const failure = codedFailure(code);
+      reportDiagnostic(entry.request, failure);
+      try {
+        entry.frameWindow.postMessage(
+          dataBridgeFailure(entry.request.requestId, failure),
+          "*"
+        );
+      } catch {
+        // The frame is gone; there is nothing left to tell, and not starting
+        // the work was the point.
+      }
+    },
+    [reportDiagnostic]
+  );
+}
+
+/**
+ * Drop every queued entry that has waited past the parent's deadline (#1788).
+ *
+ * The frame gives up on a request it has been holding (its own pre-ack budget)
+ * and deletes the pending entry; dispatching after that would run a real Server
+ * Action whose answer nobody is waiting for — and for a `submit` that means a
+ * write landing after the artifact was told it failed, so the author's retry
+ * duplicates the record.
+ *
+ * Called from BOTH the pump and the admission check, which matters: a full
+ * queue is refused before `pump()` ever runs, so purging only inside the pump
+ * would let one never-settling request wedge the bridge permanently — every
+ * later request answered `too_many_requests` behind entries that had long since
+ * expired and would never be swept.
+ *
+ * Mutates the queue in place (it is a ref's array, shared with the pump).
+ */
+function purgeExpiredQueued(
+  queue: QueuedBridgeRequest[],
+  onDispatchAbandoned: (
+    entry: QueuedBridgeRequest,
+    code: ArtifactBridgeErrorCode
+  ) => void
+): void {
+  const now = Date.now();
+  while (queue.length > 0 && now - queue[0].enqueuedAt >= MAX_QUEUE_WAIT_MS) {
+    const expired = queue.shift();
+    if (expired) onDispatchAbandoned(expired, "timeout");
+  }
+}
+
+/**
+ * Drop anything still waiting when the bridge's mount goes away (#1788).
+ *
+ * The frame is torn down with it, so there is nobody left to answer; leaving
+ * entries queued would let a late `pump()` from an in-flight completion dispatch
+ * work for a version the canvas has already switched away from (#1787's
+ * stale-diagnostic problem, one layer down).
+ */
+function useDrainQueueOnUnmount(
+  queueRef: React.RefObject<QueuedBridgeRequest[]>
+): void {
+  useEffect(() => {
+    const queue = queueRef.current;
+    return () => {
+      queue.length = 0;
+    };
+  }, [queueRef]);
 }
 
 /** Install the source-authenticated, bounded artifact data request listener. */
@@ -780,7 +1181,10 @@ function useArtifactDataBridge({
     },
     [onDiagnostic]
   );
+  /** Requests currently dispatched (never more than the concurrency limit). */
   const inFlightDataRequestsRef = useRef(0);
+  /** FIFO of accepted-but-not-yet-dispatched requests (#1788). */
+  const queuedDataRequestsRef = useRef<QueuedBridgeRequest[]>([]);
   /**
    * #1712: pin the mode for the LIFETIME of this mount, not just to the current
    * prop. Nothing on the reader route re-renders this component with a fresher
@@ -803,25 +1207,16 @@ function useArtifactDataBridge({
    * the authority boundary. Action failures and thrown errors collapse to the
    * same generic response.
    */
-  const handleDataRequest = useCallback(
+  const runBridgeRequest = useCallback(
     async (request: ArtifactDataRequest, frameWindow: Window): Promise<void> => {
-      const refusal = parentSideRefusal({
-        dataBridgeEnabled,
-        contentId,
-        request,
-        loadedDataAccess: loadedDataAccessRef.current,
-        inFlight: inFlightDataRequestsRef.current,
-      });
-      if (refusal || !contentId) {
-        // `!contentId` is already covered by `parentSideRefusal`; repeating it
-        // here is what narrows `contentId` to a string for the call below.
-        const failure = refusal ?? codedFailure("unavailable");
+      // `contentId` was proven present by `parentSideRefusal` before the request
+      // was queued; repeating the check is what narrows it to a string here.
+      if (!contentId) {
+        const failure = codedFailure("unavailable");
         reportDiagnostic(request, failure);
         frameWindow.postMessage(dataBridgeFailure(request.requestId, failure), "*");
         return;
       }
-
-      inFlightDataRequestsRef.current += 1;
       let response: ArtifactDataResponse;
       try {
         const outcome = await invokeBridgeAction(request, contentId, versionId);
@@ -837,23 +1232,72 @@ function useArtifactDataBridge({
           response = dataBridgeFailure(request.requestId, outcome.failure);
         }
       } catch {
-        // A thrown server action (network failure, non-2xx) never produced a
+        // A thrown transport (offline, DNS, a torn-down page) never produced a
         // classified answer at all.
         const failure = codedFailure("unavailable");
         reportDiagnostic(request, failure);
         response = dataBridgeFailure(request.requestId, failure);
-      } finally {
-        inFlightDataRequestsRef.current -= 1;
       }
 
       // The authenticated receiver is an opaque-origin WindowProxy. As with
       // postCode, a concrete targetOrigin would silently discard the response.
       frameWindow.postMessage(response, "*");
     },
+    [contentId, reportDiagnostic, versionId]
+  );
+
+  const handleDispatchAbandoned = useDispatchAbandonedHandler(reportDiagnostic);
+
+  const pump = useBridgePump(
+    runBridgeRequest,
+    inFlightDataRequestsRef,
+    queuedDataRequestsRef,
+    handleDispatchAbandoned
+  );
+
+  const handleDataRequest = useCallback(
+    (request: ArtifactDataRequest, frameWindow: Window): void => {
+      // Sweep expired entries BEFORE measuring capacity. A full queue is
+      // refused below without ever reaching `pump()`, so purging only there
+      // would let one never-settling request wedge the bridge: every later
+      // request refused `too_many_requests` behind entries that had long since
+      // expired and would never be swept (#1788).
+      purgeExpiredQueued(queuedDataRequestsRef.current, handleDispatchAbandoned);
+      const refusal = parentSideRefusal({
+        dataBridgeEnabled,
+        contentId,
+        request,
+        loadedDataAccess: loadedDataAccessRef.current,
+        outstanding:
+          inFlightDataRequestsRef.current + queuedDataRequestsRef.current.length,
+      });
+      if (refusal || !contentId) {
+        // `!contentId` is already covered by `parentSideRefusal`; repeating it
+        // here keeps this fail-closed if that gate ever changes.
+        const failure = refusal ?? codedFailure("unavailable");
+        reportDiagnostic(request, failure);
+        frameWindow.postMessage(dataBridgeFailure(request.requestId, failure), "*");
+        return;
+      }
+      queuedDataRequestsRef.current.push({
+        request,
+        frameWindow,
+        enqueuedAt: Date.now(),
+      });
+      pump();
+    },
     // `loadedDataAccessRef` is a stable ref, deliberately NOT a dependency: the
     // pinned mode must not change for the life of this mount (see the ref).
-    [contentId, dataBridgeEnabled, versionId, reportDiagnostic]
+    [
+      contentId,
+      dataBridgeEnabled,
+      pump,
+      reportDiagnostic,
+      handleDispatchAbandoned,
+    ]
   );
+
+  useDrainQueueOnUnmount(queuedDataRequestsRef);
 
   /**
    * Answer a request the narrowing predicate rejected (see
@@ -889,7 +1333,7 @@ function useArtifactDataBridge({
       // `sandbox="allow-scripts"` frame has the opaque serialized origin "null".
       if (!frameWindow || event.source !== frameWindow) return;
       if (isArtifactDataRequest(event.data)) {
-        void handleDataRequest(event.data, frameWindow);
+        handleDataRequest(event.data, frameWindow);
         return;
       }
       handleMalformedRequest(event.data, frameWindow);

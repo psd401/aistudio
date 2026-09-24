@@ -10,15 +10,79 @@ jest.mock("@/actions/db/atrium/artifact-data", () => ({
   listArtifactRecords: (...args: unknown[]) => listArtifactRecordsMock(...args),
 }));
 
-jest.mock("@/actions/db/atrium/artifact-query", () => ({
-  queryArtifactData: (...args: unknown[]) => queryArtifactDataMock(...args),
-}));
-
 import {
   ArtifactSandbox,
   type ArtifactSandboxDiagnostic,
 } from "@/components/atrium/ArtifactSandbox";
+import {
+  ARTIFACT_QUERY_STATUS_BY_CODE,
+  artifactQueryRoutePath,
+} from "@/lib/content/artifact-query-transport";
 import type { ContentDataAccess } from "@/lib/content/types";
+
+/**
+ * #1788: `query` no longer goes through a Server Action — it POSTs to
+ * `/api/atrium/artifacts/{id}/query`, because the App Router dispatches Server
+ * Actions ONE AT A TIME and that serialized every dashboard's queries.
+ *
+ * The suites below still express their expectations in terms of
+ * `queryArtifactDataMock`, because the route's whole job is to call that action
+ * with exactly those arguments. This stub is the route: it decodes the request
+ * the bridge actually built (including the base64 SQL that gets it past the edge
+ * WAF's `SQLi_BODY` rule), hands it to the mock, and answers with the status the
+ * route would answer with. What the bridge sends on the wire is asserted
+ * directly in the transport suite.
+ */
+interface StubResponse {
+  ok: boolean;
+  status: number;
+  json: () => Promise<unknown>;
+}
+
+const fetchMock = jest.fn<Promise<StubResponse>, [string, RequestInit]>();
+
+function decodeQueryBody(init: RequestInit): Record<string, unknown> {
+  const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+  const sqlBase64 = String(body.sqlBase64 ?? "");
+  return {
+    sql: Buffer.from(sqlBase64, "base64").toString("utf8"),
+    limit: body.limit,
+    offset: body.offset,
+    versionId: body.versionId,
+  };
+}
+
+/** The default stub: run the mock action and map its outcome to a response. */
+async function routeStub(url: string, init: RequestInit): Promise<StubResponse> {
+  const contentId = decodeURIComponent(
+    url.replace(/^\/api\/atrium\/artifacts\//, "").replace(/\/query$/, "")
+  );
+  const { sql, limit, offset, versionId } = decodeQueryBody(init);
+  const outcome = (await queryArtifactDataMock({
+    contentId,
+    sql,
+    limit,
+    offset,
+    versionId,
+  })) as { isSuccess: boolean; code?: string };
+  const status = outcome.isSuccess
+    ? 200
+    : ARTIFACT_QUERY_STATUS_BY_CODE[
+        outcome.code as keyof typeof ARTIFACT_QUERY_STATUS_BY_CODE
+      ] ?? 503;
+  return { ok: outcome.isSuccess, status, json: async () => outcome };
+}
+
+/** A response with no usable typed body — a WAF block, an ALB 502, a bare 401. */
+function bodylessResponse(status: number): StubResponse {
+  return {
+    ok: false,
+    status,
+    json: async () => {
+      throw new SyntaxError("Unexpected token < in JSON");
+    },
+  };
+}
 
 const SANDBOX_SRC = "https://sandbox.example.test/render";
 const TRUSTED_CONTENT_ID = "trusted-content-id";
@@ -169,6 +233,15 @@ function mountSandbox(
   return { frameWindow, postMessage };
 }
 
+/**
+ * Let every queued microtask run. A `query` now crosses `fetch` → `.json()` →
+ * the response post, so a single `await Promise.resolve()` no longer reaches the
+ * end of one request (#1788).
+ */
+async function flushMicrotasks(): Promise<void> {
+  for (let i = 0; i < 20; i += 1) await Promise.resolve();
+}
+
 async function sendMessage(
   data: unknown,
   source: MessageEventSource | null,
@@ -182,8 +255,20 @@ async function sendMessage(
         source,
       })
     );
-    await Promise.resolve();
+    await flushMicrotasks();
   });
+}
+
+/** Every dispatch ack the parent posted, in order (#1788). */
+function dispatchAcks(postMessage: jest.Mock): string[] {
+  const calls = postMessage.mock.calls as Array<[message: unknown, origin: unknown]>;
+  return calls.flatMap(([message]) =>
+    typeof message === "object" &&
+    message !== null &&
+    (message as { type?: unknown }).type === "atrium-artifact-data-ack"
+      ? [String((message as { requestId?: unknown }).requestId)]
+      : []
+  );
 }
 
 function submitRequest(requestId: string): Record<string, unknown> {
@@ -197,6 +282,8 @@ function submitRequest(requestId: string): Record<string, unknown> {
 }
 
 beforeEach(() => {
+  fetchMock.mockReset().mockImplementation(routeStub);
+  (globalThis as { fetch: unknown }).fetch = fetchMock;
   submitArtifactRecordMock.mockReset().mockResolvedValue({
     isSuccess: true,
     message: "Artifact record submitted",
@@ -580,7 +667,18 @@ describe("ArtifactSandbox artifact data bridge failure controls", () => {
     );
   });
 
-  it("bounds in-flight action work per frame", async () => {
+  /**
+   * #1788: the old hard cap of 8 REJECTED the 9th concurrent call. Excess work
+   * now queues behind a concurrency limit of 6 and every request is answered —
+   * a dashboard with more panels than the limit is not a failure case.
+   */
+  it("queues record ops ONE AT A TIME instead of rejecting, and answers all", async () => {
+    // Record ops still travel over Server Actions, which the App Router
+    // dispatches one at a time. Acking six of them would restart the frame's
+    // 10s clock on five requests still sitting in Next's action queue — a later
+    // `submit` would time out in the frame, write anyway, and the author's
+    // retry would create a DUPLICATE record. So the parent runs exactly one,
+    // and "dispatched" means "started".
     const { frameWindow, postMessage } = mountSandbox(true);
     type SubmitSuccess = {
       isSuccess: true;
@@ -605,36 +703,273 @@ describe("ArtifactSandbox artifact data bridge failure controls", () => {
           })
         );
       }
+      await flushMicrotasks();
     });
 
-    expect(submitArtifactRecordMock).toHaveBeenCalledTimes(8);
-    expect(dataResponses(postMessage)).toContainEqual({
-      message: {
-        type: "atrium-artifact-data-response",
-        requestId: REQUEST_IDS[8],
-        ok: false,
-        ...TOO_MANY_REQUESTS_FAILURE,
-      },
-      targetOrigin: "*",
-    });
+    // One dispatched, eight waiting — and NOTHING refused.
+    expect(submitArtifactRecordMock).toHaveBeenCalledTimes(1);
+    expect(dispatchAcks(postMessage)).toEqual([REQUEST_IDS[0]]);
+    expect(dataResponses(postMessage)).toEqual([]);
+
+    const drain = async (): Promise<void> => {
+      await act(async () => {
+        const batch = resolvers.splice(0, resolvers.length);
+        for (const [index, resolve] of batch.entries()) {
+          resolve({
+            isSuccess: true,
+            message: "ok",
+            data: {
+              id: `record-${index}`,
+              createdAt: "2026-08-02T00:00:00.000Z",
+            },
+          });
+        }
+        await flushMicrotasks();
+      });
+    };
+    // Each completion pulls exactly one more through, in FIFO order.
+    for (let dispatched = 2; dispatched <= REQUEST_IDS.length; dispatched += 1) {
+      await drain();
+      expect(submitArtifactRecordMock).toHaveBeenCalledTimes(dispatched);
+      expect(dispatchAcks(postMessage)).toEqual(
+        REQUEST_IDS.slice(0, dispatched)
+      );
+    }
+    await drain();
+    await waitFor(() => expect(dataResponses(postMessage)).toHaveLength(9));
+    expect(
+      dataResponses(postMessage).every(({ message }) => message.ok === true)
+    ).toBe(true);
+    expect(dispatchAcks(postMessage)).toEqual([...REQUEST_IDS]);
+  });
+
+});
+
+/** The one case that IS still refused: a full queue (#1788). */
+describe("ArtifactSandbox bounded request queue (#1788)", () => {
+  it("refuses only once the bounded queue is FULL", async () => {
+    // 6 in flight + 26 queued = 32, which is EXACTLY the sandbox host's own
+    // MAX_PENDING_DATA_REQUESTS. The two layers count different things (the
+    // host counts every open promise, the parent only what waits behind the
+    // active slots), so the totals have to be reconciled deliberately — a
+    // 32-deep queue here would advertise 38 slots the frame would never fill.
+    // The 33rd request is the first refusal, on both sides.
+    const ids = Array.from({ length: 33 }, (_, index) =>
+      `00000000-0000-4000-8000-0000000001${String(index).padStart(2, "0")}`
+    );
+    const { frameWindow, postMessage } = mountQuerySandbox();
+    fetchMock.mockImplementation(() => new Promise(() => {}));
 
     await act(async () => {
-      let index = 0;
-      for (const resolve of resolvers) {
-        resolve({
-          isSuccess: true,
-          message: "ok",
-          data: {
-            id: `record-${index}`,
-            createdAt: "2026-08-02T00:00:00.000Z",
-          },
-        });
-        index += 1;
+      for (const requestId of ids) {
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            data: queryRequest(requestId, "SELECT 1"),
+            origin: "null",
+            source: frameWindow,
+          })
+        );
       }
-      await Promise.resolve();
+      await flushMicrotasks();
     });
-    await waitFor(() => expect(dataResponses(postMessage)).toHaveLength(9));
+
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(dataResponses(postMessage)).toEqual([
+      {
+        message: {
+          type: "atrium-artifact-data-response",
+          requestId: ids[32],
+          ok: false,
+          ...TOO_MANY_REQUESTS_FAILURE,
+        },
+        targetOrigin: "*",
+      },
+    ]);
   });
+
+  it("does not ack a record op until its action transport is loaded", async () => {
+    // The record path lazily imports its Server Action chunk. The ack restarts
+    // the frame's 10s post-dispatch clock, so acking BEFORE that import settles
+    // would let a slow chunk land after the frame had already rejected the
+    // artifact's promise — `submitArtifactRecord` would then run, the write
+    // would commit, and the author's retry would duplicate the record.
+    //
+    // The ack is therefore behind an await. Dispatching without flushing
+    // microtasks must produce NO ack; it appears only once the transport is
+    // ready. This pins the ordering: moving the ack back ahead of the await
+    // (where it used to be) fails here.
+    const { frameWindow, postMessage } = mountSandbox(true);
+    submitArtifactRecordMock.mockImplementation(() => new Promise(() => {}));
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: submitRequest(REQUEST_IDS[0]),
+        origin: "null",
+        source: frameWindow,
+      })
+    );
+
+    expect(dispatchAcks(postMessage)).toEqual([]);
+    expect(submitArtifactRecordMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(dispatchAcks(postMessage)).toEqual([REQUEST_IDS[0]]);
+    expect(submitArtifactRecordMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("never DISPATCHES a queued write that has already waited too long", async () => {
+    // The frame gives up on a request it has been holding and deletes its
+    // pending entry. If the parent still dispatched afterwards, a `submit`
+    // would COMMIT after the artifact was told it timed out — and the author's
+    // retry would create a duplicate record. The parent's queue deadline is
+    // deliberately shorter than the frame's, so it always abandons first.
+    const { frameWindow, postMessage } = mountSandbox(true);
+    let release: (() => void) | undefined;
+    submitArtifactRecordMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({
+              isSuccess: true,
+              message: "ok",
+              data: { id: "r1", createdAt: "2026-09-24T00:00:00.000Z" },
+            });
+        })
+    );
+    const nowSpy = jest.spyOn(Date, "now");
+    nowSpy.mockReturnValue(0);
+
+    // Two submits: the first occupies the single record slot, the second waits.
+    await act(async () => {
+      for (const requestId of REQUEST_IDS.slice(0, 2)) {
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            data: submitRequest(requestId),
+            origin: "null",
+            source: frameWindow,
+          })
+        );
+      }
+      await flushMicrotasks();
+    });
+    expect(submitArtifactRecordMock).toHaveBeenCalledTimes(1);
+
+    // The queued one has now waited past the parent's deadline.
+    nowSpy.mockReturnValue(300_000);
+    await act(async () => {
+      release?.();
+      await flushMicrotasks();
+    });
+
+    // The expired write was never sent to the action...
+    expect(submitArtifactRecordMock).toHaveBeenCalledTimes(1);
+    // ...and the artifact was told, with the honest code.
+    const expired = dataResponses(postMessage).find(
+      ({ message }) => message.requestId === REQUEST_IDS[1]
+    );
+    expect(expired?.message).toMatchObject({ ok: false, code: "timeout" });
+    expect(dispatchAcks(postMessage)).toEqual([REQUEST_IDS[0]]);
+    nowSpy.mockRestore();
+  });
+
+  it("gives the RECORDS lane the same total capacity, not a smaller one", async () => {
+    // Records run 1 at a time, so a cap expressed as a QUEUE DEPTH sized
+    // against the query lane's concurrency (32 - 6 = 26) would let a
+    // records-mode mount hold only 1 + 26 = 27 and refuse the 28th — while the
+    // frame is still willing to hold 32. The parent caps TOTAL outstanding
+    // instead, so both lanes reach 32 and refuse exactly the request the frame
+    // would.
+    const ids = Array.from({ length: 33 }, (_, index) =>
+      `00000000-0000-4000-8000-0000000002${String(index).padStart(2, "0")}`
+    );
+    const { frameWindow, postMessage } = mountSandbox(true);
+    submitArtifactRecordMock.mockImplementation(() => new Promise(() => {}));
+
+    await act(async () => {
+      for (const requestId of ids) {
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            data: submitRequest(requestId),
+            origin: "null",
+            source: frameWindow,
+          })
+        );
+      }
+      await flushMicrotasks();
+    });
+
+    // One dispatched, 31 queued, and only the 33rd refused.
+    expect(submitArtifactRecordMock).toHaveBeenCalledTimes(1);
+    expect(dataResponses(postMessage)).toEqual([
+      {
+        message: {
+          type: "atrium-artifact-data-response",
+          requestId: ids[32],
+          ok: false,
+          ...TOO_MANY_REQUESTS_FAILURE,
+        },
+        targetOrigin: "*",
+      },
+    ]);
+  });
+});
+
+/** Expiry must not be reachable ONLY through the pump (#1788). */
+describe("ArtifactSandbox expired-queue sweep (#1788)", () => {
+  it("does not WEDGE when the queue is full of expired entries", async () => {
+    // A full queue is refused at admission, before `pump()` runs. If expired
+    // entries were only swept inside the pump, one never-settling request would
+    // wedge the bridge for good: every later request answered
+    // `too_many_requests` behind entries that had long since expired and would
+    // never be swept. The sweep therefore also runs at admission.
+    const ids = Array.from({ length: 34 }, (_, index) =>
+      `00000000-0000-4000-8000-0000000003${String(index).padStart(2, "0")}`
+    );
+    const { frameWindow, postMessage } = mountSandbox(true);
+    // Nothing ever settles: the single record slot stays occupied forever.
+    submitArtifactRecordMock.mockImplementation(() => new Promise(() => {}));
+    const nowSpy = jest.spyOn(Date, "now");
+    nowSpy.mockReturnValue(0);
+
+    // Fill the whole budget: 1 dispatched + 31 queued = 32.
+    await act(async () => {
+      for (const requestId of ids.slice(0, 32)) {
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            data: submitRequest(requestId),
+            origin: "null",
+            source: frameWindow,
+          })
+        );
+      }
+      await flushMicrotasks();
+    });
+    // The 33rd is refused while the queue is genuinely full.
+    await sendMessage(submitRequest(ids[32]), frameWindow);
+    expect(dataResponses(postMessage).at(-1)?.message).toMatchObject({
+      requestId: ids[32],
+      ...TOO_MANY_REQUESTS_FAILURE,
+    });
+
+    // Time passes: every QUEUED entry is now past the parent's deadline.
+    nowSpy.mockReturnValue(300_000);
+    await sendMessage(submitRequest(ids[33]), frameWindow);
+
+    // The expired entries were swept at admission, so this one is ACCEPTED —
+    // not refused behind a queue of dead requests.
+    const last = dataResponses(postMessage).at(-1)?.message;
+    expect(last).not.toMatchObject({ requestId: ids[33], ...TOO_MANY_REQUESTS_FAILURE });
+    // And each swept entry was answered rather than dropped silently.
+    const timedOut = dataResponses(postMessage).filter(
+      ({ message }) => message.code === "timeout"
+    );
+    expect(timedOut).toHaveLength(31);
+    nowSpy.mockRestore();
+  });
+
 });
 
 /**
@@ -883,6 +1218,106 @@ function queryRequest(requestId: string, sql = "SELECT nope") {
 }
 
 /**
+ * #1788 — the query TRANSPORT. `AtriumData.query` used to reach a Server Action,
+ * which the App Router dispatches one at a time; it now POSTs to a route handler
+ * so a dashboard's queries actually overlap.
+ */
+describe("ArtifactSandbox query transport (#1788)", () => {
+  it("POSTs to the artifact query route with the SQL base64-encoded", async () => {
+    const { frameWindow } = mountQuerySandbox("version-9");
+
+    await sendMessage(
+      { ...queryRequest(REQUEST_IDS[0], "SELECT 1"), limit: 10, offset: 5 },
+      frameWindow
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(artifactQueryRoutePath(TRUSTED_CONTENT_ID));
+    expect(init.method).toBe("POST");
+    expect(init.credentials).toBe("same-origin");
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    // Raw SQL in a request body is exactly what the edge WAF's SQLi_BODY rule
+    // blocks — with a bare 403 the app never sees. It travels base64.
+    expect(body.sqlBase64).toBe(Buffer.from("SELECT 1", "utf8").toString("base64"));
+    expect(String(init.body)).not.toContain("SELECT 1");
+    expect(body).toMatchObject({ limit: 10, offset: 5, versionId: "version-9" });
+  });
+
+  it("runs concurrent queries in parallel rather than back to back", async () => {
+    let concurrent = 0;
+    let peak = 0;
+    const release: Array<() => void> = [];
+    fetchMock.mockImplementation(async () => {
+      concurrent += 1;
+      peak = Math.max(peak, concurrent);
+      await new Promise<void>((resolve) => release.push(resolve));
+      concurrent -= 1;
+      return { ok: true, status: 200, json: async () => ({ isSuccess: true, data: {} }) };
+    });
+    const { frameWindow } = mountQuerySandbox();
+
+    await act(async () => {
+      for (const requestId of REQUEST_IDS.slice(0, 6)) {
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            data: queryRequest(requestId, "SELECT 1"),
+            origin: "null",
+            source: frameWindow,
+          })
+        );
+      }
+      await flushMicrotasks();
+    });
+
+    // The whole point of the issue: six queries, six simultaneous requests.
+    expect(peak).toBe(6);
+    await act(async () => {
+      for (const resolve of release) resolve();
+      await flushMicrotasks();
+    });
+  });
+
+  it("derives a typed code from the STATUS when the response carries no body", async () => {
+    // middleware answers a signed-out /api/* request with a plain 401, and a
+    // WAF block is an HTML 403 — neither carries the typed bridge body.
+    fetchMock.mockResolvedValueOnce(bodylessResponse(401));
+    const { frameWindow, postMessage } = mountQuerySandbox();
+
+    await sendMessage(queryRequest(REQUEST_IDS[1], "SELECT 1"), frameWindow);
+
+    expect(dataResponses(postMessage)[0]?.message).toMatchObject({
+      ok: false,
+      code: "unauthenticated",
+    });
+  });
+
+  it("does not trust a 2xx whose body is not the success envelope", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ surprise: true }),
+    });
+    const { frameWindow, postMessage } = mountQuerySandbox();
+
+    await sendMessage(queryRequest(REQUEST_IDS[2], "SELECT 1"), frameWindow);
+
+    expect(dataResponses(postMessage)[0]?.message).toMatchObject({
+      ok: false,
+      ...GENERIC_FAILURE,
+    });
+  });
+
+  it("acks each query at DISPATCH so the frame's clock excludes queue time", async () => {
+    const { frameWindow, postMessage } = mountQuerySandbox();
+
+    await sendMessage(queryRequest(REQUEST_IDS[3], "SELECT 1"), frameWindow);
+
+    expect(dispatchAcks(postMessage)).toEqual([REQUEST_IDS[3]]);
+  });
+});
+
+/**
  * #1787 — the typed failure contract: the frame must be able to tell a broken
  * query from a permissions problem, which one generic string never allowed.
  */
@@ -1064,11 +1499,10 @@ describe("ArtifactSandbox preview diagnostics (#1787)", () => {
     expect(diagnostics).toEqual([]);
   });
 
-  it("reports the in-flight cap as too_many_requests", async () => {
-    const pending: Array<(value: unknown) => void> = [];
-    queryArtifactDataMock.mockImplementation(
-      () => new Promise((resolve) => pending.push(resolve))
-    );
+  it("queues nine concurrent queries without reporting a single refusal", async () => {
+    // #1788: nine queries used to overrun the cap of eight and one was refused
+    // with a code the artifact could do nothing about. They now queue.
+    queryArtifactDataMock.mockImplementation(() => new Promise(() => {}));
     const { frameWindow, diagnostics } = mountQuerySandbox();
 
     await act(async () => {
@@ -1081,13 +1515,10 @@ describe("ArtifactSandbox preview diagnostics (#1787)", () => {
           })
         );
       }
-      await Promise.resolve();
+      await flushMicrotasks();
     });
 
-    // 9 requests against a cap of 8: exactly one is refused up front.
-    expect(diagnostics).toEqual([
-      { kind: "data", code: "too_many_requests", message: TOO_MANY_REQUESTS_FAILURE.error, sql: "SELECT nope" },
-    ]);
+    expect(diagnostics).toEqual([]);
   });
 
   it("drops a failure that resolves after the sandbox unmounted", async () => {

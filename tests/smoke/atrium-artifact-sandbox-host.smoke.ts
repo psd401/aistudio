@@ -176,6 +176,8 @@ function makeHost(
     disableRandomUuid?: boolean;
     postMessageFailures?: number;
     externalScripts?: Record<string, StubScript>;
+    /** Records every setTimeout delay the page requests (#1788). */
+    timeoutDelays?: number[];
     /** Replaces the page's Date.now before the host script captures it. */
     fakeNow?: () => number;
     /** Receives the page's console.error calls instead of the test output. */
@@ -219,12 +221,18 @@ function makeHost(
         }
         parentMessages.push({ origin: targetOrigin, data });
       }) as Window["postMessage"];
-      if (options.timeoutDelayMs !== undefined) {
+      if (options.timeoutDelayMs !== undefined || options.timeoutDelays) {
         const nativeSetTimeout = hostWindow.setTimeout.bind(hostWindow);
+        const recorded = options.timeoutDelays;
         Object.defineProperty(hostWindow, "setTimeout", {
           configurable: true,
-          value: (handler: TimerHandler) =>
-            nativeSetTimeout(handler, options.timeoutDelayMs),
+          value: (handler: TimerHandler, delay?: number) => {
+            if (recorded) recorded.push(delay ?? 0);
+            return nativeSetTimeout(
+              handler,
+              options.timeoutDelayMs ?? delay
+            );
+          },
         });
       }
       if (options.fakeNow) {
@@ -421,6 +429,113 @@ async function testQueryEnvelopeWithoutOptions(): Promise<void> {
     error: "Artifact data request failed",
   });
   await assert.rejects(queryPromise, /Artifact data request failed/);
+}
+
+/**
+ * #1788 — the dispatch ack restarts the query clock.
+ *
+ * The parent now QUEUES requests beyond its concurrency limit instead of
+ * rejecting the excess, so "the page posted" and "the server was asked" are no
+ * longer the same moment. The 45s budget used to start at the post, which is how
+ * the later queries of a wide dashboard timed out having never run. The parent
+ * posts an ack when it actually dispatches, and the host re-arms the SAME budget
+ * from there — at most once, so a repeated ack cannot hold a request open.
+ */
+async function testDispatchAckRestartsQueryClock(): Promise<void> {
+  const timeoutDelays: number[] = [];
+  const { window, parentMessages } = makeHost([APP_ORIGIN], { timeoutDelays });
+  const api = atriumData(window);
+
+  const queryPromise = api.query("SELECT 1");
+  const requestId = parentMessages[0]?.data.requestId;
+  // Before the ack the request may still be sitting in the PARENT's queue, so
+  // the pre-ack budget has to outlast the worst-case queue wait (26 queued
+  // behind 6 concurrent). Arming 45s here would time the tail of a wide
+  // dashboard out un-dispatched -- and the parent would then dispatch it
+  // anyway, burning a rate-limit slot on an answer nobody is waiting for.
+  assert.deepEqual(
+    timeoutDelays,
+    [315000],
+    "query did not arm the queue-tolerant pre-ack budget"
+  );
+
+  postDataResponse(window, {
+    type: "atrium-artifact-data-ack",
+    requestId,
+  });
+  // Dispatched: now the real 45s SERVER budget, which must outlast the server's
+  // own 30s deadline and nothing more.
+  assert.deepEqual(
+    timeoutDelays,
+    [315000, 45000],
+    "the dispatch ack did not restart the clock at the server budget"
+  );
+
+  // A second ack (a retry, a duplicate post) must NOT extend the budget again.
+  postDataResponse(window, {
+    type: "atrium-artifact-data-ack",
+    requestId,
+  });
+  assert.deepEqual(timeoutDelays, [315000, 45000], "a repeated ack re-armed the clock");
+
+  // An ack for something not pending is ignored outright.
+  postDataResponse(window, {
+    type: "atrium-artifact-data-ack",
+    requestId: "00000000-0000-4000-8000-00000000dead",
+  });
+  assert.deepEqual(timeoutDelays, [315000, 45000]);
+
+  // The ack is not an answer: the request is still pending and still resolvable.
+  const rows = { columns: ["n"], rows: [[1]] };
+  postDataResponse(window, {
+    type: "atrium-artifact-data-response",
+    requestId,
+    ok: true,
+    data: rows,
+  });
+  assert.deepEqual(await queryPromise, rows);
+}
+
+/**
+ * A RECORD op gets the queue-tolerant pre-ack budget too, then drops to its own
+ * 10s once dispatched (#1788).
+ *
+ * The parent's FIFO accepts submit/list as well as queries. At a bare 10s a
+ * queued `submit` would reject locally and be deleted from the pending map,
+ * while the parent went on to dispatch it anyway -- the write lands AFTER the
+ * artifact was told it failed, so the author's retry silently writes a
+ * DUPLICATE record. The pre-ack budget is what makes that unreachable.
+ */
+async function testDispatchAckRestartsRecordClock(): Promise<void> {
+  const timeoutDelays: number[] = [];
+  const { window, parentMessages } = makeHost([APP_ORIGIN], { timeoutDelays });
+
+  const submitPromise = atriumData(window).submit("signups", { name: "a" });
+  const requestId = parentMessages[0]?.data.requestId;
+  assert.deepEqual(
+    timeoutDelays,
+    [315000],
+    "a record op did not arm the queue-tolerant pre-ack budget"
+  );
+
+  postDataResponse(window, {
+    type: "atrium-artifact-data-ack",
+    requestId,
+  });
+  assert.deepEqual(
+    timeoutDelays,
+    [315000, 10000],
+    "the ack did not drop a record op to its own 10s budget"
+  );
+
+  const record = { id: "r1", createdAt: "2026-09-24T00:00:00.000Z" };
+  postDataResponse(window, {
+    type: "atrium-artifact-data-response",
+    requestId,
+    ok: true,
+    data: record,
+  });
+  assert.deepEqual(await submitPromise, record);
 }
 
 async function testParentSourceFilter(): Promise<void> {
@@ -1191,6 +1306,59 @@ async function testDuplicateRenderIsAckedNotRerun(): Promise<void> {
   assert.deepEqual(artifactLog(window), ["library ran", "inline ran"]);
 }
 
+/** The AtriumData bridge checks, split out to keep `main` readable. */
+async function runBridgeChecks(): Promise<void> {
+  await check(
+    "installs AtriumData before artifact scripts execute",
+    testAtriumDataReadyBeforeArtifact
+  );
+  await check(
+    "submit and list use UUID-correlated bridge envelopes",
+    testBridgeEnvelopes
+  );
+  await check(
+    "restarts the query clock on the parent's dispatch ack, once",
+    testDispatchAckRestartsQueryClock
+  );
+  await check(
+    "gives a queued record op the pre-ack budget, then its own 10s",
+    testDispatchAckRestartsRecordClock
+  );
+  await check(
+    "ignores data responses not sent by window.parent",
+    testParentSourceFilter
+  );
+  await check(
+    "rejects a disabled-bridge response with a catchable error",
+    testDisabledBridgeResponse
+  );
+  await check(
+    "rejects and cleans up when no response arrives before timeout",
+    testDataRequestTimeout
+  );
+  await check(
+    "reports a frame-side query timeout to the parent as a data diagnostic",
+    testLocalTimeoutIsReportedToParent
+  );
+  await check("sends a query envelope with only sql/limit/offset", testQueryEnvelope);
+  await check(
+    "omits absent query options and surfaces a rejection",
+    testQueryEnvelopeWithoutOptions
+  );
+  await check(
+    "keeps rendering when UUID generation is unavailable",
+    testMissingRandomUuidDoesNotBreakRendering
+  );
+  await check(
+    "cleans up after a synchronous parent post failure",
+    testPostMessageFailureCleanup
+  );
+  await check(
+    "bounds pending calls and releases capacity after cleanup",
+    testPendingRequestBound
+  );
+}
+
 async function main(): Promise<void> {
   await check("renders artifact markup for an allowlisted parent origin", () => {
     const { window, acks } = makeHost([APP_ORIGIN]);
@@ -1236,47 +1404,7 @@ async function main(): Promise<void> {
     );
   });
 
-  await check(
-    "installs AtriumData before artifact scripts execute",
-    testAtriumDataReadyBeforeArtifact
-  );
-  await check(
-    "submit and list use UUID-correlated bridge envelopes",
-    testBridgeEnvelopes
-  );
-  await check(
-    "ignores data responses not sent by window.parent",
-    testParentSourceFilter
-  );
-  await check(
-    "rejects a disabled-bridge response with a catchable error",
-    testDisabledBridgeResponse
-  );
-  await check(
-    "rejects and cleans up when no response arrives before timeout",
-    testDataRequestTimeout
-  );
-  await check(
-    "reports a frame-side query timeout to the parent as a data diagnostic",
-    testLocalTimeoutIsReportedToParent
-  );
-  await check("sends a query envelope with only sql/limit/offset", testQueryEnvelope);
-  await check(
-    "omits absent query options and surfaces a rejection",
-    testQueryEnvelopeWithoutOptions
-  );
-  await check(
-    "keeps rendering when UUID generation is unavailable",
-    testMissingRandomUuidDoesNotBreakRendering
-  );
-  await check(
-    "cleans up after a synchronous parent post failure",
-    testPostMessageFailureCleanup
-  );
-  await check(
-    "bounds pending calls and releases capacity after cleanup",
-    testPendingRequestBound
-  );
+  await runBridgeChecks();
 
   await check(
     "#1787 a rejected query carries the typed err.code and its message",

@@ -354,6 +354,131 @@ function EmptyDraftPanel({ canEdit }: { canEdit: boolean }): React.JSX.Element {
 type CanvasBridge = { contentId: string; dataAccess: ContentDataAccess } | null;
 
 /**
+ * The key the preview sandbox is mounted under — changing it REMOUNTS the frame
+ * and re-runs the artifact from scratch.
+ *
+ * One function, used both where the frame is rendered and where CanvasBody
+ * decides whether a hidden frame may stay mounted (#1788). Those two must agree
+ * exactly: if the decision watched a narrower key than the mount does, a change
+ * to the unwatched part (`contentId`, `dataAccess`) would remount the sandbox
+ * underneath `display: none`, which is the zero-layout case the latch exists to
+ * prevent.
+ */
+function previewMountKey(bridge: CanvasBridge, versionKey: string): string {
+  return bridge
+    ? `${bridge.contentId}:${bridge.dataAccess}:${versionKey}`
+    : versionKey;
+}
+
+/**
+ * The canvas body: the error/loading/empty states and the preview+code pair.
+ *
+ * Split out of `ArtifactCanvas` purely so each function stays readable; it holds
+ * no state of its own and every value is passed in.
+ */
+function CanvasBody({
+  state,
+  message,
+  tab,
+  code,
+  bodyFormat,
+  canEdit,
+  selectedVersionId,
+  sandboxSrc,
+  bridge,
+  onSave,
+  keepPreviewMounted,
+}: {
+  state: LoadState;
+  message: string | null;
+  tab: Tab;
+  code: string;
+  bodyFormat: BodyFormat;
+  canEdit: boolean;
+  selectedVersionId: string | null;
+  sandboxSrc: string | null;
+  bridge: CanvasBridge;
+  onSave: (next: string) => Promise<void>;
+  /**
+   * Whether the preview frame should be in the tree at all: true on the Preview
+   * tab, and behind the Code tab only for a frame that already mounted VISIBLY.
+   * See the `display: none` block below for why that distinction matters.
+   */
+  keepPreviewMounted: boolean;
+}): React.JSX.Element {
+  if (state === "error") {
+    return (
+      <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+        {message ?? "Could not load this artifact."}
+      </div>
+    );
+  }
+  if (state === "loading") {
+    // While loading, `code` is still "" and `selectedVersionId` is null.
+    // Rendering <ArtifactSandbox> here would mount an iframe with empty code
+    // and key="" — if its onLoad races ahead of loadCode it posts an empty
+    // render, clearing the sandbox host's placeholder to a blank frame before
+    // the real key/code arrives. A stable-height placeholder avoids that
+    // empty-code mount and prevents layout shift when the real body lands.
+    // minHeight 75vh matches the loaded preview (.atrium-artifact-preview) so
+    // the canvas does not jump when the artifact body arrives.
+    return <div style={{ minHeight: "75vh" }} aria-busy="true" />;
+  }
+
+  const editor = (
+    <CodeEditor
+      value={code}
+      bodyFormat={bodyFormat}
+      editable={canEdit}
+      onSave={canEdit ? onSave : undefined}
+    />
+  );
+  if (isEmptyDraft(selectedVersionId, code)) {
+    return tab === "preview" ? <EmptyDraftPanel canEdit={canEdit} /> : editor;
+  }
+
+  /*
+    #1788: the preview frame stays MOUNTED while the Code tab is open, hidden
+    with `display: none` rather than unmounted. Toggling the tab used to tear
+    the iframe down and rebuild it, which re-ran every `AtriumData.query` the
+    artifact makes — an author comparing code and output on an 8-query
+    dashboard could exhaust the 60/min budget in well under a minute and see
+    nothing but a generic failure.
+
+    But a frame is only KEPT this way, never FIRST MOUNTED this way. An element
+    inside `display: none` has no layout box, so artifact code that sizes itself
+    from `clientWidth` / `offsetWidth` (every charting library) would initialize
+    at zero and never re-run — un-hiding the frame does not re-execute its
+    scripts. Saving or switching versions while the Code tab is open changes
+    `versionKey` and would otherwise remount the frame hidden, so an author
+    would flip back to Preview and find a collapsed chart.
+
+    So the frame renders only when the preview is visible, or when the key
+    already mounted while visible matches the current one. A newly keyed frame
+    waits for the Preview tab and mounts with real dimensions — it re-queries
+    once, exactly as it did before this change, which is the unavoidable cost
+    of a version actually changing.
+  */
+  return (
+    <>
+      {keepPreviewMounted ? (
+        <div style={tab === "preview" ? undefined : { display: "none" }}>
+          {/* See ArtifactPreviewFrame for the version-remount and data-bridge
+              (#1725) contracts this one element carries. */}
+          <ArtifactPreviewFrame
+            code={code}
+            sandboxSrc={sandboxSrc}
+            versionKey={selectedVersionId ?? ""}
+            bridge={bridge}
+          />
+        </div>
+      ) : null}
+      {tab === "preview" ? null : editor}
+    </>
+  );
+}
+
+/**
  * Narrow the props union ONCE, here: destructuring `contentId`/`dataAccess`
  * alongside the base props inside the component would lose the correlation
  * TypeScript needs to prove the two are present together, so the bridge is read
@@ -414,7 +539,7 @@ function ArtifactPreviewFrame({
   if (!bridge) {
     return (
       <ArtifactSandbox
-        key={versionKey}
+        key={previewMountKey(null, versionKey)}
         code={code}
         src={sandboxSrc}
         className="atrium-artifact-preview"
@@ -423,7 +548,7 @@ function ArtifactPreviewFrame({
   }
   return (
     <ArtifactSandbox
-      key={`${bridge.contentId}:${bridge.dataAccess}:${versionKey}`}
+      key={previewMountKey(bridge, versionKey)}
       code={code}
       src={sandboxSrc}
       className="atrium-artifact-preview"
@@ -551,9 +676,62 @@ function usePreviewDiagnostics(
   );
 }
 
+/**
+ * The Preview/Code tab, plus the latch deciding whether a hidden preview frame
+ * may stay mounted (#1788).
+ *
+ * `previewMountedKey` is the version key that was ON SCREEN when the author
+ * last left the Preview tab, or null if no frame was showing.
+ *
+ * Keeping that frame alive behind the Code tab is the whole point of not
+ * unmounting it: toggling tabs used to tear the iframe down and rebuild it,
+ * re-running every `AtriumData.query` the artifact makes. Mounting a NEW frame
+ * there is a different thing entirely — an element inside `display: none` has
+ * no layout box, so artifact code that sizes itself from `clientWidth` (every
+ * charting library) initializes at zero, and un-hiding it later does not re-run
+ * its scripts. A frame is therefore kept, never first created, while hidden.
+ *
+ * The latch is written in the tab handler rather than during render or in an
+ * effect: the moment a visible frame becomes hidden IS a tab change, and that
+ * is the one place this can be recorded without reading a ref during render or
+ * calling setState from an effect.
+ */
+function usePreviewTab(
+  state: LoadState,
+  /**
+   * The COMPOSITE key `ArtifactPreviewFrame` actually keys its sandbox on
+   * (`contentId:dataAccess:versionKey`), not just the version. Latching only
+   * the version portion would miss a `contentId` or `dataAccess` change, which
+   * remounts the sandbox just as surely — and would do it under `display: none`.
+   */
+  previewMountKey: string
+): { tab: Tab; handleTab: (next: Tab) => void; keepPreviewMounted: boolean } {
+  const [tab, setTab] = useState<Tab>("preview");
+  const [previewMountedKey, setPreviewMountedKey] = useState<string | null>(null);
+
+  const handleTab = useCallback(
+    (next: Tab) => {
+      // `state === "ready"` matters: while loading, CanvasBody renders a
+      // placeholder instead of the frame, so latching a key there would claim a
+      // mount that never happened. Leaving FOR Preview clears the latch — that
+      // tab renders the frame itself, and a stale key must not outlive a visit.
+      setPreviewMountedKey(next === "code" && state === "ready" ? previewMountKey : null);
+      setTab(next);
+    },
+    [state, previewMountKey]
+  );
+
+  // If anything the sandbox is keyed on changes while the Code tab is open, the
+  // latched key stops matching and the frame is dropped rather than silently
+  // rebuilt with no layout — it remounts, visible and correctly sized, on the
+  // way back to Preview.
+  const keepPreviewMounted = tab === "preview" || previewMountedKey === previewMountKey;
+
+  return { tab, handleTab, keepPreviewMounted };
+}
+
 export function ArtifactCanvas(props: ArtifactCanvasProps) {
   const { idOrSlug, canEdit = false, sandboxSrc = null } = props;
-  const [tab, setTab] = useState<Tab>("preview");
   const [state, setState] = useState<LoadState>("loading");
   const [message, setMessage] = useState<string | null>(null);
 
@@ -566,6 +744,7 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
   // from `message`, which belongs to the load-error state machine).
   const [restoring, setRestoring] = useState(false);
   const [restoreNotice, setRestoreNotice] = useState<string | null>(null);
+
   // The resolved stable object UUID (idOrSlug may be a slug); save targets this.
   const objectIdRef = useRef<string | null>(null);
 
@@ -674,6 +853,12 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
   }, [refreshVersions, loadCode]);
 
   const bridge = useCanvasBridgePin(props, refreshVersions, loadCode);
+
+  const { tab, handleTab, keepPreviewMounted } = usePreviewTab(
+    state,
+    previewMountKey(bridge, selectedVersionId ?? "")
+  );
+
   const handleSelectVersion = useCallback(
     (versionId: string) =>
       performSelectVersion({ versionId, loadCode, setState, setMessage, setRestoreNotice }),
@@ -744,7 +929,7 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
     <div className="atrium-artifact-canvas flex flex-col gap-2">
       <CanvasToolbar
         tab={tab}
-        onTab={setTab}
+        onTab={handleTab}
         versions={versions}
         selectedVersionId={selectedVersionId}
         onSelectVersion={handleSelectVersion}
@@ -756,35 +941,19 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
         notice={restoreNotice}
       />
 
-      {/* Canvas body */}
-      {state === "error" ? (
-        <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-          {message ?? "Could not load this artifact."}
-        </div>
-      ) : state === "loading" ? (
-        // While loading, `code` is still "" and `selectedVersionId` is null.
-        // Rendering <ArtifactSandbox> here would mount an iframe with empty code
-        // and key="" — if its onLoad races ahead of loadCode it posts an empty
-        // render, clearing the sandbox host's placeholder to a blank frame before
-        // the real key/code arrives. A stable-height placeholder avoids that
-        // empty-code mount and prevents layout shift when the real body lands.
-        // minHeight 75vh matches the loaded preview (.atrium-artifact-preview) so
-        // the canvas does not jump when the artifact body arrives.
-        <div style={{ minHeight: "75vh" }} aria-busy="true" />
-      ) : isEmptyDraft(selectedVersionId, code) && tab === "preview" ? (
-        <EmptyDraftPanel canEdit={canEdit} />
-      ) : tab === "preview" ? (
-        // See ArtifactPreviewFrame for the version-remount and data-bridge
-        // (#1725) contracts this one element carries.
-        <ArtifactPreviewFrame code={code} sandboxSrc={sandboxSrc} versionKey={selectedVersionId ?? ""} bridge={bridge} />
-      ) : (
-        <CodeEditor
-          value={code}
-          bodyFormat={bodyFormat}
-          editable={canEdit}
-          onSave={canEdit ? handleSave : undefined}
-        />
-      )}
+      <CanvasBody
+        state={state}
+        message={message}
+        tab={tab}
+        code={code}
+        bodyFormat={bodyFormat}
+        canEdit={canEdit}
+        selectedVersionId={selectedVersionId}
+        sandboxSrc={sandboxSrc}
+        bridge={bridge}
+        onSave={handleSave}
+        keepPreviewMounted={keepPreviewMounted}
+      />
 
       <CanvasHint />
     </div>

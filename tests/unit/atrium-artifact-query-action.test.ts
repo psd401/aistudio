@@ -465,12 +465,14 @@ describe("queryArtifactData upstream failures", () => {
  * #1787 — every failure carries a typed `code`, and the data MCP's own text is
  * kept (logged always, forwarded only to someone who can edit the artifact).
  */
+/** Narrow an outcome to its failure arm, shared by the failure suites. */
+function failureOf(result: Awaited<ReturnType<typeof queryArtifactData>>) {
+  if (result.isSuccess) throw new Error("expected a failure");
+  return result;
+}
+
 describe("queryArtifactData typed failure codes (#1787)", () => {
   /** Narrow the outcome to its failure arm so `code` is readable. */
-  function failureOf(result: Awaited<ReturnType<typeof queryArtifactData>>) {
-    if (result.isSuccess) throw new Error("expected a failure");
-    return result;
-  }
 
   it("classifies a missing session as unauthenticated", async () => {
     mockGetServerSession.mockResolvedValueOnce(null);
@@ -539,7 +541,169 @@ describe("queryArtifactData typed failure codes (#1787)", () => {
     });
     expect(failureOf(await queryArtifactData(validInput)).code).toBe("unavailable");
   });
+});
 
+/**
+ * #1788: the 30s budget used to start at `execute()`, so a slow connector
+ * handshake was FREE — the real server-side worst case ran past the sandbox
+ * host's 45s clock, and the page gave up on a query that was still running. The
+ * budget now spans `getConnectorTools` too, so the server always loses the race.
+ */
+describe("queryArtifactData overall deadline (#1788)", () => {
+  it("times out a handshake that never settles, and closes a late connector", async () => {
+    jest.useFakeTimers();
+    let settleConnector: (value: unknown) => void = () => undefined;
+    mockGetConnectorTools.mockImplementationOnce(
+      () => new Promise((resolve) => (settleConnector = resolve))
+    );
+
+    const pending = queryArtifactData(validInput);
+    await jest.advanceTimersByTimeAsync(31_000);
+    const result = await pending;
+
+    expect(failureOf(result).code).toBe("timeout");
+    expect(mockExecute).not.toHaveBeenCalled();
+
+    // A connector that arrives after the caller gave up must not be leaked.
+    settleConnector({
+      serverId: CONNECTOR_ID,
+      serverName: "psd-data",
+      tools: { query_data: { execute: mockExecute } },
+      close: mockClose,
+    });
+    await jest.advanceTimersByTimeAsync(0);
+    expect(mockClose).toHaveBeenCalled();
+    jest.useRealTimers();
+  });
+
+  it("gives the tool call the REMAINING budget, not a fresh one", async () => {
+    jest.useFakeTimers();
+    let capturedSignal: AbortSignal | undefined;
+    mockGetConnectorTools.mockImplementationOnce(async () => {
+      // A handshake that eats 20s of the 30s budget.
+      await jest.advanceTimersByTimeAsync(20_000);
+      return {
+        serverId: CONNECTOR_ID,
+        serverName: "psd-data",
+        tools: { query_data: { execute: mockExecute } },
+        close: mockClose,
+      };
+    });
+    mockExecute.mockImplementationOnce(
+      async (_args: unknown, options: { abortSignal: AbortSignal }) => {
+        capturedSignal = options.abortSignal;
+        await jest.advanceTimersByTimeAsync(11_000);
+        throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      }
+    );
+
+    const result = await queryArtifactData(validInput);
+
+    expect(failureOf(result).code).toBe("timeout");
+    expect(capturedSignal?.aborted).toBe(true);
+    jest.useRealTimers();
+  });
+
+  it("counts PREFLIGHT against the budget, not just the connector work", async () => {
+    // The budget has to cover session resolution, the visibility check, the
+    // version lookup and the connector config read as well. Arming it only
+    // around the connector work left the same hole in a smaller form: a slow
+    // preflight plus a full-length execution still runs past the sandbox host's
+    // 45s clock, so the host discards the answer to a query that is still
+    // running and the page retries it.
+    jest.useFakeTimers();
+    mockContentGet.mockImplementationOnce(async () => {
+      // A preflight that eats the whole budget before any connector work.
+      await jest.advanceTimersByTimeAsync(31_000);
+      return { ...CONTENT };
+    });
+
+    const result = await queryArtifactData(validInput);
+
+    expect(failureOf(result).code).toBe("timeout");
+    // The deadline had already expired, so no connector was ever opened.
+    expect(mockGetConnectorTools).not.toHaveBeenCalled();
+    expect(mockExecute).not.toHaveBeenCalled();
+    jest.useRealTimers();
+  });
+
+  it("does not start LATER preflight stages once the budget is gone", async () => {
+    // The race bounds what the caller waits for, but none of these calls is
+    // cancellable — so a stage that has already begun still finishes. Without a
+    // check between stages the closure would carry on and run the version and
+    // connector-config lookups for a request whose caller already got
+    // `timeout`, and under a dependency slowdown every retry would pile more of
+    // that abandoned background work up behind the failures.
+    jest.useFakeTimers();
+    mockContentGet.mockImplementationOnce(async () => {
+      // Resolves, but only after the whole budget has gone.
+      await jest.advanceTimersByTimeAsync(31_000);
+      return { ...CONTENT };
+    });
+
+    const result = await queryArtifactData(validInput);
+    expect(failureOf(result).code).toBe("timeout");
+
+    // The caller is already answered, but the closure is not cancellable — so
+    // let every continuation it could still run actually run before asserting.
+    // Without this the assertions pass trivially, having simply outrun the
+    // background work they are meant to forbid.
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    // The stages AFTER the slow one never ran.
+    expect(mockVersionGetById).not.toHaveBeenCalled();
+    expect(mockResolveConnectorId).not.toHaveBeenCalled();
+    expect(mockGetConnectorTools).not.toHaveBeenCalled();
+    expect(mockExecute).not.toHaveBeenCalled();
+    jest.useRealTimers();
+  });
+
+  it("stops between the connector helper's OWN two stages", async () => {
+    // `requirePsdDataConnectorId` reads the router config and THEN looks the
+    // connector up. Checking only before entering it leaves a gap: a config
+    // read that starts inside the budget and finishes outside it would go on
+    // to start a fresh database query for a caller already answered `timeout`.
+    jest.useFakeTimers();
+    mockGetNexusRouterConfig.mockImplementationOnce(async () => {
+      await jest.advanceTimersByTimeAsync(31_000);
+      return {
+        config: { specialists: { psdDataConnectorName: "psd-data" } },
+        mode: "active",
+      };
+    });
+
+    const result = await queryArtifactData(validInput);
+    expect(failureOf(result).code).toBe("timeout");
+
+    // Let any continuation the closure could still run actually run.
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    expect(mockResolveConnectorId).not.toHaveBeenCalled();
+    expect(mockGetConnectorTools).not.toHaveBeenCalled();
+    jest.useRealTimers();
+  });
+
+  it("bounds a preflight that NEVER settles, not just a slow one", async () => {
+    // Arming the clock is not enough on its own: none of the preflight calls
+    // takes an AbortSignal, so without racing them a single hung dependency (a
+    // wedged DB pool, a stalled connector-config read) would leave this action
+    // pending forever — long after the frame discarded the request, while the
+    // page retried it.
+    jest.useFakeTimers();
+    mockContentGet.mockImplementationOnce(() => new Promise(() => {}));
+
+    const pending = queryArtifactData(validInput);
+    await jest.advanceTimersByTimeAsync(31_000);
+    const result = await pending;
+
+    expect(failureOf(result).code).toBe("timeout");
+    expect(mockGetConnectorTools).not.toHaveBeenCalled();
+    expect(mockExecute).not.toHaveBeenCalled();
+    jest.useRealTimers();
+  });
+});
+
+describe("queryArtifactData disclosure gate (#1787)", () => {
   it("gives an EDITOR the database's own message for a query_error", async () => {
     mockCanEdit.mockReturnValue(true);
     mockExecute.mockResolvedValueOnce({
