@@ -356,7 +356,7 @@ function definePublishServicePublishSuite1Part1() {
     // Level, gated by visibilityService.setLevel. Gating the live switch gated
     // the STATE rather than the exposure, which is what made the old widen
     // prompt both wrong and bypassable.
-    txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
+    txResults = [[{ id: "o1", slug: "s1" }], [{ id: "pub1" }]];
     await expect(
       publishService.publish(owner, "o1", { destination: "intranet" })
     ).resolves.toMatchObject({ publicationId: "pub1" });
@@ -372,7 +372,7 @@ function definePublishServicePublishSuite1Part1() {
   });
 
   it("`public_web` is a legacy alias: it publishes the ONE live intranet row", async () => {
-    txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
+    txResults = [[{ id: "o1", slug: "s1" }], [{ id: "pub1" }]];
     const result = await publishService.publish(owner, "o1", {
       destination: "public_web",
     });
@@ -385,7 +385,7 @@ function definePublishServicePublishSuite1Part1() {
 
   it("NEVER writes visibility, whatever the caller or the locked level (#1726)", async () => {
     txResults = [
-      [{ id: "o1", visibilityLevel: "group" }],
+      [{ id: "o1", slug: "s1", visibilityLevel: "group" }],
       [{ id: "pub1" }],
     ];
     await publishService.publish(owner, "o1", { destination: "intranet" });
@@ -426,7 +426,7 @@ function definePublishServicePublishSuite1Part2() {it("GATES the live switch on 
     // caller holding only `content:publish_internal` finish an exposure it could
     // never have started — widening TO `public` is gated in `setLevel`.
     txResults = [
-      [{ id: "o1", visibilityLevel: "public" }], // FOR UPDATE lock
+      [{ id: "o1", slug: "s1", visibilityLevel: "public" }], // FOR UPDATE lock
     ];
     await expect(
       publishService.publish(owner, "o1", { destination: "intranet" })
@@ -440,7 +440,7 @@ function definePublishServicePublishSuite1Part2() {it("GATES the live switch on 
     // The gate is about the anonymous surface, not about publishing. A `group`
     // object going Live changes nothing about who may read it.
     txResults = [
-      [{ id: "o1", visibilityLevel: "group" }],
+      [{ id: "o1", slug: "s1", visibilityLevel: "group" }],
       [{ id: "pub1" }],
     ];
     await expect(
@@ -457,7 +457,7 @@ function definePublishServicePublishSuite1Part2() {it("GATES the live switch on 
     // object IS served at /p/{slug}, and handing back /c/{slug} would give an API
     // caller a sign-in-required link for a page the world can open.
     txResults = [
-      [{ id: "o1", visibilityLevel: "public" }], // FOR UPDATE lock
+      [{ id: "o1", slug: "s1", visibilityLevel: "public" }], // FOR UPDATE lock
       [], // no live-surface row yet -> this call is the transition
       [{ id: "pub1" }], // publication upsert RETURNING
     ];
@@ -478,7 +478,7 @@ function definePublishServicePublishSuite1Part2() {it("GATES the live switch on 
     // of a public page would file a fresh "went public" notice, the flooding
     // `becamePublic` avoids on the visibility side.
     txResults = [
-      [{ id: "o1", visibilityLevel: "public" }],
+      [{ id: "o1", slug: "s1", visibilityLevel: "public" }],
       [{ id: "pub-live" }], // already live
       [{ id: "pub1" }],
     ];
@@ -500,7 +500,7 @@ function definePublishServicePublishSuite1Part2() {it("GATES the live switch on 
     // results so that IF the tx wrongly ran, it would not crash for the wrong
     // reason — the assertions below prove it never ran. (public_web is now LIVE, so
     // a stub destination is used to preserve this exact regression guard.)
-    txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
+    txResults = [[{ id: "o1", slug: "s1" }], [{ id: "pub1" }]];
     await expect(
       publishService.publish(admin, "o1", { destination: "schoology" })
     ).rejects.toThrow(ValidationError);
@@ -534,7 +534,7 @@ function definePublishServicePublishSuite1Part2() {it("GATES the live switch on 
     // (implemented: false) blocks BEFORE the transaction — no publication row and
     // no visibility widen is written for a not-yet-wired connector.
     for (const destination of ["schoology", "google"] as const) {
-      txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
+      txResults = [[{ id: "o1", slug: "s1" }], [{ id: "pub1" }]];
       await expect(
         publishService.publish(admin, "o1", { destination })
       ).rejects.toThrow(ValidationError);
@@ -549,7 +549,7 @@ function definePublishServicePublishSuite1Part3() {it("the live switch runs the 
     // The intranet adapter addresses the object by slug and deliberately returns
     // a null external_ref, so no persist-external-ref UPDATE is issued and the
     // reader link is DERIVED from the same slug the adapter published under.
-    txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
+    txResults = [[{ id: "o1", slug: "s1" }], [{ id: "pub1" }]];
     const result = await publishService.publish(admin, "o1", {
       destination: "intranet",
     });
@@ -589,7 +589,7 @@ function definePublishServicePublishSuite1Part3() {it("the live switch runs the 
 
   it("resolves and runs the adapter AFTER the tx on the happy path", async () => {
     // tx queue: FOR UPDATE lock row, then the publication upsert RETURNING id.
-    txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
+    txResults = [[{ id: "o1", slug: "s1" }], [{ id: "pub1" }]];
     const result = await publishService.publish(owner, "o1", {
       destination: "intranet",
     });
@@ -633,7 +633,7 @@ function definePublishServicePublishSuite1Part3() {it("the live switch runs the 
     // An approval replay pins the raise-time version so the admin publishes the
     // REVIEWED content even though the current head is v1. getById validates the
     // pinned version belongs to the object.
-    txResults = [[{ id: "o1" }], [{ id: "pub1" }]];
+    txResults = [[{ id: "o1", slug: "s1" }], [{ id: "pub1" }]];
     const result = await publishService.publish(admin, "o1", {
       destination: "intranet",
       versionId: "v-reviewed",
@@ -668,7 +668,7 @@ function definePublishServicePublishSuite1Part4() {it("throws ValidationError wh
     // The status write is now a plain UPDATE on the locked row. Before #1726 it
     // was folded into `setLevelInTx`'s level UPDATE whenever a visibility was
     // supplied — the same call that replaces the object's grant set.
-    txResults = [[{ id: "o1" }], [{ id: "pub2" }]];
+    txResults = [[{ id: "o1", slug: "s1" }], [{ id: "pub2" }]];
     await publishService.publish(owner, "o1", { destination: "intranet" });
     expect(setLevelInTxCalls).toBe(0);
     expect(txSetPayloads).toContainEqual(
@@ -678,7 +678,7 @@ function definePublishServicePublishSuite1Part4() {it("throws ValidationError wh
 
   it("throws ValidationError when the upsert returns no row", async () => {
     // tx queue: FOR UPDATE lock row (found), then the upsert RETURNING yields [].
-    txResults = [[{ id: "o1" }], []];
+    txResults = [[{ id: "o1", slug: "s1" }], []];
     await expect(
       publishService.publish(owner, "o1", { destination: "intranet" })
     ).rejects.toThrow(ValidationError);
@@ -754,7 +754,7 @@ function definePublishServiceUnpublishSuite2Part1() {
 
   it("marks unpublished and runs the adapter teardown AFTER the tx on the happy path", async () => {
     // tx queue: FOR UPDATE lock row, then a live publication row with externalRef.
-    txResults = [[{ id: "o1" }], [{ id: "pub1", destination: "intranet", externalRef: null }]];
+    txResults = [[{ id: "o1", slug: "s1" }], [{ id: "pub1", destination: "intranet", externalRef: null }]];
     const result = await publishService.unpublish(owner, "o1", "intranet");
     expect(result).toEqual({ unpublished: true, destination: "intranet" });
     expect(adapterUnpublishCalls).toBe(1);
@@ -766,7 +766,7 @@ function definePublishServiceUnpublishSuite2Part1() {
     // (a retry would idempotently no-op at the `status='live'` filter and never
     // reach a prune placed after the teardown).
     adapterUnpublishThrows = true;
-    txResults = [[{ id: "o1" }], [{ id: "pub1", destination: "intranet", externalRef: null }]];
+    txResults = [[{ id: "o1", slug: "s1" }], [{ id: "pub1", destination: "intranet", externalRef: null }]];
     await expect(
       publishService.unpublish(owner, "o1", "intranet")
     ).rejects.toThrow(/nav hide boom/);
@@ -800,7 +800,7 @@ function definePublishServiceUnpublishSuite2Part1() {
     // success while `/c/{slug}` and `/p/{slug}` kept serving the object from the
     // row nothing touched. Both aliases must be in the target set.
     txResults = [
-      [{ id: "o1" }],
+      [{ id: "o1", slug: "s1" }],
       [
         { id: "pub-intranet", destination: "intranet", externalRef: null },
         { id: "pub-legacy", destination: "public_web", externalRef: null },
@@ -828,7 +828,7 @@ function definePublishServiceUnpublishSuite2Part1() {
   }
 
 function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing a connector when the caller has an explicit publish_public capability", async () => {
-    txResults = [[{ id: "o1" }], [{ id: "pub1", destination: "intranet", externalRef: null }]];
+    txResults = [[{ id: "o1", slug: "s1" }], [{ id: "pub1", destination: "intranet", externalRef: null }]];
     const result = await publishService.unpublish(owner, "o1", "google", {
       hasPublishPublicCapability: true,
     });
@@ -855,7 +855,7 @@ function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing a c
     // tx queue: FOR UPDATE lock, the live public_web row being torn down, then the
     // "any other destination still live?" check returns a row (intranet live).
     txResults = [
-      [{ id: "o1" }],
+      [{ id: "o1", slug: "s1" }],
       [{ id: "pub1", destination: "intranet", externalRef: null }],
       [{ id: "pub-intranet" }],
     ];
@@ -881,7 +881,7 @@ function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing a c
     // third result is the still-live check, which must now find NOTHING because
     // the only remaining live row is `okf`.
     txResults = [
-      [{ id: "o1" }],
+      [{ id: "o1", slug: "s1" }],
       [{ id: "pub1", destination: "intranet", externalRef: null }],
       [],
     ];
@@ -900,7 +900,7 @@ function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing a c
   it("prunes the retrieval index only when the last live destination is removed", async () => {
     // tx queue: FOR UPDATE lock, the live row being torn down, then the
     // "any other destination still live?" check returns [] (none remain).
-    txResults = [[{ id: "o1" }], [{ id: "pub1", destination: "intranet", externalRef: null }], []];
+    txResults = [[{ id: "o1", slug: "s1" }], [{ id: "pub1", destination: "intranet", externalRef: null }], []];
     const result = await publishService.unpublish(admin, "o1", "public_web");
     expect(result).toEqual({ unpublished: true, destination: "intranet" });
     expect(removeFromIndexMock).toHaveBeenCalledTimes(1);
@@ -908,7 +908,7 @@ function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing a c
   });
 
   it("does NOT prune the index on the idempotent no-op path (nothing was live)", async () => {
-    txResults = [[{ id: "o1" }], []];
+    txResults = [[{ id: "o1", slug: "s1" }], []];
     const result = await publishService.unpublish(owner, "o1", "intranet");
     expect(result).toEqual({ unpublished: false, destination: "intranet" });
     expect(removeFromIndexMock).not.toHaveBeenCalled();
@@ -916,7 +916,7 @@ function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing a c
 
   it("a prune failure is best-effort: the unpublish still succeeds", async () => {
     removeFromIndexMock.mockRejectedValueOnce(new Error("index prune boom"));
-    txResults = [[{ id: "o1" }], [{ id: "pub1", destination: "intranet", externalRef: null }], []];
+    txResults = [[{ id: "o1", slug: "s1" }], [{ id: "pub1", destination: "intranet", externalRef: null }], []];
     const result = await publishService.unpublish(admin, "o1", "public_web");
     // The unpublish already committed; a failed index prune is logged, not thrown.
     expect(result).toEqual({ unpublished: true, destination: "intranet" });
@@ -925,7 +925,7 @@ function definePublishServiceUnpublishSuite2Part2() {it("allows unpublishing a c
   it("reverts the object to draft when the unpublished destination was the last live one", async () => {
     // tx queue: FOR UPDATE lock, the live row being torn down, then the
     // "any other destination still live?" check returns [] (none remain).
-    txResults = [[{ id: "o1" }], [{ id: "pub1", destination: "intranet", externalRef: null }], []];
+    txResults = [[{ id: "o1", slug: "s1" }], [{ id: "pub1", destination: "intranet", externalRef: null }], []];
     const result = await publishService.unpublish(admin, "o1", "public_web");
     expect(result).toEqual({ unpublished: true, destination: "intranet" });
     const statuses = txSetPayloads.map((p) => p.status);
@@ -940,3 +940,27 @@ const definePublishServiceUnpublishSuite2 = () => {
 };
 
 describe("publishService.unpublish", definePublishServiceUnpublishSuite2);
+
+describe("publishService.publish — slug read under the row lock (#1791)", () => {
+  it("addresses the object by the LOCKED slug when a rename re-slugged it while publish waited", async () => {
+    // Pre-tx load saw the old slug; a concurrent rename of the never-published
+    // object committed a new one before publish acquired FOR UPDATE.
+    publishableRows[0].slug = "old-prompt-slug";
+    txResults = [[{ id: "o1", slug: "device-repairs-dashboard" }], [{ id: "pub1" }]];
+
+    const result = await publishService.publish(admin, "o1", {
+      destination: "intranet",
+    });
+
+    expect(result.readerUrl).toBe("/c/device-repairs-dashboard");
+    const { intranetAdapter } = jest.requireMock(
+      "@/lib/content/publish-adapters/intranet"
+    ) as { intranetAdapter: { publish: jest.Mock } };
+    expect(JSON.stringify(intranetAdapter.publish.mock.calls[0])).toContain(
+      "device-repairs-dashboard"
+    );
+    expect(JSON.stringify(intranetAdapter.publish.mock.calls[0])).not.toContain(
+      "old-prompt-slug"
+    );
+  });
+});

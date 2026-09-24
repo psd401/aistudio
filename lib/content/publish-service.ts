@@ -593,7 +593,6 @@ async function runPublishTx(
   args: {
     req: Requester;
     objectId: string;
-    slug: string;
     destination: PublishDestination;
     publishedVersionId: string;
     publishedBy: number | null;
@@ -609,11 +608,17 @@ async function runPublishTx(
    * pre-tx load a concurrent `setLevel` could have moved underneath it.
    */
   visibilityLevel: VisibilityLevel;
+  /**
+   * The slug as read under the row lock (#1791). A rename of a never-published
+   * object re-slugs it under this same lock; a publish that loaded the object
+   * first and then waited here must address the object by the slug it will
+   * actually be served at, not the pre-tx load's.
+   */
+  slug: string;
 }> {
   const {
     req,
     objectId,
-    slug,
     destination,
     publishedVersionId,
     publishedBy,
@@ -635,6 +640,7 @@ async function runPublishTx(
       id: contentObjects.id,
       currentVersionId: contentObjects.currentVersionId,
       visibilityLevel: contentObjects.visibilityLevel,
+      slug: contentObjects.slug,
     })
     .from(contentObjects)
     .where(eq(contentObjects.id, objectId))
@@ -643,6 +649,7 @@ async function runPublishTx(
   if (!locked[0]) {
     throw new NotFoundError("Content not found", { objectId });
   }
+  const slug = locked[0].slug;
   assertVersionPrecondition(expectedVersionId, locked[0].currentVersionId);
 
   // §26.4 — the live switch on a `public` object.
@@ -731,6 +738,7 @@ async function runPublishTx(
     publicationId: row.id,
     becamePubliclyReachable: publiclyReachable && !liveBefore[0],
     visibilityLevel,
+    slug,
   };
 }
 
@@ -1066,12 +1074,12 @@ export const publishService = {
       publicationId,
       becamePubliclyReachable,
       visibilityLevel: publishedLevel,
+      slug,
     } = await executeTransaction(
       (tx: DbTransaction) =>
         runPublishTx(tx, {
           req,
           objectId,
-          slug: obj.slug,
           destination,
           publishedVersionId,
           publishedBy,
@@ -1084,10 +1092,12 @@ export const publishService = {
     // Post-commit: run the destination adapter (external IO outside the tx) with
     // compensation, then record its external_ref. Extracted so `publish` stays
     // within the max-lines budget.
+    // `slug` is the LOCKED row's: a concurrent rename re-slugs under the same
+    // lock, so the pre-tx `obj.slug` can be stale by now (#1791).
     const externalRef = await runPublishAdapter({
       adapter,
       objectId,
-      slug: obj.slug,
+      slug,
       versionId: publishedVersionId,
       title: obj.title,
       collectionId: obj.collectionId,
@@ -1107,7 +1117,7 @@ export const publishService = {
     await runPublishSideEffects({
       req,
       objectId,
-      slug: obj.slug,
+      slug,
       publishedVersionId,
       destination,
       log,
@@ -1118,7 +1128,7 @@ export const publishService = {
       publishedVersionId,
       destination,
       readerUrl:
-        externalRef ?? derivedReaderUrl(destination, obj.slug, publishedLevel),
+        externalRef ?? derivedReaderUrl(destination, slug, publishedLevel),
       becamePubliclyReachable,
     };
   },
