@@ -111,6 +111,33 @@ describe("Assistant Architect create form — blocked submit is visible", () => 
     expect(screen.getByText("Please select an image for your assistant.")).toBeInTheDocument()
   })
 
+  /**
+   * The toast and the focus ring must name the SAME field. They did not: the
+   * toast reports the first error in schema order (name) while react-hook-form's
+   * own `_focusError()` walks fields in registration order (the icon grid renders
+   * first) and runs after the invalid callback, so it always won. A user on a
+   * blank form was told "Name must be at least 3 characters" while the focus and
+   * the highlight landed on the icon grid. The form now sets
+   * `shouldFocusError: false` so reportValidationFailure is the only thing that
+   * moves focus. Asserting the toast TITLE alone cannot catch this regression.
+   */
+  it("points the focus at the same field the toast names", async () => {
+    await renderForm()
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }))
+
+    await waitFor(() => expect(mockToast).toHaveBeenCalled())
+    const { description } = mockToast.mock.calls[0][0]
+
+    // A wholly blank form fails on `name` first in schema order.
+    expect(description).toMatch(/name/i)
+    await waitFor(() =>
+      expect(screen.getByPlaceholderText("Enter assistant name...")).toHaveFocus()
+    )
+    // …and NOT on the icon grid, which is what registration order would pick.
+    expect(screen.getByTestId("assistant-icon-grid")).not.toHaveFocus()
+  })
+
   it("Add Field with no icon selected is blocked the same way, with feedback", async () => {
     await renderForm()
 

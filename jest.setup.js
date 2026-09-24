@@ -220,11 +220,27 @@ jest.mock('next/server', () => ({
   }
 }));
 
-// Radix's Slot mock lives in tests/mocks/radix-ui-slot.js, wired through
-// moduleNameMapper. It cannot be a jest.mock() factory here: every other
-// @radix-ui/* specifier maps to the shared radix-ui-primitives.js file, so the
-// factories below all register against that one resolved path and the last one
-// wins — which silently left Slot undefined (Issue #1697).
+// Radix's Slot mock does NOT live here — it is tests/mocks/radix-ui-slot.js,
+// wired through its own moduleNameMapper entry in jest.config.js and
+// jest.config.ci.js, placed ABOVE the `^@radix-ui/(.*)$` catch-all.
+//
+// Why (Issue #1697): as a jest.mock() factory in this file it did not take
+// effect — `Slot` resolved to undefined and every test rendering a shadcn
+// <FormControl> died with "Element type is invalid". The catch-all maps each
+// unlisted `@radix-ui/*` specifier to the SAME file
+// (tests/mocks/radix-ui-primitives.js), and these factories are keyed by
+// resolved path, so they interfere; giving Slot its own mapper target — a
+// distinct path — fixed it.
+//
+// The interference is NOT a simple "last registration wins": the factories
+// below are load-bearing. Deleting react-primitive / react-collection /
+// react-select / react-context / react-dropdown-menu was tried and turns three
+// suites red (e.g. components/ui/select.tsx reads
+// `SelectPrimitive.Trigger.displayName`). Leave them alone.
+//
+// TO GIVE ANOTHER PACKAGE A REAL MOCK, follow the Slot pattern: its own file
+// under tests/mocks/ plus a mapper entry in BOTH jest configs, above the
+// catch-all. Adding another factory here is not reliable.
 
 // Mock Radix UI Primitive
 jest.mock('@radix-ui/react-primitive', () => {

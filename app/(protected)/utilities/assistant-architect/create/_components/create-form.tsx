@@ -59,7 +59,15 @@ function AssistantSetupSections({
   return (
     <>
       <Form {...form}>
-        <form className="space-y-6">
+        {/*
+          The Continue / Add Field buttons live OUTSIDE this <form>, so it has
+          no submit button and never had an onSubmit. With a single text input
+          in it, the browser's implicit-submission rule fires on Enter in the
+          Name field: a native GET to the current URL with the field values as
+          query params, i.e. a full page reload that silently discards the
+          whole draft. Same class of "the form is broken" symptom as #1697.
+        */}
+        <form className="space-y-6" onSubmit={event => event.preventDefault()}>
           <AssistantDetailsForm control={form.control} images={images} />
         </form>
       </Form>
@@ -130,7 +138,37 @@ function createInitialAgenticConfig(initialData?: SelectAssistantArchitect): Age
  * `form.formState` after a `trigger()`: that read came back empty (the
  * subscribed formState proxy had not caught up yet), which collapsed every
  * blocked submit to the generic fallback and skipped `setFocus` entirely.
+ *
+ * This is the ONLY thing that moves focus, which is why the form is created
+ * with `shouldFocusError: false`. RHF's own `_focusError()` walks fields in
+ * REGISTRATION order and runs after the invalid callback (twice — once
+ * synchronously, once on a timeout), so it always won. The icon grid registers
+ * first while this names the first error in SCHEMA order, so a blank form told
+ * the user "Name must be at least 3 characters" and then put the focus ring on
+ * the icon grid. One owner, one field, one message.
  */
+/** The selectable assistant icons, loaded once on mount. `[]` if the fetch fails. */
+function useAssistantImages(): string[] {
+  const [images, setImages] = useState<string[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    fetch("/api/assistant-images")
+      .then(res => res.json())
+      .then(data => {
+        if (!cancelled) setImages(data.images)
+      })
+      .catch(() => {
+        if (!cancelled) setImages([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  return images
+}
+
 function reportValidationFailure(
   form: UseFormReturn<FormValues>,
   toast: ReturnType<typeof useToast>["toast"],
@@ -149,7 +187,7 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
   const router = useRouter()
   const { toast } = useToast()
   const [isSubmitting, setIsSubmitting] = useState(false)
-  const [images, setImages] = useState<string[]>([])
+  const images = useAssistantImages()
   const [assistantId, setAssistantId] = useState<string | null>(
     initialData?.id ? String(initialData.id) : null
   )
@@ -165,15 +203,10 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
   // be reverted, so lock the prompt-chain option when editing such an assistant.
   const lockAgentic = initialData?.mode === "agentic"
 
-  useEffect(() => {
-    fetch("/api/assistant-images")
-      .then(res => res.json())
-      .then(data => setImages(data.images))
-      .catch(() => setImages([]))
-  }, [])
-
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
+    // reportValidationFailure owns the focus — see its doc comment.
+    shouldFocusError: false,
     defaultValues: {
       name: initialData?.name || "",
       description: initialData?.description || "",
@@ -183,14 +216,15 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
 
 
   const persist = useCallback(async (values: FormValues): Promise<string | null> => {
-    const agenticPayload = toAgenticPayload(agentic)
-    const routingPayload = {
-      modelRoutingMode: routing.mode,
-      modelRoutingFamily: routing.mode === "advanced" ? routing.family : null,
-    }
-
     try {
-      setIsSubmitting(true)
+      // Built inside the try: if either ever throws, the catch reports it
+      // instead of the exception escaping an onClick handler as an unhandled
+      // rejection with no user feedback.
+      const agenticPayload = toAgenticPayload(agentic)
+      const routingPayload = {
+        modelRoutingMode: routing.mode,
+        modelRoutingFamily: routing.mode === "advanced" ? routing.family : null,
+      }
       if (assistantId) {
         const result = await updateAssistantArchitectAction(assistantId, {
           ...values,
@@ -219,8 +253,6 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
         variant: "destructive"
       })
       return null
-    } finally {
-      setIsSubmitting(false)
     }
   }, [assistantId, toast, agentic, routing])
 
@@ -228,15 +260,24 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
    * `handleSubmit` is used instead of `trigger()` so the invalid branch receives
    * the real errors object (see reportValidationFailure). It awaits the async
    * valid handler, so `savedId` is settled by the time it resolves.
+   *
+   * `isSubmitting` is raised HERE, not inside persist(): the zod resolver is
+   * async, so two fast clicks both cleared validation before either flipped the
+   * flag and both created a draft assistant.
    */
   const saveAssistant = useCallback(async (): Promise<string | null> => {
     let savedId: string | null = null
-    await form.handleSubmit(
-      async (values) => {
-        savedId = await persist(values)
-      },
-      errors => reportValidationFailure(form, toast, errors)
-    )()
+    setIsSubmitting(true)
+    try {
+      await form.handleSubmit(
+        async (values) => {
+          savedId = await persist(values)
+        },
+        errors => reportValidationFailure(form, toast, errors)
+      )()
+    } finally {
+      setIsSubmitting(false)
+    }
     return savedId
   }, [form, persist, toast])
 
