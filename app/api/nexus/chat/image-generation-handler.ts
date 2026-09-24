@@ -12,6 +12,7 @@ import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { nexusConversations, nexusMessages } from "@/lib/db/schema";
 import { getAttachmentFromS3 } from "@/lib/services/attachment-storage-service";
 import { getObjectStream } from "@/lib/aws/s3-client";
+import { getGeneratedImageBucket } from "@/lib/ai/generated-image-bucket";
 import { sanitizeTextForDatabase } from "@/lib/utils/text-sanitizer";
 import { safeJsonbStringify } from "@/lib/db/json-utils";
 import { assertSafeFetchUrl } from "@/lib/agents/agent-tools/web-fetch";
@@ -101,14 +102,16 @@ function invalidCanonicalImage(message: string): Error {
 }
 
 /**
- * Read an object from the documents bucket into memory, refusing anything over
+ * Read an object from S3 into memory, refusing anything over
  * MAX_REFERENCE_IMAGE_BYTES (checked against Content-Length, then while reading).
+ * `bucket` defaults to the Settings-resolved documents bucket.
  */
 async function readReferenceObject(
   objectKey: string,
   tooLarge: () => Error,
+  bucket?: string,
 ): Promise<{ bytes: Buffer; contentType?: string }> {
-  const object = await getObjectStream(objectKey);
+  const object = await getObjectStream(objectKey, bucket);
   if (
     object.contentLength != null &&
     object.contentLength > MAX_REFERENCE_IMAGE_BYTES
@@ -200,9 +203,12 @@ async function hydratePreviousGeneratedImage(
     return ref;
   }
   try {
+    // Read from the bucket the image was written to (storeImageInS3), not the
+    // Settings-resolved bucket the generic S3 client would pick.
     const object = await readReferenceObject(
       ref.s3Key,
       () => new Error("Previous generated image is too large"),
+      getGeneratedImageBucket(),
     );
     const mimeType = bareMimeType(object.contentType);
     if (!mimeType || !ALLOWED_IMAGE_MIMES.has(mimeType)) {

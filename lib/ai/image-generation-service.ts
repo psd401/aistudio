@@ -20,6 +20,7 @@ import { Settings } from '@/lib/settings-manager';
 import { ErrorFactories } from '@/lib/error-utils';
 import { assertSafeFetchUrl } from '@/lib/agents/agent-tools/web-fetch';
 import { safeFetch } from '@/lib/security/safe-fetch';
+import { getGeneratedImageBucket } from '@/lib/ai/generated-image-bucket';
 
 // Type for OpenAI image size
 type OpenAIImageSize = '256x256' | '512x512' | '1024x1024' | '1792x1024' | '1024x1792';
@@ -215,21 +216,6 @@ export interface ImageGenerationError {
   message: string;
   retryAfter?: number;
   details?: string;
-}
-
-/**
- * Get the documents bucket name from environment
- */
-function getDocumentsBucket(): string {
-  if (process.env.NODE_ENV === 'test') {
-    return process.env.DOCUMENTS_BUCKET_NAME || 'test-documents-bucket';
-  }
-
-  if (!process.env.DOCUMENTS_BUCKET_NAME) {
-    throw new Error('DOCUMENTS_BUCKET_NAME environment variable is required');
-  }
-
-  return process.env.DOCUMENTS_BUCKET_NAME;
 }
 
 /**
@@ -834,7 +820,7 @@ async function storeImageInS3(params: {
   modelId: string;
   contentType: string;
 }): Promise<{ s3Key: string; presignedUrl: string }> {
-  const bucket = getDocumentsBucket();
+  const bucket = getGeneratedImageBucket();
   const timestamp = Date.now();
   const sanitizedModelId = params.modelId.replace(/[^\dA-Za-z-]/g, '-');
 

@@ -15,7 +15,8 @@ const mockDeleteDocumentVersions = jest.fn();
 const mockGetObjectStream = jest.fn();
 jest.mock('@/lib/aws/s3-client', () => ({
   deleteDocumentVersions: (key: string) => mockDeleteDocumentVersions(key),
-  getObjectStream: (key: string) => mockGetObjectStream(key),
+  getObjectStream: (key: string, bucket?: string) =>
+    bucket === undefined ? mockGetObjectStream(key) : mockGetObjectStream(key, bucket),
 }));
 
 const mockExecuteQuery = jest.fn();
@@ -430,7 +431,12 @@ describe('resolvePreviousGeneratedImageReferences', () => {
 
     const refs = await resolvePreviousGeneratedImageReferences(CONVO, 42);
 
-    expect(mockGetObjectStream).toHaveBeenCalledWith(GENERATED_KEY);
+    // Read from the bucket the writer (storeImageInS3) uses, not the
+    // Settings-resolved bucket the generic S3 client would pick.
+    expect(mockGetObjectStream).toHaveBeenCalledWith(
+      GENERATED_KEY,
+      process.env.DOCUMENTS_BUCKET_NAME || 'test-documents-bucket',
+    );
     expect(refs).toEqual([{
       base64: `data:image/png;base64,${Buffer.from('PNG-BYTES').toString('base64')}`,
       mimeType: 'image/png',
