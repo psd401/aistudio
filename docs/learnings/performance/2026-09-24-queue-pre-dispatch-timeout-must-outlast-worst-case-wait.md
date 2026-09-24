@@ -10,7 +10,7 @@ applicable_to: project
 
 ## What Happened
 
-Self-review of #1788 found: replacing a hard in-flight cap of 8 (which rejected the 9th request) with a concurrency limit of 6 + bounded FIFO queue of 32 (`components/atrium/ArtifactSandbox.tsx`) broke the existing 45s query timeout. With 32 queued behind 6 concurrent slots, a tail request could wait up to `ceil(38/6) = 7` dispatch waves before even starting. The 45s clock (originally meant to bound execution time) started at enqueue, so tail requests timed out before dispatch — then got dispatched anyway, ran a real MCP+RDS query burning a rate-limit slot, and had their answer discarded.
+Self-review of #1788 found: replacing a hard in-flight cap of 8 (which rejected the 9th request) with a concurrency limit of 6 + a bounded FIFO queue (`components/atrium/ArtifactSandbox.tsx`) broke the existing 45s query timeout. With 26 queued behind 6 concurrent slots (32 total, matching the sandbox host's own `MAX_PENDING_DATA_REQUESTS`), a tail request could wait up to `ceil(32/6) = 6` dispatch waves before even starting. The 45s clock (originally meant to bound execution time) started at enqueue, so tail requests timed out before dispatch — then got dispatched anyway, ran a real MCP+RDS query burning a rate-limit slot, and had their answer discarded.
 
 ## Root Cause
 
@@ -20,9 +20,11 @@ General lesson: when adding a queue in front of work that already had a timeout,
 
 ## Solution
 
-Split the timeout into two phases: a queue-tolerant pre-ack budget of 315s (covers worst-case queue wait for 32 items at 6 concurrency), which resets to the real 45s server-execution budget once `atrium-artifact-data-ack` confirms dispatch. Also added the ack event itself (`infra/sandbox-host/render.html` restarts its query clock at DISPATCH, not at post time) so the client's clock and the server's clock agree on when work actually started.
+Split the timeout into two phases: a queue-tolerant pre-ack budget of 315s (covers the worst-case queue wait of 6 dispatch waves), applied to EVERY op rather than only queries, which resets to the real 45s server-execution budget once `atrium-artifact-data-ack` confirms dispatch. Also added the ack event itself (`infra/sandbox-host/render.html` restarts its query clock at DISPATCH, not at post time) so the client's clock and the server's clock agree on when work actually started.
 
 ## Prevention
 
 - When introducing or widening a queue/concurrency limiter in front of previously-direct calls, compute worst-case queue wait (`ceil(queueDepth / concurrency) * avgSlotDuration`) and compare it against any existing timeout on that path.
 - If a dispatch-ack pattern is used to re-arm timeouts, verify the pre-ack timeout can never fire while a request is legitimately still queued (not yet dispatched).
+- Apply the pre-dispatch budget to EVERY operation the queue accepts, not just the slow one you were thinking about. The first version of this fix covered only queries; a later review found that a queued `submit` still had its bare 10s budget, so it could be rejected locally and then dispatched anyway — the write landed after the caller was told it failed, and a retry created a duplicate record.
+- Reconcile the capacity of the two layers explicitly. A parent counting "queued behind the active slots" and a frame counting "every promise held open" do NOT agree just because both say 32: derive one from the other (here `queue = hostPending - concurrency`) or the advertised capacity is unreachable.
