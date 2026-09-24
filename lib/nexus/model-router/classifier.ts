@@ -2,6 +2,7 @@ import { generateText, tool } from "ai"
 import { z } from "zod"
 import { createProviderModel } from "@/lib/ai/provider-factory"
 import { createLogger } from "@/lib/logger"
+import { containsExplicitUrl } from "./url-detection"
 import {
   nexusRouterIntentSchema,
   nexusRouterTierSchema,
@@ -19,12 +20,6 @@ const EXPLICIT_WEB_SEARCH_PHRASES = [
   "search online", "browse the web", "browse web", "browse the internet",
   "browse internet", "browse online", "web search", "internet search",
 ]
-/**
- * An explicit http(s) URL in the message — the "paste a link" case (#1696).
- * Bounded by whitespace and common trailing delimiters so a link inside prose or
- * markdown still matches.
- */
-const EXPLICIT_URL_PATTERN = /\bhttps?:\/\/[^\s<>()[\]{}"']{3,}/i
 const CURRENT_INFO_PATTERN = /\b(?:latest|current|today(?:'s)?|recent|up-to-date|right\s+now|this\s+(?:week|month|year))\b.{0,60}\b(?:news|weather|forecast|price|cost|stock|score|schedule|standings|results?|version|release|president|governor|mayor|ceo|law|policy|regulation|guidance)\b|\b(?:news|weather|forecast|price|cost|stock|score|schedule|standings|results?|version|release|president|governor|mayor|ceo|law|policy|regulation|guidance)\b.{0,60}\b(?:latest|current|today(?:'s)?|recent|up-to-date|right\s+now|this\s+(?:week|month|year))\b/i
 const USER_SUPPLIED_CONTEXT_PATTERN = /\b(?:this|the|my|our|attached|uploaded|provided)\s+(?:spreadsheet|sheet|document|file|attachment|draft|paragraph|project|report|data|results?)\b|\b(?:spreadsheet|sheet|document|file|attachment|draft|paragraph|project|report|data)\b.{0,60}\b(?:attached|uploaded|provided|above|below)\b/i
 const HIGH_PATTERN = /\b(architecture|migration|security review|threat model|root cause|research report|multi-step|optimize|prove|complex analysis)\b/i
@@ -77,7 +72,7 @@ export function deterministicClassify(text: string, hasImageInput = false): Nexu
   // bottom takes its tier from the same complexity heuristic every other
   // unmatched message uses — otherwise pasting a link into a hard question
   // would silently pin it to `medium` and downgrade the model.
-  const hasExplicitUrl = EXPLICIT_URL_PATTERN.test(text)
+  const hasExplicitUrl = containsExplicitUrl(text)
   if (!hasExplicitUrl && CURRENT_INFO_PATTERN.test(text) && !USER_SUPPLIED_CONTEXT_PATTERN.test(text)) {
     return { intent: "web-search", tier: "medium", confidence: 0.96, reasonCodes: ["current_web_information"], source: "deterministic" }
   }

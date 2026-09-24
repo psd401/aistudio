@@ -498,7 +498,7 @@ describe("Nexus model router workspace attachment", () => {
     expect(result.workspacePsdDataConnectorId).toBe(PSD_CONNECTOR_ID)
   })
 
-  describe("prefers a model that can call the data tools it attaches", () => {
+  describe("prefers a model that can call the tools the turn depends on", () => {
     const noToolsFirst = nexusRouterConfigSchema.parse({
       ...config,
       auto: { light: [], medium: ["no-tools", "gpt-terra"], high: [] },
@@ -519,6 +519,46 @@ describe("Nexus model router workspace attachment", () => {
       const result = await routeNexusRequest({
         ...followUp,
         workspace: { ...editableArtifact, kind: "document" as const },
+      })
+
+      expect(result.modelId).toBe("no-tools")
+    })
+
+    it("routes a pasted-link turn past a candidate without function calling", async () => {
+      // #1696: `web_fetch` is universal, so the decision names no required tool
+      // and nothing else would stop a model that cannot call it — which would
+      // answer about the link without ever opening it.
+      mockGetConfig.mockResolvedValue({ config: noToolsFirst, mode: "active" })
+
+      const result = await routeNexusRequest({
+        ...followUp,
+        text: "Open https://example.com/article and quote the main heading",
+      })
+
+      expect(result.modelId).toBe("gpt-terra")
+    })
+
+    it("keeps the first candidate for a turn with no link and no data tools", async () => {
+      mockGetConfig.mockResolvedValue({ config: noToolsFirst, mode: "active" })
+
+      const result = await routeNexusRequest({
+        ...followUp,
+        text: "Rewrite this paragraph to be shorter",
+      })
+
+      expect(result.modelId).toBe("no-tools")
+    })
+
+    it("keeps the normal model for a link turn when none can call tools", async () => {
+      // The URL preference must never harden into a requirement — that is the
+      // hard "cannot access URLs" dead end #1696 removed.
+      mockGetConfig.mockResolvedValue({ config: noToolsFirst, mode: "active" })
+      mockFilterAccessibleResourceIds.mockResolvedValue(["8"])
+
+      const result = await routeNexusRequest({
+        ...followUp,
+        fallbackModelId: "no-tools",
+        text: "Summarize https://example.com/article for me",
       })
 
       expect(result.modelId).toBe("no-tools")

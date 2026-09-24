@@ -9,6 +9,7 @@ import {
   selectRoutedTextModel,
 } from "@/lib/ai/model-router/core"
 import { classifyNexusRequest } from "./classifier"
+import { containsExplicitUrl } from "./url-detection"
 import { getNexusRouterConfig } from "./config"
 import { resolvePsdDataConnectorId } from "./psd-data-connector"
 import {
@@ -183,25 +184,35 @@ function selectModelForRuntime(
 }
 
 /**
- * Pick the executed model, preferring one that can call tools when this turn
- * attaches the PSD Data tools (#1786). Selection runs before the connector is
- * attached, so without this a turn could bind `query_data` beside a model that
- * can never invoke it. A PREFERENCE, not a requirement: with no function-calling
- * model available the turn keeps its normal model and the chat route's
- * do-not-guess guidance covers it, rather than an artifact edit failing outright.
- * Only active routing attaches the connector, so only it re-selects.
+ * Pick the executed model, preferring one that can call the tools this turn
+ * depends on. Selection runs before those tools are attached, so without this a
+ * turn could bind `query_data` beside a model that can never invoke it (#1786).
+ *
+ * Two turn shapes need it:
+ *   - PSD Data (#1786) — the connector is attached only by active routing.
+ *   - A pasted URL (#1696) — `web_fetch` is universal, so a `general` decision
+ *     carries no required tool and nothing else would keep the turn off a model
+ *     whose `supports_function_calling` is false. Such a model answers about the
+ *     link without ever opening it, which is the failure this fix exists to
+ *     remove, just one step later in the pipeline.
+ *
+ * A PREFERENCE, not a requirement: with no function-calling model available the
+ * turn keeps its normal model and the chat route's do-not-guess guidance covers
+ * it, rather than failing outright. That matters most for the URL case —
+ * demanding a capability here would re-introduce the hard "cannot access URLs"
+ * dead end #1696 removed.
  */
-function selectModelForDataTools(
+function selectModelForToolUse(
   args: Parameters<typeof selectModel>[0],
   mode: Exclude<NexusRouterRuntimeMode, "off">,
   fallback: NexusModelRow,
-  wantsPsdData: boolean
+  prefersFunctionCalling: boolean
 ): { model: NexusModelRow; fallbackUsed: boolean } {
-  if (mode === "active" && wantsPsdData) {
+  if (mode === "active" && prefersFunctionCalling) {
     try {
       return selectModel({ ...args, requiresFunctionCalling: true })
     } catch (error) {
-      log.warn("No function-calling model for a PSD Data turn; keeping the normal selection", {
+      log.warn("No function-calling model for a tool-dependent turn; keeping the normal selection", {
         error: error instanceof Error ? error.message : String(error),
       })
     }
@@ -478,7 +489,15 @@ async function routeWithConfiguredRouter(options: {
   // server-required input tool is an authorization/correctness boundary, so
   // execute a compatible text model even while recording the proposed route.
   const wantsPsdData = decision.intent === "psd-data" || workspaceNeedsPsdData(args.workspace)
-  const selection = selectModelForDataTools(selectionArgs, mode, fallback, wantsPsdData)
+  // A link in the message means `web_fetch` has to be callable for the turn to
+  // do what the user asked, even though the decision names no required tool.
+  const wantsWebFetch = containsExplicitUrl(args.text)
+  const selection = selectModelForToolUse(
+    selectionArgs,
+    mode,
+    fallback,
+    wantsPsdData || wantsWebFetch
+  )
   const psdConnectorId = await resolveAutomaticPsdConnector(wantsPsdData, config)
   // Only an explicit psd-data REQUEST fails closed. A workspace-artifact turn
   // asked for something else too ("add a dropdown"), so an unavailable
