@@ -1,9 +1,14 @@
 "use client"
 
-import { useState, useCallback } from "react"
+import { useState, useCallback, useId } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { FormLabel } from "@/components/ui/form"
+// Plain Label, NOT FormLabel: these inputs are local component state, not
+// react-hook-form fields, so there is no <FormField> ancestor. FormLabel
+// would call useFormField(), whose `useFormState({ name: undefined })`
+// subscribes to the WHOLE form and re-renders on every keystroke, and it
+// would render htmlFor="undefined-form-item" (Issue #1697).
+import { Label } from "@/components/ui/label"
 
 interface FieldOption {
   label: string
@@ -17,6 +22,8 @@ interface FieldOptionsEditorProps {
 
 export function FieldOptionsEditor({ options, onOptionsChange }: FieldOptionsEditorProps) {
   const [newOption, setNewOption] = useState<FieldOption>({ label: "", value: "" })
+  const labelInputId = useId()
+  const valueInputId = useId()
 
   const handleLabelChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     setNewOption(prev => ({ ...prev, label: e.target.value }))
@@ -42,8 +49,9 @@ export function FieldOptionsEditor({ options, onOptionsChange }: FieldOptionsEdi
       <h5 className="text-sm font-medium">Options</h5>
       <div className="grid grid-cols-[1fr_1fr_auto] gap-2 items-end">
         <div>
-          <FormLabel className="text-xs">Label</FormLabel>
+          <Label className="text-xs" htmlFor={labelInputId}>Label</Label>
           <Input
+            id={labelInputId}
             value={newOption.label}
             onChange={handleLabelChange}
             placeholder="Display text"
@@ -51,8 +59,9 @@ export function FieldOptionsEditor({ options, onOptionsChange }: FieldOptionsEdi
           />
         </div>
         <div>
-          <FormLabel className="text-xs">Value</FormLabel>
+          <Label className="text-xs" htmlFor={valueInputId}>Value</Label>
           <Input
+            id={valueInputId}
             value={newOption.value}
             onChange={handleValueChange}
             placeholder="Stored value"

@@ -10,6 +10,7 @@ import {
   FieldValues,
   FormProvider,
   useFormContext,
+  useFormState,
 } from "react-hook-form"
 
 import { cn } from "@/lib/utils"
@@ -44,7 +45,15 @@ const FormField = <
 const useFormField = () => {
   const fieldContext = React.useContext(FormFieldContext)
   const itemContext = React.useContext(FormItemContext)
-  const { getFieldState, formState } = useFormContext()
+  const { getFieldState } = useFormContext()
+  // `useFormState({ name })` and NOT `useFormContext().formState` (Issue
+  // #1697): the formState proxy returned by useFormContext only re-renders the
+  // component that called useForm, so FormLabel / FormControl / FormMessage
+  // never re-rendered when their field's error appeared. The inline validation
+  // message and aria-invalid were therefore invisible in the browser — the
+  // Assistant Architect create flow showed no message under the icon grid at
+  // all. This matches upstream shadcn.
+  const formState = useFormState({ name: fieldContext.name })
 
   const fieldState = getFieldState(fieldContext.name, formState)
 
