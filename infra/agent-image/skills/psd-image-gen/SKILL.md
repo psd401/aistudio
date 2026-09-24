@@ -45,7 +45,7 @@ After this skill returns a 2xx result, your **next chat message MUST be the bare
 - ✅ Correct:
   ```
   Here you go:
-  https://psd-agents-dev-390844780692.s3.us-east-1.amazonaws.com/public-images/<email>/<uuid>.png
+  https://<agent-workspace-bucket>.s3.us-east-1.amazonaws.com/public-images/<email>/<uuid>.png
   ```
 - ❌ Wrong: Describing the image's contents/layers/composition in prose without pasting the URL. The user cannot see the tool result. If the URL is not in your chat reply, the user got nothing.
 - ❌ Wrong: Wrapping the URL in `[label](url)` or `**bold**` — Google Chat's renderer corrupts these for long S3 URLs. Bare URL only.
