@@ -45,7 +45,7 @@ interface ProviderCapabilities {
 
 ### Step 1: Create Provider Adapter
 
-Create a new adapter file in `/packages/ai-streaming-core/src/provider-adapters/`:
+Create a new adapter file in `/lib/streaming/provider-adapters/`:
 
 ```typescript
 // Example: mistral-adapter.ts
@@ -116,96 +116,32 @@ export class MistralAdapter extends BaseProviderAdapter {
 
 ### Step 2: Add Required Dependencies
 
-Update the package dependencies in `/packages/ai-streaming-core/package.json`:
+Add the AI SDK provider package to the root `package.json`:
 
-```json
-{
-  "dependencies": {
-    "ai": "^5.0.23",
-    "@ai-sdk/openai": "^2.0.20",
-    "@ai-sdk/google": "^2.0.8", 
-    "@ai-sdk/amazon-bedrock": "^3.0.10",
-    "@ai-sdk/azure": "^2.0.20",
-    "@ai-sdk/mistral": "^2.0.8"
-  }
-}
+```bash
+bun add @ai-sdk/mistral
 ```
 
-### Step 3: Register Provider in Factory
+### Step 3: Register Provider in the Adapter Registry
 
-Update `/packages/ai-streaming-core/src/provider-factory.ts`:
+Add the adapter to the `adapters` map in `/lib/streaming/provider-adapters/index.ts`:
 
 ```typescript
-import { OpenAIAdapter } from './provider-adapters/openai-adapter';
-import { ClaudeAdapter } from './provider-adapters/claude-adapter';
-import { GeminiAdapter } from './provider-adapters/gemini-adapter';
-import { AzureAdapter } from './provider-adapters/azure-adapter';
-import { MistralAdapter } from './provider-adapters/mistral-adapter';
-import type { BaseProviderAdapter } from './provider-adapters/base-adapter';
-import type { SettingsManager } from './utils/settings-manager';
+import { MistralAdapter } from './mistral-adapter';
 
-export function createProviderAdapter(provider: string, settingsManager?: SettingsManager): BaseProviderAdapter {
-  const normalizedProvider = provider.toLowerCase();
-  
-  switch (normalizedProvider) {
-    case 'openai':
-      return new OpenAIAdapter(settingsManager);
-      
-    case 'amazon-bedrock':
-    case 'bedrock':
-    case 'claude':
-    case 'anthropic':
-      return new ClaudeAdapter(settingsManager);
-      
-    case 'google':
-    case 'gemini':
-      return new GeminiAdapter(settingsManager);
-      
-    case 'azure':
-    case 'azure-openai':
-      return new AzureAdapter(settingsManager);
-      
-    case 'mistral':
-      return new MistralAdapter(settingsManager);
-      
-    default:
-      throw new Error(`Unknown provider: ${provider}`);
-  }
-}
-
-export function getSupportedProviders(): string[] {
-  return ['openai', 'amazon-bedrock', 'google', 'azure', 'mistral'];
-}
-
-export function isProviderSupported(provider: string): boolean {
-  const normalizedProvider = provider.toLowerCase();
-  return getSupportedProviders().some(p => 
-    normalizedProvider === p || 
-    normalizedProvider === p.replace('-', '') ||
-    (p === 'amazon-bedrock' && ['bedrock', 'claude', 'anthropic'].includes(normalizedProvider)) ||
-    (p === 'google' && normalizedProvider === 'gemini') ||
-    (p === 'azure' && normalizedProvider === 'azure-openai')
-  );
-}
+const adapters = new Map<string, ProviderAdapter>([
+  ['openai', new OpenAIAdapter()],
+  ['amazon-bedrock', new ClaudeAdapter()],
+  ['google', new GeminiAdapter()],
+  ['azure', new AzureAdapter()],
+  ['latimer', new LatimerAdapter()],
+  ['mistral', new MistralAdapter()]
+]);
 ```
 
-### Step 4: Export from Package Index
+`getProviderAdapter()` and `getSupportedProviders()` read from this map, so no other registration is needed there.
 
-Update `/packages/ai-streaming-core/src/index.ts`:
-
-```typescript
-// Provider Adapters
-export { BaseProviderAdapter } from './provider-adapters/base-adapter';
-export { OpenAIAdapter } from './provider-adapters/openai-adapter';
-export { ClaudeAdapter } from './provider-adapters/claude-adapter';
-export { GeminiAdapter } from './provider-adapters/gemini-adapter';
-export { AzureAdapter } from './provider-adapters/azure-adapter';
-export { MistralAdapter } from './provider-adapters/mistral-adapter';
-
-// Rest of exports...
-```
-
-### Step 5: Add Database Configuration
+### Step 4: Add Database Configuration
 
 Update the AI models table to include the new provider:
 
@@ -253,7 +189,7 @@ INSERT INTO ai_models (
 );
 ```
 
-### Step 6: Add Settings Management
+### Step 5: Add Settings Management
 
 Add API key configuration support:
 
@@ -279,24 +215,14 @@ export class SettingsManager {
 }
 ```
 
-### Step 7: Build and Test
+### Step 6: Verify
 
-Build the package and run tests:
+Run the standard checks from the repository root:
 
 ```bash
-cd packages/ai-streaming-core
-
-# Build the package
-npm run build
-
-# Run type checking
-npm run typecheck
-
-# Run linting
-npm run lint
-
-# Test the new provider
-npm test -- --grep "MistralAdapter"
+bun run typecheck
+bun run lint
+bun run test:ci
 ```
 
 ## Advanced Provider Features
@@ -542,7 +468,6 @@ Before deploying a new provider to production:
 ### Production Deployment
 
 - [ ] Database migration applied
-- [ ] Shared package version updated
 - [ ] Lambda functions redeployed
 - [ ] Frontend updated to show new provider
 - [ ] Monitoring dashboards updated

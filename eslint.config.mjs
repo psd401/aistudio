@@ -109,7 +109,6 @@ export default [
       "infra/**/*.{js,mjs,cjs,ts,mts,cts}",
       "eslint-plugin-logging/**/*.js",
       ".jest/**/*.js",
-      "packages/*/src/**/*.{js,mjs,cjs,ts,mts,cts}",
       "auth.ts",
       "instrumentation.ts",
       "middleware.ts",
