@@ -7,6 +7,10 @@ import { useAction } from '@/lib/hooks/use-action'
 import { getPrompt, trackPromptUse } from '@/actions/prompt-library.actions'
 import { toast } from 'sonner'
 import { createLogger } from '@/lib/client-logger'
+import {
+  consumeDraftAutoSend,
+  DRAFT_AUTO_SEND_PARAM,
+} from '@/lib/nexus/draft-auto-send'
 
 const log = createLogger({ moduleName: 'prompt-auto-loader' })
 
@@ -41,6 +45,15 @@ export function PromptAutoLoader() {
   // it before the agent builds. Composer-only: it never touches the conversation
   // tree (docs/features/nexus-conversation-architecture.md invariants hold).
   const draft = searchParams.get('draft')
+  // #1791 finding 2: a draft is still PREFILL-ONLY by default. The one
+  // exception is a draft this same tab armed immediately before navigating —
+  // the Atrium "Ask the agent" card, whose button said "Ask" but only filled a
+  // box on another page. `consumeDraftAutoSend` returns true only when this
+  // tab's sessionStorage holds this nonce for this exact draft text, so a
+  // `?send=` a link carries from outside the app is inert and the draft simply
+  // prefills. It returns true at most once: the entry is deleted on read, so a
+  // reload or a Back navigation re-prefills rather than sending again.
+  const autoSendNonce = searchParams.get(DRAFT_AUTO_SEND_PARAM)
   const processedDraftRef = useRef(false)
 
   useEffect(() => {
@@ -62,20 +75,41 @@ export function PromptAutoLoader() {
       processedDraftRef.current = true
 
       // Cap the prefill defensively (a URL param is user-controlled).
-      composer.setText(draft.slice(0, 4000))
-      log.info('Draft prompt prefilled in composer', { length: draft.length })
+      const text = draft.slice(0, 4000)
+      composer.setText(text)
+      // Consume BEFORE the URL rewrite below: the rewrite re-runs this effect
+      // with the params gone, and a handshake left unconsumed would outlive the
+      // navigation it was armed for.
+      const autoSend = consumeDraftAutoSend(autoSendNonce, draft)
+      log.info('Draft prompt prefilled in composer', {
+        length: draft.length,
+        autoSend,
+      })
 
-      // Strip `draft` from the URL, preserving every other param (workspace/id/…).
+      // Strip `draft` (and the handshake nonce) from the URL, preserving every
+      // other param (workspace/id/…).
       const params = new URLSearchParams(searchParams.toString())
       params.delete('draft')
+      params.delete(DRAFT_AUTO_SEND_PARAM)
       const qs = params.toString()
       router.replace(qs ? `/nexus?${qs}` : '/nexus')
+
+      if (!autoSend) return
+      // Same one-tick delay the promptId path uses: `setText` must settle into
+      // the composer before `send` reads it, or an empty message is dispatched.
+      setTimeout(() => {
+        if (!active) return
+        composer.send()
+        log.info('Draft prompt auto-sent from an in-app ask', {
+          length: text.length,
+        })
+      }, 100)
     }
     fill()
     return () => {
       active = false
     }
-  }, [draft, composer, router, searchParams])
+  }, [draft, autoSendNonce, composer, router, searchParams])
 
   useEffect(() => {
     async function loadAndSendPrompt() {

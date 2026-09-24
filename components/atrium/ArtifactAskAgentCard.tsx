@@ -12,6 +12,10 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import {
+  armDraftAutoSend,
+  DRAFT_AUTO_SEND_PARAM,
+} from "@/lib/nexus/draft-auto-send";
 
 const EXAMPLE_PROMPTS: readonly string[] = [
   "Add a comparison to last year",
@@ -37,7 +41,20 @@ export function ArtifactAskAgentCard({
     // `draft` and `promptId` and nothing else. This used to send `prompt`,
     // which no code path reads, so every chip and every typed change silently
     // landed in an empty composer.
-    const href = text.trim() ? `${base}&draft=${encodeURIComponent(text.trim())}` : base;
+    const draft = text.trim();
+    if (!draft) {
+      router.push(base);
+      return;
+    }
+    // #1791 finding 2: the button said "Ask" but only prefilled, so the person
+    // had to press send a second time on a different page. Arm the one-shot
+    // handshake so the composer sends it on arrival. A link without a matching
+    // sessionStorage entry — i.e. one that did not originate from this click —
+    // still only prefills, so the flag cannot be weaponised from outside.
+    const nonce = armDraftAutoSend(draft);
+    const href =
+      `${base}&draft=${encodeURIComponent(draft)}` +
+      (nonce ? `&${DRAFT_AUTO_SEND_PARAM}=${encodeURIComponent(nonce)}` : "");
     router.push(href);
   };
 
