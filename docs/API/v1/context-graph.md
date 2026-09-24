@@ -1246,6 +1246,12 @@ curl -N -X POST \
 label such as `[Attached repository content: implementation-plan.pdf]`, never
 the opaque marker.
 
+A run that goes quiet — a reasoning model thinking, or a long tool call — is
+padded with SSE comment frames (`: keep-alive`) roughly every 15s so no
+intermediary idles the connection out mid-turn. Comment frames carry no event
+data and a spec-compliant SSE client discards them; a client that splits the
+body by hand must skip any line starting with `:`.
+
 **Response `400`** — Input shape/size failure, more than 10 temporary sources,
 or a missing, foreign, expired, or otherwise unavailable temporary source.
 Every unavailable-source variant returns the same
