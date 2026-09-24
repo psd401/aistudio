@@ -917,6 +917,61 @@ describe("ArtifactSandbox bounded request queue (#1788)", () => {
   });
 });
 
+/** Expiry must not be reachable ONLY through the pump (#1788). */
+describe("ArtifactSandbox expired-queue sweep (#1788)", () => {
+  it("does not WEDGE when the queue is full of expired entries", async () => {
+    // A full queue is refused at admission, before `pump()` runs. If expired
+    // entries were only swept inside the pump, one never-settling request would
+    // wedge the bridge for good: every later request answered
+    // `too_many_requests` behind entries that had long since expired and would
+    // never be swept. The sweep therefore also runs at admission.
+    const ids = Array.from({ length: 34 }, (_, index) =>
+      `00000000-0000-4000-8000-0000000003${String(index).padStart(2, "0")}`
+    );
+    const { frameWindow, postMessage } = mountSandbox(true);
+    // Nothing ever settles: the single record slot stays occupied forever.
+    submitArtifactRecordMock.mockImplementation(() => new Promise(() => {}));
+    const nowSpy = jest.spyOn(Date, "now");
+    nowSpy.mockReturnValue(0);
+
+    // Fill the whole budget: 1 dispatched + 31 queued = 32.
+    await act(async () => {
+      for (const requestId of ids.slice(0, 32)) {
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            data: submitRequest(requestId),
+            origin: "null",
+            source: frameWindow,
+          })
+        );
+      }
+      await flushMicrotasks();
+    });
+    // The 33rd is refused while the queue is genuinely full.
+    await sendMessage(submitRequest(ids[32]), frameWindow);
+    expect(dataResponses(postMessage).at(-1)?.message).toMatchObject({
+      requestId: ids[32],
+      ...TOO_MANY_REQUESTS_FAILURE,
+    });
+
+    // Time passes: every QUEUED entry is now past the parent's deadline.
+    nowSpy.mockReturnValue(300_000);
+    await sendMessage(submitRequest(ids[33]), frameWindow);
+
+    // The expired entries were swept at admission, so this one is ACCEPTED —
+    // not refused behind a queue of dead requests.
+    const last = dataResponses(postMessage).at(-1)?.message;
+    expect(last).not.toMatchObject({ requestId: ids[33], ...TOO_MANY_REQUESTS_FAILURE });
+    // And each swept entry was answered rather than dropped silently.
+    const timedOut = dataResponses(postMessage).filter(
+      ({ message }) => message.code === "timeout"
+    );
+    expect(timedOut).toHaveLength(31);
+    nowSpy.mockRestore();
+  });
+
+});
+
 /**
  * Mount with one mode, then re-render the SAME mount with another. Models an
  * RSC re-render of the reader handing the component a fresher prop; the pin

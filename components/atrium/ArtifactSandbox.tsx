@@ -978,21 +978,7 @@ function useBridgePump(
     // by an earlier render can safely finish the queue it is draining.
     const step = (): void => {
       for (;;) {
-        // Purge anything that has waited too long BEFORE looking at capacity.
-        // The frame gives up on a request it has been holding (its own pre-ack
-        // budget) and deletes the pending entry; dispatching after that would
-        // run a real Server Action whose answer nobody is waiting for — and for
-        // a `submit` that means a write landing after the artifact was told it
-        // failed, so the author's retry duplicates the record. Purging first
-        // also frees capacity for work that can still be answered.
-        const now = Date.now();
-        while (
-          queuedDataRequestsRef.current.length > 0 &&
-          now - queuedDataRequestsRef.current[0].enqueuedAt >= MAX_QUEUE_WAIT_MS
-        ) {
-          const expired = queuedDataRequestsRef.current.shift();
-          if (expired) onDispatchAbandoned(expired, "timeout");
-        }
+        purgeExpiredQueued(queuedDataRequestsRef.current, onDispatchAbandoned);
         // Peek before taking: the limit depends on what is at the head. A
         // record op still travels over a Server Action, and the App Router
         // dispatches those ONE AT A TIME — the very serialization this issue is
@@ -1063,6 +1049,74 @@ function useBridgePump(
     queuedDataRequestsRef,
     onDispatchAbandoned,
   ]);
+}
+
+/**
+ * Answer a request the pump decided NOT to dispatch (#1788).
+ *
+ * Two cases, both of which must never reach the transport:
+ *  - `timeout`: it waited past the parent's queue deadline, so the frame is
+ *    about to give up (or already has).
+ *  - `unavailable`: its transport chunk failed to load.
+ *
+ * Answering here rather than letting the frame's own clock expire keeps the
+ * artifact's rejection prompt AND — the reason this exists — guarantees the
+ * work is never started, so a `submit` cannot commit after its promise has
+ * already been rejected.
+ */
+function useDispatchAbandonedHandler(
+  reportDiagnostic: (
+    request: ArtifactDataRequest,
+    failure: ArtifactDataFailure
+  ) => void
+): (entry: QueuedBridgeRequest, code: ArtifactBridgeErrorCode) => void {
+  return useCallback(
+    (entry: QueuedBridgeRequest, code: ArtifactBridgeErrorCode) => {
+      const failure = codedFailure(code);
+      reportDiagnostic(entry.request, failure);
+      try {
+        entry.frameWindow.postMessage(
+          dataBridgeFailure(entry.request.requestId, failure),
+          "*"
+        );
+      } catch {
+        // The frame is gone; there is nothing left to tell, and not starting
+        // the work was the point.
+      }
+    },
+    [reportDiagnostic]
+  );
+}
+
+/**
+ * Drop every queued entry that has waited past the parent's deadline (#1788).
+ *
+ * The frame gives up on a request it has been holding (its own pre-ack budget)
+ * and deletes the pending entry; dispatching after that would run a real Server
+ * Action whose answer nobody is waiting for — and for a `submit` that means a
+ * write landing after the artifact was told it failed, so the author's retry
+ * duplicates the record.
+ *
+ * Called from BOTH the pump and the admission check, which matters: a full
+ * queue is refused before `pump()` ever runs, so purging only inside the pump
+ * would let one never-settling request wedge the bridge permanently — every
+ * later request answered `too_many_requests` behind entries that had long since
+ * expired and would never be swept.
+ *
+ * Mutates the queue in place (it is a ref's array, shared with the pump).
+ */
+function purgeExpiredQueued(
+  queue: QueuedBridgeRequest[],
+  onDispatchAbandoned: (
+    entry: QueuedBridgeRequest,
+    code: ArtifactBridgeErrorCode
+  ) => void
+): void {
+  const now = Date.now();
+  while (queue.length > 0 && now - queue[0].enqueuedAt >= MAX_QUEUE_WAIT_MS) {
+    const expired = queue.shift();
+    if (expired) onDispatchAbandoned(expired, "timeout");
+  }
 }
 
 /**
@@ -1192,35 +1246,7 @@ function useArtifactDataBridge({
     [contentId, reportDiagnostic, versionId]
   );
 
-  /**
-   * Answer a request the pump decided NOT to dispatch (#1788).
-   *
-   * Two cases, both of which must never reach the transport:
-   *  - `timeout`: it waited past the parent's queue deadline, so the frame is
-   *    about to give up (or already has).
-   *  - `unavailable`: its transport chunk failed to load.
-   *
-   * Answering here rather than letting the frame's own clock expire keeps the
-   * artifact's rejection prompt AND -- the reason this exists -- guarantees the
-   * work is never started, so a `submit` cannot commit after its promise has
-   * already been rejected.
-   */
-  const handleDispatchAbandoned = useCallback(
-    (entry: QueuedBridgeRequest, code: ArtifactBridgeErrorCode) => {
-      const failure = codedFailure(code);
-      reportDiagnostic(entry.request, failure);
-      try {
-        entry.frameWindow.postMessage(
-          dataBridgeFailure(entry.request.requestId, failure),
-          "*"
-        );
-      } catch {
-        // The frame is gone; there is nothing left to tell, and not starting
-        // the work was the point.
-      }
-    },
-    [reportDiagnostic]
-  );
+  const handleDispatchAbandoned = useDispatchAbandonedHandler(reportDiagnostic);
 
   const pump = useBridgePump(
     runBridgeRequest,
@@ -1231,6 +1257,12 @@ function useArtifactDataBridge({
 
   const handleDataRequest = useCallback(
     (request: ArtifactDataRequest, frameWindow: Window): void => {
+      // Sweep expired entries BEFORE measuring capacity. A full queue is
+      // refused below without ever reaching `pump()`, so purging only there
+      // would let one never-settling request wedge the bridge: every later
+      // request refused `too_many_requests` behind entries that had long since
+      // expired and would never be swept (#1788).
+      purgeExpiredQueued(queuedDataRequestsRef.current, handleDispatchAbandoned);
       const refusal = parentSideRefusal({
         dataBridgeEnabled,
         contentId,
@@ -1256,7 +1288,13 @@ function useArtifactDataBridge({
     },
     // `loadedDataAccessRef` is a stable ref, deliberately NOT a dependency: the
     // pinned mode must not change for the life of this mount (see the ref).
-    [contentId, dataBridgeEnabled, pump, reportDiagnostic]
+    [
+      contentId,
+      dataBridgeEnabled,
+      pump,
+      reportDiagnostic,
+      handleDispatchAbandoned,
+    ]
   );
 
   useDrainQueueOnUnmount(queuedDataRequestsRef);
