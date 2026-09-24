@@ -38,6 +38,8 @@ openwiki:
     - lib/content/publish-service.ts
     - lib/content/reader-links.ts
     - lib/content/atrium-data-contract.ts
+    - lib/content/artifact-bridge-errors.ts
+    - lib/atrium/artifact-preview-diagnostics.ts
     - lib/content/grant-targets.ts
     - lib/content/visibility-service.ts
     - lib/content/collection-management-service.ts
@@ -99,6 +101,13 @@ openwiki:
     - Generated image bucket resolver is separate from generic S3 client — getGeneratedImageBucket() reads DOCUMENTS_BUCKET_NAME directly; storeImageInS3 and resolvePreviousGeneratedImageReferences must use the same bucket (#1804)
     - Generated images use key prefix v2/generated-images/{conversationId}/ — only keys under this prefix are readable for edits, preventing cross-conversation access (#1804)
     - Edit-after-persistence reads by S3 key, not presigned URL — presigned URLs expire after one hour; edits work indefinitely by hydrating image bytes from durable storage (#1804)
+    - Bridge failures are typed — `err.code` is one of a closed set (unauthenticated, forbidden, not_query_mode, rate_limited, timeout, query_error, too_many_requests, unavailable); wrap every AtriumData call in try/catch and branch on the code (#1787)
+    - query_error message is viewer-gated — the database error message is attached only when the requester can EDIT the artifact; plain readers get the code with a generic message (#1787)
+    - Error messages are bounded and flattened — multi-line Postgres errors collapse to one line; length capped at 500 characters; never grow without bound or smuggle line structure into prompts (#1787)
+    - Preview diagnostics are per-artifact — the failure buffer is replaced outright when switching artifacts; stale entries from one artifact can never be reported against another (#1787)
+    - Diagnostics are read once per request — takeArtifactPreviewDiagnostics clears the buffer so each failure reaches the model exactly once, never re-sent on every later turn (#1787)
+    - Failed send restores diagnostics — if the request never reached the server, the taken entries are restored so the preview may re-run the failing query (#1787)
+    - Fresh version clears diagnostics — clearArtifactPreviewDiagnostics is called when a new artifact version mounts so previous failures don't describe code that is no longer running (#1787)
   validation_commands:
     - bun run typecheck
     - bun run lint
@@ -132,6 +141,8 @@ openwiki:
     - tests/unit/nexus-workspace-change-signal.test.tsx
     - tests/unit/nexus-tool-group-workspace-signal.test.tsx
     - tests/unit/lib/content/atrium-data-contract.test.ts
+    - tests/unit/atrium-artifact-preview-diagnostics.test.ts
+    - tests/e2e/atrium-sandbox-typed-errors.spec.ts
     - tests/unit/lib/nexus/chat-step-budget.test.ts
     - tests/unit/lib/nexus/workspace-chat-tools.test.ts
     - tests/unit/lib/nexus/workspace-routing-context.test.ts
@@ -374,20 +385,39 @@ A view-only caller gets only the read tool; an unviewable `?workspace=` yields n
 
 **Step Budget**: A build turn explores data before writing code, so `lib/nexus/chat-step-budget.ts` raises `maxSteps` to 20 when workspace tools are bound; every other multi-step path keeps 10.
 
-**Panel Refresh Without Reload**: When a mutating workspace tool result lands, the Nexus tool-call renderer fires `atrium:workspace-changed` (a DOM event). `WorkspacePanel` alone subscribes, refetches its loader (where pinned `dataAccess` comes from), then bumps `ArtifactCanvas.refreshSignal`. Two independent subscribers would race; one owner ensures consistent order.
+#### Preview Diagnostics (#1787)
+
+When a Nexus chat writes an artifact, it watches the preview render but receives no direct feedback about whether the code worked. In the incident that prompted this feature, a model wrote a dashboard with a filter based on a non-existent column, then told the user the dropdown was "populated live from the database" — every query had failed silently, and the model had no way to know.
+
+The preview now records its failures in a client-side ring buffer, and each chat request carries those entries to the server where they appear in `read_workspace_content` results as `previewDiagnostics`. The model can then see what failed on the NEXT turn and fix its own SQL.
+
+**Buffer behavior** (`lib/atrium/artifact-preview-diagnostics.ts`):
+- **Per-artifact**: The buffer tracks entries for ONE artifact at a time. Switching artifacts replaces the buffer outright so stale failures are never reported against the new code.
+- **Bounded**: At most 10 entries are retained; oldest are dropped first. Message and SQL prefix are each bounded to prevent unbounded prompt injection.
+- **Read once**: `takeArtifactPreviewDiagnostics()` reads and clears the buffer. Each failure reaches the model exactly once, never re-sent on later turns.
+- **Restored on send failure**: If the request never reaches the server (network error, session check failure), the taken entries are restored so the preview may re-run the failing query.
+- **Cleared on fresh version**: When a new artifact version mounts, `clearArtifactPreviewDiagnostics()` drops all previous entries so they don't describe code that is no longer running.
+
+**Entry shape**:
+- `kind`: `"data"` for bridge call failures, `"script"` for uncaught frame errors
+- `code`: The typed bridge error code for `kind: "data"` (see below)
+- `message`: Human-readable error (bounded, flattened to one line)
+- `sql`: A prefix of the failing SQL (for `query_error`), capped at 200 characters so the model can identify which query broke
+- `at`: Epoch milliseconds, so the model can tell stale from fresh
+
+**Server validation**: The `contentId` in the buffer is checked against the object the server actually bound. A buffer left over from a different artifact (or a forged one) is dropped rather than shown.
 
 **Key Sources**:
-- `/docs/features/nexus-workspace-chat-editing.md` — full documentation
-- `/lib/nexus/workspace-chat-tools.ts` — tool definitions
-- `/lib/atrium/workspace-change-event.ts` — DOM event contract
-- `/app/(protected)/nexus/_components/tools/use-workspace-change-signal.ts` — hook for emitting events
+- `/lib/atrium/artifact-preview-diagnostics.ts` — Client-side ring buffer
+- `/lib/nexus/workspace-chat-tools.ts` — `read_workspace_content` returns `previewDiagnostics`
+- `/app/(protected)/nexus/page.tsx` — Attaches buffer to chat request body
 
 **Focused Tests**:
-- `tests/unit/lib/nexus/workspace-chat-tools.test.ts` — gating, read vs edit, `dataAccess` read/set, pagination and UTF-8 boundary safety
-- `tests/unit/lib/nexus/chat-step-budget.test.ts` — step budget derivation
-- `tests/unit/atrium-workspace-change-refresh.test.tsx` — panel refresh on signal
-- `tests/unit/nexus-workspace-change-signal.test.tsx` — signal emission from tool calls
-- `tests/e2e/nexus-workspace-artifact-refresh.spec.ts` — end-to-end refresh without reload
+- `tests/unit/atrium-artifact-preview-diagnostics.test.ts` — Buffer lifecycle, bounded entries, artifact isolation
+- `tests/unit/lib/nexus/workspace-chat-tools.test.ts` — `previewDiagnostics` attached to read results
+- `tests/e2e/atrium-sandbox-typed-errors.spec.ts` — End-to-end typed error forwarding
+
+**Panel Refresh Without Reload**: When a mutating workspace tool result lands, the Nexus tool-call renderer fires `atrium:workspace-changed` (a DOM event). `WorkspacePanel` alone subscribes, refetches its loader (where pinned `dataAccess` comes from), then bumps `ArtifactCanvas.refreshSignal`. Two independent subscribers would race; one owner ensures consistent order.
 
 ### Key Source Files
 
@@ -816,6 +846,70 @@ interface AtriumData {
 
 **Source**: `/docs/features/atrium-artifact-data.md` — comprehensive data bridge documentation.
 
+#### Typed Bridge Errors (#1787)
+
+Every `AtriumData` operation can fail. The bridge classifies failures into a closed set of typed error codes so artifact authors can handle them appropriately instead of rendering a generic "something went wrong" or misclassifying a broken SQL query as a permission error.
+
+**Error Codes** (defined in `lib/content/artifact-bridge-errors.ts`):
+
+| Code | When | What to Show |
+|------|------|--------------|
+| `unauthenticated` | No session or unusable ID token | Sign-in prompt |
+| `forbidden` | Signed in but not allowed to view/use artifact | No-access state (not error details) |
+| `not_query_mode` | Called `query` on artifact not in `query` mode | Fix artifact mode, not the code |
+| `rate_limited` | Per-viewer, per-artifact budget exhausted | Retry message with `err.retryAfterSeconds` |
+| `timeout` | Request did not answer within bridge budget | Retry message |
+| `query_error` | **SQL was rejected** (bad syntax, unknown column, bad arguments) | Show `err.message` to author — fix the SQL, do NOT show no-access state |
+| `too_many_requests` | Too many bridge calls already in flight from this page | Retry message |
+| `unavailable` | Anything else: connector unconfigured, upstream down, unexpected shape | Generic unavailable message |
+
+**Security model**:
+- The error describes the VIEWER'S own request evaluated against their own permissions
+- The sandbox frame has no egress (`connect-src 'none'`, opaque origin) — data cannot be exfiltrated through error messages
+- `query_error` carries the upstream database message ONLY when the requester can EDIT the artifact (editors could run the same SQL from the Code tab anyway)
+- Plain readers get `query_error` with a generic message — no schema leakage
+
+**Required error handling pattern**:
+```typescript
+try {
+  const result = await AtriumData.query(sql);
+  // use result
+} catch (err) {
+  switch (err.code) {
+    case "forbidden":
+    case "unauthenticated":
+      // Show sign-in or no-access state — the VIEWER lacks permission
+      break;
+    case "query_error":
+      // The SQL is wrong — show err.message (the database error)
+      // DO NOT show a no-access state; the fix is in the SQL, not permissions
+      break;
+    case "rate_limited":
+      // Show retry message with err.retryAfterSeconds
+      break;
+    // ... handle other codes
+  }
+}
+```
+
+**Never assume a call succeeded**. A dashboard whose every query fails looks exactly like one that works — empty charts, silent errors. Wrap every bridge call in try/catch and render an appropriate state for each failure mode.
+
+**Error message bounds**:
+- Messages capped at 500 characters before crossing trust boundaries
+- Multi-line Postgres errors flattened to one line (newlines replaced with spaces)
+- SQL prefix in preview diagnostics capped at 200 characters (enough to identify the query)
+
+**Key Sources**:
+- `/lib/content/artifact-bridge-errors.ts` — Typed error codes and default messages
+- `/actions/db/atrium/artifact-query.ts` — Server-side classification of failures
+- `/components/atrium/ArtifactSandbox.tsx` — Carries errors across postMessage bridge
+- `/infra/sandbox-host/render.html` — Frame-side error rejection with `.code` property
+
+**Focused Tests**:
+- `tests/unit/atrium-artifact-query-action.test.ts` — Server-side error classification
+- `tests/unit/atrium-artifact-data-bridge.test.tsx` — Bridge error handling
+- `tests/e2e/atrium-sandbox-typed-errors.spec.ts` — End-to-end error forwarding in real browser
+
 ### Script Execution Order and Lifecycle Events (#1785)
 
 The Atrium sandbox host guarantees deterministic script execution order and fires synthetic lifecycle events after all scripts complete. This fixes the "Chart is not defined" regression where inline code ran before its preceding CDN library.
@@ -863,7 +957,9 @@ The Atrium sandbox host guarantees deterministic script execution order and fire
 The `AtriumData` bridge contract is defined in `/lib/content/atrium-data-contract.ts` and shared across all artifact-authoring surfaces:
 
 - **`DATA_ACCESS_DESC`** — What the three modes mean (imported by both MCP content tools and workspace chat tools)
-- **`ATRIUM_DATA_AUTHORING_GUIDANCE`** — How to write artifact code against the bridge (the operations, return shapes, authoring rules, and script timing guarantees: document-order execution, external script await, synthetic `DOMContentLoaded`/`load`)
+- **`ATRIUM_DATA_AUTHORING_GUIDANCE`** — How to write artifact code against the bridge (the operations, return shapes, authoring rules, typed error handling, and script timing guarantees: document-order execution, external script await, synthetic `DOMContentLoaded`/`load`)
+
+The guidance now includes the typed error code list and explicit instructions to **wrap every call in try/catch** and branch on `err.code`. Models are told to render a no-access state ONLY for `forbidden` and `unauthenticated`, and to show `err.message` for `query_error` instead of dressing a broken query up as a permissions problem.
 
 **Why shared**: Before #1749, the workspace chat knew nothing about the bridge. A "build me a live dashboard" request worked through MCP tools and failed in workspace chat — the model was never told `window.AtriumData` existed, invented a helper, saw it fail, and baked a stale snapshot into the source.
 
