@@ -48,6 +48,9 @@ openwiki:
     - lib/atrium/workspace-change-event.ts
     - lib/nexus/workspace-chat-tools.ts
     - lib/nexus/chat-step-budget.ts
+    - app/(protected)/utilities/assistant-architect/create/_components/create-form.tsx
+    - components/ui/use-toast.ts
+    - components/ui/form.tsx
     - app/(protected)/nexus/_components/tools/use-workspace-change-signal.ts
     - actions/mcp-connector.actions.ts
     - app/(protected)/nexus/_components/chat/mcp-popover.tsx
@@ -151,6 +154,9 @@ openwiki:
     - tests/e2e/nexus-workspace-artifact-refresh.spec.ts
     - tests/e2e/atrium-sandbox-script-order.spec.ts
     - tests/smoke/atrium-artifact-sandbox-host.smoke.ts
+    - tests/unit/assistant-architect-create-form.test.tsx
+    - tests/unit/use-toast-sonner-adapter.test.ts
+    - tests/e2e/assistant-architect-create-add-field.functional.spec.ts
 ---
 
 # Core Application Features
@@ -489,12 +495,42 @@ Assistants can operate in **agentic mode** for autonomous multi-step workflows:
 
 See `/docs/features/assistant-architect-agentic-mode.md` for details.
 
+### Create Form Validation (#1697)
+
+**Location**: `/app/(protected)/utilities/assistant-architect/create/_components/create-form.tsx`
+
+The assistant creation flow at `/utilities/assistant-architect/create` requires an icon (`imagePath`) before the user can continue to the prompts step. A blocked submit must produce **visible feedback** — toast + focus + inline message — rather than a silent no-op that looks like a dead button.
+
+**Root causes fixed in #1697**:
+1. **Toast system was not mounted** — The app uses sonner (`app/layout.tsx` mounts `<Toaster />`), but `use-toast.ts` was writing to an unmounted shadcn queue. `useToast()` is now a thin adapter over sonner so all ~60 call sites render correctly.
+2. **Form validation errors were stale** — `form.formState.errors` reads empty immediately after `await form.trigger()` due to proxy timing. Validation errors now come from `handleSubmit(onValid, onInvalid)` callbacks.
+3. **Focus had no target** — `form.setFocus("imagePath")` failed because `IconPicker` never forwarded `field.ref`. The icon grid now carries the ref with `role="radiogroup"` and proper ARIA.
+
+**Invariants**:
+- Toasts use `components/ui/use-toast.ts` adapter → sonner — never mount a second toast root
+- `useFormField` subscribes via `useFormState({ name })`, not `useFormContext().formState` — descendants must re-render
+- Validation errors come from `handleSubmit` callbacks, not `form.formState.errors` after `trigger()`
+- Focus uses `shouldFocusError: false` with explicit `setFocus()` to control order (schema order matches display order)
+- Icon grid has `role="radiogroup"` with `aria-required` and `aria-labelledby` — each option is `role="radio"` with `aria-checked`
+- Buttons outside `<form>` require `onSubmit={e => e.preventDefault()}` to prevent implicit submission on Enter
+
+**Key Sources**:
+- `/app/(protected)/utilities/assistant-architect/create/_components/create-form.tsx` — Create form with validation
+- `/components/ui/use-toast.ts` — Sonner adapter for toast system
+- `/components/ui/form.tsx` — `useFormField` using `useFormState`
+
+**Focused Tests**:
+- `tests/unit/assistant-architect-create-form.test.tsx` — Blocked submit feedback, focus, ARIA
+- `tests/unit/use-toast-sonner-adapter.test.ts` — Toast adapter reaches sonner
+- `tests/e2e/assistant-architect-create-add-field.functional.spec.ts` — E2E blocked submit visibility
+
 ### Key Source Files
 
 | File | Purpose |
 |------|---------|
 | `/lib/assistant-architect/` | Core assistant execution logic |
 | `/app/(protected)/prompt-library/` | UI for managing assistants |
+| `/app/(protected)/utilities/assistant-architect/create/` | Create flow UI |
 | `/app/api/assistant-architect/execute/` | Execution endpoint |
 
 ---
