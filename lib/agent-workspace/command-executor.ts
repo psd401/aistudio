@@ -62,6 +62,11 @@ export interface WorkspaceMediaHandoff {
 export type WorkspaceCommandRejectionReason =
   | "operation_not_allowed"
   | "drive_upload_use_publish"
+  // `params_not_json` is likewise not a policy refusal: the command is
+  // allowed, its query parameters just did not survive tokenization. The
+  // remedy (`--params-file`) is mechanical, so the skill can branch on this
+  // code rather than on the English of the message (#1801).
+  | "params_not_json"
 
 export class WorkspaceCommandValidationError extends Error {
   constructor(
@@ -1042,18 +1047,44 @@ function validateWorkspaceArguments(argv: readonly string[]): void {
  *
  * The message names the transport that works, because the input that produces
  * this is almost always a Drive `q` whose required single quotes were eaten by
- * the tokenizer, and the model otherwise retries the same broken shape.
+ * the tokenizer, and the model otherwise retries the same broken shape. It
+ * carries the `params_not_json` reason code so the skill can branch on
+ * something stabler than that wording.
+ *
+ * Unparseable and parseable-but-not-an-object get DIFFERENT wording: the
+ * quoting advice is the answer to the first and a red herring for the second,
+ * and `--params-file` accepts any JSON, so a `[…]` payload reaches here
+ * having already passed the skill's own parse check.
+ *
+ * Ordering matters: `validateWorkspaceCommand` runs this (via
+ * `validateWorkspaceArguments`) before `validateWorkspaceMutation`, so every
+ * later gate that reads `--params` is guaranteed a value it can actually see.
+ * `rejects an unparseable --params before any mutation gate runs` in
+ * command-executor.test.ts pins that order.
  */
 function assertParamsParse(argv: readonly string[]): void {
   const raw = argumentValue(argv, "--params")
   if (raw === null) return
-  if (parseObjectArgument(argv, "--params") === null) {
-    throw new Error(
-      "Workspace --params is not valid JSON. Quotes inside a value (a Drive " +
-        "query such as \"name contains 'X'\") cannot survive --command; write " +
-        "the parameters to a file and pass --params-file <absolute-path>."
-    )
+  if (parseObjectArgument(argv, "--params") !== null) return
+
+  let parsedButNotAnObject: boolean
+  try {
+    JSON.parse(raw)
+    parsedButNotAnObject = true
+  } catch {
+    parsedButNotAnObject = false
   }
+  throw new WorkspaceCommandValidationError(
+    parsedButNotAnObject
+      ? "Workspace --params must be a JSON object, not an array or a bare " +
+          "value. Put the query parameters in an object, e.g. " +
+          '{"q":"…","pageSize":50}.'
+      : "Workspace --params is not valid JSON. Quotes inside a value (a Drive " +
+          "query such as \"name contains 'X'\") cannot survive --command; write " +
+          "the parameters to a file and pass --params-file <absolute-path>.",
+    "params_not_json",
+    workspaceOperation(argv)
+  )
 }
 
 

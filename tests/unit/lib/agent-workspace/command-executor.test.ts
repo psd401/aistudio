@@ -5,6 +5,7 @@ import {
   validateEmailTaskWorkspaceCommand,
   validateScheduledWorkspaceCommand,
   validateWorkspaceCommand,
+  WorkspaceCommandValidationError,
   workspaceOperation,
 } from "@/lib/agent-workspace/command-executor"
 
@@ -1054,12 +1055,52 @@ describe("--params must parse (#1801)", () => {
     )
   })
 
-  it("refuses valid JSON that is not an object", () => {
+  it("refuses valid JSON that is not an object, without the quoting advice", () => {
+    // `--params-file` accepts any JSON, so this shape reaches the broker
+    // having passed the skill's own parse check — telling the model its
+    // quotes were eaten would send it down the wrong road.
     for (const value of ['["q"]', '"q"', "42", "null"]) {
       expect(() => validateWorkspaceCommand(listArgv(value))).toThrow(
-        /--params is not valid JSON/
+        /--params must be a JSON object/
       )
     }
+  })
+
+  it("carries the params_not_json reason code, not the generic one", () => {
+    // The skill branches on `reason`; the English of the message is not a
+    // contract it should have to pattern-match.
+    expect.assertions(2)
+    try {
+      validateWorkspaceCommand(listArgv("{oops"))
+    } catch (error) {
+      expect(error).toBeInstanceOf(WorkspaceCommandValidationError)
+      expect((error as WorkspaceCommandValidationError).reason).toBe(
+        "params_not_json"
+      )
+    }
+  })
+
+  it("rejects an unparseable --params before any mutation gate runs", () => {
+    // The whole fix rests on this order: every gate that reads parameters
+    // through parseObjectArgument (drive metadata updates, share targets,
+    // access proposals, Chat destinations) would otherwise judge a command
+    // whose parameters it cannot see. `drive files update` on the user slot
+    // hits validateUserDriveMetadataUpdate, so a reordering would surface
+    // here as the metadata error instead of this one.
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: [
+          "drive",
+          "files",
+          "update",
+          "--params",
+          "{oops",
+          "--json",
+          '{"name":"x"}',
+        ],
+      })
+    ).toThrow(/--params is not valid JSON/)
   })
 
   it("accepts a Drive query whose values are single-quoted", () => {

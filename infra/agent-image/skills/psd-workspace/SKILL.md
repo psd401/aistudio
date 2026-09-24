@@ -183,10 +183,11 @@ node /opt/psd-skills/psd-workspace/run.js \
 Children of one folder use the same shape with
 `{"q":"'<folderId>' in parents and trashed = false"}`.
 
-If the broker answers `Workspace --params is not valid JSON`, the quotes were
-eaten in tokenization: move the parameters into a file and retry with
-`--params-file`. Do not retry the same inline shape, and do not fall back to
-double quotes — Drive refuses them. The broker never repairs or replaces a
+If the broker answers `"reason":"params_not_json"`, the quotes were eaten in
+tokenization: move the parameters into a file and retry with `--params-file`.
+Do not retry the same inline shape, and do not fall back to double quotes —
+Drive refuses them. (The same reason code with a "must be a JSON object"
+message means the file held an array or a bare value — wrap it in an object.) The broker never repairs or replaces a
 `--params` value it cannot parse, so an unfiltered listing can no longer come
 back dressed as search results (#1801).
 
@@ -335,8 +336,9 @@ node /opt/psd-skills/psd-workspace/run.js \
 ```
 
 Rules: the path must be absolute; use the file form OR the inline flag, never
-both (`--json`/`--json-file`, `--body`/`--body-file`, `--text`/`--text-file`);
-one of each flag per command. The file content is handed to gws as exactly one
+both (`--json`/`--json-file`, `--params`/`--params-file`, `--body`/`--body-file`,
+`--text`/`--text-file`); one of each flag per command. A `--json-file` or
+`--params-file` must contain a JSON **object**, not an array or a bare value. The file content is handed to gws as exactly one
 argv token — quoting rules never apply to it. Phase 1 gates and marker
 injection still see the real payload (they run against the resolved content),
 so this is a transport mechanism, not a bypass: forbidden operations are still
