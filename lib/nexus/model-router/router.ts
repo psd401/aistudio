@@ -457,6 +457,52 @@ async function buildRoutedResult(options: {
   }
 }
 
+/**
+ * Select the model, degrading a URL + current-info turn to a fetch-only turn
+ * when web search is unavailable (#1696).
+ *
+ * "Summarize <url> and give today's weather" classifies as web-search, which
+ * requires a search-capable model and throws NexusSpecialistUnavailableError
+ * when none is accessible. For a message that names a page, that would refuse
+ * the link outright, which is the bug #1696 fixed. So when the message has a
+ * URL, the turn falls back to `general` with `web_fetch` only: the page is
+ * still read, and only the live-search half is lost. Without a URL the error
+ * propagates as before.
+ */
+function selectWithFetchOnlyFallback(options: {
+  decision: NexusClassifierDecision
+  wantsWebFetch: boolean
+  requiredTools: string[]
+  select: (decision: NexusClassifierDecision) => { model: NexusModelRow; fallbackUsed: boolean }
+}): { decision: NexusClassifierDecision; selection: { model: NexusModelRow; fallbackUsed: boolean } } {
+  const { decision, wantsWebFetch, requiredTools, select } = options
+  const hadWebSearch = requiredTools.includes("webSearch")
+  addRequiredWebSearchTool(decision, requiredTools)
+  try {
+    return { decision, selection: select(decision) }
+  } catch (error) {
+    if (
+      !(error instanceof NexusSpecialistUnavailableError)
+      || decision.intent !== "web-search"
+      || !wantsWebFetch
+    ) {
+      throw error
+    }
+    log.warn("Web search unavailable for a URL turn; routing as fetch-only", {
+      error: error.message,
+    })
+    // Drop only the web-search requirement this decision added, never one the
+    // user enabled themselves.
+    if (!hadWebSearch) requiredTools.splice(requiredTools.indexOf("webSearch"), 1)
+    const fetchOnly: NexusClassifierDecision = {
+      ...decision,
+      intent: "general",
+      reasonCodes: [...decision.reasonCodes, "web_search_unavailable_fetch_only"],
+    }
+    return { decision: fetchOnly, selection: select(fetchOnly) }
+  }
+}
+
 async function routeWithConfiguredRouter(options: {
   args: RouteNexusRequestArgs
   config: NexusRouterConfig
@@ -475,29 +521,32 @@ async function routeWithConfiguredRouter(options: {
     accessibleIds,
     requiredTools,
   } = options
-  const decision = await classifyNexusRequest(args.text, config, {
+  const classified = await classifyNexusRequest(args.text, config, {
     hasImageInput: args.hasImageInput,
     hasPreviousGeneratedImage: args.hasPreviousGeneratedImage,
   })
-  addRequiredWebSearchTool(decision, requiredTools)
-  const selectionArgs = {
-    models, config, family: args.requestedFamily, tier: decision.tier,
-    intent: decision.intent, fallbackModelId: args.fallbackModelId, accessibleIds,
-    requiredTools,
-  }
   // Shadow mode may retain a legacy fallback only when doing so is safe. A
   // server-required input tool is an authorization/correctness boundary, so
   // execute a compatible text model even while recording the proposed route.
-  const wantsPsdData = decision.intent === "psd-data" || workspaceNeedsPsdData(args.workspace)
+  const wantsPsdData = classified.intent === "psd-data" || workspaceNeedsPsdData(args.workspace)
   // A link in the message means `web_fetch` has to be callable for the turn to
   // do what the user asked, even though the decision names no required tool.
   const wantsWebFetch = containsExplicitUrl(args.text)
-  const selection = selectModelForToolUse(
-    selectionArgs,
-    mode,
-    fallback,
-    wantsPsdData || wantsWebFetch
-  )
+  const { decision, selection } = selectWithFetchOnlyFallback({
+    decision: classified,
+    wantsWebFetch,
+    requiredTools,
+    select: current => selectModelForToolUse(
+      {
+        models, config, family: args.requestedFamily, tier: current.tier,
+        intent: current.intent, fallbackModelId: args.fallbackModelId, accessibleIds,
+        requiredTools,
+      },
+      mode,
+      fallback,
+      wantsPsdData || wantsWebFetch
+    ),
+  })
   const psdConnectorId = await resolveAutomaticPsdConnector(wantsPsdData, config)
   // Only an explicit psd-data REQUEST fails closed. A workspace-artifact turn
   // asked for something else too ("add a dropdown"), so an unavailable

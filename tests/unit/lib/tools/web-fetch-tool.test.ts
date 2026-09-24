@@ -109,20 +109,21 @@ describe("web_fetch tool registration", () => {
     );
   });
 
-  it("is attached by createUniversalTools", async () => {
+  it("is not attached by createUniversalTools", async () => {
+    // Every unified-streaming caller gets universal tools, including
+    // single-step surfaces (compare-models, ai-helpers). There a web_fetch call
+    // ends the turn on the tool result with no text, so only the Nexus chat
+    // route (which has a multi-step budget) attaches it.
     const tools = await createUniversalTools([]);
-    expect(tools).toHaveProperty("web_fetch");
+    expect(tools).not.toHaveProperty("web_fetch");
+    expect(tools).toHaveProperty("show_chart");
   });
 
   it.each(["openai", "google", "amazon-bedrock", "azure", "unknown-provider"])(
-    "is attached for provider %s",
+    "is not injected into the adapter tool set for provider %s",
     async (provider) => {
-      // The regression that made FS#164086 a total loss on Claude:
-      // `createBedrockNativeTools()` returns `{}`, so a provider-native web tool
-      // never reaches Bedrock. `web_fetch` runs in-process, so it must survive
-      // on every provider, including ones with no native tools at all.
       const tools = await createProviderNativeTools(provider, "some-model", []);
-      expect(Object.keys(tools)).toContain("web_fetch");
+      expect(Object.keys(tools)).not.toContain("web_fetch");
     }
   );
 

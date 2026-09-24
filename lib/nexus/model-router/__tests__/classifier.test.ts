@@ -111,14 +111,27 @@ describe("Nexus request classifier", () => {
     });
   });
 
-  it("prefers the link over an implicit currency signal (#1696)", () => {
-    // Without a URL this is a web search; with one, the user has already named
-    // the page to read, and routing it as web-search kills the turn whenever no
-    // web-search-capable model is accessible.
-    expect(deterministicClassify("What is the latest guidance?")?.intent).toBe("web-search");
+  it("does not read currency wording inside the URL itself (#1696)", () => {
+    // `latest` and `news` here are path segments, not the user asking for live data.
     expect(
-      deterministicClassify("What is the latest guidance? See https://example.com/guidance")
+      deterministicClassify("Summarize https://example.com/latest-news/policy-update")
     ).toMatchObject({ intent: "general", reasonCodes: ["explicit_url_web_fetch"] });
+  });
+
+  it("keeps web search for a link plus a separate current-info request (#1696)", () => {
+    // The page cannot supply today's weather, so live search is still needed.
+    // web_fetch stays attached, and the router degrades to fetch-only when no
+    // search model is accessible.
+    expect(
+      deterministicClassify("Summarize https://example.com and give today's weather")
+    ).toMatchObject({
+      intent: "web-search",
+      reasonCodes: ["current_web_information", "explicit_url_web_fetch"],
+    });
+    expect(deterministicClassify("What is the latest guidance?")).toMatchObject({
+      intent: "web-search",
+      reasonCodes: ["current_web_information"],
+    });
   });
 
   it("recognizes an edit instruction when an image is attached", async () => {

@@ -2,7 +2,7 @@ import { generateText, tool } from "ai"
 import { z } from "zod"
 import { createProviderModel } from "@/lib/ai/provider-factory"
 import { createLogger } from "@/lib/logger"
-import { containsExplicitUrl } from "./url-detection"
+import { containsExplicitUrl, stripExplicitUrls } from "./url-detection"
 import {
   nexusRouterIntentSchema,
   nexusRouterTierSchema,
@@ -65,16 +65,30 @@ export function deterministicClassify(text: string, hasImageInput = false): Nexu
   // pasting a URL produced "cannot access URL directly" / "unable to access the
   // internet".
   //
-  // So a URL SUPPRESSES the implicit web-search branch below rather than
-  // classifying the whole message on its own. It is only a weak signal about
+  // So a URL alone never triggers the implicit web-search branch below, and it
+  // does not classify the whole message on its own either. The current-info
+  // check reads the message with URLs removed: "summarize <url>" is a fetch,
+  // but "summarize <url> and give today's weather" also needs live search, so
+  // it still routes as web-search (`web_fetch` stays attached). The router
+  // degrades that mixed case to a fetch-only turn when no search model is
+  // accessible, so the link is never refused. A URL is only a weak signal about
   // intent and says nothing about domain or complexity, so a URL alongside
   // lesson-planning wording is still `instruction`, and the catch-all at the
   // bottom takes its tier from the same complexity heuristic every other
   // unmatched message uses — otherwise pasting a link into a hard question
   // would silently pin it to `medium` and downgrade the model.
   const hasExplicitUrl = containsExplicitUrl(text)
-  if (!hasExplicitUrl && CURRENT_INFO_PATTERN.test(text) && !USER_SUPPLIED_CONTEXT_PATTERN.test(text)) {
-    return { intent: "web-search", tier: "medium", confidence: 0.96, reasonCodes: ["current_web_information"], source: "deterministic" }
+  const userWording = hasExplicitUrl ? stripExplicitUrls(text) : text
+  if (CURRENT_INFO_PATTERN.test(userWording) && !USER_SUPPLIED_CONTEXT_PATTERN.test(userWording)) {
+    return {
+      intent: "web-search",
+      tier: "medium",
+      confidence: 0.96,
+      reasonCodes: hasExplicitUrl
+        ? ["current_web_information", "explicit_url_web_fetch"]
+        : ["current_web_information"],
+      source: "deterministic",
+    }
   }
   if (INSTRUCTION_PATTERN.test(text)) {
     return { intent: "instruction", tier: "medium", confidence: 0.95, reasonCodes: ["instruction_domain"], source: "deterministic" }

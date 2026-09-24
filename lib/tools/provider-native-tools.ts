@@ -4,7 +4,6 @@ import { Settings } from '@/lib/settings-manager'
 import { createLogger } from '@/lib/logger'
 import type { ToolSet } from 'ai'
 import { createShowChartTool } from './show-chart-tool'
-import { createWebFetchTool } from './web-fetch-tool'
 
 const log = createLogger({ module: 'provider-native-tools' })
 
@@ -59,14 +58,12 @@ export async function createUniversalTools(_enabledTools: string[]): Promise<Too
   tools.show_chart = createShowChartTool()
   log.debug('Added show_chart visualization tool (always enabled)')
 
-  // URL reader - ALWAYS enabled for all providers (Issue #1696).
-  // Runs in-process rather than provider-side, so it is the ONLY web capability
-  // Bedrock/Claude and Azure models have: `createBedrockNativeTools()` returns
-  // `{}` and the Azure adapter adds nothing. It is also the only way any model
-  // can open a URL the user pasted -- provider-native web search can search, but
-  // cannot fetch a specific link, which is the bug reported in FS#164087.
-  tools.web_fetch = createWebFetchTool()
-  log.debug('Added web_fetch URL reader tool (always enabled)')
+  // NOT `web_fetch` (Issue #1696). The URL reader is attached by the Nexus chat
+  // route only (`buildMergedChatTools`). Every unified-streaming caller reaches
+  // this function through `adapter.createTools()`, including single-step
+  // surfaces (compare-models, `lib/ai-helpers.ts`) with no follow-up model step.
+  // There, a model that calls `web_fetch` for a pasted URL ends the turn on the
+  // tool result and returns no text.
 
   return tools as ToolSet
 }

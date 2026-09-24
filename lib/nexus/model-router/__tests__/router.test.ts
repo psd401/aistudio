@@ -623,6 +623,41 @@ describe("Nexus model router link handling", () => {
 
     expect(result.modelId).toBe("no-tools")
   })
+
+  it("degrades a link + current-info turn to fetch-only when web search is unavailable", async () => {
+    // Anthropic has no web-search model; without the fallback this throws and
+    // refuses the link outright.
+    mockClassify.mockResolvedValue({
+      intent: "web-search", tier: "medium", confidence: 0.96,
+      reasonCodes: ["current_web_information", "explicit_url_web_fetch"], source: "deterministic",
+    })
+
+    const result = await routeNexusRequest({
+      ...turn,
+      experienceMode: "advanced",
+      requestedFamily: "anthropic",
+      text: "Summarize https://example.com and give today's weather",
+    })
+
+    expect(result.modelId).toBe("us.anthropic.claude-sonnet")
+    expect(result.metadata.intent).toBe("general")
+    expect(result.metadata.reasonCodes).toContain("web_search_unavailable_fetch_only")
+    expect(result.automaticToolNames).toEqual([])
+  })
+
+  it("still fails a current-info turn with no link when web search is unavailable", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "web-search", tier: "medium", confidence: 0.96,
+      reasonCodes: ["current_web_information"], source: "deterministic",
+    })
+
+    await expect(routeNexusRequest({
+      ...turn,
+      experienceMode: "advanced",
+      requestedFamily: "anthropic",
+      text: "Give today's weather",
+    })).rejects.toThrow("Web search is not available")
+  })
 })
 
 describe("Nexus workspace auto-connector preview", () => {

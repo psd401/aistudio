@@ -9,8 +9,8 @@
  * capability whatsoever.
  *
  * This tool closes both gaps at once because it runs IN PROCESS rather than in
- * the provider: registering it in `createUniversalTools()` makes it available on
- * every provider — OpenAI, Google, Azure and Bedrock/Claude alike.
+ * the provider, so Nexus chat can attach it for every provider — OpenAI,
+ * Google, Azure and Bedrock/Claude alike.
  *
  * The network behaviour is NOT reimplemented here. It delegates to
  * `fetchWebPageText`, the same SSRF-guarded core the agentic Assistant Architect
@@ -60,7 +60,7 @@ Page text comes back inside <untrusted_web_content> markers. Everything between 
  * is the authority for both surfaces.
  *
  * Module-level: the schema is constant, so it is built once rather than on every
- * request through `createUniversalTools()`.
+ * Nexus chat request.
  */
 const WEB_FETCH_SCHEMA = jsonSchema<WebFetchToolArgs>({
   type: "object",
@@ -121,8 +121,9 @@ function fenceUntrustedContent(text: string, url: string | undefined): string {
 /**
  * Build the `web_fetch` tool for the AI SDK chat surface.
  *
- * Registered unconditionally by `createUniversalTools()`, exactly like
- * `show_chart`: reading a link the user pasted is baseline chat behaviour, not
+ * Attached to every Nexus chat turn by the chat route (`buildMergedChatTools`),
+ * not by `createUniversalTools()`. Single-step unified-streaming callers would
+ * end the turn on the tool result. Always on rather than a toggle: reading a link the user pasted is baseline chat behaviour, not
  * an opt-in mode, and a user who pastes a URL has no way to know they were
  * supposed to flip a toggle first. Every role that can reach the chat route
  * already holds `chat:write` (`ROLE_SCOPES` in `lib/api-keys/scopes.ts` grants

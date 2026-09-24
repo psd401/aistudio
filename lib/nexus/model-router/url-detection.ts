@@ -16,7 +16,18 @@
  * calls.
  */
 const EXPLICIT_URL_PATTERN = /\bhttps?:\/\/[^\s<>()[\]{}"']{3,}/i
+/** Same pattern, global, for `replace()` only — never call `test()` on it. */
+const EXPLICIT_URL_PATTERN_ALL = /\bhttps?:\/\/[^\s<>()[\]{}"']{3,}/gi
 
 export function containsExplicitUrl(text: string): boolean {
   return EXPLICIT_URL_PATTERN.test(text)
+}
+
+/**
+ * The message with every explicit URL removed, so wording checks read only what
+ * the user wrote. A link like `https://news.example/latest-policy` must not make
+ * the message itself read as a request for current information.
+ */
+export function stripExplicitUrls(text: string): string {
+  return text.replace(EXPLICIT_URL_PATTERN_ALL, " ")
 }

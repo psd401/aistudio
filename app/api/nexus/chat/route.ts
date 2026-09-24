@@ -19,6 +19,7 @@ import { userCanAccessResource } from '@/lib/db/drizzle/resource-access';
 import { getConnectorTools } from '@/lib/mcp/connector-service';
 import type { McpConnectorToolsResult } from '@/lib/mcp/connector-types';
 import { createUniversalTools } from '@/lib/tools/provider-native-tools';
+import { createWebFetchTool } from '@/lib/tools/web-fetch-tool';
 import {
   createNexusAttachmentTools,
   createNexusRepositorySearchTools,
@@ -279,10 +280,15 @@ function createOnFinishCallback(params: {
 
 /**
  * Pre-merge the adapter (universal) tools with per-user MCP connector tools and
- * the server-built workspace, attachment, and memory tools. Returns undefined
- * when no pre-merged tool source is active (the streaming service then builds
- * adapter tools itself from `enabledTools`). Server-built tools take precedence
- * over adapter tools on a name collision.
+ * the server-built workspace, attachment, and memory tools. Server-built tools
+ * take precedence over adapter tools on a name collision.
+ *
+ * `web_fetch` (#1696) is included on EVERY Nexus turn. With no other pre-merged
+ * source, only `web_fetch` is returned, and the streaming service merges the
+ * adapter tools (from `enabledTools`) under it. It lives here rather than in
+ * `createUniversalTools()` because Nexus is the surface with a multi-step
+ * budget for it (`resolveMaxSteps`). Single-step unified-streaming callers would
+ * end the turn on the tool result.
  */
 async function buildMergedChatTools(params: {
   enabledTools: string[];
@@ -308,9 +314,12 @@ async function buildMergedChatTools(params: {
     !hasAttachmentTools &&
     !hasMemoryTools
   ) {
-    return undefined;
+    return { web_fetch: createWebFetchTool() };
   }
-  const merged: ToolSet = { ...(await createUniversalTools(enabledTools)) };
+  const merged: ToolSet = {
+    ...(await createUniversalTools(enabledTools)),
+    web_fetch: createWebFetchTool(),
+  };
   for (const result of connectorToolResults) {
     Object.assign(merged, result.tools);
   }
@@ -495,7 +504,7 @@ async function executeStreaming(params: {
     hasRepositoryTools ||
     (!!memoryTools && Object.keys(memoryTools).length > 0);
 
-  // Pre-merge adapter + connector + workspace tools (undefined when none active).
+  // Pre-merge adapter + connector + workspace tools, plus the Nexus-only `web_fetch`.
   const mergedTools = await buildMergedChatTools({
     enabledTools,
     connectorToolResults,

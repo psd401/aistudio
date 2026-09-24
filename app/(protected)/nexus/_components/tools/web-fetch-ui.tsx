@@ -18,14 +18,17 @@ import type { WebFetchToolArgs, WebFetchToolResult } from '@/lib/tools/web-fetch
 /**
  * Best-effort display label for the fetched page.
  *
- * `args` is empty while the call is still streaming, so fall back to parsing the
- * partial `argsText`, then to the URL echoed back on the result.
+ * A completed result's `url` wins: it is the URL the page actually came from,
+ * after redirects, and may be on a different host than the one requested.
+ * Before the result exists, use `args`, which is empty while the call is still
+ * streaming, then the partial `argsText`.
  */
 function extractUrl(
   args: WebFetchToolArgs | undefined,
   argsText: string | undefined,
   result: WebFetchToolResult | undefined
 ): string {
+  if (result?.url) return result.url
   if (args?.url) return args.url
   if (argsText) {
     try {
@@ -41,7 +44,7 @@ function extractUrl(
       // Partial JSON while streaming -- fall through to the result.
     }
   }
-  return result?.url ?? ''
+  return ''
 }
 
 /** Show the host when the URL parses, so the card stays readable for long URLs. */
