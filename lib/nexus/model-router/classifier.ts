@@ -25,7 +25,7 @@ const EXPLICIT_WEB_SEARCH_PHRASES = [
  * markdown still matches.
  */
 const EXPLICIT_URL_PATTERN = /\bhttps?:\/\/[^\s<>()[\]{}"']{3,}/i
-const CURRENT_INFO_PATTERN =/\b(?:latest|current|today(?:'s)?|recent|up-to-date|right\s+now|this\s+(?:week|month|year))\b.{0,60}\b(?:news|weather|forecast|price|cost|stock|score|schedule|standings|results?|version|release|president|governor|mayor|ceo|law|policy|regulation|guidance)\b|\b(?:news|weather|forecast|price|cost|stock|score|schedule|standings|results?|version|release|president|governor|mayor|ceo|law|policy|regulation|guidance)\b.{0,60}\b(?:latest|current|today(?:'s)?|recent|up-to-date|right\s+now|this\s+(?:week|month|year))\b/i
+const CURRENT_INFO_PATTERN = /\b(?:latest|current|today(?:'s)?|recent|up-to-date|right\s+now|this\s+(?:week|month|year))\b.{0,60}\b(?:news|weather|forecast|price|cost|stock|score|schedule|standings|results?|version|release|president|governor|mayor|ceo|law|policy|regulation|guidance)\b|\b(?:news|weather|forecast|price|cost|stock|score|schedule|standings|results?|version|release|president|governor|mayor|ceo|law|policy|regulation|guidance)\b.{0,60}\b(?:latest|current|today(?:'s)?|recent|up-to-date|right\s+now|this\s+(?:week|month|year))\b/i
 const USER_SUPPLIED_CONTEXT_PATTERN = /\b(?:this|the|my|our|attached|uploaded|provided)\s+(?:spreadsheet|sheet|document|file|attachment|draft|paragraph|project|report|data|results?)\b|\b(?:spreadsheet|sheet|document|file|attachment|draft|paragraph|project|report|data)\b.{0,60}\b(?:attached|uploaded|provided|above|below)\b/i
 const HIGH_PATTERN = /\b(architecture|migration|security review|threat model|root cause|research report|multi-step|optimize|prove|complex analysis)\b/i
 const LIGHT_PATTERN = /^(hi|hello|thanks|thank you|yes|no|ok|okay)[!. ]*$|^(what is|who is|when is|where is|how many)\b|\b(define|translate|summarize briefly|quick question)\b/i
@@ -68,16 +68,34 @@ export function deterministicClassify(text: string, hasImageInput = false): Nexu
   // NexusSpecialistUnavailableError when none is accessible, killing the turn
   // before the model ever runs. That hard failure was the reported symptom:
   // pasting a URL produced "cannot access URL directly" / "unable to access the
-  // internet". Returning deterministically here also short-circuits the LLM
-  // classifier, which otherwise labels "open <url>" as web-search.
-  if (EXPLICIT_URL_PATTERN.test(text)) {
-    return { intent: "general", tier: "medium", confidence: 0.95, reasonCodes: ["explicit_url_web_fetch"], source: "deterministic" }
-  }
-  if (CURRENT_INFO_PATTERN.test(text) && !USER_SUPPLIED_CONTEXT_PATTERN.test(text)) {
+  // internet".
+  //
+  // So a URL SUPPRESSES the implicit web-search branch below rather than
+  // classifying the whole message on its own. It is only a weak signal about
+  // intent and says nothing about domain or complexity, so a URL alongside
+  // lesson-planning wording is still `instruction`, and the catch-all at the
+  // bottom takes its tier from the same complexity heuristic every other
+  // unmatched message uses — otherwise pasting a link into a hard question
+  // would silently pin it to `medium` and downgrade the model.
+  const hasExplicitUrl = EXPLICIT_URL_PATTERN.test(text)
+  if (!hasExplicitUrl && CURRENT_INFO_PATTERN.test(text) && !USER_SUPPLIED_CONTEXT_PATTERN.test(text)) {
     return { intent: "web-search", tier: "medium", confidence: 0.96, reasonCodes: ["current_web_information"], source: "deterministic" }
   }
   if (INSTRUCTION_PATTERN.test(text)) {
     return { intent: "instruction", tier: "medium", confidence: 0.95, reasonCodes: ["instruction_domain"], source: "deterministic" }
+  }
+  // Nothing more specific matched, but there is a link to open. Resolve here
+  // rather than falling through, because the LLM classifier labels "open <url>"
+  // as web-search — the exact misroute this fix exists to prevent — and because
+  // a fetch needs no classifier call to decide.
+  if (hasExplicitUrl) {
+    return {
+      intent: "general",
+      tier: heuristicFallback(text).tier,
+      confidence: 0.95,
+      reasonCodes: ["explicit_url_web_fetch"],
+      source: "deterministic",
+    }
   }
   return null
 }

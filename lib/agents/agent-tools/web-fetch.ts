@@ -267,10 +267,16 @@ function resolveMaxChars(value: unknown): number {
  * jump to an internal host (a 302 to 169.254.170.2 / localhost / a VPC service)
  * without re-running the SSRF guard, turning this tool into an internal-read
  * primitive (REV-COR-496). A single shared AbortSignal bounds the whole chain to
- * FETCH_TIMEOUT_MS. Returns the final non-redirect Response; throws on a blocked
- * redirect target, an invalid Location, or exceeding the hop cap.
+ * FETCH_TIMEOUT_MS. Returns the final non-redirect Response together with the
+ * URL it actually came from — the caller reports that to the model and the user,
+ * so a redirected fetch is not attributed to the URL that was merely asked for.
+ * Throws on a blocked redirect target, an invalid Location, or exceeding the hop
+ * cap.
  */
-async function fetchWithGuardedRedirects(url: URL, signal: AbortSignal): Promise<Response> {
+async function fetchWithGuardedRedirects(
+  url: URL,
+  signal: AbortSignal
+): Promise<{ res: Response; finalUrl: URL }> {
   let currentUrl = url;
   for (let hop = 0; ; hop++) {
     const res = await safeFetch(currentUrl, {
@@ -280,7 +286,7 @@ async function fetchWithGuardedRedirects(url: URL, signal: AbortSignal): Promise
 
     const isRedirect =
       res.status >= 300 && res.status < 400 && res.headers.has("location");
-    if (!isRedirect) return res;
+    if (!isRedirect) return { res, finalUrl: currentUrl };
 
     // Free the redirect response's socket before the next hop.
     try {
@@ -357,7 +363,11 @@ export async function fetchWebPageText(
   }
 
   try {
-    const res = await fetchWithGuardedRedirects(
+    // `finalUrl` is the URL the body actually came from. Report that, not the
+    // requested URL: a 301 to a different path or host would otherwise be
+    // attributed to a page that was never read, both in the text handed to the
+    // model and in the URL the chat tool card shows the user.
+    const { res, finalUrl } = await fetchWithGuardedRedirects(
       url,
       AbortSignal.timeout(FETCH_TIMEOUT_MS)
     );
@@ -365,21 +375,22 @@ export async function fetchWebPageText(
       return {
         text: `Fetch failed: HTTP ${res.status} ${res.statusText}`,
         isError: true,
-        url: url.href,
+        url: finalUrl.href,
         status: res.status,
       };
     }
 
     const text = await readResponseText(res, charLimit);
     log.info("Web fetch completed", {
-      host: url.hostname,
+      host: finalUrl.hostname,
       status: res.status,
       chars: text.length,
+      redirected: finalUrl.href !== url.href,
     });
     return {
-      text: `Fetched ${url.href} (${res.status})\n\n${text || "[no readable text content]"}`,
+      text: `Fetched ${finalUrl.href} (${res.status})\n\n${text || "[no readable text content]"}`,
       isError: false,
-      url: url.href,
+      url: finalUrl.href,
       status: res.status,
     };
   } catch (err) {

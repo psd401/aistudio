@@ -84,6 +84,43 @@ describe("Nexus request classifier", () => {
     ).toBe("web-search");
   });
 
+  it("does not let a pasted URL shadow a more specific domain or complexity signal (#1696)", () => {
+    // A URL says the turn needs a FETCH; it says nothing about the subject or
+    // how hard the question is. Classifying on the link alone would silently
+    // downgrade both the specialist and the tier.
+    expect(
+      deterministicClassify(
+        "Using the rubric at https://example.com/rubric.pdf, build a differentiated lesson plan"
+      )
+    ).toMatchObject({ intent: "instruction" });
+
+    expect(
+      deterministicClassify(
+        "Do a full architecture review of this migration; the endpoint is https://example.com/v1"
+      )
+    ).toMatchObject({
+      intent: "general",
+      tier: "high",
+      reasonCodes: ["explicit_url_web_fetch"],
+    });
+
+    expect(deterministicClassify("What is https://example.com/page")).toMatchObject({
+      intent: "general",
+      tier: "light",
+      reasonCodes: ["explicit_url_web_fetch"],
+    });
+  });
+
+  it("prefers the link over an implicit currency signal (#1696)", () => {
+    // Without a URL this is a web search; with one, the user has already named
+    // the page to read, and routing it as web-search kills the turn whenever no
+    // web-search-capable model is accessible.
+    expect(deterministicClassify("What is the latest guidance?")?.intent).toBe("web-search");
+    expect(
+      deterministicClassify("What is the latest guidance? See https://example.com/guidance")
+    ).toMatchObject({ intent: "general", reasonCodes: ["explicit_url_web_fetch"] });
+  });
+
   it("recognizes an edit instruction when an image is attached", async () => {
     const decision = await classifyNexusRequest("Make this brighter", config, { hasImageInput: true })
     expect(decision).toMatchObject({ intent: "image", source: "deterministic" })
