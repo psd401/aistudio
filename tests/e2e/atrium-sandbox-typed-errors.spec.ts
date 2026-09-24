@@ -46,6 +46,8 @@ async function openHost(page: Page): Promise<void> {
  */
 function collectForwardedFrameErrors(): void {
   window.addEventListener("message", (event) => {
+    // The page drives itself at top level, so its own posts carry its origin.
+    if (event.origin !== window.location.origin) return;
     const data = event.data as { type?: string; message?: string };
     if (data?.type !== "atrium-artifact-error") return;
     (window as unknown as { __artifactLog: string[] }).__artifactLog.push(
@@ -64,6 +66,7 @@ async function installFailingBridge(
 ): Promise<void> {
   await page.evaluate((reply) => {
     window.addEventListener("message", (event) => {
+      if (event.origin !== window.location.origin) return;
       const data = event.data as { type?: string; requestId?: string };
       if (data?.type !== "atrium-artifact-data-request") return;
       window.postMessage(
