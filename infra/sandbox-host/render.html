@@ -438,6 +438,10 @@
             }
           }
           artifactLifecycleListeners = kept;
+          // The property-handler form fires on the same synthetic `load` and
+          // bypasses addEventListener. The host never sets it, and this runs
+          // before the new chain's first script, so any value is stale.
+          window.onload = null;
         }
 
         /**

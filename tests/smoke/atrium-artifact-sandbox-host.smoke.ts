@@ -136,15 +136,8 @@ function renderHostHtml(allowedParentOrigins: string[]): string {
   return renderAtriumSandboxHostPage(template, allowedParentOrigins, csp);
 }
 
-/**
- * How a stubbed external `<script src>` resolves. `pending` never settles, so
- * the chain waiting on it stays parked for the whole test — the state a render
- * has to be in to be superseded mid-chain.
- */
-type StubScript =
-  | { kind: "ok"; source: string }
-  | { kind: "error" }
-  | { kind: "pending" };
+/** How a stubbed external `<script src>` resolves. */
+type StubScript = { kind: "ok"; source: string } | { kind: "error" };
 
 /**
  * Serves stubbed sources for the exact `src` URLs a test declares, so the
@@ -162,9 +155,7 @@ class StubScriptLoader extends ResourceLoader {
     const promise =
       stub.kind === "error"
         ? Promise.reject<Buffer>(new Error("stubbed load failure"))
-        : stub.kind === "pending"
-          ? new Promise<Buffer>(() => {})
-          : Promise.resolve(Buffer.from(stub.source, "utf8"));
+        : Promise.resolve(Buffer.from(stub.source, "utf8"));
     // jsdom's loader contract wants an abortable promise; nothing in these
     // tests aborts, so a no-op abort satisfies it.
     return Object.assign(promise, { abort: () => {} });
@@ -943,9 +934,8 @@ async function testResumedChainSurvivesTamperedGlobals(): Promise<void> {
  * ordering test does not catch this.
  */
 async function testSupersededChainLeavesNoStaleLifecycleListener(): Promise<void> {
-  const { window, acks } = makeHost([APP_ORIGIN], {
-    externalScripts: { [CHART_CDN_URL]: { kind: "pending" } },
-  });
+  // A loader with no stubs: SILENT_CDN_URL is never loaded and fires nothing.
+  const { window, acks } = makeHost([APP_ORIGIN], { externalScripts: {} });
   // The parked script leaves the chain's 60s fallback timer armed, so the
   // window is torn down at the end: otherwise it holds the process open for a
   // full minute after the assertions are done.
@@ -959,12 +949,15 @@ async function testSupersededChainLeavesNoStaleLifecycleListener(): Promise<void
       ' window.__artifactLog.push("STALE DOMContentLoaded"); });' +
       'window.addEventListener("load", function () {' +
       ' window.__artifactLog.push("STALE load"); });' +
+      'window.onload = function () { window.__artifactLog.push("STALE onload"); };' +
       'window.__artifactLog.push("stale listeners registered");' +
       CLOSE_SCRIPT +
-      // Parks the chain here: the stub never settles, and the per-script
-      // fallback is 60s, so this render is still mid-chain when the next lands.
+      // Parks the chain here: the script never loads or fires, and the
+      // per-script fallback is 60s, so this render is still mid-chain when the
+      // next lands. (A never-settling stub cannot model this in jsdom — see
+      // SILENT_CDN_URL.)
       '<script src="' +
-      CHART_CDN_URL +
+      SILENT_CDN_URL +
       '">' +
       CLOSE_SCRIPT;
 
