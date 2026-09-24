@@ -802,6 +802,48 @@ async function fetchArtifactQuery(
 }
 
 /**
+ * The record Server Action module, loaded once and remembered (#1788).
+ *
+ * The dynamic import keeps the server-only action graph out of fail-closed and
+ * preview-only clients, but it also means the FIRST record op pays a chunk
+ * download before anything can run. That download must happen BEFORE the parent
+ * acknowledges dispatch: the ack restarts the frame's 10s clock, and on a slow
+ * connection the chunk can land after that clock has already rejected the
+ * artifact's promise — at which point `submitArtifactRecord` still runs, the
+ * write commits, and the author's retry duplicates the record.
+ *
+ * Memoizing the promise is what lets the pump await readiness before acking
+ * while `invokeBridgeAction` awaits the same settled promise for free.
+ */
+let recordActionsPromise: Promise<
+  typeof import("@/actions/db/atrium/artifact-data")
+> | null = null;
+
+function loadRecordActions(): Promise<
+  typeof import("@/actions/db/atrium/artifact-data")
+> {
+  // A FAILED import must not be remembered: the next attempt should retry the
+  // chunk rather than replay a stale rejection for the life of the page.
+  recordActionsPromise ??= import("@/actions/db/atrium/artifact-data").catch(
+    (error: unknown) => {
+      recordActionsPromise = null;
+      throw error;
+    }
+  );
+  return recordActionsPromise;
+}
+
+/**
+ * Wait until the transport for this op can actually START work, so the dispatch
+ * ack means what it says (#1788). Queries go over `fetch`, which needs nothing
+ * loaded; record ops need their action chunk.
+ */
+async function awaitTransportReady(op: ArtifactDataRequest["op"]): Promise<void> {
+  if (op === "query") return;
+  await loadRecordActions();
+}
+
+/**
  * Route one validated request to its transport, copying ONLY the fields the op
  * is allowed to influence. `contentId` always comes from the trusted prop.
  *
@@ -824,9 +866,7 @@ async function invokeBridgeAction(
     return fetchArtifactQuery(request, contentId, versionId);
   }
 
-  const { listArtifactRecords, submitArtifactRecord } = await import(
-    "@/actions/db/atrium/artifact-data"
-  );
+  const { listArtifactRecords, submitArtifactRecord } = await loadRecordActions();
   if (request.op === "submit") {
     const result = await submitArtifactRecord({
       contentId,
@@ -972,17 +1012,35 @@ function useBridgePump(
         if (inFlightDataRequestsRef.current >= limit) break;
         const next = queuedDataRequestsRef.current.shift();
         if (!next) break;
+        // The slot is taken synchronously, so capacity accounting cannot race
+        // with the await below.
         inFlightDataRequestsRef.current += 1;
-        try {
-          next.frameWindow.postMessage(
-            { type: DATA_DISPATCH_ACK_TYPE, requestId: next.request.requestId },
-            "*"
-          );
-        } catch {
-          // A gone frame still gets its request run; the response post is what
-          // actually fails, and it fails the same way it always has.
-        }
-        void runBridgeRequest(next.request, next.frameWindow).finally(() => {
+        void (async () => {
+          // Ack only once the transport can actually begin. The record path
+          // lazily imports its Server Action chunk; acking first would restart
+          // the frame's 10s clock while that download is still in flight, and a
+          // slow chunk would let the frame reject the artifact's promise before
+          // `submitArtifactRecord` had even been called -- the write would then
+          // land anyway and a retry would duplicate it. Until the ack the frame
+          // is still on its queue-tolerant pre-ack budget, which is the right
+          // clock for "not started yet".
+          try {
+            await awaitTransportReady(next.request.op);
+          } catch {
+            // The chunk failed to load; `runBridgeRequest` will answer with the
+            // same generic failure it always has for a dead transport.
+          }
+          try {
+            next.frameWindow.postMessage(
+              { type: DATA_DISPATCH_ACK_TYPE, requestId: next.request.requestId },
+              "*"
+            );
+          } catch {
+            // A gone frame still gets its request run; the response post is
+            // what actually fails, and it fails the same way it always has.
+          }
+          await runBridgeRequest(next.request, next.frameWindow);
+        })().finally(() => {
           inFlightDataRequestsRef.current -= 1;
           step();
         });

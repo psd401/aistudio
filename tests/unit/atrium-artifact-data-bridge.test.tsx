@@ -787,6 +787,39 @@ describe("ArtifactSandbox bounded request queue (#1788)", () => {
     ]);
   });
 
+  it("does not ack a record op until its action transport is loaded", async () => {
+    // The record path lazily imports its Server Action chunk. The ack restarts
+    // the frame's 10s post-dispatch clock, so acking BEFORE that import settles
+    // would let a slow chunk land after the frame had already rejected the
+    // artifact's promise — `submitArtifactRecord` would then run, the write
+    // would commit, and the author's retry would duplicate the record.
+    //
+    // The ack is therefore behind an await. Dispatching without flushing
+    // microtasks must produce NO ack; it appears only once the transport is
+    // ready. This pins the ordering: moving the ack back ahead of the await
+    // (where it used to be) fails here.
+    const { frameWindow, postMessage } = mountSandbox(true);
+    submitArtifactRecordMock.mockImplementation(() => new Promise(() => {}));
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: submitRequest(REQUEST_IDS[0]),
+        origin: "null",
+        source: frameWindow,
+      })
+    );
+
+    expect(dispatchAcks(postMessage)).toEqual([]);
+    expect(submitArtifactRecordMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(dispatchAcks(postMessage)).toEqual([REQUEST_IDS[0]]);
+    expect(submitArtifactRecordMock).toHaveBeenCalledTimes(1);
+  });
+
   it("never DISPATCHES a queued write that has already waited too long", async () => {
     // The frame gives up on a request it has been holding and deletes its
     // pending entry. If the parent still dispatched afterwards, a `submit`
