@@ -315,8 +315,11 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     requiredScope: "content:create",
     internalScopes: ["content:create"],
     destructive: true,
+    // v4: #1710 added `dataAccess` (artifact sandbox data-bridge mode) without a
+    // bump, so from 2026-09-02 every boot refused the v3 row and the catalog kept
+    // serving the pre-#1710 schema (and the #1750 CSP description).
     // v3: #1290 added `sourceRef`; v2 added `codeEncoding` (#1245).
-    version: "v3",
+    version: "v4",
   },
   get_content: {
     identifier: "content.get",
@@ -343,6 +346,9 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     requiredScope: "content:update",
     internalScopes: ["content:update"],
     destructive: true,
+    // v2: #1710 added `dataAccess` without a bump; the v1 row stayed frozen on
+    // the old schema from 2026-09-02 (immutability violation on every boot).
+    version: "v2",
   },
   create_version: {
     identifier: "content.create_version",
@@ -491,6 +497,109 @@ const LEGACY_MCP_MANIFEST_ENTRIES: readonly ToolManifestEntry[] = [
     requiredScopes: ["content:read"],
     surfaceScopes: { internal: ["content:read"] },
     agentCallable: true,
+  },
+  // Snapshot of create_artifact@v3 as published before #1710 added `dataAccess`; superseded by v4.
+  // Copied verbatim from the prod tool_catalog row (id 29, 2026-09-24) so the
+  // boot sync finds an identical schema and keeps the row active for pinned callers.
+  {
+    identifier: "content.create_artifact",
+    version: "v3",
+    name: "create_artifact",
+    description:
+      "Create an interactive artifact (HTML/JS or JSX) content object. Does not publish. Returns the object id, slug, and reader link.",
+    inputSchema: {
+      type: "object",
+      required: ["title", "code", "bodyFormat"],
+      properties: {
+        code: {
+          type: "string",
+          description: "Artifact source (HTML/JS or JSX)",
+        },
+        tags: {
+          type: "array",
+          items: {
+            type: "string",
+          },
+          description: "Tags",
+        },
+        title: {
+          type: "string",
+          description: "Artifact title",
+        },
+        sourceRef: {
+          type: "object",
+          description: "Create-only structured provenance. Capture clients use { type: 'capture', provider, externalId, clientSurface: 'browser'|'mac', clientVersion, capturedAt, sourceOrigins? }. Source origins are normalized to scheme+host+port; arbitrary telemetry is rejected.",
+        },
+        bodyFormat: {
+          enum: ["html", "jsx"],
+          type: "string",
+          description: "Body format",
+        },
+        collection: {
+          type: "string",
+          description: "Collection slug or id (optional)",
+        },
+        visibility: {
+          type: "object",
+          description: "Visibility object: { level: 'private'|'group'|'internal'|'public', grants?: [{ kind: 'role'|'building'|'department'|'grade'|'user'|'group', value: string }] }",
+        },
+        codeEncoding: {
+          enum: ["base64"],
+          type: "string",
+          description: "Transit encoding for the body. Set 'base64' when the body/code contains HTML/JS/CSS (<script>, <style>, style=\"…\") — the edge WAF blocks that markup in a raw request body, so send the body base64-encoded and the server decodes it before screening. Omit for plain text/markdown.",
+        },
+      },
+    },
+    surfaces: ["mcp", "internal"],
+    requiredScopes: ["content:create"],
+    surfaceScopes: { internal: ["content:create"] },
+    agentCallable: true,
+    destructive: true,
+  },
+  // Snapshot of update_content@v1 as published before #1710 added `dataAccess`; superseded by v2.
+  // Copied verbatim from the prod tool_catalog row (id 18, 2026-09-24) so the
+  // boot sync finds an identical schema and keeps the row active for pinned callers.
+  {
+    identifier: "content.update",
+    version: "v1",
+    name: "update_content",
+    description:
+      "Update object metadata (title, tags, collection, status). Body changes use create_version.",
+    inputSchema: {
+      type: "object",
+      required: ["id"],
+      properties: {
+        id: {
+          type: "string",
+          description: "Object id",
+        },
+        tags: {
+          type: "array",
+          items: {
+            type: "string",
+          },
+          description: "Replacement tags",
+        },
+        title: {
+          type: "string",
+          description: "New title",
+        },
+        status: {
+          enum: ["draft", "published", "archived"],
+          type: "string",
+          description: "New status",
+        },
+        collection: {
+          type: "string",
+          description: "Collection slug or id (or null to clear)",
+        },
+      },
+    },
+    surfaces: ["mcp", "internal"],
+    requiredScopes: ["content:update"],
+    surfaceScopes: { internal: ["content:update"] },
+    agentCallable: true,
+    destructive: true,
   },
 ];
 

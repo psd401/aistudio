@@ -160,7 +160,12 @@ describe("Atrium MCP content tools registry", () => {
     }
   });
 
-  it("publishes sourceRef additions as v3 create-tool contracts", () => {
+  it("publishes sourceRef additions as create-tool contracts at v3 or later", () => {
+    const expectedVersion: Record<string, string> = {
+      create_document: "v3",
+      // v4: #1710 added `dataAccess` to create_artifact.
+      create_artifact: "v4",
+    };
     for (const name of ["create_document", "create_artifact"]) {
       const tool = CONTENT_MCP_TOOLS.find((candidate) => candidate.name === name);
       const manifestEntry = TOOL_MANIFEST.find(
@@ -169,7 +174,47 @@ describe("Atrium MCP content tools registry", () => {
 
       expect(tool?.inputSchema.properties.sourceRef?.type).toBe("object");
       expect(tool?.inputSchema.required ?? []).not.toContain("sourceRef");
-      expect(manifestEntry?.version).toBe("v3");
+      expect(manifestEntry?.version).toBe(expectedVersion[name]);
+    }
+  });
+
+  it("publishes the #1710 dataAccess field under bumped catalog versions", () => {
+    // A published version's schema is frozen by the catalog sync; adding
+    // dataAccess without a bump left prod serving the old contract.
+    const expectedVersion: Record<string, string> = {
+      create_artifact: "v4",
+      update_content: "v2",
+    };
+    for (const name of ["create_artifact", "update_content"]) {
+      const tool = CONTENT_MCP_TOOLS.find((candidate) => candidate.name === name);
+      const manifestEntry = TOOL_MANIFEST.find(
+        (candidate) => candidate.name === name
+      );
+
+      expect(tool?.inputSchema.properties.dataAccess?.type).toBe("string");
+      expect(manifestEntry?.version).toBe(expectedVersion[name]);
+    }
+  });
+
+  it("keeps the superseded create_artifact@v3 and update@v1 contracts addressable", () => {
+    // Callers pinned to the old versions must keep resolving after the bump: the
+    // boot sync retires any (identifier, version) no longer in the manifest, so
+    // the old contracts stay as frozen snapshots without `dataAccess`.
+    for (const [identifier, oldVersion, newVersion] of [
+      ["content.create_artifact", "v3", "v4"],
+      ["content.update", "v1", "v2"],
+    ] as const) {
+      const versions = TOOL_MANIFEST.filter((entry) => entry.identifier === identifier);
+      expect(versions.map((entry) => entry.version).sort()).toEqual([oldVersion, newVersion].sort());
+
+      const legacy = versions.find((entry) => entry.version === oldVersion);
+      expect(legacy?.inputSchema.properties.dataAccess).toBeUndefined();
+      expect(legacy?.destructive).toBe(true);
+      expect(legacy?.surfaces).toEqual(["mcp", "internal"]);
+
+      const current = versions.find((entry) => entry.version === newVersion);
+      expect(current?.name).toBe(legacy?.name);
+      expect(current?.inputSchema.properties.dataAccess?.type).toBe("string");
     }
   });
 
