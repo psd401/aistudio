@@ -41,6 +41,7 @@ jest.mock("@/lib/logger", () => ({
 }))
 
 import { POST } from "@/app/api/compare-models/route"
+import { SSE_KEEP_ALIVE_INTERVAL_MS } from "@/lib/streaming/sse-keep-alive"
 
 function request(body: Record<string, unknown>): Request {
   return new Request("http://localhost/api/compare-models", {
@@ -99,5 +100,32 @@ describe("compare models route", () => {
     expect(body).toContain('"model1Finished":true')
     expect(body).toContain('"model2Finished":true')
     expect(body).toContain('"done":true')
+  })
+
+  it("keeps a silent comparison alive through the ALB idle timeout (#1698)", async () => {
+    jest.useFakeTimers()
+    try {
+      let finishAll!: () => void
+      const bothSilent = new Promise<void>(resolve => {
+        finishAll = resolve
+      })
+      streamMock.mockImplementation(async (streamRequest) => {
+        await bothSilent
+        await streamRequest.callbacks.onFinish({ usage: { totalTokens: 3 } })
+      })
+
+      const response = await POST(request(validBody))
+      const bodyPromise = response.text()
+
+      await jest.advanceTimersByTimeAsync(SSE_KEEP_ALIVE_INTERVAL_MS * 2)
+      finishAll()
+      await jest.advanceTimersByTimeAsync(0)
+      const body = await bodyPromise
+
+      expect(body.match(/^: keep-alive$/gm)?.length).toBe(2)
+      expect(body.indexOf(": keep-alive")).toBeLessThan(body.indexOf('"done":true'))
+    } finally {
+      jest.useRealTimers()
+    }
   })
 })

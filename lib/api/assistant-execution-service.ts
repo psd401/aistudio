@@ -50,6 +50,7 @@ import {
   createCoordinatedAssistantExecution,
   remainingAssistantExecutionTimeoutMs,
 } from "@/lib/assistant-architect/execution-coordinator"
+import { deferUIMessageStreamResponse } from "@/lib/streaming/deferred-ui-message-stream"
 
 // ============================================
 // Constants
@@ -83,6 +84,13 @@ export interface ExecuteAssistantParams {
    * Arbitrary caller-created objects are rejected by this module.
    */
   preparedInputs?: PreparedAssistantExecutionInputs
+  /**
+   * Map a chain failure that arrives after the stream was already committed
+   * (see `deferUIMessageStreamResponse`) to the error Response the route would
+   * otherwise return. Its message becomes the in-stream `error` chunk. Without
+   * it the client gets a generic message.
+   */
+  onLateError?: (error: unknown) => Response | Promise<Response>
 }
 
 export interface ExecuteAssistantResult {
@@ -472,37 +480,48 @@ export async function executeAssistant(
   const setup = await prepareAssistantExecution(params)
   const { prompts, context, executionId, inputs, log } = setup
 
-  try {
-    const streamResponse = await executePromptChain(
-      prompts,
-      inputs,
-      context,
-      params.requestId,
-      log
-    )
-
-    if (!streamResponse) {
-      throw ErrorFactories.sysInternalError("No stream response generated from prompt execution")
-    }
-
-    timer({ status: "success" })
-    log.info("Execution streaming started", { executionId, assistantId: params.assistantId })
-
-    const response = streamResponse.result.toUIMessageStreamResponse({
-      headers: {
-        "X-Execution-Id": executionId.toString(),
-        "X-Assistant-Id": params.assistantId.toString(),
-        "X-Prompt-Count": prompts.length.toString(),
-        "X-Request-Id": params.requestId,
-      },
-    })
-
-    return { streamResponse: response, executionId }
-  } catch (executionError) {
-    await handleExecutionFailure(executionId, executionError, log)
-    timer({ status: "error" })
-    throw executionError
+  const headers = {
+    "X-Execution-Id": executionId.toString(),
+    "X-Assistant-Id": params.assistantId.toString(),
+    "X-Prompt-Count": prompts.length.toString(),
+    "X-Request-Id": params.requestId,
   }
+
+  const execution = (async () => {
+    try {
+      const streamResponse = await executePromptChain(
+        prompts,
+        inputs,
+        context,
+        params.requestId,
+        log
+      )
+
+      if (!streamResponse) {
+        throw ErrorFactories.sysInternalError("No stream response generated from prompt execution")
+      }
+
+      timer({ status: "success" })
+      log.info("Execution streaming started", { executionId, assistantId: params.assistantId })
+
+      return streamResponse.result.toUIMessageStreamResponse({ headers })
+    } catch (executionError) {
+      await handleExecutionFailure(executionId, executionError, log)
+      timer({ status: "error" })
+      throw executionError
+    }
+  })()
+
+  // Every prompt but the last runs to completion before the streaming
+  // Response exists, so a slow earlier prompt would leave the socket silent
+  // until the ALB idles it out (#1698). Commit to the stream after a grace
+  // period and keep it alive; a fast failure still rejects here unchanged.
+  const response = await deferUIMessageStreamResponse(execution, {
+    headers,
+    onLateError: params.onLateError ?? (() => new Response(null, { status: 500 })),
+  })
+
+  return { streamResponse: response, executionId }
 }
 
 /**

@@ -322,6 +322,36 @@ Default `refetchOnWindowFocus=true` creates new session object reference on ever
 useEffect(() => { ... }, [status, conversationId]) // not [session, conversationId]
 ```
 
+## SSE Transport
+
+### A silent SSE stream is idled out before any app-level error can reach the client
+
+The ALB in front of ECS closes a connection after 300s with no bytes in either
+direction (`infra/lib/constructs/ecs-service.ts`, `idleTimeout`). A reasoning-tier
+model emits `start` immediately and can then go silent for the whole think/tool
+phase, so the idle timer runs from that first byte. The `gpt-5*` per-step budget
+is itself 300s, which means the socket died at or before the app-level abort:
+the terminal `error` chunk `buildAbortAwareResponse` appends was enqueued into a
+stream nobody was reading. The user saw the turn stop with no answer and no
+error, and `incompleteTurnReason()` correctly declined to persist it (#1698).
+
+```typescript
+// WRONG — a data-* chunk as the keep-alive. `isVisibleChunkType` counts data-*
+// as visible output, so it suppresses the "empty response" notice from #1686.
+controller.enqueue({ type: 'data-keepalive' })
+
+// CORRECT — an SSE comment frame, below the transport. eventsource-parser routes
+// `:`-prefixed lines to onComment, which the AI SDK does not supply, so the frame
+// never reaches processUIMessageStream. See lib/streaming/sse-keep-alive.ts.
+controller.enqueue(new TextEncoder().encode(': keep-alive\n\n'))
+```
+
+**Review rule:** any new long-lived SSE/WebSocket response must emit something
+well inside 300s. Raising the ALB timeout is not the fix — intermediary proxies
+idle out too, and it needs a CDK deploy. Always release the keep-alive timer on
+end-of-stream, on error, *and* on consumer cancel, or every abandoned turn leaks
+an interval.
+
 ## HTML Entity Decoding
 
 ### Null bytes and double-unescaping

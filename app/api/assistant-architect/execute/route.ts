@@ -82,6 +82,7 @@ import {
   createCoordinatedAssistantExecution,
   remainingAssistantExecutionTimeoutMs,
 } from '@/lib/assistant-architect/execution-coordinator';
+import { deferUIMessageStreamResponse } from '@/lib/streaming/deferred-ui-message-stream';
 
 // Allow streaming responses up to 15 minutes for long chains
 export const maxDuration = 900;
@@ -905,6 +906,25 @@ async function loadProtectedExecutionGraph(args: {
   };
 }
 
+/** Response headers the client reads to track an execution (both response paths). */
+function executionStreamHeaders(args: {
+  executionId: number;
+  toolId: number;
+  promptCount: number;
+  requestId: string;
+  context: PromptExecutionContext;
+}): Record<string, string> {
+  return {
+    'X-Execution-Id': args.executionId.toString(),
+    'X-Tool-Id': args.toolId.toString(),
+    'X-Prompt-Count': args.promptCount.toString(),
+    'X-Request-Id': args.requestId,
+    ...(args.context.conversation?.conversationId && {
+      'X-Conversation-Id': args.context.conversation.conversationId,
+    }),
+  };
+}
+
 /**
  * Phase (e): run the execution (agentic or prompt-chain), build the streaming
  * Response, and on a synchronous pre-stream failure roll back the
@@ -956,13 +976,7 @@ async function runExecutionAndBuildResponse(args: {
     }
 
     return streamResponse.result.toUIMessageStreamResponse({
-      headers: {
-        'X-Execution-Id': executionId.toString(),
-        'X-Tool-Id': toolId.toString(),
-        'X-Prompt-Count': prompts.length.toString(),
-        'X-Request-Id': requestId,
-        ...(context.conversation?.conversationId && { 'X-Conversation-Id': context.conversation.conversationId }),
-      }
+      headers: executionStreamHeaders({ executionId, toolId, promptCount: prompts.length, requestId, context }),
     });
 
   } catch (executionError) {
@@ -1310,7 +1324,7 @@ export async function POST(req: Request) {
 
     // Run execution + build the SSE stream response; on a pre-stream failure the
     // helper rolls back the execution row and re-throws to the outer catch.
-    return await runExecutionAndBuildResponse({
+    const execution = runExecutionAndBuildResponse({
       architect,
       prompts,
       inputs: modelInputs,
@@ -1322,6 +1336,17 @@ export async function POST(req: Request) {
       approveDestructiveTools: approveDestructiveTools === true,
       requestId,
       log,
+    });
+
+    // A prompt chain runs every prompt but the last to completion before the
+    // streaming Response exists, so a slow earlier prompt would leave the
+    // socket with no bytes at all until the ALB idles it out (#1698). If the
+    // Response is not ready within the grace period, commit to the stream now
+    // and keep it alive; a failure after that point arrives as an in-stream
+    // `error` chunk carrying the message the error Response would have had.
+    return await deferUIMessageStreamResponse(execution, {
+      headers: executionStreamHeaders({ executionId, toolId, promptCount: prompts.length, requestId, context }),
+      onLateError: error => buildExecuteRouteErrorResponse(error, requestId, log, timer),
     });
 
   } catch (error) {

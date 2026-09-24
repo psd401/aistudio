@@ -1720,7 +1720,24 @@ paths:
                   plan: "[[repository-attachment:v1:123e4567-e89b-42d3-a456-426614174000:44:implementation-plan.pdf]]"
       responses:
         "200":
-          description: SSE streaming response (when Accept is text/event-stream)
+          description: |
+            SSE streaming response (when Accept is text/event-stream).
+
+            A turn that stays silent — a reasoning model thinking, or a long
+            tool call — is padded with SSE comment frames (`: keep-alive`)
+            roughly every 15s so intermediaries do not idle the connection out.
+            Comments carry no event data; a spec-compliant SSE client discards
+            them. Clients that split the body by hand must skip any line
+            starting with `:`.
+
+            A multi-prompt assistant runs its earlier prompts before the
+            final prompt starts streaming. If the response is not ready within
+            ~15s, the server sends `200` with the SSE headers and keep-alive
+            frames right away. A failure after that point cannot change the
+            status, so it arrives as a single UI-message error chunk
+            (`data: {"type":"error","errorText":"<message>"}`) carrying the
+            message the error response would have had. Failures inside the
+            first ~15s still return the documented `4xx`/`5xx` JSON errors.
           content:
             text/event-stream:
               schema:
@@ -1856,7 +1873,10 @@ paths:
                   plan: "[[repository-attachment:v1:123e4567-e89b-42d3-a456-426614174000:44:implementation-plan.pdf]]"
       responses:
         "200":
-          description: SSE stream with X-Conversation-Id header
+          description: |
+            SSE stream with X-Conversation-Id header. Silent stretches are
+            padded with `: keep-alive` comment frames; see the note on
+            `/assistants/{id}/execute`.
           headers:
             X-Conversation-Id:
               schema:
@@ -1957,7 +1977,10 @@ paths:
                   maxLength: 100000
       responses:
         "200":
-          description: SSE stream with assistant response
+          description: |
+            SSE stream with assistant response. Silent stretches are padded
+            with `: keep-alive` comment frames; see the note on
+            `/assistants/{id}/execute`.
         "400":
           $ref: "#/components/responses/ValidationError"
         "401":

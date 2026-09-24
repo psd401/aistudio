@@ -363,6 +363,10 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       requestId,
       preparedInputs,
       requireApproved: auth.authType !== "session",
+      // A chain failure after the stream is committed gets the same message
+      // as one caught below, delivered as an in-stream `error` chunk.
+      onLateError: (lateError) =>
+        assistantExecutionErrorResponse(lateError, requestId, assistantId, log),
     })
 
     // Cast to NextResponse — streaming Response is compatible at runtime
