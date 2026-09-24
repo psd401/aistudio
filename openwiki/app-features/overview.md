@@ -994,4 +994,3 @@ Atrium
 - **[architecture/overview.md](../architecture/overview.md)** — Overall system architecture
 - **[agent-platform/overview.md](../agent-platform/overview.md)** — Agent skills and MCP integration
 - **[api-integration/overview.md](../api-integration/overview.md)** — External API access to these features
-/overview.md](../api-integration/overview.md)** — External API access to these features
