@@ -83,6 +83,19 @@ describe("repository readiness", () => {
     expect(blocksRepositorySearch(empty)).toBe(false)
   })
 
+  it("treats a zero-item repository with a degraded connector as failed, not empty", () => {
+    const failedSync = deriveRepositoryReadiness(
+      row({
+        connector_count: 1,
+        degraded_connector_count: 1,
+        last_connector_error: "Drive sync failed",
+      })
+    )
+    expect(failedSync.readiness).toBe("failed")
+    expect(failedSync.lastIndexError).toBe("Drive sync failed")
+    expect(blocksRepositorySearch(failedSync)).toBe(true)
+  })
+
   it("reports a fully taken-down repository as unavailable, not empty", () => {
     const takenDown = deriveRepositoryReadiness(
       row({ unavailable_item_count: 3 })

@@ -108,7 +108,11 @@ export function deriveRepositoryReadiness(
   } else if (
     activeItemCount > 0 ||
     failedItemCount > 0 ||
-    failedGenerationCount > 0
+    failedGenerationCount > 0 ||
+    // A degraded connector with nothing ingested is a failed sync, not an
+    // empty repository: the source exists but never arrived. It must stay
+    // behind the gate rather than take the "empty" exemption.
+    degradedConnectorCount > 0
   ) {
     readiness = "failed"
   } else if (unavailableItemCount > 0) {

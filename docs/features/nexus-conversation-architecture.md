@@ -492,6 +492,8 @@ creation auto-provisions a private "project files" repository with zero items,
 and gating on it made every new project chat-dead (FS#165251 / #1733). The gate
 still fails closed for `processing`, `failed`, `disconnected` and `unavailable`
 (every item taken down — content existed and is gone, so it is not `empty`).
+A zero-item repository with a degraded connector is a failed sync, so it derives
+`failed`, not `empty`, and stays behind the gate.
 
 Forking copies project, skill, and normalized repository bindings. Assistant
 execution conversations bind the union of prompt-configured and runtime
