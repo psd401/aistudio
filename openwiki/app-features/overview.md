@@ -14,6 +14,8 @@ openwiki:
     - actions/db/atrium/workspace-panel.ts
     - actions/db/atrium/create-content.ts
     - actions/db/atrium/snapshot-document.ts
+    - lib/attachments/chat-attachment-adapters.ts
+    - lib/attachments/use-chat-attachments.ts
     - actions/db/atrium/comments.ts
     - actions/db/atrium/publish-document.ts
     - lib/nexus/model-router/router.ts
@@ -86,6 +88,11 @@ openwiki:
     - Do-not-guess guidance — when workspace-artifact turn lacks schema tools (inspect_table_schema, query_data), model must NOT invent columns (#1786)
     - Resolution 404-masks — resolveWorkspace 404-masks non-viewable objects; spoofed ?workspace= yields null and turn routes normally (#1786)
     - One resolution per request — routing resolves workspace; tool-binding reuses preloaded to avoid second contentService.get call (#1786)
+    - Shared attachment wiring — useChatAttachments hook memoizes adapter, processing/failed sets, and lazy conversation-id accessor for nexus, decision-capture, and assistant-architect surfaces (#1735)
+    - Conversation ID accessor must be closure-backed, never a memo dependency of the adapter — prevents runtime recreation during null→UUID transition (docs/features/nexus-conversation-architecture.md Pitfall 4)
+    - Eager image upload — VisionImageAdapter starts repository upload at attach time, not send time; processing callbacks fire immediately so UI shows spinner during ingestion
+    - Failed attachments are still "complete" — they carry safe error messages for the model, so failedAttachments set is required to prevent "Ready" chip on failed uploads
+    - Document adapters sanitize errors — toSafeErrorMessage returns controlled strings for LLM context; raw server errors never cross chat boundary (OWASP LLM Top 10)
   validation_commands:
     - bun run typecheck
     - bun run lint
@@ -211,6 +218,49 @@ Model Context Protocol tools integrated via:
 
 Tools are gated by user capabilities and resource access grants.
 
+### Attachments (#1735)
+
+File attachments (documents and images) are handled through a unified adapter system shared across Nexus, decision capture, and Assistant Architect. The system supports both inline content and repository-backed canonical references.
+
+**Unified Attachment Hook**: `useChatAttachments` from `/lib/attachments/use-chat-attachments.ts` provides shared wiring for every assistant-ui composer:
+- Memoized repository-backed adapter with stable dependencies
+- Processing-spinner state management (`processingAttachments` set)
+- Failed-upload tracking (`failedAttachments` set) — prevents "Ready" chip on failed attachments
+- Lazy conversation-id accessor (closure-backed, never a memo dependency)
+- Automatic upload-failure toasts (session expiry shows sign-in action)
+
+**Adapter Implementations** (from `/lib/attachments/chat-attachment-adapters.ts`):
+
+| Adapter | Purpose | Features |
+|---------|---------|----------|
+| `HybridDocumentAdapter` | PDF, DOCX, XLSX, TXT, CSV, JSON, etc. | Server-side processing with 500MB limit; magic-byte validation; safe error messages for LLM context |
+| `VisionImageAdapter` | JPEG, PNG, WebP, GIF | Base64 inline for vision models; 20MB limit; optional repository canonical reference |
+| `CompositeAttachmentAdapter` | Combines multiple adapters | `createEnhancedNexusAttachmentAdapter()` for Nexus; `createDocumentAttachmentAdapter()` for Assistant Architect (images excluded) |
+
+**Repository-Backed Mode**: When `repositoryBacked: true`, uploads go through `uploadTemporaryAttachment` and return an opaque marker (e.g., `[[repository-attachment:v1:...]]`) that the AI model sees instead of raw file content. This preserves privacy and enables consistent retrieval from the repository service.
+
+**Eager Upload**: Image uploads start at attach time (not send time), so 2+ minute repository ingestion doesn't freeze the composer. Processing callbacks fire immediately so the UI shows spinners.
+
+**Adapter Configuration**:
+- `purpose` — Product surface attribution (`"nexus"` or `"assistant-architect"`)
+- `getConversationId` — Lazy accessor for conversation binding (must NOT be a memo dependency; see docs/features/nexus-conversation-architecture.md Pitfall 4)
+- `repositoryBacked` — Enable canonical reference mode
+
+**Critical**: Read `/docs/features/nexus-conversation-architecture.md` Pitfall 4 before modifying attachment adapter memoization. The conversation ID accessor must be closure-backed, not a dependency, or runtime recreation breaks streaming.
+
+**Key Sources**:
+- `/lib/attachments/chat-attachment-adapters.ts` — Adapter implementations
+- `/lib/attachments/use-chat-attachments.ts` — Shared hook for attachment wiring
+- `/components/assistant-ui/attachment.tsx` — Attachment UI primitives
+- `/components/assistant-ui/thread.tsx` — Processing-spinner rendering
+
+**Focused Tests**:
+- `tests/unit/document-attachment-adapter.test.ts` — Document adapter validation
+- `tests/components/composer-add-attachment-capability.test.tsx` — Composer integration
+- `tests/e2e/assistant-architect-attachment.functional.spec.ts` — E2E attachment flow for Assistant Architect
+- `tests/unit/lib/attachments/chat-attachment-adapters.test.ts` — Adapter behavior (719 lines)
+- `tests/unit/lib/attachments/use-chat-attachments.test.ts` — Hook contract (123 lines)
+
 ### Workspace Chat Editing (#1087)
 
 When an Atrium document or artifact is open beside the chat (`?workspace=<id>`), Nexus can read and edit that object directly — the "re-prompt via adjacent chat" workflow where "add a section about X" or "change the button color" acts on the panel, not just the chat.
@@ -307,7 +357,8 @@ A view-only caller gets only the read tool; an unviewable `?workspace=` yields n
 | `/lib/nexus/workspace-routing-context.ts` | Workspace object resolution for routing (#1786) |
 | `/lib/nexus/model-router/workspace-auto-connector.ts` | Preview of auto-attached connectors for UI (#1786) |
 | `/lib/nexus/history-adapter.ts` | Conversation history management |
-| `/lib/nexus/enhanced-attachment-adapters.ts` | File attachment handling |
+| `/lib/attachments/chat-attachment-adapters.ts` | File attachment handling (documents, images) |
+| `/lib/attachments/use-chat-attachments.ts` | Shared attachment wiring hook for Nexus, decision capture, and Assistant Architect (#1735) |
 | `/lib/nexus/workspace-chat-tools.ts` | Workspace panel editing tools |
 | `/lib/nexus/chat-step-budget.ts` | Multi-step budget (10 vs 20 steps) |
 | `/lib/atrium/workspace-change-event.ts` | DOM event for panel refresh |
@@ -943,3 +994,4 @@ Atrium
 - **[architecture/overview.md](../architecture/overview.md)** — Overall system architecture
 - **[agent-platform/overview.md](../agent-platform/overview.md)** — Agent skills and MCP integration
 - **[api-integration/overview.md](../api-integration/overview.md)** — External API access to these features
+/overview.md](../api-integration/overview.md)** — External API access to these features
