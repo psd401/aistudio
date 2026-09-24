@@ -786,6 +786,47 @@ describe("ArtifactSandbox bounded request queue (#1788)", () => {
       },
     ]);
   });
+
+  it("gives the RECORDS lane the same total capacity, not a smaller one", async () => {
+    // Records run 1 at a time, so a cap expressed as a QUEUE DEPTH sized
+    // against the query lane's concurrency (32 - 6 = 26) would let a
+    // records-mode mount hold only 1 + 26 = 27 and refuse the 28th — while the
+    // frame is still willing to hold 32. The parent caps TOTAL outstanding
+    // instead, so both lanes reach 32 and refuse exactly the request the frame
+    // would.
+    const ids = Array.from({ length: 33 }, (_, index) =>
+      `00000000-0000-4000-8000-0000000002${String(index).padStart(2, "0")}`
+    );
+    const { frameWindow, postMessage } = mountSandbox(true);
+    submitArtifactRecordMock.mockImplementation(() => new Promise(() => {}));
+
+    await act(async () => {
+      for (const requestId of ids) {
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            data: submitRequest(requestId),
+            origin: "null",
+            source: frameWindow,
+          })
+        );
+      }
+      await flushMicrotasks();
+    });
+
+    // One dispatched, 31 queued, and only the 33rd refused.
+    expect(submitArtifactRecordMock).toHaveBeenCalledTimes(1);
+    expect(dataResponses(postMessage)).toEqual([
+      {
+        message: {
+          type: "atrium-artifact-data-response",
+          requestId: ids[32],
+          ok: false,
+          ...TOO_MANY_REQUESTS_FAILURE,
+        },
+        targetOrigin: "*",
+      },
+    ]);
+  });
 });
 
 /**

@@ -159,17 +159,18 @@ const MAX_CONCURRENT_RECORD_REQUESTS = 1;
  */
 const MAX_PENDING_DATA_REQUESTS_IN_FRAME = 32;
 /**
- * The bounded FIFO behind the concurrency limit.
+ * The most requests this parent will hold at once, in flight AND queued.
  *
- * Sized so that IN-FLIGHT PLUS QUEUED equals the sandbox host's own
- * `MAX_PENDING_DATA_REQUESTS` of 32 (render.html): 6 + 26. The two layers count
- * different things — the host counts every promise it is holding open, the
- * parent counts only what is waiting behind the active slots — so setting this
- * to 32 did NOT make them agree. It made the parent advertise 38 slots that the
- * frame would never fill: the host rejected the 33rd simultaneous call while
- * this queue still believed it had six free.
+ * Deliberately a TOTAL rather than a queue depth, and deliberately the host's
+ * own number. The two layers count different things — the frame counts every
+ * promise it is holding open, the parent could count only what waits behind the
+ * active slots — so any queue-depth constant has to be reconciled against the
+ * concurrency limit that happens to apply, and gets it wrong the moment there
+ * is more than one such limit. Capping the total instead is correct for every
+ * lane by construction: a query-mode mount reaches 6 + 26 and a records-mode
+ * mount reaches 1 + 31, and both refuse exactly the request the frame would.
  */
-const MAX_QUEUED_DATA_REQUESTS = MAX_PENDING_DATA_REQUESTS_IN_FRAME - MAX_CONCURRENT_DATA_REQUESTS;
+const MAX_OUTSTANDING_DATA_REQUESTS = MAX_PENDING_DATA_REQUESTS_IN_FRAME;
 const MAX_DATA_PAYLOAD_BYTES = 8 * 1024;
 const MAX_DATA_PAYLOAD_VALUES = 8_192;
 const MAX_DATA_PAYLOAD_STRING_CODE_UNITS = MAX_DATA_PAYLOAD_BYTES;
@@ -852,8 +853,8 @@ function parentSideRefusal(args: {
   contentId: string | undefined;
   request: ArtifactDataRequest;
   loadedDataAccess: ContentDataAccess | undefined;
-  /** How many requests are already waiting behind the concurrency limit. */
-  queued: number;
+  /** In flight PLUS queued — what the frame is holding open for this mount. */
+  outstanding: number;
 }): ArtifactDataFailure | null {
   const isQuery = args.request.op === "query";
   if (!args.dataBridgeEnabled || !args.contentId) {
@@ -878,11 +879,80 @@ function parentSideRefusal(args: {
   }
   // #1788: only a FULL queue is refused now. Work beyond the concurrency limit
   // waits its turn instead of failing, which is what a dashboard with more
-  // panels than the limit actually wants.
-  if (args.queued >= MAX_QUEUED_DATA_REQUESTS) {
+  // panels than the limit actually wants. The cap is the TOTAL outstanding, so
+  // it lands on the same request the frame's own cap would, in either lane.
+  if (args.outstanding >= MAX_OUTSTANDING_DATA_REQUESTS) {
     return codedFailure("too_many_requests");
   }
   return null;
+}
+
+/**
+ * Dispatch queued requests up to the concurrency limit (#1788).
+ *
+ * Each dispatch also posts an `atrium-artifact-data-ack` to the frame. The
+ * host's 45s query clock used to start when the page POSTED, so a request
+ * that waited behind five others could time out having never run; the ack
+ * restarts that clock at DISPATCH, which is the only moment the parent knows
+ * the server is actually being asked.
+ */
+function useBridgePump(
+  runBridgeRequest: (
+    request: ArtifactDataRequest,
+    frameWindow: Window
+  ) => Promise<void>,
+  inFlightDataRequestsRef: React.RefObject<number>,
+  queuedDataRequestsRef: React.RefObject<QueuedBridgeRequest[]>
+): () => void {
+  return useCallback((): void => {
+    // `step` recurses LEXICALLY rather than through a ref: a ref assigned in
+    // the render body is a rules-of-hooks violation, and one assigned in an
+    // effect leaves a window where a completing request reads a stale pump.
+    // Everything `runBridgeRequest` closes over is fixed for the mount anyway
+    // (the canvas keys the sandbox on contentId + version), so a drain started
+    // by an earlier render can safely finish the queue it is draining.
+    const step = (): void => {
+      for (;;) {
+        // Peek before taking: the limit depends on what is at the head. A
+        // record op still travels over a Server Action, and the App Router
+        // dispatches those ONE AT A TIME — the very serialization this issue is
+        // about. Running six of them "concurrently" here would buy nothing and
+        // would make the dispatch ack a lie: the parent would restart the
+        // frame's 10s clock on five requests that are still sitting in Next's
+        // client-side action queue, so a later `submit` could time out in the
+        // frame and then write anyway, and the author's retry would create a
+        // DUPLICATE record. One at a time makes "dispatched" mean "started".
+        //
+        // Query and record ops never mix on one mount: `isOpAllowedByLoadedMode`
+        // pins the mount to a single mode, so this is one lane either way, not
+        // two competing ones.
+        const head = queuedDataRequestsRef.current[0];
+        if (!head) break;
+        const limit =
+          head.request.op === "query"
+            ? MAX_CONCURRENT_DATA_REQUESTS
+            : MAX_CONCURRENT_RECORD_REQUESTS;
+        if (inFlightDataRequestsRef.current >= limit) break;
+        const next = queuedDataRequestsRef.current.shift();
+        if (!next) break;
+        inFlightDataRequestsRef.current += 1;
+        try {
+          next.frameWindow.postMessage(
+            { type: DATA_DISPATCH_ACK_TYPE, requestId: next.request.requestId },
+            "*"
+          );
+        } catch {
+          // A gone frame still gets its request run; the response post is what
+          // actually fails, and it fails the same way it always has.
+        }
+        void runBridgeRequest(next.request, next.frameWindow).finally(() => {
+          inFlightDataRequestsRef.current -= 1;
+          step();
+        });
+      }
+    };
+    step();
+  }, [runBridgeRequest, inFlightDataRequestsRef, queuedDataRequestsRef]);
 }
 
 /**
@@ -1012,64 +1082,11 @@ function useArtifactDataBridge({
     [contentId, reportDiagnostic, versionId]
   );
 
-  /**
-   * Dispatch queued requests up to the concurrency limit (#1788).
-   *
-   * Each dispatch also posts an `atrium-artifact-data-ack` to the frame. The
-   * host's 45s query clock used to start when the page POSTED, so a request
-   * that waited behind five others could time out having never run; the ack
-   * restarts that clock at DISPATCH, which is the only moment the parent knows
-   * the server is actually being asked.
-   */
-  const pump = useCallback((): void => {
-    // `step` recurses LEXICALLY rather than through a ref: a ref assigned in
-    // the render body is a rules-of-hooks violation, and one assigned in an
-    // effect leaves a window where a completing request reads a stale pump.
-    // Everything `runBridgeRequest` closes over is fixed for the mount anyway
-    // (the canvas keys the sandbox on contentId + version), so a drain started
-    // by an earlier render can safely finish the queue it is draining.
-    const step = (): void => {
-      for (;;) {
-        // Peek before taking: the limit depends on what is at the head. A
-        // record op still travels over a Server Action, and the App Router
-        // dispatches those ONE AT A TIME — the very serialization this issue is
-        // about. Running six of them "concurrently" here would buy nothing and
-        // would make the dispatch ack a lie: the parent would restart the
-        // frame's 10s clock on five requests that are still sitting in Next's
-        // client-side action queue, so a later `submit` could time out in the
-        // frame and then write anyway, and the author's retry would create a
-        // DUPLICATE record. One at a time makes "dispatched" mean "started".
-        //
-        // Query and record ops never mix on one mount: `isOpAllowedByLoadedMode`
-        // pins the mount to a single mode, so this is one lane either way, not
-        // two competing ones.
-        const head = queuedDataRequestsRef.current[0];
-        if (!head) break;
-        const limit =
-          head.request.op === "query"
-            ? MAX_CONCURRENT_DATA_REQUESTS
-            : MAX_CONCURRENT_RECORD_REQUESTS;
-        if (inFlightDataRequestsRef.current >= limit) break;
-        const next = queuedDataRequestsRef.current.shift();
-        if (!next) break;
-        inFlightDataRequestsRef.current += 1;
-        try {
-          next.frameWindow.postMessage(
-            { type: DATA_DISPATCH_ACK_TYPE, requestId: next.request.requestId },
-            "*"
-          );
-        } catch {
-          // A gone frame still gets its request run; the response post is what
-          // actually fails, and it fails the same way it always has.
-        }
-        void runBridgeRequest(next.request, next.frameWindow).finally(() => {
-          inFlightDataRequestsRef.current -= 1;
-          step();
-        });
-      }
-    };
-    step();
-  }, [runBridgeRequest]);
+  const pump = useBridgePump(
+    runBridgeRequest,
+    inFlightDataRequestsRef,
+    queuedDataRequestsRef
+  );
 
   const handleDataRequest = useCallback(
     (request: ArtifactDataRequest, frameWindow: Window): void => {
@@ -1078,7 +1095,8 @@ function useArtifactDataBridge({
         contentId,
         request,
         loadedDataAccess: loadedDataAccessRef.current,
-        queued: queuedDataRequestsRef.current.length,
+        outstanding:
+          inFlightDataRequestsRef.current + queuedDataRequestsRef.current.length,
       });
       if (refusal || !contentId) {
         // `!contentId` is already covered by `parentSideRefusal`; repeating it

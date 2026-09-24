@@ -190,7 +190,7 @@ outright. Three changes:
 | Before | Now |
 |---|---|
 | Server Action (serialized by the App Router) | `POST /api/atrium/artifacts/{id}/query` via `fetch` — genuinely parallel |
-| Hard cap of 8 in flight; the 9th **rejected** | Concurrency limit **6** for queries (**1** for record ops, which still ride serialized Server Actions), with a bounded FIFO of **26** behind it — **32 total**, matching the host's own `MAX_PENDING_DATA_REQUESTS`, so both layers refuse the same request. Only a full queue is refused. |
+| Hard cap of 8 in flight; the 9th **rejected** | Concurrency limit **6** for queries (**1** for record ops, which still ride serialized Server Actions), with the rest queued. The parent caps **total outstanding** (in flight + queued) at **32** — the host's own `MAX_PENDING_DATA_REQUESTS` — so both layers refuse the same request in either lane. Only a full queue is refused. |
 | Host's 45 s clock started when the page **posted** | Parent posts `atrium-artifact-data-ack` on **dispatch**; the host runs a queue-tolerant 315 s budget until then, and re-arms the real 45 s server budget on the ack, once |
 | Server budget: 30 s for `execute()` only, handshake free | One 30 s deadline spanning `getConnectorTools` **and** `execute()`, so the server always loses the race to the host's clock |
 
@@ -213,6 +213,23 @@ The canvas also keeps the preview iframe **mounted but hidden** on the Code tab.
 Toggling tabs used to tear the frame down and rebuild it, re-running every query
 the artifact makes, so an author flipping back and forth on an 8-query dashboard
 could exhaust the 60/min budget in well under a minute.
+
+Two consequences worth knowing:
+
+- A frame is **kept** hidden, never **first created** hidden. An element inside
+  `display: none` has no layout box, so artifact code that sizes itself from
+  `clientWidth` (every charting library) would initialize at zero — and
+  un-hiding a frame does not re-run its scripts. The canvas therefore latches
+  the exact composite key the sandbox is mounted under
+  (`contentId:dataAccess:versionKey`); if any part of it changes while the Code
+  tab is open, the frame is dropped and remounts visible, correctly sized, on
+  the way back.
+- A hidden frame is still **running**. Its timers keep firing, so an artifact
+  that polls on an interval goes on querying while the author edits, against the
+  same 60/min budget. That is the direct cost of not re-running every query on
+  each tab toggle, and it is why the authoring guidance says to query on load
+  rather than on a timer. An artifact that polls was already outside the
+  contract; one that does not is unaffected.
 
 ### Typed failures (#1787)
 
