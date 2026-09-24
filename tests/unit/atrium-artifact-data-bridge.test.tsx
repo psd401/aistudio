@@ -737,8 +737,13 @@ describe("ArtifactSandbox artifact data bridge failure controls", () => {
 /** The one case that IS still refused: a full queue (#1788). */
 describe("ArtifactSandbox bounded request queue (#1788)", () => {
   it("refuses only once the bounded queue is FULL", async () => {
-    // 32 queued + 6 in flight is the whole budget; the 39th is refused.
-    const ids = Array.from({ length: 39 }, (_, index) =>
+    // 6 in flight + 26 queued = 32, which is EXACTLY the sandbox host's own
+    // MAX_PENDING_DATA_REQUESTS. The two layers count different things (the
+    // host counts every open promise, the parent only what waits behind the
+    // active slots), so the totals have to be reconciled deliberately — a
+    // 32-deep queue here would advertise 38 slots the frame would never fill.
+    // The 33rd request is the first refusal, on both sides.
+    const ids = Array.from({ length: 33 }, (_, index) =>
       `00000000-0000-4000-8000-0000000001${String(index).padStart(2, "0")}`
     );
     const { frameWindow, postMessage } = mountSandbox(true);
@@ -761,7 +766,7 @@ describe("ArtifactSandbox bounded request queue (#1788)", () => {
       {
         message: {
           type: "atrium-artifact-data-response",
-          requestId: ids[38],
+          requestId: ids[32],
           ok: false,
           ...TOO_MANY_REQUESTS_FAILURE,
         },

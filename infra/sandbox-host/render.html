@@ -108,23 +108,27 @@
         // wide dashboard timed out having never run. The parent's dispatch ack
         // restarts the clock, so 45s always measures the SERVER's time.
         var QUERY_REQUEST_TIMEOUT_MS = 45000;
-        // The budget a query gets BEFORE the parent's dispatch ack arrives, i.e.
-        // while it is still sitting in the parent's queue (#1788).
+        // The budget ANY request gets BEFORE the parent's dispatch ack arrives,
+        // i.e. while it is still sitting in the parent's queue (#1788).
         //
-        // The ack re-arms the clock to QUERY_REQUEST_TIMEOUT_MS, but it can only
-        // do that while the request is still pending -- so the pre-ack budget
-        // has to outlast the WORST-CASE queue wait, or the very case the queue
-        // was added for breaks in a new way. The parent holds 32 queued behind 6
-        // concurrent, so a request can wait ceil(38/6) = 7 dispatch waves, each
-        // bounded by the server's own 30s deadline. At 45s the tail of a
-        // 32-query dashboard would time out un-dispatched AND then be dispatched
-        // anyway: a real MCP+RDS query would run, burn a rate-limit slot, and
-        // have its answer discarded -- exactly the "gave up on a query that is
-        // still running" failure this issue set out to remove.
+        // The ack re-arms the clock to the operation's real budget, but it can
+        // only do that while the request is STILL PENDING -- so the pre-ack
+        // budget has to outlast the worst-case queue wait, or the queue
+        // reintroduces the very failure it was added to remove. The parent runs
+        // 6 concurrently with 26 queued behind them (32 total, matching
+        // MAX_PENDING_DATA_REQUESTS below), so a request can wait ceil(32/6) = 6
+        // dispatch waves.
         //
-        // This is a QUEUE ceiling, not a server one. Once dispatched a query
-        // still gets 45s and no more, so a wedged request always surfaces.
-        var QUERY_QUEUED_TIMEOUT_MS = 315000;
+        // This applies to RECORD ops too, not just queries. The queue accepts
+        // submit/list as well, and at their bare 10s budget a queued `submit`
+        // would reject locally, be deleted from this map, and then be dispatched
+        // by the parent anyway -- the write lands AFTER the artifact was told it
+        // failed, so an author's retry silently creates a duplicate record.
+        //
+        // This is a QUEUE ceiling, not a server one: once dispatched, a query
+        // still gets 45s and a record op still gets 10s, so a wedged request
+        // always surfaces as `timeout`.
+        var QUEUED_DISPATCH_TIMEOUT_MS = 315000;
         var MAX_PENDING_DATA_REQUESTS = 32;
         var pendingDataRequests = new Map();
         // Capture the primitives before artifact scripts can replace globals.
@@ -378,14 +382,11 @@
               reject(localBridgeFailure(op, fields, "unavailable", "Atrium data request ID collision"));
               return;
             }
-            // Two budgets for a query: a queue-tolerant one until the parent
-            // says it has dispatched, then the real 45s server budget (#1788).
-            // A record op is never queued long enough to need the distinction.
-            var isQuery = op === "query";
-            var budgetMs = isQuery
-              ? QUERY_REQUEST_TIMEOUT_MS
-              : DATA_REQUEST_TIMEOUT_MS;
-            var initialBudgetMs = isQuery ? QUERY_QUEUED_TIMEOUT_MS : budgetMs;
+            // Two budgets for EVERY op: a queue-tolerant one until the parent
+            // says it has dispatched, then the operation's real budget (#1788).
+            var budgetMs =
+              op === "query" ? QUERY_REQUEST_TIMEOUT_MS : DATA_REQUEST_TIMEOUT_MS;
+            var initialBudgetMs = QUEUED_DISPATCH_TIMEOUT_MS;
             // Named so the dispatch ack can re-arm the SAME callback rather
             // than rebuilding a second closure over the request (#1788).
             var onTimeout = function () {

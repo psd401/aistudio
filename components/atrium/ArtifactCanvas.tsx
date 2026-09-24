@@ -370,6 +370,7 @@ function CanvasBody({
   sandboxSrc,
   bridge,
   onSave,
+  keepPreviewMounted,
 }: {
   state: LoadState;
   message: string | null;
@@ -381,6 +382,12 @@ function CanvasBody({
   sandboxSrc: string | null;
   bridge: CanvasBridge;
   onSave: (next: string) => Promise<void>;
+  /**
+   * Whether the preview frame should be in the tree at all: true on the Preview
+   * tab, and behind the Code tab only for a frame that already mounted VISIBLY.
+   * See the `display: none` block below for why that distinction matters.
+   */
+  keepPreviewMounted: boolean;
 }): React.JSX.Element {
   if (state === "error") {
     return (
@@ -413,29 +420,42 @@ function CanvasBody({
     return tab === "preview" ? <EmptyDraftPanel canEdit={canEdit} /> : editor;
   }
 
+  /*
+    #1788: the preview frame stays MOUNTED while the Code tab is open, hidden
+    with `display: none` rather than unmounted. Toggling the tab used to tear
+    the iframe down and rebuild it, which re-ran every `AtriumData.query` the
+    artifact makes — an author comparing code and output on an 8-query
+    dashboard could exhaust the 60/min budget in well under a minute and see
+    nothing but a generic failure.
+
+    But a frame is only KEPT this way, never FIRST MOUNTED this way. An element
+    inside `display: none` has no layout box, so artifact code that sizes itself
+    from `clientWidth` / `offsetWidth` (every charting library) would initialize
+    at zero and never re-run — un-hiding the frame does not re-execute its
+    scripts. Saving or switching versions while the Code tab is open changes
+    `versionKey` and would otherwise remount the frame hidden, so an author
+    would flip back to Preview and find a collapsed chart.
+
+    So the frame renders only when the preview is visible, or when the key
+    already mounted while visible matches the current one. A newly keyed frame
+    waits for the Preview tab and mounts with real dimensions — it re-queries
+    once, exactly as it did before this change, which is the unavoidable cost
+    of a version actually changing.
+  */
   return (
     <>
-      {/*
-        #1788: the preview frame stays MOUNTED while the Code tab is open,
-        hidden with `display: none` rather than unmounted. Toggling the tab
-        used to tear the iframe down and rebuild it, which re-ran every
-        `AtriumData.query` the artifact makes — an author comparing code and
-        output on an 8-query dashboard could exhaust the 60/min budget in well
-        under a minute and see nothing but a generic failure.
-
-        `display: none` keeps the frame's JS alive and its timers running, which
-        is exactly what we want here: the artifact is not re-rendered, so it is
-        not re-queried. See ArtifactPreviewFrame for the version-remount and
-        data-bridge (#1725) contracts it carries.
-      */}
-      <div style={tab === "preview" ? undefined : { display: "none" }}>
-        <ArtifactPreviewFrame
-          code={code}
-          sandboxSrc={sandboxSrc}
-          versionKey={selectedVersionId ?? ""}
-          bridge={bridge}
-        />
-      </div>
+      {keepPreviewMounted ? (
+        <div style={tab === "preview" ? undefined : { display: "none" }}>
+          {/* See ArtifactPreviewFrame for the version-remount and data-bridge
+              (#1725) contracts this one element carries. */}
+          <ArtifactPreviewFrame
+            code={code}
+            sandboxSrc={sandboxSrc}
+            versionKey={selectedVersionId ?? ""}
+            bridge={bridge}
+          />
+        </div>
+      ) : null}
       {tab === "preview" ? null : editor}
     </>
   );
@@ -639,9 +659,58 @@ function usePreviewDiagnostics(
   );
 }
 
+/**
+ * The Preview/Code tab, plus the latch deciding whether a hidden preview frame
+ * may stay mounted (#1788).
+ *
+ * `previewMountedKey` is the version key that was ON SCREEN when the author
+ * last left the Preview tab, or null if no frame was showing.
+ *
+ * Keeping that frame alive behind the Code tab is the whole point of not
+ * unmounting it: toggling tabs used to tear the iframe down and rebuild it,
+ * re-running every `AtriumData.query` the artifact makes. Mounting a NEW frame
+ * there is a different thing entirely — an element inside `display: none` has
+ * no layout box, so artifact code that sizes itself from `clientWidth` (every
+ * charting library) initializes at zero, and un-hiding it later does not re-run
+ * its scripts. A frame is therefore kept, never first created, while hidden.
+ *
+ * The latch is written in the tab handler rather than during render or in an
+ * effect: the moment a visible frame becomes hidden IS a tab change, and that
+ * is the one place this can be recorded without reading a ref during render or
+ * calling setState from an effect.
+ */
+function usePreviewTab(
+  state: LoadState,
+  selectedVersionId: string | null
+): { tab: Tab; handleTab: (next: Tab) => void; keepPreviewMounted: boolean } {
+  const [tab, setTab] = useState<Tab>("preview");
+  const [previewMountedKey, setPreviewMountedKey] = useState<string | null>(null);
+
+  const handleTab = useCallback(
+    (next: Tab) => {
+      // `state === "ready"` matters: while loading, CanvasBody renders a
+      // placeholder instead of the frame, so latching a key there would claim a
+      // mount that never happened. Leaving FOR Preview clears the latch — that
+      // tab renders the frame itself, and a stale key must not outlive a visit.
+      setPreviewMountedKey(
+        next === "code" && state === "ready" ? (selectedVersionId ?? "") : null
+      );
+      setTab(next);
+    },
+    [state, selectedVersionId]
+  );
+
+  // If the author saves or switches version while on the Code tab, the latched
+  // key stops matching and the frame is dropped rather than silently rebuilt
+  // with no layout — it remounts, visible and correctly sized, on the way back.
+  const keepPreviewMounted =
+    tab === "preview" || previewMountedKey === (selectedVersionId ?? "");
+
+  return { tab, handleTab, keepPreviewMounted };
+}
+
 export function ArtifactCanvas(props: ArtifactCanvasProps) {
   const { idOrSlug, canEdit = false, sandboxSrc = null } = props;
-  const [tab, setTab] = useState<Tab>("preview");
   const [state, setState] = useState<LoadState>("loading");
   const [message, setMessage] = useState<string | null>(null);
 
@@ -654,6 +723,7 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
   // from `message`, which belongs to the load-error state machine).
   const [restoring, setRestoring] = useState(false);
   const [restoreNotice, setRestoreNotice] = useState<string | null>(null);
+
   // The resolved stable object UUID (idOrSlug may be a slug); save targets this.
   const objectIdRef = useRef<string | null>(null);
 
@@ -762,6 +832,12 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
   }, [refreshVersions, loadCode]);
 
   const bridge = useCanvasBridgePin(props, refreshVersions, loadCode);
+
+  const { tab, handleTab, keepPreviewMounted } = usePreviewTab(
+    state,
+    selectedVersionId
+  );
+
   const handleSelectVersion = useCallback(
     (versionId: string) =>
       performSelectVersion({ versionId, loadCode, setState, setMessage, setRestoreNotice }),
@@ -832,7 +908,7 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
     <div className="atrium-artifact-canvas flex flex-col gap-2">
       <CanvasToolbar
         tab={tab}
-        onTab={setTab}
+        onTab={handleTab}
         versions={versions}
         selectedVersionId={selectedVersionId}
         onSelectVersion={handleSelectVersion}
@@ -855,6 +931,7 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
         sandboxSrc={sandboxSrc}
         bridge={bridge}
         onSave={handleSave}
+        keepPreviewMounted={keepPreviewMounted}
       />
 
       <CanvasHint />

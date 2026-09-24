@@ -136,12 +136,24 @@ const RENDER_MAX_ATTEMPTS = 40;
  */
 const MAX_CONCURRENT_DATA_REQUESTS = 6;
 /**
- * The bounded FIFO behind the concurrency limit. Matches the sandbox host's own
- * `MAX_PENDING_DATA_REQUESTS` (render.html), so a page can never queue more here
- * than the frame is willing to hold open — the two caps agree instead of the
- * parent refusing work the frame still considers pending.
+ * The sandbox host's `MAX_PENDING_DATA_REQUESTS` (infra/sandbox-host/render.html),
+ * mirrored here so the parent's total capacity is derived from it rather than
+ * guessed alongside it. The frame is the binding constraint: it refuses to hold
+ * more than this many promises open at once, whatever the parent would accept.
  */
-const MAX_QUEUED_DATA_REQUESTS = 32;
+const MAX_PENDING_DATA_REQUESTS_IN_FRAME = 32;
+/**
+ * The bounded FIFO behind the concurrency limit.
+ *
+ * Sized so that IN-FLIGHT PLUS QUEUED equals the sandbox host's own
+ * `MAX_PENDING_DATA_REQUESTS` of 32 (render.html): 6 + 26. The two layers count
+ * different things — the host counts every promise it is holding open, the
+ * parent counts only what is waiting behind the active slots — so setting this
+ * to 32 did NOT make them agree. It made the parent advertise 38 slots that the
+ * frame would never fill: the host rejected the 33rd simultaneous call while
+ * this queue still believed it had six free.
+ */
+const MAX_QUEUED_DATA_REQUESTS = MAX_PENDING_DATA_REQUESTS_IN_FRAME - MAX_CONCURRENT_DATA_REQUESTS;
 const MAX_DATA_PAYLOAD_BYTES = 8 * 1024;
 const MAX_DATA_PAYLOAD_VALUES = 8_192;
 const MAX_DATA_PAYLOAD_STRING_CODE_UNITS = MAX_DATA_PAYLOAD_BYTES;

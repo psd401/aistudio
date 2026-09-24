@@ -449,7 +449,7 @@ async function testDispatchAckRestartsQueryClock(): Promise<void> {
   const queryPromise = api.query("SELECT 1");
   const requestId = parentMessages[0]?.data.requestId;
   // Before the ack the request may still be sitting in the PARENT's queue, so
-  // the pre-ack budget has to outlast the worst-case queue wait (32 queued
+  // the pre-ack budget has to outlast the worst-case queue wait (26 queued
   // behind 6 concurrent). Arming 45s here would time the tail of a wide
   // dashboard out un-dispatched -- and the parent would then dispatch it
   // anyway, burning a rate-limit slot on an answer nobody is waiting for.
@@ -494,6 +494,48 @@ async function testDispatchAckRestartsQueryClock(): Promise<void> {
     data: rows,
   });
   assert.deepEqual(await queryPromise, rows);
+}
+
+/**
+ * A RECORD op gets the queue-tolerant pre-ack budget too, then drops to its own
+ * 10s once dispatched (#1788).
+ *
+ * The parent's FIFO accepts submit/list as well as queries. At a bare 10s a
+ * queued `submit` would reject locally and be deleted from the pending map,
+ * while the parent went on to dispatch it anyway -- the write lands AFTER the
+ * artifact was told it failed, so the author's retry silently writes a
+ * DUPLICATE record. The pre-ack budget is what makes that unreachable.
+ */
+async function testDispatchAckRestartsRecordClock(): Promise<void> {
+  const timeoutDelays: number[] = [];
+  const { window, parentMessages } = makeHost([APP_ORIGIN], { timeoutDelays });
+
+  const submitPromise = atriumData(window).submit("signups", { name: "a" });
+  const requestId = parentMessages[0]?.data.requestId;
+  assert.deepEqual(
+    timeoutDelays,
+    [315000],
+    "a record op did not arm the queue-tolerant pre-ack budget"
+  );
+
+  postDataResponse(window, {
+    type: "atrium-artifact-data-ack",
+    requestId,
+  });
+  assert.deepEqual(
+    timeoutDelays,
+    [315000, 10000],
+    "the ack did not drop a record op to its own 10s budget"
+  );
+
+  const record = { id: "r1", createdAt: "2026-09-24T00:00:00.000Z" };
+  postDataResponse(window, {
+    type: "atrium-artifact-data-response",
+    requestId,
+    ok: true,
+    data: record,
+  });
+  assert.deepEqual(await submitPromise, record);
 }
 
 async function testParentSourceFilter(): Promise<void> {
@@ -1277,6 +1319,10 @@ async function runBridgeChecks(): Promise<void> {
   await check(
     "restarts the query clock on the parent's dispatch ack, once",
     testDispatchAckRestartsQueryClock
+  );
+  await check(
+    "gives a queued record op the pre-ack budget, then its own 10s",
+    testDispatchAckRestartsRecordClock
   );
   await check(
     "ignores data responses not sent by window.parent",
