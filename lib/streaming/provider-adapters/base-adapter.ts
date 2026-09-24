@@ -52,22 +52,42 @@ const ABSOLUTE_STREAM_CEILING_MS = 600_000; // 10 minutes
  *
  * This grants each step its own `stepBudgetMs`, pushed forward at every step
  * boundary, while an absolute ceiling still bounds a runaway loop.
+ *
+ * Step boundaries alone are not enough when ONE step is long (#1791): an
+ * `update_workspace_artifact` call that streams a 50-60 KB dashboard is a single
+ * step, so a 180s step budget can abort a run that was producing output the
+ * whole time — saving nothing and losing everything. `touch()` therefore turns
+ * the per-step budget into an IDLE timeout: visible progress pushes the clock
+ * forward, silence still aborts, and `hardStopAt` remains the absolute bound.
  */
 export interface StreamDeadline {
   /** Abort signal for `streamText`; undefined when no budget is configured. */
   readonly signal?: AbortSignal;
   /** Push the per-step clock forward. Call at each step boundary. */
   extend(): void;
+  /**
+   * Push the clock forward on observed stream progress (one chunk). Throttled
+   * internally, so it is safe to call per token without churning the timer.
+   */
+  touch(): void;
   /** True once THIS deadline aborted the run (vs. a caller-initiated abort). */
   timedOut(): boolean;
   /** Release the timer. Safe to call more than once. */
   dispose(): void;
 }
 
+/**
+ * Minimum gap between two timer re-arms driven by `touch()`. Chunks arrive many
+ * times per second; re-arming a `setTimeout` for each one is pure overhead when
+ * the budget is measured in tens of seconds.
+ */
+const DEADLINE_TOUCH_THROTTLE_MS = 1_000;
+
 /** Shared handle for "no timeout configured" — nothing to arm or release. */
 const NO_STREAM_DEADLINE: StreamDeadline = {
   signal: undefined,
   extend: () => {},
+  touch: () => {},
   timedOut: () => false,
   dispose: () => {},
 };
@@ -356,6 +376,13 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
             metadata: enhancedConfig.experimental_telemetry.metadata
           }
         }),
+        // #1791: a single step that streams a large artifact must not be killed
+        // by the per-step budget while it is visibly producing output. Every
+        // chunk pushes the clock forward (throttled); `hardStopAt` still bounds
+        // the whole run, so a wedged stream that goes quiet is still aborted.
+        onChunk: () => {
+          deadline.touch();
+        },
         // Capture tool calls as each step finishes (AI SDK v6)
         onStepFinish: (event) => {
           // Reaching a step boundary buys the next step a fresh budget, so the
@@ -807,14 +834,30 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
 
     arm();
 
+    let lastTouchArmAt = 0;
+    const push = () => {
+      deadlineAt = Date.now() + timeoutMs;
+      arm();
+    };
+
     return {
       signal: controller.signal,
       extend: () => {
         if (expired) {
           return;
         }
-        deadlineAt = Date.now() + timeoutMs;
-        arm();
+        push();
+      },
+      touch: () => {
+        if (expired) {
+          return;
+        }
+        const now = Date.now();
+        if (now - lastTouchArmAt < DEADLINE_TOUCH_THROTTLE_MS) {
+          return;
+        }
+        lastTouchArmAt = now;
+        push();
       },
       timedOut: () => expired,
       dispose: clear,
