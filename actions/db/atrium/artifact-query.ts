@@ -93,15 +93,18 @@ const DEFAULT_QUERY_LIMIT = 200;
 const MAX_QUERY_LIMIT = 2_000;
 const MAX_QUERY_OFFSET = 1_000_000;
 /**
+ * ONE overall budget for the connector handshake AND the query (#1788).
+ *
  * Each query is Lambda + RDS behind an MCP round trip. Chat's connector path
  * already budgets 30s, so the bridge uses the same ceiling rather than the
  * records bridge's 10s (which would time out legitimate aggregates).
  *
- * This clock starts only at `execute()`, after the session/rate/visibility
- * checks and the connector handshake. The sandbox host's own clock starts when
- * the page posts the request, so the host allows 45s (render.html) -- the
- * server must always lose the race, or a late server answer is dropped and the
- * page retries a query that is still running.
+ * This clock used to start only at `execute()`, which meant the real server-side
+ * worst case was the handshake (`MCP_CLIENT_TIMEOUT_MS` for the client, plus
+ * tools/list) PLUS 30s — comfortably past the sandbox host's 45s, so a slow
+ * handshake made the host give up on a query that was still running and the
+ * page retried it. The deadline now spans `getConnectorTools` as well, so the
+ * server always loses the race against the host's clock by construction.
  */
 const QUERY_TIMEOUT_MS = 30_000;
 /**
@@ -533,6 +536,49 @@ function classifyQueryFailure(error: unknown): ClassifiedQueryFailure {
  * Invoke `query_data` on the resolved connector with the forced arguments and a
  * hard timeout, always closing the MCP client.
  */
+/**
+ * Reject as soon as `signal` aborts, even when `work` never settles (#1788).
+ *
+ * `getConnectorTools` takes no AbortSignal, so the handshake could otherwise run
+ * past the whole budget. A connector that arrives AFTER the deadline is closed
+ * rather than leaked — the caller has already given up on it.
+ */
+function withDeadline<T>(
+  work: Promise<T>,
+  signal: AbortSignal,
+  onLateSettle: (value: T) => void
+): Promise<T> {
+  if (signal.aborted) {
+    void work.then(onLateSettle, () => {});
+    return Promise.reject(signal.reason);
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const onAbort = () => {
+      settled = true;
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        if (settled) {
+          onLateSettle(value);
+          return;
+        }
+        settled = true;
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        if (settled) return;
+        settled = true;
+        reject(error);
+      }
+    );
+  });
+}
+
 async function callQueryData(args: {
   connectorId: string;
   userId: number;
@@ -543,11 +589,19 @@ async function callQueryData(args: {
   offset: number;
   reason: string;
 }): Promise<QueryArtifactDataResult> {
-  const connector = await getConnectorTools(
-    args.connectorId,
-    args.userId,
-    args.roles,
-    { idToken: args.idToken }
+  // One signal for the handshake AND the execution, so the two cannot add up to
+  // more than the host's clock allows. `AbortSignal.timeout` aborts with a
+  // DOMException named TimeoutError, which `classifyQueryFailure` already maps
+  // to the `timeout` bridge code.
+  const deadline = AbortSignal.timeout(QUERY_TIMEOUT_MS);
+  const connector = await withDeadline(
+    getConnectorTools(args.connectorId, args.userId, args.roles, {
+      idToken: args.idToken,
+    }),
+    deadline,
+    (late) => {
+      void late.close().catch(() => {});
+    }
   );
   try {
     const tool = connector.tools[QUERY_TOOL_NAME];
@@ -571,7 +625,9 @@ async function callQueryData(args: {
       {
         toolCallId: `atrium-artifact-query-${Date.now()}`,
         messages: [],
-        abortSignal: AbortSignal.timeout(QUERY_TIMEOUT_MS),
+        // The SAME signal the handshake raced: what is left of the 30s budget,
+        // never a fresh one (#1788).
+        abortSignal: deadline,
       }
     );
     return parseToolResult(result);

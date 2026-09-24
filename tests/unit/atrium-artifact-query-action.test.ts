@@ -465,12 +465,14 @@ describe("queryArtifactData upstream failures", () => {
  * #1787 — every failure carries a typed `code`, and the data MCP's own text is
  * kept (logged always, forwarded only to someone who can edit the artifact).
  */
+/** Narrow an outcome to its failure arm, shared by the failure suites. */
+function failureOf(result: Awaited<ReturnType<typeof queryArtifactData>>) {
+  if (result.isSuccess) throw new Error("expected a failure");
+  return result;
+}
+
 describe("queryArtifactData typed failure codes (#1787)", () => {
   /** Narrow the outcome to its failure arm so `code` is readable. */
-  function failureOf(result: Awaited<ReturnType<typeof queryArtifactData>>) {
-    if (result.isSuccess) throw new Error("expected a failure");
-    return result;
-  }
 
   it("classifies a missing session as unauthenticated", async () => {
     mockGetServerSession.mockResolvedValueOnce(null);
@@ -539,7 +541,71 @@ describe("queryArtifactData typed failure codes (#1787)", () => {
     });
     expect(failureOf(await queryArtifactData(validInput)).code).toBe("unavailable");
   });
+});
 
+/**
+ * #1788: the 30s budget used to start at `execute()`, so a slow connector
+ * handshake was FREE — the real server-side worst case ran past the sandbox
+ * host's 45s clock, and the page gave up on a query that was still running. The
+ * budget now spans `getConnectorTools` too, so the server always loses the race.
+ */
+describe("queryArtifactData overall deadline (#1788)", () => {
+  it("times out a handshake that never settles, and closes a late connector", async () => {
+    jest.useFakeTimers();
+    let settleConnector: (value: unknown) => void = () => undefined;
+    mockGetConnectorTools.mockImplementationOnce(
+      () => new Promise((resolve) => (settleConnector = resolve))
+    );
+
+    const pending = queryArtifactData(validInput);
+    await jest.advanceTimersByTimeAsync(31_000);
+    const result = await pending;
+
+    expect(failureOf(result).code).toBe("timeout");
+    expect(mockExecute).not.toHaveBeenCalled();
+
+    // A connector that arrives after the caller gave up must not be leaked.
+    settleConnector({
+      serverId: CONNECTOR_ID,
+      serverName: "psd-data",
+      tools: { query_data: { execute: mockExecute } },
+      close: mockClose,
+    });
+    await jest.advanceTimersByTimeAsync(0);
+    expect(mockClose).toHaveBeenCalled();
+    jest.useRealTimers();
+  });
+
+  it("gives the tool call the REMAINING budget, not a fresh one", async () => {
+    jest.useFakeTimers();
+    let capturedSignal: AbortSignal | undefined;
+    mockGetConnectorTools.mockImplementationOnce(async () => {
+      // A handshake that eats 20s of the 30s budget.
+      await jest.advanceTimersByTimeAsync(20_000);
+      return {
+        serverId: CONNECTOR_ID,
+        serverName: "psd-data",
+        tools: { query_data: { execute: mockExecute } },
+        close: mockClose,
+      };
+    });
+    mockExecute.mockImplementationOnce(
+      async (_args: unknown, options: { abortSignal: AbortSignal }) => {
+        capturedSignal = options.abortSignal;
+        await jest.advanceTimersByTimeAsync(11_000);
+        throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      }
+    );
+
+    const result = await queryArtifactData(validInput);
+
+    expect(failureOf(result).code).toBe("timeout");
+    expect(capturedSignal?.aborted).toBe(true);
+    jest.useRealTimers();
+  });
+});
+
+describe("queryArtifactData disclosure gate (#1787)", () => {
   it("gives an EDITOR the database's own message for a query_error", async () => {
     mockCanEdit.mockReturnValue(true);
     mockExecute.mockResolvedValueOnce({

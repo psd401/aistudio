@@ -354,6 +354,94 @@ function EmptyDraftPanel({ canEdit }: { canEdit: boolean }): React.JSX.Element {
 type CanvasBridge = { contentId: string; dataAccess: ContentDataAccess } | null;
 
 /**
+ * The canvas body: the error/loading/empty states and the preview+code pair.
+ *
+ * Split out of `ArtifactCanvas` purely so each function stays readable; it holds
+ * no state of its own and every value is passed in.
+ */
+function CanvasBody({
+  state,
+  message,
+  tab,
+  code,
+  bodyFormat,
+  canEdit,
+  selectedVersionId,
+  sandboxSrc,
+  bridge,
+  onSave,
+}: {
+  state: LoadState;
+  message: string | null;
+  tab: Tab;
+  code: string;
+  bodyFormat: BodyFormat;
+  canEdit: boolean;
+  selectedVersionId: string | null;
+  sandboxSrc: string | null;
+  bridge: CanvasBridge;
+  onSave: (next: string) => Promise<void>;
+}): React.JSX.Element {
+  if (state === "error") {
+    return (
+      <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+        {message ?? "Could not load this artifact."}
+      </div>
+    );
+  }
+  if (state === "loading") {
+    // While loading, `code` is still "" and `selectedVersionId` is null.
+    // Rendering <ArtifactSandbox> here would mount an iframe with empty code
+    // and key="" — if its onLoad races ahead of loadCode it posts an empty
+    // render, clearing the sandbox host's placeholder to a blank frame before
+    // the real key/code arrives. A stable-height placeholder avoids that
+    // empty-code mount and prevents layout shift when the real body lands.
+    // minHeight 75vh matches the loaded preview (.atrium-artifact-preview) so
+    // the canvas does not jump when the artifact body arrives.
+    return <div style={{ minHeight: "75vh" }} aria-busy="true" />;
+  }
+
+  const editor = (
+    <CodeEditor
+      value={code}
+      bodyFormat={bodyFormat}
+      editable={canEdit}
+      onSave={canEdit ? onSave : undefined}
+    />
+  );
+  if (isEmptyDraft(selectedVersionId, code)) {
+    return tab === "preview" ? <EmptyDraftPanel canEdit={canEdit} /> : editor;
+  }
+
+  return (
+    <>
+      {/*
+        #1788: the preview frame stays MOUNTED while the Code tab is open,
+        hidden with `display: none` rather than unmounted. Toggling the tab
+        used to tear the iframe down and rebuild it, which re-ran every
+        `AtriumData.query` the artifact makes — an author comparing code and
+        output on an 8-query dashboard could exhaust the 60/min budget in well
+        under a minute and see nothing but a generic failure.
+
+        `display: none` keeps the frame's JS alive and its timers running, which
+        is exactly what we want here: the artifact is not re-rendered, so it is
+        not re-queried. See ArtifactPreviewFrame for the version-remount and
+        data-bridge (#1725) contracts it carries.
+      */}
+      <div style={tab === "preview" ? undefined : { display: "none" }}>
+        <ArtifactPreviewFrame
+          code={code}
+          sandboxSrc={sandboxSrc}
+          versionKey={selectedVersionId ?? ""}
+          bridge={bridge}
+        />
+      </div>
+      {tab === "preview" ? null : editor}
+    </>
+  );
+}
+
+/**
  * Narrow the props union ONCE, here: destructuring `contentId`/`dataAccess`
  * alongside the base props inside the component would lose the correlation
  * TypeScript needs to prove the two are present together, so the bridge is read
@@ -756,35 +844,18 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
         notice={restoreNotice}
       />
 
-      {/* Canvas body */}
-      {state === "error" ? (
-        <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-          {message ?? "Could not load this artifact."}
-        </div>
-      ) : state === "loading" ? (
-        // While loading, `code` is still "" and `selectedVersionId` is null.
-        // Rendering <ArtifactSandbox> here would mount an iframe with empty code
-        // and key="" — if its onLoad races ahead of loadCode it posts an empty
-        // render, clearing the sandbox host's placeholder to a blank frame before
-        // the real key/code arrives. A stable-height placeholder avoids that
-        // empty-code mount and prevents layout shift when the real body lands.
-        // minHeight 75vh matches the loaded preview (.atrium-artifact-preview) so
-        // the canvas does not jump when the artifact body arrives.
-        <div style={{ minHeight: "75vh" }} aria-busy="true" />
-      ) : isEmptyDraft(selectedVersionId, code) && tab === "preview" ? (
-        <EmptyDraftPanel canEdit={canEdit} />
-      ) : tab === "preview" ? (
-        // See ArtifactPreviewFrame for the version-remount and data-bridge
-        // (#1725) contracts this one element carries.
-        <ArtifactPreviewFrame code={code} sandboxSrc={sandboxSrc} versionKey={selectedVersionId ?? ""} bridge={bridge} />
-      ) : (
-        <CodeEditor
-          value={code}
-          bodyFormat={bodyFormat}
-          editable={canEdit}
-          onSave={canEdit ? handleSave : undefined}
-        />
-      )}
+      <CanvasBody
+        state={state}
+        message={message}
+        tab={tab}
+        code={code}
+        bodyFormat={bodyFormat}
+        canEdit={canEdit}
+        selectedVersionId={selectedVersionId}
+        sandboxSrc={sandboxSrc}
+        bridge={bridge}
+        onSave={handleSave}
+      />
 
       <CanvasHint />
     </div>

@@ -146,7 +146,8 @@ artifact code
         | postMessage {op:"query", sql, limit, offset}
         v
 sandbox host -> ArtifactSandbox parent (event.source check, trusted contentId)
-        | session-authenticated Server Action
+        | concurrency limit 6, bounded FIFO 32, dispatch ack back to the frame
+        | fetch POST /api/atrium/artifacts/{id}/query  (sqlBase64)
         v
 queryArtifactData
   - requires a session WITH a Cognito ID token (fails closed without one)
@@ -176,6 +177,42 @@ service) rather than the records bridge's 10s, because each call is Lambda +
 RDS. `requireUserAccess` runs inside `getConnectorTools`, so a student — or any
 viewer outside the connector's allow list — is refused before any request
 reaches the data MCP.
+
+### Concurrency and clocks (#1788)
+
+`query` used to reach `queryArtifactData` as a **Server Action**, and the App
+Router dispatches Server Actions strictly one at a time. Measured on prod
+(2026-09-23), a six-query `Promise.all` dashboard therefore ran them back to
+back — each POST started within 5 ms of the previous one finishing, ~6.5 s for
+~1.2 s of work — and the parent bridge **rejected** the 9th concurrent call
+outright. Three changes:
+
+| Before | Now |
+|---|---|
+| Server Action (serialized by the App Router) | `POST /api/atrium/artifacts/{id}/query` via `fetch` — genuinely parallel |
+| Hard cap of 8 in flight; the 9th **rejected** | Concurrency limit **6**, bounded FIFO of **32** behind it; only a full queue is refused |
+| Host's 45 s clock started when the page **posted** | Parent posts `atrium-artifact-data-ack` on **dispatch**; the host re-arms the 45 s budget there, once |
+| Server budget: 30 s for `execute()` only, handshake free | One 30 s deadline spanning `getConnectorTools` **and** `execute()`, so the server always loses the race to the host's clock |
+
+The frame still has **no** network access. Only the trusted parent calls the
+route, with the artifact id from its own props, and the route re-uses
+`queryArtifactData` itself rather than restating its guards — so the session,
+404 mask, mode check, rate limit and connector access check cannot drift between
+the two entry points. (A `"use server"` function called from a Route Handler is
+inlined and runs in-process; `"use server"` marks "callable by a client", not a
+runtime boundary.)
+
+The SQL travels **base64** (`sqlBase64`). The edge WAF's `SQLi_BODY` managed
+rule inspects request bodies and blocks with a bare 403 the app never sees; a
+body whose whole purpose is a SQL statement is exactly that shape. This is
+transport encoding only — the same `codeEncoding: "base64"` dodge the artifact
+canvas already uses for `<script>`-bearing code — and the decoded SQL is
+validated and executed by the same code as before.
+
+The canvas also keeps the preview iframe **mounted but hidden** on the Code tab.
+Toggling tabs used to tear the frame down and rebuild it, re-running every query
+the artifact makes, so an author flipping back and forth on an 8-query dashboard
+could exhaust the 60/min budget in well under a minute.
 
 ### Typed failures (#1787)
 
@@ -524,6 +561,9 @@ For a live dashboard, set `dataAccess: "query"` on `create_artifact` and use
   concatenated into the SQL. Either fetch an aggregated/bounded result set once
   and filter it in JavaScript, or build the SQL from a fixed set of
   author-written predicates chosen by a dropdown of known values.
+- **Budget 3-8 aggregate queries per load, fired together** (`Promise.all`).
+  Up to 6 run at once; the rest queue. The ceiling is 60/min per viewer per
+  artifact.
 - **Handle rejection.** A rejected `query()` means no session, an expired ID
   token, no access to a table, the wrong data-access mode, or a rate limit —
   render a sign-in / no-access state, never a blank chart.

@@ -288,6 +288,22 @@ Rules — follow all of them:
 - **Aggregate in SQL.** A chart query should return tens of rows, not a dataset.
   Every call is a Lambda + database round trip.
 - **Page detail tables** with `limit` / `offset` instead of one huge read.
+- **Budget 3-8 aggregate queries per page load**, and fire them together:
+
+  ```js
+  const [enrollment, attendance, staffing] = await Promise.all([
+    window.AtriumData.query(ENROLLMENT_SQL),
+    window.AtriumData.query(ATTENDANCE_SQL),
+    window.AtriumData.query(STAFFING_SQL),
+  ]);
+  ```
+
+  Concurrent calls genuinely run in parallel (up to **6 at a time**); anything
+  beyond that **queues** rather than failing, so a wide dashboard is fine. The
+  hard ceiling is **60 queries per minute, per viewer, per artifact** — past it
+  calls reject with `err.code === "rate_limited"` and `err.retryAfterSeconds`.
+  So never query inside a loop over rows, and prefer filtering one aggregate
+  result in JavaScript over re-querying on every filter change.
 - **There are no bound parameters.** `query()` accepts the SQL string plus
   `{ limit, offset }` and nothing else — never concatenate a user-typed value
   into the SQL. Fetch an aggregated/bounded result set and filter it in

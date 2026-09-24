@@ -91,13 +91,22 @@
 
         var DATA_REQUEST_TYPE = "atrium-artifact-data-request";
         var DATA_RESPONSE_TYPE = "atrium-artifact-data-response";
+        // The parent posts this the moment it DISPATCHES a request rather than
+        // queueing it (#1788). See restartPendingClock below.
+        var DATA_DISPATCH_ACK_TYPE = "atrium-artifact-data-ack";
         var DATA_REQUEST_TIMEOUT_MS = 10000;
         // A query is an MCP round trip to a Lambda + RDS, which the server
-        // action budgets 30s for -- but that clock starts only once the action
-        // has authorized the request and opened the connector. This clock
-        // starts now, so it must be longer than the server's, or the server's
-        // eventual answer arrives after the pending entry is gone and the page
-        // retries a query that is still running.
+        // budgets 30s for (one overall deadline, handshake included) -- but that
+        // clock starts only once the request has been authorized and the
+        // connector opened. This clock starts now, so it must be longer than the
+        // server's, or the server's eventual answer arrives after the pending
+        // entry is gone and the page retries a query that is still running.
+        //
+        // #1788: the parent now QUEUES beyond its concurrency limit instead of
+        // rejecting, so "now" can be well before the request is sent. Queue time
+        // used to count against this budget, which is how the later queries of a
+        // wide dashboard timed out having never run. The parent's dispatch ack
+        // restarts the clock, so 45s always measures the SERVER's time.
         var QUERY_REQUEST_TIMEOUT_MS = 45000;
         var MAX_PENDING_DATA_REQUESTS = 32;
         var pendingDataRequests = new Map();
@@ -185,12 +194,37 @@
           return err;
         }
 
+        /**
+         * Restart one pending request's timeout because the parent has just
+         * DISPATCHED it (#1788).
+         *
+         * Honoured AT MOST ONCE per request (`acked`). The ack comes from the
+         * authenticated parent, so this is not a trust boundary, but a repeated
+         * ack must not be able to hold a request open indefinitely -- a stuck
+         * request has to surface as `timeout` eventually.
+         */
+        function restartPendingClock(requestId) {
+          var pending = pendingDataRequests.get(requestId);
+          if (!pending || pending.acked) return;
+          pending.acked = true;
+          cancelTimeout(pending.timeoutId);
+          pending.timeoutId = scheduleTimeout(pending.onTimeout, pending.budgetMs);
+        }
+
         function handleDataResponse(event) {
           // Match the exact parent WindowProxy rather than trusting any window
           // that happens to share the parent's origin. The parent bridge applies
           // the reciprocal check against this frame's contentWindow.
           if (event.source !== parentWindow) return;
           var data = event.data;
+          if (
+            data &&
+            data.type === DATA_DISPATCH_ACK_TYPE &&
+            typeof data.requestId === "string"
+          ) {
+            restartPendingClock(data.requestId);
+            return;
+          }
           if (
             !data ||
             data.type !== DATA_RESPONSE_TYPE ||
@@ -327,18 +361,25 @@
               reject(localBridgeFailure(op, fields, "unavailable", "Atrium data request ID collision"));
               return;
             }
-            var timeoutId = scheduleTimeout(
-              function () {
-                pendingDataRequests.delete(requestId);
-                reject(localBridgeFailure(op, fields, "timeout", "Atrium data request timed out"));
-              },
-              op === "query" ? QUERY_REQUEST_TIMEOUT_MS : DATA_REQUEST_TIMEOUT_MS
-            );
+            var budgetMs =
+              op === "query" ? QUERY_REQUEST_TIMEOUT_MS : DATA_REQUEST_TIMEOUT_MS;
+            // Named so the dispatch ack can re-arm the SAME callback rather
+            // than rebuilding a second closure over the request (#1788).
+            var onTimeout = function () {
+              pendingDataRequests.delete(requestId);
+              reject(localBridgeFailure(op, fields, "timeout", "Atrium data request timed out"));
+            };
+            var timeoutId = scheduleTimeout(onTimeout, budgetMs);
 
             pendingDataRequests.set(requestId, {
               resolve: resolve,
               reject: reject,
               timeoutId: timeoutId,
+              onTimeout: onTimeout,
+              budgetMs: budgetMs,
+              // Flipped by the parent's dispatch ack, which restarts the clock
+              // exactly once so queue time is not charged to the server budget.
+              acked: false,
             });
 
             var message = {
