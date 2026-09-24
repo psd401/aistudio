@@ -26,6 +26,7 @@ AI Studio is an open-source platform that provides K-12 educators and students w
 
 ### Architecture & Infrastructure
 - **[architecture/overview.md](architecture/overview.md)** — Technology stack, design patterns, layered architecture, and key concepts
+- **[architecture/streaming.md](architecture/streaming.md)** — SSE streaming architecture, keep-alive implementation, provider adapters (#1698)
 - **[infrastructure/overview.md](infrastructure/overview.md)** — AWS CDK infrastructure, ECS deployment, Aurora database, Lambda functions
 - **[data-models/overview.md](data-models/overview.md)** — Drizzle ORM schema, key database tables, migrations
 
@@ -56,13 +57,14 @@ AI Studio is an open-source platform that provides K-12 educators and students w
 2. **Database Migrations**: Files 001-005 are immutable. Add migrations 010+ and update `/infra/database/migrations.json`
 3. **Logging**: Never use `console.log/error`. Use `@/lib/logger` (exception: standalone CJS scripts)
 4. **Git Flow**: PRs target `dev` branch, never `main`
-5. **Nexus Conversations**: Read `/docs/features/nexus-conversation-architecture.md` before modifying conversation code — repository bindings, readiness gates, and tool scoping have subtle invariants
-6. **Attachment Adapters**: When modifying attachment code, the conversation ID accessor must be closure-backed, never a memo dependency of the adapter — see **[app-features/overview.md](app-features/overview.md#attachments-1735)** for shared hook pattern (#1735)
-7. **Workspace Artifact Routing**: An editable artifact open beside chat gets PSD Data connector attached regardless of message classification — "add a dropdown" on a live dashboard is a schema question. See **[app-features/overview.md](app-features/overview.md#workspace-artifact-psd-data-routing-1786)** for routing predicates and do-not-guess guidance (#1786)
-8. **Repository Readiness**: Empty repositories bind but don\'t block chat turns; `searchableRepositoryIds` excludes them from tool scope — see **[app-features/overview.md](app-features/overview.md#repository-readiness-gate)** for the gate contract (#1733)
-9. **API Changes**: Update both `docs/API/v1/openapi.yaml` and `docs/API/v1/context-graph.md` for API v1 modifications
-10. **Visibility Changes**: Read grants before modifying — `PATCH /content/:id/visibility` replaces the grant list, use `--add-grants`/`--remove-grants` for merge operations (#1763)
-11. **Grant Targets**: `user` and `group` grants validate target existence before storing; see **[app-features/overview.md](app-features/overview.md#grant-target-existence-validation-1777)** for contract (#1777)
+5. **SSE Keep-Alive**: Long-running AI turns require SSE comment frames (`: keep-alive\n\n`) every 15s to prevent ALB idle timeout. Use `withSseKeepAlive` for existing streams or `deferUIMessageStreamResponse` for deferred responses. SEE **[architecture/streaming.md](architecture/streaming.md)** for complete contract (#1698).
+6. **Nexus Conversations**: Read `/docs/features/nexus-conversation-architecture.md` before modifying conversation code — repository bindings, readiness gates, and tool scoping have subtle invariants
+7. **Attachment Adapters**: When modifying attachment code, the conversation ID accessor must be closure-backed, never a memo dependency of the adapter — see **[app-features/overview.md](app-features/overview.md#attachments-1735)** for shared hook pattern (#1735)
+8. **Workspace Artifact Routing**: An editable artifact open beside chat gets PSD Data connector attached regardless of message classification — "add a dropdown" on a live dashboard is a schema question. See **[app-features/overview.md](app-features/overview.md#workspace-artifact-psd-data-routing-1786)** for routing predicates and do-not-guess guidance (#1786)
+9. **Repository Readiness**: Empty repositories bind but don\'t block chat turns; `searchableRepositoryIds` excludes them from tool scope — see **[app-features/overview.md](app-features/overview.md#repository-readiness-gate)** for the gate contract (#1733)
+10. **API Changes**: Update both `docs/API/v1/openapi.yaml` and `docs/API/v1/context-graph.md` for API v1 modifications
+11. **Visibility Changes**: Read grants before modifying — `PATCH /content/:id/visibility` replaces the grant list, use `--add-grants`/`--remove-grants` for merge operations (#1763)
+12. **Grant Targets**: `user` and `group` grants validate target existence before storing; see **[app-features/overview.md](app-features/overview.md#grant-target-existence-validation-1777)** for contract (#1777)
 
 ## Development Quick Start
 

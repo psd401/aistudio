@@ -104,11 +104,14 @@ Request IDs flow through server actions, API routes, and external service calls.
 ### 4. Streaming Architecture
 
 Server-Sent Events (SSE) for real-time AI responses with:
+- **SSE keep-alive** — Comment frames during silent reasoning phases prevent ALB idle timeout (#1698)
 - Circuit breaker pattern for provider failures
 - Automatic failover between providers
 - Token usage tracking and cost optimization
+- Deferred responses for prompt chains that don't have a body initially
 
-See `/lib/streaming/README.md` for detailed streaming documentation.
+See **[streaming.md](streaming.md)** for detailed architecture, keep-alive implementation, and deferred response patterns.
+See `/lib/streaming/README.md` for developer reference.
 
 ## Authentication & Authorization
 
@@ -196,6 +199,7 @@ See `/docs/features/k12-content-safety.md` for implementation details and filter
 
 ## Related Concepts
 
+- **[streaming.md](streaming.md)** — SSE keep-alive, deferred responses, provider adapters
 - **[infrastructure/overview.md](../infrastructure/overview.md)** — AWS CDK infrastructure, deployment
 - **[data-models/overview.md](../data-models/overview.md)** — Database schema and migrations
 - **[app-features/overview.md](../app-features/overview.md)** — Application feature architecture
