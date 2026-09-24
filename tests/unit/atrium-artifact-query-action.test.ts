@@ -568,6 +568,19 @@ describe("queryArtifactData typed failure codes (#1787)", () => {
     expect(failure.message).not.toMatch(/school_name/);
   });
 
+  it("gives a NON-editor this server's own message about their malformed request", async () => {
+    mockCanEdit.mockReturnValue(false);
+
+    const failure = failureOf(await queryArtifactData({ ...validInput, offset: -1 }));
+
+    // Text this server wrote about the page's own request, never upstream text —
+    // so it is not gated on edit rights the way the database's message is.
+    expect(failure.code).toBe("query_error");
+    expect(failure.detail).toEqual(expect.any(String));
+    expect(failure.message).toBe(failure.detail);
+    expect(mockGetConnectorTools).not.toHaveBeenCalled();
+  });
+
   it("flattens control characters out of an upstream message", async () => {
     mockCanEdit.mockReturnValue(true);
     mockExecute.mockResolvedValueOnce({

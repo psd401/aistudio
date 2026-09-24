@@ -461,7 +461,6 @@ function bridgeCodeForErrorCode(code: string): ArtifactBridgeErrorCode {
   ) {
     return "forbidden";
   }
-  // AUTHZ_ before AUTH_: the former is a prefix-extension of the latter.
   if (code.startsWith("AUTHZ_")) return "forbidden";
   if (code.startsWith("AUTH_")) return "unauthenticated";
   if (REQUEST_VALIDATION_CODES.has(code)) return "query_error";
@@ -474,6 +473,11 @@ interface ClassifiedQueryFailure {
   retryAfterSeconds?: number;
   /** Upstream/technical text. ALWAYS logged; forwarded only for an editor. */
   detail?: string;
+  /**
+   * `detail` describes the page's OWN request (text this server wrote, never
+   * upstream text), so it is forwarded to every viewer, not just an editor.
+   */
+  detailIsViewerSafe?: boolean;
 }
 
 /**
@@ -514,7 +518,10 @@ function classifyQueryFailure(error: unknown): ClassifiedQueryFailure {
     // out-of-range limit), so its message is safe for any viewer to read.
     if (bridgeCode === "query_error") {
       const detail = boundBridgeErrorMessage(error.message);
-      return { code: bridgeCode, ...(detail ? { detail } : {}) };
+      return {
+        code: bridgeCode,
+        ...(detail ? { detail, detailIsViewerSafe: true } : {}),
+      };
     }
     return { code: bridgeCode };
   }
@@ -631,7 +638,8 @@ async function resolveAuditVersionId(
  * server logs — but its generic `message` is replaced by the code's own text, so
  * the page gets something it can act on. `detail` (upstream SQL/MCP text) is
  * attached ONLY for a `query_error` raised for a requester who may edit the
- * artifact; a plain reader gets the code and nothing more.
+ * artifact; a plain reader gets the code and nothing more — except when the
+ * detail is this server's own validation message about the reader's request.
  */
 function buildQueryFailure(
   error: unknown,
@@ -646,7 +654,9 @@ function buildQueryFailure(
     metadata: { bridgeCode: classified.code, upstreamDetail: classified.detail },
   });
   const detail =
-    classified.code === "query_error" && mayEdit ? classified.detail : undefined;
+    classified.code === "query_error" && (mayEdit || classified.detailIsViewerSafe)
+      ? classified.detail
+      : undefined;
   return {
     isSuccess: false,
     message: detail ?? artifactBridgeErrorMessage(classified.code),

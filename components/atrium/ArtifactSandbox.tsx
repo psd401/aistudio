@@ -708,8 +708,20 @@ function useArtifactDataBridge({
   versionId,
   onDiagnostic,
 }: ArtifactDataBridgeOptions): void {
+  // False once this mount is torn down. The canvas remounts the sandbox (new
+  // `key`) on every version switch, but a server action already in flight is not
+  // cancelled by that — without this, a failure resolving after the switch would
+  // be recorded as the NEW version's diagnostic (#1787).
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const reportDiagnostic = useCallback(
     (request: ArtifactDataRequest, failure: ArtifactDataFailure): void => {
+      if (!mountedRef.current) return;
       try {
         onDiagnostic?.({
           kind: "data",

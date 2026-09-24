@@ -586,7 +586,7 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
 function defineBuildWorkspaceChatToolsPreviewDiagnosticsSuite() {
   const PREVIEW_FAILURE = {
     kind: "data" as const,
-    code: "query_error",
+    code: "query_error" as const,
     message: 'column "school_name" does not exist',
     sql: "SELECT school_name FROM devices",
   };
@@ -665,6 +665,10 @@ function defineBuildWorkspaceChatToolsPreviewDiagnosticsSuite() {
 
     expect(description).toContain("previewDiagnostics");
     expect(description).toMatch(/after update_workspace_artifact/i);
+    // The buffer is read once when the request is sent, so it can never verify
+    // an edit made this turn — the description must not claim it can.
+    expect(description).toMatch(/NEVER reflect a version you write during this turn/);
+    expect(description).not.toMatch(/call this tool again after update_workspace_artifact/i);
   });
 }
 

@@ -2,9 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { test, expect, type Page } from "@playwright/test";
 import {
-  buildAtriumSandboxCsp,
-  renderAtriumSandboxHostPage,
-} from "@/infra/lib/atrium-sandbox-host-page";
+  CLOSE_SCRIPT,
+  HOST_URL,
+  readLog,
+  render,
+  routeHost,
+} from "./helpers/atrium-sandbox-host";
 
 /**
  * Atrium sandbox host — real-browser script semantics (#1785). Always-run, CI-safe.
@@ -32,32 +35,10 @@ import {
  * Run: bunx playwright test tests/e2e/atrium-sandbox-script-order.spec.ts
  */
 
-const SANDBOX_ORIGIN = "https://atrium-sandbox.test";
-const HOST_URL = `${SANDBOX_ORIGIN}/render.html`;
 const CHART_CDN_URL =
   "https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js";
 /** How long the stubbed CDN "takes"; long enough that force-async would lose. */
 const CDN_DELAY_MS = 300;
-const CLOSE_SCRIPT = "</" + "script>";
-
-/**
- * The host page as deployed. The parent-origin allowlist is the sandbox origin
- * itself because this spec drives the page at top level (window.parent ===
- * window), so a render message it posts to itself carries that origin.
- */
-function hostHtml(): string {
-  const template = fs.readFileSync(
-    path.join(process.cwd(), "infra", "sandbox-host", "render.html"),
-    "utf8"
-  );
-  // The same builder the CDK stack deploys with, allowlisting the one CDN.
-  const parentOrigins = [SANDBOX_ORIGIN];
-  const csp = buildAtriumSandboxCsp({
-    parentOrigins,
-    cdns: ["https://cdnjs.cloudflare.com"],
-  });
-  return renderAtriumSandboxHostPage(template, parentOrigins, csp);
-}
 
 /** Observations of the stubbed CDN, for syncing on it instead of sleeping. */
 interface CdnStub {
@@ -73,9 +54,7 @@ async function openHost(page: Page): Promise<CdnStub> {
   const requested = new Promise<void>((resolve) => {
     markRequested = resolve;
   });
-  await page.route(HOST_URL, (route) =>
-    route.fulfill({ status: 200, contentType: "text/html", body: hostHtml() })
-  );
+  await routeHost(page, ["https://cdnjs.cloudflare.com"]);
   await page.route(CHART_CDN_URL, async (route) => {
     requestCount += 1;
     markRequested();
@@ -93,19 +72,6 @@ async function openHost(page: Page): Promise<CdnStub> {
   await page.goto(HOST_URL);
   await page.waitForLoadState("load");
   return { requested, requestCount: () => requestCount };
-}
-
-/** Post a render message the way the app's ArtifactSandbox does. */
-async function render(page: Page, code: string): Promise<void> {
-  await page.evaluate((artifactCode) => {
-    window.postMessage({ type: "atrium-render", code: artifactCode }, "*");
-  }, code);
-}
-
-function readLog(page: Page): Promise<string[]> {
-  return page.evaluate(
-    () => (window as unknown as { __artifactLog?: string[] }).__artifactLog ?? []
-  );
 }
 
 /** `typeof window.Chart` in the page — "function" once the stub library ran. */

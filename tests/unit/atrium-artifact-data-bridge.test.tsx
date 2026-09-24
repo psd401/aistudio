@@ -833,9 +833,10 @@ function mountQuerySandbox(versionId?: string): {
   frameWindow: Window;
   postMessage: jest.Mock;
   diagnostics: ArtifactSandboxDiagnostic[];
+  unmount: () => void;
 } {
   const diagnostics: ArtifactSandboxDiagnostic[] = [];
-  render(
+  const { unmount } = render(
     <ArtifactSandbox
       code="<p>artifact</p>"
       src={SANDBOX_SRC}
@@ -856,7 +857,7 @@ function mountQuerySandbox(versionId?: string): {
     configurable: true,
     value: postMessage,
   });
-  return { frameWindow, postMessage, diagnostics };
+  return { frameWindow, postMessage, diagnostics, unmount };
 }
 
 function queryRequest(requestId: string, sql = "SELECT nope") {
@@ -1034,6 +1035,27 @@ describe("ArtifactSandbox preview diagnostics (#1787)", () => {
     expect(diagnostics).toEqual([
       { kind: "data", code: "too_many_requests", message: TOO_MANY_REQUESTS_FAILURE.error, sql: "SELECT nope" },
     ]);
+  });
+
+  it("drops a failure that resolves after the sandbox unmounted", async () => {
+    // The canvas remounts the sandbox on every version switch, but that does not
+    // cancel a server action already in flight: its late failure describes the
+    // OLD version and must not land in the new version's buffer.
+    let resolveQuery: (value: unknown) => void = () => undefined;
+    queryArtifactDataMock.mockImplementationOnce(
+      () => new Promise((resolve) => (resolveQuery = resolve))
+    );
+    const { frameWindow, diagnostics, unmount } = mountQuerySandbox();
+
+    await sendMessage(queryRequest(DIAGNOSTIC_REQUEST_IDS[0]), frameWindow);
+    unmount();
+    await act(async () => {
+      resolveQuery({ isSuccess: false, code: "query_error", message: "stale" });
+      await Promise.resolve();
+    });
+
+    expect(queryArtifactDataMock).toHaveBeenCalledTimes(1);
+    expect(diagnostics).toEqual([]);
   });
 
   it("forwards the frame's uncaught errors as script diagnostics", async () => {

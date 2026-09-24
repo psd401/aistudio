@@ -11,7 +11,9 @@
  *
  * So the preview records its failures here, and the next chat request carries
  * them to the server, where `read_workspace_content` returns them as
- * `previewDiagnostics`. The model can then fix its own SQL in the same turn.
+ * `previewDiagnostics`. The model can then fix its own SQL on the NEXT turn —
+ * the buffer is read once when a request is sent, so it can never describe a
+ * version the model writes during that same request.
  *
  * SHAPE OF THE SOLUTION — a module-level client singleton, deliberately not a
  * React context and not a conversation-runtime subscription. `WorkspacePanel`

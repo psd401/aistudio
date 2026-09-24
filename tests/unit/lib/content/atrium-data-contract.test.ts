@@ -14,6 +14,7 @@ import {
   ATRIUM_DATA_AUTHORING_GUIDANCE,
   DATA_ACCESS_DESC,
 } from "@/lib/content/atrium-data-contract";
+import { ARTIFACT_BRIDGE_ERROR_CODES } from "@/lib/content/artifact-bridge-errors";
 
 const root = process.cwd();
 const mcpSource = fs.readFileSync(path.join(root, "lib/mcp/content-tools.ts"), "utf8");
@@ -48,5 +49,31 @@ describe("Atrium data-bridge contract", () => {
       expect(source).not.toMatch(/const\s+DATA_ACCESS_DESC\s*=/);
       expect(source).not.toMatch(/const\s+ATRIUM_DATA_AUTHORING_GUIDANCE\s*=/);
     }
+  });
+
+  /**
+   * #1787: the bridge's failure codes have one source, but two surfaces cannot
+   * import it — the sandbox host (a static asset with no bundler) and the agent
+   * skill (Markdown). Pin both to the closed set so an added or renamed code
+   * fails here instead of silently degrading to `unavailable` in the frame or
+   * going undocumented for the agent.
+   */
+  it("lists exactly the closed failure-code set in every copy", () => {
+    for (const code of ARTIFACT_BRIDGE_ERROR_CODES) {
+      expect(ATRIUM_DATA_AUTHORING_GUIDANCE).toContain(`\`${code}\``);
+    }
+
+    const renderHtml = fs.readFileSync(path.join(root, "infra/sandbox-host/render.html"), "utf8");
+    const hostList = renderHtml.match(/var BRIDGE_ERROR_CODES = \[([\s\S]*?)\];/);
+    expect(hostList).not.toBeNull();
+    const hostCodes = [...(hostList?.[1] ?? "").matchAll(/"(\w+)"/g)].map((m) => m[1]);
+    expect([...hostCodes].sort()).toEqual([...ARTIFACT_BRIDGE_ERROR_CODES].sort());
+
+    const skill = fs.readFileSync(
+      path.join(root, "infra/agent-image/skills/psd-atrium/SKILL.md"),
+      "utf8",
+    );
+    const skillCodes = [...skill.matchAll(/^\s*\| `(\w+)` \|/gm)].map((m) => m[1]);
+    expect([...skillCodes].sort()).toEqual([...ARTIFACT_BRIDGE_ERROR_CODES].sort());
   });
 });

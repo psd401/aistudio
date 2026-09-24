@@ -2,9 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { test, expect, type Page } from "@playwright/test";
 import {
-  buildAtriumSandboxCsp,
-  renderAtriumSandboxHostPage,
-} from "@/infra/lib/atrium-sandbox-host-page";
+  CLOSE_SCRIPT,
+  HOST_URL,
+  readLog,
+  render,
+  routeHost,
+} from "./helpers/atrium-sandbox-host";
 
 /**
  * Atrium sandbox host — typed bridge failures and forwarded frame errors
@@ -27,30 +30,8 @@ import {
  * Run: bunx playwright test tests/e2e/atrium-sandbox-typed-errors.spec.ts
  */
 
-const SANDBOX_ORIGIN = "https://atrium-sandbox.test";
-const HOST_URL = `${SANDBOX_ORIGIN}/render.html`;
-const CLOSE_SCRIPT = "</" + "script>";
-
-function hostHtml(): string {
-  const template = fs.readFileSync(
-    path.join(process.cwd(), "infra", "sandbox-host", "render.html"),
-    "utf8"
-  );
-  // The page is driven at TOP LEVEL here (window.parent === window), so the
-  // render message it posts to itself carries the sandbox origin — which is
-  // therefore the allowlisted parent origin.
-  const parentOrigins = [SANDBOX_ORIGIN];
-  return renderAtriumSandboxHostPage(
-    template,
-    parentOrigins,
-    buildAtriumSandboxCsp({ parentOrigins, cdns: [] })
-  );
-}
-
 async function openHost(page: Page): Promise<void> {
-  await page.route(HOST_URL, (route) =>
-    route.fulfill({ status: 200, contentType: "text/html", body: hostHtml() })
-  );
+  await routeHost(page);
   await page.goto(HOST_URL);
   await page.waitForLoadState("load");
   await page.evaluate(() => {
@@ -58,16 +39,19 @@ async function openHost(page: Page): Promise<void> {
   });
 }
 
-function readLog(page: Page): Promise<string[]> {
-  return page.evaluate(
-    () => (window as unknown as { __artifactLog?: string[] }).__artifactLog ?? []
-  );
-}
-
-async function render(page: Page, code: string): Promise<void> {
-  await page.evaluate((artifactCode) => {
-    window.postMessage({ type: "atrium-render", code: artifactCode }, "*");
-  }, code);
+/**
+ * In-page: log every `atrium-artifact-error` the host posts "to its parent".
+ * Top level (not inline in the test) because Playwright serializes it into the
+ * page, and inline it nests one callback past the lint budget.
+ */
+function collectForwardedFrameErrors(): void {
+  window.addEventListener("message", (event) => {
+    const data = event.data as { type?: string; message?: string };
+    if (data?.type !== "atrium-artifact-error") return;
+    (window as unknown as { __artifactLog: string[] }).__artifactLog.push(
+      "forwarded=" + data.message
+    );
+  });
 }
 
 /**
@@ -176,15 +160,7 @@ test.describe("Atrium sandbox host — typed bridge failures (#1787)", () => {
     await openHost(page);
     // Collect what the host posts "to its parent" — which is this same window,
     // because the spec drives the page at top level.
-    await page.evaluate(() => {
-      window.addEventListener("message", (event) => {
-        const data = event.data as { type?: string; message?: string };
-        if (data?.type !== "atrium-artifact-error") return;
-        (window as unknown as { __artifactLog: string[] }).__artifactLog.push(
-          "forwarded=" + data.message
-        );
-      });
-    });
+    await page.evaluate(collectForwardedFrameErrors);
 
     // The single most common authoring failure: a bootstrap that references a
     // library the CSP never let load. Before #1787 it existed only in a console
