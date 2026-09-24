@@ -114,6 +114,56 @@ describe("workspacePsdDataToolsMissing", () => {
     ).toBe(true);
   });
 
+  it("is true when the surviving tools cannot reveal a schema", () => {
+    // A skill's `allowed-tools` pin can keep one unrelated tool off this
+    // connector while dropping every data tool. Counting that as usable would
+    // suppress the warning for a model that cannot read a schema at all.
+    expect(
+      workspacePsdDataToolsMissing({
+        workspace: EDITABLE_ARTIFACT,
+        connectorId: PSD,
+        connectorToolResults: [connectorResult(PSD, ["save_lesson"])],
+      })
+    ).toBe(true);
+  });
+
+  it("is true when only table NAMES survived — names are not columns", () => {
+    // `list_available_tables` tells you a table exists, not that its column is
+    // `location_code` rather than `school_name`. That substitution is the bug.
+    expect(
+      workspacePsdDataToolsMissing({
+        workspace: EDITABLE_ARTIFACT,
+        connectorId: PSD,
+        connectorToolResults: [connectorResult(PSD, ["list_available_tables"])],
+      })
+    ).toBe(true);
+  });
+
+  it.each(["inspect_table_schema", "query_data"])(
+    "is false when %s survived — either one can verify a column",
+    (tool) => {
+      expect(
+        workspacePsdDataToolsMissing({
+          workspace: EDITABLE_ARTIFACT,
+          connectorId: PSD,
+          connectorToolResults: [connectorResult(PSD, [tool])],
+        })
+      ).toBe(false);
+    }
+  );
+
+  it("is not fooled by inherited object properties", () => {
+    // The tool set is keyed by names the connector supplies, so membership must
+    // be an own-property check — `'constructor' in {}` is true.
+    expect(
+      workspacePsdDataToolsMissing({
+        workspace: EDITABLE_ARTIFACT,
+        connectorId: PSD,
+        connectorToolResults: [connectorResult(PSD, ["constructor"])],
+      })
+    ).toBe(true);
+  });
+
   it("never warns when the rule does not apply to this workspace", () => {
     for (const workspace of [
       null,
@@ -138,8 +188,20 @@ describe("WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE", () => {
     expect(WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE.startsWith(" ")).toBe(true);
   });
 
-  it("forbids guessing and names the user-facing way out", () => {
+  it("forbids guessing and requires telling the user", () => {
     expect(WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE).toMatch(/do not guess/i);
-    expect(WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE).toMatch(/connect menu/i);
+    expect(WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE).toMatch(/tell the user/i);
+  });
+
+  it("prescribes no specific control the user may not have", () => {
+    // Most ways a turn lands here — unconfigured connector, no access, MCP down,
+    // a skill tool pin — are not fixable from any menu, the Connect menu renders
+    // only in Advanced mode, and where it renders this change locks the PSD Data
+    // row on. Naming a control would hand the user a remedy that cannot work.
+    expect(WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE).not.toMatch(/connect menu/i);
+    expect(WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE).not.toMatch(/switch .* on/i);
+    expect(WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE).toMatch(
+      /do not tell them which setting to change/i
+    );
   });
 });

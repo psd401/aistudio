@@ -52,15 +52,34 @@ export function workspaceNeedsPsdData(
 }
 
 /**
- * True when this turn can author a data-backed artifact but ended up with no PSD
- * Data tools — the trigger for the do-not-guess guidance below.
+ * The PSD Data tools that can reveal a table's COLUMNS, and so are the only ones
+ * that let a turn stop guessing.
+ *
+ * `list_available_tables` is deliberately absent. Knowing a table exists does not
+ * tell you it has `location_code` rather than `school_name` — which is the exact
+ * substitution that broke the dashboard in #1786 — so a turn holding only that
+ * tool is still a guessing turn and must still get the warning.
+ */
+const WORKSPACE_PSD_DATA_SCHEMA_TOOLS = ["inspect_table_schema", "query_data"];
+
+/**
+ * True when this turn can author a data-backed artifact but ended up with no way
+ * to verify a schema — the trigger for the do-not-guess guidance below.
  *
  * Asked of the connector results that will ACTUALLY reach the model, never of
  * the router's intent. The router choosing a connector is not the same as its
  * tools binding: the caller's connector access, a failed MCP handshake and a
- * skill's `allowed-tools` pin all bite after routing. A connector that bound
- * ZERO tools therefore counts as missing — it is the tools the model needs, not
- * the connector row.
+ * skill's `allowed-tools` pin all bite after routing.
+ *
+ * And not merely "did the connector bind ANY tool". A skill pin can keep one
+ * unrelated tool off this connector while dropping every data tool; counting
+ * that as usable would suppress the warning for a model that cannot read a
+ * schema at all, rebuilding the exact failure this module exists to prevent.
+ * The question is whether a COLUMN-revealing tool survived.
+ *
+ * Fails toward warning on purpose: a connector that renamed these tools reads as
+ * unavailable, which costs a redundant caution. The opposite error costs a
+ * silently corrupted dashboard that reports success.
  *
  * @param connectorId the connector the router meant to carry the data tools, or
  *   null when it could not resolve one at all.
@@ -75,7 +94,11 @@ export function workspacePsdDataToolsMissing(params: {
   return !params.connectorToolResults.some(
     (result) =>
       result.serverId === params.connectorId &&
-      Object.keys(result.tools).length > 0
+      // `hasOwn`, not `in`: the tool set is keyed by names the connector
+      // supplies, and `in` would also answer true for `constructor`/`toString`.
+      WORKSPACE_PSD_DATA_SCHEMA_TOOLS.some((tool) =>
+        Object.hasOwn(result.tools, tool)
+      )
   );
 }
 
@@ -87,11 +110,24 @@ export function workspacePsdDataToolsMissing(params: {
  * Model-facing text, not user copy. Without it the model reads
  * `ATRIUM_DATA_AUTHORING_GUIDANCE` ("Explore the data with a couple of
  * queries"), finds no query tool, and invents column names anyway.
+ *
+ * Deliberately names NO specific control. An earlier draft told the model to
+ * send the user to the Connect menu, which is an instruction many affected users
+ * cannot follow: that menu renders only in Advanced mode, and where it does
+ * render this very change locks the PSD Data row on, so there is nothing to
+ * switch. Worse, most of the ways a turn lands here — the connector is
+ * unconfigured, the user has no access to it, the MCP server is down, a skill's
+ * tool pin stripped it — are not fixable from that menu at all. Handing someone
+ * a remedy that cannot work is its own version of reporting success falsely, so
+ * the model states the limit and asks, rather than prescribing a click.
  */
 export const WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE =
   " PSD DATA TOOLS ARE NOT AVAILABLE ON THIS TURN: you have no way to list tables," +
   " inspect a schema, or run a query. Do NOT guess table or column names and do NOT" +
   " write or edit SQL you cannot verify. Keep any SQL already in the artifact exactly" +
-  " as it is, make only the changes you can make without knowing the schema, and tell" +
-  " the user plainly that you could not verify the data schema and that they should" +
-  " switch PSD Data on in the Connect menu for data changes.";
+  " as it is, and make only the changes you can make without knowing the schema." +
+  " Then tell the user plainly that you could not reach the district data this turn," +
+  " so you did not change anything that depends on the data schema, and ask them how" +
+  " they would like to proceed. Do NOT tell them which setting to change: you cannot" +
+  " see why the tools are missing, and the cause is often not something they can fix" +
+  " themselves.";
