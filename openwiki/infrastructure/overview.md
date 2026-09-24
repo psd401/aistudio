@@ -10,6 +10,8 @@ openwiki:
     - Dockerfile.dev
     - Dockerfile.graviton
     - infra/lib/frontend-stack-ecs.ts
+    - infra/lib/constructs/ecs-service.ts
+    - infra/test/ecs-scheduled-scaling.test.ts
     - infra/test/frontend-waf-body-signatures.test.ts
     - infra/test/agent-skill-cdn-allowlist.test.ts
     - infra/test/atrium-sandbox-csp.test.ts
@@ -18,6 +20,7 @@ openwiki:
     - infra/sandbox-host/render.html
     - infra/agent-image/check_config_consistency.py
   test_paths:
+    - infra/test/ecs-scheduled-scaling.test.ts
     - infra/test/frontend-waf-body-signatures.test.ts
     - infra/test/agent-skill-cdn-allowlist.test.ts
     - infra/agent-image/test_check_config_consistency.py
@@ -182,6 +185,29 @@ Dev environments scale to 0 when idle, saving ~$44/month:
 - Min capacity: 0 (dev), 2 (prod)
 - No cold start for prod
 - Configured via Aurora and ECS task scaling
+
+### Scheduled Scaling (Prod)
+
+**Source**: `/infra/lib/constructs/ecs-service.ts` — `PROD_SCALING_SCHEDULES`, `PROD_SCALING_TIME_ZONE`
+
+Production ECS services use scheduled scaling to ensure adequate capacity during peak usage hours. The schedules run in **Pacific time** (`America/Los_Angeles`) to align with district schedules, automatically adjusting for daylight saving transitions (PST/PDT).
+
+**Schedule Table** (from `PROD_SCALING_SCHEDULES`):
+
+| Schedule | Local Time | Days | Min | Max | Purpose |
+|----------|-----------|------|-----|-----|---------|
+| MorningScaleUp | 6:00 AM | Mon-Fri | 4 | 20 | Ahead of agent briefs at 6:30 |
+| EveningScaleDown | 8:00 PM | Mon-Fri | 2 | 10 | After business hours |
+| WeekendScaling | 12:00 AM | Sat | 1 | 5 | Weekend floor until Monday scale-up |
+
+**Why 6:00 AM**: The previous schedule ran at 7:30 AM PST, but agent morning briefs start landing around 6:30 AM. On 2026-09-23, the 2-task overnight floor was overwhelmed: one task sat at 100% CPU from 6:38 to 6:41 AM PDT, ALB target response time peaked at 101 seconds, and the third task only started at 6:40 AM. Agent workspace save/restore calls timed out during this window.
+
+**Timezone Handling** (`PROD_SCALING_TIME_ZONE`): Application Auto Scaling evaluates cron expressions in the configured timezone, so schedules follow PST/PDT automatically. The previous UTC-based schedules assumed PST year-round and were never hand-adjusted for daylight saving, so all summer they ran an hour late in local time.
+
+**Target-Tracking Auto-Scaling**: CPU 70% and memory 80% thresholds still scale capacity above these floors during unexpected load.
+
+**Focused Tests**:
+- `/infra/test/ecs-scheduled-scaling.test.ts` — Schedule table validation
 
 ---
 
