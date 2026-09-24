@@ -60,11 +60,15 @@ openwiki:
     - lib/agents/agent-tools/web-fetch.ts
     - lib/nexus/model-router/url-detection.ts
     - app/(protected)/nexus/_components/tools/web-fetch-ui.tsx
+    - app/api/atrium/artifacts/[id]/query/route.ts
+    - lib/content/artifact-query-transport.ts
   invariants:
     - Artifact data_access modes (records/query/none) are mutually exclusive — prevents exfiltration loop
     - Mode is enforced twice (client-side pin + server-side check) and changes only take effect on fresh page load (#1712)
     - Bridge enabled on authoring surfaces (view page, editor canvas, workspace panel); embeds/thumbnails/public reader stay fail-closed (#1725)
     - Canvas sandbox keys on contentId:dataAccess:versionId — one mount belongs to one artifact in one mode
+    - Query concurrent cap is 6 (records 1) with 32 total outstanding; excess queues rather than rejects (#1788)
+    - Server budget (30s) spans preflight + MCP handshake + execution; preflight stages race deadline (#1788)
     - normalizeDataAccess fails unrecognized values closed to 'none'
     - Viewer-scoped PSD queries execute as the VIEWER with their row-level security
     - Sidebar tree starts collapsed; expanded sections persist per-viewer in localStorage
@@ -175,6 +179,8 @@ openwiki:
     - tests/unit/lib/tools/web-fetch-tool.test.ts
     - tests/unit/lib/nexus/model-router/__tests__/url-detection.test.ts
     - tests/e2e/nexus-url-access.functional.spec.ts
+    - tests/unit/atrium-artifact-query-route.test.ts
+    - tests/unit/atrium-artifact-record-transport-failure.test.tsx
 ---
 
 # Core Application Features
@@ -916,6 +922,55 @@ Artifacts can interact with data through a sandbox bridge. The `data_access` mod
 
 **Dual-Layer Enforcement** (#1712): Each mode is enforced twice, and both layers must agree. The reader page pins the mode it read when it rendered, and the sandbox refuses any operation that does not match that pinned mode. The Server Actions independently re-check the artifact's current mode. A mode change (settings, REST `PATCH`, MCP) only takes effect on a fresh page load, which starts with no queried data in memory. This prevents the owner from loading a viewer with `query` mode, then flipping to `records` to let that page submit queried rows back into the records store—exactly the exfiltration loop the mutual exclusivity is meant to close.
 
+#### Query Concurrency and Transport (#1788)
+
+`query` operations now use a dedicated Route Handler for parallel execution, with sophisticated concurrency management and deadline-aware timeout budgeting.
+
+**Why a Route Handler (not Server Action)**: The Next.js App Router dispatches Server Actions strictly one at a time. A six-query `Promise.all` dashboard executed them back-to-back (~6.5s for ~1.2s of actual work). `fetch` to a Route Handler has no such queue, so queries run genuinely in parallel.
+
+**Transport Path**:
+```
+ArtifactSandbox parent (trusted contentId from props)
+  | fetch POST /api/atrium/artifacts/{id}/query (sqlBase64)
+  v
+queryArtifactData Server Action (in-process, guards unchanged)
+  | End-to-end 30s deadline: preflight + MCP handshake + execution
+  v
+PSD Data MCP connector
+```
+
+**Concurrency Model**:
+
+| Lane | Concurrent Cap | Queue Depth | Total Outstanding |
+|------|---------------|-------------|-------------------|
+| Query (`AtriumData.query`) | **6** at once | 26 waiting | 32 (matches host cap) |
+| Records (`submit`/`list`) | **1** at a time | 31 waiting | 32 (matches host cap) |
+
+Query and record ops never mix on one mount (mode pinning), so there is only one active lane per artifact.
+
+**Deadline Architecture**: ONE 30s budget armed at the TOP of `queryArtifactData` and spanning:
+
+1. **Preflight** — session resolution, visibility check, version lookup, connector config read (each stage raced against deadline)
+2. **MCP Handshake** — connector tools resolution with deadline-aware timeout
+3. **Execution** — the `query_data` tool call with remaining budget
+
+The sandbox host's 45s clock covers the entire server turn, including network latency. A preflight-stage timeout stops before starting the NEXT stage (`stopIfExpired()` checks), preventing background work pileups from retries.
+
+**Dispatch Acknowledgment**: When a queued request starts, the parent posts `atrium-artifact-data-ack` to the frame. The host runs a queue-tolerant 315s pre-ack budget, then re-arms the real 45s server budget on the ack. This ensures the frame's timeout clock starts when work BEGINS, not when the page POSTED.
+
+**SQL Base64 Encoding**: The request body carries `sqlBase64` (UTF-8 base64) rather than raw SQL because the edge WAF's `SQLi_BODY` managed rule blocks request bodies that match SQL patterns with a bare 403 the app never sees. This is transport encoding only — the decoded SQL is validated and executed by the same code path as before, under the viewer's row-level permissions.
+
+**Key Sources**:
+- `/app/api/atrium/artifacts/[id]/query/route.ts` — Route handler with base64 decoding
+- `/lib/content/artifact-query-transport.ts` — Wire contract, route path builder, status codes
+- `/actions/db/atrium/artifact-query.ts` — `queryArtifactData` with end-to-end deadline, `withDeadline` helper
+- `/components/atrium/ArtifactSandbox.tsx` — `fetchArtifactQuery`, queue pump, dispatch ack
+
+**Focused Tests**:
+- `tests/unit/atrium-artifact-query-route.test.ts` — Route handler validation
+- `tests/unit/atrium-artifact-query-action.test.ts` — Server-side error classification and timeout
+- `tests/unit/atrium-artifact-record-transport-failure.test.tsx` — Queue expiry, dispatch abandonment
+
 **Pinning Mechanism**:
 - Reader page (`app/(protected)/c/[slug]/page.tsx`) reads `data_access` during render and passes it to `<ArtifactSandbox dataAccess=…>`
 - Full-screen viewer (`app/(protected)/atrium/[id]/view/page.tsx`) does the same for drafts — keyed on `obj.id` so one mount is one artifact
@@ -924,6 +979,7 @@ Artifacts can interact with data through a sandbox bridge. The `data_access` mod
 - `isOpAllowedByLoadedMode()` rejects ops before the Server Action is called
 - `normalizeDataAccess()` in `/lib/content/types.ts` collapses unrecognized values to `"none"` (fail closed)
 - Canvas sandbox keys on `contentId:dataAccess:versionId` — flipping the mode in Content settings remounts the frame (the "fresh load" the pin requires), and an artifact change also remounts
+- **Preview Frame Preservation** (#1788): The canvas keeps the preview iframe mounted on the Code tab (hidden with `display: none`), preventing query re-runs on tab toggle. A frame is kept hidden, never first created hidden — an element inside `display: none` has no layout box, so charting libraries that size from `clientWidth` would initialize at zero. The canvas latches the exact composite key (`previewMountKey`) and drops the frame if any part changes while hidden, remounting visible on return to Preview.
 
 **Viewer-Scoped PSD Queries** (`query` mode):
 - Artifact calls `window.AtriumData.query(sql, { limit, offset })`
@@ -932,6 +988,8 @@ Artifacts can interact with data through a sandbox bridge. The `data_access` mod
 - Uses the same PSD Data MCP connector as Nexus chat (resolved via `/lib/nexus/model-router/psd-data-connector.ts`)
 - Rate limit: 60 queries per viewer per artifact per minute
 - SQL capped at 8,000 characters; limit clamped to 2,000 rows
+- **Concurrency**: Up to 6 queries run in parallel via fetch Route Handler; excess queue rather than reject (#1788)
+- **Budget guidance**: Aim for 3-8 aggregate queries per load, fired together (`Promise.all`)
 
 **Artifact API** (installed by sandbox host):
 ```typescript
