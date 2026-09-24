@@ -45,13 +45,14 @@ export function versionAuthorLabel(version: VersionAuthorship): string {
 }
 
 /**
- * Sentence-form label for the About rail, where there is room to be explicit
- * about the split between who authorized the write and what wrote it.
+ * Sentence-form label for the About rail. Viewer-neutral on purpose: the DTO
+ * omits `authorUserId`, so it cannot say WHOSE session the chat ran under — an
+ * admin or co-editor reading this must not be told they wrote it.
  */
 export function versionAuthorDescription(version: VersionAuthorship): string {
   if (version.authorActor === "agent") return "Agent-maintained · auto-refreshes";
   if (version.authorLabel === NEXUS_CHAT_AUTHOR_LABEL) {
-    return "Written by the agent in Nexus chat, under your account";
+    return "Written by the agent in Nexus chat";
   }
   return "Human-authored";
 }

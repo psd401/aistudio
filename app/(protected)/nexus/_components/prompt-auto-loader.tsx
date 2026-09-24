@@ -39,10 +39,10 @@ export function PromptAutoLoader() {
   })
 
   const promptId = searchParams.get('promptId')
-  // `?draft=<text>` — a free-text prompt prefill (Atrium "Create with the agent"
-  // deep-links here with the new artifact bound via `?workspace=`). Unlike
-  // `promptId`, a draft is PREFILLED only (never auto-sent) so the author reviews
-  // it before the agent builds. Composer-only: it never touches the conversation
+  // `?draft=<text>` — a free-text prompt prefill (Atrium "Build it for me" and
+  // the artifact Ask card deep-link here with the object bound via
+  // `?workspace=`). Unlike `promptId`, a draft is PREFILLED only unless the
+  // one-shot handshake below says this tab asked for it to be sent. Composer-only: it never touches the conversation
   // tree (docs/features/nexus-conversation-architecture.md invariants hold).
   const draft = searchParams.get('draft')
   // #1791 finding 2: a draft is still PREFILL-ONLY by default. The one
@@ -55,6 +55,16 @@ export function PromptAutoLoader() {
   // reload or a Back navigation re-prefills rather than sending again.
   const autoSendNonce = searchParams.get(DRAFT_AUTO_SEND_PARAM)
   const processedDraftRef = useRef(false)
+  // Unmount-only cancellation for the delayed auto-send. The effect's own
+  // cleanup cannot be used: stripping `draft` from the URL changes
+  // `searchParams`, re-running the effect and cancelling its own pending send.
+  const unmountedRef = useRef(false)
+  useEffect(() => {
+    unmountedRef.current = false
+    return () => {
+      unmountedRef.current = true
+    }
+  }, [])
 
   useEffect(() => {
     if (!draft) return
@@ -98,21 +108,29 @@ export function PromptAutoLoader() {
 
       // Strip `draft` (and the handshake nonce) from the URL, preserving every
       // other param (workspace/id/…).
-      const params = new URLSearchParams(searchParams.toString())
-      params.delete('draft')
-      params.delete(DRAFT_AUTO_SEND_PARAM)
-      const qs = params.toString()
-      router.replace(qs ? `/nexus?${qs}` : '/nexus')
+      const stripDraftFromUrl = () => {
+        const params = new URLSearchParams(searchParams.toString())
+        params.delete('draft')
+        params.delete(DRAFT_AUTO_SEND_PARAM)
+        const qs = params.toString()
+        router.replace(qs ? `/nexus?${qs}` : '/nexus')
+      }
 
-      if (!autoSend) return
+      if (!autoSend) {
+        stripDraftFromUrl()
+        return
+      }
       // Same one-tick delay the promptId path uses: `setText` must settle into
       // the composer before `send` reads it, or an empty message is dispatched.
+      // The URL is stripped only AFTER sending — stripping first re-ran this
+      // effect, whose cleanup then cancelled the send (prefill only).
       setTimeout(() => {
-        if (!active) return
+        if (unmountedRef.current) return
         composer.send()
         log.info('Draft prompt auto-sent from an in-app ask', {
           length: text.length,
         })
+        stripDraftFromUrl()
       }, 100)
     }
     fill()

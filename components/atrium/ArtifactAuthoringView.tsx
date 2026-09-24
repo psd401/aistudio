@@ -206,6 +206,7 @@ export async function ArtifactAuthoringView({
             // About rail can say the agent wrote it in chat rather than calling
             // a model-written version "Human-authored".
             headAuthorLabel={currentVersion?.authorLabel ?? null}
+            headAuthorActor={currentVersion?.authorActor ?? null}
             visibilityLevel={obj.visibilityLevel}
             backlinks={backlinks}
           />

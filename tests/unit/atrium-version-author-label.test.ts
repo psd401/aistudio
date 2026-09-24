@@ -65,13 +65,13 @@ describe("versionAuthorLabel", () => {
 });
 
 describe("versionAuthorDescription", () => {
-  it("says the agent wrote it, under the user's account", () => {
+  it("says the agent wrote it in chat, without claiming whose account", () => {
     expect(
       versionAuthorDescription({
         authorActor: "human",
         authorLabel: NEXUS_CHAT_AUTHOR_LABEL,
       })
-    ).toBe("Written by the agent in Nexus chat, under your account");
+    ).toBe("Written by the agent in Nexus chat");
   });
 
   it("keeps the existing phrasing for the other two cases", () => {

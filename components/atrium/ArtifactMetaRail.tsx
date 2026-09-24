@@ -57,6 +57,13 @@ export interface ArtifactMetaRailProps {
    * under the user's own requester.
    */
   headAuthorLabel?: string | null;
+  /**
+   * The head version's actor. The About card describes the CURRENT version, so
+   * this wins over the creator-level `agentMaintained` whenever a head exists —
+   * a human-created artifact later rewritten by an agent (or the reverse) must
+   * not be described by who created it.
+   */
+  headAuthorActor?: "human" | "agent" | null;
   visibilityLevel: VisibilityLevel;
   /** Viewer-visible documents that embed this artifact. */
   backlinks: EmbeddingDocument[];
@@ -78,6 +85,7 @@ export function ArtifactMetaRail({
   updatedAt,
   versionNumber,
   headAuthorLabel = null,
+  headAuthorActor = null,
   visibilityLevel,
   backlinks,
 }: ArtifactMetaRailProps): React.JSX.Element {
@@ -85,18 +93,20 @@ export function ArtifactMetaRail({
   // authoring surface are different facts, and the shared helper resolves them
   // into one phrase so this card and the version lists never disagree.
   const authorship = {
-    authorActor: agentMaintained ? ("agent" as const) : ("human" as const),
+    authorActor:
+      headAuthorActor ?? (agentMaintained ? ("agent" as const) : ("human" as const)),
     authorLabel: headAuthorLabel,
   };
-  const writtenInChat =
-    !agentMaintained && headAuthorLabel === NEXUS_CHAT_AUTHOR_LABEL;
+  const agentWrote =
+    authorship.authorActor === "agent" ||
+    authorship.authorLabel === NEXUS_CHAT_AUTHOR_LABEL;
   return (
     <aside className="mer-artifact-rail" data-testid="artifact-meta-rail">
       {/* ABOUT */}
       <div className="mer-artifact-rail-card">
         <div className="mer-artifact-rail-label">About</div>
         <p className="mer-artifact-about-lead">
-          {agentMaintained || writtenInChat ? (
+          {agentWrote ? (
             <>
               <span className="mer-agent-mark" aria-hidden="true">
                 ✦
