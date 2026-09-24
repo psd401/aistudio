@@ -17,6 +17,11 @@
  */
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useRouter } from "next/navigation";
+import {
+  consumeDraftAutoSend,
+  DRAFT_AUTO_SEND_PARAM,
+} from "@/lib/nexus/draft-auto-send";
 
 // The grid/home/bulk children are irrelevant here and drag in the pure-ESM
 // Atrium markdown pipeline (not jest-loadable — see the note in jest.config.js)
@@ -132,6 +137,27 @@ describe("library artifact create sends a WAF-opaque body (#1714)", () => {
     expect(createContentActionMock).toHaveBeenCalledTimes(1);
     expect(createCall()[0].bodyFormat).toBe("html");
     expectWafOpaqueArtifactCreate();
+  });
+
+  /**
+   * #1791: the person already asked for this build in the dialog, so the chat
+   * must SEND the prompt on arrival — via the same one-shot sessionStorage
+   * handshake as the artifact Ask card, never a bare URL flag.
+   */
+  it('"Build it for me" opens the chat armed to send the prompt', async () => {
+    const push = (useRouter() as unknown as { push: jest.Mock }).push;
+    await openCreateDialog();
+
+    await expect(dialogProps.onSubmit?.("a dashboard")).resolves.toBeNull();
+
+    expect(push).toHaveBeenCalledTimes(1);
+    const url = new URL(push.mock.calls[0][0] as string, "https://example.test");
+    expect(url.pathname).toBe("/nexus");
+    expect(url.searchParams.get("workspace")).toBe("obj-1");
+    expect(url.searchParams.get("draft")).toBe("a dashboard");
+    const nonce = url.searchParams.get(DRAFT_AUTO_SEND_PARAM);
+    expect(nonce).toBeTruthy();
+    expect(consumeDraftAutoSend(nonce, "a dashboard")).toBe(true);
   });
 
   it('base64-encodes the starter body for "Start blank"', async () => {

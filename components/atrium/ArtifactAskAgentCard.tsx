@@ -16,10 +16,7 @@
 
 import { useCallback, useState } from "react";
 import { useRouter } from "next/navigation";
-import {
-  armDraftAutoSend,
-  DRAFT_AUTO_SEND_PARAM,
-} from "@/lib/nexus/draft-auto-send";
+import { nexusWorkspaceHref } from "@/lib/nexus/draft-auto-send";
 import { findWorkspaceConversationAction } from "@/actions/nexus/workspace-binding.actions";
 
 const EXAMPLE_PROMPTS: readonly string[] = [
@@ -53,15 +50,13 @@ export function ArtifactAskAgentCard({
     //
     // A failed or empty lookup falls through to a new conversation — the
     // previous behaviour — so this can never block the person from asking.
-    // Documents resolve the same binding server-side while the edit page
-    // loads (app/(protected)/atrium/[id]/edit/page.tsx) — change both together.
-    let base = `/nexus?workspace=${encodeURIComponent(artifactId)}`;
+    // The edit page resolves the same binding server-side for "Open beside
+    // chat" (app/(protected)/atrium/[id]/edit/page.tsx) — change both together.
+    let conversationId: string | null = null;
     if (!forceNewChat) {
       try {
         const found = await findWorkspaceConversationAction(artifactId);
-        if (found.isSuccess && found.data.conversationId) {
-          base += `&id=${encodeURIComponent(found.data.conversationId)}`;
-        }
+        if (found.isSuccess) conversationId = found.data.conversationId;
       } catch {
         // Fall through to a new chat.
       }
@@ -71,21 +66,19 @@ export function ArtifactAskAgentCard({
     // `draft` and `promptId` and nothing else. This used to send `prompt`,
     // which no code path reads, so every chip and every typed change silently
     // landed in an empty composer.
-    const draft = text.trim();
-    if (!draft) {
-      router.push(base);
-      return;
-    }
     // #1791 finding 2: the button said "Ask" but only prefilled, so the person
     // had to press send a second time on a different page. Arm the one-shot
     // handshake so the composer sends it on arrival. A link without a matching
     // sessionStorage entry — i.e. one that did not originate from this click —
     // still only prefills, so the flag cannot be weaponised from outside.
-    const nonce = armDraftAutoSend(draft);
-    const href =
-      `${base}&draft=${encodeURIComponent(draft)}` +
-      (nonce ? `&${DRAFT_AUTO_SEND_PARAM}=${encodeURIComponent(nonce)}` : "");
-    router.push(href);
+    router.push(
+      nexusWorkspaceHref({
+        workspaceId: artifactId,
+        conversationId,
+        draft: text,
+        autoSend: true,
+      })
+    );
     // `opening` is deliberately left set: the navigation is in flight and the
     // controls should stay disabled until this page is torn down.
   }, [artifactId, router]);

@@ -33,6 +33,7 @@ import { VisibilityChip } from "@/components/atrium/VisibilityChip";
 import { ContentSettings } from "@/components/atrium/ContentSettings";
 import { VersionMenu } from "@/components/atrium/VersionMenu";
 import { findLatestConversationForWorkspace } from "@/lib/nexus/workspace-conversation-binding";
+import { nexusWorkspaceHref } from "@/lib/nexus/draft-auto-send";
 
 export const dynamic = "force-dynamic";
 
@@ -97,15 +98,18 @@ export default async function AtriumEditPage({
   // the fresh one had to rediscover everything. Resolve the most recent
   // conversation this user had about this object and reopen THAT beside it. No
   // binding (or a resolution failure) simply falls back to the old behaviour.
-  // Artifacts resolve the same binding on click instead, in
-  // components/atrium/ArtifactAskAgentCard.tsx — change both together.
+  // Used for both kinds. The artifact rail's Ask card resolves the same binding
+  // again on click (components/atrium/ArtifactAskAgentCard.tsx), because it
+  // also sends a draft — change both together.
   const boundConversationId = await findLatestConversationForWorkspace({
     workspaceObjectId: obj.id,
     userId: req.userId,
   }).catch(() => null);
-  const openBesideChatHref =
-    `/nexus?workspace=${encodeURIComponent(obj.id)}` +
-    (boundConversationId ? `&id=${encodeURIComponent(boundConversationId)}` : "");
+  // No draft and no auto-send: this is a rendered link someone could copy.
+  const openBesideChatHref = nexusWorkspaceHref({
+    workspaceId: obj.id,
+    conversationId: boundConversationId,
+  });
 
   if (obj.kind === "artifact") {
     // The Meridian artifact chrome (topbar + canvas + manage-rights-only rail) is
@@ -117,6 +121,7 @@ export default async function AtriumEditPage({
         userCanEdit={userCanEdit}
         collectionName={collectionName}
         collectionSlug={collectionRef?.slug ?? null}
+        openBesideChatHref={openBesideChatHref}
       />
     );
   }

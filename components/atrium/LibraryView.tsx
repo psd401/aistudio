@@ -39,6 +39,7 @@ import { LibraryList } from "./LibraryList";
 import { LibraryHome } from "./LibraryHome";
 import { LibraryBulkBar } from "./LibraryBulkBar";
 import { CreateContentDialog } from "./CreateContentDialog";
+import { nexusWorkspaceHref } from "@/lib/nexus/draft-auto-send";
 import { PrivateCollectionsDialog } from "./PrivateCollectionsDialog";
 
 const log = createLogger({ component: "LibraryView" });
@@ -245,8 +246,15 @@ function useLibraryCreate(collectionId: string | null) {
           )
         );
         if (res.isSuccess) {
+          // The person already asked for this build, so send the prompt on
+          // arrival (same one-shot handshake as the artifact Ask card) rather
+          // than making them press send again on a different page.
           router.push(
-            `/nexus?workspace=${res.data.id}&draft=${encodeURIComponent(promptText)}`
+            nexusWorkspaceHref({
+              workspaceId: res.data.id,
+              draft: promptText,
+              autoSend: true,
+            })
           );
           return null;
         }

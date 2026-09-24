@@ -16,6 +16,7 @@ import {
   armDraftAutoSend,
   consumeDraftAutoSend,
   DRAFT_AUTO_SEND_PARAM,
+  nexusWorkspaceHref,
 } from "../draft-auto-send";
 
 describe("draft auto-send handshake", () => {
@@ -88,5 +89,47 @@ describe("draft auto-send handshake", () => {
     } finally {
       Object.defineProperty(window, "sessionStorage", original);
     }
+  });
+});
+
+describe("nexusWorkspaceHref", () => {
+  beforeEach(() => {
+    window.sessionStorage.clear();
+  });
+
+  const parse = (href: string) => new URL(href, "https://example.test");
+
+  it("builds a plain workspace link (optionally continuing a conversation)", () => {
+    expect(nexusWorkspaceHref({ workspaceId: "obj 1" })).toBe(
+      "/nexus?workspace=obj+1"
+    );
+    const url = parse(
+      nexusWorkspaceHref({ workspaceId: "obj-1", conversationId: "conv-9" })
+    );
+    expect(url.searchParams.get("id")).toBe("conv-9");
+    expect(url.searchParams.has("draft")).toBe(false);
+  });
+
+  it("prefills without arming when autoSend is not requested", () => {
+    const url = parse(nexusWorkspaceHref({ workspaceId: "o", draft: " hi & bye " }));
+    expect(url.searchParams.get("draft")).toBe("hi & bye");
+    expect(url.searchParams.has(DRAFT_AUTO_SEND_PARAM)).toBe(false);
+    expect(window.sessionStorage.length).toBe(0);
+  });
+
+  it("arms a nonce the composer will honour exactly once", () => {
+    const url = parse(
+      nexusWorkspaceHref({ workspaceId: "o", draft: "Build a dashboard", autoSend: true })
+    );
+    const draft = url.searchParams.get("draft") ?? "";
+    const nonce = url.searchParams.get(DRAFT_AUTO_SEND_PARAM);
+    expect(consumeDraftAutoSend(nonce, draft)).toBe(true);
+    expect(consumeDraftAutoSend(nonce, draft)).toBe(false);
+  });
+
+  it("ignores autoSend when there is no draft to send", () => {
+    const url = parse(nexusWorkspaceHref({ workspaceId: "o", draft: "  ", autoSend: true }));
+    expect(url.searchParams.has("draft")).toBe(false);
+    expect(url.searchParams.has(DRAFT_AUTO_SEND_PARAM)).toBe(false);
   });
 });

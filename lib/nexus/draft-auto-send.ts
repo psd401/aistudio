@@ -84,3 +84,29 @@ export function consumeDraftAutoSend(
     return false;
   }
 }
+
+/**
+ * The one builder for a `/nexus?workspace=` link, so every entry point (the
+ * artifact Ask card, the library's "Build it for me", the editor's "Open
+ * beside chat") continues a bound conversation and auto-sends the same way.
+ *
+ * `autoSend` arms the one-shot handshake above; it must only be set by code
+ * running on the click that navigates, never when rendering a link someone
+ * could copy. Without a draft there is nothing to send, so it is ignored.
+ */
+export function nexusWorkspaceHref(args: {
+  workspaceId: string;
+  conversationId?: string | null;
+  draft?: string;
+  autoSend?: boolean;
+}): string {
+  const params = new URLSearchParams({ workspace: args.workspaceId });
+  if (args.conversationId) params.set("id", args.conversationId);
+  const draft = args.draft?.trim();
+  if (draft) {
+    params.set("draft", draft);
+    const nonce = args.autoSend ? armDraftAutoSend(draft) : null;
+    if (nonce) params.set(DRAFT_AUTO_SEND_PARAM, nonce);
+  }
+  return `/nexus?${params.toString()}`;
+}
