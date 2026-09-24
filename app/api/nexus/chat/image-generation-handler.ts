@@ -12,6 +12,7 @@ import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { nexusConversations, nexusMessages } from "@/lib/db/schema";
 import { getAttachmentFromS3 } from "@/lib/services/attachment-storage-service";
 import { getObjectStream } from "@/lib/aws/s3-client";
+import { getGeneratedImageBucket } from "@/lib/ai/generated-image-bucket";
 import { sanitizeTextForDatabase } from "@/lib/utils/text-sanitizer";
 import { safeJsonbStringify } from "@/lib/db/json-utils";
 import { assertSafeFetchUrl } from "@/lib/agents/agent-tools/web-fetch";
@@ -65,7 +66,7 @@ export async function deleteUnpersistedGeneratedImage(params: {
   s3Key?: string;
 }): Promise<boolean> {
   const { conversationId, s3Key } = params;
-  if (!s3Key || !s3Key.startsWith(`v2/generated-images/${conversationId}/`)) {
+  if (!s3Key || !isGeneratedImageKeyForConversation(s3Key, conversationId)) {
     return false;
   }
   await deleteDocumentVersions(s3Key);
@@ -80,7 +81,9 @@ interface ReferenceImage {
   role?: "reference" | "mask";
 }
 
-const MAX_CANONICAL_REFERENCE_IMAGE_BYTES = 20 * 1024 * 1024;
+// Cap for any reference image read from S3 (canonical attachment or a previous
+// generated image) before it is inlined as base64 for the provider.
+const MAX_REFERENCE_IMAGE_BYTES = 20 * 1024 * 1024;
 // SVG intentionally excluded — it can embed scripts and event handlers.
 const ALLOWED_IMAGE_MIMES = new Set([
   "image/jpeg",
@@ -98,25 +101,22 @@ function invalidCanonicalImage(message: string): Error {
   return Object.assign(new Error(message), { type: "INVALID_ATTACHMENT" });
 }
 
-async function loadCanonicalRepositoryImage(
-  source: NexusAttachmentImageSource,
-): Promise<ReferenceImage> {
-  if (!isRepositorySourceObjectKey(source.repositoryId, source.objectKey)) {
-    throw invalidCanonicalImage("Canonical image source is invalid");
-  }
-  if (
-    source.byteSize != null &&
-    source.byteSize > MAX_CANONICAL_REFERENCE_IMAGE_BYTES
-  ) {
-    throw invalidCanonicalImage("Canonical image source is too large");
-  }
-
-  const object = await getObjectStream(source.objectKey);
+/**
+ * Read an object from S3 into memory, refusing anything over
+ * MAX_REFERENCE_IMAGE_BYTES (checked against Content-Length, then while reading).
+ * `bucket` defaults to the Settings-resolved documents bucket.
+ */
+async function readReferenceObject(
+  objectKey: string,
+  tooLarge: () => Error,
+  bucket?: string,
+): Promise<{ bytes: Buffer; contentType?: string }> {
+  const object = await getObjectStream(objectKey, bucket);
   if (
     object.contentLength != null &&
-    object.contentLength > MAX_CANONICAL_REFERENCE_IMAGE_BYTES
+    object.contentLength > MAX_REFERENCE_IMAGE_BYTES
   ) {
-    throw invalidCanonicalImage("Canonical image source is too large");
+    throw tooLarge();
   }
   const chunks: Buffer[] = [];
   let totalBytes = 0;
@@ -126,30 +126,111 @@ async function loadCanonicalRepositoryImage(
         ? Buffer.from(chunk)
         : Buffer.from(chunk as Uint8Array);
     totalBytes += buffer.byteLength;
-    if (totalBytes > MAX_CANONICAL_REFERENCE_IMAGE_BYTES) {
+    if (totalBytes > MAX_REFERENCE_IMAGE_BYTES) {
       object.stream.destroy();
-      throw invalidCanonicalImage("Canonical image source is too large");
+      throw tooLarge();
     }
     chunks.push(buffer);
   }
+  return { bytes: Buffer.concat(chunks), contentType: object.contentType };
+}
 
-  const mimeType = (
+/** Lower-cased media type without parameters (`image/png; x=y` -> `image/png`). */
+function bareMimeType(value: string | undefined): string {
+  return (value ?? "").split(";", 1)[0]?.trim().toLowerCase() ?? "";
+}
+
+async function loadCanonicalRepositoryImage(
+  source: NexusAttachmentImageSource,
+): Promise<ReferenceImage> {
+  if (!isRepositorySourceObjectKey(source.repositoryId, source.objectKey)) {
+    throw invalidCanonicalImage("Canonical image source is invalid");
+  }
+  if (
+    source.byteSize != null &&
+    source.byteSize > MAX_REFERENCE_IMAGE_BYTES
+  ) {
+    throw invalidCanonicalImage("Canonical image source is too large");
+  }
+
+  const object = await readReferenceObject(source.objectKey, () =>
+    invalidCanonicalImage("Canonical image source is too large"),
+  );
+
+  const mimeType = bareMimeType(
     source.detectedContentType ??
-    object.contentType ??
-    source.declaredContentType ??
-    ""
-  )
-    .split(";", 1)[0]
-    ?.trim()
-    .toLowerCase();
+      object.contentType ??
+      source.declaredContentType ??
+      "",
+  );
   if (!mimeType || !ALLOWED_IMAGE_MIMES.has(mimeType)) {
     throw invalidCanonicalImage("Canonical image source is not an image");
   }
   return {
-    base64: `data:${mimeType};base64,${Buffer.concat(chunks).toString("base64")}`,
+    base64: `data:${mimeType};base64,${object.bytes.toString("base64")}`,
     mimeType,
     role: "reference",
   };
+}
+
+/** Server-written key prefix for a conversation's generated images. */
+function isGeneratedImageKeyForConversation(
+  s3Key: string,
+  conversationId: string,
+): boolean {
+  return s3Key.startsWith(`v2/generated-images/${conversationId}/`);
+}
+
+/**
+ * Turn a previous generated image into inline bytes read from its durable S3
+ * object. The persisted `imageUrl` is a presigned link that expires one hour
+ * after generation, so fetching it for a later edit returns 403 from S3 (seen in
+ * prod 2026-09-23: a user returned 18 hours later, every edit failed with HTTP
+ * 500). Only keys under this conversation's own generated-images prefix are read;
+ * anything else, or a failed read, keeps the stored reference unchanged.
+ */
+async function hydratePreviousGeneratedImage(
+  ref: ReferenceImage,
+  conversationId: string,
+): Promise<ReferenceImage> {
+  if (!ref.s3Key) {
+    return ref;
+  }
+  if (!isGeneratedImageKeyForConversation(ref.s3Key, conversationId)) {
+    log.warn("Previous generated image key is outside this conversation's prefix", {
+      conversationId,
+    });
+    return ref;
+  }
+  try {
+    // Read from the bucket the image was written to (storeImageInS3), not the
+    // Settings-resolved bucket the generic S3 client would pick.
+    const object = await readReferenceObject(
+      ref.s3Key,
+      () => new Error("Previous generated image is too large"),
+      getGeneratedImageBucket(),
+    );
+    const mimeType = bareMimeType(object.contentType);
+    if (!mimeType || !ALLOWED_IMAGE_MIMES.has(mimeType)) {
+      log.warn("Previous generated image is not an allowed image type; using stored URL", {
+        conversationId,
+        mimeType,
+      });
+      return ref;
+    }
+    return {
+      base64: `data:${mimeType};base64,${object.bytes.toString("base64")}`,
+      mimeType,
+      s3Key: ref.s3Key,
+      role: "reference",
+    };
+  } catch (error) {
+    log.warn("Could not read previous generated image from S3; using stored URL", {
+      conversationId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return ref;
+  }
 }
 
 /**
@@ -705,6 +786,23 @@ export async function getPreviousGeneratedImages(
   }
 
   return referenceImages;
+}
+
+/**
+ * The most recent generated image in an owned conversation, ready to send as an
+ * edit reference: the image bytes are read from S3 by key instead of via the
+ * stored presigned `imageUrl`, which stops working an hour after generation.
+ * Routing only needs to know an image exists, so it keeps calling
+ * `getPreviousGeneratedImages` and never downloads the object.
+ */
+export async function resolvePreviousGeneratedImageReferences(
+  conversationId: string,
+  userId: number,
+): Promise<ReferenceImage[]> {
+  const previous = await getPreviousGeneratedImages(conversationId, userId);
+  return Promise.all(
+    previous.map((ref) => hydratePreviousGeneratedImage(ref, conversationId)),
+  );
 }
 
 /**

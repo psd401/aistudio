@@ -53,7 +53,7 @@ import {
   getOrCreateImageConversation,
   extractReferenceImages,
   extractCanonicalRepositoryImages,
-  getPreviousGeneratedImages,
+  resolvePreviousGeneratedImageReferences,
   getImageRoutingContext,
   persistImageExchange,
   deleteUnpersistedGeneratedImage,
@@ -643,7 +643,7 @@ async function resolveImageReferences(params: {
     params.existingConversationId &&
     referenceImages.length === 0
   ) {
-    return getPreviousGeneratedImages(
+    return resolvePreviousGeneratedImageReferences(
       params.existingConversationId,
       params.userId,
     );

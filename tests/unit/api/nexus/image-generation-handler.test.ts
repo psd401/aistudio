@@ -15,7 +15,8 @@ const mockDeleteDocumentVersions = jest.fn();
 const mockGetObjectStream = jest.fn();
 jest.mock('@/lib/aws/s3-client', () => ({
   deleteDocumentVersions: (key: string) => mockDeleteDocumentVersions(key),
-  getObjectStream: (key: string) => mockGetObjectStream(key),
+  getObjectStream: (key: string, bucket?: string) =>
+    bucket === undefined ? mockGetObjectStream(key) : mockGetObjectStream(key, bucket),
 }));
 
 const mockExecuteQuery = jest.fn();
@@ -33,6 +34,7 @@ import {
   persistImageExchange,
   deleteUnpersistedGeneratedImage,
   extractCanonicalRepositoryImages,
+  resolvePreviousGeneratedImageReferences,
   handleImageGenerationError
 } from '@/app/api/nexus/chat/image-generation-handler';
 
@@ -398,6 +400,98 @@ describe('extractCanonicalRepositoryImages', () => {
         },
       ])
     ).rejects.toMatchObject({ type: 'INVALID_ATTACHMENT' });
+    expect(mockGetObjectStream).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolvePreviousGeneratedImageReferences', () => {
+  // Stored generated-image rows carry a durable s3Key plus a presigned imageUrl
+  // that expires an hour after generation. An edit request later than that must
+  // read the image by key, never through the expired link (prod 2026-09-23).
+  const GENERATED_KEY = `v2/generated-images/${CONVO}/1790115067808-gemini.png`;
+  const EXPIRED_URL =
+    'https://bucket.s3.us-east-1.amazonaws.com/v2/generated-images/x.png?X-Amz-Expires=3600';
+
+  beforeEach(() => {
+    mockExecuteQuery.mockReset();
+    mockGetObjectStream.mockReset();
+  });
+
+  const storedImagePart = (s3Key?: string) => [{
+    parts: [{ type: 'image', s3Key, imageUrl: EXPIRED_URL, altText: 'Generated image' }],
+  }];
+
+  it('reads the most recent generated image from S3 by key instead of its stored URL', async () => {
+    mockExecuteQuery.mockResolvedValue(storedImagePart(GENERATED_KEY));
+    mockGetObjectStream.mockResolvedValue({
+      stream: Readable.from([Buffer.from('PNG-BYTES')]),
+      contentType: 'image/png',
+      contentLength: 9,
+    });
+
+    const refs = await resolvePreviousGeneratedImageReferences(CONVO, 42);
+
+    // Read from the bucket the writer (storeImageInS3) uses, not the
+    // Settings-resolved bucket the generic S3 client would pick.
+    expect(mockGetObjectStream).toHaveBeenCalledWith(
+      GENERATED_KEY,
+      process.env.DOCUMENTS_BUCKET_NAME || 'test-documents-bucket',
+    );
+    expect(refs).toEqual([{
+      base64: `data:image/png;base64,${Buffer.from('PNG-BYTES').toString('base64')}`,
+      mimeType: 'image/png',
+      s3Key: GENERATED_KEY,
+      role: 'reference',
+    }]);
+    expect(refs[0]).not.toHaveProperty('url');
+  });
+
+  it('never reads a key outside this conversation’s generated-images prefix', async () => {
+    const foreignKey = 'v2/generated-images/another-conversation/x.png';
+    mockExecuteQuery.mockResolvedValue(storedImagePart(foreignKey));
+
+    const refs = await resolvePreviousGeneratedImageReferences(CONVO, 42);
+
+    expect(mockGetObjectStream).not.toHaveBeenCalled();
+    expect(refs).toEqual([{ url: EXPIRED_URL, s3Key: foreignKey, role: 'reference' }]);
+  });
+
+  it('falls back to the stored reference when the S3 read fails', async () => {
+    mockExecuteQuery.mockResolvedValue(storedImagePart(GENERATED_KEY));
+    mockGetObjectStream.mockRejectedValue(new Error('NoSuchKey'));
+
+    await expect(resolvePreviousGeneratedImageReferences(CONVO, 42)).resolves.toEqual([
+      { url: EXPIRED_URL, s3Key: GENERATED_KEY, role: 'reference' },
+    ]);
+  });
+
+  it('refuses a stored object that is not an allowed raster image type', async () => {
+    mockExecuteQuery.mockResolvedValue(storedImagePart(GENERATED_KEY));
+    mockGetObjectStream.mockResolvedValue({
+      stream: Readable.from([Buffer.from('<svg/>')]),
+      contentType: 'image/svg+xml',
+      contentLength: 6,
+    });
+
+    const refs = await resolvePreviousGeneratedImageReferences(CONVO, 42);
+
+    expect(refs[0]).not.toHaveProperty('base64');
+    expect(refs[0]).toMatchObject({ url: EXPIRED_URL });
+  });
+
+  it('keeps legacy rows without an s3Key on their stored URL', async () => {
+    mockExecuteQuery.mockResolvedValue(storedImagePart(undefined));
+
+    await expect(resolvePreviousGeneratedImageReferences(CONVO, 42)).resolves.toEqual([
+      { url: EXPIRED_URL, s3Key: undefined, role: 'reference' },
+    ]);
+    expect(mockGetObjectStream).not.toHaveBeenCalled();
+  });
+
+  it('returns nothing when the conversation has no generated image', async () => {
+    mockExecuteQuery.mockResolvedValue([{ parts: [{ type: 'text', text: 'hi' }] }]);
+
+    await expect(resolvePreviousGeneratedImageReferences(CONVO, 42)).resolves.toEqual([]);
     expect(mockGetObjectStream).not.toHaveBeenCalled();
   });
 });

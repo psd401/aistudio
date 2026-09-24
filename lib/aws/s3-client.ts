@@ -643,8 +643,10 @@ export async function generateUploadPresignedUrl({
   }
 }
 
-// Get object as a stream for efficient processing
-export async function getObjectStream(key: string): Promise<{ 
+// Get object as a stream for efficient processing. `bucket` overrides the
+// Settings-resolved bucket for callers whose writer uses a different resolver
+// (e.g. Nexus generated images, see lib/ai/generated-image-bucket.ts).
+export async function getObjectStream(key: string, bucket?: string): Promise<{
   stream: Readable
   contentType?: string
   contentLength?: number
@@ -652,7 +654,7 @@ export async function getObjectStream(key: string): Promise<{
 }> {
   const s3Client = await getS3Client()
   const config = await getS3Config()
-  const bucketName = config.bucket!
+  const bucketName = bucket ?? config.bucket!
   
   try {
     const command = new GetObjectCommand({
