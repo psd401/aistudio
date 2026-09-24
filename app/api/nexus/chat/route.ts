@@ -24,6 +24,7 @@ import {
   createNexusRepositorySearchTools,
 } from '@/lib/nexus/attachment-repository-tool';
 import { prepareRepositoryAttachmentMessages } from '@/lib/nexus/repository-attachment-messages';
+import { pruneStaleWorkspaceToolPayloads } from '@/lib/nexus/workspace-tool-history';
 import {
   resolveNexusAttachmentImageSources,
   resolveNexusConversationRepositoryIds,
@@ -2322,7 +2323,12 @@ async function prepareChatRequest(params: {
       projectBinding,
       attachmentPreflight: preflight.preflight,
       safePersistenceMessages: prepared.messages as ChatMessages,
-      safeModelMessages: prepared.modelMessages as ChatMessages,
+      // #1791 finding 7: drop superseded artifact/document sources from what the
+      // MODEL sees. `safePersistenceMessages` above keeps them, so the thread
+      // still reloads byte-for-byte; only the re-sent history shrinks.
+      safeModelMessages: pruneStaleWorkspaceToolPayloads(
+        prepared.modelMessages as UIMessage[]
+      ) as ChatMessages,
       routingEnabledTools,
     },
   };
