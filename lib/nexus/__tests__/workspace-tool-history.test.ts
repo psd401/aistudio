@@ -299,5 +299,50 @@ describe("pruneStaleWorkspaceToolPayloads — paged reads of one revision", () =
     expect(text(out, 1)).toMatch(/^\[omitted from history/);
     expect(text(out, 2)).toBe(newHead);
   });
+
+  describe("document edits (append is the tools' default mode)", () => {
+    const docEdit = (callId: string, markdown: string, mode?: "append" | "replace") => ({
+      type: "tool-edit_workspace_document",
+      toolCallId: callId,
+      state: "output-available",
+      input: mode ? { markdown, mode } : { markdown },
+      output: { ok: true, objectId: "obj-a", mode: mode ?? "append" },
+    });
+    const md = (i: number, out: UIMessage[]) => {
+      const part = out[i].parts[0] as unknown as Record<string, Record<string, unknown>>;
+      return (part.output.body ?? part.input.markdown) as string;
+    };
+
+    it("keeps the read and every append — together they are the current document", () => {
+      const doc = bigCode("a");
+      const add1 = bigCode("b");
+      const add2 = bigCode("c");
+      const out = pruneStaleWorkspaceToolPayloads([
+        message("m1", [page("r0", 0, doc)]),
+        message("m2", [docEdit("e1", add1)]),
+        message("m3", [docEdit("e2", add2, "append")]),
+      ]);
+      expect(md(0, out)).toBe(doc);
+      expect(md(1, out)).toBe(add1);
+      expect(md(2, out)).toBe(add2);
+    });
+
+    it("a replace supersedes the earlier read and appends, but not the appends after it", () => {
+      const doc = bigCode("a");
+      const add1 = bigCode("b");
+      const replaced = bigCode("c");
+      const add2 = bigCode("d");
+      const out = pruneStaleWorkspaceToolPayloads([
+        message("m1", [page("r0", 0, doc)]),
+        message("m2", [docEdit("e1", add1)]),
+        message("m3", [docEdit("e2", replaced, "replace")]),
+        message("m4", [docEdit("e3", add2)]),
+      ]);
+      expect(md(0, out)).toMatch(/^\[omitted from history/);
+      expect(md(1, out)).toMatch(/^\[omitted from history/);
+      expect(md(2, out)).toBe(replaced);
+      expect(md(3, out)).toBe(add2);
+    });
+  });
 });
 

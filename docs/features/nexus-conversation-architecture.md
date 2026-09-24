@@ -483,8 +483,11 @@ the three operations, each scoped by `user_id` in the `WHERE` predicate:
 Model-side only, `lib/nexus/workspace-tool-history.ts` stubs superseded
 workspace source payloads (full artifact code, document bodies) out of the
 messages sent to the model. Per object it keeps the newest write that
-carried source (a mode-only `dataAccess` change does not count), plus every
-page of the newest read sequence after it: a large source is read in several
+REPLACED the source (artifact `code`, or a document edit in `replace` mode),
+every document append after it (append is the edit tools' default, and adds
+to the document rather than replacing it; a mode-only `dataAccess` change
+does not count as a write), plus every page of the newest read sequence
+after the replacement: a large source is read in several
 pages at different offsets, and a fresh offset-0 read starts a new sequence,
 so pages from an older revision are never stitched onto a new first page. Persisted messages are never touched. Tool parts keep their exact
 shape so every tool call still pairs with its result on replay.
