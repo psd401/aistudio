@@ -119,41 +119,93 @@ function prunePart(part: unknown): unknown {
  * without an id (older persisted parts, error results) share one "" group.
  */
 function partObjectId(part: unknown): string {
+  return stringField(part, "objectId") ?? "";
+}
+
+function stringField(part: unknown, field: string): string | undefined {
   const record = part as Record<string, unknown>;
   for (const key of PAYLOAD_KEYS) {
     const payload = record[key];
     if (payload && typeof payload === "object") {
-      const id = (payload as Record<string, unknown>).objectId;
-      if (typeof id === "string") return id;
+      const value = (payload as Record<string, unknown>)[field];
+      if (typeof value === "string") return value;
     }
   }
-  return "";
+  return undefined;
+}
+
+function isReadPart(part: unknown): boolean {
+  const { type, toolName } = part as Record<string, unknown>;
+  return (
+    toolName === "read_workspace_content" ||
+    type === "tool-read_workspace_content"
+  );
+}
+
+/** Byte offset of a read page (0 for a first/only page or an older part). */
+function readOffset(part: unknown): number {
+  const record = part as Record<string, unknown>;
+  for (const key of PAYLOAD_KEYS) {
+    const payload = record[key];
+    if (payload && typeof payload === "object") {
+      const offset = (payload as Record<string, unknown>).byteOffset;
+      if (typeof offset === "number") return offset;
+    }
+  }
+  return 0;
+}
+
+/**
+ * Which workspace source parts to keep verbatim. Per object:
+ *  - the newest WRITE (the code/markdown the model last sent) is kept;
+ *  - READ pages after that write are the current revision, and a large source
+ *    is read in several pages at different offsets — every page is needed to
+ *    reconstruct it, so the newest read at EACH offset is kept;
+ *  - everything else for the object (reads before the newest write, earlier
+ *    writes, an older re-read of the same page) is superseded.
+ */
+function partsToKeep(messages: UIMessage[]): Set<string> {
+  const lastWrite = new Map<string, number>();
+  const sourceParts: Array<{ pos: number; key: string; part: unknown }> = [];
+  let pos = 0;
+  for (const [m, message] of messages.entries()) {
+    const parts = message?.parts;
+    if (!Array.isArray(parts)) continue;
+    for (const [p, part] of parts.entries()) {
+      if (!isWorkspaceSourceToolPart(part)) continue;
+      pos += 1;
+      sourceParts.push({ pos, key: `${m}:${p}`, part });
+      if (!isReadPart(part)) lastWrite.set(partObjectId(part), pos);
+    }
+  }
+
+  const keep = new Map<string, string>();
+  for (const { pos: at, key, part } of sourceParts) {
+    const objectId = partObjectId(part);
+    const writeAt = lastWrite.get(objectId) ?? 0;
+    if (!isReadPart(part)) {
+      if (at === writeAt) keep.set(`write:${objectId}`, key);
+      continue;
+    }
+    if (at < writeAt) continue;
+    // Later reads of the same page overwrite earlier ones.
+    keep.set(`read:${objectId}:${readOffset(part)}`, key);
+  }
+  return new Set(keep.values());
 }
 
 /**
  * Returns `messages` with every superseded workspace source payload stubbed.
  *
- * The newest workspace source tool part PER OBJECT is left verbatim. When
- * nothing needs pruning the original array is returned by reference, so the
- * common case (a chat with no workspace open, or a first edit) allocates
- * nothing.
+ * See `partsToKeep` for what counts as current. When nothing needs pruning the
+ * original array is returned by reference, so the common case (a chat with no
+ * workspace open, or a first edit) allocates nothing.
  */
 export function pruneStaleWorkspaceToolPayloads(
   messages: UIMessage[]
 ): UIMessage[] {
-  // Locate the newest workspace source part for each object; everything
-  // earlier for that same object is stale.
-  const latest = new Map<string, string>();
-  for (const [m, message] of messages.entries()) {
-    const parts = message?.parts;
-    if (!Array.isArray(parts)) continue;
-    for (const [p, part] of parts.entries()) {
-      if (isWorkspaceSourceToolPart(part)) {
-        latest.set(partObjectId(part), `${m}:${p}`);
-      }
-    }
-  }
-  if (latest.size === 0) return messages;
+  const keep = partsToKeep(messages);
+  if (keep.size === 0) return messages;
 
   let anyChanged = false;
   const pruned = messages.map((message, m) => {
@@ -162,7 +214,7 @@ export function pruneStaleWorkspaceToolPayloads(
     let messageChanged = false;
     const nextParts = parts.map((part, p) => {
       if (!isWorkspaceSourceToolPart(part)) return part;
-      if (latest.get(partObjectId(part)) === `${m}:${p}`) return part;
+      if (keep.has(`${m}:${p}`)) return part;
       const next = prunePart(part);
       if (next !== part) messageChanged = true;
       return next;

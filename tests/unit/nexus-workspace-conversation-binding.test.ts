@@ -88,6 +88,7 @@ import {
   bindConversationWorkspace,
   findLatestConversationForWorkspace,
   getConversationWorkspaceObjectId,
+  workspaceIdForTurn,
 } from "@/lib/nexus/workspace-conversation-binding";
 
 /** Flatten a captured predicate tree into its leaf comparisons. */
@@ -222,5 +223,45 @@ describe("findLatestConversationForWorkspace", () => {
     await findLatestConversationForWorkspace({ workspaceObjectId: "obj-1", userId: 7 });
     // "Who else worked on this artifact" is not a question this may answer.
     expect(scopedToUser(predicates[0], 7)).toBe(true);
+  });
+});
+
+describe("workspaceIdForTurn (a send while the panel is still restoring)", () => {
+  const base = {
+    requestedWorkspaceId: undefined,
+    restoreBoundWorkspace: true,
+    conversationId: "conv-1",
+    userId: 7,
+  };
+
+  it("uses an explicit workspace without reading the binding", async () => {
+    rows = [{ workspaceObjectId: "obj-bound" }];
+    await expect(
+      workspaceIdForTurn({ ...base, requestedWorkspaceId: "obj-open" })
+    ).resolves.toBe("obj-open");
+    expect(predicates).toHaveLength(0);
+  });
+
+  it("falls back to the caller's persisted binding while restoring", async () => {
+    rows = [{ workspaceObjectId: "obj-bound" }];
+    await expect(workspaceIdForTurn(base)).resolves.toBe("obj-bound");
+    expect(scopedToUser(predicates[0], 7)).toBe(true);
+  });
+
+  it("never reads the binding unless the client says it is restoring (a closed panel stays closed)", async () => {
+    rows = [{ workspaceObjectId: "obj-bound" }];
+    await expect(
+      workspaceIdForTurn({ ...base, restoreBoundWorkspace: false })
+    ).resolves.toBeUndefined();
+    expect(predicates).toHaveLength(0);
+  });
+
+  it("degrades to no workspace when the lookup fails", async () => {
+    const { executeQuery } = jest.requireMock("@/lib/db/drizzle-client") as {
+      executeQuery: jest.Mock;
+    };
+    executeQuery.mockRejectedValueOnce(new Error("connection reset"));
+    await expect(workspaceIdForTurn(base)).resolves.toBeUndefined();
+    expect(warnMock).toHaveBeenCalled();
   });
 });

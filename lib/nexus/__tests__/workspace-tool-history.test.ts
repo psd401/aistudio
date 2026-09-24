@@ -211,3 +211,57 @@ describe("pruneStaleWorkspaceToolPayloads", () => {
     expect(code(2)).toBe(artifactB2);
   });
 });
+
+describe("pruneStaleWorkspaceToolPayloads — paged reads of one revision", () => {
+  const page = (callId: string, offset: number, body: string) => ({
+    ...readPart(callId, body),
+    output: { objectId: "obj-a", title: "Big", body, byteOffset: offset },
+  });
+  const write = (callId: string, code: string) => ({
+    ...updatePart(callId, code),
+    output: { success: true, objectId: "obj-a" },
+  });
+  const text = (out: UIMessage[], i: number) => {
+    const part = out[i].parts[0] as unknown as Record<string, Record<string, unknown>>;
+    return (part.output.body ?? part.input.code) as string;
+  };
+
+  it("keeps EVERY page of the current revision, not just the last one", () => {
+    const p0 = bigCode("a");
+    const p1 = bigCode("b");
+    const p2 = bigCode("c");
+    const out = pruneStaleWorkspaceToolPayloads([
+      message("m1", [page("r0", 0, p0)]),
+      message("m2", [page("r1", 98_304, p1)]),
+      message("m3", [page("r2", 196_608, p2)]),
+    ]);
+    expect(text(out, 0)).toBe(p0);
+    expect(text(out, 1)).toBe(p1);
+    expect(text(out, 2)).toBe(p2);
+  });
+
+  it("stubs pages read BEFORE the newest write — they are the old revision", () => {
+    const oldPage = bigCode("a");
+    const newCode = bigCode("b");
+    const freshPage = bigCode("c");
+    const out = pruneStaleWorkspaceToolPayloads([
+      message("m1", [page("r0", 0, oldPage)]),
+      message("m2", [write("w1", newCode)]),
+      message("m3", [page("r1", 0, freshPage)]),
+    ]);
+    expect(text(out, 0)).toMatch(/^\[omitted from history/);
+    expect(text(out, 1)).toBe(newCode);
+    expect(text(out, 2)).toBe(freshPage);
+  });
+
+  it("stubs an older re-read of the SAME page", () => {
+    const first = bigCode("a");
+    const again = bigCode("b");
+    const out = pruneStaleWorkspaceToolPayloads([
+      message("m1", [page("r0", 0, first)]),
+      message("m2", [page("r1", 0, again)]),
+    ]);
+    expect(text(out, 0)).toMatch(/^\[omitted from history/);
+    expect(text(out, 1)).toBe(again);
+  });
+});

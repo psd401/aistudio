@@ -471,15 +471,20 @@ the three operations, each scoped by `user_id` in the `WHERE` predicate:
   `?workspace=` param restores the panel (`useRestoreBoundWorkspace` in
   `app/(protected)/nexus/page.tsx`). The id is not re-authorized here; the
   panel load and the workspace tools re-check `canView`/`canEdit` and degrade
-  to a not-found state for a deleted or revoked object.
+  to a not-found state for a deleted or revoked object. The restore is async,
+  so until it settles the request body carries `restoreBoundWorkspace: true`
+  (`lib/nexus/workspace-restore-state.ts`) and the route binds the persisted
+  object for that turn (`workspaceIdForTurn`). The flag is never sent after
+  the restore settles, so a panel the person closed stays closed.
 - `findLatestConversationForWorkspace` — Atrium's "Open beside chat" and
   "Ask the agent" continue the most recent conversation about the object
   instead of starting a new one.
 
 Model-side only, `lib/nexus/workspace-tool-history.ts` stubs superseded
 workspace source payloads (full artifact code, document bodies) out of the
-messages sent to the model, keeping the newest payload **per object**
-verbatim. Persisted messages are never touched. Tool parts keep their exact
+messages sent to the model. Per object it keeps the newest write verbatim,
+plus every read page after it (a large source is read in several pages at
+different offsets, and all of them are the current revision). Persisted messages are never touched. Tool parts keep their exact
 shape so every tool call still pairs with its result on replay.
 
 ---

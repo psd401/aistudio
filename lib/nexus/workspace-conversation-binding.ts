@@ -111,6 +111,41 @@ export async function getConversationWorkspaceObjectId(params: {
 }
 
 /**
+ * The workspace a chat turn binds. An explicit `requestedWorkspaceId` always
+ * wins. Without one, a turn sent while the client is still restoring a
+ * reopened conversation's panel (`restoreBoundWorkspace`) falls back to the
+ * persisted binding — owner-scoped in the query, and still canView-gated by
+ * the caller's `resolveWorkspace` like any other id. A lookup failure degrades
+ * to no workspace, the behaviour before the binding existed.
+ */
+export async function workspaceIdForTurn(args: {
+  requestedWorkspaceId: string | undefined;
+  restoreBoundWorkspace: boolean;
+  conversationId: string | undefined;
+  userId: number;
+  requestId?: string;
+}): Promise<string | undefined> {
+  if (args.requestedWorkspaceId) return args.requestedWorkspaceId;
+  if (!args.restoreBoundWorkspace || !args.conversationId) return undefined;
+  try {
+    const bound = await getConversationWorkspaceObjectId({
+      conversationId: args.conversationId,
+      userId: args.userId,
+    });
+    return bound ?? undefined;
+  } catch (error) {
+    createLogger({
+      requestId: args.requestId,
+      module: "nexus-workspace-binding",
+    }).warn("Could not read the conversation workspace binding; continuing without it", {
+      conversationId: args.conversationId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return undefined;
+  }
+}
+
+/**
  * The user's most recently active conversation about this object, or null.
  *
  * Archived conversations are excluded: the editor's "Ask the agent" should land
