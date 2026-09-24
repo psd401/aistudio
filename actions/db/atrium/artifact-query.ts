@@ -38,8 +38,18 @@
  * author intended. Evaluate any FUTURE bridge operation against that invariant
  * before shipping it.
  *
- * Failures collapse to a generic message on the way out: upstream MCP/database
- * text never reaches the frame.
+ * ## How failures are reported (#1787)
+ * Every failure is classified into one `ArtifactBridgeErrorCode` (see
+ * `lib/content/artifact-bridge-errors.ts`) so the page can tell "you are signed
+ * out" from "your SQL names a column that does not exist" — they used to be the
+ * same string, which is how a broken dashboard could look like a permissions
+ * problem to the viewer, the author, and the model that wrote it.
+ *
+ * Upstream MCP/database TEXT is still withheld from plain readers. It is attached
+ * (as `detail`) only when the requester may EDIT the artifact: an editor can open
+ * the Code tab, read that SQL, and run it themselves, so the Postgres message
+ * about their own statement tells them nothing they could not already obtain.
+ * The full upstream text is ALWAYS logged server-side, for either audience.
  */
 
 import {
@@ -48,15 +58,22 @@ import {
   sanitizeForLogging,
   startTimer,
 } from "@/lib/logger";
-import { createSuccess, ErrorFactories, handleError } from "@/lib/error-utils";
+import { ErrorFactories, handleError } from "@/lib/error-utils";
 import { getServerSession } from "@/lib/auth/server-session";
 import type { CognitoSession } from "@/lib/auth/server-session";
-import { contentService } from "@/lib/content";
+import { contentService, versionService } from "@/lib/content";
+import type { ContentDataAccess } from "@/lib/content/types";
+import { canEdit } from "@/lib/content/helpers";
+import {
+  artifactBridgeErrorMessage,
+  boundBridgeErrorMessage,
+  type ArtifactBridgeErrorCode,
+} from "@/lib/content/artifact-bridge-errors";
 import { getConnectorTools } from "@/lib/mcp/connector-service";
 import { getNexusRouterConfig } from "@/lib/nexus/model-router/config";
 import { resolvePsdDataConnectorId } from "@/lib/nexus/model-router/psd-data-connector";
 import { consumeRateLimit } from "@/lib/rate-limit";
-import type { ActionState } from "@/types";
+import { ErrorCode } from "@/types/error-types";
 import { assertArtifactDataAccess, validateContentId } from "./artifact-guards";
 import { getUserRequester } from "./requester";
 
@@ -102,7 +119,39 @@ export interface QueryArtifactDataInput {
   sql: string;
   limit?: number;
   offset?: number;
+  /**
+   * The version whose code is actually RUNNING in the frame (#1787), supplied by
+   * the bridge from its own trusted props — never from the artifact's message.
+   * It exists only to make the data MCP's audit line say which version asked:
+   * `content.currentVersionId` is the working HEAD, which is the wrong answer on
+   * a `/c/` published page or whenever the canvas dropdown previews an older
+   * version. Validated as belonging to this object before it is used.
+   */
+  versionId?: string;
 }
+
+/**
+ * The failure shape `queryArtifactData` returns (#1787). A strict narrowing of
+ * `ActionState`'s failure arm — extra fields only — so existing callers that
+ * treat it as `ActionState` keep working.
+ */
+export interface QueryArtifactDataFailure {
+  isSuccess: false;
+  message: string;
+  /** The typed reason, carried through the bridge to `err.code` in the frame. */
+  code: ArtifactBridgeErrorCode;
+  /** Present for `rate_limited` only. */
+  retryAfterSeconds?: number;
+  /**
+   * Upstream text (e.g. `column "school_name" does not exist`). Present only for
+   * `query_error`, and only when the requester may EDIT this artifact.
+   */
+  detail?: string;
+}
+
+export type QueryArtifactDataOutcome =
+  | { isSuccess: true; message: string; data: QueryArtifactDataResult }
+  | QueryArtifactDataFailure;
 
 /** The data MCP's `format: "json"` body, camelCased for the bridge. */
 export interface QueryArtifactDataResult {
@@ -234,8 +283,76 @@ async function requirePsdDataConnectorId(): Promise<string> {
   return connectorId;
 }
 
+/**
+ * An error carrying the bridge code the classifier should use, for the cases the
+ * generic `ErrorCode` taxonomy cannot distinguish: a mode mismatch and a data-MCP
+ * tool error are both `VALIDATION_FAILED`/`EXTERNAL_SERVICE_ERROR` to
+ * `ErrorFactories`, but `not_query_mode` and `query_error` are the whole point of
+ * #1787. `bridgeDetail` is the upstream text — always logged, and forwarded to
+ * the page only for an editor.
+ */
+interface BridgeTaggedError extends Error {
+  bridgeCode?: ArtifactBridgeErrorCode;
+  bridgeDetail?: string;
+}
+
+function tagBridgeError<T extends Error>(
+  error: T,
+  code: ArtifactBridgeErrorCode,
+  detail?: string
+): T {
+  const tagged = error as T & BridgeTaggedError;
+  tagged.bridgeCode = code;
+  if (detail !== undefined) tagged.bridgeDetail = detail;
+  return tagged;
+}
+
+/**
+ * A malformed/unusable answer from the data MCP — the request reached it, but
+ * what came back is not a result. Not the artifact's SQL problem, so it stays
+ * `unavailable`; `dataMcpQueryError` is the SQL one.
+ */
 function dataMcpFailure(detail: string): Error {
-  return ErrorFactories.externalServiceError("psd-data-mcp", new Error(detail));
+  return tagBridgeError(
+    ErrorFactories.externalServiceError("psd-data-mcp", new Error(detail)),
+    "unavailable"
+  );
+}
+
+/**
+ * The data MCP ran the statement and reported an error (`isError: true`) — bad
+ * SQL, an unknown column, a table the viewer's row-level policy refuses. `text`
+ * is the server's own message, which is ABOUT THE ARTIFACT'S OWN SQL.
+ */
+function dataMcpQueryError(text: string | null): Error {
+  return tagBridgeError(
+    ErrorFactories.externalServiceError(
+      "psd-data-mcp",
+      new Error(text ?? "tool reported an error")
+    ),
+    "query_error",
+    text ?? undefined
+  );
+}
+
+/**
+ * Pull whatever human-readable text an MCP `CallToolResult` carries, joining the
+ * text blocks. Returns null when there is none to report.
+ */
+function textFromToolContent(content: unknown): string | null {
+  if (!Array.isArray(content)) return null;
+  const parts: string[] = [];
+  for (const block of content) {
+    if (
+      typeof block === "object" &&
+      block !== null &&
+      (block as { type?: unknown }).type === "text" &&
+      typeof (block as { text?: unknown }).text === "string"
+    ) {
+      parts.push((block as { text: string }).text);
+    }
+  }
+  return boundBridgeErrorMessage(parts.join(" "));
 }
 
 /**
@@ -249,7 +366,9 @@ function parseToolResult(result: unknown): QueryArtifactDataResult {
   }
   const envelope = result as { isError?: unknown; content?: unknown };
   if (envelope.isError === true) {
-    throw dataMcpFailure("tool reported an error");
+    // #1787: keep the server's own text. Discarding it here was why a Postgres
+    // `column "x" does not exist` never reached the author OR the server logs.
+    throw dataMcpQueryError(textFromToolContent(envelope.content));
   }
   const content = Array.isArray(envelope.content) ? envelope.content : [];
   const textBlock = content.find(
@@ -308,6 +427,102 @@ function parseToolResult(result: unknown): QueryArtifactDataResult {
 }
 
 /**
+ * `requireUserAccess` (inside `getConnectorTools`) refuses a viewer who is
+ * neither on the server's allow list nor staff/administrator, and it throws a
+ * PLAIN `Error` with no code — so the message is the only signal that this is a
+ * permission refusal rather than "the MCP server is down". Matched narrowly, and
+ * only to choose between `forbidden` and `unavailable`: both refuse the request.
+ */
+const CONNECTOR_ACCESS_DENIED_RE =
+  /does not have (?:role-based )?access to MCP server/i;
+
+/** Validation codes: the page asked for something malformed. */
+const REQUEST_VALIDATION_CODES: ReadonlySet<string> = new Set([
+  ErrorCode.VALIDATION_FAILED,
+  ErrorCode.INVALID_INPUT,
+  ErrorCode.MISSING_REQUIRED_FIELD,
+  ErrorCode.INVALID_FORMAT,
+  ErrorCode.VALUE_OUT_OF_RANGE,
+  "CONTENT_VALIDATION",
+]);
+
+/** Map a typed/domain error `code` onto the bridge's closed code set. */
+function bridgeCodeForErrorCode(code: string): ArtifactBridgeErrorCode {
+  if (code === ErrorCode.BIZ_RATE_LIMIT_EXCEEDED) return "rate_limited";
+  if (code === ErrorCode.EXTERNAL_SERVICE_TIMEOUT || code === ErrorCode.DB_TIMEOUT) {
+    return "timeout";
+  }
+  // The shared 404 mask: "cannot see it" and "does not exist" are deliberately
+  // the same answer, and `forbidden` is the honest one for a viewer.
+  if (
+    code === ErrorCode.DB_RECORD_NOT_FOUND ||
+    code === "CONTENT_NOT_FOUND" ||
+    code === "CONTENT_FORBIDDEN"
+  ) {
+    return "forbidden";
+  }
+  // AUTHZ_ before AUTH_: the former is a prefix-extension of the latter.
+  if (code.startsWith("AUTHZ_")) return "forbidden";
+  if (code.startsWith("AUTH_")) return "unauthenticated";
+  if (REQUEST_VALIDATION_CODES.has(code)) return "query_error";
+  return "unavailable";
+}
+
+/** One classified failure, before the editor gate decides what the page sees. */
+interface ClassifiedQueryFailure {
+  code: ArtifactBridgeErrorCode;
+  retryAfterSeconds?: number;
+  /** Upstream/technical text. ALWAYS logged; forwarded only for an editor. */
+  detail?: string;
+}
+
+/**
+ * Classify a thrown failure into exactly one bridge code (#1787). Errors we
+ * construct carry the answer already (`bridgeCode`); everything else is mapped
+ * from its `ErrorCode`, its `name` (abort/timeout), or the connector's
+ * access-refusal message.
+ */
+function classifyQueryFailure(error: unknown): ClassifiedQueryFailure {
+  if (!(error instanceof Error)) return { code: "unavailable" };
+  const tagged = error as BridgeTaggedError;
+  if (tagged.bridgeCode) {
+    return {
+      code: tagged.bridgeCode,
+      ...(tagged.bridgeDetail ? { detail: tagged.bridgeDetail } : {}),
+    };
+  }
+  // `AbortSignal.timeout` rejects with a DOMException named TimeoutError; an
+  // MCP client that forwards the signal may surface AbortError instead.
+  if (error.name === "TimeoutError" || error.name === "AbortError") {
+    return { code: "timeout" };
+  }
+  const code = (error as { code?: unknown }).code;
+  if (typeof code === "string") {
+    const bridgeCode = bridgeCodeForErrorCode(code);
+    if (bridgeCode === "rate_limited") {
+      const retryAfterSeconds = (
+        error as { rateLimit?: { retryAfterSeconds?: unknown } }
+      ).rateLimit?.retryAfterSeconds;
+      return {
+        code: "rate_limited",
+        ...(typeof retryAfterSeconds === "number" && retryAfterSeconds >= 0
+          ? { retryAfterSeconds }
+          : {}),
+      };
+    }
+    // A validation refusal is about the page's OWN request (a missing sql, an
+    // out-of-range limit), so its message is safe for any viewer to read.
+    if (bridgeCode === "query_error") {
+      const detail = boundBridgeErrorMessage(error.message);
+      return { code: bridgeCode, ...(detail ? { detail } : {}) };
+    }
+    return { code: bridgeCode };
+  }
+  if (CONNECTOR_ACCESS_DENIED_RE.test(error.message)) return { code: "forbidden" };
+  return { code: "unavailable" };
+}
+
+/**
  * Invoke `query_data` on the resolved connector with the forced arguments and a
  * hard timeout, always closing the MCP client.
  */
@@ -358,15 +573,112 @@ async function callQueryData(args: {
   }
 }
 
+/**
+ * The exclusivity gate, retagged (#1787). `assertArtifactDataAccess` raises a
+ * generic `VALIDATION_FAILED`, which is indistinguishable from "your `limit` is
+ * out of range" — and telling a records-mode artifact that its SQL is broken is
+ * exactly the confusion this issue is about.
+ */
+function assertQueryMode(content: { kind: string; dataAccess: ContentDataAccess }): void {
+  try {
+    assertArtifactDataAccess(
+      content,
+      "query",
+      "Artifact is not configured for data queries"
+    );
+  } catch (error) {
+    if (error instanceof Error) throw tagBridgeError(error, "not_query_mode");
+    throw error;
+  }
+}
+
+/**
+ * Which version the data MCP's audit line should name (#1787).
+ *
+ * `content.currentVersionId` is the working HEAD — the wrong answer for a
+ * published `/c/` page or a canvas previewing an older version. The caller may
+ * therefore supply the version actually running, but only a version that belongs
+ * to THIS object is accepted: `versionService.getById` is scoped by `objectId`,
+ * so a mismatched id cannot make one object's audit line name another's version.
+ *
+ * The head needs no lookup (it is already known to belong), so the ordinary case
+ * costs no extra query.
+ */
+async function resolveAuditVersionId(
+  content: { id: string; currentVersionId: string | null },
+  requested: unknown
+): Promise<string | null> {
+  if (typeof requested !== "string" || !requested.trim()) {
+    return content.currentVersionId;
+  }
+  const versionId = requested.trim();
+  if (versionId === content.currentVersionId) return versionId;
+  const version = await versionService.getById(content.id, versionId);
+  if (!version) {
+    throw ErrorFactories.invalidInput(
+      "versionId",
+      null,
+      "versionId does not belong to this artifact"
+    );
+  }
+  return version.id;
+}
+
+/**
+ * Turn a thrown failure into the typed bridge response (#1787).
+ *
+ * `handleError` still runs — it is what writes the full technical detail to the
+ * server logs — but its generic `message` is replaced by the code's own text, so
+ * the page gets something it can act on. `detail` (upstream SQL/MCP text) is
+ * attached ONLY for a `query_error` raised for a requester who may edit the
+ * artifact; a plain reader gets the code and nothing more.
+ */
+function buildQueryFailure(
+  error: unknown,
+  requestId: string,
+  mayEdit: boolean
+): QueryArtifactDataFailure {
+  const classified = classifyQueryFailure(error);
+  handleError(error, "Failed to query artifact data", {
+    context: "queryArtifactData",
+    requestId,
+    operation: "queryArtifactData",
+    metadata: { bridgeCode: classified.code, upstreamDetail: classified.detail },
+  });
+  const detail =
+    classified.code === "query_error" && mayEdit ? classified.detail : undefined;
+  return {
+    isSuccess: false,
+    message: detail ?? artifactBridgeErrorMessage(classified.code),
+    code: classified.code,
+    ...(classified.retryAfterSeconds !== undefined
+      ? { retryAfterSeconds: classified.retryAfterSeconds }
+      : {}),
+    ...(detail ? { detail } : {}),
+  };
+}
+
 export async function queryArtifactData(
   input: QueryArtifactDataInput
-): Promise<ActionState<QueryArtifactDataResult>> {
+): Promise<QueryArtifactDataOutcome> {
   const requestId = generateRequestId();
   const timer = startTimer("queryArtifactData");
   const log = createLogger({ requestId, action: "queryArtifactData" });
+  // Whether the requester may EDIT this artifact, resolved as soon as both the
+  // requester and the object are known. It gates `detail` in the catch below, so
+  // it must default to false: every failure BEFORE the object is resolved (no
+  // session, rate limited, not viewable) is answered without upstream text.
+  let mayEdit = false;
 
   try {
+    // #1787: logged BEFORE authorization, so a session/rate-limit/validation
+    // refusal is no longer an "Action started"-less log line with no contentId
+    // to correlate it by.
     const contentId = validateContentId(input?.contentId);
+    log.info("Action started: query artifact data", {
+      contentId: sanitizeForLogging(contentId),
+    });
+
     const { session, idToken } = await authorizeQueryRequest(contentId);
     const params = validateQueryParams(input);
 
@@ -377,23 +689,22 @@ export async function queryArtifactData(
       throw ErrorFactories.authNoSession();
     }
 
-    log.info("Action started: query artifact data", {
-      contentId: sanitizeForLogging(contentId),
-      sqlLength: params.sql.length,
-      limit: params.limit,
-      offset: params.offset,
-    });
-
     // Shared 404 mask for missing/non-viewable content, exactly as the record
     // actions do — a viewer who cannot see the artifact learns nothing.
     const content = await contentService.get(requester, contentId);
+    mayEdit = canEdit(requester, content.ownerUserId);
     // The exclusivity gate: `records` and `none` artifacts never reach the
     // data MCP (see the artifact-data.ts header for why).
-    assertArtifactDataAccess(
-      content,
-      "query",
-      "Artifact is not configured for data queries"
-    );
+    assertQueryMode(content);
+    const auditVersionId = await resolveAuditVersionId(content, input?.versionId);
+
+    log.debug("Artifact data query accepted", {
+      contentId: content.id,
+      sqlLength: params.sql.length,
+      limit: params.limit,
+      offset: params.offset,
+      auditVersionId,
+    });
 
     // `getConnectorTools` runs `requireUserAccess` internally (allow list, else
     // staff/administrator), so a student or an out-of-list viewer is refused
@@ -406,8 +717,9 @@ export async function queryArtifactData(
       sql: params.sql,
       limit: params.limit,
       offset: params.offset,
-      // The audit line the data MCP records for this call.
-      reason: `atrium artifact ${content.id} v${content.currentVersionId ?? "none"}`,
+      // The audit line the data MCP records for this call — naming the version
+      // that is actually running, not whatever the working head happens to be.
+      reason: `atrium artifact ${content.id} v${auditVersionId ?? "none"}`,
     });
 
     timer({ status: "success" });
@@ -417,15 +729,18 @@ export async function queryArtifactData(
       returnedCount: result.returnedCount,
       truncated: result.truncated,
     });
-    return createSuccess(result, "Artifact data query completed");
+    // Built as a literal rather than via `createSuccess`, whose return type is
+    // the whole `ActionState` union — including a failure arm that carries no
+    // bridge `code` and so does not satisfy `QueryArtifactDataOutcome`.
+    return {
+      isSuccess: true,
+      message: "Artifact data query completed",
+      data: result,
+    };
   } catch (error) {
     timer({ status: "error" });
-    // The bridge collapses every failure to one generic string before it reaches
-    // the frame; this handler keeps the detail server-side for operators.
-    return handleError(error, "Failed to query artifact data", {
-      context: "queryArtifactData",
-      requestId,
-      operation: "queryArtifactData",
-    });
+    // `handleError` (inside) keeps the full technical detail server-side; the
+    // page gets a typed code plus, for an editor, the upstream SQL message.
+    return buildQueryFailure(error, requestId, mayEdit);
   }
 }

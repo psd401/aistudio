@@ -21,10 +21,19 @@ jest.mock("@/actions/db/atrium/requester", () => ({
 }));
 
 const mockContentGet = jest.fn();
+const mockVersionGetById = jest.fn();
 jest.mock("@/lib/content", () => ({
   contentService: {
     get: (...args: unknown[]) => mockContentGet(...args),
   },
+  versionService: {
+    getById: (...args: unknown[]) => mockVersionGetById(...args),
+  },
+}));
+
+const mockCanEdit = jest.fn();
+jest.mock("@/lib/content/helpers", () => ({
+  canEdit: (...args: unknown[]) => mockCanEdit(...args),
 }));
 
 const mockConsumeRateLimit = jest.fn();
@@ -79,7 +88,10 @@ const CONTENT = {
   kind: "artifact",
   dataAccess: "query",
   currentVersionId: "22222222-2222-4222-8222-222222222222",
+  ownerUserId: 7,
 };
+/** A non-head version of the SAME artifact (the /c/ + dropdown case, #1787). */
+const OLDER_VERSION_ID = "44444444-4444-4444-8444-444444444444";
 const CONNECTOR_ID = "33333333-3333-4333-8333-333333333333";
 
 const JSON_BODY = {
@@ -118,6 +130,10 @@ beforeEach(() => {
   mockGetServerSession.mockResolvedValue({ ...SESSION });
   mockGetUserRequester.mockResolvedValue({ ...REQUESTER });
   mockContentGet.mockResolvedValue({ ...CONTENT });
+  // Default to a NON-editor requester: upstream text must stay withheld unless
+  // a test opts into the editor case.
+  mockCanEdit.mockReturnValue(false);
+  mockVersionGetById.mockResolvedValue(null);
   mockConsumeRateLimit.mockReturnValue({
     allowed: true,
     retryAfterSeconds: 0,
@@ -442,5 +458,190 @@ describe("queryArtifactData upstream failures", () => {
     expect(result.isSuccess).toBe(false);
     expect(mockExecute).not.toHaveBeenCalled();
     expect(mockClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * #1787 — every failure carries a typed `code`, and the data MCP's own text is
+ * kept (logged always, forwarded only to someone who can edit the artifact).
+ */
+describe("queryArtifactData typed failure codes (#1787)", () => {
+  /** Narrow the outcome to its failure arm so `code` is readable. */
+  function failureOf(result: Awaited<ReturnType<typeof queryArtifactData>>) {
+    if (result.isSuccess) throw new Error("expected a failure");
+    return result;
+  }
+
+  it("classifies a missing session as unauthenticated", async () => {
+    mockGetServerSession.mockResolvedValueOnce(null);
+    expect(failureOf(await queryArtifactData(validInput)).code).toBe(
+      "unauthenticated"
+    );
+  });
+
+  it("classifies a session with no id token as unauthenticated", async () => {
+    mockGetServerSession.mockResolvedValueOnce({ sub: SESSION.sub });
+    expect(failureOf(await queryArtifactData(validInput)).code).toBe(
+      "unauthenticated"
+    );
+  });
+
+  it("classifies the 404 mask as forbidden", async () => {
+    mockContentGet.mockRejectedValueOnce(new NotFoundError("Content not found"));
+    expect(failureOf(await queryArtifactData(validInput)).code).toBe("forbidden");
+  });
+
+  it("classifies a connector access denial as forbidden", async () => {
+    mockGetConnectorTools.mockRejectedValueOnce(
+      new Error("User 7 does not have role-based access to MCP server x")
+    );
+    expect(failureOf(await queryArtifactData(validInput)).code).toBe("forbidden");
+  });
+
+  it.each(["records", "none"] as const)(
+    "classifies a %s-mode artifact as not_query_mode, not a query error",
+    async (dataAccess) => {
+      mockContentGet.mockResolvedValueOnce({ ...CONTENT, dataAccess });
+      expect(failureOf(await queryArtifactData(validInput)).code).toBe(
+        "not_query_mode"
+      );
+    }
+  );
+
+  it("classifies an exhausted budget as rate_limited and carries the retry delay", async () => {
+    mockConsumeRateLimit.mockReturnValueOnce({
+      allowed: false,
+      retryAfterSeconds: 30,
+      resetTime: Date.now() + 30_000,
+    });
+
+    const failure = failureOf(await queryArtifactData(validInput));
+
+    expect(failure.code).toBe("rate_limited");
+    expect(failure.retryAfterSeconds).toBe(30);
+  });
+
+  it("classifies an unconfigured connector as unavailable", async () => {
+    mockResolveConnectorId.mockResolvedValueOnce(null);
+    expect(failureOf(await queryArtifactData(validInput)).code).toBe("unavailable");
+  });
+
+  it("classifies an aborted/timed-out tool call as timeout", async () => {
+    const aborted = new Error("The operation was aborted due to timeout");
+    aborted.name = "TimeoutError";
+    mockExecute.mockRejectedValueOnce(aborted);
+    expect(failureOf(await queryArtifactData(validInput)).code).toBe("timeout");
+  });
+
+  it("classifies a malformed upstream body as unavailable, not a query error", async () => {
+    mockExecute.mockResolvedValueOnce({
+      content: [{ type: "text", text: "not json" }],
+    });
+    expect(failureOf(await queryArtifactData(validInput)).code).toBe("unavailable");
+  });
+
+  it("gives an EDITOR the database's own message for a query_error", async () => {
+    mockCanEdit.mockReturnValue(true);
+    mockExecute.mockResolvedValueOnce({
+      isError: true,
+      content: [{ type: "text", text: 'column "school_name" does not exist' }],
+    });
+
+    const failure = failureOf(await queryArtifactData(validInput));
+
+    expect(failure.code).toBe("query_error");
+    expect(failure.detail).toBe('column "school_name" does not exist');
+    expect(failure.message).toContain('column "school_name" does not exist');
+  });
+
+  it("withholds the database text from a NON-editor", async () => {
+    mockCanEdit.mockReturnValue(false);
+    mockExecute.mockResolvedValueOnce({
+      isError: true,
+      content: [{ type: "text", text: 'column "school_name" does not exist' }],
+    });
+
+    const failure = failureOf(await queryArtifactData(validInput));
+
+    expect(failure.code).toBe("query_error");
+    expect(failure.detail).toBeUndefined();
+    expect(failure.message).not.toMatch(/school_name/);
+  });
+
+  it("flattens control characters out of an upstream message", async () => {
+    mockCanEdit.mockReturnValue(true);
+    mockExecute.mockResolvedValueOnce({
+      isError: true,
+      content: [{ type: "text", text: "syntax error\nLINE 1: SELEC\n  ^" }],
+    });
+
+    const failure = failureOf(await queryArtifactData(validInput));
+
+    expect(failure.detail).toBe("syntax error LINE 1: SELEC ^");
+  });
+
+  it("never leaks upstream text to an editor through a non-query failure", async () => {
+    mockCanEdit.mockReturnValue(true);
+    mockGetConnectorTools.mockRejectedValueOnce(
+      new Error("connect ECONNREFUSED 10.0.0.1:443")
+    );
+
+    const failure = failureOf(await queryArtifactData(validInput));
+
+    expect(failure.code).toBe("unavailable");
+    expect(failure.detail).toBeUndefined();
+    expect(failure.message).not.toMatch(/ECONNREFUSED/);
+  });
+});
+
+/** #1787 — the audit line must name the version that is actually running. */
+describe("queryArtifactData audit version (#1787)", () => {
+  function reasonOf(): string {
+    const [args] = mockExecute.mock.calls[0] as [Record<string, unknown>];
+    return args.reason as string;
+  }
+
+  it("names the head when no version is supplied, without a lookup", async () => {
+    await queryArtifactData(validInput);
+
+    expect(reasonOf()).toBe(
+      `atrium artifact ${CONTENT.id} v${CONTENT.currentVersionId}`
+    );
+    expect(mockVersionGetById).not.toHaveBeenCalled();
+  });
+
+  it("skips the lookup when the supplied version IS the head", async () => {
+    await queryArtifactData({
+      ...validInput,
+      versionId: CONTENT.currentVersionId,
+    });
+
+    expect(mockVersionGetById).not.toHaveBeenCalled();
+    expect(reasonOf()).toBe(
+      `atrium artifact ${CONTENT.id} v${CONTENT.currentVersionId}`
+    );
+  });
+
+  it("names a non-head version that belongs to this artifact", async () => {
+    mockVersionGetById.mockResolvedValueOnce({ id: OLDER_VERSION_ID });
+
+    await queryArtifactData({ ...validInput, versionId: OLDER_VERSION_ID });
+
+    expect(mockVersionGetById).toHaveBeenCalledWith(CONTENT.id, OLDER_VERSION_ID);
+    expect(reasonOf()).toBe(`atrium artifact ${CONTENT.id} v${OLDER_VERSION_ID}`);
+  });
+
+  it("refuses a version that does not belong to this artifact", async () => {
+    // `versionService.getById` is scoped by objectId, so a null answer means the
+    // id belongs to some other object (or nothing) — never audit under it.
+    mockVersionGetById.mockResolvedValueOnce(null);
+
+    const result = await queryArtifactData({
+      ...validInput,
+      versionId: "55555555-5555-4555-8555-555555555555",
+    });
+
+    expect(result.isSuccess).toBe(false);
+    expect(mockGetConnectorTools).not.toHaveBeenCalled();
   });
 });

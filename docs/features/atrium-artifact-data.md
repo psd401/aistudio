@@ -167,7 +167,7 @@ else is forced server-side and cannot be influenced from the frame:
 | `format` | `"json"` | Machine-usable rows instead of the chat Markdown table. |
 | `export` | `false` | No CSV download link. The data MCP also rejects export in JSON mode. |
 | `view_results` | `true` | — |
-| `reason` | `atrium artifact <contentId> v<versionId>` | The data MCP audit log reads "this viewer, via artifact X". |
+| `reason` | `atrium artifact <contentId> v<versionId>` | The data MCP audit log reads "this viewer, via artifact X". Since #1787 `<versionId>` is the version actually RUNNING in the frame (the caller passes it from trusted props; the action validates it belongs to this object via `versionService.getById`), not the working head — which was the wrong answer on a published `/c/` page or while the canvas previewed an older version. |
 
 Bounds: SQL is capped at 8,000 characters, `limit` is clamped to 2,000 (the data
 MCP's `JSON_ROW_LIMIT`), `offset` to 1,000,000, and the viewer gets 60 queries
@@ -177,8 +177,56 @@ RDS. `requireUserAccess` runs inside `getConnectorTools`, so a student — or an
 viewer outside the connector's allow list — is refused before any request
 reaches the data MCP.
 
-Every failure, from "not in query mode" to an upstream MCP error, reaches the
-frame as the same generic rejection. Upstream text never leaves the server.
+### Typed failures (#1787)
+
+Failures used to reach the frame as ONE string — "Artifact data request failed"
+— so a SQL typo, an expired session and a rate limit were indistinguishable to
+the page, to the author previewing it, and to the chat model that wrote the
+code. Every rejection now carries an `ArtifactBridgeErrorCode`
+(`lib/content/artifact-bridge-errors.ts`), surfaced to artifact code as
+`err.code`:
+
+| code | meaning |
+|---|---|
+| `unauthenticated` | no session, or no usable ID token |
+| `forbidden` | cannot see this artifact, or no access to the data server |
+| `not_query_mode` | the artifact's `data_access` does not allow this operation |
+| `rate_limited` | budget exhausted; `err.retryAfterSeconds` carries the backoff |
+| `timeout` | no answer within the budget |
+| `query_error` | the SQL/arguments were rejected |
+| `too_many_requests` | the page has too many bridge calls in flight |
+| `unavailable` | connector unconfigured, upstream down, unexpected shape |
+
+This discloses nothing new: every code describes the VIEWER'S OWN request under
+the viewer's own permissions, and the frame has no egress (`connect-src 'none'`).
+
+Upstream database text is still withheld by default. For `query_error` it is
+attached (as `detail`, and as the message) only when the requester may **edit**
+the artifact — an editor can read that SQL in the Code tab and run it
+themselves, so `column "school_name" does not exist` tells them nothing new. A
+plain reader gets the code with a generic message. The full upstream text is
+always logged server-side.
+
+The record operations (`submit` / `list`) have no typed classification of their
+own and keep their pre-#1787 generic answer under `unavailable`.
+
+### Preview diagnostics: closing the loop to the chat (#1787)
+
+The preview runs cross-origin in the viewer's browser, so a chat that authors an
+artifact cannot observe whether its code works — which is how one turn shipped a
+dashboard whose every query failed and reported it as "populated live from the
+database."
+
+So the sandbox reports each failure (rejected bridge calls, plus uncaught errors
+and unhandled rejections the frame forwards as `atrium-artifact-error`) to its
+parent via `onDiagnostic`. `ArtifactCanvas` buffers up to ten of them in
+`lib/atrium/artifact-preview-diagnostics.ts` — a module-level client singleton,
+deliberately not a React context, so the workspace panel and the Nexus
+conversation runtime stay unaware of each other. The next chat request carries
+the buffer as `workspacePreviewDiagnostics`, and `read_workspace_content`
+returns it as `previewDiagnostics` **only** when its `contentId` matches the
+object the server bound. The buffer is cleared whenever a different artifact,
+version, or mode starts running.
 
 ### Data MCP contract
 

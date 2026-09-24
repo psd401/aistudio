@@ -293,6 +293,11 @@ Rules — follow all of them:
   into the SQL. Fetch an aggregated/bounded result set and filter it in
   JavaScript, or pick between a fixed set of predicates you wrote (a dropdown of
   known values), re-querying when the choice changes.
+- **Never report success you have not observed.** The preview runs in the
+  viewer's browser; nothing about a failed query reaches you unless you look. In
+  the Nexus workspace chat, `read_workspace_content` returns `previewDiagnostics`
+  — call it again after every artifact write and read them before you tell anyone
+  the dashboard works.
 - **Test it before you publish it.** The bridge is live on the authoring
   surfaces — the full-screen viewer (`/atrium/<id>/view`, which the create/edit
   response links to), the editor canvas, and the "Open beside chat" panel — so
@@ -300,10 +305,23 @@ Rules — follow all of them:
   tell anyone the dashboard is ready. It stays OFF for embeds inside a document,
   library thumbnails, and the anonymous public reader `/p/<slug>`; a query-mode
   artifact is not usable on those surfaces at all.
-- **Handle rejection.** Wrap every call in `try`/`catch` and render a sign-in /
-  no-access state. A rejection means no session, an expired ID token (they last
-  about an hour — tell the viewer to reload), no access to a table, the wrong
-  data-access mode, or a rate limit (60 queries per artifact per minute).
+- **Handle rejection, and branch on `err.code`.** Wrap every call in
+  `try`/`catch`. The rejected `Error` carries a TYPED `err.code`, one of:
+
+  | `err.code` | What it means | What the artifact should do |
+  |---|---|---|
+  | `unauthenticated` | No session, or the ID token expired (they last about an hour) | "Reload the page to sign in again" |
+  | `forbidden` | The viewer may not see this artifact or use the data server | A no-access state |
+  | `not_query_mode` | The artifact is not in `data-access query` | Fix the artifact's mode, not the code |
+  | `rate_limited` | 60 queries per artifact per minute exceeded; `err.retryAfterSeconds` says how long | Back off and retry |
+  | `timeout` | No answer within the budget | Offer a retry |
+  | `query_error` | **The SQL itself is wrong** — bad column, bad syntax | Show `err.message` (for someone who can edit the artifact that is the database's own message, e.g. `column "school_name" does not exist`) and FIX THE SQL |
+  | `too_many_requests` | Too many calls already in flight from this page | `await` them instead of firing them all at once |
+  | `unavailable` | Connector unconfigured or upstream down | A generic "data unavailable" state |
+
+  Render a no-access state **only** for `forbidden` / `unauthenticated`. Telling
+  the viewer "you don't have access" when the real problem is your own broken
+  column name is the failure mode this contract exists to prevent (#1787).
 - **`query` and `submit`/`list` are mutually exclusive.** An artifact in `query`
   mode cannot use the record store, and vice versa. This is a security boundary,
   not a limitation to work around: records are readable by the artifact's author,

@@ -113,6 +113,8 @@ interface ParentMessage {
   payload?: unknown;
   limit?: unknown;
   scope?: unknown;
+  /** #1787: the frame's forwarded uncaught error / unhandled rejection. */
+  message?: unknown;
 }
 
 /** Build the deployed host HTML the way the CDK stack does (token substitution). */
@@ -469,8 +471,109 @@ async function testDataRequestTimeout(): Promise<void> {
   const { window } = makeHost([APP_ORIGIN], { timeoutDelayMs: 0 });
   await assert.rejects(
     atriumData(window).list("leaderboard"),
-    /Atrium data request timed out/
+    (err: Error & { code?: string }) => {
+      assert.match(err.message, /Atrium data request timed out/);
+      // #1787: a timeout is its own code, not the catch-all.
+      assert.equal(err.code, "timeout");
+      return true;
+    }
   );
+}
+
+/**
+ * #1787 — the typed code the parent attaches reaches artifact code as
+ * `err.code`, so a page can render "your SQL is wrong" instead of guessing
+ * "no access" from a single generic string.
+ */
+async function testTypedBridgeErrorCodes(): Promise<void> {
+  const { window, parentMessages } = makeHost([APP_ORIGIN]);
+  const queryPromise = atriumData(window).query("select nope");
+  postDataResponse(window, {
+    type: "atrium-artifact-data-response",
+    requestId: parentMessages[0]?.data.requestId,
+    ok: false,
+    code: "query_error",
+    error: 'column "nope" does not exist',
+  });
+  await assert.rejects(
+    queryPromise,
+    (err: Error & { code?: string; retryAfterSeconds?: number }) => {
+      assert.equal(err.code, "query_error");
+      assert.equal(err.message, 'column "nope" does not exist');
+      assert.equal(err.retryAfterSeconds, undefined);
+      return true;
+    }
+  );
+}
+
+/** #1787 — `rate_limited` also carries the backoff the viewer should honour. */
+async function testRateLimitedCarriesRetryAfter(): Promise<void> {
+  const { window, parentMessages } = makeHost([APP_ORIGIN]);
+  const queryPromise = atriumData(window).query("select 1");
+  postDataResponse(window, {
+    type: "atrium-artifact-data-response",
+    requestId: parentMessages[0]?.data.requestId,
+    ok: false,
+    code: "rate_limited",
+    error: "Too many data requests. Try again in a moment.",
+    retryAfterSeconds: 30,
+  });
+  await assert.rejects(
+    queryPromise,
+    (err: Error & { code?: string; retryAfterSeconds?: number }) => {
+      assert.equal(err.code, "rate_limited");
+      assert.equal(err.retryAfterSeconds, 30);
+      return true;
+    }
+  );
+}
+
+/**
+ * #1787 — an unknown code must not reach artifact code verbatim: a page that
+ * branches on `err.code` would fall through every arm it knows about, so the
+ * host normalizes to the catch-all instead.
+ */
+async function testUnknownBridgeErrorCodeNormalizes(): Promise<void> {
+  const { window, parentMessages } = makeHost([APP_ORIGIN]);
+  const listPromise = atriumData(window).list("leaderboard");
+  postDataResponse(window, {
+    type: "atrium-artifact-data-response",
+    requestId: parentMessages[0]?.data.requestId,
+    ok: false,
+    code: "something_new",
+    error: "Artifact data request failed",
+    retryAfterSeconds: 30,
+  });
+  await assert.rejects(
+    listPromise,
+    (err: Error & { code?: string; retryAfterSeconds?: number }) => {
+      assert.equal(err.code, "unavailable");
+      // The backoff hint only rides on `rate_limited`.
+      assert.equal(err.retryAfterSeconds, undefined);
+      return true;
+    }
+  );
+}
+
+/**
+ * #1787 — the frame forwards its own uncaught errors and unhandled rejections
+ * to the parent, which is the only way a `ReferenceError` in an artifact's
+ * bootstrap reaches anyone at all (least of all the model that wrote it).
+ */
+async function testFrameErrorsAreForwardedToParent(): Promise<void> {
+  const { window, parentMessages } = makeHost([APP_ORIGIN]);
+
+  window.dispatchEvent(
+    new window.ErrorEvent("error", { message: "Chart is not defined" })
+  );
+
+  const forwarded = parentMessages.filter(
+    (entry) => entry.data.type === "atrium-artifact-error"
+  );
+  assert.equal(forwarded.length, 1);
+  assert.equal(forwarded[0]?.data.message, "Chart is not defined");
+  // Parent-bound only — never a concrete third-party origin.
+  assert.equal(forwarded[0]?.origin, "*");
 }
 
 async function testMissingRandomUuidDoesNotBreakRendering(): Promise<void> {
@@ -1123,6 +1226,23 @@ async function main(): Promise<void> {
   await check(
     "bounds pending calls and releases capacity after cleanup",
     testPendingRequestBound
+  );
+
+  await check(
+    "#1787 a rejected query carries the typed err.code and its message",
+    testTypedBridgeErrorCodes
+  );
+  await check(
+    "#1787 rate_limited carries err.retryAfterSeconds",
+    testRateLimitedCarriesRetryAfter
+  );
+  await check(
+    "#1787 an unknown code normalizes to unavailable",
+    testUnknownBridgeErrorCodeNormalizes
+  );
+  await check(
+    "#1787 the frame forwards its uncaught errors to the parent",
+    testFrameErrorsAreForwardedToParent
   );
 
   await check(
