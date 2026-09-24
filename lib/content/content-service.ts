@@ -518,11 +518,47 @@ async function applyCollectionChangeInTx(
   setValues.collectionId = patch.collectionId ?? null;
 }
 
-async function updateWithCollectionChange(
+/**
+ * Has this object ever been published anywhere? (#1791 finding 3)
+ *
+ * A publication row is NOT deleted on unpublish — it flips to `unpublished` —
+ * which is exactly the semantics a slug needs: once a URL has been live,
+ * somebody may have linked to it, so the slug must stay stable forever after.
+ * An object that has never had a row has never had a public URL, so re-slugging
+ * it on rename breaks nothing.
+ *
+ * Read inside the rename transaction rather than before it, so a publish racing
+ * a rename cannot slip between the check and the write.
+ */
+async function hasEverBeenPublishedInTx(
+  tx: DbTransaction,
+  objectId: string
+): Promise<boolean> {
+  const rows = await tx
+    .select({ id: contentPublications.id })
+    .from(contentPublications)
+    .where(eq(contentPublications.objectId, objectId))
+    .limit(1);
+  return rows.length > 0;
+}
+
+/**
+ * The transactional update path: taken when the collection is changing, when a
+ * rename may need a new slug, or both. `applyCollectionChangeInTx` no-ops when
+ * `patch.collectionId` is undefined, so this is safe for a rename-only call.
+ *
+ * `reslugTitle` (#1791 finding 3): the library's "Build it for me" flow titles a
+ * starter artifact with the truncated PROMPT, and the slug allocated at create
+ * froze that prompt into `/c/<slug>` forever — a later rename only changed the
+ * title. Re-slug on rename, but ONLY while the object has never been published:
+ * after publication a slug change breaks every link that already points at it.
+ */
+async function updateInTransaction(
   req: Requester,
   existingId: string,
   patch: UpdatePatch,
-  setValues: ContentObjectSetValues
+  setValues: ContentObjectSetValues,
+  reslugTitle: string | null
 ): Promise<ObjectRowAsText[]> {
   return executeTransaction(async (tx) => {
     const lockedRows = await tx
@@ -537,12 +573,21 @@ async function updateWithCollectionChange(
     const locked = rowToObjectDTO(lockedRows[0] as ObjectRowAsText);
     assertCanEdit(req, locked.ownerUserId);
     await applyCollectionChangeInTx(tx, req, locked, patch, setValues);
+    if (
+      reslugTitle !== null &&
+      !(await hasEverBeenPublishedInTx(tx, existingId))
+    ) {
+      // A slug race here surfaces as the same ConflictError ("please retry")
+      // that a concurrent create raises — never a silently-kept old slug, which
+      // would report a renamed URL that did not change.
+      setValues.slug = await uniqueSlug(tx, reslugTitle);
+    }
     return (await tx
       .update(contentObjects)
       .set(setValues)
       .where(eq(contentObjects.id, existingId))
       .returning(objectSelectFields)) as ObjectRowAsText[];
-  }, "content.updateCollection");
+  }, "content.updateTransactional");
 }
 
 function applyStatusChange(
@@ -982,8 +1027,13 @@ export const contentService = {
     // action boundary and merged as a typed partial (see presentationSetValues).
     Object.assign(setValues, presentationSetValues(patch));
 
+    // #1791 finding 3: a rename re-slugs — but only inside the transaction, and
+    // only for an object that has never been published (checked there, under the
+    // row lock). `setValues.title` is set iff `applyTitleAndTags` accepted a
+    // title, so this cannot fire for a tags-only or status-only patch.
+    const reslugTitle = patch.title !== undefined ? patch.title : null;
     const rows =
-      patch.collectionId === undefined
+      patch.collectionId === undefined && reslugTitle === null
         ? await executeQuery(
             (db) =>
               db
@@ -993,11 +1043,12 @@ export const contentService = {
                 .returning(objectSelectFields),
             "content.update"
           )
-        : await updateWithCollectionChange(
+        : await updateInTransaction(
             req,
             existing.id,
             patch,
-            setValues
+            setValues,
+            reslugTitle
           );
     // Guard against a concurrent delete between load and update (TOCTOU): the
     // RETURNING yields no row, so surface a clean NotFoundError, not a TypeError.

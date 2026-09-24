@@ -1,0 +1,210 @@
+/** @jest-environment node */
+
+/**
+ * #1791 finding 3: the library's "Build it for me" flow titles a starter
+ * artifact with the truncated PROMPT, and the slug was allocated once at create
+ * (`uniqueSlug`, inside the create transaction) and never recomputed. So a
+ * dashboard kept `/c/a-dashboard-of-chromebook-device-repairs-from-our-district-…`
+ * forever — even after someone renamed it in Content settings, because
+ * `applyTitleAndTags` writes `title` and nothing else.
+ *
+ * A rename now re-slugs, but ONLY while the object has never been published:
+ * once a URL has been live somebody may have linked to it, so the slug must stay
+ * stable from then on. These tests pin both halves of that rule, plus the fact
+ * that the check happens INSIDE the rename transaction (under the row lock), so
+ * a publish racing a rename cannot slip between the check and the write.
+ */
+
+jest.mock("@/lib/content/collection-access", () => ({
+  collectionAccessSnapshot: jest.fn(),
+  collectionAccessSnapshotInTx: jest.fn(),
+}));
+jest.mock("@/lib/content/visibility-service", () => ({
+  visibilityService: {
+    canView: jest.fn(async () => true),
+    assertWritableLevel: jest.fn(),
+    applyGrantsForLevel: jest.fn(async () => undefined),
+  },
+}));
+// Defined INSIDE the factory: `jest.mock` is hoisted above the file's consts,
+// so referencing an outer binding here throws "cannot access before
+// initialization". The table identities are read back below via requireMock.
+jest.mock("@/lib/db/schema", () => ({
+  contentAuditLogs: {},
+  contentCollections: {},
+  contentObjects: { id: {}, slug: {} },
+  contentPublications: { id: {}, objectId: {}, destination: {} },
+  contentVersions: {},
+  navigationItems: {},
+}));
+const { contentObjects: CONTENT_OBJECTS, contentPublications: CONTENT_PUBLICATIONS } =
+  jest.requireMock("@/lib/db/schema") as {
+    contentObjects: unknown;
+    contentPublications: unknown;
+  };
+jest.mock("@/lib/db/json-utils", () => ({
+  safeJsonbStringify: (value: unknown) => JSON.stringify(value),
+}));
+jest.mock("drizzle-orm", () => ({
+  and: (...args: unknown[]) => args,
+  count: (value: unknown) => value,
+  eq: (...args: unknown[]) => args,
+  gte: (...args: unknown[]) => args,
+  isNull: (value: unknown) => value,
+  like: (...args: unknown[]) => args,
+  sql: Object.assign((..._args: unknown[]) => ({}), { join: () => ({}) }),
+}));
+jest.mock("@/lib/content/mappers", () => ({
+  objectSelectFields: {},
+  rowToObjectDTO: (row: Record<string, unknown>) => row,
+}));
+jest.mock("@/lib/content/version-service", () => ({
+  snapshotInTx: jest.fn(),
+  versionService: { flushSnapshotWrites: jest.fn(async () => undefined) },
+}));
+jest.mock("@/lib/content/agent-screening", () => ({
+  screenAgentBodyForWrite: jest.fn(async () => null),
+}));
+jest.mock("@/lib/content/events", () => ({
+  contentEvents: { emit: jest.fn(async () => undefined) },
+}));
+
+const OBJECT_ID = "11111111-1111-1111-1111-111111111111";
+const lockedObject = {
+  id: OBJECT_ID,
+  kind: "artifact",
+  title: "A dashboard of Chromebook/device repairs from our district data: repairs per…",
+  slug: "a-dashboard-of-chromebook-device-repairs-from-our-district-data-repairs-per",
+  ownerUserId: 7,
+  collectionId: null,
+  visibilityLevel: "private",
+  status: "draft",
+  tags: [],
+};
+
+/** Publication rows the in-transaction check will find (empty = never published). */
+let publicationRows: Array<Record<string, unknown>> = [];
+/** Slugs already taken, as `uniqueSlug`'s prefetch SELECT would report them. */
+let takenSlugs: Array<{ slug: string }> = [];
+/** Order in which the transaction touched each table, for the race assertion. */
+let txSelects: string[] = [];
+let updatedValues: Record<string, unknown> | null = null;
+/** Rows the pre-transaction `loadByIdOrSlug` returns. */
+const outsideRows = () => [lockedObject];
+
+const updateReturningMock = jest.fn(async () => [
+  { ...lockedObject, ...(updatedValues ?? {}) },
+]);
+const updateSetMock = jest.fn((values: Record<string, unknown>) => {
+  updatedValues = values;
+  return { where: jest.fn(() => ({ returning: updateReturningMock })) };
+});
+
+/**
+ * A tx stub that dispatches on the TABLE each select targets, because the rename
+ * path issues three structurally different selects: the `FOR UPDATE` row lock,
+ * the publication probe (`.limit(1)`), and `uniqueSlug`'s prefetch (awaited
+ * directly). Each returns a real promise — never a shared thenable, which
+ * re-runs per `.then()`.
+ */
+const txStub = {
+  select: jest.fn(() => ({
+    from: jest.fn((table: unknown) => {
+      if (table === CONTENT_PUBLICATIONS) {
+        txSelects.push("publications");
+        return {
+          where: jest.fn(() => ({
+            limit: jest.fn(async () => publicationRows),
+          })),
+        };
+      }
+      txSelects.push("objects");
+      // The row lock chains `.for("update").limit(1)`; `uniqueSlug` awaits the
+      // `where(...)` directly. Both shapes are served from here.
+      const where = jest.fn(() => {
+        const locked = {
+          for: jest.fn(() => ({ limit: jest.fn(async () => [lockedObject]) })),
+        };
+        return Object.assign(Promise.resolve(takenSlugs), locked);
+      });
+      return { where };
+    }),
+  })),
+  update: jest.fn(() => ({ set: updateSetMock })),
+};
+
+// `loadByIdOrSlug` (the pre-transaction load in `update`) runs outside the
+// transaction through executeQuery; everything the rename does runs inside it.
+jest.mock("@/lib/db/drizzle-client", () => ({
+  executeQuery: jest.fn(async () => outsideRows()),
+  executeTransaction: jest.fn(
+    async (callback: (tx: unknown) => Promise<unknown>) => callback(txStub)
+  ),
+}));
+
+import { contentService } from "@/lib/content/content-service";
+import type { Requester } from "@/lib/content/types";
+
+const requester: Requester = {
+  kind: "user",
+  userId: 7,
+  roles: ["staff"],
+  isAdmin: false,
+};
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  publicationRows = [];
+  takenSlugs = [];
+  txSelects = [];
+  updatedValues = null;
+});
+
+describe("rename re-slugs an unpublished object (#1791 finding 3)", () => {
+  it("regenerates the slug from the new title while the object has never been published", async () => {
+    await contentService.update(requester, OBJECT_ID, {
+      title: "Device repairs dashboard",
+    });
+
+    expect(updatedValues?.title).toBe("Device repairs dashboard");
+    expect(updatedValues?.slug).toBe("device-repairs-dashboard");
+  });
+
+  it("KEEPS the slug once the object has ever been published — links must not break", async () => {
+    // A publication row is not deleted on unpublish; it flips to `unpublished`.
+    // Once a URL has been live, the slug is frozen.
+    publicationRows = [{ id: "pub-1" }];
+
+    await contentService.update(requester, OBJECT_ID, {
+      title: "Device repairs dashboard",
+    });
+
+    expect(updatedValues?.title).toBe("Device repairs dashboard");
+    expect(updatedValues?.slug).toBeUndefined();
+  });
+
+  it("checks publication INSIDE the transaction, after the row lock", async () => {
+    await contentService.update(requester, OBJECT_ID, { title: "Renamed" });
+    // objects (FOR UPDATE lock) -> publications (probe) -> objects (uniqueSlug).
+    expect(txSelects[0]).toBe("objects");
+    expect(txSelects[1]).toBe("publications");
+  });
+
+  it("avoids a slug already taken rather than colliding", async () => {
+    takenSlugs = [{ slug: "device-repairs-dashboard" }];
+
+    await contentService.update(requester, OBJECT_ID, {
+      title: "Device repairs dashboard",
+    });
+
+    expect(updatedValues?.slug).not.toBe("device-repairs-dashboard");
+    expect(String(updatedValues?.slug)).toMatch(/^device-repairs-dashboard-/);
+  });
+
+  it("does NOT re-slug (or open a transaction) for a tags-only patch", async () => {
+    await contentService.update(requester, OBJECT_ID, { tags: ["reports"] });
+
+    expect(txStub.update).not.toHaveBeenCalled();
+    expect(txSelects).toEqual([]);
+  });
+});

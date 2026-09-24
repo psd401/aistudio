@@ -86,6 +86,7 @@ import {
   ApprovalRequiredError,
   ConflictError,
   ForbiddenError,
+  ValidationError,
 } from "@/lib/content/errors";
 import {
   ATRIUM_DATA_AUTHORING_GUIDANCE,
@@ -161,6 +162,7 @@ function defineBuildWorkspaceChatToolsSuite1Part1() {
         "edit_workspace_document",
         "publish_workspace_content",
         "read_workspace_content",
+        "rename_workspace_content",
         "unpublish_workspace_content",
       ].sort()
     );
@@ -176,6 +178,7 @@ function defineBuildWorkspaceChatToolsSuite1Part1() {
         "delete_workspace_content",
         "publish_workspace_content",
         "read_workspace_content",
+        "rename_workspace_content",
         "unpublish_workspace_content",
         "update_workspace_artifact",
       ].sort()
@@ -472,6 +475,102 @@ function defineBuildWorkspaceChatToolsSuite1Part2() {it("edit_workspace_document
     };
     expect(out.error).toMatch(/invalid data access mode/i);
     expect(updateMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * #1791 finding 3: the library titles a starter artifact with the truncated
+   * PROMPT, and the chat had no way to fix it — asked for "a proper title" the
+   * model could only edit the artifact's own <h1>, which the library, the panel
+   * header and the editor never read.
+   */
+  it("rename_workspace_content renames through the service and echoes the new slug", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    updateMock.mockResolvedValue({
+      id: "art-1",
+      title: "Device repairs dashboard",
+      slug: "device-repairs-dashboard",
+    });
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = await exec(tools.rename_workspace_content, {
+      title: "Device repairs dashboard",
+    });
+    expect(updateMock).toHaveBeenCalledWith(REQ, "art-1", {
+      title: "Device repairs dashboard",
+    });
+    expect(out).toEqual({
+      ok: true,
+      objectId: "art-1",
+      title: "Device repairs dashboard",
+      slug: "device-repairs-dashboard",
+    });
+  });
+
+  it("rename_workspace_content trims the title before it reaches the service", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    updateMock.mockResolvedValue({ id: "art-1", title: "Repairs", slug: "repairs" });
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    await exec(tools.rename_workspace_content, { title: "  Repairs  " });
+    // contentService.update validates the TRIMMED title but persists what it is
+    // given, so an untrimmed value would store padding and slugify from it.
+    expect(updateMock).toHaveBeenCalledWith(REQ, "art-1", { title: "Repairs" });
+  });
+
+  it("rename_workspace_content refuses an empty title without calling the service", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.rename_workspace_content, { title: "   " })) as {
+      error: string;
+    };
+    expect(out.error).toMatch(/no title provided/i);
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+
+  it("rename_workspace_content relays a validation failure the model can fix", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    updateMock.mockRejectedValue(
+      new ValidationError("Title must be 200 characters or fewer")
+    );
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.rename_workspace_content, { title: "x".repeat(400) })) as {
+      error: string;
+    };
+    expect(out.error).toMatch(/200 characters or fewer/);
+  });
+
+  it("rename_workspace_content does NOT leak a permission failure's detail", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    updateMock.mockRejectedValue(new ForbiddenError("no edit access"));
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.rename_workspace_content, { title: "New title" })) as {
+      error: string;
+    };
+    expect(out.error).toMatch(/could not be renamed right now/i);
+  });
+
+  it("is NOT bound for an object the caller cannot edit", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(false);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    expect(tools.rename_workspace_content).toBeUndefined();
+  });
+
+  it("nudges the model to set a real title instead of keeping the prompt", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    const result = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    expect(result.systemPromptFragment).toContain("rename_workspace_content");
+    expect(result.systemPromptFragment).toMatch(
+      /request that created it rather than a name/i
+    );
+    // A read-only object has no rename tool, so it must not be told about one.
+    canEditMock.mockReturnValue(false);
+    const readOnly = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    expect(readOnly.systemPromptFragment).not.toContain("rename_workspace_content");
   });
 
   it("tells the model a mode-only change needs no code", async () => {

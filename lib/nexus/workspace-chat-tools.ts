@@ -802,6 +802,83 @@ async function runWorkspacePublishOp(args: WorkspacePublishArgs): Promise<Record
   }
 }
 
+/**
+ * Build the rename tool for the WORKSPACE-bound object (#1791 finding 3).
+ *
+ * The library's "Build it for me" flow titles a starter artifact with the
+ * truncated PROMPT, so a dashboard is called "A dashboard of Chromebook/device
+ * repairs from our district data: repairs per…" in the library, the panel
+ * header and the editor, forever. The chat had no way to fix that: asked to
+ * "give it a proper title", the model could only edit the artifact's own
+ * `<h1>`/`<title>`, which changes nothing outside the rendered page.
+ *
+ * `contentService.update` runs the same canView (404-mask) → canEdit gate the
+ * Content settings dialog uses, under the SESSION user's requester, so this is
+ * no wider than the dialog. It also re-slugs while the object has never been
+ * published (see `updateInTransaction`), so the URL stops carrying the prompt.
+ */
+function buildRenameTool(args: {
+  objectId: string;
+  kind: "document" | "artifact";
+  userId: number;
+  log: ReturnType<typeof createLogger>;
+}): Tool {
+  const { objectId, kind, userId, log } = args;
+  return tool({
+    description:
+      `Rename the ${kind} open in the workspace panel — the title shown in the library, the panel header and the editor. ` +
+      `Editing a heading INSIDE the content does not rename it; only this tool does. ` +
+      `Give a newly created ${kind} a real title on your first build: the library names it after the prompt that created it, which is not a title. ` +
+      `While the ${kind} has never been published its address is regenerated from the new title too; once it has been published the address stays fixed so existing links keep working.`,
+    inputSchema: jsonSchema<{ title: string }>({
+      type: "object",
+      properties: {
+        title: {
+          type: "string",
+          description:
+            "The new title. A short, human title for the thing itself — not a restatement of the request that created it.",
+        },
+      },
+      required: ["title"],
+      additionalProperties: false,
+    }),
+    execute: async (
+      toolArgs
+    ): Promise<
+      { ok: true; objectId: string; title: string; slug: string } | { error: string }
+    > => {
+      // Trim here: `contentService.update` validates the TRIMMED title but
+      // persists what it is given, so an untrimmed value would store leading
+      // whitespace and slugify from it.
+      const title = typeof toolArgs?.title === "string" ? toolArgs.title.trim() : "";
+      if (!title) return { error: "No title provided." };
+      const req = await requesterForUserId(userId);
+      if (!req) return { error: "Could not resolve your identity." };
+      try {
+        const updated = await contentService.update(req, objectId, { title });
+        return {
+          ok: true,
+          // Echoed so `useWorkspaceChangeSignal` refreshes the right object —
+          // an id-less success matches EVERY listener.
+          objectId,
+          title: updated.title,
+          slug: updated.slug,
+        };
+      } catch (err) {
+        if (err instanceof ValidationError) {
+          // The only model-fixable failure: an empty or over-long title.
+          return { error: err.message };
+        }
+        log.warn("rename_workspace_content failed", {
+          objectId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return { error: `The ${kind} could not be renamed right now.` };
+      }
+    },
+  });
+}
+
 /** Build the publish/unpublish tool for the WORKSPACE-bound object (ITEM 2). */
 function buildPublishTool(args: {
   op: "publish" | "unpublish";
@@ -1078,6 +1155,9 @@ export async function buildWorkspaceChatTools(params: {
         log
       );
     }
+    // #1791 finding 3: rename the OPEN object (library/panel/editor title, and
+    // the address while it has never been published).
+    tools.rename_workspace_content = buildRenameTool({ objectId: obj.id, kind, userId, log });
     // ITEM 2: publish/unpublish the OPEN object through the human publish gate.
     tools.publish_workspace_content = buildPublishTool({ op: "publish", objectId: obj.id, kind, userId, requestId, log });
     tools.unpublish_workspace_content = buildPublishTool({ op: "unpublish", objectId: obj.id, kind, userId, requestId, log });
@@ -1100,6 +1180,12 @@ export async function buildWorkspaceChatTools(params: {
   tools.find_atrium_documents = buildFindDocumentsTool(userId, log);
   tools.edit_atrium_document = buildEditDocumentByIdTool(userId, requestId, log);
 
+  // #1791 finding 3: the model has to KNOW the title is renameable, and has to
+  // be nudged to set a real one on the first build — the library names a starter
+  // artifact after the prompt that created it, which is not a title.
+  const renameHint =
+    ` Its title (in the library, the panel header and the editor) is changed with rename_workspace_content — editing a heading inside the content does NOT rename it.` +
+    ` If the title still looks like the request that created it rather than a name for the thing, set a real one with that tool as part of your first build, without being asked.`;
   const editHint = editable
     ? kind === "document"
       ? " You can edit it with the edit_workspace_document tool; your edits appear live in the panel." +
@@ -1120,6 +1206,7 @@ export async function buildWorkspaceChatTools(params: {
         " You can also publish or unpublish it with publish_workspace_content / unpublish_workspace_content." +
         " If the user EXPLICITLY asks to permanently delete it (not archive), use delete_workspace_content — it is irreversible and refused while the artifact is published."
     : " It is read-only for this user.";
+  const editHintWithRename = editable ? editHint + renameHint : editHint;
 
   // Escape the title via JSON.stringify: a content title is user-controlled and
   // is interpolated into a SYSTEM instruction block, so a raw title with
@@ -1129,7 +1216,7 @@ export async function buildWorkspaceChatTools(params: {
     `A ${kind} titled ${safeTitle} is open in the workspace panel beside this chat. ` +
     `When the user asks you to change, add to, or fix it, act on THAT ${kind} rather than answering in chat only. ` +
     `Call read_workspace_content first to see its current content.` +
-    editHint +
+    editHintWithRename +
     ` To work on a DIFFERENT Atrium document, use find_atrium_documents to locate it and edit_atrium_document to change it (only documents the user can edit).`;
 
   log.info("Workspace chat tools bound", {
