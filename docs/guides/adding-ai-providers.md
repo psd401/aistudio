@@ -11,14 +11,20 @@ This guide provides step-by-step instructions for adding new AI providers to the
 All providers must extend the `BaseProviderAdapter` abstract class:
 
 ```typescript
-export abstract class BaseProviderAdapter {
-  abstract providerName: string;
-  abstract createModel(modelId: string, options?: any): Promise<any>;
+// lib/streaming/provider-adapters/base-adapter.ts (abridged)
+export abstract class BaseProviderAdapter implements ProviderAdapter {
+  protected abstract providerName: string;
+  protected providerClient?: unknown;
+
+  // Required
+  abstract createModel(modelId: string, options?: StreamRequest['options']): Promise<LanguageModel>;
   abstract getCapabilities(modelId: string): ProviderCapabilities;
-  
+  abstract getSupportedTools(modelId: string): string[];
+  abstract supportsModel(modelId: string): boolean;
+
   // Optional overrides
-  getProviderOptions(modelId: string, options?: any): Record<string, any>;
-  supportsModel(modelId: string): boolean;
+  getProviderOptions(modelId: string, options?: StreamRequest['options']): Record<string, unknown>;
+  async createTools(enabledTools: string[]): Promise<ToolSet>;
 }
 ```
 
@@ -47,69 +53,65 @@ interface ProviderCapabilities {
 
 Create a new adapter file in `/lib/streaming/provider-adapters/`:
 
+Follow the existing adapters (for example `azure-adapter.ts`): read credentials through `Settings`, keep option types as `StreamRequest['options']`, and implement every abstract member of `BaseProviderAdapter` (`createModel`, `getCapabilities`, `getSupportedTools`, `supportsModel`).
+
 ```typescript
 // Example: mistral-adapter.ts
-import { mistral } from '@ai-sdk/mistral';
+import { createMistral } from '@ai-sdk/mistral';
+import { createLogger } from '@/lib/logger';
+import { Settings } from '@/lib/settings-manager';
+import { ErrorFactories } from '@/lib/error-utils';
 import { BaseProviderAdapter } from './base-adapter';
-import type { ProviderCapabilities } from '../types';
+import type { ProviderCapabilities, StreamRequest } from '../types';
+
+const log = createLogger({ module: 'mistral-adapter' });
 
 export class MistralAdapter extends BaseProviderAdapter {
-  providerName = 'mistral';
-  
-  async createModel(modelId: string, options?: any): Promise<any> {
-    // Get API key from settings manager or environment
-    const apiKey = await this.settingsManager?.getApiKey('mistral') || 
-                   process.env.MISTRAL_API_KEY;
-    
+  protected providerName = 'mistral';
+
+  async createModel(modelId: string) {
+    // Database-first with env fallback (see Step 5)
+    const apiKey = await Settings.getMistral();
     if (!apiKey) {
-      throw new Error('Mistral API key not configured');
+      log.error('Mistral API key not configured');
+      throw ErrorFactories.sysConfigurationError('Mistral API key not configured');
     }
-    
-    // Create model instance using AI SDK provider
-    return mistral(modelId, {
-      apiKey,
-      baseURL: options?.baseURL,
-      // Other provider-specific options
-    });
+
+    const client = createMistral({ apiKey });
+    this.providerClient = client;
+    return client(modelId);
   }
-  
+
+  getSupportedTools(_modelId: string): string[] {
+    return [];
+  }
+
   getCapabilities(modelId: string): ProviderCapabilities {
-    // Define capabilities based on model
     const isLargeModel = this.matchesPattern(modelId, ['mistral-large*']);
-    const isCodeModel = this.matchesPattern(modelId, ['*-code*', 'codestral*']);
-    
+
     return {
       supportsReasoning: false,
       supportsThinking: false,
       supportedResponseModes: ['standard'],
       supportsBackgroundMode: false,
-      supportedTools: isCodeModel ? ['function_calling', 'code_interpreter'] : ['function_calling'],
+      supportedTools: this.getSupportedTools(modelId),
       typicalLatencyMs: isLargeModel ? 4000 : 2000,
       maxTimeoutMs: 60000,
       costPerInputToken: isLargeModel ? 0.000002 : 0.000001,
       costPerOutputToken: isLargeModel ? 0.000006 : 0.000003
     };
   }
-  
-  getProviderOptions(modelId: string, options?: any): Record<string, any> {
-    // Provider-specific configuration
+
+  getProviderOptions(modelId: string, options?: StreamRequest['options']): Record<string, unknown> {
+    // Start from the base options, then add provider-specific ones
     return {
-      temperature: options?.temperature || 0.7,
-      maxTokens: options?.maxTokens,
-      // Mistral-specific options
-      safePrompt: options?.safePrompt ?? true
+      ...super.getProviderOptions(modelId, options),
+      safePrompt: true
     };
   }
-  
+
   supportsModel(modelId: string): boolean {
-    // Define which models this adapter supports
-    const supportedPatterns = [
-      'mistral-*',
-      'codestral*',
-      'mixtral-*'
-    ];
-    
-    return this.matchesPattern(modelId, supportedPatterns);
+    return this.matchesPattern(modelId, ['mistral-*', 'codestral*', 'mixtral-*']);
   }
 }
 ```
@@ -139,7 +141,29 @@ const adapters = new Map<string, ProviderAdapter>([
 ]);
 ```
 
-`getProviderAdapter()` and `getSupportedProviders()` read from this map, so no other registration is needed there.
+`getProviderAdapter()` and `getSupportedProviders()` in this file read from the map.
+
+The central model factory, `/lib/ai/provider-factory.ts`, keeps its own provider list. Callers of `createProviderModel()` (for example `app/api/compare/route.ts`) reject any provider missing from it. Register the provider there too:
+
+```typescript
+// 1. Add a case to the switch in createProviderModel()
+case 'mistral':
+  return await createMistralModel(modelId);
+
+// 2. Add a creator that delegates to the adapter (same pattern as createLatimerModel)
+async function createMistralModel(modelId: string): Promise<LanguageModel> {
+  try {
+    log.debug(`Creating Mistral model: ${modelId}`);
+    const adapter = await getProviderAdapter('mistral');
+    return await adapter.createModel(modelId);
+  } catch (error) {
+    log.error('Failed to create Mistral model', { modelId, error });
+    throw error;
+  }
+}
+
+// 3. Add 'mistral' to the arrays in isSupportedProvider() and getSupportedProviders()
+```
 
 ### Step 4: Add Database Configuration
 
@@ -191,27 +215,15 @@ INSERT INTO ai_models (
 
 ### Step 5: Add Settings Management
 
-Add API key configuration support:
+Add a getter to the `Settings` object in `/lib/settings-manager.ts`. `getSetting()` reads the database first and falls back to the environment variable of the same name:
 
 ```typescript
-// Update SettingsManager to handle new provider
-export class SettingsManager {
-  async getApiKey(provider: string): Promise<string> {
-    const keyMap = {
-      'openai': 'OPENAI_API_KEY',
-      'google': 'GOOGLE_API_KEY',
-      'azure': 'AZURE_OPENAI_KEY',
-      'amazon-bedrock': 'AWS_SECRET_ACCESS_KEY',
-      'mistral': 'MISTRAL_API_KEY'
-    };
-    
-    const keyName = keyMap[provider];
-    if (!keyName) {
-      throw new Error(`No API key configuration for provider: ${provider}`);
-    }
-    
-    return await this.getSetting(keyName);
-  }
+export const Settings = {
+  // ...existing getters
+
+  async getMistral() {
+    return getSetting('MISTRAL_API_KEY')
+  },
 }
 ```
 
