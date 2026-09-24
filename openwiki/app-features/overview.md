@@ -16,7 +16,12 @@ openwiki:
     - actions/db/atrium/snapshot-document.ts
     - actions/db/atrium/comments.ts
     - actions/db/atrium/publish-document.ts
+    - lib/nexus/model-router/router.ts
+    - lib/nexus/model-router/types.ts
     - lib/nexus/model-router/psd-data-connector.ts
+    - lib/nexus/workspace-routing-contract.ts
+    - lib/nexus/workspace-routing-context.ts
+    - lib/nexus/model-router/workspace-auto-connector.ts
     - components/atrium/dnd/atrium-dnd.tsx
     - components/atrium/use-expanded-sections.ts
     - components/atrium/ArtifactSandbox.tsx
@@ -37,6 +42,10 @@ openwiki:
     - lib/nexus/workspace-chat-tools.ts
     - lib/nexus/chat-step-budget.ts
     - app/(protected)/nexus/_components/tools/use-workspace-change-signal.ts
+    - actions/mcp-connector.actions.ts
+    - app/(protected)/nexus/_components/chat/mcp-popover.tsx
+    - app/(protected)/nexus/page.tsx
+    - components/assistant-ui/thread.tsx
   invariants:
     - Artifact data_access modes (records/query/none) are mutually exclusive — prevents exfiltration loop
     - Mode is enforced twice (client-side pin + server-side check) and changes only take effect on fresh page load (#1712)
@@ -68,6 +77,15 @@ openwiki:
     - Empty repositories bind but never gate — searchableRepositoryIds excludes them so no tool is scoped, but the turn proceeds (#1733)
     - Processing, failed, disconnected, unavailable repositories block — the gate fails closed on missing/incomplete/stale indexes (#1733)
     - A zero-item repository with degraded connector is failed, not empty — source exists but never arrived (#1733)
+    - Workspace artifact routing — an editable artifact open beside chat gets PSD Data connector attached regardless of message classification ("add a dropdown" is a schema question) (#1786)
+    - All editable artifacts get PSD Data, not only dataAccess === "query" — one update_workspace_artifact call away from query mode (#1786)
+    - Documents never get workspace PSD Data — no sandbox, no data bridge (#1786)
+    - Read-only viewers never get workspace PSD Data — editable: false means no authoring tools (#1786)
+    - Workspace connector is optional — if unresolvable, turn continues with do-not-guess guidance instead of failing (#1786)
+    - Three surfaces agree — router.ts, route.ts, mcp-connector.actions.ts share workspaceNeedsPsdData predicate, pinned by router.test.ts (#1786)
+    - Do-not-guess guidance — when workspace-artifact turn lacks schema tools (inspect_table_schema, query_data), model must NOT invent columns (#1786)
+    - Resolution 404-masks — resolveWorkspace 404-masks non-viewable objects; spoofed ?workspace= yields null and turn routes normally (#1786)
+    - One resolution per request — routing resolves workspace; tool-binding reuses preloaded to avoid second contentService.get call (#1786)
   validation_commands:
     - bun run typecheck
     - bun run lint
@@ -102,8 +120,9 @@ openwiki:
     - tests/unit/lib/content/atrium-data-contract.test.ts
     - tests/unit/lib/nexus/chat-step-budget.test.ts
     - tests/unit/lib/nexus/workspace-chat-tools.test.ts
-    - tests/unit/atrium-visibility.test.ts
-    - tests/unit/atrium-collection-management.test.ts
+    - tests/unit/lib/nexus/workspace-routing-context.test.ts
+    - tests/unit/lib/nexus/workspace-routing-contract.test.ts
+    - tests/unit/nexus-mcp-popover-workspace-connector.test.tsx
     - tests/e2e/nexus-workspace-artifact-refresh.spec.ts
 ---
 
@@ -121,6 +140,7 @@ Conversational AI interface with automatic model routing, MCP tool integration, 
 
 Nexus defaults to **Standard** mode where the server classifies each request and automatically selects the appropriate model:
 
+1. **Resolve workspace** BEFORE classification — if a workspace artifact is open beside chat, this affects routing (#1786)
 1. **Authenticate** the user before classification
 2. **Apply K-12 guardrails** (content filtering, PII tokenization)
 3. **Classify intent** using deterministic capability rules for:
@@ -195,8 +215,45 @@ When an Atrium document or artifact is open beside the chat (`?workspace=<id>`),
 
 **How it works**:
 1. Client sends `workspaceId` on each chat request (via ref so opening/closing/switching mid-conversation always sends current value)
-2. Server builds AI SDK tools for THAT object and injects system-prompt context (server-side, never from client tool list)
-3. Object resolved through `contentService` (canView 404-mask → canEdit 403) against session user
+2. Server resolves workspace object through `contentService.get` BEFORE classification — resolution is reused for tool binding (#1786)
+3. Server builds AI SDK tools for THAT object and injects system-prompt context (server-side, never from client tool list)
+4. Object resolution 404-masks non-viewable objects — spoofed `?workspace=` yields null and turn routes normally
+
+#### Workspace Artifact PSD Data Routing (#1786)
+
+When an **editable artifact** is open beside the chat, the PSD Data connector is auto-attached regardless of how the user's message classifies. A follow-up like "add a school dropdown" asked of a live dashboard is a schema question wearing a UI question's clothes — without the data tools, the model invents column names and silently breaks working dashboards.
+
+**Routing Rule** (`workspaceNeedsPsdData` in `lib/nexus/workspace-routing-contract.ts`):
+- **Editable artifacts** → PSD Data connector always attached (not just `dataAccess === "query"`)
+- **Documents** → Never attached (no sandbox, no data bridge)
+- **Read-only viewers** → Never attached (`editable: false` means no authoring tools)
+
+**Why all editable artifacts**: An artifact is one `update_workspace_artifact` call away from `query` mode, and "make this chart use real data" is exactly the turn that flips it — gating on current mode would leave that critical turn blind.
+
+**Connector is optional**: The workspace connector is NOT required — if it can't be resolved or connected, the turn continues with do-not-guess guidance instead of failing. Access control, a downed MCP server, and skill `allowed-tools` pins all bite after routing, so the system degrades gracefully.
+
+**Do-Not-Guess Guidance**: When a workspace-artifact turn ends up without schema-revealing tools (`inspect_table_schema`, `query_data`), the system appends `WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE` (from `lib/nexus/workspace-routing-contract.ts`):
+> PSD DATA TOOLS ARE NOT AVAILABLE ON THIS TURN: you have no way to list tables, inspect a schema, or run a query. Do NOT guess table or column names...
+
+The model must keep existing SQL unchanged and ask the user how to proceed rather than inventing schemas.
+
+**Connect Popover Display**: In Advanced mode, the Connect popover renders the PSD Data connector as ON and locked when a workspace artifact is open — the user cannot switch it off because the router attaches it regardless of their toggle. The row shows "On for this workspace" and clicking explains why it stays on. Counter and row agree by using the same `isAutoAttachedForWorkspace` predicate (gated on `connected` status so expired tokens show Reconnect instead of a false "On").
+
+**Resolution Reuse**: The workspace object is resolved once before classification (for routing) and reused for tool binding via `preloaded` param — avoiding a second `requesterForUserId` + `contentService.get` per turn.
+
+**Key Sources**:
+- `/lib/nexus/workspace-routing-contract.ts` — Routing predicates: `workspaceNeedsPsdData()`, `workspacePsdDataToolsMissing()`, `withPsdDataConnectorLast()`, `reconnectableConnectorIds()`
+- `/lib/nexus/workspace-routing-context.ts` — `resolveWorkspace()` for routing, `ResolvedWorkspace` interface
+- `/lib/nexus/model-router/router.ts` — Takes `workspace` param, returns `workspacePsdDataConnectorId`
+- `/lib/nexus/model-router/workspace-auto-connector.ts` — `previewWorkspaceAutoConnectorIds()` for UI popover
+- `/actions/mcp-connector.actions.ts` — `getConnectorsWithStatus({ workspaceId })` returns `autoAttachedForWorkspace`
+- `/app/(protected)/nexus/_components/chat/mcp-popover.tsx` — Renders auto-attached connectors as on/locked
+
+**Focused Tests**:
+- `tests/unit/lib/nexus/workspace-routing-contract.test.ts` — Routing predicates
+- `tests/unit/lib/nexus/workspace-routing-context.test.ts` — Workspace resolution logic
+- `tests/unit/nexus-mcp-popover-workspace-connector.test.tsx` — Popover rendering for workspace auto-attached
+- `tests/e2e/nexus-workspace-psd-data-connector.functional.spec.ts` — E2E (gated) popover behavior
 
 **Bound Tools**:
 
@@ -244,12 +301,17 @@ A view-only caller gets only the read tool; an unviewable `?workspace=` yields n
 | `/lib/nexus/model-router/router.ts` | Automatic model routing logic |
 | `/lib/nexus/model-router/classifier.ts` | Intent classification |
 | `/lib/nexus/model-router/psd-data-connector.ts` | Shared PSD Data MCP server resolution (used by Nexus and Atrium artifact queries) |
+| `/lib/nexus/workspace-routing-contract.ts` | Workspace artifact routing predicates and do-not-guess guidance (#1786) |
+| `/lib/nexus/workspace-routing-context.ts` | Workspace object resolution for routing (#1786) |
+| `/lib/nexus/model-router/workspace-auto-connector.ts` | Preview of auto-attached connectors for UI (#1786) |
 | `/lib/nexus/history-adapter.ts` | Conversation history management |
 | `/lib/nexus/enhanced-attachment-adapters.ts` | File attachment handling |
 | `/lib/nexus/workspace-chat-tools.ts` | Workspace panel editing tools |
 | `/lib/nexus/chat-step-budget.ts` | Multi-step budget (10 vs 20 steps) |
 | `/lib/atrium/workspace-change-event.ts` | DOM event for panel refresh |
 | `/app/(protected)/nexus/_components/tools/use-workspace-change-signal.ts` | Hook to emit workspace change events |
+| `/actions/mcp-connector.actions.ts` | Connector status with workspace auto-attach flag (#1786) |
+| `/app/(protected)/nexus/_components/chat/mcp-popover.tsx` | Connect popover UI with workspace-aware rendering (#1786) |
 
 ---
 
