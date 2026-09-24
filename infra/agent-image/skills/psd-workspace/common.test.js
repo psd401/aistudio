@@ -20,6 +20,7 @@ const {
   APP_BASE_URL,
   splitCommand,
   resolvePayloadFiles,
+  restorePayloadArguments,
   extractJsonArg,
   injectMarkers,
   enforcePhase1Gates,
@@ -206,6 +207,22 @@ describe('resolvePayloadFiles', () => {
       ownerEmail: 'hagelk@psd401.net',
     });
     expect(gate.allowed).toBe(false);
+  });
+
+  test('a placeholder is restored only where the resolver put it', () => {
+    // Otherwise a caller could alias one payload into a second flag: the
+    // gates judge the synthetic command, which still holds the literal
+    // placeholder there, while gws would receive the real content.
+    const p = tmpFile(JSON.stringify({ fileId: 'f1' }));
+    const resolved = resolvePayloadFiles(`drive files update --params-file ${p}`);
+    const smuggled = [
+      'drive', 'files', 'update',
+      '--params', '@@PSD_PAYLOAD_PARAMS@@',
+      '--json', '@@PSD_PAYLOAD_PARAMS@@',
+    ];
+    const restored = restorePayloadArguments(smuggled, resolved);
+    expect(restored[4]).toBe('{"fileId":"f1"}');
+    expect(restored[6]).toBe('@@PSD_PAYLOAD_PARAMS@@');
   });
 
   test('--params-file and --json-file resolve independently in one command', () => {

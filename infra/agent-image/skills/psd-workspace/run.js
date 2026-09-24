@@ -70,6 +70,7 @@ const {
   enforcePhase1Gates,
   injectMarkers,
   resolvePayloadFiles,
+  restorePayloadArguments,
   extractJsonArg,
 } = require('./common');
 const { requestAgentBroker } = require('../_shared/agent-broker');
@@ -99,15 +100,6 @@ function emitForbiddenGate(gateCheck) {
       `the final step themselves. Do not retry with a different shape.`,
   });
   process.exit(13);
-}
-
-function restorePayloadArguments(argv, resolvedPayloads) {
-  if (!resolvedPayloads) return argv;
-  return argv.map((token) =>
-    Object.prototype.hasOwnProperty.call(resolvedPayloads.payloads, token)
-      ? resolvedPayloads.payloads[token]
-      : token
-  );
 }
 
 function prepareWorkspaceArguments(command, scope, ownerEmail) {

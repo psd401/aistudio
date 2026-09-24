@@ -264,6 +264,32 @@ function resolvePayloadFiles(commandString, options = {}) {
 }
 
 /**
+ * Swap placeholder tokens back for their payloads, AFTER splitCommand — the
+ * step that makes a payload exactly one argv token whatever it contains.
+ *
+ * A placeholder is restored ONLY in the value position of the inline flag
+ * `resolvePayloadFiles` put it in. Substituting any token that merely equals a
+ * placeholder let a caller alias one payload into a second flag:
+ * `--params-file <p> --json @@PSD_PAYLOAD_PARAMS@@` would reach gws with the
+ * params content as the request BODY, while the synthetic command the Phase 1
+ * gates ran against still carried the literal placeholder there. The gate and
+ * the executed argv have to describe the same call (REV-COR-346).
+ */
+const PLACEHOLDER_FLAGS = Object.fromEntries(
+  Object.values(PAYLOAD_PLACEHOLDERS).map((spec) => [spec.placeholder, spec.flag])
+);
+
+function restorePayloadArguments(argv, resolvedPayloads) {
+  if (!resolvedPayloads) return argv;
+  return argv.map((token, index) =>
+    Object.prototype.hasOwnProperty.call(resolvedPayloads.payloads, token) &&
+    argv[index - 1] === PLACEHOLDER_FLAGS[token]
+      ? resolvedPayloads.payloads[token]
+      : token
+  );
+}
+
+/**
  * Return the value of the `--json` argument from an argv token array — i.e. the
  * exact string gws receives (quotes already stripped by splitCommand). Returns
  * null if there is no `--json` flag with a following value. Security-sensitive
@@ -1225,6 +1251,7 @@ module.exports = {
   enforcePhase1Gates,
   injectMarkers,
   resolvePayloadFiles,
+  restorePayloadArguments,
   extractJsonArg,
   missingScopesForCommand,
   isPermittedFolderCreate,
