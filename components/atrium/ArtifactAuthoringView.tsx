@@ -196,6 +196,10 @@ export async function ArtifactAuthoringView({
             agentMaintained={obj.createdByActor === "agent"}
             updatedAt={obj.updatedAt}
             versionNumber={currentVersion?.versionNumber ?? null}
+            // #1791 finding 6: the head version's authoring surface, so the
+            // About rail can say the agent wrote it in chat rather than calling
+            // a model-written version "Human-authored".
+            headAuthorLabel={currentVersion?.authorLabel ?? null}
             visibilityLevel={obj.visibilityLevel}
             backlinks={backlinks}
           />

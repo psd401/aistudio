@@ -573,6 +573,25 @@ function defineBuildWorkspaceChatToolsSuite1Part2() {it("edit_workspace_document
     expect(readOnly.systemPromptFragment).not.toContain("rename_workspace_content");
   });
 
+  /**
+   * #1791 finding 6: the chat tools run under the user's OWN requester, so the
+   * version is correctly `authorActor: "human"` — but the MODEL wrote the code,
+   * and the history said "human" with nothing to distinguish it.
+   */
+  it("stamps the authoring surface on a chat-written version", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    createVersionMock.mockResolvedValue({ version: { versionNumber: 6 } });
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    await exec(tools.update_workspace_artifact, { code: "<div/>" });
+
+    expect(createVersionMock).toHaveBeenCalledWith(
+      REQ,
+      "art-1",
+      expect.objectContaining({ authorLabel: "nexus-chat" })
+    );
+  });
+
   it("tells the model a mode-only change needs no code", async () => {
     getMock.mockResolvedValue(ART);
     canEditMock.mockReturnValue(true);

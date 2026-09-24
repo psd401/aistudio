@@ -38,6 +38,20 @@ export const nexusConversations = pgTable(
     skillId: uuid("skill_id").references(() => psdAgentSkills.id, {
       onDelete: "set null",
     }),
+    /**
+     * The Atrium content object this conversation worked on (#1791).
+     *
+     * Set on the first turn that carries a workspace binding, so reopening the
+     * conversation restores the workspace panel and the editor can route "Ask
+     * the agent" back to the chat that already knows the artifact — instead of
+     * a fresh conversation that re-runs every schema probe.
+     *
+     * -> content_objects.id (ON DELETE SET NULL). The SQL FK is defined in
+     * migration 183 rather than as a Drizzle reference, matching
+     * `content_versions.author_agent_id`: a Drizzle FK here would make the Nexus
+     * schema import the Atrium content schema and create an import cycle.
+     */
+    workspaceObjectId: uuid("workspace_object_id"),
     messageCount: integer("message_count").default(0),
     totalTokens: integer("total_tokens").default(0),
     lastMessageAt: timestamp("last_message_at").defaultNow(),

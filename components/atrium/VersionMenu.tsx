@@ -35,15 +35,11 @@ import {
 } from "@/components/ui/dialog";
 import { listContentVersionsAction, rollbackVersionAction } from "@/actions/db/atrium/rollback-version";
 import type { VersionSummary } from "@/actions/db/atrium/list-versions";
+import { versionAuthorLabel } from "@/lib/content/version-author-label";
 import { meridianPortalClassName } from "@/lib/meridian/fonts";
 import { createLogger } from "@/lib/client-logger";
 
 const log = createLogger({ component: "VersionMenu" });
-
-/** "AI" | "human" author label for a version (matches the canvas labels). */
-function authorLabel(v: VersionSummary): string {
-  return v.authorActor === "agent" ? "AI" : "human";
-}
 
 /** Locale date-time for a version's createdAt, or empty when unknown. */
 function versionDate(v: VersionSummary): string {
@@ -180,7 +176,7 @@ export function VersionMenu({
               >
                 <span className="font-medium">v{v.versionNumber}</span>
                 <Badge variant={v.authorActor === "agent" ? "info" : "success"}>
-                  {authorLabel(v)}
+                  {versionAuthorLabel(v)}
                 </Badge>
                 <span className="min-w-0 flex-1 truncate text-muted-foreground">
                   {versionDate(v)}

@@ -83,6 +83,7 @@ const versionSelectFields = {
   authorActor: contentVersions.authorActor,
   authorUserId: contentVersions.authorUserId,
   authorAgentId: contentVersions.authorAgentId,
+  authorLabel: contentVersions.authorLabel,
   bodyFormat: contentVersions.bodyFormat,
   bodyLocation: contentVersions.bodyLocation,
   bodyInline: contentVersions.bodyInline,
@@ -408,6 +409,10 @@ export async function snapshotInTx(
       authorActor,
       authorUserId,
       authorAgentId: agentIdOf(req),
+      // #1791 finding 6: the surface that wrote it. `authorAgentId` is a UUID
+      // referencing agent_identities and stays NULL for the Nexus chat, which
+      // is not a registered agent identity.
+      authorLabel: input.authorLabel ?? null,
       bodyFormat,
       bodyLocation,
       bodyInline,

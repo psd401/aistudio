@@ -55,10 +55,16 @@ import {
 } from "@/lib/content/errors";
 import { buildArtifactCspGuidance } from "@/lib/content/artifact-sandbox-config";
 import type { ArtifactBridgeErrorCode } from "@/lib/content/artifact-bridge-errors";
+import { NEXUS_CHAT_AUTHOR_LABEL } from "@/lib/content/version-author-label";
 import { createLogger } from "@/lib/logger";
 
-/** Free-form attribution label stamped on the purple rail for chat-driven edits. */
-const NEXUS_CHAT_AGENT_LABEL = "nexus-chat";
+/**
+ * Free-form attribution label stamped on the purple rail for chat-driven edits,
+ * and (since #1791 finding 6) on `content_versions.author_label` so the version
+ * history can say what wrote a version. ONE constant, shared with the UI's
+ * label helper, so the write side and the read side can never drift.
+ */
+const NEXUS_CHAT_AGENT_LABEL = NEXUS_CHAT_AUTHOR_LABEL;
 /** Bound on the markdown/code a single chat edit may write (mirrors the bridge). */
 const MAX_EDIT_BYTES = 512 * 1024;
 
@@ -700,6 +706,13 @@ function buildArtifactUpdateTool(
           body: code,
           bodyFormat: bodyFormat === "jsx" ? "jsx" : "html",
           summary,
+          // #1791 finding 6: these tools run under the user's OWN requester —
+          // the right call for authorization, and why the version is correctly
+          // `authorActor: "human"`. But the MODEL wrote this code, and the
+          // version list said "human" with nothing to distinguish it, so "who
+          // wrote this SQL?" was unanswerable. The label records the surface
+          // without weakening the authorization record above it.
+          authorLabel: NEXUS_CHAT_AGENT_LABEL,
         });
       } catch (err) {
         log.warn("update_workspace_artifact failed", {
