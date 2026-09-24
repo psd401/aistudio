@@ -340,6 +340,44 @@ text.replace(/&amp;/g, '&').replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+
 
 **Review rule:** Test with `&#0;`, `&#x0;`, and surrogate-pair entities (`&#55357;&#56832;`) when touching any entity decoder.
 
+## Toasts
+
+### A toast hook whose renderer is never mounted (Issue #1697)
+
+A toast queue only exists if something renders it. The stock shadcn `use-toast` keeps its own module-level reducer, and `components/ui/toaster.tsx` is the *only* thing that subscribes to it. That `<Toaster />` was never mounted — `app/layout.tsx` mounts **sonner's** `<Toaster />`, an unrelated system — so `toast()` pushed onto a queue with zero subscribers. It never threw, never warned, and returned a normal handle. Roughly 60 files used it for their only error feedback, so every one of them was mute in production. The reported casualty: the Assistant Architect create flow reported blocked validation solely through that toast, which made "Continue" look like a dead button.
+
+```typescript
+// WRONG — two toast systems, only one root mounted
+// app/layout.tsx mounts sonner's <Toaster />
+import { toast } from "@/components/ui/use-toast"  // …but this writes to the shadcn reducer
+
+// CORRECT — one system. `@/components/ui/use-toast` is now a thin adapter that
+// forwards to the sonner root the layout actually mounts.
+```
+
+**Review rule:** one toast root per app. When a PR adds or swaps a toast library, grep for every `toast(` importer and confirm they all resolve to the root that `app/layout.tsx` mounts. A toast that cannot be asserted in an E2E spec (`[data-sonner-toast]`) is not user feedback.
+
+### Feedback that only exists as a toast
+
+Even a working toast auto-dismisses and can be missed. Validation failure needs a second, persistent channel: an inline `<FormMessage />`, `aria-invalid`, and focus moved to the offending control. `form.setFocus(name)` silently no-ops when the field's `ref` was never forwarded to a focusable DOM node — a custom control (an icon grid, a segmented picker) must pass `field.ref` through and carry `tabIndex={-1}` so it can receive programmatic focus.
+
+## React Hook Form
+
+### `useFormContext().formState` does not re-render child components (Issue #1697)
+
+`formState` is a Proxy whose subscription is owned by the component that called `useForm()`. Reading it from a descendant through `useFormContext()` tracks nothing there, so the descendant never re-renders when an error appears. shadcn's `useFormField` did exactly this, which meant `<FormMessage />` and `aria-invalid` were computed once and never updated — inline validation errors were invisible app-wide.
+
+```typescript
+// WRONG — the child never re-renders when its error appears
+const { getFieldState, formState } = useFormContext()
+
+// CORRECT — subscribe this component to this field
+const { getFieldState } = useFormContext()
+const formState = useFormState({ name: fieldContext.name })
+```
+
+The same staleness bites imperatively: after `await form.trigger()`, `form.formState.errors` can still read empty. Take the errors from `handleSubmit(onValid, onInvalid)`'s invalid callback instead, which is passed the settled object.
+
 ---
 
 *Source: learnings from database, ai-sdk, streaming, security, frontend, api-patterns, infrastructure, and monitoring categories (2026-02-18 through 2026-05-15)*

@@ -374,6 +374,9 @@ tree, and anti-patterns.
 - **Don't** pass a Web API `Blob` to `@google/genai` SDK methods — the SDK expects `{ data: base64string, mimeType: string }`, not a `Blob` object
 - **Don't** assume AWS SDK assessment objects are flat — check ALL sub-properties (e.g., `wordPolicy.customWords` AND `wordPolicy.managedWordLists`); missing one drops an entire blocking category from observability
 - **Don't** omit `state: 'output-available'` and `input` on tool-call UIMessage parts — `convertToModelMessages` silently skips the `tool_result` block, causing `AI_MissingToolResultsError` on replay
+- **Don't** add a second toast system — `@/components/ui/use-toast` forwards to the ONE sonner `<Toaster />` mounted in `app/layout.tsx`; a hook whose root is unmounted is silently mute
+- **Don't** make a toast the only feedback for a blocked action — pair it with `<FormMessage />`, `aria-invalid`, and `setFocus` (which no-ops unless `field.ref` reaches a focusable node)
+- **Don't** read `formState` off `useFormContext()` in a child — it never re-renders there; use `useFormState({ name })`. Likewise `form.formState.errors` after `await trigger()` can read empty — take errors from `handleSubmit`'s invalid callback
 - **Don't** consolidate multi-step MCP responses into a single DB row — persist each step separately inside `executeTransaction` or reload fails with consecutive user turns (see `chat-helpers.ts:saveConversationSteps`)
 
 ### Edge Runtime (see `docs/guides/edge-runtime-boundaries.md`)
