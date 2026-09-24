@@ -38,7 +38,7 @@ AI Studio is deployed on AWS using CDK (Cloud Development Kit) with TypeScript. 
 
 ```bash
 cd infra && bunx cdk deploy --all                          # Deploy all stacks
-cd infra && bunx cdk deploy AIStudio-FrontendStack-Dev     # Deploy single stack
+cd infra && bunx cdk deploy AIStudio-FrontendStack-ECS-Dev # Deploy single stack
 cd infra && bunx cdk diff                                  # Preview changes
 ```
 
@@ -593,11 +593,12 @@ This ensures the CSP enforced by the sandbox matches the guidance the app provid
 
 **Documentation**: `/docs/features/k12-content-safety.md`
 
-Amazon Bedrock Guardrails provide:
-- Content filtering (violence, hate, sexual content)
-- PII detection and tokenization
-- Copilot/FERPA/CIPA compliance support
-- Real-time SNS alerts for violations
+Amazon Bedrock Guardrails operate in **detect-and-log mode**:
+- `HarmInstruction` topic evaluates inputs and outputs for direct how-to/encouragement of self-harm, violence, weapons, illegal drugs, harassment, and eating disorders
+- Detections are logged to CloudWatch only; no content is blocked (all content filters removed due to false positives on legitimate K-12 educational content, #639–#929)
+- PII is handled via Amazon Comprehend detect-only telemetry on durable content boundaries
+- SNS violation notifications are published only when guardrail blocks content (none occur under current detect-only configuration)
+- COPPA/FERPA/CIPA compliance via provider zero-data-retention agreements and logging infrastructure
 
 ### IAM Least Privilege
 
