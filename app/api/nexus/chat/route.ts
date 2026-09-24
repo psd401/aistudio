@@ -316,10 +316,7 @@ async function buildMergedChatTools(params: {
   ) {
     return { web_fetch: createWebFetchTool() };
   }
-  const merged: ToolSet = {
-    ...(await createUniversalTools(enabledTools)),
-    web_fetch: createWebFetchTool(),
-  };
+  const merged: ToolSet = { ...(await createUniversalTools(enabledTools)) };
   for (const result of connectorToolResults) {
     Object.assign(merged, result.tools);
   }
@@ -339,6 +336,10 @@ async function buildMergedChatTools(params: {
     // silently disable or widen them.
     Object.assign(merged, memoryTools);
   }
+  // Assigned LAST so a connector or workspace tool that happens to be named
+  // `web_fetch` cannot replace the SSRF-guarded, content-fenced built-in. The
+  // Nexus tool card also expects this implementation's result shape.
+  merged.web_fetch = createWebFetchTool();
   return merged;
 }
 

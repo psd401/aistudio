@@ -217,6 +217,28 @@ describe("web_fetch redirect attribution", () => {
     expect(result.content).toContain("https://example.com/article-2026");
     expect(result.content).toContain("Moved article");
   });
+
+  it("attributes a read failure after a redirect to the final URL", async () => {
+    transportMock
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 302,
+        statusText: "Found",
+        headers: new Map([["location", "https://files.example.net/report.bin"]]),
+        body: undefined,
+        text: async () => "",
+      } as unknown as Response)
+      .mockResolvedValueOnce(
+        stubResponse({ body: "binary", contentType: "application/octet-stream" })
+      );
+
+    const result = await runTool({ url: "https://example.com/report" });
+
+    expect(result.ok).toBe(false);
+    expect(result.url).toBe("https://files.example.net/report.bin");
+    expect(result.content).toContain("https://files.example.net/report.bin");
+    expect(result.content).not.toContain("https://example.com/report\"");
+  });
 });
 
 describe("web_fetch untrusted-content fencing", () => {

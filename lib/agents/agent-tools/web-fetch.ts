@@ -362,6 +362,10 @@ export async function fetchWebPageText(
     };
   }
 
+  // The page a failure belongs to: the requested URL until the redirect chain
+  // resolves, then the final URL, so a body that fails to read after a redirect
+  // is reported against the page it actually came from.
+  let attemptedUrl = url;
   try {
     // `finalUrl` is the URL the body actually came from. Report that, not the
     // requested URL: a 301 to a different path or host would otherwise be
@@ -371,6 +375,7 @@ export async function fetchWebPageText(
       url,
       AbortSignal.timeout(FETCH_TIMEOUT_MS)
     );
+    attemptedUrl = finalUrl;
     if (!res.ok) {
       return {
         text: `Fetch failed: HTTP ${res.status} ${res.statusText}`,
@@ -395,15 +400,15 @@ export async function fetchWebPageText(
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    log.warn("Web fetch failed", { host: url.hostname, error: message });
+    log.warn("Web fetch failed", { host: attemptedUrl.hostname, error: message });
     const friendly =
       err instanceof Error && err.name === "TimeoutError"
         ? "request timed out"
         : message;
     return {
-      text: `Failed to fetch "${url.href}": ${friendly}`,
+      text: `Failed to fetch "${attemptedUrl.href}": ${friendly}`,
       isError: true,
-      url: url.href,
+      url: attemptedUrl.href,
     };
   }
 }
