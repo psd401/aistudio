@@ -111,6 +111,47 @@ export function workspacePsdDataToolsMissing(params: {
 }
 
 /**
+ * Move the PSD Data connector's result to the END of the list.
+ *
+ * Connector tools are merged in order with `Object.assign`, so on a name
+ * collision the LAST connector wins. Another enabled connector exporting its own
+ * `query_data` would otherwise silently replace PSD Data's after
+ * `workspacePsdDataToolsMissing` had already seen PSD's copy and stayed quiet,
+ * and the model would rewrite the artifact against the wrong service's schema.
+ */
+export function withPsdDataConnectorLast(
+  results: McpConnectorToolsResult[],
+  connectorId: string | null
+): McpConnectorToolsResult[] {
+  if (!connectorId) return results;
+  return [
+    ...results.filter((result) => result.serverId !== connectorId),
+    ...results.filter((result) => result.serverId === connectorId),
+  ];
+}
+
+/**
+ * The failed connectors worth a "reconnect" prompt: every failure EXCEPT the
+ * PSD Data connector when the workspace attached it and the user never did.
+ *
+ * That attach is optional (the turn continues without it), and the user cannot
+ * act on a reconnect prompt for it: it usually failed because they have no
+ * access or the server is down, and in Standard mode the Connect menu is
+ * hidden. The do-not-guess guidance already covers the missing tools.
+ */
+export function reconnectableConnectorIds(params: {
+  failedIds: string[];
+  workspaceConnectorId: string | null;
+  manuallyEnabledIds: string[];
+}): string[] {
+  const { failedIds, workspaceConnectorId, manuallyEnabledIds } = params;
+  if (!workspaceConnectorId || manuallyEnabledIds.includes(workspaceConnectorId)) {
+    return failedIds;
+  }
+  return failedIds.filter((id) => id !== workspaceConnectorId);
+}
+
+/**
  * Appended to the workspace system-prompt fragment when an editable artifact is
  * open but the PSD Data tools could NOT be attached this turn — the connector is
  * unconfigured, unavailable, or the router is in shadow mode.

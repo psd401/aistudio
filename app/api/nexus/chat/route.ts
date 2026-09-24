@@ -93,6 +93,8 @@ import {
 } from '@/lib/nexus/workspace-routing-context';
 import {
   WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE,
+  reconnectableConnectorIds,
+  withPsdDataConnectorLast,
   workspacePsdDataToolsMissing,
   type NexusWorkspaceRoutingContext,
 } from '@/lib/nexus/workspace-routing-contract';
@@ -2741,8 +2743,17 @@ async function resolveToolsAndStream(params: {
     conversationTitle: conversation.conversationTitle,
     enabledTools: skillBinding.scopedEnabledTools,
     enabledConnectors: resolved.enabledConnectors,
-    connectorToolResults: skillBinding.effectiveConnectorToolResults,
-    failedConnectorIds: failedIds,
+    // PSD Data last so it wins a tool-name collision in the merge, matching
+    // what `workspacePsdDataToolsMissing` saw above.
+    connectorToolResults: withPsdDataConnectorLast(
+      skillBinding.effectiveConnectorToolResults,
+      resolved.routing.workspacePsdDataConnectorId,
+    ),
+    failedConnectorIds: reconnectableConnectorIds({
+      failedIds,
+      workspaceConnectorId: resolved.routing.workspacePsdDataConnectorId,
+      manuallyEnabledIds: prepared.validationData.enabledConnectors ?? [],
+    }),
     skillInstructions: skillBinding.skillInstructions,
     skillName: skillBinding.skillName,
     workspaceTools,

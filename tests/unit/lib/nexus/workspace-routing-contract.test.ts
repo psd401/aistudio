@@ -15,6 +15,8 @@
 import type { McpConnectorToolsResult } from "@/lib/mcp/connector-types";
 import {
   WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE,
+  reconnectableConnectorIds,
+  withPsdDataConnectorLast,
   workspaceNeedsPsdData,
   workspacePsdDataToolsMissing,
   type NexusWorkspaceRoutingContext,
@@ -240,5 +242,69 @@ describe("WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE", () => {
     expect(WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE).toMatch(
       /do not tell them which setting to change/i
     );
+  });
+});
+
+describe("withPsdDataConnectorLast", () => {
+  it("lets PSD Data win a tool-name collision in the Object.assign merge", () => {
+    const psd = connectorResult(PSD, ["query_data"]);
+    const other = connectorResult("other", ["query_data"]);
+
+    const ordered = withPsdDataConnectorLast([psd, other], PSD);
+    const merged = Object.assign({}, ...ordered.map((result) => result.tools));
+
+    expect(ordered.map((result) => result.serverId)).toEqual(["other", PSD]);
+    expect(merged.query_data).toBe(psd.tools.query_data);
+  });
+
+  it("keeps the same result objects so MCP clients still close", () => {
+    const psd = connectorResult(PSD, ["query_data"]);
+    const other = connectorResult("other", ["x"]);
+
+    const ordered = withPsdDataConnectorLast([psd, other], PSD);
+
+    expect(ordered).toHaveLength(2);
+    expect(ordered).toContain(psd);
+    expect(ordered).toContain(other);
+  });
+
+  it("leaves the order alone when no PSD Data connector was routed", () => {
+    const a = connectorResult("a", ["x"]);
+    const b = connectorResult("b", ["y"]);
+
+    expect(withPsdDataConnectorLast([a, b], null)).toEqual([a, b]);
+  });
+});
+
+describe("reconnectableConnectorIds", () => {
+  it("drops the PSD Data connector the workspace attached on its own", () => {
+    expect(
+      reconnectableConnectorIds({
+        failedIds: [PSD, "other"],
+        workspaceConnectorId: PSD,
+        manuallyEnabledIds: ["other"],
+      })
+    ).toEqual(["other"]);
+  });
+
+  it("keeps it when the user switched PSD Data on themselves", () => {
+    // A user-chosen connector with an expired token IS reconnectable.
+    expect(
+      reconnectableConnectorIds({
+        failedIds: [PSD],
+        workspaceConnectorId: PSD,
+        manuallyEnabledIds: [PSD],
+      })
+    ).toEqual([PSD]);
+  });
+
+  it("changes nothing when no workspace connector was routed", () => {
+    expect(
+      reconnectableConnectorIds({
+        failedIds: [PSD, "other"],
+        workspaceConnectorId: null,
+        manuallyEnabledIds: [],
+      })
+    ).toEqual([PSD, "other"]);
   });
 });
