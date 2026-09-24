@@ -139,6 +139,34 @@ describe("Connect popover — workspace-attached connector", () => {
     expect(screen.getByTestId("nexus-mcp-control")).toHaveTextContent("1");
   });
 
+  it("does not count a named-but-unreachable connector the row shows as off", async () => {
+    // The router names the connector for this workspace, but the caller has no
+    // usable token, so it would bind no tools and the row correctly reads off.
+    // The header must agree: when only the row applied the `connected` gate,
+    // the badge said "1" beside a row showing off — the popover contradicting
+    // itself about the one thing #1786 is about.
+    getConnectorsMock.mockResolvedValue({
+      isSuccess: true,
+      data: [
+        connector({
+          id: PSD_DATA_ID,
+          name: "PSD Data",
+          authType: "oauth",
+          status: "token_expired",
+          autoAttachedForWorkspace: true,
+        }),
+      ],
+    });
+
+    await openPopover({ workspaceId: "device-repairs" });
+
+    const row = await screen.findByTestId(`nexus-connector-${PSD_DATA_ID}`);
+    expect(row).toHaveAttribute("aria-checked", "false");
+    expect(row).not.toHaveAttribute("aria-disabled");
+    expect(row).not.toHaveTextContent("On for this workspace");
+    expect(screen.getByTestId("nexus-mcp-control")).not.toHaveTextContent("1");
+  });
+
   it("behaves exactly as before when nothing is auto-attached", async () => {
     getConnectorsMock.mockResolvedValue({
       isSuccess: true,

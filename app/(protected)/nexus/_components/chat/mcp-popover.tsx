@@ -59,6 +59,24 @@ interface ConnectorItemProps {
   onReconnect: (connectorId: string) => void
 }
 
+/**
+ * Whether the model router will carry this connector for the open workspace
+ * whatever the user's own toggle says (#1786).
+ *
+ * Gated on `connected` deliberately: attaching a connector whose token is
+ * missing or expired binds no tools, so claiming "On for this workspace" over a
+ * `token_expired` row would be the same lie in the other direction — and would
+ * bury the Reconnect link that fixes it.
+ *
+ * Shared by the row and the header count on purpose. When only the row applied
+ * the `connected` gate, a connector the router names but the user has no token
+ * for was counted as on in the header while its row read off — the popover
+ * contradicting itself about the very thing this issue is about.
+ */
+function isAutoAttachedForWorkspace(connector: ConnectorWithStatus): boolean {
+  return connector.autoAttachedForWorkspace && connector.status === 'connected'
+}
+
 const ConnectorItem = memo(function ConnectorItem({
   connector,
   isEnabled,
@@ -66,16 +84,10 @@ const ConnectorItem = memo(function ConnectorItem({
   onToggle,
   onReconnect,
 }: ConnectorItemProps) {
-  // #1786: the router attaches this connector to every turn while the workspace
-  // object is open, so the user's toggle cannot turn it off. Render it as on and
-  // say why, rather than showing "off" beside tools the model is using.
-  //
-  // Only when the connector can actually be reached: attaching a connector whose
-  // token is missing or expired binds no tools, so claiming "On for this
-  // workspace" over a `token_expired` row would be the same lie in the other
-  // direction — and would bury the Reconnect link that fixes it.
-  const autoAttached =
-    connector.autoAttachedForWorkspace && connector.status === 'connected'
+  // The router attaches this connector to every turn while the workspace object
+  // is open, so the user's toggle cannot turn it off. Render it as on and say
+  // why, rather than showing "off" beside tools the model is using.
+  const autoAttached = isAutoAttachedForWorkspace(connector)
   const locked = isAuthenticating || autoAttached
   const checked = isEnabled || autoAttached
 
@@ -215,9 +227,11 @@ function MCPPopoverView({
 }) {
   // #1786: count what the turn will actually carry, not just the user's own
   // toggles — a workspace-attached connector is on whether or not it was picked.
+  // Same predicate as the row, so the header cannot claim one is on while its
+  // row reads off.
   const effectivelyOnIds = new Set(enabledConnectors)
   for (const connector of connectors) {
-    if (connector.autoAttachedForWorkspace) effectivelyOnIds.add(connector.id)
+    if (isAutoAttachedForWorkspace(connector)) effectivelyOnIds.add(connector.id)
   }
   const enabledCount = effectivelyOnIds.size
   let content: React.ReactNode
