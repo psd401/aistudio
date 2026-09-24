@@ -14,11 +14,15 @@ openwiki:
     - infra/test/agent-skill-cdn-allowlist.test.ts
     - infra/test/atrium-sandbox-csp.test.ts
     - infra/lib/atrium-sandbox-stack.ts
+    - infra/lib/atrium-sandbox-host-page.ts
+    - infra/sandbox-host/render.html
     - infra/agent-image/check_config_consistency.py
   test_paths:
     - infra/test/frontend-waf-body-signatures.test.ts
     - infra/test/agent-skill-cdn-allowlist.test.ts
     - infra/agent-image/test_check_config_consistency.py
+    - tests/e2e/atrium-sandbox-script-order.spec.ts
+    - tests/smoke/atrium-artifact-sandbox-host.smoke.ts
 ---
 
 # Infrastructure
@@ -451,6 +455,27 @@ When adding new alarms or metric filters that depend on `resources.failureMetric
 ---
 
 ## Atrium Sandbox Configuration
+
+### Sandbox Host Page Assembly (#1785)
+
+**Source**: `/infra/lib/atrium-sandbox-host-page.ts`, `/infra/sandbox-host/render.html`
+
+The sandbox host page is assembled from a shared module that ensures the CSP, token substitution, and page rendering are consistent across:
+
+1. **Deployed stack** — `AtriumSandboxStack` uses `buildAtriumSandboxCsp()` and `renderAtriumSandboxHostPage()`
+2. **Smoke tests** — `tests/smoke/atrium-artifact-sandbox-host.smoke.ts` imports the same functions to load the page exactly as deployed
+3. **E2E tests** — `tests/e2e/atrium-sandbox-script-order.spec.ts` uses the same builder for Chromium testing
+
+**Why extraction matters**: Before #1785, the CSP was constructed inline in `atrium-sandbox-stack.ts` and duplicated in the smoke test. A change to policy shape required updating multiple locations. The extracted module `atrium-sandbox-host-page.ts` is deliberately free of `aws-cdk-lib` and file I/O so test runners can import it directly—callers provide the template content and normalized origins.
+
+**Key Exports**:
+
+| Function | Purpose |
+|----------|---------|
+| `buildAtriumSandboxCsp(input)` | Constructs CSP string from parent origins, CDN allowlist, media origins |
+| `renderAtriumSandboxHostPage(template, parentOrigins, cspPolicy)` | Substitutes `__ALLOWED_PARENT_ORIGINS__` and `__CSP_POLICY__` tokens |
+
+**Test Alignment**: Both jsdom smoke tests and Chromium E2E tests load the real committed `infra/sandbox-host/render.html` template with production token substitution. A CSP change that reaches the stack automatically reaches the tests—no separate test fixture to maintain.
 
 ### Content Security Policy Configuration (#1750)
 
