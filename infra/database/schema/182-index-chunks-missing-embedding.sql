@@ -1,0 +1,36 @@
+-- Migration 182: partial index over the chunks that still have no text embedding
+--
+-- The unified-content-processor maintenance loop runs on two rate(1 minute)
+-- schedules, and every run executes publishContentPlatformOperationalMetrics
+-- (lib/repositories/content-platform/operational-metrics.ts). Two of its
+-- subqueries - chunks_missing_embeddings and items_searchable_without_embeddings -
+-- filter repository_item_chunks only by `chunk.embedding IS NULL`, with no
+-- index_generation_id or item_id predicate an existing index could drive. Prod's
+-- plan (EXPLAIN, 2026-09-24) is a Seq Scan on repository_item_chunks at cost
+-- ~1.24M, filtering down to ~3,800 estimated rows (2,631 actual). The table's
+-- heap is 9.6 GB (plus 79 GB of TOASTed vectors the scan does not touch), so
+-- this reads ~9.6 GB several times a minute around the clock: a live sample
+-- recorded 15 full scans of the table in 302 s at ~midnight Pacific, and
+-- pg_stat_activity caught this exact query running for 6 s in all 15 captures.
+-- That churn is a large part of why prod Aurora has sat at its 6 ACU ceiling
+-- since 2026-09-13 while CPU averages ~13%.
+--
+-- A partial index containing only the embedding-less rows (0.5% of the table)
+-- lets both subqueries start from ~2.6k index entries instead of the whole
+-- heap. The key (index_generation_id, item_id) matches the joins those queries
+-- make. The per-generation recovery / activation queries in
+-- lib/repositories/content-platform/embedding-recovery.ts and
+-- infra/lambdas/embedding-generator already drive from
+-- idx_repository_chunks_generation and are unaffected.
+--
+-- NOT CONCURRENTLY, deliberately: the migration runner executes through the RDS
+-- Data API and `validateStatements` in infra/database/lambda/db-init-handler.ts
+-- rejects the keyword (see migration 181). A plain CREATE INDEX holds a SHARE
+-- lock (blocks writes, not reads) for the build, which is one pass over the
+-- heap: the equivalent `SELECT count(*) ... WHERE embedding IS NULL` took 5.9 s
+-- end to end through the Data API in prod on 2026-09-24, well inside the Data
+-- API's 45 s statement limit. Expect a few seconds of queued chunk writes in the
+-- content pipeline while it builds. IF NOT EXISTS keeps a re-run a no-op.
+CREATE INDEX IF NOT EXISTS idx_repository_chunks_missing_embedding
+  ON repository_item_chunks (index_generation_id, item_id)
+  WHERE embedding IS NULL;
