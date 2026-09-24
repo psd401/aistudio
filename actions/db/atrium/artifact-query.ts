@@ -805,10 +805,21 @@ export async function queryArtifactData(
     // `mayEdit` is assigned inside, so an abort leaves it at its fail-closed
     // `false` and the catch withholds upstream text, exactly as for any other
     // pre-object failure.
+    // None of the preflight calls is cancellable, so the race bounds what the
+    // CALLER waits for but cannot stop a stage that has already begun. Checking
+    // between stages stops the closure from starting the NEXT one once the
+    // budget is gone — otherwise a dependency slowdown leaves every abandoned
+    // request still running version and connector-config lookups in the
+    // background, and retries pile that work up behind the failures.
+    const stopIfExpired = (): void => {
+      if (deadline.aborted) throw deadline.reason;
+    };
+
     const preflight = await withDeadline(
       (async () => {
         const { session, idToken } = await authorizeQueryRequest(contentId);
         const params = validateQueryParams(input);
+        stopIfExpired();
 
         // Same session instance the gate above validated — never a second
         // resolve.
@@ -821,16 +832,22 @@ export async function queryArtifactData(
         // Shared 404 mask for missing/non-viewable content, exactly as the
         // record actions do — a viewer who cannot see the artifact learns
         // nothing.
+        stopIfExpired();
+
         const content = await contentService.get(requester, contentId);
         mayEdit = canEdit(requester, content.ownerUserId);
         // The exclusivity gate: `records` and `none` artifacts never reach the
         // data MCP (see the artifact-data.ts header for why).
         assertQueryMode(content);
+        stopIfExpired();
+
         const auditVersionId = await resolveAuditVersionId(
           content,
           input?.versionId,
           log
         );
+        stopIfExpired();
+
         const connectorId = await requirePsdDataConnectorId();
         return {
           idToken,

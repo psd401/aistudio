@@ -627,6 +627,37 @@ describe("queryArtifactData overall deadline (#1788)", () => {
     jest.useRealTimers();
   });
 
+  it("does not start LATER preflight stages once the budget is gone", async () => {
+    // The race bounds what the caller waits for, but none of these calls is
+    // cancellable — so a stage that has already begun still finishes. Without a
+    // check between stages the closure would carry on and run the version and
+    // connector-config lookups for a request whose caller already got
+    // `timeout`, and under a dependency slowdown every retry would pile more of
+    // that abandoned background work up behind the failures.
+    jest.useFakeTimers();
+    mockContentGet.mockImplementationOnce(async () => {
+      // Resolves, but only after the whole budget has gone.
+      await jest.advanceTimersByTimeAsync(31_000);
+      return { ...CONTENT };
+    });
+
+    const result = await queryArtifactData(validInput);
+    expect(failureOf(result).code).toBe("timeout");
+
+    // The caller is already answered, but the closure is not cancellable — so
+    // let every continuation it could still run actually run before asserting.
+    // Without this the assertions pass trivially, having simply outrun the
+    // background work they are meant to forbid.
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    // The stages AFTER the slow one never ran.
+    expect(mockVersionGetById).not.toHaveBeenCalled();
+    expect(mockResolveConnectorId).not.toHaveBeenCalled();
+    expect(mockGetConnectorTools).not.toHaveBeenCalled();
+    expect(mockExecute).not.toHaveBeenCalled();
+    jest.useRealTimers();
+  });
+
   it("bounds a preflight that NEVER settles, not just a slow one", async () => {
     // Arming the clock is not enough on its own: none of the preflight calls
     // takes an AbortSignal, so without racing them a single hung dependency (a

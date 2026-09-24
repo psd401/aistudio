@@ -192,7 +192,7 @@ outright. Three changes:
 | Server Action (serialized by the App Router) | `POST /api/atrium/artifacts/{id}/query` via `fetch` — genuinely parallel |
 | Hard cap of 8 in flight; the 9th **rejected** | Concurrency limit **6** for queries (**1** for record ops, which still ride serialized Server Actions), with the rest queued. The parent caps **total outstanding** (in flight + queued) at **32** — the host's own `MAX_PENDING_DATA_REQUESTS` — so both layers refuse the same request in either lane. Only a full queue is refused. |
 | Host's 45 s clock started when the page **posted** | Parent posts `atrium-artifact-data-ack` on **dispatch**; the host runs a queue-tolerant 315 s budget until then, and re-arms the real 45 s server budget on the ack, once |
-| Server budget: 30 s for `execute()` only, handshake free | One 30 s deadline spanning `getConnectorTools` **and** `execute()`, so the server always loses the race to the host's clock |
+| Server budget: 30 s for `execute()` only; preflight and handshake free | **One** 30 s deadline, armed at the top of `queryArtifactData` and spanning **preflight + handshake + execution** — the preflight is RACED against it (and stops between stages once it expires), so the server always loses the race to the host's clock by construction rather than by assuming any stage is fast |
 
 The frame still has **no** network access. Only the trusted parent calls the
 route, with the artifact id from its own props, and the route re-uses
@@ -433,9 +433,13 @@ request that has waited past its own queue deadline — shorter than the frame's
 so a `submit` can never commit after the artifact was already told it timed out.
 
 The host applies a ten-second timeout
-(forty-five seconds for `query`: the action's own 30s budget starts only after
-authorization and the connector handshake, so the host must always outlast it
-or a late server answer is dropped and the page retries a running query). The
+(forty-five seconds for `query`: the action's own 30s budget covers the WHOLE
+server turn — session resolution, the visibility check, the version lookup, the
+connector config read, the MCP handshake and the execution — so the host always
+outlasts it. If any stage ran outside that budget, a late server answer would be
+dropped and the page would retry a query that is still running; that is why the
+deadline is armed before the first await rather than around the connector work).
+The
 parent independently bounds concurrent work and validates request ids,
 namespaces, list options, JSON structure, and payload size before loading the
 Server Action. The Server Action repeats authoritative validation.
