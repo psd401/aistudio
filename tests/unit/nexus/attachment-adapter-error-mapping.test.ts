@@ -3,7 +3,7 @@
 import { describe, it, expect } from '@jest/globals';
 
 // assistant-ui/react is ESM-only; replace with class stubs so Jest (CJS) can
-// load enhanced-attachment-adapters.ts without hitting an ESM parse error.
+// load chat-attachment-adapters.ts without hitting an ESM parse error.
 // NOTE: must use global jest (not imported from @jest/globals) so the SWC
 // transform can hoist this call before the module imports are evaluated.
 jest.mock('@assistant-ui/react', () => ({
@@ -28,7 +28,7 @@ jest.mock('@/lib/utils/uuid', () => ({
   generateUUID: () => 'test-uuid',
 }));
 
-import { HybridDocumentAdapter } from '@/lib/nexus/enhanced-attachment-adapters';
+import { HybridDocumentAdapter } from '@/lib/attachments/chat-attachment-adapters';
 
 describe('HybridDocumentAdapter.toSafeErrorMessage', () => {
   // -------------------------------------------------------------------------

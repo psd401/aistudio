@@ -121,6 +121,8 @@ export interface SuggestedAction {
 
 interface ThreadProps {
   processingAttachments?: Set<string>;
+  /** Attachment ids whose upload failed; their chip shows "Failed" instead of "Ready". */
+  failedAttachments?: Set<string>;
   conversationId?: string | null;
   // Model and tools for composer controls
   selectedModel?: SelectAiModel | null;
@@ -150,6 +152,7 @@ interface ThreadProps {
 
 export const Thread: FC<ThreadProps> = ({
   processingAttachments,
+  failedAttachments,
   conversationId,
   selectedModel,
   onModelChange,
@@ -213,6 +216,7 @@ export const Thread: FC<ThreadProps> = ({
 
               <Composer
                 processingAttachments={processingAttachments}
+                failedAttachments={failedAttachments}
                 selectedModel={selectedModel}
                 onModelChange={onModelChange}
                 routingMode={routingMode}
@@ -331,6 +335,7 @@ const ThreadWelcomeSuggestions: FC<{ actions?: SuggestedAction[] }> = ({ actions
 
 interface ComposerProps {
   processingAttachments?: Set<string>;
+  failedAttachments?: Set<string>;
   selectedModel?: SelectAiModel | null;
   onModelChange?: (model: SelectAiModel) => void;
   routingMode?: NexusExperienceMode;
@@ -351,6 +356,7 @@ interface ComposerProps {
 
 const Composer: FC<ComposerProps> = ({
   processingAttachments,
+  failedAttachments,
   selectedModel,
   onModelChange,
   routingMode = "standard",
@@ -397,7 +403,10 @@ const Composer: FC<ComposerProps> = ({
             workspaceId={workspaceId}
           />
         )}
-        <ComposerAttachments processingAttachments={processingAttachments} />
+        <ComposerAttachments
+          processingAttachments={processingAttachments}
+          failedAttachments={failedAttachments}
+        />
         <ComposerPrimitive.Input
           placeholder="How can I help you today?"
           className="bg-muted dark:border-muted-foreground/15 focus:outline-primary placeholder:text-muted-foreground max-h-48 min-h-16 w-full resize-none overflow-y-auto px-4 pb-3 pt-2 text-base outline-none"

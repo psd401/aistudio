@@ -593,26 +593,22 @@ const attachmentAdapter = createEnhancedNexusAttachmentAdapter({...})
 ```
 
 ```typescript
-// CORRECT - memoize with stable dependencies
-const [conversationIdAccessor] = useState(() =>
-  createConversationIdAccessor(initialConversationId)
-)
-
-const attachmentAdapter = useMemo(() =>
-  createEnhancedNexusAttachmentAdapter(
-    {...callbacks},
-    {
-      repositoryBacked: true,
-      getConversationId: conversationIdAccessor.get
-    }
-  ),
-  [
-    conversationIdAccessor,
-    handleAttachmentProcessingStart,
-    handleAttachmentProcessingComplete
-  ]
-)
+// CORRECT - use the shared hook (lib/attachments/use-chat-attachments.ts).
+// It memoizes the adapter with stable dependencies and exposes a closure-backed
+// conversation-id accessor the adapter reads lazily.
+const {
+  attachmentAdapter,
+  conversationId: conversationIdAccessor, // .get() / .set()
+  processingAttachments,
+  failedAttachments,
+} = useChatAttachments(createEnhancedNexusAttachmentAdapter, {
+  initialConversationId,
+})
 ```
+
+The factory argument must be a stable module-level function. Nexus, decision
+capture, and Assistant Architect (document-only adapter,
+`purpose: "assistant-architect"`) all use this hook.
 
 ### ❌ Pitfall 5: Fetching messages on every conversationId change
 
@@ -817,7 +813,7 @@ After making changes to conversation handling, test ALL of these scenarios:
 ### Core Files
 - `/app/(protected)/nexus/page.tsx` - Main conversation page
 - `/lib/nexus/history-adapter.ts` - Message persistence
-- `/lib/nexus/enhanced-attachment-adapters.ts` - Attachment handling
+- `/lib/attachments/chat-attachment-adapters.ts` - Attachment handling
 - `/lib/nexus/conversation-navigation.ts` - ID validation
 
 ### API Routes

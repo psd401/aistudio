@@ -39,7 +39,7 @@ jest.mock("@assistant-ui/react", () => ({
   },
 }));
 
-import { createDocumentAttachmentAdapter } from "@/lib/nexus/enhanced-attachment-adapters";
+import { createDocumentAttachmentAdapter } from "@/lib/attachments/chat-attachment-adapters";
 
 describe("createDocumentAttachmentAdapter (#1735)", () => {
   const accept = createDocumentAttachmentAdapter().accept;

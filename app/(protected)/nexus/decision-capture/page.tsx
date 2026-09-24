@@ -13,12 +13,11 @@ import { ErrorBoundary } from '../_components/error-boundary'
 import { ConversationInitializer } from '../_components/conversation-initializer'
 import { DecisionToolUIs } from './_components/tools/decision-tools-ui'
 import { ChartVisualizationUI } from '../_components/tools/chart-visualization-ui'
-import { createEnhancedNexusAttachmentAdapter } from '@/lib/nexus/enhanced-attachment-adapters'
-import { UploadClassifiedError } from '@/lib/errors/upload-errors'
+import { createEnhancedNexusAttachmentAdapter } from '@/lib/attachments/chat-attachment-adapters'
+import { useChatAttachments } from '@/lib/attachments/use-chat-attachments'
 import { validateConversationId, navigateToDecisionCaptureConversation, navigateToNewDecisionCapture } from '@/lib/nexus/conversation-navigation'
 import { createLogger } from '@/lib/client-logger'
 import { handleContentBlockedResponse } from '@/lib/nexus/content-blocked-handler'
-import { toast } from 'sonner'
 
 /**
  * Decision Capture Page
@@ -81,53 +80,13 @@ function DecisionRuntimeProvider({
   initialMessages = [],
   onConversationIdChange,
 }: DecisionRuntimeProviderProps) {
-  // Attachment processing state
-  const [processingAttachments, setProcessingAttachments] = useState<Set<string>>(new Set())
-
-  const handleAttachmentProcessingStart = useCallback((attachmentId: string) => {
-    setProcessingAttachments(prev => {
-      const next = new Set(prev)
-      next.add(attachmentId)
-      return next
-    })
-  }, [])
-
-  const handleAttachmentProcessingComplete = useCallback((attachmentId: string) => {
-    setProcessingAttachments(prev => {
-      const next = new Set(prev)
-      next.delete(attachmentId)
-      return next
-    })
-  }, [])
-
-  const handleAttachmentError = useCallback((attachmentId: string, error: UploadClassifiedError | Error) => {
-    log.warn('Attachment processing failed', {
-      attachmentId,
-      code: error instanceof UploadClassifiedError ? error.code : undefined,
-      error: error.message,
-    })
-
-    if (error instanceof UploadClassifiedError && error.code === 'UNAUTHORIZED') {
-      toast.error('Session expired', {
-        description: 'Your session expired during file upload. Please sign in again.',
-        duration: 8000,
-        action: {
-          label: 'Sign in',
-          onClick: () => {
-            const callbackUrl = encodeURIComponent(window.location.pathname + window.location.search)
-            window.location.href = `/api/auth/signin?callbackUrl=${callbackUrl}`
-          },
-        },
-      })
-    } else {
-      toast.error('File upload failed', {
-        description: error instanceof UploadClassifiedError
-          ? `Upload error: ${error.code.replace(/_/g, ' ').toLowerCase()}.`
-          : 'The file could not be uploaded. Please try again.',
-        duration: 6000,
-      })
-    }
-  }, [])
+  // The adapter still sends the attachment marker to the specialized decision
+  // route, but source bytes and extraction use the same private canonical
+  // repository lifecycle as the rest of Nexus. The temporary-attachment
+  // endpoint retains the legacy fallback until the independent Nexus cutover
+  // flag is enabled.
+  const { attachmentAdapter, processingAttachments, failedAttachments } =
+    useChatAttachments(createEnhancedNexusAttachmentAdapter)
 
   // Custom fetch to intercept conversation ID header and handle content safety blocks
   const customFetch = useCallback(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -146,22 +105,6 @@ function DecisionRuntimeProvider({
 
     return response
   }, [conversationId, onConversationIdChange])
-
-  // Create attachment adapter
-  const attachmentAdapter = useMemo(() => {
-    return createEnhancedNexusAttachmentAdapter({
-      onProcessingStart: handleAttachmentProcessingStart,
-      onProcessingComplete: handleAttachmentProcessingComplete,
-      onError: handleAttachmentError,
-    }, {
-      // The adapter still sends the attachment marker to the specialized
-      // decision route, but source bytes and extraction now use the same
-      // private canonical repository lifecycle as the rest of Nexus. The
-      // temporary-attachment endpoint retains the legacy fallback until the
-      // independent Nexus cutover flag is enabled.
-      repositoryBacked: true,
-    })
-  }, [handleAttachmentProcessingStart, handleAttachmentProcessingComplete, handleAttachmentError])
 
   // Chat runtime — no model picker needed, model is admin-configured
   const runtime = useChatRuntime({
@@ -185,6 +128,7 @@ function DecisionRuntimeProvider({
       <ChartVisualizationUI />
       <Thread
         processingAttachments={processingAttachments}
+        failedAttachments={failedAttachments}
         conversationId={conversationId}
         suggestedActions={DECISION_SUGGESTED_ACTIONS}
       />

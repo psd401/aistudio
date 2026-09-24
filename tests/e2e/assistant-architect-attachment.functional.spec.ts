@@ -11,7 +11,10 @@
  *   1. an approved fixture assistant is executed,
  *   2. the composer's paperclip is present once the thread renders,
  *   3. choosing a document attaches it (a chip appears) instead of rejecting,
- *   4. no "Attachments are not supported" error reaches the page.
+ *   4. the (stubbed) failed upload reads "Failed", never "Ready", and is
+ *      attributed to `purpose: "assistant-architect"`,
+ *   5. a pasted image — outside the document-only adapter — raises a toast,
+ *   6. no "Attachments are not supported" error reaches the page.
  *
  * The `/api/assistant-architect/execute` stream is stubbed so the run completes
  * deterministically without a model provider — what is under test is the
@@ -113,7 +116,9 @@ async function dropArchitectFixture(
  * (the unified temporary-attachment endpoint and the legacy document upload), so
  * the test never depends on a model provider or on S3.
  */
-async function stubBackends(page: Page): Promise<void> {
+/** Returns the `purpose` of every repository upload the composer attempts. */
+async function stubBackends(page: Page): Promise<string[]> {
+  const uploadPurposes: string[] = [];
   await page.route("**/api/assistant-architect/execute", route =>
     route.fulfill({
       status: 200,
@@ -126,13 +131,15 @@ async function stubBackends(page: Page): Promise<void> {
       body: EXECUTION_STREAM,
     })
   );
-  await page.route("**/api/repositories/temporary-attachments**", route =>
-    route.fulfill({
+  await page.route("**/api/repositories/temporary-attachments**", route => {
+    const body = route.request().postDataJSON() as { purpose?: string } | null;
+    if (body?.purpose) uploadPurposes.push(body.purpose);
+    return route.fulfill({
       status: 503,
       contentType: "application/json",
       body: JSON.stringify({ error: "stubbed", code: "STORAGE_UNAVAILABLE" }),
-    })
-  );
+    });
+  });
   await page.route("**/api/documents/v2/**", route =>
     route.fulfill({
       status: 503,
@@ -140,6 +147,20 @@ async function stubBackends(page: Page): Promise<void> {
       body: JSON.stringify({ error: "stubbed", code: "STORAGE_UNAVAILABLE" }),
     })
   );
+  return uploadPurposes;
+}
+
+/** Pastes an image into the composer — the document-only adapter rejects it. */
+async function pasteImageIntoComposer(page: Page): Promise<void> {
+  const input = page.getByPlaceholder("How can I help you today?");
+  await input.click();
+  await input.evaluate(element => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(["png"], "pasted.png", { type: "image/png" }));
+    element.dispatchEvent(
+      new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true })
+    );
+  });
 }
 
 function collectPageErrors(page: Page): string[] {
@@ -168,7 +189,7 @@ async function runAttachmentTest(
     architectId = fixture.architectId;
 
     await authenticateContext(page.context());
-    await stubBackends(page);
+    const uploadPurposes = await stubBackends(page);
     const errors = collectPageErrors(page);
 
     await page.goto(`/tools/assistant-architect/${fixture.architectId}`);
@@ -192,6 +213,20 @@ async function runAttachmentTest(
     await expect(page.getByText("blind-spot-notes.txt").first()).toBeVisible({
       timeout: 30_000,
     });
+
+    // The stubbed upload fails: the chip says so instead of flashing "Ready",
+    // and the upload was attributed to Assistant Architect, not Nexus.
+    await expect(page.getByText("Failed", { exact: true })).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(page.getByText("Ready", { exact: true })).toHaveCount(0);
+    expect(uploadPurposes).toContain("assistant-architect");
+    expect(uploadPurposes).not.toContain("nexus");
+
+    // A pasted image is outside the document-only adapter; the user is told
+    // rather than the rejection vanishing into the console.
+    await pasteImageIntoComposer(page);
+    await expect(page.getByText("File type not supported")).toBeVisible();
 
     await mkdir(".verification", { recursive: true });
     await page.screenshot({
