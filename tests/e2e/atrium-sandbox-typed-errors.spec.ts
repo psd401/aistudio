@@ -157,6 +157,37 @@ test.describe("Atrium sandbox host — typed bridge failures (#1787)", () => {
       .toEqual(["rate_limited:30"]);
   });
 
+  test("an UNCAUGHT bridge rejection is not re-forwarded as a script error", async ({
+    page,
+  }) => {
+    await openHost(page);
+    await page.evaluate(collectForwardedFrameErrors);
+    await installFailingBridge(page, {
+      code: "query_error",
+      error: 'column "nope" does not exist',
+    });
+
+    // The first query's rejection is left uncaught. It was already reported
+    // with its code when the bridge rejected, so the unhandledrejection
+    // forwarder must skip it (Codex P2 on #1808). The sentinel — an ordinary
+    // uncaught rejection raised AFTER the bridge ones have settled — proves the
+    // forwarder is still live, so the absence below is not just a slow page.
+    await render(
+      page,
+      "<script>" +
+        "AtriumData.query('select nope from a');" +
+        "AtriumData.query('select nope from b').catch(function () {" +
+        "  setTimeout(function () { Promise.reject(new Error('sentinel')); }, 100);" +
+        "});" +
+        CLOSE_SCRIPT
+    );
+
+    await expect
+      .poll(() => readLog(page), { timeout: 10_000 })
+      .toContain("forwarded=sentinel");
+    expect(await readLog(page)).toEqual(["forwarded=sentinel"]);
+  });
+
   test("an uncaught artifact error is forwarded to the parent", async ({
     page,
   }, testInfo) => {

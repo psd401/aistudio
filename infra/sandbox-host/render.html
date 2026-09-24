@@ -153,6 +153,18 @@
          * expired" for `unauthenticated` and show the message for `query_error`,
          * instead of guessing from one string the way it had to before.
          */
+        /**
+         * Every Error the bridge itself rejects with. Each one was ALREADY
+         * reported with its code (and SQL): by the parent's own diagnostic for a
+         * parent answer, or by `localBridgeFailure` for one raised here. When the
+         * artifact leaves one uncaught, the `unhandledrejection` forwarder skips
+         * it, so a typed entry is not duplicated as a generic script error that
+         * could push the useful ones out of the parent's 10-entry buffer. A
+         * WeakSet held in this closure, so artifact code cannot add to it.
+         */
+        var bridgeCreatedErrors =
+          typeof WeakSet === "function" ? new WeakSet() : null;
+
         function bridgeError(code, message, retryAfterSeconds) {
           var normalized = normalizeBridgeCode(code);
           var err = new Error(
@@ -161,6 +173,7 @@
               : "Atrium data request failed"
           );
           err.code = normalized;
+          if (bridgeCreatedErrors) bridgeCreatedErrors.add(err);
           if (
             normalized === "rate_limited" &&
             typeof retryAfterSeconds === "number" &&
@@ -275,6 +288,15 @@
         });
         window.addEventListener("unhandledrejection", function (event) {
           var reason = event && event.reason;
+          // Already reported, with its code, when the bridge rejected.
+          if (
+            bridgeCreatedErrors &&
+            reason &&
+            typeof reason === "object" &&
+            bridgeCreatedErrors.has(reason)
+          ) {
+            return;
+          }
           reportFrameError(
             reason && reason.message ? reason.message : String(reason)
           );
