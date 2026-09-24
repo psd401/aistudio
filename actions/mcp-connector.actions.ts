@@ -14,6 +14,8 @@ import {
 } from "@/lib/db/schema"
 import type { ActionState } from "@/types/actions-types"
 import type { McpAuthType, McpConnectionStatus } from "@/lib/mcp/connector-types"
+import { previewWorkspaceAutoConnectorIds } from "@/lib/nexus/model-router/workspace-auto-connector"
+import { resolveWorkspaceRoutingContext } from "@/lib/nexus/workspace-routing-context"
 
 /** Token expiry buffer — proactively mark tokens expiring within 60 seconds as expired */
 const TOKEN_EXPIRY_BUFFER_MS = 60_000
@@ -30,6 +32,38 @@ export interface ConnectorWithStatus {
   name: string
   authType: McpAuthType
   status: McpConnectionStatus
+  /**
+   * #1786: the model router will attach this connector to every turn sent while
+   * the caller's workspace object is open, whatever the user's own toggle says.
+   * The popover renders it as on and explains why, instead of showing an off
+   * toggle beside a connector the model is actually using. Always false when no
+   * `workspaceId` was passed.
+   */
+  autoAttachedForWorkspace: boolean
+}
+
+/**
+ * The connectors the model router will attach on its own for the open workspace
+ * object (#1786).
+ *
+ * The decision itself lives beside the router
+ * (`lib/nexus/model-router/workspace-auto-connector.ts`) and is pinned against
+ * the live routing path by `router.test.ts`, so the popover cannot claim
+ * something the router will not do. All this adds is resolving the id/slug the
+ * caller passed into the object that decision is made about.
+ */
+async function resolveWorkspaceAutoAttachedIds(params: {
+  workspaceId?: string
+  userId: number
+  requestId: string
+}): Promise<Set<string>> {
+  if (!params.workspaceId) return new Set()
+  const workspace = await resolveWorkspaceRoutingContext({
+    workspaceIdOrSlug: params.workspaceId,
+    userId: params.userId,
+    requestId: params.requestId,
+  })
+  return new Set(await previewWorkspaceAutoConnectorIds(workspace))
 }
 
 /**
@@ -44,7 +78,9 @@ export interface ConnectorWithStatus {
  *
  * Combines connector listing + per-user token status in a single JOIN.
  */
-export async function getConnectorsWithStatus(): Promise<ActionState<ConnectorWithStatus[]>> {
+export async function getConnectorsWithStatus(
+  params: { workspaceId?: string } = {}
+): Promise<ActionState<ConnectorWithStatus[]>> {
   const requestId = generateRequestId()
   const timer = startTimer("getConnectorsWithStatus")
   const log = createLogger({ requestId, action: "getConnectorsWithStatus" })
@@ -125,6 +161,11 @@ export async function getConnectorsWithStatus(): Promise<ActionState<ConnectorWi
     )
 
     const bufferThreshold = new Date(Date.now() + TOKEN_EXPIRY_BUFFER_MS)
+    const autoAttachedIds = await resolveWorkspaceAutoAttachedIds({
+      workspaceId: params.workspaceId,
+      userId,
+      requestId,
+    })
 
     const connectors: ConnectorWithStatus[] = rows.map((row) => {
       let status: McpConnectionStatus = "no_token"
@@ -151,7 +192,13 @@ export async function getConnectorsWithStatus(): Promise<ActionState<ConnectorWi
         authType = "none"
       }
 
-      return { id: row.id, name: row.name, authType, status }
+      return {
+        id: row.id,
+        name: row.name,
+        authType,
+        status,
+        autoAttachedForWorkspace: autoAttachedIds.has(row.id),
+      }
     })
 
     timer({ status: "success", count: connectors.length })

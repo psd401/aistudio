@@ -11,6 +11,10 @@ import {
 import { classifyNexusRequest } from "./classifier"
 import { getNexusRouterConfig } from "./config"
 import { resolvePsdDataConnectorId } from "./psd-data-connector"
+import {
+  workspaceNeedsPsdData,
+  type NexusWorkspaceRoutingContext,
+} from "../workspace-routing-contract"
 import { NexusSpecialistUnavailableError } from "./errors"
 import type {
   NexusClassifierDecision,
@@ -75,6 +79,8 @@ function selectModel(args: {
   fallbackModelId: string
   accessibleIds: Set<string>
   requiredTools: string[]
+  /** Demand function calling even when no named tool is required (#1786). */
+  requiresFunctionCalling?: boolean
 }): { model: NexusModelRow; fallbackUsed: boolean } {
   const configuredIds = configuredCandidates(args.config, args.family, args.tier, args.intent)
   // A specialist-only image model cannot first call server-side input tools.
@@ -111,7 +117,7 @@ function selectModel(args: {
     fallbackModelId: args.fallbackModelId,
     requirements: {
       requiredTools: args.requiredTools,
-      requiresFunctionCalling: args.requiredTools.length > 0,
+      requiresFunctionCalling: args.requiredTools.length > 0 || args.requiresFunctionCalling === true,
     },
     additionalEligibility: model =>
       !hasCapability(model.capabilities, "imageGeneration")
@@ -133,11 +139,19 @@ function selectModel(args: {
   throw new Error("No accessible Nexus model is available")
 }
 
+/**
+ * Resolve the PSD Data connector id when this turn needs it, or null.
+ *
+ * `needed` is deliberately NOT just `intent === "psd-data"` (#1786): a turn
+ * against an editable workspace artifact needs the data tools however its
+ * sentence classifies, because "add a school dropdown" asked of an open live
+ * dashboard is a schema question wearing a UI question's clothes.
+ */
 async function resolveAutomaticPsdConnector(
-  intent: NexusRouterIntent,
+  needed: boolean,
   config: NexusRouterConfig
 ): Promise<string | null> {
-  if (intent !== "psd-data") return null
+  if (!needed) return null
   try {
     const connectorId = await resolvePsdDataConnectorId(config)
     if (!connectorId) {
@@ -168,6 +182,35 @@ function selectModelForRuntime(
   }
 }
 
+/**
+ * Pick the executed model, preferring one that can call tools when this turn
+ * attaches the PSD Data tools (#1786). Selection runs before the connector is
+ * attached, so without this a turn could bind `query_data` beside a model that
+ * can never invoke it. A PREFERENCE, not a requirement: with no function-calling
+ * model available the turn keeps its normal model and the chat route's
+ * do-not-guess guidance covers it, rather than an artifact edit failing outright.
+ * Only active routing attaches the connector, so only it re-selects.
+ */
+function selectModelForDataTools(
+  args: Parameters<typeof selectModel>[0],
+  mode: Exclude<NexusRouterRuntimeMode, "off">,
+  fallback: NexusModelRow,
+  wantsPsdData: boolean
+): { model: NexusModelRow; fallbackUsed: boolean } {
+  if (mode === "active" && wantsPsdData) {
+    try {
+      return selectModel({ ...args, requiresFunctionCalling: true })
+    } catch (error) {
+      log.warn("No function-calling model for a PSD Data turn; keeping the normal selection", {
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+  return args.requiredTools.length > 0
+    ? selectModel(args)
+    : selectModelForRuntime(args, mode, fallback)
+}
+
 interface RouteNexusRequestArgs {
   text: string
   fallbackModelId: string
@@ -178,6 +221,11 @@ interface RouteNexusRequestArgs {
   userId: number
   hasImageInput?: boolean
   hasPreviousGeneratedImage?: boolean
+  /**
+   * The object open in the workspace panel beside the chat, already resolved
+   * and view-gated (#1786). Null/absent when no workspace is open.
+   */
+  workspace?: NexusWorkspaceRoutingContext | null
 }
 
 function addRequiredWebSearchTool(
@@ -192,14 +240,36 @@ function addRequiredWebSearchTool(
   }
 }
 
-function buildRouterOffResult(options: {
+/**
+ * The PSD Data connector that carries the data tools for a workspace turn, or
+ * null when this turn is not a workspace-artifact turn / the connector cannot be
+ * resolved at all (#1786).
+ *
+ * Resolved for ALL THREE runtime modes, because the chat route uses it to ask a
+ * question the router cannot answer: did those tools actually reach the model?
+ * Access control, a downed MCP server and a skill's `allowed-tools` pin all bite
+ * AFTER routing, so the router reports WHICH connector it meant rather than
+ * asserting that it worked.
+ */
+async function resolveWorkspacePsdDataConnectorId(options: {
+  workspace: NexusWorkspaceRoutingContext | null | undefined
+  config: NexusRouterConfig
+  psdConnectorId?: string | null
+}): Promise<string | null> {
+  if (!workspaceNeedsPsdData(options.workspace)) return null
+  return options.psdConnectorId !== undefined
+    ? options.psdConnectorId
+    : await resolveAutomaticPsdConnector(true, options.config)
+}
+
+async function buildRouterOffResult(options: {
   args: RouteNexusRequestArgs
   config: NexusRouterConfig
   models: NexusModelRow[]
   fallback: NexusModelRow
   accessibleIds: Set<string>
   requiredTools: string[]
-}): NexusRouteResult {
+}): Promise<NexusRouteResult> {
   const { args, config, models, fallback, accessibleIds, requiredTools } = options
   let selected = fallback
   let fallbackUsed = false
@@ -219,11 +289,19 @@ function buildRouterOffResult(options: {
     fallbackUsed = selection.fallbackUsed
     reasonCodes.push("required_tools_enforced")
   }
+  // Router-off attaches nothing, but an open artifact still needs the route to
+  // be able to tell whether the user switched PSD Data on themselves (#1786) —
+  // otherwise this deployment keeps the bug the fix exists for.
+  const workspacePsdDataConnectorId = await resolveWorkspacePsdDataConnectorId({
+    workspace: args.workspace,
+    config,
+  })
   return {
     modelId: selected.modelId,
     connectorIds: args.enabledConnectorIds,
     automaticConnectorIds: [],
     automaticToolNames: [],
+    workspacePsdDataConnectorId,
     metadata: {
       version: config.version,
       runtimeMode: "off",
@@ -253,7 +331,31 @@ function selectedRuntimeModel(
   return selection.model
 }
 
-function buildRoutedResult(options: {
+/**
+ * The classifier's own reason codes plus what routing added on top of them, so
+ * the stored per-message metadata explains the turn's tools after the fact.
+ */
+function buildReasonCodes(options: {
+  decision: NexusClassifierDecision
+  requiredTools: string[]
+  workspaceWantsPsdData: boolean
+  /** Whether the connector reached the turn's connector list — NOT whether its
+   *  tools bound, which only the chat route can know. Telemetry, not behaviour. */
+  workspacePsdDataAttached: boolean
+}): string[] {
+  const reasonCodes = [...options.decision.reasonCodes]
+  if (options.requiredTools.length > 0) reasonCodes.push("required_tools_enforced")
+  if (options.workspaceWantsPsdData) {
+    reasonCodes.push(
+      options.workspacePsdDataAttached
+        ? "workspace_artifact_psd_data"
+        : "workspace_psd_data_unavailable"
+    )
+  }
+  return reasonCodes
+}
+
+async function buildRoutedResult(options: {
   args: RouteNexusRequestArgs
   config: NexusRouterConfig
   mode: Exclude<NexusRouterRuntimeMode, "off">
@@ -262,7 +364,7 @@ function buildRoutedResult(options: {
   selection: { model: NexusModelRow; fallbackUsed: boolean }
   psdConnectorId: string | null
   requiredTools: string[]
-}): NexusRouteResult {
+}): Promise<NexusRouteResult> {
   const {
     args,
     config,
@@ -288,13 +390,36 @@ function buildRoutedResult(options: {
   const autoEnabledWebSearch =
     mode === "active" && decision.intent === "web-search"
   const autoAttachedPsdData = mode === "active" && Boolean(psdConnectorId)
+  const workspaceWantsPsdData = workspaceNeedsPsdData(args.workspace)
+  const workspacePsdDataConnectorId = await resolveWorkspacePsdDataConnectorId({
+    workspace: args.workspace,
+    config,
+    psdConnectorId,
+  })
+  const reasonCodes = buildReasonCodes({
+    decision,
+    requiredTools,
+    workspaceWantsPsdData,
+    workspacePsdDataAttached:
+      workspacePsdDataConnectorId !== null
+      && connectorIds.includes(workspacePsdDataConnectorId),
+  })
 
   return {
     modelId: selected.modelId,
     connectorIds,
+    // REQUIRED connectors only — the ones the user's own message asked for. A
+    // workspace-artifact turn asked for something else ("add a dropdown"), so
+    // its connector must never join this list: `resolveToolsAndStream` fails
+    // the WHOLE turn when an id here cannot be connected, and doing that to
+    // every edit made by a user who lacks PSD Data access would be a far worse
+    // bug than the one this fix exists for (#1786).
     automaticConnectorIds:
-      autoAttachedPsdData && psdConnectorId ? [psdConnectorId] : [],
+      autoAttachedPsdData && psdConnectorId && decision.intent === "psd-data"
+        ? [psdConnectorId]
+        : [],
     automaticToolNames: autoEnabledWebSearch ? ["webSearch"] : [],
+    workspacePsdDataConnectorId,
     metadata: {
       version: config.version,
       runtimeMode: mode,
@@ -304,10 +429,7 @@ function buildRoutedResult(options: {
       intent: decision.intent,
       tier: decision.tier,
       confidence: decision.confidence,
-      reasonCodes:
-        requiredTools.length > 0
-          ? [...decision.reasonCodes, "required_tools_enforced"]
-          : decision.reasonCodes,
+      reasonCodes,
       decisionSource: decision.source,
       selectedModelId: selected.modelId,
       proposedModelId:
@@ -355,10 +477,12 @@ async function routeWithConfiguredRouter(options: {
   // Shadow mode may retain a legacy fallback only when doing so is safe. A
   // server-required input tool is an authorization/correctness boundary, so
   // execute a compatible text model even while recording the proposed route.
-  const selection = requiredTools.length > 0
-    ? selectModel(selectionArgs)
-    : selectModelForRuntime(selectionArgs, mode, fallback)
-  const psdConnectorId = await resolveAutomaticPsdConnector(decision.intent, config)
+  const wantsPsdData = decision.intent === "psd-data" || workspaceNeedsPsdData(args.workspace)
+  const selection = selectModelForDataTools(selectionArgs, mode, fallback, wantsPsdData)
+  const psdConnectorId = await resolveAutomaticPsdConnector(wantsPsdData, config)
+  // Only an explicit psd-data REQUEST fails closed. A workspace-artifact turn
+  // asked for something else too ("add a dropdown"), so an unavailable
+  // connector degrades to the do-not-guess guidance instead of a hard error.
   if (mode === "active" && decision.intent === "psd-data" && !psdConnectorId) {
     throw new NexusSpecialistUnavailableError(
       "psd-data",
