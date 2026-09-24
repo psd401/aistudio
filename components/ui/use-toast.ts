@@ -26,6 +26,8 @@ export interface ToastOptions {
   /** `destructive` renders as an error toast; anything else is neutral. */
   variant?: "default" | "destructive"
   duration?: number
+  /** sonner accepts a ReactNode action, so shadcn's action element passes straight through. */
+  action?: React.ReactNode
 }
 
 export interface ToastHandle {
@@ -41,11 +43,12 @@ export interface ToastHandle {
  * a description-only toast is never dropped.
  */
 function emit(options: ToastOptions, id?: string | number): string | number {
-  const { title, description, variant, duration } = options
+  const { title, description, variant, duration, action } = options
   const message = title ?? description
   const data = {
     description: title == null ? undefined : description,
     duration,
+    action,
     ...(id === undefined ? {} : { id }),
   }
 

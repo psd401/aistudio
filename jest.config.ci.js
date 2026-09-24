@@ -27,6 +27,11 @@ const customJestConfig = {
     'lucide-react': '<rootDir>/tests/mocks/lucide-react.js',
     'next-auth/react': '<rootDir>/tests/mocks/next-auth.js',
     'next/navigation': '<rootDir>/tests/mocks/next-navigation.js',
+    // Keep in sync with jest.config.js. Slot must precede the catch-all:
+    // mapping every @radix-ui/* specifier to one file collapses them onto a
+    // single module-registry key, so the per-package jest.mock factories in
+    // jest.setup.js overwrite one another (see tests/mocks/radix-ui-slot.js).
+    '^@radix-ui/react-slot$': '<rootDir>/tests/mocks/radix-ui-slot.js',
     '^@radix-ui/(.*)$': '<rootDir>/tests/mocks/radix-ui-primitives.js',
     '^@/components/ui/select$': '<rootDir>/tests/mocks/radix-ui.js',
     '^@/components/ui/dialog$': '<rootDir>/tests/mocks/radix-ui.js',
