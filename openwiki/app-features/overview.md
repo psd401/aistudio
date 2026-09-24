@@ -56,6 +56,10 @@ openwiki:
     - app/(protected)/nexus/_components/chat/mcp-popover.tsx
     - app/(protected)/nexus/page.tsx
     - components/assistant-ui/thread.tsx
+    - lib/tools/web-fetch-tool.ts
+    - lib/agents/agent-tools/web-fetch.ts
+    - lib/nexus/model-router/url-detection.ts
+    - app/(protected)/nexus/_components/tools/web-fetch-ui.tsx
   invariants:
     - Artifact data_access modes (records/query/none) are mutually exclusive — prevents exfiltration loop
     - Mode is enforced twice (client-side pin + server-side check) and changes only take effect on fresh page load (#1712)
@@ -111,6 +115,17 @@ openwiki:
     - Diagnostics are read once per request — takeArtifactPreviewDiagnostics clears the buffer so each failure reaches the model exactly once, never re-sent on every later turn (#1787)
     - Failed send restores diagnostics — if the request never reached the server, the taken entries are restored so the preview may re-run the failing query (#1787)
     - Fresh version clears diagnostics — clearArtifactPreviewDiagnostics is called when a new artifact version mounts so previous failures don't describe code that is no longer running (#1787)
+    - web_fetch is Nexus-only — attached to every Nexus turn, never to single-step surfaces (model compare, AI helpers without multi-step budgets) (#1696)
+    - Page text is fenced as untrusted — fetched content wrapped in <untrusted_web_content> markers; model must treat it as data, not instructions (OWASP LLM01) (#1696)
+    - Fence markers are neutralized — the page cannot close its own fence with literal </untrusted_web_content> or whitespace variants; attempted breakouts are escaped (#1696)
+    - SSRF guard blocks private hosts — loopback, link-local, unique-local IPv6, cloud-metadata addresses refused before fetch, including through redirects (#1696)
+    - Redirects report final URL — a cross-host redirect attributes the content to the final destination, not the requested link (#1696)
+    - Failure messages are sanitized — never echo server-controlled text (status lines, headers, error messages); only known-safe strings reach the model (#1696)
+    - URL messages route as general — a pasted link classifies as general intent, never web-search, so the turn never fails for lack of a search-capable model (#1696)
+    - Mixed URL + current-info still routes as web-search — "summarize <url> and give today's weather" keeps web_fetch attached; degrades to fetch-only when no search model available (#1696)
+    - Minimum step budget is 3 — WEB_FETCH_MAX_STEPS ensures a follow-up step after calling web_fetch; prevents empty replies on "summarize this link" (#1696)
+    - Skill allowed-tools pins can exclude web_fetch — a non-empty pin omitting web_fetch / webFetch / chat.web_fetch prevents attachment (#1696)
+    - Built-in web_fetch wins on name collision — a connector exposing web_fetch cannot replace the SSRF-guarded implementation (#1696)
   validation_commands:
     - bun run typecheck
     - bun run lint
@@ -157,6 +172,9 @@ openwiki:
     - tests/unit/assistant-architect-create-form.test.tsx
     - tests/unit/use-toast-sonner-adapter.test.ts
     - tests/e2e/assistant-architect-create-add-field.functional.spec.ts
+    - tests/unit/lib/tools/web-fetch-tool.test.ts
+    - tests/unit/lib/nexus/model-router/__tests__/url-detection.test.ts
+    - tests/e2e/nexus-url-access.functional.spec.ts
 ---
 
 # Core Application Features
@@ -243,6 +261,50 @@ Model Context Protocol tools integrated via:
 - `/lib/mcp/tool-handlers.ts` — Server-side tool execution
 
 Tools are gated by user capabilities and resource access grants.
+
+### Web Fetch Tool (#1696)
+
+Nexus chat can open a specific URL when the user pastes one. This closes a gap where the only internet-facing tool was provider-native web *search* (which finds pages but cannot fetch a given link), so "open this URL" requests previously failed with "I cannot access URLs directly."
+
+**Scope**: Nexus chat only. The tool is NOT attached to single-step streaming surfaces (model compare, AI helpers without multi-step budgets) because `web_fetch` is non-terminal — the model calls it, then needs a follow-up step to answer from the fetched content. Attaching it to a single-step surface would end the turn at the tool result with no text reaching the user.
+
+**Security Measures**:
+- **SSRF Guard**: HTTPS-only in production; private/loopback/link-local/cloud-metadata hosts blocked, including through redirects and DNS rebinding (`/lib/agents/agent-tools/web-fetch.ts` — `isBlockedHost()`)
+- **Content Fencing**: Fetched page text is wrapped in `<untrusted_web_content source="...">` markers. The tool description instructs the model to treat everything inside the fence as *data* (summarize, quote, answer from), never as permission or directions to follow (OWASP LLM01 — indirect prompt injection)
+- **Fence Neutralization**: The page controls the text, so `neutralizeFenceMarkers()` escapes the `<` of any literal `</untrusted_web_content>` or `<untrusted_web_content>` in the page body — preventing a hostile page from closing its fence early and surfacing injected instructions outside the boundary
+- **Redirect Attribution**: After a redirect, the tool reports the *final* URL (where content actually came from) rather than the requested URL
+- **Error Message Sanitization**: Failure messages never echo server-controlled text (status lines, header values, error messages) — only known-safe strings like standard HTTP reason phrases or generic "network error (CODE)" forms
+
+**Routing Implications**:
+- A message naming a URL classifies as `general` intent, never `web-search`, because `web_fetch` is universal (attached to every Nexus turn) and needs no specialist model
+- The router prefers a function-calling model for URL messages (`selectModelForToolUse`) but falls back to the normal model when none is available — refusing the link is worse
+- A URL alongside current-info wording (`"summarize <url> and give today's weather"`) still routes as `web-search` with both reason codes (`current_web_information`, `explicit_url_web_fetch`), and `web_fetch` stays attached
+- When no search-capable model is accessible for that mixed case, the router degrades to a fetch-only `general` turn so the link is never refused
+
+**Step Budget**: The minimum budget for any Nexus turn is now 3 steps (`WEB_FETCH_MAX_STEPS` in `/lib/nexus/chat-step-budget.ts`) — one to fetch, one to answer, and one spare. This floor prevents a "summarize this link" turn from stopping at the tool call with no follow-up.
+
+**Skill Pin Enforcement**: A skill with a non-empty `allowed-tools` pin that omits `web_fetch` / `webFetch` / `chat.web_fetch` will not have the tool attached. The built-in is also preserved over same-named external tools — a connector exposing `web_fetch` cannot replace the SSRF-guarded implementation.
+
+**URL Detection** (`/lib/nexus/model-router/url-detection.ts`):
+- `containsExplicitUrl(text)` — Detects http(s) URLs in the message, including bracketed IPv6 hosts
+- `stripExplicitUrls(text)` — Removes URLs for the current-info wording check, preventing `https://example.com/latest-news/` from triggering the web-search branch
+
+**Key Sources**:
+- `/lib/tools/web-fetch-tool.ts` — AI SDK tool implementation, content fencing, fence neutralization
+- `/lib/agents/agent-tools/web-fetch.ts` — Core `fetchWebPageText()` with SSRF guards, redirect validation, error sanitization
+- `/lib/nexus/model-router/classifier.ts` — URL detection in deterministic classification
+- `/lib/nexus/model-router/url-detection.ts` — Shared URL detection patterns
+- `/lib/nexus/chat-step-budget.ts` — `WEB_FETCH_MAX_STEPS` floor
+- `/app/api/nexus/chat/route.ts` — `buildMergedChatTools()` attachment logic
+- `/app/(protected)/nexus/_components/tools/web-fetch-ui.tsx` — Tool UI card showing which page was opened
+
+**Focused Tests**:
+- `tests/unit/lib/tools/web-fetch-tool.test.ts` — 34 test cases covering tool behavior, fencing, neutralization, error handling
+- `tests/unit/lib/nexus/model-router/__tests__/classifier.test.ts` — URL routing classifier tests
+- `tests/unit/lib/nexus/model-router/__tests__/url-detection.test.ts` — URL detection patterns including IPv6
+- `tests/unit/lib/nexus/model-router/__tests__/router.test.ts` — Model selection preferences for URL messages
+- `tests/unit/lib/nexus/chat-step-budget.test.ts` — Step budget floor tests
+- `tests/e2e/nexus-url-access.functional.spec.ts` — E2E test for URL opening flow
 
 ### Image Generation
 
