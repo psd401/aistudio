@@ -66,6 +66,7 @@ AI Studio is an open-source platform that provides K-12 educators and students w
 11. **Visibility Changes**: Read grants before modifying — `PATCH /content/:id/visibility` replaces the grant list, use `--add-grants`/`--remove-grants` for merge operations (#1763)
 12. **Grant Targets**: `user` and `group` grants validate target existence before storing; see **[app-features/overview.md](app-features/overview.md#grant-target-existence-validation-1777)** for contract (#1777)
 13. **Typed Bridge Errors**: AtriumData bridge failures carry typed `err.code` (unauthenticated, forbidden, not_query_mode, rate_limited, timeout, query_error, too_many_requests, unavailable). Wrap every bridge call in try/catch — see **[app-features/overview.md](app-features/overview.md#typed-bridge-errors-1787)** for contract and handling pattern (#1787)
+14. **MCP Tool Versioning**: Tool schemas are immutable at a given version — changing a schema requires bumping the version. Old versions must be preserved as frozen legacy entries in `LEGACY_MCP_MANIFEST_ENTRIES`. See **[api-integration/overview.md](api-integration/overview.md#mcp-tool-versioning-contract)** for versioning contract (#1710, #1817)
 
 ## Development Quick Start
 
