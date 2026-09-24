@@ -9,7 +9,7 @@
  * S3-checkpointed workspaces, so the real numbers are recoverable.
  *
  * Dry-run (default — reads only, writes NOTHING):
- *   AGENT_WORKSPACE_BUCKET=psd-agents-dev-390844780692 \
+ *   AGENT_WORKSPACE_BUCKET=psd-agents-dev-<AWS_ACCOUNT_ID> \
  *   DB_CLUSTER_ARN=arn:aws:rds:us-east-1:...:cluster:aistudio-dev-cluster \
  *   DB_SECRET_ARN=arn:aws:secretsmanager:us-east-1:...:secret:DbSecret... \
  *   bun scripts/db/backfill-agent-message-usage.ts --since=2026-07-30

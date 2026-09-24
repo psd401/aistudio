@@ -61,9 +61,9 @@ All GCP steps are done in the web console. No `gcloud` CLI required.
 1. Go to **APIs & Services** → **Enabled APIs** → click **Google Chat API** → **Configuration** tab
 2. Fill in:
    - App name and visibility:
-     - **Dev — `psd-aistudio-dev`:** app name **PSD Agent Dev**; visibility
+     - **Dev — `<GCP_DEV_PROJECT_ID>`:** app name **PSD Agent Dev**; visibility
        limited to the named testers who will use the dev app.
-     - **Prod — `aistudio-462612`:** app name **PSD AI Agent**; visibility
+     - **Prod — `<GCP_PROD_PROJECT_ID>`:** app name **PSD AI Agent**; visibility
        set to the intended domain audience.
    - Avatar URL: (optional, leave blank for now)
    - Description: "Personal AI agent for district staff"
@@ -100,13 +100,13 @@ action in a multi-user space. There are two control planes to check:
    are enabled.
 3. Configure the two apps separately in **GCP Console** → **Google Chat API** →
    **Configuration**:
-   - **Dev — `psd-aistudio-dev` / PSD Agent Dev:** enable **Interactive
+   - **Dev — `<GCP_DEV_PROJECT_ID>` / PSD Agent Dev:** enable **Interactive
      features**, select **Join spaces and group conversations**, keep the
-     Cloud Pub/Sub topic `projects/psd-aistudio-dev/topics/agent-chat-messages`,
+     Cloud Pub/Sub topic `projects/<GCP_DEV_PROJECT_ID>/topics/agent-chat-messages`,
      and keep **Visibility** limited to the named testers. Add every person who
      will mention the app during the live test. Domain-wide visibility is not
      required for a development app.
-   - **Prod — `aistudio-462612` / PSD AI Agent:** enable **Interactive
+   - **Prod — `<GCP_PROD_PROJECT_ID>` / PSD AI Agent:** enable **Interactive
      features**, select **Join spaces and group conversations**, keep the
      configured production Pub/Sub topic, and make the app available to the
      intended domain audience. If Marketplace access is allowlist-only, step 2
@@ -391,7 +391,7 @@ git diff --cached --quiet
 test -z "$(git status --porcelain --untracked-files=all)"
 
 export AWS_REGION=us-east-1
-export EXPECTED_AWS_ACCOUNT=390844780692
+export EXPECTED_AWS_ACCOUNT=<AWS_ACCOUNT_ID>
 export ENVIRONMENT=dev
 export AGENT_IMAGE_TAG="workspace-generation-$(date -u +%Y%m%dT%H%M%SZ)"
 test "$(aws sts get-caller-identity \
@@ -424,7 +424,7 @@ step 5.
 set -euo pipefail
 
 export AWS_REGION=us-east-1
-export EXPECTED_AWS_ACCOUNT=390844780692
+export EXPECTED_AWS_ACCOUNT=<AWS_ACCOUNT_ID>
 export CUTOVER_ENV=dev
 export BASE_DOMAIN=aistudio.psd401.ai
 export AGENT_STACK=AIStudio-AgentPlatformStack-Dev

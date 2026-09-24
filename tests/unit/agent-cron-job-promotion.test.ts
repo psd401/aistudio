@@ -56,7 +56,7 @@ const baseInput = {
   conversationSessionId:
     "hagelk-db0f32b5-sched-5123b45b-2026-07-27",
   lockToken: "lock-token-abc",
-  runtimeId: "arn:aws:bedrock-agentcore:us-east-1:390844780692:runtime/psd_agent_dev-abc",
+  runtimeId: "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/psd_agent_dev-abc",
   userEmail: "hagelk@psd401.net",
   displayName: "Kris Hagel",
   workspacePrefix: "hagelk-db0f32b5",

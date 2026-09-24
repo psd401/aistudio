@@ -182,7 +182,7 @@ aws cloudwatch get-metric-statistics \
 ## PowerTuning State Machine Details
 
 **State Machine ARN** (Dev):
-`arn:aws:states:us-east-1:390844780692:stateMachine:lambda-power-tuning-dev`
+`arn:aws:states:us-east-1:<AWS_ACCOUNT_ID>:stateMachine:lambda-power-tuning-dev`
 
 **Cost**: ~$0.10/month (negligible - keep it deployed)
 

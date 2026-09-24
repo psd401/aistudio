@@ -46,7 +46,7 @@ const RETIRED_SOURCE = `${JSON.stringify({
 
 beforeEach(() => {
   send.mockReset()
-  process.env.AGENT_WORKSPACE_BUCKET = "psd-agents-dev-390844780692"
+  process.env.AGENT_WORKSPACE_BUCKET = "psd-agents-dev-123456789012"
 })
 
 describe("listWorkspaceObjects", () => {

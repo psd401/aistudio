@@ -1108,7 +1108,7 @@ Implemented on `codex/unified-content-google-sync`, ready for dev review:
   no-store token responses. Every route reuses the Repository Manager
   capability plus exact owner/admin repository boundary.
 - Shared Drives use the fixed
-  `unified-content-sync@psd-aistudio-broker.iam.gserviceaccount.com` service
+  `<content-sync-sa>@<GCP_BROKER_PROJECT_ID>.iam.gserviceaccount.com` service
   account through the exact `aws-agent-broker/content-sync` WIF provider. The
   isolated Lambda role is named
   `unified-content-sync-execution-role-{dev|prod}` to match the external trust;

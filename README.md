@@ -30,7 +30,7 @@ AI Studio eliminates these barriers by:
 - **90% Cost Reduction**: Secure API architecture replaces expensive per-seat licenses
 - **Multi-Model Access**: Real-time switching between GPT-5, Claude Opus, and Google Gemini
 - **District-Level Security**: All data processed within your secure servers—nothing leaves your environment
-- **K-12 Content Safety**: Automatic content filtering and PII protection across all AI interactions
+- **K-12 Content Safety**: Detect-and-log safety monitoring and PII telemetry across AI interactions
 - **No-Code Customization**: Design custom AI assistants using visual prompt chains
 - **Open Source**: MIT-licensed, fully self-hostable on your infrastructure
 
@@ -67,10 +67,10 @@ AI Studio eliminates these barriers by:
   - Audit logging
 
 - 🛡️ **K-12 Content Safety** - Purpose-built for educational environments
-  - **Content Filtering**: Blocks inappropriate content (violence, hate speech, sexual content) in both inputs and AI responses using Amazon Bedrock Guardrails
+  - **Safety Monitoring**: Amazon Bedrock Guardrails evaluate inputs and AI responses against a single high-precision `HarmInstruction` topic in **detect-and-log mode** — detections are logged and alerted, but content is not blocked. Blocking content filters were removed after repeated false positives on legitimate educational content (#639–#929)
   - **PII Protection**: Keeps ordinary inference byte-identical under provider zero-data-retention agreements, with detect-only refusal for Nexus memory and telemetry for published agent content
   - **Compliance Ready**: Helps meet COPPA, FERPA, and CIPA requirements
-  - **Real-time Alerts**: SNS notifications for safety violations
+  - **Real-time Alerts**: SNS notifications for safety detections
   - **Zero Configuration**: Works automatically across all AI providers
   - See [K-12 Content Safety Documentation](./docs/features/k12-content-safety.md) for details
 
@@ -128,9 +128,10 @@ See [Architecture Diagrams](./docs/diagrams/README.md) for detailed visualizatio
 
 ### Prerequisites
 
-- Node.js 20.x and npm
+- [Bun](https://bun.sh) 1.2.23+ (the repo's package manager, pinned in `package.json`)
+- Node.js 22.x (matches the `node:22-alpine` production image)
 - AWS CLI configured with appropriate credentials
-- AWS CDK CLI (`npm install -g aws-cdk`)
+- AWS CDK CLI (run via `bunx cdk`, no global install needed)
 - Docker installed (for building container images)
 
 ### Local Development
@@ -140,17 +141,19 @@ See [Architecture Diagrams](./docs/diagrams/README.md) for detailed visualizatio
 git clone https://github.com/psd401/aistudio.git
 cd aistudio
 
-# Install dependencies
-npm install
+# Install dependencies (both manifests — infra/lambdas/agent-router resolves its
+# AWS SDK deps from its own package.json)
+bun install
+(cd infra/lambdas/agent-router && bun install --frozen-lockfile)
 
 # Copy environment variables
 cp .env.example .env.local
 # Edit .env.local with your configuration
 
 # Start local PostgreSQL and dev server
-npm run db:up              # Start PostgreSQL via Docker
-npm run db:seed            # Create test users (first time)
-npm run dev:local          # Start Next.js with local database
+bun run db:up              # Start PostgreSQL via Docker
+bun run db:seed            # Create test users (first time)
+bun run dev:local          # Start Next.js with local database
 ```
 
 Open [http://localhost:3000](http://localhost:3000) to see the application.
@@ -168,7 +171,7 @@ bunx cdk deploy AIStudio-AuthStack-Dev
 bunx cdk deploy AIStudio-StorageStack-Dev
 bunx cdk deploy AIStudio-DocumentProcessingStack-Dev
 bunx cdk deploy AIStudio-GuardrailsStack-Dev
-bunx cdk deploy AIStudio-FrontendStack-Dev
+bunx cdk deploy AIStudio-FrontendStack-ECS-Dev
 
 # Or deploy all at once
 bunx cdk deploy --all
@@ -252,17 +255,17 @@ With mixed usage (Gemini + GPT-4 mini), costs drop to ~$200/month (**90% savings
 ## 🧪 Testing
 
 ```bash
-# Run test suite
-npm test
+# Run test suite (CI config)
+bun run test:ci
 
 # Run tests in watch mode
-npm run test:watch
+bun run test:watch
 
 # Run linting
-npm run lint
+bun run lint
 
 # Run type checking
-npm run typecheck
+bun run typecheck
 ```
 
 ## 🤝 Contributing

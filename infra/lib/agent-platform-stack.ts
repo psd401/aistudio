@@ -4099,6 +4099,9 @@ export class AgentPlatformStack extends cdk.Stack {
     resources: AgentPlatformBuildResources,
   ): void {
     const { environment } = props;
+    // Per-environment admin UI link for alarm descriptions (dev.<baseDomain> vs
+    // <baseDomain>). Falls back to a relative path when no base URL is set.
+    const agentsTriageUrl = `${props.appBaseUrl ?? ''}/admin/agents`;
     // Set BEFORE anything that builds a Metric from it, including the cron
     // alarms this method delegates to. It used to be assigned midway through
     // the alarm block, so a Metric created above that line got `undefined` and
@@ -4213,7 +4216,7 @@ export class AgentPlatformStack extends cdk.Stack {
     const failureRateAlarm = new cloudwatch.Alarm(this, 'AgentFailureRateAlarm', {
       alarmName: `psd-agent-failures-${environment}`,
       alarmDescription:
-        `Agent failures >= 10 in 5 min. Triage: https://aistudio.psd401.net/admin/agents (Failures tab)`,
+        `Agent failures >= 10 in 5 min. Triage: ${agentsTriageUrl} (Failures tab)`,
       metric: new cloudwatch.MathExpression({
         expression: 'routerCron + harness',
         usingMetrics: {
@@ -4250,6 +4253,7 @@ export class AgentPlatformStack extends cdk.Stack {
     resources: AgentPlatformBuildResources,
   ): void {
     const { environment } = props;
+    const agentsTriageUrl = `${props.appBaseUrl ?? ''}/admin/agents`;
     // =====================================================================
     // 9b-2. Degradation alarms + iteration metrics (issue #1161)
     // =====================================================================
@@ -4301,7 +4305,7 @@ export class AgentPlatformStack extends cdk.Stack {
         alarmName: `psd-agent-error-turns-${environment}`,
         alarmDescription:
           'Agent error-turn rate elevated (>= 10 in 5 min). Triage: ' +
-          'https://aistudio.psd401.net/admin/agents (Failures tab).',
+          `${agentsTriageUrl} (Failures tab).`,
         metric: sumMetric('ErrorTurns'),
         threshold: 10,
         evaluationPeriods: 1,

@@ -283,6 +283,25 @@ describe('agent alarm delivery', () => {
     }
   });
 
+  it('links triage alarms to the admin UI of their own environment', () => {
+    // The descriptions used to hardcode https://aistudio.psd401.net, which is
+    // not where the app is served, for BOTH environments.
+    for (const environment of ['dev', 'prod'] as const) {
+      const alarms = buildTemplate(environment, 'alerts@psd401.net')
+        .findResources('AWS::CloudWatch::Alarm');
+      const descriptions = Object.values(alarms)
+        .map(body => (body as { Properties?: { AlarmDescription?: unknown } })
+          .Properties?.AlarmDescription)
+        .filter((d): d is string => typeof d === 'string' && d.includes('/admin/agents'));
+      expect(descriptions).toHaveLength(2);
+      for (const description of descriptions) {
+        expect(description).toContain(
+          `https://${environment}.aistudio.psd401.ai/admin/agents (Failures tab)`
+        );
+      }
+    }
+  });
+
   it('passes the AgentCore runtime id to the router without an SSM lookup', () => {
     const fns = buildTemplate('prod', 'alerts@psd401.net').findResources(
       'AWS::Lambda::Function'

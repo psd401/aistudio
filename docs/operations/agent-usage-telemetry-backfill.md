@@ -63,9 +63,9 @@ are recoverable.
 
 ```bash
 # DRY RUN (default — reads only, writes NOTHING)
-AGENT_WORKSPACE_BUCKET=psd-agents-dev-390844780692 \
-DB_CLUSTER_ARN=arn:aws:rds:us-east-1:390844780692:cluster:aistudio-dev-cluster \
-DB_SECRET_ARN=arn:aws:secretsmanager:us-east-1:390844780692:secret:DbSecret685A0FA5-Tby3OSNjVCjb-i3YrMv \
+AGENT_WORKSPACE_BUCKET=psd-agents-dev-<AWS_ACCOUNT_ID> \
+DB_CLUSTER_ARN=<DB_CLUSTER_ARN> \
+DB_SECRET_ARN=<DB_SECRET_ARN> \
 bun run db:backfill-agent-usage -- --since=2026-07-30
 
 # EXECUTE (requires BOTH flags)
@@ -162,7 +162,7 @@ writing zeros over zeros and claiming success.
 
 ### Dry-run result on dev (2026-08-10)
 
-Against `psd-agents-dev-390844780692`, `--since=2026-07-25`:
+Against `psd-agents-dev-<AWS_ACCOUNT_ID>`, `--since=2026-07-25`:
 
 ```
 transcript sessions: 32   parsed usage records: 229
