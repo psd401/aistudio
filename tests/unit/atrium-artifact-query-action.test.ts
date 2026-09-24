@@ -603,6 +603,29 @@ describe("queryArtifactData overall deadline (#1788)", () => {
     expect(capturedSignal?.aborted).toBe(true);
     jest.useRealTimers();
   });
+
+  it("counts PREFLIGHT against the budget, not just the connector work", async () => {
+    // The budget has to cover session resolution, the visibility check, the
+    // version lookup and the connector config read as well. Arming it only
+    // around the connector work left the same hole in a smaller form: a slow
+    // preflight plus a full-length execution still runs past the sandbox host's
+    // 45s clock, so the host discards the answer to a query that is still
+    // running and the page retries it.
+    jest.useFakeTimers();
+    mockContentGet.mockImplementationOnce(async () => {
+      // A preflight that eats the whole budget before any connector work.
+      await jest.advanceTimersByTimeAsync(31_000);
+      return { ...CONTENT };
+    });
+
+    const result = await queryArtifactData(validInput);
+
+    expect(failureOf(result).code).toBe("timeout");
+    // The deadline had already expired, so no connector was ever opened.
+    expect(mockGetConnectorTools).not.toHaveBeenCalled();
+    expect(mockExecute).not.toHaveBeenCalled();
+    jest.useRealTimers();
+  });
 });
 
 describe("queryArtifactData disclosure gate (#1787)", () => {

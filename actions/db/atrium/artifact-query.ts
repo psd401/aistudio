@@ -103,8 +103,15 @@ const MAX_QUERY_OFFSET = 1_000_000;
  * worst case was the handshake (`MCP_CLIENT_TIMEOUT_MS` for the client, plus
  * tools/list) PLUS 30s — comfortably past the sandbox host's 45s, so a slow
  * handshake made the host give up on a query that was still running and the
- * page retried it. The deadline now spans `getConnectorTools` as well, so the
- * server always loses the race against the host's clock by construction.
+ * page retried it.
+ *
+ * It is now armed at the TOP of `queryArtifactData` and threaded down, so it
+ * spans the preflight (session resolution, the `contentService.get` visibility
+ * check, the version lookup, the connector config read), the handshake, AND the
+ * execution. Covering only part of the server's work left the same hole in a
+ * smaller form: a 15s preflight plus a full 30s execution still exceeds the
+ * host's 45s. The server now always loses that race BY CONSTRUCTION rather than
+ * by assuming any stage is fast.
  */
 const QUERY_TIMEOUT_MS = 30_000;
 /**
@@ -580,6 +587,17 @@ function withDeadline<T>(
 }
 
 async function callQueryData(args: {
+  /**
+   * The caller's end-to-end budget, already running (#1788). It covers the
+   * PREFLIGHT as well as the handshake and the execution, so the three cannot
+   * add up to more than the sandbox host's own clock allows. Armed by
+   * `queryArtifactData` rather than here, because the preflight it must cover
+   * happens before this function is reached.
+   *
+   * `AbortSignal.timeout` aborts with a DOMException named TimeoutError, which
+   * `classifyQueryFailure` already maps to the `timeout` bridge code.
+   */
+  deadline: AbortSignal;
   connectorId: string;
   userId: number;
   roles: string[];
@@ -589,11 +607,13 @@ async function callQueryData(args: {
   offset: number;
   reason: string;
 }): Promise<QueryArtifactDataResult> {
-  // One signal for the handshake AND the execution, so the two cannot add up to
-  // more than the host's clock allows. `AbortSignal.timeout` aborts with a
-  // DOMException named TimeoutError, which `classifyQueryFailure` already maps
-  // to the `timeout` bridge code.
-  const deadline = AbortSignal.timeout(QUERY_TIMEOUT_MS);
+  const { deadline } = args;
+  // Already out of budget before any connector work: fail here rather than
+  // opening an MCP client we have given up on. `withDeadline` would handle a
+  // pre-aborted signal safely (it closes a connector that arrives late), but
+  // the handshake would still have been STARTED -- a Lambda invocation and a
+  // tools/list round trip for an answer nobody can receive.
+  if (deadline.aborted) throw deadline.reason;
   const connector = await withDeadline(
     getConnectorTools(args.connectorId, args.userId, args.roles, {
       idToken: args.idToken,
@@ -752,6 +772,18 @@ export async function queryArtifactData(
   // it must default to false: every failure BEFORE the object is resolved (no
   // session, rate limited, not viewable) is answered without upstream text.
   let mayEdit = false;
+  // ONE end-to-end server budget, armed BEFORE any preflight work (#1788).
+  //
+  // This used to be armed inside `callQueryData`, so session resolution, the
+  // `contentService.get` visibility check, the version lookup and the connector
+  // config read all ran outside it. The sandbox host's clock, by contrast,
+  // covers everything from the moment the request is dispatched — so a slow
+  // preflight plus a full 30s execution could exceed the host's 45s, and the
+  // host would discard an answer for a query that was still running. The server
+  // must always lose that race BY CONSTRUCTION, not by assuming preflight is
+  // fast, so the deadline starts here and what remains of it is what the
+  // handshake and the execution get.
+  const deadline = AbortSignal.timeout(QUERY_TIMEOUT_MS);
 
   try {
     // #1787: logged BEFORE authorization, so a session/rate-limit/validation
@@ -793,6 +825,7 @@ export async function queryArtifactData(
     // staff/administrator), so a student or an out-of-list viewer is refused
     // BEFORE any request reaches the data MCP.
     const result = await callQueryData({
+      deadline,
       connectorId: await requirePsdDataConnectorId(),
       userId: requester.userId,
       roles: requester.roles ?? [],
