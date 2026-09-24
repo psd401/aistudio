@@ -19,7 +19,13 @@ const EXPLICIT_WEB_SEARCH_PHRASES = [
   "search online", "browse the web", "browse web", "browse the internet",
   "browse internet", "browse online", "web search", "internet search",
 ]
-const CURRENT_INFO_PATTERN = /\b(?:latest|current|today(?:'s)?|recent|up-to-date|right\s+now|this\s+(?:week|month|year))\b.{0,60}\b(?:news|weather|forecast|price|cost|stock|score|schedule|standings|results?|version|release|president|governor|mayor|ceo|law|policy|regulation|guidance)\b|\b(?:news|weather|forecast|price|cost|stock|score|schedule|standings|results?|version|release|president|governor|mayor|ceo|law|policy|regulation|guidance)\b.{0,60}\b(?:latest|current|today(?:'s)?|recent|up-to-date|right\s+now|this\s+(?:week|month|year))\b/i
+/**
+ * An explicit http(s) URL in the message — the "paste a link" case (#1696).
+ * Bounded by whitespace and common trailing delimiters so a link inside prose or
+ * markdown still matches.
+ */
+const EXPLICIT_URL_PATTERN = /\bhttps?:\/\/[^\s<>()[\]{}"']{3,}/i
+const CURRENT_INFO_PATTERN =/\b(?:latest|current|today(?:'s)?|recent|up-to-date|right\s+now|this\s+(?:week|month|year))\b.{0,60}\b(?:news|weather|forecast|price|cost|stock|score|schedule|standings|results?|version|release|president|governor|mayor|ceo|law|policy|regulation|guidance)\b|\b(?:news|weather|forecast|price|cost|stock|score|schedule|standings|results?|version|release|president|governor|mayor|ceo|law|policy|regulation|guidance)\b.{0,60}\b(?:latest|current|today(?:'s)?|recent|up-to-date|right\s+now|this\s+(?:week|month|year))\b/i
 const USER_SUPPLIED_CONTEXT_PATTERN = /\b(?:this|the|my|our|attached|uploaded|provided)\s+(?:spreadsheet|sheet|document|file|attachment|draft|paragraph|project|report|data|results?)\b|\b(?:spreadsheet|sheet|document|file|attachment|draft|paragraph|project|report|data)\b.{0,60}\b(?:attached|uploaded|provided|above|below)\b/i
 const HIGH_PATTERN = /\b(architecture|migration|security review|threat model|root cause|research report|multi-step|optimize|prove|complex analysis)\b/i
 const LIGHT_PATTERN = /^(hi|hello|thanks|thank you|yes|no|ok|okay)[!. ]*$|^(what is|who is|when is|where is|how many)\b|\b(define|translate|summarize briefly|quick question)\b/i
@@ -52,8 +58,22 @@ export function deterministicClassify(text: string, hasImageInput = false): Nexu
   if (PSD_PATTERN.test(text)) {
     return { intent: "psd-data", tier: "medium", confidence: 0.97, reasonCodes: ["psd_data_domain"], source: "deterministic" }
   }
-  if (requestsExplicitWebSearch(text)
-    || (CURRENT_INFO_PATTERN.test(text) && !USER_SUPPLIED_CONTEXT_PATTERN.test(text))) {
+  // An explicit "search the web" still wants a search model, even alongside a link.
+  if (requestsExplicitWebSearch(text)) {
+    return { intent: "web-search", tier: "medium", confidence: 0.96, reasonCodes: ["current_web_information"], source: "deterministic" }
+  }
+  // A message naming a page to open is a FETCH, not a search (#1696). `web_fetch`
+  // is universal, so such a turn needs no web-search-capable model — and must not
+  // be routed as "web-search", because that requires one and throws
+  // NexusSpecialistUnavailableError when none is accessible, killing the turn
+  // before the model ever runs. That hard failure was the reported symptom:
+  // pasting a URL produced "cannot access URL directly" / "unable to access the
+  // internet". Returning deterministically here also short-circuits the LLM
+  // classifier, which otherwise labels "open <url>" as web-search.
+  if (EXPLICIT_URL_PATTERN.test(text)) {
+    return { intent: "general", tier: "medium", confidence: 0.95, reasonCodes: ["explicit_url_web_fetch"], source: "deterministic" }
+  }
+  if (CURRENT_INFO_PATTERN.test(text) && !USER_SUPPLIED_CONTEXT_PATTERN.test(text)) {
     return { intent: "web-search", tier: "medium", confidence: 0.96, reasonCodes: ["current_web_information"], source: "deterministic" }
   }
   if (INSTRUCTION_PATTERN.test(text)) {

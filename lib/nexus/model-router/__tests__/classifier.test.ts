@@ -47,6 +47,43 @@ describe("Nexus request classifier", () => {
     expect(deterministicClassify("Summarize the current results in this spreadsheet")).toBeNull()
   })
 
+  it("treats a pasted URL as a fetch, not a web search (#1696)", async () => {
+    // Routing a "open this link" turn as web-search requires a web-search-capable
+    // model and throws NexusSpecialistUnavailableError when none is accessible —
+    // killing the turn before the model can use the universal `web_fetch` tool.
+    // That hard failure was the reported bug (FS#164087 / FS#164086).
+    for (const message of [
+      "Open https://example.com and quote the main heading",
+      "Summarize http://example.org/article for me",
+      "What does this say? https://example.com/page",
+      "Please read https://example.com/docs/guide and explain it",
+    ]) {
+      expect(deterministicClassify(message)).toMatchObject({
+        intent: "general",
+        reasonCodes: ["explicit_url_web_fetch"],
+      });
+    }
+  });
+
+  it("does not spend a classifier call on a pasted URL (#1696)", async () => {
+    // The LLM classifier labels "open <url>" as web-search, so the deterministic
+    // rule must short-circuit it rather than merely reorder the local patterns.
+    const decision = await classifyNexusRequest(
+      "Open https://example.com and quote the main heading",
+      config
+    );
+    expect(decision).toMatchObject({ intent: "general", source: "deterministic" });
+    expect(mockCreateProviderModel).not.toHaveBeenCalled();
+  });
+
+  it("still routes an explicit search to web search even when a link is present (#1696)", () => {
+    expect(
+      deterministicClassify(
+        "Search the web for district guidance, then compare it with https://example.com"
+      )?.intent
+    ).toBe("web-search");
+  });
+
   it("recognizes an edit instruction when an image is attached", async () => {
     const decision = await classifyNexusRequest("Make this brighter", config, { hasImageInput: true })
     expect(decision).toMatchObject({ intent: "image", source: "deterministic" })

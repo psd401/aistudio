@@ -17,7 +17,10 @@
  *      claiming the assistant cannot access URLs.
  */
 
-import { createWebFetchTool } from "@/lib/tools/web-fetch-tool";
+import {
+  createWebFetchTool,
+  type WebFetchToolResult,
+} from "@/lib/tools/web-fetch-tool";
 import {
   createUniversalTools,
   createProviderNativeTools,
@@ -68,13 +71,25 @@ function stubResponse(options: {
   } as unknown as Response;
 }
 
-/** Run the tool's `execute` with a fully-typed args object. */
-async function runTool(args: { url: string; maxChars?: number }) {
+/**
+ * Run the tool's `execute` with a fully-typed args object.
+ *
+ * The AI SDK types `execute` as optional and allows it to stream
+ * (`AsyncIterable`); this tool always defines it and always resolves a single
+ * object, so narrow both here rather than at every assertion.
+ */
+async function runTool(args: {
+  url: string;
+  maxChars?: number;
+}): Promise<WebFetchToolResult> {
   const tool = createWebFetchTool();
-  // `execute` is always defined for this tool; the AI SDK types it optional.
   const execute = tool.execute;
   if (!execute) throw new Error("web_fetch tool has no execute()");
-  return execute(args, { toolCallId: "test-call", messages: [] });
+  const result = await execute(args, { toolCallId: "test-call", messages: [] });
+  if (Symbol.asyncIterator in Object(result)) {
+    throw new Error("web_fetch tool unexpectedly streamed its result");
+  }
+  return result as WebFetchToolResult;
 }
 
 describe("web_fetch tool registration", () => {
