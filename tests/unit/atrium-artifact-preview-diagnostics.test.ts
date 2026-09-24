@@ -23,6 +23,7 @@ import {
   clearArtifactPreviewDiagnostics,
   readArtifactPreviewDiagnostics,
   recordArtifactPreviewDiagnostic,
+  takeArtifactPreviewDiagnostics,
 } from "@/lib/atrium/artifact-preview-diagnostics";
 
 beforeEach(() => {
@@ -166,5 +167,16 @@ describe("artifact preview diagnostics buffer", () => {
     recordArtifactPreviewDiagnostic("art-1", { kind: "script", message: "stale" });
     clearArtifactPreviewDiagnostics();
     expect(readArtifactPreviewDiagnostics()).toBeNull();
+  });
+
+  it("TAKE empties the buffer, so a failure reaches the chat exactly once", () => {
+    recordArtifactPreviewDiagnostic("art-1", { kind: "script", message: "boom" });
+
+    expect(takeArtifactPreviewDiagnostics()?.entries).toHaveLength(1);
+    expect(takeArtifactPreviewDiagnostics()).toBeNull();
+
+    // A failure the preview hits AGAIN after the send is reported again.
+    recordArtifactPreviewDiagnostic("art-1", { kind: "script", message: "boom" });
+    expect(takeArtifactPreviewDiagnostics()?.entries).toHaveLength(1);
   });
 });

@@ -610,17 +610,34 @@ function assertQueryMode(content: { kind: string; dataAccess: ContentDataAccess 
  *
  * The head needs no lookup (it is already known to belong), so the ordinary case
  * costs no extra query.
+ *
+ * If the lookup itself FAILS (a DB blip), the audit line falls back to the head
+ * rather than failing the query: the lookup only chooses which version the
+ * audit names, and blocking a healthy query on it reported "the data service is
+ * unavailable" for SQL that never ran. The fallback is logged. A lookup that
+ * SUCCEEDS and finds nothing still refuses — that id is not this object's.
  */
 async function resolveAuditVersionId(
   content: { id: string; currentVersionId: string | null },
-  requested: unknown
+  requested: unknown,
+  log: ReturnType<typeof createLogger>
 ): Promise<string | null> {
   if (typeof requested !== "string" || !requested.trim()) {
     return content.currentVersionId;
   }
   const versionId = requested.trim();
   if (versionId === content.currentVersionId) return versionId;
-  const version = await versionService.getById(content.id, versionId);
+  let version: { id: string } | null;
+  try {
+    version = await versionService.getById(content.id, versionId);
+  } catch (error) {
+    log.warn("Audit version lookup failed; auditing under the head version", {
+      contentId: content.id,
+      requestedVersionId: versionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return content.currentVersionId;
+  }
   if (!version) {
     throw ErrorFactories.invalidInput(
       "versionId",
@@ -706,7 +723,7 @@ export async function queryArtifactData(
     // The exclusivity gate: `records` and `none` artifacts never reach the
     // data MCP (see the artifact-data.ts header for why).
     assertQueryMode(content);
-    const auditVersionId = await resolveAuditVersionId(content, input?.versionId);
+    const auditVersionId = await resolveAuditVersionId(content, input?.versionId, log);
 
     log.debug("Artifact data query accepted", {
       contentId: content.id,

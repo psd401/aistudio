@@ -644,6 +644,17 @@ describe("queryArtifactData audit version (#1787)", () => {
     expect(reasonOf()).toBe(`atrium artifact ${CONTENT.id} v${OLDER_VERSION_ID}`);
   });
 
+  it("falls back to the head when the version lookup itself fails", async () => {
+    // The lookup only picks the audit line's version; a DB blip there must not
+    // block a healthy query (#1787).
+    mockVersionGetById.mockRejectedValueOnce(new Error("connection reset"));
+
+    const result = await queryArtifactData({ ...validInput, versionId: OLDER_VERSION_ID });
+
+    expect(result.isSuccess).toBe(true);
+    expect(reasonOf()).toBe(`atrium artifact ${CONTENT.id} v${CONTENT.currentVersionId}`);
+  });
+
   it("refuses a version that does not belong to this artifact", async () => {
     // `versionService.getById` is scoped by objectId, so a null answer means the
     // id belongs to some other object (or nothing) — never audit under it.

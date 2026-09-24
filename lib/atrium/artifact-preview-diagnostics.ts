@@ -111,6 +111,20 @@ export function readArtifactPreviewDiagnostics(): {
 }
 
 /**
+ * Read the buffer AND empty it — what the chat request body uses. Each failure
+ * reaches the model exactly once: re-sending it on every later turn kept
+ * steering unrelated conversations back to a bug already reported. The failure
+ * reappears only if the preview hits it again.
+ */
+export function takeArtifactPreviewDiagnostics(): ReturnType<
+  typeof readArtifactPreviewDiagnostics
+> {
+  const taken = readArtifactPreviewDiagnostics();
+  buffer = null;
+  return taken;
+}
+
+/**
  * Drop everything. Called when a fresh version of the artifact is mounted: the
  * previous version's failures describe code that is no longer running, and
  * reporting them against the new code is how a model "fixes" a bug twice.

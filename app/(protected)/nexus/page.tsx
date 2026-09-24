@@ -35,7 +35,7 @@ import { useVoiceSession } from './_components/voice-mode/use-voice-session'
 import { getNexusChatPreferences, updateNexusChatPreferences } from '@/actions/settings/user-settings.actions'
 import type { NexusExperienceMode, NexusModelFamily } from '@/lib/nexus/model-router/types'
 import { createSynchronousValueAccessor } from '@/lib/nexus/synchronous-value-accessor'
-import { readArtifactPreviewDiagnostics } from '@/lib/atrium/artifact-preview-diagnostics'
+import { takeArtifactPreviewDiagnostics } from '@/lib/atrium/artifact-preview-diagnostics'
 import { RepositoryPicker } from '@/components/features/repositories/repository-picker'
 import { Button } from '@/components/ui/button'
 import { Database } from 'lucide-react'
@@ -427,8 +427,10 @@ function ConversationRuntimeProvider({
           // lib/atrium/artifact-preview-diagnostics.ts and
           // docs/features/nexus-conversation-architecture.md). The SERVER drops
           // the buffer unless its contentId matches the object it bound.
+          // TAKEN, not read: sending empties the buffer, so each failure is
+          // reported to the model once rather than on every later turn.
           workspacePreviewDiagnostics:
-            readArtifactPreviewDiagnostics() ?? undefined,
+            takeArtifactPreviewDiagnostics() ?? undefined,
           conversationId: values.conversationId || undefined,
           repositoryIds: values.repositorySelectionLoaded
             ? values.selectedRepositoryIds
