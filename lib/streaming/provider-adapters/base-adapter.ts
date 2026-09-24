@@ -9,6 +9,7 @@ import {
 } from 'ai';
 import { createLogger } from '@/lib/logger';
 import { createUniversalTools } from '@/lib/tools/provider-native-tools';
+import { withSseKeepAliveResponse } from '../sse-keep-alive';
 import type {
   ProviderAdapter,
   ProviderCapabilities,
@@ -685,10 +686,18 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       })
     );
 
-    return createUIMessageStreamResponse({
-      stream,
-      ...(options?.headers ? { headers: options.headers } : {}),
-    });
+    // Keep the socket warm through a silent reasoning/tool stretch. Without
+    // this the ALB's 300s idle timeout drops the connection at or before the
+    // app-level abort above fires, so the terminal `error` chunk is enqueued
+    // into a stream nobody is reading and the turn just stops with nothing
+    // shown (#1698). The injected frames are SSE comments, discarded by the
+    // client's parser, so the chunk sequence is unchanged.
+    return withSseKeepAliveResponse(
+      createUIMessageStreamResponse({
+        stream,
+        ...(options?.headers ? { headers: options.headers } : {}),
+      })
+    );
   }
 
   /**

@@ -375,6 +375,7 @@ tree, and anti-patterns.
 - **Don't** assume AWS SDK assessment objects are flat — check ALL sub-properties (e.g., `wordPolicy.customWords` AND `wordPolicy.managedWordLists`); missing one drops an entire blocking category from observability
 - **Don't** omit `state: 'output-available'` and `input` on tool-call UIMessage parts — `convertToModelMessages` silently skips the `tool_result` block, causing `AI_MissingToolResultsError` on replay
 - **Don't** consolidate multi-step MCP responses into a single DB row — persist each step separately inside `executeTransaction` or reload fails with consecutive user turns (see `chat-helpers.ts:saveConversationSteps`)
+- **Don't** let an SSE response go quiet for minutes — the ALB idles it out at 300s and the app's own error chunk never reaches the browser. Emit `: keep-alive` comment frames (`lib/streaming/sse-keep-alive.ts`), never a `data-*` chunk (that sets `producedVisibleOutput`)
 
 ### Edge Runtime (see `docs/guides/edge-runtime-boundaries.md`)
 - **Don't** import `@/lib/logger` (winston), `@aws-sdk/*`, or `node:*` from anything reachable from `middleware.ts` — that includes all of `auth.ts` and its callbacks. Use `@/lib/auth/edge-logger` and `fetch`

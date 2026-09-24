@@ -336,18 +336,16 @@ export class NexusStreamingService extends UnifiedStreamingService {
       nexusModelOptions(request)
     );
     
-    // Enhance the base stream request
+    // Enhance the base stream request.
+    //
+    // Spread the whole request rather than copying named fields: this used to
+    // enumerate ten of them and silently dropped the rest — including
+    // `timeout` (which `resolveStreamTimeout()` / `buildStreamDeadline()` need
+    // to build the abort deadline), `tools`/`enabledTools`/`maxSteps` (tool use
+    // would have been disabled) and `costCapCents` (the cost cap would have
+    // been bypassed). Only `callbacks` is meant to be overridden here. (#1698)
     const enhancedRequest: StreamRequest = {
-      messages: request.messages,
-      provider: request.provider,
-      modelId: request.modelId,
-      userId: request.userId,
-      sessionId: request.sessionId,
-      conversationId: request.conversationId,
-      source: request.source,
-      documentId: request.documentId,
-      systemPrompt: request.systemPrompt,
-      options: request.options,
+      ...request,
       callbacks: {
         ...request.callbacks,
         onProgress: (progress) => {

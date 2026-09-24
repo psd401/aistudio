@@ -8,6 +8,7 @@
   "e2e_flows": [
     "admin-groups",
     "nexus-keep-toggle",
+    "nexus-chat-slow-stream-visible-error",
     "atrium-library-search",
     "atrium-library-bulk",
     "atrium-cover-picker",
