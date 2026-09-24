@@ -272,14 +272,17 @@ function resolvePayloadFiles(commandString, options = {}) {
 
   if (Object.keys(payloads).length === 0) return null;
 
-  let syntheticCommand = execCommand;
-  for (const [placeholder, content] of Object.entries(payloads)) {
-    // Literal split/join, not a regex: `content` is arbitrary text and would
-    // otherwise be read for `$&`-style replacement patterns. The command holds
-    // exactly one of each placeholder — the check above guarantees the caller
-    // supplied none.
-    syntheticCommand = syntheticCommand.split(placeholder).join(content);
-  }
+  // ONE scan over the placeholder command, so substituted content is never
+  // itself scanned: a payload that happens to contain another placeholder's
+  // literal token stays as written. A replacement FUNCTION, not a string, so
+  // `$&`-style patterns in arbitrary payload text are inserted verbatim.
+  const syntheticCommand = execCommand.replace(
+    /@@PSD_PAYLOAD_[A-Z]+@@/g,
+    (token) =>
+      Object.prototype.hasOwnProperty.call(payloads, token)
+        ? payloads[token]
+        : token
+  );
   return { execCommand, syntheticCommand, payloads };
 }
 

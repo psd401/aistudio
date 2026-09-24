@@ -228,6 +228,19 @@ describe('resolvePayloadFiles: --params-file and cross-flag isolation (#1801)', 
     expect(extractJsonArg(resolved.syntheticCommand)).toBe(JSON.stringify(body));
   });
 
+  test("a payload mentioning another payload's placeholder is left alone", () => {
+    // Substituting placeholders one after another would let the first
+    // payload's content be scanned by the next substitution.
+    const body = { name: 'Literally @@PSD_PAYLOAD_TEXT@@ in the title' };
+    const jsonPath = tmpFile(JSON.stringify(body));
+    const textPath = tmpFile('chat message', '.txt');
+    const resolved = resolvePayloadFiles(
+      `chat +send --json-file ${jsonPath} --text-file ${textPath}`
+    );
+    expect(resolved.syntheticCommand).toContain(JSON.stringify(body));
+    expect(extractJsonArg(resolved.syntheticCommand)).toBe(JSON.stringify(body));
+  });
+
   test('a command carrying a reserved placeholder token is refused', () => {
     const p = tmpFile(JSON.stringify({ fileId: 'f1' }));
     expect(() =>
