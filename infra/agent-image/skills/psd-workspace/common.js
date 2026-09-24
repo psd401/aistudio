@@ -584,7 +584,7 @@ function isMetadataOnlyDriveUpdate(commandString, tokens) {
   // this function's contract names it. Symptom: a plain rename succeeded while
   // the same file's move was blocked, silently wedging the Purdy Drive
   // auto-sort schedule on every run.
-  const params = extractParamsResource(tokens);
+  const params = extractParamsResource(commandString, tokens);
   if (params) {
     const paramKeys = Object.keys(params);
     if (!paramKeys.every((key) => DRIVE_PARAM_FIELDS.has(key.toLowerCase()))) {
@@ -609,21 +609,42 @@ function isMetadataOnlyDriveUpdate(commandString, tokens) {
 
 /**
  * Parse the `--params` query-parameter object, or null when absent/unparseable.
- * Separate from extractDriveResource, which reads the `--json` request BODY.
+ * Separate from extractDriveResource, which reads the `--json` request BODY —
+ * but it uses the SAME dual extraction, and for the same reason.
+ *
+ * Token first, because that is what gws receives (REV-COR-346). Raw-string
+ * scan second, because the payload-file flow inlines minified JSON UNQUOTED
+ * into the synthetic command the gates run against, and `splitCommand` treats
+ * its `"` as quote toggles — so a `--params-file` parent move read from tokens
+ * alone came back null and `isMetadataOnlyDriveUpdate` refused a move it
+ * documents as allowed, while the identical inline `--params` passed.
+ *
+ * The fallback cannot mask a divergence: what executes is the token, and the
+ * broker (`assertParamsParse`) refuses any `--params` token that does not
+ * parse as an object, so a command whose token and string disagree never runs.
  */
-function extractParamsResource(tokens) {
-  for (let i = 0; i < tokens.length - 1; i++) {
-    if (tokens[i] !== '--params') continue;
+function extractParamsResource(commandString, tokens) {
+  const asObject = (raw) => {
     try {
-      const parsed = JSON.parse(tokens[i + 1]);
+      const parsed = JSON.parse(raw);
       return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
         ? parsed
         : null;
     } catch {
       return null;
     }
+  };
+  for (let i = 0; i < tokens.length - 1; i++) {
+    if (tokens[i] !== '--params') continue;
+    const fromToken = asObject(tokens[i + 1]);
+    if (fromToken) return fromToken;
+    break;
   }
-  return null;
+  if (typeof commandString !== 'string') return null;
+  const span = findFlagObjectSpan(commandString, '--params');
+  return span
+    ? asObject(commandString.slice(span.jsonStart, span.jsonEnd + 1))
+    : null;
 }
 
 /**
@@ -1083,8 +1104,8 @@ function injectMarkers(commandString) {
  * inclusive) or null when there is no parseable --json object. Shared by
  * mutateJsonField (marker injection) and extractJsonArg (payload-file flow).
  */
-function findJsonObjectStart(commandString, jsonFlagIdx) {
-  let i = jsonFlagIdx + '--json'.length;
+function findJsonObjectStart(commandString, jsonFlagIdx, flag = '--json') {
+  let i = jsonFlagIdx + flag.length;
   while (i < commandString.length && /\s/.test(commandString[i])) i++;
   let openQuote = '';
   if (commandString[i] === "'" || commandString[i] === '"') {
@@ -1123,13 +1144,25 @@ function findBalancedJsonEnd(commandString, jsonStart) {
   return -1;
 }
 
+function findFlagObjectSpan(commandString, flag) {
+  // Scanned rather than built into a RegExp so the flag stays a literal.
+  // The whitespace requirement is what keeps `--json` off `--json-file` and
+  // `--params` off `--params-file`: a hyphen follows the flag there.
+  let searchFrom = 0;
+  for (;;) {
+    const flagIdx = commandString.indexOf(flag, searchFrom);
+    if (flagIdx === -1) return null;
+    searchFrom = flagIdx + flag.length;
+    if (!/\s/.test(commandString[searchFrom] || '')) continue;
+    const start = findJsonObjectStart(commandString, flagIdx, flag);
+    if (!start) continue;
+    const jsonEnd = findBalancedJsonEnd(commandString, start.jsonStart);
+    if (jsonEnd !== -1) return { ...start, jsonEnd };
+  }
+}
+
 function findJsonSpan(commandString) {
-  const jsonFlagIdx = commandString.search(/--json\s+['"]?\{/);
-  if (jsonFlagIdx === -1) return null;
-  const start = findJsonObjectStart(commandString, jsonFlagIdx);
-  if (!start) return null;
-  const jsonEnd = findBalancedJsonEnd(commandString, start.jsonStart);
-  return jsonEnd === -1 ? null : { ...start, jsonEnd };
+  return findFlagObjectSpan(commandString, '--json');
 }
 
 /**

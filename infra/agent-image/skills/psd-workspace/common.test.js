@@ -179,6 +179,35 @@ describe('resolvePayloadFiles', () => {
     ).toThrow(/use either --params or --params-file/);
   });
 
+  test('a --params-file parent move still passes the user-slot gate', () => {
+    // The synthetic command inlines minified JSON UNQUOTED, so splitCommand
+    // folds `{"fileId":"f1","addParents":"new"}` into one unparseable token.
+    // Reading --params from tokens alone therefore refused a move that the
+    // identical inline --params allows — isMetadataOnlyDriveUpdate has to
+    // fall back to the raw-string scan, exactly as the --json gate does.
+    const p = tmpFile(
+      JSON.stringify({ fileId: 'f1', addParents: 'new', removeParents: 'old' })
+    );
+    const resolved = resolvePayloadFiles(`drive files update --params-file ${p}`);
+    const gate = enforcePhase1Gates(resolved.syntheticCommand, {
+      scope: 'user_account',
+      ownerEmail: 'hagelk@psd401.net',
+    });
+    expect(gate.allowed).toBe(true);
+  });
+
+  test('a --params-file that is not a metadata move is still refused', () => {
+    // The fallback must not become a way past the allowlist: uploadType is
+    // not a permitted query parameter on the user slot.
+    const p = tmpFile(JSON.stringify({ fileId: 'f1', uploadType: 'media' }));
+    const resolved = resolvePayloadFiles(`drive files update --params-file ${p}`);
+    const gate = enforcePhase1Gates(resolved.syntheticCommand, {
+      scope: 'user_account',
+      ownerEmail: 'hagelk@psd401.net',
+    });
+    expect(gate.allowed).toBe(false);
+  });
+
   test('--params-file and --json-file resolve independently in one command', () => {
     const paramsPath = tmpFile(JSON.stringify({ fileId: 'f1' }));
     const jsonPath = tmpFile(JSON.stringify({ name: 'Renamed' }));
