@@ -482,9 +482,11 @@ the three operations, each scoped by `user_id` in the `WHERE` predicate:
 
 Model-side only, `lib/nexus/workspace-tool-history.ts` stubs superseded
 workspace source payloads (full artifact code, document bodies) out of the
-messages sent to the model. Per object it keeps the newest write verbatim,
-plus every read page after it (a large source is read in several pages at
-different offsets, and all of them are the current revision). Persisted messages are never touched. Tool parts keep their exact
+messages sent to the model. Per object it keeps the newest write that
+carried source (a mode-only `dataAccess` change does not count), plus every
+page of the newest read sequence after it: a large source is read in several
+pages at different offsets, and a fresh offset-0 read starts a new sequence,
+so pages from an older revision are never stitched onto a new first page. Persisted messages are never touched. Tool parts keep their exact
 shape so every tool call still pairs with its result on replay.
 
 ---

@@ -264,4 +264,40 @@ describe("pruneStaleWorkspaceToolPayloads — paged reads of one revision", () =
     expect(text(out, 0)).toMatch(/^\[omitted from history/);
     expect(text(out, 1)).toBe(again);
   });
+
+  it("a mode-only update does not supersede the read pages (the source did not change)", () => {
+    const p0 = bigCode("a");
+    const p1 = bigCode("b");
+    const modeOnly = {
+      type: "tool-update_workspace_artifact",
+      toolCallId: "w1",
+      state: "output-available",
+      input: { code: null, dataAccess: "query" },
+      output: { ok: true, objectId: "obj-a", dataAccess: "query" },
+    };
+    const out = pruneStaleWorkspaceToolPayloads([
+      message("m1", [page("r0", 0, p0)]),
+      message("m2", [page("r1", 98_304, p1)]),
+      message("m3", [modeOnly]),
+    ]);
+    expect(text(out, 0)).toBe(p0);
+    expect(text(out, 1)).toBe(p1);
+  });
+
+  it("never stitches an older read sequence's tail onto a fresh first page", () => {
+    // Read in pages, then the source changed OUTSIDE the chat (Code tab) and
+    // the model started over at offset 0: the old tail is a different revision.
+    const oldHead = bigCode("a");
+    const oldTail = bigCode("b");
+    const newHead = bigCode("c");
+    const out = pruneStaleWorkspaceToolPayloads([
+      message("m1", [page("r0", 0, oldHead)]),
+      message("m2", [page("r1", 98_304, oldTail)]),
+      message("m3", [page("r2", 0, newHead)]),
+    ]);
+    expect(text(out, 0)).toMatch(/^\[omitted from history/);
+    expect(text(out, 1)).toMatch(/^\[omitted from history/);
+    expect(text(out, 2)).toBe(newHead);
+  });
 });
+

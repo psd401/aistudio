@@ -156,16 +156,71 @@ function readOffset(part: unknown): number {
 }
 
 /**
+ * True when a write part actually changed the source: it carries `code` or
+ * `markdown`. A mode-only `update_workspace_artifact` (`code` null, only
+ * `dataAccess`) leaves the source as it was, so it must not mark earlier reads
+ * superseded — they would still be the model's only copy of the source.
+ */
+function isSourceWrite(part: unknown): boolean {
+  const record = part as Record<string, unknown>;
+  for (const key of ["input", "args"] as const) {
+    const payload = record[key];
+    if (!payload || typeof payload !== "object") continue;
+    const { code, markdown } = payload as Record<string, unknown>;
+    if (typeof code === "string" && code.length > 0) return true;
+    if (typeof markdown === "string") return true;
+  }
+  return false;
+}
+
+/**
  * Which workspace source parts to keep verbatim. Per object:
- *  - the newest WRITE (the code/markdown the model last sent) is kept;
- *  - READ pages after that write are the current revision, and a large source
- *    is read in several pages at different offsets — every page is needed to
- *    reconstruct it, so the newest read at EACH offset is kept;
- *  - everything else for the object (reads before the newest write, earlier
- *    writes, an older re-read of the same page) is superseded.
+ *  - the newest source WRITE (the code/markdown the model last sent) is kept;
+ *  - after it, the newest READ SEQUENCE is the current revision. A sequence
+ *    starts at a read of offset 0; a large source is then paged at higher
+ *    offsets, and every page is needed to reconstruct it, so the newest read
+ *    at EACH offset within that sequence is kept;
+ *  - everything else for the object is superseded: reads before the newest
+ *    write, earlier writes, an older re-read of the same page, and pages from
+ *    an EARLIER read sequence. A fresh offset-0 read means the model started
+ *    over, and the source may have changed outside this chat in between (the
+ *    Code tab, another editor), so old higher-offset pages must never be
+ *    stitched onto the new first page.
  */
 function partsToKeep(messages: UIMessage[]): Set<string> {
+  const { sourceParts, lastWrite, lastSequenceStart } =
+    indexSourceParts(messages);
+
+  const keep = new Map<string, string>();
+  for (const { pos: at, key, part } of sourceParts) {
+    const objectId = partObjectId(part);
+    const writeAt = lastWrite.get(objectId) ?? 0;
+    if (!isReadPart(part)) {
+      // Mode-only writes carry no source; keeping them costs nothing.
+      if (at === writeAt || !isSourceWrite(part)) keep.set(`write:${key}`, key);
+      continue;
+    }
+    // The current read sequence starts at the newest offset-0 read, or at the
+    // newest write when paging has not restarted since.
+    if (at < Math.max(writeAt, lastSequenceStart.get(objectId) ?? 0)) continue;
+    // Later reads of the same page overwrite earlier ones.
+    keep.set(`read:${objectId}:${readOffset(part)}`, key);
+  }
+  return new Set(keep.values());
+}
+
+/**
+ * One pass over the history: every workspace source part in order, plus, per
+ * object, the position of the newest source write and of the newest offset-0
+ * read (the start of the newest read sequence).
+ */
+function indexSourceParts(messages: UIMessage[]): {
+  sourceParts: Array<{ pos: number; key: string; part: unknown }>;
+  lastWrite: Map<string, number>;
+  lastSequenceStart: Map<string, number>;
+} {
   const lastWrite = new Map<string, number>();
+  const lastSequenceStart = new Map<string, number>();
   const sourceParts: Array<{ pos: number; key: string; part: unknown }> = [];
   let pos = 0;
   for (const [m, message] of messages.entries()) {
@@ -175,23 +230,16 @@ function partsToKeep(messages: UIMessage[]): Set<string> {
       if (!isWorkspaceSourceToolPart(part)) continue;
       pos += 1;
       sourceParts.push({ pos, key: `${m}:${p}`, part });
-      if (!isReadPart(part)) lastWrite.set(partObjectId(part), pos);
+      const objectId = partObjectId(part);
+      if (isReadPart(part)) {
+        if (readOffset(part) === 0) lastSequenceStart.set(objectId, pos);
+      } else if (isSourceWrite(part)) {
+        lastWrite.set(objectId, pos);
+      }
     }
   }
 
-  const keep = new Map<string, string>();
-  for (const { pos: at, key, part } of sourceParts) {
-    const objectId = partObjectId(part);
-    const writeAt = lastWrite.get(objectId) ?? 0;
-    if (!isReadPart(part)) {
-      if (at === writeAt) keep.set(`write:${objectId}`, key);
-      continue;
-    }
-    if (at < writeAt) continue;
-    // Later reads of the same page overwrite earlier ones.
-    keep.set(`read:${objectId}:${readOffset(part)}`, key);
-  }
-  return new Set(keep.values());
+  return { sourceParts, lastWrite, lastSequenceStart };
 }
 
 /**
