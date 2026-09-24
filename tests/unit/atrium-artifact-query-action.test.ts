@@ -658,6 +658,31 @@ describe("queryArtifactData overall deadline (#1788)", () => {
     jest.useRealTimers();
   });
 
+  it("stops between the connector helper's OWN two stages", async () => {
+    // `requirePsdDataConnectorId` reads the router config and THEN looks the
+    // connector up. Checking only before entering it leaves a gap: a config
+    // read that starts inside the budget and finishes outside it would go on
+    // to start a fresh database query for a caller already answered `timeout`.
+    jest.useFakeTimers();
+    mockGetNexusRouterConfig.mockImplementationOnce(async () => {
+      await jest.advanceTimersByTimeAsync(31_000);
+      return {
+        config: { specialists: { psdDataConnectorName: "psd-data" } },
+        mode: "active",
+      };
+    });
+
+    const result = await queryArtifactData(validInput);
+    expect(failureOf(result).code).toBe("timeout");
+
+    // Let any continuation the closure could still run actually run.
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    expect(mockResolveConnectorId).not.toHaveBeenCalled();
+    expect(mockGetConnectorTools).not.toHaveBeenCalled();
+    jest.useRealTimers();
+  });
+
   it("bounds a preflight that NEVER settles, not just a slow one", async () => {
     // Arming the clock is not enough on its own: none of the preflight calls
     // takes an AbortSignal, so without racing them a single hung dependency (a

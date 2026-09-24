@@ -281,8 +281,18 @@ async function authorizeQueryRequest(contentId: string): Promise<{
 }
 
 /** Resolve "the PSD data server", failing closed when it is not configured. */
-async function requirePsdDataConnectorId(): Promise<string> {
+async function requirePsdDataConnectorId(
+  /**
+   * Called between this helper's OWN two async stages (#1788). The caller
+   * checks its deadline before entering, but the config read and the connector
+   * lookup are two sequential awaits: a config read that starts inside the
+   * budget and finishes outside it would otherwise go on to start a fresh
+   * database query for a caller that has already been answered `timeout`.
+   */
+  stopIfExpired: () => void = () => {}
+): Promise<string> {
   const { config } = await getNexusRouterConfig();
+  stopIfExpired();
   const connectorId = await resolvePsdDataConnectorId(config);
   if (!connectorId) {
     throw ErrorFactories.sysConfigurationError(
@@ -848,7 +858,7 @@ export async function queryArtifactData(
         );
         stopIfExpired();
 
-        const connectorId = await requirePsdDataConnectorId();
+        const connectorId = await requirePsdDataConnectorId(stopIfExpired);
         return {
           idToken,
           params,
