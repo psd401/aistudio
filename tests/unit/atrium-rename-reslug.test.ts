@@ -49,7 +49,8 @@ jest.mock("drizzle-orm", () => ({
   eq: (...args: unknown[]) => args,
   gte: (...args: unknown[]) => args,
   isNull: (value: unknown) => value,
-  like: (...args: unknown[]) => args,
+  // Tagged so a prefix scan is distinguishable from the other shapes.
+  like: (...args: unknown[]) => ({ like: args }),
   // Tagged so the self-exclusion is distinguishable from the lock's `eq`.
   ne: (...args: unknown[]) => ({ ne: args }),
   sql: Object.assign((..._args: unknown[]) => ({}), { join: () => ({}) }),
@@ -230,6 +231,22 @@ describe("rename re-slugs an unpublished object (#1791 finding 3)", () => {
     await expect(
       contentService.update(requester, OBJECT_ID, { title: "Renamed" })
     ).rejects.toBeInstanceOf(ConflictError);
+  });
+
+  it("scans by the truncated prefix for a 200-char title, so an occupied shortened -1 is seen", async () => {
+    const longTitle = "a".repeat(250);
+    const base = "a".repeat(200);
+    // `slugCandidate(base, 1)` is 198 a's + "-1" — NOT `${base}-%`.
+    takenSlugs = [{ slug: base }, { slug: `${"a".repeat(198)}-1` }];
+
+    await contentService.update(requester, OBJECT_ID, { title: longTitle });
+
+    const slugScan = objectWheres[objectWheres.length - 1] as unknown[];
+    expect(slugScan).toContainEqual({
+      like: [expect.anything(), `${"a".repeat(189)}%`],
+    });
+    // Both occupied forms were seen, so the next free slot is taken.
+    expect(updatedValues?.slug).toBe(`${"a".repeat(198)}-2`);
   });
 });
 

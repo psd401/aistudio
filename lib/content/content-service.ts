@@ -120,6 +120,13 @@ function uniqueConstraint(error: unknown): string | null {
 }
 
 /**
+ * `slugCandidate` keeps `200 - "-N".length` base chars (then drops at most the
+ * one trailing hyphen `slugifyTitle` can leave), so every candidate up to a
+ * 9-digit suffix starts with the first 189 base chars.
+ */
+const SLUG_SCAN_PREFIX_CHARS = 189;
+
+/**
  * Allocate a unique slug for a title within the create transaction.
  *
  * Fetches all slugs that collide with the base (`base` and `base-N`) in a single
@@ -146,6 +153,15 @@ async function uniqueSlug(
   // `LIKE base%` over-fetches unrelated neighbours (`report` would pull in
   // `reporter`, `report-card`, `reporting-2024`), loading rows we never compare
   // against while the transaction holds a pooled connection.
+  //
+  // Near the 200-char cap `slugCandidate` TRUNCATES the base to make room for
+  // the suffix, so `base-%` would miss an occupied `-1`/`-2` and the insert
+  // would hit the unique constraint instead of taking the next free slot. For
+  // a long base, scan by the shortest prefix any candidate keeps.
+  const scanPrefix =
+    base.length > SLUG_SCAN_PREFIX_CHARS
+      ? base.slice(0, SLUG_SCAN_PREFIX_CHARS)
+      : null;
   const taken = new Set(
     (
       await tx
@@ -153,10 +169,12 @@ async function uniqueSlug(
         .from(contentObjects)
         .where(
           and(
-            sql`(${contentObjects.slug} = ${base} OR ${like(
-              contentObjects.slug,
-              `${base}-%`
-            )})`,
+            scanPrefix === null
+              ? sql`(${contentObjects.slug} = ${base} OR ${like(
+                  contentObjects.slug,
+                  `${base}-%`
+                )})`
+              : like(contentObjects.slug, `${scanPrefix}%`),
             // A rename must not collide with the row's OWN current slug, or a
             // same-base title (case change, repeated rename) churns `-1`, `-2`.
             excludeId === undefined

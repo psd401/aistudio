@@ -496,8 +496,7 @@ export interface SnapshotInput {
   /**
    * Authoring-surface label for the version (#1791 finding 6), e.g.
    * `"nexus-chat"`. Set by a surface where a MODEL wrote the body under a human
-   * requester, so the history can say "you, via Nexus chat" instead of
-   * "human". Never an authorization signal: `authorActor` / `authorUserId`
+   * requester, so the history can say "via Nexus chat" instead of "human". Never an authorization signal: `authorActor` / `authorUserId`
    * remain the record of who was allowed to do this.
    */
   authorLabel?: string;

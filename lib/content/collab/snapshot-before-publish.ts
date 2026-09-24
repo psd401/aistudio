@@ -38,8 +38,14 @@ export async function snapshotLiveDocumentForPublish(params: {
   objectId: string;
   kind: "document" | "artifact";
   requestId: string;
+  /**
+   * Authoring-surface label for the snapshot version (#1791), e.g. the Nexus
+   * chat's, so a document the chat edited and then published is labelled like
+   * an artifact version the chat wrote — not "human".
+   */
+  authorLabel?: string;
 }): Promise<void> {
-  const { req, objectId, kind, requestId } = params;
+  const { req, objectId, kind, requestId, authorLabel } = params;
   if (kind !== "document") return;
   const log = createLogger({ requestId, module: "snapshot-before-publish" });
 
@@ -72,7 +78,12 @@ export async function snapshotLiveDocumentForPublish(params: {
     await versionService.snapshot(
       req,
       { id: objectId, kind: "document" },
-      { body: live, bodyFormat: "markdown", summary: "Snapshot before agent publish" }
+      {
+        body: live,
+        bodyFormat: "markdown",
+        summary: "Snapshot before agent publish",
+        ...(authorLabel ? { authorLabel } : {}),
+      }
     );
     log.info("pre-publish snapshot advanced the version head to live content", { objectId });
   } catch (err) {

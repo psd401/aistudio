@@ -882,7 +882,13 @@ function defineBuildWorkspaceChatToolsPublishSuite() {
     const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
     const out = await exec(tools.publish_workspace_content, {});
     expect(snapshotBeforePublishMock).toHaveBeenCalledWith(
-      expect.objectContaining({ objectId: "doc-1", kind: "document", requestId: "r" })
+      expect.objectContaining({
+        objectId: "doc-1",
+        kind: "document",
+        requestId: "r",
+        // #1791: the published version is labelled as written via Nexus chat.
+        authorLabel: "nexus-chat",
+      })
     );
     expect(order).toEqual(["snapshot", "publish"]);
     expect(publishMock).toHaveBeenCalledWith(REQ, "doc-1", { destination: "intranet" });

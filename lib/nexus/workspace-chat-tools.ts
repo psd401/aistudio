@@ -783,7 +783,13 @@ async function runWorkspacePublishOp(args: WorkspacePublishArgs): Promise<Record
       // Advance the version head to the live doc content first: chat edits land only
       // on the live Yjs/atrium_doc_state path, so publishing the persisted head
       // without this would ship the stale/empty version (Codex review P1).
-      await snapshotLiveDocumentForPublish({ req, objectId, kind, requestId });
+      await snapshotLiveDocumentForPublish({
+        req,
+        objectId,
+        kind,
+        requestId,
+        authorLabel: NEXUS_CHAT_AUTHOR_LABEL,
+      });
       const result = await publishService.publish(req, objectId, { destination });
       return {
         ok: true,
