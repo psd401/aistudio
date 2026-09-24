@@ -12,12 +12,13 @@
 /**
  * An explicit http(s) URL in the message — the "paste a link" case. Bounded by
  * whitespace and common trailing delimiters so a link inside prose or markdown
- * still matches. No `g` flag: `test()` on a global regex is stateful across
- * calls.
+ * still matches. A bracketed IPv6 host (`https://[2606:4700::1111]/`) is
+ * matched as its own alternative, because `[` is otherwise a delimiter. No `g`
+ * flag: `test()` on a global regex is stateful across calls.
  */
-const EXPLICIT_URL_PATTERN = /\bhttps?:\/\/[^\s<>()[\]{}"']{3,}/i
+const EXPLICIT_URL_PATTERN = /\bhttps?:\/\/(?:\[[0-9a-f:.]+\][^\s<>()[\]{}"']*|[^\s<>()[\]{}"']{3,})/i
 /** Same pattern, global, for `replace()` only — never call `test()` on it. */
-const EXPLICIT_URL_PATTERN_ALL = /\bhttps?:\/\/[^\s<>()[\]{}"']{3,}/gi
+const EXPLICIT_URL_PATTERN_ALL = /\bhttps?:\/\/(?:\[[0-9a-f:.]+\][^\s<>()[\]{}"']*|[^\s<>()[\]{}"']{3,})/gi
 
 export function containsExplicitUrl(text: string): boolean {
   return EXPLICIT_URL_PATTERN.test(text)
