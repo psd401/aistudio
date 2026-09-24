@@ -130,7 +130,6 @@ const PAYLOAD_PLACEHOLDERS = {
   '--json-file': {
     flag: '--json',
     matcher: /(^|\s)--json-file\s+(\S+)/g,
-    inlineMatcher: /(^|\s)--json\s/,
     placeholder: '@@PSD_PAYLOAD_JSON@@',
     kind: 'json',
   },
@@ -147,14 +146,12 @@ const PAYLOAD_PLACEHOLDERS = {
   '--params-file': {
     flag: '--params',
     matcher: /(^|\s)--params-file\s+(\S+)/g,
-    inlineMatcher: /(^|\s)--params\s/,
     placeholder: '@@PSD_PAYLOAD_PARAMS@@',
     kind: 'json',
   },
   '--body-file': {
     flag: '--body',
     matcher: /(^|\s)--body-file\s+(\S+)/g,
-    inlineMatcher: /(^|\s)--body\s/,
     placeholder: '@@PSD_PAYLOAD_BODY@@',
     kind: 'text',
   },
@@ -164,7 +161,6 @@ const PAYLOAD_PLACEHOLDERS = {
   '--text-file': {
     flag: '--text',
     matcher: /(^|\s)--text-file\s+(\S+)/g,
-    inlineMatcher: /(^|\s)--text\s/,
     placeholder: '@@PSD_PAYLOAD_TEXT@@',
     kind: 'text',
   },
@@ -241,19 +237,35 @@ function resolvePayloadFiles(commandString, options = {}) {
   // corrupted JSON — not the file's contents — was what got sent.
   let execCommand = commandString;
   const payloads = {};
+  // The matchers scan the raw string, which cannot by itself tell a real flag
+  // from the same text sitting inside a quoted value — `--json '{"name":"Keep
+  // --params-file /tmp/q.json literal"}'` had that sentence rewritten into a
+  // placeholder, corrupting the caller's own JSON. The argv tokens settle it:
+  // a flag mentioned inside a value is part of its token, never a token of its
+  // own. Counts must agree, or the command is ambiguous and is refused.
+  const argvTokens = splitCommand(commandString);
 
   for (const [fileFlag, spec] of Object.entries(PAYLOAD_PLACEHOLDERS)) {
     const matches = [...commandString.matchAll(spec.matcher)];
-    if (matches.length === 0) continue;
-    if (matches.length > 1) {
+    const flagTokens = argvTokens.filter((token) => token === fileFlag).length;
+    if (flagTokens === 0) continue;
+    if (flagTokens > 1) {
       reject(`${fileFlag} may appear at most once per command`);
+    }
+    if (matches.length === 0) {
+      reject(`${fileFlag} requires an absolute path following it`);
+    }
+    if (matches.length !== flagTokens) {
+      reject(
+        `${fileFlag} also appears inside another argument's value; it must be a flag of its own`
+      );
     }
     // Exactly one payload source per flag: reject the file form alongside its
     // inline counterpart (--json + --json-file, --body + --body-file) —
     // otherwise gws would receive two occurrences of the same flag and pick
-    // one silently. `--json\s` does not match `--json-file` (hyphen, not
-    // whitespace, follows), so the file flag never trips its own check.
-    if (spec.inlineMatcher.test(commandString)) {
+    // one silently. Judged on the argv tokens for the same reason as above: a
+    // `--params` mentioned inside a quoted value is not a second flag.
+    if (argvTokens.includes(spec.flag)) {
       reject(`use either ${spec.flag} or ${fileFlag}, not both`);
     }
     const filePath = normalizePayloadFilePath(matches[0][2], fileFlag, reject);

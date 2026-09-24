@@ -241,6 +241,34 @@ describe('resolvePayloadFiles: --params-file and cross-flag isolation (#1801)', 
     expect(extractJsonArg(resolved.syntheticCommand)).toBe(JSON.stringify(body));
   });
 
+  test('a file flag mentioned inside an inline value is not a flag', () => {
+    // The raw-string matcher cannot tell a real flag from the same text
+    // sitting inside a quoted value; it rewrote the caller's own JSON.
+    const command =
+      `docs documents batchUpdate --json '{"name":"Keep --params-file /tmp/query.json literal"}'`;
+    expect(resolvePayloadFiles(command)).toBeNull();
+  });
+
+  test('a real flag alongside the same text in a value is refused as ambiguous', () => {
+    const p = tmpFile(JSON.stringify({ fileId: 'f1' }));
+    expect(() =>
+      resolvePayloadFiles(
+        `drive files update --params-file ${p} --text 'see --params-file /tmp/x.json'`,
+        { onError(message) { throw new Error(message); } }
+      )
+    ).toThrow(/inside another argument's value/);
+  });
+
+  test('an inline --params mentioned inside a value is not the inline form', () => {
+    // The both-forms check is judged on tokens too, so quoted prose about
+    // --params does not block a legitimate --params-file.
+    const p = tmpFile(JSON.stringify({ fileId: 'f1' }));
+    const resolved = resolvePayloadFiles(
+      `drive files update --params-file ${p} --text 'use --params here'`
+    );
+    expect(resolved.payloads['@@PSD_PAYLOAD_PARAMS@@']).toBe('{"fileId":"f1"}');
+  });
+
   test('a command carrying a reserved placeholder token is refused', () => {
     const p = tmpFile(JSON.stringify({ fileId: 'f1' }));
     expect(() =>
