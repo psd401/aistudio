@@ -146,11 +146,16 @@ const ConnectorItem = memo(function ConnectorItem({
           </div>
           <div className="flex items-center gap-1">
             <p className="text-xs text-muted-foreground truncate">
-              {/* Append, never replace: the connection status still drives the
-                  dot beside the name and the Reconnect link below, so dropping
-                  it would leave "Reconnect" with nothing explaining why. */}
+              {/* Replace rather than append, ONLY here. This line is ~170px wide
+                  inside a w-72 popover, and "Connected · On for this workspace"
+                  truncates to "Connected · On for this workspa…" — cutting off
+                  the one thing this row exists to say. Nothing is lost by
+                  dropping the status word: `autoAttached` already requires
+                  status === 'connected', the green dot beside the name still
+                  carries that, and the Reconnect link below is reachable only
+                  from `token_expired`, which cannot co-occur with this state. */}
               {autoAttached
-                ? `${STATUS_LABELS[connector.status]} · On for this workspace`
+                ? 'On for this workspace'
                 : STATUS_LABELS[connector.status]}
             </p>
             {connector.status === 'token_expired' && !isAuthenticating && (

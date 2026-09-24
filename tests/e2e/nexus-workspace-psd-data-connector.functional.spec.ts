@@ -70,9 +70,20 @@ async function openConnectPopover(page: Page): Promise<void> {
   await connect.click();
 }
 
-/** The PSD Data row, or null when this deployment has no such connector. */
+/**
+ * The PSD Data row, or null when this deployment has no such connector.
+ *
+ * The wait is load-bearing: the popover fetches its connectors through a server
+ * action AFTER it opens, and `count()` does not auto-retry — so counting
+ * straight after the click reports "no such connector" on a perfectly healthy
+ * deployment and silently skips the whole spec.
+ */
 async function psdDataRow(page: Page) {
   const row = page.getByRole("switch", { name: /PSD Data connector/i });
+  await row
+    .first()
+    .waitFor({ state: "visible", timeout: 30_000 })
+    .catch(() => undefined);
   return (await row.count()) > 0 ? row.first() : null;
 }
 
@@ -106,7 +117,13 @@ test.describe("#1786 Connect popover reflects the workspace-attached PSD Data co
     });
 
     // Clicking it must not silently do nothing — it explains why it is locked.
-    await row.click();
+    //
+    // `force` is required and correct: the row is `aria-disabled`, not
+    // `disabled`, so Playwright's actionability check refuses it while a real
+    // pointer still reaches it. That difference is the point of the pattern —
+    // the control stays perceivable, focusable and clickable precisely so it can
+    // tell the user why it will not move.
+    await row.click({ force: true });
     await expect(page.getByText(/stays on while this workspace is open/i)).toBeVisible({
       timeout: 15_000,
     });
