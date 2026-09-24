@@ -1955,18 +1955,19 @@ async function bindWorkspaceTools(
   requestId: string,
   resolved: ResolvedWorkspace | null
 ): Promise<Awaited<ReturnType<typeof buildWorkspaceChatTools>>> {
-  if (!workspaceId) return null;
   // `resolved` is this same object, already fetched for routing earlier in the
-  // request (#1786). Reused so a workspace turn resolves it once, not twice.
-  if (resolved) {
-    return buildWorkspaceChatTools({
-      workspaceIdOrSlug: workspaceId,
-      userId,
-      requestId,
-      preloaded: { requester: resolved.requester, object: resolved.object },
-    });
-  }
-  return buildWorkspaceChatTools({ workspaceIdOrSlug: workspaceId, userId, requestId });
+  // request (#1786), and it is the ONLY resolution this turn may bind from.
+  // When routing's lookup failed, the PSD Data attach and the do-not-guess
+  // guidance were both decided from "no workspace"; re-resolving here and
+  // succeeding would hand the model edit tools with neither safeguard. A
+  // transient failure costs one turn without workspace tools instead.
+  if (!workspaceId || !resolved) return null;
+  return buildWorkspaceChatTools({
+    workspaceIdOrSlug: workspaceId,
+    userId,
+    requestId,
+    preloaded: { requester: resolved.requester, object: resolved.object },
+  });
 }
 
 /**
