@@ -78,9 +78,15 @@ const ROUTING_CASES: Array<{
  * with a generic error — indistinguishable in the UI from a real regression. So
  * the runner declares what is configured rather than the spec guessing, and a
  * partially-configured environment still reports honestly on what it CAN run.
+ *
+ * The default covers only what every environment has: Bedrock is always treated
+ * as configured (ambient AWS credentials), and AUTO routing falls back to it. A
+ * default that named openai/google turned the pre-push wall red on any machine
+ * without those keys. Opt in where they exist:
+ * NEXUS_URL_ACCESS_FAMILIES=anthropic,openai,google,auto
  */
 const CONFIGURED_FAMILIES = (
-  process.env.NEXUS_URL_ACCESS_FAMILIES ?? "anthropic,openai,google,auto"
+  process.env.NEXUS_URL_ACCESS_FAMILIES ?? "anthropic,auto"
 )
   .split(",")
   .map((value) => value.trim().toLowerCase())
