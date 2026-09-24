@@ -43,7 +43,14 @@ jest.mock("@/actions/prompt-library.actions", () => ({
   getPrompt: jest.fn(),
   trackPromptUse: jest.fn(),
 }));
-jest.mock("sonner", () => ({ toast: { error: jest.fn(), success: jest.fn() } }));
+const toastWarning = jest.fn();
+jest.mock("sonner", () => ({
+  toast: {
+    error: jest.fn(),
+    success: jest.fn(),
+    warning: (...args: unknown[]) => toastWarning(...args),
+  },
+}));
 jest.mock("@/lib/client-logger", () => ({
   createLogger: () => ({
     info: jest.fn(),
@@ -122,4 +129,19 @@ describe("PromptAutoLoader draft auto-send", () => {
 
     expect(composer.send).not.toHaveBeenCalled();
   });
+
+  it("never auto-sends a draft it had to truncate — prefills it and says so", () => {
+    const long = "x".repeat(4_500);
+    mountAt(nexusWorkspaceHref({ workspaceId: "obj-1", draft: long, autoSend: true }));
+
+    advance(10);
+    advance(140);
+
+    expect(composer.setText).toHaveBeenCalledWith("x".repeat(4_000));
+    expect(composer.send).not.toHaveBeenCalled();
+    expect(toastWarning).toHaveBeenCalledTimes(1);
+    // The one-shot handshake is still consumed, so it cannot fire later.
+    expect(window.sessionStorage.length).toBe(0);
+  });
 });
+

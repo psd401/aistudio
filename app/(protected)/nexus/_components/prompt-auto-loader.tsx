@@ -14,6 +14,9 @@ import {
 
 const log = createLogger({ moduleName: 'prompt-auto-loader' })
 
+/** Longest `?draft=` the composer is prefilled with. */
+const MAX_DRAFT_CHARS = 4000
+
 /**
  * Component that automatically loads and sends a prompt from the Prompt Library
  * when the promptId URL parameter is present.
@@ -95,14 +98,24 @@ export function PromptAutoLoader() {
       processedDraftRef.current = true
 
       // Cap the prefill defensively (a URL param is user-controlled).
-      const text = draft.slice(0, 4000)
+      const truncated = draft.length > MAX_DRAFT_CHARS
+      const text = draft.slice(0, MAX_DRAFT_CHARS)
       composer.setText(text)
       // Consume BEFORE the URL rewrite below: the rewrite re-runs this effect
       // with the params gone, and a handshake left unconsumed would outlive the
-      // navigation it was armed for.
-      const autoSend = consumeDraftAutoSend(autoSendNonce, draft)
+      // navigation it was armed for. Always consumed, but a TRUNCATED draft is
+      // never auto-sent: that would submit instructions the person did not
+      // finish writing, with nothing on screen to say part was cut.
+      const autoSend =
+        consumeDraftAutoSend(autoSendNonce, draft) && !truncated
+      if (truncated) {
+        toast.warning('Your request was shortened', {
+          description: `Only the first ${MAX_DRAFT_CHARS.toLocaleString()} characters fit. Review it before sending.`,
+        })
+      }
       log.info('Draft prompt prefilled in composer', {
         length: draft.length,
+        truncated,
         autoSend,
       })
 

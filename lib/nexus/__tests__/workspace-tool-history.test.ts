@@ -343,6 +343,22 @@ describe("pruneStaleWorkspaceToolPayloads — paged reads of one revision", () =
       expect(md(2, out)).toBe(replaced);
       expect(md(3, out)).toBe(add2);
     });
+
+    it("appends before a FRESH read are superseded — the read already holds them", () => {
+      // Read, append in chat, then the document was replaced outside the chat
+      // and the model re-read it from offset 0.
+      const doc = bigCode("a");
+      const add = bigCode("b");
+      const fresh = bigCode("c");
+      const out = pruneStaleWorkspaceToolPayloads([
+        message("m1", [page("r0", 0, doc)]),
+        message("m2", [docEdit("e1", add)]),
+        message("m3", [page("r1", 0, fresh)]),
+      ]);
+      expect(md(0, out)).toMatch(/^\[omitted from history/);
+      expect(md(1, out)).toMatch(/^\[omitted from history/);
+      expect(md(2, out)).toBe(fresh);
+    });
   });
 });
 

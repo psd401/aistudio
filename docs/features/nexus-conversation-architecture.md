@@ -489,7 +489,8 @@ to the document rather than replacing it; a mode-only `dataAccess` change
 does not count as a write), plus every page of the newest read sequence
 after the replacement: a large source is read in several
 pages at different offsets, and a fresh offset-0 read starts a new sequence,
-so pages from an older revision are never stitched onto a new first page. Persisted messages are never touched. Tool parts keep their exact
+so pages from an older revision are never stitched onto a new first page,
+and appends made before that fresh read are dropped (the read holds them). Persisted messages are never touched. Tool parts keep their exact
 shape so every tool call still pairs with its result on replay.
 
 ---

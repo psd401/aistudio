@@ -204,9 +204,14 @@ function partsToKeep(messages: UIMessage[]): Set<string> {
     const writeAt = lastWrite.get(objectId) ?? 0;
     if (!isReadPart(part)) {
       // The newest replacement and every append after it are the current
-      // source; a mode-only write carries no source, so keeping it is free.
+      // source — unless a fresh offset-0 read came later, which already holds
+      // them (and any change made outside this chat). A mode-only write
+      // carries no source, so keeping it is free.
       const kind = writeKind(part);
-      if (at >= writeAt || kind === "none") keep.set(`write:${key}`, key);
+      const sequenceAt = lastSequenceStart.get(objectId) ?? 0;
+      const current =
+        at === writeAt || (kind === "append" && at >= Math.max(writeAt, sequenceAt));
+      if (current || kind === "none") keep.set(`write:${key}`, key);
       continue;
     }
     // The current read sequence starts at the newest offset-0 read, or at the
