@@ -26,6 +26,19 @@ import { mkdirSync } from 'node:fs'
 
 const SHOT_DIR = '.verification/assistant-architect-create-add-field'
 
+/**
+ * Runs in the browser (serialized by `page.waitForFunction`), so it must not
+ * close over anything from this module. Declared at module scope rather than
+ * inline to keep the callback nesting shallow.
+ */
+function iconGridImagesLoaded(): boolean {
+  const grid = document.querySelector('[data-testid="assistant-icon-grid"]')
+  if (!grid) return false
+  const imgs = Array.from(grid.querySelectorAll('img'))
+  if (imgs.length === 0) return false
+  return imgs.slice(0, 12).every(img => img.complete)
+}
+
 test.describe('Assistant Architect create — Add Field / Continue', () => {
   test.skip(
     process.env.PLAYWRIGHT_AUTH_ENABLED !== 'true',
@@ -50,16 +63,7 @@ test.describe('Assistant Architect create — Add Field / Continue', () => {
 
     // Let the lazy next/image icons finish loading, so the evidence
     // screenshots show the real grid rather than empty placeholders.
-    await page.waitForFunction(
-      () => {
-        const grid = document.querySelector('[data-testid="assistant-icon-grid"]')
-        if (!grid) return false
-        const imgs = Array.from(grid.querySelectorAll('img'))
-        return imgs.length > 0 && imgs.slice(0, 12).every(img => img.complete)
-      },
-      undefined,
-      { timeout: 30_000 }
-    )
+    await page.waitForFunction(iconGridImagesLoaded, undefined, { timeout: 30_000 })
 
     await page.getByPlaceholder('Enter assistant name...').fill(`FS164138 ${Date.now()}`)
     await page
