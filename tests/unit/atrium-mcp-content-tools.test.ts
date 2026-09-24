@@ -160,7 +160,12 @@ describe("Atrium MCP content tools registry", () => {
     }
   });
 
-  it("publishes sourceRef additions as v3 create-tool contracts", () => {
+  it("publishes sourceRef additions as create-tool contracts at v3 or later", () => {
+    const expectedVersion: Record<string, string> = {
+      create_document: "v3",
+      // v4: #1710 added `dataAccess` to create_artifact.
+      create_artifact: "v4",
+    };
     for (const name of ["create_document", "create_artifact"]) {
       const tool = CONTENT_MCP_TOOLS.find((candidate) => candidate.name === name);
       const manifestEntry = TOOL_MANIFEST.find(
@@ -169,7 +174,25 @@ describe("Atrium MCP content tools registry", () => {
 
       expect(tool?.inputSchema.properties.sourceRef?.type).toBe("object");
       expect(tool?.inputSchema.required ?? []).not.toContain("sourceRef");
-      expect(manifestEntry?.version).toBe("v3");
+      expect(manifestEntry?.version).toBe(expectedVersion[name]);
+    }
+  });
+
+  it("publishes the #1710 dataAccess field under bumped catalog versions", () => {
+    // A published version's schema is frozen by the catalog sync; adding
+    // dataAccess without a bump left prod serving the old contract.
+    const expectedVersion: Record<string, string> = {
+      create_artifact: "v4",
+      update_content: "v2",
+    };
+    for (const name of ["create_artifact", "update_content"]) {
+      const tool = CONTENT_MCP_TOOLS.find((candidate) => candidate.name === name);
+      const manifestEntry = TOOL_MANIFEST.find(
+        (candidate) => candidate.name === name
+      );
+
+      expect(tool?.inputSchema.properties.dataAccess?.type).toBe("string");
+      expect(manifestEntry?.version).toBe(expectedVersion[name]);
     }
   });
 

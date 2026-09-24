@@ -315,8 +315,11 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     requiredScope: "content:create",
     internalScopes: ["content:create"],
     destructive: true,
+    // v4: #1710 added `dataAccess` (artifact sandbox data-bridge mode) without a
+    // bump, so from 2026-09-02 every boot refused the v3 row and the catalog kept
+    // serving the pre-#1710 schema (and the #1750 CSP description).
     // v3: #1290 added `sourceRef`; v2 added `codeEncoding` (#1245).
-    version: "v3",
+    version: "v4",
   },
   get_content: {
     identifier: "content.get",
@@ -343,6 +346,9 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     requiredScope: "content:update",
     internalScopes: ["content:update"],
     destructive: true,
+    // v2: #1710 added `dataAccess` without a bump; the v1 row stayed frozen on
+    // the old schema from 2026-09-02 (immutability violation on every boot).
+    version: "v2",
   },
   create_version: {
     identifier: "content.create_version",
