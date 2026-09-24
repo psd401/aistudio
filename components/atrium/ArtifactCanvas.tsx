@@ -32,7 +32,14 @@ import { createVersionAction } from "@/actions/db/atrium/create-version";
 import { rollbackVersionAction } from "@/actions/db/atrium/rollback-version";
 import type { BodyFormat, ContentDataAccess } from "@/lib/content";
 import { toBase64Utf8 } from "@/lib/content/code-encoding-browser";
-import { ArtifactSandbox } from "./ArtifactSandbox";
+import {
+  clearArtifactPreviewDiagnostics,
+  recordArtifactPreviewDiagnostic,
+} from "@/lib/atrium/artifact-preview-diagnostics";
+import {
+  ArtifactSandbox,
+  type ArtifactSandboxDiagnostic,
+} from "./ArtifactSandbox";
 import { CodeEditor } from "./CodeEditor";
 import "@/styles/atrium-content.css";
 
@@ -401,6 +408,9 @@ function ArtifactPreviewFrame({
   versionKey: string;
   bridge: CanvasBridge;
 }): React.JSX.Element {
+  // Called unconditionally, above the branch: a hook after a conditional return
+  // is exactly the ordering bug the rules-of-hooks lint exists to catch.
+  const onDiagnostic = usePreviewDiagnostics(bridge, versionKey);
   if (!bridge) {
     return (
       <ArtifactSandbox
@@ -420,6 +430,11 @@ function ArtifactPreviewFrame({
       dataBridgeEnabled={true}
       contentId={bridge.contentId}
       dataAccess={bridge.dataAccess}
+      // The version actually on screen, so the data MCP's audit line names it
+      // rather than the working head (#1787). "" is the empty-draft case, which
+      // never reaches a query.
+      versionId={versionKey || undefined}
+      onDiagnostic={onDiagnostic}
     />
   );
 }
@@ -498,6 +513,42 @@ function useCanvasBridgePin(
   const effectiveMode = pin.settledFor === refreshSignal ? mode : pin.mode;
   if (!target || !effectiveMode) return null;
   return { contentId: target.contentId, dataAccess: effectiveMode };
+}
+
+/**
+ * Buffer this preview's failures so the next chat turn can carry them (#1787).
+ *
+ * The chat that authors an artifact is otherwise blind to whether its code
+ * works: the preview runs cross-origin in the user's browser and the model only
+ * ever sees tool results, so it can write a dashboard whose every query fails
+ * and tell the user it is "populated live from the database".
+ *
+ * Buffering is scoped to the bridge surfaces (the edit page and the workspace
+ * panel). Thumbnails and embeds pass no bridge and collect nothing.
+ *
+ * CLEARED whenever a different artifact, version, or mode starts running: those
+ * failures describe code that is no longer on screen, and replaying them against
+ * a fresh version is how a model "fixes" the same bug twice.
+ */
+function usePreviewDiagnostics(
+  bridge: CanvasBridge,
+  versionKey: string
+): (diagnostic: ArtifactSandboxDiagnostic) => void {
+  const contentId = bridge?.contentId ?? null;
+  const frameKey = `${contentId ?? ""}:${bridge?.dataAccess ?? ""}:${versionKey}`;
+
+  useEffect(() => {
+    if (!contentId) return;
+    clearArtifactPreviewDiagnostics();
+  }, [contentId, frameKey]);
+
+  return useCallback(
+    (diagnostic: ArtifactSandboxDiagnostic) => {
+      if (!contentId) return;
+      recordArtifactPreviewDiagnostic(contentId, diagnostic);
+    },
+    [contentId]
+  );
 }
 
 export function ArtifactCanvas(props: ArtifactCanvasProps) {
