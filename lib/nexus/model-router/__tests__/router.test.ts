@@ -645,6 +645,22 @@ describe("Nexus model router link handling", () => {
     expect(result.automaticToolNames).toEqual([])
   })
 
+  it("still fails an explicit web-search request with a link when search is unavailable", async () => {
+    // The user asked for a search; silently answering from the page alone
+    // would skip what they asked for.
+    mockClassify.mockResolvedValue({
+      intent: "web-search", tier: "medium", confidence: 0.96,
+      reasonCodes: ["current_web_information"], source: "deterministic",
+    })
+
+    await expect(routeNexusRequest({
+      ...turn,
+      experienceMode: "advanced",
+      requestedFamily: "anthropic",
+      text: "Search the web for district guidance, then compare it with https://example.com",
+    })).rejects.toThrow("Web search is not available")
+  })
+
   it("still fails a current-info turn with no link when web search is unavailable", async () => {
     mockClassify.mockResolvedValue({
       intent: "web-search", tier: "medium", confidence: 0.96,

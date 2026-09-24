@@ -464,18 +464,20 @@ async function buildRoutedResult(options: {
  * "Summarize <url> and give today's weather" classifies as web-search, which
  * requires a search-capable model and throws NexusSpecialistUnavailableError
  * when none is accessible. For a message that names a page, that would refuse
- * the link outright, which is the bug #1696 fixed. So when the message has a
- * URL, the turn falls back to `general` with `web_fetch` only: the page is
- * still read, and only the live-search half is lost. Without a URL the error
+ * the link outright, which is the bug #1696 fixed. So that implicit case (the
+ * classifier's `explicit_url_web_fetch` reason code on a web-search decision)
+ * falls back to `general` with `web_fetch` only: the page is still read, and
+ * only the live-search half is lost. An EXPLICIT "search the web" request does
+ * not carry that code, so it keeps the specialist-unavailable error rather than
+ * silently skipping the search the user asked for. Without a URL the error
  * propagates as before.
  */
 function selectWithFetchOnlyFallback(options: {
   decision: NexusClassifierDecision
-  wantsWebFetch: boolean
   requiredTools: string[]
   select: (decision: NexusClassifierDecision) => { model: NexusModelRow; fallbackUsed: boolean }
 }): { decision: NexusClassifierDecision; selection: { model: NexusModelRow; fallbackUsed: boolean } } {
-  const { decision, wantsWebFetch, requiredTools, select } = options
+  const { decision, requiredTools, select } = options
   const hadWebSearch = requiredTools.includes("webSearch")
   addRequiredWebSearchTool(decision, requiredTools)
   try {
@@ -484,7 +486,7 @@ function selectWithFetchOnlyFallback(options: {
     if (
       !(error instanceof NexusSpecialistUnavailableError)
       || decision.intent !== "web-search"
-      || !wantsWebFetch
+      || !decision.reasonCodes.includes("explicit_url_web_fetch")
     ) {
       throw error
     }
@@ -534,7 +536,6 @@ async function routeWithConfiguredRouter(options: {
   const wantsWebFetch = containsExplicitUrl(args.text)
   const { decision, selection } = selectWithFetchOnlyFallback({
     decision: classified,
-    wantsWebFetch,
     requiredTools,
     select: current => selectModelForToolUse(
       {
