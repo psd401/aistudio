@@ -1025,3 +1025,59 @@ describe("Drive access proposals", () => {
     ).toThrow(/agent-owned/)
   })
 })
+
+/**
+ * #1801 — `parseObjectArgument` answers `null` for an unparseable --params
+ * exactly as it does for an absent one, so every gate that reads query
+ * parameters judged a command whose parameters it could not see, and
+ * `withSharedDriveSupport` wrote its own object over the caller's value.
+ * Refuse at the boundary instead: one reading, and a loud error the agent can
+ * act on.
+ */
+describe("--params must parse (#1801)", () => {
+  const listArgv = (params: string) => ({
+    scope: "user" as const,
+    argv: ["drive", "files", "list", "--params", params],
+  })
+
+  it("refuses the token splitCommand produces from a quoted Drive query", () => {
+    expect(() =>
+      validateWorkspaceCommand(
+        listArgv(String.raw`{"q":"name contains \Classified\"}`)
+      )
+    ).toThrow(/--params is not valid JSON/)
+  })
+
+  it("names --params-file so the model has somewhere to go", () => {
+    expect(() => validateWorkspaceCommand(listArgv("{oops"))).toThrow(
+      /--params-file/
+    )
+  })
+
+  it("refuses valid JSON that is not an object", () => {
+    for (const value of ['["q"]', '"q"', "42", "null"]) {
+      expect(() => validateWorkspaceCommand(listArgv(value))).toThrow(
+        /--params is not valid JSON/
+      )
+    }
+  })
+
+  it("accepts a Drive query whose values are single-quoted", () => {
+    expect(() =>
+      validateWorkspaceCommand(
+        listArgv(
+          JSON.stringify({ q: "name contains 'Budget' and trashed = false" })
+        )
+      )
+    ).not.toThrow()
+  })
+
+  it("leaves a command with no --params alone", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: ["drive", "files", "list"],
+      })
+    ).not.toThrow()
+  })
+})

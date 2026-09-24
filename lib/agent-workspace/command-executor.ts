@@ -577,9 +577,24 @@ export function withSharedDriveSupport(argv: readonly string[]): string[] {
     additions.includeItemsFromAllDrives = true
   }
 
-  const existing = parseObjectArgument(argv, "--params") ?? {}
-  const present = new Set(Object.keys(existing).map((key) => key.toLowerCase()))
-  const merged = { ...existing }
+  // Fail closed on a --params value this cannot read (#1801). Merging into
+  // `{}` and writing the result back REPLACED the caller's value: a Drive `q`
+  // that lost its quotes in tokenization became
+  // `{"supportsAllDrives":true,"includeItemsFromAllDrives":true}`, so Drive
+  // returned the first page of everything the identity could see and the agent
+  // read that unfiltered listing as search results. Before this transform
+  // existed the same input produced a visible gws parse error; never trade a
+  // loud failure for a silently different query. `validateWorkspaceArguments`
+  // already rejects such a value upstream — this branch keeps the transform
+  // safe on its own terms for any caller that reaches it directly.
+  const rawParams = argumentValue(argv, "--params")
+  const existing = parseObjectArgument(argv, "--params")
+  if (rawParams !== null && existing === null) return [...argv]
+
+  const present = new Set(
+    Object.keys(existing ?? {}).map((key) => key.toLowerCase())
+  )
+  const merged = { ...(existing ?? {}) }
   let changed = false
   for (const [key, value] of Object.entries(additions)) {
     if (present.has(key.toLowerCase())) continue
@@ -703,7 +718,8 @@ function carriesDriveContent(argv: readonly string[]): boolean {
  *  2. Past validation it still could not work. `gws` runs in a fresh empty
  *     `mkdtemp` on the WEB tier, so a container path simply does not exist
  *     there. There is a download hand-off (`handOffDownloadedMedia`) but no
- *     upload counterpart, and `--json-file`/`--body-file`/`--text-file` inline
+ *     upload counterpart, and the `--*-file` payload flags
+ *     (`--json-file`/`--params-file`/`--body-file`/`--text-file`) inline
  *     their target with `readFileSync(path, 'utf8')` — text only, never binary.
  *
  * A user who asked for "a link to this PDF" therefore dead-ended on a bare
@@ -1008,6 +1024,35 @@ function validateWorkspaceArguments(argv: readonly string[]): void {
   }
   if (writesResponseToCallerPath(argv)) {
     throw new Error("Workspace command cannot write response data to a file")
+  }
+  assertParamsParse(argv)
+}
+
+/**
+ * `--params` must be a JSON object or not be there at all (#1801).
+ *
+ * Every gate that reads query parameters — the Drive metadata-update
+ * allowlist, the share target's fileId, the access-proposal union, the Chat
+ * destination space — goes through `parseObjectArgument`, which answers `null`
+ * for an unparseable value exactly as it does for an absent one. So a value
+ * mangled in tokenization did not merely lose the caller's filter, it also
+ * made those gates judge a command whose parameters they could not see.
+ * Refusing here, before any of them run, is the only way the two readings
+ * cannot diverge.
+ *
+ * The message names the transport that works, because the input that produces
+ * this is almost always a Drive `q` whose required single quotes were eaten by
+ * the tokenizer, and the model otherwise retries the same broken shape.
+ */
+function assertParamsParse(argv: readonly string[]): void {
+  const raw = argumentValue(argv, "--params")
+  if (raw === null) return
+  if (parseObjectArgument(argv, "--params") === null) {
+    throw new Error(
+      "Workspace --params is not valid JSON. Quotes inside a value (a Drive " +
+        "query such as \"name contains 'X'\") cannot survive --command; write " +
+        "the parameters to a file and pass --params-file <absolute-path>."
+    )
   }
 }
 

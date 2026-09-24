@@ -134,6 +134,23 @@ const PAYLOAD_PLACEHOLDERS = {
     placeholder: '@@PSD_PAYLOAD_JSON@@',
     kind: 'json',
   },
+  // Drive/Gmail query parameters (#1801). Drive's query language REQUIRES
+  // single-quoted string values (`name contains 'X'`, `'<folderId>' in
+  // parents`), and there is no way to express one inline: splitCommand treats
+  // every `'` as a quote toggle, so the shell idiom `'\''` yields invalid JSON,
+  // and Drive rejects double-quoted values with `Invalid Value`. Observed live
+  // 2026-08-19..2026-09-01 across at least 8 users — the broker then merged its
+  // shared-drive flags over the unparseable value and Drive returned an
+  // UNFILTERED listing, which the agent read as search results (agent_failures
+  // 10764, 11787). The broker now refuses an unparseable --params instead of
+  // replacing it; this flag is the transport that makes the query expressible.
+  '--params-file': {
+    flag: '--params',
+    matcher: /(^|\s)--params-file\s+(\S+)/g,
+    inlineMatcher: /(^|\s)--params\s/,
+    placeholder: '@@PSD_PAYLOAD_PARAMS@@',
+    kind: 'json',
+  },
   '--body-file': {
     flag: '--body',
     matcher: /(^|\s)--body-file\s+(\S+)/g,

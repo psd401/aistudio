@@ -109,6 +109,70 @@ describe("withSharedDriveSupport", () => {
     }
   })
 
+  /**
+   * #1801 — the transform used to merge its flags into `{}` whenever
+   * --params did not parse, then write that object back over the caller's
+   * value. A Drive `q` whose single quotes were eaten by the skill tokenizer
+   * therefore reached gws as
+   * `{"supportsAllDrives":true,"includeItemsFromAllDrives":true}`: an
+   * unfiltered listing the agent read as search results. At least 8 users hit
+   * it between 2026-08-19 and 2026-09-01 (agent_failures 10764, 11787).
+   */
+  it.each([
+    // What `splitCommand` produces from the shell idiom `'\''`.
+    String.raw`{"q":"name contains \Classified\"}`,
+    String.raw`{"q":"\<folderId>\ in parents","pageSize":50}`,
+    "not json at all",
+    // Valid JSON, but not an object — gws takes an object here.
+    '["q"]',
+    '"q"',
+  ])("never replaces an unparseable --params: %s", (value) => {
+    const argv = ["drive", "files", "list", "--params", value]
+    expect(withSharedDriveSupport(argv)).toEqual(argv)
+  })
+
+  it("does not append a second --params flag to an unparseable one", () => {
+    const out = withSharedDriveSupport([
+      "drive",
+      "files",
+      "list",
+      "--params",
+      "{oops",
+    ])
+    expect(out.filter((token) => token === "--params")).toHaveLength(1)
+  })
+
+  it("keeps a q whose values are single-quoted, as Drive requires", () => {
+    // The only transport that gets this shape through the skill is
+    // --params-file; once here it must round-trip byte-identical.
+    const q = "name contains 'Classified' and trashed = false"
+    const out = withSharedDriveSupport([
+      "drive",
+      "files",
+      "list",
+      "--params",
+      JSON.stringify({ q, pageSize: 50 }),
+    ])
+    expect(params(out)).toEqual({
+      q,
+      pageSize: 50,
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    })
+  })
+
+  it("keeps a folder-children query intact", () => {
+    const q = "'1AbCfolderId' in parents and trashed = false"
+    const out = withSharedDriveSupport([
+      "drive",
+      "files",
+      "list",
+      "--params",
+      JSON.stringify({ q }),
+    ])
+    expect((params(out) as { q: string }).q).toBe(q)
+  })
+
   it("returns a copy rather than mutating the caller's argv", () => {
     const argv = ["drive", "files", "get"]
     const out = withSharedDriveSupport(argv)

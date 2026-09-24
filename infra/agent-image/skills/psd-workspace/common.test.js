@@ -140,6 +140,60 @@ describe('resolvePayloadFiles', () => {
     expect(gate2.allowed).toBe(false);
   });
 
+  test('--params-file: a Drive q with single-quoted values survives intact (#1801)', () => {
+    // Drive REQUIRES single quotes around string values, and splitCommand has
+    // no escape syntax, so this query cannot be expressed inline at all. The
+    // file carries it as exactly one argv token.
+    const params = {
+      q: "name contains 'Classified' and trashed = false",
+      pageSize: 50,
+    };
+    const p = tmpFile(JSON.stringify(params, null, 2));
+    const resolved = resolvePayloadFiles(`drive files list --params-file ${p}`);
+    expect(resolved).not.toBeNull();
+    const minified = JSON.stringify(params);
+    expect(resolved.payloads['@@PSD_PAYLOAD_PARAMS@@']).toBe(minified);
+    expect(resolved.execCommand).toContain('--params @@PSD_PAYLOAD_PARAMS@@');
+    expect(resolved.execCommand).not.toContain('--params-file');
+    // The placeholder is whitespace-free, so tokenization never touches the
+    // query; substitution then restores it as one token (run.js).
+    const tokens = splitCommand(resolved.execCommand);
+    expect(tokens).toEqual([
+      'drive', 'files', 'list', '--params', '@@PSD_PAYLOAD_PARAMS@@',
+    ]);
+    const restored = tokens.map((t) =>
+      Object.prototype.hasOwnProperty.call(resolved.payloads, t)
+        ? resolved.payloads[t]
+        : t
+    );
+    expect(JSON.parse(restored[4])).toEqual(params);
+  });
+
+  test('--params-file alongside an inline --params is rejected', () => {
+    const p = tmpFile(JSON.stringify({ q: "name contains 'x'" }));
+    expect(() =>
+      resolvePayloadFiles(
+        `drive files list --params '{"pageSize":10}' --params-file ${p}`,
+        { onError(message) { throw new Error(message); } }
+      )
+    ).toThrow(/use either --params or --params-file/);
+  });
+
+  test('--params-file and --json-file resolve independently in one command', () => {
+    const paramsPath = tmpFile(JSON.stringify({ fileId: 'f1' }));
+    const jsonPath = tmpFile(JSON.stringify({ name: 'Renamed' }));
+    const resolved = resolvePayloadFiles(
+      `drive files update --params-file ${paramsPath} --json-file ${jsonPath}`
+    );
+    expect(resolved.payloads['@@PSD_PAYLOAD_PARAMS@@']).toBe('{"fileId":"f1"}');
+    expect(resolved.payloads['@@PSD_PAYLOAD_JSON@@']).toBe('{"name":"Renamed"}');
+    expect(splitCommand(resolved.execCommand)).toEqual([
+      'drive', 'files', 'update',
+      '--params', '@@PSD_PAYLOAD_PARAMS@@',
+      '--json', '@@PSD_PAYLOAD_JSON@@',
+    ]);
+  });
+
   test('markers land in file-based calendar payloads via the synthetic path', () => {
     const p = tmpFile(JSON.stringify({ summary: 'Standup', description: 'Daily sync' }));
     const resolved = resolvePayloadFiles(

@@ -25,7 +25,7 @@ Since 2026-07-25 (#1305) the user slot holds `drive.readonly` +
 
 | Do this | How |
 |---|---|
-| List / search anything the user can see | `drive files list --params '{"q":"…"}'` |
+| List / search anything the user can see | `drive files list --params-file <abs-path>` — see [Searching Drive](#searching-drive-q-always-goes-in-a---params-file) |
 | Read or export a file | `drive files get` / `drive files export` |
 | Rename a file | `drive files update --params '{"fileId":"…"}' --json '{"name":"New name"}'` |
 | Move a file between folders | `drive files update --params '{"fileId":"…","addParents":"<new>","removeParents":"<old>"}' --json '{"name":"…"}'` |
@@ -160,6 +160,36 @@ After a successful read/list call that the user asked only to summarize now,
 return the requested fields immediately. Do not read or write memory, and do
 not call an unrelated tool, before the final answer.
 
+### Searching Drive: `q` always goes in a `--params-file`
+
+Drive's query language requires **single-quoted** string values — `name
+contains 'Budget'`, `'<folderId>' in parents`, `mimeType =
+'application/vnd.google-apps.folder'`. Double quotes are rejected by Drive with
+`Invalid Value`, and a single quote cannot survive the `--command` tokenizer,
+which has no escape syntax. So an inline `--params` **cannot express a Drive
+search at all**. Write the parameters to a file instead:
+
+```bash
+# 1. write  →  /tmp/drive-query.json   (use the `write` TOOL)
+#    {"q":"name contains 'Budget' and trashed = false","pageSize":50,
+#     "fields":"files(id,name,mimeType,modifiedTime)"}
+
+# 2. Reference it — --params-file REPLACES --params (never pass both)
+node /opt/psd-skills/psd-workspace/run.js \
+  --user hagelk@psd401.net \
+  --command "drive files list --params-file /tmp/drive-query.json"
+```
+
+Children of one folder use the same shape with
+`{"q":"'<folderId>' in parents and trashed = false"}`.
+
+If the broker answers `Workspace --params is not valid JSON`, the quotes were
+eaten in tokenization: move the parameters into a file and retry with
+`--params-file`. Do not retry the same inline shape, and do not fall back to
+double quotes — Drive refuses them. The broker never repairs or replaces a
+`--params` value it cannot parse, so an unfiltered listing can no longer come
+back dressed as search results (#1801).
+
 ```bash
 node /opt/psd-skills/psd-workspace/run.js \
   --user <caller-email> \
@@ -228,12 +258,13 @@ node /opt/psd-skills/psd-workspace/run.js \
 node /opt/psd-skills/psd-workspace/run.js --user hagelk@psd401.net --command "--help"
 ```
 
-## Passing real text: `--json-file` / `--body-file` (REQUIRED for content writes)
+## Passing real text: `--json-file` / `--params-file` / `--body-file` (REQUIRED for content writes and quoted queries)
 
 The `--command` tokenizer has **no escape syntax**: an apostrophe inside a
 single-quoted value, mixed quotes, or a newline breaks tokenization, and there
 is no way to fix it with more quoting. **Never inline document/email/event
-body text in `--json` or `--body`.** Instead, write the payload to a file
+body text in `--json` or `--body`, and never inline a query whose value needs
+quotes in `--params`.** Instead, write the payload to a file
 first and reference it:
 
 **Write the payload file with the `write` tool, not a shell heredoc.** `write`
@@ -263,6 +294,11 @@ node /opt/psd-skills/psd-workspace/run.js \
 node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
   --command "sheets spreadsheets batchUpdate --params '{\"spreadsheetId\":\"<id>\"}' --json-file /tmp/sheet-payload.json"
+
+# Query parameters whose values need quotes use --params-file (replaces --params)
+node /opt/psd-skills/psd-workspace/run.js \
+  --user hagelk@psd401.net \
+  --command "drive files list --params-file /tmp/drive-query.json"
 
 # Plain-text bodies (e.g. +draft) use --body-file (replaces --body)
 node /opt/psd-skills/psd-workspace/run.js \
