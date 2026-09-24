@@ -213,6 +213,53 @@ function readPayloadFile(filePath, fileFlag, kind, reject) {
  * that also appears inside another argument's value, and a command that
  * already carries one of the reserved placeholder tokens.
  */
+/**
+ * The absolute path one payload-file flag carries, or null when the flag is
+ * not present. Rejects every ambiguous shape.
+ *
+ * The raw matcher and the argv tokens are BOTH consulted because neither is
+ * sufficient alone: the matcher can fire on the flag's text sitting inside a
+ * quoted value, and the tokens cannot tell the resolver where to rewrite. They
+ * are made to agree — same count, same path — and anything else is refused.
+ */
+function validatedPayloadFilePath({ commandString, argvTokens, fileFlag, spec }, reject) {
+  const ambiguous = `${fileFlag} also appears inside another argument's value; it must be a flag of its own`;
+  const flagTokens = argvTokens.filter((token) => token === fileFlag).length;
+  if (flagTokens === 0) return null;
+  if (flagTokens > 1) {
+    reject(`${fileFlag} may appear at most once per command`);
+  }
+  // The path comes from the TOKEN after the real flag. Equal counts alone were
+  // not enough: `--subject 'see --body-file /tmp/example literal' --body-file`
+  // has one match and one token that are DIFFERENT occurrences, so the
+  // resolver would have read /tmp/example, rewritten the mention inside the
+  // subject, and left the actual flag unresolved.
+  const tokenPath = argvTokens[argvTokens.indexOf(fileFlag) + 1];
+  if (!tokenPath || tokenPath.startsWith('--')) {
+    reject(`${fileFlag} requires an absolute path following it`);
+  }
+  const matches = [...commandString.matchAll(spec.matcher)];
+  if (matches.length !== flagTokens) reject(ambiguous);
+  // Exactly one payload source per flag: reject the file form alongside its
+  // inline counterpart (--json + --json-file, --body + --body-file) —
+  // otherwise gws would receive two occurrences of the same flag and pick one
+  // silently. Judged on the tokens for the same reason: a `--params`
+  // mentioned inside a quoted value is not a second flag.
+  if (argvTokens.includes(spec.flag)) {
+    reject(`use either ${spec.flag} or ${fileFlag}, not both`);
+  }
+  // Models habitually quote flag values (every SKILL.md example quotes
+  // --params). \S+ captures those quotes, so strip one matching surrounding
+  // pair before validating — otherwise a valid quoted path fails the
+  // absolute-path check with a misleading error.
+  const filePath = normalizePayloadFilePath(matches[0][2], fileFlag, reject);
+  // Last tie between the two readings: the path the raw match found must be
+  // the path the real flag's token carries, or the match is some other
+  // occurrence.
+  if (filePath !== tokenPath) reject(ambiguous);
+  return filePath;
+}
+
 function resolvePayloadFiles(commandString, options = {}) {
   if (!commandString || typeof commandString !== 'string') return null;
   const onError = options.onError || fail;
@@ -248,33 +295,11 @@ function resolvePayloadFiles(commandString, options = {}) {
   const argvTokens = splitCommand(commandString);
 
   for (const [fileFlag, spec] of Object.entries(PAYLOAD_PLACEHOLDERS)) {
-    const matches = [...commandString.matchAll(spec.matcher)];
-    const flagTokens = argvTokens.filter((token) => token === fileFlag).length;
-    if (flagTokens === 0) continue;
-    if (flagTokens > 1) {
-      reject(`${fileFlag} may appear at most once per command`);
-    }
-    if (matches.length === 0) {
-      reject(`${fileFlag} requires an absolute path following it`);
-    }
-    if (matches.length !== flagTokens) {
-      reject(
-        `${fileFlag} also appears inside another argument's value; it must be a flag of its own`
-      );
-    }
-    // Exactly one payload source per flag: reject the file form alongside its
-    // inline counterpart (--json + --json-file, --body + --body-file) —
-    // otherwise gws would receive two occurrences of the same flag and pick
-    // one silently. Judged on the argv tokens for the same reason as above: a
-    // `--params` mentioned inside a quoted value is not a second flag.
-    if (argvTokens.includes(spec.flag)) {
-      reject(`use either ${spec.flag} or ${fileFlag}, not both`);
-    }
-    const filePath = normalizePayloadFilePath(matches[0][2], fileFlag, reject);
-    // Models habitually quote flag values (every SKILL.md example quotes
-    // --params). \S+ captures those quotes, so strip one matching
-    // surrounding pair before validating — otherwise a valid quoted path
-    // fails the absolute-path check with a misleading error.
+    const filePath = validatedPayloadFilePath(
+      { commandString, argvTokens, fileFlag, spec },
+      reject
+    );
+    if (filePath === null) continue;
     // JSON is minified so the marker injector and gates see one line.
     const content = readPayloadFile(filePath, fileFlag, spec.kind, reject);
     payloads[spec.placeholder] = content;

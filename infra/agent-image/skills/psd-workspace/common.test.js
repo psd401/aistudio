@@ -259,6 +259,18 @@ describe('resolvePayloadFiles: --params-file and cross-flag isolation (#1801)', 
     ).toThrow(/inside another argument's value/);
   });
 
+  test('a trailing flag whose path only appears inside a value is refused', () => {
+    // One raw match and one standalone token, but DIFFERENT occurrences:
+    // equal counts alone would have read /tmp/example, rewritten the mention
+    // inside the subject, and left the real flag unresolved.
+    expect(() =>
+      resolvePayloadFiles(
+        `gmail +draft --to a@psd401.net --subject 'see --body-file /tmp/example literal' --body-file`,
+        { onError(message) { throw new Error(message); } }
+      )
+    ).toThrow(/requires an absolute path following it/);
+  });
+
   test('an inline --params mentioned inside a value is not the inline form', () => {
     // The both-forms check is judged on tokens too, so quoted prose about
     // --params does not block a legitimate --params-file.
