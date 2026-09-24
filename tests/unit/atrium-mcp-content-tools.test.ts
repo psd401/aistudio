@@ -196,6 +196,28 @@ describe("Atrium MCP content tools registry", () => {
     }
   });
 
+  it("keeps the superseded create_artifact@v3 and update@v1 contracts addressable", () => {
+    // Callers pinned to the old versions must keep resolving after the bump: the
+    // boot sync retires any (identifier, version) no longer in the manifest, so
+    // the old contracts stay as frozen snapshots without `dataAccess`.
+    for (const [identifier, oldVersion, newVersion] of [
+      ["content.create_artifact", "v3", "v4"],
+      ["content.update", "v1", "v2"],
+    ] as const) {
+      const versions = TOOL_MANIFEST.filter((entry) => entry.identifier === identifier);
+      expect(versions.map((entry) => entry.version).sort()).toEqual([oldVersion, newVersion].sort());
+
+      const legacy = versions.find((entry) => entry.version === oldVersion);
+      expect(legacy?.inputSchema.properties.dataAccess).toBeUndefined();
+      expect(legacy?.destructive).toBe(true);
+      expect(legacy?.surfaces).toEqual(["mcp", "internal"]);
+
+      const current = versions.find((entry) => entry.version === newVersion);
+      expect(current?.name).toBe(legacy?.name);
+      expect(current?.inputSchema.properties.dataAccess?.type).toBe("string");
+    }
+  });
+
 });
 
 // #1750 — the sandbox CSP blocks external scripts/styles SILENTLY: the page
