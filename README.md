@@ -67,10 +67,10 @@ AI Studio eliminates these barriers by:
   - Audit logging
 
 - 🛡️ **K-12 Content Safety** - Purpose-built for educational environments
-  - **Safety Monitoring**: Amazon Bedrock Guardrails evaluate inputs and AI responses against a single high-precision `HarmInstruction` topic in **detect-and-log mode** — detections are logged and alerted, but content is not blocked. Blocking content filters were removed after repeated false positives on legitimate educational content (#639–#929)
+  - **Safety Monitoring**: Amazon Bedrock Guardrails evaluate inputs and AI responses against a single high-precision `HarmInstruction` topic in **detect-and-log mode** — detections are logged to CloudWatch, but content is not blocked. Blocking content filters were removed after repeated false positives on legitimate educational content (#639–#929)
   - **PII Protection**: Keeps ordinary inference byte-identical under provider zero-data-retention agreements, with detect-only refusal for Nexus memory and telemetry for published agent content
   - **Compliance Ready**: Helps meet COPPA, FERPA, and CIPA requirements
-  - **Real-time Alerts**: SNS notifications for safety detections
+  - **Violation Alerts**: SNS notifications are sent only when a guardrail blocks content; with the current detect-only configuration, detections are CloudWatch-logged only
   - **Zero Configuration**: Works automatically across all AI providers
   - See [K-12 Content Safety Documentation](./docs/features/k12-content-safety.md) for details
 

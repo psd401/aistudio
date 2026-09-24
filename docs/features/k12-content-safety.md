@@ -27,7 +27,7 @@ AI Studio's content safety system addresses both risks at the infrastructure lev
 - Protection applies to ALL AI interactions automatically
 - Works across all supported AI providers (OpenAI, Anthropic, Google, Bedrock)
 - No configuration required by teachers or students
-- Administrators receive real-time violation notifications
+- Administrators can subscribe to SNS notifications for blocked content (none occur while the guardrail is detect-only; detections are CloudWatch-logged)
 
 ## Features
 
@@ -47,7 +47,7 @@ After repeated false positives on legitimate K-12 educational content, all block
 | Sensitive information (PII) | Guardrail policy | **Not configured** — PII is handled by Amazon Comprehend detect-only telemetry (below) |
 
 **What this means in practice:**
-- Detections are logged via CloudWatch and published to the SNS violation topic with `action: 'detected'`.
+- Detections are logged to CloudWatch only (`Topics detected in detect-only mode (not blocked)`). SNS violation notifications are published only when the guardrail blocks content, so none are sent under the current configuration.
 - Content blocking is delegated to the AI providers' built-in safety training (OpenAI, Anthropic, Google).
 - The application still honors a guardrail intervention (`lib/safety/bedrock-guardrails-service.ts` returns an age-appropriate `blockedMessage` without revealing filter details), so if a policy is re-enabled to `BLOCK`, users see that message. With the current configuration no intervention occurs.
 - Before re-enabling blocking, review `docs/operations/guardrail-tuning-2026-04-29.md`.
@@ -89,7 +89,7 @@ Bedrock Guardrails continue to evaluate both inference input and output independ
 
 ### Violation Notifications
 
-Administrators can receive real-time notifications when safety violations occur:
+Administrators can receive real-time notifications when the guardrail **blocks** content. Detect-only matches are not published to SNS (see `sendViolationNotification` in `lib/safety/bedrock-guardrails-service.ts`), so no notifications are sent under the current detect-only configuration:
 
 - **SNS Topic**: Subscribable for email, SMS, or webhook alerts
 - **Privacy-Preserving**: User IDs are hashed in notifications
@@ -152,7 +152,7 @@ Administrators can receive real-time notifications when safety violations occur:
 ### CIPA (Children's Internet Protection Act)
 
 - AI Studio's guardrail is detect-and-log only and does not block content; blocking relies on the AI providers' built-in safety training
-- Real-time detection logging and SNS alerts for AI inputs and responses
+- Real-time CloudWatch detection logging for AI inputs and responses
 
 ## Configuration
 
@@ -254,7 +254,7 @@ bunx cdk deploy --exclusively AIStudio-GuardrailsStack-Dev
    ```
    - Expected: Content **allowed** (`HarmInstruction` topic is detect-only; no content filters are configured)
    - Verify in logs: `HarmInstruction` topic detected and logged
-   - Verify: SNS notification sent with `action: 'detected'`
+   - Verify: No SNS notification is sent (SNS publishes only on a block)
 
 6. **Test Anti-Bullying Content (Should Pass - Issue #929):**
    ```
@@ -546,7 +546,7 @@ All safety events are logged with structured JSON for easy analysis:
 
 ### Violation Alerts
 
-Subscribe to the SNS topic for real-time alerts:
+Subscribe to the SNS topic for real-time alerts when content is blocked (no messages are published while the guardrail is detect-only):
 
 ```bash
 aws sns subscribe \

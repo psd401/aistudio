@@ -38,6 +38,13 @@ const REAL_VPC_KEY =
 // distinct configurations under test but one call per test, so memoise them.
 const TEMPLATE_CACHE = new Map<string, Template>();
 
+// Mirrors infra/bin/infra.ts: dev is served at dev.<baseDomain>, prod at the
+// root <baseDomain> (no subdomain).
+const APP_BASE_URL: Record<'dev' | 'prod', string> = {
+  dev: 'https://dev.aistudio.psd401.ai',
+  prod: 'https://aistudio.psd401.ai',
+};
+
 function buildTemplate(
   environment: 'dev' | 'prod',
   alertEmail?: string
@@ -92,7 +99,7 @@ function synthTemplate(
       guardrailArn: `arn:aws:bedrock:${REGION}:${TEST_ACCOUNT}:guardrail/test`,
       guardrailId: 'test-guardrail-id',
       ...(alertEmail ? { alertEmail } : {}),
-      appBaseUrl: `https://${environment}.aistudio.psd401.ai`,
+      appBaseUrl: APP_BASE_URL[environment],
       env: { account: TEST_ACCOUNT, region: REGION },
     }
   );
@@ -296,7 +303,7 @@ describe('agent alarm delivery', () => {
       expect(descriptions).toHaveLength(2);
       for (const description of descriptions) {
         expect(description).toContain(
-          `https://${environment}.aistudio.psd401.ai/admin/agents (Failures tab)`
+          `${APP_BASE_URL[environment]}/admin/agents (Failures tab)`
         );
       }
     }
