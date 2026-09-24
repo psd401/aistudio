@@ -30,7 +30,7 @@ import unittest
 SCRIPT = pathlib.Path(__file__).with_name("build-and-push.sh")
 
 DIGEST = "sha256:5deea07c297d674a57e2eed10894574f7aa7a1e482e114557b281c696665d78f"
-REPO = "390844780692.dkr.ecr.us-east-1.amazonaws.com/psd-agent-base-prod"
+REPO = "123456789012.dkr.ecr.us-east-1.amazonaws.com/psd-agent-base-prod"
 
 
 def _extract_function() -> str:

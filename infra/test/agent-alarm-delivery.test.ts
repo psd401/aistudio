@@ -38,6 +38,13 @@ const REAL_VPC_KEY =
 // distinct configurations under test but one call per test, so memoise them.
 const TEMPLATE_CACHE = new Map<string, Template>();
 
+// Mirrors infra/bin/infra.ts: dev is served at dev.<baseDomain>, prod at the
+// root <baseDomain> (no subdomain).
+const APP_BASE_URL: Record<'dev' | 'prod', string> = {
+  dev: 'https://dev.aistudio.psd401.ai',
+  prod: 'https://aistudio.psd401.ai',
+};
+
 function buildTemplate(
   environment: 'dev' | 'prod',
   alertEmail?: string
@@ -92,7 +99,7 @@ function synthTemplate(
       guardrailArn: `arn:aws:bedrock:${REGION}:${TEST_ACCOUNT}:guardrail/test`,
       guardrailId: 'test-guardrail-id',
       ...(alertEmail ? { alertEmail } : {}),
-      appBaseUrl: `https://${environment}.aistudio.psd401.ai`,
+      appBaseUrl: APP_BASE_URL[environment],
       env: { account: TEST_ACCOUNT, region: REGION },
     }
   );
@@ -280,6 +287,25 @@ describe('agent alarm delivery', () => {
         })
         .map(([id]) => id);
       expect(missing).toEqual([]);
+    }
+  });
+
+  it('links triage alarms to the admin UI of their own environment', () => {
+    // The descriptions used to hardcode https://aistudio.psd401.net, which is
+    // not where the app is served, for BOTH environments.
+    for (const environment of ['dev', 'prod'] as const) {
+      const alarms = buildTemplate(environment, 'alerts@psd401.net')
+        .findResources('AWS::CloudWatch::Alarm');
+      const descriptions = Object.values(alarms)
+        .map(body => (body as { Properties?: { AlarmDescription?: unknown } })
+          .Properties?.AlarmDescription)
+        .filter((d): d is string => typeof d === 'string' && d.includes('/admin/agents'));
+      expect(descriptions).toHaveLength(2);
+      for (const description of descriptions) {
+        expect(description).toContain(
+          `${APP_BASE_URL[environment]}/admin/agents (Failures tab)`
+        );
+      }
     }
   });
 

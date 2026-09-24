@@ -118,7 +118,7 @@ Metrics tracked:
 Check for violations:
 ```bash
 aws accessanalyzer list-findings \
-  --analyzer-arn "arn:aws:access-analyzer:us-east-1:390844780692:analyzer/aistudio-dev-analyzer" \
+  --analyzer-arn "arn:aws:access-analyzer:us-east-1:<AWS_ACCOUNT_ID>:analyzer/aistudio-dev-analyzer" \
   --filter 'status={eq=["ACTIVE"]}'
 ```
 

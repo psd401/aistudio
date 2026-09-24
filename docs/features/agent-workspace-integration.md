@@ -197,7 +197,7 @@ account.
    aws secretsmanager create-secret \
      --name psd-agent/dev/agent-gateway \
      --tags Key=Environment,Value=dev Key=ManagedBy,Value=aistudio \
-     --secret-string '{"url":"https://n8n.psd401.net/mcp/…/sse","token":"…"}'
+     --secret-string '{"url":"https://<n8n-host>/mcp/…/sse","token":"…"}'
    ```
    The `psd-workflows` skill discovers the gateway's live MCP `tools/list`
    roster through the signed web broker; an absent/incomplete secret → exit 11
