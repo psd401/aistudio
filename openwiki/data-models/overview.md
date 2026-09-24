@@ -154,12 +154,14 @@ The function safely extracts `causeCode`, `causeConstraint`, and `causeTable` wi
 |-------|---------|
 | `knowledge_repositories` | Repository definitions with `lifecycle_status` and readiness tracking |
 | `repository_items` | Uploaded documents with `status` (active/pending/failed/unavailable) |
-| `repository_item_chunks` | Vector-searchable chunks |
+| `repository_item_chunks` | Vector-searchable chunks with partial index for embedding-less rows (migration 182) |
 | `repository_access` | Repository permissions |
 | `documents` | Legacy document storage |
 | `document_chunks` | Legacy chunk storage |
 
 Repository readiness is derived from item counts, connector state, and generation status by `/lib/repositories/readiness-service.ts`. Readiness states: `empty`, `processing`, `searchable`, `degraded`, `disconnected`, `unavailable`, `failed`. The Nexus conversation gate uses `blocksRepositorySearch()` — empty repositories pass (no index to be stale), all others fail closed. See **[app-features/overview.md#repository-readiness-gate](../app-features/overview.md#repository-readiness-gate)** for gate behavior and contract.
+
+**Performance Optimization** (migration 182): A partial index on `repository_item_chunks(embedding IS NULL)` reduces operational metrics queries from full table scans (~9.6 GB) to ~2.6k index entries. This index (`idx_repository_chunks_missing_embedding`) drives the `chunks_missing_embeddings` and `items_searchable_without_embeddings` metrics in `/lib/repositories/content-platform/operational-metrics.ts` that execute multiple times per minute. Source: `/infra/database/schema/182-index-chunks-missing-embedding.sql`.
 
 ---
 
