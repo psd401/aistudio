@@ -964,7 +964,10 @@ function useBridgePump(
   ) => Promise<void>,
   inFlightDataRequestsRef: React.RefObject<number>,
   queuedDataRequestsRef: React.RefObject<QueuedBridgeRequest[]>,
-  onQueueWaitExpired: (entry: QueuedBridgeRequest) => void
+  onDispatchAbandoned: (
+    entry: QueuedBridgeRequest,
+    code: ArtifactBridgeErrorCode
+  ) => void
 ): () => void {
   return useCallback((): void => {
     // `step` recurses LEXICALLY rather than through a ref: a ref assigned in
@@ -988,7 +991,7 @@ function useBridgePump(
           now - queuedDataRequestsRef.current[0].enqueuedAt >= MAX_QUEUE_WAIT_MS
         ) {
           const expired = queuedDataRequestsRef.current.shift();
-          if (expired) onQueueWaitExpired(expired);
+          if (expired) onDispatchAbandoned(expired, "timeout");
         }
         // Peek before taking: the limit depends on what is at the head. A
         // record op still travels over a Server Action, and the App Router
@@ -1027,8 +1030,15 @@ function useBridgePump(
           try {
             await awaitTransportReady(next.request.op);
           } catch {
-            // The chunk failed to load; `runBridgeRequest` will answer with the
-            // same generic failure it always has for a dead transport.
+            // The chunk failed to load. Do NOT ack and do NOT run: acking would
+            // start the frame's 10s post-dispatch clock, and `loadRecordActions`
+            // has already cleared its memo on this rejection, so
+            // `invokeBridgeAction` would kick off a SECOND import behind that
+            // clock — a slow retry would then let the frame reject the promise
+            // before the write ran, and the write would land anyway. Answer
+            // now, leave the retry to a later request the artifact makes.
+            onDispatchAbandoned(next, "unavailable");
+            return;
           }
           try {
             next.frameWindow.postMessage(
@@ -1051,7 +1061,7 @@ function useBridgePump(
     runBridgeRequest,
     inFlightDataRequestsRef,
     queuedDataRequestsRef,
-    onQueueWaitExpired,
+    onDispatchAbandoned,
   ]);
 }
 
@@ -1183,17 +1193,21 @@ function useArtifactDataBridge({
   );
 
   /**
-   * Answer a request that waited too long to be worth dispatching (#1788).
+   * Answer a request the pump decided NOT to dispatch (#1788).
    *
-   * `timeout` is the honest code: the request was accepted and then never got a
-   * turn. Answering here rather than letting the frame's own clock expire keeps
-   * the artifact's rejection prompt AND — the reason this exists — guarantees
-   * the work is never started, so a `submit` cannot commit after its promise
-   * has already been rejected.
+   * Two cases, both of which must never reach the transport:
+   *  - `timeout`: it waited past the parent's queue deadline, so the frame is
+   *    about to give up (or already has).
+   *  - `unavailable`: its transport chunk failed to load.
+   *
+   * Answering here rather than letting the frame's own clock expire keeps the
+   * artifact's rejection prompt AND -- the reason this exists -- guarantees the
+   * work is never started, so a `submit` cannot commit after its promise has
+   * already been rejected.
    */
-  const handleQueueWaitExpired = useCallback(
-    (entry: QueuedBridgeRequest) => {
-      const failure = codedFailure("timeout");
+  const handleDispatchAbandoned = useCallback(
+    (entry: QueuedBridgeRequest, code: ArtifactBridgeErrorCode) => {
+      const failure = codedFailure(code);
       reportDiagnostic(entry.request, failure);
       try {
         entry.frameWindow.postMessage(
@@ -1201,8 +1215,8 @@ function useArtifactDataBridge({
           "*"
         );
       } catch {
-        // The frame is gone; there is nothing left to tell, and dropping the
-        // request was the point.
+        // The frame is gone; there is nothing left to tell, and not starting
+        // the work was the point.
       }
     },
     [reportDiagnostic]
@@ -1212,7 +1226,7 @@ function useArtifactDataBridge({
     runBridgeRequest,
     inFlightDataRequestsRef,
     queuedDataRequestsRef,
-    handleQueueWaitExpired
+    handleDispatchAbandoned
   );
 
   const handleDataRequest = useCallback(
