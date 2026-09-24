@@ -5,6 +5,7 @@ import {
   validateEmailTaskWorkspaceCommand,
   validateScheduledWorkspaceCommand,
   validateWorkspaceCommand,
+  WorkspaceCommandValidationError,
   workspaceOperation,
 } from "@/lib/agent-workspace/command-executor"
 
@@ -1023,5 +1024,121 @@ describe("Drive access proposals", () => {
         ],
       })
     ).toThrow(/agent-owned/)
+  })
+})
+
+/**
+ * #1801 — `parseObjectArgument` answers `null` for an unparseable --params
+ * exactly as it does for an absent one, so every gate that reads query
+ * parameters judged a command whose parameters it could not see, and
+ * `withSharedDriveSupport` wrote its own object over the caller's value.
+ * Refuse at the boundary instead: one reading, and a loud error the agent can
+ * act on.
+ */
+describe("--params must parse (#1801)", () => {
+  const listArgv = (params: string) => ({
+    scope: "user" as const,
+    argv: ["drive", "files", "list", "--params", params],
+  })
+
+  it("refuses the token splitCommand produces from a quoted Drive query", () => {
+    expect(() =>
+      validateWorkspaceCommand(
+        listArgv(String.raw`{"q":"name contains \Classified\"}`)
+      )
+    ).toThrow(/--params is not valid JSON/)
+  })
+
+  it("names --params-file so the model has somewhere to go", () => {
+    expect(() => validateWorkspaceCommand(listArgv("{oops"))).toThrow(
+      /--params-file/
+    )
+  })
+
+  it("refuses valid JSON that is not an object, without the quoting advice", () => {
+    // `--params-file` accepts any JSON, so this shape reaches the broker
+    // having passed the skill's own parse check — telling the model its
+    // quotes were eaten would send it down the wrong road.
+    for (const value of ['["q"]', '"q"', "42", "null"]) {
+      expect(() => validateWorkspaceCommand(listArgv(value))).toThrow(
+        /--params must be a JSON object/
+      )
+    }
+  })
+
+  it("carries the params_not_json reason code, not the generic one", () => {
+    // The skill branches on `reason`; the English of the message is not a
+    // contract it should have to pattern-match.
+    expect.assertions(2)
+    try {
+      validateWorkspaceCommand(listArgv("{oops"))
+    } catch (error) {
+      expect(error).toBeInstanceOf(WorkspaceCommandValidationError)
+      expect((error as WorkspaceCommandValidationError).reason).toBe(
+        "params_not_json"
+      )
+    }
+  })
+
+  it("rejects an unparseable --params before any mutation gate runs", () => {
+    // The whole fix rests on this order: every gate that reads parameters
+    // through parseObjectArgument (drive metadata updates, share targets,
+    // access proposals, Chat destinations) would otherwise judge a command
+    // whose parameters it cannot see. `drive files update` on the user slot
+    // hits validateUserDriveMetadataUpdate, so a reordering would surface
+    // here as the metadata error instead of this one.
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: [
+          "drive",
+          "files",
+          "update",
+          "--params",
+          "{oops",
+          "--json",
+          '{"name":"x"}',
+        ],
+      })
+    ).toThrow(/--params is not valid JSON/)
+  })
+
+  it("accepts a Drive query whose values are single-quoted", () => {
+    expect(() =>
+      validateWorkspaceCommand(
+        listArgv(
+          JSON.stringify({ q: "name contains 'Budget' and trashed = false" })
+        )
+      )
+    ).not.toThrow()
+  })
+
+  it("refuses a --params with no value instead of treating it as absent", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: ["drive", "files", "list", "--params"],
+      })
+    ).toThrow(/--params has no value/)
+  })
+
+  it("refuses a --params followed by another flag, without the quoting advice", () => {
+    // `argumentValue` would read `--pageAll` as the value and the model would
+    // be told its quotes were eaten — the wrong fix for a missing value.
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: ["drive", "files", "list", "--params", "--pageAll"],
+      })
+    ).toThrow(/--params has no value/)
+  })
+
+  it("leaves a command with no --params alone", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: ["drive", "files", "list"],
+      })
+    ).not.toThrow()
   })
 })

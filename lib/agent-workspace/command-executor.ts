@@ -62,6 +62,11 @@ export interface WorkspaceMediaHandoff {
 export type WorkspaceCommandRejectionReason =
   | "operation_not_allowed"
   | "drive_upload_use_publish"
+  // `params_not_json` is likewise not a policy refusal: the command is
+  // allowed, its query parameters just did not survive tokenization. The
+  // remedy (`--params-file`) is mechanical, so the skill can branch on this
+  // code rather than on the English of the message (#1801).
+  | "params_not_json"
 
 export class WorkspaceCommandValidationError extends Error {
   constructor(
@@ -577,9 +582,16 @@ export function withSharedDriveSupport(argv: readonly string[]): string[] {
     additions.includeItemsFromAllDrives = true
   }
 
-  const existing = parseObjectArgument(argv, "--params") ?? {}
-  const present = new Set(Object.keys(existing).map((key) => key.toLowerCase()))
-  const merged = { ...existing }
+  // Precondition (#1801): `assertParamsParse`, run by
+  // `validateWorkspaceCommand` before this transform, refuses any --params
+  // that is missing its value or is not a JSON object. So `null` here means
+  // the flag is absent — never a value this would overwrite with its own.
+  const existing = parseObjectArgument(argv, "--params")
+
+  const present = new Set(
+    Object.keys(existing ?? {}).map((key) => key.toLowerCase())
+  )
+  const merged = { ...(existing ?? {}) }
   let changed = false
   for (const [key, value] of Object.entries(additions)) {
     if (present.has(key.toLowerCase())) continue
@@ -703,7 +715,8 @@ function carriesDriveContent(argv: readonly string[]): boolean {
  *  2. Past validation it still could not work. `gws` runs in a fresh empty
  *     `mkdtemp` on the WEB tier, so a container path simply does not exist
  *     there. There is a download hand-off (`handOffDownloadedMedia`) but no
- *     upload counterpart, and `--json-file`/`--body-file`/`--text-file` inline
+ *     upload counterpart, and the `--*-file` payload flags
+ *     (`--json-file`/`--params-file`/`--body-file`/`--text-file`) inline
  *     their target with `readFileSync(path, 'utf8')` — text only, never binary.
  *
  * A user who asked for "a link to this PDF" therefore dead-ended on a bare
@@ -1009,6 +1022,73 @@ function validateWorkspaceArguments(argv: readonly string[]): void {
   if (writesResponseToCallerPath(argv)) {
     throw new Error("Workspace command cannot write response data to a file")
   }
+  assertParamsParse(argv)
+}
+
+/**
+ * `--params` must be a JSON object or not be there at all (#1801).
+ *
+ * Every gate that reads query parameters — the Drive metadata-update
+ * allowlist, the share target's fileId, the access-proposal union, the Chat
+ * destination space — goes through `parseObjectArgument`, which answers `null`
+ * for an unparseable value exactly as it does for an absent one. So a value
+ * mangled in tokenization did not merely lose the caller's filter, it also
+ * made those gates judge a command whose parameters they could not see.
+ * Refusing here, before any of them run, is the only way the two readings
+ * cannot diverge.
+ *
+ * The message names the transport that works, because the input that produces
+ * this is almost always a Drive `q` whose required single quotes were eaten by
+ * the tokenizer, and the model otherwise retries the same broken shape. It
+ * carries the `params_not_json` reason code so the skill can branch on
+ * something stabler than that wording.
+ *
+ * Unparseable and parseable-but-not-an-object get DIFFERENT wording: the
+ * quoting advice is the answer to the first and a red herring for the second,
+ * and `--params-file` accepts any JSON, so a `[…]` payload reaches here
+ * having already passed the skill's own parse check.
+ *
+ * Ordering matters: `validateWorkspaceCommand` runs this (via
+ * `validateWorkspaceArguments`) before `validateWorkspaceMutation`, so every
+ * later gate that reads `--params` is guaranteed a value it can actually see.
+ * `rejects an unparseable --params before any mutation gate runs` in
+ * command-executor.test.ts pins that order.
+ */
+function assertParamsParse(argv: readonly string[]): void {
+  // Not `argumentValue`: it answers `null` for a trailing `--params` (read as
+  // "no parameters") and returns the NEXT flag as the value when one follows
+  // (answered with quoting advice). Both are a missing value, and say so.
+  const index = argv.indexOf("--params")
+  if (index === -1) return
+  const raw = argv[index + 1]
+  if (raw === undefined || raw.startsWith("--")) {
+    throw new WorkspaceCommandValidationError(
+      "Workspace --params has no value. Pass a JSON object after it, or " +
+        "drop the flag.",
+      "params_not_json",
+      workspaceOperation(argv)
+    )
+  }
+  if (parseObjectArgument(argv, "--params") !== null) return
+
+  let parsedButNotAnObject: boolean
+  try {
+    JSON.parse(raw)
+    parsedButNotAnObject = true
+  } catch {
+    parsedButNotAnObject = false
+  }
+  throw new WorkspaceCommandValidationError(
+    parsedButNotAnObject
+      ? "Workspace --params must be a JSON object, not an array or a bare " +
+          "value. Put the query parameters in an object, e.g. " +
+          '{"q":"…","pageSize":50}.'
+      : "Workspace --params is not valid JSON. Quotes inside a value (a Drive " +
+          "query such as \"name contains 'X'\") cannot survive --command; write " +
+          "the parameters to a file and pass --params-file <absolute-path>.",
+    "params_not_json",
+    workspaceOperation(argv)
+  )
 }
 
 
