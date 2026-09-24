@@ -14,7 +14,10 @@ jest.mock("@/actions/db/atrium/artifact-query", () => ({
   queryArtifactData: (...args: unknown[]) => queryArtifactDataMock(...args),
 }));
 
-import { ArtifactSandbox } from "@/components/atrium/ArtifactSandbox";
+import {
+  ArtifactSandbox,
+  type ArtifactSandboxDiagnostic,
+} from "@/components/atrium/ArtifactSandbox";
 import type { ContentDataAccess } from "@/lib/content/types";
 
 const SANDBOX_SRC = "https://sandbox.example.test/render";
@@ -57,6 +60,49 @@ const MODE_PIN_REQUEST_IDS = [
   "00000000-0000-4000-8000-000000000026",
   "00000000-0000-4000-8000-000000000027",
 ] as const;
+
+/**
+ * Ids for the #1787 typed-failure / diagnostics suite. Nine of them, so the
+ * in-flight-cap case can overrun the cap of eight. Separate from every array
+ * above for the reason the others are.
+ */
+const DIAGNOSTIC_REQUEST_IDS = [
+  "00000000-0000-4000-8000-000000000030",
+  "00000000-0000-4000-8000-000000000031",
+  "00000000-0000-4000-8000-000000000032",
+  "00000000-0000-4000-8000-000000000033",
+  "00000000-0000-4000-8000-000000000034",
+  "00000000-0000-4000-8000-000000000035",
+  "00000000-0000-4000-8000-000000000036",
+  "00000000-0000-4000-8000-000000000037",
+  "00000000-0000-4000-8000-000000000038",
+] as const;
+
+/**
+ * #1787 expectation helpers. Every bridge failure now carries a typed `code`
+ * alongside the message, so these name the answers the parent-side gates
+ * produce rather than repeating literals at a dozen call sites.
+ */
+/** The pre-#1787 generic answer, kept verbatim for the record ops. */
+const GENERIC_FAILURE = {
+  code: "unavailable",
+  error: "Artifact data request failed",
+} as const;
+/** A record op refused by the page's loaded mode (#1712). */
+const MODE_PIN_RECORD_FAILURE = {
+  code: "not_query_mode",
+  error: "This artifact's data mode does not allow record operations.",
+} as const;
+/** A query refused by the page's loaded mode (#1712). */
+const MODE_PIN_QUERY_FAILURE = {
+  code: "not_query_mode",
+  error: "This artifact is not configured for live data queries.",
+} as const;
+/** The per-frame in-flight cap. */
+const TOO_MANY_REQUESTS_FAILURE = {
+  code: "too_many_requests",
+  error: "Too many data requests are already running on this page.",
+} as const;
 
 interface PostedDataResponse {
   message: Record<string, unknown>;
@@ -266,6 +312,19 @@ describe("ArtifactSandbox artifact data bridge", () => {
  * frame's message; every other field (contentId, tool name, export, format,
  * reason) is either taken from trusted props or forced by the Server Action.
  */
+/**
+ * #1787: a query the narrowing predicate rejects is ANSWERED at once with
+ * `query_error` — not dropped, which left the artifact waiting out the host's
+ * 45s timeout and reporting `timeout` for a bad argument.
+ */
+function expectMalformedQueryAnswer(postMessage: jest.Mock): void {
+  expect(dataResponses(postMessage)).toEqual([
+    expect.objectContaining({
+      message: expect.objectContaining({ ok: false, code: "query_error" }),
+    }),
+  ]);
+}
+
 describe("ArtifactSandbox viewer-scoped query bridge", () => {
   it("copies only sql/limit/offset and uses the trusted prop contentId", async () => {
     const { frameWindow, postMessage } = mountSandbox(true, "query");
@@ -300,7 +359,7 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
     expect(listArtifactRecordsMock).not.toHaveBeenCalled();
   });
 
-  it("drops a query request with no sql without invoking the action", async () => {
+  it("answers a query request with no sql as query_error without invoking the action", async () => {
     const { frameWindow, postMessage } = mountSandbox(true, "query");
 
     await sendMessage(
@@ -313,7 +372,7 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
     );
 
     expect(queryArtifactDataMock).not.toHaveBeenCalled();
-    expect(dataResponses(postMessage)).toEqual([]);
+    expectMalformedQueryAnswer(postMessage);
   });
 
   it("refuses oversized SQL before serializing a Server Action payload", async () => {
@@ -330,10 +389,10 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
     );
 
     expect(queryArtifactDataMock).not.toHaveBeenCalled();
-    expect(dataResponses(postMessage)).toEqual([]);
+    expectMalformedQueryAnswer(postMessage);
   });
 
-  it("drops whitespace-only SQL without invoking the action", async () => {
+  it("answers whitespace-only SQL as query_error without invoking the action", async () => {
     const { frameWindow, postMessage } = mountSandbox(true, "query");
 
     await sendMessage(
@@ -347,10 +406,10 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
     );
 
     expect(queryArtifactDataMock).not.toHaveBeenCalled();
-    expect(dataResponses(postMessage)).toEqual([]);
+    expectMalformedQueryAnswer(postMessage);
   });
 
-  it("drops a negative limit without invoking the action", async () => {
+  it("answers a negative limit as query_error without invoking the action", async () => {
     const { frameWindow, postMessage } = mountSandbox(true, "query");
 
     await sendMessage(
@@ -365,10 +424,10 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
     );
 
     expect(queryArtifactDataMock).not.toHaveBeenCalled();
-    expect(dataResponses(postMessage)).toEqual([]);
+    expectMalformedQueryAnswer(postMessage);
   });
 
-  it("drops a negative offset without invoking the action", async () => {
+  it("answers a negative offset as query_error without invoking the action", async () => {
     const { frameWindow, postMessage } = mountSandbox(true, "query");
 
     await sendMessage(
@@ -383,7 +442,7 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
     );
 
     expect(queryArtifactDataMock).not.toHaveBeenCalled();
-    expect(dataResponses(postMessage)).toEqual([]);
+    expectMalformedQueryAnswer(postMessage);
   });
 
   it("refuses every query when the bridge is disabled", async () => {
@@ -404,7 +463,7 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
       type: "atrium-artifact-data-response",
       requestId: REQUEST_IDS[5],
       ok: false,
-      error: "Artifact data request failed",
+      ...GENERIC_FAILURE,
     });
   });
 
@@ -429,7 +488,7 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
       type: "atrium-artifact-data-response",
       requestId: REQUEST_IDS[6],
       ok: false,
-      error: "Artifact data request failed",
+      ...GENERIC_FAILURE,
     });
   });
 });
@@ -451,7 +510,7 @@ describe("ArtifactSandbox artifact data bridge failure controls", () => {
           type: "atrium-artifact-data-response",
           requestId: REQUEST_IDS[0],
           ok: false,
-          error: "Artifact data request failed",
+          ...GENERIC_FAILURE,
         },
         targetOrigin: "*",
       },
@@ -480,7 +539,7 @@ describe("ArtifactSandbox artifact data bridge failure controls", () => {
           type: "atrium-artifact-data-response",
           requestId: REQUEST_IDS[0],
           ok: false,
-          error: "Artifact data request failed",
+          ...GENERIC_FAILURE,
         },
         targetOrigin: "*",
       },
@@ -489,7 +548,7 @@ describe("ArtifactSandbox artifact data bridge failure controls", () => {
           type: "atrium-artifact-data-response",
           requestId: REQUEST_IDS[1],
           ok: false,
-          error: "Artifact data request failed",
+          ...GENERIC_FAILURE,
         },
         targetOrigin: "*",
       },
@@ -512,7 +571,7 @@ describe("ArtifactSandbox artifact data bridge failure controls", () => {
         type: "atrium-artifact-data-response",
         requestId: REQUEST_IDS[0],
         ok: false,
-        error: "Artifact data request failed",
+        ...GENERIC_FAILURE,
       },
       targetOrigin: "*",
     });
@@ -554,7 +613,7 @@ describe("ArtifactSandbox artifact data bridge failure controls", () => {
         type: "atrium-artifact-data-response",
         requestId: REQUEST_IDS[8],
         ok: false,
-        error: "Artifact data request failed",
+        ...TOO_MANY_REQUESTS_FAILURE,
       },
       targetOrigin: "*",
     });
@@ -632,7 +691,7 @@ describe("ArtifactSandbox loaded-mode pin", () => {
           type: "atrium-artifact-data-response",
           requestId: MODE_PIN_REQUEST_IDS[0],
           ok: false,
-          error: "Artifact data request failed",
+          ...MODE_PIN_RECORD_FAILURE,
         },
         targetOrigin: "*",
       },
@@ -657,7 +716,7 @@ describe("ArtifactSandbox loaded-mode pin", () => {
       type: "atrium-artifact-data-response",
       requestId: MODE_PIN_REQUEST_IDS[1],
       ok: false,
-      error: "Artifact data request failed",
+      ...MODE_PIN_RECORD_FAILURE,
     });
   });
 
@@ -679,7 +738,7 @@ describe("ArtifactSandbox loaded-mode pin", () => {
       type: "atrium-artifact-data-response",
       requestId: MODE_PIN_REQUEST_IDS[2],
       ok: false,
-      error: "Artifact data request failed",
+      ...MODE_PIN_QUERY_FAILURE,
     });
   });
 
@@ -700,7 +759,7 @@ describe("ArtifactSandbox loaded-mode pin", () => {
       type: "atrium-artifact-data-response",
       requestId: MODE_PIN_REQUEST_IDS[6],
       ok: false,
-      error: "Artifact data request failed",
+      ...MODE_PIN_RECORD_FAILURE,
     });
   });
 
@@ -727,7 +786,7 @@ describe("ArtifactSandbox loaded-mode pin", () => {
       type: "atrium-artifact-data-response",
       requestId: MODE_PIN_REQUEST_IDS[7],
       ok: false,
-      error: "Artifact data request failed",
+      ...MODE_PIN_QUERY_FAILURE,
     });
   });
 
@@ -759,13 +818,363 @@ describe("ArtifactSandbox loaded-mode pin", () => {
     expect(queryArtifactDataMock).not.toHaveBeenCalled();
     expect(
       dataResponses(postMessage).map((response) => response.message)
-    ).toEqual(
-      MODE_PIN_REQUEST_IDS.slice(3, 6).map((requestId) => ({
+    ).toEqual([
+      {
         type: "atrium-artifact-data-response",
-        requestId,
+        requestId: MODE_PIN_REQUEST_IDS[3],
         ok: false,
-        error: "Artifact data request failed",
-      }))
+        ...MODE_PIN_RECORD_FAILURE,
+      },
+      {
+        type: "atrium-artifact-data-response",
+        requestId: MODE_PIN_REQUEST_IDS[4],
+        ok: false,
+        ...MODE_PIN_RECORD_FAILURE,
+      },
+      {
+        type: "atrium-artifact-data-response",
+        requestId: MODE_PIN_REQUEST_IDS[5],
+        ok: false,
+        ...MODE_PIN_QUERY_FAILURE,
+      },
+    ]);
+  });
+});
+
+/** #1787: mount in query mode with a diagnostic sink and a pinned version id. */
+function mountQuerySandbox(versionId?: string): {
+  frameWindow: Window;
+  postMessage: jest.Mock;
+  diagnostics: ArtifactSandboxDiagnostic[];
+  unmount: () => void;
+} {
+  const diagnostics: ArtifactSandboxDiagnostic[] = [];
+  const { unmount } = render(
+    <ArtifactSandbox
+      code="<p>artifact</p>"
+      src={SANDBOX_SRC}
+      dataBridgeEnabled={true}
+      contentId={TRUSTED_CONTENT_ID}
+      dataAccess="query"
+      versionId={versionId}
+      onDiagnostic={(diagnostic) => diagnostics.push(diagnostic)}
+    />
+  );
+  const frame = screen.getByTestId(
+    "artifact-sandbox-frame"
+  ) as HTMLIFrameElement;
+  const frameWindow = frame.contentWindow;
+  if (!frameWindow) throw new Error("test iframe has no contentWindow");
+  const postMessage = jest.fn();
+  Object.defineProperty(frameWindow, "postMessage", {
+    configurable: true,
+    value: postMessage,
+  });
+  return { frameWindow, postMessage, diagnostics, unmount };
+}
+
+function queryRequest(requestId: string, sql = "SELECT nope") {
+  return {
+    type: "atrium-artifact-data-request",
+    requestId,
+    op: "query" as const,
+    sql,
+  };
+}
+
+/**
+ * #1787 — the typed failure contract: the frame must be able to tell a broken
+ * query from a permissions problem, which one generic string never allowed.
+ */
+describe("ArtifactSandbox typed failures (#1787)", () => {
+  it("round-trips the action's typed code and message to the frame", async () => {
+    queryArtifactDataMock.mockResolvedValueOnce({
+      isSuccess: false,
+      code: "query_error",
+      message: 'column "school_name" does not exist',
+      detail: 'column "school_name" does not exist',
+    });
+    const { frameWindow, postMessage } = mountQuerySandbox();
+
+    await sendMessage(queryRequest(DIAGNOSTIC_REQUEST_IDS[0]), frameWindow);
+
+    expect(dataResponses(postMessage)[0]?.message).toEqual({
+      type: "atrium-artifact-data-response",
+      requestId: DIAGNOSTIC_REQUEST_IDS[0],
+      ok: false,
+      code: "query_error",
+      error: 'column "school_name" does not exist',
+    });
+  });
+
+  it("carries retryAfterSeconds for rate_limited and nothing else", async () => {
+    queryArtifactDataMock
+      .mockResolvedValueOnce({
+        isSuccess: false,
+        code: "rate_limited",
+        message: "Too many data requests. Try again in a moment.",
+        retryAfterSeconds: 30,
+      })
+      .mockResolvedValueOnce({
+        isSuccess: false,
+        code: "forbidden",
+        message: "You do not have access to this data.",
+        // A stray retry hint on a non-rate-limit code must not be forwarded.
+        retryAfterSeconds: 30,
+      });
+    const { frameWindow, postMessage } = mountQuerySandbox();
+
+    await sendMessage(queryRequest(DIAGNOSTIC_REQUEST_IDS[0]), frameWindow);
+    await sendMessage(queryRequest(DIAGNOSTIC_REQUEST_IDS[1]), frameWindow);
+
+    const [limited, forbidden] = dataResponses(postMessage);
+    expect(limited?.message).toMatchObject({
+      code: "rate_limited",
+      retryAfterSeconds: 30,
+    });
+    expect(forbidden?.message).not.toHaveProperty("retryAfterSeconds");
+  });
+
+  it("drops an unrecognized code AND its unvetted message", async () => {
+    // A payload from an older action (or a corrupted one) has not been through
+    // the server's disclosure gate, so neither half of it may be forwarded.
+    queryArtifactDataMock.mockResolvedValueOnce({
+      isSuccess: false,
+      code: "totally_new_code",
+      message: "relation content_data_records missing for private-content-id",
+    });
+    const { frameWindow, postMessage } = mountQuerySandbox();
+
+    await sendMessage(queryRequest(DIAGNOSTIC_REQUEST_IDS[0]), frameWindow);
+
+    expect(dataResponses(postMessage)[0]?.message).toEqual({
+      type: "atrium-artifact-data-response",
+      requestId: DIAGNOSTIC_REQUEST_IDS[0],
+      ok: false,
+      ...GENERIC_FAILURE,
+    });
+  });
+
+  it("passes the trusted versionId to the action, never a request field", async () => {
+    const { frameWindow } = mountQuerySandbox("version-from-props");
+
+    await sendMessage(
+      {
+        ...queryRequest(DIAGNOSTIC_REQUEST_IDS[0]),
+        // A hostile page naming its own version must be ignored.
+        versionId: "version-from-the-artifact",
+      },
+      frameWindow
     );
+
+    expect(queryArtifactDataMock).toHaveBeenCalledWith({
+      contentId: TRUSTED_CONTENT_ID,
+      sql: "SELECT nope",
+      limit: undefined,
+      offset: undefined,
+      versionId: "version-from-props",
+    });
+  });
+});
+
+/**
+ * #1787 — the diagnostic channel: SOMETHING on the app side has to notice a
+ * failure the artifact swallowed, or a chat can write a dead dashboard and
+ * report success.
+ */
+describe("ArtifactSandbox preview diagnostics (#1787)", () => {
+  it("reports a rejected query to onDiagnostic with its code and SQL", async () => {
+    queryArtifactDataMock.mockResolvedValueOnce({
+      isSuccess: false,
+      code: "query_error",
+      message: 'column "school_name" does not exist',
+    });
+    const { frameWindow, diagnostics } = mountQuerySandbox();
+
+    await sendMessage(
+      queryRequest(DIAGNOSTIC_REQUEST_IDS[0], "SELECT school_name FROM x"),
+      frameWindow
+    );
+
+    expect(diagnostics).toEqual([
+      {
+        kind: "data",
+        code: "query_error",
+        message: 'column "school_name" does not exist',
+        sql: "SELECT school_name FROM x",
+      },
+    ]);
+  });
+
+  it("ANSWERS a malformed query instead of letting it time out", async () => {
+    // Oversized SQL fails the narrowing predicate. Before, it was dropped: the
+    // artifact waited out its own timeout and reported `timeout` for what is
+    // really a bad argument, and no diagnostic was recorded (Codex P2, #1808).
+    const { frameWindow, postMessage, diagnostics } = mountQuerySandbox();
+
+    await sendMessage(
+      {
+        ...queryRequest(DIAGNOSTIC_REQUEST_IDS[0]),
+        sql: "a".repeat(8_001),
+      },
+      frameWindow
+    );
+
+    expect(queryArtifactDataMock).not.toHaveBeenCalled();
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "atrium-artifact-data-response",
+        requestId: DIAGNOSTIC_REQUEST_IDS[0],
+        ok: false,
+        code: "query_error",
+      }),
+      "*"
+    );
+    expect(diagnostics).toEqual([
+      expect.objectContaining({ kind: "data", code: "query_error" }),
+    ]);
+    // The recorded SQL is bounded to the bridge's own SQL cap.
+    expect(diagnostics[0]?.sql).toHaveLength(8_000);
+  });
+
+  it("answers a negative limit as query_error", async () => {
+    const { frameWindow, postMessage } = mountQuerySandbox();
+
+    await sendMessage(
+      { ...queryRequest(DIAGNOSTIC_REQUEST_IDS[0]), limit: -1 },
+      frameWindow
+    );
+
+    expect(queryArtifactDataMock).not.toHaveBeenCalled();
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ ok: false, code: "query_error" }),
+      "*"
+    );
+  });
+
+  it("still ignores a message that is not a data request at all", async () => {
+    const { frameWindow, postMessage, diagnostics } = mountQuerySandbox();
+
+    await sendMessage(
+      { type: "atrium-artifact-data-request", requestId: "bad id!", op: "query" },
+      frameWindow
+    );
+
+    expect(postMessage).not.toHaveBeenCalled();
+    expect(diagnostics).toEqual([]);
+  });
+
+  it("reports the in-flight cap as too_many_requests", async () => {
+    const pending: Array<(value: unknown) => void> = [];
+    queryArtifactDataMock.mockImplementation(
+      () => new Promise((resolve) => pending.push(resolve))
+    );
+    const { frameWindow, diagnostics } = mountQuerySandbox();
+
+    await act(async () => {
+      for (const requestId of DIAGNOSTIC_REQUEST_IDS) {
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            data: queryRequest(requestId),
+            origin: "null",
+            source: frameWindow,
+          })
+        );
+      }
+      await Promise.resolve();
+    });
+
+    // 9 requests against a cap of 8: exactly one is refused up front.
+    expect(diagnostics).toEqual([
+      { kind: "data", code: "too_many_requests", message: TOO_MANY_REQUESTS_FAILURE.error, sql: "SELECT nope" },
+    ]);
+  });
+
+  it("drops a failure that resolves after the sandbox unmounted", async () => {
+    // The canvas remounts the sandbox on every version switch, but that does not
+    // cancel a server action already in flight: its late failure describes the
+    // OLD version and must not land in the new version's buffer.
+    let resolveQuery: (value: unknown) => void = () => undefined;
+    queryArtifactDataMock.mockImplementationOnce(
+      () => new Promise((resolve) => (resolveQuery = resolve))
+    );
+    const { frameWindow, diagnostics, unmount } = mountQuerySandbox();
+
+    await sendMessage(queryRequest(DIAGNOSTIC_REQUEST_IDS[0]), frameWindow);
+    unmount();
+    await act(async () => {
+      resolveQuery({ isSuccess: false, code: "query_error", message: "stale" });
+      await Promise.resolve();
+    });
+
+    expect(queryArtifactDataMock).toHaveBeenCalledTimes(1);
+    expect(diagnostics).toEqual([]);
+  });
+
+});
+
+/**
+ * #1787 — what the FRAME itself reports: its uncaught errors, and bridge
+ * failures it raised locally (its own timeout or pending cap). Its own suite so
+ * the diagnostics suite stays inside the max-lines-per-function budget.
+ */
+describe("ArtifactSandbox forwarded frame errors (#1787)", () => {
+  it("forwards the frame's uncaught errors as script diagnostics", async () => {
+    const { frameWindow, diagnostics } = mountQuerySandbox();
+
+    await sendMessage(
+      { type: "atrium-artifact-error", message: "Chart is not defined" },
+      frameWindow
+    );
+
+    expect(diagnostics).toEqual([
+      { kind: "script", message: "Chart is not defined" },
+    ]);
+  });
+
+  it("records a frame-side bridge failure as a DATA diagnostic with its code", async () => {
+    const { frameWindow, diagnostics } = mountQuerySandbox();
+
+    await sendMessage(
+      {
+        type: "atrium-artifact-error",
+        kind: "data",
+        code: "timeout",
+        message: "Atrium data request timed out",
+        sql: "select slow()",
+      },
+      frameWindow
+    );
+
+    expect(diagnostics).toEqual([
+      {
+        kind: "data",
+        code: "timeout",
+        message: "Atrium data request timed out",
+        sql: "select slow()",
+      },
+    ]);
+  });
+
+  it("keeps a frame report with an unknown code as a plain script error", async () => {
+    const { frameWindow, diagnostics } = mountQuerySandbox();
+
+    await sendMessage(
+      { type: "atrium-artifact-error", kind: "data", code: "made_up", message: "x" },
+      frameWindow
+    );
+
+    expect(diagnostics).toEqual([{ kind: "script", message: "x" }]);
+  });
+
+  it("ignores a frame error from any window that is not this frame", async () => {
+    const { diagnostics } = mountQuerySandbox();
+
+    await sendMessage(
+      { type: "atrium-artifact-error", message: "spoofed" },
+      window
+    );
+
+    expect(diagnostics).toEqual([]);
   });
 });

@@ -52,9 +52,20 @@
  *   report `event.origin === "null"`, so origin is deliberately NOT the bridge
  *   authenticator. The trusted `contentId` comes only from this component's
  *   props; any similarly named request field is ignored. Only authenticated
- *   callers explicitly enable the bridge, work is bounded per frame, and every
- *   failure returned to artifact code uses the same generic message. Responses
- *   also require `targetOrigin: "*"` because the receiving frame is opaque-origin.
+ *   callers explicitly enable the bridge and work is bounded per frame.
+ *   Responses require `targetOrigin: "*"` because the receiving frame is
+ *   opaque-origin.
+ * - FAILURES ARE TYPED (#1787). Each rejection carries an
+ *   `ArtifactBridgeErrorCode` — `unauthenticated | forbidden | not_query_mode |
+ *   rate_limited | timeout | query_error | too_many_requests | unavailable` —
+ *   plus a readable message, because one generic string made a SQL typo look
+ *   identical to "you do not have access" and artifacts rendered the wrong
+ *   failure state for years of debugging time. This discloses nothing new: every
+ *   code describes the VIEWER'S OWN request under the viewer's own permissions,
+ *   and the frame has no egress (`connect-src 'none'`). Upstream database text
+ *   rides along only under `query_error`, and only when the SERVER decided the
+ *   requester may edit this artifact (see `artifact-query.ts`) — this component
+ *   forwards that decision, it never makes it.
  *
  * When the sandbox origin is not configured (or, defensively, resolves to the
  * app origin) the component fails CLOSED — it renders an "unavailable" notice
@@ -68,6 +79,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { normalizeOrigin } from "@/lib/content/artifact-sandbox-config";
+import {
+  artifactBridgeErrorMessage,
+  boundBridgeErrorMessage,
+  isArtifactBridgeErrorCode,
+  type ArtifactBridgeErrorCode,
+} from "@/lib/content/artifact-bridge-errors";
 import type { ContentDataAccess } from "@/lib/content/types";
 import type { ArtifactDataPayload } from "@/lib/db/types/jsonb";
 
@@ -104,7 +121,15 @@ const MAX_IN_FLIGHT_DATA_REQUESTS = 8;
 const MAX_DATA_PAYLOAD_BYTES = 8 * 1024;
 const MAX_DATA_PAYLOAD_VALUES = 8_192;
 const MAX_DATA_PAYLOAD_STRING_CODE_UNITS = MAX_DATA_PAYLOAD_BYTES;
-/** One response for every bridge failure; never expose action or database detail. */
+/**
+ * The fallback message for a bridge failure that carries no better text.
+ *
+ * #1787: this used to be the ONLY thing an artifact could ever learn about a
+ * failure — a SQL typo, "you are signed out", and a rate limit were the same
+ * string. Every failure now also carries an `ArtifactBridgeErrorCode`, and the
+ * record ops (submit/list), which have no typed classification of their own,
+ * still answer with this generic text under the `unavailable` code.
+ */
 const DATA_BRIDGE_ERROR_MESSAGE = "Artifact data request failed";
 const DATA_NAMESPACE_RE = /^[a-z0-9_-]{1,64}$/;
 /**
@@ -135,6 +160,16 @@ interface ArtifactSandboxBaseProps {
   title?: string;
   /** Optional className for the iframe (sizing/styling). */
   className?: string;
+  /**
+   * Called for every preview failure worth reporting (#1787): a rejected
+   * `AtriumData` call, and any uncaught error / unhandled rejection the frame
+   * forwards. Optional — surfaces with nowhere to put a diagnostic (thumbnails,
+   * embeds) simply omit it and nothing is collected.
+   *
+   * This component stores nothing itself. `ArtifactCanvas` buffers the entries
+   * so the next chat turn can carry them to the model that wrote the code.
+   */
+  onDiagnostic?: (diagnostic: ArtifactSandboxDiagnostic) => void;
 }
 
 /**
@@ -153,8 +188,21 @@ export type ArtifactSandboxProps = ArtifactSandboxBaseProps &
         dataBridgeEnabled: true;
         contentId: string;
         dataAccess: ContentDataAccess;
+        /**
+         * The version whose code this frame is running (#1787). Trusted — it
+         * comes from the caller's own state, never from the frame — and used
+         * only to name the version in the data MCP's audit line, in place of
+         * the working head (which is the wrong answer on a published page or
+         * while the canvas previews an older version).
+         */
+        versionId?: string;
       }
-    | { dataBridgeEnabled?: false; contentId?: never; dataAccess?: never }
+    | {
+        dataBridgeEnabled?: false;
+        contentId?: never;
+        dataAccess?: never;
+        versionId?: never;
+      }
   );
 
 interface RenderAck {
@@ -209,12 +257,74 @@ type ArtifactDataResponse =
       ok: true;
       data: unknown;
     }
-  | {
+  | ({
       type: "atrium-artifact-data-response";
       requestId: string;
       ok: false;
-      error: string;
-    };
+    } & ArtifactDataFailure);
+
+/**
+ * The typed failure half of a bridge response (#1787). `code` is the closed
+ * enum the frame re-exposes as `err.code`; `error` is a human-readable message
+ * (the code's default, or — for `query_error` raised for an EDITOR — the
+ * upstream Postgres/MCP text the action decided to forward).
+ */
+interface ArtifactDataFailure {
+  code: ArtifactBridgeErrorCode;
+  error: string;
+  /** Seconds to wait before retrying. `rate_limited` only. */
+  retryAfterSeconds?: number;
+}
+
+/**
+ * A preview failure worth telling somebody about (#1787) — the bridge rejections
+ * the artifact swallowed, plus whatever the frame itself threw. Reported to the
+ * caller so `ArtifactCanvas` can buffer it for the chat; this component keeps no
+ * state of its own for it.
+ */
+export interface ArtifactSandboxDiagnostic {
+  kind: "data" | "script";
+  code?: ArtifactBridgeErrorCode;
+  message: string;
+  /** The SQL that failed, for a `query` rejection. */
+  sql?: string;
+}
+
+/**
+ * The frame's forwarded uncaught error / unhandled rejection (render.html) — or,
+ * with `kind: "data"`, a bridge failure the FRAME raised itself (its own
+ * timeout or pending-request cap), which the parent never sees otherwise.
+ */
+interface ArtifactFrameError {
+  type: "atrium-artifact-error";
+  message: string;
+  kind?: unknown;
+  code?: unknown;
+  sql?: unknown;
+}
+
+/** The diagnostic a forwarded frame error becomes. `message` is already bounded. */
+function frameErrorDiagnostic(
+  data: ArtifactFrameError,
+  message: string
+): ArtifactSandboxDiagnostic {
+  // An unrecognized code is not trusted as a data failure; it stays a plain
+  // script error rather than reaching the chat as an unvalidated code.
+  if (data.kind !== "data" || !isArtifactBridgeErrorCode(data.code)) {
+    return { kind: "script", message };
+  }
+  const sql = typeof data.sql === "string" ? boundBridgeErrorMessage(data.sql) : "";
+  return { kind: "data", code: data.code, message, ...(sql ? { sql } : {}) };
+}
+
+function isArtifactFrameError(data: unknown): data is ArtifactFrameError {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    (data as { type?: unknown }).type === "atrium-artifact-error" &&
+    typeof (data as { message?: unknown }).message === "string"
+  );
+}
 
 /** Narrow an unknown postMessage payload to the host's render acknowledgement. */
 function isRenderAck(data: unknown): data is RenderAck {
@@ -389,13 +499,54 @@ function isArtifactDataRequest(data: unknown): data is ArtifactDataRequest {
   return false;
 }
 
-function dataBridgeFailure(requestId: string): ArtifactDataResponse {
+function dataBridgeFailure(
+  requestId: string,
+  failure: ArtifactDataFailure
+): ArtifactDataResponse {
   return {
     type: "atrium-artifact-data-response",
     requestId,
     ok: false,
-    error: DATA_BRIDGE_ERROR_MESSAGE,
+    ...failure,
   };
+}
+
+/** A failure with no per-case text: the code's own default message. */
+function codedFailure(code: ArtifactBridgeErrorCode): ArtifactDataFailure {
+  return { code, error: artifactBridgeErrorMessage(code) };
+}
+
+/**
+ * The record ops (`submit` / `list`) have no typed classification server-side,
+ * so they keep exactly the behaviour they had before #1787 — one generic string
+ * — under the `unavailable` code. Only `query` carries real codes today.
+ */
+const RECORD_OP_FAILURE: ArtifactDataFailure = {
+  code: "unavailable",
+  error: DATA_BRIDGE_ERROR_MESSAGE,
+};
+
+/** A query the bridge refused as malformed or oversized, before any server call. */
+const MALFORMED_QUERY_FAILURE: ArtifactDataFailure = {
+  code: "query_error",
+  error: "The data request was rejected as malformed or oversized.",
+};
+
+/**
+ * The `requestId` of a message that IS a data request by envelope (right type,
+ * well-formed id) but failed `isArtifactDataRequest` — empty or oversized SQL, a
+ * negative `limit`, a bad record payload. Such a request still gets an answer:
+ * dropping it left `AtriumData.*` waiting out its own timeout and reporting
+ * `timeout` for what is really a bad argument, with no preview diagnostic.
+ */
+function malformedDataRequestId(data: unknown): string | null {
+  if (typeof data !== "object" || data === null) return null;
+  const candidate = data as Record<string, unknown>;
+  if (candidate.type !== "atrium-artifact-data-request") return null;
+  const requestId = candidate.requestId;
+  return typeof requestId === "string" && REQUEST_ID_RE.test(requestId)
+    ? requestId
+    : null;
 }
 
 /**
@@ -435,8 +586,44 @@ function isOpAllowedByLoadedMode(
   return false;
 }
 
-/** Sentinel for "the action ran and refused" — distinct from a thrown error. */
-const BRIDGE_ACTION_FAILED = Symbol("atrium-bridge-action-failed");
+/** The outcome of one routed bridge action: data, or a typed failure. */
+type BridgeActionOutcome =
+  | { ok: true; data: unknown }
+  | { ok: false; failure: ArtifactDataFailure };
+
+/**
+ * Narrow the query action's typed failure (#1787). The action returns the
+ * closed `code` plus a message it has already decided is safe for THIS
+ * requester (upstream SQL text only for an editor), so the bridge forwards both
+ * verbatim rather than re-deciding. An older/unexpected payload with no valid
+ * code degrades to `unavailable` with the generic message — never to a
+ * success, and never to an unvalidated string.
+ */
+function queryActionFailure(result: {
+  message?: unknown;
+  code?: unknown;
+  retryAfterSeconds?: unknown;
+}): ArtifactDataFailure {
+  if (!isArtifactBridgeErrorCode(result.code)) {
+    // No code means this is not a payload #1787 produced. Its `message` has not
+    // been through the action's disclosure gate, so it is NOT forwarded — the
+    // pre-#1787 generic answer is the safe degradation.
+    return { code: "unavailable", error: DATA_BRIDGE_ERROR_MESSAGE };
+  }
+  const code = result.code;
+  const message = boundBridgeErrorMessage(result.message);
+  const retryAfterSeconds = result.retryAfterSeconds;
+  return {
+    code,
+    error: message ?? artifactBridgeErrorMessage(code),
+    ...(code === "rate_limited" &&
+    typeof retryAfterSeconds === "number" &&
+    Number.isFinite(retryAfterSeconds) &&
+    retryAfterSeconds >= 0
+      ? { retryAfterSeconds }
+      : {}),
+  };
+}
 
 /**
  * Route one validated request to its Server Action, copying ONLY the fields the
@@ -450,8 +637,9 @@ const BRIDGE_ACTION_FAILED = Symbol("atrium-bridge-action-failed");
  */
 async function invokeBridgeAction(
   request: ArtifactDataRequest,
-  contentId: string
-): Promise<unknown> {
+  contentId: string,
+  versionId: string | undefined
+): Promise<BridgeActionOutcome> {
   if (request.op === "query") {
     const { queryArtifactData } = await import(
       "@/actions/db/atrium/artifact-query"
@@ -461,8 +649,13 @@ async function invokeBridgeAction(
       sql: request.sql,
       limit: request.limit,
       offset: request.offset,
+      // Trusted prop, never a request field: it only names the version in the
+      // data MCP's audit line (#1787).
+      versionId,
     });
-    return result.isSuccess ? result.data : BRIDGE_ACTION_FAILED;
+    return result.isSuccess
+      ? { ok: true, data: result.data }
+      : { ok: false, failure: queryActionFailure(result) };
   }
 
   const { listArtifactRecords, submitArtifactRecord } = await import(
@@ -474,7 +667,9 @@ async function invokeBridgeAction(
       namespace: request.namespace,
       payload: request.payload,
     });
-    return result.isSuccess ? result.data : BRIDGE_ACTION_FAILED;
+    return result.isSuccess
+      ? { ok: true, data: result.data }
+      : { ok: false, failure: RECORD_OP_FAILURE };
   }
   const result = await listArtifactRecords({
     contentId,
@@ -482,7 +677,9 @@ async function invokeBridgeAction(
     limit: request.limit,
     scope: request.scope,
   });
-  return result.isSuccess ? result.data : BRIDGE_ACTION_FAILED;
+  return result.isSuccess
+    ? { ok: true, data: result.data }
+    : { ok: false, failure: RECORD_OP_FAILURE };
 }
 
 interface ArtifactDataBridgeOptions {
@@ -492,6 +689,52 @@ interface ArtifactDataBridgeOptions {
   contentId?: string;
   /** The artifact's data-access mode as of THIS page load (#1712). */
   dataAccess?: ContentDataAccess;
+  /** The version running in the frame, for the data MCP audit line (#1787). */
+  versionId?: string;
+  /** Report a bridge rejection to the caller (#1787). Never throws. */
+  onDiagnostic?: (diagnostic: ArtifactSandboxDiagnostic) => void;
+}
+
+/**
+ * Which parent-side gate (if any) refuses this request, as a typed failure.
+ *
+ * #1787: these five refusals used to share one string with every server-side
+ * failure, so an artifact could not tell "this page is not in query mode" (fix:
+ * change the artifact's dataAccess) from "your SQL is wrong" (fix: the SQL) from
+ * "you are firing too many queries at once" (fix: await them).
+ */
+function parentSideRefusal(args: {
+  dataBridgeEnabled: boolean;
+  contentId: string | undefined;
+  request: ArtifactDataRequest;
+  loadedDataAccess: ContentDataAccess | undefined;
+  inFlight: number;
+}): ArtifactDataFailure | null {
+  const isQuery = args.request.op === "query";
+  if (!args.dataBridgeEnabled || !args.contentId) {
+    // The bridge was never enabled for this mount — nothing about the request
+    // is wrong, there is simply nothing behind it.
+    return RECORD_OP_FAILURE;
+  }
+  // The mode this page was LOADED with (#1712) — checked before the action so a
+  // mode flipped under an open page cannot be used by it.
+  if (!isOpAllowedByLoadedMode(args.request.op, args.loadedDataAccess)) {
+    return isQuery
+      ? codedFailure("not_query_mode")
+      : {
+          code: "not_query_mode",
+          error: "This artifact's data mode does not allow record operations.",
+        };
+  }
+  if (!isRequestWithinBridgeBounds(args.request)) {
+    // Only `query` gets the sharper code: a record op has no typed vocabulary
+    // of its own (see RECORD_OP_FAILURE), so it keeps its pre-#1787 answer.
+    return isQuery ? MALFORMED_QUERY_FAILURE : RECORD_OP_FAILURE;
+  }
+  if (args.inFlight >= MAX_IN_FLIGHT_DATA_REQUESTS) {
+    return codedFailure("too_many_requests");
+  }
+  return null;
 }
 
 /** Install the source-authenticated, bounded artifact data request listener. */
@@ -501,7 +744,42 @@ function useArtifactDataBridge({
   dataBridgeEnabled,
   contentId,
   dataAccess,
+  versionId,
+  onDiagnostic,
 }: ArtifactDataBridgeOptions): void {
+  // False once this mount is torn down. The canvas remounts the sandbox (new
+  // `key`) on every version switch, but a server action already in flight is not
+  // cancelled by that — without this, a failure resolving after the switch would
+  // be recorded as the NEW version's diagnostic (#1787).
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const reportDiagnostic = useCallback(
+    (
+      request: { op?: unknown; sql?: unknown },
+      failure: ArtifactDataFailure
+    ): void => {
+      if (!mountedRef.current) return;
+      try {
+        onDiagnostic?.({
+          kind: "data",
+          code: failure.code,
+          message: failure.error,
+          ...(request.op === "query" && typeof request.sql === "string"
+            ? { sql: request.sql.slice(0, MAX_QUERY_SQL_LENGTH) }
+            : {}),
+        });
+      } catch {
+        // A broken consumer must never turn a data failure into a crash — the
+        // frame is still owed its response.
+      }
+    },
+    [onDiagnostic]
+  );
   const inFlightDataRequestsRef = useRef(0);
   /**
    * #1712: pin the mode for the LIFETIME of this mount, not just to the current
@@ -527,34 +805,43 @@ function useArtifactDataBridge({
    */
   const handleDataRequest = useCallback(
     async (request: ArtifactDataRequest, frameWindow: Window): Promise<void> => {
-      if (
-        !dataBridgeEnabled ||
-        !contentId ||
-        // The mode this page was LOADED with (#1712) — checked before the
-        // action so a mode flipped under an open page cannot be used by it.
-        !isOpAllowedByLoadedMode(request.op, loadedDataAccessRef.current) ||
-        !isRequestWithinBridgeBounds(request) ||
-        inFlightDataRequestsRef.current >= MAX_IN_FLIGHT_DATA_REQUESTS
-      ) {
-        frameWindow.postMessage(dataBridgeFailure(request.requestId), "*");
+      const refusal = parentSideRefusal({
+        dataBridgeEnabled,
+        contentId,
+        request,
+        loadedDataAccess: loadedDataAccessRef.current,
+        inFlight: inFlightDataRequestsRef.current,
+      });
+      if (refusal || !contentId) {
+        // `!contentId` is already covered by `parentSideRefusal`; repeating it
+        // here is what narrows `contentId` to a string for the call below.
+        const failure = refusal ?? codedFailure("unavailable");
+        reportDiagnostic(request, failure);
+        frameWindow.postMessage(dataBridgeFailure(request.requestId, failure), "*");
         return;
       }
 
       inFlightDataRequestsRef.current += 1;
       let response: ArtifactDataResponse;
       try {
-        const data = await invokeBridgeAction(request, contentId);
-        response =
-          data === BRIDGE_ACTION_FAILED
-            ? dataBridgeFailure(request.requestId)
-            : {
-                type: "atrium-artifact-data-response",
-                requestId: request.requestId,
-                ok: true,
-                data,
-              };
+        const outcome = await invokeBridgeAction(request, contentId, versionId);
+        if (outcome.ok) {
+          response = {
+            type: "atrium-artifact-data-response",
+            requestId: request.requestId,
+            ok: true,
+            data: outcome.data,
+          };
+        } else {
+          reportDiagnostic(request, outcome.failure);
+          response = dataBridgeFailure(request.requestId, outcome.failure);
+        }
       } catch {
-        response = dataBridgeFailure(request.requestId);
+        // A thrown server action (network failure, non-2xx) never produced a
+        // classified answer at all.
+        const failure = codedFailure("unavailable");
+        reportDiagnostic(request, failure);
+        response = dataBridgeFailure(request.requestId, failure);
       } finally {
         inFlightDataRequestsRef.current -= 1;
       }
@@ -565,7 +852,32 @@ function useArtifactDataBridge({
     },
     // `loadedDataAccessRef` is a stable ref, deliberately NOT a dependency: the
     // pinned mode must not change for the life of this mount (see the ref).
-    [contentId, dataBridgeEnabled]
+    [contentId, dataBridgeEnabled, versionId, reportDiagnostic]
+  );
+
+  /**
+   * Answer a request the narrowing predicate rejected (see
+   * `malformedDataRequestId`). Nothing reaches a Server Action. A query gets
+   * the same answer `parentSideRefusal` gives an out-of-bounds one — or
+   * `not_query_mode` when the loaded mode forbids queries at all — and a
+   * record op keeps its generic pre-#1787 failure.
+   */
+  const handleMalformedRequest = useCallback(
+    (data: unknown, frameWindow: Window): void => {
+      const requestId = malformedDataRequestId(data);
+      if (!requestId) return;
+      const request = data as { op?: unknown; sql?: unknown };
+      let failure = RECORD_OP_FAILURE;
+      if (dataBridgeEnabled && contentId && request.op === "query") {
+        failure = isOpAllowedByLoadedMode("query", loadedDataAccessRef.current)
+          ? MALFORMED_QUERY_FAILURE
+          : codedFailure("not_query_mode");
+      }
+      reportDiagnostic(request, failure);
+      frameWindow.postMessage(dataBridgeFailure(requestId, failure), "*");
+    },
+    // `loadedDataAccessRef` is a stable ref (see handleDataRequest).
+    [contentId, dataBridgeEnabled, reportDiagnostic]
   );
 
   useEffect(() => {
@@ -576,12 +888,60 @@ function useArtifactDataBridge({
       // authentication. event.origin is intentionally not consulted: a real
       // `sandbox="allow-scripts"` frame has the opaque serialized origin "null".
       if (!frameWindow || event.source !== frameWindow) return;
-      if (!isArtifactDataRequest(event.data)) return;
-      void handleDataRequest(event.data, frameWindow);
+      if (isArtifactDataRequest(event.data)) {
+        void handleDataRequest(event.data, frameWindow);
+        return;
+      }
+      handleMalformedRequest(event.data, frameWindow);
     };
     window.addEventListener("message", onDataMessage);
     return () => window.removeEventListener("message", onDataMessage);
-  }, [handleDataRequest, iframeRef, origin]);
+  }, [handleDataRequest, handleMalformedRequest, iframeRef, origin]);
+}
+
+/**
+ * Collect the frame's own uncaught errors and unhandled rejections (#1787).
+ *
+ * `render.html` installs a `window.onerror` / `unhandledrejection` forwarder and
+ * posts `{ type: "atrium-artifact-error", message }` to the parent. That is safe
+ * in both directions: the message is PARENT-BOUND only (it cannot reach any
+ * other window), and it carries nothing but a string the artifact's own code
+ * produced.
+ *
+ * Without this, the most common authoring failure of all — a `ReferenceError` in
+ * the artifact's bootstrap — is visible only in a browser console nobody has
+ * open, least of all the model that wrote the code.
+ *
+ * Installed independently of the data bridge: a script error is worth reporting
+ * on an artifact with no data access at all.
+ */
+function useArtifactFrameErrors(
+  iframeRef: React.RefObject<HTMLIFrameElement | null>,
+  origin: string | null,
+  onDiagnostic?: (diagnostic: ArtifactSandboxDiagnostic) => void
+): void {
+  useEffect(() => {
+    if (!origin || !onDiagnostic) return;
+    const onMessage = (event: MessageEvent) => {
+      // Same WindowProxy-identity authentication as the data bridge: an opaque
+      // origin reports "null", so `event.origin` cannot be the authenticator.
+      if (event.source !== iframeRef.current?.contentWindow) return;
+      if (!isArtifactFrameError(event.data)) return;
+      const message = boundBridgeErrorMessage(event.data.message);
+      if (!message) return;
+      try {
+        onDiagnostic(frameErrorDiagnostic(event.data, message));
+      } catch {
+        // Never let a consumer's throw escape a message handler.
+      }
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+    // `onDiagnostic` is a dependency rather than a render-assigned ref (which
+    // react-hooks/refs forbids): callers pass a `useCallback`-stable function,
+    // so the listener is installed once. An unstable one only costs a
+    // remove/add pair per render, never a missed message.
+  }, [iframeRef, origin, onDiagnostic]);
 }
 
 /** Shared look for the two non-executable notices (unavailable / frame error). */
@@ -606,6 +966,8 @@ export function ArtifactSandbox({
   dataBridgeEnabled = false,
   contentId,
   dataAccess,
+  versionId,
+  onDiagnostic,
 }: ArtifactSandboxProps) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   // The render URL is resolved server-side and arrives via `src`. Derive the
@@ -635,7 +997,10 @@ export function ArtifactSandbox({
     dataBridgeEnabled,
     contentId,
     dataAccess,
+    versionId,
+    onDiagnostic,
   });
+  useArtifactFrameErrors(iframeRef, origin, onDiagnostic);
 
   /**
    * Post the current code to the framed host. Reads `code` and `origin` via

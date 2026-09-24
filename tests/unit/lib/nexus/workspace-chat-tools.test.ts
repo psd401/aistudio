@@ -574,8 +574,106 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
     expect(out).not.toHaveProperty("dataAccess");
   });
 
-  // --- ITEM 2: publish / unpublish the OPEN object ---------------------------
+}
 
+/**
+ * #1787 — close the loop: the model must SEE what the preview actually failed
+ * with, or it reports success over a dashboard whose every query broke.
+ *
+ * Its own suite function so `Part3` stays inside the max-lines-per-function
+ * budget the repo lints at zero warnings.
+ */
+function defineBuildWorkspaceChatToolsPreviewDiagnosticsSuite() {
+  const PREVIEW_FAILURE = {
+    kind: "data" as const,
+    code: "query_error" as const,
+    message: 'column "school_name" does not exist',
+    sql: "SELECT school_name FROM devices",
+  };
+
+  it("read_workspace_content surfaces previewDiagnostics for the bound artifact", async () => {
+    getMock.mockResolvedValue({ ...ART, dataAccess: "query" });
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({
+      workspaceIdOrSlug: "art-1",
+      userId: 7,
+      requestId: "r",
+      previewDiagnostics: { contentId: "art-1", entries: [PREVIEW_FAILURE] },
+    }))!;
+
+    const out = (await exec(tools.read_workspace_content, {})) as Record<string, unknown>;
+
+    expect(out.previewDiagnostics).toEqual([PREVIEW_FAILURE]);
+  });
+
+  it("read_workspace_content DROPS a buffer that names a different artifact", async () => {
+    // The client buffer is one artifact at a time; a stale (or forged) one must
+    // never be reported against the object the server actually bound.
+    getMock.mockResolvedValue({ ...ART, dataAccess: "query" });
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({
+      workspaceIdOrSlug: "art-1",
+      userId: 7,
+      requestId: "r",
+      previewDiagnostics: {
+        contentId: "some-other-artifact",
+        entries: [PREVIEW_FAILURE],
+      },
+    }))!;
+
+    const out = (await exec(tools.read_workspace_content, {})) as Record<string, unknown>;
+
+    expect(out).not.toHaveProperty("previewDiagnostics");
+  });
+
+  it("read_workspace_content omits previewDiagnostics when nothing failed", async () => {
+    getMock.mockResolvedValue({ ...ART, dataAccess: "query" });
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({
+      workspaceIdOrSlug: "art-1",
+      userId: 7,
+      requestId: "r",
+      previewDiagnostics: { contentId: "art-1", entries: [] },
+    }))!;
+
+    const out = (await exec(tools.read_workspace_content, {})) as Record<string, unknown>;
+
+    expect(out).not.toHaveProperty("previewDiagnostics");
+  });
+
+  it("read_workspace_content never reports previewDiagnostics for a document", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({
+      workspaceIdOrSlug: "doc-1",
+      userId: 7,
+      requestId: "r",
+      previewDiagnostics: { contentId: "doc-1", entries: [PREVIEW_FAILURE] },
+    }))!;
+
+    const out = (await exec(tools.read_workspace_content, {})) as Record<string, unknown>;
+
+    expect(out).not.toHaveProperty("previewDiagnostics");
+  });
+
+  it("the READ tool description tells the model to check previewDiagnostics after a write", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+
+    const description = (tools.read_workspace_content as { description: string }).description;
+
+    expect(description).toContain("previewDiagnostics");
+    expect(description).toMatch(/after update_workspace_artifact/i);
+    // The buffer is read once when the request is sent, so it can never verify
+    // an edit made this turn — the description must not claim it can.
+    expect(description).toMatch(/NEVER reflect a version you write during this turn/);
+    expect(description).not.toMatch(/call this tool again after update_workspace_artifact/i);
+  });
+}
+
+/** ITEM 2: publish / unpublish the OPEN object. */
+function defineBuildWorkspaceChatToolsPublishSuite() {
   it("publish_workspace_content SNAPSHOTS the live document into a version BEFORE publishing (Codex P1)", async () => {
     getMock.mockResolvedValue(DOC);
     canEditMock.mockReturnValue(true);
@@ -797,6 +895,8 @@ const defineBuildWorkspaceChatToolsSuite1 = () => {
   defineBuildWorkspaceChatToolsSuite1Part2()
   defineBuildWorkspaceChatToolsSuite1Part2b()
   defineBuildWorkspaceChatToolsSuite1Part3()
+  defineBuildWorkspaceChatToolsPreviewDiagnosticsSuite()
+  defineBuildWorkspaceChatToolsPublishSuite()
   defineBuildWorkspaceChatToolsReadPagingSuite()
   defineBuildWorkspaceChatToolsSuite1Part4()
 };

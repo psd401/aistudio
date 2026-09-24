@@ -120,6 +120,10 @@ export default async function AtriumArtifactViewPage({
         // #1712: the mode as read for THIS load. `rowToObjectDTO` already
         // fails an out-of-enum value closed to "none".
         dataAccess={obj.dataAccess}
+        // #1787: the version THIS render loaded. This page never remounts when
+        // the head advances, so omitting it would audit a still-open old version
+        // under whatever head exists when each later query runs.
+        versionId={version?.id}
       />
     </div>
   );

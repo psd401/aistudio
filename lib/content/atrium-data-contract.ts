@@ -24,6 +24,16 @@
  * These are MODEL-FACING prompt/description text, not user-facing copy.
  */
 
+import { ARTIFACT_BRIDGE_ERROR_CODES } from "@/lib/content/artifact-bridge-errors";
+
+/**
+ * The bridge's failure codes as the guidance lists them — built from the closed
+ * set (#1787) so adding or renaming a code cannot leave the model's list stale.
+ */
+const BRIDGE_ERROR_CODE_LIST = ARTIFACT_BRIDGE_ERROR_CODES.map((code) =>
+  code === "rate_limited" ? "`rate_limited` (with `err.retryAfterSeconds`)" : `\`${code}\``
+).join(", ");
+
 /**
  * What the three `dataAccess` modes mean. Attached to every tool input that can
  * read or set the mode.
@@ -41,7 +51,8 @@ export const ATRIUM_DATA_AUTHORING_GUIDANCE =
   "DATA BRIDGE: the artifact runs in a sandbox that installs `window.AtriumData` before your code runs — it is the ONLY way an artifact can reach data (fetch/XMLHttpRequest, localStorage and sessionStorage are all blocked by the sandbox CSP and opaque origin, so never propose them). Three operations, gated by the artifact's dataAccess mode: " +
   "(1) `await AtriumData.query(sql, { limit, offset })` — requires mode 'query'; resolves to { columns: string[], rows: unknown[][], totalCount, returnedCount, limit, offset, truncated }, where each row is a TUPLE in `columns` order. The SQL is read-only and runs as the PERSON VIEWING the page, under their row-level permissions. " +
   "(2) `await AtriumData.submit(namespace, payload)` and (3) `await AtriumData.list(namespace, { limit, scope })` — require mode 'records' (the per-artifact record store). " +
-  "Rules: never embed query results in the source (they go stale and are shown to every viewer at YOUR permission level, visible verbatim in the Code tab) — query at runtime; aggregate in SQL so a chart query returns tens of rows, not a dataset; page detail tables with limit/offset; wrap EVERY call in try/catch and render a clear failure state (a rejection means no session, an expired token, no access to the table, the wrong mode, or a rate limit). " +
+  "Rules: never embed query results in the source (they go stale and are shown to every viewer at YOUR permission level, visible verbatim in the Code tab) — query at runtime; aggregate in SQL so a chart query returns tens of rows, not a dataset; page detail tables with limit/offset. " +
+  "FAILURES ARE TYPED: wrap EVERY call in try/catch and branch on `err.code`, which is one of " + BRIDGE_ERROR_CODE_LIST + ". Render a no-access/sign-in state ONLY for `forbidden` and `unauthenticated`. For `query_error` the SQL ITSELF is wrong (a bad column or syntax) — show `err.message`, which for someone who can edit the artifact is the database's own message; do NOT dress a broken query up as a permissions problem. Never assume a call succeeded, and never leave a chart silently empty on a rejection. " +
   "There are NO bound parameters: `query` takes the SQL string plus `{ limit, offset }` and nothing else. So do NOT concatenate a user-typed value into the SQL. Either fetch an aggregated/bounded result set once and filter it in JavaScript, or — when a filter really must reach the database — build the SQL from a FIXED set of predicates you wrote, selected by the user's choice (a dropdown of known values), never from free text. " +
   "'query' and 'records' are mutually exclusive — pick the one the artifact needs. Explore the data with a couple of queries at most before you start writing code. " +
   "SCRIPT TIMING: the sandbox runs your <script> tags in document order and waits for each external script to finish before the next tag runs, so inline code may use a library the tag before it loaded; after the last script it fires DOMContentLoaded on document and load on window exactly once, so a DOMContentLoaded bootstrap works.";

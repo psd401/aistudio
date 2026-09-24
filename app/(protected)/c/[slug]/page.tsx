@@ -363,6 +363,10 @@ export default async function ReaderPage({
           // open page cannot reopen the records/query exfiltration loop; the
           // Server Actions still re-check the artifact's current mode.
           dataAccess={target.dataAccess}
+          // #1787: the PUBLISHED version this page renders, so the data MCP's
+          // audit line names it rather than the working head. The server only
+          // accepts a version that belongs to this artifact.
+          versionId={version.id}
           className="atrium-artifact-reader-frame"
         />
       </ReaderFrame>

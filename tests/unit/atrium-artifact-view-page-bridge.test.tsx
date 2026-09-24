@@ -123,6 +123,17 @@ describe("Atrium full-screen artifact viewer — data bridge (#1725)", () => {
     expect(mockNotFound).not.toHaveBeenCalled();
   });
 
+  it("pins the audit to the version THIS render loaded (#1787)", async () => {
+    // The page never remounts when the head advances, so without this a
+    // still-open old version would be audited under the newer head.
+    loadByIdOrSlugMock.mockResolvedValue(ARTIFACT);
+    canViewMock.mockResolvedValue(true);
+
+    const sandbox = await renderSandbox();
+
+    expect(sandbox.props).toEqual(expect.objectContaining({ versionId: "ver-1" }));
+  });
+
   it("forwards the artifact's own mode rather than assuming query", async () => {
     loadByIdOrSlugMock.mockResolvedValue({ ...ARTIFACT, dataAccess: "records" });
     canViewMock.mockResolvedValue(true);

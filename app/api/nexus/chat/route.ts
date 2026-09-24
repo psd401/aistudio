@@ -86,7 +86,15 @@ import {
   type ApprovedSkillSession,
 } from '@/lib/skills/skill-tool-enforcement';
 import { readSkillMarkdown } from '@/lib/skills/skill-publish-pipeline';
-import { buildWorkspaceChatTools } from '@/lib/nexus/workspace-chat-tools';
+import {
+  buildWorkspaceChatTools,
+  type WorkspacePreviewDiagnostics,
+} from '@/lib/nexus/workspace-chat-tools';
+import {
+  ARTIFACT_BRIDGE_ERROR_CODES,
+  MAX_ARTIFACT_BRIDGE_ERROR_MESSAGE_LENGTH,
+} from '@/lib/content/artifact-bridge-errors';
+import { MAX_PREVIEW_DIAGNOSTICS } from '@/lib/atrium/artifact-preview-diagnostics';
 import {
   resolveWorkspace,
   type ResolvedWorkspace,
@@ -579,6 +587,30 @@ async function executeStreaming(params: {
   });
 }
 
+/**
+ * The workspace preview's recent failures, as reported by the client (#1787).
+ *
+ * Client-supplied, so bounded hard: at most `MAX_PREVIEW_DIAGNOSTICS` entries of
+ * capped length. The entries describe the VIEWER'S OWN preview of the object
+ * they have open and end up in that same viewer's model context — but they are
+ * still treated as data, never as instruction, and the tool that surfaces them
+ * verifies `contentId` against the object the server actually bound.
+ */
+const workspacePreviewDiagnosticsSchema = z.object({
+  contentId: z.string().min(1).max(200),
+  entries: z
+    .array(
+      z.object({
+        kind: z.enum(["data", "script"]),
+        code: z.enum(ARTIFACT_BRIDGE_ERROR_CODES).optional(),
+        message: z.string().min(1).max(MAX_ARTIFACT_BRIDGE_ERROR_MESSAGE_LENGTH),
+        sql: z.string().max(MAX_ARTIFACT_BRIDGE_ERROR_MESSAGE_LENGTH).optional(),
+        at: z.number().int().nonnegative().optional(),
+      })
+    )
+    .max(MAX_PREVIEW_DIAGNOSTICS),
+});
+
 // Flexible message validation that accepts various formats from the UI
 const ChatRequestSchema = z.object({
   messages: z.array(z.object({
@@ -602,6 +634,13 @@ const ChatRequestSchema = z.object({
   // the server binds read/edit tools for THAT object (Atrium §1087). Loose validation
   // only — the tool builder canView/canEdit-gates server-side; cap length like other params.
   workspaceId: z.string().min(1).max(200).optional(),
+  // #1787: what the open artifact's PREVIEW failed with since the last turn, as
+  // observed in the user's own browser. The model that wrote the code otherwise
+  // has no way to learn that its queries failed, so it reports success over a
+  // dead dashboard. Strictly bounded here AND re-bounded in the tool; the
+  // `contentId` is checked against the object actually bound before the model
+  // sees anything, so a stale/mismatched buffer is dropped rather than reported.
+  workspacePreviewDiagnostics: workspacePreviewDiagnosticsSchema.optional(),
   reasoningEffort: z.enum(['minimal', 'low', 'medium', 'high']).optional(),
   responseMode: z.enum(['standard', 'priority', 'flex']).optional(),
   nexusMode: nexusExperienceModeSchema.default('standard'),
@@ -1955,7 +1994,8 @@ async function bindWorkspaceTools(
   workspaceId: string | undefined,
   userId: number,
   requestId: string,
-  resolved: ResolvedWorkspace | null
+  resolved: ResolvedWorkspace | null,
+  previewDiagnostics: WorkspacePreviewDiagnostics | undefined
 ): Promise<Awaited<ReturnType<typeof buildWorkspaceChatTools>>> {
   // `resolved` is this same object, already fetched for routing earlier in the
   // request (#1786), and it is the ONLY resolution this turn may bind from.
@@ -1969,6 +2009,7 @@ async function bindWorkspaceTools(
     userId,
     requestId,
     preloaded: { requester: resolved.requester, object: resolved.object },
+    previewDiagnostics,
   });
 }
 
@@ -1983,12 +2024,15 @@ async function bindWorkspaceToolsForChat(args: {
   requestId: string;
   skillAllowedTools: string[];
   resolvedWorkspace: ResolvedWorkspace | null;
+  /** #1787: the preview failures the client observed since the last turn. */
+  previewDiagnostics: WorkspacePreviewDiagnostics | undefined;
 }): Promise<{ workspaceTools: ToolSet | undefined; workspacePromptFragment: string | undefined }> {
   const workspace = await bindWorkspaceTools(
     args.workspaceId,
     args.userId,
     args.requestId,
-    args.resolvedWorkspace
+    args.resolvedWorkspace,
+    args.previewDiagnostics
   );
   const workspaceTools = filterWorkspaceToolsBySkillPin(workspace?.tools, args.skillAllowedTools);
   // Drop the prompt fragment when the pin filtered every workspace tool away.
@@ -2724,6 +2768,8 @@ async function resolveToolsAndStream(params: {
       requestId: params.requestId,
       skillAllowedTools: skillBinding.skillAllowedTools,
       resolvedWorkspace: prepared.workspace,
+      previewDiagnostics:
+        prepared.validationData.workspacePreviewDiagnostics,
     });
   // #1786: the artifact-authoring guidance tells the model to explore the data
   // first. When this turn ended up with no PSD Data tools, say so in the same

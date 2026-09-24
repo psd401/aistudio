@@ -35,6 +35,10 @@ import { useVoiceSession } from './_components/voice-mode/use-voice-session'
 import { getNexusChatPreferences, updateNexusChatPreferences } from '@/actions/settings/user-settings.actions'
 import type { NexusExperienceMode, NexusModelFamily } from '@/lib/nexus/model-router/types'
 import { createSynchronousValueAccessor } from '@/lib/nexus/synchronous-value-accessor'
+import {
+  restoreTakenArtifactPreviewDiagnostics,
+  takeArtifactPreviewDiagnostics,
+} from '@/lib/atrium/artifact-preview-diagnostics'
 import { RepositoryPicker } from '@/components/features/repositories/repository-picker'
 import { Button } from '@/components/ui/button'
 import { Database } from 'lucide-react'
@@ -296,12 +300,19 @@ async function fetchNexusChat(
   init: RequestInit | undefined,
   context: NexusFetchContext
 ): Promise<Response> {
-  if (context.runtimeValues.get().sessionStatus === 'unauthenticated') {
-    throwSessionExpired('Pre-send check: session unauthenticated, blocking chat request')
+  let response: Response
+  try {
+    if (context.runtimeValues.get().sessionStatus === 'unauthenticated') {
+      throwSessionExpired('Pre-send check: session unauthenticated, blocking chat request')
+    }
+    response = await fetchNexusResponse(input, init)
+    await handleNexusResponseErrors(response)
+  } catch (error) {
+    // #1787: body() TOOK the preview diagnostics for this request. It never
+    // reached the server, so put them back for the next send.
+    restoreTakenArtifactPreviewDiagnostics()
+    throw error
   }
-
-  const response = await fetchNexusResponse(input, init)
-  await handleNexusResponseErrors(response)
   applyConversationHeader(response, context)
   applyConnectorToolsHeader(response, context)
   applyConnectorReconnectHeader(response, context)
@@ -417,6 +428,19 @@ function ConversationRuntimeProvider({
           projectId,
           // Bind the open workspace object so the server offers §1087 read/edit tools.
           workspaceId: values.workspaceId || undefined,
+          // #1787: carry what the open artifact's PREVIEW failed with since the
+          // last turn, so `read_workspace_content` can show the model its own
+          // broken SQL instead of letting it report success over a dead
+          // dashboard. Read from a module-level buffer rather than a panel
+          // subscription — the workspace panel is a layout sibling of this
+          // runtime and neither may reach into the other (see
+          // lib/atrium/artifact-preview-diagnostics.ts and
+          // docs/features/nexus-conversation-architecture.md). The SERVER drops
+          // the buffer unless its contentId matches the object it bound.
+          // TAKEN, not read: sending empties the buffer, so each failure is
+          // reported to the model once rather than on every later turn.
+          workspacePreviewDiagnostics:
+            takeArtifactPreviewDiagnostics() ?? undefined,
           conversationId: values.conversationId || undefined,
           repositoryIds: values.repositorySelectionLoaded
             ? values.selectedRepositoryIds
