@@ -505,6 +505,29 @@ const RECORD_OP_FAILURE: ArtifactDataFailure = {
   error: DATA_BRIDGE_ERROR_MESSAGE,
 };
 
+/** A query the bridge refused as malformed or oversized, before any server call. */
+const MALFORMED_QUERY_FAILURE: ArtifactDataFailure = {
+  code: "query_error",
+  error: "The data request was rejected as malformed or oversized.",
+};
+
+/**
+ * The `requestId` of a message that IS a data request by envelope (right type,
+ * well-formed id) but failed `isArtifactDataRequest` — empty or oversized SQL, a
+ * negative `limit`, a bad record payload. Such a request still gets an answer:
+ * dropping it left `AtriumData.*` waiting out its own timeout and reporting
+ * `timeout` for what is really a bad argument, with no preview diagnostic.
+ */
+function malformedDataRequestId(data: unknown): string | null {
+  if (typeof data !== "object" || data === null) return null;
+  const candidate = data as Record<string, unknown>;
+  if (candidate.type !== "atrium-artifact-data-request") return null;
+  const requestId = candidate.requestId;
+  return typeof requestId === "string" && REQUEST_ID_RE.test(requestId)
+    ? requestId
+    : null;
+}
+
 /**
  * Per-op parent-side bounds. The Server Actions remain the authority and repeat
  * their own validation; this mirror keeps an oversized or malformed request from
@@ -685,12 +708,7 @@ function parentSideRefusal(args: {
   if (!isRequestWithinBridgeBounds(args.request)) {
     // Only `query` gets the sharper code: a record op has no typed vocabulary
     // of its own (see RECORD_OP_FAILURE), so it keeps its pre-#1787 answer.
-    return isQuery
-      ? {
-          code: "query_error",
-          error: "The data request was rejected as malformed or oversized.",
-        }
-      : RECORD_OP_FAILURE;
+    return isQuery ? MALFORMED_QUERY_FAILURE : RECORD_OP_FAILURE;
   }
   if (args.inFlight >= MAX_IN_FLIGHT_DATA_REQUESTS) {
     return codedFailure("too_many_requests");
@@ -720,14 +738,19 @@ function useArtifactDataBridge({
     };
   }, []);
   const reportDiagnostic = useCallback(
-    (request: ArtifactDataRequest, failure: ArtifactDataFailure): void => {
+    (
+      request: { op?: unknown; sql?: unknown },
+      failure: ArtifactDataFailure
+    ): void => {
       if (!mountedRef.current) return;
       try {
         onDiagnostic?.({
           kind: "data",
           code: failure.code,
           message: failure.error,
-          ...(request.op === "query" ? { sql: request.sql } : {}),
+          ...(request.op === "query" && typeof request.sql === "string"
+            ? { sql: request.sql.slice(0, MAX_QUERY_SQL_LENGTH) }
+            : {}),
         });
       } catch {
         // A broken consumer must never turn a data failure into a crash — the
@@ -811,6 +834,31 @@ function useArtifactDataBridge({
     [contentId, dataBridgeEnabled, versionId, reportDiagnostic]
   );
 
+  /**
+   * Answer a request the narrowing predicate rejected (see
+   * `malformedDataRequestId`). Nothing reaches a Server Action. A query gets
+   * the same answer `parentSideRefusal` gives an out-of-bounds one — or
+   * `not_query_mode` when the loaded mode forbids queries at all — and a
+   * record op keeps its generic pre-#1787 failure.
+   */
+  const handleMalformedRequest = useCallback(
+    (data: unknown, frameWindow: Window): void => {
+      const requestId = malformedDataRequestId(data);
+      if (!requestId) return;
+      const request = data as { op?: unknown; sql?: unknown };
+      let failure = RECORD_OP_FAILURE;
+      if (dataBridgeEnabled && contentId && request.op === "query") {
+        failure = isOpAllowedByLoadedMode("query", loadedDataAccessRef.current)
+          ? MALFORMED_QUERY_FAILURE
+          : codedFailure("not_query_mode");
+      }
+      reportDiagnostic(request, failure);
+      frameWindow.postMessage(dataBridgeFailure(requestId, failure), "*");
+    },
+    // `loadedDataAccessRef` is a stable ref (see handleDataRequest).
+    [contentId, dataBridgeEnabled, reportDiagnostic]
+  );
+
   useEffect(() => {
     if (!origin) return;
     const onDataMessage = (event: MessageEvent) => {
@@ -819,12 +867,15 @@ function useArtifactDataBridge({
       // authentication. event.origin is intentionally not consulted: a real
       // `sandbox="allow-scripts"` frame has the opaque serialized origin "null".
       if (!frameWindow || event.source !== frameWindow) return;
-      if (!isArtifactDataRequest(event.data)) return;
-      void handleDataRequest(event.data, frameWindow);
+      if (isArtifactDataRequest(event.data)) {
+        void handleDataRequest(event.data, frameWindow);
+        return;
+      }
+      handleMalformedRequest(event.data, frameWindow);
     };
     window.addEventListener("message", onDataMessage);
     return () => window.removeEventListener("message", onDataMessage);
-  }, [handleDataRequest, iframeRef, origin]);
+  }, [handleDataRequest, handleMalformedRequest, iframeRef, origin]);
 }
 
 /**

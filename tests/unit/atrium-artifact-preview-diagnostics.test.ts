@@ -23,6 +23,7 @@ import {
   clearArtifactPreviewDiagnostics,
   readArtifactPreviewDiagnostics,
   recordArtifactPreviewDiagnostic,
+  restoreTakenArtifactPreviewDiagnostics,
   takeArtifactPreviewDiagnostics,
 } from "@/lib/atrium/artifact-preview-diagnostics";
 
@@ -178,5 +179,51 @@ describe("artifact preview diagnostics buffer", () => {
     // A failure the preview hits AGAIN after the send is reported again.
     recordArtifactPreviewDiagnostic("art-1", { kind: "script", message: "boom" });
     expect(takeArtifactPreviewDiagnostics()?.entries).toHaveLength(1);
+  });
+
+  it("RESTORES taken entries when the send that carried them failed", () => {
+    recordArtifactPreviewDiagnostic("art-1", { kind: "script", message: "old" });
+    takeArtifactPreviewDiagnostics();
+    // Recorded after the take, while the failed request was in flight.
+    recordArtifactPreviewDiagnostic("art-1", { kind: "script", message: "new" });
+
+    restoreTakenArtifactPreviewDiagnostics();
+
+    expect(
+      readArtifactPreviewDiagnostics()?.entries.map((entry) => entry.message)
+    ).toEqual(["old", "new"]);
+  });
+
+  it("restores only once", () => {
+    recordArtifactPreviewDiagnostic("art-1", { kind: "script", message: "boom" });
+    takeArtifactPreviewDiagnostics();
+
+    restoreTakenArtifactPreviewDiagnostics();
+    restoreTakenArtifactPreviewDiagnostics();
+
+    expect(readArtifactPreviewDiagnostics()?.entries).toHaveLength(1);
+  });
+
+  it("does NOT restore once a new version cleared the buffer", () => {
+    recordArtifactPreviewDiagnostic("art-1", { kind: "script", message: "stale" });
+    takeArtifactPreviewDiagnostics();
+    clearArtifactPreviewDiagnostics();
+
+    restoreTakenArtifactPreviewDiagnostics();
+
+    expect(readArtifactPreviewDiagnostics()).toBeNull();
+  });
+
+  it("does NOT restore over a different artifact's failures", () => {
+    recordArtifactPreviewDiagnostic("art-1", { kind: "script", message: "from A" });
+    takeArtifactPreviewDiagnostics();
+    recordArtifactPreviewDiagnostic("art-2", { kind: "script", message: "from B" });
+
+    restoreTakenArtifactPreviewDiagnostics();
+
+    expect(readArtifactPreviewDiagnostics()).toEqual({
+      contentId: "art-2",
+      entries: [{ kind: "script", message: "from B", at: expect.any(Number) }],
+    });
   });
 });

@@ -71,6 +71,12 @@ interface DiagnosticsBuffer {
  */
 let buffer: DiagnosticsBuffer | null = null;
 
+/** Bumped by every clear, so a restore can tell the preview has moved on. */
+let generation = 0;
+
+/** What the last take removed, held until the send it rode on succeeds or fails. */
+let lastTaken: { generation: number; taken: DiagnosticsBuffer } | null = null;
+
 /** Record one preview failure for `contentId`, evicting the oldest past the cap. */
 export function recordArtifactPreviewDiagnostic(
   contentId: string,
@@ -121,7 +127,31 @@ export function takeArtifactPreviewDiagnostics(): ReturnType<
 > {
   const taken = readArtifactPreviewDiagnostics();
   buffer = null;
+  lastTaken = taken ? { generation, taken } : null;
   return taken;
+}
+
+/**
+ * Put the last TAKEN entries back because the request that carried them never
+ * reached the server (a pre-send session check, a network error, a non-2xx).
+ * Without this a failed send silently loses them, and the preview may never
+ * re-run the failing query to record them again.
+ *
+ * Skipped when the preview moved on since the take — a clear (new version or
+ * mode) or a different artifact — because those entries no longer describe the
+ * code on screen. Restored entries go BEFORE anything recorded since, oldest
+ * first, under the same cap.
+ */
+export function restoreTakenArtifactPreviewDiagnostics(): void {
+  const pending = lastTaken;
+  lastTaken = null;
+  if (!pending || pending.generation !== generation) return;
+  const { contentId, entries } = pending.taken;
+  if (buffer && buffer.contentId !== contentId) return;
+  buffer = {
+    contentId,
+    entries: [...entries, ...(buffer?.entries ?? [])].slice(-MAX_PREVIEW_DIAGNOSTICS),
+  };
 }
 
 /**
@@ -131,4 +161,6 @@ export function takeArtifactPreviewDiagnostics(): ReturnType<
  */
 export function clearArtifactPreviewDiagnostics(): void {
   buffer = null;
+  generation += 1;
+  lastTaken = null;
 }

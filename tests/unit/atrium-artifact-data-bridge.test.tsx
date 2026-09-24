@@ -312,6 +312,19 @@ describe("ArtifactSandbox artifact data bridge", () => {
  * frame's message; every other field (contentId, tool name, export, format,
  * reason) is either taken from trusted props or forced by the Server Action.
  */
+/**
+ * #1787: a query the narrowing predicate rejects is ANSWERED at once with
+ * `query_error` — not dropped, which left the artifact waiting out the host's
+ * 45s timeout and reporting `timeout` for a bad argument.
+ */
+function expectMalformedQueryAnswer(postMessage: jest.Mock): void {
+  expect(dataResponses(postMessage)).toEqual([
+    expect.objectContaining({
+      message: expect.objectContaining({ ok: false, code: "query_error" }),
+    }),
+  ]);
+}
+
 describe("ArtifactSandbox viewer-scoped query bridge", () => {
   it("copies only sql/limit/offset and uses the trusted prop contentId", async () => {
     const { frameWindow, postMessage } = mountSandbox(true, "query");
@@ -346,7 +359,7 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
     expect(listArtifactRecordsMock).not.toHaveBeenCalled();
   });
 
-  it("drops a query request with no sql without invoking the action", async () => {
+  it("answers a query request with no sql as query_error without invoking the action", async () => {
     const { frameWindow, postMessage } = mountSandbox(true, "query");
 
     await sendMessage(
@@ -359,7 +372,7 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
     );
 
     expect(queryArtifactDataMock).not.toHaveBeenCalled();
-    expect(dataResponses(postMessage)).toEqual([]);
+    expectMalformedQueryAnswer(postMessage);
   });
 
   it("refuses oversized SQL before serializing a Server Action payload", async () => {
@@ -376,10 +389,10 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
     );
 
     expect(queryArtifactDataMock).not.toHaveBeenCalled();
-    expect(dataResponses(postMessage)).toEqual([]);
+    expectMalformedQueryAnswer(postMessage);
   });
 
-  it("drops whitespace-only SQL without invoking the action", async () => {
+  it("answers whitespace-only SQL as query_error without invoking the action", async () => {
     const { frameWindow, postMessage } = mountSandbox(true, "query");
 
     await sendMessage(
@@ -393,10 +406,10 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
     );
 
     expect(queryArtifactDataMock).not.toHaveBeenCalled();
-    expect(dataResponses(postMessage)).toEqual([]);
+    expectMalformedQueryAnswer(postMessage);
   });
 
-  it("drops a negative limit without invoking the action", async () => {
+  it("answers a negative limit as query_error without invoking the action", async () => {
     const { frameWindow, postMessage } = mountSandbox(true, "query");
 
     await sendMessage(
@@ -411,10 +424,10 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
     );
 
     expect(queryArtifactDataMock).not.toHaveBeenCalled();
-    expect(dataResponses(postMessage)).toEqual([]);
+    expectMalformedQueryAnswer(postMessage);
   });
 
-  it("drops a negative offset without invoking the action", async () => {
+  it("answers a negative offset as query_error without invoking the action", async () => {
     const { frameWindow, postMessage } = mountSandbox(true, "query");
 
     await sendMessage(
@@ -429,7 +442,7 @@ describe("ArtifactSandbox viewer-scoped query bridge", () => {
     );
 
     expect(queryArtifactDataMock).not.toHaveBeenCalled();
-    expect(dataResponses(postMessage)).toEqual([]);
+    expectMalformedQueryAnswer(postMessage);
   });
 
   it("refuses every query when the bridge is disabled", async () => {
@@ -993,8 +1006,11 @@ describe("ArtifactSandbox preview diagnostics (#1787)", () => {
     ]);
   });
 
-  it("stays silent for a request the narrowing predicate never recognized", async () => {
-    const { frameWindow, diagnostics } = mountQuerySandbox();
+  it("ANSWERS a malformed query instead of letting it time out", async () => {
+    // Oversized SQL fails the narrowing predicate. Before, it was dropped: the
+    // artifact waited out its own timeout and reported `timeout` for what is
+    // really a bad argument, and no diagnostic was recorded (Codex P2, #1808).
+    const { frameWindow, postMessage, diagnostics } = mountQuerySandbox();
 
     await sendMessage(
       {
@@ -1005,9 +1021,46 @@ describe("ArtifactSandbox preview diagnostics (#1787)", () => {
     );
 
     expect(queryArtifactDataMock).not.toHaveBeenCalled();
-    // The narrowing predicate drops oversized SQL before it is even recognized
-    // as a request, so nothing is reported — the frame simply times out. The
-    // in-bounds refusals below are the ones a page can actually observe.
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "atrium-artifact-data-response",
+        requestId: DIAGNOSTIC_REQUEST_IDS[0],
+        ok: false,
+        code: "query_error",
+      }),
+      "*"
+    );
+    expect(diagnostics).toEqual([
+      expect.objectContaining({ kind: "data", code: "query_error" }),
+    ]);
+    // The recorded SQL is bounded to the bridge's own SQL cap.
+    expect(diagnostics[0]?.sql).toHaveLength(8_000);
+  });
+
+  it("answers a negative limit as query_error", async () => {
+    const { frameWindow, postMessage } = mountQuerySandbox();
+
+    await sendMessage(
+      { ...queryRequest(DIAGNOSTIC_REQUEST_IDS[0]), limit: -1 },
+      frameWindow
+    );
+
+    expect(queryArtifactDataMock).not.toHaveBeenCalled();
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ ok: false, code: "query_error" }),
+      "*"
+    );
+  });
+
+  it("still ignores a message that is not a data request at all", async () => {
+    const { frameWindow, postMessage, diagnostics } = mountQuerySandbox();
+
+    await sendMessage(
+      { type: "atrium-artifact-data-request", requestId: "bad id!", op: "query" },
+      frameWindow
+    );
+
+    expect(postMessage).not.toHaveBeenCalled();
     expect(diagnostics).toEqual([]);
   });
 
