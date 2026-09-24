@@ -136,8 +136,15 @@ function renderHostHtml(allowedParentOrigins: string[]): string {
   return renderAtriumSandboxHostPage(template, allowedParentOrigins, csp);
 }
 
-/** How a stubbed external `<script src>` resolves. */
-type StubScript = { kind: "ok"; source: string } | { kind: "error" };
+/**
+ * How a stubbed external `<script src>` resolves. `pending` never settles, so
+ * the chain waiting on it stays parked for the whole test — the state a render
+ * has to be in to be superseded mid-chain.
+ */
+type StubScript =
+  | { kind: "ok"; source: string }
+  | { kind: "error" }
+  | { kind: "pending" };
 
 /**
  * Serves stubbed sources for the exact `src` URLs a test declares, so the
@@ -155,7 +162,9 @@ class StubScriptLoader extends ResourceLoader {
     const promise =
       stub.kind === "error"
         ? Promise.reject<Buffer>(new Error("stubbed load failure"))
-        : Promise.resolve(Buffer.from(stub.source, "utf8"));
+        : stub.kind === "pending"
+          ? new Promise<Buffer>(() => {})
+          : Promise.resolve(Buffer.from(stub.source, "utf8"));
     // jsdom's loader contract wants an abortable promise; nothing in these
     // tests aborts, so a no-op abort satisfies it.
     return Object.assign(promise, { abort: () => {} });
@@ -918,6 +927,81 @@ async function testResumedChainSurvivesTamperedGlobals(): Promise<void> {
   assert.deepEqual(uncaught, [], "the resumed chain's error escaped uncaught");
 }
 
+/**
+ * Supersession must not leave a stale bootstrap armed (#1795 review, P2).
+ *
+ * The parent re-posts the artifact until its ack lands, so a second render
+ * routinely arrives while the first chain is still parked on a CDN. Bumping the
+ * render generation abandons that chain, but it cannot unregister the
+ * DOMContentLoaded/load handlers the chain's EARLIER inline scripts already
+ * installed on window/document. Without the tracking purge, the replacement
+ * chain's synthetic dispatch runs those stale handlers too, initializing the
+ * artifact twice and repeating side effects such as AtriumData.submit.
+ *
+ * The listener therefore has to be registered BEFORE the script that parks the
+ * chain — a listener that sits after it is never reached, which is why the
+ * ordering test does not catch this.
+ */
+async function testSupersededChainLeavesNoStaleLifecycleListener(): Promise<void> {
+  const { window, acks } = makeHost([APP_ORIGIN], {
+    externalScripts: { [CHART_CDN_URL]: { kind: "pending" } },
+  });
+  // The parked script leaves the chain's 60s fallback timer armed, so the
+  // window is torn down at the end: otherwise it holds the process open for a
+  // full minute after the assertions are done.
+  try {
+    await whenHostLoaded(window);
+    seedArtifactLog(window);
+
+    const superseded =
+      "<script>" +
+      'document.addEventListener("DOMContentLoaded", function () {' +
+      ' window.__artifactLog.push("STALE DOMContentLoaded"); });' +
+      'window.addEventListener("load", function () {' +
+      ' window.__artifactLog.push("STALE load"); });' +
+      'window.__artifactLog.push("stale listeners registered");' +
+      CLOSE_SCRIPT +
+      // Parks the chain here: the stub never settles, and the per-script
+      // fallback is 60s, so this render is still mid-chain when the next lands.
+      '<script src="' +
+      CHART_CDN_URL +
+      '">' +
+      CLOSE_SCRIPT;
+
+    postToHost(
+      window,
+      APP_ORIGIN,
+      { type: "atrium-render", code: superseded },
+      acks
+    );
+    await waitFor(
+      () => artifactLog(window).includes("stale listeners registered"),
+      "the superseded render's inline script to register its listeners"
+    );
+
+    // The parent re-posts because the first ack was slow; this is the live chain.
+    postToHost(
+      window,
+      APP_ORIGIN,
+      { type: "atrium-render", code: LIFECYCLE_ARTIFACT_SCRIPT },
+      acks
+    );
+    await waitFor(
+      () => artifactLog(window).includes("load"),
+      "the replacement chain's synthetic load event"
+    );
+    await settle();
+
+    assert.deepEqual(
+      artifactLog(window),
+      ["stale listeners registered", "DOMContentLoaded", "load"],
+      "the superseded render's lifecycle handlers fired again"
+    );
+  } finally {
+    window.close();
+  }
+}
+
 async function main(): Promise<void> {
   await check("renders artifact markup for an allowlisted parent origin", () => {
     const { window, acks } = makeHost([APP_ORIGIN]);
@@ -1032,6 +1116,10 @@ async function main(): Promise<void> {
   await check(
     "#1785 the resumed chain survives tampered globals and never throws uncaught",
     testResumedChainSurvivesTamperedGlobals
+  );
+  await check(
+    "#1785 a superseded chain's lifecycle listeners do not fire on the replacement render",
+    testSupersededChainLeavesNoStaleLifecycleListener
   );
 
   await check("the deployed host page hard-codes no allow-same-origin and embeds the allowlist", () => {

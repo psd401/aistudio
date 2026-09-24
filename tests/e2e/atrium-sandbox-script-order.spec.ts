@@ -182,7 +182,17 @@ test.describe("Atrium sandbox host — script order and lifecycle events (#1785)
 
     await render(
       page,
-      `<script src="${CHART_CDN_URL}">` +
+      // The lifecycle handlers are registered BEFORE the script that parks the
+      // chain, so they are live when the supersession lands. Abandoning the
+      // chain cannot unregister them; if the replacement chain does not drop
+      // them first, its synthetic dispatch re-enters this dead artifact.
+      "<script>" +
+        'document.addEventListener("DOMContentLoaded", function () {' +
+        ' window.__artifactLog.push("STALE DOMContentLoaded"); });' +
+        'window.addEventListener("load", function () {' +
+        ' window.__artifactLog.push("STALE load"); });' +
+        CLOSE_SCRIPT +
+        `<script src="${CHART_CDN_URL}">` +
         CLOSE_SCRIPT +
         "<script>" +
         'window.__artifactLog.push("first artifact");' +
@@ -204,7 +214,10 @@ test.describe("Atrium sandbox host — script order and lifecycle events (#1785)
       .toEqual(["second artifact", "DOMContentLoaded", "load"]);
 
     // Let the stale CDN answer — the library running proves it did — then give
-    // any (incorrect) resumed stale chain time to act; it must stay dead.
+    // any (incorrect) resumed stale chain time to act; it must stay dead. The
+    // absence of the STALE entries is the #1795-review assertion: the
+    // superseded render's lifecycle handlers were unregistered, not merely
+    // left unreachable by the abandoned chain.
     await expect.poll(() => chartType(page)).toBe("function");
     await page.waitForTimeout(500);
     expect(await readLog(page)).toEqual([

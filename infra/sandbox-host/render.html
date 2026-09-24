@@ -336,6 +336,110 @@
         // an earlier chain is still waiting on a CDN.
         var renderGeneration = 0;
 
+        // Lifecycle listeners the ARTIFACT registered (#1785). Abandoning a
+        // superseded chain stops it running more scripts, but it cannot
+        // unregister what its earlier inline scripts already put on
+        // window/document: a stale `DOMContentLoaded`/`load` handler stays
+        // live, and the replacement chain's synthetic dispatch then runs it
+        // alongside the current one — initializing the artifact twice and
+        // repeating side effects such as `AtriumData.submit`. This is the
+        // ordinary retry path, not an edge case: the parent re-posts the code
+        // until it is acked, so a second render lands whenever the first ack is
+        // slow. The same applies across artifacts, where a PREVIOUS artifact's
+        // handlers would otherwise see the next one's lifecycle pair.
+        //
+        // So record every lifecycle registration against the generation that
+        // made it, and drop the other generations' when a new chain starts.
+        // Best-effort by design: an artifact that replaces
+        // `document.addEventListener` outright stops being tracked, and the
+        // chain's own dispatch primitives were captured up-front regardless.
+        var LIFECYCLE_EVENT_TYPES = ["DOMContentLoaded", "load"];
+        var artifactLifecycleListeners = [];
+
+        /** `removeEventListener` matches on the capture flag alone. */
+        function captureFlagOf(options) {
+          if (options && typeof options === "object") return !!options.capture;
+          return !!options;
+        }
+
+        /**
+         * Shadow `addEventListener` on one target so lifecycle registrations
+         * made while a render chain is running are recorded. Registrations from
+         * before the first render (the host's own) have generation 0 and are
+         * never touched.
+         */
+        function trackLifecycleListeners(target, add, remove) {
+          var wrapped = function (type, listener) {
+            if (
+              renderGeneration !== 0 &&
+              listener &&
+              LIFECYCLE_EVENT_TYPES.indexOf(type) !== -1
+            ) {
+              artifactLifecycleListeners.push({
+                generation: renderGeneration,
+                remove: remove,
+                type: type,
+                listener: listener,
+                capture: captureFlagOf(arguments[2]),
+              });
+            }
+            return add.apply(null, arguments);
+          };
+          try {
+            Object.defineProperty(target, "addEventListener", {
+              value: wrapped,
+              writable: true,
+              configurable: true,
+              enumerable: false,
+            });
+          } catch (err) {
+            // A browser that refuses the shadow keeps the native method; the
+            // double-dispatch this prevents is strictly better than a host that
+            // fails to load.
+            logError("Atrium sandbox: lifecycle listener tracking unavailable:", err);
+          }
+        }
+
+        trackLifecycleListeners(
+          document,
+          document.addEventListener.bind(document),
+          document.removeEventListener.bind(document)
+        );
+        trackLifecycleListeners(
+          window,
+          window.addEventListener.bind(window),
+          window.removeEventListener.bind(window)
+        );
+
+        /**
+         * Unregister the lifecycle listeners that belong to any generation
+         * other than the current one, so neither a superseded chain nor a
+         * previous artifact can be re-entered by this chain's dispatch.
+         */
+        function dropStaleLifecycleListeners() {
+          var kept = [];
+          for (var i = 0; i < artifactLifecycleListeners.length; i++) {
+            var entry = artifactLifecycleListeners[i];
+            if (entry.generation === renderGeneration) {
+              kept.push(entry);
+              continue;
+            }
+            try {
+              // Object form, not the boolean shorthand: both are spec-legal in
+              // a browser, but some EventTarget implementations only match the
+              // capture flag when it arrives as `{ capture }`, and a silently
+              // unmatched remove leaves exactly the stale handler this drops.
+              entry.remove(entry.type, entry.listener, { capture: entry.capture });
+            } catch (err) {
+              // An artifact that broke removeEventListener must not stop the
+              // new render; the worst case is the stale handler this was meant
+              // to drop.
+              logError("Atrium sandbox: could not drop a stale lifecycle listener:", err);
+            }
+          }
+          artifactLifecycleListeners = kept;
+        }
+
         /**
          * Does the chain have to WAIT for this script, rather than assume it ran
          * on insertion? External classic scripts must be fetched, and module
@@ -361,15 +465,19 @@
 
           renderGeneration += 1;
           var generation = renderGeneration;
+          // Any chain this one supersedes — and any previous artifact — loses
+          // its lifecycle handlers now, before this chain can dispatch to them.
+          dropStaleLifecycleListeners();
           var index = 0;
           var deadline = now() + SCRIPT_CHAIN_DEADLINE_MS;
 
           function finish() {
             // Listener exceptions do not propagate out of dispatchEvent, so a
-            // broken artifact bootstrap cannot break the host here. Listeners a
-            // PREVIOUS artifact registered on window/document also still exist
-            // (innerHTML cannot unregister them, exactly as it cannot undo any
-            // other global it set) and will see this pair too.
+            // broken artifact bootstrap cannot break the host here. Only THIS
+            // generation's handlers are still registered: innerHTML cannot
+            // unregister a previous artifact's listeners (any more than it can
+            // undo the other globals it set), so dropStaleLifecycleListeners()
+            // removed the tracked ones when this chain started.
             dispatchOnDocument(new EventCtor("DOMContentLoaded", { bubbles: true }));
             dispatchOnWindow(new EventCtor("load"));
           }
