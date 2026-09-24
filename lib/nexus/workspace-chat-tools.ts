@@ -482,15 +482,27 @@ function narrowDataAccess(value: unknown): ContentDataAccess | null {
  * Returns `{ error }` (never throws): a tool reports a bad argument back to the
  * model as a result, it does not blow up the turn. Extracted to keep `execute`
  * inside the complexity budget.
+ *
+ * #1791 finding 4: `code` is optional WHEN `dataAccess` is supplied. "Switch
+ * this to live data" is a one-field change, and requiring `code` forced the
+ * model to re-emit the entire 20-60 KB source to make it — slow, expensive, and
+ * at real risk of blowing the per-step stream budget for no benefit. A call with
+ * `dataAccess` and no `code` is a mode-only change and creates NO new version.
+ * At least one of the two is still required: a call with neither is a no-op the
+ * model should be told about rather than silently succeeding.
  */
 function parseArtifactUpdateArgs(
   args: { code?: unknown; summary?: unknown; dataAccess?: unknown } | undefined
 ):
-  | { code: string; summary: string | undefined; dataAccess: ContentDataAccess | null }
+  | {
+      code: string | null;
+      summary: string | undefined;
+      dataAccess: ContentDataAccess | null;
+    }
   | { error: string } {
-  const code = typeof args?.code === "string" ? args.code : "";
-  if (!code.trim()) return { error: "No code provided for the new version." };
-  if (Buffer.byteLength(code, "utf8") > MAX_EDIT_BYTES) {
+  const rawCode = typeof args?.code === "string" ? args.code : "";
+  const hasCode = rawCode.trim().length > 0;
+  if (hasCode && Buffer.byteLength(rawCode, "utf8") > MAX_EDIT_BYTES) {
     return { error: "That artifact is too large to save in one step." };
   }
   let dataAccess: ContentDataAccess | null = null;
@@ -502,8 +514,14 @@ function parseArtifactUpdateArgs(
       };
     }
   }
+  if (!hasCode && dataAccess === null) {
+    return {
+      error:
+        "Nothing to change: provide `code` for a new version, or `dataAccess` alone to change only the sandbox data mode.",
+    };
+  }
   return {
-    code,
+    code: hasCode ? rawCode : null,
     summary: typeof args?.summary === "string" ? args.summary : undefined,
     dataAccess,
   };
@@ -526,7 +544,8 @@ async function applyDataAccessAfterVersion(args: {
   req: NonNullable<Awaited<ReturnType<typeof requesterForUserId>>>;
   objectId: string;
   dataAccess: ContentDataAccess | null;
-  versionNumber: number;
+  /** Absent on a mode-only call (#1791 finding 4) — no version was written. */
+  versionNumber?: number;
   log: ReturnType<typeof createLogger>;
 }): Promise<{ dataAccess?: ContentDataAccess; warning?: string }> {
   const { req, objectId, dataAccess, versionNumber, log } = args;
@@ -542,7 +561,12 @@ async function applyDataAccessAfterVersion(args: {
       error: err instanceof Error ? err.message : String(err),
     });
     return {
-      warning: `The new code was saved, but the data access mode could NOT be changed to '${dataAccess}' — the artifact still has its previous mode, so any AtriumData call the new code makes for '${dataAccess}' will be rejected by the sandbox until the mode is changed. Tell the user that the code landed and the mode did not, and offer to retry.`,
+      warning:
+        versionNumber === undefined
+          ? // Mode-only call (#1791 finding 4): there is no "the code landed"
+            // half to report — nothing changed at all.
+            `The data access mode could NOT be changed to '${dataAccess}'. Nothing was changed — the artifact still has its previous mode, so any AtriumData call it makes for '${dataAccess}' will be rejected by the sandbox. Tell the user the change did not apply, and offer to retry.`
+          : `The new code was saved, but the data access mode could NOT be changed to '${dataAccess}' — the artifact still has its previous mode, so any AtriumData call the new code makes for '${dataAccess}' will be rejected by the sandbox until the mode is changed. Tell the user that the code landed and the mode did not, and offer to retry.`,
     };
   }
 }
@@ -559,6 +583,9 @@ function buildArtifactUpdateTool(
     description:
       "Update the ARTIFACT open in the workspace panel by creating a new version with the given full source code. The new version appears in the artifact's version dropdown. Provide the COMPLETE code (it replaces the current version's code), not a diff. " +
       "Pass dataAccess to also switch the artifact's sandbox data-bridge mode in the same call — do that whenever the user asks for a LIVE dashboard, because code written against the wrong mode is rejected by the sandbox at runtime. " +
+      // #1791 finding 4: a mode switch used to force a full re-emit of the
+      // source. Say plainly that it does not, so the model takes the cheap path.
+      "To change ONLY the data mode, send dataAccess with NO code: that changes the mode in place and creates no new version. Do that whenever the existing code already works under the new mode — do NOT re-send the whole source just to flip the mode. " +
       ATRIUM_DATA_AUTHORING_GUIDANCE +
       // #1750 — same CSP rule the MCP content tools carry, from the same
       // allowlist the sandbox host's CSP is built from. A blocked CDN script
@@ -568,7 +595,7 @@ function buildArtifactUpdateTool(
       " " +
       buildArtifactCspGuidance(),
     inputSchema: jsonSchema<{
-      code: string;
+      code?: string;
       summary?: string;
       dataAccess?: ContentDataAccess;
     }>({
@@ -576,7 +603,8 @@ function buildArtifactUpdateTool(
       properties: {
         code: {
           type: "string",
-          description: "The complete new source code for the artifact.",
+          description:
+            "The complete new source code for the artifact. Omit it ONLY when you are changing dataAccess alone.",
         },
         summary: {
           type: "string",
@@ -586,11 +614,13 @@ function buildArtifactUpdateTool(
           type: "string",
           enum: [...CONTENT_DATA_ACCESS_MODES],
           description:
-            "Optional — set the artifact's sandbox data bridge mode alongside the new code. Omit to leave it unchanged. " +
+            "Optional — set the artifact's sandbox data bridge mode. Send it WITH code to change both at once, or WITHOUT code to change only the mode (no new version). Omit to leave it unchanged. " +
             DATA_ACCESS_DESC,
         },
       },
-      required: ["code"],
+      // #1791 finding 4: neither field is required on its own, but the executor
+      // rejects a call that supplies neither — the schema cannot express "one of".
+      required: [],
       additionalProperties: false,
     }),
     execute: async (
@@ -599,7 +629,8 @@ function buildArtifactUpdateTool(
       | {
           ok: true;
           objectId: string;
-          versionNumber: number;
+          /** Omitted on a mode-only change (#1791) — no version was written. */
+          versionNumber?: number;
           dataAccess?: ContentDataAccess;
           warning?: string;
         }
@@ -610,6 +641,24 @@ function buildArtifactUpdateTool(
       const { code, summary, dataAccess } = parsed;
       const req = await requesterForUserId(userId);
       if (!req) return { error: "Could not resolve your identity." };
+      // #1791 finding 4: mode-only change. No model-authored bytes are being
+      // persisted, so there is nothing for the §28.3 screen to evaluate and no
+      // version to create — `contentService.update` runs the same canView
+      // (404-mask) → canEdit gate under the SESSION user's requester that the
+      // Content settings dialog uses, so this is no wider than the dialog.
+      if (code === null) {
+        const applied = await applyDataAccessAfterVersion({
+          req,
+          objectId,
+          dataAccess,
+          log,
+        });
+        // A failed flip changed nothing; report it as an error rather than an
+        // `ok: true` carrying a warning, because unlike the code+mode path
+        // there is no successful half to acknowledge.
+        if (applied.warning) return { error: applied.warning };
+        return { ok: true, objectId, ...applied };
+      }
       // §28.3: this tool runs under a `kind: "user"` (human) requester, and
       // contentService.createVersion only screens AGENT/delegated authors — so
       // the model-generated code would be persisted UNSCREENED without this

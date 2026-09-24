@@ -413,6 +413,78 @@ function defineBuildWorkspaceChatToolsSuite1Part2() {it("edit_workspace_document
     expect(out.error).toMatch(/nothing was changed/i);
   });
 
+  /**
+   * #1791 finding 4: "switch this to live data" used to require `code`, forcing
+   * the model to re-emit the whole 20-60 KB source to change one field — slow,
+   * costly, and at real risk of blowing the per-step stream budget.
+   */
+  it("update_workspace_artifact changes the mode ALONE without creating a version", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    updateMock.mockResolvedValue({ id: "art-1" });
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = await exec(tools.update_workspace_artifact, { dataAccess: "query" });
+
+    expect(updateMock).toHaveBeenCalledWith(REQ, "art-1", { dataAccess: "query" });
+    expect(createVersionMock).not.toHaveBeenCalled();
+    // No model-authored bytes are persisted, so there is nothing for the §28.3
+    // screen to evaluate.
+    expect(screenMock).not.toHaveBeenCalled();
+    // `objectId` still drives the panel refetch signal; no versionNumber,
+    // because no version was written.
+    expect(out).toEqual({ ok: true, objectId: "art-1", dataAccess: "query" });
+  });
+
+  it("a mode-only change that fails is an ERROR, not an ok-with-warning", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    updateMock.mockRejectedValue(new ForbiddenError("no edit access"));
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.update_workspace_artifact, { dataAccess: "query" })) as {
+      ok?: true;
+      error?: string;
+    };
+    // Unlike the code+mode path there is no successful half to acknowledge —
+    // nothing changed at all, so `ok: true` would be a false success.
+    expect(out.ok).toBeUndefined();
+    expect(out.error).toMatch(/could NOT be changed to 'query'/);
+    expect(out.error).toMatch(/nothing was changed/i);
+    expect(createVersionMock).not.toHaveBeenCalled();
+  });
+
+  it("update_workspace_artifact rejects a call with neither code nor dataAccess", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.update_workspace_artifact, {})) as { error: string };
+    expect(out.error).toMatch(/nothing to change/i);
+    expect(updateMock).not.toHaveBeenCalled();
+    expect(createVersionMock).not.toHaveBeenCalled();
+    expect(screenMock).not.toHaveBeenCalled();
+  });
+
+  it("a mode-only call still rejects an invalid dataAccess and writes NOTHING", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.update_workspace_artifact, { dataAccess: "everything" })) as {
+      error: string;
+    };
+    expect(out.error).toMatch(/invalid data access mode/i);
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+
+  it("tells the model a mode-only change needs no code", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const description = String(
+      (tools.update_workspace_artifact as { description?: unknown }).description
+    );
+    expect(description).toMatch(/dataAccess with NO code/i);
+    expect(description).toMatch(/creates no new version/i);
+  });
+
 }
 
 /** #1749 contract + screening assertions (split out for max-lines-per-function). */
