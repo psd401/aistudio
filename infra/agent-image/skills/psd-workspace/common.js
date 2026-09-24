@@ -222,8 +222,24 @@ function resolvePayloadFiles(commandString, options = {}) {
     onError(message);
     throw new Error('resolvePayloadFiles onError callback must not return');
   };
+  // No legitimate command contains a placeholder token, and one that does
+  // could steer the substitution below. Refuse rather than guess.
+  for (const spec of Object.values(PAYLOAD_PLACEHOLDERS)) {
+    if (commandString.includes(spec.placeholder)) {
+      reject(`--command may not contain the reserved token ${spec.placeholder}`);
+    }
+  }
+
+  // Two passes, and the order matters. Pass 1 rewrites ONLY the file flags
+  // found in the original command, into placeholders — so no payload content
+  // exists in the string any matcher runs over. Pass 2 then builds the
+  // synthetic command by literal placeholder substitution.
+  //
+  // Doing both in one pass meant a later flag's matcher ran over an earlier
+  // payload's content: a Doc body reading `Use --params-file /tmp/example
+  // here` had that sentence rewritten into the real params object, and the
+  // corrupted JSON — not the file's contents — was what got sent.
   let execCommand = commandString;
-  let syntheticCommand = commandString;
   const payloads = {};
 
   for (const [fileFlag, spec] of Object.entries(PAYLOAD_PLACEHOLDERS)) {
@@ -252,15 +268,19 @@ function resolvePayloadFiles(commandString, options = {}) {
       spec.matcher,
       (m, lead) => `${lead}${spec.flag} ${spec.placeholder}`
     );
-    syntheticCommand = syntheticCommand.replace(
-      spec.matcher,
-      (m, lead) => `${lead}${spec.flag} ${content}`
-    );
   }
 
-  return Object.keys(payloads).length > 0
-    ? { execCommand, syntheticCommand, payloads }
-    : null;
+  if (Object.keys(payloads).length === 0) return null;
+
+  let syntheticCommand = execCommand;
+  for (const [placeholder, content] of Object.entries(payloads)) {
+    // Literal split/join, not a regex: `content` is arbitrary text and would
+    // otherwise be read for `$&`-style replacement patterns. The command holds
+    // exactly one of each placeholder — the check above guarantees the caller
+    // supplied none.
+    syntheticCommand = syntheticCommand.split(placeholder).join(content);
+  }
+  return { execCommand, syntheticCommand, payloads };
 }
 
 /**

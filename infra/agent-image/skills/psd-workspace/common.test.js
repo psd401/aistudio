@@ -141,7 +141,10 @@ describe('resolvePayloadFiles', () => {
     expect(gate2.allowed).toBe(false);
   });
 
-  test('--params-file: a Drive q with single-quoted values survives intact (#1801)', () => {
+});
+
+describe('resolvePayloadFiles: --params-file and cross-flag isolation (#1801)', () => {
+  test('a Drive q with single-quoted values survives intact', () => {
     // Drive REQUIRES single quotes around string values, and splitCommand has
     // no escape syntax, so this query cannot be expressed inline at all. The
     // file carries it as exactly one argv token.
@@ -207,6 +210,32 @@ describe('resolvePayloadFiles', () => {
       ownerEmail: 'hagelk@psd401.net',
     });
     expect(gate.allowed).toBe(false);
+  });
+
+  test('a payload containing a file flag is not rewritten by a later flag', () => {
+    // The --json payload is inlined first; before the two-pass split, the
+    // --params-file matcher then ran over that inlined text and rewrote the
+    // sentence inside it into the real params object, so the corrupted JSON —
+    // not the file's contents — is what got sent.
+    const body = { name: 'Use --params-file /tmp/example here' };
+    const jsonPath = tmpFile(JSON.stringify(body));
+    const paramsPath = tmpFile(JSON.stringify({ fileId: 'f1' }));
+    const resolved = resolvePayloadFiles(
+      `drive files update --json-file ${jsonPath} --params-file ${paramsPath}`
+    );
+    expect(resolved.payloads['@@PSD_PAYLOAD_JSON@@']).toBe(JSON.stringify(body));
+    expect(resolved.syntheticCommand).toContain(JSON.stringify(body));
+    expect(extractJsonArg(resolved.syntheticCommand)).toBe(JSON.stringify(body));
+  });
+
+  test('a command carrying a reserved placeholder token is refused', () => {
+    const p = tmpFile(JSON.stringify({ fileId: 'f1' }));
+    expect(() =>
+      resolvePayloadFiles(
+        `drive files update --params-file ${p} --json @@PSD_PAYLOAD_PARAMS@@`,
+        { onError(message) { throw new Error(message); } }
+      )
+    ).toThrow(/reserved token @@PSD_PAYLOAD_PARAMS@@/);
   });
 
   test('a placeholder is restored only where the resolver put it', () => {
