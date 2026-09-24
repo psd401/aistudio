@@ -525,8 +525,11 @@ curl -H "Authorization: Bearer sk-your-key" \
 Each entry includes `id`, `name`, `description`, `ownerName`, `visibility`,
 `itemCount`, `readiness`, `activeIndexGenerationId`, `indexedItemCount`,
 `segmentCount`, `lastIndexError`, and update timestamps. Readiness is one of
-`empty`, `processing`, `searchable`, `degraded`, `disconnected`, or `failed`;
-only `searchable` and `degraded` have a serving snapshot.
+`empty`, `processing`, `searchable`, `degraded`, `disconnected`, `unavailable`,
+or `failed`; only `searchable` and `degraded` have a serving snapshot.
+`unavailable` means every item was taken down (for example quarantined) with no
+revoked connector to explain it; unlike `empty`, it still fails closed with
+`409 REPOSITORY_NOT_READY`.
 
 #### `GET /api/v1/repositories/{id}`
 
@@ -553,10 +556,12 @@ durable repositories.
 `audio`, `video`, or `table`. Results use retrieval v2 and include immutable
 source citations. Unauthorized requested ids produce no results from those
 repositories; they never disclose whether the id exists. An explicitly
-requested accessible repository without a serving snapshot returns
-`409 REPOSITORY_NOT_READY` (or `REPOSITORY_DISCONNECTED`) instead of silently
-producing zero context. A binding that became inaccessible returns
-`403 REPOSITORY_BINDING_INACCESSIBLE`.
+requested accessible repository that is mid-ingestion, broken or disconnected
+returns `409 REPOSITORY_NOT_READY` (or `REPOSITORY_DISCONNECTED`) instead of
+silently producing zero context. An **empty** repository — active, with no
+items at all — is the one exception: it has no snapshot to be stale, so it is
+searched as a no-op and returns no hits rather than a 409. A binding that
+became inaccessible returns `403 REPOSITORY_BINDING_INACCESSIBLE`.
 
 #### `GET /api/v1/repositories/{id}/source`
 
@@ -1135,8 +1140,9 @@ conversation message, the server:
 Starting an Assistant conversation also writes that complete union into
 normalized Nexus conversation bindings before the first message. Resuming the
 conversation in Nexus therefore retains the Assistant's repository context.
-Unsearchable or disconnected sources fail before conversation creation with
-`409 REPOSITORY_NOT_READY` or `409 REPOSITORY_DISCONNECTED`; an ACL race returns
+Mid-ingestion, broken or disconnected sources fail before conversation creation
+with `409 REPOSITORY_NOT_READY` or `409 REPOSITORY_DISCONNECTED` (an empty
+repository does not fail — it binds and is skipped); an ACL race returns
 `403 REPOSITORY_BINDING_INACCESSIBLE`.
 
 Assistant ownership never lends repository access. The synchronous REST path,

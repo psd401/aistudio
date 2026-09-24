@@ -476,11 +476,24 @@ after a newer one.
 
 Every model turn reloads conversation ownership, current repository ACLs,
 lifecycle, and active-generation readiness. Search is offered automatically as
-`searchConversationRepositories` only after that validation. Repository-backed
-claims must use the tool and cite returned source labels. Structured preflight
+`searchConversationRepositories` only after that validation, and only over the
+repositories that can actually serve results — the tool is scoped to
+`searchableRepositoryIds`, not to the full bound set. Repository-backed claims
+must use the tool and cite returned source labels. Structured preflight
 failures are `REPOSITORY_NOT_READY`, `REPOSITORY_DISCONNECTED`, or
 `REPOSITORY_BINDING_INACCESSIBLE`; the client must throw every non-streaming
 HTTP error before the AI SDK attempts SSE parsing.
+
+An **empty** repository — lifecycle active, zero items, nothing pending,
+nothing failed — binds but never gates the turn. It carries no index to be
+stale about, so searching it is a no-op rather than an error. This is what
+makes a brand-new Nexus project chattable before anything is uploaded: project
+creation auto-provisions a private "project files" repository with zero items,
+and gating on it made every new project chat-dead (FS#165251 / #1733). The gate
+still fails closed for `processing`, `failed`, `disconnected` and `unavailable`
+(every item taken down — content existed and is gone, so it is not `empty`).
+A zero-item repository with a degraded connector is a failed sync, so it derives
+`failed`, not `empty`, and stays behind the gate.
 
 Forking copies project, skill, and normalized repository bindings. Assistant
 execution conversations bind the union of prompt-configured and runtime

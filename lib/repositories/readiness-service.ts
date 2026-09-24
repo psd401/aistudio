@@ -7,6 +7,7 @@ export const REPOSITORY_READINESS_STATES = [
   "searchable",
   "degraded",
   "disconnected",
+  "unavailable",
   "failed",
 ] as const
 
@@ -107,9 +108,18 @@ export function deriveRepositoryReadiness(
   } else if (
     activeItemCount > 0 ||
     failedItemCount > 0 ||
-    failedGenerationCount > 0
+    failedGenerationCount > 0 ||
+    // A degraded connector with nothing ingested is a failed sync, not an
+    // empty repository: the source exists but never arrived. It must stay
+    // behind the gate rather than take the "empty" exemption.
+    degradedConnectorCount > 0
   ) {
     readiness = "failed"
+  } else if (unavailableItemCount > 0) {
+    // Every item was taken down (quarantine, manual removal) without a
+    // revoked connector to blame. Not "empty": content existed and is gone,
+    // so the gate keeps failing closed on it instead of skipping it.
+    readiness = "unavailable"
   } else {
     readiness = "empty"
   }
@@ -135,6 +145,37 @@ export function isRepositorySearchable(
     snapshot.readiness === "searchable" ||
     snapshot.readiness === "degraded"
   )
+}
+
+/**
+ * An intentionally empty repository — lifecycle active, zero active items,
+ * nothing pending, nothing failed — carries no index to be stale about.
+ * Searching it is a no-op that yields zero results, so it must not block the
+ * turn that binds it. Blocking on `"empty"` made every freshly created Nexus
+ * project chat-dead until a document finished indexing (FS#165251 / #1733).
+ *
+ * The gate still fails closed for `processing`, `failed`, `disconnected` and
+ * `unavailable`, which is where a stale, half-built, revoked or taken-down
+ * index actually hides.
+ */
+export function blocksRepositorySearch(
+  snapshot: RepositoryReadinessSnapshot
+): boolean {
+  return !isRepositorySearchable(snapshot) && snapshot.readiness !== "empty"
+}
+
+/**
+ * Narrow a validated readiness set to the repositories that can actually serve
+ * results. Callers building a retrieval tool must use this rather than the full
+ * bound set, so an empty repository never widens or misrepresents the tool's
+ * scope.
+ */
+export function selectSearchableRepositoryIds(
+  snapshots: RepositoryReadinessSnapshot[]
+): number[] {
+  return snapshots
+    .filter(isRepositorySearchable)
+    .map((snapshot) => snapshot.repositoryId)
 }
 
 // eslint-disable-next-line max-lines-per-function -- One query derives all readiness evidence from a single PostgreSQL snapshot.
@@ -300,6 +341,14 @@ export async function getRepositoryReadiness(
   )
 }
 
+/**
+ * The shared pre-run gate for every repository-bound entry point (Nexus chat,
+ * Assistant Architect execute, v1 assistants, MCP catalog search). Fails closed
+ * on missing, disconnected, processing, unavailable and failed repositories.
+ * An `"empty"`
+ * repository passes for every caller (see `blocksRepositorySearch`): it has no
+ * items, so retrieval over it is a no-op, never stale context.
+ */
 export async function assertRepositoriesSearchable(
   repositoryIds: number[]
 ): Promise<RepositoryReadinessSnapshot[]> {
@@ -327,9 +376,7 @@ export async function assertRepositoriesSearchable(
       disconnected
     )
   }
-  const notReady = snapshots.filter(
-    (snapshot) => !isRepositorySearchable(snapshot)
-  )
+  const notReady = snapshots.filter(blocksRepositorySearch)
   if (notReady.length > 0) {
     throw new RepositoryReadinessError(
       "REPOSITORY_NOT_READY",

@@ -9,6 +9,7 @@ import { getAccessibleRepositoryIds } from "@/lib/db/drizzle";
 import {
   assertRepositoriesSearchable,
   RepositoryReadinessError,
+  selectSearchableRepositoryIds,
   type RepositoryReadinessSnapshot,
 } from "@/lib/repositories/readiness-service";
 
@@ -35,7 +36,13 @@ export interface ConversationRepositoryBinding {
 
 export interface ValidatedConversationRepositoryContext {
   bindings: ConversationRepositoryBinding[];
+  /** Every repository bound to the conversation, including empty ones. */
   repositoryIds: number[];
+  /**
+   * The subset that can actually serve results. Empty repositories are bound
+   * but not searchable, so retrieval tools must be scoped to this list.
+   */
+  searchableRepositoryIds: number[];
   readiness: RepositoryReadinessSnapshot[];
 }
 
@@ -231,12 +238,22 @@ export async function loadValidatedConversationRepositoryContext(input: {
     bindings.map((binding) => binding.repositoryId)
   );
   if (repositoryIds.length === 0) {
-    return { bindings, repositoryIds, readiness: [] };
+    return {
+      bindings,
+      repositoryIds,
+      searchableRepositoryIds: [],
+      readiness: [],
+    };
   }
 
   await assertAccessibleRepositoryIds(repositoryIds, input.userId);
   const readiness = await assertRepositoriesSearchable(repositoryIds);
-  return { bindings, repositoryIds, readiness };
+  return {
+    bindings,
+    repositoryIds,
+    searchableRepositoryIds: selectSearchableRepositoryIds(readiness),
+    readiness,
+  };
 }
 
 export async function copyConversationRepositoryBindings(input: {

@@ -121,8 +121,10 @@ mismatches, stale indexes, and missing shadow evidence.
   `REPOSITORY_BINDING_INACCESSIBLE`.
 - Start from a skill, project, and Assistant execution; reopen each conversation
   directly in Nexus and verify its durable repository context.
-- An unready repository must return `REPOSITORY_NOT_READY`; a disconnected one
-  must return `REPOSITORY_DISCONNECTED`.
+- A repository that is mid-ingestion or broken must return
+  `REPOSITORY_NOT_READY`; a disconnected one must return
+  `REPOSITORY_DISCONNECTED`. An **empty** repository must NOT: it binds, is
+  skipped for search, and the turn proceeds (FS#165251 / #1733).
 - Agentic Assistant execution must fail with an actionable model-configuration
   error when no admitted model exists and must succeed when an eligible model
   is configured.

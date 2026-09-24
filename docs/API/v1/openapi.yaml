@@ -1777,9 +1777,11 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           description: |
-            A prompt-bound or runtime repository is not searchable or has been
+            A prompt-bound or runtime repository is mid-ingestion, broken or
             disconnected. The error code is `REPOSITORY_NOT_READY` or
             `REPOSITORY_DISCONNECTED`; no execution or polling job is created.
+            An empty repository (active, zero items) does not trigger this — it
+            is searched as a no-op and simply returns no hits.
           content:
             application/json:
               schema:
@@ -1882,9 +1884,11 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           description: |
-            A prompt-bound or runtime repository is not searchable or has been
+            A prompt-bound or runtime repository is mid-ingestion, broken or
             disconnected. The error code is `REPOSITORY_NOT_READY` or
-            `REPOSITORY_DISCONNECTED`; no conversation is created.
+            `REPOSITORY_DISCONNECTED`; no conversation is created. An empty
+            repository (active, zero items) does not trigger this — it is
+            searched as a no-op and simply returns no hits.
           content:
             application/json:
               schema:
@@ -1968,9 +1972,11 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "409":
           description: |
-            A bound repository is not searchable or has been disconnected. The
+            A bound repository is mid-ingestion, broken or disconnected. The
             error code is `REPOSITORY_NOT_READY` or
-            `REPOSITORY_DISCONNECTED`; no user message is persisted.
+            `REPOSITORY_DISCONNECTED`; no user message is persisted. An empty
+            repository (active, zero items) does not trigger this — it is
+            searched as a no-op and simply returns no hits.
           content:
             application/json:
               schema:
@@ -3972,7 +3978,7 @@ components:
         itemCount: { type: integer }
         readiness:
           type: string
-          enum: [empty, processing, searchable, degraded, disconnected, failed]
+          enum: [empty, processing, searchable, degraded, disconnected, unavailable, failed]
         activeIndexGenerationId: { type: [string, "null"], format: uuid }
         indexedItemCount: { type: integer, minimum: 0 }
         segmentCount: { type: integer, minimum: 0 }
