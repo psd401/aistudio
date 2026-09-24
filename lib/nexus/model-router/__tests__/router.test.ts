@@ -498,6 +498,48 @@ describe("Nexus model router workspace attachment", () => {
     expect(result.workspacePsdDataConnectorId).toBe(PSD_CONNECTOR_ID)
   })
 
+  describe("prefers a model that can call the data tools it attaches", () => {
+    const noToolsFirst = nexusRouterConfigSchema.parse({
+      ...config,
+      auto: { light: [], medium: ["no-tools", "gpt-terra"], high: [] },
+    })
+
+    it("routes an artifact turn past a candidate without function calling", async () => {
+      mockGetConfig.mockResolvedValue({ config: noToolsFirst, mode: "active" })
+
+      const result = await routeNexusRequest({ ...followUp, workspace: editableArtifact })
+
+      expect(result.modelId).toBe("gpt-terra")
+      expect(result.connectorIds).toEqual([PSD_CONNECTOR_ID])
+    })
+
+    it("keeps the first candidate for a turn that attaches no data tools", async () => {
+      mockGetConfig.mockResolvedValue({ config: noToolsFirst, mode: "active" })
+
+      const result = await routeNexusRequest({
+        ...followUp,
+        workspace: { ...editableArtifact, kind: "document" as const },
+      })
+
+      expect(result.modelId).toBe("no-tools")
+    })
+
+    it("keeps the normal model instead of failing when none can call tools", async () => {
+      // A preference, not a requirement: the chat route warns this turn instead.
+      mockGetConfig.mockResolvedValue({ config: noToolsFirst, mode: "active" })
+      mockFilterAccessibleResourceIds.mockResolvedValue(["8"])
+
+      const result = await routeNexusRequest({
+        ...followUp,
+        fallbackModelId: "no-tools",
+        workspace: editableArtifact,
+      })
+
+      expect(result.modelId).toBe("no-tools")
+      expect(result.connectorIds).toEqual([PSD_CONNECTOR_ID])
+    })
+  })
+
   it("makes no PSD Data claim for a document workspace with the router off", async () => {
     mockGetConfig.mockResolvedValue({ config, mode: "off" })
 

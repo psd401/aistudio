@@ -79,6 +79,8 @@ function selectModel(args: {
   fallbackModelId: string
   accessibleIds: Set<string>
   requiredTools: string[]
+  /** Demand function calling even when no named tool is required (#1786). */
+  requiresFunctionCalling?: boolean
 }): { model: NexusModelRow; fallbackUsed: boolean } {
   const configuredIds = configuredCandidates(args.config, args.family, args.tier, args.intent)
   // A specialist-only image model cannot first call server-side input tools.
@@ -115,7 +117,7 @@ function selectModel(args: {
     fallbackModelId: args.fallbackModelId,
     requirements: {
       requiredTools: args.requiredTools,
-      requiresFunctionCalling: args.requiredTools.length > 0,
+      requiresFunctionCalling: args.requiredTools.length > 0 || args.requiresFunctionCalling === true,
     },
     additionalEligibility: model =>
       !hasCapability(model.capabilities, "imageGeneration")
@@ -178,6 +180,35 @@ function selectModelForRuntime(
     })
     return { model: fallback, fallbackUsed: true }
   }
+}
+
+/**
+ * Pick the executed model, preferring one that can call tools when this turn
+ * attaches the PSD Data tools (#1786). Selection runs before the connector is
+ * attached, so without this a turn could bind `query_data` beside a model that
+ * can never invoke it. A PREFERENCE, not a requirement: with no function-calling
+ * model available the turn keeps its normal model and the chat route's
+ * do-not-guess guidance covers it, rather than an artifact edit failing outright.
+ * Only active routing attaches the connector, so only it re-selects.
+ */
+function selectModelForDataTools(
+  args: Parameters<typeof selectModel>[0],
+  mode: Exclude<NexusRouterRuntimeMode, "off">,
+  fallback: NexusModelRow,
+  wantsPsdData: boolean
+): { model: NexusModelRow; fallbackUsed: boolean } {
+  if (mode === "active" && wantsPsdData) {
+    try {
+      return selectModel({ ...args, requiresFunctionCalling: true })
+    } catch (error) {
+      log.warn("No function-calling model for a PSD Data turn; keeping the normal selection", {
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+  return args.requiredTools.length > 0
+    ? selectModel(args)
+    : selectModelForRuntime(args, mode, fallback)
 }
 
 interface RouteNexusRequestArgs {
@@ -446,14 +477,9 @@ async function routeWithConfiguredRouter(options: {
   // Shadow mode may retain a legacy fallback only when doing so is safe. A
   // server-required input tool is an authorization/correctness boundary, so
   // execute a compatible text model even while recording the proposed route.
-  const selection = requiredTools.length > 0
-    ? selectModel(selectionArgs)
-    : selectModelForRuntime(selectionArgs, mode, fallback)
-  const workspaceWantsPsdData = workspaceNeedsPsdData(args.workspace)
-  const psdConnectorId = await resolveAutomaticPsdConnector(
-    decision.intent === "psd-data" || workspaceWantsPsdData,
-    config
-  )
+  const wantsPsdData = decision.intent === "psd-data" || workspaceNeedsPsdData(args.workspace)
+  const selection = selectModelForDataTools(selectionArgs, mode, fallback, wantsPsdData)
+  const psdConnectorId = await resolveAutomaticPsdConnector(wantsPsdData, config)
   // Only an explicit psd-data REQUEST fails closed. A workspace-artifact turn
   // asked for something else too ("add a dropdown"), so an unavailable
   // connector degrades to the do-not-guess guidance instead of a hard error.
