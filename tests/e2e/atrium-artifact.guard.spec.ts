@@ -4,10 +4,12 @@ import { authenticateContext } from "./helpers/session-auth";
 /**
  * E2E guard: Atrium Phase 2 artifact surfaces (#1052) — always-run, CI-safe.
  *
- * The artifact path adds no new API routes (the canvas loaders are server
- * actions); its public surface is the kind-aware reader at `/c/[slug]` (#1051's
- * route, now rendering artifacts in the cross-origin sandbox) and the authoring
- * page at `/atrium/[id]/edit`.
+ * The canvas loaders are server actions, so the artifact path's browser surface
+ * is the kind-aware reader at `/c/[slug]` (#1051's route, now rendering
+ * artifacts in the cross-origin sandbox) and the authoring page at
+ * `/atrium/[id]/edit`. Since #1788 it also has ONE API route:
+ * `POST /api/atrium/artifacts/[id]/query`, the live-data read that moved off a
+ * Server Action so a dashboard's queries stop being serialized.
  *
  * These guards prove the routes are WIRED (auth-gated) without needing a session or
  * a seeded artifact:
@@ -60,6 +62,34 @@ test.describe("Atrium artifact surfaces — route auth-gating (always-run)", () 
     const res = await request.get(`/atrium/${SOME_ID}/edit`, { maxRedirects: 0 });
     expect(res.status()).toBe(307);
     expect(res.headers()["location"]).toContain("/api/auth/signin");
+  });
+
+  test("POST /api/atrium/artifacts/[id]/query unauthenticated -> 401, never a query", async ({
+    request,
+  }) => {
+    // #1788 moved the live-data read off a Server Action onto this route, which
+    // is a genuinely new unauthenticated-reachable HTTP surface. Assert the
+    // SPECIFIC 401 the middleware returns for `/api/*` (not a loose
+    // `not.toBe(200)`, which a 500 would also satisfy), so a regression that
+    // adds the path to the public allow-list in middleware.ts — or drops the
+    // gate — is caught here rather than in production.
+    //
+    // The body is a well-formed request for a non-existent artifact: it has to
+    // be rejected for being unauthenticated, BEFORE anything looks at the id or
+    // decodes the SQL. `sqlBase64` carries "SELECT 1" (the route takes base64
+    // so the edge WAF's SQLi_BODY rule does not block the body outright).
+    const res = await request.post(`/api/atrium/artifacts/${SOME_ID}/query`, {
+      headers: { "Content-Type": "application/json" },
+      data: { sqlBase64: Buffer.from("SELECT 1", "utf8").toString("base64") },
+      maxRedirects: 0,
+    });
+    expect(res.status()).toBe(401);
+
+    // Nothing that looks like a result set came back — the gate refused before
+    // the action ran, rather than answering with data and a 401 status.
+    const text = await res.text();
+    expect(text).not.toContain("\"columns\"");
+    expect(text).not.toContain("\"rows\"");
   });
 });
 
