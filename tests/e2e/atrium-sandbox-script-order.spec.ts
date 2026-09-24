@@ -83,8 +83,11 @@ async function openHost(page: Page): Promise<CdnStub> {
     await route.fulfill({
       status: 200,
       contentType: "application/javascript",
-      // Stands in for Chart.js: the point is only that the symbol exists.
-      body: "window.Chart = function Chart(){}; window.Chart.defaults = {};",
+      // Stands in for Chart.js: the point is that the symbol exists, plus a
+      // count of how many times the library actually executed.
+      body:
+        "window.Chart = function Chart(){}; window.Chart.defaults = {};" +
+        "window.__chartExecutions = (window.__chartExecutions || 0) + 1;",
     });
   });
   await page.goto(HOST_URL);
@@ -172,6 +175,62 @@ test.describe("Atrium sandbox host — script order and lifecycle events (#1785)
     });
   });
 
+  test("a blocked or failing external script does not stall the rest of the artifact", async ({
+    page,
+  }) => {
+    await openHost(page);
+    // Override the CDN stub with a hard failure for this test only.
+    await page.route(CHART_CDN_URL, (route) => route.abort("failed"));
+    await page.evaluate(() => {
+      (window as unknown as { __artifactLog: string[] }).__artifactLog = [];
+    });
+
+    await render(
+      page,
+      '<div id="out"></div>' +
+        `<script src="${CHART_CDN_URL}">` +
+        CLOSE_SCRIPT +
+        "<script>" +
+        'window.__artifactLog.push("inline ran, Chart=" + typeof window.Chart);' +
+        CLOSE_SCRIPT +
+        LIFECYCLE_SCRIPT
+    );
+
+    await expect
+      .poll(() => readLog(page), { timeout: 10_000 })
+      .toEqual(["inline ran, Chart=undefined", "DOMContentLoaded", "load"]);
+  });
+
+  test("a classic nomodule script is skipped without stalling the chain", async ({
+    page,
+  }) => {
+    const cdn = await openHost(page);
+    await page.evaluate(() => {
+      (window as unknown as { __artifactLog: string[] }).__artifactLog = [];
+    });
+
+    await render(
+      page,
+      '<div id="out"></div>' +
+        `<script nomodule src="${CHART_CDN_URL}">` +
+        CLOSE_SCRIPT +
+        "<script>" +
+        'window.__artifactLog.push("inline ran, Chart=" + typeof window.Chart);' +
+        CLOSE_SCRIPT +
+        LIFECYCLE_SCRIPT
+    );
+
+    // Well inside the host's 60s per-script timeout: a chain that waited on the
+    // nomodule script (which fires neither load nor error) would miss this.
+    await expect
+      .poll(() => readLog(page), { timeout: 10_000 })
+      .toEqual(["inline ran, Chart=undefined", "DOMContentLoaded", "load"]);
+    // Chromium never even fetched it — the premise the host relies on.
+    expect(cdn.requestCount()).toBe(0);
+  });
+});
+
+test.describe("Atrium sandbox host — re-renders while a chain is in flight (#1785)", () => {
   test("a render that supersedes one still waiting on a CDN abandons the stale chain", async ({
     page,
   }) => {
@@ -227,33 +286,7 @@ test.describe("Atrium sandbox host — script order and lifecycle events (#1785)
     ]);
   });
 
-  test("a blocked or failing external script does not stall the rest of the artifact", async ({
-    page,
-  }) => {
-    await openHost(page);
-    // Override the CDN stub with a hard failure for this test only.
-    await page.route(CHART_CDN_URL, (route) => route.abort("failed"));
-    await page.evaluate(() => {
-      (window as unknown as { __artifactLog: string[] }).__artifactLog = [];
-    });
-
-    await render(
-      page,
-      '<div id="out"></div>' +
-        `<script src="${CHART_CDN_URL}">` +
-        CLOSE_SCRIPT +
-        "<script>" +
-        'window.__artifactLog.push("inline ran, Chart=" + typeof window.Chart);' +
-        CLOSE_SCRIPT +
-        LIFECYCLE_SCRIPT
-    );
-
-    await expect
-      .poll(() => readLog(page), { timeout: 10_000 })
-      .toEqual(["inline ran, Chart=undefined", "DOMContentLoaded", "load"]);
-  });
-
-  test("a classic nomodule script is skipped without stalling the chain", async ({
+  test("a duplicate post of the same code while a CDN is in flight is acked, not re-rendered", async ({
     page,
   }) => {
     const cdn = await openHost(page);
@@ -261,23 +294,38 @@ test.describe("Atrium sandbox host — script order and lifecycle events (#1785)
       (window as unknown as { __artifactLog: string[] }).__artifactLog = [];
     });
 
-    await render(
-      page,
+    // Handlers registered BEFORE the pending script, then inline code after it
+    // — the shape a re-render would duplicate.
+    const code =
       '<div id="out"></div>' +
-        `<script nomodule src="${CHART_CDN_URL}">` +
-        CLOSE_SCRIPT +
-        "<script>" +
-        'window.__artifactLog.push("inline ran, Chart=" + typeof window.Chart);' +
-        CLOSE_SCRIPT +
-        LIFECYCLE_SCRIPT
-    );
+      LIFECYCLE_SCRIPT +
+      `<script src="${CHART_CDN_URL}">` +
+      CLOSE_SCRIPT +
+      "<script>" +
+      'window.__artifactLog.push("inline sees Chart: " + typeof Chart);' +
+      CLOSE_SCRIPT;
 
-    // Well inside the host's 60s per-script timeout: a chain that waited on the
-    // nomodule script (which fires neither load nor error) would miss this.
+    await render(page, code);
+    // The parent's retry loop re-posts identical code before it sees the ack.
+    await cdn.requested;
+    await render(page, code);
+
     await expect
       .poll(() => readLog(page), { timeout: 10_000 })
-      .toEqual(["inline ran, Chart=undefined", "DOMContentLoaded", "load"]);
-    // Chromium never even fetched it — the premise the host relies on.
-    expect(cdn.requestCount()).toBe(0);
+      .toEqual(["inline sees Chart: function", "DOMContentLoaded", "load"]);
+    await page.waitForTimeout(500);
+    expect(await readLog(page)).toEqual([
+      "inline sees Chart: function",
+      "DOMContentLoaded",
+      "load",
+    ]);
+    // A re-render would insert a second copy of the library alongside the
+    // first, still-in-flight one — and both would execute.
+    expect(
+      await page.evaluate(
+        () => (window as { __chartExecutions?: number }).__chartExecutions
+      )
+    ).toBe(1);
+    expect(cdn.requestCount()).toBe(1);
   });
 });

@@ -594,13 +594,32 @@
           executeScripts(root);
         }
 
+        // The code of the last render that started without throwing. The parent
+        // re-posts the SAME code until it sees an ack (immediately, again when
+        // the frame's load fires, then on an interval), so duplicates routinely
+        // land while the first render is still waiting on a CDN. Re-rendering
+        // for one would tear down a live chain whose already-inserted external
+        // script still executes later, into the replacement render — work that
+        // no in-document mechanism can take back. A duplicate is therefore
+        // acked without touching the render at all. (Genuinely NEW code is
+        // still rendered over the old; the app gives each artifact version a
+        // fresh frame, so that path is best-effort by design.)
+        var currentRenderCode = null;
+
         window.addEventListener("message", function (event) {
           // Reject any message from an origin not on the build-time allowlist.
           if (!isAllowedOrigin(event.origin)) return;
           var data = event.data;
           if (!data || data.type !== "atrium-render") return;
           try {
-            render(data.code);
+            var code = typeof data.code === "string" ? data.code : "";
+            if (code !== currentRenderCode) {
+              // Cleared first so a render that throws is retried by the next
+              // post rather than acked as a duplicate.
+              currentRenderCode = null;
+              render(code);
+              currentRenderCode = code;
+            }
             // Acknowledge back to the (validated) parent so the app can surface
             // load state. We do NOT send any artifact data back.
             event.source &&

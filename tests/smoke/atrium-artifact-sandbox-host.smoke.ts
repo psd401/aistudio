@@ -995,6 +995,53 @@ async function testSupersededChainLeavesNoStaleLifecycleListener(): Promise<void
   }
 }
 
+/**
+ * The parent re-posts the SAME code until it sees an ack, so a duplicate lands
+ * while the first render is still waiting on its CDN script. Re-rendering for
+ * it would leave that in-flight script to execute into the replacement render
+ * (#1795 review). A duplicate must be acked without re-rendering: the library
+ * and the inline code each run exactly once. (The lifecycle pair after an
+ * external script is not observable in jsdom — see LIMITS OF THIS HARNESS — so
+ * the Chromium spec pins that part.)
+ */
+async function testDuplicateRenderIsAckedNotRerun(): Promise<void> {
+  const { window, acks } = makeHost([APP_ORIGIN], {
+    externalScripts: {
+      [CHART_CDN_URL]: {
+        kind: "ok",
+        source: CHART_STUB_SOURCE + 'window.__artifactLog.push("library ran");',
+      },
+    },
+  });
+  await whenHostLoaded(window);
+  seedArtifactLog(window);
+
+  const code =
+    '<script src="' +
+    CHART_CDN_URL +
+    '">' +
+    CLOSE_SCRIPT +
+    "<script>" +
+    'window.__artifactLog.push("inline ran");' +
+    CLOSE_SCRIPT;
+
+  postToHost(window, APP_ORIGIN, { type: "atrium-render", code }, acks);
+  postToHost(window, APP_ORIGIN, { type: "atrium-render", code }, acks);
+  const ok = { type: "atrium-artifact-rendered", ok: true };
+  assert.deepEqual(
+    acks.map((ack) => ack.data),
+    [ok, ok],
+    "every post must still be acked"
+  );
+
+  await waitFor(
+    () => artifactLog(window).includes("inline ran"),
+    "the single render's inline script"
+  );
+  await settle();
+  assert.deepEqual(artifactLog(window), ["library ran", "inline ran"]);
+}
+
 async function main(): Promise<void> {
   await check("renders artifact markup for an allowlisted parent origin", () => {
     const { window, acks } = makeHost([APP_ORIGIN]);
@@ -1113,6 +1160,10 @@ async function main(): Promise<void> {
   await check(
     "#1785 a superseded chain's lifecycle listeners do not fire on the replacement render",
     testSupersededChainLeavesNoStaleLifecycleListener
+  );
+  await check(
+    "#1785 a duplicate post of the same code is acked without re-rendering",
+    testDuplicateRenderIsAckedNotRerun
   );
 
   await check("the deployed host page hard-codes no allow-same-origin and embeds the allowlist", () => {
