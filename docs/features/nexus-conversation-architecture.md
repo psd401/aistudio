@@ -490,7 +490,10 @@ does not count as a write), plus every page of the newest read sequence
 after the replacement: a large source is read in several
 pages at different offsets, and a fresh offset-0 read starts a new sequence,
 so pages from an older revision are never stitched onto a new first page,
-and appends made before that fresh read are dropped (the read holds them). Persisted messages are never touched. Tool parts keep their exact
+and appends made before that fresh read are dropped (the read holds them).
+A part that names no `objectId` (reads persisted before reads returned it,
+error results) is never pruned: it cannot be shown to belong to the same
+object as a later part. Persisted messages are never touched. Tool parts keep their exact
 shape so every tool call still pairs with its result on replay.
 
 ---

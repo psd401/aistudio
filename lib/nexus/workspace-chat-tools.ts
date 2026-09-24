@@ -436,7 +436,8 @@ function buildDocumentEditTool(
   objectId: string,
   userId: number,
   requestId: string,
-  log: ReturnType<typeof createLogger>
+  log: ReturnType<typeof createLogger>,
+  onEdited: () => void
 ): Tool {
   return tool({
     description:
@@ -463,7 +464,9 @@ function buildDocumentEditTool(
       const mode = args?.mode === "replace" ? "replace" : "append";
       // Edit rights were confirmed at bind time (this tool is only bound for an
       // editable document); the shared helper screens + applies.
-      return screenAndApplyDocEdit(objectId, markdown, mode, requestId, log);
+      const result = await screenAndApplyDocEdit(objectId, markdown, mode, requestId, log);
+      if ("ok" in result) onEdited();
+      return result;
     },
   });
 }
@@ -766,10 +769,16 @@ interface WorkspacePublishArgs {
   requestId: string;
   destinationRaw: string | undefined;
   log: ReturnType<typeof createLogger>;
+  /**
+   * True when the chat edited this document earlier in the SAME request. Only
+   * then is the pre-publish snapshot labelled as written via Nexus chat — a
+   * publish-only request must not relabel a human-authored document (#1791).
+   */
+  chatEditedThisRequest: () => boolean;
 }
 
 async function runWorkspacePublishOp(args: WorkspacePublishArgs): Promise<Record<string, unknown>> {
-  const { op, objectId, kind, userId, requestId, destinationRaw, log } = args;
+  const { op, objectId, kind, userId, requestId, destinationRaw, log, chatEditedThisRequest } = args;
   const req = await requesterForUserId(userId);
   if (!req) return { error: "Could not resolve your identity." };
   let destination: ReturnType<typeof assertEditorDestination>;
@@ -788,7 +797,7 @@ async function runWorkspacePublishOp(args: WorkspacePublishArgs): Promise<Record
         objectId,
         kind,
         requestId,
-        authorLabel: NEXUS_CHAT_AUTHOR_LABEL,
+        ...(chatEditedThisRequest() ? { authorLabel: NEXUS_CHAT_AUTHOR_LABEL } : {}),
       });
       const result = await publishService.publish(req, objectId, { destination });
       return {
@@ -906,8 +915,9 @@ function buildPublishTool(args: {
   userId: number;
   requestId: string;
   log: ReturnType<typeof createLogger>;
+  chatEditedThisRequest: () => boolean;
 }): Tool {
-  const { op, objectId, kind, userId, requestId, log } = args;
+  const { op, objectId, kind, userId, requestId, log, chatEditedThisRequest } = args;
   const verb = op === "publish" ? "Publish" : "Unpublish";
   return tool({
     description:
@@ -936,6 +946,7 @@ function buildPublishTool(args: {
         requestId,
         destinationRaw: toolArgs?.destination,
         log,
+        chatEditedThisRequest,
       }),
   });
 }
@@ -1162,9 +1173,17 @@ export async function buildWorkspaceChatTools(params: {
     ),
   };
 
+  // Whether the chat edited the open document in THIS request (#1791), so a
+  // later publish in the same request labels its snapshot as chat-written and
+  // a publish-only request does not.
+  let editedThisRequest = false;
+  const chatEditedThisRequest = () => editedThisRequest;
+
   if (editable) {
     if (kind === "document") {
-      tools.edit_workspace_document = buildDocumentEditTool(obj.id, userId, requestId, log);
+      tools.edit_workspace_document = buildDocumentEditTool(obj.id, userId, requestId, log, () => {
+        editedThisRequest = true;
+      });
     } else {
       tools.update_workspace_artifact = buildArtifactUpdateTool(
         obj.id,
@@ -1178,8 +1197,8 @@ export async function buildWorkspaceChatTools(params: {
     // the address while it has never been published).
     tools.rename_workspace_content = buildRenameTool({ objectId: obj.id, kind, userId, log });
     // ITEM 2: publish/unpublish the OPEN object through the human publish gate.
-    tools.publish_workspace_content = buildPublishTool({ op: "publish", objectId: obj.id, kind, userId, requestId, log });
-    tools.unpublish_workspace_content = buildPublishTool({ op: "unpublish", objectId: obj.id, kind, userId, requestId, log });
+    tools.publish_workspace_content = buildPublishTool({ op: "publish", objectId: obj.id, kind, userId, requestId, log, chatEditedThisRequest });
+    tools.unpublish_workspace_content = buildPublishTool({ op: "unpublish", objectId: obj.id, kind, userId, requestId, log, chatEditedThisRequest });
   }
 
   // Hard delete of the OPEN object, bound on `canDelete` — NOT `canEdit`. helpers.ts

@@ -115,11 +115,15 @@ function prunePart(part: unknown): unknown {
  * The object a workspace source part is about, read from its `objectId`. A
  * conversation can be rebound to another artifact mid-thread, so "superseded"
  * must mean "an earlier payload for the SAME object" — stubbing a different
- * object's source would label it stale when no later copy of it exists. Parts
- * without an id (older persisted parts, error results) share one "" group.
+ * object's source would label it stale when no later copy of it exists.
+ *
+ * Null when the part names no object: reads persisted before reads returned
+ * `objectId`, and error results. Such a part cannot be proven to belong to the
+ * same object as anything else, so it is kept verbatim — exactly what happened
+ * to every part before pruning existed.
  */
-function partObjectId(part: unknown): string {
-  return stringField(part, "objectId") ?? "";
+function partObjectId(part: unknown): string | null {
+  return stringField(part, "objectId") ?? null;
 }
 
 function stringField(part: unknown, field: string): string | undefined {
@@ -201,6 +205,11 @@ function partsToKeep(messages: UIMessage[]): Set<string> {
   const keep = new Map<string, string>();
   for (const { pos: at, key, part } of sourceParts) {
     const objectId = partObjectId(part);
+    if (objectId === null) {
+      // No object named: cannot be proven superseded, so never pruned.
+      keep.set(`unidentified:${key}`, key);
+      continue;
+    }
     const writeAt = lastWrite.get(objectId) ?? 0;
     if (!isReadPart(part)) {
       // The newest replacement and every append after it are the current
@@ -245,6 +254,8 @@ function indexSourceParts(messages: UIMessage[]): {
       pos += 1;
       sourceParts.push({ pos, key: `${m}:${p}`, part });
       const objectId = partObjectId(part);
+      // An unidentified part neither supersedes nor is superseded.
+      if (objectId === null) continue;
       if (isReadPart(part)) {
         if (readOffset(part) === 0) lastSequenceStart.set(objectId, pos);
       } else if (writeKind(part) === "replace") {

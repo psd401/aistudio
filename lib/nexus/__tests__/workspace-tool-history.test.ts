@@ -26,7 +26,7 @@ function updatePart(callId: string, code: string): Record<string, unknown> {
     toolCallId: callId,
     state: "output-available",
     input: { code, dataAccess: "query" },
-    output: { success: true, versionNumber: 3 },
+    output: { success: true, objectId: "obj-a", versionNumber: 3 },
   };
 }
 
@@ -36,7 +36,7 @@ function readPart(callId: string, body: string): Record<string, unknown> {
     toolCallId: callId,
     state: "output-available",
     input: {},
-    output: { title: "Repairs dashboard", dataAccess: "query", body },
+    output: { objectId: "obj-a", title: "Repairs dashboard", dataAccess: "query", body },
   };
 }
 
@@ -109,7 +109,7 @@ describe("pruneStaleWorkspaceToolPayloads", () => {
       "code",
       "dataAccess",
     ]);
-    expect(part.output).toEqual({ success: true, versionNumber: 3 });
+    expect(part.output).toEqual({ success: true, objectId: "obj-a", versionNumber: 3 });
   });
 
   it("keeps short fields — the meaning in the history — fully intact", () => {
@@ -154,7 +154,7 @@ describe("pruneStaleWorkspaceToolPayloads", () => {
           toolName: "update_workspace_artifact",
           toolCallId: "c1",
           args: { code: bigCode("a") },
-          result: { success: true },
+          result: { success: true, objectId: "obj-a" },
         },
       ]),
       message("m2", [updatePart("c2", bigCode("b"))]),
@@ -165,7 +165,7 @@ describe("pruneStaleWorkspaceToolPayloads", () => {
       Record<string, unknown>
     >;
     expect(String(part.args.code)).toContain("omitted from history");
-    expect(part.result).toEqual({ success: true });
+    expect(part.result).toEqual({ success: true, objectId: "obj-a" });
   });
 
   it("tolerates messages without a parts array", () => {
@@ -362,3 +362,24 @@ describe("pruneStaleWorkspaceToolPayloads — paged reads of one revision", () =
   });
 });
 
+describe("pruneStaleWorkspaceToolPayloads — parts that name no object", () => {
+  it("keeps parts that name no object verbatim (reads persisted before objectId existed)", () => {
+    // A legacy conversation: read object A, rebound, read object B. Neither
+    // read says which object it was, so neither may be judged stale.
+    const legacyRead = (callId: string, body: string) => ({
+      type: "tool-read_workspace_content",
+      toolCallId: callId,
+      state: "output-available",
+      input: {},
+      output: { title: "Untitled", body },
+    });
+    const a = bigCode("a");
+    const b = bigCode("b");
+    const messages = [
+      message("m1", [legacyRead("c1", a)]),
+      message("m2", [legacyRead("c2", b)]),
+    ];
+    const out = pruneStaleWorkspaceToolPayloads(messages);
+    expect(out).toBe(messages);
+  });
+});

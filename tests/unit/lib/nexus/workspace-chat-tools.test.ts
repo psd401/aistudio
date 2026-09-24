@@ -871,6 +871,29 @@ function defineBuildWorkspaceChatToolsPreviewDiagnosticsSuite() {
 
 /** ITEM 2: publish / unpublish the OPEN object. */
 function defineBuildWorkspaceChatToolsPublishSuite() {
+  it("labels the pre-publish snapshot as chat-written only after a chat edit in the same request (#1791)", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    publishMock.mockResolvedValue({ publicationId: "pub-1" });
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    await exec(tools.edit_workspace_document, { markdown: "## New section" });
+    await exec(tools.publish_workspace_content, {});
+    expect(snapshotBeforePublishMock).toHaveBeenCalledWith(
+      expect.objectContaining({ objectId: "doc-1", authorLabel: "nexus-chat" })
+    );
+  });
+
+  it("does NOT label the snapshot when the chat's edit was refused", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    screenMock.mockResolvedValue({ allowed: false, reason: "blocked", message: "nope" });
+    publishMock.mockResolvedValue({ publicationId: "pub-1" });
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    await exec(tools.edit_workspace_document, { markdown: "bad" });
+    await exec(tools.publish_workspace_content, {});
+    expect(snapshotBeforePublishMock.mock.calls[0][0]).not.toHaveProperty("authorLabel");
+  });
+
   it("publish_workspace_content SNAPSHOTS the live document into a version BEFORE publishing (Codex P1)", async () => {
     getMock.mockResolvedValue(DOC);
     canEditMock.mockReturnValue(true);
@@ -882,14 +905,11 @@ function defineBuildWorkspaceChatToolsPublishSuite() {
     const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
     const out = await exec(tools.publish_workspace_content, {});
     expect(snapshotBeforePublishMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        objectId: "doc-1",
-        kind: "document",
-        requestId: "r",
-        // #1791: the published version is labelled as written via Nexus chat.
-        authorLabel: "nexus-chat",
-      })
+      expect.objectContaining({ objectId: "doc-1", kind: "document", requestId: "r" })
     );
+    // #1791: a publish-only request made no chat edit, so the snapshot must not
+    // claim the chat wrote it (the document keeps its real provenance).
+    expect(snapshotBeforePublishMock.mock.calls[0][0]).not.toHaveProperty("authorLabel");
     expect(order).toEqual(["snapshot", "publish"]);
     expect(publishMock).toHaveBeenCalledWith(REQ, "doc-1", { destination: "intranet" });
     expect(out).toEqual({
