@@ -187,6 +187,22 @@ Tools are cataloged in `/lib/tools/catalog/` and exposed on the `mcp` surface:
 
 **Atrium content tools** (`create_document`, `create_artifact`, `get_content`, `get_visibility`, `list_content`, `update_content`, `create_version`, `set_visibility`, `publish_content`, `unpublish_content`, `export_okf`, `import_okf`) are registered alongside these, scoped via `content:*`. See **[app-features/overview.md](../app-features/overview.md#mcp-tools)** for the full tool list and **[app-features/overview.md](../app-features/overview.md#visibility--grant-management-1763)** for visibility/grant management details including the grant target existence validation added in #1777.
 
+### MCP Tool Versioning Contract
+
+Tool schemas published in the catalog are **immutable at a given version**. Once a version (e.g., `create_artifact@v3`) is synced to the catalog, its schema is frozen and cannot be changed. This immutability is enforced by the boot sync in `/lib/tools/catalog/sync.ts` — any schema change without a version bump is rejected with `"schema_frozen"` and the existing row stays untouched.
+
+**Why immutability matters**: External agents and MCP clients cache tool schemas by identifier+version. Changing a schema in-place would break those callers silently. The catalog's contract is that a given `(identifier, version)` pair always resolves to the same schema.
+
+**Version bump transparency (#1710, #1817)**: In September 2026, the `dataAccess` field (artifact sandbox data-bridge mode) was added to `create_artifact` and `update_content` input schemas without bumping their catalog versions. For weeks, every boot rejected the update and the catalog kept serving the pre-`dataAccess` schema. The fix (#1817) bumped versions (`create_artifact` v3→v4, `update_content` v1→v2) and preserved the superseded versions as frozen legacy entries in `LEGACY_MCP_MANIFEST_ENTRIES`. Pinned callers continue to resolve old versions; unpinned callers get the latest schema with `dataAccess`.
+
+**Key Sources**:
+- `/lib/tools/catalog/manifest.ts` — Tool version definitions and legacy manifest entries
+- `/lib/tools/catalog/sync.ts` — Catalog synchronization with immutability enforcement
+- `/lib/tools/catalog/version-resolver.ts` — Latest version resolution and pinned dispatch
+
+**Focused Tests**:
+- `tests/unit/atrium-mcp-content-tools.test.ts` — Version bump expectations, legacy version coexistence
+
 ### MCP OAuth Flow
 
 Per-user MCP connector tokens are stored in `nexus_mcp_user_tokens` table with encryption:
