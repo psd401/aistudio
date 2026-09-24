@@ -8,10 +8,13 @@ openwiki:
   source_paths:
     - infra/agent-image/skills/psd-atrium/SKILL.md
     - infra/agent-image/skills/psd-html-artifact/SKILL.md
+    - infra/agent-image/skills/psd-workspace/SKILL.md
     - lib/content/atrium-data-contract.ts
+    - lib/agent-workspace/command-executor.ts
   test_paths:
     - tests/e2e/atrium-sandbox-script-order.spec.ts
     - tests/smoke/atrium-artifact-sandbox-host.smoke.ts
+    - tests/unit/lib/agent-workspace/command-executor.test.ts
 ---
 
 # Agent Platform
@@ -62,7 +65,7 @@ infra/agent-image/skills/{skill-name}/
 
 **Data & Integration**
 - `psd-data` — District data queries (PowerSchool, spreadsheets)
-- `psd-workspace` — Google Workspace wrapper for agent accounts
+- `psd-workspace` — Google Workspace wrapper for agent accounts; Drive queries with quoted values (`name contains 'X'`) MUST use `--params-file` — tokenizer cannot preserve single quotes (#1801)
 - `psd-credentials` — Secure credential management and capability verification
 - `psd-canva` — Canva design integration
 - `psd-plaud` — Plaud note integration
@@ -677,6 +680,22 @@ gmail.modify ≠ gmail.settings.basic
 ```
 
 When a user attempts Gmail filter operations without `gmail.settings.basic`, they receive a prompt to re-authorize with the additional scope rather than an opaque Google 403.
+
+#### Query Parameter Validation Security (#1801)
+
+**Source**: `/lib/agent-workspace/command-executor.ts`
+
+The `assertParamsParse()` function validates that `--params` is a parseable JSON object **before any mutation gates run**. This prevents a critical security vulnerability where:
+
+1. An unparseable `--params` value (e.g., Drive query with single quotes eaten by tokenizer) would be read as `null` by `parseObjectArgument`
+2. `withSharedDriveSupport` would merge shared-drive flags over the `null` value
+3. The command would execute against an **unfiltered** Drive listing, returning results the caller interpreted as matching their (lost) query
+
+**Rejection Reason**: `params_not_json` — skill logic can branch on this code rather than pattern-matching error messages.
+
+**Ordering Invariant**: `validateWorkspaceArguments` (which calls `assertParamsParse`) runs **before** `validateWorkspaceMutation`, ensuring every gate that reads `--params` is guaranteed a value it can actually see.
+
+**Remedy**: When a Drive query requires single-quoted values (`name contains 'Budget'`), the tokenizer cannot preserve them. Write parameters to a file and use `--params-file <abs-path>` instead. See `infra/agent-image/skills/psd-workspace/SKILL.md` for the complete pattern.
 
 ---
 

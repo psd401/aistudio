@@ -440,7 +440,7 @@ for EMAIL in whiteb@psd401.net herberr@psd401.net pratzm@psd401.net; do
 done
 ```
 
-Multi-line payloads still go through `--json-file`/`--body-file`/`--text-file` (write the file first in the same exec).
+Multi-line payloads still go through `--json-file`/`--body-file`/`--text-file`, and query parameters whose values need quotes (any Drive `q`) through `--params-file` (write the file first in the same exec).
 
 **Why:** observed 2026-07-08 (#1138): granting 2 docs × 4 people as separate calls burned 35 model round-trips ≈ 22 minutes on a 30-second task and ended in a timeout crash. Batched, it is 2–3 round-trips.
 

@@ -130,14 +130,28 @@ const PAYLOAD_PLACEHOLDERS = {
   '--json-file': {
     flag: '--json',
     matcher: /(^|\s)--json-file\s+(\S+)/g,
-    inlineMatcher: /(^|\s)--json\s/,
     placeholder: '@@PSD_PAYLOAD_JSON@@',
+    kind: 'json',
+  },
+  // Drive/Gmail query parameters (#1801). Drive's query language REQUIRES
+  // single-quoted string values (`name contains 'X'`, `'<folderId>' in
+  // parents`), and there is no way to express one inline: splitCommand treats
+  // every `'` as a quote toggle, so the shell idiom `'\''` yields invalid JSON,
+  // and Drive rejects double-quoted values with `Invalid Value`. Observed live
+  // 2026-08-19..2026-09-01 across at least 8 users — the broker then merged its
+  // shared-drive flags over the unparseable value and Drive returned an
+  // UNFILTERED listing, which the agent read as search results (agent_failures
+  // 10764, 11787). The broker now refuses an unparseable --params instead of
+  // replacing it; this flag is the transport that makes the query expressible.
+  '--params-file': {
+    flag: '--params',
+    matcher: /(^|\s)--params-file\s+(\S+)/g,
+    placeholder: '@@PSD_PAYLOAD_PARAMS@@',
     kind: 'json',
   },
   '--body-file': {
     flag: '--body',
     matcher: /(^|\s)--body-file\s+(\S+)/g,
-    inlineMatcher: /(^|\s)--body\s/,
     placeholder: '@@PSD_PAYLOAD_BODY@@',
     kind: 'text',
   },
@@ -147,7 +161,6 @@ const PAYLOAD_PLACEHOLDERS = {
   '--text-file': {
     flag: '--text',
     matcher: /(^|\s)--text-file\s+(\S+)/g,
-    inlineMatcher: /(^|\s)--text\s/,
     placeholder: '@@PSD_PAYLOAD_TEXT@@',
     kind: 'text',
   },
@@ -195,9 +208,58 @@ function readPayloadFile(filePath, fileFlag, kind, reject) {
  *   }
  *
  * Fails (exit 1) on: relative path, unreadable file, invalid JSON in a
- * --json-file, duplicate use of the same flag, or --json-file alongside an
- * inline --json (ambiguous — exactly one payload source allowed).
+ * --json-file, duplicate use of the same flag, --json-file alongside an
+ * inline --json (ambiguous — exactly one payload source allowed), a file flag
+ * that also appears inside another argument's value, and a command that
+ * already carries one of the reserved placeholder tokens.
  */
+/**
+ * The absolute path one payload-file flag carries, or null when the flag is
+ * not present. Rejects every ambiguous shape.
+ *
+ * The raw matcher and the argv tokens are BOTH consulted because neither is
+ * sufficient alone: the matcher can fire on the flag's text sitting inside a
+ * quoted value, and the tokens cannot tell the resolver where to rewrite. They
+ * are made to agree — same count, same path — and anything else is refused.
+ */
+function validatedPayloadFilePath({ commandString, argvTokens, fileFlag, spec }, reject) {
+  const ambiguous = `${fileFlag} also appears inside another argument's value; it must be a flag of its own`;
+  const flagTokens = argvTokens.filter((token) => token === fileFlag).length;
+  if (flagTokens === 0) return null;
+  if (flagTokens > 1) {
+    reject(`${fileFlag} may appear at most once per command`);
+  }
+  // The path comes from the TOKEN after the real flag. Equal counts alone were
+  // not enough: `--subject 'see --body-file /tmp/example literal' --body-file`
+  // has one match and one token that are DIFFERENT occurrences, so the
+  // resolver would have read /tmp/example, rewritten the mention inside the
+  // subject, and left the actual flag unresolved.
+  const tokenPath = argvTokens[argvTokens.indexOf(fileFlag) + 1];
+  if (!tokenPath || tokenPath.startsWith('--')) {
+    reject(`${fileFlag} requires an absolute path following it`);
+  }
+  const matches = [...commandString.matchAll(spec.matcher)];
+  if (matches.length !== flagTokens) reject(ambiguous);
+  // Exactly one payload source per flag: reject the file form alongside its
+  // inline counterpart (--json + --json-file, --body + --body-file) —
+  // otherwise gws would receive two occurrences of the same flag and pick one
+  // silently. Judged on the tokens for the same reason: a `--params`
+  // mentioned inside a quoted value is not a second flag.
+  if (argvTokens.includes(spec.flag)) {
+    reject(`use either ${spec.flag} or ${fileFlag}, not both`);
+  }
+  // Models habitually quote flag values (every SKILL.md example quotes
+  // --params). \S+ captures those quotes, so strip one matching surrounding
+  // pair before validating — otherwise a valid quoted path fails the
+  // absolute-path check with a misleading error.
+  const filePath = normalizePayloadFilePath(matches[0][2], fileFlag, reject);
+  // Last tie between the two readings: the path the raw match found must be
+  // the path the real flag's token carries, or the match is some other
+  // occurrence.
+  if (filePath !== tokenPath) reject(ambiguous);
+  return filePath;
+}
+
 function resolvePayloadFiles(commandString, options = {}) {
   if (!commandString || typeof commandString !== 'string') return null;
   const onError = options.onError || fail;
@@ -205,29 +267,39 @@ function resolvePayloadFiles(commandString, options = {}) {
     onError(message);
     throw new Error('resolvePayloadFiles onError callback must not return');
   };
+  // No legitimate command contains a placeholder token, and one that does
+  // could steer the substitution below. Refuse rather than guess.
+  for (const spec of Object.values(PAYLOAD_PLACEHOLDERS)) {
+    if (commandString.includes(spec.placeholder)) {
+      reject(`--command may not contain the reserved token ${spec.placeholder}`);
+    }
+  }
+
+  // Two passes, and the order matters. Pass 1 rewrites ONLY the file flags
+  // found in the original command, into placeholders — so no payload content
+  // exists in the string any matcher runs over. Pass 2 then builds the
+  // synthetic command by literal placeholder substitution.
+  //
+  // Doing both in one pass meant a later flag's matcher ran over an earlier
+  // payload's content: a Doc body reading `Use --params-file /tmp/example
+  // here` had that sentence rewritten into the real params object, and the
+  // corrupted JSON — not the file's contents — was what got sent.
   let execCommand = commandString;
-  let syntheticCommand = commandString;
   const payloads = {};
+  // The matchers scan the raw string, which cannot by itself tell a real flag
+  // from the same text sitting inside a quoted value — `--json '{"name":"Keep
+  // --params-file /tmp/q.json literal"}'` had that sentence rewritten into a
+  // placeholder, corrupting the caller's own JSON. The argv tokens settle it:
+  // a flag mentioned inside a value is part of its token, never a token of its
+  // own. Counts must agree, or the command is ambiguous and is refused.
+  const argvTokens = splitCommand(commandString);
 
   for (const [fileFlag, spec] of Object.entries(PAYLOAD_PLACEHOLDERS)) {
-    const matches = [...commandString.matchAll(spec.matcher)];
-    if (matches.length === 0) continue;
-    if (matches.length > 1) {
-      reject(`${fileFlag} may appear at most once per command`);
-    }
-    // Exactly one payload source per flag: reject the file form alongside its
-    // inline counterpart (--json + --json-file, --body + --body-file) —
-    // otherwise gws would receive two occurrences of the same flag and pick
-    // one silently. `--json\s` does not match `--json-file` (hyphen, not
-    // whitespace, follows), so the file flag never trips its own check.
-    if (spec.inlineMatcher.test(commandString)) {
-      reject(`use either ${spec.flag} or ${fileFlag}, not both`);
-    }
-    const filePath = normalizePayloadFilePath(matches[0][2], fileFlag, reject);
-    // Models habitually quote flag values (every SKILL.md example quotes
-    // --params). \S+ captures those quotes, so strip one matching
-    // surrounding pair before validating — otherwise a valid quoted path
-    // fails the absolute-path check with a misleading error.
+    const filePath = validatedPayloadFilePath(
+      { commandString, argvTokens, fileFlag, spec },
+      reject
+    );
+    if (filePath === null) continue;
     // JSON is minified so the marker injector and gates see one line.
     const content = readPayloadFile(filePath, fileFlag, spec.kind, reject);
     payloads[spec.placeholder] = content;
@@ -235,15 +307,48 @@ function resolvePayloadFiles(commandString, options = {}) {
       spec.matcher,
       (m, lead) => `${lead}${spec.flag} ${spec.placeholder}`
     );
-    syntheticCommand = syntheticCommand.replace(
-      spec.matcher,
-      (m, lead) => `${lead}${spec.flag} ${content}`
-    );
   }
 
-  return Object.keys(payloads).length > 0
-    ? { execCommand, syntheticCommand, payloads }
-    : null;
+  if (Object.keys(payloads).length === 0) return null;
+
+  // ONE scan over the placeholder command, so substituted content is never
+  // itself scanned: a payload that happens to contain another placeholder's
+  // literal token stays as written. A replacement FUNCTION, not a string, so
+  // `$&`-style patterns in arbitrary payload text are inserted verbatim.
+  const syntheticCommand = execCommand.replace(
+    /@@PSD_PAYLOAD_[A-Z]+@@/g,
+    (token) =>
+      Object.prototype.hasOwnProperty.call(payloads, token)
+        ? payloads[token]
+        : token
+  );
+  return { execCommand, syntheticCommand, payloads };
+}
+
+/**
+ * Swap placeholder tokens back for their payloads, AFTER splitCommand — the
+ * step that makes a payload exactly one argv token whatever it contains.
+ *
+ * A placeholder is restored ONLY in the value position of the inline flag
+ * `resolvePayloadFiles` put it in. Substituting any token that merely equals a
+ * placeholder let a caller alias one payload into a second flag:
+ * `--params-file <p> --json @@PSD_PAYLOAD_PARAMS@@` would reach gws with the
+ * params content as the request BODY, while the synthetic command the Phase 1
+ * gates ran against still carried the literal placeholder there. The gate and
+ * the executed argv have to describe the same call (REV-COR-346).
+ */
+const PLACEHOLDER_FLAGS = Object.fromEntries(
+  Object.values(PAYLOAD_PLACEHOLDERS).map((spec) => [spec.placeholder, spec.flag])
+);
+
+function restorePayloadArguments(argv, resolvedPayloads) {
+  if (!resolvedPayloads) return argv;
+  return argv.map((token, index) =>
+    Object.prototype.hasOwnProperty.call(resolvedPayloads.payloads, token) &&
+    argv[index - 1] === PLACEHOLDER_FLAGS[token]
+      ? resolvedPayloads.payloads[token]
+      : token
+  );
 }
 
 /**
@@ -567,7 +672,7 @@ function isMetadataOnlyDriveUpdate(commandString, tokens) {
   // this function's contract names it. Symptom: a plain rename succeeded while
   // the same file's move was blocked, silently wedging the Purdy Drive
   // auto-sort schedule on every run.
-  const params = extractParamsResource(tokens);
+  const params = extractParamsResource(commandString, tokens);
   if (params) {
     const paramKeys = Object.keys(params);
     if (!paramKeys.every((key) => DRIVE_PARAM_FIELDS.has(key.toLowerCase()))) {
@@ -592,21 +697,42 @@ function isMetadataOnlyDriveUpdate(commandString, tokens) {
 
 /**
  * Parse the `--params` query-parameter object, or null when absent/unparseable.
- * Separate from extractDriveResource, which reads the `--json` request BODY.
+ * Separate from extractDriveResource, which reads the `--json` request BODY —
+ * but it uses the SAME dual extraction, and for the same reason.
+ *
+ * Token first, because that is what gws receives (REV-COR-346). Raw-string
+ * scan second, because the payload-file flow inlines minified JSON UNQUOTED
+ * into the synthetic command the gates run against, and `splitCommand` treats
+ * its `"` as quote toggles — so a `--params-file` parent move read from tokens
+ * alone came back null and `isMetadataOnlyDriveUpdate` refused a move it
+ * documents as allowed, while the identical inline `--params` passed.
+ *
+ * The fallback cannot mask a divergence: what executes is the token, and the
+ * broker (`assertParamsParse`) refuses any `--params` token that does not
+ * parse as an object, so a command whose token and string disagree never runs.
  */
-function extractParamsResource(tokens) {
-  for (let i = 0; i < tokens.length - 1; i++) {
-    if (tokens[i] !== '--params') continue;
+function extractParamsResource(commandString, tokens) {
+  const asObject = (raw) => {
     try {
-      const parsed = JSON.parse(tokens[i + 1]);
+      const parsed = JSON.parse(raw);
       return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
         ? parsed
         : null;
     } catch {
       return null;
     }
+  };
+  for (let i = 0; i < tokens.length - 1; i++) {
+    if (tokens[i] !== '--params') continue;
+    const fromToken = asObject(tokens[i + 1]);
+    if (fromToken) return fromToken;
+    break;
   }
-  return null;
+  if (typeof commandString !== 'string') return null;
+  const span = findFlagObjectSpan(commandString, '--params');
+  return span
+    ? asObject(commandString.slice(span.jsonStart, span.jsonEnd + 1))
+    : null;
 }
 
 /**
@@ -1066,8 +1192,8 @@ function injectMarkers(commandString) {
  * inclusive) or null when there is no parseable --json object. Shared by
  * mutateJsonField (marker injection) and extractJsonArg (payload-file flow).
  */
-function findJsonObjectStart(commandString, jsonFlagIdx) {
-  let i = jsonFlagIdx + '--json'.length;
+function findJsonObjectStart(commandString, jsonFlagIdx, flag = '--json') {
+  let i = jsonFlagIdx + flag.length;
   while (i < commandString.length && /\s/.test(commandString[i])) i++;
   let openQuote = '';
   if (commandString[i] === "'" || commandString[i] === '"') {
@@ -1106,13 +1232,25 @@ function findBalancedJsonEnd(commandString, jsonStart) {
   return -1;
 }
 
+function findFlagObjectSpan(commandString, flag) {
+  // Scanned rather than built into a RegExp so the flag stays a literal.
+  // The whitespace requirement is what keeps `--json` off `--json-file` and
+  // `--params` off `--params-file`: a hyphen follows the flag there.
+  let searchFrom = 0;
+  for (;;) {
+    const flagIdx = commandString.indexOf(flag, searchFrom);
+    if (flagIdx === -1) return null;
+    searchFrom = flagIdx + flag.length;
+    if (!/\s/.test(commandString[searchFrom] || '')) continue;
+    const start = findJsonObjectStart(commandString, flagIdx, flag);
+    if (!start) continue;
+    const jsonEnd = findBalancedJsonEnd(commandString, start.jsonStart);
+    if (jsonEnd !== -1) return { ...start, jsonEnd };
+  }
+}
+
 function findJsonSpan(commandString) {
-  const jsonFlagIdx = commandString.search(/--json\s+['"]?\{/);
-  if (jsonFlagIdx === -1) return null;
-  const start = findJsonObjectStart(commandString, jsonFlagIdx);
-  if (!start) return null;
-  const jsonEnd = findBalancedJsonEnd(commandString, start.jsonStart);
-  return jsonEnd === -1 ? null : { ...start, jsonEnd };
+  return findFlagObjectSpan(commandString, '--json');
 }
 
 /**
@@ -1175,6 +1313,7 @@ module.exports = {
   enforcePhase1Gates,
   injectMarkers,
   resolvePayloadFiles,
+  restorePayloadArguments,
   extractJsonArg,
   missingScopesForCommand,
   isPermittedFolderCreate,

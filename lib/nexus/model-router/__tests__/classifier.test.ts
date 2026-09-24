@@ -47,6 +47,93 @@ describe("Nexus request classifier", () => {
     expect(deterministicClassify("Summarize the current results in this spreadsheet")).toBeNull()
   })
 
+  it("treats a pasted URL as a fetch, not a web search (#1696)", async () => {
+    // Routing a "open this link" turn as web-search requires a web-search-capable
+    // model and throws NexusSpecialistUnavailableError when none is accessible —
+    // killing the turn before the model can use the universal `web_fetch` tool.
+    // That hard failure was the reported bug (FS#164087 / FS#164086).
+    for (const message of [
+      "Open https://example.com and quote the main heading",
+      "Summarize http://example.org/article for me",
+      "What does this say? https://example.com/page",
+      "Please read https://example.com/docs/guide and explain it",
+    ]) {
+      expect(deterministicClassify(message)).toMatchObject({
+        intent: "general",
+        reasonCodes: ["explicit_url_web_fetch"],
+      });
+    }
+  });
+
+  it("does not spend a classifier call on a pasted URL (#1696)", async () => {
+    // The LLM classifier labels "open <url>" as web-search, so the deterministic
+    // rule must short-circuit it rather than merely reorder the local patterns.
+    const decision = await classifyNexusRequest(
+      "Open https://example.com and quote the main heading",
+      config
+    );
+    expect(decision).toMatchObject({ intent: "general", source: "deterministic" });
+    expect(mockCreateProviderModel).not.toHaveBeenCalled();
+  });
+
+  it("still routes an explicit search to web search even when a link is present (#1696)", () => {
+    expect(
+      deterministicClassify(
+        "Search the web for district guidance, then compare it with https://example.com"
+      )?.intent
+    ).toBe("web-search");
+  });
+
+  it("does not let a pasted URL shadow a more specific domain or complexity signal (#1696)", () => {
+    // A URL says the turn needs a FETCH; it says nothing about the subject or
+    // how hard the question is. Classifying on the link alone would silently
+    // downgrade both the specialist and the tier.
+    expect(
+      deterministicClassify(
+        "Using the rubric at https://example.com/rubric.pdf, build a differentiated lesson plan"
+      )
+    ).toMatchObject({ intent: "instruction" });
+
+    expect(
+      deterministicClassify(
+        "Do a full architecture review of this migration; the endpoint is https://example.com/v1"
+      )
+    ).toMatchObject({
+      intent: "general",
+      tier: "high",
+      reasonCodes: ["explicit_url_web_fetch"],
+    });
+
+    expect(deterministicClassify("What is https://example.com/page")).toMatchObject({
+      intent: "general",
+      tier: "light",
+      reasonCodes: ["explicit_url_web_fetch"],
+    });
+  });
+
+  it("does not read currency wording inside the URL itself (#1696)", () => {
+    // `latest` and `news` here are path segments, not the user asking for live data.
+    expect(
+      deterministicClassify("Summarize https://example.com/latest-news/policy-update")
+    ).toMatchObject({ intent: "general", reasonCodes: ["explicit_url_web_fetch"] });
+  });
+
+  it("keeps web search for a link plus a separate current-info request (#1696)", () => {
+    // The page cannot supply today's weather, so live search is still needed.
+    // web_fetch stays attached, and the router degrades to fetch-only when no
+    // search model is accessible.
+    expect(
+      deterministicClassify("Summarize https://example.com and give today's weather")
+    ).toMatchObject({
+      intent: "web-search",
+      reasonCodes: ["current_web_information", "explicit_url_web_fetch"],
+    });
+    expect(deterministicClassify("What is the latest guidance?")).toMatchObject({
+      intent: "web-search",
+      reasonCodes: ["current_web_information"],
+    });
+  });
+
   it("recognizes an edit instruction when an image is attached", async () => {
     const decision = await classifyNexusRequest("Make this brighter", config, { hasImageInput: true })
     expect(decision).toMatchObject({ intent: "image", source: "deterministic" })

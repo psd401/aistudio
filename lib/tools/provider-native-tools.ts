@@ -58,6 +58,13 @@ export async function createUniversalTools(_enabledTools: string[]): Promise<Too
   tools.show_chart = createShowChartTool()
   log.debug('Added show_chart visualization tool (always enabled)')
 
+  // NOT `web_fetch` (Issue #1696). The URL reader is attached by the Nexus chat
+  // route only (`buildMergedChatTools`). Every unified-streaming caller reaches
+  // this function through `adapter.createTools()`, including single-step
+  // surfaces (compare-models, `lib/ai-helpers.ts`) with no follow-up model step.
+  // There, a model that calls `web_fetch` for a pasted URL ends the turn on the
+  // tool result and returns no text.
+
   return tools as ToolSet
 }
 
@@ -169,7 +176,7 @@ async function createBedrockNativeTools(enabledTools: string[]): Promise<ToolSet
  */
 export function providerSupportsNativeTools(provider: string, toolName: string): boolean {
   // Universal tools work with any provider
-  if (['showChart', 'show_chart'].includes(toolName)) {
+  if (['showChart', 'show_chart', 'webFetch', 'web_fetch'].includes(toolName)) {
     return true
   }
 

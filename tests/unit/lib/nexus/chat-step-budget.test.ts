@@ -8,15 +8,26 @@
 
 import {
   DEFAULT_MAX_STEPS,
+  WEB_FETCH_MAX_STEPS,
   WORKSPACE_MAX_STEPS,
   resolveMaxSteps,
 } from "@/lib/nexus/chat-step-budget";
 
 describe("resolveMaxSteps", () => {
-  it("is undefined (single-step) when no multi-step tools are active", () => {
+  it("still allows a follow-up step when no multi-step tools are active (#1696)", () => {
+    // The universal `web_fetch` tool is attached to EVERY turn and is not
+    // terminal: without a follow-up step the model calls it and the turn ends
+    // before it can answer from the page it just read.
     expect(
       resolveMaxSteps({ multiStepToolsActive: false, hasWorkspaceTools: false })
-    ).toBeUndefined();
+    ).toBe(WEB_FETCH_MAX_STEPS);
+    expect(WEB_FETCH_MAX_STEPS).toBeGreaterThanOrEqual(2);
+  });
+
+  it("keeps the baseline budget far below the multi-step bounds (#1696)", () => {
+    // The step budget scales the stream wall-clock ceiling, so an ordinary turn
+    // must not inherit the ten-step tool-chain budget.
+    expect(WEB_FETCH_MAX_STEPS).toBeLessThan(DEFAULT_MAX_STEPS);
   });
 
   it("keeps the original bound for non-workspace multi-step chains", () => {
@@ -33,9 +44,9 @@ describe("resolveMaxSteps", () => {
     expect(WORKSPACE_MAX_STEPS).toBeGreaterThan(DEFAULT_MAX_STEPS);
   });
 
-  it("stays single-step for workspace tools when multi-step is off (never a bypass)", () => {
+  it("does not widen to the workspace bound when multi-step is off (never a bypass)", () => {
     expect(
       resolveMaxSteps({ multiStepToolsActive: false, hasWorkspaceTools: true })
-    ).toBeUndefined();
+    ).toBe(WEB_FETCH_MAX_STEPS);
   });
 });

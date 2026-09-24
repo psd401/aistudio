@@ -11,6 +11,7 @@
 
 import type { McpToolHandler, McpToolResult } from "@/lib/mcp/types";
 import { createLogger } from "@/lib/logger";
+import { STATUS_CODES } from "node:http";
 import { safeFetch } from "@/lib/security/safe-fetch";
 
 const DEFAULT_MAX_CHARS = 20_000;
@@ -104,6 +105,60 @@ function isBlockedHost(host: string): boolean {
 }
 
 /**
+ * A failure whose message this module wrote itself, with no upstream-controlled
+ * text in it. Only these messages (plus the fixed `safeFetch` refusals below)
+ * reach the model verbatim. Anything else, such as a TLS error quoting a
+ * certificate's names, comes from the remote server and is reduced to a code.
+ */
+class WebFetchError extends Error {}
+
+/** `safeFetch`'s own fixed refusal messages: safe to pass through verbatim. */
+const SAFE_FETCH_REFUSALS = new Set([
+  "Outbound target resolves to a private/internal address",
+  "Outbound target did not resolve",
+  "Outbound URL must use HTTP or HTTPS",
+]);
+
+/**
+ * Failure detail that is safe to hand back to the model (#1696 / Codex P1).
+ * Failure text is returned OUTSIDE the untrusted-content fence, so it must never
+ * carry text a remote server controls: a hostile page could otherwise put
+ * prompt-injection text in a status line, header or error message. Our own
+ * messages pass through. For any other error, only a bare error code such as
+ * `ENOTFOUND` survives, and the full message goes to the server log.
+ */
+function describeFetchFailure(err: unknown): string {
+  if (!(err instanceof Error)) return "network error";
+  if (err.name === "TimeoutError") return "request timed out";
+  if (err instanceof WebFetchError || SAFE_FETCH_REFUSALS.has(err.message)) {
+    return err.message;
+  }
+  const code = (err as { code?: unknown }).code ?? (err.cause as { code?: unknown } | undefined)?.code;
+  return typeof code === "string" && /^[A-Z][A-Z0-9_]{1,40}$/.test(code)
+    ? `network error (${code})`
+    : "network error";
+}
+
+/**
+ * The standard reason phrase for an HTTP status. The upstream `statusText` is
+ * server-controlled, so it is never echoed back to the model.
+ */
+function reasonPhrase(status: number): string {
+  return STATUS_CODES[status] ?? "";
+}
+
+/**
+ * A Content-Type is echoed only when it is a well-formed media type. It comes
+ * from the remote server, so anything else is reported as unrecognized.
+ */
+function safeMediaType(contentType: string): string {
+  const mediaType = contentType.split(";", 1)[0]?.trim() ?? "";
+  return /^[a-z0-9!#$&^_.+-]{1,64}\/[a-z0-9!#$&^_.+-]{1,64}$/.test(mediaType)
+    ? mediaType
+    : "unrecognized";
+}
+
+/**
  * Reject URLs that target private, loopback, link-local, or cloud-metadata hosts
  * (SSRF guard). Mirrors the host checks in `lib/mcp/connector-service.ts`
  * (`rejectUnsafeMcpUrl`) but is self-contained so this handler does not pull the
@@ -116,14 +171,14 @@ export function assertSafeFetchUrl(rawUrl: string): URL {
   try {
     url = new URL(rawUrl);
   } catch {
-    throw new Error("Invalid URL");
+    throw new WebFetchError("Invalid URL");
   }
 
   const isProd = process.env.NODE_ENV === "production";
   const protocolAllowed =
     url.protocol === "https:" || (url.protocol === "http:" && !isProd);
   if (!protocolAllowed) {
-    throw new Error(
+    throw new WebFetchError(
       isProd ? "Only https:// URLs are allowed" : "Only http(s):// URLs are allowed"
     );
   }
@@ -132,7 +187,7 @@ export function assertSafeFetchUrl(rawUrl: string): URL {
   // so the IPv6 checks match.
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   if (isBlockedHost(host)) {
-    throw new Error("Refusing to fetch a private/loopback/internal host");
+    throw new WebFetchError("Refusing to fetch a private/loopback/internal host");
   }
 
   return url;
@@ -231,15 +286,15 @@ async function readBoundedText(res: Response, maxBytes: number): Promise<string>
 export async function readResponseText(res: Response, maxChars: number): Promise<string> {
   const contentType = (res.headers.get("content-type") || "").toLowerCase();
   if (!isTextualContentType(contentType)) {
-    throw new Error(
-      `non-text content (content-type: ${contentType || "unknown"})`
+    throw new WebFetchError(
+      `non-text content (content-type: ${contentType ? safeMediaType(contentType) : "unknown"})`
     );
   }
   // Fast reject: an advertised Content-Length over the cap, before reading a
   // single body byte (REV-COR-500).
   const declaredLength = Number(res.headers.get("content-length"));
   if (Number.isFinite(declaredLength) && declaredLength > MAX_BYTES) {
-    throw new Error(
+    throw new WebFetchError(
       `response too large (content-length ${declaredLength} > ${MAX_BYTES} bytes)`
     );
   }
@@ -267,10 +322,16 @@ function resolveMaxChars(value: unknown): number {
  * jump to an internal host (a 302 to 169.254.170.2 / localhost / a VPC service)
  * without re-running the SSRF guard, turning this tool into an internal-read
  * primitive (REV-COR-496). A single shared AbortSignal bounds the whole chain to
- * FETCH_TIMEOUT_MS. Returns the final non-redirect Response; throws on a blocked
- * redirect target, an invalid Location, or exceeding the hop cap.
+ * FETCH_TIMEOUT_MS. Returns the final non-redirect Response together with the
+ * URL it actually came from — the caller reports that to the model and the user,
+ * so a redirected fetch is not attributed to the URL that was merely asked for.
+ * Throws on a blocked redirect target, an invalid Location, or exceeding the hop
+ * cap.
  */
-async function fetchWithGuardedRedirects(url: URL, signal: AbortSignal): Promise<Response> {
+async function fetchWithGuardedRedirects(
+  url: URL,
+  signal: AbortSignal
+): Promise<{ res: Response; finalUrl: URL }> {
   let currentUrl = url;
   for (let hop = 0; ; hop++) {
     const res = await safeFetch(currentUrl, {
@@ -280,7 +341,7 @@ async function fetchWithGuardedRedirects(url: URL, signal: AbortSignal): Promise
 
     const isRedirect =
       res.status >= 300 && res.status < 400 && res.headers.has("location");
-    if (!isRedirect) return res;
+    if (!isRedirect) return { res, finalUrl: currentUrl };
 
     // Free the redirect response's socket before the next hop.
     try {
@@ -289,7 +350,7 @@ async function fetchWithGuardedRedirects(url: URL, signal: AbortSignal): Promise
       /* ignore */
     }
     if (hop >= MAX_REDIRECTS) {
-      throw new Error(`too many redirects (> ${MAX_REDIRECTS})`);
+      throw new WebFetchError(`too many redirects (> ${MAX_REDIRECTS})`);
     }
 
     const location = res.headers.get("location") || "";
@@ -297,7 +358,8 @@ async function fetchWithGuardedRedirects(url: URL, signal: AbortSignal): Promise
     try {
       nextUrl = new URL(location, currentUrl); // resolve a relative Location
     } catch {
-      throw new Error(`invalid redirect target "${location}"`);
+      // The Location value is server-controlled, so it is not echoed back.
+      throw new WebFetchError("invalid redirect target");
     }
     // Re-validate the redirect target's protocol + host (SSRF guard). Throws if
     // the hop points at a private/loopback/internal host.
@@ -305,49 +367,109 @@ async function fetchWithGuardedRedirects(url: URL, signal: AbortSignal): Promise
   }
 }
 
-export const handleWebFetch: McpToolHandler = async (args, context) => {
-  const log = createLogger({ requestId: context.requestId, action: "agent.web_fetch" });
-  const rawUrl = typeof args.url === "string" ? args.url : "";
-  if (!rawUrl) {
-    return textResult("Missing required field: url", true);
+/** Outcome of a guarded page fetch. `isError` mirrors `McpToolResult.isError`. */
+export interface WebFetchOutcome {
+  /** Human/model-readable text: the page content, or the failure reason. */
+  text: string;
+  isError: boolean;
+  /** Resolved URL, when the input parsed and passed the SSRF guard. */
+  url?: string;
+  /** Upstream HTTP status, when a response was received. */
+  status?: number;
+}
+
+/**
+ * Fetch one public web page and return its readable text, or a description of
+ * why it could not be fetched. Never throws — every failure is reported through
+ * `isError`.
+ *
+ * This is the shared core behind BOTH web-fetch surfaces (Issue #1696):
+ * - `handleWebFetch` — the `internal`-surface MCP tool used by the agentic
+ *   Assistant Architect runtime.
+ * - `createWebFetchTool()` (`lib/tools/web-fetch-tool.ts`) — the `ai_sdk`
+ *   universal tool that lets Nexus chat open a URL a user pastes.
+ *
+ * Keeping one implementation means the SSRF guard, redirect re-validation,
+ * byte/char caps and timeout cannot drift apart between the two surfaces.
+ *
+ * @param rawUrl   Absolute http(s) URL. Non-strings are treated as missing.
+ * @param maxChars Optional character cap (default 20000, hard max 100000).
+ * @param action   Logger `action` label identifying the calling surface.
+ */
+export async function fetchWebPageText(
+  rawUrl: unknown,
+  maxChars: unknown,
+  { requestId, action }: { requestId?: string; action: string }
+): Promise<WebFetchOutcome> {
+  const log = createLogger({ requestId, action });
+  const target = typeof rawUrl === "string" ? rawUrl : "";
+  if (!target) {
+    return { text: "Missing required field: url", isError: true };
   }
-  const maxChars = resolveMaxChars(args.maxChars);
+  const charLimit = resolveMaxChars(maxChars);
 
   let url: URL;
   try {
-    url = assertSafeFetchUrl(rawUrl);
+    url = assertSafeFetchUrl(target);
   } catch (err) {
-    return textResult(
-      `Cannot fetch "${rawUrl}": ${err instanceof Error ? err.message : "blocked"}`,
-      true
-    );
+    return {
+      text: `Cannot fetch "${target}": ${err instanceof Error ? err.message : "blocked"}`,
+      isError: true,
+    };
   }
 
+  // The page a failure belongs to: the requested URL until the redirect chain
+  // resolves, then the final URL, so a body that fails to read after a redirect
+  // is reported against the page it actually came from.
+  let attemptedUrl = url;
   try {
-    const res = await fetchWithGuardedRedirects(
+    // `finalUrl` is the URL the body actually came from. Report that, not the
+    // requested URL: a 301 to a different path or host would otherwise be
+    // attributed to a page that was never read, both in the text handed to the
+    // model and in the URL the chat tool card shows the user.
+    const { res, finalUrl } = await fetchWithGuardedRedirects(
       url,
       AbortSignal.timeout(FETCH_TIMEOUT_MS)
     );
+    attemptedUrl = finalUrl;
     if (!res.ok) {
-      return textResult(`Fetch failed: HTTP ${res.status} ${res.statusText}`, true);
+      return {
+        text: `Fetch failed: HTTP ${res.status} ${reasonPhrase(res.status)}`.trimEnd(),
+        isError: true,
+        url: finalUrl.href,
+        status: res.status,
+      };
     }
 
-    const text = await readResponseText(res, maxChars);
-    log.info("Agent web fetch completed", {
-      host: url.hostname,
+    const text = await readResponseText(res, charLimit);
+    log.info("Web fetch completed", {
+      host: finalUrl.hostname,
       status: res.status,
       chars: text.length,
+      redirected: finalUrl.href !== url.href,
     });
-    return textResult(
-      `Fetched ${url.href} (${res.status})\n\n${text || "[no readable text content]"}`
-    );
+    return {
+      text: `Fetched ${finalUrl.href} (${res.status})\n\n${text || "[no readable text content]"}`,
+      isError: false,
+      url: finalUrl.href,
+      status: res.status,
+    };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    log.warn("Agent web fetch failed", { host: url.hostname, error: message });
-    const friendly =
-      err instanceof Error && err.name === "TimeoutError"
-        ? "request timed out"
-        : message;
-    return textResult(`Failed to fetch "${url.href}": ${friendly}`, true);
+    log.warn("Web fetch failed", { host: attemptedUrl.hostname, error: message });
+    const friendly = describeFetchFailure(err);
+    return {
+      text: `Failed to fetch "${attemptedUrl.href}": ${friendly}`,
+      isError: true,
+      url: attemptedUrl.href,
+    };
   }
+}
+
+export const handleWebFetch: McpToolHandler = async (args, context) => {
+  const outcome = await fetchWebPageText(args.url, args.maxChars, {
+    requestId: context.requestId,
+    action: "agent.web_fetch",
+  });
+  return textResult(outcome.text, outcome.isError);
 };

@@ -109,6 +109,40 @@ describe("withSharedDriveSupport", () => {
     }
   })
 
+  // An unparseable --params never reaches this transform: `assertParamsParse`
+  // refuses it first (#1801, pinned in command-executor.test.ts). What must
+  // hold here is that a Drive `q` that DID arrive intact survives the merge.
+  it("keeps a q whose values are single-quoted, as Drive requires", () => {
+    // The only transport that gets this shape through the skill is
+    // --params-file; once here it must round-trip byte-identical.
+    const q = "name contains 'Classified' and trashed = false"
+    const out = withSharedDriveSupport([
+      "drive",
+      "files",
+      "list",
+      "--params",
+      JSON.stringify({ q, pageSize: 50 }),
+    ])
+    expect(params(out)).toEqual({
+      q,
+      pageSize: 50,
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    })
+  })
+
+  it("keeps a folder-children query intact", () => {
+    const q = "'1AbCfolderId' in parents and trashed = false"
+    const out = withSharedDriveSupport([
+      "drive",
+      "files",
+      "list",
+      "--params",
+      JSON.stringify({ q }),
+    ])
+    expect((params(out) as { q: string }).q).toBe(q)
+  })
+
   it("returns a copy rather than mutating the caller's argv", () => {
     const argv = ["drive", "files", "get"]
     const out = withSharedDriveSupport(argv)
