@@ -658,6 +658,7 @@ function defineBuildWorkspaceChatToolsSuite1Part2b() {
     // The live read short-circuits — the stale projection is NOT consulted.
     expect(loadDocStateMock).not.toHaveBeenCalled();
     expect(out).toEqual({
+      objectId: "doc-1",
       title: "My Doc",
       kind: "document",
       bodyFormat: "markdown",
@@ -677,7 +678,7 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
     const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
     const out = await exec(tools.read_workspace_content, {});
     expect(loadDocStateMock).not.toHaveBeenCalled();
-    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: "", byteOffset: 0, totalBytes: 0 });
+    expect(out).toEqual({ objectId: "doc-1", title: "My Doc", kind: "document", bodyFormat: "markdown", body: "", byteOffset: 0, totalBytes: 0 });
   });
 
   it("read_workspace_content falls back to the projection when the live read is unavailable (null)", async () => {
@@ -689,7 +690,7 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
     const out = await exec(tools.read_workspace_content, {});
     expect(readAgentDocMarkdownMock).toHaveBeenCalledWith("doc-1");
     expect(loadDocStateMock).toHaveBeenCalledWith("doc-1");
-    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: "# Projection", byteOffset: 0, totalBytes: 12 });
+    expect(out).toEqual({ objectId: "doc-1", title: "My Doc", kind: "document", bodyFormat: "markdown", body: "# Projection", byteOffset: 0, totalBytes: 12 });
   });
 
   it("read_workspace_content falls back to version.bodyInline when live read AND projection are empty", async () => {
@@ -699,7 +700,7 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
     loadDocStateMock.mockResolvedValue({ markdown: "", revision: 5 });
     const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
     const out = await exec(tools.read_workspace_content, {});
-    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: "# Snapshot", byteOffset: 0, totalBytes: 10 });
+    expect(out).toEqual({ objectId: "doc-1", title: "My Doc", kind: "document", bodyFormat: "markdown", body: "# Snapshot", byteOffset: 0, totalBytes: 10 });
   });
 
   it("read_workspace_content flags bodyUnavailable only when live read, projection AND snapshot are all empty", async () => {
@@ -709,7 +710,7 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
     loadDocStateMock.mockResolvedValue({ markdown: "", revision: 5 });
     const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
     const out = await exec(tools.read_workspace_content, {});
-    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: null, bodyUnavailable: true });
+    expect(out).toEqual({ objectId: "doc-1", title: "My Doc", kind: "document", bodyFormat: "markdown", body: null, bodyUnavailable: true });
   });
 
   // #1749 barrier B: an artifact over the 4 KiB inline threshold lives in S3.
@@ -722,6 +723,7 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
     const out = await exec(tools.read_workspace_content, {});
     expect(loadArtifactCodeMock).toHaveBeenCalledWith(BIG_ART.version);
     expect(out).toEqual({
+      objectId: "art-1",
       title: "My Art",
       kind: "artifact",
       bodyFormat: "jsx",
@@ -740,6 +742,7 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
     const out = await exec(tools.read_workspace_content, {});
     // Must NOT report body "" (which would let the model rewrite from nothing).
     expect(out).toEqual({
+      objectId: "art-1",
       title: "My Art",
       kind: "artifact",
       bodyFormat: "jsx",

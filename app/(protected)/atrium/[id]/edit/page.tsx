@@ -97,6 +97,8 @@ export default async function AtriumEditPage({
   // the fresh one had to rediscover everything. Resolve the most recent
   // conversation this user had about this object and reopen THAT beside it. No
   // binding (or a resolution failure) simply falls back to the old behaviour.
+  // Artifacts resolve the same binding on click instead, in
+  // components/atrium/ArtifactAskAgentCard.tsx — change both together.
   const boundConversationId = await findLatestConversationForWorkspace({
     workspaceObjectId: obj.id,
     userId: req.userId,

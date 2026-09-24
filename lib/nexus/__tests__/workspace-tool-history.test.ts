@@ -185,4 +185,29 @@ describe("pruneStaleWorkspaceToolPayloads", () => {
       "update_workspace_artifact",
     ]);
   });
+
+  it("never stubs another object's source as superseded (rebound conversation)", () => {
+    const artifactA = bigCode("a");
+    const artifactB1 = bigCode("b");
+    const artifactB2 = bigCode("c");
+    const withId = (part: Record<string, unknown>, objectId: string) => ({
+      ...part,
+      output: { ...(part.output as Record<string, unknown>), objectId },
+    });
+    const messages = [
+      message("m1", [withId(updatePart("c1", artifactA), "obj-a")]),
+      message("m2", [withId(updatePart("c2", artifactB1), "obj-b")]),
+      message("m3", [withId(updatePart("c3", artifactB2), "obj-b")]),
+    ];
+
+    const out = pruneStaleWorkspaceToolPayloads(messages);
+    const code = (i: number) =>
+      (out[i].parts[0] as unknown as Record<string, Record<string, unknown>>)
+        .input.code;
+    // A has no later copy of itself: it stays verbatim.
+    expect(code(0)).toBe(artifactA);
+    // B's earlier revision IS superseded by B's newer one.
+    expect(code(1)).toMatch(/^\[omitted from history/);
+    expect(code(2)).toBe(artifactB2);
+  });
 });

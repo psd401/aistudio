@@ -69,7 +69,17 @@ export function PromptAutoLoader() {
       if (!active || processedDraftRef.current) return
       const composerState = composer.getState()
       if (!composerState) {
-        if (attempts++ < 50) setTimeout(fill, 100)
+        if (attempts++ < 50) {
+          setTimeout(fill, 100)
+          return
+        }
+        // Budget exhausted: say so, and burn the auto-send handshake so it
+        // cannot outlive this navigation. `draft` stays in the URL, so a reload
+        // still recovers the prefill.
+        consumeDraftAutoSend(autoSendNonce, draft)
+        log.warn('Composer never became ready; draft not prefilled', {
+          length: draft.length,
+        })
         return
       }
       processedDraftRef.current = true

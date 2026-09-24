@@ -112,30 +112,48 @@ function prunePart(part: unknown): unknown {
 }
 
 /**
+ * The object a workspace source part is about, read from its `objectId`. A
+ * conversation can be rebound to another artifact mid-thread, so "superseded"
+ * must mean "an earlier payload for the SAME object" — stubbing a different
+ * object's source would label it stale when no later copy of it exists. Parts
+ * without an id (older persisted parts, error results) share one "" group.
+ */
+function partObjectId(part: unknown): string {
+  const record = part as Record<string, unknown>;
+  for (const key of PAYLOAD_KEYS) {
+    const payload = record[key];
+    if (payload && typeof payload === "object") {
+      const id = (payload as Record<string, unknown>).objectId;
+      if (typeof id === "string") return id;
+    }
+  }
+  return "";
+}
+
+/**
  * Returns `messages` with every superseded workspace source payload stubbed.
  *
- * The newest workspace source tool part is left verbatim. When nothing needs
- * pruning the original array is returned by reference, so the common case (a
- * chat with no workspace open, or a first edit) allocates nothing.
+ * The newest workspace source tool part PER OBJECT is left verbatim. When
+ * nothing needs pruning the original array is returned by reference, so the
+ * common case (a chat with no workspace open, or a first edit) allocates
+ * nothing.
  */
 export function pruneStaleWorkspaceToolPayloads(
   messages: UIMessage[]
 ): UIMessage[] {
-  // Locate the newest workspace source part; everything before it is stale.
-  let latestMessageIndex = -1;
-  let latestPartIndex = -1;
+  // Locate the newest workspace source part for each object; everything
+  // earlier for that same object is stale.
+  const latest = new Map<string, string>();
   for (const [m, message] of messages.entries()) {
     const parts = message?.parts;
     if (!Array.isArray(parts)) continue;
     for (const [p, part] of parts.entries()) {
       if (isWorkspaceSourceToolPart(part)) {
-        latestMessageIndex = m;
-        latestPartIndex = p;
+        latest.set(partObjectId(part), `${m}:${p}`);
       }
     }
   }
-  // Fewer than two workspace source parts means there is nothing superseded.
-  if (latestMessageIndex < 0) return messages;
+  if (latest.size === 0) return messages;
 
   let anyChanged = false;
   const pruned = messages.map((message, m) => {
@@ -144,7 +162,7 @@ export function pruneStaleWorkspaceToolPayloads(
     let messageChanged = false;
     const nextParts = parts.map((part, p) => {
       if (!isWorkspaceSourceToolPart(part)) return part;
-      if (m === latestMessageIndex && p === latestPartIndex) return part;
+      if (latest.get(partObjectId(part)) === `${m}:${p}`) return part;
       const next = prunePart(part);
       if (next !== part) messageChanged = true;
       return next;

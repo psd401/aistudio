@@ -58,13 +58,6 @@ import type { ArtifactBridgeErrorCode } from "@/lib/content/artifact-bridge-erro
 import { NEXUS_CHAT_AUTHOR_LABEL } from "@/lib/content/version-author-label";
 import { createLogger } from "@/lib/logger";
 
-/**
- * Free-form attribution label stamped on the purple rail for chat-driven edits,
- * and (since #1791 finding 6) on `content_versions.author_label` so the version
- * history can say what wrote a version. ONE constant, shared with the UI's
- * label helper, so the write side and the read side can never drift.
- */
-const NEXUS_CHAT_AGENT_LABEL = NEXUS_CHAT_AUTHOR_LABEL;
 /** Bound on the markdown/code a single chat edit may write (mirrors the bridge). */
 const MAX_EDIT_BYTES = 512 * 1024;
 
@@ -100,6 +93,12 @@ export interface WorkspaceChatTools {
 }
 
 interface ReadResult {
+  /**
+   * The object read. History pruning (`workspace-tool-history.ts`) keys
+   * "superseded" on it, so a rebound conversation never stubs another
+   * object's source as stale.
+   */
+  objectId: string;
   title: string;
   kind: "document" | "artifact";
   bodyFormat: string | null;
@@ -345,6 +344,7 @@ function buildReadTool(
         // unavailable/absent body can never be reported as an empty first page.
         const page = body === null ? null : sliceBodyForRead(body, offset);
         return {
+          objectId: obj.id,
           title: obj.title,
           kind,
           bodyFormat: obj.version?.bodyFormat ?? null,
@@ -410,7 +410,7 @@ async function screenAndApplyDocEdit(
     };
   }
   try {
-    await applyAgentEdit({ objectId, markdown, agentId: NEXUS_CHAT_AGENT_LABEL, mode });
+    await applyAgentEdit({ objectId, markdown, agentId: NEXUS_CHAT_AUTHOR_LABEL, mode });
     // #1749: echo the id the edit actually landed on. `atrium:workspace-changed`
     // is scoped by this id, and an event WITHOUT one matches every listener
     // (`workspaceChangeMatches` treats a missing id as "about you") — so an
@@ -712,7 +712,7 @@ function buildArtifactUpdateTool(
           // version list said "human" with nothing to distinguish it, so "who
           // wrote this SQL?" was unanswerable. The label records the surface
           // without weakening the authorization record above it.
-          authorLabel: NEXUS_CHAT_AGENT_LABEL,
+          authorLabel: NEXUS_CHAT_AUTHOR_LABEL,
         });
       } catch (err) {
         log.warn("update_workspace_artifact failed", {

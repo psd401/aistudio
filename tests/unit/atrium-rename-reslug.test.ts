@@ -50,6 +50,8 @@ jest.mock("drizzle-orm", () => ({
   gte: (...args: unknown[]) => args,
   isNull: (value: unknown) => value,
   like: (...args: unknown[]) => args,
+  // Tagged so the self-exclusion is distinguishable from the lock's `eq`.
+  ne: (...args: unknown[]) => ({ ne: args }),
   sql: Object.assign((..._args: unknown[]) => ({}), { join: () => ({}) }),
 }));
 jest.mock("@/lib/content/mappers", () => ({
@@ -86,6 +88,8 @@ let publicationRows: Array<Record<string, unknown>> = [];
 let takenSlugs: Array<{ slug: string }> = [];
 /** Order in which the transaction touched each table, for the race assertion. */
 let txSelects: string[] = [];
+/** Conditions passed to each content_objects `.where(...)`, in order. */
+let objectWheres: unknown[] = [];
 let updatedValues: Record<string, unknown> | null = null;
 /** Rows the pre-transaction `loadByIdOrSlug` returns. */
 const outsideRows = () => [lockedObject];
@@ -109,7 +113,8 @@ function publicationsWhere() {
  * `uniqueSlug`'s prefetch awaits the `where(...)` directly. A real promise, not
  * a shared thenable — a thenable re-runs per `.then()`.
  */
-function objectsWhere() {
+function objectsWhere(condition?: unknown) {
+  objectWheres.push(condition);
   const lockable = { for: () => ({ limit: async () => [lockedObject] }) };
   return Object.assign(Promise.resolve(takenSlugs), lockable);
 }
@@ -143,6 +148,7 @@ jest.mock("@/lib/db/drizzle-client", () => ({
 }));
 
 import { contentService } from "@/lib/content/content-service";
+import { ConflictError } from "@/lib/content/errors";
 import type { Requester } from "@/lib/content/types";
 
 const requester: Requester = {
@@ -157,6 +163,7 @@ beforeEach(() => {
   publicationRows = [];
   takenSlugs = [];
   txSelects = [];
+  objectWheres = [];
   updatedValues = null;
 });
 
@@ -207,4 +214,22 @@ describe("rename re-slugs an unpublished object (#1791 finding 3)", () => {
     expect(txStub.update).not.toHaveBeenCalled();
     expect(txSelects).toEqual([]);
   });
+
+  it("excludes the object's OWN row from the collision scan (no -1 churn on a same-base rename)", async () => {
+    await contentService.update(requester, OBJECT_ID, { title: "Renamed" });
+    // The last objects select is `uniqueSlug`'s prefetch.
+    const slugScan = objectWheres[objectWheres.length - 1] as unknown[];
+    expect(slugScan).toContainEqual({ ne: [expect.anything(), OBJECT_ID] });
+  });
+
+  it("maps a slug unique-violation race on rename to a ConflictError, not a raw 500", async () => {
+    updateReturningMock.mockRejectedValueOnce(
+      Object.assign(new Error("duplicate key"), { code: "23505" })
+    );
+
+    await expect(
+      contentService.update(requester, OBJECT_ID, { title: "Renamed" })
+    ).rejects.toBeInstanceOf(ConflictError);
+  });
 });
+

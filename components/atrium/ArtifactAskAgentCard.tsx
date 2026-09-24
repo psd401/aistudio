@@ -53,6 +53,8 @@ export function ArtifactAskAgentCard({
     //
     // A failed or empty lookup falls through to a new conversation — the
     // previous behaviour — so this can never block the person from asking.
+    // Documents resolve the same binding server-side while the edit page
+    // loads (app/(protected)/atrium/[id]/edit/page.tsx) — change both together.
     let base = `/nexus?workspace=${encodeURIComponent(artifactId)}`;
     if (!forceNewChat) {
       try {

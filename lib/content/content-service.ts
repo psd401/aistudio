@@ -11,7 +11,7 @@
  * driver); JSONB columns insert via `sql\`${safeJsonbStringify(v)}::jsonb\``.
  */
 
-import { and, count, eq, gte, isNull, like, sql } from "drizzle-orm";
+import { and, count, eq, gte, isNull, like, ne, sql } from "drizzle-orm";
 import { createLogger } from "@/lib/logger";
 import {
   executeQuery,
@@ -132,7 +132,11 @@ function uniqueConstraint(error: unknown): string | null {
  * `isUniqueViolation` catch translates into a `ConflictError` on the rare
  * concurrent-create race.
  */
-async function uniqueSlug(tx: DbTransaction, title: string): Promise<string> {
+async function uniqueSlug(
+  tx: DbTransaction,
+  title: string,
+  excludeId?: string
+): Promise<string> {
   const base = slugifyTitle(title);
   // `_` and `%` are not producible by slugifyTitle (it emits [a-z0-9-] only), so
   // no LIKE-wildcard escaping is required for the base prefix.
@@ -148,10 +152,17 @@ async function uniqueSlug(tx: DbTransaction, title: string): Promise<string> {
         .select({ slug: contentObjects.slug })
         .from(contentObjects)
         .where(
-          sql`${contentObjects.slug} = ${base} OR ${like(
-            contentObjects.slug,
-            `${base}-%`
-          )}`
+          and(
+            sql`(${contentObjects.slug} = ${base} OR ${like(
+              contentObjects.slug,
+              `${base}-%`
+            )})`,
+            // A rename must not collide with the row's OWN current slug, or a
+            // same-base title (case change, repeated rename) churns `-1`, `-2`.
+            excludeId === undefined
+              ? undefined
+              : ne(contentObjects.id, excludeId)
+          )
         )
     ).map((r) => r.slug)
   );
@@ -580,13 +591,22 @@ async function updateInTransaction(
       // A slug race here surfaces as the same ConflictError ("please retry")
       // that a concurrent create raises — never a silently-kept old slug, which
       // would report a renamed URL that did not change.
-      setValues.slug = await uniqueSlug(tx, reslugTitle);
+      setValues.slug = await uniqueSlug(tx, reslugTitle, existingId);
     }
     return (await tx
       .update(contentObjects)
       .set(setValues)
       .where(eq(contentObjects.id, existingId))
-      .returning(objectSelectFields)) as ObjectRowAsText[];
+      .returning(objectSelectFields)
+      .catch((e: unknown) => {
+        if (isUniqueViolation(e)) {
+          throw new ConflictError(
+            "A content object with this slug already exists",
+            { slug: setValues.slug }
+          );
+        }
+        throw e;
+      })) as ObjectRowAsText[];
   }, "content.updateTransactional");
 }
 

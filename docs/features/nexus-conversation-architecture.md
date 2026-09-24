@@ -455,6 +455,35 @@ path. See
 
 ---
 
+## Workspace object binding (#1791)
+
+A conversation opened beside an Atrium document or artifact records that
+object durably in `nexus_conversations.workspace_object_id` (migration 183,
+`ON DELETE SET NULL`); like repository bindings, it is not stored only in the
+`?workspace=` URL param. `lib/nexus/workspace-conversation-binding.ts` owns
+the three operations, each scoped by `user_id` in the `WHERE` predicate:
+
+- `bindConversationWorkspace` — written by the chat route on every turn that
+  runs with a workspace bound. A conversation can move between objects; the
+  newest binding wins. A failed write is logged and swallowed (the turn is
+  not failed; only the next reopen loses its panel).
+- `getConversationWorkspaceObjectId` — reopening a conversation with no
+  `?workspace=` param restores the panel (`useRestoreBoundWorkspace` in
+  `app/(protected)/nexus/page.tsx`). The id is not re-authorized here; the
+  panel load and the workspace tools re-check `canView`/`canEdit` and degrade
+  to a not-found state for a deleted or revoked object.
+- `findLatestConversationForWorkspace` — Atrium's "Open beside chat" and
+  "Ask the agent" continue the most recent conversation about the object
+  instead of starting a new one.
+
+Model-side only, `lib/nexus/workspace-tool-history.ts` stubs superseded
+workspace source payloads (full artifact code, document bodies) out of the
+messages sent to the model, keeping the newest payload **per object**
+verbatim. Persisted messages are never touched. Tool parts keep their exact
+shape so every tool call still pairs with its result on replay.
+
+---
+
 ## Durable repository bindings
 
 Durable repository context is normalized in
