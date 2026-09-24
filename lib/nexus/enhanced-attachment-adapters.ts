@@ -914,6 +914,33 @@ export class VisionImageAdapter implements AttachmentAdapter {
  * - Hybrid document adapter (client/server processing)
  * - Simple text adapter
  */
+/**
+ * Document- and text-only composite adapter for chat surfaces that post to
+ * `/api/nexus/chat` but build the request body themselves instead of going
+ * through `AssistantChatTransport` (today: Assistant Architect follow-up chat,
+ * #1735).
+ *
+ * Images are deliberately excluded. `VisionImageAdapter` emits an assistant-ui
+ * `{ type: "image", image: <data-url> }` content part, and only
+ * `AssistantChatTransport` rewrites that into the AI SDK `file` part the route's
+ * `convertToModelMessages` understands. A hand-rolled request builder forwards
+ * the part verbatim, so the image would be dropped or rejected server-side.
+ * Every adapter below emits `{ type: "text" }` parts, which forward unchanged.
+ *
+ * Because `CompositeAttachmentAdapter.accept` is the union of its adapters'
+ * `accept` strings, the file picker itself filters images out — the user never
+ * gets a silently-dropped attachment.
+ */
+export function createDocumentAttachmentAdapter(
+  callbacks?: AttachmentProcessingCallbacks,
+  options: NexusAttachmentAdapterOptions = {}
+) {
+  return new CompositeAttachmentAdapter([
+    new HybridDocumentAdapter(callbacks, options),
+    new SimpleTextAttachmentAdapter(),
+  ]);
+}
+
 export function createEnhancedNexusAttachmentAdapter(
   callbacks?: AttachmentProcessingCallbacks,
   options: NexusAttachmentAdapterOptions = {}

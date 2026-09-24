@@ -14,6 +14,7 @@ import {
   ComposerPrimitive,
   MessagePrimitive,
   useAttachment,
+  useAuiState,
 } from "@assistant-ui/react";
 import { useShallow } from "zustand/shallow";
 import {
@@ -291,7 +292,25 @@ export const ComposerAttachments: FC<ComposerAttachmentsProps> = ({ processingAt
   );
 };
 
+/**
+ * Paperclip button for the shared composer.
+ *
+ * Renders only when the active runtime was given an attachment adapter
+ * (`adapters.attachments`). assistant-ui's own `disabled` flag on
+ * `ComposerPrimitive.AddAttachment` tracks composer editing state ONLY — it does
+ * not know whether an adapter exists — so without this gate the button is live on
+ * adapter-less runtimes and `composer.addAttachment()` rejects with
+ * "Attachments are not supported", surfacing as an unhandled promise rejection
+ * and a dead-end UI (#1735). Reading the runtime capability rather than taking a
+ * prop keeps every current and future consumer of `Thread` correct by default.
+ */
 export const ComposerAddAttachment: FC = () => {
+  const attachmentsSupported = useAuiState(
+    (s) => s.thread.capabilities.attachments,
+  );
+
+  if (!attachmentsSupported) return null;
+
   return (
     <ComposerPrimitive.AddAttachment asChild>
       <TooltipIconButton

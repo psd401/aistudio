@@ -33,8 +33,10 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { collectAndSanitizeEnabledTools, getToolDisplayName } from '@/lib/assistant-architect/tool-utils'
 import Image from "next/image"
 import DocumentUploadButton from "@/components/ui/document-upload-button"
-import { AssistantRuntimeProvider, useThreadRuntime, useLocalRuntime, type ChatModelRunOptions, type ChatModelRunResult } from '@assistant-ui/react'
+import { AssistantRuntimeProvider, useThreadRuntime, useLocalRuntime, type AttachmentAdapter, type ChatModelRunOptions, type ChatModelRunResult } from '@assistant-ui/react'
 import { Thread } from '@/components/assistant-ui/thread'
+import { createDocumentAttachmentAdapter } from '@/lib/nexus/enhanced-attachment-adapters'
+import { UploadClassifiedError } from '@/lib/errors/upload-errors'
 import { createLogger } from '@/lib/client-logger'
 import { ExecutionProgress } from './execution-progress'
 import { ToolCallTimeline } from './tool-call-timeline'
@@ -762,6 +764,100 @@ function createAssistantArchitectAdapter(
   }
 }
 
+/**
+ * Mutable holder for the follow-up conversation id.
+ *
+ * `current` keeps the existing ref-shaped contract the streaming adapter already
+ * reads and writes; `get` is a stable closure the attachment adapter can capture
+ * once. It is deliberately a plain object rather than a `useRef` — the attachment
+ * adapter is built in a `useMemo`, and handing a real ref to a factory during
+ * render trips `react-hooks/refs`.
+ */
+interface ConversationIdStore {
+  current: string | null
+  get: () => string | null
+}
+
+function createConversationIdStore(): ConversationIdStore {
+  const store: ConversationIdStore = {
+    current: null,
+    get: () => store.current
+  }
+  return store
+}
+
+/**
+ * Attachment support for the Assistant Architect composer (#1735).
+ *
+ * The composer's follow-up turns post to `/api/nexus/chat`, which already
+ * resolves repository-backed attachment markers, so documents attached here
+ * reach the model the same way they do in Nexus. Before this the runtime had no
+ * attachment adapter at all, which made the shared composer's paperclip button a
+ * dead end that rejected with "Attachments are not supported".
+ *
+ * `conversationIdRef` is read lazily so the null -> UUID transition that happens
+ * on the first follow-up response never recreates the adapter (recreating it
+ * would drop in-flight background uploads).
+ */
+function useArchitectAttachments(
+  conversationIdStore: ConversationIdStore
+): { attachmentAdapter: AttachmentAdapter; processingAttachments: Set<string> } {
+  const { toast } = useToast()
+  const [processingAttachments, setProcessingAttachments] = useState<Set<string>>(
+    () => new Set()
+  )
+
+  const handleProcessingStart = useCallback((attachmentId: string) => {
+    setProcessingAttachments(previous => new Set(previous).add(attachmentId))
+  }, [])
+
+  const handleProcessingComplete = useCallback((attachmentId: string) => {
+    setProcessingAttachments(previous => {
+      const next = new Set(previous)
+      next.delete(attachmentId)
+      return next
+    })
+  }, [])
+
+  const handleError = useCallback((
+    attachmentId: string,
+    error: UploadClassifiedError | Error
+  ) => {
+    // Clear the spinner: the adapter reports failures through onError without a
+    // matching onProcessingComplete, so the chip would otherwise spin forever.
+    handleProcessingComplete(attachmentId)
+    const code = error instanceof UploadClassifiedError ? error.code : undefined
+    log.warn('Attachment processing failed', {
+      attachmentId,
+      code,
+      error: error.message
+    })
+    toast({
+      title: code === 'UNAUTHORIZED' ? 'Session expired' : 'File upload failed',
+      description: code === 'UNAUTHORIZED'
+        ? 'Your session expired during the upload. Please sign in again.'
+        : 'The file could not be uploaded. Please try again.',
+      variant: 'destructive'
+    })
+  }, [handleProcessingComplete, toast])
+
+  const attachmentAdapter = useMemo(() => createDocumentAttachmentAdapter({
+    onProcessingStart: handleProcessingStart,
+    onProcessingComplete: handleProcessingComplete,
+    onError: handleError
+  }, {
+    repositoryBacked: true,
+    getConversationId: conversationIdStore.get
+  }), [
+    conversationIdStore,
+    handleError,
+    handleProcessingComplete,
+    handleProcessingStart
+  ])
+
+  return { attachmentAdapter, processingAttachments }
+}
+
 // Runtime provider component to handle streaming with single runtime and custom fetch routing
 function AssistantArchitectRuntimeProvider({
   children,
@@ -773,7 +869,9 @@ function AssistantArchitectRuntimeProvider({
   onExecutionError,
   hasCompletedExecution,
   onToolEvent,
-  approveDestructive
+  approveDestructive,
+  attachmentAdapter,
+  conversationIdRef
 }: {
   children: React.ReactNode
   tool: AssistantArchitectWithRelations
@@ -785,6 +883,11 @@ function AssistantArchitectRuntimeProvider({
   hasCompletedExecution: boolean
   onToolEvent: (event: ToolTimelineEvent) => void
   approveDestructive: boolean
+  /** Enables the composer's paperclip button; see `useArchitectAttachments`. */
+  attachmentAdapter: AttachmentAdapter
+  /** Owned by the pane so the attachment adapter and the request builder read
+   *  the same conversation id (#1735). */
+  conversationIdRef: ConversationIdStore
 }) {
   const inputsRef = useRef(inputs)
 
@@ -809,7 +912,6 @@ function AssistantArchitectRuntimeProvider({
   // Track whether we're in execution or conversation mode
   const hasCompletedExecutionRef = useRef(hasCompletedExecution)
   const executionIdRef = useRef<number | null>(null)
-  const conversationIdRef = useRef<string | null>(null)
 
   // Store model configuration from first prompt for follow-up conversations
   const executionModelRef = useRef<{ modelId: string; provider: string } | null>(null)
@@ -873,11 +975,19 @@ function AssistantArchitectRuntimeProvider({
       approveDestructiveRef
     })
     startTransition(() => { setAdapter(newAdapter) })
-  }, [currentToolId])
+  }, [currentToolId, conversationIdRef])
+
+  // Declaring the attachment adapter is what sets the thread's `attachments`
+  // capability, which is in turn what makes the shared composer render its
+  // paperclip button at all (#1735).
+  const runtimeOptions = useMemo(
+    () => ({ adapters: { attachments: attachmentAdapter } }),
+    [attachmentAdapter]
+  )
 
   // Use LocalRuntime with stable adapter reference
   // Adapter is null only on first render before the effect fires
-  const runtime = useLocalRuntime(adapter!)
+  const runtime = useLocalRuntime(adapter!, runtimeOptions)
 
   if (!adapter) return null
 
@@ -1251,10 +1361,18 @@ function AssistantExecutionPane(props: {
   onExecutionError: (error: string) => void
   onToolEvent: (event: ToolTimelineEvent) => void
 }) {
+  // Hooks stay above the early return — the pane unmounts between runs, which is
+  // also what resets the conversation id for the next execution.
+  const [conversationIdStore] = useState(createConversationIdStore)
+  const { attachmentAdapter, processingAttachments } =
+    useArchitectAttachments(conversationIdStore)
+
   if (!props.isExecuting && !props.hasResults) return null
   return (
     <ErrorBoundary>
       <AssistantArchitectRuntimeProvider
+        attachmentAdapter={attachmentAdapter}
+        conversationIdRef={conversationIdStore}
         tool={props.tool}
         inputs={props.inputs}
         onExecutionIdChange={props.onExecutionIdChange}
@@ -1287,7 +1405,7 @@ function AssistantExecutionPane(props: {
             </div>
           )}
           <div className="border rounded-lg p-4 space-y-4 max-w-full">
-            <Thread />
+            <Thread processingAttachments={processingAttachments} />
           </div>
         </div>
       </AssistantArchitectRuntimeProvider>
