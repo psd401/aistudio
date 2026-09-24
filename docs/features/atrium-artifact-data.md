@@ -423,7 +423,16 @@ type ArtifactDataResponse =
     };
 ```
 
-The host keeps at most 32 pending calls (the parent's 6 + 26 is sized to match) and applies a ten-second timeout
+The host keeps at most 32 pending calls, and the parent caps its own TOTAL
+outstanding (in flight + queued) at the same 32 so both refuse the same request.
+How that 32 splits depends on the lane: a `query` mount runs **6 concurrent + 26
+queued**, a `records` mount **1 concurrent + 31 queued** (record ops still ride
+Server Actions, which the App Router serializes, so a wider limit there would
+only create a second invisible queue). The parent also refuses to DISPATCH a
+request that has waited past its own queue deadline — shorter than the frame's,
+so a `submit` can never commit after the artifact was already told it timed out.
+
+The host applies a ten-second timeout
 (forty-five seconds for `query`: the action's own 30s budget starts only after
 authorization and the connector handshake, so the host must always outlast it
 or a late server answer is dropped and the page retries a running query). The

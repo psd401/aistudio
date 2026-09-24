@@ -787,6 +787,61 @@ describe("ArtifactSandbox bounded request queue (#1788)", () => {
     ]);
   });
 
+  it("never DISPATCHES a queued write that has already waited too long", async () => {
+    // The frame gives up on a request it has been holding and deletes its
+    // pending entry. If the parent still dispatched afterwards, a `submit`
+    // would COMMIT after the artifact was told it timed out — and the author's
+    // retry would create a duplicate record. The parent's queue deadline is
+    // deliberately shorter than the frame's, so it always abandons first.
+    const { frameWindow, postMessage } = mountSandbox(true);
+    let release: (() => void) | undefined;
+    submitArtifactRecordMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({
+              isSuccess: true,
+              message: "ok",
+              data: { id: "r1", createdAt: "2026-09-24T00:00:00.000Z" },
+            });
+        })
+    );
+    const nowSpy = jest.spyOn(Date, "now");
+    nowSpy.mockReturnValue(0);
+
+    // Two submits: the first occupies the single record slot, the second waits.
+    await act(async () => {
+      for (const requestId of REQUEST_IDS.slice(0, 2)) {
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            data: submitRequest(requestId),
+            origin: "null",
+            source: frameWindow,
+          })
+        );
+      }
+      await flushMicrotasks();
+    });
+    expect(submitArtifactRecordMock).toHaveBeenCalledTimes(1);
+
+    // The queued one has now waited past the parent's deadline.
+    nowSpy.mockReturnValue(300_000);
+    await act(async () => {
+      release?.();
+      await flushMicrotasks();
+    });
+
+    // The expired write was never sent to the action...
+    expect(submitArtifactRecordMock).toHaveBeenCalledTimes(1);
+    // ...and the artifact was told, with the honest code.
+    const expired = dataResponses(postMessage).find(
+      ({ message }) => message.requestId === REQUEST_IDS[1]
+    );
+    expect(expired?.message).toMatchObject({ ok: false, code: "timeout" });
+    expect(dispatchAcks(postMessage)).toEqual([REQUEST_IDS[0]]);
+    nowSpy.mockRestore();
+  });
+
   it("gives the RECORDS lane the same total capacity, not a smaller one", async () => {
     // Records run 1 at a time, so a cap expressed as a QUEUE DEPTH sized
     // against the query lane's concurrency (32 - 6 = 26) would let a

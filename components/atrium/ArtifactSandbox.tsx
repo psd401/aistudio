@@ -651,7 +651,28 @@ const DATA_DISPATCH_ACK_TYPE = "atrium-artifact-data-ack";
 interface QueuedBridgeRequest {
   request: ArtifactDataRequest;
   frameWindow: Window;
+  /** `Date.now()` when this was accepted, for the queue-wait deadline below. */
+  enqueuedAt: number;
 }
+
+/**
+ * How long the parent will let a request WAIT before it refuses to dispatch it
+ * at all (#1788).
+ *
+ * Deliberately SHORTER than the frame's own pre-ack budget
+ * (`QUEUED_DISPATCH_TIMEOUT_MS`, 315s in render.html). The frame arms a clock
+ * when the artifact posts and rejects the artifact's promise when it expires —
+ * at which point the pending entry is gone and any later answer is discarded.
+ * If the parent were still willing to dispatch after that, a queued `submit`
+ * would COMMIT after the artifact had been told it timed out, and the author's
+ * retry would create a duplicate record.
+ *
+ * So the parent must always give up first, by a margin wide enough to cover the
+ * dispatch itself. A request past this deadline is answered `timeout` here
+ * instead — which also reaches the artifact sooner than the frame's own clock
+ * would have.
+ */
+const MAX_QUEUE_WAIT_MS = 300_000;
 
 /** The outcome of one routed bridge action: data, or a typed failure. */
 type BridgeActionOutcome =
@@ -902,7 +923,8 @@ function useBridgePump(
     frameWindow: Window
   ) => Promise<void>,
   inFlightDataRequestsRef: React.RefObject<number>,
-  queuedDataRequestsRef: React.RefObject<QueuedBridgeRequest[]>
+  queuedDataRequestsRef: React.RefObject<QueuedBridgeRequest[]>,
+  onQueueWaitExpired: (entry: QueuedBridgeRequest) => void
 ): () => void {
   return useCallback((): void => {
     // `step` recurses LEXICALLY rather than through a ref: a ref assigned in
@@ -913,6 +935,21 @@ function useBridgePump(
     // by an earlier render can safely finish the queue it is draining.
     const step = (): void => {
       for (;;) {
+        // Purge anything that has waited too long BEFORE looking at capacity.
+        // The frame gives up on a request it has been holding (its own pre-ack
+        // budget) and deletes the pending entry; dispatching after that would
+        // run a real Server Action whose answer nobody is waiting for — and for
+        // a `submit` that means a write landing after the artifact was told it
+        // failed, so the author's retry duplicates the record. Purging first
+        // also frees capacity for work that can still be answered.
+        const now = Date.now();
+        while (
+          queuedDataRequestsRef.current.length > 0 &&
+          now - queuedDataRequestsRef.current[0].enqueuedAt >= MAX_QUEUE_WAIT_MS
+        ) {
+          const expired = queuedDataRequestsRef.current.shift();
+          if (expired) onQueueWaitExpired(expired);
+        }
         // Peek before taking: the limit depends on what is at the head. A
         // record op still travels over a Server Action, and the App Router
         // dispatches those ONE AT A TIME — the very serialization this issue is
@@ -952,7 +989,12 @@ function useBridgePump(
       }
     };
     step();
-  }, [runBridgeRequest, inFlightDataRequestsRef, queuedDataRequestsRef]);
+  }, [
+    runBridgeRequest,
+    inFlightDataRequestsRef,
+    queuedDataRequestsRef,
+    onQueueWaitExpired,
+  ]);
 }
 
 /**
@@ -1082,10 +1124,37 @@ function useArtifactDataBridge({
     [contentId, reportDiagnostic, versionId]
   );
 
+  /**
+   * Answer a request that waited too long to be worth dispatching (#1788).
+   *
+   * `timeout` is the honest code: the request was accepted and then never got a
+   * turn. Answering here rather than letting the frame's own clock expire keeps
+   * the artifact's rejection prompt AND — the reason this exists — guarantees
+   * the work is never started, so a `submit` cannot commit after its promise
+   * has already been rejected.
+   */
+  const handleQueueWaitExpired = useCallback(
+    (entry: QueuedBridgeRequest) => {
+      const failure = codedFailure("timeout");
+      reportDiagnostic(entry.request, failure);
+      try {
+        entry.frameWindow.postMessage(
+          dataBridgeFailure(entry.request.requestId, failure),
+          "*"
+        );
+      } catch {
+        // The frame is gone; there is nothing left to tell, and dropping the
+        // request was the point.
+      }
+    },
+    [reportDiagnostic]
+  );
+
   const pump = useBridgePump(
     runBridgeRequest,
     inFlightDataRequestsRef,
-    queuedDataRequestsRef
+    queuedDataRequestsRef,
+    handleQueueWaitExpired
   );
 
   const handleDataRequest = useCallback(
@@ -1106,7 +1175,11 @@ function useArtifactDataBridge({
         frameWindow.postMessage(dataBridgeFailure(request.requestId, failure), "*");
         return;
       }
-      queuedDataRequestsRef.current.push({ request, frameWindow });
+      queuedDataRequestsRef.current.push({
+        request,
+        frameWindow,
+        enqueuedAt: Date.now(),
+      });
       pump();
     },
     // `loadedDataAccessRef` is a stable ref, deliberately NOT a dependency: the
