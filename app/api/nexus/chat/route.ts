@@ -2524,17 +2524,11 @@ async function prepareConversationRepositories(params: {
         userCognitoSub: prepared.session.sub,
       })
     : {};
-  const projectTools =
-    prepared.projectBinding
-      ? createNexusRepositorySearchTools({
-          repositoryIds: prepared.projectBinding.repositoryIds,
-          userCognitoSub: prepared.session.sub,
-          toolName: "searchProjectRepositories",
-          description:
-            `Search the repositories connected to the Nexus project "${prepared.projectBinding.name}". ` +
-            "Use this before making project-specific claims and cite returned sources.",
-        })
-      : {};
+  const projectTools = buildProjectSearchTools({
+    projectBinding: prepared.projectBinding,
+    searchableRepositoryIds: durableContext.searchableRepositoryIds,
+    userCognitoSub: prepared.session.sub,
+  });
   const conversationTools =
     durableContext.searchableRepositoryIds.length > 0
       ? createNexusRepositorySearchTools({
@@ -2561,17 +2555,50 @@ async function prepareConversationRepositories(params: {
   };
 }
 
+/**
+ * Project repositories are bound to the conversation before readiness is
+ * validated, so the searchable set covers them. A brand-new project's only
+ * repository is empty: offer no search tool rather than one that can only
+ * return nothing.
+ */
+function buildProjectSearchTools(params: {
+  projectBinding: SuccessfulProjectBinding;
+  searchableRepositoryIds: number[];
+  userCognitoSub: string;
+}): ToolSet {
+  const { projectBinding } = params;
+  if (!projectBinding) return {};
+  const searchable = new Set(params.searchableRepositoryIds);
+  const repositoryIds = projectBinding.repositoryIds.filter((id) =>
+    searchable.has(id),
+  );
+  if (repositoryIds.length === 0) return {};
+  return createNexusRepositorySearchTools({
+    repositoryIds,
+    userCognitoSub: params.userCognitoSub,
+    toolName: "searchProjectRepositories",
+    description:
+      `Search the repositories connected to the Nexus project "${projectBinding.name}". ` +
+      "Use this before making project-specific claims and cite returned sources.",
+  });
+}
+
 function buildRepositoryPromptFragment(params: {
   projectBinding: SuccessfulProjectBinding;
+  projectSearchable: boolean;
   skillRepositoryIds: number[];
   durableRepositoryIds: number[];
 }): string | undefined {
+  // Only name a search tool that was actually offered this turn.
+  const projectSearchHint = params.projectSearchable
+    ? "\n\nUse searchProjectRepositories for project repository questions."
+    : "";
   const fragments = [
     params.durableRepositoryIds.length > 0
       ? "This conversation has durable repository bindings. Use searchConversationRepositories before making repository-dependent claims, and cite the returned source labels."
       : null,
     params.projectBinding
-      ? `You are working in the Nexus project "${params.projectBinding.name}". Follow these project instructions for this conversation:\n\n${params.projectBinding.instructions || "(No additional instructions.)"}\n\nUse searchProjectRepositories for project repository questions.`
+      ? `You are working in the Nexus project "${params.projectBinding.name}". Follow these project instructions for this conversation:\n\n${params.projectBinding.instructions || "(No additional instructions.)"}${projectSearchHint}`
       : null,
     params.skillRepositoryIds.length > 0
       ? "The loaded skill has repository bindings. Use searchSkillRepositories before applying repository-dependent instructions."
@@ -2620,10 +2647,16 @@ async function resolveToolsAndStream(params: {
     resolved.routing.automaticToolNames,
     skillBinding.scopedEnabledTools,
   );
+  // Skill repositories are bound to the conversation too; scope the tool to the
+  // ones that can serve results, exactly like the conversation and project tools.
+  const durableSearchableIds = new Set(repositories.durableRepositoryIds);
+  const skillRepositoryIds = skillBinding.skillRepositoryIds.filter((id) =>
+    durableSearchableIds.has(id),
+  );
   const skillRepositoryTools =
-    skillBinding.skillRepositoryIds.length > 0
+    skillRepositoryIds.length > 0
       ? createNexusRepositorySearchTools({
-          repositoryIds: skillBinding.skillRepositoryIds,
+          repositoryIds: skillRepositoryIds,
           userCognitoSub: prepared.session.sub,
           toolName: "searchSkillRepositories",
           description:
@@ -2681,7 +2714,11 @@ async function resolveToolsAndStream(params: {
     attachmentTools: repositoryTools,
     repositoryPromptFragment: buildRepositoryPromptFragment({
       projectBinding: prepared.projectBinding,
-      skillRepositoryIds: skillBinding.skillRepositoryIds,
+      projectSearchable: Object.hasOwn(
+        repositories.projectTools,
+        "searchProjectRepositories",
+      ),
+      skillRepositoryIds,
       durableRepositoryIds: repositories.durableRepositoryIds,
     }),
     memoryTools: memoryContext.tools,

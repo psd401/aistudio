@@ -7,6 +7,7 @@ export const REPOSITORY_READINESS_STATES = [
   "searchable",
   "degraded",
   "disconnected",
+  "unavailable",
   "failed",
 ] as const
 
@@ -110,6 +111,11 @@ export function deriveRepositoryReadiness(
     failedGenerationCount > 0
   ) {
     readiness = "failed"
+  } else if (unavailableItemCount > 0) {
+    // Every item was taken down (quarantine, manual removal) without a
+    // revoked connector to blame. Not "empty": content existed and is gone,
+    // so the gate keeps failing closed on it instead of skipping it.
+    readiness = "unavailable"
   } else {
     readiness = "empty"
   }
@@ -144,8 +150,9 @@ export function isRepositorySearchable(
  * turn that binds it. Blocking on `"empty"` made every freshly created Nexus
  * project chat-dead until a document finished indexing (FS#165251 / #1733).
  *
- * The gate still fails closed for `processing`, `failed` and `disconnected`,
- * which is where a stale, half-built or revoked index actually hides.
+ * The gate still fails closed for `processing`, `failed`, `disconnected` and
+ * `unavailable`, which is where a stale, half-built, revoked or taken-down
+ * index actually hides.
  */
 export function blocksRepositorySearch(
   snapshot: RepositoryReadinessSnapshot
@@ -333,7 +340,8 @@ export async function getRepositoryReadiness(
 /**
  * The shared pre-run gate for every repository-bound entry point (Nexus chat,
  * Assistant Architect execute, v1 assistants, MCP catalog search). Fails closed
- * on missing, disconnected, processing and failed repositories. An `"empty"`
+ * on missing, disconnected, processing, unavailable and failed repositories.
+ * An `"empty"`
  * repository passes for every caller (see `blocksRepositorySearch`): it has no
  * items, so retrieval over it is a no-op, never stale context.
  */

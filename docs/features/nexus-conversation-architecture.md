@@ -490,7 +490,8 @@ stale about, so searching it is a no-op rather than an error. This is what
 makes a brand-new Nexus project chattable before anything is uploaded: project
 creation auto-provisions a private "project files" repository with zero items,
 and gating on it made every new project chat-dead (FS#165251 / #1733). The gate
-still fails closed for `processing`, `failed` and `disconnected`.
+still fails closed for `processing`, `failed`, `disconnected` and `unavailable`
+(every item taken down — content existed and is gone, so it is not `empty`).
 
 Forking copies project, skill, and normalized repository bindings. Assistant
 execution conversations bind the union of prompt-configured and runtime

@@ -4,32 +4,7 @@ import {
   isRepositorySearchable,
   selectSearchableRepositoryIds,
 } from "@/lib/repositories/readiness-service"
-
-function row(
-  overrides: Partial<Parameters<typeof deriveRepositoryReadiness>[0]> = {}
-): Parameters<typeof deriveRepositoryReadiness>[0] {
-  return {
-    repository_id: 39,
-    lifecycle_status: "active",
-    active_generation_id: null,
-    active_generation_status: null,
-    active_item_count: 0,
-    indexed_item_count: 0,
-    segment_count: 0,
-    pending_item_count: 0,
-    failed_item_count: 0,
-    unavailable_item_count: 0,
-    building_generation_count: 0,
-    failed_generation_count: 0,
-    last_item_error: null,
-    last_generation_error: null,
-    connector_count: 0,
-    revoked_connector_count: 0,
-    degraded_connector_count: 0,
-    last_connector_error: null,
-    ...overrides,
-  }
-}
+import { readinessRow as row } from "./lib/repositories/readiness-fixtures"
 
 describe("repository readiness", () => {
   it("requires a complete active snapshot to be searchable", () => {
@@ -106,6 +81,36 @@ describe("repository readiness", () => {
     expect(empty.readiness).toBe("empty")
     expect(isRepositorySearchable(empty)).toBe(false)
     expect(blocksRepositorySearch(empty)).toBe(false)
+  })
+
+  it("reports a fully taken-down repository as unavailable, not empty", () => {
+    const takenDown = deriveRepositoryReadiness(
+      row({ unavailable_item_count: 3 })
+    )
+    expect(takenDown.readiness).toBe("unavailable")
+    expect(isRepositorySearchable(takenDown)).toBe(false)
+    expect(blocksRepositorySearch(takenDown)).toBe(true)
+  })
+
+  it("keeps a revoked-connector takedown disconnected rather than unavailable", () => {
+    expect(
+      deriveRepositoryReadiness(
+        row({
+          unavailable_item_count: 3,
+          connector_count: 2,
+          revoked_connector_count: 2,
+        })
+      ).readiness
+    ).toBe("disconnected")
+    expect(
+      deriveRepositoryReadiness(
+        row({
+          unavailable_item_count: 3,
+          connector_count: 2,
+          revoked_connector_count: 1,
+        })
+      ).readiness
+    ).toBe("unavailable")
   })
 
   it("still blocks on processing, failed and disconnected repositories", () => {

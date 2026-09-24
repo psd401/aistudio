@@ -5,7 +5,11 @@ import {
   SEEDED_ADMIN_EMAIL,
   SEEDED_ADMIN_SUB,
 } from "./helpers/session-auth";
-import { sendMessage, waitForStreamingComplete } from "./nexus/utils";
+import {
+  createNexusProject,
+  sendMessage,
+  waitForStreamingComplete,
+} from "./nexus/utils";
 
 /**
  * FS#165251 / #1733 — a freshly created Nexus project used to be chat-dead.
@@ -34,22 +38,9 @@ test.describe("Nexus project chat with an empty project repository", () => {
       SEEDED_ADMIN_SUB
     );
 
-    const projectName = `E2E empty project ${Date.now()}`;
-    await page.goto("/nexus/projects");
-    await page.getByRole("button", { name: "New project" }).click();
-    const createProjectDialog = page.getByRole("dialog", {
-      name: "New project",
-    });
-    await expect(createProjectDialog).toBeVisible();
-    await createProjectDialog.getByLabel("Project name").fill(projectName);
-    await createProjectDialog
-      .getByLabel("Project instructions")
-      .fill("Answer briefly. No documents have been uploaded yet.");
-    await createProjectDialog
-      .getByRole("button", { name: "Create project" })
-      .click();
-
-    await expect(page).toHaveURL(/\/nexus\/projects\/[0-9a-f-]+$/, {
+    await createNexusProject(page, {
+      name: `E2E empty project ${Date.now()}`,
+      instructions: "Answer briefly. No documents have been uploaded yet.",
       timeout: 60_000,
     });
     // The private repository exists and is empty — exactly the reported state.

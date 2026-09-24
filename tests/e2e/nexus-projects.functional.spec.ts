@@ -4,6 +4,7 @@ import {
   SEEDED_ADMIN_EMAIL,
   SEEDED_ADMIN_SUB,
 } from "./helpers/session-auth";
+import { createNexusProject } from "./nexus/utils";
 
 const STAFF_EMAIL = "staff@example.com";
 const STAFF_SUB = "e2e-staff-user";
@@ -36,28 +37,13 @@ function defineNexusProjectsAuthenticatedSuite1Part1() {
     const updatedInstructions =
       "Use the current approved project sources and cite each policy.";
 
-    await page.goto("/nexus/projects");
     // Creating a project is a modal now — the form used to sit permanently at
     // the top of the page, which pushed the project list below the fold and left
     // the "New project" affordance with nothing to do.
-    await page.getByRole("button", { name: "New project" }).click();
-    const createProjectDialog = page.getByRole("dialog", { name: "New project" });
-    await expect(createProjectDialog).toBeVisible();
-    await createProjectDialog.getByLabel("Project name").fill(projectName);
-    await createProjectDialog
-      .getByLabel("Project instructions")
-      .fill(originalInstructions);
-    await createProjectDialog
-      .getByRole("button", { name: "Create project" })
-      .click();
-
-    await expect(page).toHaveURL(/\/nexus\/projects\/[0-9a-f-]+$/, {
-      timeout: 30_000,
+    const projectId = await createNexusProject(page, {
+      name: projectName,
+      instructions: originalInstructions,
     });
-    const projectId = page.url().split("/").at(-1);
-    expect(projectId).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-    );
 
     await expect(
       page.getByRole("heading", { name: projectName })

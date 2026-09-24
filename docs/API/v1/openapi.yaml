@@ -3978,7 +3978,7 @@ components:
         itemCount: { type: integer }
         readiness:
           type: string
-          enum: [empty, processing, searchable, degraded, disconnected, failed]
+          enum: [empty, processing, searchable, degraded, disconnected, unavailable, failed]
         activeIndexGenerationId: { type: [string, "null"], format: uuid }
         indexedItemCount: { type: integer, minimum: 0 }
         segmentCount: { type: integer, minimum: 0 }

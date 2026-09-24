@@ -525,8 +525,11 @@ curl -H "Authorization: Bearer sk-your-key" \
 Each entry includes `id`, `name`, `description`, `ownerName`, `visibility`,
 `itemCount`, `readiness`, `activeIndexGenerationId`, `indexedItemCount`,
 `segmentCount`, `lastIndexError`, and update timestamps. Readiness is one of
-`empty`, `processing`, `searchable`, `degraded`, `disconnected`, or `failed`;
-only `searchable` and `degraded` have a serving snapshot.
+`empty`, `processing`, `searchable`, `degraded`, `disconnected`, `unavailable`,
+or `failed`; only `searchable` and `degraded` have a serving snapshot.
+`unavailable` means every item was taken down (for example quarantined) with no
+revoked connector to explain it; unlike `empty`, it still fails closed with
+`409 REPOSITORY_NOT_READY`.
 
 #### `GET /api/v1/repositories/{id}`
 
