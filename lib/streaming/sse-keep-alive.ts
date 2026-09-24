@@ -45,7 +45,13 @@
  */
 export const SSE_KEEP_ALIVE_INTERVAL_MS = 15_000;
 
-const KEEP_ALIVE_FRAME = new TextEncoder().encode(': keep-alive\n\n');
+/**
+ * The comment frame written during a silent stretch. Exported so tests that
+ * splice frames into a mocked body stay in step with the real wire format.
+ */
+export const SSE_KEEP_ALIVE_FRAME = ': keep-alive\n\n';
+
+const KEEP_ALIVE_BYTES = new TextEncoder().encode(SSE_KEEP_ALIVE_FRAME);
 
 /**
  * Wrap an SSE byte stream so that a gap longer than `intervalMs` is filled with
@@ -55,6 +61,11 @@ const KEEP_ALIVE_FRAME = new TextEncoder().encode(': keep-alive\n\n');
  * actively-streaming response is byte-identical to the unwrapped one. The timer
  * is always released — on end-of-stream, on error, and on consumer cancel — so
  * an abandoned turn cannot leak an interval.
+ *
+ * Backpressure is preserved: the source is only read while the consumer has
+ * room (`desiredSize > 0`), so a slow client stalls the model stream exactly as
+ * it would without the wrapper instead of buffering the rest of the turn in
+ * memory.
  */
 export function withSseKeepAlive(
   source: ReadableStream<Uint8Array>,
@@ -63,6 +74,11 @@ export function withSseKeepAlive(
   const reader = source.getReader();
   let timer: ReturnType<typeof setInterval> | undefined;
   let lastByteAt = Date.now();
+  // Set once the wrapper is closed, errored or cancelled; the pump must not
+  // touch the controller after that.
+  let finished = false;
+  // Resolves the pump's wait for the consumer to drain the queue.
+  let wake: (() => void) | undefined;
 
   const stopTimer = () => {
     if (timer !== undefined) {
@@ -71,12 +87,23 @@ export function withSseKeepAlive(
     }
   };
 
+  const resumePump = () => {
+    const resume = wake;
+    wake = undefined;
+    resume?.();
+  };
+
   return new ReadableStream<Uint8Array>({
     start(controller) {
+      const hasRoom = () => (controller.desiredSize ?? 0) > 0;
+
       timer = setInterval(() => {
         if (Date.now() - lastByteAt < intervalMs) return;
+        // Bytes are already queued for a consumer that has not read them yet;
+        // another frame behind them would not reach the socket any sooner.
+        if (!hasRoom()) return;
         try {
-          controller.enqueue(KEEP_ALIVE_FRAME);
+          controller.enqueue(KEEP_ALIVE_BYTES);
           lastByteAt = Date.now();
         } catch {
           // The stream is already closed or errored — nothing left to keep alive.
@@ -84,29 +111,43 @@ export function withSseKeepAlive(
         }
       }, intervalMs);
 
-      // Pump eagerly rather than from `pull()`: the timer has to be able to
-      // enqueue during a gap in which the consumer is not pulling, and the two
-      // producers cannot share a pull-driven contract. SSE frames are small and
-      // the consumer is a network socket, so the unbounded queue is bounded in
-      // practice by the model's own output rate.
+      // Pump from `start()` rather than `pull()`: the timer has to be able to
+      // enqueue during a gap in which the pump is parked on a pending source
+      // read, and a pull-driven source cannot enqueue outside `pull()`. The
+      // pump still waits for `pull()` (via `wake`) whenever the queue is full.
       void (async () => {
         try {
           for (;;) {
+            while (!finished && !hasRoom()) {
+              await new Promise<void>(resolve => {
+                wake = resolve;
+              });
+            }
+            if (finished) return;
             const { done, value } = await reader.read();
+            if (finished) return;
             if (done) break;
             lastByteAt = Date.now();
             controller.enqueue(value);
           }
+          finished = true;
           stopTimer();
           controller.close();
         } catch (error) {
           stopTimer();
+          if (finished) return;
+          finished = true;
           controller.error(error);
         }
       })();
     },
+    pull() {
+      resumePump();
+    },
     cancel(reason) {
+      finished = true;
       stopTimer();
+      resumePump();
       return reader.cancel(reason);
     },
   });

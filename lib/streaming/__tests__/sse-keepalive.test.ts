@@ -22,6 +22,7 @@ import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals
 import { EventSourceParserStream } from 'eventsource-parser/stream';
 import { BaseProviderAdapter } from '../provider-adapters/base-adapter';
 import {
+  SSE_KEEP_ALIVE_FRAME,
   SSE_KEEP_ALIVE_INTERVAL_MS,
   withSseKeepAlive,
   withSseKeepAliveResponse,
@@ -50,7 +51,11 @@ function controllableSource() {
   };
 }
 
-/** Read everything currently queued without blocking on an open stream. */
+/**
+ * Read `count` frames. Start this BEFORE advancing timers when the test models
+ * a live socket: a real consumer always has a read pending, and the wrapper
+ * only fills a gap while the consumer has room for it.
+ */
 async function drain(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   count: number
@@ -77,10 +82,14 @@ describe('withSseKeepAlive', () => {
     const source = controllableSource();
     const reader = withSseKeepAlive(source.stream).getReader();
 
+    const pending = drain(reader, 3);
     await jest.advanceTimersByTimeAsync(SSE_KEEP_ALIVE_INTERVAL_MS * 3);
 
-    const frames = await drain(reader, 3);
-    expect(frames).toEqual([': keep-alive\n\n', ': keep-alive\n\n', ': keep-alive\n\n']);
+    expect(await pending).toEqual([
+      SSE_KEEP_ALIVE_FRAME,
+      SSE_KEEP_ALIVE_FRAME,
+      SSE_KEEP_ALIVE_FRAME,
+    ]);
   });
 
   it('stays byte-identical while the model is actually producing output', async () => {
@@ -104,12 +113,13 @@ describe('withSseKeepAlive', () => {
     const source = controllableSource();
     const reader = withSseKeepAlive(source.stream).getReader();
 
+    const pending = drain(reader, 3);
     source.emit('data: {"type":"start"}\n\n');
     await jest.advanceTimersByTimeAsync(SSE_KEEP_ALIVE_INTERVAL_MS * 2);
 
-    const frames = await drain(reader, 3);
+    const frames = await pending;
     expect(frames[0]).toBe('data: {"type":"start"}\n\n');
-    expect(frames.slice(1)).toEqual([': keep-alive\n\n', ': keep-alive\n\n']);
+    expect(frames.slice(1)).toEqual([SSE_KEEP_ALIVE_FRAME, SSE_KEEP_ALIVE_FRAME]);
   });
 
   it('releases the timer when the source ends', async () => {
@@ -145,6 +155,56 @@ describe('withSseKeepAlive', () => {
 
     await expect(reader.read()).rejects.toThrow('upstream exploded');
     expect(jest.getTimerCount()).toBe(0);
+  });
+
+  it('does not drain the source ahead of a consumer that is not reading', async () => {
+    // A slow client must stall the model stream, not make the wrapper buffer
+    // the rest of the turn in memory (PR #1799 review).
+    let pulls = 0;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls++;
+        if (pulls > 100) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(encoder.encode(`data: {"n":${pulls}}\n\n`));
+      },
+    });
+    const reader = withSseKeepAlive(source).getReader();
+
+    await jest.advanceTimersByTimeAsync(SSE_KEEP_ALIVE_INTERVAL_MS * 3);
+    expect(pulls).toBeLessThan(5);
+
+    // Once the consumer reads, everything still arrives, in order, with no
+    // filler: the source was never silent, only the consumer was slow.
+    const frames = await drain(reader, 200);
+    expect(frames).toHaveLength(100);
+    expect(frames[0]).toBe('data: {"n":1}\n\n');
+    expect(frames.some(frame => frame.startsWith(':'))).toBe(false);
+  });
+
+  it('stays quiet when the source settles after the consumer cancelled', async () => {
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on('unhandledRejection', onRejection);
+    try {
+      const source = controllableSource();
+      const wrapped = withSseKeepAlive(source.stream);
+      const reader = wrapped.getReader();
+
+      // The pump is parked on a pending source read when the client leaves;
+      // the source then resolves that read after the wrapper is already gone.
+      const pending = reader.read();
+      await reader.cancel('client disconnected');
+      await pending;
+      await jest.advanceTimersByTimeAsync(SSE_KEEP_ALIVE_INTERVAL_MS * 2);
+
+      expect(rejections).toEqual([]);
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      process.off('unhandledRejection', onRejection);
+    }
   });
 
   it('fires well before the ALB idle timeout so a long gap survives', () => {
@@ -235,6 +295,17 @@ describe('buildAbortAwareResponse keeps a silent turn alive', () => {
     const response = new ResponseAdapter().respond(chunks as ReadableStream<never>);
     const reader = response.body!.getReader();
 
+    // Read concurrently, as the HTTP layer does: the socket always has a read
+    // pending while the model is silent.
+    const bodyPromise = (async () => {
+      let text = '';
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) return text;
+        text += decoder.decode(value, { stream: true });
+      }
+    })();
+
     // `start` goes out immediately — this is what resets the ALB idle timer
     // once and then never again while the model thinks.
     controller.enqueue({ type: 'start' });
@@ -246,12 +317,7 @@ describe('buildAbortAwareResponse keeps a silent turn alive', () => {
     controller.close();
     await jest.advanceTimersByTimeAsync(0);
 
-    let body = '';
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      body += decoder.decode(value, { stream: true });
-    }
+    const body = await bodyPromise;
 
     expect(body.match(/^: keep-alive$/gm)?.length).toBe(2);
     expect(body).toContain('"type":"start"');

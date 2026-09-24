@@ -4,6 +4,7 @@ import { getServerSession } from "@/lib/auth/server-session"
 import { filterAccessibleResourceIds } from "@/lib/db/drizzle/resource-access"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { unifiedStreamingService } from "@/lib/streaming/unified-streaming-service"
+import { withSseKeepAliveResponse } from "@/lib/streaming/sse-keep-alive"
 import type { StreamRequest } from "@/lib/streaming/types"
 import type { UIMessage } from "ai"
 
@@ -317,7 +318,10 @@ export async function POST(req: Request) {
       userId: currentUser.data.user.id.toString(),
     })
 
-    return new Response(stream, {
+    // A reasoning-tier model can stay silent past the ALB's 300s idle
+    // timeout; comment frames keep the socket open (#1698). The client only
+    // acts on `data: ` lines, so they are ignored there.
+    return withSseKeepAliveResponse(new Response(stream, {
       headers: {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
@@ -325,7 +329,7 @@ export async function POST(req: Request) {
         "X-Request-Id": requestId,
         "X-Unified-Streaming": "true",
       },
-    })
+    }))
   } catch (error) {
     log.error("Compare API error", {
       error:

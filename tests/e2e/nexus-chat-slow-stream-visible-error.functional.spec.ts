@@ -1,6 +1,7 @@
 import { test, expect, type Page } from './fixtures'
 import { authenticateContext } from './helpers/session-auth'
 import { gotoNexus, sendMessage } from './nexus/utils'
+import { SSE_KEEP_ALIVE_FRAME } from '@/lib/streaming/sse-keep-alive'
 
 /**
  * FS#164150 / #1698 — "chat appears to have been ingested, but then abandoned".
@@ -23,6 +24,11 @@ import { gotoNexus, sendMessage } from './nexus/utils'
  * The provider is mocked at the network boundary (`page.route`) rather than
  * driven live: a real several-minute silent gap is not runnable in a test, and
  * the point under test is the wire format, not the model.
+ *
+ * These are client-contract specs only: the mocked body bypasses the server,
+ * so they would still pass if the server stopped emitting keep-alives. That
+ * regression is covered by `lib/streaming/__tests__/sse-keepalive.test.ts`
+ * ("buildAbortAwareResponse keeps a silent turn alive").
  */
 
 const SSE_HEADERS = {
@@ -41,7 +47,7 @@ function sse(chunks: unknown[]): string {
 
 /** Splice keep-alive comment frames into a body, standing in for a silent gap. */
 function withKeepAlives(body: string, marker: string, count: number): string {
-  const filler = ': keep-alive\n\n'.repeat(count)
+  const filler = SSE_KEEP_ALIVE_FRAME.repeat(count)
   const at = body.indexOf(marker)
   expect(at).toBeGreaterThan(-1)
   return body.slice(0, at) + filler + body.slice(at)

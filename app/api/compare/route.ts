@@ -16,6 +16,7 @@ import type { ImageGenerationError } from '@/lib/ai/image-generation-service';
 import { mergeResponseGenerators, asyncGeneratorToStream, type DualStreamEvent } from '@/lib/compare/dual-stream-merger';
 import { isTransientStreamError } from '@/lib/streaming/provider-adapters/base-adapter'
 import { isSafeImageUrl } from '@/lib/utils/image-validation';
+import { withSseKeepAliveResponse } from '@/lib/streaming/sse-keep-alive';
 
 // Allow streaming responses up to 5 minutes
 export const maxDuration = 300;
@@ -634,8 +635,10 @@ export async function POST(req: Request) {
       operation: 'streaming_started'
     });
 
-    // 10. Return SSE stream
-    return new Response(mergedStream, {
+    // 10. Return SSE stream. A reasoning-tier model can stay silent past the
+    // ALB's 300s idle timeout; comment frames keep the socket open (#1698).
+    // The client only acts on `data: ` lines, so they are ignored there.
+    return withSseKeepAliveResponse(new Response(mergedStream, {
       headers: {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache, no-transform',
@@ -643,7 +646,7 @@ export async function POST(req: Request) {
         'X-Request-Id': requestId,
         'X-Comparison-Id': comparisonId.toString()
       }
-    });
+    }));
 
   } catch (error) {
     log.error('Compare API error', {
