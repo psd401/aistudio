@@ -56,10 +56,11 @@ AI Studio is an open-source platform that provides K-12 educators and students w
 2. **Database Migrations**: Files 001-005 are immutable. Add migrations 010+ and update `/infra/database/migrations.json`
 3. **Logging**: Never use `console.log/error`. Use `@/lib/logger` (exception: standalone CJS scripts)
 4. **Git Flow**: PRs target `dev` branch, never `main`
-5. **Nexus Conversations**: Read `/docs/features/nexus-conversation-architecture.md` before modifying conversation code
-6. **API Changes**: Update both `docs/API/v1/openapi.yaml` and `docs/API/v1/context-graph.md` for API v1 modifications
-7. **Visibility Changes**: Read grants before modifying — `PATCH /content/:id/visibility` replaces the grant list, use `--add-grants`/`--remove-grants` for merge operations (#1763)
-8. **Grant Targets**: `user` and `group` grants validate target existence before storing; see **[app-features/overview.md](app-features/overview.md#grant-target-existence-validation-1777)** for contract (#1777)
+5. **Nexus Conversations**: Read `/docs/features/nexus-conversation-architecture.md` before modifying conversation code — repository bindings, readiness gates, and tool scoping have subtle invariants
+6. **Repository Readiness**: Empty repositories bind but don't block chat turns; `searchableRepositoryIds` excludes them from tool scope — see **[app-features/overview.md](app-features/overview.md#repository-readiness-gate)** for the gate contract (#1733)
+7. **API Changes**: Update both `docs/API/v1/openapi.yaml` and `docs/API/v1/context-graph.md` for API v1 modifications
+8. **Visibility Changes**: Read grants before modifying — `PATCH /content/:id/visibility` replaces the grant list, use `--add-grants`/`--remove-grants` for merge operations (#1763)
+9. **Grant Targets**: `user` and `group` grants validate target existence before storing; see **[app-features/overview.md](app-features/overview.md#grant-target-existence-validation-1777)** for contract (#1777)
 
 ## Development Quick Start
 
