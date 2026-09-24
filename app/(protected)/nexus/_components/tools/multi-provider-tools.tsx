@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/badge'
 import { Globe, Clock, Code2, Terminal, ExternalLink } from 'lucide-react'
 import { isSafeUrl } from '@/lib/utils'
 import { ChartVisualizationUI } from './chart-visualization-ui'
+import { WebFetchUI } from './web-fetch-ui'
 import { ToolArgsRecoveryBoundary } from '@/components/assistant-ui/tool-args-recovery-boundary'
 
 /**
@@ -358,6 +359,9 @@ export function MultiProviderToolUIs() {
       {/* Web Search tools - will be grouped by ToolGroup when multiple searches occur */}
       <OpenAIWebSearchUI />
       <GoogleSearchUI />
+
+      {/* URL reader - shows which page the assistant opened (Issue #1696) */}
+      <WebFetchUI />
 
       {/* Code Interpreter - shows execution results */}
       <CodeInterpreterUI />

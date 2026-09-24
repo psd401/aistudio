@@ -104,6 +104,19 @@ export const AI_SDK_TOOLS: readonly AiSdkToolDef[] = [
     requiredScopes: [],
   },
   {
+    // Always on in Nexus chat (no `ui`, so not a selectable toggle): it runs
+    // in-process, works on every provider, and reading a link the user pasted is
+    // baseline chat behaviour. Attached by the Nexus chat route, not by
+    // `createUniversalTools()`. See `lib/tools/web-fetch-tool.ts` (Issue #1696).
+    identifier: 'chat.web_fetch',
+    version: 'v1',
+    wireName: 'web_fetch',
+    friendlyName: 'webFetch',
+    description:
+      'Open a specific URL and read the page text. Complements web search, which finds pages but cannot open a given link.',
+    requiredScopes: [],
+  },
+  {
     identifier: 'chat.web_search',
     version: 'v2',
     wireName: 'web_search_preview',

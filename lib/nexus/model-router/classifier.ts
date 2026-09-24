@@ -2,6 +2,7 @@ import { generateText, tool } from "ai"
 import { z } from "zod"
 import { createProviderModel } from "@/lib/ai/provider-factory"
 import { createLogger } from "@/lib/logger"
+import { containsExplicitUrl, stripExplicitUrls } from "./url-detection"
 import {
   nexusRouterIntentSchema,
   nexusRouterTierSchema,
@@ -52,12 +53,58 @@ export function deterministicClassify(text: string, hasImageInput = false): Nexu
   if (PSD_PATTERN.test(text)) {
     return { intent: "psd-data", tier: "medium", confidence: 0.97, reasonCodes: ["psd_data_domain"], source: "deterministic" }
   }
-  if (requestsExplicitWebSearch(text)
-    || (CURRENT_INFO_PATTERN.test(text) && !USER_SUPPLIED_CONTEXT_PATTERN.test(text))) {
+  // An explicit "search the web" still wants a search model, even alongside a link.
+  if (requestsExplicitWebSearch(text)) {
     return { intent: "web-search", tier: "medium", confidence: 0.96, reasonCodes: ["current_web_information"], source: "deterministic" }
+  }
+  // A message naming a page to open is a FETCH, not a search (#1696). `web_fetch`
+  // is universal, so such a turn needs no web-search-capable model — and must not
+  // be routed as "web-search", because that requires one and throws
+  // NexusSpecialistUnavailableError when none is accessible, killing the turn
+  // before the model ever runs. That hard failure was the reported symptom:
+  // pasting a URL produced "cannot access URL directly" / "unable to access the
+  // internet".
+  //
+  // So a URL alone never triggers the implicit web-search branch below, and it
+  // does not classify the whole message on its own either. The current-info
+  // check reads the message with URLs removed: "summarize <url>" is a fetch,
+  // but "summarize <url> and give today's weather" also needs live search, so
+  // it still routes as web-search (`web_fetch` stays attached). The router
+  // degrades that mixed case to a fetch-only turn when no search model is
+  // accessible, so the link is never refused. A URL is only a weak signal about
+  // intent and says nothing about domain or complexity, so a URL alongside
+  // lesson-planning wording is still `instruction`, and the catch-all at the
+  // bottom takes its tier from the same complexity heuristic every other
+  // unmatched message uses — otherwise pasting a link into a hard question
+  // would silently pin it to `medium` and downgrade the model.
+  const hasExplicitUrl = containsExplicitUrl(text)
+  const userWording = hasExplicitUrl ? stripExplicitUrls(text) : text
+  if (CURRENT_INFO_PATTERN.test(userWording) && !USER_SUPPLIED_CONTEXT_PATTERN.test(userWording)) {
+    return {
+      intent: "web-search",
+      tier: "medium",
+      confidence: 0.96,
+      reasonCodes: hasExplicitUrl
+        ? ["current_web_information", "explicit_url_web_fetch"]
+        : ["current_web_information"],
+      source: "deterministic",
+    }
   }
   if (INSTRUCTION_PATTERN.test(text)) {
     return { intent: "instruction", tier: "medium", confidence: 0.95, reasonCodes: ["instruction_domain"], source: "deterministic" }
+  }
+  // Nothing more specific matched, but there is a link to open. Resolve here
+  // rather than falling through, because the LLM classifier labels "open <url>"
+  // as web-search — the exact misroute this fix exists to prevent — and because
+  // a fetch needs no classifier call to decide.
+  if (hasExplicitUrl) {
+    return {
+      intent: "general",
+      tier: heuristicFallback(text).tier,
+      confidence: 0.95,
+      reasonCodes: ["explicit_url_web_fetch"],
+      source: "deterministic",
+    }
   }
   return null
 }

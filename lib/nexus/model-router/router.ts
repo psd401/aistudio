@@ -9,6 +9,7 @@ import {
   selectRoutedTextModel,
 } from "@/lib/ai/model-router/core"
 import { classifyNexusRequest } from "./classifier"
+import { containsExplicitUrl } from "./url-detection"
 import { getNexusRouterConfig } from "./config"
 import { resolvePsdDataConnectorId } from "./psd-data-connector"
 import {
@@ -183,25 +184,35 @@ function selectModelForRuntime(
 }
 
 /**
- * Pick the executed model, preferring one that can call tools when this turn
- * attaches the PSD Data tools (#1786). Selection runs before the connector is
- * attached, so without this a turn could bind `query_data` beside a model that
- * can never invoke it. A PREFERENCE, not a requirement: with no function-calling
- * model available the turn keeps its normal model and the chat route's
- * do-not-guess guidance covers it, rather than an artifact edit failing outright.
- * Only active routing attaches the connector, so only it re-selects.
+ * Pick the executed model, preferring one that can call the tools this turn
+ * depends on. Selection runs before those tools are attached, so without this a
+ * turn could bind `query_data` beside a model that can never invoke it (#1786).
+ *
+ * Two turn shapes need it:
+ *   - PSD Data (#1786) — the connector is attached only by active routing.
+ *   - A pasted URL (#1696) — `web_fetch` is universal, so a `general` decision
+ *     carries no required tool and nothing else would keep the turn off a model
+ *     whose `supports_function_calling` is false. Such a model answers about the
+ *     link without ever opening it, which is the failure this fix exists to
+ *     remove, just one step later in the pipeline.
+ *
+ * A PREFERENCE, not a requirement: with no function-calling model available the
+ * turn keeps its normal model and the chat route's do-not-guess guidance covers
+ * it, rather than failing outright. That matters most for the URL case —
+ * demanding a capability here would re-introduce the hard "cannot access URLs"
+ * dead end #1696 removed.
  */
-function selectModelForDataTools(
+function selectModelForToolUse(
   args: Parameters<typeof selectModel>[0],
   mode: Exclude<NexusRouterRuntimeMode, "off">,
   fallback: NexusModelRow,
-  wantsPsdData: boolean
+  prefersFunctionCalling: boolean
 ): { model: NexusModelRow; fallbackUsed: boolean } {
-  if (mode === "active" && wantsPsdData) {
+  if (mode === "active" && prefersFunctionCalling) {
     try {
       return selectModel({ ...args, requiresFunctionCalling: true })
     } catch (error) {
-      log.warn("No function-calling model for a PSD Data turn; keeping the normal selection", {
+      log.warn("No function-calling model for a tool-dependent turn; keeping the normal selection", {
         error: error instanceof Error ? error.message : String(error),
       })
     }
@@ -446,6 +457,54 @@ async function buildRoutedResult(options: {
   }
 }
 
+/**
+ * Select the model, degrading a URL + current-info turn to a fetch-only turn
+ * when web search is unavailable (#1696).
+ *
+ * "Summarize <url> and give today's weather" classifies as web-search, which
+ * requires a search-capable model and throws NexusSpecialistUnavailableError
+ * when none is accessible. For a message that names a page, that would refuse
+ * the link outright, which is the bug #1696 fixed. So that implicit case (the
+ * classifier's `explicit_url_web_fetch` reason code on a web-search decision)
+ * falls back to `general` with `web_fetch` only: the page is still read, and
+ * only the live-search half is lost. An EXPLICIT "search the web" request does
+ * not carry that code, so it keeps the specialist-unavailable error rather than
+ * silently skipping the search the user asked for. Without a URL the error
+ * propagates as before.
+ */
+function selectWithFetchOnlyFallback(options: {
+  decision: NexusClassifierDecision
+  requiredTools: string[]
+  select: (decision: NexusClassifierDecision) => { model: NexusModelRow; fallbackUsed: boolean }
+}): { decision: NexusClassifierDecision; selection: { model: NexusModelRow; fallbackUsed: boolean } } {
+  const { decision, requiredTools, select } = options
+  const hadWebSearch = requiredTools.includes("webSearch")
+  addRequiredWebSearchTool(decision, requiredTools)
+  try {
+    return { decision, selection: select(decision) }
+  } catch (error) {
+    if (
+      !(error instanceof NexusSpecialistUnavailableError)
+      || decision.intent !== "web-search"
+      || !decision.reasonCodes.includes("explicit_url_web_fetch")
+    ) {
+      throw error
+    }
+    log.warn("Web search unavailable for a URL turn; routing as fetch-only", {
+      error: error.message,
+    })
+    // Drop only the web-search requirement this decision added, never one the
+    // user enabled themselves.
+    if (!hadWebSearch) requiredTools.splice(requiredTools.indexOf("webSearch"), 1)
+    const fetchOnly: NexusClassifierDecision = {
+      ...decision,
+      intent: "general",
+      reasonCodes: [...decision.reasonCodes, "web_search_unavailable_fetch_only"],
+    }
+    return { decision: fetchOnly, selection: select(fetchOnly) }
+  }
+}
+
 async function routeWithConfiguredRouter(options: {
   args: RouteNexusRequestArgs
   config: NexusRouterConfig
@@ -464,21 +523,31 @@ async function routeWithConfiguredRouter(options: {
     accessibleIds,
     requiredTools,
   } = options
-  const decision = await classifyNexusRequest(args.text, config, {
+  const classified = await classifyNexusRequest(args.text, config, {
     hasImageInput: args.hasImageInput,
     hasPreviousGeneratedImage: args.hasPreviousGeneratedImage,
   })
-  addRequiredWebSearchTool(decision, requiredTools)
-  const selectionArgs = {
-    models, config, family: args.requestedFamily, tier: decision.tier,
-    intent: decision.intent, fallbackModelId: args.fallbackModelId, accessibleIds,
-    requiredTools,
-  }
   // Shadow mode may retain a legacy fallback only when doing so is safe. A
   // server-required input tool is an authorization/correctness boundary, so
   // execute a compatible text model even while recording the proposed route.
-  const wantsPsdData = decision.intent === "psd-data" || workspaceNeedsPsdData(args.workspace)
-  const selection = selectModelForDataTools(selectionArgs, mode, fallback, wantsPsdData)
+  const wantsPsdData = classified.intent === "psd-data" || workspaceNeedsPsdData(args.workspace)
+  // A link in the message means `web_fetch` has to be callable for the turn to
+  // do what the user asked, even though the decision names no required tool.
+  const wantsWebFetch = containsExplicitUrl(args.text)
+  const { decision, selection } = selectWithFetchOnlyFallback({
+    decision: classified,
+    requiredTools,
+    select: current => selectModelForToolUse(
+      {
+        models, config, family: args.requestedFamily, tier: current.tier,
+        intent: current.intent, fallbackModelId: args.fallbackModelId, accessibleIds,
+        requiredTools,
+      },
+      mode,
+      fallback,
+      wantsPsdData || wantsWebFetch
+    ),
+  })
   const psdConnectorId = await resolveAutomaticPsdConnector(wantsPsdData, config)
   // Only an explicit psd-data REQUEST fails closed. A workspace-artifact turn
   // asked for something else too ("add a dropdown"), so an unavailable

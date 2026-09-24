@@ -560,6 +560,122 @@ describe("Nexus model router workspace attachment", () => {
  * is one that disagrees with what the router then actually does, so pin the two
  * against each other rather than against a hardcoded expectation.
  */
+/**
+ * #1696: a pasted link needs `web_fetch`, but `web_fetch` is universal — the
+ * decision names no required tool, so nothing else keeps such a turn off a
+ * model that cannot call it. Its own suite rather than a case inside the
+ * workspace block, which is already at the `max-lines-per-function` ceiling.
+ */
+describe("Nexus model router link handling", () => {
+  const noToolsFirst = nexusRouterConfigSchema.parse({
+    ...config,
+    auto: { light: [], medium: ["no-tools", "gpt-terra"], high: [] },
+  })
+  const turn = {
+    text: "Rewrite this paragraph to be shorter",
+    fallbackModelId: "gpt-terra",
+    experienceMode: "standard" as const,
+    requestedFamily: "auto" as const,
+    enabledConnectorIds: [],
+    userId: 7,
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockGetNexusEnabledModels.mockResolvedValue(models)
+    mockFilterAccessibleResourceIds.mockResolvedValue(models.map(model => String(model.id)))
+    mockGetConfig.mockResolvedValue({ config: noToolsFirst, mode: "active" })
+    mockGetConfiguredChatProviders.mockResolvedValue(
+      new Set(["openai", "google", "amazon-bedrock", "azure", "latimer"])
+    )
+    // The reported shape: a link turn that classifies as plain `general`.
+    mockClassify.mockResolvedValue({
+      intent: "general", tier: "medium", confidence: 0.9,
+      reasonCodes: ["explicit_url_web_fetch"], source: "deterministic",
+    })
+  })
+
+  it("routes a pasted-link turn past a candidate without function calling", async () => {
+    const result = await routeNexusRequest({
+      ...turn,
+      text: "Open https://example.com/article and quote the main heading",
+    })
+
+    expect(result.modelId).toBe("gpt-terra")
+  })
+
+  it("keeps the first candidate for a turn with no link and no data tools", async () => {
+    const result = await routeNexusRequest(turn)
+
+    expect(result.modelId).toBe("no-tools")
+  })
+
+  it("keeps the normal model for a link turn when none can call tools", async () => {
+    // The preference must never harden into a requirement — that is the hard
+    // "cannot access URLs" dead end #1696 removed.
+    mockFilterAccessibleResourceIds.mockResolvedValue(["8"])
+
+    const result = await routeNexusRequest({
+      ...turn,
+      fallbackModelId: "no-tools",
+      text: "Summarize https://example.com/article for me",
+    })
+
+    expect(result.modelId).toBe("no-tools")
+  })
+
+  it("degrades a link + current-info turn to fetch-only when web search is unavailable", async () => {
+    // Anthropic has no web-search model; without the fallback this throws and
+    // refuses the link outright.
+    mockClassify.mockResolvedValue({
+      intent: "web-search", tier: "medium", confidence: 0.96,
+      reasonCodes: ["current_web_information", "explicit_url_web_fetch"], source: "deterministic",
+    })
+
+    const result = await routeNexusRequest({
+      ...turn,
+      experienceMode: "advanced",
+      requestedFamily: "anthropic",
+      text: "Summarize https://example.com and give today's weather",
+    })
+
+    expect(result.modelId).toBe("us.anthropic.claude-sonnet")
+    expect(result.metadata.intent).toBe("general")
+    expect(result.metadata.reasonCodes).toContain("web_search_unavailable_fetch_only")
+    expect(result.automaticToolNames).toEqual([])
+  })
+
+  it("still fails an explicit web-search request with a link when search is unavailable", async () => {
+    // The user asked for a search; silently answering from the page alone
+    // would skip what they asked for.
+    mockClassify.mockResolvedValue({
+      intent: "web-search", tier: "medium", confidence: 0.96,
+      reasonCodes: ["current_web_information"], source: "deterministic",
+    })
+
+    await expect(routeNexusRequest({
+      ...turn,
+      experienceMode: "advanced",
+      requestedFamily: "anthropic",
+      text: "Search the web for district guidance, then compare it with https://example.com",
+    })).rejects.toThrow("Web search is not available")
+  })
+
+  it("still fails a current-info turn with no link when web search is unavailable", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "web-search", tier: "medium", confidence: 0.96,
+      reasonCodes: ["current_web_information"], source: "deterministic",
+    })
+
+    await expect(routeNexusRequest({
+      ...turn,
+      experienceMode: "advanced",
+      requestedFamily: "anthropic",
+      text: "Give today's weather",
+    })).rejects.toThrow("Web search is not available")
+  })
+})
+
 describe("Nexus workspace auto-connector preview", () => {
   const PSD_CONNECTOR_ID = "54f0f531-f7ab-485e-bd6b-65a95c4bc871"
   const editableArtifact = {

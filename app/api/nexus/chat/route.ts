@@ -19,6 +19,7 @@ import { userCanAccessResource } from '@/lib/db/drizzle/resource-access';
 import { getConnectorTools } from '@/lib/mcp/connector-service';
 import type { McpConnectorToolsResult } from '@/lib/mcp/connector-types';
 import { createUniversalTools } from '@/lib/tools/provider-native-tools';
+import { createWebFetchTool, skillPinAllowsWebFetch } from '@/lib/tools/web-fetch-tool';
 import {
   createNexusAttachmentTools,
   createNexusRepositorySearchTools,
@@ -287,10 +288,18 @@ function createOnFinishCallback(params: {
 
 /**
  * Pre-merge the adapter (universal) tools with per-user MCP connector tools and
- * the server-built workspace, attachment, and memory tools. Returns undefined
- * when no pre-merged tool source is active (the streaming service then builds
- * adapter tools itself from `enabledTools`). Server-built tools take precedence
- * over adapter tools on a name collision.
+ * the server-built workspace, attachment, and memory tools. Server-built tools
+ * take precedence over adapter tools on a name collision.
+ *
+ * `web_fetch` (#1696) is included on every Nexus turn unless a bound skill's
+ * `allowed-tools` pin excludes it: it is a network-capable tool, so a pin must be
+ * able to keep it out, as it does for connector and workspace tools. With no
+ * other pre-merged
+ * source, only `web_fetch` is returned, and the streaming service merges the
+ * adapter tools (from `enabledTools`) under it. It lives here rather than in
+ * `createUniversalTools()` because Nexus is the surface with a multi-step
+ * budget for it (`resolveMaxSteps`). Single-step unified-streaming callers would
+ * end the turn on the tool result.
  */
 async function buildMergedChatTools(params: {
   enabledTools: string[];
@@ -298,6 +307,8 @@ async function buildMergedChatTools(params: {
   workspaceTools?: ToolSet;
   attachmentTools?: ToolSet;
   memoryTools?: ToolSet;
+  /** False when a bound skill's `allowed-tools` pin excludes `web_fetch`. */
+  webFetchAllowed: boolean;
 }): Promise<ToolSet | undefined> {
   const {
     enabledTools,
@@ -305,6 +316,7 @@ async function buildMergedChatTools(params: {
     workspaceTools,
     attachmentTools,
     memoryTools,
+    webFetchAllowed,
   } = params;
   const hasWorkspaceTools = !!workspaceTools && Object.keys(workspaceTools).length > 0;
   const hasAttachmentTools =
@@ -316,7 +328,7 @@ async function buildMergedChatTools(params: {
     !hasAttachmentTools &&
     !hasMemoryTools
   ) {
-    return undefined;
+    return webFetchAllowed ? { web_fetch: createWebFetchTool() } : undefined;
   }
   const merged: ToolSet = { ...(await createUniversalTools(enabledTools)) };
   for (const result of connectorToolResults) {
@@ -337,6 +349,15 @@ async function buildMergedChatTools(params: {
     // than client-selected skill tools, so a skill allowed-tools pin cannot
     // silently disable or widen them.
     Object.assign(merged, memoryTools);
+  }
+  // Assigned LAST so a connector or workspace tool that happens to be named
+  // `web_fetch` cannot replace the SSRF-guarded, content-fenced built-in. The
+  // Nexus tool card also expects this implementation's result shape. A skill
+  // pin that excludes it removes any same-named external tool too.
+  if (webFetchAllowed) {
+    merged.web_fetch = createWebFetchTool();
+  } else {
+    delete merged.web_fetch;
   }
   return merged;
 }
@@ -439,6 +460,8 @@ async function executeStreaming(params: {
   repositoryPromptFragment?: string;
   /** Owner-scoped save/forget tools, present only when all memory gates pass. */
   memoryTools?: ToolSet;
+  /** False when a bound skill's `allowed-tools` pin excludes `web_fetch`. */
+  webFetchAllowed: boolean;
   /** Sanitized, owner-scoped memory context for this turn. */
   userMemoryFragment?: string;
   /** Guardrail-processed latest user text used for post-turn extraction. */
@@ -470,6 +493,7 @@ async function executeStreaming(params: {
     attachmentTools,
     repositoryPromptFragment,
     memoryTools,
+    webFetchAllowed,
     userMemoryFragment,
     latestUserText,
     reasoningEffort,
@@ -503,13 +527,14 @@ async function executeStreaming(params: {
     hasRepositoryTools ||
     (!!memoryTools && Object.keys(memoryTools).length > 0);
 
-  // Pre-merge adapter + connector + workspace tools (undefined when none active).
+  // Pre-merge adapter + connector + workspace tools, plus the Nexus-only `web_fetch`.
   const mergedTools = await buildMergedChatTools({
     enabledTools,
     connectorToolResults,
     workspaceTools: hasWorkspaceTools ? workspaceTools : undefined,
     attachmentTools: hasRepositoryTools ? attachmentTools : undefined,
     memoryTools,
+    webFetchAllowed,
   });
 
   const streamRequest: StreamRequest = {
@@ -2848,6 +2873,7 @@ async function resolveToolsAndStream(params: {
       durableRepositoryIds: repositories.durableRepositoryIds,
     }),
     memoryTools: memoryContext.tools,
+    webFetchAllowed: skillPinAllowsWebFetch(skillBinding.skillAllowedTools),
     userMemoryFragment: memoryContext.userMemoryFragment,
     latestUserText: resolved.protectedLatestUserText,
     reasoningEffort: prepared.validationData.reasoningEffort || "medium",

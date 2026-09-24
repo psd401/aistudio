@@ -1,6 +1,6 @@
 {
   "summary": {
-    "actions": 33,
+    "actions": 34,
     "features": 10,
     "scopes": 33,
     "agentInvocableActions": 26
@@ -176,6 +176,20 @@
       "identifier": "chat.show_chart",
       "name": "show_chart",
       "description": "Render a chart (bar, line, pie, etc.) from structured data on the client.",
+      "surfaces": [
+        "ai_sdk"
+      ],
+      "requiredScopes": [],
+      "scopesBySurface": {
+        "ai_sdk": []
+      },
+      "destructive": false,
+      "agentInvocable": false
+    },
+    {
+      "identifier": "chat.web_fetch",
+      "name": "web_fetch",
+      "description": "Open a specific URL and read the page text. Complements web search, which finds pages but cannot open a given link.",
       "surfaces": [
         "ai_sdk"
       ],
