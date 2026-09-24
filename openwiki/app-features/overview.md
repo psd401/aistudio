@@ -6,6 +6,9 @@ tags: [features, nexus, atrium, assistants, knowledge]
 openwiki:
   roles: [architecture, domain]
   source_paths:
+    - lib/repositories/readiness-service.ts
+    - lib/nexus/conversation-repository-service.ts
+    - app/api/nexus/chat/route.ts
     - actions/db/atrium/artifact-query.ts
     - actions/db/atrium/artifact-guards.ts
     - actions/db/atrium/workspace-panel.ts
@@ -62,10 +65,16 @@ openwiki:
     - Group comparison uses lower(group_email) on both sides, matching the read path and handling mixed-case storage (#1777)
     - Out-of-range user IDs (>2147483647) are rejected without hitting database — prevents int4 overflow from surfacing as 500 (#1777)
     - Both user and group queries resolve before throwing — a single 400 names every invalid target (#1777)
+    - Empty repositories bind but never gate — searchableRepositoryIds excludes them so no tool is scoped, but the turn proceeds (#1733)
+    - Processing, failed, disconnected, unavailable repositories block — the gate fails closed on missing/incomplete/stale indexes (#1733)
+    - A zero-item repository with degraded connector is failed, not empty — source exists but never arrived (#1733)
   validation_commands:
     - bun run typecheck
     - bun run lint
   test_paths:
+    - tests/unit/lib/nexus/conversation-repository-empty-project-gate.test.ts
+    - tests/unit/repository-readiness.test.ts
+    - tests/e2e/nexus-project-empty-repository-chat.functional.spec.ts
     - tests/e2e/atrium-artifact-data-access.functional.spec.ts
     - tests/unit/atrium-artifact-query-action.test.ts
     - tests/unit/atrium-artifact-data-access-migration.test.ts
@@ -136,6 +145,41 @@ See `/docs/features/nexus-model-routing.md` for full configuration.
 - Real-time streaming responses
 
 **Critical**: Read `/docs/features/nexus-conversation-architecture.md` before modifying any conversation code. This system has broken multiple times—follow documented patterns exactly.
+
+#### Repository Readiness Gate
+
+Every model turn reloads conversation ownership, repository ACLs, lifecycle, and active-generation readiness. The search tool (`searchConversationRepositories`) is offered only for repositories that can actually serve results — scoped to `searchableRepositoryIds`, not the full bound set.
+
+**Readiness States** (from `/lib/repositories/readiness-service.ts`):
+
+| State | Behavior |
+|-------|----------|
+| `searchable` | Has serving snapshot, retrieval available |
+| `degraded` | Has serving snapshot with connector issues, retrieval available |
+| `empty` | **Passes**: Zero items, nothing pending/failed — binds but never gates (#1733) |
+| `processing` | **Blocks**: Items mid-ingestion, index incomplete |
+| `failed` | **Blocks**: Active items without serving snapshot, or degraded connector with no items |
+| `disconnected` | **Blocks**: All connectors revoked |
+| `unavailable` | **Blocks**: Every item taken down (quarantine, manual removal) — content existed and is gone |
+
+**Empty Repository Exception (#1733)**: A repository with zero items, nothing pending, and nothing failed carries no stale index, so searching it is a no-op. This is what makes a brand-new Nexus project chattable before any document is uploaded:
+
+- Project creation auto-provisions a private "project files" repository with zero items
+- Before #1733, the readiness gate rejected every turn with `REPOSITORY_NOT_READY`
+- Now the repository binds and is excluded from `searchableRepositoryIds` (no tool scoped to it)
+- The turn proceeds; searching returns zero results instead of blocking
+
+A zero-item repository with a **degraded connector** is `failed`, not `empty` — the source exists but never arrived, so it stays behind the gate.
+
+**Key Sources**:
+- `/lib/repositories/readiness-service.ts` — `blocksRepositorySearch()`, `selectSearchableRepositoryIds()`
+- `/lib/nexus/conversation-repository-service.ts` — `ValidatedConversationRepositoryContext.searchableRepositoryIds`
+- `/app/api/nexus/chat/route.ts` — `buildProjectSearchTools()`
+
+**Focused Tests**:
+- `tests/unit/lib/nexus/conversation-repository-empty-project-gate.test.ts` — empty project repository passes gate
+- `tests/unit/repository-readiness.test.ts` — `blocksRepositorySearch`, `selectSearchableRepositoryIds`
+- `tests/e2e/nexus-project-empty-repository-chat.functional.spec.ts` — E2E chat with empty project repository
 
 ### MCP Integration
 

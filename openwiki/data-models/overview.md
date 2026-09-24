@@ -152,12 +152,14 @@ The function safely extracts `causeCode`, `causeConstraint`, and `causeTable` wi
 **Knowledge Repositories**
 | Table | Purpose |
 |-------|---------|
-| `knowledge_repositories` | Repository definitions |
-| `repository_items` | Uploaded documents |
+| `knowledge_repositories` | Repository definitions with `lifecycle_status` and readiness tracking |
+| `repository_items` | Uploaded documents with `status` (active/pending/failed/unavailable) |
 | `repository_item_chunks` | Vector-searchable chunks |
 | `repository_access` | Repository permissions |
 | `documents` | Legacy document storage |
 | `document_chunks` | Legacy chunk storage |
+
+Repository readiness is derived from item counts, connector state, and generation status by `/lib/repositories/readiness-service.ts`. Readiness states: `empty`, `processing`, `searchable`, `degraded`, `disconnected`, `unavailable`, `failed`. The Nexus conversation gate uses `blocksRepositorySearch()` — empty repositories pass (no index to be stale), all others fail closed. See **[app-features/overview.md#repository-readiness-gate](../app-features/overview.md#repository-readiness-gate)** for gate behavior and contract.
 
 ---
 
