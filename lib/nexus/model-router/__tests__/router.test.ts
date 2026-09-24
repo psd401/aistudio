@@ -498,7 +498,7 @@ describe("Nexus model router workspace attachment", () => {
     expect(result.workspacePsdDataConnectorId).toBe(PSD_CONNECTOR_ID)
   })
 
-  describe("prefers a model that can call the tools the turn depends on", () => {
+  describe("prefers a model that can call the data tools it attaches", () => {
     const noToolsFirst = nexusRouterConfigSchema.parse({
       ...config,
       auto: { light: [], medium: ["no-tools", "gpt-terra"], high: [] },
@@ -519,46 +519,6 @@ describe("Nexus model router workspace attachment", () => {
       const result = await routeNexusRequest({
         ...followUp,
         workspace: { ...editableArtifact, kind: "document" as const },
-      })
-
-      expect(result.modelId).toBe("no-tools")
-    })
-
-    it("routes a pasted-link turn past a candidate without function calling", async () => {
-      // #1696: `web_fetch` is universal, so the decision names no required tool
-      // and nothing else would stop a model that cannot call it — which would
-      // answer about the link without ever opening it.
-      mockGetConfig.mockResolvedValue({ config: noToolsFirst, mode: "active" })
-
-      const result = await routeNexusRequest({
-        ...followUp,
-        text: "Open https://example.com/article and quote the main heading",
-      })
-
-      expect(result.modelId).toBe("gpt-terra")
-    })
-
-    it("keeps the first candidate for a turn with no link and no data tools", async () => {
-      mockGetConfig.mockResolvedValue({ config: noToolsFirst, mode: "active" })
-
-      const result = await routeNexusRequest({
-        ...followUp,
-        text: "Rewrite this paragraph to be shorter",
-      })
-
-      expect(result.modelId).toBe("no-tools")
-    })
-
-    it("keeps the normal model for a link turn when none can call tools", async () => {
-      // The URL preference must never harden into a requirement — that is the
-      // hard "cannot access URLs" dead end #1696 removed.
-      mockGetConfig.mockResolvedValue({ config: noToolsFirst, mode: "active" })
-      mockFilterAccessibleResourceIds.mockResolvedValue(["8"])
-
-      const result = await routeNexusRequest({
-        ...followUp,
-        fallbackModelId: "no-tools",
-        text: "Summarize https://example.com/article for me",
       })
 
       expect(result.modelId).toBe("no-tools")
@@ -600,6 +560,71 @@ describe("Nexus model router workspace attachment", () => {
  * is one that disagrees with what the router then actually does, so pin the two
  * against each other rather than against a hardcoded expectation.
  */
+/**
+ * #1696: a pasted link needs `web_fetch`, but `web_fetch` is universal — the
+ * decision names no required tool, so nothing else keeps such a turn off a
+ * model that cannot call it. Its own suite rather than a case inside the
+ * workspace block, which is already at the `max-lines-per-function` ceiling.
+ */
+describe("Nexus model router link handling", () => {
+  const noToolsFirst = nexusRouterConfigSchema.parse({
+    ...config,
+    auto: { light: [], medium: ["no-tools", "gpt-terra"], high: [] },
+  })
+  const turn = {
+    text: "Rewrite this paragraph to be shorter",
+    fallbackModelId: "gpt-terra",
+    experienceMode: "standard" as const,
+    requestedFamily: "auto" as const,
+    enabledConnectorIds: [],
+    userId: 7,
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockGetNexusEnabledModels.mockResolvedValue(models)
+    mockFilterAccessibleResourceIds.mockResolvedValue(models.map(model => String(model.id)))
+    mockGetConfig.mockResolvedValue({ config: noToolsFirst, mode: "active" })
+    mockGetConfiguredChatProviders.mockResolvedValue(
+      new Set(["openai", "google", "amazon-bedrock", "azure", "latimer"])
+    )
+    // The reported shape: a link turn that classifies as plain `general`.
+    mockClassify.mockResolvedValue({
+      intent: "general", tier: "medium", confidence: 0.9,
+      reasonCodes: ["explicit_url_web_fetch"], source: "deterministic",
+    })
+  })
+
+  it("routes a pasted-link turn past a candidate without function calling", async () => {
+    const result = await routeNexusRequest({
+      ...turn,
+      text: "Open https://example.com/article and quote the main heading",
+    })
+
+    expect(result.modelId).toBe("gpt-terra")
+  })
+
+  it("keeps the first candidate for a turn with no link and no data tools", async () => {
+    const result = await routeNexusRequest(turn)
+
+    expect(result.modelId).toBe("no-tools")
+  })
+
+  it("keeps the normal model for a link turn when none can call tools", async () => {
+    // The preference must never harden into a requirement — that is the hard
+    // "cannot access URLs" dead end #1696 removed.
+    mockFilterAccessibleResourceIds.mockResolvedValue(["8"])
+
+    const result = await routeNexusRequest({
+      ...turn,
+      fallbackModelId: "no-tools",
+      text: "Summarize https://example.com/article for me",
+    })
+
+    expect(result.modelId).toBe("no-tools")
+  })
+})
+
 describe("Nexus workspace auto-connector preview", () => {
   const PSD_CONNECTOR_ID = "54f0f531-f7ab-485e-bd6b-65a95c4bc871"
   const editableArtifact = {
