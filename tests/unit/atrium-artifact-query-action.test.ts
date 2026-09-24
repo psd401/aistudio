@@ -626,6 +626,25 @@ describe("queryArtifactData overall deadline (#1788)", () => {
     expect(mockExecute).not.toHaveBeenCalled();
     jest.useRealTimers();
   });
+
+  it("bounds a preflight that NEVER settles, not just a slow one", async () => {
+    // Arming the clock is not enough on its own: none of the preflight calls
+    // takes an AbortSignal, so without racing them a single hung dependency (a
+    // wedged DB pool, a stalled connector-config read) would leave this action
+    // pending forever — long after the frame discarded the request, while the
+    // page retried it.
+    jest.useFakeTimers();
+    mockContentGet.mockImplementationOnce(() => new Promise(() => {}));
+
+    const pending = queryArtifactData(validInput);
+    await jest.advanceTimersByTimeAsync(31_000);
+    const result = await pending;
+
+    expect(failureOf(result).code).toBe("timeout");
+    expect(mockGetConnectorTools).not.toHaveBeenCalled();
+    expect(mockExecute).not.toHaveBeenCalled();
+    jest.useRealTimers();
+  });
 });
 
 describe("queryArtifactData disclosure gate (#1787)", () => {

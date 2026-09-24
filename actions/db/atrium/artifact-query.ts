@@ -794,24 +794,70 @@ export async function queryArtifactData(
       contentId: sanitizeForLogging(contentId),
     });
 
-    const { session, idToken } = await authorizeQueryRequest(contentId);
-    const params = validateQueryParams(input);
+    // Every preflight await RACES the deadline as one unit (#1788). Arming the
+    // clock is not enough on its own: none of these calls takes an
+    // AbortSignal, so without the race a single hung dependency (a wedged DB
+    // pool, a stalled connector-config read) would leave this route pending
+    // long after the frame had discarded the request — and the page would retry
+    // while the original preflight was still running. Racing here bounds the
+    // whole turn, whatever any one dependency does.
+    //
+    // `mayEdit` is assigned inside, so an abort leaves it at its fail-closed
+    // `false` and the catch withholds upstream text, exactly as for any other
+    // pre-object failure.
+    const preflight = await withDeadline(
+      (async () => {
+        const { session, idToken } = await authorizeQueryRequest(contentId);
+        const params = validateQueryParams(input);
 
-    // Same session instance the gate above validated — never a second resolve.
-    const requester = await getUserRequester(requestId, session);
-    // Keep the boundary fail-closed if requester resolution ever broadens.
-    if (requester.kind !== "user" || requester.userId == null) {
-      throw ErrorFactories.authNoSession();
-    }
+        // Same session instance the gate above validated — never a second
+        // resolve.
+        const requester = await getUserRequester(requestId, session);
+        // Keep the boundary fail-closed if requester resolution ever broadens.
+        if (requester.kind !== "user" || requester.userId == null) {
+          throw ErrorFactories.authNoSession();
+        }
 
-    // Shared 404 mask for missing/non-viewable content, exactly as the record
-    // actions do — a viewer who cannot see the artifact learns nothing.
-    const content = await contentService.get(requester, contentId);
-    mayEdit = canEdit(requester, content.ownerUserId);
-    // The exclusivity gate: `records` and `none` artifacts never reach the
-    // data MCP (see the artifact-data.ts header for why).
-    assertQueryMode(content);
-    const auditVersionId = await resolveAuditVersionId(content, input?.versionId, log);
+        // Shared 404 mask for missing/non-viewable content, exactly as the
+        // record actions do — a viewer who cannot see the artifact learns
+        // nothing.
+        const content = await contentService.get(requester, contentId);
+        mayEdit = canEdit(requester, content.ownerUserId);
+        // The exclusivity gate: `records` and `none` artifacts never reach the
+        // data MCP (see the artifact-data.ts header for why).
+        assertQueryMode(content);
+        const auditVersionId = await resolveAuditVersionId(
+          content,
+          input?.versionId,
+          log
+        );
+        const connectorId = await requirePsdDataConnectorId();
+        return {
+          idToken,
+          params,
+          // Returned narrowed: the `!= null` check above does not survive the
+          // trip out of this closure, and the caller needs a plain number.
+          userId: requester.userId,
+          roles: requester.roles ?? [],
+          content,
+          auditVersionId,
+          connectorId,
+        };
+      })(),
+      deadline,
+      // Nothing to release: preflight opens no connector. A late settle is
+      // simply discarded.
+      () => {}
+    );
+    const {
+      idToken,
+      params,
+      userId,
+      roles,
+      content,
+      auditVersionId,
+      connectorId,
+    } = preflight;
 
     log.debug("Artifact data query accepted", {
       contentId: content.id,
@@ -826,9 +872,9 @@ export async function queryArtifactData(
     // BEFORE any request reaches the data MCP.
     const result = await callQueryData({
       deadline,
-      connectorId: await requirePsdDataConnectorId(),
-      userId: requester.userId,
-      roles: requester.roles ?? [],
+      connectorId,
+      userId,
+      roles,
       idToken,
       sql: params.sql,
       limit: params.limit,
@@ -841,7 +887,7 @@ export async function queryArtifactData(
     timer({ status: "success" });
     log.info("Artifact data query completed", {
       contentId: content.id,
-      userId: requester.userId,
+      userId,
       returnedCount: result.returnedCount,
       truncated: result.truncated,
     });
