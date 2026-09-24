@@ -124,6 +124,8 @@ openwiki:
     - tests/unit/lib/nexus/workspace-routing-contract.test.ts
     - tests/unit/nexus-mcp-popover-workspace-connector.test.tsx
     - tests/e2e/nexus-workspace-artifact-refresh.spec.ts
+    - tests/e2e/atrium-sandbox-script-order.spec.ts
+    - tests/smoke/atrium-artifact-sandbox-host.smoke.ts
 ---
 
 # Core Application Features
@@ -707,12 +709,54 @@ interface AtriumData {
 
 **Source**: `/docs/features/atrium-artifact-data.md` — comprehensive data bridge documentation.
 
+### Script Execution Order and Lifecycle Events (#1785)
+
+The Atrium sandbox host guarantees deterministic script execution order and fires synthetic lifecycle events after all scripts complete. This fixes the "Chart is not defined" regression where inline code ran before its preceding CDN library.
+
+**Execution Guarantees**:
+
+| Guarantee | Behavior |
+|-----------|----------|
+| **Document order** | Scripts execute in markup order, not force-async |
+| **External await** | Inline code waits for preceding `<script src>` to load before running |
+| **Synthetic lifecycle** | `DOMContentLoaded` and `load` fire exactly once after all scripts complete |
+| **Failed scripts don't block** | A blocked or failing external script fires `error` and the chain continues |
+| **Non-executable skipped** | `<script type="text/template">`, `<script nomodule>` never stall chain |
+| **Deadline bounded** | Total wait time bounded at 90s; past deadline, remaining scripts insert without waiting |
+
+**Authoring Pattern**: An artifact can now structure scripts naturally:
+
+```html
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+  // Inline code that depends on Chart — runs after library loads
+  new Chart(ctx, config);
+</script>
+<script>
+  // Bootstrap from DOMContentLoaded — fires once after above scripts
+  document.addEventListener("DOMContentLoaded", () => init());
+</script>
+```
+
+**Superseded Chains**: When a new render arrives while an earlier chain is still waiting on a CDN, the stale chain is abandoned and its lifecycle listeners are unregistered. This prevents double-initialization and duplicate side effects (e.g., `AtriumData.submit` firing twice).
+
+**Duplicate Renders**: The parent re-posts the same code until acked. A duplicate post while a CDN is in flight is acknowledged without re-rendering — the library and inline code each run exactly once.
+
+**Key Sources**:
+- `/infra/sandbox-host/render.html` — `executeScripts()` chain with ordering, timeout, and lifecycle dispatch
+- `/infra/lib/atrium-sandbox-host-page.ts` — Extracted CSP builder and page renderer shared by stack and tests
+- `/lib/content/atrium-data-contract.ts` — `ATRIUM_DATA_AUTHORING_GUIDANCE` includes script timing note
+
+**Focused Tests**:
+- `/tests/e2e/atrium-sandbox-script-order.spec.ts` — Chromium tests for real browser behavior (force-async interleave, lifecycle events)
+- `/tests/smoke/atrium-artifact-sandbox-host.smoke.ts` — jsdom smoke with extended #1785 test cases
+
 ### Shared Data Contract (#1749)
 
 The `AtriumData` bridge contract is defined in `/lib/content/atrium-data-contract.ts` and shared across all artifact-authoring surfaces:
 
 - **`DATA_ACCESS_DESC`** — What the three modes mean (imported by both MCP content tools and workspace chat tools)
-- **`ATRIUM_DATA_AUTHORING_GUIDANCE`** — How to write artifact code against the bridge (the operations, return shapes, authoring rules)
+- **`ATRIUM_DATA_AUTHORING_GUIDANCE`** — How to write artifact code against the bridge (the operations, return shapes, authoring rules, and script timing guarantees: document-order execution, external script await, synthetic `DOMContentLoaded`/`load`)
 
 **Why shared**: Before #1749, the workspace chat knew nothing about the bridge. A "build me a live dashboard" request worked through MCP tools and failed in workspace chat — the model was never told `window.AtriumData` existed, invented a helper, saw it fail, and baked a stale snapshot into the source.
 

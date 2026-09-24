@@ -3,6 +3,15 @@ type: Platform Overview
 title: Agent Platform & Skills System
 description: Extensible agent skill system with 39 domain-specific capabilities including media processing (HTML-to-PDF, ffmpeg, transcription), Google Workspace integration, Cedar governance, and MCP tool exposure for K-12 AI assistants.
 tags: [agents, skills, mcp, workspace, governance]
+openwiki:
+  roles: [infrastructure, domain]
+  source_paths:
+    - infra/agent-image/skills/psd-atrium/SKILL.md
+    - infra/agent-image/skills/psd-html-artifact/SKILL.md
+    - lib/content/atrium-data-contract.ts
+  test_paths:
+    - tests/e2e/atrium-sandbox-script-order.spec.ts
+    - tests/smoke/atrium-artifact-sandbox-host.smoke.ts
 ---
 
 # Agent Platform
@@ -116,6 +125,8 @@ Both are required because the skills ride the agent image (separate deploy pipel
 
 **Authoring Rules for Artifacts**:
 - **Inline scripts/styles are permitted** — This is the intended way to build artifacts
+- **Script execution order is guaranteed (#1785)** — Scripts run in document order; an inline script waits for its preceding external `<script src>` to load before executing. CDN library followed by inline usage now works as expected.
+- **DOMContentLoaded/load fire once (#1785)** — After all artifact scripts complete, `DOMContentLoaded` fires on `document` and `load` fires on `window` exactly once, so `document.addEventListener("DOMContentLoaded", init)` bootstraps normally.
 - **External scripts**: Only from allowlisted CDN (`https://cdnjs.cloudflare.com` by default); pin an exact version (not `latest`)
 - **No network requests**: `connect-src` is `'none'` — fetch/XHR/WebSocket blocked
 - **Fonts**: `font-src` allows only `data:` URIs; Google Fonts `<link>` silently fails, use system fonts or embedded data URIs
