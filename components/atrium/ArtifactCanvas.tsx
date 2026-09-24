@@ -354,6 +354,23 @@ function EmptyDraftPanel({ canEdit }: { canEdit: boolean }): React.JSX.Element {
 type CanvasBridge = { contentId: string; dataAccess: ContentDataAccess } | null;
 
 /**
+ * The key the preview sandbox is mounted under — changing it REMOUNTS the frame
+ * and re-runs the artifact from scratch.
+ *
+ * One function, used both where the frame is rendered and where CanvasBody
+ * decides whether a hidden frame may stay mounted (#1788). Those two must agree
+ * exactly: if the decision watched a narrower key than the mount does, a change
+ * to the unwatched part (`contentId`, `dataAccess`) would remount the sandbox
+ * underneath `display: none`, which is the zero-layout case the latch exists to
+ * prevent.
+ */
+function previewMountKey(bridge: CanvasBridge, versionKey: string): string {
+  return bridge
+    ? `${bridge.contentId}:${bridge.dataAccess}:${versionKey}`
+    : versionKey;
+}
+
+/**
  * The canvas body: the error/loading/empty states and the preview+code pair.
  *
  * Split out of `ArtifactCanvas` purely so each function stays readable; it holds
@@ -522,7 +539,7 @@ function ArtifactPreviewFrame({
   if (!bridge) {
     return (
       <ArtifactSandbox
-        key={versionKey}
+        key={previewMountKey(null, versionKey)}
         code={code}
         src={sandboxSrc}
         className="atrium-artifact-preview"
@@ -531,7 +548,7 @@ function ArtifactPreviewFrame({
   }
   return (
     <ArtifactSandbox
-      key={`${bridge.contentId}:${bridge.dataAccess}:${versionKey}`}
+      key={previewMountKey(bridge, versionKey)}
       code={code}
       src={sandboxSrc}
       className="atrium-artifact-preview"
@@ -681,7 +698,13 @@ function usePreviewDiagnostics(
  */
 function usePreviewTab(
   state: LoadState,
-  selectedVersionId: string | null
+  /**
+   * The COMPOSITE key `ArtifactPreviewFrame` actually keys its sandbox on
+   * (`contentId:dataAccess:versionKey`), not just the version. Latching only
+   * the version portion would miss a `contentId` or `dataAccess` change, which
+   * remounts the sandbox just as surely — and would do it under `display: none`.
+   */
+  previewMountKey: string
 ): { tab: Tab; handleTab: (next: Tab) => void; keepPreviewMounted: boolean } {
   const [tab, setTab] = useState<Tab>("preview");
   const [previewMountedKey, setPreviewMountedKey] = useState<string | null>(null);
@@ -692,19 +715,17 @@ function usePreviewTab(
       // placeholder instead of the frame, so latching a key there would claim a
       // mount that never happened. Leaving FOR Preview clears the latch — that
       // tab renders the frame itself, and a stale key must not outlive a visit.
-      setPreviewMountedKey(
-        next === "code" && state === "ready" ? (selectedVersionId ?? "") : null
-      );
+      setPreviewMountedKey(next === "code" && state === "ready" ? previewMountKey : null);
       setTab(next);
     },
-    [state, selectedVersionId]
+    [state, previewMountKey]
   );
 
-  // If the author saves or switches version while on the Code tab, the latched
-  // key stops matching and the frame is dropped rather than silently rebuilt
-  // with no layout — it remounts, visible and correctly sized, on the way back.
-  const keepPreviewMounted =
-    tab === "preview" || previewMountedKey === (selectedVersionId ?? "");
+  // If anything the sandbox is keyed on changes while the Code tab is open, the
+  // latched key stops matching and the frame is dropped rather than silently
+  // rebuilt with no layout — it remounts, visible and correctly sized, on the
+  // way back to Preview.
+  const keepPreviewMounted = tab === "preview" || previewMountedKey === previewMountKey;
 
   return { tab, handleTab, keepPreviewMounted };
 }
@@ -835,7 +856,7 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
 
   const { tab, handleTab, keepPreviewMounted } = usePreviewTab(
     state,
-    selectedVersionId
+    previewMountKey(bridge, selectedVersionId ?? "")
   );
 
   const handleSelectVersion = useCallback(

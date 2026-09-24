@@ -136,6 +136,22 @@ const RENDER_MAX_ATTEMPTS = 40;
  */
 const MAX_CONCURRENT_DATA_REQUESTS = 6;
 /**
+ * Record ops (`submit` / `list`) run strictly one at a time.
+ *
+ * They still travel over Server Actions, which the App Router dispatches one at
+ * a time regardless — so a higher limit here would not make them overlap. It
+ * would only create a SECOND, invisible queue after the dispatch ack, and the
+ * ack's whole job is to tell the frame "your request has started" so it can
+ * time the server rather than the wait. Acking six record ops that are really
+ * queued in Next would restart the frame's 10s clock on requests that have not
+ * begun: a later `submit` would time out in the frame, write anyway, and the
+ * author's retry would duplicate the record.
+ *
+ * Queries do not have this problem — they go over `fetch`, which genuinely runs
+ * them in parallel (see `fetchArtifactQuery`).
+ */
+const MAX_CONCURRENT_RECORD_REQUESTS = 1;
+/**
  * The sandbox host's `MAX_PENDING_DATA_REQUESTS` (infra/sandbox-host/render.html),
  * mirrored here so the parent's total capacity is derived from it rather than
  * guessed alongside it. The frame is the binding constraint: it refuses to hold
@@ -1013,10 +1029,27 @@ function useArtifactDataBridge({
     // (the canvas keys the sandbox on contentId + version), so a drain started
     // by an earlier render can safely finish the queue it is draining.
     const step = (): void => {
-      while (
-        inFlightDataRequestsRef.current < MAX_CONCURRENT_DATA_REQUESTS &&
-        queuedDataRequestsRef.current.length > 0
-      ) {
+      for (;;) {
+        // Peek before taking: the limit depends on what is at the head. A
+        // record op still travels over a Server Action, and the App Router
+        // dispatches those ONE AT A TIME — the very serialization this issue is
+        // about. Running six of them "concurrently" here would buy nothing and
+        // would make the dispatch ack a lie: the parent would restart the
+        // frame's 10s clock on five requests that are still sitting in Next's
+        // client-side action queue, so a later `submit` could time out in the
+        // frame and then write anyway, and the author's retry would create a
+        // DUPLICATE record. One at a time makes "dispatched" mean "started".
+        //
+        // Query and record ops never mix on one mount: `isOpAllowedByLoadedMode`
+        // pins the mount to a single mode, so this is one lane either way, not
+        // two competing ones.
+        const head = queuedDataRequestsRef.current[0];
+        if (!head) break;
+        const limit =
+          head.request.op === "query"
+            ? MAX_CONCURRENT_DATA_REQUESTS
+            : MAX_CONCURRENT_RECORD_REQUESTS;
+        if (inFlightDataRequestsRef.current >= limit) break;
         const next = queuedDataRequestsRef.current.shift();
         if (!next) break;
         inFlightDataRequestsRef.current += 1;

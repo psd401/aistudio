@@ -672,7 +672,13 @@ describe("ArtifactSandbox artifact data bridge failure controls", () => {
    * now queues behind a concurrency limit of 6 and every request is answered —
    * a dashboard with more panels than the limit is not a failure case.
    */
-  it("queues past the concurrency limit instead of rejecting, and answers all", async () => {
+  it("queues record ops ONE AT A TIME instead of rejecting, and answers all", async () => {
+    // Record ops still travel over Server Actions, which the App Router
+    // dispatches one at a time. Acking six of them would restart the frame's
+    // 10s clock on five requests still sitting in Next's action queue — a later
+    // `submit` would time out in the frame, write anyway, and the author's
+    // retry would create a DUPLICATE record. So the parent runs exactly one,
+    // and "dispatched" means "started".
     const { frameWindow, postMessage } = mountSandbox(true);
     type SubmitSuccess = {
       isSuccess: true;
@@ -700,9 +706,9 @@ describe("ArtifactSandbox artifact data bridge failure controls", () => {
       await flushMicrotasks();
     });
 
-    // Six dispatched, three waiting — and NOTHING refused.
-    expect(submitArtifactRecordMock).toHaveBeenCalledTimes(6);
-    expect(dispatchAcks(postMessage)).toEqual(REQUEST_IDS.slice(0, 6));
+    // One dispatched, eight waiting — and NOTHING refused.
+    expect(submitArtifactRecordMock).toHaveBeenCalledTimes(1);
+    expect(dispatchAcks(postMessage)).toEqual([REQUEST_IDS[0]]);
     expect(dataResponses(postMessage)).toEqual([]);
 
     const drain = async (): Promise<void> => {
@@ -721,9 +727,14 @@ describe("ArtifactSandbox artifact data bridge failure controls", () => {
         await flushMicrotasks();
       });
     };
-    await drain();
-    // Completing the first six pulls the queued three through.
-    expect(submitArtifactRecordMock).toHaveBeenCalledTimes(9);
+    // Each completion pulls exactly one more through, in FIFO order.
+    for (let dispatched = 2; dispatched <= REQUEST_IDS.length; dispatched += 1) {
+      await drain();
+      expect(submitArtifactRecordMock).toHaveBeenCalledTimes(dispatched);
+      expect(dispatchAcks(postMessage)).toEqual(
+        REQUEST_IDS.slice(0, dispatched)
+      );
+    }
     await drain();
     await waitFor(() => expect(dataResponses(postMessage)).toHaveLength(9));
     expect(
@@ -746,14 +757,14 @@ describe("ArtifactSandbox bounded request queue (#1788)", () => {
     const ids = Array.from({ length: 33 }, (_, index) =>
       `00000000-0000-4000-8000-0000000001${String(index).padStart(2, "0")}`
     );
-    const { frameWindow, postMessage } = mountSandbox(true);
-    submitArtifactRecordMock.mockImplementation(() => new Promise(() => {}));
+    const { frameWindow, postMessage } = mountQuerySandbox();
+    fetchMock.mockImplementation(() => new Promise(() => {}));
 
     await act(async () => {
       for (const requestId of ids) {
         window.dispatchEvent(
           new MessageEvent("message", {
-            data: submitRequest(requestId),
+            data: queryRequest(requestId, "SELECT 1"),
             origin: "null",
             source: frameWindow,
           })
@@ -762,6 +773,7 @@ describe("ArtifactSandbox bounded request queue (#1788)", () => {
       await flushMicrotasks();
     });
 
+    expect(fetchMock).toHaveBeenCalledTimes(6);
     expect(dataResponses(postMessage)).toEqual([
       {
         message: {

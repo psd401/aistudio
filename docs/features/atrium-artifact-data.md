@@ -146,7 +146,7 @@ artifact code
         | postMessage {op:"query", sql, limit, offset}
         v
 sandbox host -> ArtifactSandbox parent (event.source check, trusted contentId)
-        | concurrency limit 6, bounded FIFO 32, dispatch ack back to the frame
+        | 6 queries at once (records 1 at a time), FIFO 26, dispatch ack to frame
         | fetch POST /api/atrium/artifacts/{id}/query  (sqlBase64)
         v
 queryArtifactData
@@ -190,7 +190,7 @@ outright. Three changes:
 | Before | Now |
 |---|---|
 | Server Action (serialized by the App Router) | `POST /api/atrium/artifacts/{id}/query` via `fetch` — genuinely parallel |
-| Hard cap of 8 in flight; the 9th **rejected** | Concurrency limit **6**, bounded FIFO of **32** behind it; only a full queue is refused |
+| Hard cap of 8 in flight; the 9th **rejected** | Concurrency limit **6** for queries (**1** for record ops, which still ride serialized Server Actions), with a bounded FIFO of **26** behind it — **32 total**, matching the host's own `MAX_PENDING_DATA_REQUESTS`, so both layers refuse the same request. Only a full queue is refused. |
 | Host's 45 s clock started when the page **posted** | Parent posts `atrium-artifact-data-ack` on **dispatch**; the host runs a queue-tolerant 315 s budget until then, and re-arms the real 45 s server budget on the ack, once |
 | Server budget: 30 s for `execute()` only, handshake free | One 30 s deadline spanning `getConnectorTools` **and** `execute()`, so the server always loses the race to the host's clock |
 
@@ -406,7 +406,7 @@ type ArtifactDataResponse =
     };
 ```
 
-The host keeps at most 32 pending calls and applies a ten-second timeout
+The host keeps at most 32 pending calls (the parent's 6 + 26 is sized to match) and applies a ten-second timeout
 (forty-five seconds for `query`: the action's own 30s budget starts only after
 authorization and the connector handshake, so the host must always outlast it
 or a late server answer is dropped and the page retries a running query). The
