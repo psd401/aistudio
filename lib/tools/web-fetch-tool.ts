@@ -22,6 +22,7 @@
 import type { Tool } from "ai";
 import { jsonSchema } from "ai";
 import { fetchWebPageText } from "@/lib/agents/agent-tools/web-fetch";
+import { intersectSkillAllowedTools } from "@/lib/skills/skill-tool-enforcement";
 
 export interface WebFetchToolArgs {
   url: string;
@@ -148,4 +149,20 @@ export function createWebFetchTool(): Tool<WebFetchToolArgs, WebFetchToolResult>
       };
     },
   };
+}
+
+/**
+ * Whether a bound skill's `allowed-tools` pin permits `web_fetch`. It is a
+ * network-capable tool, so a skill that pins its tools must be able to keep it
+ * out, as it can for connector and workspace tools. An empty pin (no skill, or
+ * a skill that pins nothing) allows it. A pin may name the tool by wire name,
+ * friendly name or catalog identifier.
+ */
+export function skillPinAllowsWebFetch(skillAllowedTools: string[]): boolean {
+  return (
+    intersectSkillAllowedTools(
+      ["web_fetch", "webFetch", "chat.web_fetch"],
+      skillAllowedTools
+    ).length > 0
+  );
 }
