@@ -115,6 +115,10 @@ interface ParentMessage {
   scope?: unknown;
   /** #1787: the frame's forwarded uncaught error / unhandled rejection. */
   message?: unknown;
+  /** #1787: set when the forwarded error is a frame-side bridge failure. */
+  kind?: unknown;
+  code?: unknown;
+  sql?: unknown;
 }
 
 /** Build the deployed host HTML the way the CDK stack does (token substitution). */
@@ -481,6 +485,26 @@ async function testDataRequestTimeout(): Promise<void> {
 }
 
 /**
+ * #1787 (Codex P2 on #1808) — a failure the FRAME raises itself is reported to
+ * the parent. The artifact catches the rejection (as the guidance says), so no
+ * `unhandledrejection` fires, and the parent never answered; without this
+ * report the chat got no diagnostic for a timed-out query at all.
+ */
+async function testLocalTimeoutIsReportedToParent(): Promise<void> {
+  const { window, parentMessages } = makeHost([APP_ORIGIN], { timeoutDelayMs: 0 });
+  await assert.rejects(atriumData(window).query("select slow()"));
+
+  const reports = parentMessages.filter(
+    (entry) => entry.data.type === "atrium-artifact-error"
+  );
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0]?.data.kind, "data");
+  assert.equal(reports[0]?.data.code, "timeout");
+  assert.equal(reports[0]?.data.sql, "select slow()");
+  assert.equal(reports[0]?.origin, "*");
+}
+
+/**
  * #1787 — the typed code the parent attaches reaches artifact code as
  * `err.code`, so a page can render "your SQL is wrong" instead of guessing
  * "no access" from a single generic string.
@@ -585,7 +609,12 @@ async function testMissingRandomUuidDoesNotBreakRendering(): Promise<void> {
     atriumData(window).list("leaderboard"),
     /Atrium data bridge is unavailable/
   );
-  assert.equal(parentMessages.length, 0);
+  // No data request reaches the parent — only the #1787 diagnostic reporting
+  // the frame-side failure.
+  assert.deepEqual(
+    parentMessages.map((entry) => [entry.data.type, entry.data.code]),
+    [["atrium-artifact-error", "unavailable"]]
+  );
 
   postToHost(
     window,
@@ -610,10 +639,17 @@ async function testPostMessageFailureCleanup(): Promise<void> {
     api.list("leaderboard"),
     /Atrium data bridge is unavailable/
   );
-  assert.equal(parentMessages.length, 0);
+  // No data request reaches the parent — only the #1787 diagnostic reporting
+  // the frame-side failure.
+  assert.deepEqual(
+    parentMessages.map((entry) => [entry.data.type, entry.data.code]),
+    [["atrium-artifact-error", "unavailable"]]
+  );
 
   const retry = api.list("leaderboard");
-  const requestId = parentMessages[0]?.data.requestId;
+  const requestId = parentMessages.find(
+    (entry) => entry.data.type === "atrium-artifact-data-request"
+  )?.data.requestId;
   postDataResponse(window, {
     type: "atrium-artifact-data-response",
     requestId,
@@ -645,8 +681,18 @@ async function testPendingRequestBound(): Promise<void> {
   }
   await Promise.all(pending);
 
+  // #1787: the refused 33rd call is reported to the parent as a diagnostic.
+  assert.deepEqual(
+    parentMessages
+      .filter((entry) => entry.data.type === "atrium-artifact-error")
+      .map((entry) => entry.data.code),
+    ["too_many_requests"]
+  );
+
   const afterCleanup = api.list("leaderboard");
-  const afterCleanupRequest = parentMessages[32]?.data;
+  const afterCleanupRequest = parentMessages.filter(
+    (entry) => entry.data.type === "atrium-artifact-data-request"
+  )[32]?.data;
   postDataResponse(window, {
     type: "atrium-artifact-data-response",
     requestId: afterCleanupRequest?.requestId,
@@ -1209,6 +1255,10 @@ async function main(): Promise<void> {
   await check(
     "rejects and cleans up when no response arrives before timeout",
     testDataRequestTimeout
+  );
+  await check(
+    "reports a frame-side query timeout to the parent as a data diagnostic",
+    testLocalTimeoutIsReportedToParent
   );
   await check("sends a query envelope with only sql/limit/offset", testQueryEnvelope);
   await check(

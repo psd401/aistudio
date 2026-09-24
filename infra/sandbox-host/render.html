@@ -224,22 +224,43 @@
         var MAX_FORWARDED_ERROR_LENGTH = 500;
         var forwardedFrameErrors = 0;
 
-        function reportFrameError(message) {
+        function reportFrameError(message, dataFailure) {
           if (forwardedFrameErrors >= MAX_FORWARDED_FRAME_ERRORS) return;
           var text = typeof message === "string" ? message : String(message);
           if (!text) return;
           forwardedFrameErrors += 1;
+          var report = {
+            type: "atrium-artifact-error",
+            message: text.slice(0, MAX_FORWARDED_ERROR_LENGTH),
+          };
+          if (dataFailure) {
+            report.kind = "data";
+            report.code = dataFailure.code;
+            if (typeof dataFailure.sql === "string") {
+              report.sql = dataFailure.sql.slice(0, MAX_FORWARDED_ERROR_LENGTH);
+            }
+          }
           try {
-            postToParent(
-              {
-                type: "atrium-artifact-error",
-                message: text.slice(0, MAX_FORWARDED_ERROR_LENGTH),
-              },
-              "*"
-            );
+            postToParent(report, "*");
           } catch (_err) {
             // The parent is gone or refused the post; nothing else to do.
           }
+        }
+
+        /**
+         * A bridge failure raised HERE rather than answered by the parent — the
+         * local timeout, the pending-request cap, a missing id generator. The
+         * parent never learns of these on its own (a timed-out request may even
+         * succeed there later), so without this an artifact that catches the
+         * rejection, as the guidance tells it to, leaves the next chat turn with
+         * no diagnostic at all (#1787). Reported, then returned for rejecting.
+         */
+        function localBridgeFailure(op, fields, code, message) {
+          reportFrameError(message, {
+            code: code,
+            sql: op === "query" && fields ? fields.sql : undefined,
+          });
+          return bridgeError(code, message);
         }
 
         // `addEventListener`, not `window.onerror`: an artifact may assign the
@@ -262,15 +283,13 @@
         function requestData(op, namespace, fields) {
           if (!createRequestId) {
             return Promise.reject(
-              bridgeError("unavailable", "Atrium data bridge is unavailable")
+              localBridgeFailure(op, fields, "unavailable", "Atrium data bridge is unavailable")
             );
           }
           if (pendingDataRequests.size >= MAX_PENDING_DATA_REQUESTS) {
             return Promise.reject(
-              bridgeError(
-                "too_many_requests",
-                "Atrium data bridge has too many pending requests"
-              )
+              localBridgeFailure(op, fields, "too_many_requests",
+                "Atrium data bridge has too many pending requests")
             );
           }
 
@@ -279,17 +298,17 @@
             try {
               requestId = createRequestId();
             } catch (_err) {
-              reject(bridgeError("unavailable", "Atrium data bridge is unavailable"));
+              reject(localBridgeFailure(op, fields, "unavailable", "Atrium data bridge is unavailable"));
               return;
             }
             if (pendingDataRequests.has(requestId)) {
-              reject(bridgeError("unavailable", "Atrium data request ID collision"));
+              reject(localBridgeFailure(op, fields, "unavailable", "Atrium data request ID collision"));
               return;
             }
             var timeoutId = scheduleTimeout(
               function () {
                 pendingDataRequests.delete(requestId);
-                reject(bridgeError("timeout", "Atrium data request timed out"));
+                reject(localBridgeFailure(op, fields, "timeout", "Atrium data request timed out"));
               },
               op === "query" ? QUERY_REQUEST_TIMEOUT_MS : DATA_REQUEST_TIMEOUT_MS
             );
@@ -330,7 +349,7 @@
             } catch (_err) {
               pendingDataRequests.delete(requestId);
               cancelTimeout(timeoutId);
-              reject(bridgeError("unavailable", "Atrium data bridge is unavailable"));
+              reject(localBridgeFailure(op, fields, "unavailable", "Atrium data bridge is unavailable"));
             }
           });
         }

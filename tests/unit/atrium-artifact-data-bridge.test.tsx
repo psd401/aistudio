@@ -1111,6 +1111,14 @@ describe("ArtifactSandbox preview diagnostics (#1787)", () => {
     expect(diagnostics).toEqual([]);
   });
 
+});
+
+/**
+ * #1787 — what the FRAME itself reports: its uncaught errors, and bridge
+ * failures it raised locally (its own timeout or pending cap). Its own suite so
+ * the diagnostics suite stays inside the max-lines-per-function budget.
+ */
+describe("ArtifactSandbox forwarded frame errors (#1787)", () => {
   it("forwards the frame's uncaught errors as script diagnostics", async () => {
     const { frameWindow, diagnostics } = mountQuerySandbox();
 
@@ -1122,6 +1130,41 @@ describe("ArtifactSandbox preview diagnostics (#1787)", () => {
     expect(diagnostics).toEqual([
       { kind: "script", message: "Chart is not defined" },
     ]);
+  });
+
+  it("records a frame-side bridge failure as a DATA diagnostic with its code", async () => {
+    const { frameWindow, diagnostics } = mountQuerySandbox();
+
+    await sendMessage(
+      {
+        type: "atrium-artifact-error",
+        kind: "data",
+        code: "timeout",
+        message: "Atrium data request timed out",
+        sql: "select slow()",
+      },
+      frameWindow
+    );
+
+    expect(diagnostics).toEqual([
+      {
+        kind: "data",
+        code: "timeout",
+        message: "Atrium data request timed out",
+        sql: "select slow()",
+      },
+    ]);
+  });
+
+  it("keeps a frame report with an unknown code as a plain script error", async () => {
+    const { frameWindow, diagnostics } = mountQuerySandbox();
+
+    await sendMessage(
+      { type: "atrium-artifact-error", kind: "data", code: "made_up", message: "x" },
+      frameWindow
+    );
+
+    expect(diagnostics).toEqual([{ kind: "script", message: "x" }]);
   });
 
   it("ignores a frame error from any window that is not this frame", async () => {

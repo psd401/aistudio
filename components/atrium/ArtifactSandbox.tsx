@@ -290,10 +290,31 @@ export interface ArtifactSandboxDiagnostic {
   sql?: string;
 }
 
-/** The frame's forwarded uncaught error / unhandled rejection (render.html). */
+/**
+ * The frame's forwarded uncaught error / unhandled rejection (render.html) — or,
+ * with `kind: "data"`, a bridge failure the FRAME raised itself (its own
+ * timeout or pending-request cap), which the parent never sees otherwise.
+ */
 interface ArtifactFrameError {
   type: "atrium-artifact-error";
   message: string;
+  kind?: unknown;
+  code?: unknown;
+  sql?: unknown;
+}
+
+/** The diagnostic a forwarded frame error becomes. `message` is already bounded. */
+function frameErrorDiagnostic(
+  data: ArtifactFrameError,
+  message: string
+): ArtifactSandboxDiagnostic {
+  // An unrecognized code is not trusted as a data failure; it stays a plain
+  // script error rather than reaching the chat as an unvalidated code.
+  if (data.kind !== "data" || !isArtifactBridgeErrorCode(data.code)) {
+    return { kind: "script", message };
+  }
+  const sql = typeof data.sql === "string" ? boundBridgeErrorMessage(data.sql) : "";
+  return { kind: "data", code: data.code, message, ...(sql ? { sql } : {}) };
 }
 
 function isArtifactFrameError(data: unknown): data is ArtifactFrameError {
@@ -909,7 +930,7 @@ function useArtifactFrameErrors(
       const message = boundBridgeErrorMessage(event.data.message);
       if (!message) return;
       try {
-        onDiagnostic({ kind: "script", message });
+        onDiagnostic(frameErrorDiagnostic(event.data, message));
       } catch {
         // Never let a consumer's throw escape a message handler.
       }

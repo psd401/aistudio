@@ -295,9 +295,12 @@ Rules — follow all of them:
   known values), re-querying when the choice changes.
 - **Never report success you have not observed.** The preview runs in the
   viewer's browser; nothing about a failed query reaches you unless you look. In
-  the Nexus workspace chat, `read_workspace_content` returns `previewDiagnostics`
-  — call it again after every artifact write and read them before you tell anyone
-  the dashboard works.
+  the Nexus workspace chat, `read_workspace_content` returns `previewDiagnostics`,
+  a snapshot taken when the user sent their message — it can never show how a
+  version you write during that turn behaves, because the new code only runs in
+  their browser after you reply. So after a write, do not say the dashboard
+  works: say the preview will report any failures, and read `previewDiagnostics`
+  on the user's NEXT turn.
 - **Test it before you publish it.** The bridge is live on the authoring
   surfaces — the full-screen viewer (`/atrium/<id>/view`, which the create/edit
   response links to), the editor canvas, and the "Open beside chat" panel — so
