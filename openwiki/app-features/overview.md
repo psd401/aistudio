@@ -9,6 +9,9 @@ openwiki:
     - lib/repositories/readiness-service.ts
     - lib/nexus/conversation-repository-service.ts
     - app/api/nexus/chat/route.ts
+    - app/api/nexus/chat/image-generation-handler.ts
+    - lib/ai/generated-image-bucket.ts
+    - lib/ai/image-generation-service.ts
     - actions/db/atrium/artifact-query.ts
     - actions/db/atrium/artifact-guards.ts
     - actions/db/atrium/workspace-panel.ts
@@ -93,11 +96,15 @@ openwiki:
     - Eager image upload — VisionImageAdapter starts repository upload at attach time, not send time; processing callbacks fire immediately so UI shows spinner during ingestion
     - Failed attachments are still "complete" — they carry safe error messages for the model, so failedAttachments set is required to prevent "Ready" chip on failed uploads
     - Document adapters sanitize errors — toSafeErrorMessage returns controlled strings for LLM context; raw server errors never cross chat boundary (OWASP LLM Top 10)
+    - Generated image bucket resolver is separate from generic S3 client — getGeneratedImageBucket() reads DOCUMENTS_BUCKET_NAME directly; storeImageInS3 and resolvePreviousGeneratedImageReferences must use the same bucket (#1804)
+    - Generated images use key prefix v2/generated-images/{conversationId}/ — only keys under this prefix are readable for edits, preventing cross-conversation access (#1804)
+    - Edit-after-persistence reads by S3 key, not presigned URL — presigned URLs expire after one hour; edits work indefinitely by hydrating image bytes from durable storage (#1804)
   validation_commands:
     - bun run typecheck
     - bun run lint
   test_paths:
     - tests/unit/lib/nexus/conversation-repository-empty-project-gate.test.ts
+    - tests/unit/api/nexus/image-generation-handler.test.ts
     - tests/unit/repository-readiness.test.ts
     - tests/e2e/nexus-project-empty-repository-chat.functional.spec.ts
     - tests/e2e/atrium-artifact-data-access.functional.spec.ts
@@ -217,6 +224,40 @@ Model Context Protocol tools integrated via:
 - `/lib/mcp/tool-handlers.ts` — Server-side tool execution
 
 Tools are gated by user capabilities and resource access grants.
+
+### Image Generation
+
+Nexus supports AI image generation through OpenAI (DALL-E) and Google Gemini models. The automatic model router classifies image generation requests and routes to the appropriate provider.
+
+**Supported Operations**:
+- **Generate**: Create images from text prompts
+- **Edit**: Modify existing generated images with new prompts
+- **Variations**: Generate variations of existing images (provider-dependent)
+
+#### Storage and Retrieval
+
+Generated images are stored in the configured documents bucket (`DOCUMENTS_BUCKET_NAME`) with the key pattern `v2/generated-images/{conversationId}/{uuid}.{ext}`. The system uses a dedicated bucket resolver (`getGeneratedImageBucket()` from `/lib/ai/generated-image-bucket.ts`) instead of the generic S3 client because the database `S3_BUCKET` setting is not guaranteed to match `DOCUMENTS_BUCKET_NAME`.
+
+**Why this matters**: The generic S3 client resolves its bucket from the database setting, which may differ from the generated-images bucket. Using a dedicated resolver ensures image storage and retrieval always target the same location (`storeImageInS3` and `resolvePreviousGeneratedImageReferences` must agree).
+
+#### Edit-After-Persistence (#1804)
+
+Generated images can be edited hours or days after creation, not just within the current session. This works by reading previous images from S3 by their durable key instead of relying on the presigned `imageUrl` stored in the message.
+
+**The Problem**: Presigned URLs expire one hour after generation. When a user returned 18 hours later and tried to edit a generated image, every edit request failed with HTTP 500 because the system tried to fetch the expired presigned URL from S3, which returned 403 Forbidden.
+
+**The Fix**: `resolvePreviousGeneratedImageReferences()` (from `/app/api/nexus/chat/image-generation-handler.ts`) reads previous generated images directly from S3 using their stored `s3Key` instead of the expired `imageUrl`. This hydrates the image bytes fresh for each edit request, making edits work indefinitely.
+
+**Security**: Only images under the conversation's own generated-images prefix (`v2/generated-images/{conversationId}/`) are readable. Keys outside this prefix point to another conversation's images and are rejected before any S3 read (enforced by `isGeneratedImageKeyForConversation`).
+
+**Key Sources**:
+- `/lib/ai/generated-image-bucket.ts` — Bucket resolver for generated images
+- `/lib/ai/image-generation-service.ts` — Provider-agnostic image generation with S3 storage
+- `/app/api/nexus/chat/image-generation-handler.ts` — Nexus integration, edit-after-persistence logic, reference hydration
+- `/app/api/nexus/chat/route.ts` — Routing classification for image generation
+
+**Focused Tests**:
+- `tests/unit/api/nexus/image-generation-handler.test.ts` — Handler behavior including reference hydration
 
 ### Attachments (#1735)
 
