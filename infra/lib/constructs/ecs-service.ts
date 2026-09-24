@@ -166,6 +166,45 @@ export interface EcsServiceConstructProps {
 }
 
 /**
+ * Time zone for the prod scheduled-scaling actions. Application Auto Scaling
+ * evaluates the cron in this zone, so the schedules follow PST/PDT on their own.
+ * The previous UTC crons assumed PST year-round and were never hand-adjusted
+ * for daylight saving, so all of summer they ran an hour late in local time.
+ */
+export const PROD_SCALING_TIME_ZONE = cdk.TimeZone.AMERICA_LOS_ANGELES;
+
+export interface ScheduledScalingSpec {
+  id: string;
+  /** Local (Pacific) wall-clock hour and minute; see PROD_SCALING_TIME_ZONE. */
+  hour: string;
+  minute: string;
+  weekDay: string;
+  minCapacity: number;
+  maxCapacity: number;
+}
+
+/**
+ * Prod app task-count floors by time of day, in Pacific local time.
+ *
+ * MorningScaleUp runs at 6:00, before the scheduled agent morning briefs start
+ * landing around 6:30. It used to run at 7:30 PST (8:30 PDT), so the brief wave
+ * hit the 2-task overnight floor: on 2026-09-23 one task sat at 100% CPU from
+ * 6:38 to 6:41 PDT, ALB target response time peaked at 101 s, the third task
+ * only started at 6:40, and agent workspace save/restore calls timed out.
+ * Most agent workspace timeouts over the prior week fell in that window.
+ *
+ * Target-tracking (CPU 70% / memory 80%) still scales above these floors.
+ */
+export const PROD_SCALING_SCHEDULES: readonly ScheduledScalingSpec[] = [
+  // Weekday mornings, ahead of the 6:30 agent brief wave.
+  { id: 'MorningScaleUp', hour: '6', minute: '0', weekDay: 'MON-FRI', minCapacity: 4, maxCapacity: 20 },
+  // Weekday evenings after business hours.
+  { id: 'EveningScaleDown', hour: '20', minute: '0', weekDay: 'MON-FRI', minCapacity: 2, maxCapacity: 10 },
+  // Weekend floor from Saturday midnight until Monday's MorningScaleUp.
+  { id: 'WeekendScaling', hour: '0', minute: '0', weekDay: 'SAT', minCapacity: 1, maxCapacity: 5 },
+];
+
+/**
  * ECS Fargate service construct for the AI Studio Next.js application.
  * Provides HTTP/2 streaming support through Application Load Balancer.
  */
@@ -1466,55 +1505,22 @@ export class EcsServiceConstruct extends Construct {
   }
 
   /**
-   * Add scheduled scaling for predictable traffic patterns
-   *
-   * IMPORTANT: Times are in UTC and assume PST (UTC-8) year-round.
-   * During PDT (Daylight Saving Time, March-November), scaling will occur 1 hour early.
-   *
-   * To adjust for DST, manually update these schedules twice per year:
-   * - March (PDT begins): Add 1 hour to all UTC times
-   * - November (PST returns): Subtract 1 hour from all UTC times
-   *
-   * Alternative: Monitor actual traffic patterns and adjust based on CloudWatch metrics.
+   * Add scheduled scaling for predictable traffic patterns (prod only).
+   * The schedule table and its rationale live in PROD_SCALING_SCHEDULES.
    */
   private addScheduledScaling(scaling: ecs.ScalableTaskCount): void {
-    // Scale up before business hours (Mon-Fri 7:30 AM PST/PDT)
-    // PST (Nov-Mar): 7:30 AM PST = 3:30 PM UTC (15:30)
-    // PDT (Mar-Nov): 7:30 AM PDT = 2:30 PM UTC (14:30)
-    // Currently configured for PST
-    scaling.scaleOnSchedule('MorningScaleUp', {
-      schedule: autoscaling.Schedule.cron({
-        hour: '15', // 7:30 AM PST = 3:30 PM UTC (adjust to 14 during PDT)
-        minute: '30',
-        weekDay: 'MON-FRI',
-      }),
-      minCapacity: 4,
-      maxCapacity: 20,
-    });
-
-    // Scale down after business hours (8:00 PM PST/PDT)
-    // PST: 8:00 PM PST = 4:00 AM UTC next day
-    // PDT: 8:00 PM PDT = 3:00 AM UTC next day
-    scaling.scaleOnSchedule('EveningScaleDown', {
-      schedule: autoscaling.Schedule.cron({
-        hour: '4', // 8:00 PM PST = 4:00 AM UTC next day (adjust to 3 during PDT)
-        minute: '0',
-        weekDay: 'TUE-SAT', // Next day in UTC
-      }),
-      minCapacity: 2,
-      maxCapacity: 10,
-    });
-
-    // Weekend scaling (lower capacity on Saturday midnight PST/PDT)
-    scaling.scaleOnSchedule('WeekendScaling', {
-      schedule: autoscaling.Schedule.cron({
-        hour: '8', // Midnight PST = 8:00 AM UTC (adjust to 7 during PDT)
-        minute: '0',
-        weekDay: 'SAT',
-      }),
-      minCapacity: 1,
-      maxCapacity: 5,
-    });
+    for (const s of PROD_SCALING_SCHEDULES) {
+      scaling.scaleOnSchedule(s.id, {
+        schedule: autoscaling.Schedule.cron({
+          hour: s.hour,
+          minute: s.minute,
+          weekDay: s.weekDay,
+        }),
+        timeZone: PROD_SCALING_TIME_ZONE,
+        minCapacity: s.minCapacity,
+        maxCapacity: s.maxCapacity,
+      });
+    }
   }
 
   /**
