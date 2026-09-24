@@ -1113,6 +1113,26 @@ describe("--params must parse (#1801)", () => {
     ).not.toThrow()
   })
 
+  it("refuses a --params with no value instead of treating it as absent", () => {
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: ["drive", "files", "list", "--params"],
+      })
+    ).toThrow(/--params has no value/)
+  })
+
+  it("refuses a --params followed by another flag, without the quoting advice", () => {
+    // `argumentValue` would read `--pageAll` as the value and the model would
+    // be told its quotes were eaten — the wrong fix for a missing value.
+    expect(() =>
+      validateWorkspaceCommand({
+        scope: "user",
+        argv: ["drive", "files", "list", "--params", "--pageAll"],
+      })
+    ).toThrow(/--params has no value/)
+  })
+
   it("leaves a command with no --params alone", () => {
     expect(() =>
       validateWorkspaceCommand({

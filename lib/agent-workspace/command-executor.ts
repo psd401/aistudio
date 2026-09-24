@@ -582,19 +582,11 @@ export function withSharedDriveSupport(argv: readonly string[]): string[] {
     additions.includeItemsFromAllDrives = true
   }
 
-  // Fail closed on a --params value this cannot read (#1801). Merging into
-  // `{}` and writing the result back REPLACED the caller's value: a Drive `q`
-  // that lost its quotes in tokenization became
-  // `{"supportsAllDrives":true,"includeItemsFromAllDrives":true}`, so Drive
-  // returned the first page of everything the identity could see and the agent
-  // read that unfiltered listing as search results. Before this transform
-  // existed the same input produced a visible gws parse error; never trade a
-  // loud failure for a silently different query. `validateWorkspaceArguments`
-  // already rejects such a value upstream — this branch keeps the transform
-  // safe on its own terms for any caller that reaches it directly.
-  const rawParams = argumentValue(argv, "--params")
+  // Precondition (#1801): `assertParamsParse`, run by
+  // `validateWorkspaceCommand` before this transform, refuses any --params
+  // that is missing its value or is not a JSON object. So `null` here means
+  // the flag is absent — never a value this would overwrite with its own.
   const existing = parseObjectArgument(argv, "--params")
-  if (rawParams !== null && existing === null) return [...argv]
 
   const present = new Set(
     Object.keys(existing ?? {}).map((key) => key.toLowerCase())
@@ -1063,8 +1055,20 @@ function validateWorkspaceArguments(argv: readonly string[]): void {
  * command-executor.test.ts pins that order.
  */
 function assertParamsParse(argv: readonly string[]): void {
-  const raw = argumentValue(argv, "--params")
-  if (raw === null) return
+  // Not `argumentValue`: it answers `null` for a trailing `--params` (read as
+  // "no parameters") and returns the NEXT flag as the value when one follows
+  // (answered with quoting advice). Both are a missing value, and say so.
+  const index = argv.indexOf("--params")
+  if (index === -1) return
+  const raw = argv[index + 1]
+  if (raw === undefined || raw.startsWith("--")) {
+    throw new WorkspaceCommandValidationError(
+      "Workspace --params has no value. Pass a JSON object after it, or " +
+        "drop the flag.",
+      "params_not_json",
+      workspaceOperation(argv)
+    )
+  }
   if (parseObjectArgument(argv, "--params") !== null) return
 
   let parsedButNotAnObject: boolean

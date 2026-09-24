@@ -187,7 +187,9 @@ If the broker answers `"reason":"params_not_json"`, the quotes were eaten in
 tokenization: move the parameters into a file and retry with `--params-file`.
 Do not retry the same inline shape, and do not fall back to double quotes —
 Drive refuses them. (The same reason code with a "must be a JSON object"
-message means the file held an array or a bare value — wrap it in an object.) The broker never repairs or replaces a
+message means the file held an array or a bare value — wrap it in an object;
+with a "has no value" message, `--params` was passed with nothing after it.)
+The broker never repairs or replaces a
 `--params` value it cannot parse, so an unfiltered listing can no longer come
 back dressed as search results (#1801).
 
