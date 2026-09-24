@@ -98,12 +98,14 @@ const WEB_FETCH_SCHEMA = jsonSchema<WebFetchToolArgs>({
  * description tells the model to distrust — defeating the fence on the very
  * input it exists to contain. `neutralizeFenceMarkers` escapes the `<` of any
  * opening or closing marker so no page can reopen or close its own fence, while
- * leaving the text readable and quotable.
+ * leaving the text readable and quotable. Whitespace around the `/` is matched
+ * too: a model reads `< /untrusted_web_content >` as the same closing tag even
+ * though it is not strict XML.
  */
-const FENCE_MARKER_PATTERN = /<(\/?)untrusted_web_content/gi;
+const FENCE_MARKER_PATTERN = /<(\s*\/?\s*untrusted_web_content)/gi;
 
 function neutralizeFenceMarkers(text: string): string {
-  return text.replace(FENCE_MARKER_PATTERN, "&lt;$1untrusted_web_content");
+  return text.replace(FENCE_MARKER_PATTERN, "&lt;$1");
 }
 
 function fenceUntrustedContent(text: string, url: string | undefined): string {
