@@ -191,7 +191,7 @@ outright. Three changes:
 |---|---|
 | Server Action (serialized by the App Router) | `POST /api/atrium/artifacts/{id}/query` via `fetch` — genuinely parallel |
 | Hard cap of 8 in flight; the 9th **rejected** | Concurrency limit **6**, bounded FIFO of **32** behind it; only a full queue is refused |
-| Host's 45 s clock started when the page **posted** | Parent posts `atrium-artifact-data-ack` on **dispatch**; the host re-arms the 45 s budget there, once |
+| Host's 45 s clock started when the page **posted** | Parent posts `atrium-artifact-data-ack` on **dispatch**; the host runs a queue-tolerant 315 s budget until then, and re-arms the real 45 s server budget on the ack, once |
 | Server budget: 30 s for `execute()` only, handshake free | One 30 s deadline spanning `getConnectorTools` **and** `execute()`, so the server always loses the race to the host's clock |
 
 The frame still has **no** network access. Only the trusted parent calls the

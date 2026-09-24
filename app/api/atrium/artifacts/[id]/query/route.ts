@@ -29,6 +29,10 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { queryArtifactData } from "@/actions/db/atrium/artifact-query";
+import {
+  BoundedJsonRequestError,
+  parseBoundedJsonRequest,
+} from "@/lib/api/bounded-json-request";
 import { decodeContentBody } from "@/lib/content/code-encoding";
 import {
   artifactBridgeErrorMessage,
@@ -44,16 +48,35 @@ import { createLogger, generateRequestId } from "@/lib/logger";
 export const runtime = "nodejs";
 
 /**
+ * The most this route will read off the wire before refusing (#1788).
+ *
+ * The action caps the DECODED SQL at 8,000 characters, and the shared decoder's
+ * own ceiling is 5 MB — three orders of magnitude of slack that nothing else
+ * closes: the edge WAF deliberately excludes `SizeRestrictions_BODY` (see
+ * `lib/content/code-encoding.ts`), so without this the SSR task would buffer and
+ * parse a multi-megabyte body before rejecting it, and reject it HERE — before
+ * `queryArtifactData` consumes a rate-limit slot, so the 60/min budget would not
+ * throttle the loop at all.
+ *
+ * 64 KiB clears the legitimate worst case comfortably: 8,000 characters of
+ * 3-byte UTF-8 is 24,000 bytes, ~32,000 base64 characters, plus a little JSON.
+ */
+const MAX_QUERY_REQUEST_BYTES = 64 * 1024;
+
+/**
  * A body this route refused before the action ran — unparseable JSON, a
  * `sqlBase64` that is not base64. `query_error` because it describes the
  * REQUEST, and its message is this server's own text about the caller's own
  * request, so it is safe for any viewer (the same rule `artifact-query.ts`
  * applies to its validation failures).
  */
-function badRequest(message: string): NextResponse {
+function badRequest(
+  message: string,
+  status: number = ARTIFACT_QUERY_STATUS_BY_CODE.query_error
+): NextResponse {
   return NextResponse.json(
     { isSuccess: false, code: "query_error" satisfies ArtifactBridgeErrorCode, message },
-    { status: ARTIFACT_QUERY_STATUS_BY_CODE.query_error }
+    { status }
   );
 }
 
@@ -72,8 +95,21 @@ export async function POST(
 
   let body: Partial<ArtifactQueryRequestBody>;
   try {
-    body = (await req.json()) as Partial<ArtifactQueryRequestBody>;
-  } catch {
+    // Bounded rather than `req.json()`: the stream is counted as it arrives, so
+    // an understated Content-Length cannot get a large body buffered anyway.
+    body = (await parseBoundedJsonRequest(
+      req,
+      MAX_QUERY_REQUEST_BYTES
+    )) as Partial<ArtifactQueryRequestBody>;
+  } catch (error) {
+    if (error instanceof BoundedJsonRequestError) {
+      return badRequest(
+        error.code === "PAYLOAD_TOO_LARGE"
+          ? "Query request is too large"
+          : "Request body is not valid JSON",
+        error.status
+      );
+    }
     return badRequest("Request body is not valid JSON");
   }
   if (typeof body !== "object" || body === null || Array.isArray(body)) {

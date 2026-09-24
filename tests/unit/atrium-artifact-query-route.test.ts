@@ -29,12 +29,27 @@ import type { ArtifactBridgeErrorCode } from "@/lib/content/artifact-bridge-erro
 
 const CONTENT_ID = "11111111-2222-4333-8444-555555555555";
 
-function request(body: unknown): NextRequest {
+/**
+ * A request the route can read with `parseBoundedJsonRequest`, which counts the
+ * STREAM rather than calling `req.json()` — so the double has to be a real body
+ * stream plus headers, not a `json()` stub. A string `body` is sent verbatim to
+ * exercise the unparseable-JSON path.
+ */
+function request(body: unknown, overrideContentLength?: string): NextRequest {
+  const text = typeof body === "string" ? body : JSON.stringify(body);
+  const bytes = new TextEncoder().encode(text);
+  const headers = new Headers({
+    "content-type": "application/json",
+    "content-length": overrideContentLength ?? String(bytes.byteLength),
+  });
   return {
-    json: async () => {
-      if (typeof body === "string") throw new SyntaxError("bad json");
-      return body;
-    },
+    headers,
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes);
+        controller.close();
+      },
+    }),
   } as unknown as NextRequest;
 }
 
@@ -180,5 +195,45 @@ describe("POST /api/atrium/artifacts/[id]/query", () => {
 
     expect(queryArtifactDataMock).not.toHaveBeenCalled();
     expect(response.status).toBe(400);
+  });
+
+  it("refuses an oversized body as 413 instead of buffering it", async () => {
+    // The decoded-SQL cap is 8,000 chars, but the shared decoder's own ceiling
+    // is 5 MB and the edge WAF deliberately excludes SizeRestrictions_BODY —
+    // so without a bound here an authenticated viewer could make the SSR task
+    // buffer and parse megabytes per request, and because the refusal happens
+    // BEFORE the action, no rate-limit slot is consumed to throttle the loop.
+    const response = await POST(
+      request({ sqlBase64: "A".repeat(200_000) }),
+      params()
+    );
+
+    expect(queryArtifactDataMock).not.toHaveBeenCalled();
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({ code: "query_error" });
+  });
+
+  it("refuses an understated Content-Length rather than trusting the header", async () => {
+    // The header is only an early-rejection hint; the stream itself is counted,
+    // so a small declared length cannot smuggle a large body past the bound.
+    const response = await POST(
+      request({ sqlBase64: "A".repeat(200_000) }, "12"),
+      params()
+    );
+
+    expect(queryArtifactDataMock).not.toHaveBeenCalled();
+    expect(response.status).toBe(413);
+  });
+
+  it("still accepts a large but legitimate query", async () => {
+    // 8,000 ASCII characters is the action's own SQL ceiling — the transport
+    // bound must not refuse a query the action would have accepted.
+    const response = await POST(
+      request({ sqlBase64: encoded(`SELECT ${"x".repeat(7_980)}`) }),
+      params()
+    );
+
+    expect(response.status).toBe(200);
+    expect(queryArtifactDataMock).toHaveBeenCalled();
   });
 });

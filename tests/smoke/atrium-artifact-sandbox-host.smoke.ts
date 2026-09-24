@@ -448,16 +448,27 @@ async function testDispatchAckRestartsQueryClock(): Promise<void> {
 
   const queryPromise = api.query("SELECT 1");
   const requestId = parentMessages[0]?.data.requestId;
-  assert.deepEqual(timeoutDelays, [45000], "query did not arm the 45s budget");
+  // Before the ack the request may still be sitting in the PARENT's queue, so
+  // the pre-ack budget has to outlast the worst-case queue wait (32 queued
+  // behind 6 concurrent). Arming 45s here would time the tail of a wide
+  // dashboard out un-dispatched -- and the parent would then dispatch it
+  // anyway, burning a rate-limit slot on an answer nobody is waiting for.
+  assert.deepEqual(
+    timeoutDelays,
+    [315000],
+    "query did not arm the queue-tolerant pre-ack budget"
+  );
 
   postDataResponse(window, {
     type: "atrium-artifact-data-ack",
     requestId,
   });
+  // Dispatched: now the real 45s SERVER budget, which must outlast the server's
+  // own 30s deadline and nothing more.
   assert.deepEqual(
     timeoutDelays,
-    [45000, 45000],
-    "the dispatch ack did not restart the clock"
+    [315000, 45000],
+    "the dispatch ack did not restart the clock at the server budget"
   );
 
   // A second ack (a retry, a duplicate post) must NOT extend the budget again.
@@ -465,14 +476,14 @@ async function testDispatchAckRestartsQueryClock(): Promise<void> {
     type: "atrium-artifact-data-ack",
     requestId,
   });
-  assert.deepEqual(timeoutDelays, [45000, 45000], "a repeated ack re-armed the clock");
+  assert.deepEqual(timeoutDelays, [315000, 45000], "a repeated ack re-armed the clock");
 
   // An ack for something not pending is ignored outright.
   postDataResponse(window, {
     type: "atrium-artifact-data-ack",
     requestId: "00000000-0000-4000-8000-00000000dead",
   });
-  assert.deepEqual(timeoutDelays, [45000, 45000]);
+  assert.deepEqual(timeoutDelays, [315000, 45000]);
 
   // The ack is not an answer: the request is still pending and still resolvable.
   const rows = { columns: ["n"], rows: [[1]] };
