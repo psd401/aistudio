@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react"
 import { useRouter } from "next/navigation"
 import { zodResolver } from "@hookform/resolvers/zod"
-import { useForm, type UseFormReturn } from "react-hook-form"
+import { useForm, type FieldErrors, type UseFormReturn } from "react-hook-form"
 import * as z from "zod"
 import { Button } from "@/components/ui/button"
 import { Form } from "@/components/ui/form"
@@ -125,12 +125,17 @@ function createInitialAgenticConfig(initialData?: SelectAssistantArchitect): Age
  * Validation used to fail silently — saveAssistant() just returned null, so a
  * blocked "Continue" looked exactly like a dead button: no toast, no scroll, no
  * focus, nothing in the console. Say which field is wrong and focus it.
+ *
+ * The errors are taken from handleSubmit's invalid callback rather than read off
+ * `form.formState` after a `trigger()`: that read came back empty (the
+ * subscribed formState proxy had not caught up yet), which collapsed every
+ * blocked submit to the generic fallback and skipped `setFocus` entirely.
  */
 function reportValidationFailure(
   form: UseFormReturn<FormValues>,
-  toast: ReturnType<typeof useToast>["toast"]
+  toast: ReturnType<typeof useToast>["toast"],
+  errors: FieldErrors<FormValues>
 ) {
-  const errors = form.formState.errors
   const firstField = Object.keys(errors)[0] as keyof FormValues | undefined
   const message =
     firstField && typeof errors[firstField]?.message === "string"
@@ -177,14 +182,7 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
   })
 
 
-  const saveAssistant = useCallback(async (): Promise<string | null> => {
-    const values = form.getValues()
-    const isValid = await form.trigger()
-    if (!isValid) {
-      reportValidationFailure(form, toast)
-      return null
-    }
-
+  const persist = useCallback(async (values: FormValues): Promise<string | null> => {
     const agenticPayload = toAgenticPayload(agentic)
     const routingPayload = {
       modelRoutingMode: routing.mode,
@@ -224,7 +222,23 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
     } finally {
       setIsSubmitting(false)
     }
-  }, [form, assistantId, toast, agentic, routing])
+  }, [assistantId, toast, agentic, routing])
+
+  /**
+   * `handleSubmit` is used instead of `trigger()` so the invalid branch receives
+   * the real errors object (see reportValidationFailure). It awaits the async
+   * valid handler, so `savedId` is settled by the time it resolves.
+   */
+  const saveAssistant = useCallback(async (): Promise<string | null> => {
+    let savedId: string | null = null
+    await form.handleSubmit(
+      async (values) => {
+        savedId = await persist(values)
+      },
+      errors => reportValidationFailure(form, toast, errors)
+    )()
+    return savedId
+  }, [form, persist, toast])
 
   const handleAddField = useCallback(async () => saveAssistant(), [saveAssistant])
 

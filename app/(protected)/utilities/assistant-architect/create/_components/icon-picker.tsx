@@ -4,27 +4,45 @@ import { useCallback, useMemo } from "react"
 import Image from "next/image"
 import {
   FormControl,
+  FormDescription,
   FormField,
   FormItem,
   FormLabel,
   FormMessage
 } from "@/components/ui/form"
-import type { Control, ControllerRenderProps } from "react-hook-form"
+import type { Control, ControllerRenderProps, RefCallBack } from "react-hook-form"
 
 interface IconPickerProps {
   control: Control<{ name: string; description?: string; imagePath: string }>
   images: string[]
 }
 
-interface IconGridProps {
+interface IconGridProps extends Omit<React.HTMLAttributes<HTMLDivElement>, "onChange"> {
   images: string[]
   value: string
   onChange: (value: string) => void
+  fieldRef: RefCallBack
 }
 
-function IconGrid({ images, value, onChange }: IconGridProps) {
+function IconGrid({ images, value, onChange, fieldRef, ...slotProps }: IconGridProps) {
   return (
-    <div className="grid grid-cols-4 gap-1 p-2 bg-muted rounded-lg max-h-[300px] overflow-y-auto">
+    // The grid carries the field ref so `form.setFocus("imagePath")` has
+    // somewhere to land (Issue #1697) — without it a blocked submit had nothing
+    // to point the user at. `tabIndex={-1}` keeps it out of the tab order while
+    // still being programmatically focusable, and focusing it scrolls the
+    // requirement into view. `focus:` rather than `focus-visible:` because
+    // programmatic focus does not match :focus-visible.
+    // `slotProps` (id / aria-invalid / aria-describedby, injected by
+    // FormControl's Slot) is spread FIRST: React 19 hands `ref` to function
+    // components as an ordinary prop, so a trailing spread would overwrite
+    // `fieldRef` with the Slot's own empty ref and setFocus would go nowhere.
+    <div
+      {...slotProps}
+      ref={fieldRef}
+      tabIndex={-1}
+      data-testid="assistant-icon-grid"
+      className="grid grid-cols-4 gap-1 p-2 bg-muted rounded-lg max-h-[300px] overflow-y-auto scroll-mt-24 focus:outline-none focus:ring-2 focus:ring-ring"
+    >
       {images.map((image) => (
         <IconOption key={image} image={image} isSelected={value === image} onSelect={onChange} />
       ))}
@@ -41,10 +59,19 @@ function IconPickerContent({
 }) {
   return (
     <FormItem>
-      <FormLabel>Icon</FormLabel>
+      <FormLabel>
+        Icon <span className="text-destructive" aria-hidden="true">*</span>
+        <span className="sr-only">(required)</span>
+      </FormLabel>
       <FormControl>
-        <IconGrid images={images} value={field.value} onChange={field.onChange} />
+        <IconGrid
+          images={images}
+          value={field.value}
+          onChange={field.onChange}
+          fieldRef={field.ref}
+        />
       </FormControl>
+      <FormDescription>Pick an icon — required before you can continue.</FormDescription>
       <FormMessage />
     </FormItem>
   )

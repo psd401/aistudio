@@ -50,7 +50,7 @@ export default async function RootLayout({
           }}>
             <ErrorCaptureInit />
             {children}
-            <Toaster />
+            <Toaster richColors />
           </BrandingProvider>
         </AuthSessionProvider>
       </body>

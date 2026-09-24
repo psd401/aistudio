@@ -220,41 +220,11 @@ jest.mock('next/server', () => ({
   }
 }));
 
-// Mock Radix UI primitives
-jest.mock('@radix-ui/react-slot', () => {
-  const React = require('react');
-
-  const Slot = React.forwardRef(({ children, ...props }, ref) => {
-    if (React.Children.count(children) === 1) {
-      const child = React.Children.only(children);
-      if (React.isValidElement(child)) {
-        return React.cloneElement(child, {
-          ...props,
-          ...child.props,
-          ref
-        });
-      }
-    }
-    return React.createElement('div', { ...props, ref }, children);
-  });
-
-  const SlotClone = React.forwardRef(({ children, ...props }, ref) => {
-    return React.createElement('span', { ...props, ref }, children);
-  });
-
-  const createSlot = (name) => ({
-    __scopedNameSlot: Symbol(name),
-    Provider: ({ children }) => children,
-    Slot: Slot,
-    SlotClone: SlotClone
-  });
-
-  return {
-    Slot,
-    SlotClone,
-    createSlot
-  };
-});
+// Radix's Slot mock lives in tests/mocks/radix-ui-slot.js, wired through
+// moduleNameMapper. It cannot be a jest.mock() factory here: every other
+// @radix-ui/* specifier maps to the shared radix-ui-primitives.js file, so the
+// factories below all register against that one resolved path and the last one
+// wins — which silently left Slot undefined (Issue #1697).
 
 // Mock Radix UI Primitive
 jest.mock('@radix-ui/react-primitive', () => {
