@@ -37,11 +37,9 @@ jest.mock("@/lib/db/schema", () => ({
   contentVersions: {},
   navigationItems: {},
 }));
-const { contentObjects: CONTENT_OBJECTS, contentPublications: CONTENT_PUBLICATIONS } =
-  jest.requireMock("@/lib/db/schema") as {
-    contentObjects: unknown;
-    contentPublications: unknown;
-  };
+const { contentPublications: CONTENT_PUBLICATIONS } = jest.requireMock(
+  "@/lib/db/schema"
+) as { contentPublications: unknown };
 jest.mock("@/lib/db/json-utils", () => ({
   safeJsonbStringify: (value: unknown) => JSON.stringify(value),
 }));
@@ -100,36 +98,38 @@ const updateSetMock = jest.fn((values: Record<string, unknown>) => {
   return { where: jest.fn(() => ({ returning: updateReturningMock })) };
 });
 
+/** `.where(...)` for the publication probe: chains a `.limit(1)`. */
+function publicationsWhere() {
+  return { limit: async () => publicationRows };
+}
+
+/**
+ * `.where(...)` for a select on content_objects. Two callers with different
+ * shapes share it: the row lock chains `.for("update").limit(1)`, while
+ * `uniqueSlug`'s prefetch awaits the `where(...)` directly. A real promise, not
+ * a shared thenable — a thenable re-runs per `.then()`.
+ */
+function objectsWhere() {
+  const lockable = { for: () => ({ limit: async () => [lockedObject] }) };
+  return Object.assign(Promise.resolve(takenSlugs), lockable);
+}
+
 /**
  * A tx stub that dispatches on the TABLE each select targets, because the rename
  * path issues three structurally different selects: the `FOR UPDATE` row lock,
- * the publication probe (`.limit(1)`), and `uniqueSlug`'s prefetch (awaited
- * directly). Each returns a real promise — never a shared thenable, which
- * re-runs per `.then()`.
+ * the publication probe, and `uniqueSlug`'s prefetch.
  */
+function txFrom(table: unknown) {
+  if (table === CONTENT_PUBLICATIONS) {
+    txSelects.push("publications");
+    return { where: publicationsWhere };
+  }
+  txSelects.push("objects");
+  return { where: objectsWhere };
+}
+
 const txStub = {
-  select: jest.fn(() => ({
-    from: jest.fn((table: unknown) => {
-      if (table === CONTENT_PUBLICATIONS) {
-        txSelects.push("publications");
-        return {
-          where: jest.fn(() => ({
-            limit: jest.fn(async () => publicationRows),
-          })),
-        };
-      }
-      txSelects.push("objects");
-      // The row lock chains `.for("update").limit(1)`; `uniqueSlug` awaits the
-      // `where(...)` directly. Both shapes are served from here.
-      const where = jest.fn(() => {
-        const locked = {
-          for: jest.fn(() => ({ limit: jest.fn(async () => [lockedObject]) })),
-        };
-        return Object.assign(Promise.resolve(takenSlugs), locked);
-      });
-      return { where };
-    }),
-  })),
+  select: jest.fn(() => ({ from: txFrom })),
   update: jest.fn(() => ({ set: updateSetMock })),
 };
 

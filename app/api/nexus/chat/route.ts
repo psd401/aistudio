@@ -25,6 +25,7 @@ import {
 } from '@/lib/nexus/attachment-repository-tool';
 import { prepareRepositoryAttachmentMessages } from '@/lib/nexus/repository-attachment-messages';
 import { pruneStaleWorkspaceToolPayloads } from '@/lib/nexus/workspace-tool-history';
+import { bindConversationWorkspace } from '@/lib/nexus/workspace-conversation-binding';
 import {
   resolveNexusAttachmentImageSources,
   resolveNexusConversationRepositoryIds,
@@ -2912,6 +2913,20 @@ async function executeStandardChatTurn(params: {
     skillId: params.prepared.skillId,
   });
   if ("error" in conversation) return conversation.error;
+  // #1791 finding 1: record which Atrium object this conversation worked on, so
+  // reopening it restores the panel and the editor can route "Ask the agent"
+  // back to the chat that already knows the artifact. The RESOLVED object id is
+  // used, never the raw `?workspace=` param (which may be a slug), and only from
+  // a resolution that already passed the canView gate. Never fatal: a binding
+  // that fails to record costs the NEXT visit, not this turn.
+  if (params.prepared.workspace) {
+    await bindConversationWorkspace({
+      conversationId: conversation.conversationId,
+      userId: params.prepared.userId,
+      workspaceObjectId: params.prepared.workspace.object.id,
+      requestId: params.requestId,
+    });
+  }
   try {
     const repositories = await prepareConversationRepositories({
       prepared: params.prepared,

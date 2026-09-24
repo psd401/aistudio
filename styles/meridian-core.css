@@ -1507,6 +1507,27 @@ li[data-dragging="true"] > div {
   border-color: var(--mer-agent);
   box-shadow: 0 0 0 3px rgba(109, 79, 194, 0.12);
 }
+/* #1791 finding 1 — the "start over" escape from the Ask card, which now
+   continues the artifact's existing conversation by default. Quiet by design:
+   it is the exception, not the primary action. */
+.mer-artifact-ask-newchat {
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 12px;
+  color: var(--mer-ink-muted);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.mer-artifact-ask-newchat:hover:not(:disabled) {
+  color: var(--mer-ink-secondary);
+}
+.mer-artifact-ask-newchat:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* #1791 finding 5 — the live-PSD-data opt-in on the create dialog. */
 .mer-prompt-livedata {
   display: flex;

@@ -416,6 +416,10 @@ function defineBuildWorkspaceChatToolsSuite1Part2() {it("edit_workspace_document
     expect(out.error).toMatch(/nothing was changed/i);
   });
 
+}
+
+/** The #1791 rename + mode-only + provenance additions (split for max-lines). */
+function defineBuildWorkspaceChatToolsSuite1791() {
   /**
    * #1791 finding 4: "switch this to live data" used to require `code`, forcing
    * the model to re-emit the whole 20-60 KB source to change one field — slow,
@@ -1083,6 +1087,7 @@ function defineBuildWorkspaceChatToolsSuite1Part4() {it("unpublish_workspace_con
 const defineBuildWorkspaceChatToolsSuite1 = () => {
   defineBuildWorkspaceChatToolsSuite1Part1()
   defineBuildWorkspaceChatToolsSuite1Part2()
+  defineBuildWorkspaceChatToolsSuite1791()
   defineBuildWorkspaceChatToolsSuite1Part2b()
   defineBuildWorkspaceChatToolsSuite1Part3()
   defineBuildWorkspaceChatToolsPreviewDiagnosticsSuite()

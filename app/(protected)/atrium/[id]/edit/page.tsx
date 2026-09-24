@@ -32,6 +32,7 @@ import { ArtifactAuthoringView } from "@/components/atrium/ArtifactAuthoringView
 import { VisibilityChip } from "@/components/atrium/VisibilityChip";
 import { ContentSettings } from "@/components/atrium/ContentSettings";
 import { VersionMenu } from "@/components/atrium/VersionMenu";
+import { findLatestConversationForWorkspace } from "@/lib/nexus/workspace-conversation-binding";
 
 export const dynamic = "force-dynamic";
 
@@ -91,6 +92,19 @@ export default async function AtriumEditPage({
   const collectionRef = await collectionService.refById(obj.collectionId);
   const collectionName = collectionRef?.name ?? null;
 
+  // #1791 finding 1: "Open beside chat" used to always start a NEW conversation,
+  // so the chat that already knew this document was unreachable from here and
+  // the fresh one had to rediscover everything. Resolve the most recent
+  // conversation this user had about this object and reopen THAT beside it. No
+  // binding (or a resolution failure) simply falls back to the old behaviour.
+  const boundConversationId = await findLatestConversationForWorkspace({
+    workspaceObjectId: obj.id,
+    userId: req.userId,
+  }).catch(() => null);
+  const openBesideChatHref =
+    `/nexus?workspace=${encodeURIComponent(obj.id)}` +
+    (boundConversationId ? `&id=${encodeURIComponent(boundConversationId)}` : "");
+
   if (obj.kind === "artifact") {
     // The Meridian artifact chrome (topbar + canvas + manage-rights-only rail) is
     // its own server component so this route handler stays lean.
@@ -114,7 +128,7 @@ export default async function AtriumEditPage({
   const documentTopbarControls = (
     <div className="flex shrink-0 items-center gap-2">
       <a
-        href={`/nexus?workspace=${obj.id}`}
+        href={openBesideChatHref}
         className="mer-ectl mer-ectl-icon"
         aria-label="Open beside chat"
         title="Open beside chat"
@@ -152,7 +166,7 @@ export default async function AtriumEditPage({
       title={obj.title}
       eyebrow={collectionName ? `${collectionName} · Document` : "Document"}
       breadcrumb={sectionCrumb(collectionRef)}
-      askAgentHref={`/nexus?workspace=${obj.id}`}
+      askAgentHref={openBesideChatHref}
       coverGradient={obj.coverGradient}
       icon={obj.icon}
       historyControl={

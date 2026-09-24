@@ -27,6 +27,7 @@ import { createLogger } from '@/lib/client-logger'
 import { toast } from 'sonner'
 import { handleContentBlockedResponse } from '@/lib/nexus/content-blocked-handler'
 import { getPromptSettings } from '@/actions/prompt-library.actions'
+import { getConversationWorkspaceAction } from '@/actions/nexus/workspace-binding.actions'
 import { ModelFallbackBanner } from './_components/model-fallback-banner'
 import { VoiceModeOverlay } from './_components/voice-mode/voice-mode-overlay'
 import { VoiceButton, DisabledVoiceButton } from './_components/voice-mode/voice-button'
@@ -1081,6 +1082,70 @@ function useModelFallbackInfo(
   }, [conversationModelId, models, selectedModelName])
 }
 
+/**
+ * Reopen the workspace panel for a conversation that was bound to an Atrium
+ * object (#1791 finding 1).
+ *
+ * The binding used to live ONLY in `?workspace=`, so opening a conversation
+ * from the sidebar showed the chat with no panel: the model lost its workspace
+ * tools and the author lost the live preview of the thing they were building.
+ * The server now records it, and this puts it back into the URL — which is the
+ * single source everything downstream already reads (the panel mount AND the
+ * `workspaceId` on the chat request body), so nothing else needs to change.
+ *
+ * `router.replace` (not `push`): restoring state is not a navigation the Back
+ * button should have to undo.
+ *
+ * Attempted at most ONCE per conversation, tracked by ID rather than a boolean
+ * (a boolean ref on a parameterized route is the stale-guard bug in
+ * docs/guides/react-patterns.md). That is also what makes the panel's own close
+ * button work: `closeWorkspace` strips the param, and without the once-guard
+ * this effect would immediately put it back.
+ */
+function useRestoreBoundWorkspace(
+  conversationId: string | null,
+  urlWorkspaceId: string | null
+): void {
+  const router = useRouter()
+  const attemptedForRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (!conversationId) return
+    // An explicit `?workspace=` wins: the person just opened something specific.
+    if (urlWorkspaceId) {
+      attemptedForRef.current = conversationId
+      return
+    }
+    if (attemptedForRef.current === conversationId) return
+    attemptedForRef.current = conversationId
+
+    let cancelled = false
+    void getConversationWorkspaceAction(conversationId)
+      .then((result) => {
+        if (cancelled) return
+        const objectId = result.isSuccess ? result.data.workspaceObjectId : null
+        if (!objectId) return
+        // Read the CURRENT search params rather than a captured copy: the await
+        // above means the user may have navigated or changed a param since.
+        const params = new URLSearchParams(window.location.search)
+        if (params.get('workspace')) return
+        params.set('workspace', objectId)
+        router.replace(`/nexus?${params.toString()}`, { scroll: false })
+      })
+      .catch((error: unknown) => {
+        // Never fatal: the chat works without the panel, which is exactly the
+        // behaviour this restores from.
+        log.warn('Could not restore the conversation workspace panel', {
+          conversationId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [conversationId, urlWorkspaceId, router])
+}
+
 function useInvalidConversationRedirect(
   urlConversationId: string | null,
   validatedConversationId: string | null
@@ -1325,6 +1390,10 @@ function NexusPageContent() {
   // This prevents remounting when ID is assigned during runtime
   const [stableConversationId] = useState<string | null>(validatedConversationId)
   useInvalidConversationRedirect(urlConversationId, validatedConversationId)
+  // #1791: restore the workspace panel for a conversation that was bound to an
+  // Atrium object. Keyed on the LIVE conversationId, not stableConversationId,
+  // so a chat that binds a workspace on its first turn also restores on reload.
+  useRestoreBoundWorkspace(conversationId, urlWorkspaceId)
 
   // Debug logging for enabled tools
   useEffect(() => {
