@@ -46,6 +46,20 @@
 export const SSE_KEEP_ALIVE_INTERVAL_MS = 15_000;
 
 /**
+ * Hard ceiling on how long a wrapped stream may stay open, whatever its source
+ * is doing.
+ *
+ * Keep-alives defeat the ALB idle timeout on purpose, which also removes it as
+ * an infrastructure backstop against a stream that never ends. Each turn is
+ * already bounded by its own app deadline (`StreamDeadline`, the Assistant
+ * Architect `executionDeadlineAt`); this cap is the backstop for a call site
+ * whose deadline is missing or broken. It sits above the longest route budget
+ * in the app (`app/api/nexus/chat/route.ts`, `maxDuration = 1800`), so it never
+ * cuts a turn that its own deadline would have allowed.
+ */
+export const SSE_MAX_LIFETIME_MS = 40 * 60_000;
+
+/**
  * The comment frame written during a silent stretch. Exported so tests that
  * splice frames into a mocked body stay in step with the real wire format.
  */
@@ -53,26 +67,39 @@ export const SSE_KEEP_ALIVE_FRAME = ': keep-alive\n\n';
 
 const KEEP_ALIVE_BYTES = new TextEncoder().encode(SSE_KEEP_ALIVE_FRAME);
 
+export interface SseKeepAliveOptions {
+  /** Silence allowed before a keep-alive frame. Defaults to {@link SSE_KEEP_ALIVE_INTERVAL_MS}. */
+  intervalMs?: number;
+  /** Lifetime ceiling. Defaults to {@link SSE_MAX_LIFETIME_MS}. */
+  maxLifetimeMs?: number;
+}
+
 /**
  * Wrap an SSE byte stream so that a gap longer than `intervalMs` is filled with
  * comment frames.
  *
  * The timer is skipped whenever real bytes went out within the interval, so an
- * actively-streaming response is byte-identical to the unwrapped one. The timer
- * is always released — on end-of-stream, on error, and on consumer cancel — so
+ * actively-streaming response is byte-identical to the unwrapped one. Timers
+ * are always released — on end-of-stream, on error, and on consumer cancel — so
  * an abandoned turn cannot leak an interval.
  *
  * Backpressure is preserved: the source is only read while the consumer has
  * room (`desiredSize > 0`), so a slow client stalls the model stream exactly as
  * it would without the wrapper instead of buffering the rest of the turn in
  * memory.
+ *
+ * A stream still open after `maxLifetimeMs` is errored (so the client sees a
+ * failed request, not a clean end) and its source is cancelled.
  */
 export function withSseKeepAlive(
   source: ReadableStream<Uint8Array>,
-  intervalMs: number = SSE_KEEP_ALIVE_INTERVAL_MS
+  options: SseKeepAliveOptions = {}
 ): ReadableStream<Uint8Array> {
+  const intervalMs = options.intervalMs ?? SSE_KEEP_ALIVE_INTERVAL_MS;
+  const maxLifetimeMs = options.maxLifetimeMs ?? SSE_MAX_LIFETIME_MS;
   const reader = source.getReader();
   let timer: ReturnType<typeof setInterval> | undefined;
+  let lifetimeTimer: ReturnType<typeof setTimeout> | undefined;
   let lastByteAt = Date.now();
   // Set once the wrapper is closed, errored or cancelled; the pump must not
   // touch the controller after that.
@@ -80,10 +107,14 @@ export function withSseKeepAlive(
   // Resolves the pump's wait for the consumer to drain the queue.
   let wake: (() => void) | undefined;
 
-  const stopTimer = () => {
+  const stopTimers = () => {
     if (timer !== undefined) {
       clearInterval(timer);
       timer = undefined;
+    }
+    if (lifetimeTimer !== undefined) {
+      clearTimeout(lifetimeTimer);
+      lifetimeTimer = undefined;
     }
   };
 
@@ -107,9 +138,23 @@ export function withSseKeepAlive(
           lastByteAt = Date.now();
         } catch {
           // The stream is already closed or errored — nothing left to keep alive.
-          stopTimer();
+          stopTimers();
         }
       }, intervalMs);
+
+      lifetimeTimer = setTimeout(() => {
+        if (finished) return;
+        finished = true;
+        stopTimers();
+        resumePump();
+        const error = new Error(
+          `SSE stream exceeded its ${Math.round(maxLifetimeMs / 1000)}s lifetime ceiling`
+        );
+        controller.error(error);
+        reader.cancel(error).catch(() => {
+          // The source may already be errored; there is nothing left to release.
+        });
+      }, maxLifetimeMs);
 
       // Pump from `start()` rather than `pull()`: the timer has to be able to
       // enqueue during a gap in which the pump is parked on a pending source
@@ -131,10 +176,10 @@ export function withSseKeepAlive(
             controller.enqueue(value);
           }
           finished = true;
-          stopTimer();
+          stopTimers();
           controller.close();
         } catch (error) {
-          stopTimer();
+          stopTimers();
           if (finished) return;
           finished = true;
           controller.error(error);
@@ -146,7 +191,7 @@ export function withSseKeepAlive(
     },
     cancel(reason) {
       finished = true;
-      stopTimer();
+      stopTimers();
       resumePump();
       return reader.cancel(reason);
     },
@@ -159,10 +204,10 @@ export function withSseKeepAlive(
  */
 export function withSseKeepAliveResponse(
   response: Response,
-  intervalMs: number = SSE_KEEP_ALIVE_INTERVAL_MS
+  options: SseKeepAliveOptions = {}
 ): Response {
   if (!response.body) return response;
-  return new Response(withSseKeepAlive(response.body, intervalMs), {
+  return new Response(withSseKeepAlive(response.body, options), {
     status: response.status,
     statusText: response.statusText,
     headers: response.headers,

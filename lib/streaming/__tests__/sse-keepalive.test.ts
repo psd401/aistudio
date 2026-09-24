@@ -24,6 +24,7 @@ import { BaseProviderAdapter } from '../provider-adapters/base-adapter';
 import {
   SSE_KEEP_ALIVE_FRAME,
   SSE_KEEP_ALIVE_INTERVAL_MS,
+  SSE_MAX_LIFETIME_MS,
   withSseKeepAlive,
   withSseKeepAliveResponse,
 } from '../sse-keep-alive';
@@ -205,6 +206,29 @@ describe('withSseKeepAlive', () => {
     } finally {
       process.off('unhandledRejection', onRejection);
     }
+  });
+
+  it('errors and cancels a stream that outlives its lifetime ceiling', async () => {
+    const source = controllableSource();
+    const reader = withSseKeepAlive(source.stream, { maxLifetimeMs: 60_000 }).getReader();
+
+    const outcome = drain(reader, 100).then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    await jest.advanceTimersByTimeAsync(60_000);
+
+    expect(await outcome).toEqual(expect.objectContaining({
+      message: expect.stringContaining('lifetime ceiling'),
+    }));
+    expect(source.wasCancelled()).toBe(true);
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  it('never cuts a turn that its own route budget would allow', () => {
+    // The longest route budget is app/api/nexus/chat/route.ts maxDuration
+    // (1800s). The ceiling is only a backstop above every per-turn deadline.
+    expect(SSE_MAX_LIFETIME_MS).toBeGreaterThan(1800 * 1000);
   });
 
   it('fires well before the ALB idle timeout so a long gap survives', () => {

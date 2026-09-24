@@ -1252,6 +1252,17 @@ intermediary idles the connection out mid-turn. Comment frames carry no event
 data and a spec-compliant SSE client discards them; a client that splits the
 body by hand must skip any line starting with `:`.
 
+A multi-prompt assistant runs its earlier prompts before the final prompt
+starts streaming. If the response is not ready within ~15s, the server commits
+to `200` with the SSE headers and keep-alive frames immediately, so a slow
+earlier prompt cannot idle the connection out. A failure after that point
+cannot change the HTTP status: it arrives as one UI-message error chunk,
+`data: {"type":"error","errorText":"<message>"}`, carrying the same message the
+JSON error response would have had. Failures within the first ~15s still return
+the documented `4xx`/`5xx` JSON errors. This applies to
+`POST /assistants/{id}/execute` (stream mode) and
+`POST /assistants/{id}/conversations`.
+
 **Response `400`** — Input shape/size failure, more than 10 temporary sources,
 or a missing, foreign, expired, or otherwise unavailable temporary source.
 Every unavailable-source variant returns the same

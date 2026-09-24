@@ -1729,6 +1729,15 @@ paths:
             Comments carry no event data; a spec-compliant SSE client discards
             them. Clients that split the body by hand must skip any line
             starting with `:`.
+
+            A multi-prompt assistant runs its earlier prompts before the
+            final prompt starts streaming. If the response is not ready within
+            ~15s, the server sends `200` with the SSE headers and keep-alive
+            frames right away. A failure after that point cannot change the
+            status, so it arrives as a single UI-message error chunk
+            (`data: {"type":"error","errorText":"<message>"}`) carrying the
+            message the error response would have had. Failures inside the
+            first ~15s still return the documented `4xx`/`5xx` JSON errors.
           content:
             text/event-stream:
               schema:

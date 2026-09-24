@@ -388,6 +388,16 @@ function handleToolOutputEvent(
     log.error('Stream error received', { error: event.error })
     throw new Error(event.error || 'Stream error')
   }
+  // The AI SDK's own `error` chunk carries `errorText`, not `error`, so
+  // `isErrorEvent` misses it. The server's abort/timeout notice and a
+  // late failure on a deferred stream both arrive in this shape (#1698);
+  // dropping it left the user with a turn that just stopped.
+  const sdkError = event as { type: string; errorText?: unknown }
+  const errorText = sdkError.errorText
+  if (sdkError.type === 'error' && typeof errorText === 'string') {
+    log.error('Stream error received', { error: errorText })
+    throw new Error(errorText || 'Stream error')
+  }
   return { handled: false }
 }
 
@@ -493,11 +503,9 @@ function processArchitectSseLine(
   const data = line.slice(6)
   if (data === '[DONE]') return { done: true }
 
+  let event: SSEEvent
   try {
-    return {
-      done: false,
-      output: handleArchitectEvent(parseSSEEvent(data), context)
-    }
+    event = parseSSEEvent(data)
   } catch (error) {
     context.monitor.recordParseError(
       error instanceof Error ? error : new Error(String(error)),
@@ -509,6 +517,11 @@ function processArchitectSseLine(
     })
     return { done: false }
   }
+
+  // Outside the parse `try`: a stream `error` event throws here on purpose so
+  // the adapter surfaces it. Catching it as a parse failure (as this did
+  // before #1698) silently dropped every server-reported error.
+  return { done: false, output: handleArchitectEvent(event, context) }
 }
 
 function* processArchitectSseLines(

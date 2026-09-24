@@ -440,6 +440,11 @@ async function startConversation(
       requestId,
       preparedInputs,
       requireApproved: auth.authType !== "session",
+      // A chain failure after the stream is committed gets the same
+      // compensation and message as one caught below.
+      onLateError: async (lateError) =>
+        (await compensateEmptyConversation(state, lateError, auth, requestId, log)) ??
+        mapStartConversationError(lateError, state, assistantId, requestId, log),
     })
     return new NextResponse(execution.streamResponse.body, {
       status: execution.streamResponse.status,
