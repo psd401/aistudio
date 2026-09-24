@@ -83,13 +83,21 @@ const WORKSPACE_PSD_DATA_SCHEMA_TOOLS = ["inspect_table_schema", "query_data"];
  *
  * @param connectorId the connector the router meant to carry the data tools, or
  *   null when it could not resolve one at all.
+ * @param modelCanCallTools whether the SELECTED model can invoke tools at all.
+ *   Model selection runs before this connector is attached and does not know a
+ *   workspace turn wants data tools, so a model without function calling can be
+ *   chosen and the connector still bind `query_data` beside it. Those tools are
+ *   then unreachable, and treating them as present would suppress the warning on
+ *   precisely the turn that cannot verify anything.
  */
 export function workspacePsdDataToolsMissing(params: {
   workspace: NexusWorkspaceRoutingContext | null | undefined;
   connectorId: string | null;
   connectorToolResults: McpConnectorToolsResult[];
+  modelCanCallTools: boolean;
 }): boolean {
   if (!workspaceNeedsPsdData(params.workspace)) return false;
+  if (!params.modelCanCallTools) return true;
   if (!params.connectorId) return true;
   return !params.connectorToolResults.some(
     (result) =>

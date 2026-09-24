@@ -76,6 +76,7 @@ describe("workspacePsdDataToolsMissing", () => {
         workspace: EDITABLE_ARTIFACT,
         connectorId: PSD,
         connectorToolResults: [QUERY_TOOLS],
+        modelCanCallTools: true,
       })
     ).toBe(false);
   });
@@ -86,6 +87,7 @@ describe("workspacePsdDataToolsMissing", () => {
         workspace: EDITABLE_ARTIFACT,
         connectorId: null,
         connectorToolResults: [],
+        modelCanCallTools: true,
       })
     ).toBe(true);
   });
@@ -98,6 +100,7 @@ describe("workspacePsdDataToolsMissing", () => {
         workspace: EDITABLE_ARTIFACT,
         connectorId: PSD,
         connectorToolResults: [connectorResult("some-other-connector", ["x"])],
+        modelCanCallTools: true,
       })
     ).toBe(true);
   });
@@ -110,6 +113,7 @@ describe("workspacePsdDataToolsMissing", () => {
         workspace: EDITABLE_ARTIFACT,
         connectorId: PSD,
         connectorToolResults: [connectorResult(PSD, [])],
+        modelCanCallTools: true,
       })
     ).toBe(true);
   });
@@ -123,6 +127,7 @@ describe("workspacePsdDataToolsMissing", () => {
         workspace: EDITABLE_ARTIFACT,
         connectorId: PSD,
         connectorToolResults: [connectorResult(PSD, ["save_lesson"])],
+        modelCanCallTools: true,
       })
     ).toBe(true);
   });
@@ -135,6 +140,7 @@ describe("workspacePsdDataToolsMissing", () => {
         workspace: EDITABLE_ARTIFACT,
         connectorId: PSD,
         connectorToolResults: [connectorResult(PSD, ["list_available_tables"])],
+        modelCanCallTools: true,
       })
     ).toBe(true);
   });
@@ -147,6 +153,7 @@ describe("workspacePsdDataToolsMissing", () => {
           workspace: EDITABLE_ARTIFACT,
           connectorId: PSD,
           connectorToolResults: [connectorResult(PSD, [tool])],
+          modelCanCallTools: true,
         })
       ).toBe(false);
     }
@@ -160,8 +167,37 @@ describe("workspacePsdDataToolsMissing", () => {
         workspace: EDITABLE_ARTIFACT,
         connectorId: PSD,
         connectorToolResults: [connectorResult(PSD, ["constructor"])],
+        modelCanCallTools: true,
       })
     ).toBe(true);
+  });
+
+  it("is true when the selected model cannot call tools at all", () => {
+    // Model selection runs BEFORE this connector is attached and does not know
+    // the turn wants data tools, so a model without function calling can be
+    // chosen and the connector still bind `query_data` beside it. Those tools
+    // are unreachable, so the turn still cannot verify a schema.
+    expect(
+      workspacePsdDataToolsMissing({
+        workspace: EDITABLE_ARTIFACT,
+        connectorId: PSD,
+        connectorToolResults: [QUERY_TOOLS],
+        modelCanCallTools: false,
+      })
+    ).toBe(true);
+  });
+
+  it("still does not warn on a document turn with a tool-less model", () => {
+    // The capability gate must not widen the rule to workspaces it never
+    // covered — a document turn has no data bridge to be warned about.
+    expect(
+      workspacePsdDataToolsMissing({
+        workspace: { ...EDITABLE_ARTIFACT, kind: "document" },
+        connectorId: null,
+        connectorToolResults: [],
+        modelCanCallTools: false,
+      })
+    ).toBe(false);
   });
 
   it("never warns when the rule does not apply to this workspace", () => {
@@ -175,6 +211,7 @@ describe("workspacePsdDataToolsMissing", () => {
           workspace,
           connectorId: null,
           connectorToolResults: [],
+          modelCanCallTools: true,
         })
       ).toBe(false);
     }

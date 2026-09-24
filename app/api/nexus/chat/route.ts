@@ -2699,24 +2699,29 @@ async function resolveToolsAndStream(params: {
   // Ungated by `workspacePromptFragment` on purpose — a skill pin that filters
   // every workspace tool away drops that fragment, and dropping the warning
   // with it is exactly how the model ends up guessing column names again.
+  const toolCallingSupported = modelSupportsFunctionCalling({
+    provider: resolved.modelConfig.provider,
+    providerMetadata: resolved.modelConfig.providerMetadata,
+  });
   const effectiveWorkspacePromptFragment = workspacePsdDataToolsMissing({
     workspace: prepared.workspace?.context ?? null,
     connectorId: resolved.routing.workspacePsdDataConnectorId,
     connectorToolResults: skillBinding.effectiveConnectorToolResults,
+    // A model that cannot call tools cannot call THESE tools, so a connector
+    // that bound them perfectly well still leaves this turn unable to verify a
+    // schema. Without this, selecting a non-function-calling model (Latimer,
+    // say) would SUPPRESS the warning on exactly the turn that needs it most.
+    modelCanCallTools: toolCallingSupported,
   })
     ? (workspacePromptFragment ?? "") + WORKSPACE_PSD_DATA_UNAVAILABLE_GUIDANCE
     : workspacePromptFragment;
-  const memoryToolCallingSupported = modelSupportsFunctionCalling({
-    provider: resolved.modelConfig.provider,
-    providerMetadata: resolved.modelConfig.providerMetadata,
-  });
   const memoryContext = await resolveNexusMemoryContext({
     userId: prepared.userId,
     cognitoSub: prepared.session.sub,
     conversationId: conversation.conversationId,
     latestUserText: resolved.protectedLatestUserText,
     requestId: params.requestId,
-    toolCallingSupported: memoryToolCallingSupported,
+    toolCallingSupported,
   });
   log.info("Nexus memory turn context resolved", {
     conversationId: conversation.conversationId,
