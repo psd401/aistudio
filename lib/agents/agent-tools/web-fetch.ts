@@ -305,22 +305,55 @@ async function fetchWithGuardedRedirects(url: URL, signal: AbortSignal): Promise
   }
 }
 
-export const handleWebFetch: McpToolHandler = async (args, context) => {
-  const log = createLogger({ requestId: context.requestId, action: "agent.web_fetch" });
-  const rawUrl = typeof args.url === "string" ? args.url : "";
-  if (!rawUrl) {
-    return textResult("Missing required field: url", true);
+/** Outcome of a guarded page fetch. `isError` mirrors `McpToolResult.isError`. */
+export interface WebFetchOutcome {
+  /** Human/model-readable text: the page content, or the failure reason. */
+  text: string;
+  isError: boolean;
+  /** Resolved URL, when the input parsed and passed the SSRF guard. */
+  url?: string;
+  /** Upstream HTTP status, when a response was received. */
+  status?: number;
+}
+
+/**
+ * Fetch one public web page and return its readable text, or a description of
+ * why it could not be fetched. Never throws — every failure is reported through
+ * `isError`.
+ *
+ * This is the shared core behind BOTH web-fetch surfaces (Issue #1696):
+ * - `handleWebFetch` — the `internal`-surface MCP tool used by the agentic
+ *   Assistant Architect runtime.
+ * - `createWebFetchTool()` (`lib/tools/web-fetch-tool.ts`) — the `ai_sdk`
+ *   universal tool that lets Nexus chat open a URL a user pastes.
+ *
+ * Keeping one implementation means the SSRF guard, redirect re-validation,
+ * byte/char caps and timeout cannot drift apart between the two surfaces.
+ *
+ * @param rawUrl   Absolute http(s) URL. Non-strings are treated as missing.
+ * @param maxChars Optional character cap (default 20000, hard max 100000).
+ * @param action   Logger `action` label identifying the calling surface.
+ */
+export async function fetchWebPageText(
+  rawUrl: unknown,
+  maxChars: unknown,
+  { requestId, action }: { requestId?: string; action: string }
+): Promise<WebFetchOutcome> {
+  const log = createLogger({ requestId, action });
+  const target = typeof rawUrl === "string" ? rawUrl : "";
+  if (!target) {
+    return { text: "Missing required field: url", isError: true };
   }
-  const maxChars = resolveMaxChars(args.maxChars);
+  const charLimit = resolveMaxChars(maxChars);
 
   let url: URL;
   try {
-    url = assertSafeFetchUrl(rawUrl);
+    url = assertSafeFetchUrl(target);
   } catch (err) {
-    return textResult(
-      `Cannot fetch "${rawUrl}": ${err instanceof Error ? err.message : "blocked"}`,
-      true
-    );
+    return {
+      text: `Cannot fetch "${target}": ${err instanceof Error ? err.message : "blocked"}`,
+      isError: true,
+    };
   }
 
   try {
@@ -329,25 +362,45 @@ export const handleWebFetch: McpToolHandler = async (args, context) => {
       AbortSignal.timeout(FETCH_TIMEOUT_MS)
     );
     if (!res.ok) {
-      return textResult(`Fetch failed: HTTP ${res.status} ${res.statusText}`, true);
+      return {
+        text: `Fetch failed: HTTP ${res.status} ${res.statusText}`,
+        isError: true,
+        url: url.href,
+        status: res.status,
+      };
     }
 
-    const text = await readResponseText(res, maxChars);
-    log.info("Agent web fetch completed", {
+    const text = await readResponseText(res, charLimit);
+    log.info("Web fetch completed", {
       host: url.hostname,
       status: res.status,
       chars: text.length,
     });
-    return textResult(
-      `Fetched ${url.href} (${res.status})\n\n${text || "[no readable text content]"}`
-    );
+    return {
+      text: `Fetched ${url.href} (${res.status})\n\n${text || "[no readable text content]"}`,
+      isError: false,
+      url: url.href,
+      status: res.status,
+    };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    log.warn("Agent web fetch failed", { host: url.hostname, error: message });
+    log.warn("Web fetch failed", { host: url.hostname, error: message });
     const friendly =
       err instanceof Error && err.name === "TimeoutError"
         ? "request timed out"
         : message;
-    return textResult(`Failed to fetch "${url.href}": ${friendly}`, true);
+    return {
+      text: `Failed to fetch "${url.href}": ${friendly}`,
+      isError: true,
+      url: url.href,
+    };
   }
+}
+
+export const handleWebFetch: McpToolHandler = async (args, context) => {
+  const outcome = await fetchWebPageText(args.url, args.maxChars, {
+    requestId: context.requestId,
+    action: "agent.web_fetch",
+  });
+  return textResult(outcome.text, outcome.isError);
 };

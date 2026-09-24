@@ -4,6 +4,7 @@ import { Settings } from '@/lib/settings-manager'
 import { createLogger } from '@/lib/logger'
 import type { ToolSet } from 'ai'
 import { createShowChartTool } from './show-chart-tool'
+import { createWebFetchTool } from './web-fetch-tool'
 
 const log = createLogger({ module: 'provider-native-tools' })
 
@@ -57,6 +58,15 @@ export async function createUniversalTools(_enabledTools: string[]): Promise<Too
   // This is a universal tool that renders on the client side
   tools.show_chart = createShowChartTool()
   log.debug('Added show_chart visualization tool (always enabled)')
+
+  // URL reader - ALWAYS enabled for all providers (Issue #1696).
+  // Runs in-process rather than provider-side, so it is the ONLY web capability
+  // Bedrock/Claude and Azure models have: `createBedrockNativeTools()` returns
+  // `{}` and the Azure adapter adds nothing. It is also the only way any model
+  // can open a URL the user pasted -- provider-native web search can search, but
+  // cannot fetch a specific link, which is the bug reported in FS#164087.
+  tools.web_fetch = createWebFetchTool()
+  log.debug('Added web_fetch URL reader tool (always enabled)')
 
   return tools as ToolSet
 }
@@ -169,7 +179,7 @@ async function createBedrockNativeTools(enabledTools: string[]): Promise<ToolSet
  */
 export function providerSupportsNativeTools(provider: string, toolName: string): boolean {
   // Universal tools work with any provider
-  if (['showChart', 'show_chart'].includes(toolName)) {
+  if (['showChart', 'show_chart', 'webFetch', 'web_fetch'].includes(toolName)) {
     return true
   }
 
