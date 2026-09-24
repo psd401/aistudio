@@ -178,7 +178,9 @@ See `/docs/features/nexus-model-routing.md` for full configuration.
 - Hierarchical conversations with folders
 - Message threading and navigation
 - Persistent conversation history
-- Real-time streaming responses
+- Real-time streaming responses with SSE keep-alive
+
+**Streaming Reliability**: Long-running AI turns use SSE keep-alive to prevent ALB idle timeout during silent reasoning phases. Provider adapters automatically inject `: keep-alive\n\n` comment frames at 15-second intervals. See **[architecture/streaming.md](../architecture/streaming.md)** for implementation details.
 
 **Critical**: Read `/docs/features/nexus-conversation-architecture.md` before modifying any conversation code. This system has broken multiple times—follow documented patterns exactly.
 
@@ -434,6 +436,19 @@ User Input → Variable Substitution → Prompt Chain Execution → Tool Calls �
 3. Each prompt in the chain executes sequentially
 4. Tool executions happen as defined in the assistant
 5. Results are stored in `execution_results` table
+
+### Prompt Chain Streaming
+
+**Problem**: Prompt chains run every prompt except the last to completion before building the streaming Response for the final one. A slow earlier prompt would leave the socket with no bytes at all, triggering ALB idle timeout after 300 seconds (#1698).
+
+**Solution**: The execution endpoint uses `deferUIMessageStreamResponse()` to wait a grace period for the real Response. If not ready in time, it commits to a 200 SSE response immediately with keep-alive comments, then streams the real body once it exists.
+
+**Key Files**:
+- `/app/api/assistant-architect/execute/route.ts` — Uses `deferUIMessageStreamResponse`
+- `/lib/api/assistant-execution-service.ts` — Execution service integration
+- `/lib/streaming/deferred-ui-message-stream.ts` — Deferred response implementation
+
+See **[architecture/streaming.md](../architecture/streaming.md#deferred-response-for-prompt-chains)** for complete architecture.
 
 ### Agentic Mode
 
