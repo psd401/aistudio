@@ -14,7 +14,7 @@ import {
   waitForTemporaryAttachment,
 } from "@/lib/repositories/temporary-attachment-client";
 
-const log = createLogger({ moduleName: 'enhanced-attachment-adapters' });
+const log = createLogger({ moduleName: 'chat-attachment-adapters' });
 const LEGACY_UPLOAD_DEADLINE_MS = 15 * 60 * 1_000;
 const LEGACY_STATUS_DEADLINE_MS = 15_000;
 
@@ -56,7 +56,7 @@ export interface AttachmentProcessingCallbacks {
   onError?: (attachmentId: string, error: UploadClassifiedError | Error) => void;
 }
 
-export interface NexusAttachmentAdapterOptions {
+export interface ChatAttachmentAdapterOptions {
   /**
    * Enables the unified repository-backed attachment path. The server still
    * owns the rollout decision and may return legacy mode when cutover flags are
@@ -68,6 +68,11 @@ export interface NexusAttachmentAdapterOptions {
    * adapter or the assistant-ui runtime.
    */
   getConversationId?: () => string | null | undefined;
+  /**
+   * Product surface recorded on repository-backed uploads. Attribution only —
+   * the server never treats it as an authorization claim. Defaults to "nexus".
+   */
+  purpose?: "nexus" | "assistant-architect";
 }
 
 /**
@@ -146,11 +151,11 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
   private processedCache = new Map<string, CompleteAttachment>();
   private processingPromises = new Map<string, Promise<CompleteAttachment>>();
   private callbacks?: AttachmentProcessingCallbacks;
-  private readonly options: NexusAttachmentAdapterOptions;
+  private readonly options: ChatAttachmentAdapterOptions;
 
   constructor(
     callbacks?: AttachmentProcessingCallbacks,
-    options: NexusAttachmentAdapterOptions = {}
+    options: ChatAttachmentAdapterOptions = {}
   ) {
     this.callbacks = callbacks;
     this.options = options;
@@ -256,7 +261,7 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
           // stable adapter from accidentally reusing a promoted repository or
           // a repository already bound to another conversation.
           draftKey: generateUUID(),
-          purpose: "nexus",
+          purpose: this.options.purpose ?? "nexus",
           conversationId: this.options.getConversationId?.() ?? undefined,
         });
         if (repositoryUpload.mode === "canonical") {
@@ -694,7 +699,7 @@ export class VisionImageAdapter implements AttachmentAdapter {
   accept = "image/jpeg,image/png,image/webp,image/gif";
 
   private callbacks?: AttachmentProcessingCallbacks;
-  private readonly options: NexusAttachmentAdapterOptions;
+  private readonly options: ChatAttachmentAdapterOptions;
   /**
    * Repository upload started at attach time, keyed by attachment id. Images used
    * to upload inside send(), which froze the composer for as long as repository
@@ -708,7 +713,7 @@ export class VisionImageAdapter implements AttachmentAdapter {
 
   constructor(
     callbacks?: AttachmentProcessingCallbacks,
-    options: NexusAttachmentAdapterOptions = {}
+    options: ChatAttachmentAdapterOptions = {}
   ) {
     this.callbacks = callbacks;
     this.options = options;
@@ -725,7 +730,7 @@ export class VisionImageAdapter implements AttachmentAdapter {
     const repositoryUpload = await uploadTemporaryAttachment({
       file,
       draftKey: generateUUID(),
-      purpose: "nexus",
+      purpose: this.options.purpose ?? "nexus",
       conversationId: this.options.getConversationId?.() ?? undefined,
     });
     if (repositoryUpload.mode !== "canonical") {
@@ -908,6 +913,33 @@ export class VisionImageAdapter implements AttachmentAdapter {
 }
 
 /**
+ * Document- and text-only composite adapter for chat surfaces that post to
+ * `/api/nexus/chat` but build the request body themselves instead of going
+ * through `AssistantChatTransport` (today: Assistant Architect follow-up chat,
+ * #1735).
+ *
+ * Images are deliberately excluded. `VisionImageAdapter` emits an assistant-ui
+ * `{ type: "image", image: <data-url> }` content part, and only
+ * `AssistantChatTransport` rewrites that into the AI SDK `file` part the route's
+ * `convertToModelMessages` understands. A hand-rolled request builder forwards
+ * the part verbatim, so the image would be dropped or rejected server-side.
+ * Every adapter below emits `{ type: "text" }` parts, which forward unchanged.
+ *
+ * Because `CompositeAttachmentAdapter.accept` is the union of its adapters'
+ * `accept` strings, the file picker itself filters images out — the user never
+ * gets a silently-dropped attachment.
+ */
+export function createDocumentAttachmentAdapter(
+  callbacks?: AttachmentProcessingCallbacks,
+  options: ChatAttachmentAdapterOptions = {}
+) {
+  return new CompositeAttachmentAdapter([
+    new HybridDocumentAdapter(callbacks, options),
+    new SimpleTextAttachmentAdapter(),
+  ]);
+}
+
+/**
  * Creates a composite adapter combining all enhanced attachment adapters for Nexus
  * Includes:
  * - Enhanced vision-capable image adapter
@@ -916,7 +948,7 @@ export class VisionImageAdapter implements AttachmentAdapter {
  */
 export function createEnhancedNexusAttachmentAdapter(
   callbacks?: AttachmentProcessingCallbacks,
-  options: NexusAttachmentAdapterOptions = {}
+  options: ChatAttachmentAdapterOptions = {}
 ) {
   return new CompositeAttachmentAdapter([
     new VisionImageAdapter(callbacks, options),  // Canonical shadow + vision pixels

@@ -33,8 +33,10 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { collectAndSanitizeEnabledTools, getToolDisplayName } from '@/lib/assistant-architect/tool-utils'
 import Image from "next/image"
 import DocumentUploadButton from "@/components/ui/document-upload-button"
-import { AssistantRuntimeProvider, useThreadRuntime, useLocalRuntime, type ChatModelRunOptions, type ChatModelRunResult } from '@assistant-ui/react'
+import { AssistantRuntimeProvider, useThreadRuntime, useLocalRuntime, type AttachmentAdapter, type ChatModelRunOptions, type ChatModelRunResult } from '@assistant-ui/react'
 import { Thread } from '@/components/assistant-ui/thread'
+import { createDocumentAttachmentAdapter } from '@/lib/attachments/chat-attachment-adapters'
+import { useChatAttachments, type ConversationIdAccessor } from '@/lib/attachments/use-chat-attachments'
 import { createLogger } from '@/lib/client-logger'
 import { ExecutionProgress } from './execution-progress'
 import { ToolCallTimeline } from './tool-call-timeline'
@@ -154,7 +156,7 @@ interface AssistantArchitectAdapterOptions {
   inputsRef: React.MutableRefObject<Record<string, unknown>>
   hasCompletedExecutionRef: React.MutableRefObject<boolean>
   executionIdRef: React.MutableRefObject<number | null>
-  conversationIdRef: React.MutableRefObject<string | null>
+  conversationId: ConversationIdAccessor
   executionModelRef: React.MutableRefObject<{ modelId: string; provider: string } | null>
   onExecutionIdChangeRef: React.MutableRefObject<(id: number) => void>
   onPromptCountChangeRef: React.MutableRefObject<(count: number) => void>
@@ -573,7 +575,7 @@ function buildAdapterRequest(
       messages: prepareAdapterMessages(messages),
       modelId: modelConfig.modelId,
       provider: modelConfig.provider,
-      conversationId: options.conversationIdRef.current || undefined,
+      conversationId: options.conversationId.get() || undefined,
       enabledTools: []
     }
   }
@@ -583,7 +585,7 @@ function captureAdapterResponseMetadata(
   response: Response,
   options: AssistantArchitectAdapterOptions,
   mode: string
-): boolean {
+): void {
   const executionId = response.headers.get('X-Execution-Id')
   const promptCount = response.headers.get('X-Prompt-Count')
   const conversationId = response.headers.get('X-Conversation-Id')
@@ -595,8 +597,8 @@ function captureAdapterResponseMetadata(
   if (promptCount) {
     options.onPromptCountChangeRef.current(Number(promptCount))
   }
-  if (!conversationId || conversationId === options.conversationIdRef.current) {
-    return true
+  if (!conversationId || conversationId === options.conversationId.get()) {
+    return
   }
   const validation = z.string().uuid().safeParse(conversationId)
   if (!validation.success) {
@@ -605,15 +607,16 @@ function captureAdapterResponseMetadata(
       mode,
       error: validation.error.message
     })
-    return false
+    // Throw rather than silently ending the run: the adapter's catch surfaces
+    // it as a visible error turn, like every other failed request.
+    throw new Error('Invalid conversation ID from server')
   }
   log.info('Conversation ID captured', {
     conversationId,
     mode,
-    wasNull: options.conversationIdRef.current === null
+    wasNull: options.conversationId.get() === null
   })
-  options.conversationIdRef.current = conversationId
-  return true
+  options.conversationId.set(conversationId)
 }
 
 async function* consumeAdapterStream(
@@ -715,15 +718,7 @@ function createAssistantArchitectAdapter(
           })
           throw new Error(`Stream request failed: ${response.status}`)
         }
-        if (
-          !captureAdapterResponseMetadata(
-            response,
-            adapterOptions,
-            request.mode
-          )
-        ) {
-          return
-        }
+        captureAdapterResponseMetadata(response, adapterOptions, request.mode)
         yield* consumeAdapterStream(
           response,
           adapterOptions,
@@ -773,7 +768,9 @@ function AssistantArchitectRuntimeProvider({
   onExecutionError,
   hasCompletedExecution,
   onToolEvent,
-  approveDestructive
+  approveDestructive,
+  attachmentAdapter,
+  conversationId
 }: {
   children: React.ReactNode
   tool: AssistantArchitectWithRelations
@@ -785,6 +782,11 @@ function AssistantArchitectRuntimeProvider({
   hasCompletedExecution: boolean
   onToolEvent: (event: ToolTimelineEvent) => void
   approveDestructive: boolean
+  /** Enables the composer's paperclip button; see `AssistantExecutionPane`. */
+  attachmentAdapter: AttachmentAdapter
+  /** Owned by the pane so the attachment adapter and the request builder read
+   *  the same conversation id (#1735). */
+  conversationId: ConversationIdAccessor
 }) {
   const inputsRef = useRef(inputs)
 
@@ -809,7 +811,6 @@ function AssistantArchitectRuntimeProvider({
   // Track whether we're in execution or conversation mode
   const hasCompletedExecutionRef = useRef(hasCompletedExecution)
   const executionIdRef = useRef<number | null>(null)
-  const conversationIdRef = useRef<string | null>(null)
 
   // Store model configuration from first prompt for follow-up conversations
   const executionModelRef = useRef<{ modelId: string; provider: string } | null>(null)
@@ -865,7 +866,7 @@ function AssistantArchitectRuntimeProvider({
       inputsRef,
       hasCompletedExecutionRef,
       executionIdRef,
-      conversationIdRef,
+      conversationId,
       executionModelRef,
       onExecutionIdChangeRef,
       onPromptCountChangeRef,
@@ -873,11 +874,31 @@ function AssistantArchitectRuntimeProvider({
       approveDestructiveRef
     })
     startTransition(() => { setAdapter(newAdapter) })
-  }, [currentToolId])
+  }, [currentToolId, conversationId])
+
+  // A new execution (first run or rerun) mints its own conversation server-side
+  // and reports it via X-Conversation-Id. Drop the previous run's id so a
+  // follow-up turn never posts to — or binds an attachment to — a stale
+  // conversation (#1735).
+  useEffect(() => {
+    if (!hasCompletedExecution) conversationId.set(null)
+  }, [hasCompletedExecution, conversationId])
+
+  // Declaring the attachment adapter is what sets the thread's `attachments`
+  // capability, which is in turn what makes the shared composer render its
+  // paperclip button at all (#1735). Offered only in follow-up (conversation)
+  // mode: the execution request never carries attachments, and a failed
+  // execution unmounts this pane — anything attached earlier would be lost.
+  const runtimeOptions = useMemo(
+    () => ({
+      adapters: hasCompletedExecution ? { attachments: attachmentAdapter } : {}
+    }),
+    [attachmentAdapter, hasCompletedExecution]
+  )
 
   // Use LocalRuntime with stable adapter reference
   // Adapter is null only on first render before the effect fires
-  const runtime = useLocalRuntime(adapter!)
+  const runtime = useLocalRuntime(adapter!, runtimeOptions)
 
   if (!adapter) return null
 
@@ -1251,10 +1272,26 @@ function AssistantExecutionPane(props: {
   onExecutionError: (error: string) => void
   onToolEvent: (event: ToolTimelineEvent) => void
 }) {
+  // Attachment support for the composer (#1735). Follow-up turns post to
+  // `/api/nexus/chat`, which resolves repository-backed attachment markers, so
+  // documents reach the model the same way they do in Nexus. Document-only
+  // adapter: see `createDocumentAttachmentAdapter` for why images are excluded.
+  // Hooks stay above the early return.
+  const {
+    attachmentAdapter,
+    conversationId,
+    processingAttachments,
+    failedAttachments
+  } = useChatAttachments(createDocumentAttachmentAdapter, {
+    purpose: 'assistant-architect'
+  })
+
   if (!props.isExecuting && !props.hasResults) return null
   return (
     <ErrorBoundary>
       <AssistantArchitectRuntimeProvider
+        attachmentAdapter={attachmentAdapter}
+        conversationId={conversationId}
         tool={props.tool}
         inputs={props.inputs}
         onExecutionIdChange={props.onExecutionIdChange}
@@ -1287,7 +1324,10 @@ function AssistantExecutionPane(props: {
             </div>
           )}
           <div className="border rounded-lg p-4 space-y-4 max-w-full">
-            <Thread />
+            <Thread
+              processingAttachments={processingAttachments}
+              failedAttachments={failedAttachments}
+            />
           </div>
         </div>
       </AssistantArchitectRuntimeProvider>

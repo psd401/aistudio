@@ -19,8 +19,8 @@ import { MultiProviderToolUIs } from './_components/tools/multi-provider-tools'
 import { ConnectorToolProvider, useConnectorTools } from './_components/tools/connector-tool-context'
 import { ConnectorReconnectPrompt, ConnectorToolFallback } from './_components/tools/connector-tool-ui'
 import { useModelsWithPersistence } from '@/lib/hooks/use-models'
-import { createEnhancedNexusAttachmentAdapter } from '@/lib/nexus/enhanced-attachment-adapters'
-import { UploadClassifiedError } from '@/lib/errors/upload-errors'
+import { createEnhancedNexusAttachmentAdapter } from '@/lib/attachments/chat-attachment-adapters'
+import { useChatAttachments } from '@/lib/attachments/use-chat-attachments'
 import { validateConversationId } from '@/lib/nexus/conversation-navigation'
 import type { SelectAiModel } from '@/types'
 import { createLogger } from '@/lib/client-logger'
@@ -468,6 +468,7 @@ interface NexusRuntimeWrapperProps {
   initialMessages: UIMessage[]
   onConversationIdChange: (id: string) => void
   processingAttachments: Set<string>
+  failedAttachments: Set<string>
   onModelChange: (model: SelectAiModel) => void
   onToolsChange: (tools: string[]) => void
   onConnectorsChange: (connectors: string[]) => void
@@ -545,6 +546,7 @@ function NexusRuntimeWrapper({
   initialMessages,
   onConversationIdChange,
   processingAttachments,
+  failedAttachments,
   onModelChange,
   onToolsChange,
   onConnectorsChange,
@@ -664,6 +666,7 @@ function NexusRuntimeWrapper({
 
         <Thread
           processingAttachments={processingAttachments}
+          failedAttachments={failedAttachments}
           conversationId={conversationId}
           selectedModel={selectedModel}
           onModelChange={onModelChange}
@@ -698,23 +701,6 @@ const WorkspacePanel = dynamic(
     import('@/components/atrium/WorkspacePanel').then((m) => m.WorkspacePanel),
   { ssr: false }
 )
-
-interface ConversationIdAccessor {
-  get: () => string | null
-  set: (value: string | null) => void
-}
-
-function createConversationIdAccessor(
-  initialValue: string | null
-): ConversationIdAccessor {
-  let value = initialValue
-  return {
-    get: () => value,
-    set: (nextValue) => {
-      value = nextValue
-    },
-  }
-}
 
 function useNexusUrlConfiguration() {
   const router = useRouter()
@@ -898,76 +884,6 @@ function usePromptSettingsSync({
   ])
 }
 
-function useNexusAttachments(initialConversationId: string | null) {
-  const [processingAttachments, setProcessingAttachments] = useState<Set<string>>(new Set())
-  const [attachmentConversationId] = useState(() =>
-    createConversationIdAccessor(initialConversationId)
-  )
-  const handleProcessingStart = useCallback((attachmentId: string) => {
-    setProcessingAttachments(previous => new Set([...previous, attachmentId]))
-    log.debug('Attachment processing started', { attachmentId })
-  }, [])
-  const handleProcessingComplete = useCallback((attachmentId: string) => {
-    setProcessingAttachments(previous => {
-      const next = new Set(previous)
-      next.delete(attachmentId)
-      return next
-    })
-    log.debug('Attachment processing completed', { attachmentId })
-  }, [])
-  const handleError = useCallback((
-    attachmentId: string,
-    error: UploadClassifiedError | Error
-  ) => {
-    log.warn('Attachment processing failed', {
-      attachmentId,
-      code: error instanceof UploadClassifiedError ? error.code : undefined,
-      error: error.message,
-    })
-    if (error instanceof UploadClassifiedError && error.code === 'UNAUTHORIZED') {
-      toast.error('Session expired', {
-        description: 'Your session expired during file upload. Please sign in again.',
-        duration: 8000,
-        action: {
-          label: 'Sign in',
-          onClick: () => {
-            const callbackUrl = encodeURIComponent(
-              window.location.pathname + window.location.search
-            )
-            window.location.href = `/api/auth/signin?callbackUrl=${callbackUrl}`
-          },
-        },
-      })
-      return
-    }
-    toast.error('File upload failed', {
-      description: error instanceof UploadClassifiedError
-        ? `Upload error: ${error.code.replace(/_/g, ' ').toLowerCase()}.`
-        : 'The file could not be uploaded. Please try again.',
-      duration: 6000,
-    })
-  }, [])
-  const attachmentAdapter = useMemo(() => createEnhancedNexusAttachmentAdapter({
-    onProcessingStart: handleProcessingStart,
-    onProcessingComplete: handleProcessingComplete,
-    onError: handleError,
-  }, {
-    repositoryBacked: true,
-    getConversationId: attachmentConversationId.get,
-  }), [
-    attachmentConversationId,
-    handleError,
-    handleProcessingComplete,
-    handleProcessingStart,
-  ])
-
-  return {
-    attachmentAdapter,
-    attachmentConversationId,
-    processingAttachments,
-  }
-}
-
 function useNexusAuthentication() {
   const router = useRouter()
   const { data: session, status: sessionStatus } = useSession()
@@ -1094,6 +1010,7 @@ function NexusPageView({
                           initialMessages={initialMessages}
                           onConversationIdChange={runtimeProps.onConversationIdChange}
                           processingAttachments={runtimeProps.processingAttachments}
+                          failedAttachments={runtimeProps.failedAttachments}
                           onModelChange={runtimeProps.onModelChange}
                           onToolsChange={runtimeProps.onToolsChange}
                           onConnectorsChange={runtimeProps.onConnectorsChange}
@@ -1373,9 +1290,12 @@ function NexusPageContent() {
   } = useNexusRepositorySelection(conversationId)
   const {
     attachmentAdapter,
-    attachmentConversationId,
+    conversationId: attachmentConversationId,
     processingAttachments,
-  } = useNexusAttachments(validatedConversationId)
+    failedAttachments,
+  } = useChatAttachments(createEnhancedNexusAttachmentAdapter, {
+    initialConversationId: validatedConversationId,
+  })
 
   // Stable conversation ID for ConversationInitializer - only set on initial load from URL
   // This prevents remounting when ID is assigned during runtime
@@ -1489,6 +1409,7 @@ function NexusPageContent() {
     onRoutingModeChange: handleRoutingModeChange,
     onToolsChange,
     processingAttachments,
+    failedAttachments,
     projectId: urlProjectId,
     selectedRepositoryIds,
     repositorySelectionLoaded,

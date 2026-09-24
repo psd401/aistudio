@@ -14,7 +14,10 @@ import {
   ComposerPrimitive,
   MessagePrimitive,
   useAttachment,
+  useAuiEvent,
+  useAuiState,
 } from "@assistant-ui/react";
+import { toast } from "sonner";
 import { useShallow } from "zustand/shallow";
 import {
   Tooltip,
@@ -130,16 +133,18 @@ const AttachmentThumb: FC = () => {
 
 interface AttachmentProcessingIndicatorProps {
   processingAttachments?: Set<string>;
+  failedAttachments?: Set<string>;
 }
 
-const AttachmentProcessingIndicator: FC<AttachmentProcessingIndicatorProps> = ({ processingAttachments }) => {
+const AttachmentProcessingIndicator: FC<AttachmentProcessingIndicatorProps> = ({ processingAttachments, failedAttachments }) => {
   const attachmentId = useAttachment((a) => a.id);
   const attachmentType = useAttachment((a) => a.type);
   const attachmentSource = useAttachment((a) => a.source);
   const [showReady, setShowReady] = useState(false);
   const [wasProcessing, setWasProcessing] = useState(false);
-  
+
   const isCurrentlyProcessing = processingAttachments?.has(attachmentId) || false;
+  const hasFailed = failedAttachments?.has(attachmentId) || false;
   
   // Track when processing completes to show temporary "Ready" state
   useEffect(() => {
@@ -160,7 +165,20 @@ const AttachmentProcessingIndicator: FC<AttachmentProcessingIndicatorProps> = ({
   // Only show processing indicators for documents (images process quickly)
   // And only in the composer, not in messages
   if (attachmentType !== "document" || attachmentSource === "message") return null;
-  
+
+  // A failed upload still resolves as "complete", so the processing -> done
+  // transition alone would flash "Ready". Failure wins and stays visible.
+  if (hasFailed && !isCurrentlyProcessing) {
+    return (
+      <div className="absolute inset-0 flex items-center justify-center bg-background/80 rounded-lg">
+        <div className="flex flex-col items-center gap-1">
+          <CircleXIcon className="h-4 w-4 text-destructive" />
+          <span className="text-xs text-destructive">Failed</span>
+        </div>
+      </div>
+    );
+  }
+
   if (!isCurrentlyProcessing && !showReady) return null;
   
   return (
@@ -183,9 +201,10 @@ const AttachmentProcessingIndicator: FC<AttachmentProcessingIndicatorProps> = ({
 
 interface AttachmentUIProps {
   processingAttachments?: Set<string>;
+  failedAttachments?: Set<string>;
 }
 
-const AttachmentUI: FC<AttachmentUIProps> = ({ processingAttachments }) => {
+const AttachmentUI: FC<AttachmentUIProps> = ({ processingAttachments, failedAttachments }) => {
   const canRemove = useAttachment((a) => a.source !== "message");
   const typeLabel = useAttachment((a) => {
     const type = a.type;
@@ -214,7 +233,10 @@ const AttachmentUI: FC<AttachmentUIProps> = ({ processingAttachments }) => {
                 </p>
                 <p className="text-muted-foreground text-xs">{typeLabel}</p>
               </div>
-              <AttachmentProcessingIndicator processingAttachments={processingAttachments} />
+              <AttachmentProcessingIndicator
+                processingAttachments={processingAttachments}
+                failedAttachments={failedAttachments}
+              />
             </div>
           </TooltipTrigger>
         </AttachmentPreviewDialog>
@@ -272,14 +294,40 @@ export const UserMessageAttachments: FC = () => {
 
 interface ComposerAttachmentsProps {
   processingAttachments?: Set<string>;
+  failedAttachments?: Set<string>;
 }
 
-export const ComposerAttachments: FC<ComposerAttachmentsProps> = ({ processingAttachments }) => {
+export const ComposerAttachments: FC<ComposerAttachmentsProps> = ({ processingAttachments, failedAttachments }) => {
+  // assistant-ui rejects a file before any adapter code runs when its type is
+  // outside the adapter's `accept` list (a pasted image in a document-only
+  // composer) or when the adapter's own validation throws. The paste handler
+  // only console.errors those rejections, so surface them to the user here.
+  useAuiEvent("composer.attachmentAddError", ({ reason, message }) => {
+    log.warn("Attachment rejected", { reason, message });
+    if (reason === "not-accepted") {
+      toast.error("File type not supported", {
+        description: "This chat can't accept that kind of file.",
+      });
+      return;
+    }
+    if (reason === "adapter-error") {
+      toast.error("File could not be attached", {
+        description: "The file could not be added. Please try another file.",
+      });
+    }
+  });
+
   const AttachmentWithProcessing = useMemo(
     () => function AttachmentWithProcessing(props: AttachmentUIProps) {
-      return <AttachmentUI {...props} processingAttachments={processingAttachments} />;
+      return (
+        <AttachmentUI
+          {...props}
+          processingAttachments={processingAttachments}
+          failedAttachments={failedAttachments}
+        />
+      );
     },
-    [processingAttachments],
+    [processingAttachments, failedAttachments],
   );
 
   return (
@@ -291,7 +339,25 @@ export const ComposerAttachments: FC<ComposerAttachmentsProps> = ({ processingAt
   );
 };
 
+/**
+ * Paperclip button for the shared composer.
+ *
+ * Renders only when the active runtime was given an attachment adapter
+ * (`adapters.attachments`). assistant-ui's own `disabled` flag on
+ * `ComposerPrimitive.AddAttachment` tracks composer editing state ONLY — it does
+ * not know whether an adapter exists — so without this gate the button is live on
+ * adapter-less runtimes and `composer.addAttachment()` rejects with
+ * "Attachments are not supported", surfacing as an unhandled promise rejection
+ * and a dead-end UI (#1735). Reading the runtime capability rather than taking a
+ * prop keeps every current and future consumer of `Thread` correct by default.
+ */
 export const ComposerAddAttachment: FC = () => {
+  const attachmentsSupported = useAuiState(
+    (s) => s.thread.capabilities.attachments,
+  );
+
+  if (!attachmentsSupported) return null;
+
   return (
     <ComposerPrimitive.AddAttachment asChild>
       <TooltipIconButton

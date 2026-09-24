@@ -40,7 +40,7 @@ jest.mock('@/lib/repositories/temporary-attachment-client', () => ({
 import {
   HybridDocumentAdapter,
   VisionImageAdapter,
-} from '../enhanced-attachment-adapters';
+} from '../chat-attachment-adapters';
 
 // Polyfill File.arrayBuffer() for Jest environment
 if (typeof File !== 'undefined' && !File.prototype.arrayBuffer) {
