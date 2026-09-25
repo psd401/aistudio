@@ -62,8 +62,10 @@ export function livePublicationConditions(): readonly [SQL, SQL] {
  * The one-column answer to "what does a reader see right now?", shared by the
  * surfaces that must distinguish the published version from the working head
  * (#1789): `/atrium/[id]/view` (which renders the published version for a
- * non-editor) and `contentService.update` (which refuses to re-stamp a live
- * version's data-access mode). `/c/` keeps its own projection because it also
+ * non-editor) and the artifact data-bridge actions (which authorize a reader
+ * against that same version). `contentService.update` composes
+ * `livePublicationConditions` into its head-stamp UPDATE instead, so the check
+ * and the write are one statement. `/c/` keeps its own projection because it also
  * needs `publishedAt` for the reader's meta line.
  */
 export async function livePublishedVersionId(

@@ -801,11 +801,15 @@ export async function queryArtifactData(
 
         const content = await contentService.get(requester, contentId);
         mayEdit = canEdit(requester, content.ownerUserId);
+        // The version resolution below is DB work of its own (#1789), so a
+        // budget spent loading the object must not start it.
+        stopIfExpired();
         // #1789: resolve WHICH version is running BEFORE the exclusivity gate —
         // the gate now judges that version's own mode, not the object's. A
         // version id that does not belong to this artifact is still refused.
         const rendered = await resolveRenderedVersionAccess(
           content,
+          mayEdit,
           input?.versionId,
           log
         );

@@ -174,7 +174,9 @@ export default async function AtriumArtifactViewPage({
         // a mount must belong to exactly one artifact. Keying on the id makes
         // that true by construction rather than relying on the router remounting
         // the leaf page on a param change (same as the /c reader).
-        key={obj.id}
+        // #1789: the version is in the key too — a soft navigation to another
+        // `?version=` must remount, or its code would run under the old pin.
+        key={`${obj.id}:${version?.id ?? ""}`}
         code={code}
         src={getArtifactSandboxRenderUrl()}
         title={obj.title}

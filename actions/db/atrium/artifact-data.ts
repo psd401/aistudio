@@ -44,6 +44,7 @@ import {
 import { createSuccess, ErrorFactories, handleError } from "@/lib/error-utils";
 import { getServerSession } from "@/lib/auth/server-session";
 import { contentService } from "@/lib/content";
+import { canEdit } from "@/lib/content/helpers";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { contentDataRecords, users } from "@/lib/db/schema";
 import { safeJsonbStringify } from "@/lib/db/json-utils";
@@ -429,6 +430,7 @@ export async function submitArtifactRecord(
     // change cannot take the Live page's store away from its readers.
     const rendered = await resolveRenderedVersionAccess(
       content,
+      canEdit(requester, content.ownerUserId),
       input?.versionId,
       log
     );
@@ -531,6 +533,7 @@ export async function listArtifactRecords(
     // change cannot take the Live page's store away from its readers.
     const rendered = await resolveRenderedVersionAccess(
       content,
+      canEdit(requester, content.ownerUserId),
       input?.versionId,
       log
     );

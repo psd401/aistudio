@@ -135,8 +135,8 @@ describe("Atrium full-screen artifact viewer — data bridge (#1725)", () => {
       })
     );
     // #1712: the pin lives in a ref for the mount's lifetime, so a mount must
-    // belong to exactly one artifact.
-    expect(sandbox.key).toBe("obj-1");
+    // belong to exactly one artifact — and (#1789) one version of it.
+    expect(sandbox.key).toBe("obj-1:ver-1");
     expect(mockNotFound).not.toHaveBeenCalled();
   });
 

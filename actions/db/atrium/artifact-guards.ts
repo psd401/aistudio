@@ -18,6 +18,7 @@ import "server-only";
 
 import { ErrorFactories } from "@/lib/error-utils";
 import { versionService } from "@/lib/content";
+import { livePublishedVersionId } from "@/lib/content/live-publication";
 import { resolveVersionDataAccess } from "@/lib/content/types";
 import type { ContentDataAccess, ContentVersionDTO } from "@/lib/content";
 import type { createLogger } from "@/lib/logger";
@@ -105,21 +106,35 @@ export function assertArtifactDataAccess(
  * stamped on the version the code lives on, and every bridge action authorizes
  * against the version the page actually rendered.
  *
- * `requested` comes from a TRUSTED page prop (the published version id on `/c/`,
- * the head on the authoring surfaces), never from the sandboxed frame — but it
- * still crosses the client, so it is verified rather than believed:
- * `versionService.getById` is scoped by `objectId`, so an id belonging to
- * another object is refused outright and can never lend its mode to this one.
+ * WHICH version answers depends on who is asking, because the `versionId` the
+ * action receives is caller-controlled at the RPC boundary — the page prop is
+ * only what the shipped UI sends:
  *
- * The head needs no lookup on either axis: `contentService.update` keeps the
- * head's stamp equal to the object's mode, so the ordinary case costs no extra
- * query.
+ *  - A READER (cannot edit) is never trusted with a version id. The server picks
+ *    the version they are entitled to see — the live published version, else the
+ *    head (the `/atrium/[id]/view` backstop for a viewable-but-unpublished
+ *    object) — exactly as `/c/` and `/atrium/[id]/view` choose what to render.
+ *    Honouring a reader's id would let any viewer list the historical versions
+ *    and pick whichever stamped mode suits them, putting `records` and `query`
+ *    in reach on the same artifact at once: the exfiltration loop the
+ *    exclusivity gate exists to prevent.
+ *  - An EDITOR previews any version of their own artifact (the canvas version
+ *    picker), so their id is honoured when it belongs to THIS object —
+ *    `versionService.getById` is scoped by `objectId`, so a foreign id is
+ *    refused outright and can never lend its mode to this one. That grants them
+ *    nothing beyond what Content settings already let them set.
  *
- * A lookup that FAILS (a DB blip) falls back to the head — the pre-#1787
- * contract: the lookup chooses which version answers, and failing an otherwise
- * healthy operation on it reported "the data service is unavailable" for work
- * that never ran. The fallback is logged. A lookup that SUCCEEDS and finds
- * nothing still refuses: that id is not this object's.
+ * The answer is always the chosen version's OWN stamp (null — a version
+ * predating migration 183 — resolves to the object's mode), including for the
+ * head. Nothing here relies on the head's stamp equalling the object's mode, so
+ * a mode write that commits on the object without reaching the versions can
+ * never re-capability the Live page.
+ *
+ * A lookup that FAILS (a DB blip) falls back to the head under the object's
+ * mode — the pre-#1789 contract: failing an otherwise healthy operation on it
+ * reported "the data service is unavailable" for work that never ran. The
+ * fallback is logged. An editor-requested id that is found NOT to belong to this
+ * object still refuses.
  */
 export async function resolveRenderedVersionAccess(
   content: {
@@ -127,39 +142,48 @@ export async function resolveRenderedVersionAccess(
     currentVersionId: string | null;
     dataAccess: ContentDataAccess;
   },
+  mayEdit: boolean,
   requested: unknown,
   log: ReturnType<typeof createLogger>
 ): Promise<{ versionId: string | null; dataAccess: ContentDataAccess }> {
-  const head = {
+  const fallback = {
     versionId: content.currentVersionId,
     dataAccess: content.dataAccess,
   };
-  if (typeof requested !== "string" || !requested.trim()) return head;
-  const versionId = requested.trim();
-  if (versionId === content.currentVersionId) return head;
+  const requestedId =
+    mayEdit && typeof requested === "string" ? requested.trim() : "";
 
   let version: ContentVersionDTO | null;
+  let targetId: string | null = null;
   try {
-    version = await versionService.getById(content.id, versionId);
+    targetId =
+      requestedId ||
+      (mayEdit ? null : await livePublishedVersionId(content.id)) ||
+      content.currentVersionId;
+    if (!targetId) return fallback;
+    version = await versionService.getById(content.id, targetId);
   } catch (error) {
     log.warn("Rendered version lookup failed; falling back to the head", {
       contentId: content.id,
-      requestedVersionId: versionId,
+      requestedVersionId: targetId,
       error: error instanceof Error ? error.message : String(error),
     });
-    return head;
+    return fallback;
   }
   if (!version) {
-    throw ErrorFactories.invalidInput(
-      "versionId",
-      null,
-      "versionId does not belong to this artifact"
-    );
+    if (requestedId && requestedId !== content.currentVersionId) {
+      throw ErrorFactories.invalidInput(
+        "versionId",
+        null,
+        "versionId does not belong to this artifact"
+      );
+    }
+    // The head or Live version vanished between loading the object and this
+    // lookup (a concurrent delete) — answer as the pre-#1789 object mode did.
+    return fallback;
   }
   return {
     versionId: version.id,
-    // Null (a version predating migration 183) resolves to the object's mode —
-    // exactly the pre-#1789 behaviour, so the deploy changes no capability.
     dataAccess: resolveVersionDataAccess(version, content.dataAccess),
   };
 }

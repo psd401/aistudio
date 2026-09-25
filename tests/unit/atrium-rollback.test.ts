@@ -84,6 +84,8 @@ jest.mock("@/lib/content/retrieval-service", () => ({
 // `txResults`. The order rollback issues them: 1) target-version SELECT,
 // 2) head-advance UPDATE returning.
 let txResults: unknown[] = [];
+// Every `.set(...)` payload, so a test can assert what the UPDATE wrote.
+let setCalls: Array<Record<string, unknown>> = [];
 function nextResult(): unknown {
   return txResults.shift() ?? [];
 }
@@ -92,6 +94,12 @@ const chainHandler: ProxyHandler<Record<string, unknown>> = {
   get(_t, prop: string) {
     if (prop === "limit" || prop === "returning") {
       return () => nextResult();
+    }
+    if (prop === "set") {
+      return (values: Record<string, unknown>) => {
+        setCalls.push(values);
+        return chainProxy;
+      };
     }
     // select/from/where/set/update/delete/insert/values/orderBy/offset all
     // return the chain so the builder keeps fluently chaining.
@@ -112,6 +120,7 @@ beforeEach(() => {
   ownerLoadResult = [{ ownerUserId: 7, visibilityLevel: "private" }];
   canViewResult = true;
   txResults = [];
+  setCalls = [];
   jest.clearAllMocks();
 });
 
@@ -163,6 +172,28 @@ describe("versionService.rollback", () => {
     await expect(
       versionService.rollback(owner, "o1", "v1")
     ).resolves.toBeUndefined();
+  });
+
+  it("restores the data-bridge mode the target version was authored for (#1789)", async () => {
+    // Keeps "head stamp == object mode": otherwise Content settings shows the
+    // object's mode while the restored head carries (and authorizes) another.
+    txResults = [[{ id: "v1", dataAccess: "records" }], [{ id: "o1" }]];
+
+    await versionService.rollback(owner, "o1", "v1");
+
+    expect(setCalls).toHaveLength(1);
+    expect(setCalls[0]).toEqual(
+      expect.objectContaining({ currentVersionId: "v1", dataAccess: "records" })
+    );
+  });
+
+  it("leaves the object's mode alone for an unstamped target (#1789)", async () => {
+    // Documents and versions predating migration 183 carry no stamp.
+    txResults = [[{ id: "v1", dataAccess: null }], [{ id: "o1" }]];
+
+    await versionService.rollback(owner, "o1", "v1");
+
+    expect(setCalls[0]).not.toHaveProperty("dataAccess");
   });
 
   it("re-indexes the retrieval snapshot after a successful rollback", async () => {

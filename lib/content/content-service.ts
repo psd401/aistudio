@@ -11,7 +11,7 @@
  * driver); JSONB columns insert via `sql\`${safeJsonbStringify(v)}::jsonb\``.
  */
 
-import { and, count, eq, gte, isNull, like, sql } from "drizzle-orm";
+import { and, count, eq, gte, isNull, like, notExists, sql } from "drizzle-orm";
 import { createLogger } from "@/lib/logger";
 import {
   executeQuery,
@@ -47,7 +47,7 @@ import {
   type ObjectRowAsText,
 } from "./mappers";
 import { snapshotInTx, versionService } from "./version-service";
-import { livePublishedVersionId } from "./live-publication";
+import { livePublicationConditions } from "./live-publication";
 import { visibilityService } from "./visibility-service";
 import {
   collectionAccessSnapshot,
@@ -62,6 +62,7 @@ import {
   VersionPreconditionFailedError,
 } from "./errors";
 import type {
+  ContentDataAccess,
   ContentKind,
   ContentObjectDTO,
   ContentObjectWithVersion,
@@ -105,26 +106,38 @@ async function propagateDataAccessToHead(
   if (obj.kind !== "artifact" || !obj.currentVersionId) return null;
   const headId = obj.currentVersionId;
 
-  const publishedVersionId = await livePublishedVersionId(obj.id);
-
-  if (publishedVersionId !== headId) {
-    // Scoped by object id as well as version id, so a stray version id can
-    // never be stamped through this path.
-    await executeQuery(
-      (db) =>
-        db
-          .update(contentVersions)
-          .set({ dataAccess: obj.dataAccess })
-          .where(
-            and(
-              eq(contentVersions.id, headId),
-              eq(contentVersions.objectId, obj.id)
+  // One statement decides AND writes: the stamp lands only while no live
+  // publication pins the head. A read-then-write pair left a window in which a
+  // concurrent publish could make the head Live after the check and before the
+  // stamp — re-capabilitying the Live page with no republish. Scoped by object
+  // id as well as version id, so a stray version id can never be stamped here.
+  const stamped = await executeQuery(
+    (db) =>
+      db
+        .update(contentVersions)
+        .set({ dataAccess: obj.dataAccess })
+        .where(
+          and(
+            eq(contentVersions.id, headId),
+            eq(contentVersions.objectId, obj.id),
+            notExists(
+              db
+                .select({ one: sql`1` })
+                .from(contentPublications)
+                .where(
+                  and(
+                    eq(contentPublications.objectId, obj.id),
+                    eq(contentPublications.publishedVersionId, headId),
+                    ...livePublicationConditions()
+                  )
+                )
             )
-          ),
-      "content.dataAccess.stampHead"
-    );
-    return null;
-  }
+          )
+        )
+        .returning({ id: contentVersions.id }),
+    "content.dataAccess.stampHead"
+  );
+  if (stamped[0]) return null;
 
   // The head IS Live. Fork a draft carrying the new mode.
   const head = await versionService.getById(obj.id, headId);
@@ -148,6 +161,35 @@ async function propagateDataAccessToHead(
     dataAccess: obj.dataAccess,
   });
   return forked.currentVersionId;
+}
+
+/**
+ * Restore an object's data-bridge mode after `propagateDataAccessToHead` failed
+ * (#1789). Best-effort: the original failure is what the caller must see, so a
+ * failed revert is logged rather than thrown over it.
+ */
+async function revertDataAccessBestEffort(
+  objectId: string,
+  previous: ContentDataAccess
+): Promise<void> {
+  try {
+    await executeQuery(
+      (db) =>
+        db
+          .update(contentObjects)
+          .set({ dataAccess: previous })
+          .where(eq(contentObjects.id, objectId)),
+      "content.dataAccess.revert"
+    );
+  } catch (error) {
+    createLogger({ action: "content.dataAccess" }).error(
+      "Failed to revert data access after a failed mode propagation",
+      {
+        objectId,
+        error: error instanceof Error ? error.message : String(error),
+      }
+    );
+  }
 }
 
 /** What a successful hard delete returns — the identity of what was removed. */
@@ -1102,7 +1144,17 @@ export const contentService = {
     // patch that also takes the object offline takes the cheap stamp-in-place
     // path rather than forking a version for a page that is no longer Live.
     if (patch.dataAccess !== undefined) {
-      const newHeadId = await propagateDataAccessToHead(req, updated);
+      let newHeadId: string | null;
+      try {
+        newHeadId = await propagateDataAccessToHead(req, updated);
+      } catch (error) {
+        // The object row already committed the new mode. If the fork failed
+        // (version race, re-screening block, storage), put the mode back so the
+        // caller's error is the whole truth: otherwise Content settings shows a
+        // mode no version carries, and the next save would silently stamp it.
+        await revertDataAccessBestEffort(existing.id, existing.dataAccess);
+        throw error;
+      }
       if (newHeadId) updated.currentVersionId = newHeadId;
     }
     return updated;

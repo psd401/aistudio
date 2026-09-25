@@ -812,7 +812,7 @@ export const versionService = {
     await executeTransaction(async (tx) => {
       // Single query: the target must exist AND belong to this object.
       const target = await tx
-        .select({ id: contentVersions.id })
+        .select({ id: contentVersions.id, dataAccess: contentVersions.dataAccess })
         .from(contentVersions)
         .where(
           and(
@@ -828,9 +828,19 @@ export const versionService = {
         });
       }
 
+      // #1789: restoring a version restores the data-bridge mode its code was
+      // authored for, keeping "head stamp == object mode" true. Without this, a
+      // restored head keeps its old stamp while Content settings shows the
+      // object's mode — the canvas and the settings panel disagree about what the
+      // page can do. A null stamp (documents, pre-183 versions) leaves the
+      // object's mode alone.
       const updated = await tx
         .update(contentObjects)
-        .set({ currentVersionId: toVersionId, updatedAt: new Date() })
+        .set({
+          currentVersionId: toVersionId,
+          updatedAt: new Date(),
+          ...(target[0].dataAccess ? { dataAccess: target[0].dataAccess } : {}),
+        })
         .where(eq(contentObjects.id, objectId))
         .returning({ id: contentObjects.id });
       // The object row could be deleted between the outer permission check
