@@ -38,6 +38,7 @@ openwiki:
     - lib/content/publish-service.ts
     - lib/content/reader-links.ts
     - lib/content/atrium-data-contract.ts
+    - lib/content/artifact-query-limits.ts
     - lib/content/artifact-bridge-errors.ts
     - lib/atrium/artifact-preview-diagnostics.ts
     - lib/content/grant-targets.ts
@@ -84,6 +85,7 @@ openwiki:
     - Rollback restores version's mode — head stamp equals object mode invariant preserved (#1789)
     - Canvas bridge pin uses loaded version's stamp — previewing older version uses that version's mode (#1789)
     - Full-screen link from Live pins to published version — readers never see author's half-finished draft (#1789)
+    - Bridge numeric limits are enforced and stated from one source — DEFAULT 200, MAX 2000, offset MAX 1M, SQL MAX 8000 chars, timeouts 30s server / 45s client — interpolated into authoring guidance so models cannot state a limit the code does not apply (#1792)
     - Bridge enabled on authoring surfaces (view page, editor canvas, workspace panel); embeds/thumbnails/public reader stay fail-closed (#1725)
     - Canvas sandbox keys on contentId:dataAccess:versionId — one mount belongs to one artifact in one mode
     - Query concurrent cap is 6 (records 1) with 32 total outstanding; excess queues rather than rejects (#1788)
@@ -101,7 +103,7 @@ openwiki:
     - WorkspacePanel and ArtifactCanvas are pure layout siblings of the Nexus conversation tree — DOM events (atrium:workspace-changed) are the ONLY communication path, never shared state or runtime imports (#1749)
     - One refresh owner — WorkspacePanel alone subscribes to the change event; it refetches then bumps ArtifactCanvas.refreshSignal; two independent subscribers would race and render mixed state
     - Step budget varies by tool presence — 20 steps when workspace tools bound (explore-then-build), 10 otherwise (#1749)
-    - Shared data contract — DATA_ACCESS_DESC is imported by both MCP content tools and workspace chat tools so artifact-authoring surfaces cannot drift
+    - Shared data contract — DATA_ACCESS_DESC and ATRIUM_DATA_AUTHORING_GUIDANCE are imported by both MCP content tools (create_artifact/create_version) and workspace chat tools so artifact-authoring surfaces cannot drift (#1792)
     - psd-atrium skill's "Live PSD data inside an artifact" section is hand-maintained Markdown — editing lib/content/atrium-data-contract.ts does NOT update the skill automatically
     - read_workspace_content is paged, never truncated — one call returns at most 96 KiB with byteOffset/totalBytes/hasMore/nextOffset; model pages with offset until hasMore is absent (#1770)
     - Page edges land on UTF-8 character boundaries — concatenated pages reproduce source byte-for-byte with no replacement characters (#1770)
@@ -1231,8 +1233,14 @@ The sandbox host's 45s clock covers the entire server turn, including network la
 - Query executes **as the viewer** with their row-level security
 - Author cannot influence which rows the viewer sees
 - Uses the same PSD Data MCP connector as Nexus chat (resolved via `/lib/nexus/model-router/psd-data-connector.ts`)
-- Rate limit: 60 queries per viewer per artifact per minute
-- SQL capped at 8,000 characters; limit clamped to 2,000 rows
+- **Numeric limits** (defined in `/lib/content/artifact-query-limits.ts` and interpolated into authoring guidance #1792):
+  - **Default limit**: 200 (applied when omitted, NOT an error — unaggregated SELECTs return first 200 rows silently)
+  - **Max limit**: 2,000 (clamped, not rejected)
+  - **Max offset**: 1,000,000 (larger values clamp to last reachable page)
+  - **Max SQL length**: 8,000 characters
+  - **Server timeout**: 30s from dispatch (queue wait excluded)
+  - **Client timeout**: 45s safety clock
+  - **Rate limit**: 60 queries per viewer per artifact per minute
 - **Concurrency**: Up to 6 queries run in parallel via fetch Route Handler; excess queue rather than reject (#1788)
 - **Budget guidance**: Aim for 3-8 aggregate queries per load, fired together (`Promise.all`)
 
@@ -1427,16 +1435,30 @@ The Atrium sandbox host guarantees deterministic script execution order and fire
 - `/tests/e2e/atrium-sandbox-script-order.spec.ts` — Chromium tests for real browser behavior (force-async interleave, lifecycle events)
 - `/tests/smoke/atrium-artifact-sandbox-host.smoke.ts` — jsdom smoke with extended #1785 test cases
 
-### Shared Data Contract (#1749)
+### Shared Data Contract (#1749, #1792)
 
 The `AtriumData` bridge contract is defined in `/lib/content/atrium-data-contract.ts` and shared across all artifact-authoring surfaces:
 
 - **`DATA_ACCESS_DESC`** — What the three modes mean (imported by both MCP content tools and workspace chat tools)
-- **`ATRIUM_DATA_AUTHORING_GUIDANCE`** — How to write artifact code against the bridge (the operations, return shapes, authoring rules, typed error handling, and script timing guarantees: document-order execution, external script await, synthetic `DOMContentLoaded`/`load`)
+- **`ATRIUM_DATA_AUTHORING_GUIDANCE`** — How to write artifact code against the bridge (the operations, return shapes, authoring rules, typed error handling, numeric limits, and script timing guarantees: document-order execution, external script await, synthetic `DOMContentLoaded`/`load`)
 
-The guidance now includes the typed error code list and explicit instructions to **wrap every call in try/catch** and branch on `err.code`. Models are told to render a no-access state ONLY for `forbidden` and `unauthenticated`, and to show `err.message` for `query_error` instead of dressing a broken query up as a permissions problem.
+**Both surfaces carry the full guidance as of #1792**: The MCP content tools (`create_artifact`, `create_version`) and the Nexus workspace chat tools both import and append `ATRIUM_DATA_AUTHORING_GUIDANCE`. Before #1792, only the workspace chat carried it — a model using MCP tools knew `query` mode existed but not that `rows` are tuples in `columns` order, leading to `rows.map(r => r.school_name)` returning blanks.
 
-**Why shared**: Before #1749, the workspace chat knew nothing about the bridge. A "build me a live dashboard" request worked through MCP tools and failed in workspace chat — the model was never told `window.AtriumData` existed, invented a helper, saw it fail, and baked a stale snapshot into the source.
+**Numeric limits are interpolated from a single source**: The guidance imports constants from `/lib/content/artifact-query-limits.ts` — the same module the query action (`artifact-query.ts`) and sandbox bridge (`ArtifactSandbox.tsx`) enforce them from. This ensures models cannot be told a limit the code does not apply:
+
+| Constant | Value | Guidance Text |
+|----------|-------|---------------|
+| `ARTIFACT_QUERY_DEFAULT_LIMIT` | 200 | "`limit` DEFAULTS TO 200 when you omit it" |
+| `ARTIFACT_QUERY_MAX_LIMIT` | 2,000 | "capped at 2000" |
+| `ARTIFACT_QUERY_MAX_OFFSET` | 1,000,000 | "offset is capped at 1,000,000" |
+| `ARTIFACT_QUERY_MAX_SQL_LENGTH` | 8,000 | "SQL is capped at 8000 characters" |
+| `ARTIFACT_QUERY_SERVER_TIMEOUT_MS` | 30,000 | "30s on the server" |
+| `ARTIFACT_MAX_CONCURRENT_DATA_REQUESTS` | 6 | "up to 6 at a time" |
+| `ARTIFACT_MAX_PENDING_DATA_REQUESTS` | 32 | "past 32 outstanding... reject with `too_many_requests`" |
+
+**Why the default limit is stated explicitly** (#1792): An unaggregated SELECT with no `limit` returns the first 200 rows silently — no error, no warning, just a wrong total. Models must be told to aggregate in SQL and compare `returnedCount` to `totalCount` before rendering totals.
+
+The guidance also includes explicit instructions to **wrap every call in try/catch** and branch on `err.code`. Models are told to render a no-access state ONLY for `forbidden` and `unauthenticated`, and to show `err.message` for `query_error` instead of dressing a broken query up as a permissions problem.
 
 **Synchronization required**: The `psd-atrium` agent skill keeps a hand-maintained Markdown copy of the same guidance (`infra/agent-image/skills/psd-atrium/SKILL.md`, "Live PSD data inside an artifact" section). Editing `atrium-data-contract.ts` does NOT update the skill automatically — change both when the contract changes.
 
