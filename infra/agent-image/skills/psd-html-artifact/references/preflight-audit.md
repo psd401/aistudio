@@ -89,7 +89,10 @@ enforces are also listed here so you build them in from the start:
 - [ ] All meaningful images have `alt` text. Logo (if any) is a real file, never AI-generated.
 
 ## Data & charts (data register only)
-- [ ] Dataset is **inlined** in the file (no fetch unless the brief required live data).
+- [ ] Dataset is **inlined** in the file (no fetch unless the brief required live data) —
+      **unless the artifact is in Atrium query mode**, where the opposite holds: nothing is
+      inlined, every number comes from `window.AtriumData.query` at runtime, and each call is
+      wrapped in `try`/`catch` branching on `err.code` (see `psd-atrium`).
 - [ ] **No invented or fake-precise numbers** — every figure is real data or labeled mock; sources cited.
 - [ ] Bars/areas start at a **zero baseline**; any non-zero line axis is labeled, not misleading.
 - [ ] **Color is not the only encoding** (labels/arrows/position too); chart palette derives from the one accent; readable in grayscale.

@@ -17,7 +17,14 @@ import type { McpToolDefinition } from "./types";
 import { CONTENT_DATA_ACCESS_MODES } from "@/lib/content/types";
 // #1749: the bridge contract is shared with the Nexus workspace chat tools so the
 // two artifact-authoring surfaces cannot drift apart.
-import { DATA_ACCESS_DESC } from "@/lib/content/atrium-data-contract";
+// #1792: the MCP tools used to carry only DATA_ACCESS_DESC, so a model here knew
+// query mode existed but not that `rows` are TUPLES in `columns` order — and
+// `rows.map(r => r.school_name)` rendered a dashboard of blanks. The authoring
+// guidance now rides on the tools that actually WRITE artifact code.
+import {
+  ATRIUM_DATA_AUTHORING_GUIDANCE,
+  DATA_ACCESS_DESC,
+} from "@/lib/content/atrium-data-contract";
 import { buildArtifactCspGuidance } from "@/lib/content/artifact-sandbox-config";
 import type { ApiScope } from "@/lib/api-keys/scopes";
 
@@ -102,7 +109,9 @@ export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
     name: "create_artifact",
     description:
       "Create an interactive artifact (HTML/JS or JSX) content object. Does not publish. Returns the object id, slug, and reader link. " +
-      ARTIFACT_CSP_DESC,
+      ARTIFACT_CSP_DESC +
+      " " +
+      ATRIUM_DATA_AUTHORING_GUIDANCE,
     inputSchema: {
       type: "object",
       properties: {
@@ -196,7 +205,9 @@ export const CONTENT_MCP_TOOLS: McpToolDefinition[] = [
     name: "create_version",
     description:
       "Add a new version with new body content and an optional change summary. For an ARTIFACT body: " +
-      ARTIFACT_CSP_DESC,
+      ARTIFACT_CSP_DESC +
+      " " +
+      ATRIUM_DATA_AUTHORING_GUIDANCE,
     inputSchema: {
       type: "object",
       properties: {

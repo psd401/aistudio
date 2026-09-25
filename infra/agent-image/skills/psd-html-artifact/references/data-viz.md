@@ -11,6 +11,14 @@ The goal: charts that are beautiful, honest, self-contained, and that each say o
 The dataset travels inside the file. Never fetch from a URL/API unless the brief explicitly
 requires live data (it breaks single-file portability — say so if you do it).
 
+> **Exception — an Atrium artifact in query mode.** If the page is (or will be) an Atrium
+> artifact with `--data-access query`, do the OPPOSITE: **never inline the data.** Baked-in
+> numbers go stale and show every viewer data at *your* permission level. Call
+> `await window.AtriumData.query(sql, { limit, offset })` at runtime, aggregate in SQL, and
+> read the result as tuples in `columns` order. See the `psd-atrium` skill, "Live PSD data
+> inside an artifact", for the full contract (limits, `err.code` handling, no bound
+> parameters). Everything below about chart taste still applies unchanged.
+
 ```html
 <script type="application/json" id="data">
 { "revenue": [{"month":"Jan","value":42000}, {"month":"Feb","value":51000}] }
@@ -52,8 +60,10 @@ time series, many series with zoom/brush, cross-filtering, maps, or large datase
 | Chart.js | quick standard charts | easy; restyle away from defaults |
 | D3 | bespoke / novel visualizations | most effort, most control |
 
-When you use a library: still apply every chart-taste rule below, still inline the data
-(`connect-src 'none'` means the library cannot fetch anything at runtime), and remember a CDN
+When you use a library: still apply every chart-taste rule below, still inline the data —
+unless the artifact is in Atrium query mode, where the data comes from
+`window.AtriumData.query` at runtime and must never be inlined — (`connect-src 'none'` means
+the library itself cannot fetch anything at runtime), and remember a CDN
 dependency needs network when the file is opened. Avoid full dashboard
 frameworks — they convert a portable artifact into an app.
 

@@ -92,6 +92,13 @@ import {
   type ArtifactQueryRequestBody,
 } from "@/lib/content/artifact-query-transport";
 import { toBase64Utf8 } from "@/lib/content/code-encoding-browser";
+// #1792: the bridge's numeric limits have ONE source, shared with the query
+// action and with the model-facing authoring guidance.
+import {
+  ARTIFACT_MAX_CONCURRENT_DATA_REQUESTS,
+  ARTIFACT_MAX_PENDING_DATA_REQUESTS,
+  ARTIFACT_QUERY_MAX_SQL_LENGTH,
+} from "@/lib/content/artifact-query-limits";
 import type { ContentDataAccess } from "@/lib/content/types";
 import type { ArtifactDataPayload } from "@/lib/db/types/jsonb";
 
@@ -134,7 +141,7 @@ const RENDER_MAX_ATTEMPTS = 40;
  * `lib/content/artifact-query-transport.ts`), so requests genuinely overlap, and
  * excess work QUEUES behind this limit instead of being refused.
  */
-const MAX_CONCURRENT_DATA_REQUESTS = 6;
+const MAX_CONCURRENT_DATA_REQUESTS = ARTIFACT_MAX_CONCURRENT_DATA_REQUESTS;
 /**
  * Record ops (`submit` / `list`) run strictly one at a time.
  *
@@ -157,7 +164,7 @@ const MAX_CONCURRENT_RECORD_REQUESTS = 1;
  * guessed alongside it. The frame is the binding constraint: it refuses to hold
  * more than this many promises open at once, whatever the parent would accept.
  */
-const MAX_PENDING_DATA_REQUESTS_IN_FRAME = 32;
+const MAX_PENDING_DATA_REQUESTS_IN_FRAME = ARTIFACT_MAX_PENDING_DATA_REQUESTS;
 /**
  * The most requests this parent will hold at once, in flight AND queued.
  *
@@ -190,7 +197,7 @@ const DATA_NAMESPACE_RE = /^[a-z0-9_-]{1,64}$/;
  * the authority and re-validates; this only stops an oversized string from being
  * serialized into a Server Action payload at all.
  */
-const MAX_QUERY_SQL_LENGTH = 8_000;
+const MAX_QUERY_SQL_LENGTH = ARTIFACT_QUERY_MAX_SQL_LENGTH;
 const REQUEST_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

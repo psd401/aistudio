@@ -69,6 +69,14 @@ import {
   boundBridgeErrorMessage,
   type ArtifactBridgeErrorCode,
 } from "@/lib/content/artifact-bridge-errors";
+import {
+  ARTIFACT_QUERY_DEFAULT_LIMIT,
+  ARTIFACT_QUERY_MAX_LIMIT,
+  ARTIFACT_QUERY_MAX_OFFSET,
+  ARTIFACT_QUERY_MAX_SQL_LENGTH,
+  ARTIFACT_QUERY_RATE_LIMIT,
+  ARTIFACT_QUERY_RATE_WINDOW_MS,
+} from "@/lib/content/artifact-query-limits";
 import { getConnectorTools } from "@/lib/mcp/connector-service";
 import { getNexusRouterConfig } from "@/lib/nexus/model-router/config";
 import { resolvePsdDataConnectorId } from "@/lib/nexus/model-router/psd-data-connector";
@@ -84,18 +92,22 @@ import { getUserRequester } from "./requester";
 /** The ONLY tool this action may invoke on the data connector. */
 const QUERY_TOOL_NAME = "query_data";
 /**
- * Upper bound on the page-supplied SQL. Generous enough for a real aggregate
- * with CTEs, small enough that a hostile page cannot use the action transport
- * as an allocation amplifier. The data MCP applies its own parser limits.
+ * The page-facing bounds now live in `lib/content/artifact-query-limits.ts`
+ * (#1792), because the model-facing authoring guidance interpolates the SAME
+ * constants — a limit the code enforces but the guidance does not state is how
+ * an unaggregated query silently returns its first 200 rows.
+ *
+ * - SQL length: generous enough for a real aggregate with CTEs, small enough
+ *   that a hostile page cannot use the transport as an allocation amplifier.
+ *   The data MCP applies its own parser limits.
+ * - Max limit mirrors the data MCP's `JSON_ROW_LIMIT` (2000). Capping here too
+ *   means an out-of-range page value is clamped rather than round-tripped for a
+ *   rejection.
  */
-const MAX_SQL_LENGTH = 8_000;
-const DEFAULT_QUERY_LIMIT = 200;
-/**
- * Mirrors the data MCP's `JSON_ROW_LIMIT` (2000). Capping here too means an
- * out-of-range page value is clamped rather than round-tripped for a rejection.
- */
-const MAX_QUERY_LIMIT = 2_000;
-const MAX_QUERY_OFFSET = 1_000_000;
+const MAX_SQL_LENGTH = ARTIFACT_QUERY_MAX_SQL_LENGTH;
+const DEFAULT_QUERY_LIMIT = ARTIFACT_QUERY_DEFAULT_LIMIT;
+const MAX_QUERY_LIMIT = ARTIFACT_QUERY_MAX_LIMIT;
+const MAX_QUERY_OFFSET = ARTIFACT_QUERY_MAX_OFFSET;
 /**
  * ONE overall budget for the connector handshake AND the query (#1788).
  *
@@ -123,8 +135,8 @@ const QUERY_TIMEOUT_MS = 30_000;
  * budget is per viewer PER ARTIFACT rather than per viewer. The data MCP's own
  * per-user limit remains the backstop.
  */
-const QUERY_RATE_LIMIT = 60;
-const QUERY_RATE_WINDOW_MS = 60 * 1000;
+const QUERY_RATE_LIMIT = ARTIFACT_QUERY_RATE_LIMIT;
+const QUERY_RATE_WINDOW_MS = ARTIFACT_QUERY_RATE_WINDOW_MS;
 const QUERY_RATE_NAMESPACE = "atrium-artifact-data-query";
 
 export interface QueryArtifactDataInput {
