@@ -44,7 +44,12 @@ export function ComposerControls({
   workspaceId,
 }: ComposerControlsProps) {
   return (
-    <div className="flex items-center gap-1 px-2 py-1.5 border-b border-border">
+    // #1793: `flex-wrap`. With a workspace panel open the chat column is only
+    // ~370px wide, while this dock's controls need ~430px — and the composer
+    // root clips overflow, so the last control ("Connect") was rendered as
+    // "Con…" with no way to reach it. Wrapping to a second line keeps every
+    // control whole and clickable at any column width.
+    <div className="flex flex-wrap items-center gap-1 px-2 py-1.5 border-b border-border">
       <ModelFamilySelector
         mode={routingMode}
         family={modelFamily}

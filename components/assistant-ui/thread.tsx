@@ -113,6 +113,39 @@ const SUGGESTED_ACTIONS = [
   },
 ];
 
+/**
+ * Starters shown INSTEAD of the generic ones when a workspace object is open
+ * beside the chat (#1793, finding 3). "Help me create a lesson plan" is not
+ * what anyone wants when they are looking at a dashboard they are building,
+ * and the generic set is what the narrow workspace-bound column overflowed.
+ */
+const WORKSPACE_SUGGESTED_ACTIONS = [
+  {
+    title: "Explain this page",
+    label: "what it shows and where the data comes from",
+    action:
+      "Explain the page open beside this chat — what it shows, and where its data comes from.",
+  },
+  {
+    title: "Add a filter",
+    label: "so viewers can narrow what they see",
+    action:
+      "Add a filter control to the page open beside this chat so viewers can narrow what they see.",
+  },
+  {
+    title: "Change the layout",
+    label: "rearrange the sections on the page",
+    action:
+      "Rearrange the sections of the page open beside this chat so the most important one comes first.",
+  },
+  {
+    title: "Check it for problems",
+    label: "empty states, errors, small screens",
+    action:
+      "Review the page open beside this chat for problems — empty states, error handling, and how it renders on a small screen.",
+  },
+];
+
 export interface SuggestedAction {
   title: string;
   label: string;
@@ -301,13 +334,17 @@ const SuggestionItem: FC<SuggestionItemProps> = ({ suggestion, index }) => {
       >
         <Button
           variant="ghost"
-          className="dark:hover:bg-accent/60 h-auto w-full flex-1 flex-wrap items-start justify-start gap-1 rounded-xl border px-4 py-3.5 text-left text-sm sm:flex-col"
+          // #1793: `whitespace-normal` + `min-w-0`. The shared Button base sets
+          // `whitespace-nowrap`, so each card's min-content width was its full
+          // sentence — 438px of content in a 373px grid, which is why the cards
+          // spilled out of their cells in a workspace-narrowed chat column.
+          className="dark:hover:bg-accent/60 h-auto w-full min-w-0 flex-1 flex-wrap items-start justify-start gap-1 whitespace-normal rounded-xl border px-4 py-3.5 text-left text-sm sm:flex-col"
           aria-label={suggestion.action}
         >
-          <span className="font-medium">
+          <span className="w-full font-medium">
             {suggestion.title}
           </span>
-          <p className="text-muted-foreground">
+          <p className="w-full text-muted-foreground">
             {suggestion.label}
           </p>
         </Button>
@@ -316,12 +353,23 @@ const SuggestionItem: FC<SuggestionItemProps> = ({ suggestion, index }) => {
   );
 };
 
-const ThreadWelcomeSuggestions: FC<{ actions?: SuggestedAction[] }> = ({ actions }) => {
-  const items = actions ?? SUGGESTED_ACTIONS;
+const ThreadWelcomeSuggestions: FC<{
+  actions?: SuggestedAction[];
+  workspaceId?: string;
+}> = ({ actions, workspaceId }) => {
+  // An explicit `actions` list always wins (assistant-architect passes its own).
+  // Otherwise a bound workspace swaps the generic classroom starters for ones
+  // about the open object (#1793).
+  const items =
+    actions ?? (workspaceId ? WORKSPACE_SUGGESTED_ACTIONS : SUGGESTED_ACTIONS);
   if (items.length === 0) return null;
 
   return (
-    <div className="grid w-full gap-2 sm:grid-cols-2">
+    // #1793: the column count follows THIS column's width, not the viewport's.
+    // `sm:grid-cols-2` is a viewport query, so a 1255px window forced two
+    // columns into the ~370px chat column left by an open workspace panel and
+    // the cards overflowed their cells.
+    <div className="grid w-full grid-cols-1 gap-2 @lg/composer:grid-cols-2">
       {items.map((suggestedAction, index) => (
         <SuggestionItem
           key={`suggested-action-${suggestedAction.title}-${index}`}
@@ -373,10 +421,17 @@ const Composer: FC<ComposerProps> = ({
   composerExtraActions,
 }) => {
   return (
-    <div className="bg-white relative mx-auto flex w-full max-w-[var(--thread-max-width)] shrink-0 flex-col gap-4 px-[var(--thread-padding-x)] pb-4 md:pb-6">
+    // #1793: `@container/composer` — the composer's own width, not the
+    // viewport's, is what decides whether the starter cards fit two across.
+    // `min-w-0` stops a wide child (the control dock) from growing this box
+    // past the chat column.
+    <div className="@container/composer bg-white relative mx-auto flex w-full min-w-0 max-w-[var(--thread-max-width)] shrink-0 flex-col gap-4 px-[var(--thread-padding-x)] pb-4 md:pb-6">
       <ThreadScrollToBottom />
       <ThreadPrimitive.Empty>
-        <ThreadWelcomeSuggestions actions={suggestedActions} />
+        <ThreadWelcomeSuggestions
+          actions={suggestedActions}
+          workspaceId={workspaceId}
+        />
       </ThreadPrimitive.Empty>
       {/*
         Focus ring uses the `ring` theme token rather than a hardcoded black.
