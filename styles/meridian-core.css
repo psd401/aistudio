@@ -727,6 +727,21 @@ li[data-dragging="true"] > div {
   line-height: 1.5;
   color: var(--mer-ink);
 }
+/* Live-data notice (#1790): informational, brand-tinted — it explains what the
+   link does rather than warning that something is broken. The Public caveat next
+   to the Level picker reuses the danger-tinted .mer-share-link-warning. */
+.mer-share-live-data {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--mer-r-button);
+  background: var(--mer-brand-tint);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--mer-ink);
+}
 .mer-share-embed {
   border: 0;
   background: none;
@@ -2658,6 +2673,13 @@ li[data-dragging="true"] > div {
   color: var(--mer-ink);
   font-weight: 600;
   text-align: right;
+}
+/* #1790: the one-line explanation under the About card's "Data" row. */
+.mer-artifact-about-note {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--mer-ink-muted);
 }
 .mer-artifact-rail-empty {
   font-size: 12.5px;

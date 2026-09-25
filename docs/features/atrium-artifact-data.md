@@ -42,7 +42,7 @@ has already resolved the object server-side and holds its content id. Artifact
 code must catch a rejected bridge call and present a state such as "Sign in to
 see scores."
 
-### Where the bridge is live (#1725)
+### Where the bridge is live (#1725, #1790)
 
 | Surface | Bridge | Why |
 |---|---|---|
@@ -50,9 +50,10 @@ see scores."
 | `/atrium/<id>/view` full-screen viewer | **enabled** | Same `canView` gate; renders the CURRENT head, so it is the one surface a DRAFT can run on. |
 | `/atrium/<id>/edit` canvas preview | **enabled** | Same gate; this is where the artifact is authored. |
 | Nexus workspace panel (`?workspace=`) | **enabled** | The same canvas behind the same `canView`-gated loader. |
-| `ArtifactEmbedBlock` (artifact inside a document) | fail closed | Renders inside somebody else's document, including the anonymous public reader. |
-| Library thumbnails | fail closed | Decorative grid tiles; nothing to interact with. |
-| `/p/<slug>` public reader | fail closed | Anonymous — there is no viewer to scope a query to. |
+| `ArtifactEmbedBlock` in an **authenticated** document (`/c/<slug>`, the editor NodeView) | **enabled** (#1790) | `resolveEmbedForReader`'s `internal` audience runs the SAME `canView` on the embedded artifact, independently of the host document. Before #1790 an author who embedded their dashboard in a weekly report gave every reader a "no access" tile. |
+| `ArtifactEmbedBlock` in the **public** reader (`/p/<slug>`) | fail closed | The `public` audience always resolves `dataBridge: null` — there is no viewer identity to scope a query to. |
+| Library thumbnails | fail closed | Decorative grid tiles with no `canView` of their own. A `query`-mode artifact additionally renders a static placeholder instead of its own error state (#1790). |
+| `/p/<slug>` public reader (top-level artifact) | fail closed | Anonymous — there is no viewer to scope a query to. |
 
 Publication was **never** the authorization. `queryArtifactData`,
 `submitArtifactRecord`, and `listArtifactRecords` each independently resolve the
@@ -313,10 +314,12 @@ anything format-specific.
   run it — a principal and a district admin see different rows, and a teacher
   without access to a table gets a rejection.
 - **Rate limited.** Several queries per load is normal; a polling loop is not.
-- **Public/embed/thumbnail surfaces.** `/p/<slug>`, embeds, and library
+- **Public and thumbnail surfaces.** `/p/<slug>`, its embeds, and library
   thumbnails omit the bridge props, so `query` fails closed there by
-  construction. The authoring surfaces do NOT (see "Where the bridge is live"):
-  a draft can be exercised by its author before it is published.
+  construction. The authoring surfaces and AUTHENTICATED embeds do NOT (see
+  "Where the bridge is live"): a draft can be exercised by its author before it
+  is published, and a dashboard embedded in a `/c/` document runs for each
+  reader under that reader's own permissions (#1790).
 
 ## Artifact API
 

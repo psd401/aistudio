@@ -7,7 +7,7 @@ import { mkdirSync } from "node:fs";
  *
  * Drives the REAL artifact surfaces as the signed-in owner and proves slice D is
  * wired end to end:
- *  - the artifact viewer renders the Meridian chrome — topbar, "● LIVE ARTIFACT"
+ *  - the artifact viewer renders the Meridian chrome — topbar, "● INTERACTIVE"
  *    pill, and the 300px metadata rail (ABOUT / EMBEDDED IN / Ask-the-agent) that
  *    only manage-rights users see — and the "EMBEDDED IN" card lists the seeded
  *    backlink (content_embed_links → the host document);
@@ -61,7 +61,7 @@ test.describe("Atrium Meridian artifact viewer + embed (authenticated)", () => {
       const page = await context.newPage();
       await page.goto(`/atrium/${ARTIFACT_ID}/edit`);
 
-      // Meridian chrome: topbar + "● LIVE ARTIFACT" pill.
+      // Meridian chrome: topbar + "● INTERACTIVE" pill.
       await expect(page.locator(".mer-editor-topbar")).toBeVisible({ timeout: 60000 });
       await expect(page.locator('[data-testid="artifact-live-pill"]')).toBeVisible();
 

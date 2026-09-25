@@ -26,7 +26,15 @@ const log = createLogger({ component: "ArtifactEmbedNodeView" });
 
 /** The masked result used for a missing id or a failed/denied resolve. */
 function maskedEmbed(artifactId: string): ResolvedEmbed {
-  return { artifactId, available: false, title: null, href: null, code: "", sandboxSrc: null };
+  return {
+    artifactId,
+    available: false,
+    title: null,
+    href: null,
+    code: "",
+    sandboxSrc: null,
+    dataBridge: null,
+  };
 }
 
 export function ArtifactEmbedNodeView(props: ReactNodeViewProps): React.JSX.Element {
@@ -92,6 +100,10 @@ export function ArtifactEmbedNodeView(props: ReactNodeViewProps): React.JSX.Elem
           code={resolved.code}
           sandboxSrc={resolved.sandboxSrc}
           href={resolved.href}
+          // #1790: the editor is an authenticated surface and the action
+          // resolves with `audience: "internal"`, so a query-mode dashboard
+          // embedded in a document runs here instead of showing "no access".
+          dataBridge={resolved.dataBridge}
         />
       )}
     </NodeViewWrapper>

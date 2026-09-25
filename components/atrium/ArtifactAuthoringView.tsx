@@ -2,7 +2,7 @@
  * Atrium artifact authoring view (Epic #1059 Meridian redesign, slice D)
  *
  * The Meridian chrome for the artifact viewer/authoring surface: a topbar
- * (breadcrumb · title · "● LIVE ARTIFACT" pill · Embed-in-doc · Share · primary
+ * (breadcrumb · title · "● INTERACTIVE" pill · Embed-in-doc · Share · primary
  * "Open full screen ↗") over the canvas, plus — ONLY for users with manage rights
  * (`canEdit`) — the 300px metadata rail (ABOUT / EMBEDDED IN / Ask-the-agent).
  * Viewers without manage rights see the canvas full-width.
@@ -131,8 +131,12 @@ export async function ArtifactAuthoringView({
           </span>
           <span className="mer-breadcrumb-title">{obj.title}</span>
         </nav>
+        {/* #1790: this said "LIVE ARTIFACT" on a DRAFT. Since #1726 "Live" means
+            published, so the pill claimed the opposite of the Share dialog three
+            controls to its right. It never meant that — it means the page runs
+            code rather than being a static document — so it now says so. */}
         <span className="mer-badge mer-badge-live" data-testid="artifact-live-pill">
-          ● LIVE ARTIFACT
+          ● INTERACTIVE
         </span>
         <span className="mer-editor-topbar-spacer" />
         <div className="mer-editor-controls">
@@ -159,7 +163,15 @@ export async function ArtifactAuthoringView({
           <VisibilityChip
             key={obj.id}
             idOrSlug={obj.id}
-            share={{ objectId: obj.id, slug: obj.slug, kind: "artifact" }}
+            share={{
+              objectId: obj.id,
+              slug: obj.slug,
+              kind: "artifact",
+              // #1790: so the dialog can say that a live-data page shows each
+              // recipient their OWN data, and that the public address cannot
+              // serve it at all.
+              dataAccess: obj.dataAccess,
+            }}
           />
           <Link
             // Full screen opens the chrome-free viewer route (#1052) — it works
@@ -208,6 +220,9 @@ export async function ArtifactAuthoringView({
             headAuthorLabel={currentVersion?.authorLabel ?? null}
             headAuthorActor={currentVersion?.authorActor ?? null}
             visibilityLevel={obj.visibilityLevel}
+            // #1790: the About card described a live-data dashboard as
+            // "Human-authored" and never mentioned the data at all.
+            dataAccess={obj.dataAccess}
             backlinks={backlinks}
           />
         )}

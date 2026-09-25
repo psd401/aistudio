@@ -100,7 +100,15 @@ const requester: Requester = { kind: "user", userId: 1, roles: ["staff"], isAdmi
 
 /** The one masked shape all "cannot see it" paths must return, verbatim. */
 function expectedMask(id: string): ResolvedEmbed {
-  return { artifactId: id, available: false, title: null, href: null, code: "", sandboxSrc: null };
+  return {
+    artifactId: id,
+    available: false,
+    title: null,
+    href: null,
+    code: "",
+    sandboxSrc: null,
+    dataBridge: null,
+  };
 }
 
 beforeEach(() => {
@@ -312,5 +320,80 @@ describe("resolveEmbedForReader resolves a viewable artifact", () => {
     expect(visibilityService.canView.mock.calls[1][2]).toBe(
       sharedCollectionAccess
     );
+  });
+});
+
+/**
+ * #1790: the bridge wiring is decided HERE, by audience — not by the reader
+ * component, which `/c/` and `/p/` share. An `internal` resolve has already run
+ * the same `canView` the bridge's server actions repeat, so it may carry the
+ * wiring; `public` has no viewer identity to scope a query to, so it never can.
+ */
+describe("resolveEmbedForReader decides the data bridge by audience", () => {
+  const queryArtifactRow = {
+    id: ARTIFACT_ID,
+    kind: "artifact" as const,
+    ownerUserId: 9,
+    collectionId: "public-collection",
+    visibilityLevel: "public" as const,
+    title: "Device repair dashboard",
+    slug: "device-repair-dashboard",
+    dataAccess: "query" as const,
+  };
+
+  it("internal: carries the content id, the mode, and the running version", async () => {
+    queuedRows = [queryArtifactRow];
+    canViewResult = true;
+    const res = await resolveEmbedForReader(ARTIFACT_ID, {
+      audience: "internal",
+      requester,
+    });
+    expect(res.dataBridge).toEqual({
+      contentId: ARTIFACT_ID,
+      dataAccess: "query",
+      // The HEAD version for an internal audience — the one the frame runs.
+      versionId: "v1",
+    });
+  });
+
+  it("public: never carries the bridge, even for the same viewable artifact", async () => {
+    queuedRows = [queryArtifactRow];
+    const res = await resolveEmbedForReader(ARTIFACT_ID, { audience: "public" });
+    expect(res.available).toBe(true);
+    expect(res.dataBridge).toBeNull();
+  });
+
+  it("internal: an out-of-enum mode fails closed to 'none', not to the raw value", async () => {
+    // A mode the enum does not know must never reach the sandbox as-is: "none"
+    // is the mode under which every bridge operation is refused.
+    queuedRows = [{ ...queryArtifactRow, dataAccess: "everything" }];
+    canViewResult = true;
+    const res = await resolveEmbedForReader(ARTIFACT_ID, {
+      audience: "internal",
+      requester,
+    });
+    expect(res.dataBridge?.dataAccess).toBe("none");
+  });
+
+  it("internal: a masked artifact carries no bridge", async () => {
+    queuedRows = [queryArtifactRow];
+    canViewResult = false;
+    const res = await resolveEmbedForReader(ARTIFACT_ID, {
+      audience: "internal",
+      requester,
+    });
+    expect(res.dataBridge).toBeNull();
+  });
+
+  it("internal: omits versionId when the artifact has no version yet", async () => {
+    queuedRows = [queryArtifactRow];
+    canViewResult = true;
+    currentVersion = null;
+    const res = await resolveEmbedForReader(ARTIFACT_ID, {
+      audience: "internal",
+      requester,
+    });
+    expect(res.dataBridge?.versionId).toBeUndefined();
+    expect(res.dataBridge?.contentId).toBe(ARTIFACT_ID);
   });
 });
