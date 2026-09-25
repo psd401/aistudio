@@ -68,9 +68,22 @@ openwiki:
     - lib/nexus/draft-auto-send.ts
     - lib/content/version-author-label.ts
     - actions/nexus/workspace-binding.actions.ts
+    - lib/db/schema/tables/content-versions.ts
+    - lib/content/version-service.ts
+    - actions/db/atrium/artifact-guards.ts
+    - actions/db/atrium/get-artifact-code.ts
   invariants:
     - Artifact data_access modes (records/query/none) are mutually exclusive — prevents exfiltration loop
     - Mode is enforced twice (client-side pin + server-side check) and changes only take effect on fresh page load (#1712)
+    - Version-scoped data-access — each content_versions row carries data_access mode its code was authored for (#1789)
+    - Live pages pin published version's mode — author draft-mode changes never re-capability Live pages (#1789)
+    - resolveVersionDataAccess is the canonical resolver — null on version falls back to object's mode (#1789)
+    - Mode change on Live HEAD forks a new version — propagateDataAccessToHead never changes Live capability without republish (#1789)
+    - Reader-submitted versionId is ignored — server resolves to published version; prevents mode-selection attack (#1789)
+    - Editor-submitted versionId is validated — must belong to this object; foreign versions refuse (#1789)
+    - Rollback restores version's mode — head stamp equals object mode invariant preserved (#1789)
+    - Canvas bridge pin uses loaded version's stamp — previewing older version uses that version's mode (#1789)
+    - Full-screen link from Live pins to published version — readers never see author's half-finished draft (#1789)
     - Bridge enabled on authoring surfaces (view page, editor canvas, workspace panel); embeds/thumbnails/public reader stay fail-closed (#1725)
     - Canvas sandbox keys on contentId:dataAccess:versionId — one mount belongs to one artifact in one mode
     - Query concurrent cap is 6 (records 1) with 32 total outstanding; excess queues rather than rejects (#1788)
@@ -148,6 +161,15 @@ openwiki:
     - Mode-only update skips screening — no model-authored bytes persisted (#1791)
     - Mode-only update returns error on failure — no `ok: true` with warning (#1791)
     - Version author label is viewer-neutral — never "you"; unknown labels fall back to "human" (#1791)
+    - Version-scoped data-access — each `content_versions` row carries `data_access` mode its code was authored for (#1789)
+    - Live pages pin published version's mode — author draft-mode changes never re-capability Live pages (#1789)
+    - resolveVersionDataAccess is the canonical resolver — null on version falls back to object's mode (#1789)
+    - Mode change on Live HEAD forks a new version — propagateDataAccessToHead never changes Live capability without republish (#1789)
+    - Reader-submitted versionId is ignored — server resolves to published version; prevents mode-selection attack (#1789)
+    - Editor-submitted versionId is validated — must belong to this object; foreign versions refuse (#1789)
+    - Rollback restores version's mode — head stamp equals object mode invariant preserved (#1789)
+    - Canvas bridge pin uses loaded version's stamp — previewing older version uses that version's mode (#1789)
+    - Full-screen link from Live pins to published version — readers never see author's half-finished draft (#1789)
     - Agent-maintained version shows "AI" — authorActor field "agent" wins over surface label (#1791)
     - Pruning is per-object — parts keyed by objectId; rebound conversation cannot stub another object's reads (#1791)
     - Pruning is model-side only — persisted messages and thread render unchanged (#1791)
@@ -212,6 +234,10 @@ openwiki:
     - tests/unit/lib/nexus/workspace-tool-history.test.ts
     - tests/unit/lib/nexus/workspace-restore-state.test.ts
     - tests/unit/lib/streaming/__tests__/stream-deadline.test.ts
+    - tests/e2e/atrium-live-draft-data-access.functional.spec.ts
+    - tests/unit/atrium-rendered-version-data-access.test.ts
+    - tests/unit/atrium-version-data-access-migration.test.ts
+    - tests/unit/atrium-version-data-access-stamp.test.ts
 ---
 
 # Core Application Features
@@ -1113,7 +1139,7 @@ Permission is enforced server-side on every drop; the client hides handles it kn
 
 ### Artifact Data Access
 
-Artifacts can interact with data through a sandbox bridge. The `data_access` mode on each content object determines which operation is allowed.
+Artifacts can interact with data through a sandbox bridge. The `data_access` mode on each **content version** determines which operation is allowed for that version's code (#1789).
 
 **Data Access Modes** (mutually exclusive, migration 179):
 
@@ -1129,17 +1155,17 @@ Artifacts can interact with data through a sandbox bridge. The `data_access` mod
 
 | Surface | Bridge | Why |
 |---------|--------|-----|
-| `/c/<slug>` intranet reader | **enabled** | Authenticated, `canView`-gated, published |
-| `/atrium/<id>/view` full-screen viewer | **enabled** | Renders CURRENT head — the one surface a draft can run on |
-| `/atrium/<id>/edit` canvas preview | **enabled** | Where the artifact is authored |
+| `/c/<slug>` intranet reader | **enabled** | Authenticated, `canView`-gated, pins PUBLISHED version's mode (#1789) |
+| `/atrium/<id>/view` full-screen viewer | **enabled** | Readers get published version when Live; editors get requested or head (#1789) |
+| `/atrium/<id>/edit` canvas preview | **enabled** | Where the artifact is authored; keys on version's mode stamp |
 | Nexus workspace panel (`?workspace=`) | **enabled** | Same canvas behind same `canView`-gated loader |
 | `ArtifactEmbedBlock` (artifact inside document) | fail closed | Renders inside somebody else's document, including anonymous reader |
 | Library thumbnails | fail closed | Decorative grid tiles; nothing to interact with |
 | `/p/<slug>` public reader | fail closed | Anonymous — no viewer to scope a query to |
 
-**Publication was never the authorization** — `queryArtifactData`, `submitArtifactRecord`, and `listArtifactRecords` each independently resolve the session, run `contentService.get` (the shared 404 mask + `canView`), re-check `kind === "artifact"`, and re-check the artifact's CURRENT `data_access` mode. None reads publication state. Enabling the bridge on authoring surfaces changes only *where* a request may originate, not *who* may run one — and removes the publish → test → republish loop where an author could not exercise a query-mode dashboard until it was in front of an audience.
+**Publication was never the authorization** — `queryArtifactData`, `submitArtifactRecord`, and `listArtifactRecords` each independently resolve the session, run `contentService.get` (the shared 404 mask + `canView`), re-check `kind === "artifact"`, and re-check the `data_access` mode of the **VERSION being rendered** (#1789). None reads publication state. Enabling the bridge on authoring surfaces changes only *where* a request may originate, not *who* may run one — and removes the publish → test → republish loop where an author could not exercise a query-mode dashboard until it was in front of an audience.
 
-**Dual-Layer Enforcement** (#1712): Each mode is enforced twice, and both layers must agree. The reader page pins the mode it read when it rendered, and the sandbox refuses any operation that does not match that pinned mode. The Server Actions independently re-check the artifact's current mode. A mode change (settings, REST `PATCH`, MCP) only takes effect on a fresh page load, which starts with no queried data in memory. This prevents the owner from loading a viewer with `query` mode, then flipping to `records` to let that page submit queried rows back into the records store—exactly the exfiltration loop the mutual exclusivity is meant to close.
+**Dual-Layer Enforcement** (#1712, #1789): Each mode is enforced twice, and both layers must agree. The reader page pins the mode of the **VERSION it renders** (published for Live, head for drafts), and the sandbox refuses any operation that does not match that pinned mode. The Server Actions independently re-check that version's mode via `resolveRenderedVersionAccess`. A mode change (settings, REST `PATCH`, MCP) only takes effect on a fresh page load, which starts with no queried data in memory. This prevents the owner from loading a viewer with `query` mode, then flipping to `records` to let that page submit queried rows back into the records store—exactly the exfiltration loop the mutual exclusivity is meant to close.
 
 #### Query Concurrency and Transport (#1788)
 
@@ -1190,9 +1216,9 @@ The sandbox host's 45s clock covers the entire server turn, including network la
 - `tests/unit/atrium-artifact-query-action.test.ts` — Server-side error classification and timeout
 - `tests/unit/atrium-artifact-record-transport-failure.test.tsx` — Queue expiry, dispatch abandonment
 
-**Pinning Mechanism**:
-- Reader page (`app/(protected)/c/[slug]/page.tsx`) reads `data_access` during render and passes it to `<ArtifactSandbox dataAccess=…>`
-- Full-screen viewer (`app/(protected)/atrium/[id]/view/page.tsx`) does the same for drafts — keyed on `obj.id` so one mount is one artifact
+**Pinning Mechanism** (#1712, #1789):
+- Reader page (`app/(protected)/c/[slug]/page.tsx`) pins the **published version's** `data_access` via `resolveVersionDataAccess(version, obj.dataAccess)`
+- Full-screen viewer (`app/(protected)/atrium/[id]/view/page.tsx`) uses `resolveViewVersion()` — readers get published version, editors get requested or head
 - Workspace panel action (`loadWorkspacePanelAction`) returns `dataAccess` for artifacts, so the pin is server-resolved like every other bridge input
 - `ArtifactSandbox` stores the mode in a ref for the mount's lifetime—re-renders cannot widen what an already-running artifact may do
 - `isOpAllowedByLoadedMode()` rejects ops before the Server Action is called
@@ -1284,6 +1310,80 @@ try {
 - `tests/unit/atrium-artifact-query-action.test.ts` — Server-side error classification
 - `tests/unit/atrium-artifact-data-bridge.test.tsx` — Bridge error handling
 - `tests/e2e/atrium-sandbox-typed-errors.spec.ts` — End-to-end error forwarding in real browser
+
+#### Version-Scoped Data-Access Mode (#1789)
+
+Before migration 184, `data_access` lived only on `content_objects`. This caused a critical bug: when an object was Live, the author's draft-mode changes would silently re-capability the Live page. A records-mode sign-up sheet whose author flipped to `query` while building the next version would break `AtriumData.submit` for every reader, immediately, with no republish. The reverse — taking a Live dashboard's data offline — was equally possible.
+
+**Migration 184** stamps the mode on each `content_versions` row:
+- `content_versions.data_access` — the mode THIS version's code was authored for (nullable)
+- `content_objects.data_access` — the mode of the working HEAD (stamped onto new versions)
+
+Every render surface now pins the mode of the version it renders, not the object's current mode.
+
+**Resolution Contract** (`resolveVersionDataAccess` in `/lib/content/types.ts`):
+```typescript
+// The canonical ONE-FUNCTION for mode resolution — used by every surface
+resolveVersionDataAccess(version, object.dataAccess)
+  => version?.dataAccess ?? normalizeDataAccess(object.dataAccess)
+```
+
+A version predating migration 184 carries no stamp (`null`) and falls back to the object's mode — exactly the pre-migration behavior. Documents never carry a stamp (no sandbox).
+
+**Live Page Behavior** (`/app/(protected)/c/[slug]/page.tsx`):
+- Pins the PUBLISHED version's mode — independent of author's draft changes
+- Full-screen link includes `?version=` pointing to the published version
+- A mode change on a Live HEAD forks a new version (`propagateDataAccessToHead`) instead of re-capabilitying Live
+- The author's preview picks up the new mode; readers keep the mode their version was published with
+
+**View Page Behavior** (`/app/(protected)/atrium/[id]/view/page.tsx`):
+- **Readers** (cannot edit) receive the LIVE published version when Live — same as `/c/`
+- **Editors** receive `?version=` when provided (and belongs to this object), else head
+- A `version` from another object is ignored (scoped lookup finds nothing)
+- The server never trusts a reader-submitted versionId — readers get the published version to prevent mode-selection attacks
+
+**Mode Change on Live Head** (`propagateDataAccessToHead` in `/lib/content/content-service.ts`):
+- If head is NOT Live — stamp in place (author preview picks up change)
+- If head IS Live — write a NEW version (same code, new mode) so object becomes draft-ahead-of-Live
+- Author must republish to change Live capability
+
+**Bridge Action Authorization** (`resolveRenderedVersionAccess` in `/actions/db/atrium/artifact-guards.ts`):
+- Determines which version is running and the mode that version was authored for
+- Readers: server picks published version (ignoring any submitted versionId)
+- Editors: honor requested version if it belongs to this object
+- Validates version belongs to the artifact on every bridge call
+- A lookup failure falls back to head under object's mode (pre-1789 contract, logged)
+
+**Canvas Version Picker** (`components/atrium/ArtifactCanvas.tsx`):
+- `useCanvasBridgePin` uses `loadedDataAccess` (version's stamp) when loaded, else props pin
+- `useReloadOnObjectModeChange` reloads head when object mode prop changes
+- Sandbox keys on `contentId:dataAccess:versionId` — previewing an older version remounts with that version's mode
+- Mode-only update (`update_workspace_artifact` without code) reloads without version change
+
+**Rollback** (`versionService.rollbackToVersion`):
+- Restoring a version restores its stamped mode to the object
+- Head stamp equals object mode invariant preserved
+- A null stamp (pre-184 or document) leaves the object's mode unchanged
+
+**Key Sources**:
+- `/infra/database/schema/184-atrium-version-data-access.sql` — Migration with comprehensive header comment
+- `/lib/db/schema/tables/content-versions.ts` — `dataAccess` column with documentation
+- `/lib/content/types.ts` — `resolveVersionDataAccess()`, `ContentVersionDTO.dataAccess`
+- `/lib/content/version-service.ts` — `snapshotInTx` stamps mode, `rollbackToVersion` restores it
+- `/lib/content/content-service.ts` — `propagateDataAccessToHead()` forks on Live head
+- `/actions/db/atrium/artifact-guards.ts` — `resolveRenderedVersionAccess()` for bridge actions
+- `/app/(protected)/c/[slug]/page.tsx` — Reader page pins published version's mode
+- `/app/(protected)/atrium/[id]/view/page.tsx` — `resolveViewVersion()` for viewer versioning
+- `/components/atrium/ArtifactCanvas.tsx` — `useCanvasBridgePin`, `useReloadOnObjectModeChange`
+- `/actions/db/atrium/get-artifact-code.ts` — Returns version's resolved mode for canvas
+
+**Focused Tests**:
+- `tests/e2e/atrium-live-draft-data-access.functional.spec.ts` — Live page pins published version's mode
+- `tests/unit/atrium-rendered-version-data-access.test.ts` — Reader vs editor version resolution
+- `tests/unit/atrium-version-data-access-migration.test.ts` — Backfill behavior, NULL fallback
+- `tests/unit/atrium-version-data-access-stamp.test.ts` — Stamp on snapshot, mode preservation
+- `tests/unit/atrium-content-data-access-update-guard.test.ts` — Mode change on Live vs non-Live head
+- `tests/unit/atrium-rollback.test.ts` — Rollback restores version's mode
 
 ### Script Execution Order and Lifecycle Events (#1785)
 
