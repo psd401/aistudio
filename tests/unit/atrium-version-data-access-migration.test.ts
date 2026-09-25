@@ -1,14 +1,14 @@
 /** @jest-environment node */
 
 /**
- * Migration 183 (#1789) — `content_versions.data_access`.
+ * Migration 184 (#1789) — `content_versions.data_access`.
  *
  * Migration 179 put the artifact data-bridge mode on the OBJECT, which made the
  * LIVE page's capability follow the author's draft. This migration moves the
  * stamp onto the version the code lives on.
  *
  * The load-bearing assertions:
- *  - the column is NULLABLE (documents carry no mode, and a pre-183 artifact
+ *  - the column is NULLABLE (documents carry no mode, and a pre-184 artifact
  *    version resolves as `?? object.data_access` — no capability changes at
  *    deploy time);
  *  - the enum type is NOT re-created (179 already declared it);
@@ -21,7 +21,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { contentVersions } from "@/lib/db/schema/tables/content-versions";
 
-const migrationName = "183-atrium-version-data-access.sql";
+const migrationName = "184-atrium-version-data-access.sql";
 const migration = fs.readFileSync(
   path.join(process.cwd(), "infra/database/schema", migrationName),
   "utf8",
@@ -38,17 +38,17 @@ const manifest = JSON.parse(
   ),
 ) as { migrationFiles: string[] };
 
-describe("migration 183 version-scoped data access", () => {
+describe("migration 184 version-scoped data access", () => {
   it("runs immediately after the previous migration head", () => {
     const previousIndex = manifest.migrationFiles.indexOf(
-      "182-index-chunks-missing-embedding.sql",
+      "183-nexus-workspace-chat-iteration.sql",
     );
 
     expect(previousIndex).toBeGreaterThanOrEqual(0);
     expect(manifest.migrationFiles[previousIndex + 1]).toBe(migrationName);
   });
 
-  it("adds a NULLABLE data_access column (documents and pre-183 rows carry none)", () => {
+  it("adds a NULLABLE data_access column (documents and pre-184 rows carry none)", () => {
     expect(normalizedSql).toMatch(
       /ALTER TABLE content_versions ADD COLUMN IF NOT EXISTS data_access content_data_access\s*;/i,
     );

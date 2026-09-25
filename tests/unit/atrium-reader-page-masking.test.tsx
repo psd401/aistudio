@@ -351,7 +351,7 @@ describe("Atrium reader page — Live/Draft artifact pinning (#1789)", () => {
     );
   });
 
-  it("falls back to the object's mode for a version predating migration 183", async () => {
+  it("falls back to the object's mode for a version predating migration 184", async () => {
     // The deploy must not change any existing artifact's capability: an
     // unstamped version resolves exactly as it did before #1789.
     withLookups(

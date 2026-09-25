@@ -49,6 +49,20 @@ export const contentVersions = pgTable(
     authorUserId: integer("author_user_id").references(() => users.id),
     // -> agent_identities.id (autonomous agents). SQL FK in migration 085.
     authorAgentId: uuid("author_agent_id"),
+    /**
+     * Free-text authoring-surface label (#1791, migration 183), e.g.
+     * `"nexus-chat"`. NULL for a version a person wrote directly in the editor.
+     *
+     * The Nexus workspace chat tools run under the USER's own requester — the
+     * right call for authorization, since the model can never exceed what the
+     * person may do — so `author_actor` is `human` and `author_agent_id` is NULL
+     * for a version the chat model wrote. That made "who wrote this SQL?"
+     * unanswerable from the version list. This label carries the surface
+     * without weakening the authorization record above it; it mirrors the
+     * `authorLabel` that `applyAgentEdit` already stamps on comment threads for
+     * a non-UUID agent name.
+     */
+    authorLabel: varchar("author_label", { length: 64 }),
     bodyFormat: bodyFormatEnum("body_format").notNull(),
     bodyLocation: text("body_location").notNull(),
     bodyInline: text("body_inline"),
@@ -57,15 +71,15 @@ export const contentVersions = pgTable(
     summary: text("summary"),
     /**
      * The artifact sandbox data-bridge mode THIS version's code was authored
-     * for (migration 183, #1789). Nullable: `document` versions have no sandbox,
-     * and an artifact version written before migration 183 reaches it resolves
+     * for (migration 184, #1789). Nullable: `document` versions have no sandbox,
+     * and an artifact version written before migration 184 reaches it resolves
      * as `version.data_access ?? content_objects.data_access` — the
      * pre-migration behaviour.
      *
      * Version-scoped rather than object-scoped because the code the mode gates
      * lives on the version: `/c/{slug}` renders the version its publication
      * pins, so pinning the OBJECT's current mode let a draft-time mode change
-     * silently re-capability the Live page. See migration 183's header.
+     * silently re-capability the Live page. See migration 184's header.
      */
     dataAccess: contentDataAccessEnum("data_access"),
     createdAt: timestamp("created_at").defaultNow().notNull(),

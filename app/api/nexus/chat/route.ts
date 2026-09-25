@@ -25,6 +25,11 @@ import {
   createNexusRepositorySearchTools,
 } from '@/lib/nexus/attachment-repository-tool';
 import { prepareRepositoryAttachmentMessages } from '@/lib/nexus/repository-attachment-messages';
+import { pruneStaleWorkspaceToolPayloads } from '@/lib/nexus/workspace-tool-history';
+import {
+  bindConversationWorkspace,
+  workspaceIdForTurn,
+} from '@/lib/nexus/workspace-conversation-binding';
 import {
   resolveNexusAttachmentImageSources,
   resolveNexusConversationRepositoryIds,
@@ -659,6 +664,11 @@ const ChatRequestSchema = z.object({
   // the server binds read/edit tools for THAT object (Atrium §1087). Loose validation
   // only — the tool builder canView/canEdit-gates server-side; cap length like other params.
   workspaceId: z.string().min(1).max(200).optional(),
+  // #1791: the client is still restoring this conversation's bound workspace
+  // panel (an async lookup after reopen). With no `workspaceId`, the server
+  // uses the persisted binding for this turn instead of silently running it
+  // without the artifact. Never set once the person has closed the panel.
+  restoreBoundWorkspace: z.boolean().optional(),
   // #1787: what the open artifact's PREVIEW failed with since the last turn, as
   // observed in the user's own browser. The model that wrote the code otherwise
   // has no way to learn that its queries failed, so it reports success over a
@@ -2326,8 +2336,15 @@ async function prepareChatRequest(params: {
   // so a follow-up like "add a school dropdown" keeps the PSD Data tools. The
   // whole resolution is kept so the §1087 tool binding later in this same
   // request reuses it instead of resolving the object a second time.
+  const workspaceId = await workspaceIdForTurn({
+    requestedWorkspaceId: data.workspaceId,
+    restoreBoundWorkspace: data.restoreBoundWorkspace === true,
+    conversationId: conversationIdValue,
+    userId: auth.userId,
+    requestId: params.requestId,
+  });
   const workspace = await resolveWorkspace({
-    workspaceIdOrSlug: data.workspaceId,
+    workspaceIdOrSlug: workspaceId,
     userId: auth.userId,
     requestId: params.requestId,
   });
@@ -2339,7 +2356,7 @@ async function prepareChatRequest(params: {
       enabledTools,
       manuallyEnabledConnectors: data.enabledConnectors ?? [],
       skillId: data.skillId,
-      workspaceId: data.workspaceId,
+      workspaceId,
       workspace,
       userId: auth.userId,
       userRoleNames: auth.userRoleNames,
@@ -2347,7 +2364,12 @@ async function prepareChatRequest(params: {
       projectBinding,
       attachmentPreflight: preflight.preflight,
       safePersistenceMessages: prepared.messages as ChatMessages,
-      safeModelMessages: prepared.modelMessages as ChatMessages,
+      // #1791 finding 7: drop superseded artifact/document sources from what the
+      // MODEL sees. `safePersistenceMessages` above keeps them, so the thread
+      // still reloads byte-for-byte; only the re-sent history shrinks.
+      safeModelMessages: pruneStaleWorkspaceToolPayloads(
+        prepared.modelMessages as UIMessage[]
+      ) as ChatMessages,
       routingEnabledTools,
     },
   };
@@ -2932,6 +2954,20 @@ async function executeStandardChatTurn(params: {
     skillId: params.prepared.skillId,
   });
   if ("error" in conversation) return conversation.error;
+  // #1791 finding 1: record which Atrium object this conversation worked on, so
+  // reopening it restores the panel and the editor can route "Ask the agent"
+  // back to the chat that already knows the artifact. The RESOLVED object id is
+  // used, never the raw `?workspace=` param (which may be a slug), and only from
+  // a resolution that already passed the canView gate. Never fatal: a binding
+  // that fails to record costs the NEXT visit, not this turn.
+  if (params.prepared.workspace) {
+    await bindConversationWorkspace({
+      conversationId: conversation.conversationId,
+      userId: params.prepared.userId,
+      workspaceObjectId: params.prepared.workspace.object.id,
+      requestId: params.requestId,
+    });
+  }
   try {
     const repositories = await prepareConversationRepositories({
       prepared: params.prepared,

@@ -68,6 +68,7 @@ function makeVersion(overrides: Partial<ContentVersionDTO>): ContentVersionDTO {
     authorActor: "agent",
     authorUserId: null,
     authorAgentId: "agent-x",
+    authorLabel: null,
     bodyFormat: "html",
     bodyLocation: "inline",
     bodyInline: null,

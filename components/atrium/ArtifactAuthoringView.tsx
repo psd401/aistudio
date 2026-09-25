@@ -40,6 +40,11 @@ export interface ArtifactAuthoringViewProps {
   collectionName: string | null;
   /** The section's slug, so the breadcrumb reaches its landing page. */
   collectionSlug: string | null;
+  /**
+   * "Open beside chat" target (#1791 finding 1): continues the conversation
+   * already bound to this artifact, built by the edit page.
+   */
+  openBesideChatHref: string;
 }
 
 export async function ArtifactAuthoringView({
@@ -48,6 +53,7 @@ export async function ArtifactAuthoringView({
   userCanEdit,
   collectionName,
   collectionSlug,
+  openBesideChatHref,
 }: ArtifactAuthoringViewProps): Promise<React.JSX.Element> {
   // Publication state, read here only to decide whether the broken-public-link
   // banner below applies. The Share dialog loads its own copy for the link and
@@ -130,7 +136,7 @@ export async function ArtifactAuthoringView({
         </span>
         <span className="mer-editor-topbar-spacer" />
         <div className="mer-editor-controls">
-          <a href={`/nexus?workspace=${obj.id}`} className="mer-ectl">
+          <a href={openBesideChatHref} className="mer-ectl">
             Open beside chat
           </a>
           {userCanEdit && (
@@ -196,6 +202,11 @@ export async function ArtifactAuthoringView({
             agentMaintained={obj.createdByActor === "agent"}
             updatedAt={obj.updatedAt}
             versionNumber={currentVersion?.versionNumber ?? null}
+            // #1791 finding 6: the head version's authoring surface, so the
+            // About rail can say the agent wrote it in chat rather than calling
+            // a model-written version "Human-authored".
+            headAuthorLabel={currentVersion?.authorLabel ?? null}
+            headAuthorActor={currentVersion?.authorActor ?? null}
             visibilityLevel={obj.visibilityLevel}
             backlinks={backlinks}
           />

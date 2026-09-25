@@ -188,7 +188,7 @@ describe("versionService.rollback", () => {
   });
 
   it("leaves the object's mode alone for an unstamped target (#1789)", async () => {
-    // Documents and versions predating migration 183 carry no stamp.
+    // Documents and versions predating migration 184 carry no stamp.
     txResults = [[{ id: "v1", dataAccess: null }], [{ id: "o1" }]];
 
     await versionService.rollback(owner, "o1", "v1");

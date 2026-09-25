@@ -54,7 +54,7 @@ export interface ArtifactCodeResult {
   code: string;
   /**
    * The data-bridge mode THIS version's code was authored for (#1789), already
-   * resolved against the object (a version predating migration 183 carries no
+   * resolved against the object (a version predating migration 184 carries no
    * stamp and inherits the object's mode).
    *
    * The canvas pins it into `<ArtifactSandbox>` so the mode the frame enforces

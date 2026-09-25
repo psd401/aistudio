@@ -338,6 +338,13 @@ export class OpenAIAdapter extends BaseProviderAdapter {
         maxOutputTokens: enhancedConfig.maxTokens,
         ...(abortSignal && { abortSignal }),
         ...(stopConditions.length > 0 && { stopWhen: stopConditions }),
+        // #1791: visible progress within a single long step (e.g. streaming a
+        // large artifact) pushes the per-step clock forward, turning it into an
+        // idle timeout. The absolute ceiling inside buildStreamDeadline still
+        // bounds the run.
+        onChunk: () => {
+          deadline.touch();
+        },
         // Capture tool calls as each step finishes
         onStepFinish: (event) => {
           // A completed step buys the next one a fresh budget (see

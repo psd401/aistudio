@@ -125,7 +125,7 @@ export function assertArtifactDataAccess(
  *    nothing beyond what Content settings already let them set.
  *
  * The answer is always the chosen version's OWN stamp (null — a version
- * predating migration 183 — resolves to the object's mode), including for the
+ * predating migration 184 — resolves to the object's mode), including for the
  * head. Nothing here relies on the head's stamp equalling the object's mode, so
  * a mode write that commits on the object without reaching the versions can
  * never re-capability the Live page.

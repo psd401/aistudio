@@ -74,7 +74,7 @@ describe("resolveRenderedVersionAccess — editor", () => {
     expect(result).toEqual({ versionId: "ver-published", dataAccess: "records" });
   });
 
-  it("falls back to the object's mode for a version predating migration 183", async () => {
+  it("falls back to the object's mode for a version predating migration 184", async () => {
     const result = await resolveRenderedVersionAccess(CONTENT, true, "ver-old", log);
 
     expect(result).toEqual({ versionId: "ver-old", dataAccess: "query" });

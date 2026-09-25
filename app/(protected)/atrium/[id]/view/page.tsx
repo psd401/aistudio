@@ -188,7 +188,7 @@ export default async function AtriumArtifactViewPage({
         // (`contentService.update` keeps them in step); for a reader seeing the
         // live published version it is the mode that version was published
         // with, so an author's draft-time flip cannot re-capability it. A
-        // version predating migration 183 carries no stamp and falls back to
+        // version predating migration 184 carries no stamp and falls back to
         // the object's mode — the pre-#1789 behaviour. `normalizeDataAccess`
         // inside the resolver still fails an out-of-enum value closed.
         dataAccess={resolveVersionDataAccess(version, obj.dataAccess)}

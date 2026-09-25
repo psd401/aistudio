@@ -8,7 +8,7 @@
  *     next version immediately changed what `/c/{slug}` could do for every
  *     reader — a Live records-mode sign-up sheet stopped accepting submissions,
  *     a Live dashboard went dark — with no republish. The mode is now stamped on
- *     `content_versions.data_access` (migration 183) and
+ *     `content_versions.data_access` (migration 184) and
  *     `contentService.update` writes a NEW version rather than re-stamping the
  *     one a live publication pins.
  *  2. `/c/{slug}`'s "Full screen" linked to `/atrium/{id}/view`, which rendered

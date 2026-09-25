@@ -85,6 +85,7 @@ const versionSelectFields = {
   authorActor: contentVersions.authorActor,
   authorUserId: contentVersions.authorUserId,
   authorAgentId: contentVersions.authorAgentId,
+  authorLabel: contentVersions.authorLabel,
   bodyFormat: contentVersions.bodyFormat,
   bodyLocation: contentVersions.bodyLocation,
   bodyInline: contentVersions.bodyInline,
@@ -92,7 +93,7 @@ const versionSelectFields = {
   proofDocRef: contentVersions.proofDocRef,
   summary: contentVersions.summary,
   // #1789: the mode this version's code was authored for. Null for documents
-  // and for artifact versions predating migration 183.
+  // and for artifact versions predating migration 184.
   dataAccess: contentVersions.dataAccess,
   createdAt: pgTimestampAsText(contentVersions.createdAt),
 } as const;
@@ -448,6 +449,10 @@ export async function snapshotInTx(
       authorActor,
       authorUserId,
       authorAgentId: agentIdOf(req),
+      // #1791 finding 6: the surface that wrote it. `authorAgentId` is a UUID
+      // referencing agent_identities and stays NULL for the Nexus chat, which
+      // is not a registered agent identity.
+      authorLabel: input.authorLabel ?? null,
       bodyFormat,
       bodyLocation,
       bodyInline,
@@ -832,7 +837,7 @@ export const versionService = {
       // authored for, keeping "head stamp == object mode" true. Without this, a
       // restored head keeps its old stamp while Content settings shows the
       // object's mode — the canvas and the settings panel disagree about what the
-      // page can do. A null stamp (documents, pre-183 versions) leaves the
+      // page can do. A null stamp (documents, pre-184 versions) leaves the
       // object's mode alone.
       const updated = await tx
         .update(contentObjects)

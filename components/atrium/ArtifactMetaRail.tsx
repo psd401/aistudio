@@ -16,6 +16,11 @@
 import Link from "next/link";
 import type { VisibilityLevel } from "@/lib/content/types";
 import type { EmbeddingDocument } from "@/lib/content/embed-backlinks";
+import {
+  NEXUS_CHAT_AUTHOR_LABEL,
+  versionAuthorDescription,
+  versionAuthorLabel,
+} from "@/lib/content/version-author-label";
 import { ArtifactAskAgentCard } from "./ArtifactAskAgentCard";
 
 /** Human-readable visibility labels for the ABOUT card. */
@@ -45,6 +50,20 @@ export interface ArtifactMetaRailProps {
   updatedAt: string | null;
   /** The current head version number, or null when none exists yet. */
   versionNumber: number | null;
+  /**
+   * The head version's authoring surface (#1791 finding 6), e.g. "nexus-chat",
+   * or null when a person authored it directly. Without it this card called a
+   * version the chat MODEL wrote "Human-authored", because the chat tools run
+   * under the user's own requester.
+   */
+  headAuthorLabel?: string | null;
+  /**
+   * The head version's actor. The About card describes the CURRENT version, so
+   * this wins over the creator-level `agentMaintained` whenever a head exists —
+   * a human-created artifact later rewritten by an agent (or the reverse) must
+   * not be described by who created it.
+   */
+  headAuthorActor?: "human" | "agent" | null;
   visibilityLevel: VisibilityLevel;
   /** Viewer-visible documents that embed this artifact. */
   backlinks: EmbeddingDocument[];
@@ -65,27 +84,40 @@ export function ArtifactMetaRail({
   agentMaintained,
   updatedAt,
   versionNumber,
+  headAuthorLabel = null,
+  headAuthorActor = null,
   visibilityLevel,
   backlinks,
 }: ArtifactMetaRailProps): React.JSX.Element {
+  // #1791: the object-level `agentMaintained` flag and the head version's
+  // authoring surface are different facts, and the shared helper resolves them
+  // into one phrase so this card and the version lists never disagree.
+  const authorship = {
+    authorActor:
+      headAuthorActor ?? (agentMaintained ? ("agent" as const) : ("human" as const)),
+    authorLabel: headAuthorLabel,
+  };
+  const agentWrote =
+    authorship.authorActor === "agent" ||
+    authorship.authorLabel === NEXUS_CHAT_AUTHOR_LABEL;
   return (
     <aside className="mer-artifact-rail" data-testid="artifact-meta-rail">
       {/* ABOUT */}
       <div className="mer-artifact-rail-card">
         <div className="mer-artifact-rail-label">About</div>
         <p className="mer-artifact-about-lead">
-          {agentMaintained ? (
+          {agentWrote ? (
             <>
               <span className="mer-agent-mark" aria-hidden="true">
                 ✦
               </span>{" "}
-              Agent-maintained · auto-refreshes
+              {versionAuthorDescription(authorship)}
             </>
           ) : (
-            "Human-authored"
+            versionAuthorDescription(authorship)
           )}
         </p>
-        <AboutRow label="Source" value={agentMaintained ? "Agent" : "Human"} />
+        <AboutRow label="Source" value={versionAuthorLabel(authorship)} />
         <AboutRow label="Updated" value={formatUpdated(updatedAt)} />
         <AboutRow label="Version" value={versionNumber != null ? `v${versionNumber}` : "—"} />
         <AboutRow label="Visibility" value={VISIBILITY_LABELS[visibilityLevel]} />

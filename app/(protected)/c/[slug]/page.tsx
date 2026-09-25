@@ -374,7 +374,7 @@ export default async function ReaderPage({
           // load (records-mode sign-up sheets stopped accepting submissions;
           // live dashboards went dark). The bridge actions resolve the same
           // version and re-check its mode server-side. A version predating
-          // migration 183 carries no stamp and falls back to the object's mode,
+          // migration 184 carries no stamp and falls back to the object's mode,
           // i.e. exactly the pre-#1789 behaviour.
           dataAccess={resolveVersionDataAccess(version, target.dataAccess)}
           // #1787: the PUBLISHED version this page renders, so the data MCP's

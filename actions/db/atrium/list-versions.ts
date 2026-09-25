@@ -31,6 +31,13 @@ export interface VersionSummary {
   id: string;
   versionNumber: number;
   authorActor: "human" | "agent";
+  /**
+   * Authoring surface (#1791 finding 6), e.g. "nexus-chat", or null for a
+   * version authored directly. Safe to expose: it names a SURFACE, never a
+   * person, so it carries none of the enumeration risk that keeps
+   * `authorUserId` off this DTO.
+   */
+  authorLabel: string | null;
   // authorUserId is intentionally NOT exposed: it is a raw internal DB primary
   // key. The UI only needs `authorActor` (human/agent) for the provenance label;
   // returning the numeric user id to every viewer would leak a stable internal
@@ -73,6 +80,7 @@ export async function listVersionsAction(
       id: v.id,
       versionNumber: v.versionNumber,
       authorActor: v.authorActor,
+      authorLabel: v.authorLabel,
       summary: v.summary,
       createdAt: v.createdAt,
       isCurrent: v.id === obj.currentVersionId,

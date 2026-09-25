@@ -1,5 +1,5 @@
 -- ============================================================================
--- 183 — Version-scoped artifact data-access mode (#1789)
+-- 184 — Version-scoped artifact data-access mode (#1789)
 -- ============================================================================
 --
 -- Migration 179 put `data_access` on `content_objects`, i.e. on the OBJECT.

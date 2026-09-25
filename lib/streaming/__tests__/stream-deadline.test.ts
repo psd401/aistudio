@@ -62,8 +62,9 @@ describe('buildStreamDeadline', () => {
       const deadline = adapter.build(value as number | undefined);
       expect(deadline.signal).toBeUndefined();
       expect(deadline.timedOut()).toBe(false);
-      // extend()/dispose() must be safe to call on the inert handle.
+      // extend()/touch()/dispose() must be safe to call on the inert handle.
       deadline.extend();
+      deadline.touch();
       deadline.dispose();
     }
   });
@@ -154,6 +155,80 @@ describe('buildStreamDeadline', () => {
     expect(deadline.signal?.aborted).toBe(false);
     expect(deadline.timedOut()).toBe(false);
     // Repeated dispose is safe.
+    deadline.dispose();
+  });
+
+  /**
+   * #1791: a SINGLE step that streams a large artifact (a 50-60 KB dashboard
+   * through `update_workspace_artifact`) produces no step boundary until it is
+   * done, so the per-step budget could abort a run that was visibly producing
+   * output the whole time. `touch()` makes the budget an idle timeout.
+   */
+  it('does not abort a single step that keeps streaming past the step budget', () => {
+    const deadline = adapter.build(30_000, 10); // ceiling 300s
+
+    // 90s of continuous chunks inside ONE step — three times the step budget.
+    for (let i = 0; i < 90; i += 1) {
+      jest.advanceTimersByTime(1_000);
+      deadline.touch();
+    }
+
+    expect(deadline.signal?.aborted).toBe(false);
+    expect(deadline.timedOut()).toBe(false);
+    deadline.dispose();
+  });
+
+  it('still aborts once the stream goes quiet for a full budget', () => {
+    const deadline = adapter.build(30_000, 10);
+
+    jest.advanceTimersByTime(10_000);
+    deadline.touch(); // last chunk at T0+10s
+
+    jest.advanceTimersByTime(29_999); // T0+39_999 — 29.999s of silence
+    expect(deadline.signal?.aborted).toBe(false);
+
+    jest.advanceTimersByTime(2); // T0+40_001 — silence exceeded the budget
+    expect(deadline.signal?.aborted).toBe(true);
+    expect(deadline.timedOut()).toBe(true);
+    deadline.dispose();
+  });
+
+  it('keeps the absolute ceiling even under a continuous chunk stream', () => {
+    const deadline = adapter.build(10_000, 3); // ceiling 30s
+
+    // A wedged stream that emits forever must still be bounded.
+    for (let i = 0; i < 100; i += 1) {
+      jest.advanceTimersByTime(1_000);
+      deadline.touch();
+    }
+
+    expect(deadline.signal?.aborted).toBe(true);
+    expect(deadline.timedOut()).toBe(true);
+    deadline.dispose();
+  });
+
+  it('ignores touch() after it has already fired', () => {
+    const deadline = adapter.build(1_000);
+    jest.advanceTimersByTime(1_001);
+    expect(deadline.timedOut()).toBe(true);
+
+    deadline.touch();
+    jest.advanceTimersByTime(10_000);
+    expect(deadline.signal?.aborted).toBe(true);
+    deadline.dispose();
+  });
+
+  it('throttles touch() so per-token calls do not churn the timer', () => {
+    const deadline = adapter.build(30_000, 10);
+
+    // 500 touches inside the same throttle window cost one re-arm; the deadline
+    // therefore still runs from the first touch, not the 500th.
+    for (let i = 0; i < 500; i += 1) {
+      deadline.touch();
+    }
+
+    jest.advanceTimersByTime(30_001);
+    expect(deadline.signal?.aborted).toBe(true);
     deadline.dispose();
   });
 

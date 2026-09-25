@@ -286,7 +286,7 @@ describe("Atrium full-screen artifact viewer — Live/Draft (#1789)", () => {
       expect.objectContaining({
         versionId: "ver-1",
         // No stamp on the head → the object's own mode, i.e. the pre-#1789
-        // behaviour for a version written before migration 183.
+        // behaviour for a version written before migration 184.
         dataAccess: "query",
       })
     );

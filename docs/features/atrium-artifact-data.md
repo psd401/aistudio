@@ -540,7 +540,7 @@ object is deleted; deleting a user preserves records but clears attribution.
    (`actions/db/atrium/artifact-guards.ts`), called from both
    `artifact-data.ts` and `artifact-query.ts`, so the two sides cannot drift.
 
-   **The mode is VERSION-scoped (#1789, migration 183).** It is stamped on
+   **The mode is VERSION-scoped (#1789, migration 184).** It is stamped on
    `content_versions.data_access` — the row the gated code lives on — and every
    surface pins the mode of the version it RENDERS: `/c/{slug}` and the
    `/atrium/{id}/view` link it hands readers pin the PUBLISHED version's,
@@ -550,7 +550,7 @@ object is deleted; deleting a user preserves records but clears attribution.
    and writes a NEW version when the head is the live published one rather than
    changing what the Live page can do with no republish. Exclusivity is
    unaffected: one page runs one version's code under that version's single
-   mode. A version predating migration 183 carries no stamp and resolves to the
+   mode. A version predating migration 184 carries no stamp and resolves to the
    object's mode (`resolveVersionDataAccess`), so the deploy changes no
    artifact's capability.
 7. Declared queries (storing SQL on the object with typed parameters) were

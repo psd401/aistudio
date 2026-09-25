@@ -461,6 +461,14 @@ export interface ContentVersionDTO {
   authorActor: "human" | "agent";
   authorUserId: number | null;
   authorAgentId: string | null;
+  /**
+   * Authoring surface (#1791 finding 6), e.g. `"nexus-chat"`, or null for a
+   * version a person wrote directly in the editor. Lets the history say "you,
+   * via Nexus chat" for a version the chat MODEL wrote under the user's own
+   * requester — which is `authorActor: "human"`, correctly, because that
+   * requester is what the write was authorized against.
+   */
+  authorLabel: string | null;
   bodyFormat: BodyFormat;
   bodyLocation: string;
   /**
@@ -475,8 +483,8 @@ export interface ContentVersionDTO {
   summary: string | null;
   /**
    * The sandbox data-bridge mode THIS version's code was authored for (#1789,
-   * migration 183), or `null` when the version carries no stamp (every
-   * `document` version, and any artifact version written before migration 183
+   * migration 184), or `null` when the version carries no stamp (every
+   * `document` version, and any artifact version written before migration 184
    * reached it).
    *
    * Never read this directly to decide a capability — use
@@ -497,7 +505,7 @@ export interface ContentVersionDTO {
  * disagree.
  *
  * `version` may be null (an object with no head yet) and its stamp may be null
- * (a pre-migration-183 row, or a document): both fall back to the object's
+ * (a pre-migration-184 row, or a document): both fall back to the object's
  * mode, which is what every surface used before this issue.
  */
 export function resolveVersionDataAccess(
@@ -523,6 +531,13 @@ export interface SnapshotInput {
    * object's mode with no behaviour change. Documents never carry a stamp.
    */
   dataAccess?: ContentDataAccess;
+  /**
+   * Authoring-surface label for the version (#1791 finding 6), e.g.
+   * `"nexus-chat"`. Set by a surface where a MODEL wrote the body under a human
+   * requester, so the history can say "via Nexus chat" instead of "human". Never an authorization signal: `authorActor` / `authorUserId`
+   * remain the record of who was allowed to do this.
+   */
+  authorLabel?: string;
 }
 
 /** Exact canonical source for one committed immutable content version. */
