@@ -18,9 +18,11 @@
  * duplicated; the full-page experience stays one click away.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { X, ExternalLink } from "lucide-react";
+import { WorkspaceResizeHandle } from "./WorkspaceResizeHandle";
+import { useWorkspacePanelWidth } from "./use-workspace-panel-width";
 import {
   loadWorkspacePanelAction,
   type WorkspacePanelData,
@@ -37,6 +39,16 @@ export interface WorkspacePanelProps {
   idOrSlug: string;
   /** Close the panel (the mount clears the URL param). */
   onClose: () => void;
+  /**
+   * Whether the signed-in user may EDIT the open object, reported once this
+   * panel's own canView-gated payload lands (#1793). The chat beside the panel
+   * uses it to decide which starter prompts to offer: `buildWorkspaceChatTools`
+   * registers `edit_workspace_document` / `update_workspace_artifact` only for
+   * an editor, so offering "Add a filter" to a view-only visitor would auto-send
+   * a request the server is going to refuse. This panel already loads the
+   * answer, so nothing else has to fetch it. MUST be a stable reference.
+   */
+  onCanEditChange?: (canEdit: boolean) => void;
 }
 
 type PanelState =
@@ -44,7 +56,11 @@ type PanelState =
   | { status: "error"; message: string }
   | { status: "ready"; data: WorkspacePanelData };
 
-export function WorkspacePanel({ idOrSlug, onClose }: WorkspacePanelProps) {
+export function WorkspacePanel({
+  idOrSlug,
+  onClose,
+  onCanEditChange,
+}: WorkspacePanelProps) {
   const [state, setState] = useState<PanelState>({ status: "loading" });
   // ID change → reset to loading DURING RENDER (React's derived-state pattern —
   // a synchronous setState inside the effect would trigger cascading renders).
@@ -145,15 +161,108 @@ export function WorkspacePanel({ idOrSlug, onClose }: WorkspacePanelProps) {
     [refresh]
   );
 
+  // #1793: report editability up whenever the payload changes — including a
+  // `refresh()` after a chat tool edited the object, since a visibility change
+  // can flip it. Reset to false while loading or on error so a stale `true`
+  // from a PREVIOUS object never leaks into the new one's starters.
+  useEffect(() => {
+    onCanEditChange?.(state.status === "ready" && state.data.canEdit);
+  }, [state, onCanEditChange]);
+
+  // #1793: the split width is the user's own — drag-resized, persisted, and
+  // defaulting to half the split instead of the fixed 44% that rendered
+  // dashboards at phone width while their author was still building them.
+  const {
+    asideRef,
+    widthPct,
+    panelStyle,
+    resizeTo,
+    commitWidth,
+    measureSplit,
+  } = useWorkspacePanelWidth();
+
+  // A drag sets the width on every pointermove, so this component re-renders at
+  // pointer rate. Memoising the body means React sees the SAME element object
+  // for the editor subtree and skips reconciling it entirely — TipTap and the
+  // artifact sandbox are not things to walk sixty times a second for a change
+  // that only moves this panel's edge. Keyed on everything the body reads.
+  const body = useMemo(() => {
+    if (state.status === "loading") {
+      return <p className="p-4 text-sm text-muted-foreground">Loading workspace…</p>;
+    }
+    if (state.status === "error") {
+      return (
+        <p role="alert" className="p-4 text-sm text-destructive">
+          {state.message}
+        </p>
+      );
+    }
+    if (state.data.kind === "document") {
+      // `key` is LOAD-BEARING, not cosmetic. `DocumentEditor` binds its Y.Doc
+      // to TipTap exactly once at creation, so a document switch must fully
+      // remount it. This panel resets its own state during render rather than
+      // remounting, so without the key the same editor instance would survive
+      // an id change and a new provider would bind the PREVIOUS document's
+      // Y.Doc to the new doc name — and Yjs sync is a CRDT merge, not an
+      // overwrite, so document A's content would be merged into document B on
+      // the server. The full page mount (`/atrium/[id]/edit`) keys the same way.
+      return (
+        <DocumentEditor
+          key={state.data.id}
+          idOrSlug={state.data.id}
+          userId={state.data.userId}
+          layout="panel"
+        />
+      );
+    }
+    return (
+      <ArtifactCanvas
+        idOrSlug={state.data.id}
+        canEdit={state.data.canEdit}
+        sandboxSrc={state.data.sandboxSrc}
+        // #1725: the same authoring bridge the full edit page enables — "Open
+        // beside chat" is where most artifacts are actually built, so a
+        // query-mode dashboard has to be exercisable here too. The loader ran
+        // the same 404-masking canView gate as the edit page, and every bridge
+        // action repeats it.
+        //
+        // `dataAccess` is null only for documents, which never reach this
+        // branch; the fallback keeps the union total without widening anything
+        // (an unknown mode already normalizes to "none").
+        dataBridgeEnabled={true}
+        contentId={state.data.id}
+        dataAccess={state.data.dataAccess ?? "none"}
+        // #1749: the canvas reloads its code/version list when THIS panel has
+        // already refetched — one refresh owner, so the new code and the mode
+        // it was written for can never arrive out of order.
+        refreshSignal={refreshSignal}
+      />
+    );
+  }, [state, refreshSignal]);
+
   return (
     <aside
+      ref={asideRef}
       // Desktop-only split: below md the 380px minimum + the chat column would
       // force horizontal overflow, so the panel hides and the full-page editor
       // (one click away) is the small-screen path.
-      className="hidden h-full w-[44%] min-w-[380px] max-w-[720px] flex-col border-l bg-background md:flex"
+      //
+      // #1793: the width is now the user's own (drag handle + persisted
+      // fraction, defaulting to half the split) instead of a fixed 44% capped
+      // at 720px, which rendered dashboards at phone width while authoring.
+      // `relative` positions the handle on this edge; `min-w-0` lets the flex
+      // item honour the inline width instead of its content's min-content.
+      className="relative hidden h-full min-w-0 flex-col border-l bg-background md:flex"
+      style={panelStyle}
       aria-label="Workspace"
       data-testid="workspace-panel"
     >
+      <WorkspaceResizeHandle
+        widthPct={widthPct}
+        onResize={resizeTo}
+        onCommit={commitWidth}
+        measure={measureSplit}
+      />
       <header className="flex items-center justify-between gap-2 border-b px-3 py-2">
         <h2 className="truncate text-sm font-medium">
           {state.status === "ready" ? state.data.title : "Workspace"}
@@ -182,56 +291,7 @@ export function WorkspacePanel({ idOrSlug, onClose }: WorkspacePanelProps) {
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        {state.status === "loading" && (
-          <p className="p-4 text-sm text-muted-foreground">Loading workspace…</p>
-        )}
-        {state.status === "error" && (
-          <p role="alert" className="p-4 text-sm text-destructive">
-            {state.message}
-          </p>
-        )}
-        {state.status === "ready" &&
-          (state.data.kind === "document" ? (
-            // `key` is LOAD-BEARING, not cosmetic. `DocumentEditor` binds its
-            // Y.Doc to TipTap exactly once at creation, so a document switch
-            // must fully remount it. This panel resets its own state during
-            // render rather than remounting, so without the key the same
-            // editor instance would survive an id change and a new provider
-            // would bind the PREVIOUS document's Y.Doc to the new doc name —
-            // and Yjs sync is a CRDT merge, not an overwrite, so document A's
-            // content would be merged into document B on the server. The full
-            // page mount (`/atrium/[id]/edit`) already keys the same way.
-            <DocumentEditor
-              key={state.data.id}
-              idOrSlug={state.data.id}
-              userId={state.data.userId}
-              layout="panel"
-            />
-          ) : (
-            <ArtifactCanvas
-              idOrSlug={state.data.id}
-              canEdit={state.data.canEdit}
-              sandboxSrc={state.data.sandboxSrc}
-              // #1725: the same authoring bridge the full edit page enables —
-              // "Open beside chat" is where most artifacts are actually built,
-              // so a query-mode dashboard has to be exercisable here too. The
-              // loader ran the same 404-masking canView gate as the edit page,
-              // and every bridge action repeats it.
-              //
-              // `dataAccess` is null only for documents, which never reach this
-              // branch; the fallback keeps the union total without widening
-              // anything (an unknown mode already normalizes to "none").
-              dataBridgeEnabled={true}
-              contentId={state.data.id}
-              dataAccess={state.data.dataAccess ?? "none"}
-              // #1749: the canvas reloads its code/version list when THIS panel
-              // has already refetched — one refresh owner, so the new code and
-              // the mode it was written for can never arrive out of order.
-              refreshSignal={refreshSignal}
-            />
-          ))}
-      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto">{body}</div>
     </aside>
   );
 }

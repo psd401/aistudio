@@ -113,6 +113,81 @@ const SUGGESTED_ACTIONS = [
   },
 ];
 
+/**
+ * Starters shown INSTEAD of the generic ones when a workspace object is bound
+ * to the conversation (#1793, finding 3). "Help me create a lesson plan" is not
+ * what anyone wants while they are building a dashboard, and the generic set is
+ * what the narrow workspace-bound column overflowed.
+ *
+ * The wording says "in this workspace", never "beside this chat": the binding
+ * is what these prompts depend on, and it holds at every width, whereas the
+ * panel itself is `hidden ... md:flex` — below `md` the object is still bound
+ * and still editable by the chat, but there is nothing next to the chat to
+ * point at, and inviting someone to look at an unseen page would be a lie.
+ */
+const WORKSPACE_SUGGESTED_ACTIONS = [
+  {
+    title: "Explain this page",
+    label: "what it shows and where the data comes from",
+    action:
+      "Explain the page I have open in this workspace — what it shows, and where its data comes from.",
+  },
+  {
+    title: "Add a filter",
+    label: "so viewers can narrow what they see",
+    action:
+      "Add a filter control to the page I have open in this workspace so viewers can narrow what they see.",
+  },
+  {
+    title: "Change the layout",
+    label: "rearrange the sections on the page",
+    action:
+      "Rearrange the sections of the page I have open in this workspace so the most important one comes first.",
+  },
+  {
+    title: "Check it for problems",
+    label: "empty states, errors, small screens",
+    action:
+      "Review the page I have open in this workspace for problems — empty states, error handling, and how it renders on a small screen.",
+  },
+];
+
+/**
+ * What a VIEW-ONLY workspace visitor is offered instead (#1793).
+ *
+ * `buildWorkspaceChatTools` registers `edit_workspace_document` /
+ * `update_workspace_artifact` only when the caller may edit, and the Atrium
+ * surfaces offer "Open beside chat" to anyone who can view — so a starter set
+ * chosen from the BINDING alone would auto-send "Add a filter" for someone the
+ * server is then going to refuse. These ask the questions that do work.
+ */
+const WORKSPACE_READONLY_SUGGESTED_ACTIONS = [
+  {
+    title: "Explain this page",
+    label: "what it shows and where the data comes from",
+    action:
+      "Explain the page I have open in this workspace — what it shows, and where its data comes from.",
+  },
+  {
+    title: "Summarise what it says",
+    label: "the takeaway in a few sentences",
+    action:
+      "Summarise the page I have open in this workspace in a few sentences — what is the takeaway?",
+  },
+  {
+    title: "What should I ask about it?",
+    label: "questions this page can answer",
+    action:
+      "Looking at the page I have open in this workspace, what questions could I usefully ask about it?",
+  },
+  {
+    title: "Check it for problems",
+    label: "empty states, errors, small screens",
+    action:
+      "Review the page I have open in this workspace for problems — empty states, error handling, and how it renders on a small screen.",
+  },
+];
+
 export interface SuggestedAction {
   title: string;
   label: string;
@@ -136,6 +211,9 @@ interface ThreadProps {
   // Connector selection
   enabledConnectors?: string[];
   onConnectorsChange?: (connectors: string[]) => void;
+  /** True when the signed-in user may EDIT the bound workspace object (#1793).
+   *  Decides which starter prompts are offered — see ThreadWelcomeSuggestions. */
+  workspaceCanEdit?: boolean;
   /** Open workspace object id/slug (`?workspace=`). The Connect popover uses it to
    *  show a connector the router auto-attaches for that workspace as on (#1786). */
   workspaceId?: string;
@@ -165,6 +243,7 @@ export const Thread: FC<ThreadProps> = ({
   enabledConnectors = EMPTY_CONNECTORS_ARRAY,
   onConnectorsChange,
   onReconnectSuccess,
+  workspaceCanEdit,
   workspaceId,
   suggestedActions,
   toolFallback,
@@ -228,6 +307,7 @@ export const Thread: FC<ThreadProps> = ({
                 enabledConnectors={enabledConnectors}
                 onConnectorsChange={onConnectorsChange}
                 onReconnectSuccess={onReconnectSuccess}
+                workspaceCanEdit={workspaceCanEdit}
                 workspaceId={workspaceId}
                 suggestedActions={suggestedActions}
                 composerExtraActions={composerExtraActions}
@@ -301,13 +381,17 @@ const SuggestionItem: FC<SuggestionItemProps> = ({ suggestion, index }) => {
       >
         <Button
           variant="ghost"
-          className="dark:hover:bg-accent/60 h-auto w-full flex-1 flex-wrap items-start justify-start gap-1 rounded-xl border px-4 py-3.5 text-left text-sm sm:flex-col"
+          // #1793: `whitespace-normal` + `min-w-0`. The shared Button base sets
+          // `whitespace-nowrap`, so each card's min-content width was its full
+          // sentence — 438px of content in a 373px grid, which is why the cards
+          // spilled out of their cells in a workspace-narrowed chat column.
+          className="dark:hover:bg-accent/60 h-auto w-full min-w-0 flex-1 flex-wrap items-start justify-start gap-1 whitespace-normal rounded-xl border px-4 py-3.5 text-left text-sm sm:flex-col"
           aria-label={suggestion.action}
         >
-          <span className="font-medium">
+          <span className="w-full font-medium">
             {suggestion.title}
           </span>
-          <p className="text-muted-foreground">
+          <p className="w-full text-muted-foreground">
             {suggestion.label}
           </p>
         </Button>
@@ -316,12 +400,32 @@ const SuggestionItem: FC<SuggestionItemProps> = ({ suggestion, index }) => {
   );
 };
 
-const ThreadWelcomeSuggestions: FC<{ actions?: SuggestedAction[] }> = ({ actions }) => {
-  const items = actions ?? SUGGESTED_ACTIONS;
+const ThreadWelcomeSuggestions: FC<{
+  actions?: SuggestedAction[];
+  workspaceId?: string;
+  workspaceCanEdit?: boolean;
+}> = ({ actions, workspaceId, workspaceCanEdit }) => {
+  // An explicit `actions` list always wins (assistant-architect passes its own).
+  // Otherwise a bound workspace swaps the generic classroom starters for ones
+  // about the open object (#1793) — the edit-oriented set only for someone who
+  // may actually edit it, since the server registers the editing tools on the
+  // same condition. Unknown (still loading) is treated as view-only: offering
+  // a question too early is recoverable, auto-sending a refused edit is not.
+  const items =
+    actions ??
+    (workspaceId
+      ? workspaceCanEdit
+        ? WORKSPACE_SUGGESTED_ACTIONS
+        : WORKSPACE_READONLY_SUGGESTED_ACTIONS
+      : SUGGESTED_ACTIONS);
   if (items.length === 0) return null;
 
   return (
-    <div className="grid w-full gap-2 sm:grid-cols-2">
+    // #1793: the column count follows THIS column's width, not the viewport's.
+    // `sm:grid-cols-2` is a viewport query, so a 1255px window forced two
+    // columns into the ~370px chat column left by an open workspace panel and
+    // the cards overflowed their cells.
+    <div className="grid w-full grid-cols-1 gap-2 @lg/composer:grid-cols-2">
       {items.map((suggestedAction, index) => (
         <SuggestionItem
           key={`suggested-action-${suggestedAction.title}-${index}`}
@@ -346,6 +450,9 @@ interface ComposerProps {
   onToolsChange?: (tools: string[]) => void;
   enabledConnectors?: string[];
   onConnectorsChange?: (connectors: string[]) => void;
+  /** True when the signed-in user may EDIT the bound workspace object (#1793).
+   *  Decides which starter prompts are offered — see ThreadWelcomeSuggestions. */
+  workspaceCanEdit?: boolean;
   /** Open workspace object id/slug (`?workspace=`). The Connect popover uses it to
    *  show a connector the router auto-attaches for that workspace as on (#1786). */
   workspaceId?: string;
@@ -368,15 +475,24 @@ const Composer: FC<ComposerProps> = ({
   enabledConnectors = EMPTY_CONNECTORS_ARRAY,
   onConnectorsChange,
   onReconnectSuccess,
+  workspaceCanEdit,
   workspaceId,
   suggestedActions,
   composerExtraActions,
 }) => {
   return (
-    <div className="bg-white relative mx-auto flex w-full max-w-[var(--thread-max-width)] shrink-0 flex-col gap-4 px-[var(--thread-padding-x)] pb-4 md:pb-6">
+    // #1793: `@container/composer` — the composer's own width, not the
+    // viewport's, is what decides whether the starter cards fit two across.
+    // `min-w-0` stops a wide child (the control dock) from growing this box
+    // past the chat column.
+    <div className="@container/composer bg-white relative mx-auto flex w-full min-w-0 max-w-[var(--thread-max-width)] shrink-0 flex-col gap-4 px-[var(--thread-padding-x)] pb-4 md:pb-6">
       <ThreadScrollToBottom />
       <ThreadPrimitive.Empty>
-        <ThreadWelcomeSuggestions actions={suggestedActions} />
+        <ThreadWelcomeSuggestions
+          actions={suggestedActions}
+          workspaceCanEdit={workspaceCanEdit}
+          workspaceId={workspaceId}
+        />
       </ThreadPrimitive.Empty>
       {/*
         Focus ring uses the `ring` theme token rather than a hardcoded black.

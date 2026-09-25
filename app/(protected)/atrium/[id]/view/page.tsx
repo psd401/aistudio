@@ -56,15 +56,16 @@
 
 import { notFound } from "next/navigation";
 import { getUserRequester } from "@/actions/db/atrium/requester";
+import { canEdit } from "@/lib/content/helpers";
 import { contentService } from "@/lib/content/content-service";
 import { visibilityService } from "@/lib/content/visibility-service";
 import { versionService } from "@/lib/content/version-service";
-import { canEdit } from "@/lib/content/helpers";
 import { livePublishedVersionId } from "@/lib/content/live-publication";
 import { resolveVersionDataAccess } from "@/lib/content/types";
 import type { ContentVersionDTO } from "@/lib/content/types";
 import { getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
 import { ArtifactSandbox } from "@/components/atrium/ArtifactSandbox";
+import { ArtifactViewportBack } from "@/components/atrium/ArtifactViewportBack";
 import "@/styles/atrium-content.css";
 
 export const dynamic = "force-dynamic";
@@ -148,9 +149,13 @@ export default async function AtriumArtifactViewPage({
   // `resolveViewVersion`. An unpublished artifact still renders its head, so a
   // draft is still previewable here — the reason this route exists alongside
   // the publication-gated readers.
+  //
+  // #1793 reuses the SAME predicate for the way back rendered below: whoever
+  // gets their working head here is exactly whoever the editor will let in.
+  const userCanEdit = canEdit(req, obj.ownerUserId);
   const version = await resolveViewVersion(
     obj.id,
-    canEdit(req, obj.ownerUserId),
+    userCanEdit,
     singleParam(requestedVersion)
   );
   // Missing/unreadable body degrades to an empty preview (never the raw S3 error).
@@ -169,6 +174,15 @@ export default async function AtriumArtifactViewPage({
         background: "#fff",
       }}
     >
+      {/* #1793: this route is a dead end — the overlay hides every piece of app
+          chrome, so whoever followed "Open full screen" had no title, no close
+          button and no link back. Shown to EVERYONE (the library grid and the
+          reader both link here in the same tab, so a plain viewer is stranded
+          just the same); only the destination depends on who is looking. The
+          id is the SERVER-resolved one, never the route param. */}
+      <ArtifactViewportBack
+        editHref={userCanEdit ? `/atrium/${obj.id}/edit` : undefined}
+      />
       <ArtifactSandbox
         // #1712: the loaded-mode pin lives in a ref for the mount's lifetime, so
         // a mount must belong to exactly one artifact. Keying on the id makes
