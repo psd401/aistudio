@@ -103,9 +103,7 @@ describe("Atrium data-bridge contract", () => {
     expect(g).toContain(`capped at ${ARTIFACT_QUERY_MAX_LIMIT}`);
     expect(g).toContain(`${ARTIFACT_QUERY_MAX_SQL_LENGTH} characters`);
     expect(g).toContain(`${ARTIFACT_QUERY_RATE_LIMIT} queries per minute`);
-    expect(g).toContain(
-      `${ARTIFACT_MAX_CONCURRENT_DATA_REQUESTS} requests run in parallel`,
-    );
+    expect(g).toContain(`up to ${ARTIFACT_MAX_CONCURRENT_DATA_REQUESTS} at a time`);
     expect(g).toContain(`${ARTIFACT_MAX_PENDING_DATA_REQUESTS} outstanding`);
     expect(g).toContain(
       `${Math.round(ARTIFACT_QUERY_CLIENT_TIMEOUT_MS / 1000)}s from the moment it is dispatched`,
