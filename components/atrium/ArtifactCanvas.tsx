@@ -29,6 +29,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getArtifactCodeAction } from "@/actions/db/atrium/get-artifact-code";
 import { listVersionsAction, type VersionSummary } from "@/actions/db/atrium/list-versions";
 import { versionAuthorLabel } from "@/lib/content/version-author-label";
+import { restoreConfirmMessage } from "@/lib/content/restore-copy";
 import { createVersionAction } from "@/actions/db/atrium/create-version";
 import { rollbackVersionAction } from "@/actions/db/atrium/rollback-version";
 import type { BodyFormat, ContentDataAccess } from "@/lib/content";
@@ -115,7 +116,7 @@ async function performRestore(args: {
   if (
     typeof window !== "undefined" &&
     !window.confirm(
-      `Restore v${version.versionNumber} as the current version? Publishing will then make v${version.versionNumber} live.`
+      restoreConfirmMessage(version.versionNumber)
     )
   ) {
     return;
