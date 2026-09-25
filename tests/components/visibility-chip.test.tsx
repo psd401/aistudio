@@ -41,6 +41,11 @@ jest.mock("lucide-react", () => {
     Copy: icon("copy"),
     Check: icon("check"),
     X: icon("x"),
+    // #1790: the Link/Status sections and the live-data notice render only when
+    // a `share` prop is supplied, which the live-data suite below does.
+    Link2: icon("link2"),
+    Send: icon("send"),
+    Database: icon("database"),
   };
 });
 
@@ -228,6 +233,10 @@ jest.mock("@/actions/db/atrium/list-grant-options", () => ({
 }));
 
 import { VisibilityChip } from "@/components/atrium/VisibilityChip";
+import {
+  LIVE_DATA_NOTICE_TEXT,
+  PUBLIC_LIVE_DATA_WARNING_TEXT,
+} from "@/components/atrium/ShareLiveDataNotice";
 import { getVisibilityAction } from "@/actions/db/atrium/get-visibility";
 import { setVisibilityAction } from "@/actions/db/atrium/set-visibility";
 import { listGrantOptionsAction } from "@/actions/db/atrium/list-grant-options";
@@ -580,3 +589,80 @@ const defineVisibilityChipSuite1 = () => {
 };
 
 describe("VisibilityChip", defineVisibilityChipSuite1);
+
+/**
+ * #1790: nothing in this dialog told an author that a `query`-mode artifact
+ * shows each viewer their OWN data, nor that the Public level is the one
+ * audience live data cannot be served to. These pin both sentences AND the
+ * wiring — the mode reaches the dialog through the `share` prop.
+ */
+describe("VisibilityChip live-data notice (#1790)", () => {
+  async function renderShare(dataAccess?: "query" | "records" | "none") {
+    mockGet.mockResolvedValue(
+      getState({ visibilityLevel: "internal" }) as Awaited<
+        ReturnType<typeof getVisibilityAction>
+      >
+    );
+    await act(async () => {
+      render(
+        <VisibilityChip
+          idOrSlug="obj-1"
+          share={{
+            objectId: "obj-1",
+            slug: "device-repair-dashboard",
+            kind: "artifact",
+            dataAccess,
+          }}
+        />
+      );
+    });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+  }
+
+  it("shows the live-data notice for a query-mode artifact", async () => {
+    await renderShare("query");
+    const notice = screen.getByTestId("share-live-data-notice");
+    expect(notice.textContent).toBe(LIVE_DATA_NOTICE_TEXT);
+  });
+
+  for (const mode of ["records", "none"] as const) {
+    it(`shows no live-data notice for a ${mode}-mode artifact`, async () => {
+      await renderShare(mode);
+      expect(screen.queryByTestId("share-live-data-notice")).toBeNull();
+    });
+  }
+
+  it("shows no live-data notice when the mode is unknown (a document)", async () => {
+    await renderShare(undefined);
+    expect(screen.queryByTestId("share-live-data-notice")).toBeNull();
+  });
+
+  it("warns about the public web only once Public is actually selected", async () => {
+    await renderShare("query");
+    // Internal is the loaded level: the caveat is about a choice not yet made.
+    expect(screen.queryByTestId("share-live-data-public-warning")).toBeNull();
+
+    await act(async () => {
+      // The level picker is the first select (see the mock above).
+      fireEvent.change(screen.getAllByTestId("select")[0]!, {
+        target: { value: "public" },
+      });
+    });
+
+    const warning = await waitFor(() =>
+      screen.getByTestId("share-live-data-public-warning")
+    );
+    expect(warning.textContent).toBe(PUBLIC_LIVE_DATA_WARNING_TEXT);
+  });
+
+  it("does not warn about the public web for a records-mode artifact set to Public", async () => {
+    await renderShare("records");
+    await act(async () => {
+      // The level picker is the first select (see the mock above).
+      fireEvent.change(screen.getAllByTestId("select")[0]!, {
+        target: { value: "public" },
+      });
+    });
+    expect(screen.queryByTestId("share-live-data-public-warning")).toBeNull();
+  });
+});

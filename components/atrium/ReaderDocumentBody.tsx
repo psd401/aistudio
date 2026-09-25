@@ -40,6 +40,10 @@ export function ReaderDocumentBody({
             code={part.embed.code}
             sandboxSrc={part.embed.sandboxSrc}
             href={part.embed.href}
+            // #1790: the resolver decided this, per audience — `/c/` embeds get
+            // the bridge, `/p/` embeds always resolve it to null. This component
+            // is shared by both readers, so it must never make the decision.
+            dataBridge={part.embed.dataBridge}
           />
         )
       )}

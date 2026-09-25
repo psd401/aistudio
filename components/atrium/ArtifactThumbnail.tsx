@@ -18,12 +18,22 @@
  *  - GRACEFUL: the branded gradient (slice B) is the pre-load AND fallback state —
  *    shown before the frame mounts, when the sandbox origin is unavailable, or when
  *    the code fetch fails. A viewer never sees a broken frame.
+ *
+ * ## Query-mode artifacts never run here (#1790)
+ * A thumbnail is a decorative grid tile and stays fail-closed — it never acquires
+ * a content id, so the data bridge is absent and every `AtriumData.query` inside
+ * the code is refused. For a `query`-mode artifact that made the thumbnail a
+ * picture of the dashboard's OWN error state, which is worse than no preview: the
+ * library advertised every live dashboard as broken. Such an artifact therefore
+ * keeps the branded placeholder and never mounts a frame at all — the code is not
+ * even fetched.
  */
 
 import { useEffect, useRef, useState } from "react";
 import { getArtifactCodeAction } from "@/actions/db/atrium/get-artifact-code";
 import { ArtifactSandbox } from "./ArtifactSandbox";
 import { createLogger } from "@/lib/client-logger";
+import { isLiveDataObject, type ContentDataAccess } from "@/lib/content/types";
 
 const log = createLogger({ component: "ArtifactThumbnail" });
 
@@ -41,12 +51,19 @@ export interface ArtifactThumbnailProps {
    * attempt a live frame and stay on the gradient (fail closed, like ArtifactSandbox).
    */
   sandboxSrc: string | null;
+  /**
+   * The artifact's data-bridge mode (#1790). `query` suppresses the live frame
+   * entirely — see the "Query-mode artifacts never run here" note above.
+   */
+  dataAccess?: ContentDataAccess;
 }
 
 export function ArtifactThumbnail({
   artifactId,
   sandboxSrc,
+  dataAccess,
 }: ArtifactThumbnailProps): React.JSX.Element {
+  const isLiveData = isLiveDataObject(dataAccess);
   const ref = useRef<HTMLDivElement | null>(null);
   const claimedRef = useRef(false);
   const [state, setState] = useState<ThumbState>("idle");
@@ -54,7 +71,9 @@ export function ArtifactThumbnail({
 
   useEffect(() => {
     // No sandbox origin → never mount a frame; the gradient is the whole preview.
-    if (!sandboxSrc) return;
+    // Same for a query-mode artifact (#1790): without the bridge its code can
+    // only render its own no-access state, so don't even fetch the code.
+    if (!sandboxSrc || isLiveData) return;
     const el = ref.current;
     if (!el) return;
 
@@ -111,12 +130,19 @@ export function ArtifactThumbnail({
         claimedRef.current = false;
       }
     };
-  }, [artifactId, sandboxSrc]);
+  }, [artifactId, sandboxSrc, isLiveData]);
 
   return (
-    <div ref={ref} className="mer-artifact-preview" aria-hidden="true">
-      <span className="mer-badge mer-badge-live">● Live artifact</span>
-      {state === "ready" && code && sandboxSrc ? (
+    <div
+      ref={ref}
+      className="mer-artifact-preview"
+      aria-hidden="true"
+      data-live-data={isLiveData ? "true" : undefined}
+    >
+      <span className="mer-badge mer-badge-live">
+        {isLiveData ? "● Live data dashboard" : "● Live artifact"}
+      </span>
+      {!isLiveData && state === "ready" && code && sandboxSrc ? (
         <div className="mer-artifact-thumb-scale">
           <ArtifactSandbox
             code={code}

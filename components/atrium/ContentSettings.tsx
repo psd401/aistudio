@@ -224,6 +224,15 @@ export interface ContentSettingsProps {
   kind: "document" | "artifact";
   /** Artifact sandbox data-bridge mode (#1705). */
   dataAccess: ContentDataAccess;
+  /**
+   * How the dialog is opened: the topbar's icon button (default), or the
+   * metadata rail's inline "Content settings" link (#1790). A variant rather
+   * than an element prop on purpose — a trigger element built in a SERVER
+   * component reaches this client component as a serialized RSC element, which
+   * Radix's `asChild` Slot renders differently on the server and the client
+   * (a hydration mismatch that dropped the button).
+   */
+  trigger?: "icon" | "inline-link";
 }
 
 /**
@@ -432,6 +441,42 @@ function useCollectionOptions(open: boolean): CollectionOption[] {
   return options;
 }
 
+/**
+ * The button that opens the dialog. Rendered through `DialogTrigger asChild`,
+ * which hands its props AND ref to this component — a plain prop in React 19 —
+ * so both are spread onto the root `<button>`.
+ */
+function SettingsTrigger({
+  variant,
+  ...slotProps
+}: {
+  variant: "icon" | "inline-link";
+} & React.ComponentProps<"button">): React.JSX.Element {
+  if (variant === "inline-link") {
+    return (
+      <button
+        type="button"
+        className="mer-artifact-about-link"
+        data-testid="artifact-data-note-settings"
+        {...slotProps}
+      >
+        Content settings
+      </button>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className="mer-ectl mer-ectl-icon"
+      aria-label="Content settings"
+      title="Content settings"
+      {...slotProps}
+    >
+      <Settings2 className="h-4 w-4" aria-hidden="true" />
+    </button>
+  );
+}
+
 export function ContentSettings({
   objectId,
   title,
@@ -440,6 +485,7 @@ export function ContentSettings({
   status,
   kind,
   dataAccess,
+  trigger = "icon",
 }: ContentSettingsProps): React.JSX.Element {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -536,14 +582,7 @@ export function ContentSettings({
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
-        <button
-          type="button"
-          className="mer-ectl mer-ectl-icon"
-          aria-label="Content settings"
-          title="Content settings"
-        >
-          <Settings2 className="h-4 w-4" aria-hidden="true" />
-        </button>
+        <SettingsTrigger variant={trigger} />
       </DialogTrigger>
       <DialogContent className={meridianPortalClassName}>
         <DialogHeader>

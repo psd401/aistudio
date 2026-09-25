@@ -2,7 +2,7 @@
  * Atrium artifact authoring view (Epic #1059 Meridian redesign, slice D)
  *
  * The Meridian chrome for the artifact viewer/authoring surface: a topbar
- * (breadcrumb · title · "● LIVE ARTIFACT" pill · Embed-in-doc · Share · primary
+ * (breadcrumb · title · "● INTERACTIVE" pill · Embed-in-doc · Share · primary
  * "Open full screen ↗") over the canvas, plus — ONLY for users with manage rights
  * (`canEdit`) — the 300px metadata rail (ABOUT / EMBEDDED IN / Ask-the-agent).
  * Viewers without manage rights see the canvas full-width.
@@ -15,16 +15,30 @@
 
 import Link from "next/link";
 import { AlertTriangle } from "lucide-react";
-import type { ContentObjectDTO, Requester } from "@/lib/content/types";
+import {
+  resolveVersionDataAccess,
+  type ContentDataAccess,
+  type ContentObjectDTO,
+  type Requester,
+} from "@/lib/content/types";
 import { versionService } from "@/lib/content/version-service";
-import { listEmbeddingDocuments } from "@/lib/content/embed-backlinks";
+import {
+  listEmbeddingDocuments,
+  type EmbeddingDocument,
+} from "@/lib/content/embed-backlinks";
 import { getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
 import { ArtifactCanvas } from "./ArtifactCanvas";
 import { ArtifactMetaRail } from "./ArtifactMetaRail";
 import { ContentSettings } from "./ContentSettings";
 import { VisibilityChip } from "./VisibilityChip";
-import { publishService } from "@/lib/content/publish-service";
-import { isLive } from "@/lib/content/publish-adapters/types";
+import {
+  publishService,
+  type LivePublicationDTO,
+} from "@/lib/content/publish-service";
+import {
+  isLive,
+  LIVE_SURFACE_DESTINATIONS,
+} from "@/lib/content/publish-adapters/types";
 import {
   publicBlockers,
   PUBLIC_BLOCKER_TEXT,
@@ -45,6 +59,45 @@ export interface ArtifactAuthoringViewProps {
    * already bound to this artifact, built by the edit page.
    */
   openBesideChatHref: string;
+}
+
+/**
+ * The data mode of the version a recipient of the Share link actually runs
+ * (#1790 + #1789): the LIVE published version when there is one — its stamp,
+ * not the draft's, is what `/c/` and the reader's full-screen view pin — else
+ * the head, which is all an unpublished link opens. A draft-time mode flip
+ * therefore cannot make the dialog describe a page nobody is served.
+ */
+async function resolveSharedDataAccess(
+  obj: ContentObjectDTO,
+  publications: LivePublicationDTO[]
+): Promise<ContentDataAccess> {
+  const publishedVersionId = publications.find(
+    (p) => LIVE_SURFACE_DESTINATIONS.includes(p.destination) && p.publishedVersionId
+  )?.publishedVersionId;
+  const version = publishedVersionId
+    ? await versionService.getById(obj.id, publishedVersionId)
+    : await versionService.current(obj.id);
+  return resolveVersionDataAccess(version, obj.dataAccess);
+}
+
+/**
+ * The rail note's inline "Content settings" (#1790): the same dialog as the
+ * topbar gear, opened from the sentence that tells the author to go there.
+ */
+function RailSettingsLink({ obj }: { obj: ContentObjectDTO }): React.JSX.Element {
+  return (
+    <ContentSettings
+      objectId={obj.id}
+      title={obj.title}
+      tags={obj.tags}
+      collectionId={obj.collectionId}
+      status={obj.status}
+      kind={obj.kind}
+      dataAccess={obj.dataAccess}
+      trigger="inline-link"
+    />
+  );
 }
 
 export async function ArtifactAuthoringView({
@@ -78,12 +131,15 @@ export async function ArtifactAuthoringView({
 
   // Rail data (manage-rights only): the current head backs the version number; the
   // backlinks are viewer-filtered documents that embed this artifact.
-  const [currentVersion, backlinks] = userCanEdit
-    ? await Promise.all([
-        versionService.current(obj.id),
-        listEmbeddingDocuments(req, obj.id),
-      ])
-    : [null, []];
+  const [[currentVersion, backlinks], sharedDataAccess] = await Promise.all([
+    userCanEdit
+      ? Promise.all([
+          versionService.current(obj.id),
+          listEmbeddingDocuments(req, obj.id),
+        ])
+      : ([null, []] as [null, EmbeddingDocument[]]),
+    resolveSharedDataAccess(obj, publications),
+  ]);
 
   return (
     <div className="mer-artifact">
@@ -131,8 +187,12 @@ export async function ArtifactAuthoringView({
           </span>
           <span className="mer-breadcrumb-title">{obj.title}</span>
         </nav>
+        {/* #1790: this said "LIVE ARTIFACT" on a DRAFT. Since #1726 "Live" means
+            published, so the pill claimed the opposite of the Share dialog three
+            controls to its right. It never meant that — it means the page runs
+            code rather than being a static document — so it now says so. */}
         <span className="mer-badge mer-badge-live" data-testid="artifact-live-pill">
-          ● LIVE ARTIFACT
+          ● INTERACTIVE
         </span>
         <span className="mer-editor-topbar-spacer" />
         <div className="mer-editor-controls">
@@ -159,7 +219,16 @@ export async function ArtifactAuthoringView({
           <VisibilityChip
             key={obj.id}
             idOrSlug={obj.id}
-            share={{ objectId: obj.id, slug: obj.slug, kind: "artifact" }}
+            share={{
+              objectId: obj.id,
+              slug: obj.slug,
+              kind: "artifact",
+              // #1790: so the dialog can say that a live-data page shows each
+              // recipient their OWN data, and that the public address cannot
+              // serve it at all. The mode of the version the shared link
+              // SERVES, not the draft's — see resolveSharedDataAccess.
+              dataAccess: sharedDataAccess,
+            }}
           />
           <Link
             // Full screen opens the chrome-free viewer route (#1052) — it works
@@ -208,6 +277,10 @@ export async function ArtifactAuthoringView({
             headAuthorLabel={currentVersion?.authorLabel ?? null}
             headAuthorActor={currentVersion?.authorActor ?? null}
             visibilityLevel={obj.visibilityLevel}
+            // #1790: the About card described a live-data dashboard as
+            // "Human-authored" and never mentioned the data at all.
+            dataAccess={obj.dataAccess}
+            settingsLink={<RailSettingsLink key={`rail-settings-${obj.id}`} obj={obj} />}
             backlinks={backlinks}
           />
         )}

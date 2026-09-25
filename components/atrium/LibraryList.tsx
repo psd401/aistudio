@@ -238,7 +238,14 @@ function ArtifactCard({
           top-right "Live artifact" badge — the pill must sit outside it to stay
           in the accessibility tree). */}
       <div className="mer-artifact-preview-wrap">
-        <ArtifactThumbnail artifactId={it.id} sandboxSrc={sandboxSrc} />
+        <ArtifactThumbnail
+          artifactId={it.id}
+          sandboxSrc={sandboxSrc}
+          // #1790: a query-mode artifact cannot run without the bridge (which a
+          // decorative tile never gets), so its "live" preview was a picture of
+          // its own error state. The placeholder is the honest preview.
+          dataAccess={it.dataAccess}
+        />
         {/*
           Artifact cards carried NO lifecycle pill — only an Archived overlay —
           so a published artifact and an unpublished draft were

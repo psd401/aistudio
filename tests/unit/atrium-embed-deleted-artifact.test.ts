@@ -89,6 +89,9 @@ describe("resolveEmbedForReader: deleted artifact degrades gracefully", () => {
       href: null,
       code: "",
       sandboxSrc: null,
+      // #1790: a masked embed never carries the data bridge, even for the
+      // authenticated audience that would otherwise get one.
+      dataBridge: null,
     });
     // Never even consults visibility for an absent object.
     expect(canViewMock).not.toHaveBeenCalled();

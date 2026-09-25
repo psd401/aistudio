@@ -13,9 +13,19 @@
  * When `available` is false (the artifact does not exist or the viewer may not see
  * it) it renders a quiet, content-free placeholder — the existence mask; it never
  * receives code for a non-viewable artifact (see `embed-resolver.ts`).
+ *
+ * ## Data bridge (#1790)
+ * `dataBridge` is the resolver's decision, forwarded — never this component's.
+ * The resolver populates it only for the `internal` audience, after running the
+ * same 404-masking `canView` the bridge's server actions repeat; the anonymous
+ * `/p/<slug>` reader always resolves it to `null`. Omitting it (the default) is
+ * fail-closed: the sandbox is then mounted with no bridge props at all, so a
+ * caller that forgets to thread it degrades to the pre-#1790 behavior rather
+ * than to an open bridge.
  */
 
 import { ArtifactSandbox } from "./ArtifactSandbox";
+import type { ResolvedEmbedDataBridge } from "@/lib/content/embed-resolver";
 
 export interface ArtifactEmbedBlockProps {
   /** True only when the viewer may see the artifact (resolved upstream). */
@@ -28,6 +38,11 @@ export interface ArtifactEmbedBlockProps {
   sandboxSrc: string | null;
   /** The artifact reader route for the "Expand ↗" link, or null. */
   href: string | null;
+  /**
+   * Bridge wiring resolved upstream for an AUTHENTICATED embed (#1790), or
+   * null/absent to mount the sandbox with no bridge at all.
+   */
+  dataBridge?: ResolvedEmbedDataBridge | null;
 }
 
 export function ArtifactEmbedBlock({
@@ -36,6 +51,7 @@ export function ArtifactEmbedBlock({
   code,
   sandboxSrc,
   href,
+  dataBridge = null,
 }: ArtifactEmbedBlockProps): React.JSX.Element {
   if (!available) {
     return (
@@ -72,7 +88,25 @@ export function ArtifactEmbedBlock({
           </a>
         )}
       </div>
-      <ArtifactSandbox code={code} src={sandboxSrc} className="atrium-embed-frame" />
+      {dataBridge ? (
+        <ArtifactSandbox
+          // #1712: the loaded-mode pin lives in a ref for the mount's lifetime,
+          // so a mount must belong to exactly one artifact. The editor NodeView
+          // can re-resolve a different artifact into the SAME block without
+          // remounting it; keying on the content id makes the fresh mount
+          // structural rather than incidental (same as /c and /view).
+          key={dataBridge.contentId}
+          code={code}
+          src={sandboxSrc}
+          className="atrium-embed-frame"
+          dataBridgeEnabled
+          contentId={dataBridge.contentId}
+          dataAccess={dataBridge.dataAccess}
+          versionId={dataBridge.versionId}
+        />
+      ) : (
+        <ArtifactSandbox code={code} src={sandboxSrc} className="atrium-embed-frame" />
+      )}
     </div>
   );
 }

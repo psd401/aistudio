@@ -14,7 +14,11 @@
  */
 
 import Link from "next/link";
-import type { VisibilityLevel } from "@/lib/content/types";
+import {
+  isLiveDataObject,
+  type ContentDataAccess,
+  type VisibilityLevel,
+} from "@/lib/content/types";
 import type { EmbeddingDocument } from "@/lib/content/embed-backlinks";
 import {
   NEXUS_CHAT_AUTHOR_LABEL,
@@ -29,6 +33,21 @@ const VISIBILITY_LABELS: Record<VisibilityLevel, string> = {
   group: "Shared (group)",
   internal: "Internal",
   public: "Public",
+};
+
+/**
+ * What the artifact's data-bridge mode means, in the rail's voice (#1790).
+ *
+ * Before this row the About card described a `query`-mode dashboard as
+ * "Human-authored / Source: Human" and said nothing at all about it reading live
+ * district data — the single most important fact about the page, visible only by
+ * opening the Content settings dialog. "(as viewer)" is the part that matters:
+ * what a reader sees is scoped to THEIR permissions, not the author's.
+ */
+const DATA_ACCESS_LABELS: Record<ContentDataAccess, string> = {
+  query: "Live PSD data (as viewer)",
+  records: "Saves reader entries",
+  none: "None",
 };
 
 /** Format an ISO timestamp as a short date, or a dash when absent. */
@@ -65,6 +84,17 @@ export interface ArtifactMetaRailProps {
    */
   headAuthorActor?: "human" | "agent" | null;
   visibilityLevel: VisibilityLevel;
+  /**
+   * The artifact's sandbox data-bridge mode (#1790). Surfaced here because the
+   * rail is where an author looks to find out what the page IS, and "it reads
+   * live district data" was reachable only from the Content settings dialog.
+   */
+  dataAccess: ContentDataAccess;
+  /**
+   * The control that opens Content settings, rendered inline in the live-data
+   * note so "change this" is one click away (#1790). Plain text when omitted.
+   */
+  settingsLink?: React.ReactNode;
   /** Viewer-visible documents that embed this artifact. */
   backlinks: EmbeddingDocument[];
 }
@@ -87,6 +117,8 @@ export function ArtifactMetaRail({
   headAuthorLabel = null,
   headAuthorActor = null,
   visibilityLevel,
+  dataAccess,
+  settingsLink = "Content settings",
   backlinks,
 }: ArtifactMetaRailProps): React.JSX.Element {
   // #1791: the object-level `agentMaintained` flag and the head version's
@@ -121,6 +153,13 @@ export function ArtifactMetaRail({
         <AboutRow label="Updated" value={formatUpdated(updatedAt)} />
         <AboutRow label="Version" value={versionNumber != null ? `v${versionNumber}` : "—"} />
         <AboutRow label="Visibility" value={VISIBILITY_LABELS[visibilityLevel]} />
+        <AboutRow label="Data" value={DATA_ACCESS_LABELS[dataAccess]} />
+        {isLiveDataObject(dataAccess) && (
+          <p className="mer-artifact-about-note" data-testid="artifact-data-note">
+            Every reader sees only the data their own district permissions allow.
+            Change this in {settingsLink}.
+          </p>
+        )}
       </div>
 
       {/* EMBEDDED IN */}

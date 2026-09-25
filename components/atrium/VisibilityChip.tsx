@@ -35,6 +35,11 @@ import { unpublishDocumentAction } from "@/actions/db/atrium/unpublish-document"
 import { ShareLinkSection } from "./ShareLinkSection";
 import { SharePublishSection } from "./SharePublishSection";
 import {
+  ShareLiveDataNotice,
+  ShareLiveDataPublicWarning,
+} from "./ShareLiveDataNotice";
+import type { ContentDataAccess } from "@/lib/content/types";
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -165,6 +170,13 @@ export interface VisibilityChipProps {
     objectId: string;
     slug: string;
     kind: "document" | "artifact";
+    /**
+     * The object's sandbox data-bridge mode (#1790). `query` makes the dialog
+     * say that every recipient sees their OWN data, and that the public address
+     * cannot serve it. Absent for documents and for any caller that has not
+     * loaded the mode — the dialog then says nothing, as it did before #1790.
+     */
+    dataAccess?: ContentDataAccess;
   };
   /**
    * Called after a successful save with the new level, so a parent can reflect
@@ -448,7 +460,12 @@ function ShareDialogBody({
   /** Grants on the SAVED `group` level — the consequence line counts these. */
   savedGrantCount: number;
   livePublication: LivePublicationState;
-  share?: { objectId: string; slug: string; kind: "document" | "artifact" };
+  share?: {
+    objectId: string;
+    slug: string;
+    kind: "document" | "artifact";
+    dataAccess?: ContentDataAccess;
+  };
   publishBusy: boolean;
   publishError: string | null;
   publishPending: boolean;
@@ -476,6 +493,11 @@ function ShareDialogBody({
       </DialogHeader>
 
       <div className="space-y-4">
+        {/* #1790: BEFORE the link, because it changes what the link means — a
+            live-data page shows each recipient their own data, and two of the
+            choices below cannot serve it at all. */}
+        <ShareLiveDataNotice dataAccess={share?.dataAccess} />
+
         {/* THE LINK FIRST. Handing someone a URL is what people actually come
             here to do, and showing it above the two settings that govern it is
             what ties the three together. */}
@@ -494,6 +516,13 @@ function ShareDialogBody({
           level={level}
           disabled={!canEdit || saving}
           onChange={onChangeLevel}
+        />
+        {/* Keyed off the DRAFT level, not the saved one: the caveat is about the
+            choice the author is making right now, and it has to appear before
+            they save rather than after. */}
+        <ShareLiveDataPublicWarning
+          dataAccess={share?.dataAccess}
+          level={level}
         />
 
         {level === "group" && (
