@@ -18,7 +18,7 @@
  * duplicated; the full-page experience stays one click away.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { X, ExternalLink } from "lucide-react";
 import { WorkspaceResizeHandle } from "./WorkspaceResizeHandle";
@@ -159,6 +159,65 @@ export function WorkspacePanel({ idOrSlug, onClose }: WorkspacePanelProps) {
     measureSplit,
   } = useWorkspacePanelWidth();
 
+  // A drag sets the width on every pointermove, so this component re-renders at
+  // pointer rate. Memoising the body means React sees the SAME element object
+  // for the editor subtree and skips reconciling it entirely — TipTap and the
+  // artifact sandbox are not things to walk sixty times a second for a change
+  // that only moves this panel's edge. Keyed on everything the body reads.
+  const body = useMemo(() => {
+    if (state.status === "loading") {
+      return <p className="p-4 text-sm text-muted-foreground">Loading workspace…</p>;
+    }
+    if (state.status === "error") {
+      return (
+        <p role="alert" className="p-4 text-sm text-destructive">
+          {state.message}
+        </p>
+      );
+    }
+    if (state.data.kind === "document") {
+      // `key` is LOAD-BEARING, not cosmetic. `DocumentEditor` binds its Y.Doc
+      // to TipTap exactly once at creation, so a document switch must fully
+      // remount it. This panel resets its own state during render rather than
+      // remounting, so without the key the same editor instance would survive
+      // an id change and a new provider would bind the PREVIOUS document's
+      // Y.Doc to the new doc name — and Yjs sync is a CRDT merge, not an
+      // overwrite, so document A's content would be merged into document B on
+      // the server. The full page mount (`/atrium/[id]/edit`) keys the same way.
+      return (
+        <DocumentEditor
+          key={state.data.id}
+          idOrSlug={state.data.id}
+          userId={state.data.userId}
+          layout="panel"
+        />
+      );
+    }
+    return (
+      <ArtifactCanvas
+        idOrSlug={state.data.id}
+        canEdit={state.data.canEdit}
+        sandboxSrc={state.data.sandboxSrc}
+        // #1725: the same authoring bridge the full edit page enables — "Open
+        // beside chat" is where most artifacts are actually built, so a
+        // query-mode dashboard has to be exercisable here too. The loader ran
+        // the same 404-masking canView gate as the edit page, and every bridge
+        // action repeats it.
+        //
+        // `dataAccess` is null only for documents, which never reach this
+        // branch; the fallback keeps the union total without widening anything
+        // (an unknown mode already normalizes to "none").
+        dataBridgeEnabled={true}
+        contentId={state.data.id}
+        dataAccess={state.data.dataAccess ?? "none"}
+        // #1749: the canvas reloads its code/version list when THIS panel has
+        // already refetched — one refresh owner, so the new code and the mode
+        // it was written for can never arrive out of order.
+        refreshSignal={refreshSignal}
+      />
+    );
+  }, [state, refreshSignal]);
+
   return (
     <aside
       ref={asideRef}
@@ -210,56 +269,7 @@ export function WorkspacePanel({ idOrSlug, onClose }: WorkspacePanelProps) {
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        {state.status === "loading" && (
-          <p className="p-4 text-sm text-muted-foreground">Loading workspace…</p>
-        )}
-        {state.status === "error" && (
-          <p role="alert" className="p-4 text-sm text-destructive">
-            {state.message}
-          </p>
-        )}
-        {state.status === "ready" &&
-          (state.data.kind === "document" ? (
-            // `key` is LOAD-BEARING, not cosmetic. `DocumentEditor` binds its
-            // Y.Doc to TipTap exactly once at creation, so a document switch
-            // must fully remount it. This panel resets its own state during
-            // render rather than remounting, so without the key the same
-            // editor instance would survive an id change and a new provider
-            // would bind the PREVIOUS document's Y.Doc to the new doc name —
-            // and Yjs sync is a CRDT merge, not an overwrite, so document A's
-            // content would be merged into document B on the server. The full
-            // page mount (`/atrium/[id]/edit`) already keys the same way.
-            <DocumentEditor
-              key={state.data.id}
-              idOrSlug={state.data.id}
-              userId={state.data.userId}
-              layout="panel"
-            />
-          ) : (
-            <ArtifactCanvas
-              idOrSlug={state.data.id}
-              canEdit={state.data.canEdit}
-              sandboxSrc={state.data.sandboxSrc}
-              // #1725: the same authoring bridge the full edit page enables —
-              // "Open beside chat" is where most artifacts are actually built,
-              // so a query-mode dashboard has to be exercisable here too. The
-              // loader ran the same 404-masking canView gate as the edit page,
-              // and every bridge action repeats it.
-              //
-              // `dataAccess` is null only for documents, which never reach this
-              // branch; the fallback keeps the union total without widening
-              // anything (an unknown mode already normalizes to "none").
-              dataBridgeEnabled={true}
-              contentId={state.data.id}
-              dataAccess={state.data.dataAccess ?? "none"}
-              // #1749: the canvas reloads its code/version list when THIS panel
-              // has already refetched — one refresh owner, so the new code and
-              // the mode it was written for can never arrive out of order.
-              refreshSignal={refreshSignal}
-            />
-          ))}
-      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto">{body}</div>
     </aside>
   );
 }
