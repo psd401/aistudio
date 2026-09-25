@@ -40,6 +40,10 @@ openwiki:
     - lib/content/atrium-data-contract.ts
     - lib/content/artifact-query-limits.ts
     - lib/content/artifact-bridge-errors.ts
+    - lib/atrium/workspace-panel-width.ts
+    - components/atrium/WorkspaceResizeHandle.tsx
+    - components/atrium/use-workspace-panel-width.ts
+    - components/atrium/ArtifactViewportBack.tsx
     - lib/atrium/artifact-preview-diagnostics.ts
     - lib/content/grant-targets.ts
     - lib/content/visibility-service.ts
@@ -87,6 +91,11 @@ openwiki:
     - Full-screen link from Live pins to published version — readers never see author's half-finished draft (#1789)
     - Bridge numeric limits are enforced and stated from one source — DEFAULT 200, MAX 2000, offset MAX 1M, SQL MAX 8000 chars, timeouts 30s server / 45s client — interpolated into authoring guidance so models cannot state a limit the code does not apply (#1792)
     - Bridge enabled on authoring surfaces (view page, editor canvas, workspace panel); embeds/thumbnails/public reader stay fail-closed (#1725)
+    - Workspace panel width stored as fraction (0–1) in localStorage per user — not pixels (#1793)
+    - Minimum panel width 380px (below this dashboards render at phone layout) (#1793)
+    - Minimum chat column width 320px — both columns must stay usable (#1793)
+    - Panel minimum wins on narrow containers — sub-700px gives panel its min, chat still scrolls (#1793)
+    - Artifact viewport always shows back control — editors get edit link, viewers get history.back with fallback (#1793)
     - Canvas sandbox keys on contentId:dataAccess:versionId — one mount belongs to one artifact in one mode
     - Query concurrent cap is 6 (records 1) with 32 total outstanding; excess queues rather than rejects (#1788)
     - Server budget (30s) spans preflight + MCP handshake + execution; preflight stages race deadline (#1788)
@@ -195,6 +204,8 @@ openwiki:
     - tests/unit/atrium-data-access-normalize.test.ts
     - tests/unit/atrium-workspace-panel-action.test.ts
     - tests/unit/atrium-workspace-panel.test.tsx
+    - tests/unit/workspace-panel-width.test.ts
+    - tests/e2e/nexus-workspace-panel-layout.functional.spec.ts
     - tests/unit/atrium-create-content-code-encoding.test.ts
     - tests/unit/atrium-snapshot-document-action.test.ts
     - tests/unit/atrium-comments-actions.test.ts
@@ -756,6 +767,8 @@ The preview now records its failures in a client-side ring buffer, and each chat
 | `/lib/nexus/workspace-chat-tools.ts` | Workspace panel editing tools |
 | `/lib/nexus/chat-step-budget.ts` | Multi-step budget (10 vs 20 steps) |
 | `/lib/atrium/workspace-change-event.ts` | DOM event for panel refresh |
+| `/lib/atrium/workspace-panel-width.ts` | Panel width persistence and clamping (#1793) |
+| `/components/atrium/WorkspaceResizeHandle.tsx` | Drag handle for panel split (#1793) |
 | `/app/(protected)/nexus/_components/tools/use-workspace-change-signal.ts` | Hook to emit workspace change events |
 | `/actions/mcp-connector.actions.ts` | Connector status with workspace auto-attach flag (#1786) |
 | `/app/(protected)/nexus/_components/chat/mcp-popover.tsx` | Connect popover UI with workspace-aware rendering (#1786) |
@@ -1168,6 +1181,49 @@ Artifacts can interact with data through a sandbox bridge. The `data_access` mod
 **Publication was never the authorization** — `queryArtifactData`, `submitArtifactRecord`, and `listArtifactRecords` each independently resolve the session, run `contentService.get` (the shared 404 mask + `canView`), re-check `kind === "artifact"`, and re-check the `data_access` mode of the **VERSION being rendered** (#1789). None reads publication state. Enabling the bridge on authoring surfaces changes only *where* a request may originate, not *who* may run one — and removes the publish → test → republish loop where an author could not exercise a query-mode dashboard until it was in front of an audience.
 
 **Dual-Layer Enforcement** (#1712, #1789): Each mode is enforced twice, and both layers must agree. The reader page pins the mode of the **VERSION it renders** (published for Live, head for drafts), and the sandbox refuses any operation that does not match that pinned mode. The Server Actions independently re-check that version's mode via `resolveRenderedVersionAccess`. A mode change (settings, REST `PATCH`, MCP) only takes effect on a fresh page load, which starts with no queried data in memory. This prevents the owner from loading a viewer with `query` mode, then flipping to `records` to let that page submit queried rows back into the records store—exactly the exfiltration loop the mutual exclusivity is meant to close.
+
+#### Workspace Panel Layout (#1793)
+
+The Nexus workspace panel (`?workspace=`) is a resizable split pane with persisted width, replacing the fixed 44%/720px cap that rendered dashboards at phone width with the sidebar open.
+
+**Resizable Split**:
+- **Drag handle** on panel left edge with pointer capture
+- **Why pointer capture**: The preview is a cross-origin `<iframe>`. Without capture, the first `pointermove` crossing into the iframe is delivered there instead of the parent page, and the drag dies mid-gesture
+- **Keyboard accessible**: Slider role with arrow keys (2% step), Home/End (jump to limits)
+- **Default**: 50% of content area (was 44% capped at 720px → ~350px with sidebar)
+- **Persistence**: Stored as fraction (0–1) in `localStorage` under `nexus.workspacePanelWidthPct`
+  - Fraction survives sidebar toggle, window resize, and Nexus collapse/expand
+  - Pixel-based storage would mean different split on every layout change
+
+**Minimum Constraints**:
+- **Panel minimum**: 380px — below this dashboards collapse to single-column mobile layout
+- **Chat minimum**: 320px — the chat column must stay usable for composition
+- **Clamping**: Both limits enforced; on narrow containers (< ~700px) that cannot satisfy both, panel minimum wins
+
+**Key Sources**:
+- `/components/atrium/WorkspaceResizeHandle.tsx` — Drag handle with pointer capture
+- `/components/atrium/use-workspace-panel-width.ts` — Width state hook
+- `/lib/atrium/workspace-panel-width.ts` — Persistence and clamping
+- `/components/atrium/WorkspacePanel.tsx` — Panel component integration
+
+**Focused Tests**:
+- `tests/unit/workspace-panel-width.test.ts` — Clamping and storage logic
+- `tests/e2e/nexus-workspace-panel-layout.functional.spec.ts` — E2E layout measurements
+
+#### Full-Screen Viewport Navigation (#1793)
+
+The chrome-free artifact viewport (`/atrium/[id]/view`) renders full-bleed with no title or navigation — by design for distraction-free viewing. This also means no back button.
+
+**Back Control** (`ArtifactViewportBack`):
+- **Always rendered** — everyone who lands here needs an exit, not just editors
+- **Editors**: Get a link to `/atrium/<id>/edit` — return to the authoring surface
+- **Viewers**: Get `history.back()` — return to where they came from (library grid, /c/ reader, collection)
+  - **Fallback**: When no history exists (url opened in new tab), navigates to `/atrium` library
+- **Permissions**: Destination depends on `canEdit`; control itself is always visible
+
+**Key Source**: `/components/atrium/ArtifactViewportBack.tsx`
+
+**Focused Tests**: `tests/e2e/nexus-workspace-panel-layout.functional.spec.ts` (finding 5)
 
 #### Query Concurrency and Transport (#1788)
 
