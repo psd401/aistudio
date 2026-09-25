@@ -62,6 +62,22 @@ export interface CollectionAccessSnapshot {
   ) => CollectionGrant[];
   allowedCollectionIds: Set<string>;
   selectableCollectionIds: Set<string>;
+  /**
+   * Active DISTRICT collections the requester may NOT enter, but through which
+   * an object explicitly shared with them (a matching `group`-level grant, or a
+   * per-user grant on a `private` object) is still reachable.
+   *
+   * Sharing an item with a person or group is a deliberate act, and it used to
+   * be silently undone by the collection gate: the grantee could see the item
+   * nowhere. Passage admits ONLY the explicitly shared items — never the
+   * collection's other contents (an `internal` sibling stays behind the gate)
+   * and never create/approve rights.
+   *
+   * Personal (owner-bound) collections are excluded: they have their own
+   * sharing model and stay out of other people's sidebars. Archived collections
+   * are excluded, so archiving still hides every item.
+   */
+  grantPassageCollectionIds: Set<string>;
 }
 
 /** A human identity that can own an owner-bound private collection. */
@@ -404,6 +420,7 @@ function accessSnapshotFromRows(
   const ownerUserId = collectionOwnerUserId(req);
   const allowedCollectionIds = new Set<string>();
   const selectableCollectionIds = new Set<string>();
+  const grantPassageCollectionIds = new Set<string>();
 
   for (const collection of collections) {
     if (collection.archivedAt) continue;
@@ -430,6 +447,8 @@ function accessSnapshotFromRows(
       )
     ) {
       allowedCollectionIds.add(collection.id);
+    } else {
+      grantPassageCollectionIds.add(collection.id);
     }
     if (
       principal.isAdmin ||
@@ -450,6 +469,7 @@ function accessSnapshotFromRows(
     effectiveGrants,
     allowedCollectionIds,
     selectableCollectionIds,
+    grantPassageCollectionIds,
   };
 }
 

@@ -231,15 +231,8 @@ function buildVisibilitySql(principal: Principal): SQL {
   if (principal.isAdmin) return sql`true`;
 
   const o = contentObjects;
-  const userIdText = principal.userId != null ? String(principal.userId) : null;
-  const roleList = principal.roles;
-  const gradeList = principal.gradeLevels ?? [];
-  // Synced Google group emails (lowercased) the principal belongs to (#1205).
-  // Stored group grant_values are lowercased on write, so this is an exact-match
-  // IN (index-friendly), mirroring the role/grade lists.
-  const groupList = principal.groups ?? [];
-
-  const authenticated = userIdText != null || roleList.length > 0;
+  const authenticated =
+    principal.userId != null || principal.roles.length > 0;
   // INVARIANT: owners always see their own content regardless of visibility level
   // (encoded as the unconditional `OR (${ownerMatch})` in the predicate below).
   // This MUST stay equivalent to `canView`'s owner check (the
@@ -248,9 +241,31 @@ function buildVisibilitySql(principal: Principal): SQL {
   // unconditional form would silently leak that content to owners in `listVisible`
   // — scope it here AND in `canView` in the same commit.
   const ownerMatch =
-    userIdText != null
+    principal.userId != null
       ? sql`${o.ownerUserId} = ${principal.userId}`
       : sql`false`;
+
+  return sql`(
+    ${o.visibilityLevel} = 'public'
+    OR (${o.visibilityLevel} = 'internal' AND ${authenticated ? sql`true` : sql`false`})
+    OR (${ownerMatch})
+    OR ${buildExplicitShareSql(principal)}
+  )`;
+}
+
+/**
+ * The EXPLICIT-SHARE half of `buildVisibilitySql`: the object names the
+ * principal — a `group`-level object with a matching grant, or a `private`
+ * object with a per-user grant. The broad rules (public, internal, owner) are
+ * deliberately NOT here.
+ *
+ * Used on its own by `buildCollectionAccessSql`'s grant-passage branch, which
+ * admits explicitly shared objects through a collection the principal cannot
+ * enter. Mirrored in JS by `explicitShareAdmits`.
+ */
+function buildExplicitShareSql(principal: Principal): SQL {
+  const o = contentObjects;
+  const userIdText = principal.userId != null ? String(principal.userId) : null;
   // `g.grant_value IN (...)` over a bound list. Empty lists render as `false`
   // (postgres rejects both an empty `IN ()` and an empty `ANY(())`). Each value
   // is a separate bound parameter, so this is injection-safe.
@@ -261,9 +276,12 @@ function buildVisibilitySql(principal: Principal): SQL {
           sql`, `
         )})`
       : sql`false`;
-  const roleMatch = inList(roleList);
-  const gradeMatch = inList(gradeList);
-  const groupMatch = inList(groupList);
+  const roleMatch = inList(principal.roles);
+  const gradeMatch = inList(principal.gradeLevels ?? []);
+  // Synced Google group emails (lowercased) the principal belongs to (#1205).
+  // Stored group grant_values are lowercased on write, so this is an exact-match
+  // IN (index-friendly), mirroring the role/grade lists.
+  const groupMatch = inList(principal.groups ?? []);
   const buildingMatch =
     principal.building != null
       ? sql`g.grant_value = ${principal.building}`
@@ -285,10 +303,7 @@ function buildVisibilitySql(principal: Principal): SQL {
       : sql`false`;
 
   return sql`(
-    ${o.visibilityLevel} = 'public'
-    OR (${o.visibilityLevel} = 'internal' AND ${authenticated ? sql`true` : sql`false`})
-    OR (${ownerMatch})
-    OR (${o.visibilityLevel} = 'group' AND EXISTS (
+    (${o.visibilityLevel} = 'group' AND EXISTS (
       SELECT 1 FROM ${contentVisibilityGrants} g
       WHERE g.object_id = ${o.id} AND (
         (g.grant_kind = 'role'       AND ${roleMatch})
@@ -306,18 +321,34 @@ function buildVisibilitySql(principal: Principal): SQL {
 /**
  * Additional collection boundary for permission-pushed object queries.
  * Unfiled objects are unaffected. Filed objects must be in an active collection
- * admitted by the requester (private ownership and inherited ACLs included).
+ * admitted by the requester (private ownership and inherited ACLs included), OR
+ * explicitly shared with the requester through a grant-passage collection (see
+ * `CollectionAccessSnapshot.grantPassageCollectionIds`). Mirrored in JS by
+ * `collectionGate` + `explicitShareAdmits`.
  */
-function buildCollectionAccessSql(allowedCollectionIds: Set<string>): SQL {
-  const ids = [...allowedCollectionIds];
-  const admitted =
-    ids.length > 0
+function buildCollectionAccessSql(
+  access: Pick<
+    CollectionAccessSnapshot,
+    "allowedCollectionIds" | "grantPassageCollectionIds"
+  >,
+  principal: Principal
+): SQL {
+  const inIds = (idSet: Set<string>): SQL => {
+    const ids = [...idSet];
+    return ids.length > 0
       ? sql`${contentObjects.collectionId} IN (${sql.join(
           ids.map((id) => sql`${id}`),
           sql`, `
         )})`
       : sql`false`;
-  return sql`(${contentObjects.collectionId} IS NULL OR ${admitted})`;
+  };
+  const passage =
+    access.grantPassageCollectionIds.size > 0
+      ? sql`(${inIds(access.grantPassageCollectionIds)} AND ${buildExplicitShareSql(principal)})`
+      : sql`false`;
+  return sql`(${contentObjects.collectionId} IS NULL OR ${inIds(
+    access.allowedCollectionIds
+  )} OR ${passage})`;
 }
 
 /** A loaded object's fields `canView` needs (subset of the DTO). */
@@ -568,6 +599,86 @@ async function grantsFor(objectId: string): Promise<VisibilityGrant[]> {
   return rows.map((r) => ({ kind: r.kind, value: r.value }));
 }
 
+/**
+ * `canView`'s collection boundary (mirrors `buildCollectionAccessSql`):
+ *  - `enter`       — unfiled, or a collection the requester may enter; the
+ *                    object's own visibility decides.
+ *  - `shared-only` — a GRANT-PASSAGE collection: only an object explicitly
+ *                    shared with the requester is reachable through it.
+ *  - `deny`        — anything else.
+ *
+ * Batch callers pass one request-scoped snapshot so N concurrent object checks
+ * do not each reload the complete collection/grant hierarchy.
+ */
+async function collectionGate(
+  req: Requester,
+  obj: ViewableObject,
+  collectionAccess: CollectionAccessSnapshot | undefined
+): Promise<"enter" | "shared-only" | "deny"> {
+  if (obj.collectionId == null) return "enter";
+  const mayEnter = collectionAccess
+    ? collectionAccess.allowedCollectionIds.has(obj.collectionId)
+    : await requesterMayViewCollection(req, obj.collectionId);
+  if (mayEnter) return "enter";
+  const access = collectionAccess ?? (await collectionAccessSnapshot(req));
+  return access.grantPassageCollectionIds.has(obj.collectionId)
+    ? "shared-only"
+    : "deny";
+}
+
+/**
+ * JS mirror of `buildExplicitShareSql`: the object names the principal — a
+ * `group`-level object with a matching grant, or a `private` object with a
+ * per-user grant. Used by `canView` for those two levels AND for the
+ * grant-passage branch of its collection gate.
+ */
+async function explicitShareAdmits(
+  principal: Principal,
+  obj: ViewableObject
+): Promise<boolean> {
+  if (obj.visibilityLevel === "private") {
+    // Private is owner/admin only, plus any explicit per-user grant. A caller
+    // with no userId (anonymous / autonomous-agent) can never match a `user`
+    // grant, so skip the grantsFor DB round-trip entirely — both for efficiency
+    // AND to close the timing side-channel that the existence-masking
+    // (notFound vs forbidden) is meant to remove. The SQL path
+    // (buildExplicitShareSql.privateUserGrant) short-circuits the same way.
+    if (principal.userId == null) return false;
+    const grants = await grantsFor(obj.id);
+    return grants.some(
+      (g) => g.kind === "user" && String(principal.userId) === g.value
+    );
+  }
+
+  if (obj.visibilityLevel === "group") {
+    // Gate the grant sweep on the `group` level explicitly — `buildExplicitShareSql`
+    // gates its EXISTS subquery with `AND visibility_level = 'group'`, so a stale
+    // grant on a non-group object (a direct DB edit or a future migration path)
+    // must NOT authorize a principal here that the SQL predicate would deny. The
+    // explicit `=== "group"` check keeps the two paths equivalent AND skips the DB
+    // round-trip for any non-group level (which never consults grants).
+    const grants = await grantsFor(obj.id);
+    return grants.some(
+      (g) =>
+        (g.kind === "role" && principal.roles.includes(g.value)) ||
+        (g.kind === "building" && principal.building === g.value) ||
+        (g.kind === "department" && principal.department === g.value) ||
+        (g.kind === "grade" &&
+          (principal.gradeLevels ?? []).includes(g.value)) ||
+        (g.kind === "user" &&
+          principal.userId != null &&
+          String(principal.userId) === g.value) ||
+        // `group` grant: the viewer is a member of the granted Google group
+        // (#1205). Both `principal.groups` and the stored grant value are
+        // lowercased, so this exact match mirrors buildExplicitShareSql's
+        // `g.grant_kind = 'group' AND g.grant_value IN (groupList)`.
+        (g.kind === "group" && (principal.groups ?? []).includes(g.value))
+    );
+  }
+
+  return false;
+}
+
 export const visibilityService = {
   grantsFor,
 
@@ -586,16 +697,11 @@ export const visibilityService = {
     obj: ViewableObject,
     collectionAccess?: CollectionAccessSnapshot
   ): Promise<boolean> {
-    // Batch callers pass one request-scoped snapshot so N concurrent object
-    // checks do not each reload the complete collection/grant hierarchy.
-    const collectionVisible =
-      obj.collectionId == null ||
-      (collectionAccess
-        ? collectionAccess.allowedCollectionIds.has(obj.collectionId)
-        : await requesterMayViewCollection(req, obj.collectionId));
-    if (!collectionVisible) {
-      return false;
+    const gate = await collectionGate(req, obj, collectionAccess);
+    if (gate === "shared-only") {
+      return explicitShareAdmits(principalOf(req), obj);
     }
+    if (gate === "deny") return false;
     if (obj.visibilityLevel === "public") return true;
 
     const principal = principalOf(req);
@@ -616,44 +722,8 @@ export const visibilityService = {
       return true;
     }
 
-    if (obj.visibilityLevel === "private") {
-      // Private is owner/admin only, plus any explicit per-user grant. A caller
-      // with no userId (anonymous / autonomous-agent) can never match a `user`
-      // grant, so skip the grantsFor DB round-trip entirely — both for efficiency
-      // AND to close the timing side-channel that the existence-masking
-      // (notFound vs forbidden) is meant to remove. The SQL path
-      // (buildVisibilitySql.privateUserGrant) short-circuits the same way.
-      if (principal.userId == null) return false;
-      const grants = await grantsFor(obj.id);
-      return grants.some(
-        (g) => g.kind === "user" && String(principal.userId) === g.value
-      );
-    }
-
-    if (obj.visibilityLevel === "group") {
-      // Gate the grant sweep on the `group` level explicitly — `buildVisibilitySql`
-      // gates its EXISTS subquery with `AND visibility_level = 'group'`, so a stale
-      // grant on a non-group object (a direct DB edit or a future migration path)
-      // must NOT authorize a principal here that the SQL predicate would deny. The
-      // explicit `=== "group"` check keeps the two paths equivalent AND skips the DB
-      // round-trip for any non-group level (which never consults grants).
-      const grants = await grantsFor(obj.id);
-      return grants.some(
-        (g) =>
-          (g.kind === "role" && principal.roles.includes(g.value)) ||
-          (g.kind === "building" && principal.building === g.value) ||
-          (g.kind === "department" && principal.department === g.value) ||
-          (g.kind === "grade" &&
-            (principal.gradeLevels ?? []).includes(g.value)) ||
-          (g.kind === "user" &&
-            principal.userId != null &&
-            String(principal.userId) === g.value) ||
-          // `group` grant: the viewer is a member of the granted Google group
-          // (#1205). Both `principal.groups` and the stored grant value are
-          // lowercased, so this exact match mirrors buildVisibilitySql's
-          // `g.grant_kind = 'group' AND g.grant_value IN (groupList)`.
-          (g.kind === "group" && (principal.groups ?? []).includes(g.value))
-      );
+    if (obj.visibilityLevel === "private" || obj.visibilityLevel === "group") {
+      return explicitShareAdmits(principal, obj);
     }
 
     // Any level not handled above (e.g. a future level added to the enum but not
@@ -821,7 +891,8 @@ export const visibilityService = {
     const o = contentObjects;
     const visiblePredicate = buildVisibilitySql(principal);
     const collectionPredicate = buildCollectionAccessSql(
-      (await collectionAccessSnapshot(req)).allowedCollectionIds
+      await collectionAccessSnapshot(req),
+      principal
     );
     const rows = await executeQuery(
       (db: DrizzleDB) =>
@@ -873,7 +944,8 @@ export const visibilityService = {
     const o = contentObjects;
     const visiblePredicate = buildVisibilitySql(principal);
     const collectionPredicate = buildCollectionAccessSql(
-      (await collectionAccessSnapshot(req)).allowedCollectionIds
+      await collectionAccessSnapshot(req),
+      principal
     );
 
     const filters = [
@@ -1084,7 +1156,8 @@ export const visibilityService = {
     const o = contentObjects;
     const visiblePredicate = buildVisibilitySql(principal);
     const collectionPredicate = buildCollectionAccessSql(
-      (await collectionAccessSnapshot(req)).allowedCollectionIds
+      await collectionAccessSnapshot(req),
+      principal
     );
     const cap = Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 50) : 12;
     // LIKE-escaped and length-bounded exactly like the `filter.tag` prefix arm,

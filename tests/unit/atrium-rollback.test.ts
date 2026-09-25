@@ -69,6 +69,13 @@ jest.mock("@/lib/content/visibility-service", () => ({
   },
 }));
 
+// A Live object's publication follows the restored head (the same rule as a
+// save). Mocked here; the SQL itself is exercised against Postgres separately.
+const advanceLiveMock = jest.fn(async (..._args: unknown[]): Promise<number> => 1);
+jest.mock("@/lib/content/live-publication", () => ({
+  advanceLivePublications: (...args: unknown[]) => advanceLiveMock(...args),
+}));
+
 // retrieval-service is imported LAZILY by version-service (to avoid the
 // content<->retrieval module cycle); jest intercepts the dynamic import through
 // the module registry. rollback re-indexes the rolled-back head best-effort.
@@ -204,6 +211,21 @@ describe("versionService.rollback", () => {
     await versionService.rollback(owner, "o1", "v1");
     expect(indexObjectMock).toHaveBeenCalledTimes(1);
     expect(indexObjectMock).toHaveBeenCalledWith("o1");
+  });
+
+  it("advances the Live publication onto the restored version", async () => {
+    txResults = [[{ id: "v1" }], [{ id: "o1" }]];
+    advanceLiveMock.mockClear();
+    await versionService.rollback(owner, "o1", "v1");
+    expect(advanceLiveMock).toHaveBeenCalledWith("o1", "v1");
+  });
+
+  it("does not fail the rollback when advancing Live throws (best-effort)", async () => {
+    txResults = [[{ id: "v1" }], [{ id: "o1" }]];
+    advanceLiveMock.mockRejectedValueOnce(new Error("db blip"));
+    await expect(
+      versionService.rollback(owner, "o1", "v1")
+    ).resolves.toBeUndefined();
   });
 
   it("does not fail the rollback when the retrieval re-index throws (best-effort)", async () => {

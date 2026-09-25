@@ -47,13 +47,16 @@ import "@/styles/atrium-content.css";
 type Tab = "preview" | "code";
 type LoadState = "loading" | "ready" | "error";
 
-/** Label for a version in the dropdown: "v3 · AI (current)". */
+/** Label for a version in the dropdown: "v3 · AI (current, live)". */
 function versionLabel(v: VersionSummary): string {
   // Never "· you": VersionSummary intentionally omits authorUserId
   // (anti-enumeration), so we cannot know whether the human author is the
   // current viewer. The shared helper keeps this dropdown, the History dialog
   // and the About rail phrasing one version's provenance identically (#1791).
-  return `v${v.versionNumber} · ${versionAuthorLabel(v)}${v.isCurrent ? " (current)" : ""}`;
+  const tags = [v.isCurrent ? "current" : null, v.isLive ? "live" : null].filter(
+    (t): t is string => t != null
+  );
+  return `v${v.versionNumber} · ${versionAuthorLabel(v)}${tags.length > 0 ? ` (${tags.join(", ")})` : ""}`;
 }
 
 /** A just-created head version's summary fields (subset of ContentVersionDTO). */
@@ -85,6 +88,9 @@ function withOptimisticHead(prev: VersionSummary[], head: NewHead): VersionSumma
       summary: head.summary,
       createdAt: head.createdAt,
       isCurrent: true,
+      // Unknown until the authoritative refresh: the server decides whether the
+      // save advanced Live (it usually does).
+      isLive: false,
     },
     ...prev.map((v) => ({ ...v, isCurrent: false })),
   ];

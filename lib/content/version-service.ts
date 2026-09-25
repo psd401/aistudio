@@ -38,6 +38,7 @@ import {
 } from "@/lib/db/schema";
 import { parseEmbeddedArtifactIds } from "./embed-directive";
 import { pinVersionAssetsInTx } from "./asset-references";
+import { advanceLivePublications } from "./live-publication";
 import { pgTimestampAsText } from "@/lib/db/drizzle-helpers";
 import { createLogger } from "@/lib/logger";
 import {
@@ -568,6 +569,9 @@ async function snapshotScreened(
     "content.snapshot",
   );
   await flushSnapshotWrites(s3Writes);
+  // A save to a Live object is the update: advance the Live pin onto the new
+  // head now that its body is readable (see `advanceLivePublications`).
+  await advanceLivePublicationsBestEffort(obj.id, version.id, "content.snapshot");
 
   // Emit after the row commits + blobs flush (§27): drives re-index of the new
   // head. Best-effort — never rolls back a committed version. Fire-and-forget
@@ -772,8 +776,8 @@ export const versionService = {
   /**
    * Point the object's working head at an earlier version, enforcing edit
    * permission. Validates the target version belongs to the object.
-   * Re-publishing the rolled-back version is an explicit, separate step
-   * (publish service, Phase 5/7).
+   * A Live object's publication follows the restored head (see
+   * `advanceLivePublications`), exactly as it follows a save.
    */
   async rollback(
     req: Requester,
@@ -863,6 +867,12 @@ export const versionService = {
       }
     }, "content.rollback");
     log.info("Rolled back content head", { objectId, toVersionId });
+    // The restored version becomes Live too, under the same rules as a save.
+    await advanceLivePublicationsBestEffort(
+      objectId,
+      toVersionId,
+      "content.rollback",
+    );
 
     // Refresh the retrieval index (§16). The index stores a PERSISTED snapshot of
     // the head version's chunked text, so repointing the working head above changes
@@ -873,6 +883,33 @@ export const versionService = {
     await reindexAfterRollbackBestEffort(objectId);
   },
 };
+
+/**
+ * Advance a Live object's publication onto its new head. Best-effort: the
+ * version has already committed, and a failure here leaves Live on the previous
+ * version (the pre-change behavior) rather than failing the save.
+ */
+async function advanceLivePublicationsBestEffort(
+  objectId: string,
+  versionId: string,
+  action: string,
+): Promise<void> {
+  try {
+    const advanced = await advanceLivePublications(objectId, versionId);
+    if (advanced > 0) {
+      createLogger({ action }).info("Advanced Live publication to new head", {
+        objectId,
+        versionId,
+      });
+    }
+  } catch (error) {
+    createLogger({ action }).warn("Failed to advance Live publication", {
+      objectId,
+      versionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
 
 /**
  * Best-effort retrieval-index refresh after a rollback repoints the working head.

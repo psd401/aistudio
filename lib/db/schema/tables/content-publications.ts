@@ -8,8 +8,10 @@
  * See docs/features/atrium-design-spec.md §7.6 and §15 (publishing).
  *
  * ## Columns of note
- * - `published_version_id` — what is actually live; may lag the object's
- *   `current_version_id` until an explicit republish.
+ * - `published_version_id` — what is actually live. Every save advances it to
+ *   the new `current_version_id` (`advanceLivePublications`) except in a
+ *   `requires_approval` collection or across a data-bridge mode change, where it
+ *   lags until an explicit republish.
  * - `external_ref` — destination-specific identifier (public URL, Schoology/Google
  *   id) populated by the publish adapter.
  *

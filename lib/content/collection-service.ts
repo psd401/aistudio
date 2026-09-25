@@ -160,7 +160,8 @@ function flattenDiscoveryTree(
  *  - internal → any authenticated principal (a user id or a role).
  *  - private  → admin only.
  *  - group    → not satisfiable at the collection level (no collection grants);
- *               such a section surfaces only when it contains a visible object.
+ *               such a section surfaces only when it contains a visible object
+ *               (see `computeKeepSet`).
  *
  * Admin short-circuits for district collections; owner-bound private rows never
  * reach this fallback unless the requester is their owner.
@@ -190,10 +191,35 @@ function indexCollections(
 }
 
 /**
+ * Whether an ENTERABLE collection is directly visible: its level/ACL admits the
+ * principal, or it holds ≥1 visible object.
+ */
+function enteredDirectly(
+  c: CollectionRow,
+  principal: Principal,
+  hasVisibleObject: boolean,
+  access: CollectionAccessSnapshot
+): boolean {
+  if (!access.allowedCollectionIds.has(c.id)) return false;
+  return (
+    hasVisibleObject ||
+    c.ownerUserId != null ||
+    access.effectiveGrants(c.id, "view").length > 0 ||
+    levelAdmitsPrincipal(principal, c.defaultVisibilityLevel)
+  );
+}
+
+/**
  * The set of collection ids to KEEP: every directly-visible collection (its level
  * admits the principal OR it holds ≥1 visible object) plus every requester-
  * admitted ancestor. Denied ancestors are never added merely to preserve the
  * canonical hierarchy; the returned tree compresses across those gaps instead.
+ *
+ * "Holds ≥1 visible object" includes a GRANT-PASSAGE collection the requester
+ * cannot enter but where an object is explicitly shared with them: the count
+ * comes from the same collection-access SQL that admits exactly those objects,
+ * so a nonzero count is never a leak. Without this, sharing an item with a group
+ * left it invisible to that group everywhere.
  */
 function computeKeepSet(
   collections: CollectionRow[],
@@ -204,15 +230,16 @@ function computeKeepSet(
 ): Set<string> {
   const keep = new Set<string>();
   for (const c of collections) {
-    const allowed = access.allowedCollectionIds.has(c.id);
-    const hasViewAcl = access.effectiveGrants(c.id, "view").length > 0;
-    const levelOk =
-      allowed &&
-      (c.ownerUserId != null ||
-        hasViewAcl ||
-        levelAdmitsPrincipal(principal, c.defaultVisibilityLevel));
     const hasVisibleObject = (visibleCountByCollection.get(c.id) ?? 0) > 0;
-    if (!levelOk && !(allowed && hasVisibleObject)) continue;
+    const sharedInto =
+      hasVisibleObject && access.grantPassageCollectionIds.has(c.id);
+    if (
+      !sharedInto &&
+      !enteredDirectly(c, principal, hasVisibleObject, access)
+    ) {
+      continue;
+    }
+    if (sharedInto) keep.add(c.id);
 
     // Directly visible: mark it and each admitted ancestor. Keep walking past a
     // denied ancestor so an independently admitted grandparent can still provide
@@ -421,14 +448,21 @@ export const collectionService = {
           defaultVisibilityLevel: c.defaultVisibilityLevel,
           navItemId: c.navItemId,
           position: c.position,
-          selectableForCreate: access.selectableCollectionIds.has(c.id),
+          // A grant-passage section (kept only for items shared with the
+          // requester) never offers authoring: they cannot enter it.
+          selectableForCreate:
+            access.selectableCollectionIds.has(c.id) &&
+            access.allowedCollectionIds.has(c.id),
           canManage:
             c.ownerUserId == null
               ? principal.isAdmin
               : principal.userId !== undefined && c.ownerUserId === principal.userId,
           description: c.description,
           landingObjectId: c.landingObjectId,
-          hasHeroImage: Boolean(c.heroImageKey),
+          // The hero route serves only collections the requester may ENTER; a
+          // grant-passage section (shared items only) shows no hero.
+          hasHeroImage:
+            Boolean(c.heroImageKey) && access.allowedCollectionIds.has(c.id),
           heroImageAlt: c.heroImageAlt,
           visibleObjectCount: visibleCountByCollection.get(c.id) ?? 0,
           children: build(c.id),

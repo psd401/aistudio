@@ -59,6 +59,10 @@ jest.mock("@/lib/content/version-service", () => ({
   },
 }));
 
+jest.mock("@/lib/content/live-publication", () => ({
+  livePublishedVersionId: async () => "v1",
+}));
+
 const hasCapabilityAccessMock = jest.fn(async (..._args: unknown[]) => true);
 jest.mock("@/utils/roles", () => ({
   hasCapabilityAccess: (...args: unknown[]) => hasCapabilityAccessMock(...args),
@@ -113,8 +117,11 @@ describe("listContentVersionsAction — both kinds, canView-gated", () => {
       summary: "human revision",
       createdAt: "2026-07-01T00:00:00Z",
       isCurrent: true,
+      isLive: false,
     });
     expect(result.data[1].isCurrent).toBe(false);
+    // The Live marker follows the publication's pin, not the head.
+    expect(result.data[1].isLive).toBe(true);
     // authorUserId is a raw internal id — it must never reach the client
     // (anti-enumeration, same contract as listVersionsAction).
     expect("authorUserId" in result.data[0]).toBe(false);

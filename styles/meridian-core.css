@@ -55,6 +55,12 @@
   /* Cap the width — the base non-wide DialogContent is `w-full` with no
    * max-width, so without this every Atrium modal stretches edge-to-edge. */
   max-width: min(520px, calc(100vw - 32px));
+  /* The base content is a `grid` with no column template, so its single
+   * implicit column sizes to its widest child's min-content. A long nowrap
+   * value (e.g. the Share dialog's link URL) then widens the column past the
+   * max-width above and every row spills out of the box. Pin the column to the
+   * box so children shrink and their own ellipsis/wrap rules take effect. */
+  grid-template-columns: minmax(0, 1fr);
 }
 /* Keep opt-in wide dialogs (data-wide-mode) at their own size. */
 .meridian-portal[data-slot="dialog-content"][data-wide-mode="active"] {
@@ -3107,6 +3113,17 @@ li[data-dragging="true"] > div {
   letter-spacing: 0.06em;
   color: var(--mer-brand);
   background: var(--mer-brand-tint);
+  padding: 3px 9px;
+  border-radius: var(--mer-r-pill);
+  white-space: nowrap;
+}
+/* Editors only: the Live page is behind the latest save (review-gated). */
+.mer-reader-pill-pending {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--mer-draft);
+  background: var(--mer-draft-tint);
   padding: 3px 9px;
   border-radius: var(--mer-r-pill);
   white-space: nowrap;

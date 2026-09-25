@@ -54,6 +54,13 @@ export interface ReaderFrameProps {
   publishedAt: Date | string | null;
   /** The object's collection name for the meta line, or null. */
   collectionName: string | null;
+  /**
+   * Whether the Live version is the object's latest saved version. Saves
+   * advance Live automatically, so this is only false in a review-gated
+   * collection or after a data-bridge mode change: editors then see that an
+   * update is waiting, readers see no status pill. Defaults to true.
+   */
+  liveIsCurrent?: boolean;
   /** Rendered-document headings for the TOC ([] ⇒ no TOC, e.g. artifact readers). */
   headings: DocumentHeading[];
   /** Cover-gradient preset key (slice F), or null for no cover band. */
@@ -206,6 +213,34 @@ function ReaderBarActions({
 }
 
 /**
+ * The reader's status pill. "UP TO DATE" only when the Live version is the
+ * latest save; otherwise editors are told an update is waiting (it needs review
+ * or an explicit republish) and readers get no claim either way.
+ */
+function ReaderStatusPill({
+  liveIsCurrent,
+  viewOnly,
+}: {
+  /** Absent ⇒ current (the public reader never passes it). */
+  liveIsCurrent: boolean | undefined;
+  viewOnly: boolean;
+}): React.JSX.Element | null {
+  if (liveIsCurrent !== false) {
+    return (
+      <span className="mer-reader-pill-uptodate" data-testid="reader-uptodate">
+        UP TO DATE
+      </span>
+    );
+  }
+  if (viewOnly) return null;
+  return (
+    <span className="mer-reader-pill-pending" data-testid="reader-update-pending">
+      UPDATE PENDING REVIEW
+    </span>
+  );
+}
+
+/**
  * Full-bleed reader variant: a slim header bar (title · meta · UP TO DATE ·
  * edit/view-only) over an edge-to-edge, viewport-filling stage — used by the
  * artifact readers so an interactive artifact isn't boxed into the 720px sheet.
@@ -220,12 +255,14 @@ function FullBleedReaderFrame({
   commentCount,
   editHref,
   fullScreenHref,
+  liveIsCurrent,
   children,
   footer,
 }: {
   title: string;
   authenticated: boolean;
   viewOnly: boolean;
+  liveIsCurrent: boolean | undefined;
   metaBits: string[];
   commentHref: string | null;
   commentCount: number;
@@ -244,9 +281,7 @@ function FullBleedReaderFrame({
           <h1 className="mer-reader-artifact-title">{title}</h1>
           <div className="mer-reader-artifact-meta">
             {metaBits.length > 0 && <span>{metaBits.join(" · ")}</span>}
-            <span className="mer-reader-pill-uptodate" data-testid="reader-uptodate">
-              UP TO DATE
-            </span>
+            <ReaderStatusPill liveIsCurrent={liveIsCurrent} viewOnly={viewOnly} />
           </div>
         </div>
         <div className="mer-reader-artifact-bar-actions">
@@ -281,6 +316,7 @@ export function ReaderFrame({
   fullBleed = false,
   surface = "app",
   fullScreenHref = null,
+  liveIsCurrent,
 }: ReaderFrameProps): React.JSX.Element {
   const isPublic = surface === "public";
   const viewOnly = editHref === null;
@@ -308,6 +344,7 @@ export function ReaderFrame({
         commentCount={commentCount}
         editHref={editHref}
         fullScreenHref={fullScreenHref}
+        liveIsCurrent={liveIsCurrent}
         footer={footer}
       >
         {children}
@@ -356,12 +393,10 @@ export function ReaderFrame({
 
             <div className="mer-reader-meta">
               {metaBits.length > 0 && <span>{metaBits.join(" · ")}</span>}
-              <span
-                className="mer-reader-pill-uptodate"
-                data-testid="reader-uptodate"
-              >
-                UP TO DATE
-              </span>
+              <ReaderStatusPill
+                liveIsCurrent={liveIsCurrent}
+                viewOnly={viewOnly}
+              />
             </div>
 
             {children}

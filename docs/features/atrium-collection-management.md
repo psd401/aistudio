@@ -85,6 +85,42 @@ object's group-visibility grants. A personal collection left at the `private`
 default still produces private content; one its owner has shared at `group`
 seeds new objects with that collection's own grants.
 
+### Items shared into a restricted collection (grant passage)
+
+Sharing an item with a person or group must actually reach them. An object that
+names the requester explicitly — a `group`-level object with a matching grant, or
+a `private` object with a per-user grant — is reachable through an active
+district collection the requester cannot otherwise enter:
+
+- The item opens and appears in the library, the collection listing and
+  "Shared with me".
+- The collection appears in the sidebar, counting and listing ONLY the items
+  shared with the requester. Its `internal`/`public` siblings stay behind the
+  collection gate, it offers no authoring (`selectableForCreate: false`), and
+  its hero image is not served.
+- Denied ancestors stay hidden; the collection re-roots at the nearest ancestor
+  the requester may enter, exactly as above.
+- Personal (owner-bound) and archived collections never grant passage.
+
+`CollectionAccessSnapshot.grantPassageCollectionIds` holds the candidate
+collections; `buildCollectionAccessSql` (list/count SQL) and `canView`'s
+`collectionGate` + `explicitShareAdmits` (point reads) apply the same rule.
+
+## Live pages follow the latest save
+
+A save to a Live object advances its publication onto the new version
+(`advanceLivePublications`, run after the version's body is flushed to S3; a
+version restore does the same). Readers of `/c/{slug}` always get the latest
+saved version, with no Republish. Live stays pinned — and the reader shows
+editors "UPDATE PENDING REVIEW" instead of "UP TO DATE" — only when:
+
+- the collection has `requires_approval` (below): an approver moves Live, or
+- the new version's data-bridge mode differs from the Live version's (#1789):
+  the author republishes through the Share dialog, which discloses what the
+  page shares.
+
+Migration 185 applied the same rule once to every publication already behind.
+
 ## Publish review (migration 178)
 
 `content_collections.requires_approval` is a per-collection OPT-IN, default
