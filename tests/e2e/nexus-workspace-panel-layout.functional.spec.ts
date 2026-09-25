@@ -137,10 +137,12 @@ test.describe("Nexus workspace panel layout (#1793)", () => {
     const narrowContainer = await splitWidth();
     const narrowPanel = await panelWidth();
     expect(narrowContainer - narrowPanel).toBeGreaterThanOrEqual(319);
-    // The handle announces what is on screen, not the stored preference.
+    // The handle announces what is on screen, not the stored preference. Its
+    // value is the DIVIDER's position from the left, so it is the complement of
+    // the panel's share of the split.
     const announced = await handle.getAttribute("aria-valuenow");
     expect(Number(announced)).toBeCloseTo(
-      Math.round((narrowPanel / narrowContainer) * 100),
+      Math.round((1 - narrowPanel / narrowContainer) * 100),
       0
     );
 
@@ -153,6 +155,35 @@ test.describe("Nexus workspace panel layout (#1793)", () => {
       path: ".verification/1793-workspace-panel-resized.png",
       fullPage: false,
     });
+  });
+
+  test("the divider is reachable and moves the right way from the keyboard", async ({
+    page,
+  }) => {
+    const id = await createArtifact(page);
+    await page.goto(`/nexus?workspace=${id}`);
+    const panel = page.getByTestId("workspace-panel");
+    await expect(panel).toBeVisible({ timeout: 60_000 });
+    const panelWidth = async () =>
+      panel.evaluate((el) => el.getBoundingClientRect().width);
+
+    const handle = page.getByTestId("workspace-resize-handle");
+    await handle.focus();
+    await expect(handle).toBeFocused();
+
+    // The exposed value is the divider's position from the left, so Left moves
+    // it left — the panel grows and the announced value goes DOWN.
+    const before = await panelWidth();
+    const valueBefore = Number(await handle.getAttribute("aria-valuenow"));
+    await page.keyboard.press("ArrowLeft");
+    expect(await panelWidth()).toBeGreaterThan(before);
+    expect(
+      Number(await handle.getAttribute("aria-valuenow"))
+    ).toBeLessThan(valueBefore);
+
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowRight");
+    expect(await panelWidth()).toBeLessThan(before);
   });
 
   test("the composer dock and the starter cards fit the narrowed chat column", async ({

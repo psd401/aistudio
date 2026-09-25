@@ -101,12 +101,21 @@ export function WorkspaceResizeHandle({
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
-      // Left widens the panel (the divider moves left), right narrows it.
-      const direction =
-        event.key === "ArrowLeft" ? 1 : event.key === "ArrowRight" ? -1 : 0;
-      if (direction === 0) return;
+      // The value this control exposes is the DIVIDER's position from the left
+      // (see the aria-* below), so the slider convention and the spatial
+      // meaning agree: Right/Up move the divider right and the panel narrows,
+      // Left/Down move it left and the panel widens. Up/Down are accepted as
+      // well as Left/Right because a slider is expected to answer to both.
+      const towardsRight =
+        event.key === "ArrowRight" || event.key === "ArrowUp"
+          ? 1
+          : event.key === "ArrowLeft" || event.key === "ArrowDown"
+            ? -1
+            : 0;
+      if (towardsRight === 0) return;
       event.preventDefault();
-      const next = widthPct + direction * KEYBOARD_STEP_PCT;
+      // Divider right = panel smaller, hence the sign flip.
+      const next = widthPct - towardsRight * KEYBOARD_STEP_PCT;
       onResize(next);
       onCommit(next);
     },
@@ -121,11 +130,19 @@ export function WorkspaceResizeHandle({
       // `slider` is interactive, takes the same aria-value* contract, and
       // announces exactly what this control does — move a value with arrows.
       role="slider"
-      aria-orientation="vertical"
-      aria-label="Resize workspace panel"
-      // The consumer clamps, so the rendered fraction is always within range;
-      // rounding keeps the announced value from reading as noise.
-      aria-valuenow={Math.round(widthPct * 100)}
+      // HORIZONTAL: the value moves along the horizontal axis, and the keys
+      // that change it are Left/Right (plus Up/Down, per the slider pattern).
+      // Announcing "vertical" would point a screen-reader user at the axis the
+      // control does not travel on.
+      aria-orientation="horizontal"
+      aria-label="Workspace panel divider"
+      // The DIVIDER's position as a percentage from the left of the split, not
+      // the panel's width — so a larger value means the divider is further
+      // right, which is what "increase" has to mean for a horizontal slider.
+      // The consumer clamps, so it is always in range; rounding keeps the
+      // announced value from reading as noise.
+      aria-valuenow={Math.round((1 - widthPct) * 100)}
+      aria-valuetext={`Workspace panel ${Math.round(widthPct * 100)}% of the width`}
       aria-valuemin={0}
       aria-valuemax={100}
       tabIndex={0}

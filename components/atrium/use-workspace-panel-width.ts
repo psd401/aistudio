@@ -79,14 +79,14 @@ export function useWorkspacePanelWidth(): WorkspacePanelWidth {
   useEffect(() => {
     const parent = asideRef.current?.parentElement;
     if (!parent) return;
-    setContainerWidth(parent.getBoundingClientRect().width);
+    const measure = () => setContainerWidth(parent.getBoundingClientRect().width);
+    measure();
     // Absent in some test environments (jsdom) — the CSS bounds still hold, so
     // degrade to the unobserved behaviour rather than throwing.
     if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver((entries) => {
-      const entry = entries[0];
-      if (entry) setContainerWidth(entry.contentRect.width);
-    });
+    // Re-measures the element rather than reading the entry, matching
+    // `use-presence.ts` and keeping one source of truth for the number.
+    const observer = new ResizeObserver(measure);
     observer.observe(parent);
     return () => observer.disconnect();
   }, []);
