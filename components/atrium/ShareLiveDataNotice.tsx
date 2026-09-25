@@ -32,9 +32,13 @@ import {
 export const LIVE_DATA_NOTICE_TEXT =
   "This page shows live PSD data. Each person sees only what their own district permissions allow. People without PSD Data access will see an access message.";
 
-/** Why the Public level is the one audience live data cannot serve. */
+/**
+ * Why the Public level is the one audience live data cannot serve. Leads with
+ * the consequence (a skimming author stops after the first clause), then the
+ * reason, then the fix — the Level picker is right above it.
+ */
 export const PUBLIC_LIVE_DATA_WARNING_TEXT =
-  "Live data doesn't load on the public web: the public page has no signed-in viewer to read the data as, so a public visitor sees an access message instead of the dashboard.";
+  "Public visitors see an access message instead of the dashboard: live data needs a signed-in viewer to read it as, and the public page has none. Choose Internal or Group to share the live data.";
 
 /** The notice at the top of the Share dialog. Renders nothing off `query` mode. */
 export function ShareLiveDataNotice({

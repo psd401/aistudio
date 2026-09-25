@@ -90,6 +90,11 @@ export interface ArtifactMetaRailProps {
    * live district data" was reachable only from the Content settings dialog.
    */
   dataAccess: ContentDataAccess;
+  /**
+   * The control that opens Content settings, rendered inline in the live-data
+   * note so "change this" is one click away (#1790). Plain text when omitted.
+   */
+  settingsLink?: React.ReactNode;
   /** Viewer-visible documents that embed this artifact. */
   backlinks: EmbeddingDocument[];
 }
@@ -113,6 +118,7 @@ export function ArtifactMetaRail({
   headAuthorActor = null,
   visibilityLevel,
   dataAccess,
+  settingsLink = "Content settings",
   backlinks,
 }: ArtifactMetaRailProps): React.JSX.Element {
   // #1791: the object-level `agentMaintained` flag and the head version's
@@ -151,7 +157,7 @@ export function ArtifactMetaRail({
         {isLiveDataObject(dataAccess) && (
           <p className="mer-artifact-about-note" data-testid="artifact-data-note">
             Every reader sees only the data their own district permissions allow.
-            Change this in Content settings.
+            Change this in {settingsLink}.
           </p>
         )}
       </div>

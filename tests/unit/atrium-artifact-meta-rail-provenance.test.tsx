@@ -74,6 +74,24 @@ describe("ArtifactMetaRail data-access row", () => {
     expect(text).toContain("their own district permissions");
   });
 
+  it("renders the Content settings control inline in the live-data note", () => {
+    render(
+      <ArtifactMetaRail
+        artifactId="obj-1"
+        agentMaintained={false}
+        updatedAt={null}
+        versionNumber={2}
+        visibilityLevel="private"
+        dataAccess="query"
+        settingsLink={<button type="button">Content settings</button>}
+        backlinks={[]}
+      />
+    );
+    const note = screen.getByTestId("artifact-data-note");
+    expect(note.querySelector("button")?.textContent).toBe("Content settings");
+    expect(note.textContent).toContain("Change this in Content settings.");
+  });
+
   it("does not claim live data for a records-mode artifact", () => {
     const text = renderRail({ agentMaintained: false, dataAccess: "records" });
     expect(text).toContain("Saves reader entries");

@@ -98,6 +98,14 @@ test.describe("Atrium live-data sharing (#1790)", () => {
         fullPage: false,
       });
 
+      // The note's "Content settings" is a working control, not a direction to
+      // go find one: it opens the same dialog as the topbar gear.
+      await page.getByTestId("artifact-data-note-settings").click();
+      const settings = page.getByRole("dialog", { name: "Content settings" });
+      await expect(settings).toBeVisible({ timeout: 30_000 });
+      await page.keyboard.press("Escape");
+      await expect(settings).toHaveCount(0);
+
       // Fix 1: open Share. The notice is the first thing in the dialog.
       await page.getByRole("button", { name: /^Share/ }).first().click();
       const notice = page.getByTestId("share-live-data-notice");
@@ -126,8 +134,9 @@ test.describe("Atrium live-data sharing (#1790)", () => {
       const warning = page.getByTestId("share-live-data-public-warning");
       await expect(warning).toBeVisible();
       await expect(warning).toContainText(
-        "Live data doesn't load on the public web"
+        "Public visitors see an access message"
       );
+      await expect(warning).toContainText("Choose Internal or Group");
       await page.screenshot({
         path: ".verification/1790-share-public-live-data-warning.png",
         fullPage: false,

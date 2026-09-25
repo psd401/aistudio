@@ -2683,6 +2683,22 @@ li[data-dragging="true"] > div {
      muted ink (#8394a0) is ~3.1:1 on white — under WCAG AA's 4.5:1 at 11.5px. */
   color: var(--mer-ink-secondary);
 }
+/* Inline "Content settings" in the note above: a button that reads as a link. */
+.mer-artifact-about-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--mer-brand);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.mer-artifact-about-link:focus-visible {
+  outline: 2px solid var(--mer-brand);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
 .mer-artifact-rail-empty {
   font-size: 12.5px;
   color: var(--mer-ink-muted);

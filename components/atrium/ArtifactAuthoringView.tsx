@@ -81,6 +81,25 @@ async function resolveSharedDataAccess(
   return resolveVersionDataAccess(version, obj.dataAccess);
 }
 
+/**
+ * The rail note's inline "Content settings" (#1790): the same dialog as the
+ * topbar gear, opened from the sentence that tells the author to go there.
+ */
+function RailSettingsLink({ obj }: { obj: ContentObjectDTO }): React.JSX.Element {
+  return (
+    <ContentSettings
+      objectId={obj.id}
+      title={obj.title}
+      tags={obj.tags}
+      collectionId={obj.collectionId}
+      status={obj.status}
+      kind={obj.kind}
+      dataAccess={obj.dataAccess}
+      trigger="inline-link"
+    />
+  );
+}
+
 export async function ArtifactAuthoringView({
   obj,
   req,
@@ -261,6 +280,7 @@ export async function ArtifactAuthoringView({
             // #1790: the About card described a live-data dashboard as
             // "Human-authored" and never mentioned the data at all.
             dataAccess={obj.dataAccess}
+            settingsLink={<RailSettingsLink key={`rail-settings-${obj.id}`} obj={obj} />}
             backlinks={backlinks}
           />
         )}

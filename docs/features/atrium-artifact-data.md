@@ -50,7 +50,7 @@ see scores."
 | `/atrium/<id>/view` full-screen viewer | **enabled** | Same `canView` gate; renders the CURRENT head, so it is the one surface a DRAFT can run on. |
 | `/atrium/<id>/edit` canvas preview | **enabled** | Same gate; this is where the artifact is authored. |
 | Nexus workspace panel (`?workspace=`) | **enabled** | The same canvas behind the same `canView`-gated loader. |
-| `ArtifactEmbedBlock` in an **authenticated** document (`/c/<slug>`, the editor NodeView) | **enabled** (#1790) | `resolveEmbedForReader`'s `internal` audience runs the SAME `canView` on the embedded artifact, independently of the host document. Before #1790 an author who embedded their dashboard in a weekly report gave every reader a "no access" tile. |
+| `ArtifactEmbedBlock` in an **authenticated** document (`/c/<slug>`, the editor NodeView) | **enabled for a LIVE artifact** (#1790) | `resolveEmbedForReader`'s `internal` audience runs the SAME `canView` on the embedded artifact, independently of the host document, and renders its PUBLISHED version pinned to that version's stamp. An unpublished artifact renders its head with NO bridge, so draft code never runs against live data for a document's readers. Before #1790 an author who embedded their dashboard in a weekly report gave every reader a "no access" tile. |
 | `ArtifactEmbedBlock` in the **public** reader (`/p/<slug>`) | fail closed | The `public` audience always resolves `dataBridge: null` — there is no viewer identity to scope a query to. |
 | Library thumbnails | fail closed | Decorative grid tiles with no `canView` of their own. A `query`-mode artifact additionally renders a static placeholder instead of its own error state (#1790). |
 | `/p/<slug>` public reader (top-level artifact) | fail closed | Anonymous — there is no viewer to scope a query to. |
@@ -318,8 +318,9 @@ anything format-specific.
   thumbnails omit the bridge props, so `query` fails closed there by
   construction. The authoring surfaces and AUTHENTICATED embeds do NOT (see
   "Where the bridge is live"): a draft can be exercised by its author before it
-  is published, and a dashboard embedded in a `/c/` document runs for each
-  reader under that reader's own permissions (#1790).
+  is published, and a PUBLISHED dashboard embedded in a `/c/` document runs its
+  published version for each reader under that reader's own permissions
+  (#1790). An unpublished artifact's embed renders without the bridge.
 
 ## Artifact API
 

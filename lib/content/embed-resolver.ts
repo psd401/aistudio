@@ -24,17 +24,19 @@
  *   surface must serve the same thing to everyone, and an unpublish/archive must
  *   mask immediately). Expand links target `/p/<slug>`.
  *
- * The resolved `code` is the artifact's CURRENT head for internal audiences (the
- * "live artifact" the mockup describes). The PUBLIC audience instead receives the
- * PUBLISHED version — the same version the top-level `/p/<slug>` route serves —
- * so unpublished head edits never leak through a public document's embed. Either
- * way the code is UNTRUSTED and is only ever handed to the cross-origin
- * `<ArtifactSandbox>` (§28.1), never rendered on the app origin.
+ * The resolved `code` is the PUBLISHED version whenever the artifact is live — the
+ * same version the top-level `/c/<slug>` and `/p/<slug>` routes serve — so
+ * unpublished head edits never leak through an embed. An UNPUBLISHED artifact
+ * renders its current head for the internal audience (and masks for the public
+ * one). Either way the code is UNTRUSTED and is only ever handed to the
+ * cross-origin `<ArtifactSandbox>` (§28.1), never rendered on the app origin.
  *
  * ## Artifact data bridge (#1790)
- * An `internal` resolve additionally returns `dataBridge` — the content id, the
- * artifact's `data_access` mode as read for THIS resolve, and the version the
- * frame will run — so `ArtifactEmbedBlock` can enable the sandbox bridge. Before
+ * An `internal` resolve of a LIVE artifact additionally returns `dataBridge` —
+ * the content id, the published version's `data_access` stamp, and that version's
+ * id — so `ArtifactEmbedBlock` can enable the sandbox bridge. An unpublished
+ * artifact's head never gets the bridge: draft code must not run against live
+ * data for every reader of a document that happens to embed it. Before
  * #1790 it could not, which meant every `AtriumData.query` inside an embedded
  * dashboard failed with a generic error even in the authenticated `/c/` reader,
  * where THIS function had already run the same 404-masking `canView` the bridge's
@@ -165,6 +167,44 @@ async function canResolveEmbed(
  * see. Only a viewable artifact loads its code (best-effort — a missing body
  * degrades to an empty live preview rather than surfacing a raw S3 error).
  */
+/**
+ * Load the code a viewable embed runs — the published version when live, else
+ * the head — and the version/mode the bridge pins. Best-effort: a failed version
+ * lookup or missing body degrades to an empty live preview with `running: null`
+ * (the body-load fallback is loadArtifactCodeSafe's contract).
+ */
+async function loadRunningVersion(
+  obj: { id: string; dataAccess: unknown },
+  publishedVersionId: string | null
+): Promise<{
+  code: string;
+  running: { versionId: string; dataAccess: ContentDataAccess } | null;
+}> {
+  try {
+    const version = publishedVersionId
+      ? await versionService.getById(obj.id, publishedVersionId)
+      : await versionService.current(obj.id);
+    if (!version) return { code: "", running: null };
+    return {
+      code: await versionService.loadArtifactCodeSafe(version),
+      // #1789: the mode the RUNNING version is stamped with, not the object's
+      // current one. A Content-settings mode flip does not restamp the head, and
+      // the bridge actions authorize against the version's stamp — pinning the
+      // object's mode here let the sandbox and the server disagree.
+      running: {
+        versionId: version.id,
+        dataAccess: resolveVersionDataAccess(version, obj.dataAccess),
+      },
+    };
+  } catch (error) {
+    log.warn("embedded artifact version unavailable; rendering empty live preview", {
+      artifactId: obj.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { code: "", running: null };
+  }
+}
+
 async function resolveEmbedForReaderWithAccess(
   artifactId: string,
   opts: ResolveEmbedOptions,
@@ -200,57 +240,31 @@ async function resolveEmbedForReaderWithAccess(
   const visible = await canResolveEmbed(obj, opts, collectionAccess);
   if (!visible) return unavailable(artifactId);
 
-  // The PUBLIC audience is held to the public reader's stricter contract: only a
-  // LIVE artifact may render, and it renders the PUBLISHED version — never
-  // unpublished head edits — so a retraction masks the embed immediately, exactly
-  // like the top-level `/p/<slug>` route. (Internal audiences see the current
-  // head: the "live artifact" the mockup describes.)
-  let publishedVersionId: string | null = null;
-  if (opts.audience === "public") {
-    const [publication] = await executeQuery(
-      (db) =>
-        db
-          .select({ publishedVersionId: contentPublications.publishedVersionId })
-          .from(contentPublications)
-          .where(
-            and(
-              eq(contentPublications.objectId, obj.id),
-              ...livePublicationConditions()
-            )
+  // A LIVE artifact renders its PUBLISHED version for both audiences — never
+  // unpublished head edits — exactly like the top-level `/c/` and `/p/` readers.
+  // The public audience is additionally held to the public reader's stricter
+  // contract: no live publication masks the embed, so a retraction masks it
+  // immediately. An unpublished artifact still renders its head for the internal
+  // audience, but WITHOUT the data bridge (#1790): unreviewed draft code never
+  // runs against live data just because some document embeds it.
+  const [publication] = await executeQuery(
+    (db) =>
+      db
+        .select({ publishedVersionId: contentPublications.publishedVersionId })
+        .from(contentPublications)
+        .where(
+          and(
+            eq(contentPublications.objectId, obj.id),
+            ...livePublicationConditions()
           )
-          .limit(1),
-      "atrium.embed.livePublication"
-    );
-    if (!publication) return unavailable(artifactId);
-    publishedVersionId = publication.publishedVersionId;
-  }
+        )
+        .limit(1),
+    "atrium.embed.livePublication"
+  );
+  if (!publication && opts.audience === "public") return unavailable(artifactId);
+  const publishedVersionId = publication?.publishedVersionId ?? null;
 
-  // Viewable: load the code (published version for public, live head otherwise).
-  // Best-effort — a failed version lookup or missing body degrades to an empty
-  // live preview (the body-load fallback is loadArtifactCodeSafe's contract).
-  let code = "";
-  let running: { versionId: string; dataAccess: ContentDataAccess } | null = null;
-  try {
-    const version = publishedVersionId
-      ? await versionService.getById(obj.id, publishedVersionId)
-      : await versionService.current(obj.id);
-    if (version) {
-      // #1789: the mode the RUNNING version is stamped with, not the object's
-      // current one. A Content-settings mode flip does not restamp the head, and
-      // the bridge actions authorize against the version's stamp — pinning the
-      // object's mode here let the sandbox and the server disagree.
-      running = {
-        versionId: version.id,
-        dataAccess: resolveVersionDataAccess(version, obj.dataAccess),
-      };
-      code = await versionService.loadArtifactCodeSafe(version);
-    }
-  } catch (error) {
-    log.warn("embedded artifact version unavailable; rendering empty live preview", {
-      artifactId: obj.id,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+  const { code, running } = await loadRunningVersion(obj, publishedVersionId);
 
   return {
     artifactId,
@@ -261,10 +275,10 @@ async function resolveEmbedForReaderWithAccess(
     sandboxSrc: getArtifactSandboxRenderUrl(),
     // #1790: only the authenticated audience gets the bridge. `/p/` has no
     // viewer to scope a query to, so it stays fail-closed here rather than in
-    // the shared reader component. No loaded version means no code to run, so
-    // no bridge either.
+    // the shared reader component. Only a PUBLISHED version gets live data (see
+    // above), and no loaded version means no code to run, so no bridge either.
     dataBridge:
-      opts.audience === "internal" && running
+      opts.audience === "internal" && publishedVersionId && running
         ? {
             contentId: obj.id,
             // An out-of-enum mode fails closed to "none" (inside
