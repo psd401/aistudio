@@ -95,3 +95,67 @@ test.describe("Atrium group-directory visibility — reader (#1205)", () => {
     }
   });
 });
+
+/**
+ * Grant passage: a doc shared with a group, filed in a district collection whose
+ * own view grants admit neither user (seed section 9). Sharing must reach the
+ * member — the doc opens and its section appears, listing ONLY the shared doc —
+ * while the collection's other contents and the outsider stay locked out.
+ */
+const PASSAGE_SECTION = "e2e-restricted-budget-section";
+const PASSAGE_SHARED = "e2e-restricted-shared-budget";
+const PASSAGE_SIBLING = "e2e-restricted-internal-note";
+
+test.describe("Atrium grant passage — items shared into a restricted collection", () => {
+  test.skip(
+    process.env.PLAYWRIGHT_AUTH_ENABLED !== "true",
+    "Requires an authenticated session + atrium-group-visibility-seed.sql (section 9)"
+  );
+
+  test("member opens the shared doc; its internal sibling stays 404", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext();
+    await authenticateContext(context, MEMBER_EMAIL, MEMBER_SUB);
+    try {
+      expect((await context.request.get(`/c/${PASSAGE_SHARED}`)).status()).toBe(200);
+      expect((await context.request.get(`/c/${PASSAGE_SIBLING}`)).status()).toBe(404);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("member sees the section, listing only the shared doc", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext();
+    await authenticateContext(context, MEMBER_EMAIL, MEMBER_SUB);
+    const page = await context.newPage();
+    try {
+      const res = await page.goto(`/atrium/s/${PASSAGE_SECTION}`);
+      expect(res?.status()).toBe(200);
+      await expect(
+        page.getByRole("heading", { name: "Restricted Budget Section" }).first()
+      ).toBeVisible();
+      await expect(page.getByText("Restricted Shared Budget").first()).toBeVisible();
+      await expect(page.getByText("Restricted Internal Note")).toHaveCount(0);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("outsider gets 404 for both the section and the shared doc", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext();
+    await authenticateContext(context, OUTSIDER_EMAIL, OUTSIDER_SUB);
+    try {
+      expect((await context.request.get(`/c/${PASSAGE_SHARED}`)).status()).toBe(404);
+      expect(
+        (await context.request.get(`/atrium/s/${PASSAGE_SECTION}`)).status()
+      ).toBe(404);
+    } finally {
+      await context.close();
+    }
+  });
+});

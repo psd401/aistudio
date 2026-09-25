@@ -25,8 +25,13 @@
  * which is dependency-free and therefore safe in a client bundle.
  */
 
-import { and, eq, inArray, type SQL } from "drizzle-orm";
-import { contentPublications } from "@/lib/db/schema";
+import { and, eq, inArray, ne, sql, type SQL } from "drizzle-orm";
+import {
+  contentCollections,
+  contentObjects,
+  contentPublications,
+  contentVersions,
+} from "@/lib/db/schema";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import {
   LIVE_SURFACE_DESTINATIONS,
@@ -86,4 +91,69 @@ export async function livePublishedVersionId(
     "content.livePublishedVersionId"
   );
   return rows[0]?.publishedVersionId ?? null;
+}
+
+/**
+ * Move an object's LIVE publication onto its new working head, so a Live page
+ * always serves the latest saved version without a manual Republish.
+ *
+ * Atrium used to pin `published_version_id` until an explicit republish, so a
+ * reader opening `/c/{slug}` saw whatever was published weeks ago while the
+ * editor showed today's version. Saving is now the update: every save to a Live
+ * object advances the Live row in the same breath.
+ *
+ * It is ONE conditional UPDATE, and each condition is a rule that must keep the
+ * pin where it is:
+ *
+ *  - `requires_approval` collections keep their review gate: the Live version
+ *    only moves when an approver publishes (or approves a queued request).
+ *  - The data-bridge mode (#1789/#1790) must be unchanged. A version whose mode
+ *    differs from the Live version's would re-capability the Live page without
+ *    the Share dialog's disclosure, which is exactly what
+ *    `propagateDataAccessToHead` forks a draft to prevent. Those stay
+ *    draft-ahead-of-Live until the author republishes.
+ *  - `toVersionId` must still be the object's head, so a slow caller cannot roll
+ *    Live back behind a newer save that committed first.
+ *
+ * Exposure does not change — same object, same Level, same destination — so the
+ * §26.4 public-exposure gate (which judges a change of AUDIENCE) is not in play.
+ *
+ * Callers run this AFTER the version's S3 blobs are flushed: the Live page must
+ * never point at a version whose body is not yet readable. Returns the number of
+ * publication rows advanced (0 for a Draft, a gated collection, or a mode change).
+ */
+export async function advanceLivePublications(
+  objectId: string,
+  toVersionId: string
+): Promise<number> {
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .update(contentPublications)
+        .set({ publishedVersionId: toVersionId, updatedAt: new Date() })
+        .where(
+          and(
+            eq(contentPublications.objectId, objectId),
+            ...livePublicationConditions(),
+            ne(contentPublications.publishedVersionId, toVersionId),
+            sql`EXISTS (
+              SELECT 1 FROM ${contentObjects} o
+              LEFT JOIN ${contentCollections} c ON c.id = o.collection_id
+              WHERE o.id = ${objectId}
+                AND o.current_version_id = ${toVersionId}
+                AND COALESCE(c.requires_approval, false) = false
+            )`,
+            sql`(
+              SELECT lv.data_access FROM ${contentVersions} lv
+              WHERE lv.id = ${contentPublications.publishedVersionId}
+            ) IS NOT DISTINCT FROM (
+              SELECT nv.data_access FROM ${contentVersions} nv
+              WHERE nv.id = ${toVersionId} AND nv.object_id = ${objectId}
+            )`
+          )
+        )
+        .returning({ id: contentPublications.id }),
+    "content.advanceLivePublications"
+  );
+  return rows.length;
 }

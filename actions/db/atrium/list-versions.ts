@@ -24,6 +24,7 @@ import {
 import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { contentService } from "@/lib/content";
 import { versionService } from "@/lib/content/version-service";
+import { livePublishedVersionId } from "@/lib/content/live-publication";
 import type { ActionState } from "@/types";
 import { getOptionalRequester } from "./requester";
 
@@ -46,6 +47,12 @@ export interface VersionSummary {
   createdAt: string | null;
   /** True when this is the object's current working head. */
   isCurrent: boolean;
+  /**
+   * True when this is the version readers are served (the Live publication's
+   * pin). Usually the head too, since saves advance Live; it differs only in a
+   * review-gated collection or across a data-bridge mode change.
+   */
+  isLive: boolean;
 }
 
 export async function listVersionsAction(
@@ -74,7 +81,10 @@ export async function listVersionsAction(
       ]);
     }
 
-    const versions = await versionService.list(obj.id);
+    const [versions, liveVersionId] = await Promise.all([
+      versionService.list(obj.id),
+      livePublishedVersionId(obj.id),
+    ]);
 
     const summaries: VersionSummary[] = versions.map((v) => ({
       id: v.id,
@@ -84,6 +94,7 @@ export async function listVersionsAction(
       summary: v.summary,
       createdAt: v.createdAt,
       isCurrent: v.id === obj.currentVersionId,
+      isLive: v.id === liveVersionId,
     }));
 
     timer({ status: "success" });

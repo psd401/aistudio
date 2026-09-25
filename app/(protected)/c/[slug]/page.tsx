@@ -122,6 +122,11 @@ async function loadReaderObject(slug: string): Promise<{
   collectionId: string | null;
   visibilityLevel: "private" | "group" | "internal" | "public";
   title: string;
+  /**
+   * The working head. Compared with the Live version for the reader's status
+   * pill: saves advance Live, so they differ only when review-gated.
+   */
+  currentVersionId: string | null;
   /** The object's collection name (via left join), for the reader meta line. */
   collectionName: string | null;
   /** Cover-gradient preset key + emoji icon (slice F) for the reader cover band. */
@@ -150,6 +155,7 @@ async function loadReaderObject(slug: string): Promise<{
           collectionId: contentObjects.collectionId,
           visibilityLevel: contentObjects.visibilityLevel,
           title: contentObjects.title,
+          currentVersionId: contentObjects.currentVersionId,
           // Left join → collection name (or null when the object is uncollected),
           // surfaced in the reader's "Published … · <collection>" meta. No extra
           // query: it rides on the existing slug lookup.
@@ -343,6 +349,9 @@ export default async function ReaderPage({
           target.publication.publishedVersionId
         )}`}
         publishedAt={target.publication.publishedAt}
+        liveIsCurrent={
+          target.currentVersionId === target.publication.publishedVersionId
+        }
         collectionName={target.collectionName}
         // Artifact readers skip the TOC (no document headings to walk).
         headings={[]}
@@ -358,11 +367,13 @@ export default async function ReaderPage({
       >
         <ArtifactSandbox
           // #1712: the mode pin below lives in a ref for the mount's lifetime, so
-          // the mount MUST belong to exactly one artifact. Keying on the id makes
-          // that true by construction — a different artifact is a fresh mount and
-          // a fresh pin — instead of relying on the router remounting the leaf
-          // page on a param change (same pattern as ArtifactCanvas's version key).
-          key={target.id}
+          // the mount MUST belong to exactly one artifact VERSION. Keying on the
+          // version id makes that true by construction — a different artifact, or
+          // a new Live version after a save, is a fresh mount, a fresh pin and a
+          // fresh code post (the sandbox only posts code on mount) — instead of
+          // relying on the router remounting the leaf page (same pattern as
+          // ArtifactCanvas's version key).
+          key={version.id}
           code={code}
           src={getArtifactSandboxRenderUrl()}
           dataBridgeEnabled={true}
@@ -430,6 +441,9 @@ export default async function ReaderPage({
       commentHref={editHref}
       commentCount={commentCount}
       publishedAt={target.publication.publishedAt}
+      liveIsCurrent={
+        target.currentVersionId === target.publication.publishedVersionId
+      }
       collectionName={target.collectionName}
       headings={headings}
       coverGradient={target.coverGradient}

@@ -28,6 +28,7 @@ jest.mock("@/lib/content/collection-access", () => ({
     requesterMayViewCollectionMock(...(args as [])),
   collectionAccessSnapshot: jest.fn(async () => ({
     allowedCollectionIds: new Set<string>(),
+    grantPassageCollectionIds: new Set<string>(),
   })),
 }));
 jest.mock("@/lib/db/drizzle-helpers", () => ({
@@ -128,6 +129,63 @@ describe("canView — public", () => {
 
     expect(visible).toBe(true);
     expect(requesterMayViewCollectionMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("canView — grant passage through a collection the requester cannot enter", () => {
+  // The collection admits nobody here (requesterMayViewCollection → false), but
+  // it is an active district collection, so an item EXPLICITLY shared with the
+  // requester stays reachable through it. Nothing else in it does.
+  const passage = {
+    allowedCollectionIds: new Set<string>(),
+    grantPassageCollectionIds: new Set(["blt"]),
+  };
+  const filed = (level: "private" | "group" | "internal" | "public") => ({
+    ...obj(level),
+    collectionId: "blt",
+  });
+
+  it("admits a group-level item shared with the requester's Google group", async () => {
+    withGrants([{ kind: "group", value: "hs-staff@psd401.net" }]);
+    expect(
+      await visibilityService.canView(groupMemberUser, filed("group"), passage as never)
+    ).toBe(true);
+  });
+
+  it("admits a private item with a per-user grant to the requester", async () => {
+    // staffUser.userId is 100; `user` grants store the numeric id as text.
+    withGrants([{ kind: "user", value: "100" }]);
+    expect(
+      await visibilityService.canView(staffUser, filed("private"), passage as never)
+    ).toBe(true);
+  });
+
+  it("does NOT admit a group-level item shared with someone else", async () => {
+    withGrants([{ kind: "group", value: "cabinet@psd401.net" }]);
+    expect(
+      await visibilityService.canView(groupMemberUser, filed("group"), passage as never)
+    ).toBe(false);
+  });
+
+  it("does NOT admit an internal or public sibling (no explicit share)", async () => {
+    expect(
+      await visibilityService.canView(staffUser, filed("internal"), passage as never)
+    ).toBe(false);
+    expect(
+      await visibilityService.canView(staffUser, filed("public"), passage as never)
+    ).toBe(false);
+  });
+
+  it("does NOT admit anything through a collection outside the passage set (e.g. archived or personal)", async () => {
+    withGrants([{ kind: "group", value: "hs-staff@psd401.net" }]);
+    const closed = {
+      allowedCollectionIds: new Set<string>(),
+      grantPassageCollectionIds: new Set<string>(),
+    };
+    expect(
+      await visibilityService.canView(groupMemberUser, filed("group"), closed as never)
+    ).toBe(false);
+    expect(executeQueryMock).not.toHaveBeenCalled();
   });
 });
 

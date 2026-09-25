@@ -32,6 +32,7 @@ import {
 import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { contentService } from "@/lib/content";
 import { versionService } from "@/lib/content/version-service";
+import { livePublishedVersionId } from "@/lib/content/live-publication";
 import { NotFoundError } from "@/lib/content/errors";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
@@ -56,7 +57,10 @@ export async function listContentVersionsAction(
     const requester = await getOptionalRequester(requestId);
     const obj = await contentService.get(requester, idOrSlug);
 
-    const versions = await versionService.list(obj.id);
+    const [versions, liveVersionId] = await Promise.all([
+      versionService.list(obj.id),
+      livePublishedVersionId(obj.id),
+    ]);
 
     // Same DTO shape as listVersionsAction (VersionSummary): authorUserId stays
     // deliberately unexposed (anti-enumeration — see list-versions.ts).
@@ -68,6 +72,7 @@ export async function listContentVersionsAction(
       summary: v.summary,
       createdAt: v.createdAt,
       isCurrent: v.id === obj.currentVersionId,
+      isLive: v.id === liveVersionId,
     }));
 
     timer({ status: "success" });

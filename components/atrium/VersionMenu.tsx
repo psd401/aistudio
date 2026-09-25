@@ -12,10 +12,11 @@
  *
  * Mounted on the authoring page header for documents (the artifact canvas has
  * its own inline version select + restore, sharing the same actions). For a
- * document, restoring changes the WORKING HEAD — what Publish makes live — but
- * does not rewrite the live collaborative editor content (spec §14: rollback
- * repoints the head; the collab doc is its own live state), so the dialog says
- * exactly that. After a restore we refresh the version list, call
+ * document, restoring changes the WORKING HEAD — which a Live page follows, so
+ * readers see the restored version immediately (outside a review-gated
+ * section) — but does not rewrite the live collaborative editor content
+ * (spec §14: the collab doc is its own live state), so the dialog says exactly
+ * that. After a restore we refresh the version list, call
  * `router.refresh()`, and invoke `onRestored` so a mounting surface can reload
  * its own state.
  */
@@ -36,6 +37,7 @@ import {
 import { listContentVersionsAction, rollbackVersionAction } from "@/actions/db/atrium/rollback-version";
 import type { VersionSummary } from "@/actions/db/atrium/list-versions";
 import { versionAuthorLabel } from "@/lib/content/version-author-label";
+import { restoreConfirmMessage } from "@/lib/content/restore-copy";
 import { meridianPortalClassName } from "@/lib/meridian/fonts";
 import { createLogger } from "@/lib/client-logger";
 
@@ -109,7 +111,7 @@ export function VersionMenu({
       if (
         typeof window !== "undefined" &&
         !window.confirm(
-          `Restore v${version.versionNumber} as the current version? Publishing will then make v${version.versionNumber} live.`
+          restoreConfirmMessage(version.versionNumber)
         )
       ) {
         return;
@@ -152,8 +154,9 @@ export function VersionMenu({
         <DialogHeader>
           <DialogTitle>Version history</DialogTitle>
           <DialogDescription>
-            Restoring points the current version at an earlier snapshot; the live
-            editor content is unchanged until you publish or snapshot again.
+            Restoring points the current version at an earlier snapshot. If this
+            page is live, readers see the restored version right away; the open
+            editor content is unchanged until you snapshot again.
           </DialogDescription>
         </DialogHeader>
 
@@ -182,6 +185,7 @@ export function VersionMenu({
                   {versionDate(v)}
                   {v.summary ? ` · ${v.summary}` : ""}
                 </span>
+                {v.isLive && <Badge variant="info">live</Badge>}
                 {v.isCurrent ? (
                   <Badge variant="outline">current</Badge>
                 ) : (

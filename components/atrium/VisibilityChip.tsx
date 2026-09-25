@@ -1239,7 +1239,7 @@ function GroupGrantEditor({
             </Select>
           </div>
 
-          <div className="flex-1 space-y-1">
+          <div className="min-w-0 flex-1 space-y-1">
             <Label htmlFor="grant-value" className="text-xs">
               Value
             </Label>

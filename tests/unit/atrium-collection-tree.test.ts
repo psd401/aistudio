@@ -98,6 +98,15 @@ jest.mock("@/lib/content/collection-access", () => ({
         directGrants: new Map(),
         effectiveGrants: () => [],
         allowedCollectionIds,
+        // Active district collections the requester may not enter.
+        grantPassageCollectionIds: new Set(
+          collections
+            .filter(
+              (row) =>
+                row.ownerUserId == null && !allowedCollectionIds.has(row.id)
+            )
+            .map((row) => row.id)
+        ),
         selectableCollectionIds: new Set(
           req.kind === "user" && req.userId != null
             ? [...allowedCollectionIds]
@@ -259,6 +268,75 @@ describe("collectionService.tree visibility filtering", () => {
     const ids = idsIn(await collectionService.tree(admin));
     expect(ids.has("grp")).toBe(true);
     expect(ids.has("prv")).toBe(true);
+  });
+});
+
+describe("collectionService.tree grant passage (items shared into a restricted collection)", () => {
+  it("shows a restricted collection that holds an item explicitly shared with the requester (grant passage)", async () => {
+    // "BLT Building Budgets": its view grants exclude staff, but an item in it
+    // is shared with a group staff belongs to. The count comes from the same
+    // collection-access SQL that admits only that shared item.
+    allCollections = [
+      {
+        id: "blt",
+        name: "BLT Building Budgets",
+        slug: "blt",
+        parentId: null,
+        defaultVisibilityLevel: "group",
+        navItemId: null,
+        position: 0,
+        viewAllowed: false,
+      },
+    ];
+    visibleObjects = [{ collectionId: "blt" }];
+
+    const tree = await collectionService.tree(staff);
+    expect(tree).toHaveLength(1);
+    expect(tree[0]).toEqual(
+      expect.objectContaining({
+        id: "blt",
+        visibleObjectCount: 1,
+        // Passage is read-only and never serves the (entry-gated) hero.
+        selectableForCreate: false,
+        hasHeroImage: false,
+      })
+    );
+  });
+
+  it("hides a restricted collection with no item shared with the requester", async () => {
+    allCollections = [
+      {
+        id: "blt",
+        name: "BLT Building Budgets",
+        slug: "blt",
+        parentId: null,
+        defaultVisibilityLevel: "group",
+        navItemId: null,
+        position: 0,
+        viewAllowed: false,
+      },
+    ];
+    visibleObjects = [];
+
+    expect(await collectionService.tree(staff)).toHaveLength(0);
+  });
+
+  it("never surfaces another user's personal collection through a shared item", async () => {
+    allCollections = [
+      {
+        id: "mine",
+        name: "Someone Else's Drafts",
+        slug: "someone-elses-drafts",
+        parentId: null,
+        defaultVisibilityLevel: "private",
+        ownerUserId: 99,
+        navItemId: null,
+        position: 0,
+      },
+    ];
+    visibleObjects = [{ collectionId: "mine" }];
+
+    expect(await collectionService.tree(staff)).toHaveLength(0);
   });
 });
 

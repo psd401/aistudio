@@ -165,3 +165,66 @@ SELECT
   (SELECT id FROM users WHERE cognito_sub = 'e2e-test-user')
 ON CONFLICT (object_id, destination) DO UPDATE
   SET published_version_id = EXCLUDED.published_version_id, status = 'live';
+
+-- 9. GRANT PASSAGE: a doc shared with the group, filed in a district collection
+--    whose own view grants admit NEITHER user (only a role nobody here has). The
+--    member must still reach the shared doc and see the section (listing only that
+--    doc); its `internal` sibling stays behind the collection gate; the outsider
+--    sees nothing. Before grant passage, the collection gate hid the shared doc
+--    from the member everywhere.
+INSERT INTO content_collections (id, name, slug, default_visibility_level)
+VALUES (
+  'a7100000-0000-4000-8000-00000000c205', 'Restricted Budget Section',
+  'e2e-restricted-budget-section', 'group'
+)
+ON CONFLICT (id) DO UPDATE SET archived_at = NULL, requires_approval = false;
+
+INSERT INTO content_collection_grants (collection_id, access, grant_kind, grant_value)
+VALUES ('a7100000-0000-4000-8000-00000000c205', 'view', 'role', 'e2e-nobody-role')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO content_objects (
+  id, kind, title, slug, owner_user_id, created_by_actor, visibility_level, status,
+  collection_id
+)
+SELECT v.id::uuid, 'document', v.title, v.slug,
+  (SELECT id FROM users WHERE cognito_sub = 'e2e-test-user'), 'human',
+  v.level::visibility_level, 'published', 'a7100000-0000-4000-8000-00000000c205'
+FROM (VALUES
+  ('a7100000-0000-4000-8000-00000000c2a0', 'Restricted Shared Budget', 'e2e-restricted-shared-budget', 'group'),
+  ('a7100000-0000-4000-8000-00000000c2b0', 'Restricted Internal Note', 'e2e-restricted-internal-note', 'internal')
+) AS v(id, title, slug, level)
+ON CONFLICT (slug) DO UPDATE
+  SET visibility_level = EXCLUDED.visibility_level, status = EXCLUDED.status,
+      collection_id = EXCLUDED.collection_id;
+
+INSERT INTO content_versions (
+  id, object_id, version_number, author_actor, author_user_id, body_format,
+  body_location, summary
+)
+SELECT v.vid::uuid, v.oid::uuid, 1, 'human',
+  (SELECT id FROM users WHERE cognito_sub = 'e2e-test-user'), 'markdown', 'proof', v.summary
+FROM (VALUES
+  ('a7100000-0000-4000-8000-00000000c2a1', 'a7100000-0000-4000-8000-00000000c2a0', 'Shared into a restricted section'),
+  ('a7100000-0000-4000-8000-00000000c2b1', 'a7100000-0000-4000-8000-00000000c2b0', 'Internal sibling behind the gate')
+) AS v(vid, oid, summary)
+ON CONFLICT (object_id, version_number) DO NOTHING;
+
+UPDATE content_objects SET current_version_id = 'a7100000-0000-4000-8000-00000000c2a1'
+  WHERE id = 'a7100000-0000-4000-8000-00000000c2a0';
+UPDATE content_objects SET current_version_id = 'a7100000-0000-4000-8000-00000000c2b1'
+  WHERE id = 'a7100000-0000-4000-8000-00000000c2b0';
+
+INSERT INTO content_visibility_grants (object_id, grant_kind, grant_value)
+VALUES ('a7100000-0000-4000-8000-00000000c2a0', 'group', 'hs-staff-group@example.com')
+ON CONFLICT (object_id, grant_kind, grant_value) DO NOTHING;
+
+INSERT INTO content_publications (object_id, destination, published_version_id, status, published_by)
+SELECT v.oid::uuid, 'intranet', v.vid::uuid, 'live',
+  (SELECT id FROM users WHERE cognito_sub = 'e2e-test-user')
+FROM (VALUES
+  ('a7100000-0000-4000-8000-00000000c2a0', 'a7100000-0000-4000-8000-00000000c2a1'),
+  ('a7100000-0000-4000-8000-00000000c2b0', 'a7100000-0000-4000-8000-00000000c2b1')
+) AS v(oid, vid)
+ON CONFLICT (object_id, destination) DO UPDATE
+  SET published_version_id = EXCLUDED.published_version_id, status = 'live';

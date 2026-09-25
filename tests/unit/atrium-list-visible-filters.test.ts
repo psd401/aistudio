@@ -47,6 +47,7 @@ jest.mock("@/lib/db/drizzle-helpers", () => ({
 jest.mock("@/lib/content/collection-access", () => ({
   collectionAccessSnapshot: jest.fn(async () => ({
     allowedCollectionIds: new Set<string>(),
+    grantPassageCollectionIds: new Set<string>(),
   })),
 }));
 
