@@ -49,11 +49,15 @@ before #1749 it had none of them:
    (the operations, the `query()` return shape — rows are tuples in `columns`
    order — and the authoring rules). `DATA_ACCESS_DESC` is imported by both the
    MCP content tools and these workspace tools, so those two surfaces cannot
-   drift apart; `ATRIUM_DATA_AUTHORING_GUIDANCE` has one consumer today (this
-   surface). A unit test fails if either file redefines the strings locally. The
+   drift apart; since #1792 `ATRIUM_DATA_AUTHORING_GUIDANCE` is carried by both
+   of them too (the MCP `create_artifact` / `create_version` descriptions). A
+   unit test fails if either file redefines the strings locally. The enforced
+   numeric limits it quotes come from `lib/content/artifact-query-limits.ts`,
+   the module the query action and the sandbox bridge apply them from. The
    `psd-atrium` agent skill keeps a hand-maintained Markdown copy of the same
    contract — it does not read these constants, so a contract change has to
-   update both.
+   update both, and `tests/unit/lib/content/atrium-data-contract.test.ts`
+   asserts the skill still states the load-bearing facts.
 2. **Visibility of the mode.** `read_workspace_content` returns `dataAccess` for
    artifacts, matching what the MCP `get_content` handler already returns.
 3. **The ability to change it.** `update_workspace_artifact` takes an optional

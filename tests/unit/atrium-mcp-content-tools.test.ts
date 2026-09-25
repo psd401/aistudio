@@ -25,6 +25,7 @@ import { CONTENT_MCP_TOOLS, CONTENT_TOOL_SCOPE_MAP } from "@/lib/mcp/content-too
 import { CONTENT_TOOL_HANDLERS } from "@/lib/mcp/content-tool-handlers";
 import { TOOL_MANIFEST } from "@/lib/tools/catalog/manifest";
 import { buildArtifactCspGuidance } from "@/lib/content/artifact-sandbox-config";
+import { ATRIUM_DATA_AUTHORING_GUIDANCE } from "@/lib/content/atrium-data-contract";
 
 const EXPECTED = [
   "create_document",
@@ -247,6 +248,43 @@ describe("Atrium MCP content tools — sandbox CSP authoring rule (#1750)", () =
   it("states the no-network rule, not just the script rule", () => {
     const createArtifact = CONTENT_MCP_TOOLS.find((t) => t.name === "create_artifact");
     expect(createArtifact?.description).toContain("connect-src 'none'");
+  });
+});
+
+/**
+ * #1792 — the MCP tools carried the MODE description but not the API.
+ *
+ * A model on this surface knew `dataAccess: 'query'` existed and did not know
+ * that `rows` come back as TUPLES in `columns` order, so it wrote
+ * `rows.map(r => r.school_name)` and shipped a dashboard of blanks. These two
+ * tools are the ones that WRITE artifact code, so they are the ones that must
+ * carry the contract.
+ */
+describe("Atrium MCP content tools — AtriumData authoring guidance (#1792)", () => {
+  it.each(["create_artifact", "create_version"])(
+    "%s carries the full authoring guidance verbatim",
+    (name) => {
+      const tool = CONTENT_MCP_TOOLS.find((t) => t.name === name);
+      expect(tool?.description).toContain(ATRIUM_DATA_AUTHORING_GUIDANCE);
+    }
+  );
+
+  // The bridge is not relevant to a markdown document, and the guidance is long
+  // prompt text — it rides only where artifact code is written.
+  it.each(["create_document", "list_content", "get_content"])(
+    "%s does not carry it",
+    (name) => {
+      const tool = CONTENT_MCP_TOOLS.find((t) => t.name === name);
+      expect(tool?.description).not.toContain(ATRIUM_DATA_AUTHORING_GUIDANCE);
+    }
+  );
+
+  // Same rule as the CSP guidance above: once per tool, not once per argument.
+  it("states it on the description, not on the code argument", () => {
+    const tool = CONTENT_MCP_TOOLS.find((t) => t.name === "create_artifact");
+    expect(tool?.inputSchema.properties.code?.description).not.toContain(
+      ATRIUM_DATA_AUTHORING_GUIDANCE
+    );
   });
 });
 

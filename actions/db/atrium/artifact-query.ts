@@ -69,6 +69,26 @@ import {
   boundBridgeErrorMessage,
   type ArtifactBridgeErrorCode,
 } from "@/lib/content/artifact-bridge-errors";
+// The page-facing bounds now live in `lib/content/artifact-query-limits.ts`
+// (#1792), because the model-facing authoring guidance interpolates the SAME
+// constants — a limit the code enforces but the guidance does not state is how
+// an unaggregated query silently returns its first 200 rows.
+//
+// - SQL length: generous enough for a real aggregate with CTEs, small enough
+//   that a hostile page cannot use the transport as an allocation amplifier.
+//   The data MCP applies its own parser limits.
+// - Max limit mirrors the data MCP's `JSON_ROW_LIMIT` (2000). Capping here too
+//   means an out-of-range page value is clamped rather than round-tripped for a
+//   rejection.
+import {
+  ARTIFACT_QUERY_DEFAULT_LIMIT,
+  ARTIFACT_QUERY_MAX_LIMIT,
+  ARTIFACT_QUERY_MAX_OFFSET,
+  ARTIFACT_QUERY_MAX_SQL_LENGTH,
+  ARTIFACT_QUERY_RATE_LIMIT,
+  ARTIFACT_QUERY_RATE_WINDOW_MS,
+  ARTIFACT_QUERY_SERVER_TIMEOUT_MS,
+} from "@/lib/content/artifact-query-limits";
 import { getConnectorTools } from "@/lib/mcp/connector-service";
 import { getNexusRouterConfig } from "@/lib/nexus/model-router/config";
 import { resolvePsdDataConnectorId } from "@/lib/nexus/model-router/psd-data-connector";
@@ -84,47 +104,10 @@ import { getUserRequester } from "./requester";
 /** The ONLY tool this action may invoke on the data connector. */
 const QUERY_TOOL_NAME = "query_data";
 /**
- * Upper bound on the page-supplied SQL. Generous enough for a real aggregate
- * with CTEs, small enough that a hostile page cannot use the action transport
- * as an allocation amplifier. The data MCP applies its own parser limits.
- */
-const MAX_SQL_LENGTH = 8_000;
-const DEFAULT_QUERY_LIMIT = 200;
-/**
- * Mirrors the data MCP's `JSON_ROW_LIMIT` (2000). Capping here too means an
- * out-of-range page value is clamped rather than round-tripped for a rejection.
- */
-const MAX_QUERY_LIMIT = 2_000;
-const MAX_QUERY_OFFSET = 1_000_000;
-/**
- * ONE overall budget for the connector handshake AND the query (#1788).
- *
- * Each query is Lambda + RDS behind an MCP round trip. Chat's connector path
- * already budgets 30s, so the bridge uses the same ceiling rather than the
- * records bridge's 10s (which would time out legitimate aggregates).
- *
- * This clock used to start only at `execute()`, which meant the real server-side
- * worst case was the handshake (`MCP_CLIENT_TIMEOUT_MS` for the client, plus
- * tools/list) PLUS 30s — comfortably past the sandbox host's 45s, so a slow
- * handshake made the host give up on a query that was still running and the
- * page retried it.
- *
- * It is now armed at the TOP of `queryArtifactData` and threaded down, so it
- * spans the preflight (session resolution, the `contentService.get` visibility
- * check, the version lookup, the connector config read), the handshake, AND the
- * execution. Covering only part of the server's work left the same hole in a
- * smaller form: a 15s preflight plus a full 30s execution still exceeds the
- * host's 45s. The server now always loses that race BY CONSTRUCTION rather than
- * by assuming any stage is fast.
- */
-const QUERY_TIMEOUT_MS = 30_000;
-/**
  * Dashboards fire several queries per load — more often than chat — so the
  * budget is per viewer PER ARTIFACT rather than per viewer. The data MCP's own
  * per-user limit remains the backstop.
  */
-const QUERY_RATE_LIMIT = 60;
-const QUERY_RATE_WINDOW_MS = 60 * 1000;
 const QUERY_RATE_NAMESPACE = "atrium-artifact-data-query";
 
 export interface QueryArtifactDataInput {
@@ -194,8 +177,13 @@ function validateSql(sql: unknown): string {
   if (typeof sql !== "string") {
     throw ErrorFactories.missingRequiredField("sql");
   }
-  if (sql.length > MAX_SQL_LENGTH) {
-    throw ErrorFactories.valueOutOfRange("sql", sql.length, 1, MAX_SQL_LENGTH);
+  if (sql.length > ARTIFACT_QUERY_MAX_SQL_LENGTH) {
+    throw ErrorFactories.valueOutOfRange(
+      "sql",
+      sql.length,
+      1,
+      ARTIFACT_QUERY_MAX_SQL_LENGTH
+    );
   }
   const trimmed = sql.trim();
   if (!trimmed) throw ErrorFactories.missingRequiredField("sql");
@@ -238,14 +226,14 @@ function validateQueryParams(input: QueryArtifactDataInput): ValidatedQueryParam
     limit: normalizeBoundedInteger(
       input?.limit,
       "limit",
-      DEFAULT_QUERY_LIMIT,
-      MAX_QUERY_LIMIT
+      ARTIFACT_QUERY_DEFAULT_LIMIT,
+      ARTIFACT_QUERY_MAX_LIMIT
     ),
     offset: normalizeBoundedInteger(
       input?.offset,
       "offset",
       0,
-      MAX_QUERY_OFFSET
+      ARTIFACT_QUERY_MAX_OFFSET
     ),
   };
 }
@@ -269,8 +257,8 @@ async function authorizeQueryRequest(contentId: string): Promise<{
 
   // Per viewer PER ARTIFACT — dashboards fire several queries per load.
   const rateLimit = consumeRateLimit({
-    interval: QUERY_RATE_WINDOW_MS,
-    uniqueTokenPerInterval: QUERY_RATE_LIMIT,
+    interval: ARTIFACT_QUERY_RATE_WINDOW_MS,
+    uniqueTokenPerInterval: ARTIFACT_QUERY_RATE_LIMIT,
     namespace: QUERY_RATE_NAMESPACE,
     identifier: `user-sub:${session.sub}:content:${contentId}`,
   });
@@ -748,7 +736,7 @@ export async function queryArtifactData(
   // must always lose that race BY CONSTRUCTION, not by assuming preflight is
   // fast, so the deadline starts here and what remains of it is what the
   // handshake and the execution get.
-  const deadline = AbortSignal.timeout(QUERY_TIMEOUT_MS);
+  const deadline = AbortSignal.timeout(ARTIFACT_QUERY_SERVER_TIMEOUT_MS);
 
   try {
     // #1787: logged BEFORE authorization, so a session/rate-limit/validation

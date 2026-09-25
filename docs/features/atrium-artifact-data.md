@@ -566,9 +566,14 @@ object is deleted; deleting a user preserves records but clears attribution.
 There are **three** agent-facing author surfaces, and the contract they describe
 lives in ONE place (`lib/content/atrium-data-contract.ts` — `DATA_ACCESS_DESC`
 plus `ATRIUM_DATA_AUTHORING_GUIDANCE`) so they cannot drift into telling a model
-something the others do not. The two TypeScript surfaces import
-`DATA_ACCESS_DESC` from it; the skill keeps a hand-maintained Markdown copy, so a
-change to the contract has to update the skill as well:
+something the others do not. The two TypeScript surfaces import BOTH constants
+from it (#1792 added `ATRIUM_DATA_AUTHORING_GUIDANCE` to the MCP
+`create_artifact` / `create_version` descriptions, which had carried only the
+mode description); the enforced numeric limits the guidance quotes come from
+`lib/content/artifact-query-limits.ts`, the module that applies them. The skill
+keeps a hand-maintained Markdown copy, so a change to the contract has to update
+the skill as well — `tests/unit/lib/content/atrium-data-contract.test.ts` fails
+if the skill's section stops stating the load-bearing facts:
 
 1. the **MCP content tools** (`create_artifact` / `update_content`);
 2. the PSD Agent's **`psd-atrium` skill**;

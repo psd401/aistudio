@@ -273,11 +273,13 @@ node run.js create-artifact --title "Enrollment dashboard" \
 ```
 
 ```js
-const { columns, rows, totalCount, truncated } = await window.AtriumData.query(
-  "SELECT school_name, COUNT(*) AS enrolled FROM enrollment GROUP BY school_name",
-  { limit: 200, offset: 0 }   // optional; limit is capped at 2000
-);
+const { columns, rows, totalCount, returnedCount, truncated } =
+  await window.AtriumData.query(
+    "SELECT school_name, COUNT(*) AS enrolled FROM enrollment GROUP BY school_name",
+    { limit: 200, offset: 0 }  // optional; DEFAULTS to 200, capped at 2000
+  );
 // rows are tuples in `columns` order: [["Peninsula HS", 1234], ...]
+if (returnedCount < totalCount) { /* the result was cut off — page or aggregate */ }
 ```
 
 Rules — follow all of them:
@@ -287,7 +289,23 @@ Rules — follow all of them:
   permission level; the Code tab exposes them verbatim. Query at runtime.
 - **Aggregate in SQL.** A chart query should return tens of rows, not a dataset.
   Every call is a Lambda + database round trip.
+- **`limit` defaults to 200 and is capped at 2000.** Omitting it does not mean
+  "all rows" — an unaggregated `SELECT` comes back with its first **200** rows
+  and no rejection, so a total you compute in JavaScript is simply wrong.
+  Compare `returnedCount` to `totalCount` before rendering a total; do not rely
+  on `truncated` alone.
 - **Page detail tables** with `limit` / `offset` instead of one huge read.
+  **`offset` is capped at 1000000** — a larger value is clamped to it, not
+  rejected, so a page past it silently repeats the last reachable page.
+- **The SQL string is capped at 8000 characters**, and each query gets **30 s**
+  on the server from the moment it is dispatched before rejecting with
+  `timeout`. (The frame's own 45 s clock is only a safety net behind that —
+  do not budget against it.)
+- **Hard SQL rules from the data server.** `SELECT` only (DDL/DML is rejected);
+  row-level security rewrites your query, so never write your own access
+  filters; and always give a `NUMERIC`/`DECIMAL` cast a precision
+  (`score::NUMERIC(10,2)`, never a bare `::NUMERIC`, which is rejected and is
+  the leading suspect when a numeric column comes back blank).
 - **Budget 3-8 aggregate queries per page load**, and fire them together:
 
   ```js
@@ -299,8 +317,10 @@ Rules — follow all of them:
   ```
 
   Concurrent calls genuinely run in parallel (up to **6 at a time**); anything
-  beyond that **queues** rather than failing, so a wide dashboard is fine. The
-  hard ceiling is **60 queries per minute, per viewer, per artifact** — past it
+  beyond that **queues** rather than failing, so a wide dashboard is fine. Only
+  past **32 outstanding requests** (in flight plus queued) does a call reject
+  with `err.code === "too_many_requests"`. The hard ceiling is
+  **60 queries per minute, per viewer, per artifact** — past it
   calls reject with `err.code === "rate_limited"` and `err.retryAfterSeconds`.
   So never query inside a loop over rows, and prefer filtering one aggregate
   result in JavaScript over re-querying on every filter change.
@@ -350,6 +370,19 @@ Rules — follow all of them:
   they are forced server-side, and the audit log records the viewer's identity
   with the artifact id.
 - Students never reach this bridge; the connector is staff/administrator only.
+
+#### Browser features the sandbox silently swallows
+
+The frame is `sandbox="allow-scripts"` and nothing else. Each of the following
+**does nothing at all** — no dialog, no file, no new tab, and no error anywhere
+a viewer or an author would see it, so never build a feature on one:
+
+- `alert()`, `confirm()`, `prompt()` — render the message in the page instead.
+- `window.print()` and "Print / Save as PDF" buttons.
+- File downloads: `<a download>`, an object-URL download, an "Export CSV" or
+  "Download report" button. Offer the data as an on-page table or a copyable
+  `<textarea>`.
+- `window.open()` and `target="_blank"` links — no new window or tab appears.
 
 The following are **not live persistence options inside an Atrium artifact**:
 

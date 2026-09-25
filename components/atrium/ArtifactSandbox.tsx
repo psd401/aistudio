@@ -92,6 +92,40 @@ import {
   type ArtifactQueryRequestBody,
 } from "@/lib/content/artifact-query-transport";
 import { toBase64Utf8 } from "@/lib/content/code-encoding-browser";
+// #1792: the bridge's numeric limits have ONE source, shared with the query
+// action and with the model-facing authoring guidance.
+import {
+  // How many bridge requests the parent will have in flight at once (#1788).
+  //
+  // This used to be a hard cap of 8 that REJECTED the 9th call outright, which was
+  // the wrong shape twice over: a dashboard with nine panels got a generic failure
+  // on one of them for no reason a viewer could act on, and the cap never bought
+  // anything anyway because Server Actions were dispatched one at a time — the
+  // real concurrency was 1. Now `query` goes over `fetch` (see
+  // `lib/content/artifact-query-transport.ts`), so requests genuinely overlap, and
+  // excess work QUEUES behind this limit instead of being refused.
+  ARTIFACT_MAX_CONCURRENT_DATA_REQUESTS,
+  // The sandbox host's `MAX_PENDING_DATA_REQUESTS` (infra/sandbox-host/render.html),
+  // mirrored here so the parent's total capacity is derived from it rather than
+  // guessed alongside it. The frame is the binding constraint: it refuses to hold
+  // more than this many promises open at once, whatever the parent would accept.
+  //
+  // The most requests this parent will hold at once, in flight AND queued.
+  //
+  // Deliberately a TOTAL rather than a queue depth, and deliberately the host's
+  // own number. The two layers count different things — the frame counts every
+  // promise it is holding open, the parent could count only what waits behind the
+  // active slots — so any queue-depth constant has to be reconciled against the
+  // concurrency limit that happens to apply, and gets it wrong the moment there
+  // is more than one such limit. Capping the total instead is correct for every
+  // lane by construction: a query-mode mount reaches 6 + 26 and a records-mode
+  // mount reaches 1 + 31, and both refuse exactly the request the frame would.
+  ARTIFACT_MAX_PENDING_DATA_REQUESTS,
+  // Parent-side mirror of the query action's SQL cap (#1705). The action remains
+  // the authority and re-validates; this only stops an oversized string from being
+  // serialized into a Server Action payload at all.
+  ARTIFACT_QUERY_MAX_SQL_LENGTH,
+} from "@/lib/content/artifact-query-limits";
 import type { ContentDataAccess } from "@/lib/content/types";
 import type { ArtifactDataPayload } from "@/lib/db/types/jsonb";
 
@@ -124,18 +158,6 @@ const RENDER_RETRY_MS = 300;
  */
 const RENDER_MAX_ATTEMPTS = 40;
 /**
- * How many bridge requests the parent will have in flight at once (#1788).
- *
- * This used to be a hard cap of 8 that REJECTED the 9th call outright, which was
- * the wrong shape twice over: a dashboard with nine panels got a generic failure
- * on one of them for no reason a viewer could act on, and the cap never bought
- * anything anyway because Server Actions were dispatched one at a time — the
- * real concurrency was 1. Now `query` goes over `fetch` (see
- * `lib/content/artifact-query-transport.ts`), so requests genuinely overlap, and
- * excess work QUEUES behind this limit instead of being refused.
- */
-const MAX_CONCURRENT_DATA_REQUESTS = 6;
-/**
  * Record ops (`submit` / `list`) run strictly one at a time.
  *
  * They still travel over Server Actions, which the App Router dispatches one at
@@ -151,26 +173,6 @@ const MAX_CONCURRENT_DATA_REQUESTS = 6;
  * them in parallel (see `fetchArtifactQuery`).
  */
 const MAX_CONCURRENT_RECORD_REQUESTS = 1;
-/**
- * The sandbox host's `MAX_PENDING_DATA_REQUESTS` (infra/sandbox-host/render.html),
- * mirrored here so the parent's total capacity is derived from it rather than
- * guessed alongside it. The frame is the binding constraint: it refuses to hold
- * more than this many promises open at once, whatever the parent would accept.
- */
-const MAX_PENDING_DATA_REQUESTS_IN_FRAME = 32;
-/**
- * The most requests this parent will hold at once, in flight AND queued.
- *
- * Deliberately a TOTAL rather than a queue depth, and deliberately the host's
- * own number. The two layers count different things — the frame counts every
- * promise it is holding open, the parent could count only what waits behind the
- * active slots — so any queue-depth constant has to be reconciled against the
- * concurrency limit that happens to apply, and gets it wrong the moment there
- * is more than one such limit. Capping the total instead is correct for every
- * lane by construction: a query-mode mount reaches 6 + 26 and a records-mode
- * mount reaches 1 + 31, and both refuse exactly the request the frame would.
- */
-const MAX_OUTSTANDING_DATA_REQUESTS = MAX_PENDING_DATA_REQUESTS_IN_FRAME;
 const MAX_DATA_PAYLOAD_BYTES = 8 * 1024;
 const MAX_DATA_PAYLOAD_VALUES = 8_192;
 const MAX_DATA_PAYLOAD_STRING_CODE_UNITS = MAX_DATA_PAYLOAD_BYTES;
@@ -185,12 +187,6 @@ const MAX_DATA_PAYLOAD_STRING_CODE_UNITS = MAX_DATA_PAYLOAD_BYTES;
  */
 const DATA_BRIDGE_ERROR_MESSAGE = "Artifact data request failed";
 const DATA_NAMESPACE_RE = /^[a-z0-9_-]{1,64}$/;
-/**
- * Parent-side mirror of the query action's SQL cap (#1705). The action remains
- * the authority and re-validates; this only stops an oversized string from being
- * serialized into a Server Action payload at all.
- */
-const MAX_QUERY_SQL_LENGTH = 8_000;
 const REQUEST_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -501,7 +497,7 @@ function hasValidQueryOptions(candidate: Record<string, unknown>): boolean {
   // rather than travelling to an action that will only reject it later.
   return (
     typeof candidate.sql === "string" &&
-    candidate.sql.length <= MAX_QUERY_SQL_LENGTH &&
+    candidate.sql.length <= ARTIFACT_QUERY_MAX_SQL_LENGTH &&
     candidate.sql.trim().length > 0 &&
     isOptionalCount(candidate.limit) &&
     isOptionalCount(candidate.offset)
@@ -952,7 +948,7 @@ function parentSideRefusal(args: {
   // waits its turn instead of failing, which is what a dashboard with more
   // panels than the limit actually wants. The cap is the TOTAL outstanding, so
   // it lands on the same request the frame's own cap would, in either lane.
-  if (args.outstanding >= MAX_OUTSTANDING_DATA_REQUESTS) {
+  if (args.outstanding >= ARTIFACT_MAX_PENDING_DATA_REQUESTS) {
     return codedFailure("too_many_requests");
   }
   return null;
@@ -1006,7 +1002,7 @@ function useBridgePump(
         if (!head) break;
         const limit =
           head.request.op === "query"
-            ? MAX_CONCURRENT_DATA_REQUESTS
+            ? ARTIFACT_MAX_CONCURRENT_DATA_REQUESTS
             : MAX_CONCURRENT_RECORD_REQUESTS;
         if (inFlightDataRequestsRef.current >= limit) break;
         const next = queuedDataRequestsRef.current.shift();
@@ -1181,7 +1177,7 @@ function useArtifactDataBridge({
           code: failure.code,
           message: failure.error,
           ...(request.op === "query" && typeof request.sql === "string"
-            ? { sql: request.sql.slice(0, MAX_QUERY_SQL_LENGTH) }
+            ? { sql: request.sql.slice(0, ARTIFACT_QUERY_MAX_SQL_LENGTH) }
             : {}),
         });
       } catch {
