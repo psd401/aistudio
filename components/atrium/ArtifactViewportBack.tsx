@@ -26,7 +26,7 @@ import { useCallback } from "react";
 import { ArrowLeft } from "lucide-react";
 
 const CONTROL_CLASS =
-  "absolute left-4 top-4 z-10 inline-flex items-center gap-1.5 rounded-full border border-black/10 bg-white/90 px-3 py-1.5 text-sm font-medium text-neutral-800 shadow-sm backdrop-blur transition-colors hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-800";
+  "absolute left-4 top-4 z-10 inline-flex items-center gap-1.5 rounded-full border border-black/10 bg-white/90 min-h-11 px-4 py-2 text-sm font-medium text-neutral-800 shadow-sm backdrop-blur transition-colors hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-800";
 
 export interface ArtifactViewportBackProps {
   /** `/atrium/<id>/edit` when the viewer may edit; omitted otherwise. */

@@ -21,7 +21,7 @@ import {
 
 export interface WorkspacePanelWidth {
   /** Attach to the panel element — its PARENT is the split container. */
-  asideRef: React.MutableRefObject<HTMLElement | null>;
+  asideRef: React.RefObject<HTMLElement | null>;
   /** Current fraction (0–1) of the split taken by the panel. */
   widthPct: number;
   /** Inline width/min/max for the panel element. */

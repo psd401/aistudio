@@ -9,8 +9,8 @@
  * pointermove that crosses into the iframe is delivered to the iframe's
  * document instead of this page and the drag dies mid-gesture.
  *
- * Keyboard users get the same control through the `separator` role — arrows
- * step the split — because a drag-only affordance would make the widened panel
+ * Keyboard users get the same control through the `slider` role — arrows
+ * step the split, Home/End jump to its limits — because a drag-only affordance would make the widened panel
  * unreachable without a mouse.
  */
 
@@ -112,10 +112,21 @@ export function WorkspaceResizeHandle({
           : event.key === "ArrowLeft" || event.key === "ArrowDown"
             ? -1
             : 0;
-      if (towardsRight === 0) return;
+      // Home/End jump the divider to its extremes, per the APG slider pattern.
+      // The fractions are out of range on purpose: the consumer clamps them to
+      // the real panel/chat minimums for the current container.
+      let next: number;
+      if (event.key === "Home") {
+        next = 1; // divider fully left = widest panel
+      } else if (event.key === "End") {
+        next = 0; // divider fully right = narrowest panel
+      } else if (towardsRight !== 0) {
+        // Divider right = panel smaller, hence the sign flip.
+        next = widthPct - towardsRight * KEYBOARD_STEP_PCT;
+      } else {
+        return;
+      }
       event.preventDefault();
-      // Divider right = panel smaller, hence the sign flip.
-      const next = widthPct - towardsRight * KEYBOARD_STEP_PCT;
       onResize(next);
       onCommit(next);
     },
@@ -153,13 +164,20 @@ export function WorkspaceResizeHandle({
       onPointerCancel={endDrag}
       onKeyDown={handleKeyDown}
       className={cn(
-        // Straddles the panel's border so the grab target is comfortable
+        // Straddles the panel's border. 24px wide (WCAG 2.5.8 minimum target)
         // without a visible gutter eating layout width.
-        "absolute inset-y-0 left-0 z-10 w-3 -translate-x-1/2 cursor-col-resize",
+        "absolute inset-y-0 left-0 z-10 w-6 -translate-x-1/2 cursor-col-resize",
         "touch-none select-none",
+        // The line along the border: invisible at rest (the panel's own
+        // border-l already draws it), 2px on hover, 3px on keyboard focus —
+        // the focus indicator that replaces the suppressed outline.
         "after:absolute after:inset-y-0 after:left-1/2 after:w-px after:-translate-x-1/2 after:bg-transparent",
-        "hover:after:bg-primary/40 focus-visible:after:bg-primary",
-        "focus-visible:outline-none"
+        "hover:after:w-0.5 hover:after:bg-primary/50",
+        "focus-visible:outline-none focus-visible:after:w-[3px] focus-visible:after:bg-primary",
+        // The grip: always visible, so the split reads as draggable before
+        // anyone happens to hover the exact strip.
+        "before:absolute before:left-1/2 before:top-1/2 before:h-10 before:w-1.5 before:-translate-x-1/2 before:-translate-y-1/2 before:rounded-full before:bg-muted-foreground/40",
+        "hover:before:bg-primary/70 focus-visible:before:bg-primary"
       )}
     />
   );

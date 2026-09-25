@@ -58,6 +58,27 @@ function collectStrayControlLabels(root: Element): string[] {
   return out;
 }
 
+/**
+ * Runs IN THE PAGE: how many distinct rows `root`'s children occupy. Module
+ * scope for the same one-callback-deep reason as above.
+ */
+function countChildRows(root: Element): number {
+  const tops = new Set<number>();
+  for (const child of Array.from(root.children)) {
+    tops.add(Math.round(child.getBoundingClientRect().top));
+  }
+  return tops.size;
+}
+
+/** Shared setup for the Nexus panel suites: minted session, review window. */
+function useNexusPanelSuite(): void {
+  test.skip(!AUTH_ENABLED, "needs a minted session (PLAYWRIGHT_AUTH_ENABLED)");
+  test.use({
+    storageState: "tests/e2e/.auth/user-a.json",
+    viewport: REVIEW_VIEWPORT,
+  });
+}
+
 async function createArtifact(
   page: Page,
   visibility?: "internal"
@@ -78,11 +99,7 @@ async function createArtifact(
 }
 
 test.describe("Nexus workspace panel layout (#1793)", () => {
-  test.skip(!AUTH_ENABLED, "needs a minted session (PLAYWRIGHT_AUTH_ENABLED)");
-  test.use({
-    storageState: "tests/e2e/.auth/user-a.json",
-    viewport: REVIEW_VIEWPORT,
-  });
+  useNexusPanelSuite();
 
   test("the panel takes half the split, resizes by drag, and remembers the width", async ({
     page,
@@ -157,6 +174,11 @@ test.describe("Nexus workspace panel layout (#1793)", () => {
     });
   });
 
+});
+
+test.describe("Nexus workspace panel: divider keys, composer and starters (#1793)", () => {
+  useNexusPanelSuite();
+
   test("the divider is reachable and moves the right way from the keyboard", async ({
     page,
   }) => {
@@ -168,6 +190,12 @@ test.describe("Nexus workspace panel layout (#1793)", () => {
       panel.evaluate((el) => el.getBoundingClientRect().width);
 
     const handle = page.getByTestId("workspace-resize-handle");
+    // The grip is painted at rest — not only on hover/focus — so the split
+    // reads as draggable before anyone finds the strip.
+    const gripAtRest = await handle.evaluate(
+      (el) => getComputedStyle(el, "::before").backgroundColor
+    );
+    expect(gripAtRest).not.toMatch(/^(transparent|rgba\(0, 0, 0, 0\))$/);
     await handle.focus();
     await expect(handle).toBeFocused();
 
@@ -184,6 +212,20 @@ test.describe("Nexus workspace panel layout (#1793)", () => {
     await page.keyboard.press("ArrowRight");
     await page.keyboard.press("ArrowRight");
     expect(await panelWidth()).toBeLessThan(before);
+
+    // Home/End jump to the limits (APG slider pattern): End leaves the panel
+    // at its 380px floor, Home leaves the chat column at its 320px floor.
+    await page.keyboard.press("End");
+    expect(Math.round(await panelWidth())).toBe(380);
+    await page.keyboard.press("Home");
+    const split = await panel.evaluate(
+      (el) => el.parentElement!.getBoundingClientRect().width
+    );
+    expect(Math.round(split - (await panelWidth()))).toBe(320);
+
+    // The grab target meets the WCAG 2.5.8 24px minimum.
+    const hit = await handle.evaluate((el) => el.getBoundingClientRect().width);
+    expect(hit).toBeGreaterThanOrEqual(24);
   });
 
   test("the composer dock and the starter cards fit the narrowed chat column", async ({
@@ -199,14 +241,17 @@ test.describe("Nexus workspace panel layout (#1793)", () => {
     // and the composer clips overflow, so "Connect" was cut to "Con…".
     const connect = page.getByTestId("nexus-mcp-control");
     await expect(connect).toBeVisible();
-    const dockOverflow = await connect.evaluate((el) => {
+    // Connect lives in the advanced-controls group, whose parent is the dock.
+    const group = page.getByTestId("nexus-composer-advanced-controls");
+    await expect(group).toBeVisible();
+    const dockOverflow = await group.evaluate((el) => {
       const dock = el.parentElement as HTMLElement;
       return dock.scrollWidth - dock.clientWidth;
     });
     expect(dockOverflow).toBeLessThanOrEqual(0);
     // The whole button, not a clipped stub, sits inside the composer.
     const connectFits = await connect.evaluate((el) => {
-      const dock = el.parentElement as HTMLElement;
+      const dock = el.parentElement!.parentElement as HTMLElement;
       return (
         el.getBoundingClientRect().right <=
         dock.getBoundingClientRect().right + 1
@@ -214,6 +259,9 @@ test.describe("Nexus workspace panel layout (#1793)", () => {
     });
     expect(connectFits).toBe(true);
     await expect(connect).toContainText("Connect");
+    // The group wraps as ONE unit: Tools, Skills and Connect share a row.
+    const groupRows = await group.evaluate(countChildRows);
+    expect(groupRows).toBe(1);
 
     // finding 3 — workspace-relevant starters, and they fit their cells.
     const starters = page.getByRole("button", { name: /Explain the page I have open/i });

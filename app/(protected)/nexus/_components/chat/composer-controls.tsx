@@ -48,7 +48,11 @@ export function ComposerControls({
     // ~370px wide, while this dock's controls need ~430px — and the composer
     // root clips overflow, so the last control ("Connect") was rendered as
     // "Con…" with no way to reach it. Wrapping to a second line keeps every
-    // control whole and clickable at any column width.
+    // control whole and clickable at any column width. The advanced controls
+    // are ONE group so they wrap together as a unit (never split between rows),
+    // and the group's left rule replaces the free-standing divider: it stays
+    // attached to the group, so a wrapped second row still reads as part of the
+    // same dock rather than as a stray toolbar.
     <div className="flex flex-wrap items-center gap-1 px-2 py-1.5 border-b border-border">
       <ModelFamilySelector
         mode={routingMode}
@@ -58,8 +62,10 @@ export function ComposerControls({
       />
 
       {routingMode === 'advanced' && (
-        <>
-          <div className="h-4 w-px bg-border mx-1" />
+        <div
+          className="flex items-center gap-1 border-l border-border pl-1 ml-1"
+          data-testid="nexus-composer-advanced-controls"
+        >
           <ToolsPopover selectedModel={selectedModel} enabledTools={enabledTools} onToolsChange={onToolsChange} />
           <SkillsPopover disabled />
           <MCPPopover
@@ -69,7 +75,7 @@ export function ComposerControls({
             onReconnectSuccess={onReconnectSuccess}
             workspaceId={workspaceId}
           />
-        </>
+        </div>
       )}
     </div>
   )
