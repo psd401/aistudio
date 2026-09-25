@@ -54,9 +54,7 @@
  * page must never be statically cached or shared across principals.
  */
 
-import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft } from "lucide-react";
 import { getUserRequester } from "@/actions/db/atrium/requester";
 import { canEdit } from "@/lib/content/helpers";
 import { contentService } from "@/lib/content/content-service";
@@ -67,6 +65,7 @@ import { resolveVersionDataAccess } from "@/lib/content/types";
 import type { ContentVersionDTO } from "@/lib/content/types";
 import { getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
 import { ArtifactSandbox } from "@/components/atrium/ArtifactSandbox";
+import { ArtifactViewportBack } from "@/components/atrium/ArtifactViewportBack";
 import "@/styles/atrium-content.css";
 
 export const dynamic = "force-dynamic";
@@ -176,21 +175,14 @@ export default async function AtriumArtifactViewPage({
       }}
     >
       {/* #1793: this route is a dead end — the overlay hides every piece of app
-          chrome, so an author who followed "Open full screen" had no title, no
-          close button and no link back. Editors only: a viewer-only visitor
-          would just bounce off the editor's own gate, so for them the viewport
-          stays chrome-free. */}
-      {userCanEdit && (
-        <Link
-          href={`/atrium/${obj.id}/edit`}
-          data-testid="artifact-viewport-back"
-          // Above the sandbox iframe, which fills the overlay.
-          className="absolute left-4 top-4 z-10 inline-flex items-center gap-1.5 rounded-full border border-black/10 bg-white/90 px-3 py-1.5 text-sm font-medium text-neutral-800 shadow-sm backdrop-blur transition-colors hover:bg-white"
-        >
-          <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-          Back to editor
-        </Link>
-      )}
+          chrome, so whoever followed "Open full screen" had no title, no close
+          button and no link back. Shown to EVERYONE (the library grid and the
+          reader both link here in the same tab, so a plain viewer is stranded
+          just the same); only the destination depends on who is looking. The
+          id is the SERVER-resolved one, never the route param. */}
+      <ArtifactViewportBack
+        editHref={userCanEdit ? `/atrium/${obj.id}/edit` : undefined}
+      />
       <ArtifactSandbox
         // #1712: the loaded-mode pin lives in a ref for the mount's lifetime, so
         // a mount must belong to exactly one artifact. Keying on the id makes

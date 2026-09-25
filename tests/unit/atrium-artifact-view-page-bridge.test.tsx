@@ -212,27 +212,29 @@ describe("Atrium full-screen artifact viewer — data bridge (#1725)", () => {
 });
 
 describe("Atrium full-screen artifact viewer — way back (#1793)", () => {
-  /** The "Back to editor" link, if the page rendered one. */
-  async function backLink(): Promise<RenderedChild | undefined> {
+  /** The back control the page rendered, if any. */
+  async function backControl(): Promise<RenderedChild | undefined> {
     const children = await renderOverlayChildren();
-    return children.find((child) => "href" in child.props);
+    return children.find((child) => "editHref" in child.props);
   }
 
-  it("offers the owner a link back to the editor", async () => {
+  it("points the owner at the editor", async () => {
     // The route hides every piece of app chrome, so without this an author who
     // followed "Open full screen" had no title, no close and no way back.
     loadByIdOrSlugMock.mockResolvedValue(ARTIFACT);
     canViewMock.mockResolvedValue(true);
 
-    const link = await backLink();
-    expect(link).toBeDefined();
+    const control = await backControl();
+    expect(control).toBeDefined();
     // The SERVER-resolved id, never the route param (which may be a slug).
-    expect(link?.props.href).toBe("/atrium/obj-1/edit");
+    expect(control?.props.editHref).toBe("/atrium/obj-1/edit");
   });
 
-  it("omits it for a viewer who cannot edit", async () => {
-    // They would only bounce off the editor's own gate, so the viewport stays
-    // chrome-free for them.
+  it("still gives a viewer who cannot edit a way out, just not to the editor", async () => {
+    // The library grid and the reader both link here in the SAME tab, so a
+    // plain viewer is stranded exactly like an author. They cannot follow an
+    // editor link, so the control falls back to history (see
+    // ArtifactViewportBack) — signalled here by the absent editHref.
     getUserRequesterMock.mockResolvedValue({
       kind: "user",
       userId: 99,
@@ -241,7 +243,9 @@ describe("Atrium full-screen artifact viewer — way back (#1793)", () => {
     loadByIdOrSlugMock.mockResolvedValue(ARTIFACT);
     canViewMock.mockResolvedValue(true);
 
-    expect(await backLink()).toBeUndefined();
+    const control = await backControl();
+    expect(control).toBeDefined();
+    expect(control?.props.editHref).toBeUndefined();
     // ...and the artifact itself still renders.
     await expect(renderSandbox()).resolves.toBeDefined();
   });

@@ -158,7 +158,7 @@ test.describe("Nexus workspace panel layout (#1793)", () => {
     await expect(connect).toContainText("Connect");
 
     // finding 3 — workspace-relevant starters, and they fit their cells.
-    const starters = page.getByRole("button", { name: /Explain the page open/i });
+    const starters = page.getByRole("button", { name: /Explain the page I have open/i });
     await expect(starters).toBeVisible();
     await expect(
       page.getByRole("button", { name: /Help me create a lesson plan/i })

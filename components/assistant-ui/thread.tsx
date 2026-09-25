@@ -114,35 +114,41 @@ const SUGGESTED_ACTIONS = [
 ];
 
 /**
- * Starters shown INSTEAD of the generic ones when a workspace object is open
- * beside the chat (#1793, finding 3). "Help me create a lesson plan" is not
- * what anyone wants when they are looking at a dashboard they are building,
- * and the generic set is what the narrow workspace-bound column overflowed.
+ * Starters shown INSTEAD of the generic ones when a workspace object is bound
+ * to the conversation (#1793, finding 3). "Help me create a lesson plan" is not
+ * what anyone wants while they are building a dashboard, and the generic set is
+ * what the narrow workspace-bound column overflowed.
+ *
+ * The wording says "in this workspace", never "beside this chat": the binding
+ * is what these prompts depend on, and it holds at every width, whereas the
+ * panel itself is `hidden ... md:flex` — below `md` the object is still bound
+ * and still editable by the chat, but there is nothing next to the chat to
+ * point at, and inviting someone to look at an unseen page would be a lie.
  */
 const WORKSPACE_SUGGESTED_ACTIONS = [
   {
     title: "Explain this page",
     label: "what it shows and where the data comes from",
     action:
-      "Explain the page open beside this chat — what it shows, and where its data comes from.",
+      "Explain the page I have open in this workspace — what it shows, and where its data comes from.",
   },
   {
     title: "Add a filter",
     label: "so viewers can narrow what they see",
     action:
-      "Add a filter control to the page open beside this chat so viewers can narrow what they see.",
+      "Add a filter control to the page I have open in this workspace so viewers can narrow what they see.",
   },
   {
     title: "Change the layout",
     label: "rearrange the sections on the page",
     action:
-      "Rearrange the sections of the page open beside this chat so the most important one comes first.",
+      "Rearrange the sections of the page I have open in this workspace so the most important one comes first.",
   },
   {
     title: "Check it for problems",
     label: "empty states, errors, small screens",
     action:
-      "Review the page open beside this chat for problems — empty states, error handling, and how it renders on a small screen.",
+      "Review the page I have open in this workspace for problems — empty states, error handling, and how it renders on a small screen.",
   },
 ];
 
