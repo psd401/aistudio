@@ -11,7 +11,7 @@
  * driver); JSONB columns insert via `sql\`${safeJsonbStringify(v)}::jsonb\``.
  */
 
-import { and, count, eq, gte, isNull, like, ne, sql } from "drizzle-orm";
+import { and, count, eq, gte, isNull, like, ne, notExists, sql } from "drizzle-orm";
 import { createLogger } from "@/lib/logger";
 import {
   executeQuery,
@@ -47,6 +47,7 @@ import {
   type ObjectRowAsText,
 } from "./mappers";
 import { snapshotInTx, versionService } from "./version-service";
+import { livePublicationConditions } from "./live-publication";
 import { visibilityService } from "./visibility-service";
 import {
   collectionAccessSnapshot,
@@ -61,6 +62,7 @@ import {
   VersionPreconditionFailedError,
 } from "./errors";
 import type {
+  ContentDataAccess,
   ContentKind,
   ContentObjectDTO,
   ContentObjectWithVersion,
@@ -72,6 +74,148 @@ import type {
   VisibilityGrant,
   VisibilityLevel,
 } from "./types";
+
+/**
+ * Keep the DRAFT's data-bridge mode in step with the object's, without ever
+ * re-capabilitying the LIVE page (#1789).
+ *
+ * `content_objects.data_access` is the mode of the working head; each
+ * `content_versions` row carries the mode its code was authored for, and every
+ * render surface pins the mode of the version it renders. Two cases:
+ *
+ *  - The head is NOT the live published version (an unpublished artifact, or a
+ *    draft ahead of Live). Stamp the head in place. The author's preview picks
+ *    the new mode up on the next render, and Live keeps the mode its own
+ *    published version was stamped with.
+ *
+ *  - The head IS the live published version. Stamping it would change what the
+ *    Live page can do for every reader, right now, with no republish — the bug
+ *    this issue is about. Write a NEW version instead (same code, new mode), so
+ *    the object becomes draft-ahead-of-Live: the author previews the new mode
+ *    and republishes when the code is ready.
+ *
+ * Returns the id of the new head when a version was written, else null.
+ *
+ * Idempotent: it writes the mode the object now carries, so replaying the same
+ * patch converges rather than drifting.
+ */
+async function propagateDataAccessToHead(
+  req: Requester,
+  obj: ContentObjectDTO
+): Promise<string | null> {
+  if (obj.kind !== "artifact" || !obj.currentVersionId) return null;
+  const headId = obj.currentVersionId;
+
+  // Decide AND write under the object row lock that `runPublishTx` takes. A
+  // bare conditional UPDATE is not enough: its snapshot can predate a publish
+  // committing concurrently, so it would stamp a head that has just gone Live
+  // — re-capabilitying the Live page with no republish. Holding the row lock,
+  // a publish either committed first (the NOT EXISTS below, a fresh statement
+  // snapshot, sees it and we fork) or waits until our stamp commits. The head
+  // is re-read under the lock, so a head advanced in the meantime is not
+  // stamped either. Scoped by object id as well as version id, so a stray
+  // version id can never be stamped here.
+  const stamped = await executeTransaction(async (tx) => {
+    const locked = await tx
+      .select({ currentVersionId: contentObjects.currentVersionId })
+      .from(contentObjects)
+      .where(eq(contentObjects.id, obj.id))
+      .limit(1)
+      .for("update");
+    if (locked[0]?.currentVersionId !== headId) return true;
+    const rows = await tx
+      .update(contentVersions)
+      .set({ dataAccess: obj.dataAccess })
+      .where(
+        and(
+          eq(contentVersions.id, headId),
+          eq(contentVersions.objectId, obj.id),
+          notExists(
+            tx
+              .select({ one: sql`1` })
+              .from(contentPublications)
+              .where(
+                and(
+                  eq(contentPublications.objectId, obj.id),
+                  eq(contentPublications.publishedVersionId, headId),
+                  ...livePublicationConditions()
+                )
+              )
+          )
+        )
+      )
+      .returning({ id: contentVersions.id });
+    return rows.length > 0;
+  }, "content.dataAccess.stampHead");
+  // `true` also covers a head that moved under us: the save that advanced it
+  // stamped its own version from the object's (already updated) mode.
+  if (stamped) return null;
+
+  // The head IS Live. Fork a draft carrying the new mode.
+  const head = await versionService.getById(obj.id, headId);
+  if (!head) return null;
+  const code = await versionService.loadArtifactCodeSafe(head);
+  if (!code.trim()) {
+    // An unreadable body would make `createVersion` reject an empty snapshot.
+    // Leaving the object's mode updated and the Live version untouched is the
+    // safe outcome: Live keeps its capability, and the next real save stamps
+    // the new mode onto the version it writes.
+    createLogger({ action: "content.dataAccess" }).warn(
+      "Live head body unavailable; mode change applies to the next version",
+      { objectId: obj.id, versionId: headId }
+    );
+    return null;
+  }
+  const forked = await contentService.createVersion(req, obj.id, {
+    body: code,
+    bodyFormat: head.bodyFormat,
+    summary: `Data access set to ${obj.dataAccess}`,
+    dataAccess: obj.dataAccess,
+  });
+  return forked.currentVersionId;
+}
+
+/**
+ * Restore an object's data-bridge mode after `propagateDataAccessToHead` failed
+ * (#1789). Best-effort: the original failure is what the caller must see, so a
+ * failed revert is logged rather than thrown over it.
+ *
+ * Only while the head is still `headId`. `createVersion` commits the fork (and
+ * advances the head) BEFORE flushing large bodies to storage, so a failure can
+ * arrive after a new head stamped with the new mode already exists. Reverting
+ * the object then would put it out of step with its own head; leaving it keeps
+ * object and head agreeing, and the failure still surfaces to the caller.
+ */
+async function revertDataAccessBestEffort(
+  objectId: string,
+  previous: ContentDataAccess,
+  headId: string | null
+): Promise<void> {
+  if (!headId) return;
+  try {
+    await executeQuery(
+      (db) =>
+        db
+          .update(contentObjects)
+          .set({ dataAccess: previous })
+          .where(
+            and(
+              eq(contentObjects.id, objectId),
+              eq(contentObjects.currentVersionId, headId)
+            )
+          ),
+      "content.dataAccess.revert"
+    );
+  } catch (error) {
+    createLogger({ action: "content.dataAccess" }).error(
+      "Failed to revert data access after a failed mode propagation",
+      {
+        objectId,
+        error: error instanceof Error ? error.message : String(error),
+      }
+    );
+  }
+}
 
 /** What a successful hard delete returns — the identity of what was removed. */
 export interface DeletedContentSummary {
@@ -1108,7 +1252,30 @@ export const contentService = {
       // first transition.
       await pruneRetrievalIndexBestEffort(existing.id);
     }
-    return rowToObjectDTO(rows[0] as ObjectRowAsText);
+    const updated = rowToObjectDTO(rows[0] as ObjectRowAsText);
+    // #1789: carry the new mode onto the DRAFT the author is editing, never onto
+    // the version a live publication pins. Runs AFTER the retraction above, so a
+    // patch that also takes the object offline takes the cheap stamp-in-place
+    // path rather than forking a version for a page that is no longer Live.
+    if (patch.dataAccess !== undefined) {
+      let newHeadId: string | null;
+      try {
+        newHeadId = await propagateDataAccessToHead(req, updated);
+      } catch (error) {
+        // The object row already committed the new mode. If the fork failed
+        // (version race, re-screening block, storage), put the mode back so the
+        // caller's error is the whole truth: otherwise Content settings shows a
+        // mode no version carries, and the next save would silently stamp it.
+        await revertDataAccessBestEffort(
+          existing.id,
+          existing.dataAccess,
+          updated.currentVersionId
+        );
+        throw error;
+      }
+      if (newHeadId) updated.currentVersionId = newHeadId;
+    }
+    return updated;
   },
 
   /**

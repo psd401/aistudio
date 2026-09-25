@@ -36,6 +36,16 @@ jest.mock("@/lib/content/helpers", () => ({
   canEdit: (...args: unknown[]) => mockCanEdit(...args),
 }));
 
+// #1789: a reader is pinned to the Live version (else the head). Nothing is Live
+// here unless a test says so.
+const mockLivePublishedVersionId = jest.fn(
+  async (..._args: unknown[]): Promise<string | null> => null
+);
+jest.mock("@/lib/content/live-publication", () => ({
+  livePublishedVersionId: (...args: unknown[]) =>
+    mockLivePublishedVersionId(...args),
+}));
+
 const mockConsumeRateLimit = jest.fn();
 jest.mock("@/lib/rate-limit", () => ({
   consumeRateLimit: (...args: unknown[]) => mockConsumeRateLimit(...args),
@@ -778,28 +788,27 @@ describe("queryArtifactData audit version (#1787)", () => {
     return args.reason as string;
   }
 
-  it("names the head when no version is supplied, without a lookup", async () => {
+  it("names the head when no version is supplied", async () => {
     await queryArtifactData(validInput);
 
     expect(reasonOf()).toBe(
       `atrium artifact ${CONTENT.id} v${CONTENT.currentVersionId}`
     );
-    expect(mockVersionGetById).not.toHaveBeenCalled();
   });
 
-  it("skips the lookup when the supplied version IS the head", async () => {
+  it("names the head when the supplied version IS the head", async () => {
     await queryArtifactData({
       ...validInput,
       versionId: CONTENT.currentVersionId,
     });
 
-    expect(mockVersionGetById).not.toHaveBeenCalled();
     expect(reasonOf()).toBe(
       `atrium artifact ${CONTENT.id} v${CONTENT.currentVersionId}`
     );
   });
 
-  it("names a non-head version that belongs to this artifact", async () => {
+  it("names a non-head version an EDITOR is previewing", async () => {
+    mockCanEdit.mockReturnValue(true);
     mockVersionGetById.mockResolvedValueOnce({ id: OLDER_VERSION_ID });
 
     await queryArtifactData({ ...validInput, versionId: OLDER_VERSION_ID });
@@ -819,9 +828,28 @@ describe("queryArtifactData audit version (#1787)", () => {
     expect(reasonOf()).toBe(`atrium artifact ${CONTENT.id} v${CONTENT.currentVersionId}`);
   });
 
-  it("refuses a version that does not belong to this artifact", async () => {
+  it("never audits a READER under a version they chose (#1789)", async () => {
+    // A reader's version id is caller-controlled; the server pins them to Live,
+    // so an old version id can neither pick the mode nor name the audit line.
+    mockLivePublishedVersionId.mockResolvedValueOnce(OLDER_VERSION_ID);
+    mockVersionGetById.mockResolvedValueOnce({
+      id: OLDER_VERSION_ID,
+      dataAccess: "query",
+    });
+
+    await queryArtifactData({
+      ...validInput,
+      versionId: "55555555-5555-4555-8555-555555555555",
+    });
+
+    expect(mockVersionGetById).toHaveBeenCalledWith(CONTENT.id, OLDER_VERSION_ID);
+    expect(reasonOf()).toBe(`atrium artifact ${CONTENT.id} v${OLDER_VERSION_ID}`);
+  });
+
+  it("refuses an editor's version that does not belong to this artifact", async () => {
     // `versionService.getById` is scoped by objectId, so a null answer means the
     // id belongs to some other object (or nothing) — never audit under it.
+    mockCanEdit.mockReturnValue(true);
     mockVersionGetById.mockResolvedValueOnce(null);
 
     const result = await queryArtifactData({

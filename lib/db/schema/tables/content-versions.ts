@@ -31,7 +31,11 @@ import {
 } from "drizzle-orm/pg-core";
 import { contentObjects } from "./content-objects";
 import { users } from "./users";
-import { actorKindEnum, bodyFormatEnum } from "../enums";
+import {
+  actorKindEnum,
+  bodyFormatEnum,
+  contentDataAccessEnum,
+} from "../enums";
 
 export const contentVersions = pgTable(
   "content_versions",
@@ -65,6 +69,19 @@ export const contentVersions = pgTable(
     renderLocation: text("render_location"),
     proofDocRef: varchar("proof_doc_ref", { length: 255 }),
     summary: text("summary"),
+    /**
+     * The artifact sandbox data-bridge mode THIS version's code was authored
+     * for (migration 184, #1789). Nullable: `document` versions have no sandbox,
+     * and an artifact version written before migration 184 reaches it resolves
+     * as `version.data_access ?? content_objects.data_access` — the
+     * pre-migration behaviour.
+     *
+     * Version-scoped rather than object-scoped because the code the mode gates
+     * lives on the version: `/c/{slug}` renders the version its publication
+     * pins, so pinning the OBJECT's current mode let a draft-time mode change
+     * silently re-capability the Live page. See migration 184's header.
+     */
+    dataAccess: contentDataAccessEnum("data_access"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (t) => [

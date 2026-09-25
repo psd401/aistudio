@@ -173,7 +173,7 @@ The function safely extracts `causeCode`, `causeConstraint`, and `causeTable` wi
 |-------|---------|
 | `content_collections` | Content namespaces (sections) |
 | `content_objects` | Documents and artifacts — includes `data_access` enum (records/query/none) for artifact data bridge mode (migration 179) |
-| `content_versions` | Version history |
+| `content_versions` | Version history — includes `data_access` stamp for version-scoped artifact data bridge mode (migration 184, #1789) |
 | `content_visibility_grants` | Access permissions |
 | `content_publications` | Published content |
 | `content_user_favorites` | Per-user favorites (stars) for library home personalization |

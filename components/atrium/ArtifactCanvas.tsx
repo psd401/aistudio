@@ -596,10 +596,21 @@ function useCanvasBridgePin(
   loadCode: (
     versionId: string | null,
     opts?: { preserveOnError?: boolean }
-  ) => Promise<string | null>
+  ) => Promise<string | null>,
+  /**
+   * The mode the version CURRENTLY LOADED was authored for (#1789), set by
+   * `loadCode` in the same React batch as the code itself. Null until the first
+   * load lands, where the object's mode (the props pin) is the right answer —
+   * it is the mode the head carries and the mode the next version will carry.
+   *
+   * This is what keeps the frame's pin and the server's check in agreement once
+   * the version dropdown previews something other than the head: the bridge
+   * actions authorize against the mode stamped on the version they are handed.
+   */
+  loadedDataAccess: ContentDataAccess | null
 ): CanvasBridge {
   const target = resolveCanvasBridge(props);
-  const mode = target?.dataAccess;
+  const mode = target ? (loadedDataAccess ?? target.dataAccess) : undefined;
   const refreshSignal = props.refreshSignal;
   // The mode the sandbox stays pinned to WHILE an owner-signalled reload is in
   // flight, remembered together with the signal it was settled for. The two must
@@ -641,6 +652,46 @@ function useCanvasBridgePin(
   const effectiveMode = pin.settledFor === refreshSignal ? mode : pin.mode;
   if (!target || !effectiveMode) return null;
   return { contentId: target.contentId, dataAccess: effectiveMode };
+}
+
+/**
+ * Reload the head when the OBJECT's mode prop changes (#1789).
+ *
+ * Once a version has loaded, its own stamp (`loadedDataAccess`) takes over from
+ * the props pin. A Content settings save then only calls `router.refresh()`,
+ * which keeps this instance mounted — so without a reload the frame would stay
+ * pinned to the mode the head carried BEFORE the save, while the server now
+ * authorizes the head under its new stamp. Reloading the head picks up both an
+ * in-place stamp and a fork (a Live head gets a new draft version), and commits
+ * the new mode in the same batch as the code, like every other load.
+ */
+function useReloadOnObjectModeChange(
+  props: ArtifactCanvasProps,
+  refreshVersions: (seq?: number) => Promise<VersionSummary[] | null>,
+  loadCode: (
+    versionId: string | null,
+    opts?: { preserveOnError?: boolean }
+  ) => Promise<string | null>
+): void {
+  const objectMode = resolveCanvasBridge(props)?.dataAccess;
+  const signal = props.refreshSignal;
+  const seenModeRef = useRef(objectMode);
+  const seenSignalRef = useRef(signal);
+  useEffect(() => {
+    const signalMoved = signal !== seenSignalRef.current;
+    seenSignalRef.current = signal;
+    // The mount value never fires: the mount effect is already loading.
+    if (objectMode === seenModeRef.current) return;
+    seenModeRef.current = objectMode;
+    // A mode that arrives WITH an owner refresh signal is reloaded by
+    // `useCanvasBridgePin`, which also holds the pin until that load lands.
+    if (signalMoved) return;
+    // Background reload: a failure keeps the preview already on screen.
+    void Promise.all([
+      refreshVersions(),
+      loadCode(null, { preserveOnError: true }),
+    ]).catch(() => undefined);
+  }, [objectMode, signal, refreshVersions, loadCode]);
 }
 
 /**
@@ -742,6 +793,10 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
   const [code, setCode] = useState<string>("");
   const [bodyFormat, setBodyFormat] = useState<BodyFormat>("html");
+  // The data-bridge mode of the version currently loaded (#1789). Null until the
+  // first load resolves; see `useCanvasBridgePin`.
+  const [loadedDataAccess, setLoadedDataAccess] =
+    useState<ContentDataAccess | null>(null);
   // Restore-selected-version state (Epic #1059 completion): `restoring` blocks
   // double-fire; `restoreNotice` is the success/failure caption (kept separate
   // from `message`, which belongs to the load-error state machine).
@@ -786,6 +841,9 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
       objectIdRef.current = result.data.objectId;
       setCode(result.data.code);
       setBodyFormat(result.data.bodyFormat);
+      // #1789: committed in the SAME batch as the code, so the frame is never
+      // keyed on one version's code under another version's capability.
+      setLoadedDataAccess(result.data.dataAccess);
       setSelectedVersionId(result.data.versionId);
       setState("ready");
       return result.data.versionId;
@@ -855,7 +913,8 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
     };
   }, [refreshVersions, loadCode]);
 
-  const bridge = useCanvasBridgePin(props, refreshVersions, loadCode);
+  useReloadOnObjectModeChange(props, refreshVersions, loadCode);
+  const bridge = useCanvasBridgePin(props, refreshVersions, loadCode, loadedDataAccess);
 
   const { tab, handleTab, keepPreviewMounted } = usePreviewTab(
     state,

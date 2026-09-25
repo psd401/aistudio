@@ -15,7 +15,8 @@ import { authenticateContext } from "./helpers/session-auth";
  *    unpublish actions (replacing the old Publish ▾ split control).
  *  - (#1714) both artifact-create paths COMPLETE: "Start blank" lands in a
  *    loaded artifact editor with a v1, and "Build it for me" deep-links into
- *    the Nexus workspace with the prompt prefilled. The library posts the
+ *    the Nexus workspace with the prompt sent on arrival (#1791 auto-send;
+ *    it was prefilled before that). The library posts the
  *    starter body base64-encoded (its <style> block trips the edge WAF when
  *    sent raw, and the rejected action left the dialog spinning forever). No
  *    WAF fronts this harness, so what these prove is the other half of the
@@ -262,13 +263,20 @@ test.describe("Atrium library artifact create completes (#1714)", () => {
       expect(createdId).toBeTruthy();
 
       // Both halves of the §17 hand-off render: the artifact in the workspace
-      // panel, and the prompt PREFILLED (never auto-sent) in the composer.
+      // panel, and the prompt SENT on arrival. #1791 made "Build it for me"
+      // auto-send (the person already asked for the build), through the
+      // one-shot sessionStorage handshake in lib/nexus/draft-auto-send.ts —
+      // so the prompt lands as the first user message, not in the composer.
       await expect(page.getByTestId("workspace-panel")).toBeVisible({
         timeout: 60000,
       });
+      await expect(
+        page.locator('[data-role="user"]').filter({ hasText: prompt })
+      ).toHaveCount(1, { timeout: 60000 });
       const composer = page.locator('[aria-label="Message input"]');
       await expect(composer).toBeVisible({ timeout: 60000 });
-      await expect(composer).toHaveValue(prompt, { timeout: 30000 });
+      // Sent exactly once: the composer does not still hold the draft.
+      await expect(composer).not.toHaveValue(prompt);
 
       await page.screenshot({
         path: `${SHOT_DIR}/atrium-library-build-it-for-me.png`,

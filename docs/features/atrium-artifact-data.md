@@ -539,6 +539,20 @@ object is deleted; deleting a user preserves records but clears attribution.
    for per-artifact review. Enforced by one shared `assertArtifactDataAccess`
    (`actions/db/atrium/artifact-guards.ts`), called from both
    `artifact-data.ts` and `artifact-query.ts`, so the two sides cannot drift.
+
+   **The mode is VERSION-scoped (#1789, migration 184).** It is stamped on
+   `content_versions.data_access` — the row the gated code lives on — and every
+   surface pins the mode of the version it RENDERS: `/c/{slug}` and the
+   `/atrium/{id}/view` link it hands readers pin the PUBLISHED version's,
+   the editor and the workspace panel pin the head's. `content_objects.
+   data_access` is now the mode of the working head and the value stamped onto
+   the next version; `contentService.update` keeps the head's stamp equal to it,
+   and writes a NEW version when the head is the live published one rather than
+   changing what the Live page can do with no republish. Exclusivity is
+   unaffected: one page runs one version's code under that version's single
+   mode. A version predating migration 184 carries no stamp and resolves to the
+   object's mode (`resolveVersionDataAccess`), so the deploy changes no
+   artifact's capability.
 7. Declared queries (storing SQL on the object with typed parameters) were
    considered and deferred. With no human reviewer in the loop they add audit
    legibility but no security, and they make dynamic filters harder to author.
