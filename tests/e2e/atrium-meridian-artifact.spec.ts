@@ -50,7 +50,7 @@ test.describe("Atrium Meridian artifact viewer + embed (authenticated)", () => {
     mkdirSync(SHOT_DIR, { recursive: true });
   });
 
-  test("the artifact viewer renders the Meridian topbar, LIVE pill, and metadata rail with backlinks", async ({
+  test("the artifact viewer renders the Meridian topbar, INTERACTIVE pill, and metadata rail with backlinks", async ({
     browser,
   }) => {
     const context = await browser.newContext({
