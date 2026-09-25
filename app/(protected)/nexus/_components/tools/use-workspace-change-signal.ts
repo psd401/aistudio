@@ -39,6 +39,9 @@ import { emitWorkspaceChanged } from "@/lib/atrium/workspace-change-event";
 const WORKSPACE_MUTATING_TOOLS = new Set([
   "update_workspace_artifact",
   "edit_workspace_document",
+  // #1791: a rename changes the panel header and the library card, both of
+  // which the panel re-reads on this signal.
+  "rename_workspace_content",
   "publish_workspace_content",
   "unpublish_workspace_content",
 ]);

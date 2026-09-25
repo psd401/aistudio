@@ -28,6 +28,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getArtifactCodeAction } from "@/actions/db/atrium/get-artifact-code";
 import { listVersionsAction, type VersionSummary } from "@/actions/db/atrium/list-versions";
+import { versionAuthorLabel } from "@/lib/content/version-author-label";
 import { createVersionAction } from "@/actions/db/atrium/create-version";
 import { rollbackVersionAction } from "@/actions/db/atrium/rollback-version";
 import type { BodyFormat, ContentDataAccess } from "@/lib/content";
@@ -48,12 +49,11 @@ type LoadState = "loading" | "ready" | "error";
 
 /** Label for a version in the dropdown: "v3 · AI (current)". */
 function versionLabel(v: VersionSummary): string {
-  // "· human" (not "· you"): VersionSummary intentionally omits authorUserId
-  // (anti-enumeration), so we cannot know whether the human author is the current
-  // viewer. "human" is accurate for every viewer; "you" would mislabel another
-  // user's (e.g. an admin's) edit as the viewer's own.
-  const author = v.authorActor === "agent" ? " · AI" : " · human";
-  return `v${v.versionNumber}${author}${v.isCurrent ? " (current)" : ""}`;
+  // Never "· you": VersionSummary intentionally omits authorUserId
+  // (anti-enumeration), so we cannot know whether the human author is the
+  // current viewer. The shared helper keeps this dropdown, the History dialog
+  // and the About rail phrasing one version's provenance identically (#1791).
+  return `v${v.versionNumber} · ${versionAuthorLabel(v)}${v.isCurrent ? " (current)" : ""}`;
 }
 
 /** A just-created head version's summary fields (subset of ContentVersionDTO). */
@@ -61,6 +61,8 @@ interface NewHead {
   id: string;
   versionNumber: number;
   authorActor: "human" | "agent";
+  /** Authoring surface (#1791); absent for a save made here in the Code tab. */
+  authorLabel?: string | null;
   summary: string | null;
   createdAt: string | null;
 }
@@ -79,6 +81,7 @@ function withOptimisticHead(prev: VersionSummary[], head: NewHead): VersionSumma
       id: head.id,
       versionNumber: head.versionNumber,
       authorActor: head.authorActor,
+      authorLabel: head.authorLabel ?? null,
       summary: head.summary,
       createdAt: head.createdAt,
       isCurrent: true,

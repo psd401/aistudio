@@ -86,6 +86,7 @@ import {
   ApprovalRequiredError,
   ConflictError,
   ForbiddenError,
+  ValidationError,
 } from "@/lib/content/errors";
 import {
   ATRIUM_DATA_AUTHORING_GUIDANCE,
@@ -161,6 +162,7 @@ function defineBuildWorkspaceChatToolsSuite1Part1() {
         "edit_workspace_document",
         "publish_workspace_content",
         "read_workspace_content",
+        "rename_workspace_content",
         "unpublish_workspace_content",
       ].sort()
     );
@@ -176,6 +178,7 @@ function defineBuildWorkspaceChatToolsSuite1Part1() {
         "delete_workspace_content",
         "publish_workspace_content",
         "read_workspace_content",
+        "rename_workspace_content",
         "unpublish_workspace_content",
         "update_workspace_artifact",
       ].sort()
@@ -415,6 +418,197 @@ function defineBuildWorkspaceChatToolsSuite1Part2() {it("edit_workspace_document
 
 }
 
+/** The #1791 rename + mode-only + provenance additions (split for max-lines). */
+function defineBuildWorkspaceChatToolsSuite1791() {
+  /**
+   * #1791 finding 4: "switch this to live data" used to require `code`, forcing
+   * the model to re-emit the whole 20-60 KB source to change one field — slow,
+   * costly, and at real risk of blowing the per-step stream budget.
+   */
+  it("update_workspace_artifact changes the mode ALONE without creating a version", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    updateMock.mockResolvedValue({ id: "art-1" });
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = await exec(tools.update_workspace_artifact, { dataAccess: "query" });
+
+    expect(updateMock).toHaveBeenCalledWith(REQ, "art-1", { dataAccess: "query" });
+    expect(createVersionMock).not.toHaveBeenCalled();
+    // No model-authored bytes are persisted, so there is nothing for the §28.3
+    // screen to evaluate.
+    expect(screenMock).not.toHaveBeenCalled();
+    // `objectId` still drives the panel refetch signal; no versionNumber,
+    // because no version was written.
+    expect(out).toEqual({ ok: true, objectId: "art-1", dataAccess: "query" });
+  });
+
+  it("a mode-only change that fails is an ERROR, not an ok-with-warning", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    updateMock.mockRejectedValue(new ForbiddenError("no edit access"));
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.update_workspace_artifact, { dataAccess: "query" })) as {
+      ok?: true;
+      error?: string;
+    };
+    // Unlike the code+mode path there is no successful half to acknowledge —
+    // nothing changed at all, so `ok: true` would be a false success.
+    expect(out.ok).toBeUndefined();
+    expect(out.error).toMatch(/could NOT be changed to 'query'/);
+    expect(out.error).toMatch(/nothing was changed/i);
+    expect(createVersionMock).not.toHaveBeenCalled();
+  });
+
+  it("update_workspace_artifact rejects a call with neither code nor dataAccess", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.update_workspace_artifact, {})) as { error: string };
+    expect(out.error).toMatch(/nothing to change/i);
+    expect(updateMock).not.toHaveBeenCalled();
+    expect(createVersionMock).not.toHaveBeenCalled();
+    expect(screenMock).not.toHaveBeenCalled();
+  });
+
+  it("a mode-only call still rejects an invalid dataAccess and writes NOTHING", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.update_workspace_artifact, { dataAccess: "everything" })) as {
+      error: string;
+    };
+    expect(out.error).toMatch(/invalid data access mode/i);
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * #1791 finding 3: the library titles a starter artifact with the truncated
+   * PROMPT, and the chat had no way to fix it — asked for "a proper title" the
+   * model could only edit the artifact's own <h1>, which the library, the panel
+   * header and the editor never read.
+   */
+  it("rename_workspace_content renames through the service and echoes the new slug", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    updateMock.mockResolvedValue({
+      id: "art-1",
+      title: "Device repairs dashboard",
+      slug: "device-repairs-dashboard",
+    });
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = await exec(tools.rename_workspace_content, {
+      title: "Device repairs dashboard",
+    });
+    expect(updateMock).toHaveBeenCalledWith(REQ, "art-1", {
+      title: "Device repairs dashboard",
+    });
+    expect(out).toEqual({
+      ok: true,
+      objectId: "art-1",
+      title: "Device repairs dashboard",
+      slug: "device-repairs-dashboard",
+    });
+  });
+
+  it("rename_workspace_content trims the title before it reaches the service", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    updateMock.mockResolvedValue({ id: "art-1", title: "Repairs", slug: "repairs" });
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    await exec(tools.rename_workspace_content, { title: "  Repairs  " });
+    // contentService.update validates the TRIMMED title but persists what it is
+    // given, so an untrimmed value would store padding and slugify from it.
+    expect(updateMock).toHaveBeenCalledWith(REQ, "art-1", { title: "Repairs" });
+  });
+
+  it("rename_workspace_content refuses an empty title without calling the service", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.rename_workspace_content, { title: "   " })) as {
+      error: string;
+    };
+    expect(out.error).toMatch(/no title provided/i);
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+
+  it("rename_workspace_content relays a validation failure the model can fix", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    updateMock.mockRejectedValue(
+      new ValidationError("Title must be 200 characters or fewer")
+    );
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.rename_workspace_content, { title: "x".repeat(400) })) as {
+      error: string;
+    };
+    expect(out.error).toMatch(/200 characters or fewer/);
+  });
+
+  it("rename_workspace_content does NOT leak a permission failure's detail", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    updateMock.mockRejectedValue(new ForbiddenError("no edit access"));
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const out = (await exec(tools.rename_workspace_content, { title: "New title" })) as {
+      error: string;
+    };
+    expect(out.error).toMatch(/could not be renamed right now/i);
+  });
+
+  it("is NOT bound for an object the caller cannot edit", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(false);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    expect(tools.rename_workspace_content).toBeUndefined();
+  });
+
+  it("nudges the model to set a real title instead of keeping the prompt", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    const result = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    expect(result.systemPromptFragment).toContain("rename_workspace_content");
+    expect(result.systemPromptFragment).toMatch(
+      /request that created it rather than a name/i
+    );
+    // A read-only object has no rename tool, so it must not be told about one.
+    canEditMock.mockReturnValue(false);
+    const readOnly = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    expect(readOnly.systemPromptFragment).not.toContain("rename_workspace_content");
+  });
+
+  /**
+   * #1791 finding 6: the chat tools run under the user's OWN requester, so the
+   * version is correctly `authorActor: "human"` — but the MODEL wrote the code,
+   * and the history said "human" with nothing to distinguish it.
+   */
+  it("stamps the authoring surface on a chat-written version", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    createVersionMock.mockResolvedValue({ version: { versionNumber: 6 } });
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    await exec(tools.update_workspace_artifact, { code: "<div/>" });
+
+    expect(createVersionMock).toHaveBeenCalledWith(
+      REQ,
+      "art-1",
+      expect.objectContaining({ authorLabel: "nexus-chat" })
+    );
+  });
+
+  it("tells the model a mode-only change needs no code", async () => {
+    getMock.mockResolvedValue(ART);
+    canEditMock.mockReturnValue(true);
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "art-1", userId: 7, requestId: "r" }))!;
+    const description = String(
+      (tools.update_workspace_artifact as { description?: unknown }).description
+    );
+    expect(description).toMatch(/dataAccess with NO code/i);
+    expect(description).toMatch(/creates no new version/i);
+  });
+
+}
+
 /** #1749 contract + screening assertions (split out for max-lines-per-function). */
 function defineBuildWorkspaceChatToolsSuite1Part2b() {
   it("the artifact tool description and editHint carry the SHARED AtriumData contract", async () => {
@@ -464,6 +658,7 @@ function defineBuildWorkspaceChatToolsSuite1Part2b() {
     // The live read short-circuits — the stale projection is NOT consulted.
     expect(loadDocStateMock).not.toHaveBeenCalled();
     expect(out).toEqual({
+      objectId: "doc-1",
       title: "My Doc",
       kind: "document",
       bodyFormat: "markdown",
@@ -483,7 +678,7 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
     const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
     const out = await exec(tools.read_workspace_content, {});
     expect(loadDocStateMock).not.toHaveBeenCalled();
-    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: "", byteOffset: 0, totalBytes: 0 });
+    expect(out).toEqual({ objectId: "doc-1", title: "My Doc", kind: "document", bodyFormat: "markdown", body: "", byteOffset: 0, totalBytes: 0 });
   });
 
   it("read_workspace_content falls back to the projection when the live read is unavailable (null)", async () => {
@@ -495,7 +690,7 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
     const out = await exec(tools.read_workspace_content, {});
     expect(readAgentDocMarkdownMock).toHaveBeenCalledWith("doc-1");
     expect(loadDocStateMock).toHaveBeenCalledWith("doc-1");
-    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: "# Projection", byteOffset: 0, totalBytes: 12 });
+    expect(out).toEqual({ objectId: "doc-1", title: "My Doc", kind: "document", bodyFormat: "markdown", body: "# Projection", byteOffset: 0, totalBytes: 12 });
   });
 
   it("read_workspace_content falls back to version.bodyInline when live read AND projection are empty", async () => {
@@ -505,7 +700,7 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
     loadDocStateMock.mockResolvedValue({ markdown: "", revision: 5 });
     const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
     const out = await exec(tools.read_workspace_content, {});
-    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: "# Snapshot", byteOffset: 0, totalBytes: 10 });
+    expect(out).toEqual({ objectId: "doc-1", title: "My Doc", kind: "document", bodyFormat: "markdown", body: "# Snapshot", byteOffset: 0, totalBytes: 10 });
   });
 
   it("read_workspace_content flags bodyUnavailable only when live read, projection AND snapshot are all empty", async () => {
@@ -515,7 +710,7 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
     loadDocStateMock.mockResolvedValue({ markdown: "", revision: 5 });
     const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
     const out = await exec(tools.read_workspace_content, {});
-    expect(out).toEqual({ title: "My Doc", kind: "document", bodyFormat: "markdown", body: null, bodyUnavailable: true });
+    expect(out).toEqual({ objectId: "doc-1", title: "My Doc", kind: "document", bodyFormat: "markdown", body: null, bodyUnavailable: true });
   });
 
   // #1749 barrier B: an artifact over the 4 KiB inline threshold lives in S3.
@@ -528,6 +723,7 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
     const out = await exec(tools.read_workspace_content, {});
     expect(loadArtifactCodeMock).toHaveBeenCalledWith(BIG_ART.version);
     expect(out).toEqual({
+      objectId: "art-1",
       title: "My Art",
       kind: "artifact",
       bodyFormat: "jsx",
@@ -546,6 +742,7 @@ function defineBuildWorkspaceChatToolsSuite1Part3() {it("read_workspace_content 
     const out = await exec(tools.read_workspace_content, {});
     // Must NOT report body "" (which would let the model rewrite from nothing).
     expect(out).toEqual({
+      objectId: "art-1",
       title: "My Art",
       kind: "artifact",
       bodyFormat: "jsx",
@@ -674,6 +871,29 @@ function defineBuildWorkspaceChatToolsPreviewDiagnosticsSuite() {
 
 /** ITEM 2: publish / unpublish the OPEN object. */
 function defineBuildWorkspaceChatToolsPublishSuite() {
+  it("labels the pre-publish snapshot as chat-written only after a chat edit in the same request (#1791)", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    publishMock.mockResolvedValue({ publicationId: "pub-1" });
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    await exec(tools.edit_workspace_document, { markdown: "## New section" });
+    await exec(tools.publish_workspace_content, {});
+    expect(snapshotBeforePublishMock).toHaveBeenCalledWith(
+      expect.objectContaining({ objectId: "doc-1", authorLabel: "nexus-chat" })
+    );
+  });
+
+  it("does NOT label the snapshot when the chat's edit was refused", async () => {
+    getMock.mockResolvedValue(DOC);
+    canEditMock.mockReturnValue(true);
+    screenMock.mockResolvedValue({ allowed: false, reason: "blocked", message: "nope" });
+    publishMock.mockResolvedValue({ publicationId: "pub-1" });
+    const { tools } = (await buildWorkspaceChatTools({ workspaceIdOrSlug: "doc-1", userId: 7, requestId: "r" }))!;
+    await exec(tools.edit_workspace_document, { markdown: "bad" });
+    await exec(tools.publish_workspace_content, {});
+    expect(snapshotBeforePublishMock.mock.calls[0][0]).not.toHaveProperty("authorLabel");
+  });
+
   it("publish_workspace_content SNAPSHOTS the live document into a version BEFORE publishing (Codex P1)", async () => {
     getMock.mockResolvedValue(DOC);
     canEditMock.mockReturnValue(true);
@@ -687,6 +907,9 @@ function defineBuildWorkspaceChatToolsPublishSuite() {
     expect(snapshotBeforePublishMock).toHaveBeenCalledWith(
       expect.objectContaining({ objectId: "doc-1", kind: "document", requestId: "r" })
     );
+    // #1791: a publish-only request made no chat edit, so the snapshot must not
+    // claim the chat wrote it (the document keeps its real provenance).
+    expect(snapshotBeforePublishMock.mock.calls[0][0]).not.toHaveProperty("authorLabel");
     expect(order).toEqual(["snapshot", "publish"]);
     expect(publishMock).toHaveBeenCalledWith(REQ, "doc-1", { destination: "intranet" });
     expect(out).toEqual({
@@ -893,6 +1116,7 @@ function defineBuildWorkspaceChatToolsSuite1Part4() {it("unpublish_workspace_con
 const defineBuildWorkspaceChatToolsSuite1 = () => {
   defineBuildWorkspaceChatToolsSuite1Part1()
   defineBuildWorkspaceChatToolsSuite1Part2()
+  defineBuildWorkspaceChatToolsSuite1791()
   defineBuildWorkspaceChatToolsSuite1Part2b()
   defineBuildWorkspaceChatToolsSuite1Part3()
   defineBuildWorkspaceChatToolsPreviewDiagnosticsSuite()

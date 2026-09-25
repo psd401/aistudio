@@ -38,8 +38,12 @@ interface AgentCreateDialogProps {
   /**
    * Submit the agent prompt. Returns an error message to display, or null on
    * success (the caller navigates to the new artifact's workspace).
+   *
+   * `liveData` (#1791 finding 5) asks for the starter artifact to be created in
+   * `query` mode, so a live dashboard works from the first turn instead of
+   * depending on the model inferring the mode from the prompt.
    */
-  onSubmit: (prompt: string) => Promise<string | null>;
+  onSubmit: (prompt: string, liveData: boolean) => Promise<string | null>;
   /**
    * Create an EMPTY interactive page and open it in the editor, skipping the
    * agent entirely. Optional so surfaces that only offer the agent path can omit
@@ -52,6 +56,17 @@ interface AgentCreateDialogProps {
   onStartBlank?: () => Promise<string | null>;
 }
 
+/**
+ * #1791 finding 5: an interactive page can show each viewer live PSD data, and
+ * nothing here said so. It worked on prod only because the model inferred it
+ * from a prompt that happened to describe a dashboard. The line is written for
+ * someone who has never heard of the data bridge, and it states the permission
+ * rule up front, because "each viewer sees their own data" is exactly the part
+ * a staff member needs to trust before building one.
+ */
+const LIVE_DATA_HINT =
+  "Dashboards can show live district data. Each viewer sees what their own permissions allow.";
+
 /** A few starter prompts, so an empty field is never a blank wall. */
 const EXAMPLE_PROMPTS: ReadonlyArray<string> = [
   "A dashboard summarizing our enrollment trends by school",
@@ -62,6 +77,36 @@ const EXAMPLE_PROMPTS: ReadonlyArray<string> = [
 /** The two create paths the dialog offers; `null` when neither is in flight. */
 type CreatePath = "agent" | "blank";
 
+/**
+ * The live-PSD-data opt-in (#1791 finding 5). Its own component so the dialog
+ * body stays inside the max-lines-per-function budget, and so the explanatory
+ * copy sits next to the control it explains.
+ */
+function LiveDataOptIn({
+  checked,
+  disabled,
+  onChange,
+}: {
+  checked: boolean;
+  disabled: boolean;
+  onChange: (next: boolean) => void;
+}): React.JSX.Element {
+  return (
+    <label className="mer-prompt-livedata">
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span>
+        Use live PSD data
+        <span className="mer-prompt-livedata-hint"> — {LIVE_DATA_HINT}</span>
+      </span>
+    </label>
+  );
+}
+
 export function CreateContentDialog({
   open,
   onClose,
@@ -69,6 +114,11 @@ export function CreateContentDialog({
   onStartBlank,
 }: AgentCreateDialogProps): React.JSX.Element {
   const [prompt, setPrompt] = useState("");
+  // #1791 finding 5: opt in to the live PSD-data bridge at create time. Default
+  // off — `records` is the column default and the safe mode; a viewer-scoped
+  // query bridge is something the author chooses, never something a dialog
+  // turns on for them.
+  const [liveData, setLiveData] = useState(false);
   // Which create path is in flight, so the button that was clicked is the one
   // that spins. A disabled-but-static "Start blank" gave no sign the click
   // registered, which is how the original failure looked like a no-op (#1714).
@@ -119,8 +169,8 @@ export function CreateContentDialog({
       setError("Describe what you'd like the agent to build.");
       return;
     }
-    await runCreate("agent", () => onSubmit(trimmed));
-  }, [prompt, onSubmit, runCreate]);
+    await runCreate("agent", () => onSubmit(trimmed, liveData));
+  }, [prompt, liveData, onSubmit, runCreate]);
 
   const startBlank = useCallback(async () => {
     if (!onStartBlank) return;
@@ -160,6 +210,11 @@ export function CreateContentDialog({
                 void submit();
               }
             }}
+          />
+          <LiveDataOptIn
+            checked={liveData}
+            disabled={busy}
+            onChange={setLiveData}
           />
           <div className="mer-prompt-examples">
             {EXAMPLE_PROMPTS.map((ex) => (

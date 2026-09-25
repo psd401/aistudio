@@ -73,7 +73,8 @@ describe("CreateContentDialog — create failure recovery (#1714)", () => {
     fireEvent.click(buildButton());
 
     await waitFor(() => expect(buildButton()).not.toBeDisabled());
-    expect(onSubmit).toHaveBeenCalledWith("a budget explainer");
+    // Second argument is the #1791 live-PSD-data opt-in, off by default.
+    expect(onSubmit).toHaveBeenCalledWith("a budget explainer", false);
     // Announced, not just painted: the message is an ARIA alert.
     expect(screen.getByRole("alert")).toHaveTextContent(
       "Something went wrong. Please try again."
@@ -173,6 +174,41 @@ describe("CreateContentDialog — create failure recovery (#1714)", () => {
     await waitFor(() => expect(onStartBlank).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(startBlankButton()).toBeDisabled());
     expect(screen.queryByText(/something went wrong/i)).not.toBeInTheDocument();
+  });
+
+  /**
+   * #1791 finding 5: nothing in this dialog said an interactive page can show
+   * each viewer live district data. It worked on prod only because the model
+   * inferred it from a prompt that happened to describe a dashboard.
+   */
+  it("tells the author a page can show live district data, and whose data", async () => {
+    render(
+      <CreateContentDialog open onClose={jest.fn()} onSubmit={jest.fn(async () => null)} />
+    );
+
+    expect(
+      screen.getByText(/Dashboards can show live district data/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Each viewer sees what their own permissions allow/i)
+    ).toBeInTheDocument();
+  });
+
+  it("defaults the live-data opt-in to OFF and passes it through when ticked", async () => {
+    const onSubmit = jest.fn(async () => null);
+    render(<CreateContentDialog open onClose={jest.fn()} onSubmit={onSubmit} />);
+
+    const optIn = screen.getByRole("checkbox", { name: /use live psd data/i });
+    // A viewer-scoped query bridge is the author's choice, never a default.
+    expect(optIn).not.toBeChecked();
+
+    fireEvent.click(optIn);
+    typePrompt("a repairs dashboard");
+    fireEvent.click(buildButton());
+
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith("a repairs dashboard", true)
+    );
   });
 
   it("does not call onSubmit for an empty prompt", async () => {

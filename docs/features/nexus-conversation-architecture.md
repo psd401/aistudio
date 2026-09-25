@@ -455,6 +455,49 @@ path. See
 
 ---
 
+## Workspace object binding (#1791)
+
+A conversation opened beside an Atrium document or artifact records that
+object durably in `nexus_conversations.workspace_object_id` (migration 183,
+`ON DELETE SET NULL`); like repository bindings, it is not stored only in the
+`?workspace=` URL param. `lib/nexus/workspace-conversation-binding.ts` owns
+the three operations, each scoped by `user_id` in the `WHERE` predicate:
+
+- `bindConversationWorkspace` — written by the chat route on every turn that
+  runs with a workspace bound. A conversation can move between objects; the
+  newest binding wins. A failed write is logged and swallowed (the turn is
+  not failed; only the next reopen loses its panel).
+- `getConversationWorkspaceObjectId` — reopening a conversation with no
+  `?workspace=` param restores the panel (`useRestoreBoundWorkspace` in
+  `app/(protected)/nexus/page.tsx`). The id is not re-authorized here; the
+  panel load and the workspace tools re-check `canView`/`canEdit` and degrade
+  to a not-found state for a deleted or revoked object. The restore is async,
+  so until it settles the request body carries `restoreBoundWorkspace: true`
+  (`lib/nexus/workspace-restore-state.ts`) and the route binds the persisted
+  object for that turn (`workspaceIdForTurn`). The flag is never sent after
+  the restore settles, so a panel the person closed stays closed.
+- `findLatestConversationForWorkspace` — Atrium's "Open beside chat" and
+  "Ask the agent" continue the most recent conversation about the object
+  instead of starting a new one.
+
+Model-side only, `lib/nexus/workspace-tool-history.ts` stubs superseded
+workspace source payloads (full artifact code, document bodies) out of the
+messages sent to the model. Per object it keeps the newest write that
+REPLACED the source (artifact `code`, or a document edit in `replace` mode),
+every document append after it (append is the edit tools' default, and adds
+to the document rather than replacing it; a mode-only `dataAccess` change
+does not count as a write), plus every page of the newest read sequence
+after the replacement: a large source is read in several
+pages at different offsets, and a fresh offset-0 read starts a new sequence,
+so pages from an older revision are never stitched onto a new first page,
+and appends made before that fresh read are dropped (the read holds them).
+A part that names no `objectId` (reads persisted before reads returned it,
+error results) is never pruned: it cannot be shown to belong to the same
+object as a later part. Persisted messages are never touched. Tool parts keep their exact
+shape so every tool call still pairs with its result on replay.
+
+---
+
 ## Durable repository bindings
 
 Durable repository context is normalized in

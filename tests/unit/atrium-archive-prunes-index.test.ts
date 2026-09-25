@@ -14,17 +14,46 @@
  */
 
 const updateRows: Array<Array<Record<string, unknown>>> = [];
+/**
+ * #1791 finding 3: a patch carrying a `title` now takes the transactional path,
+ * because a rename may need a new slug. The in-transaction lock re-reads the
+ * row the outer load returned (so it must not consume another queue entry), and
+ * the publication probe returns a row so these tests never exercise re-slugging
+ * — that is covered by atrium-rename-reslug.test.ts. Status-only updates, which
+ * is what most of this file asserts, still take the non-transactional path.
+ */
+let lastLoaded: Array<Record<string, unknown>> = [];
+const txStub = {
+  select: () => ({
+    from: () => ({
+      where: () =>
+        Object.assign(Promise.resolve([{ id: "pub-1" }]), {
+          for: () => ({ limit: async () => lastLoaded }),
+          limit: async () => [{ id: "pub-1" }],
+        }),
+    }),
+  }),
+  update: () => ({
+    set: () => ({
+      where: () => ({ returning: async () => updateRows.shift() ?? [] }),
+    }),
+  }),
+};
 
 jest.mock("@/lib/db/drizzle-client", () => ({
   // Serves loadByIdOrSlug and the UPDATE ... RETURNING in call order.
-  executeQuery: jest.fn(async () => updateRows.shift() ?? []),
-  executeTransaction: jest.fn(async () => {
-    throw new Error("update should not open a transaction");
+  executeQuery: jest.fn(async () => {
+    lastLoaded = updateRows.shift() ?? [];
+    return lastLoaded;
   }),
+  executeTransaction: jest.fn(
+    async (callback: (tx: unknown) => Promise<unknown>) => callback(txStub)
+  ),
 }));
 jest.mock("@/lib/db/schema", () => ({
   contentObjects: { id: "id", slug: "slug" },
   contentCollections: {},
+  contentPublications: { id: "pub_id", objectId: "object_id" },
   contentVersions: {},
 }));
 jest.mock("@/lib/db/json-utils", () => ({

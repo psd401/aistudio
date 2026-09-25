@@ -55,10 +55,9 @@ import {
 } from "@/lib/content/errors";
 import { buildArtifactCspGuidance } from "@/lib/content/artifact-sandbox-config";
 import type { ArtifactBridgeErrorCode } from "@/lib/content/artifact-bridge-errors";
+import { NEXUS_CHAT_AUTHOR_LABEL } from "@/lib/content/version-author-label";
 import { createLogger } from "@/lib/logger";
 
-/** Free-form attribution label stamped on the purple rail for chat-driven edits. */
-const NEXUS_CHAT_AGENT_LABEL = "nexus-chat";
 /** Bound on the markdown/code a single chat edit may write (mirrors the bridge). */
 const MAX_EDIT_BYTES = 512 * 1024;
 
@@ -94,6 +93,12 @@ export interface WorkspaceChatTools {
 }
 
 interface ReadResult {
+  /**
+   * The object read. History pruning (`workspace-tool-history.ts`) keys
+   * "superseded" on it, so a rebound conversation never stubs another
+   * object's source as stale.
+   */
+  objectId: string;
   title: string;
   kind: "document" | "artifact";
   bodyFormat: string | null;
@@ -339,6 +344,7 @@ function buildReadTool(
         // unavailable/absent body can never be reported as an empty first page.
         const page = body === null ? null : sliceBodyForRead(body, offset);
         return {
+          objectId: obj.id,
           title: obj.title,
           kind,
           bodyFormat: obj.version?.bodyFormat ?? null,
@@ -404,7 +410,7 @@ async function screenAndApplyDocEdit(
     };
   }
   try {
-    await applyAgentEdit({ objectId, markdown, agentId: NEXUS_CHAT_AGENT_LABEL, mode });
+    await applyAgentEdit({ objectId, markdown, agentId: NEXUS_CHAT_AUTHOR_LABEL, mode });
     // #1749: echo the id the edit actually landed on. `atrium:workspace-changed`
     // is scoped by this id, and an event WITHOUT one matches every listener
     // (`workspaceChangeMatches` treats a missing id as "about you") — so an
@@ -430,7 +436,8 @@ function buildDocumentEditTool(
   objectId: string,
   userId: number,
   requestId: string,
-  log: ReturnType<typeof createLogger>
+  log: ReturnType<typeof createLogger>,
+  onEdited: () => void
 ): Tool {
   return tool({
     description:
@@ -457,7 +464,9 @@ function buildDocumentEditTool(
       const mode = args?.mode === "replace" ? "replace" : "append";
       // Edit rights were confirmed at bind time (this tool is only bound for an
       // editable document); the shared helper screens + applies.
-      return screenAndApplyDocEdit(objectId, markdown, mode, requestId, log);
+      const result = await screenAndApplyDocEdit(objectId, markdown, mode, requestId, log);
+      if ("ok" in result) onEdited();
+      return result;
     },
   });
 }
@@ -482,15 +491,27 @@ function narrowDataAccess(value: unknown): ContentDataAccess | null {
  * Returns `{ error }` (never throws): a tool reports a bad argument back to the
  * model as a result, it does not blow up the turn. Extracted to keep `execute`
  * inside the complexity budget.
+ *
+ * #1791 finding 4: `code` is optional WHEN `dataAccess` is supplied. "Switch
+ * this to live data" is a one-field change, and requiring `code` forced the
+ * model to re-emit the entire 20-60 KB source to make it — slow, expensive, and
+ * at real risk of blowing the per-step stream budget for no benefit. A call with
+ * `dataAccess` and no `code` is a mode-only change and creates NO new version.
+ * At least one of the two is still required: a call with neither is a no-op the
+ * model should be told about rather than silently succeeding.
  */
 function parseArtifactUpdateArgs(
   args: { code?: unknown; summary?: unknown; dataAccess?: unknown } | undefined
 ):
-  | { code: string; summary: string | undefined; dataAccess: ContentDataAccess | null }
+  | {
+      code: string | null;
+      summary: string | undefined;
+      dataAccess: ContentDataAccess | null;
+    }
   | { error: string } {
-  const code = typeof args?.code === "string" ? args.code : "";
-  if (!code.trim()) return { error: "No code provided for the new version." };
-  if (Buffer.byteLength(code, "utf8") > MAX_EDIT_BYTES) {
+  const rawCode = typeof args?.code === "string" ? args.code : "";
+  const hasCode = rawCode.trim().length > 0;
+  if (hasCode && Buffer.byteLength(rawCode, "utf8") > MAX_EDIT_BYTES) {
     return { error: "That artifact is too large to save in one step." };
   }
   let dataAccess: ContentDataAccess | null = null;
@@ -502,8 +523,14 @@ function parseArtifactUpdateArgs(
       };
     }
   }
+  if (!hasCode && dataAccess === null) {
+    return {
+      error:
+        "Nothing to change: provide `code` for a new version, or `dataAccess` alone to change only the sandbox data mode.",
+    };
+  }
   return {
-    code,
+    code: hasCode ? rawCode : null,
     summary: typeof args?.summary === "string" ? args.summary : undefined,
     dataAccess,
   };
@@ -526,7 +553,8 @@ async function applyDataAccessAfterVersion(args: {
   req: NonNullable<Awaited<ReturnType<typeof requesterForUserId>>>;
   objectId: string;
   dataAccess: ContentDataAccess | null;
-  versionNumber: number;
+  /** Absent on a mode-only call (#1791 finding 4) — no version was written. */
+  versionNumber?: number;
   log: ReturnType<typeof createLogger>;
 }): Promise<{ dataAccess?: ContentDataAccess; warning?: string }> {
   const { req, objectId, dataAccess, versionNumber, log } = args;
@@ -542,7 +570,12 @@ async function applyDataAccessAfterVersion(args: {
       error: err instanceof Error ? err.message : String(err),
     });
     return {
-      warning: `The new code was saved, but the data access mode could NOT be changed to '${dataAccess}' — the artifact still has its previous mode, so any AtriumData call the new code makes for '${dataAccess}' will be rejected by the sandbox until the mode is changed. Tell the user that the code landed and the mode did not, and offer to retry.`,
+      warning:
+        versionNumber === undefined
+          ? // Mode-only call (#1791 finding 4): there is no "the code landed"
+            // half to report — nothing changed at all.
+            `The data access mode could NOT be changed to '${dataAccess}'. Nothing was changed — the artifact still has its previous mode, so any AtriumData call it makes for '${dataAccess}' will be rejected by the sandbox. Tell the user the change did not apply, and offer to retry.`
+          : `The new code was saved, but the data access mode could NOT be changed to '${dataAccess}' — the artifact still has its previous mode, so any AtriumData call the new code makes for '${dataAccess}' will be rejected by the sandbox until the mode is changed. Tell the user that the code landed and the mode did not, and offer to retry.`,
     };
   }
 }
@@ -559,6 +592,9 @@ function buildArtifactUpdateTool(
     description:
       "Update the ARTIFACT open in the workspace panel by creating a new version with the given full source code. The new version appears in the artifact's version dropdown. Provide the COMPLETE code (it replaces the current version's code), not a diff. " +
       "Pass dataAccess to also switch the artifact's sandbox data-bridge mode in the same call — do that whenever the user asks for a LIVE dashboard, because code written against the wrong mode is rejected by the sandbox at runtime. " +
+      // #1791 finding 4: a mode switch used to force a full re-emit of the
+      // source. Say plainly that it does not, so the model takes the cheap path.
+      "To change ONLY the data mode, send dataAccess with NO code: that changes the mode in place and creates no new version. Do that whenever the existing code already works under the new mode — do NOT re-send the whole source just to flip the mode. " +
       ATRIUM_DATA_AUTHORING_GUIDANCE +
       // #1750 — same CSP rule the MCP content tools carry, from the same
       // allowlist the sandbox host's CSP is built from. A blocked CDN script
@@ -568,7 +604,7 @@ function buildArtifactUpdateTool(
       " " +
       buildArtifactCspGuidance(),
     inputSchema: jsonSchema<{
-      code: string;
+      code?: string;
       summary?: string;
       dataAccess?: ContentDataAccess;
     }>({
@@ -576,7 +612,8 @@ function buildArtifactUpdateTool(
       properties: {
         code: {
           type: "string",
-          description: "The complete new source code for the artifact.",
+          description:
+            "The complete new source code for the artifact. Omit it ONLY when you are changing dataAccess alone.",
         },
         summary: {
           type: "string",
@@ -586,11 +623,13 @@ function buildArtifactUpdateTool(
           type: "string",
           enum: [...CONTENT_DATA_ACCESS_MODES],
           description:
-            "Optional — set the artifact's sandbox data bridge mode alongside the new code. Omit to leave it unchanged. " +
+            "Optional — set the artifact's sandbox data bridge mode. Send it WITH code to change both at once, or WITHOUT code to change only the mode (no new version). Omit to leave it unchanged. " +
             DATA_ACCESS_DESC,
         },
       },
-      required: ["code"],
+      // #1791 finding 4: neither field is required on its own, but the executor
+      // rejects a call that supplies neither — the schema cannot express "one of".
+      required: [],
       additionalProperties: false,
     }),
     execute: async (
@@ -599,7 +638,8 @@ function buildArtifactUpdateTool(
       | {
           ok: true;
           objectId: string;
-          versionNumber: number;
+          /** Omitted on a mode-only change (#1791) — no version was written. */
+          versionNumber?: number;
           dataAccess?: ContentDataAccess;
           warning?: string;
         }
@@ -610,6 +650,24 @@ function buildArtifactUpdateTool(
       const { code, summary, dataAccess } = parsed;
       const req = await requesterForUserId(userId);
       if (!req) return { error: "Could not resolve your identity." };
+      // #1791 finding 4: mode-only change. No model-authored bytes are being
+      // persisted, so there is nothing for the §28.3 screen to evaluate and no
+      // version to create — `contentService.update` runs the same canView
+      // (404-mask) → canEdit gate under the SESSION user's requester that the
+      // Content settings dialog uses, so this is no wider than the dialog.
+      if (code === null) {
+        const applied = await applyDataAccessAfterVersion({
+          req,
+          objectId,
+          dataAccess,
+          log,
+        });
+        // A failed flip changed nothing; report it as an error rather than an
+        // `ok: true` carrying a warning, because unlike the code+mode path
+        // there is no successful half to acknowledge.
+        if (applied.warning) return { error: applied.warning };
+        return { ok: true, objectId, ...applied };
+      }
       // §28.3: this tool runs under a `kind: "user"` (human) requester, and
       // contentService.createVersion only screens AGENT/delegated authors — so
       // the model-generated code would be persisted UNSCREENED without this
@@ -651,6 +709,13 @@ function buildArtifactUpdateTool(
           body: code,
           bodyFormat: bodyFormat === "jsx" ? "jsx" : "html",
           summary,
+          // #1791 finding 6: these tools run under the user's OWN requester —
+          // the right call for authorization, and why the version is correctly
+          // `authorActor: "human"`. But the MODEL wrote this code, and the
+          // version list said "human" with nothing to distinguish it, so "who
+          // wrote this SQL?" was unanswerable. The label records the surface
+          // without weakening the authorization record above it.
+          authorLabel: NEXUS_CHAT_AUTHOR_LABEL,
         });
       } catch (err) {
         log.warn("update_workspace_artifact failed", {
@@ -704,10 +769,16 @@ interface WorkspacePublishArgs {
   requestId: string;
   destinationRaw: string | undefined;
   log: ReturnType<typeof createLogger>;
+  /**
+   * True when the chat edited this document earlier in the SAME request. Only
+   * then is the pre-publish snapshot labelled as written via Nexus chat — a
+   * publish-only request must not relabel a human-authored document (#1791).
+   */
+  chatEditedThisRequest: () => boolean;
 }
 
 async function runWorkspacePublishOp(args: WorkspacePublishArgs): Promise<Record<string, unknown>> {
-  const { op, objectId, kind, userId, requestId, destinationRaw, log } = args;
+  const { op, objectId, kind, userId, requestId, destinationRaw, log, chatEditedThisRequest } = args;
   const req = await requesterForUserId(userId);
   if (!req) return { error: "Could not resolve your identity." };
   let destination: ReturnType<typeof assertEditorDestination>;
@@ -721,7 +792,13 @@ async function runWorkspacePublishOp(args: WorkspacePublishArgs): Promise<Record
       // Advance the version head to the live doc content first: chat edits land only
       // on the live Yjs/atrium_doc_state path, so publishing the persisted head
       // without this would ship the stale/empty version (Codex review P1).
-      await snapshotLiveDocumentForPublish({ req, objectId, kind, requestId });
+      await snapshotLiveDocumentForPublish({
+        req,
+        objectId,
+        kind,
+        requestId,
+        ...(chatEditedThisRequest() ? { authorLabel: NEXUS_CHAT_AUTHOR_LABEL } : {}),
+      });
       const result = await publishService.publish(req, objectId, { destination });
       return {
         ok: true,
@@ -753,6 +830,83 @@ async function runWorkspacePublishOp(args: WorkspacePublishArgs): Promise<Record
   }
 }
 
+/**
+ * Build the rename tool for the WORKSPACE-bound object (#1791 finding 3).
+ *
+ * The library's "Build it for me" flow titles a starter artifact with the
+ * truncated PROMPT, so a dashboard is called "A dashboard of Chromebook/device
+ * repairs from our district data: repairs per…" in the library, the panel
+ * header and the editor, forever. The chat had no way to fix that: asked to
+ * "give it a proper title", the model could only edit the artifact's own
+ * `<h1>`/`<title>`, which changes nothing outside the rendered page.
+ *
+ * `contentService.update` runs the same canView (404-mask) → canEdit gate the
+ * Content settings dialog uses, under the SESSION user's requester, so this is
+ * no wider than the dialog. It also re-slugs while the object has never been
+ * published (see `updateInTransaction`), so the URL stops carrying the prompt.
+ */
+function buildRenameTool(args: {
+  objectId: string;
+  kind: "document" | "artifact";
+  userId: number;
+  log: ReturnType<typeof createLogger>;
+}): Tool {
+  const { objectId, kind, userId, log } = args;
+  return tool({
+    description:
+      `Rename the ${kind} open in the workspace panel — the title shown in the library, the panel header and the editor. ` +
+      `Editing a heading INSIDE the content does not rename it; only this tool does. ` +
+      `Give a newly created ${kind} a real title on your first build: the library names it after the prompt that created it, which is not a title. ` +
+      `While the ${kind} has never been published its address is regenerated from the new title too; once it has been published the address stays fixed so existing links keep working.`,
+    inputSchema: jsonSchema<{ title: string }>({
+      type: "object",
+      properties: {
+        title: {
+          type: "string",
+          description:
+            "The new title. A short, human title for the thing itself — not a restatement of the request that created it.",
+        },
+      },
+      required: ["title"],
+      additionalProperties: false,
+    }),
+    execute: async (
+      toolArgs
+    ): Promise<
+      { ok: true; objectId: string; title: string; slug: string } | { error: string }
+    > => {
+      // Trim here: `contentService.update` validates the TRIMMED title but
+      // persists what it is given, so an untrimmed value would store leading
+      // whitespace and slugify from it.
+      const title = typeof toolArgs?.title === "string" ? toolArgs.title.trim() : "";
+      if (!title) return { error: "No title provided." };
+      const req = await requesterForUserId(userId);
+      if (!req) return { error: "Could not resolve your identity." };
+      try {
+        const updated = await contentService.update(req, objectId, { title });
+        return {
+          ok: true,
+          // Echoed so `useWorkspaceChangeSignal` refreshes the right object —
+          // an id-less success matches EVERY listener.
+          objectId,
+          title: updated.title,
+          slug: updated.slug,
+        };
+      } catch (err) {
+        if (err instanceof ValidationError) {
+          // The only model-fixable failure: an empty or over-long title.
+          return { error: err.message };
+        }
+        log.warn("rename_workspace_content failed", {
+          objectId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return { error: `The ${kind} could not be renamed right now.` };
+      }
+    },
+  });
+}
+
 /** Build the publish/unpublish tool for the WORKSPACE-bound object (ITEM 2). */
 function buildPublishTool(args: {
   op: "publish" | "unpublish";
@@ -761,8 +915,9 @@ function buildPublishTool(args: {
   userId: number;
   requestId: string;
   log: ReturnType<typeof createLogger>;
+  chatEditedThisRequest: () => boolean;
 }): Tool {
-  const { op, objectId, kind, userId, requestId, log } = args;
+  const { op, objectId, kind, userId, requestId, log, chatEditedThisRequest } = args;
   const verb = op === "publish" ? "Publish" : "Unpublish";
   return tool({
     description:
@@ -791,6 +946,7 @@ function buildPublishTool(args: {
         requestId,
         destinationRaw: toolArgs?.destination,
         log,
+        chatEditedThisRequest,
       }),
   });
 }
@@ -1017,9 +1173,17 @@ export async function buildWorkspaceChatTools(params: {
     ),
   };
 
+  // Whether the chat edited the open document in THIS request (#1791), so a
+  // later publish in the same request labels its snapshot as chat-written and
+  // a publish-only request does not.
+  let editedThisRequest = false;
+  const chatEditedThisRequest = () => editedThisRequest;
+
   if (editable) {
     if (kind === "document") {
-      tools.edit_workspace_document = buildDocumentEditTool(obj.id, userId, requestId, log);
+      tools.edit_workspace_document = buildDocumentEditTool(obj.id, userId, requestId, log, () => {
+        editedThisRequest = true;
+      });
     } else {
       tools.update_workspace_artifact = buildArtifactUpdateTool(
         obj.id,
@@ -1029,9 +1193,12 @@ export async function buildWorkspaceChatTools(params: {
         log
       );
     }
+    // #1791 finding 3: rename the OPEN object (library/panel/editor title, and
+    // the address while it has never been published).
+    tools.rename_workspace_content = buildRenameTool({ objectId: obj.id, kind, userId, log });
     // ITEM 2: publish/unpublish the OPEN object through the human publish gate.
-    tools.publish_workspace_content = buildPublishTool({ op: "publish", objectId: obj.id, kind, userId, requestId, log });
-    tools.unpublish_workspace_content = buildPublishTool({ op: "unpublish", objectId: obj.id, kind, userId, requestId, log });
+    tools.publish_workspace_content = buildPublishTool({ op: "publish", objectId: obj.id, kind, userId, requestId, log, chatEditedThisRequest });
+    tools.unpublish_workspace_content = buildPublishTool({ op: "unpublish", objectId: obj.id, kind, userId, requestId, log, chatEditedThisRequest });
   }
 
   // Hard delete of the OPEN object, bound on `canDelete` — NOT `canEdit`. helpers.ts
@@ -1051,6 +1218,12 @@ export async function buildWorkspaceChatTools(params: {
   tools.find_atrium_documents = buildFindDocumentsTool(userId, log);
   tools.edit_atrium_document = buildEditDocumentByIdTool(userId, requestId, log);
 
+  // #1791 finding 3: the model has to KNOW the title is renameable, and has to
+  // be nudged to set a real one on the first build — the library names a starter
+  // artifact after the prompt that created it, which is not a title.
+  const renameHint =
+    ` Its title (in the library, the panel header and the editor) is changed with rename_workspace_content — editing a heading inside the content does NOT rename it.` +
+    ` If the title still looks like the request that created it rather than a name for the thing, set a real one with that tool as part of your first build, without being asked.`;
   const editHint = editable
     ? kind === "document"
       ? " You can edit it with the edit_workspace_document tool; your edits appear live in the panel." +
@@ -1071,6 +1244,7 @@ export async function buildWorkspaceChatTools(params: {
         " You can also publish or unpublish it with publish_workspace_content / unpublish_workspace_content." +
         " If the user EXPLICITLY asks to permanently delete it (not archive), use delete_workspace_content — it is irreversible and refused while the artifact is published."
     : " It is read-only for this user.";
+  const editHintWithRename = editable ? editHint + renameHint : editHint;
 
   // Escape the title via JSON.stringify: a content title is user-controlled and
   // is interpolated into a SYSTEM instruction block, so a raw title with
@@ -1080,7 +1254,7 @@ export async function buildWorkspaceChatTools(params: {
     `A ${kind} titled ${safeTitle} is open in the workspace panel beside this chat. ` +
     `When the user asks you to change, add to, or fix it, act on THAT ${kind} rather than answering in chat only. ` +
     `Call read_workspace_content first to see its current content.` +
-    editHint +
+    editHintWithRename +
     ` To work on a DIFFERENT Atrium document, use find_atrium_documents to locate it and edit_atrium_document to change it (only documents the user can edit).`;
 
   log.info("Workspace chat tools bound", {

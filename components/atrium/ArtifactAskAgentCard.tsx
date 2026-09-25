@@ -8,10 +8,16 @@
  * and a free-text input; submitting opens the artifact BESIDE the Nexus chat
  * (`/nexus?workspace=<id>`), the existing agent re-prompt surface (spec §17), with
  * the prompt carried as a query hint. Client component (input state + navigation).
+ *
+ * #1791: it now continues the most recent conversation bound to this artifact
+ * (`&id=<conversation>`) instead of always opening a new one, and auto-sends the
+ * prompt on arrival via the same-tab handshake in `lib/nexus/draft-auto-send`.
  */
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { useRouter } from "next/navigation";
+import { nexusWorkspaceHref } from "@/lib/nexus/draft-auto-send";
+import { findWorkspaceConversationAction } from "@/actions/nexus/workspace-binding.actions";
 
 const EXAMPLE_PROMPTS: readonly string[] = [
   "Add a comparison to last year",
@@ -29,17 +35,53 @@ export function ArtifactAskAgentCard({
 }: ArtifactAskAgentCardProps): React.JSX.Element {
   const router = useRouter();
   const [prompt, setPrompt] = useState("");
+  // The conversation lookup is a round trip, so the click needs a visible
+  // "working on it" state — otherwise pressing Ask looks like a no-op for as
+  // long as the action takes.
+  const [opening, setOpening] = useState(false);
 
-  const open = (text: string): void => {
-    const base = `/nexus?workspace=${encodeURIComponent(artifactId)}`;
+  const open = useCallback(async (text: string, forceNewChat = false): Promise<void> => {
+    setOpening(true);
+    // #1791 finding 1: continue the conversation that already worked on this
+    // artifact instead of starting a fresh one. The old link always opened a
+    // NEW chat, so the second one re-ran `list_available_tables`, three
+    // `inspect_table_schema` calls and several probe queries the first chat had
+    // already done before it could make a one-table change.
+    //
+    // A failed or empty lookup falls through to a new conversation — the
+    // previous behaviour — so this can never block the person from asking.
+    // The edit page resolves the same binding server-side for "Open beside
+    // chat" (app/(protected)/atrium/[id]/edit/page.tsx) — change both together.
+    let conversationId: string | null = null;
+    if (!forceNewChat) {
+      try {
+        const found = await findWorkspaceConversationAction(artifactId);
+        if (found.isSuccess) conversationId = found.data.conversationId;
+      } catch {
+        // Fall through to a new chat.
+      }
+    }
     // `draft` is the ONLY param the Nexus composer prefills from — see
     // app/(protected)/nexus/_components/prompt-auto-loader.tsx, which reads
     // `draft` and `promptId` and nothing else. This used to send `prompt`,
     // which no code path reads, so every chip and every typed change silently
     // landed in an empty composer.
-    const href = text.trim() ? `${base}&draft=${encodeURIComponent(text.trim())}` : base;
-    router.push(href);
-  };
+    // #1791 finding 2: the button said "Ask" but only prefilled, so the person
+    // had to press send a second time on a different page. Arm the one-shot
+    // handshake so the composer sends it on arrival. A link without a matching
+    // sessionStorage entry — i.e. one that did not originate from this click —
+    // still only prefills, so the flag cannot be weaponised from outside.
+    router.push(
+      nexusWorkspaceHref({
+        workspaceId: artifactId,
+        conversationId,
+        draft: text,
+        autoSend: true,
+      })
+    );
+    // `opening` is deliberately left set: the navigation is in flight and the
+    // controls should stay disabled until this page is torn down.
+  }, [artifactId, router]);
 
   return (
     <div className="mer-artifact-rail-card mer-artifact-ask" data-testid="artifact-ask-agent">
@@ -59,7 +101,8 @@ export function ArtifactAskAgentCard({
             key={ex}
             type="button"
             className="mer-artifact-ask-chip"
-            onClick={() => open(ex)}
+            disabled={opening}
+            onClick={() => void open(ex)}
           >
             {ex}
           </button>
@@ -69,7 +112,7 @@ export function ArtifactAskAgentCard({
         className="mer-artifact-ask-form"
         onSubmit={(e) => {
           e.preventDefault();
-          open(prompt);
+          void open(prompt);
         }}
       >
         <input
@@ -78,11 +121,26 @@ export function ArtifactAskAgentCard({
           onChange={(e) => setPrompt(e.target.value)}
           placeholder="Describe a change…"
           aria-label="Describe a change for the agent"
+          disabled={opening}
         />
-        <button type="submit" className="mer-btn mer-btn-agent">
+        <button type="submit" className="mer-btn mer-btn-agent" disabled={opening}>
           Ask
         </button>
       </form>
+      {/*
+        #1791 finding 1: Ask continues the chat that already knows this artifact.
+        Starting over is still one click away — a long thread can be the reason
+        someone wants a clean one, and silently reusing it with no escape would
+        trade one trap for another.
+      */}
+      <button
+        type="button"
+        className="mer-artifact-ask-newchat"
+        disabled={opening}
+        onClick={() => void open(prompt, true)}
+      >
+        Start a new chat instead
+      </button>
     </div>
   );
 }

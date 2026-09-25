@@ -146,6 +146,7 @@ export interface VersionRowAsText {
   authorActor: string;
   authorUserId: number | null;
   authorAgentId: string | null;
+  authorLabel: string | null;
   bodyFormat: string;
   bodyLocation: string;
   bodyInline: string | null;
@@ -163,6 +164,7 @@ export function rowToVersionDTO(row: VersionRowAsText): ContentVersionDTO {
     authorActor: row.authorActor as "human" | "agent",
     authorUserId: row.authorUserId,
     authorAgentId: row.authorAgentId,
+    authorLabel: row.authorLabel,
     bodyFormat: row.bodyFormat as BodyFormat,
     bodyLocation: row.bodyLocation,
     bodyInline: row.bodyInline,

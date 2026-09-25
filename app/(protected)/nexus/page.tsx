@@ -27,6 +27,12 @@ import { createLogger } from '@/lib/client-logger'
 import { toast } from 'sonner'
 import { handleContentBlockedResponse } from '@/lib/nexus/content-blocked-handler'
 import { getPromptSettings } from '@/actions/prompt-library.actions'
+import { getConversationWorkspaceAction } from '@/actions/nexus/workspace-binding.actions'
+import {
+  isWorkspaceRestorePending,
+  markWorkspaceRestorePending,
+  settleWorkspaceRestore,
+} from '@/lib/nexus/workspace-restore-state'
 import { ModelFallbackBanner } from './_components/model-fallback-banner'
 import { VoiceModeOverlay } from './_components/voice-mode/voice-mode-overlay'
 import { VoiceButton, DisabledVoiceButton } from './_components/voice-mode/voice-button'
@@ -428,6 +434,13 @@ function ConversationRuntimeProvider({
           projectId,
           // Bind the open workspace object so the server offers §1087 read/edit tools.
           workspaceId: values.workspaceId || undefined,
+          // #1791: the reopened conversation's panel is still being restored;
+          // the server falls back to the persisted binding for this turn.
+          restoreBoundWorkspace:
+            !values.workspaceId &&
+            isWorkspaceRestorePending(values.conversationId)
+              ? true
+              : undefined,
           // #1787: carry what the open artifact's PREVIEW failed with since the
           // last turn, so `read_workspace_content` can show the model its own
           // broken SQL instead of letting it report success over a dead
@@ -1081,6 +1094,85 @@ function useModelFallbackInfo(
   }, [conversationModelId, models, selectedModelName])
 }
 
+/**
+ * Reopen the workspace panel for a conversation that was bound to an Atrium
+ * object (#1791 finding 1).
+ *
+ * The binding used to live ONLY in `?workspace=`, so opening a conversation
+ * from the sidebar showed the chat with no panel: the model lost its workspace
+ * tools and the author lost the live preview of the thing they were building.
+ * The server now records it, and this puts it back into the URL — which is the
+ * single source everything downstream already reads (the panel mount AND the
+ * `workspaceId` on the chat request body), so nothing else needs to change.
+ *
+ * `router.replace` (not `push`): restoring state is not a navigation the Back
+ * button should have to undo.
+ *
+ * Attempted at most ONCE per conversation, tracked by ID rather than a boolean
+ * (a boolean ref on a parameterized route is the stale-guard bug in
+ * docs/guides/react-patterns.md). That is also what makes the panel's own close
+ * button work: `closeWorkspace` strips the param, and without the once-guard
+ * this effect would immediately put it back.
+ */
+function useRestoreBoundWorkspace(
+  conversationId: string | null,
+  urlWorkspaceId: string | null
+): void {
+  const router = useRouter()
+  const attemptedForRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (!conversationId) return
+    // An explicit `?workspace=` wins: the person just opened something specific.
+    // This is also where a successful restore settles: its `router.replace`
+    // lands here, and from now on requests carry the real `workspaceId`.
+    if (urlWorkspaceId) {
+      attemptedForRef.current = conversationId
+      settleWorkspaceRestore(conversationId)
+      return
+    }
+    if (attemptedForRef.current === conversationId) return
+    attemptedForRef.current = conversationId
+
+    // Until the lookup settles, a send asks the server to use the persisted
+    // binding, so a fast first message is not processed without the artifact.
+    markWorkspaceRestorePending(conversationId)
+    let cancelled = false
+    void getConversationWorkspaceAction(conversationId)
+      .then((result) => {
+        if (cancelled) return
+        const objectId = result.isSuccess ? result.data.workspaceObjectId : null
+        if (!objectId) {
+          settleWorkspaceRestore(conversationId)
+          return
+        }
+        // Read the CURRENT search params rather than a captured copy: the await
+        // above means the user may have navigated or changed a param since.
+        const params = new URLSearchParams(window.location.search)
+        if (params.get('workspace')) {
+          settleWorkspaceRestore(conversationId)
+          return
+        }
+        // Stays pending until this lands as `urlWorkspaceId` (settled above),
+        // so there is no window where a send carries neither.
+        params.set('workspace', objectId)
+        router.replace(`/nexus?${params.toString()}`, { scroll: false })
+      })
+      .catch((error: unknown) => {
+        settleWorkspaceRestore(conversationId)
+        // Never fatal: the chat works without the panel, which is exactly the
+        // behaviour this restores from.
+        log.warn('Could not restore the conversation workspace panel', {
+          conversationId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [conversationId, urlWorkspaceId, router])
+}
+
 function useInvalidConversationRedirect(
   urlConversationId: string | null,
   validatedConversationId: string | null
@@ -1325,6 +1417,10 @@ function NexusPageContent() {
   // This prevents remounting when ID is assigned during runtime
   const [stableConversationId] = useState<string | null>(validatedConversationId)
   useInvalidConversationRedirect(urlConversationId, validatedConversationId)
+  // #1791: restore the workspace panel for a conversation that was bound to an
+  // Atrium object. Keyed on the LIVE conversationId, not stableConversationId,
+  // so a chat that binds a workspace on its first turn also restores on reload.
+  useRestoreBoundWorkspace(conversationId, urlWorkspaceId)
 
   // Debug logging for enabled tools
   useEffect(() => {

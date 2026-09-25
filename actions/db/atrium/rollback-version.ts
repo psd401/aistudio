@@ -64,6 +64,7 @@ export async function listContentVersionsAction(
       id: v.id,
       versionNumber: v.versionNumber,
       authorActor: v.authorActor,
+      authorLabel: v.authorLabel,
       summary: v.summary,
       createdAt: v.createdAt,
       isCurrent: v.id === obj.currentVersionId,

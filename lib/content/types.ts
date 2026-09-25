@@ -461,6 +461,14 @@ export interface ContentVersionDTO {
   authorActor: "human" | "agent";
   authorUserId: number | null;
   authorAgentId: string | null;
+  /**
+   * Authoring surface (#1791 finding 6), e.g. `"nexus-chat"`, or null for a
+   * version a person wrote directly in the editor. Lets the history say "you,
+   * via Nexus chat" for a version the chat MODEL wrote under the user's own
+   * requester — which is `authorActor: "human"`, correctly, because that
+   * requester is what the write was authorized against.
+   */
+  authorLabel: string | null;
   bodyFormat: BodyFormat;
   bodyLocation: string;
   /**
@@ -485,6 +493,13 @@ export interface SnapshotInput {
   body: string;
   bodyFormat?: BodyFormat;
   summary?: string;
+  /**
+   * Authoring-surface label for the version (#1791 finding 6), e.g.
+   * `"nexus-chat"`. Set by a surface where a MODEL wrote the body under a human
+   * requester, so the history can say "via Nexus chat" instead of "human". Never an authorization signal: `authorActor` / `authorUserId`
+   * remain the record of who was allowed to do this.
+   */
+  authorLabel?: string;
 }
 
 /** Exact canonical source for one committed immutable content version. */

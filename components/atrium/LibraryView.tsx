@@ -39,6 +39,7 @@ import { LibraryList } from "./LibraryList";
 import { LibraryHome } from "./LibraryHome";
 import { LibraryBulkBar } from "./LibraryBulkBar";
 import { CreateContentDialog } from "./CreateContentDialog";
+import { nexusWorkspaceHref } from "@/lib/nexus/draft-auto-send";
 import { PrivateCollectionsDialog } from "./PrivateCollectionsDialog";
 
 const log = createLogger({ component: "LibraryView" });
@@ -174,7 +175,12 @@ function deriveArtifactTitle(promptText: string): string {
  */
 function starterArtifactArgs(
   title: string,
-  collectionId: string | null
+  collectionId: string | null,
+  // #1791 finding 5: create the starter directly in `query` mode when the author
+  // ticked "Use live PSD data", so a live dashboard works from the first turn
+  // instead of depending on the model inferring the mode from the prompt. Left
+  // undefined otherwise, so the column default (`records`) applies unchanged.
+  liveData = false
 ): Parameters<typeof createContentAction> {
   return [
     {
@@ -183,6 +189,7 @@ function starterArtifactArgs(
       collectionId: collectionId ?? undefined,
       body: toBase64Utf8(ARTIFACT_STARTER_HTML),
       bodyFormat: "html",
+      ...(liveData ? { dataAccess: "query" as const } : {}),
     },
     { codeEncoding: "base64" },
   ];
@@ -229,14 +236,25 @@ function useLibraryCreate(collectionId: string | null) {
   }, [creatingDoc, collectionId, router]);
 
   const handleAgentCreate = useCallback(
-    async (promptText: string): Promise<string | null> => {
+    async (promptText: string, liveData = false): Promise<string | null> => {
       try {
         const res = await createContentAction(
-          ...starterArtifactArgs(deriveArtifactTitle(promptText), collectionId)
+          ...starterArtifactArgs(
+            deriveArtifactTitle(promptText),
+            collectionId,
+            liveData
+          )
         );
         if (res.isSuccess) {
+          // The person already asked for this build, so send the prompt on
+          // arrival (same one-shot handshake as the artifact Ask card) rather
+          // than making them press send again on a different page.
           router.push(
-            `/nexus?workspace=${res.data.id}&draft=${encodeURIComponent(promptText)}`
+            nexusWorkspaceHref({
+              workspaceId: res.data.id,
+              draft: promptText,
+              autoSend: true,
+            })
           );
           return null;
         }
