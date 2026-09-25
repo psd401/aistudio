@@ -116,11 +116,13 @@ test.describe("Atrium live-data sharing (#1790)", () => {
       await expect(
         page.getByTestId("share-live-data-public-warning")
       ).toHaveCount(0);
-      await page.getByLabel("Level").selectOption("public").catch(async () => {
-        // The Radix select renders a listbox rather than a native <select>.
-        await page.getByRole("combobox").first().click();
-        await page.getByRole("option", { name: "Public" }).click();
-      });
+      // The level picker is a Radix Select (a combobox BUTTON + a portalled
+      // listbox), not a native <select>, so it is driven by click → option
+      // rather than `selectOption`. It must be addressed by accessible name:
+      // the editor behind the dialog has its own `Version` combobox, which is
+      // first in DOM order, so an unnamed `.first()` opens the wrong control.
+      await page.getByRole("combobox", { name: "Level" }).click();
+      await page.getByRole("option", { name: "Public" }).click();
       const warning = page.getByTestId("share-live-data-public-warning");
       await expect(warning).toBeVisible();
       await expect(warning).toContainText(
