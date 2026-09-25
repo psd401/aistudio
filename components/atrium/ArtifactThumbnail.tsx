@@ -33,7 +33,7 @@ import { useEffect, useRef, useState } from "react";
 import { getArtifactCodeAction } from "@/actions/db/atrium/get-artifact-code";
 import { ArtifactSandbox } from "./ArtifactSandbox";
 import { createLogger } from "@/lib/client-logger";
-import type { ContentDataAccess } from "@/lib/content/types";
+import { isLiveDataObject, type ContentDataAccess } from "@/lib/content/types";
 
 const log = createLogger({ component: "ArtifactThumbnail" });
 
@@ -63,7 +63,7 @@ export function ArtifactThumbnail({
   sandboxSrc,
   dataAccess,
 }: ArtifactThumbnailProps): React.JSX.Element {
-  const isLiveData = dataAccess === "query";
+  const isLiveData = isLiveDataObject(dataAccess);
   const ref = useRef<HTMLDivElement | null>(null);
   const claimedRef = useRef(false);
   const [state, setState] = useState<ThumbState>("idle");

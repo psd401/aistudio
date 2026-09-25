@@ -14,7 +14,11 @@
  */
 
 import Link from "next/link";
-import type { ContentDataAccess, VisibilityLevel } from "@/lib/content/types";
+import {
+  isLiveDataObject,
+  type ContentDataAccess,
+  type VisibilityLevel,
+} from "@/lib/content/types";
 import type { EmbeddingDocument } from "@/lib/content/embed-backlinks";
 import {
   NEXUS_CHAT_AUTHOR_LABEL,
@@ -144,7 +148,7 @@ export function ArtifactMetaRail({
         <AboutRow label="Version" value={versionNumber != null ? `v${versionNumber}` : "—"} />
         <AboutRow label="Visibility" value={VISIBILITY_LABELS[visibilityLevel]} />
         <AboutRow label="Data" value={DATA_ACCESS_LABELS[dataAccess]} />
-        {dataAccess === "query" && (
+        {isLiveDataObject(dataAccess) && (
           <p className="mer-artifact-about-note" data-testid="artifact-data-note">
             Every reader sees only the data their own district permissions allow.
             Change this in Content settings.

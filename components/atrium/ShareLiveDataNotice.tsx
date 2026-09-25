@@ -22,7 +22,11 @@
  */
 
 import { Database } from "lucide-react";
-import type { ContentDataAccess } from "@/lib/content/types";
+import {
+  isLiveDataObject,
+  type ContentDataAccess,
+  type VisibilityLevel,
+} from "@/lib/content/types";
 
 /** Exact copy, kept in one place so the tests pin the sentence, not a paraphrase. */
 export const LIVE_DATA_NOTICE_TEXT =
@@ -31,17 +35,6 @@ export const LIVE_DATA_NOTICE_TEXT =
 /** Why the Public level is the one audience live data cannot serve. */
 export const PUBLIC_LIVE_DATA_WARNING_TEXT =
   "Live data doesn't load on the public web: the public page has no signed-in viewer to read the data as, so a public visitor sees an access message instead of the dashboard.";
-
-/**
- * True when this object's sharing needs the live-data framing — i.e. its bridge
- * mode is `query`. `records` and `none` artifacts, and every document, show the
- * same thing to everyone, so the notice would be noise.
- */
-export function isLiveDataObject(
-  dataAccess: ContentDataAccess | undefined
-): boolean {
-  return dataAccess === "query";
-}
 
 /** The notice at the top of the Share dialog. Renders nothing off `query` mode. */
 export function ShareLiveDataNotice({
@@ -71,7 +64,7 @@ export function ShareLiveDataPublicWarning({
   level,
 }: {
   dataAccess?: ContentDataAccess;
-  level: string;
+  level: VisibilityLevel;
 }): React.JSX.Element | null {
   if (!isLiveDataObject(dataAccess) || level !== "public") return null;
   return (
@@ -84,5 +77,3 @@ export function ShareLiveDataPublicWarning({
     </p>
   );
 }
-
-export default ShareLiveDataNotice;

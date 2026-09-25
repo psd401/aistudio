@@ -2679,7 +2679,9 @@ li[data-dragging="true"] > div {
   margin: 6px 0 0;
   font-size: 11.5px;
   line-height: 1.5;
-  color: var(--mer-ink-muted);
+  /* Secondary, not muted: this is the answer to "what will readers see", and
+     muted ink (#8394a0) is ~3.1:1 on white — under WCAG AA's 4.5:1 at 11.5px. */
+  color: var(--mer-ink-secondary);
 }
 .mer-artifact-rail-empty {
   font-size: 12.5px;

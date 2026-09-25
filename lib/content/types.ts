@@ -257,6 +257,17 @@ export function normalizeDataAccess(value: unknown): ContentDataAccess {
 }
 
 /**
+ * True when an artifact shows each reader live data scoped to THEIR permissions
+ * (#1790) — i.e. its mode is `query`. `records`/`none` artifacts, and every
+ * document, show the same thing to everyone.
+ */
+export function isLiveDataObject(
+  dataAccess: ContentDataAccess | undefined
+): boolean {
+  return dataAccess === "query";
+}
+
+/**
  * The membership test behind `normalizeDataAccess`, as a type predicate.
  *
  * Widening the tuple to `readonly string[]` is what lets an `unknown` be tested

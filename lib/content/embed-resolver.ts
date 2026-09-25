@@ -63,7 +63,7 @@ import {
 import { getArtifactSandboxRenderUrl } from "./artifact-sandbox-config";
 import { isArtifactId } from "./embed-directive";
 import { renderDocumentToParts } from "./render/document-parts";
-import { normalizeDataAccess } from "./types";
+import { resolveVersionDataAccess } from "./types";
 import type { ContentDataAccess, Requester, VisibilityLevel } from "./types";
 
 const log = createLogger({ context: "atrium.embedResolver" });
@@ -229,13 +229,20 @@ async function resolveEmbedForReaderWithAccess(
   // Best-effort — a failed version lookup or missing body degrades to an empty
   // live preview (the body-load fallback is loadArtifactCodeSafe's contract).
   let code = "";
-  let runningVersionId: string | undefined;
+  let running: { versionId: string; dataAccess: ContentDataAccess } | null = null;
   try {
     const version = publishedVersionId
       ? await versionService.getById(obj.id, publishedVersionId)
       : await versionService.current(obj.id);
     if (version) {
-      runningVersionId = version.id;
+      // #1789: the mode the RUNNING version is stamped with, not the object's
+      // current one. A Content-settings mode flip does not restamp the head, and
+      // the bridge actions authorize against the version's stamp — pinning the
+      // object's mode here let the sandbox and the server disagree.
+      running = {
+        versionId: version.id,
+        dataAccess: resolveVersionDataAccess(version, obj.dataAccess),
+      };
       code = await versionService.loadArtifactCodeSafe(version);
     }
   } catch (error) {
@@ -254,15 +261,17 @@ async function resolveEmbedForReaderWithAccess(
     sandboxSrc: getArtifactSandboxRenderUrl(),
     // #1790: only the authenticated audience gets the bridge. `/p/` has no
     // viewer to scope a query to, so it stays fail-closed here rather than in
-    // the shared reader component.
+    // the shared reader component. No loaded version means no code to run, so
+    // no bridge either.
     dataBridge:
-      opts.audience === "internal"
+      opts.audience === "internal" && running
         ? {
             contentId: obj.id,
-            // `normalizeDataAccess` fails an out-of-enum value closed to "none",
-            // the mode under which the sandbox refuses every operation.
-            dataAccess: normalizeDataAccess(obj.dataAccess),
-            versionId: runningVersionId,
+            // An out-of-enum mode fails closed to "none" (inside
+            // `resolveVersionDataAccess`), under which the sandbox refuses
+            // every operation.
+            dataAccess: running.dataAccess,
+            versionId: running.versionId,
           }
         : null,
   };

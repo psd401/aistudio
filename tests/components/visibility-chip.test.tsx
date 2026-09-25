@@ -233,6 +233,10 @@ jest.mock("@/actions/db/atrium/list-grant-options", () => ({
 }));
 
 import { VisibilityChip } from "@/components/atrium/VisibilityChip";
+import {
+  LIVE_DATA_NOTICE_TEXT,
+  PUBLIC_LIVE_DATA_WARNING_TEXT,
+} from "@/components/atrium/ShareLiveDataNotice";
 import { getVisibilityAction } from "@/actions/db/atrium/get-visibility";
 import { setVisibilityAction } from "@/actions/db/atrium/set-visibility";
 import { listGrantOptionsAction } from "@/actions/db/atrium/list-grant-options";
@@ -618,10 +622,7 @@ describe("VisibilityChip live-data notice (#1790)", () => {
   it("shows the live-data notice for a query-mode artifact", async () => {
     await renderShare("query");
     const notice = screen.getByTestId("share-live-data-notice");
-    expect(notice.textContent).toContain("This page shows live PSD data");
-    expect(notice.textContent).toContain(
-      "only what their own district permissions allow"
-    );
+    expect(notice.textContent).toBe(LIVE_DATA_NOTICE_TEXT);
   });
 
   for (const mode of ["records", "none"] as const) {
@@ -651,9 +652,7 @@ describe("VisibilityChip live-data notice (#1790)", () => {
     const warning = await waitFor(() =>
       screen.getByTestId("share-live-data-public-warning")
     );
-    expect(warning.textContent).toContain(
-      "Live data doesn't load on the public web"
-    );
+    expect(warning.textContent).toBe(PUBLIC_LIVE_DATA_WARNING_TEXT);
   });
 
   it("does not warn about the public web for a records-mode artifact set to Public", async () => {

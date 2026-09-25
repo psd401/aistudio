@@ -385,7 +385,32 @@ describe("resolveEmbedForReader decides the data bridge by audience", () => {
     expect(res.dataBridge).toBeNull();
   });
 
-  it("internal: omits versionId when the artifact has no version yet", async () => {
+  it("internal: pins the RUNNING version's stamp, not the object's current mode", async () => {
+    // #1789: a Content-settings mode flip updates the object but not the head's
+    // stamp, and the bridge actions authorize against the stamp. The pin must
+    // follow the stamp or the sandbox and the server disagree.
+    queuedRows = [queryArtifactRow];
+    canViewResult = true;
+    currentVersion = { id: "v1", dataAccess: "records" };
+    const res = await resolveEmbedForReader(ARTIFACT_ID, {
+      audience: "internal",
+      requester,
+    });
+    expect(res.dataBridge?.dataAccess).toBe("records");
+  });
+
+  it("internal: an unstamped (pre-migration-184) version falls back to the object's mode", async () => {
+    queuedRows = [queryArtifactRow];
+    canViewResult = true;
+    currentVersion = { id: "v1", dataAccess: null };
+    const res = await resolveEmbedForReader(ARTIFACT_ID, {
+      audience: "internal",
+      requester,
+    });
+    expect(res.dataBridge?.dataAccess).toBe("query");
+  });
+
+  it("internal: carries no bridge when the artifact has no version yet", async () => {
     queuedRows = [queryArtifactRow];
     canViewResult = true;
     currentVersion = null;
@@ -393,7 +418,23 @@ describe("resolveEmbedForReader decides the data bridge by audience", () => {
       audience: "internal",
       requester,
     });
-    expect(res.dataBridge?.versionId).toBeUndefined();
-    expect(res.dataBridge?.contentId).toBe(ARTIFACT_ID);
+    expect(res.available).toBe(true);
+    expect(res.dataBridge).toBeNull();
+  });
+
+  it("internal: carries no bridge when the version lookup fails", async () => {
+    queuedRows = [queryArtifactRow];
+    canViewResult = true;
+    const { versionService } = jest.requireMock("@/lib/content/version-service") as {
+      versionService: { current: jest.Mock };
+    };
+    versionService.current.mockRejectedValueOnce(new Error("db down"));
+    const res = await resolveEmbedForReader(ARTIFACT_ID, {
+      audience: "internal",
+      requester,
+    });
+    expect(res.available).toBe(true);
+    expect(res.code).toBe("");
+    expect(res.dataBridge).toBeNull();
   });
 });
