@@ -144,8 +144,7 @@ describe("Atrium data-bridge contract", () => {
 
   /**
    * The sandbox host is a static asset with no bundler, so it cannot import the
-   * limits. Pin its literals instead — the guidance quotes these two numbers as
-   * the frame's behaviour, and the frame is what enforces them.
+   * limits. Pin its literals instead — the frame is what enforces them.
    */
   it("pins the bundler-less sandbox host to the same numbers", () => {
     expect(renderHtmlNumber(/var QUERY_REQUEST_TIMEOUT_MS = (\d+);/)).toBe(

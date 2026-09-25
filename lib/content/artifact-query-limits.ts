@@ -53,6 +53,12 @@ export const ARTIFACT_MAX_PENDING_DATA_REQUESTS = 32;
  * AND execution (#1788). Past it the action aborts and the call rejects with
  * `timeout`. This is the number a page can actually rely on, so it is the one
  * the authoring guidance quotes.
+ *
+ * Each query is Lambda + RDS behind an MCP round trip. Chat's connector path
+ * already budgets 30s, so the bridge uses the same ceiling rather than the
+ * record ops' 10s (which would time out legitimate aggregates). It is armed at
+ * the top of `queryArtifactData`, so preflight counts against it too — see the
+ * comment there.
  */
 export const ARTIFACT_QUERY_SERVER_TIMEOUT_MS = 30_000;
 

@@ -104,28 +104,6 @@ import { getUserRequester } from "./requester";
 /** The ONLY tool this action may invoke on the data connector. */
 const QUERY_TOOL_NAME = "query_data";
 /**
- * ONE overall budget for the connector handshake AND the query (#1788).
- *
- * Each query is Lambda + RDS behind an MCP round trip. Chat's connector path
- * already budgets 30s, so the bridge uses the same ceiling rather than the
- * records bridge's 10s (which would time out legitimate aggregates).
- *
- * This clock used to start only at `execute()`, which meant the real server-side
- * worst case was the handshake (`MCP_CLIENT_TIMEOUT_MS` for the client, plus
- * tools/list) PLUS 30s — comfortably past the sandbox host's 45s, so a slow
- * handshake made the host give up on a query that was still running and the
- * page retried it.
- *
- * It is now armed at the TOP of `queryArtifactData` and threaded down, so it
- * spans the preflight (session resolution, the `contentService.get` visibility
- * check, the version lookup, the connector config read), the handshake, AND the
- * execution. Covering only part of the server's work left the same hole in a
- * smaller form: a 15s preflight plus a full 30s execution still exceeds the
- * host's 45s. The server now always loses that race BY CONSTRUCTION rather than
- * by assuming any stage is fast.
- */
-const QUERY_TIMEOUT_MS = ARTIFACT_QUERY_SERVER_TIMEOUT_MS;
-/**
  * Dashboards fire several queries per load — more often than chat — so the
  * budget is per viewer PER ARTIFACT rather than per viewer. The data MCP's own
  * per-user limit remains the backstop.
@@ -758,7 +736,7 @@ export async function queryArtifactData(
   // must always lose that race BY CONSTRUCTION, not by assuming preflight is
   // fast, so the deadline starts here and what remains of it is what the
   // handshake and the execution get.
-  const deadline = AbortSignal.timeout(QUERY_TIMEOUT_MS);
+  const deadline = AbortSignal.timeout(ARTIFACT_QUERY_SERVER_TIMEOUT_MS);
 
   try {
     // #1787: logged BEFORE authorization, so a session/rate-limit/validation
