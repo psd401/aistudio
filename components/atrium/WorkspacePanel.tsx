@@ -21,6 +21,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { X, ExternalLink } from "lucide-react";
+import { WorkspaceResizeHandle } from "./WorkspaceResizeHandle";
+import { useWorkspacePanelWidth } from "./use-workspace-panel-width";
 import {
   loadWorkspacePanelAction,
   type WorkspacePanelData,
@@ -145,15 +147,41 @@ export function WorkspacePanel({ idOrSlug, onClose }: WorkspacePanelProps) {
     [refresh]
   );
 
+  // #1793: the split width is the user's own — drag-resized, persisted, and
+  // defaulting to half the split instead of the fixed 44% that rendered
+  // dashboards at phone width while their author was still building them.
+  const {
+    asideRef,
+    widthPct,
+    panelStyle,
+    resizeTo,
+    commitWidth,
+    measureSplit,
+  } = useWorkspacePanelWidth();
+
   return (
     <aside
+      ref={asideRef}
       // Desktop-only split: below md the 380px minimum + the chat column would
       // force horizontal overflow, so the panel hides and the full-page editor
       // (one click away) is the small-screen path.
-      className="hidden h-full w-[44%] min-w-[380px] max-w-[720px] flex-col border-l bg-background md:flex"
+      //
+      // #1793: the width is now the user's own (drag handle + persisted
+      // fraction, defaulting to half the split) instead of a fixed 44% capped
+      // at 720px, which rendered dashboards at phone width while authoring.
+      // `relative` positions the handle on this edge; `min-w-0` lets the flex
+      // item honour the inline width instead of its content's min-content.
+      className="relative hidden h-full min-w-0 flex-col border-l bg-background md:flex"
+      style={panelStyle}
       aria-label="Workspace"
       data-testid="workspace-panel"
     >
+      <WorkspaceResizeHandle
+        widthPct={widthPct}
+        onResize={resizeTo}
+        onCommit={commitWidth}
+        measure={measureSplit}
+      />
       <header className="flex items-center justify-between gap-2 border-b px-3 py-2">
         <h2 className="truncate text-sm font-medium">
           {state.status === "ready" ? state.data.title : "Workspace"}
