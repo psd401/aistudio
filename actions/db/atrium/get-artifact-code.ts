@@ -26,7 +26,8 @@ import {
 import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { contentService } from "@/lib/content";
 import { versionService } from "@/lib/content/version-service";
-import type { BodyFormat } from "@/lib/content";
+import { resolveVersionDataAccess } from "@/lib/content/types";
+import type { BodyFormat, ContentDataAccess } from "@/lib/content";
 import type { ActionState } from "@/types";
 import { getOptionalRequester } from "./requester";
 
@@ -51,6 +52,17 @@ export interface ArtifactCodeResult {
   bodyFormat: BodyFormat;
   /** UNTRUSTED artifact source — sandbox/editor only, never app-origin render. */
   code: string;
+  /**
+   * The data-bridge mode THIS version's code was authored for (#1789), already
+   * resolved against the object (a version predating migration 184 carries no
+   * stamp and inherits the object's mode).
+   *
+   * The canvas pins it into `<ArtifactSandbox>` so the mode the frame enforces
+   * is the mode of the version it is actually running — which matters as soon
+   * as the version dropdown previews something other than the head, since the
+   * bridge actions authorize against that same version server-side.
+   */
+  dataAccess: ContentDataAccess;
 }
 
 export async function getArtifactCodeAction(
@@ -104,6 +116,10 @@ export async function getArtifactCodeAction(
           versionNumber: null,
           bodyFormat: "html" as BodyFormat,
           code: "",
+          // No version to read a stamp from: the object's mode is what the next
+          // version will be stamped with, so it is the right pin for an empty
+          // draft.
+          dataAccess: resolveVersionDataAccess(null, obj.dataAccess),
         },
         "Artifact has no content yet"
       );
@@ -130,6 +146,7 @@ export async function getArtifactCodeAction(
         versionNumber: version.versionNumber,
         bodyFormat: version.bodyFormat,
         code,
+        dataAccess: resolveVersionDataAccess(version, obj.dataAccess),
       },
       "Artifact code loaded"
     );

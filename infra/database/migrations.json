@@ -173,6 +173,7 @@
     "180-atrium-single-live-publication.sql",
     "181-drop-unused-chunk-embedding-index.sql",
     "182-index-chunks-missing-embedding.sql",
-    "183-nexus-workspace-chat-iteration.sql"
+    "183-nexus-workspace-chat-iteration.sql",
+    "184-atrium-version-data-access.sql"
   ]
 }

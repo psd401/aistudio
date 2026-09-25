@@ -44,6 +44,7 @@ import {
 import { createSuccess, ErrorFactories, handleError } from "@/lib/error-utils";
 import { getServerSession } from "@/lib/auth/server-session";
 import { contentService } from "@/lib/content";
+import { canEdit } from "@/lib/content/helpers";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { contentDataRecords, users } from "@/lib/db/schema";
 import { safeJsonbStringify } from "@/lib/db/json-utils";
@@ -53,6 +54,7 @@ import type { ActionState } from "@/types";
 import {
   assertArtifactDataAccess,
   hasPostgresIncompatibleUnicode,
+  resolveRenderedVersionAccess,
   validateContentId,
 } from "./artifact-guards";
 import { getUserRequester } from "./requester";
@@ -74,7 +76,19 @@ const SUBMIT_RATE_NAMESPACE = "atrium-artifact-record-submit";
 const LIST_RATE_NAMESPACE = "atrium-artifact-record-list";
 const RESERVED_IDENTITY_KEYS = new Set(["userId", "user_id"]);
 
-export interface SubmitArtifactRecordInput {
+/**
+ * The version whose code is actually RUNNING in the frame (#1789), supplied by
+ * the bridge from its own trusted page props — never from the artifact's
+ * message. The record store is gated on the mode THAT version was authored for,
+ * so a `/c/` reader keeps the capability its published version was published
+ * with even while the author's draft sits in another mode. Validated as
+ * belonging to this object before it is used; omitted means "the head".
+ */
+interface RenderedVersionInput {
+  versionId?: string;
+}
+
+export interface SubmitArtifactRecordInput extends RenderedVersionInput {
   contentId: string;
   namespace: string;
   payload: ArtifactDataPayload;
@@ -87,7 +101,7 @@ export interface SubmitArtifactRecordResult {
 
 export type ArtifactRecordScope = "all" | "mine";
 
-export interface ListArtifactRecordsInput {
+export interface ListArtifactRecordsInput extends RenderedVersionInput {
   contentId: string;
   namespace: string;
   limit?: number;
@@ -411,8 +425,17 @@ export async function submitArtifactRecord(
     // missing or non-viewable target. The per-user guard runs first so a caller
     // over budget cannot keep generating database-backed visibility lookups.
     const content = await contentService.get(requester, contentId);
-    assertArtifactDataAccess(
+    // #1789: the record store is gated on the mode of the version the page is
+    // RENDERING, not the object's current one, so an author's draft-time mode
+    // change cannot take the Live page's store away from its readers.
+    const rendered = await resolveRenderedVersionAccess(
       content,
+      canEdit(requester, content.ownerUserId),
+      input?.versionId,
+      log
+    );
+    assertArtifactDataAccess(
+      { kind: content.kind, dataAccess: rendered.dataAccess },
       "records",
       "Artifact does not use the record store"
     );
@@ -505,8 +528,17 @@ export async function listArtifactRecords(
     });
 
     const content = await contentService.get(requester, contentId);
-    assertArtifactDataAccess(
+    // #1789: the record store is gated on the mode of the version the page is
+    // RENDERING, not the object's current one, so an author's draft-time mode
+    // change cannot take the Live page's store away from its readers.
+    const rendered = await resolveRenderedVersionAccess(
       content,
+      canEdit(requester, content.ownerUserId),
+      input?.versionId,
+      log
+    );
+    assertArtifactDataAccess(
+      { kind: content.kind, dataAccess: rendered.dataAccess },
       "records",
       "Artifact does not use the record store"
     );

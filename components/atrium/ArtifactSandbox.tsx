@@ -872,6 +872,10 @@ async function invokeBridgeAction(
       contentId,
       namespace: request.namespace,
       payload: request.payload,
+      // Trusted prop, never a request field (#1789): it selects WHICH version's
+      // data-access mode authorizes the write, so a Live page keeps the store it
+      // was published with while the author's draft sits in another mode.
+      ...(versionId ? { versionId } : {}),
     });
     return result.isSuccess
       ? { ok: true, data: result.data }
@@ -882,6 +886,8 @@ async function invokeBridgeAction(
     namespace: request.namespace,
     limit: request.limit,
     scope: request.scope,
+    // Trusted prop, never a request field (#1789) — see `submit` above.
+    ...(versionId ? { versionId } : {}),
   });
   return result.isSuccess
     ? { ok: true, data: result.data }
@@ -895,7 +901,11 @@ interface ArtifactDataBridgeOptions {
   contentId?: string;
   /** The artifact's data-access mode as of THIS page load (#1712). */
   dataAccess?: ContentDataAccess;
-  /** The version running in the frame, for the data MCP audit line (#1787). */
+  /**
+   * The version running in the frame. Names the version in the data MCP's audit
+   * line (#1787) AND selects the data-access mode that authorizes every bridge
+   * operation (#1789).
+   */
   versionId?: string;
   /** Report a bridge rejection to the caller (#1787). Never throws. */
   onDiagnostic?: (diagnostic: ArtifactSandboxDiagnostic) => void;

@@ -80,7 +80,10 @@ import { resolveDocumentParts } from "@/lib/content/embed-resolver";
 import { extractDocumentHeadings } from "@/lib/content/render/headings";
 import { canEdit } from "@/lib/content/helpers";
 import { livePublicationConditions } from "@/lib/content/live-publication";
-import { normalizeDataAccess } from "@/lib/content/types";
+import {
+  normalizeDataAccess,
+  resolveVersionDataAccess,
+} from "@/lib/content/types";
 import type { ContentDataAccess } from "@/lib/content/types";
 import { getOptionalRequester } from "@/actions/db/atrium/requester";
 import { countUnresolvedCommentThreadsAction } from "@/actions/db/atrium/comments";
@@ -332,7 +335,13 @@ export default async function ReaderPage({
         // which put an editing surface in front of a read-only action and left
         // non-editors with no route at all. `/atrium/[id]/view` re-runs its own
         // `canView` server-side, so this link grants nothing.
-        fullScreenHref={`/atrium/${target.id}/view`}
+        // #1789: pinned to the PUBLISHED version. `/view` renders the working
+        // head for an editor, which handed a reader arriving from this Live page
+        // the author's half-finished draft (and its exploratory SQL). The param
+        // is verified against this object server-side, so it grants nothing.
+        fullScreenHref={`/atrium/${target.id}/view?version=${encodeURIComponent(
+          target.publication.publishedVersionId
+        )}`}
         publishedAt={target.publication.publishedAt}
         collectionName={target.collectionName}
         // Artifact readers skip the TOC (no document headings to walk).
@@ -358,11 +367,16 @@ export default async function ReaderPage({
           src={getArtifactSandboxRenderUrl()}
           dataBridgeEnabled={true}
           contentId={target.id}
-          // #1712: the mode read for THIS render. The sandbox refuses any op
-          // that does not match it, so an owner flipping `data_access` under an
-          // open page cannot reopen the records/query exfiltration loop; the
-          // Server Actions still re-check the artifact's current mode.
-          dataAccess={target.dataAccess}
+          // #1712 + #1789: the mode the PUBLISHED version was authored for —
+          // not the object's current one. The object's mode follows the
+          // author's draft, so pinning it let a mode flip on an unpublished
+          // draft re-capability this Live page for every reader on their next
+          // load (records-mode sign-up sheets stopped accepting submissions;
+          // live dashboards went dark). The bridge actions resolve the same
+          // version and re-check its mode server-side. A version predating
+          // migration 184 carries no stamp and falls back to the object's mode,
+          // i.e. exactly the pre-#1789 behaviour.
+          dataAccess={resolveVersionDataAccess(version, target.dataAccess)}
           // #1787: the PUBLISHED version this page renders, so the data MCP's
           // audit line names it rather than the working head. The server only
           // accepts a version that belongs to this artifact.

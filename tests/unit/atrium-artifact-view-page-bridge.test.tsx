@@ -48,12 +48,19 @@ jest.mock("@/lib/content/visibility-service", () => ({
 }));
 
 const currentVersionMock = jest.fn();
+const getByIdMock = jest.fn();
 const loadArtifactCodeSafeMock = jest.fn();
 jest.mock("@/lib/content/version-service", () => ({
   versionService: {
     current: (...a: unknown[]) => currentVersionMock(...a),
+    getById: (...a: unknown[]) => getByIdMock(...a),
     loadArtifactCodeSafe: (...a: unknown[]) => loadArtifactCodeSafeMock(...a),
   },
+}));
+
+const livePublishedVersionIdMock = jest.fn();
+jest.mock("@/lib/content/live-publication", () => ({
+  livePublishedVersionId: (...a: unknown[]) => livePublishedVersionIdMock(...a),
 }));
 
 jest.mock("@/lib/content/artifact-sandbox-config", () => ({
@@ -85,17 +92,27 @@ const ARTIFACT = {
 };
 
 /** Render the page and hand back the `<ArtifactSandbox>` element it produced. */
-async function renderSandbox(): Promise<React.ReactElement> {
+async function renderSandbox(
+  searchParams: Record<string, string | string[] | undefined> = {}
+): Promise<React.ReactElement> {
   const tree = (await ViewPage({
     params: Promise.resolve({ id: "obj-1" }),
+    searchParams: Promise.resolve(searchParams),
   })) as unknown as { props: { children: React.ReactElement } };
   return tree.props.children;
 }
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // userId 7 === ARTIFACT.ownerUserId, so the default requester is an EDITOR
+  // and therefore gets the working head (the pre-#1789 behaviour).
   getUserRequesterMock.mockResolvedValue({ kind: "user", userId: 7, roles: [] });
-  currentVersionMock.mockResolvedValue({ id: "ver-1", versionNumber: 2 });
+  currentVersionMock.mockResolvedValue({
+    id: "ver-1",
+    versionNumber: 2,
+    dataAccess: null,
+  });
+  livePublishedVersionIdMock.mockResolvedValue(null);
   loadArtifactCodeSafeMock.mockResolvedValue("<p>artifact</p>");
 });
 
@@ -118,8 +135,8 @@ describe("Atrium full-screen artifact viewer — data bridge (#1725)", () => {
       })
     );
     // #1712: the pin lives in a ref for the mount's lifetime, so a mount must
-    // belong to exactly one artifact.
-    expect(sandbox.key).toBe("obj-1");
+    // belong to exactly one artifact — and (#1789) one version of it.
+    expect(sandbox.key).toBe("obj-1:ver-1");
     expect(mockNotFound).not.toHaveBeenCalled();
   });
 
@@ -167,5 +184,125 @@ describe("Atrium full-screen artifact viewer — data bridge (#1725)", () => {
     loadByIdOrSlugMock.mockResolvedValue(null);
 
     await expect(renderSandbox()).rejects.toBe(NOT_FOUND_SENTINEL);
+  });
+});
+
+describe("Atrium full-screen artifact viewer — Live/Draft (#1789)", () => {
+  /** A viewer who is neither the owner nor an admin. */
+  const READER = { kind: "user" as const, userId: 42, roles: [] };
+
+  it("shows a NON-EDITOR the live published version, not the author's head", async () => {
+    // The scenario: a reader on the Live `/c/` page clicks "Full screen". Before
+    // #1789 they landed on the author's half-finished draft.
+    loadByIdOrSlugMock.mockResolvedValue(ARTIFACT);
+    canViewMock.mockResolvedValue(true);
+    getUserRequesterMock.mockResolvedValue(READER);
+    livePublishedVersionIdMock.mockResolvedValue("ver-published");
+    getByIdMock.mockResolvedValue({
+      id: "ver-published",
+      versionNumber: 1,
+      dataAccess: "records",
+    });
+
+    const sandbox = await renderSandbox();
+
+    expect(getByIdMock).toHaveBeenCalledWith("obj-1", "ver-published");
+    expect(currentVersionMock).not.toHaveBeenCalled();
+    expect(sandbox.props).toEqual(
+      expect.objectContaining({
+        versionId: "ver-published",
+        // The mode the PUBLISHED version was published with — the object is in
+        // `query` (the author's draft), which must not leak onto this render.
+        dataAccess: "records",
+      })
+    );
+  });
+
+  it("ignores a ?version= a NON-EDITOR supplies for a Live object", async () => {
+    loadByIdOrSlugMock.mockResolvedValue(ARTIFACT);
+    canViewMock.mockResolvedValue(true);
+    getUserRequesterMock.mockResolvedValue(READER);
+    livePublishedVersionIdMock.mockResolvedValue("ver-published");
+    getByIdMock.mockResolvedValue({
+      id: "ver-published",
+      versionNumber: 1,
+      dataAccess: "records",
+    });
+
+    const sandbox = await renderSandbox({ version: "ver-draft" });
+
+    expect(getByIdMock).toHaveBeenCalledWith("obj-1", "ver-published");
+    expect(sandbox.props).toEqual(
+      expect.objectContaining({ versionId: "ver-published" })
+    );
+  });
+
+  it("still renders the head for a NON-EDITOR when the object is not Live", async () => {
+    // The `/c/` dead-link backstop (PR #1699) redirects a viewable-but-
+    // unpublished object here. There is no published version to show, so 404ing
+    // would break that backstop for exactly the audience it exists for.
+    loadByIdOrSlugMock.mockResolvedValue(ARTIFACT);
+    canViewMock.mockResolvedValue(true);
+    getUserRequesterMock.mockResolvedValue(READER);
+    livePublishedVersionIdMock.mockResolvedValue(null);
+
+    const sandbox = await renderSandbox();
+
+    expect(currentVersionMock).toHaveBeenCalledWith("obj-1");
+    expect(sandbox.props).toEqual(
+      expect.objectContaining({ versionId: "ver-1" })
+    );
+  });
+
+  it("honours ?version= for an EDITOR when it belongs to this object", async () => {
+    loadByIdOrSlugMock.mockResolvedValue(ARTIFACT);
+    canViewMock.mockResolvedValue(true);
+    getByIdMock.mockResolvedValue({
+      id: "ver-published",
+      versionNumber: 1,
+      dataAccess: "records",
+    });
+
+    const sandbox = await renderSandbox({ version: "ver-published" });
+
+    expect(sandbox.props).toEqual(
+      expect.objectContaining({
+        versionId: "ver-published",
+        dataAccess: "records",
+      })
+    );
+  });
+
+  it("falls back to the head when an EDITOR's ?version= belongs to another object", async () => {
+    // `versionService.getById` is scoped by object id, so a foreign id simply
+    // finds nothing — it can never lend its code or its mode to this artifact.
+    loadByIdOrSlugMock.mockResolvedValue(ARTIFACT);
+    canViewMock.mockResolvedValue(true);
+    getByIdMock.mockResolvedValue(null);
+
+    const sandbox = await renderSandbox({ version: "ver-of-another-object" });
+
+    expect(sandbox.props).toEqual(
+      expect.objectContaining({
+        versionId: "ver-1",
+        // No stamp on the head → the object's own mode, i.e. the pre-#1789
+        // behaviour for a version written before migration 184.
+        dataAccess: "query",
+      })
+    );
+  });
+
+  it("reads only the first value of a repeated ?version= param", async () => {
+    loadByIdOrSlugMock.mockResolvedValue(ARTIFACT);
+    canViewMock.mockResolvedValue(true);
+    getByIdMock.mockResolvedValue({
+      id: "ver-published",
+      versionNumber: 1,
+      dataAccess: "records",
+    });
+
+    await renderSandbox({ version: ["ver-published", "ver-other"] });
+
+    expect(getByIdMock).toHaveBeenCalledWith("obj-1", "ver-published");
   });
 });
