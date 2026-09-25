@@ -47,6 +47,13 @@ openwiki:
     - lib/atrium/artifact-preview-diagnostics.ts
     - lib/content/grant-targets.ts
     - lib/content/visibility-service.ts
+    - lib/content/collection-access.ts
+    - lib/content/live-publication.ts
+    - actions/db/atrium/list-versions.ts
+    - actions/db/atrium/rollback-version.ts
+    - components/atrium/VersionMenu.tsx
+    - components/atrium/VisibilityChip.tsx
+    - styles/meridian-core.css
     - lib/content/collection-management-service.ts
     - lib/atrium/usage-series.ts
     - lib/atrium/recent-window.ts
@@ -77,6 +84,12 @@ openwiki:
     - lib/content/version-service.ts
     - actions/db/atrium/artifact-guards.ts
     - actions/db/atrium/get-artifact-code.ts
+    - lib/content/collection-access.ts
+    - actions/db/atrium/list-versions.ts
+    - actions/db/atrium/rollback-version.ts
+    - components/atrium/VersionMenu.tsx
+    - components/atrium/VisibilityChip.tsx
+    - styles/meridian-core.css
   invariants:
     - Artifact data_access modes (records/query/none) are mutually exclusive — prevents exfiltration loop
     - Mode is enforced twice (client-side pin + server-side check) and changes only take effect on fresh page load (#1712)
@@ -185,6 +198,11 @@ openwiki:
     - Pruning is per-object — parts keyed by objectId; rebound conversation cannot stub another object's reads (#1791)
     - Pruning is model-side only — persisted messages and thread render unchanged (#1791)
     - Parts without objectId kept verbatim — legacy reads before objectId was returned cannot be grouped (#1791)
+    - Grant passage reaches explicit grantees through restricted collections — group-level matching grants and private per-user grants admit objects into collections the requester cannot otherwise enter (#1837)
+    - Passage collections show only shared items — internal/public siblings stay hidden; no create/approve rights granted (#1837)
+    - Personal and archived collections never grant passage — passage only through active district collections (#1837)
+    - Live follows latest save — readers see newest version without Republish unless collection requires approval or data-bridge mode differs (#1837)
+    - Migration 185 backfilled Live publications — deploy and migration could land in either order (#1837)
   validation_commands:
     - bun run typecheck
     - bun run lint
@@ -251,6 +269,13 @@ openwiki:
     - tests/unit/atrium-rendered-version-data-access.test.ts
     - tests/unit/atrium-version-data-access-migration.test.ts
     - tests/unit/atrium-version-data-access-stamp.test.ts
+    - tests/unit/atrium-visibility.test.ts
+    - tests/unit/atrium-list-visible-filters.test.ts
+    - tests/unit/atrium-live-follows-save.test.ts
+    - tests/unit/atrium-rollback-version-action.test.ts
+    - tests/unit/atrium-rollback.test.ts
+    - tests/e2e/atrium-group-visibility.functional.spec.ts
+    - tests/e2e/atrium-share-live-follows-save.functional.spec.ts
 ---
 
 # Core Application Features
@@ -1079,6 +1104,73 @@ GET /api/v1/content/:id/visibility
 - `tests/unit/atrium-content-visibility-read-route.test.ts` — REST v1 route
 - `tests/unit/agent-atrium-owner-operation.test.ts` — broker branch
 - `tests/e2e/atrium-content-api.functional.spec.ts` — grant round-trip and denial shapes
+
+#### Grant Passage (#1837)
+
+Sharing an item with a person or group must actually reach them. An object that names the requester explicitly — a `group`-level object with a matching grant, or a `private` object with a per-user grant — is reachable through an active district collection the requester cannot otherwise enter.
+
+**Visibility Through Passage Collections**:
+- The item opens and appears in the library grid, collection listing, and "Shared with me"
+- The collection appears in the sidebar, counting and listing ONLY the items shared with the requester
+- Internal/public siblings in the same collection stay hidden behind the collection gate
+- The collection offers no authoring rights (`selectableForCreate: false`, no hero image)
+- Denied ancestors stay hidden; the collection re-roots at the nearest ancestor the requester may enter
+
+**Scope Limits**:
+- Personal (owner-bound) collections never grant passage — they have their own sharing model
+- Archived collections never grant passage — archiving still hides every item
+- Only objects with explicit matching grants pass through; passage never grants create/approve rights
+
+**Implementation**:
+- `CollectionAccessSnapshot.grantPassageCollectionIds` — active district collections the requester may NOT enter, but through which shared objects are reachable
+- `buildCollectionAccessSql` — SQL for list/count admits `collection_id IN (allowed) OR (collection_id IN (passage) AND explicit share)`
+- `collectionGate` + `explicitShareAdmits` — JS mirror for point reads, replacing separate `canView` branches
+- `buildExplicitShareSql` — extracted shared predicate for group-level matching grants and private per-user grants
+
+**Key Sources**:
+- `/lib/content/visibility-service.ts` — `buildExplicitShareSql`, `collectionGate`, `explicitShareAdmits`
+- `/lib/content/collection-access.ts` — `CollectionAccessSnapshot.grantPassageCollectionIds`
+- `/lib/content/collection-service.ts` — `computeKeepSet` keeps passage collections with visible objects
+- `/docs/features/atrium-collection-management.md` — "Items shared into a restricted collection (grant passage)"
+
+**Focused Tests**:
+- `tests/unit/atrium-visibility.test.ts` — `explicitShareAdmits` and collection gate behavior
+- `tests/unit/atrium-list-visible-filters.test.ts` — SQL behavior for passage collections
+- `tests/e2e/atrium-group-visibility.functional.spec.ts` — Group-shared items visible through passage collections
+
+#### Share Dialog Containment (#1837)
+
+The Share dialog's content must stay inside its container at all viewport widths. DialogContent is a CSS grid with no column template, which used to size its implicit column to the widest child's `min-content`. A long reader URL widened that column past the 680px max-width of `.meridian-portal[data-mer-size="wide"]`, breaking layout.
+
+**Fix Applied**:
+- `/styles/meridian-core.css` — `grid-template-columns: minmax(0, 1fr)` on Meridian dialog content so children shrink and text ellipsis applies
+- `/components/atrium/VisibilityChip.tsx` — `min-w-0` on grant Value wrapper so long group labels truncate correctly
+
+**Key Sources**:
+- `/styles/meridian-core.css` — Grid constraint for all Meridian dialogs
+- `tests/e2e/atrium-share-live-follows-save.functional.spec.ts` — E2E dialog containment verification
+
+### Live Follows Save (#1837)
+
+A save to a Live object advances its publication onto the new version (`advanceLivePublications`, run after the version's body is flushed to S3), so readers of `/c/{slug}` always get the latest saved version without needing a manual Republish.
+
+**When Live Stays Pinned** (reader shows "UPDATE PENDING REVIEW" instead of "UP TO DATE"):
+1. **Collection requires approval** — an approver must review before the public/changelog-visible update lands
+2. **Data-bridge mode differs** — the new version's `data_access` mode differs from the Live version's (#1789), requiring author republish through the Share dialog so the author decides what the page shares
+
+**Migration 185**: Applied the same rule once to every publication already behind — every existing Live publication was moved to its object's current head version. The deploy and migration could land in either order without breaking readers.
+
+**Key Sources**:
+- `/lib/content/live-publication.ts` — `advanceLivePublications`, `livePublishedVersionId`
+- `/lib/content/version-service.ts` — `restoreVersion` calls advance after rollback
+- `/actions/db/atrium/rollback-version.ts` — Rollback advances Live
+- `/infra/database/schema/185-atrium-live-follows-head-backfill.sql` — Migration backfilling publications
+- `/docs/features/atrium-collection-management.md` — "Live pages follow the latest save"
+
+**Focused Tests**:
+- `tests/unit/atrium-live-follows-save.test.ts` — Advance logic, approval/mode exceptions
+- `tests/unit/atrium-rollback-version-action.test.ts` — Rollback advances Live publication
+- `tests/e2e/atrium-share-live-follows-save.functional.spec.ts` — E2E save reaches reader without republish
 
 ### Library & Favorites
 
