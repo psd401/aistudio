@@ -62,6 +62,12 @@ openwiki:
     - app/(protected)/nexus/_components/tools/web-fetch-ui.tsx
     - app/api/atrium/artifacts/[id]/query/route.ts
     - lib/content/artifact-query-transport.ts
+    - lib/nexus/workspace-conversation-binding.ts
+    - lib/nexus/workspace-restore-state.ts
+    - lib/nexus/workspace-tool-history.ts
+    - lib/nexus/draft-auto-send.ts
+    - lib/content/version-author-label.ts
+    - actions/nexus/workspace-binding.actions.ts
   invariants:
     - Artifact data_access modes (records/query/none) are mutually exclusive — prevents exfiltration loop
     - Mode is enforced twice (client-side pin + server-side check) and changes only take effect on fresh page load (#1712)
@@ -130,6 +136,22 @@ openwiki:
     - Minimum step budget is 3 — WEB_FETCH_MAX_STEPS ensures a follow-up step after calling web_fetch; prevents empty replies on "summarize this link" (#1696)
     - Skill allowed-tools pins can exclude web_fetch — a non-empty pin omitting web_fetch / webFetch / chat.web_fetch prevents attachment (#1696)
     - Built-in web_fetch wins on name collision — a connector exposing web_fetch cannot replace the SSRF-guarded implementation (#1696)
+    - Workspace binding is owner-scoped — every query includes user_id in WHERE predicate; miss and not-yours both return null (#1791)
+    - Binding write is idempotent — WHERE clause matches only when column is NULL or holds DIFFERENT id; steady state updates no rows (#1791)
+    - Failed binding write is logged not fatal — turn is not aborted; only next reopen loses panel (#1791)
+    - Restore flag is per-conversation — `restoreBoundWorkspace: true` sent only while pending for THIS conversation; stale settle cannot clear another conversation's flag (#1791)
+    - Draft auto-send requires exact match — nonce must match stored entry for exact draft text; swapped prompt is refused (#1791)
+    - Draft auto-send is one-shot — entry deleted on first read; reload/Back re-prefills (#1791)
+    - Truncated draft never auto-sends — drafts >4000 chars show warning and prefill only (#1791)
+    - Rename re-slugs only when never published — publication row to `unpublished` preserves "ever published" (#1791)
+    - Slug collision on rename → ConflictError — SQLSTATE 23505 mapped to 409 "please retry" (#1791)
+    - Mode-only update skips screening — no model-authored bytes persisted (#1791)
+    - Mode-only update returns error on failure — no `ok: true` with warning (#1791)
+    - Version author label is viewer-neutral — never "you"; unknown labels fall back to "human" (#1791)
+    - Agent-maintained version shows "AI" — authorActor field "agent" wins over surface label (#1791)
+    - Pruning is per-object — parts keyed by objectId; rebound conversation cannot stub another object's reads (#1791)
+    - Pruning is model-side only — persisted messages and thread render unchanged (#1791)
+    - Parts without objectId kept verbatim — legacy reads before objectId was returned cannot be grouped (#1791)
   validation_commands:
     - bun run typecheck
     - bun run lint
@@ -181,6 +203,15 @@ openwiki:
     - tests/e2e/nexus-url-access.functional.spec.ts
     - tests/unit/atrium-artifact-query-route.test.ts
     - tests/unit/atrium-artifact-record-transport-failure.test.tsx
+    - tests/unit/nexus-workspace-conversation-binding.test.ts
+    - tests/unit/lib/nexus/draft-auto-send.test.ts
+    - tests/unit/nexus-prompt-auto-loader-autosend.test.tsx
+    - tests/unit/atrium-rename-reslug.test.ts
+    - tests/unit/atrium-version-author-label.test.ts
+    - tests/unit/atrium-snapshot-before-publish-label.test.ts
+    - tests/unit/lib/nexus/workspace-tool-history.test.ts
+    - tests/unit/lib/nexus/workspace-restore-state.test.ts
+    - tests/unit/lib/streaming/__tests__/stream-deadline.test.ts
 ---
 
 # Core Application Features
@@ -458,6 +489,194 @@ A view-only caller gets only the read tool; an unviewable `?workspace=` yields n
 - A partial read is explicitly flagged as unsafe to rewrite from, because everything past that slice would be deleted
 
 **Step Budget**: A build turn explores data before writing code, so `lib/nexus/chat-step-budget.ts` raises `maxSteps` to 20 when workspace tools are bound; every other multi-step path keeps 10.
+
+#### Workspace Object Binding (#1791)
+
+A conversation opened beside an Atrium document or artifact records that object durably in `nexus_conversations.workspace_object_id` (migration 183). Before this, the binding lived ONLY in the `?workspace=` URL param — reopening from the sidebar showed chat without the panel, and "Ask the agent" always started a new conversation.
+
+**Binding Operations** (`lib/nexus/workspace-conversation-binding.ts`):
+
+| Operation | When | Owner Scope |
+|-----------|------|-------------|
+| `bindConversationWorkspace` | Every turn with workspace bound | `user_id` in WHERE predicate |
+| `getConversationWorkspaceObjectId` | Reopening conversation without `?workspace=` | `user_id` in WHERE predicate |
+| `findLatestConversationForWorkspace` | "Ask the agent" / "Open beside chat" | `user_id` in WHERE predicate |
+| `workspaceIdForTurn` | Server-side during restore window | Reads persisted binding only when `restoreBoundWorkspace: true` |
+
+**Security**: Every query includes `user_id` in the WHERE clause — never by a prior read. A conversation is private to the person who had it, and this binding cannot expose whether a conversation ID exists or who else worked on an artifact.
+
+**Restore Flow**:
+1. Opening `/nexus?id=...` without `?workspace=` triggers `useRestoreBoundWorkspace` (async lookup)
+2. Client posts `restoreBoundWorkspace: true` in request body while restore pending
+3. Server reads persisted binding via `workspaceIdForTurn()` and resolves through `canView` gate
+4. Once restored, `?workspace=` lands in URL and flag is never sent again (panel the person closed stays closed)
+
+**Binding is idempotent**: The WHERE clause matches only when column is NULL or holds a DIFFERENT id — steady state (every turn after first) updates no rows. A failed write is logged and swallowed (next reopen loses panel, but current turn is not aborted).
+
+**Key Sources**:
+- `/lib/nexus/workspace-conversation-binding.ts` — Three binding operations + `workspaceIdForTurn` for restore
+- `/lib/nexus/workspace-restore-state.ts` — Per-tab restore state tracking
+- `/actions/nexus/workspace-binding.actions.ts` — Server actions for client binding lookups
+- `/app/api/nexus/chat/route.ts` — Binds after `setupConversation`, uses `workspaceIdForTurn` during restore
+- `/app/(protected)/nexus/page.tsx` — `useRestoreBoundWorkspace` client hook
+
+**Focused Tests**:
+- `tests/unit/nexus-workspace-conversation-binding.test.ts` — User-scoped predicates, NULL-or-different write, last-activity ordering
+
+#### Draft Auto-Send Handshake (#1791)
+
+The Atrium "Ask the agent" card and Library "Build it for me" can auto-send a prefilled draft WITHOUT making `?send=1` a thing any external link can trigger.
+
+**Security Model** (`lib/nexus/draft-auto-send.ts`):
+
+1. **Same-tab handshake**: `armDraftAutoSend(draft)` writes a nonce → draft entry to sessionStorage immediately before `router.push`
+2. **Exact match required**: `consumeDraftAutoSend(nonce, draft)` honors the flag ONLY when this tab's storage holds that nonce for that EXACT draft text
+3. **External links degrade gracefully**: A link from outside the app has no entry and simply prefills (cannot trigger auto-send)
+4. **One-shot**: Entry deleted on first read (or mismatch), so reload/Back re-prefills rather than sending again
+5. **Truncation refuses auto-send**: Drafts capped at 4,000 characters (`MAX_DRAFT_CHARS`); truncated drafts are NOT auto-sent and show a warning
+
+**URL Parameters**:
+- `?workspace=<id>` — The artifact to bind
+- `?id=<conversation>` — Continue bound conversation (from `findLatestConversationForWorkspace`)
+- `?draft=<text>` — Prefilled prompt text
+- `?send=<nonce>` — Auto-send nonce (must match sessionStorage)
+
+**nexusWorkspaceHref Builder**: All in-app workspace links use `nexusWorkspaceHref()` from `lib/nexus/draft-auto-send.ts`:
+- `autoSend: true` arms the handshake for immediate send (Ask card, "Build it for me")
+- `autoSend: false` (or omitted) only prefills (rendered links someone could copy)
+
+**Prompt Auto-Loader** (`app/(protected)/nexus/_components/prompt-auto-loader.tsx`):
+- Consumes handshake BEFORE rewriting URL
+- Sends on same 100ms tick as promptId path
+- Skipped if effect was cleaned up (unmounted)
+
+**Key Sources**:
+- `/lib/nexus/draft-auto-send.ts` — Handshake functions, `nexusWorkspaceHref` builder
+- `/app/(protected)/nexus/_components/prompt-auto-loader.tsx` — Consumer logic
+- `/components/atrium/ArtifactAskAgentCard.tsx` — Ask card using `nexusWorkspaceHref`
+- `/components/atrium/LibraryView.tsx` — "Build it for me" using auto-send
+
+**Focused Tests**:
+- `tests/unit/lib/nexus/draft-auto-send.test.ts` — Armed success, pasted-link refusal, swapped-prompt refusal, fire-at-most-once
+- `tests/unit/nexus-prompt-auto-loader-autosend.test.tsx` — Loader behavior with router.replace re-render
+
+#### Rename and Re-slug (#1791)
+
+The workspace chat can rename content via `rename_workspace_content` tool. An unpublished rename allocates a fresh slug; an ever-published rename keeps the original slug (someone may have linked to it).
+
+**Rename Tool** (`lib/nexus/workspace-chat-tools.ts`):
+- Bound only when session user can edit the open object
+- Uses `contentService.update` under the same `canView` → `canEdit` gate as Content settings dialog
+- Trims title (update validates trimmed form but persists what it receives)
+- Returns `objectId` for `useWorkspaceChangeSignal` refresh
+
+**Re-slug Logic** (`lib/content/content-service.ts`):
+- `updateInTransaction` handles renames inside a transaction with row lock
+- `hasEverBeenPublishedInTx` checks: ever published → keep slug; never published → allocate new slug via `uniqueSlug`
+- Publication row flips to `unpublished` on unpublish, preserving the "ever published" check
+- Self-exclusion: `uniqueSlug(excludeId)` prevents counting the row's current slug as a collision
+
+**Collision Handling**:
+- SQLSTATE 23505 (unique violation) maps to `ConflictError` — concurrent slug race surfaces as 409 "please retry"
+- Case-only rename or same-title rename does not churn the slug suffix
+
+**Key Sources**:
+- `/lib/nexus/workspace-chat-tools.ts` — `rename_workspace_content` tool
+- `/lib/content/content-service.ts` — `updateInTransaction`, `hasEverBeenPublishedInTx`, `uniqueSlug`
+- `/docs/features/nexus-conversation-architecture.md` — Workspace object binding system prompt addition
+
+**Focused Tests**:
+- `tests/unit/atrium-rename-reslug.test.ts` — Re-slug when unpublished, freeze when ever published, collision handling, self-exclusion
+- `tests/unit/lib/nexus/workspace-chat-tools.test.ts` — Rename tool validation and authorization
+
+#### Mode-Only Artifact Updates (#1791)
+
+`update_workspace_artifact` can change only `dataAccess` without providing `code` — no version is created, no §28.3 screening runs.
+
+**Contract**:
+- `code` is optional WHEN `dataAccess` is supplied
+- A call with `dataAccess` and no `code` is a mode-only change: flips sandbox data-bridge mode in place
+- A call with NEITHER field is rejected with an explicit message
+- The mode-only path skips screening — no model-authored bytes are persisted
+- A failed mode-only flip returns an ERROR (not `ok: true` with warning)
+- Authorization unchanged: `contentService.update` runs the same `canView` → `canEdit` gate
+
+**Result**: Still carries `objectId` and no `error`, so `useWorkspaceChangeSignal` fires and panel refetches.
+
+**Key Sources**:
+- `/lib/nexus/workspace-chat-tools.ts` — Tool schema with optional `code`, executor validation
+- `/lib/content/content-service.ts` — `applyDataAccessAfterVersion` with optional version number
+
+**Focused Tests**:
+- `tests/unit/lib/nexus/workspace-chat-tools.test.ts` — Mode-only success (no createVersion, no screen), neither-field rejection
+
+#### Version Authorship Labels (#1791)
+
+Versions written by Nexus chat show "via Nexus chat" in the dropdown and About rail — distinguishing model-authored code from human-edited code while keeping `author_actor: "human"` (correct, because the tools run under the user's requester).
+
+**Label Source** (`lib/content/version-author-label.ts`):
+- `NEXUS_CHAT_AUTHOR_LABEL = "nexus-chat"` — single constant
+- `versionAuthorLabel()` → "AI" | "via Nexus chat" | "human"
+- `versionAuthorDescription()` → "Agent-maintained..." | "Written by the agent in Nexus chat" | "Human-authored"
+
+**Labeling Rules**:
+- Autonomous agent version stays "AI" regardless of surface label — `authorActor: "agent"` is stronger
+- Never "you" — `VersionSummary` omits `authorUserId`, so no surface can tell if the human author is the current viewer
+- Unknown label falls back to "human" — never render raw text in UI
+
+**Storage** (`content_versions.author_label`, migration 183):
+- Free-text VARCHAR(64) — e.g., `"nexus-chat"`
+- Carries the surface, not the authorization (that stays in `author_actor`/`author_user_id`)
+- Mirrors pattern `applyAgentEdit` uses for comment threads
+
+**Publish Snapshots**: Chat-published documents are labeled only when the chat EDITED them in the same request (`editedThisRequest` flag). A publish-only request (no edits) keeps the document's original provenance.
+
+**Key Sources**:
+- `/lib/content/version-author-label.ts` — Label functions
+- `/lib/db/schema/tables/content-versions.ts` — `authorLabel` column
+- `/lib/nexus/workspace-chat-tools.ts` — `NEXUS_CHAT_AUTHOR_LABEL` stamping
+- `/lib/content/collab/snapshot-before-publish.ts` — Publish snapshot with optional label
+
+**Focused Tests**:
+- `tests/unit/atrium-version-author-label.test.ts` — All three labels, agent-wins rule, no-"you" rule
+- `tests/unit/atrium-snapshot-before-publish-label.test.ts` — Label reaches versionService.snapshot
+- `tests/unit/lib/nexus/workspace-chat-tools.test.ts` — Label on createVersion
+
+#### Workspace Tool History Pruning (#1791)
+
+The messages sent to the MODEL are pruned to remove superseded workspace source payloads — keeping the most recent version of code while preserving the call/result pairing required for replay.
+
+**Problem**: Every `update_workspace_artifact` carries the full new source (20-60 KB). After 5-6 edits, the conversation history contains 100k+ tokens of code the model has already superseded — paid for on every turn, crowding real context.
+
+**Pruning Rules** (`lib/nexus/workspace-tool-history.ts`):
+
+| Part Type | Keep Condition |
+|-----------|---------------|
+| Newest REPLACE write | Kept verbatim (artifact `code` or document `mode: "replace"`) |
+| APPEND writes after replace | Kept verbatim (adds to document, not replaces) |
+| Mode-only updates | Kept verbatim (no source to prune) |
+| Read pages after newest replace | Newest at EACH byteOffset kept (paged reads) |
+| Reads before newest replace | Stubbed |
+| Writes before newest replace | Stubbed |
+| Appends before fresh offset-0 read | Stubbed (fresh read supersedes them) |
+| Parts without `objectId` | Kept verbatim (legacy, cannot group) |
+
+**Stub Format**:
+```
+[omitted from history: 25,000 characters of superseded input.code. This is an EARLIER revision, not the current one — call read_workspace_content to see what the workspace holds now.]
+```
+
+**Per-Object Tracking**: Parts are keyed by `objectId` — a conversation rebound to another artifact cannot stub the first artifact's source reads.
+
+**Model-Side Only**: Applied to `safeModelMessages`, never to `safePersistenceMessages`. What's written to the database and what the thread renders on reload are byte-for-byte unchanged.
+
+**Key Sources**:
+- `/lib/nexus/workspace-tool-history.ts` — `pruneStaleWorkspaceToolPayloads()`, `indexSourceParts()`
+- `/app/api/nexus/chat/route.ts` — Applied to `safeModelMessages` only
+- `/docs/features/nexus-conversation-architecture.md` — Pruning paragraph
+
+**Focused Tests**:
+- `tests/unit/lib/nexus/workspace-tool-history.test.ts` — Paged reads, mode-only updates, document appends, rebound conversations
 
 #### Preview Diagnostics (#1787)
 

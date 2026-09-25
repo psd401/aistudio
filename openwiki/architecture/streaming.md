@@ -14,6 +14,7 @@ openwiki:
   test_paths:
     - lib/streaming/__tests__/sse-keepalive.test.ts
     - lib/streaming/__tests__/deferred-ui-message-stream.test.ts
+    - lib/streaming/__tests__/stream-deadline.test.ts
     - tests/e2e/nexus-chat-slow-stream-visible-error.functional.spec.ts
     - tests/e2e/assistant-architect-slow-chain-visible-error.functional.spec.ts
   invariants:
@@ -23,6 +24,9 @@ openwiki:
     - 40-minute lifetime ceiling prevents infinite streams when deadline missing
     - Deferred response commits after grace period — failure after commit surfaces as UI-message error chunk
     - Prompt chains run all but last prompt before streaming begins — deferred response required
+    - Per-step deadline is now idle timeout — touch() on every chunk keeps stream alive during long single steps (#1791)
+    - touch() throttled to 1s — safe to call per token without churning setTimeout (#1791)
+    - Hard stop ceiling unchanged — absolute bound (10 min) still stops runaway streams (#1791)
   validation_commands:
     - bun run typecheck
     - bun test lib/streaming/__tests__/sse-keepalive.test.ts
@@ -146,6 +150,44 @@ When a failure arrives after response was committed:
 - Error Response also used for logging/compensation side effects
 
 ## Provider Adapter Integration
+
+### StreamDeadline
+
+The `StreamDeadline` interface (from `lib/streaming/provider-adapters/base-adapter.ts`) provides per-step timeout budgeting for AI streams:
+
+```typescript
+export interface StreamDeadline {
+  /** Abort signal for streamText; undefined when no budget is configured. */
+  readonly signal?: AbortSignal;
+  /** Push the per-step clock forward. Call at each step boundary. */
+  extend(): void;
+  /**
+   * Push the clock forward on observed stream progress (one chunk).
+   * Throttled internally, safe to call per token.
+   */
+  touch(): void;
+  /** True once THIS deadline aborted the run (vs. caller-initiated abort). */
+  timedOut(): boolean;
+  /** Release the timer. Safe to call more than once. */
+  dispose(): void;
+}
+```
+
+**Why both `extend()` and `touch()`** (#1791):
+
+Step boundaries alone (`extend()`) are not enough when ONE step is long. An `update_workspace_artifact` call that streams a 50-60 KB dashboard is a **single step** — a 180s step budget can abort a run that was producing output the whole time, saving nothing.
+
+- `extend()` — Called at step boundaries (model reaches a tool call, finishes a reasoning segment)
+- `touch()` — Called on each chunk (`onChunk` callback), turning the per-step budget into an **idle timeout**
+
+**Chunk-driven clock extension**:
+- Active output pushes the deadline forward (throttled to at most one timer re-arm per second)
+- Silence still aborts after the full budget
+- Absolute ceiling (`hardStopAt`) remains — a wedged stream that emits forever is still bounded
+
+**Call sites**:
+- `base-adapter.ts` — `streamText` call gets `onChunk: () => deadline.touch()`
+- `openai-adapter.ts` — Responses-API path also passes `onChunk`
 
 ### Base Provider Adapter
 
