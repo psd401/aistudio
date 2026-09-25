@@ -77,6 +77,7 @@ AI Studio is an open-source platform that provides K-12 educators and students w
 22. **Rename/Re-slug** (#1791): Workspace chat can rename content via `rename_workspace_content` tool. An unpublished rename allocates a fresh slug; ever-published keeps the original slug. See **[app-features/overview.md](app-features/overview.md#rename-and-re-slug-1791)** for transaction and collision handling.
 23. **Mode-Only Artifact Updates** (#1791): `update_workspace_artifact` can change only `dataAccess` without providing `code` — no version is created, no §28.3 screening runs. See **[app-features/overview.md](app-features/overview.md#mode-only-artifact-updates-1791)** for contract.
 24. **Version Authorship Labels** (#1791): Versions written by Nexus chat show "via Nexus chat" in the dropdown and About rail. The label is viewer-neutral — never "you". See **[app-features/overview.md](app-features/overview.md#version-authorship-labels-1791)** for labeling rules.
+25. **Version-Scoped Data-Access Mode** (#1789): `data_access` lives on `content_versions`, not just `content_objects`. Live pages pin the PUBLISHED version's mode — author draft changes cannot re-capability Live. Use `resolveVersionDataAccess()` for every mode resolution. See **[app-features/overview.md](app-features/overview.md#version-scoped-data-access-mode-1789)** for the complete contract.
 
 ## Development Quick Start
 
