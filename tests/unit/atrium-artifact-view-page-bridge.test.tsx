@@ -84,12 +84,34 @@ const ARTIFACT = {
   dataAccess: "query" as const,
 };
 
-/** Render the page and hand back the `<ArtifactSandbox>` element it produced. */
-async function renderSandbox(): Promise<React.ReactElement> {
+type RenderedChild = React.ReactElement & {
+  props: Record<string, unknown>;
+};
+
+/**
+ * The overlay's children. Since #1793 there is more than one: an editor also
+ * gets a "Back to editor" link ahead of the sandbox, so callers pick the child
+ * they mean rather than assuming a single one.
+ */
+async function renderOverlayChildren(): Promise<RenderedChild[]> {
   const tree = (await ViewPage({
     params: Promise.resolve({ id: "obj-1" }),
-  })) as unknown as { props: { children: React.ReactElement } };
-  return tree.props.children;
+  })) as unknown as { props: { children: React.ReactNode } };
+  const children = tree.props.children;
+  const list = Array.isArray(children) ? children : [children];
+  return list.filter(
+    (child): child is RenderedChild =>
+      typeof child === "object" && child !== null && "props" in child
+  );
+}
+
+/** Render the page and hand back the `<ArtifactSandbox>` element it produced. */
+async function renderSandbox(): Promise<React.ReactElement> {
+  const children = await renderOverlayChildren();
+  // The sandbox is the only child carrying the bridge props.
+  const sandbox = children.find((child) => "dataBridgeEnabled" in child.props);
+  if (!sandbox) throw new Error("no ArtifactSandbox element was rendered");
+  return sandbox;
 }
 
 beforeEach(() => {
@@ -167,5 +189,41 @@ describe("Atrium full-screen artifact viewer — data bridge (#1725)", () => {
     loadByIdOrSlugMock.mockResolvedValue(null);
 
     await expect(renderSandbox()).rejects.toBe(NOT_FOUND_SENTINEL);
+  });
+});
+
+describe("Atrium full-screen artifact viewer — way back (#1793)", () => {
+  /** The "Back to editor" link, if the page rendered one. */
+  async function backLink(): Promise<RenderedChild | undefined> {
+    const children = await renderOverlayChildren();
+    return children.find((child) => "href" in child.props);
+  }
+
+  it("offers the owner a link back to the editor", async () => {
+    // The route hides every piece of app chrome, so without this an author who
+    // followed "Open full screen" had no title, no close and no way back.
+    loadByIdOrSlugMock.mockResolvedValue(ARTIFACT);
+    canViewMock.mockResolvedValue(true);
+
+    const link = await backLink();
+    expect(link).toBeDefined();
+    // The SERVER-resolved id, never the route param (which may be a slug).
+    expect(link?.props.href).toBe("/atrium/obj-1/edit");
+  });
+
+  it("omits it for a viewer who cannot edit", async () => {
+    // They would only bounce off the editor's own gate, so the viewport stays
+    // chrome-free for them.
+    getUserRequesterMock.mockResolvedValue({
+      kind: "user",
+      userId: 99,
+      roles: [],
+    });
+    loadByIdOrSlugMock.mockResolvedValue(ARTIFACT);
+    canViewMock.mockResolvedValue(true);
+
+    expect(await backLink()).toBeUndefined();
+    // ...and the artifact itself still renders.
+    await expect(renderSandbox()).resolves.toBeDefined();
   });
 });

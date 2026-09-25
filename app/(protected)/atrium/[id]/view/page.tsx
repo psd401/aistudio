@@ -47,8 +47,11 @@
  * page must never be statically cached or shared across principals.
  */
 
+import Link from "next/link";
 import { notFound } from "next/navigation";
+import { ArrowLeft } from "lucide-react";
 import { getUserRequester } from "@/actions/db/atrium/requester";
+import { canEdit } from "@/lib/content/helpers";
 import { contentService } from "@/lib/content/content-service";
 import { visibilityService } from "@/lib/content/visibility-service";
 import { versionService } from "@/lib/content/version-service";
@@ -92,6 +95,14 @@ export default async function AtriumArtifactViewPage({
   // Missing/unreadable body degrades to an empty preview (never the raw S3 error).
   const code = version ? await versionService.loadArtifactCodeSafe(version) : "";
 
+  // #1793: this route is a dead end — the overlay below hides every piece of
+  // app chrome, so an author who followed "Open full screen" from the editor
+  // had no title, no close button and no link back. A single floating control
+  // returns them to the editor. It is shown only to a requester who can edit
+  // (the same predicate the editor page uses); a viewer-only visitor would just
+  // bounce off the editor's own gate, so for them the viewport stays chrome-free.
+  const userCanEdit = canEdit(req, obj.ownerUserId);
+
   // A fixed, full-viewport overlay covers the inherited Meridian shell chrome so
   // only the sandbox is visible. No transformed ancestor sits in this subtree, so
   // `position: fixed` is viewport-relative (verified against the shell CSS).
@@ -105,6 +116,17 @@ export default async function AtriumArtifactViewPage({
         background: "#fff",
       }}
     >
+      {userCanEdit && (
+        <Link
+          href={`/atrium/${obj.id}/edit`}
+          data-testid="artifact-viewport-back"
+          // Above the sandbox iframe, which fills the overlay.
+          className="absolute left-4 top-4 z-10 inline-flex items-center gap-1.5 rounded-full border border-black/10 bg-white/90 px-3 py-1.5 text-sm font-medium text-neutral-800 shadow-sm backdrop-blur transition-colors hover:bg-white"
+        >
+          <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+          Back to editor
+        </Link>
+      )}
       <ArtifactSandbox
         // #1712: the loaded-mode pin lives in a ref for the mount's lifetime, so
         // a mount must belong to exactly one artifact. Keying on the id makes
