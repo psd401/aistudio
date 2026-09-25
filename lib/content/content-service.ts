@@ -47,6 +47,7 @@ import {
   type ObjectRowAsText,
 } from "./mappers";
 import { snapshotInTx, versionService } from "./version-service";
+import { livePublishedVersionId } from "./live-publication";
 import { visibilityService } from "./visibility-service";
 import {
   collectionAccessSnapshot,
@@ -72,6 +73,82 @@ import type {
   VisibilityGrant,
   VisibilityLevel,
 } from "./types";
+
+/**
+ * Keep the DRAFT's data-bridge mode in step with the object's, without ever
+ * re-capabilitying the LIVE page (#1789).
+ *
+ * `content_objects.data_access` is the mode of the working head; each
+ * `content_versions` row carries the mode its code was authored for, and every
+ * render surface pins the mode of the version it renders. Two cases:
+ *
+ *  - The head is NOT the live published version (an unpublished artifact, or a
+ *    draft ahead of Live). Stamp the head in place. The author's preview picks
+ *    the new mode up on the next render, and Live keeps the mode its own
+ *    published version was stamped with.
+ *
+ *  - The head IS the live published version. Stamping it would change what the
+ *    Live page can do for every reader, right now, with no republish — the bug
+ *    this issue is about. Write a NEW version instead (same code, new mode), so
+ *    the object becomes draft-ahead-of-Live: the author previews the new mode
+ *    and republishes when the code is ready.
+ *
+ * Returns the id of the new head when a version was written, else null.
+ *
+ * Idempotent: it writes the mode the object now carries, so replaying the same
+ * patch converges rather than drifting.
+ */
+async function propagateDataAccessToHead(
+  req: Requester,
+  obj: ContentObjectDTO
+): Promise<string | null> {
+  if (obj.kind !== "artifact" || !obj.currentVersionId) return null;
+  const headId = obj.currentVersionId;
+
+  const publishedVersionId = await livePublishedVersionId(obj.id);
+
+  if (publishedVersionId !== headId) {
+    // Scoped by object id as well as version id, so a stray version id can
+    // never be stamped through this path.
+    await executeQuery(
+      (db) =>
+        db
+          .update(contentVersions)
+          .set({ dataAccess: obj.dataAccess })
+          .where(
+            and(
+              eq(contentVersions.id, headId),
+              eq(contentVersions.objectId, obj.id)
+            )
+          ),
+      "content.dataAccess.stampHead"
+    );
+    return null;
+  }
+
+  // The head IS Live. Fork a draft carrying the new mode.
+  const head = await versionService.getById(obj.id, headId);
+  if (!head) return null;
+  const code = await versionService.loadArtifactCodeSafe(head);
+  if (!code.trim()) {
+    // An unreadable body would make `createVersion` reject an empty snapshot.
+    // Leaving the object's mode updated and the Live version untouched is the
+    // safe outcome: Live keeps its capability, and the next real save stamps
+    // the new mode onto the version it writes.
+    createLogger({ action: "content.dataAccess" }).warn(
+      "Live head body unavailable; mode change applies to the next version",
+      { objectId: obj.id, versionId: headId }
+    );
+    return null;
+  }
+  const forked = await contentService.createVersion(req, obj.id, {
+    body: code,
+    bodyFormat: head.bodyFormat,
+    summary: `Data access set to ${obj.dataAccess}`,
+    dataAccess: obj.dataAccess,
+  });
+  return forked.currentVersionId;
+}
 
 /** What a successful hard delete returns — the identity of what was removed. */
 export interface DeletedContentSummary {
@@ -1019,7 +1096,16 @@ export const contentService = {
       // first transition.
       await pruneRetrievalIndexBestEffort(existing.id);
     }
-    return rowToObjectDTO(rows[0] as ObjectRowAsText);
+    const updated = rowToObjectDTO(rows[0] as ObjectRowAsText);
+    // #1789: carry the new mode onto the DRAFT the author is editing, never onto
+    // the version a live publication pins. Runs AFTER the retraction above, so a
+    // patch that also takes the object offline takes the cheap stamp-in-place
+    // path rather than forking a version for a page that is no longer Live.
+    if (patch.dataAccess !== undefined) {
+      const newHeadId = await propagateDataAccessToHead(req, updated);
+      if (newHeadId) updated.currentVersionId = newHeadId;
+    }
+    return updated;
   },
 
   /**

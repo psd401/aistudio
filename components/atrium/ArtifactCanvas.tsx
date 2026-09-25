@@ -593,10 +593,21 @@ function useCanvasBridgePin(
   loadCode: (
     versionId: string | null,
     opts?: { preserveOnError?: boolean }
-  ) => Promise<string | null>
+  ) => Promise<string | null>,
+  /**
+   * The mode the version CURRENTLY LOADED was authored for (#1789), set by
+   * `loadCode` in the same React batch as the code itself. Null until the first
+   * load lands, where the object's mode (the props pin) is the right answer —
+   * it is the mode the head carries and the mode the next version will carry.
+   *
+   * This is what keeps the frame's pin and the server's check in agreement once
+   * the version dropdown previews something other than the head: the bridge
+   * actions authorize against the mode stamped on the version they are handed.
+   */
+  loadedDataAccess: ContentDataAccess | null
 ): CanvasBridge {
   const target = resolveCanvasBridge(props);
-  const mode = target?.dataAccess;
+  const mode = target ? (loadedDataAccess ?? target.dataAccess) : undefined;
   const refreshSignal = props.refreshSignal;
   // The mode the sandbox stays pinned to WHILE an owner-signalled reload is in
   // flight, remembered together with the signal it was settled for. The two must
@@ -739,6 +750,10 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
   const [code, setCode] = useState<string>("");
   const [bodyFormat, setBodyFormat] = useState<BodyFormat>("html");
+  // The data-bridge mode of the version currently loaded (#1789). Null until the
+  // first load resolves; see `useCanvasBridgePin`.
+  const [loadedDataAccess, setLoadedDataAccess] =
+    useState<ContentDataAccess | null>(null);
   // Restore-selected-version state (Epic #1059 completion): `restoring` blocks
   // double-fire; `restoreNotice` is the success/failure caption (kept separate
   // from `message`, which belongs to the load-error state machine).
@@ -783,6 +798,9 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
       objectIdRef.current = result.data.objectId;
       setCode(result.data.code);
       setBodyFormat(result.data.bodyFormat);
+      // #1789: committed in the SAME batch as the code, so the frame is never
+      // keyed on one version's code under another version's capability.
+      setLoadedDataAccess(result.data.dataAccess);
       setSelectedVersionId(result.data.versionId);
       setState("ready");
       return result.data.versionId;
@@ -852,7 +870,7 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
     };
   }, [refreshVersions, loadCode]);
 
-  const bridge = useCanvasBridgePin(props, refreshVersions, loadCode);
+  const bridge = useCanvasBridgePin(props, refreshVersions, loadCode, loadedDataAccess);
 
   const { tab, handleTab, keepPreviewMounted } = usePreviewTab(
     state,

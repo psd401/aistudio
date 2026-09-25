@@ -152,6 +152,8 @@ export interface VersionRowAsText {
   renderLocation: string | null;
   proofDocRef: string | null;
   summary: string | null;
+  /** Raw `content_versions.data_access` (migration 183). Null for documents. */
+  dataAccess: string | null;
   createdAt: string | null;
 }
 
@@ -169,6 +171,9 @@ export function rowToVersionDTO(row: VersionRowAsText): ContentVersionDTO {
     renderLocation: row.renderLocation,
     proofDocRef: row.proofDocRef,
     summary: row.summary,
+    // Fail closed on an out-of-enum value, but preserve NULL: null means "this
+    // version carries no stamp", which resolves to the object's mode (#1789).
+    dataAccess: row.dataAccess === null ? null : normalizeDataAccess(row.dataAccess),
     createdAt: stripJsonQuotes(row.createdAt),
   };
 }

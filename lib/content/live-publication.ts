@@ -25,8 +25,9 @@
  * which is dependency-free and therefore safe in a client bundle.
  */
 
-import { eq, inArray, type SQL } from "drizzle-orm";
+import { and, eq, inArray, type SQL } from "drizzle-orm";
 import { contentPublications } from "@/lib/db/schema";
+import { executeQuery } from "@/lib/db/drizzle-client";
 import {
   LIVE_SURFACE_DESTINATIONS,
   type PublishDestination,
@@ -53,4 +54,34 @@ export function livePublicationConditions(): readonly [SQL, SQL] {
     ),
     eq(contentPublications.status, "live"),
   ];
+}
+
+/**
+ * The version id an object's LIVE publication pins, or null when it is a Draft.
+ *
+ * The one-column answer to "what does a reader see right now?", shared by the
+ * surfaces that must distinguish the published version from the working head
+ * (#1789): `/atrium/[id]/view` (which renders the published version for a
+ * non-editor) and `contentService.update` (which refuses to re-stamp a live
+ * version's data-access mode). `/c/` keeps its own projection because it also
+ * needs `publishedAt` for the reader's meta line.
+ */
+export async function livePublishedVersionId(
+  objectId: string
+): Promise<string | null> {
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .select({ publishedVersionId: contentPublications.publishedVersionId })
+        .from(contentPublications)
+        .where(
+          and(
+            eq(contentPublications.objectId, objectId),
+            ...livePublicationConditions()
+          )
+        )
+        .limit(1),
+    "content.livePublishedVersionId"
+  );
+  return rows[0]?.publishedVersionId ?? null;
 }

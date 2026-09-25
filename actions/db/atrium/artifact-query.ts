@@ -61,7 +61,7 @@ import {
 import { ErrorFactories, handleError } from "@/lib/error-utils";
 import { getServerSession } from "@/lib/auth/server-session";
 import type { CognitoSession } from "@/lib/auth/server-session";
-import { contentService, versionService } from "@/lib/content";
+import { contentService } from "@/lib/content";
 import type { ContentDataAccess } from "@/lib/content/types";
 import { canEdit } from "@/lib/content/helpers";
 import {
@@ -74,7 +74,11 @@ import { getNexusRouterConfig } from "@/lib/nexus/model-router/config";
 import { resolvePsdDataConnectorId } from "@/lib/nexus/model-router/psd-data-connector";
 import { consumeRateLimit } from "@/lib/rate-limit";
 import { ErrorCode } from "@/types/error-types";
-import { assertArtifactDataAccess, validateContentId } from "./artifact-guards";
+import {
+  assertArtifactDataAccess,
+  resolveRenderedVersionAccess,
+  validateContentId,
+} from "./artifact-guards";
 import { getUserRequester } from "./requester";
 
 /** The ONLY tool this action may invoke on the data connector. */
@@ -686,55 +690,6 @@ function assertQueryMode(content: { kind: string; dataAccess: ContentDataAccess 
 }
 
 /**
- * Which version the data MCP's audit line should name (#1787).
- *
- * `content.currentVersionId` is the working HEAD — the wrong answer for a
- * published `/c/` page or a canvas previewing an older version. The caller may
- * therefore supply the version actually running, but only a version that belongs
- * to THIS object is accepted: `versionService.getById` is scoped by `objectId`,
- * so a mismatched id cannot make one object's audit line name another's version.
- *
- * The head needs no lookup (it is already known to belong), so the ordinary case
- * costs no extra query.
- *
- * If the lookup itself FAILS (a DB blip), the audit line falls back to the head
- * rather than failing the query: the lookup only chooses which version the
- * audit names, and blocking a healthy query on it reported "the data service is
- * unavailable" for SQL that never ran. The fallback is logged. A lookup that
- * SUCCEEDS and finds nothing still refuses — that id is not this object's.
- */
-async function resolveAuditVersionId(
-  content: { id: string; currentVersionId: string | null },
-  requested: unknown,
-  log: ReturnType<typeof createLogger>
-): Promise<string | null> {
-  if (typeof requested !== "string" || !requested.trim()) {
-    return content.currentVersionId;
-  }
-  const versionId = requested.trim();
-  if (versionId === content.currentVersionId) return versionId;
-  let version: { id: string } | null;
-  try {
-    version = await versionService.getById(content.id, versionId);
-  } catch (error) {
-    log.warn("Audit version lookup failed; auditing under the head version", {
-      contentId: content.id,
-      requestedVersionId: versionId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return content.currentVersionId;
-  }
-  if (!version) {
-    throw ErrorFactories.invalidInput(
-      "versionId",
-      null,
-      "versionId does not belong to this artifact"
-    );
-  }
-  return version.id;
-}
-
-/**
  * Turn a thrown failure into the typed bridge response (#1787).
  *
  * `handleError` still runs — it is what writes the full technical detail to the
@@ -846,16 +801,18 @@ export async function queryArtifactData(
 
         const content = await contentService.get(requester, contentId);
         mayEdit = canEdit(requester, content.ownerUserId);
-        // The exclusivity gate: `records` and `none` artifacts never reach the
-        // data MCP (see the artifact-data.ts header for why).
-        assertQueryMode(content);
-        stopIfExpired();
-
-        const auditVersionId = await resolveAuditVersionId(
+        // #1789: resolve WHICH version is running BEFORE the exclusivity gate —
+        // the gate now judges that version's own mode, not the object's. A
+        // version id that does not belong to this artifact is still refused.
+        const rendered = await resolveRenderedVersionAccess(
           content,
           input?.versionId,
           log
         );
+        // The exclusivity gate: `records` and `none` artifacts never reach the
+        // data MCP (see the artifact-data.ts header for why).
+        assertQueryMode({ kind: content.kind, dataAccess: rendered.dataAccess });
+        const auditVersionId = rendered.versionId;
         stopIfExpired();
 
         const connectorId = await requirePsdDataConnectorId(stopIfExpired);

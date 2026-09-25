@@ -24,9 +24,15 @@ jest.mock("@/actions/db/atrium/requester", () => ({
 }));
 
 const mockContentGet = jest.fn();
+const mockVersionGetById = jest.fn();
 jest.mock("@/lib/content", () => ({
   contentService: {
     get: (...args: unknown[]) => mockContentGet(...args),
+  },
+  // #1789: the guards resolve the RENDERED version to decide which mode
+  // authorizes the operation.
+  versionService: {
+    getById: (...args: unknown[]) => mockVersionGetById(...args),
   },
 }));
 
@@ -681,5 +687,96 @@ describe("artifact record actions respect the data_access mode", () => {
 
     expect(result.isSuccess).toBe(true);
     expect(mockInsert).toHaveBeenCalled();
+  });
+});
+
+/**
+ * #1789 — the mode that authorizes a record op is the one stamped on the version
+ * the page is RENDERING, so a Live `/c/` page keeps the store it was published
+ * with while the author's draft sits in another mode (and vice versa).
+ */
+describe("artifact record actions respect the RENDERED version's mode (#1789)", () => {
+  const LIVE_VERSION = "22222222-2222-4222-8222-222222222222";
+  const HEAD_VERSION = "33333333-3333-4333-8333-333333333333";
+
+  it("allows submit against a records-mode published version while the object is in query mode", async () => {
+    // Scenario A: the Live sign-up sheet keeps accepting submissions even though
+    // the author has flipped the object to `query` for the next version.
+    mockContentGet.mockResolvedValueOnce({
+      ...CONTENT,
+      dataAccess: "query",
+      currentVersionId: HEAD_VERSION,
+    });
+    mockVersionGetById.mockResolvedValueOnce({
+      id: LIVE_VERSION,
+      dataAccess: "records",
+    });
+    mockReturning.mockResolvedValueOnce([
+      { id: "record-1", createdAt: CREATED_AT },
+    ]);
+
+    const result = await submitArtifactRecord({
+      ...validSubmitInput,
+      versionId: LIVE_VERSION,
+    });
+
+    expect(mockVersionGetById).toHaveBeenCalledWith(CONTENT.id, LIVE_VERSION);
+    expect(result.isSuccess).toBe(true);
+  });
+
+  it("refuses submit against a query-mode published version even though the object is in records mode", async () => {
+    // Scenario B, inverted: the object's `records` mode must not re-open the
+    // record store for a version that was published as a query dashboard.
+    mockContentGet.mockResolvedValueOnce({
+      ...CONTENT,
+      dataAccess: "records",
+      currentVersionId: HEAD_VERSION,
+    });
+    mockVersionGetById.mockResolvedValueOnce({
+      id: LIVE_VERSION,
+      dataAccess: "query",
+    });
+
+    const result = await submitArtifactRecord({
+      ...validSubmitInput,
+      versionId: LIVE_VERSION,
+    });
+
+    expect(result.isSuccess).toBe(false);
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+
+  it("refuses list for a version that belongs to another artifact", async () => {
+    mockContentGet.mockResolvedValueOnce({
+      ...CONTENT,
+      currentVersionId: HEAD_VERSION,
+    });
+    mockVersionGetById.mockResolvedValueOnce(null);
+
+    const result = await listArtifactRecords({
+      ...validListInput,
+      versionId: LIVE_VERSION,
+    });
+
+    expect(result.isSuccess).toBe(false);
+    expect(mockSelect).not.toHaveBeenCalled();
+  });
+
+  it("costs no version lookup when the head is what is running", async () => {
+    mockContentGet.mockResolvedValueOnce({
+      ...CONTENT,
+      currentVersionId: HEAD_VERSION,
+    });
+    mockReturning.mockResolvedValueOnce([
+      { id: "record-1", createdAt: CREATED_AT },
+    ]);
+
+    const result = await submitArtifactRecord({
+      ...validSubmitInput,
+      versionId: HEAD_VERSION,
+    });
+
+    expect(result.isSuccess).toBe(true);
+    expect(mockVersionGetById).not.toHaveBeenCalled();
   });
 });

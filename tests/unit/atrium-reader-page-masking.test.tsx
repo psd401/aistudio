@@ -320,6 +320,87 @@ describe("Atrium reader page — 404 existence masking", () => {
 });
 
 /**
+ * #1789 — what a Live reader gets is decided by the PUBLISHED version, not by
+ * whatever the author has most recently selected on their draft.
+ */
+describe("Atrium reader page — Live/Draft artifact pinning (#1789)", () => {
+  it("pins the PUBLISHED version's mode, not the object's draft mode (#1789)", async () => {
+    // Scenario A from #1789: a Live records-mode sign-up sheet whose author has
+    // switched the OBJECT to `query` while building the next version. Every
+    // reader used to get v3's code pinned to `query`, so `AtriumData.submit`
+    // failed for all of them until the author republished.
+    withLookups(
+      { ...OBJ_ROW, kind: "artifact", dataAccess: "query" },
+      PUBLICATION_ROW
+    );
+    canViewMock.mockResolvedValue(true);
+    getByIdMock.mockResolvedValue({
+      id: "ver-1",
+      objectId: "obj-1",
+      versionNumber: 3,
+      dataAccess: "records",
+    });
+    loadArtifactCodeMock.mockResolvedValue("<p>artifact</p>");
+
+    const result = await render("artifact-slug");
+    const child = (result as { props: { children: React.ReactElement } }).props
+      .children;
+
+    expect(child.props).toEqual(
+      expect.objectContaining({ dataAccess: "records", versionId: "ver-1" })
+    );
+  });
+
+  it("falls back to the object's mode for a version predating migration 183", async () => {
+    // The deploy must not change any existing artifact's capability: an
+    // unstamped version resolves exactly as it did before #1789.
+    withLookups(
+      { ...OBJ_ROW, kind: "artifact", dataAccess: "records" },
+      PUBLICATION_ROW
+    );
+    canViewMock.mockResolvedValue(true);
+    getByIdMock.mockResolvedValue({
+      id: "ver-1",
+      objectId: "obj-1",
+      versionNumber: 3,
+      dataAccess: null,
+    });
+    loadArtifactCodeMock.mockResolvedValue("<p>artifact</p>");
+
+    const result = await render("artifact-slug");
+    const child = (result as { props: { children: React.ReactElement } }).props
+      .children;
+
+    expect(child.props).toEqual(
+      expect.objectContaining({ dataAccess: "records" })
+    );
+  });
+
+  it("links Full screen to the PUBLISHED version, not the working head (#1789)", async () => {
+    // Part 2 of #1789: the unqualified link handed a reader the author's
+    // half-finished draft, exploratory SQL included.
+    withLookups(
+      { ...OBJ_ROW, kind: "artifact", dataAccess: "records" },
+      PUBLICATION_ROW
+    );
+    canViewMock.mockResolvedValue(true);
+    getByIdMock.mockResolvedValue({
+      id: "ver-1",
+      objectId: "obj-1",
+      versionNumber: 3,
+      dataAccess: "records",
+    });
+    loadArtifactCodeMock.mockResolvedValue("<p>artifact</p>");
+
+    const result = (await render("artifact-slug")) as {
+      props: { fullScreenHref: string };
+    };
+
+    expect(result.props.fullScreenHref).toBe("/atrium/obj-1/view?version=ver-1");
+  });
+});
+
+/**
  * Reader chrome gating (Epic #1059 Meridian redesign, slice E): the page computes
  * the Edit link with the REAL `canEdit` predicate (the same one the authoring
  * page's save controls use) and threads the object's collection NAME into the

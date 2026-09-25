@@ -473,7 +473,38 @@ export interface ContentVersionDTO {
   renderLocation: string | null;
   proofDocRef: string | null;
   summary: string | null;
+  /**
+   * The sandbox data-bridge mode THIS version's code was authored for (#1789,
+   * migration 183), or `null` when the version carries no stamp (every
+   * `document` version, and any artifact version written before migration 183
+   * reached it).
+   *
+   * Never read this directly to decide a capability — use
+   * `resolveVersionDataAccess`, which applies the `?? object.dataAccess`
+   * fallback that makes the null case behave exactly as it did before #1789.
+   */
+  dataAccess: ContentDataAccess | null;
   createdAt: string | null;
+}
+
+/**
+ * The mode a rendered artifact version runs under (#1789).
+ *
+ * Every surface that renders artifact code — the `/c/` reader (published
+ * version), `/atrium/[id]/view`, the editor canvas — and every bridge action
+ * that authorizes an operation MUST resolve the mode through this one function,
+ * so the pin the sandbox enforces and the mode the server enforces can never
+ * disagree.
+ *
+ * `version` may be null (an object with no head yet) and its stamp may be null
+ * (a pre-migration-183 row, or a document): both fall back to the object's
+ * mode, which is what every surface used before this issue.
+ */
+export function resolveVersionDataAccess(
+  version: { dataAccess: ContentDataAccess | null } | null | undefined,
+  objectDataAccess: unknown
+): ContentDataAccess {
+  return version?.dataAccess ?? normalizeDataAccess(objectDataAccess);
 }
 
 export interface ContentObjectWithVersion extends ContentObjectDTO {
@@ -485,6 +516,13 @@ export interface SnapshotInput {
   body: string;
   bodyFormat?: BodyFormat;
   summary?: string;
+  /**
+   * The data-bridge mode to stamp on the new version (#1789). Omitted means
+   * "the object's current mode", which is what every ordinary save wants: the
+   * head version and the object always agree, so the editor keeps pinning the
+   * object's mode with no behaviour change. Documents never carry a stamp.
+   */
+  dataAccess?: ContentDataAccess;
 }
 
 /** Exact canonical source for one committed immutable content version. */

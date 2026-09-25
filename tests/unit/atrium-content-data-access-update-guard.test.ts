@@ -46,9 +46,20 @@ jest.mock("@/lib/content/visibility-service", () => ({
 jest.mock("@/lib/content/events", () => ({
   contentEvents: { emit: jest.fn(async () => undefined) },
 }));
+const getByIdMock = jest.fn();
+const loadArtifactCodeSafeMock = jest.fn();
 jest.mock("@/lib/content/version-service", () => ({
   snapshotInTx: jest.fn(),
-  versionService: { snapshot: jest.fn(), flushSnapshotWrites: jest.fn() },
+  versionService: {
+    snapshot: jest.fn(),
+    flushSnapshotWrites: jest.fn(),
+    getById: (...a: unknown[]) => getByIdMock(...a),
+    loadArtifactCodeSafe: (...a: unknown[]) => loadArtifactCodeSafeMock(...a),
+  },
+}));
+const livePublishedVersionIdMock = jest.fn();
+jest.mock("@/lib/content/live-publication", () => ({
+  livePublishedVersionId: (...a: unknown[]) => livePublishedVersionIdMock(...a),
 }));
 
 import { executeQuery } from "@/lib/db/drizzle-client";
@@ -75,6 +86,10 @@ const baseObj = {
 beforeEach(() => {
   rows.length = 0;
   (executeQuery as jest.Mock).mockClear();
+  getByIdMock.mockReset();
+  loadArtifactCodeSafeMock.mockReset();
+  livePublishedVersionIdMock.mockReset();
+  livePublishedVersionIdMock.mockResolvedValue(null);
 });
 
 describe("contentService.create: dataAccess is artifact-only", () => {
@@ -128,5 +143,126 @@ describe("contentService.update: dataAccess is artifact-only", () => {
     });
 
     expect(updated.title).toBe("Renamed");
+  });
+});
+
+/**
+ * #1789 — the mode change must reach the DRAFT the author is editing and NEVER
+ * the version a live publication pins.
+ */
+describe("contentService.update: the mode change follows the draft, not Live", () => {
+  const artifact = {
+    ...baseObj,
+    kind: "artifact",
+    currentVersionId: "ver-head",
+  };
+
+  it("stamps the head version when it is NOT the live published version", async () => {
+    // Scenario A: Live at v3, author working on draft v4. Stamping v4 gives the
+    // author's preview the new mode while v3 keeps the one it was published
+    // with.
+    rows.push(
+      [artifact],
+      [{ ...artifact, dataAccess: "query" }],
+      [] // the content_versions UPDATE
+    );
+    livePublishedVersionIdMock.mockResolvedValue("ver-published");
+
+    const updated = await contentService.update(owner, artifact.id, {
+      dataAccess: "query",
+    });
+
+    expect(updated.dataAccess).toBe("query");
+    // lookup + object UPDATE + head stamp. No version was forked.
+    expect(executeQuery).toHaveBeenCalledTimes(3);
+    expect(executeQuery).toHaveBeenLastCalledWith(
+      expect.any(Function),
+      "content.dataAccess.stampHead"
+    );
+    expect(updated.currentVersionId).toBe("ver-head");
+  });
+
+  it("stamps the head of an artifact that is not published at all", async () => {
+    rows.push([artifact], [{ ...artifact, dataAccess: "none" }], []);
+    livePublishedVersionIdMock.mockResolvedValue(null);
+
+    await contentService.update(owner, artifact.id, { dataAccess: "none" });
+
+    expect(executeQuery).toHaveBeenLastCalledWith(
+      expect.any(Function),
+      "content.dataAccess.stampHead"
+    );
+  });
+
+  it("forks a new version instead of re-capabilitying the LIVE one", async () => {
+    // The head IS what readers are running. Stamping it would change what the
+    // Live page can do for everyone, right now, with no republish — the bug.
+    rows.push([artifact], [{ ...artifact, dataAccess: "query" }]);
+    livePublishedVersionIdMock.mockResolvedValue("ver-head");
+    getByIdMock.mockResolvedValue({
+      id: "ver-head",
+      bodyFormat: "html",
+      dataAccess: "records",
+    });
+    loadArtifactCodeSafeMock.mockResolvedValue("<p>live</p>");
+    const createVersion = jest
+      .spyOn(contentService, "createVersion")
+      .mockResolvedValue({
+        ...artifact,
+        currentVersionId: "ver-new",
+      } as unknown as Awaited<ReturnType<typeof contentService.createVersion>>);
+
+    try {
+      const updated = await contentService.update(owner, artifact.id, {
+        dataAccess: "query",
+      });
+
+      expect(createVersion).toHaveBeenCalledWith(
+        owner,
+        artifact.id,
+        expect.objectContaining({ body: "<p>live</p>", dataAccess: "query" })
+      );
+      // The returned head is the FORK, so a caller re-reading it does not hand
+      // back the version the Live page is still pinned to.
+      expect(updated.currentVersionId).toBe("ver-new");
+      // No in-place stamp went out.
+      expect(executeQuery).toHaveBeenCalledTimes(2);
+    } finally {
+      createVersion.mockRestore();
+    }
+  });
+
+  it("leaves Live alone rather than forking when the head body is unreadable", async () => {
+    // `loadArtifactCodeSafe` degrades to "" on a missing/unreadable body, and an
+    // empty snapshot would be rejected. Live keeping its capability is the safe
+    // outcome; the next real save stamps the new mode.
+    rows.push([artifact], [{ ...artifact, dataAccess: "query" }]);
+    livePublishedVersionIdMock.mockResolvedValue("ver-head");
+    getByIdMock.mockResolvedValue({ id: "ver-head", bodyFormat: "html" });
+    loadArtifactCodeSafeMock.mockResolvedValue("");
+    const createVersion = jest.spyOn(contentService, "createVersion");
+
+    try {
+      const updated = await contentService.update(owner, artifact.id, {
+        dataAccess: "query",
+      });
+
+      expect(createVersion).not.toHaveBeenCalled();
+      expect(updated.currentVersionId).toBe("ver-head");
+      expect(executeQuery).toHaveBeenCalledTimes(2);
+    } finally {
+      createVersion.mockRestore();
+    }
+  });
+
+  it("does nothing extra for an artifact that has no versions yet", async () => {
+    const fresh = { ...artifact, currentVersionId: null };
+    rows.push([fresh], [{ ...fresh, dataAccess: "query" }]);
+
+    await contentService.update(owner, fresh.id, { dataAccess: "query" });
+
+    // The next version will be stamped from the object's mode at snapshot time.
+    expect(livePublishedVersionIdMock).not.toHaveBeenCalled();
+    expect(executeQuery).toHaveBeenCalledTimes(2);
   });
 });

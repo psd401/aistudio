@@ -74,6 +74,7 @@ function makeVersion(overrides: Partial<ContentVersionDTO>): ContentVersionDTO {
     renderLocation: null,
     proofDocRef: null,
     summary: null,
+    dataAccess: null,
     createdAt: null,
     ...overrides,
   };

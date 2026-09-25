@@ -65,8 +65,10 @@ import {
   VersionPreconditionFailedError,
 } from "./errors";
 import { MAX_DECODED_BODY_BYTES } from "./code-encoding";
+import { normalizeDataAccess } from "./types";
 import type {
   BodyFormat,
+  ContentDataAccess,
   ContentVersionDTO,
   ContentSourceDTO,
   Requester,
@@ -89,6 +91,9 @@ const versionSelectFields = {
   renderLocation: contentVersions.renderLocation,
   proofDocRef: contentVersions.proofDocRef,
   summary: contentVersions.summary,
+  // #1789: the mode this version's code was authored for. Null for documents
+  // and for artifact versions predating migration 183.
+  dataAccess: contentVersions.dataAccess,
   createdAt: pgTimestampAsText(contentVersions.createdAt),
 } as const;
 
@@ -250,6 +255,32 @@ function assertHumanAuthorId(
   }
 }
 
+/**
+ * The object's CURRENT `data_access`, read inside the snapshot transaction
+ * (#1789).
+ *
+ * Read in-transaction rather than passed in from the caller so a mode change
+ * that commits between a caller's load and this insert cannot stamp a stale
+ * mode onto the new version. The read is a primary-key lookup on a row this
+ * transaction is about to update anyway.
+ *
+ * Falls back to `records` when the row is somehow unreadable — the column's own
+ * default, i.e. the mode every pre-#1705 artifact already runs under. It is not
+ * a capability decision: the render surfaces resolve the stamp against the
+ * object's mode, which `normalizeDataAccess` fails closed independently.
+ */
+async function currentObjectDataAccessInTx(
+  tx: DbTransaction,
+  objectId: string,
+): Promise<ContentDataAccess> {
+  const rows = await tx
+    .select({ dataAccess: contentObjects.dataAccess })
+    .from(contentObjects)
+    .where(eq(contentObjects.id, objectId))
+    .limit(1);
+  return rows[0] ? normalizeDataAccess(rows[0].dataAccess) : "records";
+}
+
 function validatedBodyFormat(
   kind: "document" | "artifact",
   input: SnapshotInput,
@@ -392,6 +423,15 @@ export async function snapshotInTx(
 
   const next = (await maxVersion(tx, obj.id)) + 1;
   const isDocument = obj.kind === "document";
+  // #1789: stamp the data-bridge mode this version's code is authored for.
+  // Documents have no sandbox, so they stay null. Artifacts take the explicit
+  // value when the caller supplies one (the mode-change path in
+  // `contentService.update`) and otherwise the object's CURRENT mode — which
+  // keeps the invariant "head version's stamp == object's mode" that lets every
+  // head-rendering surface keep pinning `object.dataAccess`.
+  const dataAccess = isDocument
+    ? null
+    : (input.dataAccess ?? (await currentObjectDataAccessInTx(tx, obj.id)));
   const { bodyLocation, bodyInline, renderLocation, s3Writes } =
     snapshotStoragePlan(obj, next, input.body, bodyFormat);
 
@@ -413,6 +453,7 @@ export async function snapshotInTx(
       bodyInline,
       renderLocation,
       summary: input.summary ?? null,
+      dataAccess,
     })
     .returning(versionSelectFields)
     .catch((e: unknown) => {
