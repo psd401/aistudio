@@ -152,6 +152,42 @@ const WORKSPACE_SUGGESTED_ACTIONS = [
   },
 ];
 
+/**
+ * What a VIEW-ONLY workspace visitor is offered instead (#1793).
+ *
+ * `buildWorkspaceChatTools` registers `edit_workspace_document` /
+ * `update_workspace_artifact` only when the caller may edit, and the Atrium
+ * surfaces offer "Open beside chat" to anyone who can view — so a starter set
+ * chosen from the BINDING alone would auto-send "Add a filter" for someone the
+ * server is then going to refuse. These ask the questions that do work.
+ */
+const WORKSPACE_READONLY_SUGGESTED_ACTIONS = [
+  {
+    title: "Explain this page",
+    label: "what it shows and where the data comes from",
+    action:
+      "Explain the page I have open in this workspace — what it shows, and where its data comes from.",
+  },
+  {
+    title: "Summarise what it says",
+    label: "the takeaway in a few sentences",
+    action:
+      "Summarise the page I have open in this workspace in a few sentences — what is the takeaway?",
+  },
+  {
+    title: "What should I ask about it?",
+    label: "questions this page can answer",
+    action:
+      "Looking at the page I have open in this workspace, what questions could I usefully ask about it?",
+  },
+  {
+    title: "Check it for problems",
+    label: "empty states, errors, small screens",
+    action:
+      "Review the page I have open in this workspace for problems — empty states, error handling, and how it renders on a small screen.",
+  },
+];
+
 export interface SuggestedAction {
   title: string;
   label: string;
@@ -175,6 +211,9 @@ interface ThreadProps {
   // Connector selection
   enabledConnectors?: string[];
   onConnectorsChange?: (connectors: string[]) => void;
+  /** True when the signed-in user may EDIT the bound workspace object (#1793).
+   *  Decides which starter prompts are offered — see ThreadWelcomeSuggestions. */
+  workspaceCanEdit?: boolean;
   /** Open workspace object id/slug (`?workspace=`). The Connect popover uses it to
    *  show a connector the router auto-attaches for that workspace as on (#1786). */
   workspaceId?: string;
@@ -204,6 +243,7 @@ export const Thread: FC<ThreadProps> = ({
   enabledConnectors = EMPTY_CONNECTORS_ARRAY,
   onConnectorsChange,
   onReconnectSuccess,
+  workspaceCanEdit,
   workspaceId,
   suggestedActions,
   toolFallback,
@@ -267,6 +307,7 @@ export const Thread: FC<ThreadProps> = ({
                 enabledConnectors={enabledConnectors}
                 onConnectorsChange={onConnectorsChange}
                 onReconnectSuccess={onReconnectSuccess}
+                workspaceCanEdit={workspaceCanEdit}
                 workspaceId={workspaceId}
                 suggestedActions={suggestedActions}
                 composerExtraActions={composerExtraActions}
@@ -362,12 +403,21 @@ const SuggestionItem: FC<SuggestionItemProps> = ({ suggestion, index }) => {
 const ThreadWelcomeSuggestions: FC<{
   actions?: SuggestedAction[];
   workspaceId?: string;
-}> = ({ actions, workspaceId }) => {
+  workspaceCanEdit?: boolean;
+}> = ({ actions, workspaceId, workspaceCanEdit }) => {
   // An explicit `actions` list always wins (assistant-architect passes its own).
   // Otherwise a bound workspace swaps the generic classroom starters for ones
-  // about the open object (#1793).
+  // about the open object (#1793) — the edit-oriented set only for someone who
+  // may actually edit it, since the server registers the editing tools on the
+  // same condition. Unknown (still loading) is treated as view-only: offering
+  // a question too early is recoverable, auto-sending a refused edit is not.
   const items =
-    actions ?? (workspaceId ? WORKSPACE_SUGGESTED_ACTIONS : SUGGESTED_ACTIONS);
+    actions ??
+    (workspaceId
+      ? workspaceCanEdit
+        ? WORKSPACE_SUGGESTED_ACTIONS
+        : WORKSPACE_READONLY_SUGGESTED_ACTIONS
+      : SUGGESTED_ACTIONS);
   if (items.length === 0) return null;
 
   return (
@@ -400,6 +450,9 @@ interface ComposerProps {
   onToolsChange?: (tools: string[]) => void;
   enabledConnectors?: string[];
   onConnectorsChange?: (connectors: string[]) => void;
+  /** True when the signed-in user may EDIT the bound workspace object (#1793).
+   *  Decides which starter prompts are offered — see ThreadWelcomeSuggestions. */
+  workspaceCanEdit?: boolean;
   /** Open workspace object id/slug (`?workspace=`). The Connect popover uses it to
    *  show a connector the router auto-attaches for that workspace as on (#1786). */
   workspaceId?: string;
@@ -422,6 +475,7 @@ const Composer: FC<ComposerProps> = ({
   enabledConnectors = EMPTY_CONNECTORS_ARRAY,
   onConnectorsChange,
   onReconnectSuccess,
+  workspaceCanEdit,
   workspaceId,
   suggestedActions,
   composerExtraActions,
@@ -436,6 +490,7 @@ const Composer: FC<ComposerProps> = ({
       <ThreadPrimitive.Empty>
         <ThreadWelcomeSuggestions
           actions={suggestedActions}
+          workspaceCanEdit={workspaceCanEdit}
           workspaceId={workspaceId}
         />
       </ThreadPrimitive.Empty>

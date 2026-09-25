@@ -499,6 +499,9 @@ interface NexusRuntimeWrapperProps {
   onRepositorySelectionChange: (repositoryIds: number[]) => void
   /** Open workspace object id/slug (`?workspace=`); passed to the runtime for §1087 tools. */
   workspaceId?: string
+  /** #1793: whether the user may EDIT that object, reported by `WorkspacePanel`
+   *  once its own gated payload lands. Chooses the chat's starter prompts. */
+  workspaceCanEdit?: boolean
   attachmentAdapter: AttachmentAdapter
   voiceAvailable: boolean
   voiceUnavailableReason?: string
@@ -577,6 +580,7 @@ function NexusRuntimeWrapper({
   repositorySelectionLoaded,
   onRepositorySelectionChange,
   workspaceId,
+  workspaceCanEdit,
   attachmentAdapter,
   voiceAvailable,
   voiceUnavailableReason,
@@ -713,6 +717,7 @@ function NexusRuntimeWrapper({
           onConnectorsChange={onConnectorsChange}
           onReconnectSuccess={removeFailedServerId}
           workspaceId={workspaceId}
+          workspaceCanEdit={workspaceCanEdit}
           routingMode={routingMode}
           modelFamily={modelFamily}
           onRoutingModeChange={onRoutingModeChange}
@@ -997,6 +1002,19 @@ function NexusPageView({
   stableConversationId,
   urlWorkspaceId,
 }: NexusPageViewProps) {
+  // #1793: the panel already loads the canView-gated payload that says whether
+  // this user may edit the open object; the chat needs the same answer to pick
+  // its starter prompts (the server registers the workspace EDITING tools on
+  // exactly this condition). Lifting it here avoids a second fetch. Reset to
+  // false whenever the bound object changes, so a stale `true` from the
+  // previous one cannot offer an edit starter for the new one.
+  const [workspaceCanEdit, setWorkspaceCanEdit] = useState(false)
+  const [canEditFor, setCanEditFor] = useState(urlWorkspaceId)
+  if (canEditFor !== urlWorkspaceId) {
+    setCanEditFor(urlWorkspaceId)
+    setWorkspaceCanEdit(false)
+  }
+
   return (
     <ErrorBoundary>
       <ConnectorToolProvider>
@@ -1041,6 +1059,7 @@ function NexusPageView({
                             runtimeProps.onRepositorySelectionChange
                           }
                           workspaceId={runtimeProps.workspaceId}
+                          workspaceCanEdit={workspaceCanEdit}
                           attachmentAdapter={runtimeProps.attachmentAdapter}
                           voiceAvailable={runtimeProps.voiceAvailable}
                           voiceUnavailableReason={runtimeProps.voiceUnavailableReason}
@@ -1069,7 +1088,11 @@ function NexusPageView({
                 )}
               </div>
               {urlWorkspaceId && (
-                <WorkspacePanel idOrSlug={urlWorkspaceId} onClose={closeWorkspace} />
+                <WorkspacePanel
+                  idOrSlug={urlWorkspaceId}
+                  onClose={closeWorkspace}
+                  onCanEditChange={setWorkspaceCanEdit}
+                />
               )}
             </div>
           </NexusShell>

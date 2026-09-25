@@ -27,6 +27,11 @@
  */
 
 import { test, expect, type Page } from "@playwright/test";
+import {
+  authenticateContext,
+  SEEDED_STAFF_EMAIL,
+  SEEDED_STAFF_SUB,
+} from "./helpers/session-auth";
 
 const AUTH_ENABLED = process.env.PLAYWRIGHT_AUTH_ENABLED === "true";
 
@@ -53,12 +58,16 @@ function collectStrayControlLabels(root: Element): string[] {
   return out;
 }
 
-async function createArtifact(page: Page): Promise<string> {
+async function createArtifact(
+  page: Page,
+  visibility?: "internal"
+): Promise<string> {
   const created = await page.request.post("/api/v1/content", {
     data: {
       kind: "artifact",
       title: `E2E 1793 ${crypto.randomUUID()}`,
       body: ARTIFACT_BODY,
+      ...(visibility ? { visibility: { level: visibility } } : {}),
     },
   });
   expect(created.ok()).toBeTruthy();
@@ -181,6 +190,13 @@ test.describe("Nexus workspace panel layout (#1793)", () => {
     await expect(
       page.getByRole("button", { name: /Help me create a lesson plan/i })
     ).toHaveCount(0);
+    // This artifact was created by the signed-in user, so they may edit it and
+    // get the edit-oriented set. A view-only visitor gets a read-only set
+    // instead, because the server registers the editing tools on the same
+    // condition (unit-covered; this asserts the editable branch is reached).
+    await expect(
+      page.getByRole("button", { name: /Add a filter control/i })
+    ).toBeVisible();
 
     const gridOverflow = await starters.evaluate((el) => {
       const grid = el.closest(".grid") as HTMLElement;
@@ -192,6 +208,48 @@ test.describe("Nexus workspace panel layout (#1793)", () => {
       path: ".verification/1793-composer-and-starters.png",
       fullPage: false,
     });
+  });
+
+  test("a view-only visitor is not offered starters that edit the workspace", async ({
+    page,
+    browser,
+  }) => {
+    // The Atrium surfaces offer "Open beside chat" to anyone who can VIEW, but
+    // the server registers `update_workspace_artifact` only for an editor — so
+    // an edit starter here would auto-send a request that is refused.
+    const id = await createArtifact(page, "internal");
+
+    const viewer = await browser.newContext({ viewport: REVIEW_VIEWPORT });
+    try {
+      await authenticateContext(viewer, SEEDED_STAFF_EMAIL, SEEDED_STAFF_SUB);
+      const viewerPage = await viewer.newPage();
+      await viewerPage.goto(`/nexus?workspace=${id}`);
+      await expect(viewerPage.getByTestId("workspace-panel")).toBeVisible({
+        timeout: 60_000,
+      });
+
+      // The read-only set — questions, not edits.
+      await expect(
+        viewerPage.getByRole("button", { name: /Explain the page I have open/i })
+      ).toBeVisible();
+      await expect(
+        viewerPage.getByRole("button", { name: /Add a filter control/i })
+      ).toHaveCount(0);
+      await expect(
+        viewerPage.getByRole("button", { name: /Rearrange the sections/i })
+      ).toHaveCount(0);
+    } finally {
+      await viewer.close();
+    }
+  });
+
+});
+
+test.describe("Atrium surfaces from the same #1793 review", () => {
+  test.skip(!AUTH_ENABLED, "needs a minted session (PLAYWRIGHT_AUTH_ENABLED)");
+  test.use({
+    storageState: "tests/e2e/.auth/user-a.json",
+    viewport: REVIEW_VIEWPORT,
   });
 
   test("no Share dialog control renders outside the dialog panel", async ({

@@ -39,6 +39,16 @@ export interface WorkspacePanelProps {
   idOrSlug: string;
   /** Close the panel (the mount clears the URL param). */
   onClose: () => void;
+  /**
+   * Whether the signed-in user may EDIT the open object, reported once this
+   * panel's own canView-gated payload lands (#1793). The chat beside the panel
+   * uses it to decide which starter prompts to offer: `buildWorkspaceChatTools`
+   * registers `edit_workspace_document` / `update_workspace_artifact` only for
+   * an editor, so offering "Add a filter" to a view-only visitor would auto-send
+   * a request the server is going to refuse. This panel already loads the
+   * answer, so nothing else has to fetch it. MUST be a stable reference.
+   */
+  onCanEditChange?: (canEdit: boolean) => void;
 }
 
 type PanelState =
@@ -46,7 +56,11 @@ type PanelState =
   | { status: "error"; message: string }
   | { status: "ready"; data: WorkspacePanelData };
 
-export function WorkspacePanel({ idOrSlug, onClose }: WorkspacePanelProps) {
+export function WorkspacePanel({
+  idOrSlug,
+  onClose,
+  onCanEditChange,
+}: WorkspacePanelProps) {
   const [state, setState] = useState<PanelState>({ status: "loading" });
   // ID change → reset to loading DURING RENDER (React's derived-state pattern —
   // a synchronous setState inside the effect would trigger cascading renders).
@@ -146,6 +160,14 @@ export function WorkspacePanel({ idOrSlug, onClose }: WorkspacePanelProps) {
       }),
     [refresh]
   );
+
+  // #1793: report editability up whenever the payload changes — including a
+  // `refresh()` after a chat tool edited the object, since a visibility change
+  // can flip it. Reset to false while loading or on error so a stale `true`
+  // from a PREVIOUS object never leaks into the new one's starters.
+  useEffect(() => {
+    onCanEditChange?.(state.status === "ready" && state.data.canEdit);
+  }, [state, onCanEditChange]);
 
   // #1793: the split width is the user's own — drag-resized, persisted, and
   // defaulting to half the split instead of the fixed 44% that rendered
