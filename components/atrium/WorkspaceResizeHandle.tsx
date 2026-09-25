@@ -44,7 +44,13 @@ export function WorkspaceResizeHandle({
   // captured at render time, so pointerup's handler would otherwise commit the
   // value from before the gesture.
   const latestPctRef = useRef(widthPct);
-  const draggingRef = useRef(false);
+  // The ONE pointer that owns the gesture, or null. A boolean here is not
+  // enough on a touch screen: a second finger landing on the handle mid-drag
+  // would reset the shared state, and then the FIRST finger's pointerup would
+  // end a gesture the second finger is still performing — freezing it until it
+  // lifts and touches again. Identifying the owner makes every other pointer a
+  // no-op for the whole gesture.
+  const activePointerRef = useRef<number | null>(null);
 
   const applyFromClientX = useCallback(
     (clientX: number) => {
@@ -61,10 +67,12 @@ export function WorkspaceResizeHandle({
 
   const handlePointerDown = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
-      // Ignore secondary buttons so a right-click never starts a silent drag.
-      if (event.button !== 0) return;
+      // Ignore secondary buttons so a right-click never starts a silent drag,
+      // and ignore any pointer that arrives while another already owns the
+      // gesture.
+      if (event.button !== 0 || activePointerRef.current !== null) return;
       event.preventDefault();
-      draggingRef.current = true;
+      activePointerRef.current = event.pointerId;
       latestPctRef.current = widthPct;
       event.currentTarget.setPointerCapture(event.pointerId);
     },
@@ -73,7 +81,7 @@ export function WorkspaceResizeHandle({
 
   const handlePointerMove = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
-      if (!draggingRef.current) return;
+      if (activePointerRef.current !== event.pointerId) return;
       applyFromClientX(event.clientX);
     },
     [applyFromClientX]
@@ -81,8 +89,8 @@ export function WorkspaceResizeHandle({
 
   const endDrag = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
-      if (!draggingRef.current) return;
-      draggingRef.current = false;
+      if (activePointerRef.current !== event.pointerId) return;
+      activePointerRef.current = null;
       if (event.currentTarget.hasPointerCapture(event.pointerId)) {
         event.currentTarget.releasePointerCapture(event.pointerId);
       }

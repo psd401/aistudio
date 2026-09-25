@@ -122,6 +122,24 @@ test.describe("Nexus workspace panel layout (#1793)", () => {
     const afterReload = await panelWidth();
     expect(Math.abs(afterReload - widened)).toBeLessThan(6);
 
+    // A narrower window clamps the panel so the chat keeps its 320px minimum —
+    // and does NOT quietly overwrite the preference: re-widening restores it.
+    await page.setViewportSize({ width: 900, height: 900 });
+    const narrowContainer = await splitWidth();
+    const narrowPanel = await panelWidth();
+    expect(narrowContainer - narrowPanel).toBeGreaterThanOrEqual(319);
+    // The handle announces what is on screen, not the stored preference.
+    const announced = await handle.getAttribute("aria-valuenow");
+    expect(Number(announced)).toBeCloseTo(
+      Math.round((narrowPanel / narrowContainer) * 100),
+      0
+    );
+
+    await page.setViewportSize(REVIEW_VIEWPORT);
+    await expect
+      .poll(async () => Math.abs((await panelWidth()) - widened) < 6)
+      .toBe(true);
+
     await page.screenshot({
       path: ".verification/1793-workspace-panel-resized.png",
       fullPage: false,
