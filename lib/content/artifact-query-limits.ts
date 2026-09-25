@@ -49,8 +49,17 @@ export const ARTIFACT_MAX_CONCURRENT_DATA_REQUESTS = 6;
 export const ARTIFACT_MAX_PENDING_DATA_REQUESTS = 32;
 
 /**
- * The frame's per-query clock, armed at DISPATCH (not at post). Past it the
- * call rejects with `timeout`.
+ * The server action's ONE budget for a query — preflight, connector handshake
+ * AND execution (#1788). Past it the action aborts and the call rejects with
+ * `timeout`. This is the number a page can actually rely on, so it is the one
+ * the authoring guidance quotes.
+ */
+export const ARTIFACT_QUERY_SERVER_TIMEOUT_MS = 30_000;
+
+/**
+ * The frame's per-query clock, armed at DISPATCH (not at post). A safety net
+ * only: it is deliberately longer than {@link ARTIFACT_QUERY_SERVER_TIMEOUT_MS}
+ * so the server always times out first and returns a typed `timeout`.
  */
 export const ARTIFACT_QUERY_CLIENT_TIMEOUT_MS = 45_000;
 

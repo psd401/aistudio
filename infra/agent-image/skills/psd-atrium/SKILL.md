@@ -297,8 +297,10 @@ Rules — follow all of them:
 - **Page detail tables** with `limit` / `offset` instead of one huge read.
   **`offset` is capped at 1000000** — a larger value is clamped to it, not
   rejected, so a page past it silently repeats the last reachable page.
-- **The SQL string is capped at 8000 characters**, and each query gets **45 s**
-  from the moment it is dispatched before rejecting with `timeout`.
+- **The SQL string is capped at 8000 characters**, and each query gets **30 s**
+  on the server from the moment it is dispatched before rejecting with
+  `timeout`. (The frame's own 45 s clock is only a safety net behind that —
+  do not budget against it.)
 - **Hard SQL rules from the data server.** `SELECT` only (DDL/DML is rejected);
   row-level security rewrites your query, so never write your own access
   filters; and always give a `NUMERIC`/`DECIMAL` cast a precision

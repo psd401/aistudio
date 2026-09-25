@@ -87,6 +87,7 @@ import {
   ARTIFACT_QUERY_MAX_SQL_LENGTH,
   ARTIFACT_QUERY_RATE_LIMIT,
   ARTIFACT_QUERY_RATE_WINDOW_MS,
+  ARTIFACT_QUERY_SERVER_TIMEOUT_MS,
 } from "@/lib/content/artifact-query-limits";
 import { getConnectorTools } from "@/lib/mcp/connector-service";
 import { getNexusRouterConfig } from "@/lib/nexus/model-router/config";
@@ -123,7 +124,7 @@ const QUERY_TOOL_NAME = "query_data";
  * host's 45s. The server now always loses that race BY CONSTRUCTION rather than
  * by assuming any stage is fast.
  */
-const QUERY_TIMEOUT_MS = 30_000;
+const QUERY_TIMEOUT_MS = ARTIFACT_QUERY_SERVER_TIMEOUT_MS;
 /**
  * Dashboards fire several queries per load — more often than chat — so the
  * budget is per viewer PER ARTIFACT rather than per viewer. The data MCP's own

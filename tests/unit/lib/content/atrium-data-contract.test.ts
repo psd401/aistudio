@@ -22,6 +22,7 @@ import {
   ARTIFACT_MAX_CONCURRENT_DATA_REQUESTS,
   ARTIFACT_MAX_PENDING_DATA_REQUESTS,
   ARTIFACT_QUERY_CLIENT_TIMEOUT_MS,
+  ARTIFACT_QUERY_SERVER_TIMEOUT_MS,
   ARTIFACT_QUERY_DEFAULT_LIMIT,
   ARTIFACT_QUERY_MAX_LIMIT,
   ARTIFACT_QUERY_MAX_OFFSET,
@@ -112,7 +113,12 @@ describe("Atrium data-bridge contract", () => {
     expect(g).toContain(`up to ${ARTIFACT_MAX_CONCURRENT_DATA_REQUESTS} at a time`);
     expect(g).toContain(`${ARTIFACT_MAX_PENDING_DATA_REQUESTS} outstanding`);
     expect(g).toContain(
-      `${Math.round(ARTIFACT_QUERY_CLIENT_TIMEOUT_MS / 1000)}s from the moment it is dispatched`,
+      `${Math.round(ARTIFACT_QUERY_SERVER_TIMEOUT_MS / 1000)}s on the server from the moment it is dispatched`,
+    );
+    // The frame's clock is a safety net behind the server's; it must stay the
+    // longer one so a slow query surfaces as the server's typed `timeout`.
+    expect(ARTIFACT_QUERY_CLIENT_TIMEOUT_MS).toBeGreaterThan(
+      ARTIFACT_QUERY_SERVER_TIMEOUT_MS,
     );
     // `truncated` alone cannot tell a row-limited result from a byte-trimmed
     // one, so the guidance must point at the counts instead.
@@ -132,6 +138,7 @@ describe("Atrium data-bridge contract", () => {
     }
     expect(queryActionSource).toContain("ARTIFACT_QUERY_DEFAULT_LIMIT");
     expect(queryActionSource).toContain("ARTIFACT_QUERY_RATE_LIMIT");
+    expect(queryActionSource).toContain("ARTIFACT_QUERY_SERVER_TIMEOUT_MS");
     expect(sandboxSource).toContain("ARTIFACT_MAX_CONCURRENT_DATA_REQUESTS");
   });
 
@@ -214,7 +221,7 @@ describe("Atrium data-bridge contract", () => {
       `**${ARTIFACT_MAX_PENDING_DATA_REQUESTS} outstanding requests**`,
     );
     expect(section).toContain(
-      `**${Math.round(ARTIFACT_QUERY_CLIENT_TIMEOUT_MS / 1000)} s**`,
+      `**${Math.round(ARTIFACT_QUERY_SERVER_TIMEOUT_MS / 1000)} s**`,
     );
     // The rules a wrong answer looks correct without.
     expect(section).toMatch(/Never embed query results/i);

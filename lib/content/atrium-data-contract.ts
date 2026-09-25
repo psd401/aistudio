@@ -42,6 +42,7 @@ import {
   ARTIFACT_QUERY_MAX_OFFSET,
   ARTIFACT_QUERY_MAX_SQL_LENGTH,
   ARTIFACT_QUERY_RATE_LIMIT,
+  ARTIFACT_QUERY_SERVER_TIMEOUT_MS,
 } from "@/lib/content/artifact-query-limits";
 
 /**
@@ -83,7 +84,7 @@ export const ATRIUM_DATA_AUTHORING_GUIDANCE =
   // it does not fail, it silently answers with the first page.
   "ENFORCED LIMITS (stated because breaking one of them mostly does NOT look like an error): " +
   `\`limit\` DEFAULTS TO ${ARTIFACT_QUERY_DEFAULT_LIMIT} when you omit it and is capped at ${ARTIFACT_QUERY_MAX_LIMIT} — an unaggregated SELECT therefore returns its FIRST ${ARTIFACT_QUERY_DEFAULT_LIMIT} rows and a total computed from them is simply wrong, with no rejection. Aggregate in SQL, and compare \`returnedCount\` to \`totalCount\` (do not rely on \`truncated\` alone) before you render a total. \`offset\` is capped at ${ARTIFACT_QUERY_MAX_OFFSET} — a larger value is clamped to it, not rejected, so a page past it silently repeats the last reachable page. ` +
-  `The SQL is capped at ${ARTIFACT_QUERY_MAX_SQL_LENGTH} characters, and each query has ${Math.round(ARTIFACT_QUERY_CLIENT_TIMEOUT_MS / 1000)}s from the moment it is dispatched before it rejects with \`timeout\` (the queue wait does not count against it). ` +
+  `The SQL is capped at ${ARTIFACT_QUERY_MAX_SQL_LENGTH} characters, and each query has ${Math.round(ARTIFACT_QUERY_SERVER_TIMEOUT_MS / 1000)}s on the server from the moment it is dispatched before it rejects with \`timeout\` (the queue wait does not count against it) — budget slow aggregates against that, not against the frame's longer ${Math.round(ARTIFACT_QUERY_CLIENT_TIMEOUT_MS / 1000)}s safety clock. ` +
   "SQL RULES from the data server: SELECT only (DDL/DML is rejected); row-level security rewrites your query, so never add your own access filters; and ALWAYS give a NUMERIC/DECIMAL cast a precision — `score::NUMERIC(10,2)`, never a bare `::NUMERIC`, which is rejected and is the leading suspect when a numeric column comes back blank. " +
   // The sandbox attributes, stated as behaviour rather than as an attribute
   // list: each of these is a feature a model adds in good faith and a viewer
