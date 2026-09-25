@@ -261,9 +261,13 @@ describe("ArtifactCanvas stages the data-access pin with the code", () => {
       await Promise.resolve();
     });
 
-    expect(screen.getByTestId("sandbox").getAttribute("data-data-access")).toBe("query");
-    // ...and no reload was triggered: the signal did not change.
-    expect(getCodeMock).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(screen.getByTestId("sandbox").getAttribute("data-data-access")).toBe("query")
+    );
+    // #1789: the head is reloaded, because a loaded version's own stamp
+    // otherwise masks the object's new mode (an in-place head stamp would leave
+    // the frame on the old capability while the server enforces the new one).
+    expect(getCodeMock).toHaveBeenCalledTimes(2);
   });
 });
 

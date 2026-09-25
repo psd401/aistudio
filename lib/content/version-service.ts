@@ -274,11 +274,16 @@ async function currentObjectDataAccessInTx(
   tx: DbTransaction,
   objectId: string,
 ): Promise<ContentDataAccess> {
+  // FOR UPDATE: a mode change committing between this read and the head
+  // advance would otherwise stamp the new version with the OLD mode while the
+  // object keeps the new one. Every snapshot updates this row later in the same
+  // transaction anyway, so taking the lock here costs no extra contention.
   const rows = await tx
     .select({ dataAccess: contentObjects.dataAccess })
     .from(contentObjects)
     .where(eq(contentObjects.id, objectId))
-    .limit(1);
+    .limit(1)
+    .for("update");
   return rows[0] ? normalizeDataAccess(rows[0].dataAccess) : "records";
 }
 

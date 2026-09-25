@@ -34,14 +34,37 @@ const txStub = {
   }),
 };
 
+// #1789 head stamp: a transaction that locks the object row (`.for("update")`
+// answers the head under the lock) and then issues the conditional stamp
+// (`.returning()` answers whether it matched).
+const txState: {
+  lockedHead: string | null;
+  stampRows: Array<Record<string, unknown>>;
+} = { lockedHead: "ver-head", stampRows: [] };
+const stampTx: Record<string, unknown> = new Proxy(
+  {},
+  {
+    get(_t, prop: string) {
+      if (prop === "for") {
+        return () => Promise.resolve([{ currentVersionId: txState.lockedHead }]);
+      }
+      if (prop === "returning") return () => Promise.resolve(txState.stampRows);
+      return () => stampTx;
+    },
+  }
+);
+
 jest.mock("@/lib/db/drizzle-client", () => ({
   // Serves loadByIdOrSlug and the UPDATE ... RETURNING in call order.
   executeQuery: jest.fn(async () => {
     lastLoaded = rows.shift() ?? [];
     return lastLoaded;
   }),
+  // #1789: the head stamp has its own locked transaction (see `stampTx`); every
+  // other transaction is the #1791 rename path served by `txStub`.
   executeTransaction: jest.fn(
-    async (callback: (tx: unknown) => Promise<unknown>) => callback(txStub)
+    async (callback: (tx: unknown) => Promise<unknown>, operation?: string) =>
+      callback(operation === "content.dataAccess.stampHead" ? stampTx : txStub)
   ),
 }));
 jest.mock("@/lib/db/schema", () => ({
@@ -90,7 +113,7 @@ jest.mock("@/lib/content/live-publication", () => ({
   livePublicationConditions: () => [],
 }));
 
-import { executeQuery } from "@/lib/db/drizzle-client";
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { contentService } from "@/lib/content/content-service";
 import { ValidationError } from "@/lib/content/errors";
 import type { Requester } from "@/lib/content/types";
@@ -113,7 +136,10 @@ const baseObj = {
 
 beforeEach(() => {
   rows.length = 0;
+  txState.lockedHead = "ver-head";
+  txState.stampRows = [];
   (executeQuery as jest.Mock).mockClear();
+  (executeTransaction as jest.Mock).mockClear();
   getByIdMock.mockReset();
   loadArtifactCodeSafeMock.mockReset();
 });
@@ -176,9 +202,9 @@ describe("contentService.update: dataAccess is artifact-only", () => {
  * #1789 — the mode change must reach the DRAFT the author is editing and NEVER
  * the version a live publication pins.
  *
- * The head stamp is ONE conditional UPDATE (`... WHERE NOT EXISTS <a live
- * publication pinning the head>`), so "is the head Live?" is answered by whether
- * it RETURNS a row: a row means stamped in place; none means the head is Live
+ * The head stamp runs under the object row lock `runPublishTx` also takes, as
+ * one conditional UPDATE (`... WHERE NOT EXISTS <a live publication pinning
+ * the head>`). A row back means stamped in place; none means the head is Live
  * and a draft is forked instead.
  */
 describe("contentService.update: the mode change follows the draft, not Live", () => {
@@ -192,11 +218,8 @@ describe("contentService.update: the mode change follows the draft, not Live", (
     // Scenario A: Live at v3, author working on draft v4. Stamping v4 gives the
     // author's preview the new mode while v3 keeps the one it was published
     // with.
-    rows.push(
-      [artifact],
-      [{ ...artifact, dataAccess: "query" }],
-      [{ id: "ver-head" }] // the conditional head stamp landed
-    );
+    rows.push([artifact], [{ ...artifact, dataAccess: "query" }]);
+    txState.stampRows = [{ id: "ver-head" }];
     const createVersion = jest.spyOn(contentService, "createVersion");
 
     try {
@@ -205,15 +228,32 @@ describe("contentService.update: the mode change follows the draft, not Live", (
       });
 
       expect(updated.dataAccess).toBe("query");
-      // lookup + object UPDATE + head stamp. No version was forked.
-      expect(executeQuery).toHaveBeenCalledTimes(3);
-      expect(executeQuery).toHaveBeenLastCalledWith(
+      expect(executeTransaction).toHaveBeenCalledWith(
         expect.any(Function),
         "content.dataAccess.stampHead"
       );
+      // lookup + object UPDATE; the stamp ran in the locked transaction.
+      expect(executeQuery).toHaveBeenCalledTimes(2);
       expect(createVersion).not.toHaveBeenCalled();
       expect(getByIdMock).not.toHaveBeenCalled();
       expect(updated.currentVersionId).toBe("ver-head");
+    } finally {
+      createVersion.mockRestore();
+    }
+  });
+
+  it("neither stamps nor forks when the head moved before the lock was taken", async () => {
+    // A save that advanced the head stamped its own version from the object's
+    // (already updated) mode; the old head must not be touched, nor forked.
+    rows.push([artifact], [{ ...artifact, dataAccess: "query" }]);
+    txState.lockedHead = "ver-newer";
+    const createVersion = jest.spyOn(contentService, "createVersion");
+
+    try {
+      await contentService.update(owner, artifact.id, { dataAccess: "query" });
+
+      expect(createVersion).not.toHaveBeenCalled();
+      expect(getByIdMock).not.toHaveBeenCalled();
     } finally {
       createVersion.mockRestore();
     }
@@ -223,7 +263,7 @@ describe("contentService.update: the mode change follows the draft, not Live", (
     // The head IS what readers are running, so the conditional stamp matched no
     // row. Stamping it would change what the Live page can do for everyone,
     // right now, with no republish — the bug.
-    rows.push([artifact], [{ ...artifact, dataAccess: "query" }], []);
+    rows.push([artifact], [{ ...artifact, dataAccess: "query" }]);
     getByIdMock.mockResolvedValue({
       id: "ver-head",
       bodyFormat: "html",
@@ -258,8 +298,9 @@ describe("contentService.update: the mode change follows the draft, not Live", (
   it("puts the object's mode back when the fork fails, and surfaces the failure", async () => {
     // The object row committed the new mode before the fork ran. A failed fork
     // must not leave Content settings showing a mode no version carries — the
-    // next save would silently stamp it.
-    rows.push([artifact], [{ ...artifact, dataAccess: "query" }], [], []);
+    // next save would silently stamp it. (The revert is conditional on the head
+    // not having moved, so a fork that committed before failing is left alone.)
+    rows.push([artifact], [{ ...artifact, dataAccess: "query" }], []);
     getByIdMock.mockResolvedValue({ id: "ver-head", bodyFormat: "html" });
     loadArtifactCodeSafeMock.mockResolvedValue("<p>live</p>");
     const createVersion = jest
@@ -284,7 +325,7 @@ describe("contentService.update: the mode change follows the draft, not Live", (
     // `loadArtifactCodeSafe` degrades to "" on a missing/unreadable body, and an
     // empty snapshot would be rejected. Live keeping its capability is the safe
     // outcome; the next real save stamps the new mode.
-    rows.push([artifact], [{ ...artifact, dataAccess: "query" }], []);
+    rows.push([artifact], [{ ...artifact, dataAccess: "query" }]);
     getByIdMock.mockResolvedValue({ id: "ver-head", bodyFormat: "html" });
     loadArtifactCodeSafeMock.mockResolvedValue("");
     const createVersion = jest.spyOn(contentService, "createVersion");
@@ -296,9 +337,8 @@ describe("contentService.update: the mode change follows the draft, not Live", (
 
       expect(createVersion).not.toHaveBeenCalled();
       expect(updated.currentVersionId).toBe("ver-head");
-      // lookup + object UPDATE + the stamp that matched nothing. No revert:
-      // this outcome is not a failure.
-      expect(executeQuery).toHaveBeenCalledTimes(3);
+      // lookup + object UPDATE. No revert: this outcome is not a failure.
+      expect(executeQuery).toHaveBeenCalledTimes(2);
     } finally {
       createVersion.mockRestore();
     }
@@ -312,5 +352,6 @@ describe("contentService.update: the mode change follows the draft, not Live", (
 
     // The next version will be stamped from the object's mode at snapshot time.
     expect(executeQuery).toHaveBeenCalledTimes(2);
+    expect(executeTransaction).not.toHaveBeenCalled();
   });
 });

@@ -70,6 +70,12 @@ interface StubResult {
   inserted: () => Record<string, unknown>;
 }
 
+// Lock strengths the data_access read requested, in call order.
+let lockStrengths: string[] = [];
+beforeEach(() => {
+  lockStrengths = [];
+});
+
 /**
  * A transaction stub covering exactly the calls `snapshotInTx` makes:
  * `maxVersion`'s aggregate select, the in-transaction `data_access` read, the
@@ -83,7 +89,15 @@ function makeTx(objectDataAccess: string | null): StubResult {
     const chain: Record<string, unknown> = {};
     chain.from = () => chain;
     chain.where = () => chain;
-    chain.limit = () => Promise.resolve(rows);
+    // The mode read locks the object row (`.for("update")`) so a concurrent
+    // mode change cannot land between it and the head advance.
+    chain.limit = () => ({
+      for: (strength: string) => {
+        lockStrengths.push(strength);
+        return Promise.resolve(rows);
+      },
+      then: (resolve: (v: unknown) => unknown) => resolve(rows),
+    });
     chain.then = (resolve: (v: unknown) => unknown) => resolve(rows);
     return chain;
   };
@@ -144,6 +158,8 @@ describe("snapshotInTx data-access stamping (#1789)", () => {
 
     expect(inserted().dataAccess).toBe("query");
     expect(result.version.dataAccess).toBe("query");
+    // Read under the object row lock, like the head advance it precedes.
+    expect(lockStrengths).toEqual(["update"]);
     // The version number still comes from maxVersion + 1.
     expect(inserted().versionNumber).toBe(5);
   });

@@ -106,38 +106,50 @@ async function propagateDataAccessToHead(
   if (obj.kind !== "artifact" || !obj.currentVersionId) return null;
   const headId = obj.currentVersionId;
 
-  // One statement decides AND writes: the stamp lands only while no live
-  // publication pins the head. A read-then-write pair left a window in which a
-  // concurrent publish could make the head Live after the check and before the
-  // stamp — re-capabilitying the Live page with no republish. Scoped by object
-  // id as well as version id, so a stray version id can never be stamped here.
-  const stamped = await executeQuery(
-    (db) =>
-      db
-        .update(contentVersions)
-        .set({ dataAccess: obj.dataAccess })
-        .where(
-          and(
-            eq(contentVersions.id, headId),
-            eq(contentVersions.objectId, obj.id),
-            notExists(
-              db
-                .select({ one: sql`1` })
-                .from(contentPublications)
-                .where(
-                  and(
-                    eq(contentPublications.objectId, obj.id),
-                    eq(contentPublications.publishedVersionId, headId),
-                    ...livePublicationConditions()
-                  )
+  // Decide AND write under the object row lock that `runPublishTx` takes. A
+  // bare conditional UPDATE is not enough: its snapshot can predate a publish
+  // committing concurrently, so it would stamp a head that has just gone Live
+  // — re-capabilitying the Live page with no republish. Holding the row lock,
+  // a publish either committed first (the NOT EXISTS below, a fresh statement
+  // snapshot, sees it and we fork) or waits until our stamp commits. The head
+  // is re-read under the lock, so a head advanced in the meantime is not
+  // stamped either. Scoped by object id as well as version id, so a stray
+  // version id can never be stamped here.
+  const stamped = await executeTransaction(async (tx) => {
+    const locked = await tx
+      .select({ currentVersionId: contentObjects.currentVersionId })
+      .from(contentObjects)
+      .where(eq(contentObjects.id, obj.id))
+      .limit(1)
+      .for("update");
+    if (locked[0]?.currentVersionId !== headId) return true;
+    const rows = await tx
+      .update(contentVersions)
+      .set({ dataAccess: obj.dataAccess })
+      .where(
+        and(
+          eq(contentVersions.id, headId),
+          eq(contentVersions.objectId, obj.id),
+          notExists(
+            tx
+              .select({ one: sql`1` })
+              .from(contentPublications)
+              .where(
+                and(
+                  eq(contentPublications.objectId, obj.id),
+                  eq(contentPublications.publishedVersionId, headId),
+                  ...livePublicationConditions()
                 )
-            )
+              )
           )
         )
-        .returning({ id: contentVersions.id }),
-    "content.dataAccess.stampHead"
-  );
-  if (stamped[0]) return null;
+      )
+      .returning({ id: contentVersions.id });
+    return rows.length > 0;
+  }, "content.dataAccess.stampHead");
+  // `true` also covers a head that moved under us: the save that advanced it
+  // stamped its own version from the object's (already updated) mode.
+  if (stamped) return null;
 
   // The head IS Live. Fork a draft carrying the new mode.
   const head = await versionService.getById(obj.id, headId);
@@ -167,18 +179,31 @@ async function propagateDataAccessToHead(
  * Restore an object's data-bridge mode after `propagateDataAccessToHead` failed
  * (#1789). Best-effort: the original failure is what the caller must see, so a
  * failed revert is logged rather than thrown over it.
+ *
+ * Only while the head is still `headId`. `createVersion` commits the fork (and
+ * advances the head) BEFORE flushing large bodies to storage, so a failure can
+ * arrive after a new head stamped with the new mode already exists. Reverting
+ * the object then would put it out of step with its own head; leaving it keeps
+ * object and head agreeing, and the failure still surfaces to the caller.
  */
 async function revertDataAccessBestEffort(
   objectId: string,
-  previous: ContentDataAccess
+  previous: ContentDataAccess,
+  headId: string | null
 ): Promise<void> {
+  if (!headId) return;
   try {
     await executeQuery(
       (db) =>
         db
           .update(contentObjects)
           .set({ dataAccess: previous })
-          .where(eq(contentObjects.id, objectId)),
+          .where(
+            and(
+              eq(contentObjects.id, objectId),
+              eq(contentObjects.currentVersionId, headId)
+            )
+          ),
       "content.dataAccess.revert"
     );
   } catch (error) {
@@ -1241,7 +1266,11 @@ export const contentService = {
         // (version race, re-screening block, storage), put the mode back so the
         // caller's error is the whole truth: otherwise Content settings shows a
         // mode no version carries, and the next save would silently stamp it.
-        await revertDataAccessBestEffort(existing.id, existing.dataAccess);
+        await revertDataAccessBestEffort(
+          existing.id,
+          existing.dataAccess,
+          updated.currentVersionId
+        );
         throw error;
       }
       if (newHeadId) updated.currentVersionId = newHeadId;

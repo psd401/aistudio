@@ -655,6 +655,46 @@ function useCanvasBridgePin(
 }
 
 /**
+ * Reload the head when the OBJECT's mode prop changes (#1789).
+ *
+ * Once a version has loaded, its own stamp (`loadedDataAccess`) takes over from
+ * the props pin. A Content settings save then only calls `router.refresh()`,
+ * which keeps this instance mounted — so without a reload the frame would stay
+ * pinned to the mode the head carried BEFORE the save, while the server now
+ * authorizes the head under its new stamp. Reloading the head picks up both an
+ * in-place stamp and a fork (a Live head gets a new draft version), and commits
+ * the new mode in the same batch as the code, like every other load.
+ */
+function useReloadOnObjectModeChange(
+  props: ArtifactCanvasProps,
+  refreshVersions: (seq?: number) => Promise<VersionSummary[] | null>,
+  loadCode: (
+    versionId: string | null,
+    opts?: { preserveOnError?: boolean }
+  ) => Promise<string | null>
+): void {
+  const objectMode = resolveCanvasBridge(props)?.dataAccess;
+  const signal = props.refreshSignal;
+  const seenModeRef = useRef(objectMode);
+  const seenSignalRef = useRef(signal);
+  useEffect(() => {
+    const signalMoved = signal !== seenSignalRef.current;
+    seenSignalRef.current = signal;
+    // The mount value never fires: the mount effect is already loading.
+    if (objectMode === seenModeRef.current) return;
+    seenModeRef.current = objectMode;
+    // A mode that arrives WITH an owner refresh signal is reloaded by
+    // `useCanvasBridgePin`, which also holds the pin until that load lands.
+    if (signalMoved) return;
+    // Background reload: a failure keeps the preview already on screen.
+    void Promise.all([
+      refreshVersions(),
+      loadCode(null, { preserveOnError: true }),
+    ]).catch(() => undefined);
+  }, [objectMode, signal, refreshVersions, loadCode]);
+}
+
+/**
  * Buffer this preview's failures so the next chat turn can carry them (#1787).
  *
  * The chat that authors an artifact is otherwise blind to whether its code
@@ -873,6 +913,7 @@ export function ArtifactCanvas(props: ArtifactCanvasProps) {
     };
   }, [refreshVersions, loadCode]);
 
+  useReloadOnObjectModeChange(props, refreshVersions, loadCode);
   const bridge = useCanvasBridgePin(props, refreshVersions, loadCode, loadedDataAccess);
 
   const { tab, handleTab, keepPreviewMounted } = usePreviewTab(
