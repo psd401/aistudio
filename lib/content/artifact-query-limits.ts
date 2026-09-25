@@ -53,3 +53,9 @@ export const ARTIFACT_MAX_PENDING_DATA_REQUESTS = 32;
  * call rejects with `timeout`.
  */
 export const ARTIFACT_QUERY_CLIENT_TIMEOUT_MS = 45_000;
+
+/**
+ * The frame's per-request clock for record ops (`submit` / `list`), also armed
+ * at dispatch. Mirrors the sandbox host's `DATA_REQUEST_TIMEOUT_MS`.
+ */
+export const ARTIFACT_RECORD_CLIENT_TIMEOUT_MS = 10_000;

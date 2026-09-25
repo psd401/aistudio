@@ -14,15 +14,20 @@ import {
   ATRIUM_DATA_AUTHORING_GUIDANCE,
   DATA_ACCESS_DESC,
 } from "@/lib/content/atrium-data-contract";
-import { ARTIFACT_BRIDGE_ERROR_CODES } from "@/lib/content/artifact-bridge-errors";
+import {
+  ARTIFACT_BRIDGE_ERROR_CODES,
+  MAX_ARTIFACT_BRIDGE_ERROR_MESSAGE_LENGTH,
+} from "@/lib/content/artifact-bridge-errors";
 import {
   ARTIFACT_MAX_CONCURRENT_DATA_REQUESTS,
   ARTIFACT_MAX_PENDING_DATA_REQUESTS,
   ARTIFACT_QUERY_CLIENT_TIMEOUT_MS,
   ARTIFACT_QUERY_DEFAULT_LIMIT,
   ARTIFACT_QUERY_MAX_LIMIT,
+  ARTIFACT_QUERY_MAX_OFFSET,
   ARTIFACT_QUERY_MAX_SQL_LENGTH,
   ARTIFACT_QUERY_RATE_LIMIT,
+  ARTIFACT_RECORD_CLIENT_TIMEOUT_MS,
 } from "@/lib/content/artifact-query-limits";
 
 const root = process.cwd();
@@ -101,6 +106,7 @@ describe("Atrium data-bridge contract", () => {
     const g = ATRIUM_DATA_AUTHORING_GUIDANCE;
     expect(g).toContain(`DEFAULTS TO ${ARTIFACT_QUERY_DEFAULT_LIMIT}`);
     expect(g).toContain(`capped at ${ARTIFACT_QUERY_MAX_LIMIT}`);
+    expect(g).toContain(`\`offset\` is capped at ${ARTIFACT_QUERY_MAX_OFFSET}`);
     expect(g).toContain(`${ARTIFACT_QUERY_MAX_SQL_LENGTH} characters`);
     expect(g).toContain(`${ARTIFACT_QUERY_RATE_LIMIT} queries per minute`);
     expect(g).toContain(`up to ${ARTIFACT_MAX_CONCURRENT_DATA_REQUESTS} at a time`);
@@ -141,6 +147,30 @@ describe("Atrium data-bridge contract", () => {
     expect(renderHtmlNumber(/var MAX_PENDING_DATA_REQUESTS = (\d+);/)).toBe(
       ARTIFACT_MAX_PENDING_DATA_REQUESTS,
     );
+    expect(renderHtmlNumber(/var DATA_REQUEST_TIMEOUT_MS = (\d+);/)).toBe(
+      ARTIFACT_RECORD_CLIENT_TIMEOUT_MS,
+    );
+    // The frame forwards script/data errors to the parent, which re-bounds them
+    // with the shared cap; a larger frame cap would only be truncated again.
+    expect(renderHtmlNumber(/var MAX_FORWARDED_ERROR_LENGTH = (\d+);/)).toBe(
+      MAX_ARTIFACT_BRIDGE_ERROR_MESSAGE_LENGTH,
+    );
+  });
+
+  /**
+   * The host's pre-ack budget must outlast the worst-case queue wait, or a
+   * queued request rejects locally and is then dispatched anyway (#1788). The
+   * host derives it as one full query budget per dispatch wave, plus the
+   * request's own: ceil(pending / concurrent) waves + 1. Changing either
+   * concurrency limit without re-deriving it fails here.
+   */
+  it("sizes the host's queued-dispatch budget from the concurrency limits", () => {
+    const waves = Math.ceil(
+      ARTIFACT_MAX_PENDING_DATA_REQUESTS / ARTIFACT_MAX_CONCURRENT_DATA_REQUESTS,
+    );
+    expect(renderHtmlNumber(/var QUEUED_DISPATCH_TIMEOUT_MS = (\d+);/)).toBe(
+      (waves + 1) * ARTIFACT_QUERY_CLIENT_TIMEOUT_MS,
+    );
   });
 
   /**
@@ -173,6 +203,7 @@ describe("Atrium data-bridge contract", () => {
     expect(section).toContain(`DEFAULTS to ${ARTIFACT_QUERY_DEFAULT_LIMIT}`);
     expect(section).toContain(`capped at ${ARTIFACT_QUERY_MAX_LIMIT}`);
     expect(section).toContain(`${ARTIFACT_QUERY_MAX_SQL_LENGTH} characters`);
+    expect(section).toContain(`**\`offset\` is capped at ${ARTIFACT_QUERY_MAX_OFFSET}**`);
     expect(section).toContain(
       `**${ARTIFACT_QUERY_RATE_LIMIT} queries per minute, per viewer, per artifact**`,
     );

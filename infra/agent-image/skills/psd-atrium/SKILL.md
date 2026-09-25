@@ -295,6 +295,8 @@ Rules — follow all of them:
   Compare `returnedCount` to `totalCount` before rendering a total; do not rely
   on `truncated` alone.
 - **Page detail tables** with `limit` / `offset` instead of one huge read.
+  **`offset` is capped at 1000000** — a larger value is clamped to it, not
+  rejected, so a page past it silently repeats the last reachable page.
 - **The SQL string is capped at 8000 characters**, and each query gets **45 s**
   from the moment it is dispatched before rejecting with `timeout`.
 - **Hard SQL rules from the data server.** `SELECT` only (DDL/DML is rejected);
