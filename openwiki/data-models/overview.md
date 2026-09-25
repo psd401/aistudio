@@ -98,6 +98,40 @@ The function safely extracts `causeCode`, `causeConstraint`, and `causeTable` wi
 | `group_role_mappings` | Group-to-role automatic assignments |
 | `group_selection_rules` | Admin-configured sync rules |
 
+**Nexus Conversations**
+| Table | Purpose |
+|-------|---------|
+| `nexus_conversations` | Main chat conversation storage with `workspace_object_id` for panel restore (#1791) |
+| `nexus_folders` | Conversation organization |
+| `nexus_projects` | Project-based grouping with auto-provisioned private repository |
+| `nexus_messages` | Individual chat messages |
+
+**Content & Atrium**
+| Table | Purpose |
+|-------|---------|
+| `content_objects` | Atrium content objects (documents and artifacts) |
+| `content_versions` | Immutable version snapshots with `author_label` for surface provenance (#1791) |
+| `content_publications` | Live/Draft state, destination, shared visibility |
+| `content_visibility_grants` | Per-object visibility grants (specific users, groups, roles) |
+| `content_collections` | Sections (folders for content) |
+| `content_collection_grants` | Section-level visibility grants |
+| `content_user_favorites` | User-starred content |
+
+### Key Column Notes
+
+**`nexus_conversations.workspace_object_id`** (Migration 183, #1791):
+- Nullable UUID referencing `content_objects.id` with `ON DELETE SET NULL`
+- Records which Atrium artifact/document a conversation worked on
+- Enables panel restoration when reopening from sidebar
+- Enables "Ask the agent" to continue the bound conversation instead of starting fresh
+- Partial index `idx_nexus_conversations_workspace_object` (user_id, workspace_object_id, last_message_at DESC) WHERE workspace_object_id IS NOT NULL
+
+**`content_versions.author_label`** (Migration 183, #1791):
+- VARCHAR(64) free-text surface label (e.g., `"nexus-chat"`)
+- Distinguishes versions the Nexus chat model wrote from human-edited code
+- Authoritative authorization stays in `author_actor`/`author_user_id` (chat runs under user's requester)
+- Surfaces in version dropdown as "via Nexus chat" and in About rail as "Written by the agent in Nexus chat"
+
 ---
 
 ### AI & Models
