@@ -90,7 +90,7 @@ openwiki:
     - Canvas bridge pin uses loaded version's stamp — previewing older version uses that version's mode (#1789)
     - Full-screen link from Live pins to published version — readers never see author's half-finished draft (#1789)
     - Bridge numeric limits are enforced and stated from one source — DEFAULT 200, MAX 2000, offset MAX 1M, SQL MAX 8000 chars, timeouts 30s server / 45s client — interpolated into authoring guidance so models cannot state a limit the code does not apply (#1792)
-    - Bridge enabled on authoring surfaces (view page, editor canvas, workspace panel); embeds/thumbnails/public reader stay fail-closed (#1725)
+    - Bridge enabled on authoring surfaces (view page, editor canvas, workspace panel); authenticated embeds enabled for Live artifacts; public embeds/thumbnails stay fail-closed (#1725, #1790)
     - Workspace panel width stored as fraction (0–1) in localStorage per user — not pixels (#1793)
     - Minimum panel width 380px (below this dashboards render at phone layout) (#1793)
     - Minimum chat column width 320px — both columns must stay usable (#1793)
@@ -1166,7 +1166,7 @@ Artifacts can interact with data through a sandbox bridge. The `data_access` mod
 
 **Security Model**: The modes are mutually exclusive by design to prevent exfiltration. An artifact that can query viewer data cannot also write records, closing the loop where a hostile author could query sensitive data and exfiltrate it through the records store.
 
-**Where the Bridge is Live** (#1725):
+**Where the Bridge is Live** (#1725, #1790):
 
 | Surface | Bridge | Why |
 |---------|--------|-----|
@@ -1174,13 +1174,45 @@ Artifacts can interact with data through a sandbox bridge. The `data_access` mod
 | `/atrium/<id>/view` full-screen viewer | **enabled** | Readers get published version when Live; editors get requested or head (#1789) |
 | `/atrium/<id>/edit` canvas preview | **enabled** | Where the artifact is authored; keys on version's mode stamp |
 | Nexus workspace panel (`?workspace=`) | **enabled** | Same canvas behind same `canView`-gated loader |
-| `ArtifactEmbedBlock` (artifact inside document) | fail closed | Renders inside somebody else's document, including anonymous reader |
-| Library thumbnails | fail closed | Decorative grid tiles; nothing to interact with |
-| `/p/<slug>` public reader | fail closed | Anonymous — no viewer to scope a query to |
+| `ArtifactEmbedBlock` in **authenticated** document (`/c/<slug>`, editor NodeView) | **enabled for LIVE artifact** (#1790) | Resolver's `internal` audience runs same `canView` on embedded artifact, renders PUBLISHED version pinned to that version's stamp; unpublished artifact renders head with NO bridge |
+| `ArtifactEmbedBlock` in **public** reader (`/p/<slug>`) | fail closed | `public` audience always resolves `dataBridge: null` — no viewer identity to scope a query to |
+| Library thumbnails | fail closed | Decorative grid tiles with no `canView` of their own; `query`-mode artifacts render static placeholder instead of error state (#1790) |
+| `/p/<slug>` public reader (top-level artifact) | fail closed | Anonymous — no viewer to scope a query to |
 
-**Publication was never the authorization** — `queryArtifactData`, `submitArtifactRecord`, and `listArtifactRecords` each independently resolve the session, run `contentService.get` (the shared 404 mask + `canView`), re-check `kind === "artifact"`, and re-check the `data_access` mode of the **VERSION being rendered** (#1789). None reads publication state. Enabling the bridge on authoring surfaces changes only *where* a request may originate, not *who* may run one — and removes the publish → test → republish loop where an author could not exercise a query-mode dashboard until it was in front of an audience.
+**Publication was never the authorization** — `queryArtifactData`, `submitArtifactRecord`, and `listArtifactRecords` each independently resolve the session, run `contentService.get` (the shared 404 mask + `canView`), re-check `kind === "artifact"`, and re-check the `data_access` mode of the **VERSION being rendered** (#1789). None reads publication state. Enabling the bridge on authoring surfaces and authenticated embeds changes only *where* a request may originate, not *who* may run one — and removes the publish → test → republish loop where an author could not exercise a query-mode dashboard until it was in front of an audience.
 
 **Dual-Layer Enforcement** (#1712, #1789): Each mode is enforced twice, and both layers must agree. The reader page pins the mode of the **VERSION it renders** (published for Live, head for drafts), and the sandbox refuses any operation that does not match that pinned mode. The Server Actions independently re-check that version's mode via `resolveRenderedVersionAccess`. A mode change (settings, REST `PATCH`, MCP) only takes effect on a fresh page load, which starts with no queried data in memory. This prevents the owner from loading a viewer with `query` mode, then flipping to `records` to let that page submit queried rows back into the records store—exactly the exfiltration loop the mutual exclusivity is meant to close.
+
+#### Live-Data Artifact Sharing (#1790)
+
+A `query`-mode artifact does not show a single page — it shows each viewer a DIFFERENT page built from their own district permissions. The Share dialog and metadata rail now explain this critical distinction.
+
+**Share Dialog Notice** (`ShareLiveDataNotice`):
+- **Notice text**: "This page shows live PSD data. Each person sees only what their own district permissions allow. People without PSD Data access will see an access message."
+- **Shows**: For `query`-mode artifacts (not `records`/`none`/documents)
+- **Placement**: Top of Share dialog, before the link section
+- **Reason**: Author must understand that recipients may see different data than the author sees
+
+**Public Level Warning** (`ShareLiveDataPublicWarning`):
+- **Warning text**: "Public visitors see an access message instead of the dashboard: live data needs a signed-in viewer to read it as, and the public page has none. Choose Internal or Group to share the live data."
+- **Shows**: When a `query`-mode artifact has visibility level set to `public`
+- **Placement**: Under the Level picker, keyed off the DRAFT level (the choice being made now)
+- **Not a disabled option**: Public visibility remains selectable — the artifact still opens, only the data does not load
+
+**Metadata Rail Data Access Row** (`ArtifactMetaRail`):
+- **Label**: "Live PSD data (as viewer)" for `query` mode; "Saves reader entries" for `records`; "None" otherwise
+- **Note**: "Every reader sees only the data their own district permissions allow. Change this in Content settings."
+- **Inline link**: Opens Content settings dialog directly from the note (trigger variant `inline-link`)
+
+**Key Sources**:
+- `/components/atrium/ShareLiveDataNotice.tsx` — Notice and warning text exports
+- `/components/atrium/VisibilityChip.tsx` — Integrates notice and warning
+- `/components/atrium/ArtifactMetaRail.tsx` — Data access row and inline settings link
+- `/components/atrium/ContentSettings.tsx` — `trigger="inline-link"` variant
+
+**Focused Tests**:
+- `tests/components/visibility-chip.test.tsx` — Notice and warning rendering conditions
+- `tests/unit/atrium-artifact-meta-rail-provenance.test.tsx` — Data access row display
 
 #### Workspace Panel Layout (#1793)
 
