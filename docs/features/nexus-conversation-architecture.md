@@ -510,32 +510,53 @@ the `previewDiagnostics` field on `read_workspace_content` — lost it entirely 
 any turn the model chose not to call that tool. So the failures now reach the
 model two ways, from one validated source:
 
-- `buildWorkspaceChatTools` returns `previewDiagnosticsPromptFragment` beside
-  its `systemPromptFragment`, built by `buildPreviewDiagnosticsPromptFragment`
-  from the same `previewDiagnosticsFor` helper the tool result uses — so both
-  inherit the identical guards: the client's `contentId` must match the object
-  the server actually bound, entries are re-capped at 10, the free text is
-  re-flattened with `boundBridgeErrorMessage` (which removes the line structure
-  `JSON.stringify` does not escape, U+2028/U+2029 included) and then quoted, and
-  documents never get a block at all.
-- `buildNexusSystemPrompt` appends it LAST, in its own `---` section. It is the
-  only turn-scoped fragment in that prompt: the model must act on it during this
-  turn, so a conversation that also carries repository or memory context must
-  not bury it, and the untrusted artifact text it quotes is worth a hard
-  boundary of its own.
+- `buildWorkspaceChatTools` returns `renderPreviewDiagnosticsPrompt` beside its
+  `systemPromptFragment`, built by `buildPreviewDiagnosticsPromptFragment` from
+  the same `previewDiagnosticsFor` helper the tool result uses — so both inherit
+  the identical guards: the client's `contentId` must match the object the server
+  actually bound, entries are re-capped at 10, the free text is re-flattened with
+  `boundBridgeErrorMessage` (which removes the line structure `JSON.stringify`
+  does not escape, U+2028/U+2029 included) and then quoted, and documents never
+  get a block at all.
+- `buildNexusSystemPrompt` appends the rendered block LAST, in its own `---`
+  section. It is the only turn-scoped fragment in that prompt: the model must act
+  on it during this turn, so a conversation that also carries repository or
+  memory context must not bury it, and the untrusted artifact text is worth a
+  hard boundary of its own.
 
-Two consequences worth keeping:
+Four rules hold this together:
 
-- The fragment is returned SEPARATELY from `systemPromptFragment` because a
-  skill's `allowed-tools` pin that filters every workspace tool away drops the
-  object description (it promises tools the model no longer has) but must NOT
-  drop this. A model that can no longer fix the artifact can still tell the
-  person their preview is broken.
-- The guidance for interpreting a failure lives in one constant,
+- **Another author's text never reaches the SYSTEM role.** Any VIEWABLE object
+  binds these tools, read-only ones included, so an artifact's author could
+  otherwise plant instructions in a thrown error and have them read as system
+  text in someone else's chat. Quoting is gated on strict OWNERSHIP
+  (`isSelfAuthored`, not `canEdit` — an admin does not qualify). For an artifact
+  the viewer does not own, the block carries only server-controlled values: the
+  entry count and each entry's `kind` and `code` (a zod-validated enum), and it
+  points at `read_workspace_content` for the exact text — the lower-trust
+  tool-result channel that text already travelled on. Either way the model learns
+  the preview is broken with no tool call, which is the point of #1839.
+- **The block never names a tool this turn does not have.** It is a RENDERER, not
+  a string, because whether `read_workspace_content` survived the skill pin is
+  known only in the route. With no workspace tools it tells the model to report
+  the failure and leave the fix to the person.
+- **It is returned SEPARATELY from `systemPromptFragment`** because a skill's
+  `allowed-tools` pin that filters every workspace tool away drops the object
+  description (it promises tools the model no longer has) but must NOT drop this.
+- **The interpretation guidance lives in one constant,**
   `PREVIEW_FAILURE_INTERPRETATION_GUIDANCE`, consumed by the prompt block and by
   the `read_workspace_content` description. Two hand-written copies drift, and a
-  model that is told to "check previewDiagnostics" by one and "this arrives on
-  its own" by the other has a contradiction to resolve.
+  model told to "check previewDiagnostics" by one and "this arrives on its own"
+  by the other has a contradiction to resolve.
+
+One turn cannot deliver the block at all: an image-generation or Deep Research
+request returns from `routeSpecialModel` before the workspace tools exist, while
+the browser has already emptied its one-shot buffer to send it. Those responses
+carry `PREVIEW_DIAGNOSTICS_UNCONSUMED_HEADER`
+(`lib/nexus/preview-diagnostics-header.ts`), and the client's fetch wrapper
+restores the buffer so the next ordinary turn — the one that could actually fix
+the artifact — still sees the failure. That restore is generation-guarded, so a
+preview that moved on meanwhile still drops the entries.
 
 ---
 

@@ -97,6 +97,10 @@ import {
   type WorkspacePreviewDiagnostics,
 } from '@/lib/nexus/workspace-chat-tools';
 import {
+  PREVIEW_DIAGNOSTICS_UNCONSUMED_HEADER,
+  PREVIEW_DIAGNOSTICS_UNCONSUMED_VALUE,
+} from '@/lib/nexus/preview-diagnostics-header';
+import {
   ARTIFACT_BRIDGE_ERROR_CODES,
   MAX_ARTIFACT_BRIDGE_ERROR_MESSAGE_LENGTH,
 } from '@/lib/content/artifact-bridge-errors';
@@ -1275,6 +1279,32 @@ async function handleDeepResearch(params: {
  * Extracted to keep POST() under the cyclomatic-complexity threshold and
  * to centralize the place where new "special" model classes get added.
  */
+/**
+ * Add `PREVIEW_DIAGNOSTICS_UNCONSUMED_HEADER` to `response` when the request
+ * carried preview failures this turn never looked at (#1839).
+ *
+ * Returns the SAME response when there was nothing to report, so an ordinary turn
+ * is untouched. Otherwise it rebuilds the response around the identical body —
+ * `Response.headers` is immutable on a constructed response — preserving status and
+ * every existing header, which matters because the bodies here stream.
+ */
+function markPreviewDiagnosticsUnconsumed(
+  response: Response,
+  diagnostics: WorkspacePreviewDiagnostics | undefined
+): Response {
+  if (!diagnostics || diagnostics.entries.length === 0) return response;
+  const headers = new Headers(response.headers);
+  headers.set(
+    PREVIEW_DIAGNOSTICS_UNCONSUMED_HEADER,
+    PREVIEW_DIAGNOSTICS_UNCONSUMED_VALUE
+  );
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 async function routeSpecialModel(params: {
   isImageGenerationModel: boolean;
   isDeepResearchModel: boolean;
@@ -2091,8 +2121,11 @@ async function bindWorkspaceToolsForChat(args: {
     // #1839: NOT gated on `hasTools`. A model that can no longer fix the artifact
     // can still tell the user their preview is broken, which beats answering "I
     // can't see your browser" — the failure reached the server either way, and
-    // the client already emptied its buffer to send it.
-    workspacePreviewDiagnosticsFragment: workspace?.previewDiagnosticsPromptFragment,
+    // the client already emptied its buffer to send it. The renderer is told
+    // whether the read tool survived so it never points at a tool that is gone.
+    workspacePreviewDiagnosticsFragment: workspace?.renderPreviewDiagnosticsPrompt?.({
+      readToolAvailable: !!workspaceTools?.read_workspace_content,
+    }),
   };
 }
 
@@ -2556,7 +2589,19 @@ async function resolveChatModel(params: {
     routingMetadata: routing.metadata,
   });
   if (specialRoute) {
-    return { ok: false, response: specialRoute };
+    // #1839: an image-generation or Deep Research turn returns here, long before
+    // the workspace tools or the preview-failure block are built — so this turn
+    // consumed nothing, while the client already EMPTIED its one-shot buffer to
+    // send it. Tell the client to put the entries back, or the next ordinary turn
+    // (the one that could actually fix the artifact) has no record of the failure
+    // unless the preview happens to hit it again. (PR #1842 review, Codex P2.)
+    return {
+      ok: false,
+      response: markPreviewDiagnosticsUnconsumed(
+        specialRoute,
+        prepared.validationData.workspacePreviewDiagnostics
+      ),
+    };
   }
   return {
     ok: true,

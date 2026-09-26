@@ -45,6 +45,10 @@ import {
   restoreTakenArtifactPreviewDiagnostics,
   takeArtifactPreviewDiagnostics,
 } from '@/lib/atrium/artifact-preview-diagnostics'
+import {
+  PREVIEW_DIAGNOSTICS_UNCONSUMED_HEADER,
+  PREVIEW_DIAGNOSTICS_UNCONSUMED_VALUE,
+} from '@/lib/nexus/preview-diagnostics-header'
 import { RepositoryPicker } from '@/components/features/repositories/repository-picker'
 import { Button } from '@/components/ui/button'
 import { Database } from 'lucide-react'
@@ -301,6 +305,20 @@ function applyConnectorReconnectHeader(response: Response, context: NexusFetchCo
   context.onConnectorReconnect?.(failedIds)
 }
 
+/**
+ * #1839: the server says this turn never looked at the preview failures the send
+ * carried — an image-generation or Deep Research route returns before the workspace
+ * tools and the failure block are built. `body()` already emptied the buffer, so put
+ * the entries back and let the next ordinary turn deliver them. The restore is
+ * generation-guarded, so a preview that moved on since (a new version, another
+ * artifact) still drops them.
+ */
+function applyPreviewDiagnosticsUnconsumedHeader(response: Response): void {
+  const header = response.headers.get(PREVIEW_DIAGNOSTICS_UNCONSUMED_HEADER)
+  if (header !== PREVIEW_DIAGNOSTICS_UNCONSUMED_VALUE) return
+  restoreTakenArtifactPreviewDiagnostics()
+}
+
 async function fetchNexusChat(
   input: RequestInfo | URL,
   init: RequestInit | undefined,
@@ -322,6 +340,7 @@ async function fetchNexusChat(
   applyConversationHeader(response, context)
   applyConnectorToolsHeader(response, context)
   applyConnectorReconnectHeader(response, context)
+  applyPreviewDiagnosticsUnconsumedHeader(response)
   return response
 }
 
