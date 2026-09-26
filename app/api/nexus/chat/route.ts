@@ -2114,12 +2114,16 @@ async function bindWorkspaceToolsForChat(args: {
     args.previewDiagnostics
   );
   const workspaceTools = filterWorkspaceToolsBySkillPin(workspace?.tools, args.skillAllowedTools);
-  // Drop the object description when the pin filtered every workspace tool away:
-  // it promises tools the model does not have.
+  // Drop the object description when the pin filtered every workspace tool away,
+  // or when the model cannot call functions at all: either way it promises
+  // tools (read_workspace_content, update_workspace_artifact) the model cannot
+  // use, and would contradict the preview-failure block below, which is told
+  // those tools are unavailable.
   const hasTools = !!workspaceTools && Object.keys(workspaceTools).length > 0;
   return {
     workspaceTools,
-    workspacePromptFragment: hasTools ? workspace?.systemPromptFragment : undefined,
+    workspacePromptFragment:
+      hasTools && args.modelCanCallTools ? workspace?.systemPromptFragment : undefined,
     // #1839: NOT gated on `hasTools`. A model that can no longer fix the artifact
     // can still tell the user their preview is broken, which beats answering "I
     // can't see your browser" — the failure reached the server either way, and

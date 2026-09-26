@@ -551,6 +551,10 @@ Four rules hold this together:
 - **It is returned SEPARATELY from `systemPromptFragment`** because a skill's
   `allowed-tools` pin that filters every workspace tool away drops the object
   description (it promises tools the model no longer has) but must NOT drop this.
+  The object description is dropped for a model without function calling too,
+  for the same reason — otherwise the assembled prompt tells that model to call
+  `read_workspace_content` in one fragment and that the tool is unavailable in
+  the next.
 - **The interpretation guidance lives in one constant,**
   `PREVIEW_FAILURE_INTERPRETATION_GUIDANCE`, consumed by the prompt block and by
   the `read_workspace_content` description. Two hand-written copies drift, and a
