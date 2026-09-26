@@ -13,6 +13,7 @@ import {
   fitChatMessageText,
   fitChatText,
   utf8Bytes,
+  wireBytes,
 } from './chat-text-budget';
 
 const bytes = (text: string) => Buffer.byteLength(text, 'utf8');
@@ -53,9 +54,53 @@ describe('cutToByteBudget', () => {
     expect(cutToByteBudget(accented, 9)).toBe('é'.repeat(4));
   });
 
+  test('keeps a base character and its combining mark together', () => {
+    // NFD "á" is 'a' + U+0301: one grapheme, 3 UTF-8 bytes. Pre-slicing the
+    // input to maxBytes code units before segmenting put the boundary INSIDE
+    // the cluster, and the segmenter then reported the bare 'a' as a complete
+    // grapheme — silently dropping the accent from the last visible character.
+    const accented = 'á';
+    expect(cutToByteBudget(accented, 1)).toBe('');
+    expect(cutToByteBudget(accented, 2)).toBe('');
+    expect(cutToByteBudget(accented, 3)).toBe(accented);
+    // Same split one cluster into a longer, realistically NFD-encoded reply.
+    const run = 'é'.repeat(100);
+    const cut = cutToByteBudget(run, 10);
+    expect(cut).toBe('é'.repeat(3));
+    expect(cut.endsWith('e')).toBe(false);
+  });
+
   test('returns empty for a non-positive budget', () => {
     expect(cutToByteBudget('anything', 0)).toBe('');
     expect(cutToByteBudget('anything', -5)).toBe('');
+  });
+});
+
+describe('wireBytes', () => {
+  test('counts what the string costs inside the JSON request body', () => {
+    expect(wireBytes('plain')).toBe(5);
+    // JSON escapes these, so they cost two bytes each, not one.
+    expect(wireBytes('\n')).toBe(2);
+    expect(wireBytes('"')).toBe(2);
+    expect(wireBytes('\\')).toBe(2);
+    // Non-ASCII is emitted literally, so it costs its UTF-8 length.
+    expect(wireBytes('é')).toBe(bytes('é'));
+    expect(wireBytes('🙂')).toBe(bytes('🙂'));
+  });
+
+  test('a newline-dense reply costs far more on the wire than decoded', () => {
+    // The adversarial case: 32,000 decoded bytes serializing to 48,000. Budgeting
+    // the decoded length would have "fitted" this to the limit and had Google
+    // reject the whole request — losing the reply and dead-lettering the retry.
+    const alternating = 'a\n'.repeat(16_000);
+    expect(bytes(alternating)).toBe(32_000);
+    expect(wireBytes(alternating)).toBe(48_000);
+
+    const fitted = fitChatText(alternating);
+    expect(fitted.truncated).toBe(true);
+    expect(wireBytes(fitted.text)).toBeLessThanOrEqual(
+      GOOGLE_CHAT_MESSAGE_BYTE_LIMIT
+    );
   });
 });
 
@@ -120,14 +165,14 @@ describe('fitChatText', () => {
   test('still says the message was cut when only the notice fits', () => {
     const fitted = fitChatText(
       'a'.repeat(1_000),
-      GOOGLE_CHAT_MESSAGE_BYTE_LIMIT - utf8Bytes(CHAT_TRUNCATION_NOTICE) + 10
+      GOOGLE_CHAT_MESSAGE_BYTE_LIMIT - wireBytes(CHAT_TRUNCATION_NOTICE) + 10
     );
 
     expect(fitted.truncated).toBe(true);
     expect(fitted.budgetExhausted).toBe(true);
     expect(fitted.text.length).toBeGreaterThan(0);
     expect(fitted.deliveredBytes).toBeLessThanOrEqual(
-      utf8Bytes(CHAT_TRUNCATION_NOTICE)
+      wireBytes(CHAT_TRUNCATION_NOTICE)
     );
   });
 

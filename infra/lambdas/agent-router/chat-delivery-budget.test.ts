@@ -111,6 +111,33 @@ describe('prepareGoogleChatMessage — envelope before truncation', () => {
     );
   });
 
+  test('the fully assembled request body fits, thread and JSON escaping included', () => {
+    // The reservation has to cover what actually goes over the wire: JSON
+    // escaping (a newline costs two bytes) and the `thread` object the delivery
+    // path splices in afterwards. Budgeting decoded prose let a newline-dense
+    // reply be "fitted" to 32,000 and then serialize to ~48 KB, which Google
+    // rejects outright — losing the reply and dead-lettering every retry.
+    const { log } = silentLog();
+    const threadName = `spaces/AAAA/threads/${'t'.repeat(64)}`;
+
+    for (const reply of [
+      'a\n'.repeat(40_000), // 50% newlines: the adversarial case
+      `${'"quoted" \\ escaped\n'.repeat(3_000)}`, // quotes and backslashes too
+      wrapped('b\n'.repeat(20_000), card('Escaped card')),
+    ]) {
+      const prepared = prepareGoogleChatMessage(SPACE, reply, log);
+      const assembled = {
+        ...prepared.messageBody,
+        thread: { name: threadName },
+      };
+
+      expect(prepared.truncated).toBe(true);
+      expect(
+        Buffer.byteLength(JSON.stringify(assembled), 'utf8')
+      ).toBeLessThanOrEqual(GOOGLE_CHAT_MESSAGE_BYTE_LIMIT);
+    }
+  });
+
   test('a plain 40 KB reply is cut once, at the byte ceiling', () => {
     const { log, warnings } = silentLog();
 

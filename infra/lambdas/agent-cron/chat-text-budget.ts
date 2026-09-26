@@ -20,6 +20,18 @@
 export const GOOGLE_CHAT_MESSAGE_BYTE_LIMIT = 32_000;
 
 /**
+ * Held back for request fields added after the body is built — `thread`
+ * foremost, which the delivery path splices in for a threaded reply. A thread
+ * name is validated at no more than 1,024 characters upstream; this covers that
+ * plus the surrounding `"thread":{"name":""}` scaffolding and a little slack.
+ *
+ * 1,200 of 32,000 bytes is under 4% of the budget, which is a cheap price for
+ * never having Google reject the assembled request outright — a rejection costs
+ * the entire reply and then dead-letters every retry of it.
+ */
+const REQUEST_METADATA_RESERVE_BYTES = 1_200;
+
+/**
  * Appended when a reply genuinely did not fit. The old wording ("ask me to
  * continue") implied the agent had chosen to stop, which is what made the
  * follow-up denials so confusing. This wording names the transport as the
@@ -31,13 +43,13 @@ export const CHAT_TRUNCATION_NOTICE =
   'publish the full version and share a link.)_';
 
 export interface FitChatTextResult {
-  /** The text to send. Never exceeds the budget left after `reservedBytes`. */
+  /** The text to send. Its `wireBytes` never exceed the remaining budget. */
   text: string;
   /** True when content was dropped, i.e. the notice is present. */
   truncated: boolean;
-  /** UTF-8 size of the input body. */
+  /** Serialized size of the input body, per `wireBytes`. */
   originalBytes: number;
-  /** UTF-8 size of `text`. */
+  /** Serialized size of `text`, per `wireBytes`. */
   deliveredBytes: number;
   /**
    * True when the reserved payload left no room for the body at all. Callers
@@ -52,34 +64,58 @@ export interface FitChatMessageResult extends FitChatTextResult {
   reservedBytes: number;
 }
 
-/** UTF-8 byte length of a string. */
+/** Plain UTF-8 byte length. For logging and for sizing already-serialized JSON. */
 export function utf8Bytes(text: string): number {
   return Buffer.byteLength(text, 'utf8');
+}
+
+/**
+ * Bytes this string costs **inside the JSON request body**, excluding its
+ * surrounding quotes.
+ *
+ * This is what the budget is actually spent on, and it is not the same as the
+ * UTF-8 length: JSON escapes `"`, `\` and the control characters, so a newline
+ * costs two bytes, not one. A markdown reply is a few percent larger on the
+ * wire; a newline-dense one is far larger — an alternating `a\n` reply measures
+ * 32,000 UTF-8 bytes and serializes to 48,000. Budgeting the decoded length
+ * would have let that reply be "fitted" to the limit and then rejected whole,
+ * which is worse than truncating it: a rejection loses the entire response and
+ * dead-letters every durable retry of it.
+ */
+export function wireBytes(text: string): number {
+  // The 2 removed bytes are the opening and closing quotes JSON.stringify adds.
+  return Buffer.byteLength(JSON.stringify(text), 'utf8') - 2;
 }
 
 const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' });
 
 /**
- * Cut `text` to at most `maxBytes` UTF-8 bytes without splitting a grapheme
- * cluster. A family emoji or a flag is kept whole or dropped whole — never
- * turned into a run of U+FFFD.
+ * Cut `text` so it costs at most `maxBytes` on the wire, without splitting a
+ * grapheme cluster. A family emoji, a flag, or a base character plus its
+ * combining accent is kept whole or dropped whole — never turned into a run of
+ * U+FFFD or a bare unaccented letter.
+ *
+ * `text` is segmented directly rather than pre-sliced. Slicing to `maxBytes`
+ * code units first looks like a safe over-approximation of the answer, and for
+ * byte counting it is — but it can put the slice boundary *inside* a cluster,
+ * and the segmenter then reports the truncated head as a complete grapheme:
+ * `cutToByteBudget('á', 1)` returned `'a'`, dropping the accent from the
+ * last visible character. `Intl.Segmenter` iterates lazily, so segmenting the
+ * whole reply costs no more — the loop still stops after at most `maxBytes`
+ * clusters regardless of how long the reply is.
  */
 export function cutToByteBudget(text: string, maxBytes: number): string {
   if (maxBytes <= 0) return '';
-  if (utf8Bytes(text) <= maxBytes) return text;
-  // A string of N UTF-16 code units is at least N bytes in UTF-8, so the first
-  // `maxBytes` code units are a superset of any answer. Segmenting that slice
-  // instead of the whole reply keeps this bounded on multi-megabyte input.
-  const candidate = text.slice(0, maxBytes);
+  if (wireBytes(text) <= maxBytes) return text;
   let used = 0;
   let end = 0;
-  for (const { segment, index } of segmenter.segment(candidate)) {
-    const size = utf8Bytes(segment);
+  for (const { segment, index } of segmenter.segment(text)) {
+    const size = wireBytes(segment);
     if (used + size > maxBytes) break;
     used += size;
     end = index + segment.length;
   }
-  return candidate.slice(0, end);
+  return text.slice(0, end);
 }
 
 /**
@@ -87,15 +123,14 @@ export function cutToByteBudget(text: string, maxBytes: number): string {
  *
  * The body is cut from the tail, so a shared-space attribution prefix such as
  * `[Kris's Agent] ` survives as long as the budget is larger than the prefix
- * itself. `reservedBytes` is what the rest of the request already claims — the
- * JSON cost of cardsV2/accessoryWidgets and the body scaffolding around them.
+ * itself. `reservedBytes` is what the rest of the request already claims.
  */
 export function fitChatText(
   body: string,
   reservedBytes = 0
 ): FitChatTextResult {
   const reserved = Math.max(reservedBytes, 0);
-  const originalBytes = utf8Bytes(body);
+  const originalBytes = wireBytes(body);
   const available = GOOGLE_CHAT_MESSAGE_BYTE_LIMIT - reserved;
 
   if (available <= 0) {
@@ -117,7 +152,7 @@ export function fitChatText(
     };
   }
 
-  const bodyBudget = available - utf8Bytes(CHAT_TRUNCATION_NOTICE);
+  const bodyBudget = available - wireBytes(CHAT_TRUNCATION_NOTICE);
   if (bodyBudget <= 0) {
     // The reservation is so large that even the notice does not fit cleanly.
     // Send as much of the notice as there is room for: the user at least
@@ -127,7 +162,7 @@ export function fitChatText(
       text,
       truncated: true,
       originalBytes,
-      deliveredBytes: utf8Bytes(text),
+      deliveredBytes: wireBytes(text),
       budgetExhausted: true,
     };
   }
@@ -137,7 +172,7 @@ export function fitChatText(
     text,
     truncated: true,
     originalBytes,
-    deliveredBytes: utf8Bytes(text),
+    deliveredBytes: wireBytes(text),
     budgetExhausted: false,
   };
 }
@@ -146,14 +181,18 @@ export function fitChatText(
  * Fit the prose of a Chat message whose request also carries rich parts
  * (cardsV2 / accessoryWidgets / actionResponse).
  *
- * Reserving the serialized body with an empty text field accounts for the JSON
- * scaffolding — keys, braces, commas — as well as the card payload itself. Both
- * Lambdas call this so the reservation arithmetic cannot drift between them.
+ * The reservation is the serialized body with an empty text field — which
+ * prices the card payload *and* the JSON scaffolding of keys, braces and commas
+ * around it — plus a held-back allowance for request fields the delivery path
+ * adds afterwards. Both Lambdas call this so the arithmetic cannot drift
+ * between them.
  */
 export function fitChatMessageText(
   prose: string,
   richParts: Record<string, unknown>
 ): FitChatMessageResult {
-  const reservedBytes = utf8Bytes(JSON.stringify({ ...richParts, text: '' }));
+  const reservedBytes =
+    utf8Bytes(JSON.stringify({ ...richParts, text: '' })) +
+    REQUEST_METADATA_RESERVE_BYTES;
   return { ...fitChatText(prose, reservedBytes), reservedBytes };
 }
