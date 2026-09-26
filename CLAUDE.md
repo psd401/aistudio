@@ -378,6 +378,7 @@ tree, and anti-patterns.
 - **Don't** make a toast the only feedback for a blocked action — pair it with `<FormMessage />`, `aria-invalid`, and `setFocus` (which no-ops unless `field.ref` reaches a focusable node)
 - **Don't** read `formState` off `useFormContext()` in a child — it never re-renders there; use `useFormState({ name })`. Likewise `form.formState.errors` after `await trigger()` can read empty — take errors from `handleSubmit`'s invalid callback
 - **Don't** consolidate multi-step MCP responses into a single DB row — persist each step separately inside `executeTransaction` or reload fails with consecutive user turns (see `chat-helpers.ts:saveConversationSteps`)
+- **Don't** cap a Chat/transport payload by character count or with `substring()` — the limit is bytes and `substring()` splits emoji; and don't cut before extracting a structured envelope, or a long card reply delivers raw JSON. One byte-aware, grapheme-safe helper per transport (`infra/lambdas/agent-router/chat-text-budget.ts`), and raise the retry path's bounds with the primary path's or the redelivery is silently dropped
 - **Don't** let an SSE response go quiet for minutes — the ALB idles it out at 300s and the app's own error chunk never reaches the browser. Emit `: keep-alive` comment frames (`lib/streaming/sse-keep-alive.ts`), never a `data-*` chunk (that sets `producedVisibleOutput`)
 
 ### Edge Runtime (see `docs/guides/edge-runtime-boundaries.md`)

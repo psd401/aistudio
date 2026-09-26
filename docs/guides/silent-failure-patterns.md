@@ -408,6 +408,38 @@ const formState = useFormState({ name: fieldContext.name })
 
 The same staleness bites imperatively: after `await form.trigger()`, `form.formState.errors` can still read empty. Take the errors from `handleSubmit(onValid, onInvalid)`'s invalid callback instead, which is passed the settled object.
 
+## Transport limits
+
+### A cap applied after the model returns makes the agent an unreliable witness
+
+Every Google Chat delivery path capped agent replies at 4,096 characters — a
+stale figure; the real limit is 32,000 **bytes** of text plus cards — and
+appended "(Response truncated -- ask me to continue)". The cut happened *after*
+AgentCore returned, so the agent's transcript held the full text. Users reported
+half a reply, the agent checked its own transcript, and truthfully denied
+truncating anything. Both sides were right and neither could see the other's
+evidence.
+
+Three rules came out of it:
+
+- **Truncate for a transport, not for a character count.** The limit is bytes;
+  non-ASCII prose hits it at well under the character figure, and `substring()`
+  splits surrogate pairs and emoji ZWJ clusters into U+FFFD. Cut on grapheme
+  boundaries against a byte budget (`infra/lambdas/agent-router/chat-text-budget.ts`).
+- **Extract structured payloads before cutting.** The router truncated *before*
+  lifting the `PSD_AGENT_RICH_V1` envelope out of the reply, so a long card reply
+  lost its closing sentinel and the user saw raw JSON. Envelope first, then fit,
+  with the card's bytes reserved out of the same budget.
+- **Raise a retry path's bounds with the primary path's.** The durable outbox
+  validated at 32 KiB while the primary call had already shortened the reply to
+  fit; any reply between the two bounds was accepted once and then silently
+  dropped on redelivery. Normalize once, up front, and have both paths carry
+  byte-identical content.
+
+The corresponding instruction change belongs in the prompt: an agent that cannot
+observe the cut must be told to believe the user about it rather than defend the
+send (`infra/agent-image/SOUL.md`, psd-rules Rule 6a).
+
 ---
 
 *Source: learnings from database, ai-sdk, streaming, security, frontend, api-patterns, infrastructure, and monitoring categories (2026-02-18 through 2026-05-15)*

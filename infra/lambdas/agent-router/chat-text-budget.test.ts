@@ -33,7 +33,7 @@ describe('cutToByteBudget', () => {
     const cut = cutToByteBudget('ab🙂', 3);
     expect(cut).toBe('ab');
     expect(cut).not.toContain('�');
-    expect([...cut].every(char => char.codePointAt(0)! !== 0xfffd)).toBe(true);
+    expect([...cut].every(char => char.codePointAt(0)! !== 0xFFFD)).toBe(true);
   });
 
   test('keeps a multi-code-point grapheme whole or drops it whole', () => {
