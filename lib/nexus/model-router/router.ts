@@ -71,6 +71,102 @@ function firstAccessibleModel(
   return null
 }
 
+/** Ascending, so a floor is a plain rank comparison. */
+const TIER_RANK: Record<NexusRouterTier, number> = { light: 1, medium: 2, high: 3 }
+
+/**
+ * True only when selection genuinely cannot consult `tier`, so there is no tier
+ * for a floor to govern or to miss.
+ *
+ * That is the image-specialist branch of `selectModel` alone, which returns a
+ * capability-matched model or throws without ever reaching the tier-aware path.
+ *
+ * NOT every image turn: that branch is taken only while no input tool is
+ * required, and an image turn WITH one falls through to ordinary tier-aware text
+ * routing (the case #1840's review round 5 caught). And not `web-search` either —
+ * its specialist list is consulted first, but when nothing there is eligible the
+ * tier-aware sweep decides, so the floor still matters. A false "tier is
+ * irrelevant here" silently drops the floor; a false negative only costs one
+ * discarded preference attempt, which the caller retries without it.
+ */
+function selectionIgnoresTier(intent: NexusRouterIntent, requiredToolCount: number): boolean {
+  return intent === "image" && requiredToolCount === 0
+}
+
+/**
+ * The lowest tier an editable-artifact turn may run on (#1840).
+ *
+ * #1786 gave those turns the PSD Data tools; this gives them a model that
+ * reliably decides to USE them. The classifier rates the latest message alone,
+ * with no history and no knowledge that an artifact is open, so the shortest
+ * follow-ups in an authoring session — "did that work?", "can you turn live data
+ * back on?" — score `light` and run on the light tier. Those are exactly the
+ * turns that need tool use: read the current artifact, check the preview
+ * diagnostics, write a new version. Observed on the light tier instead: no tool
+ * calls at all, and invented UI ("a Live data toggle in the panel header") in
+ * place of the `update_workspace_artifact` call that would have done the job.
+ *
+ * A FLOOR, never a cap: a `high` classification keeps its own tier.
+ *
+ * Scoped by the same predicate as the connector attach, so documents and
+ * read-only viewers are untouched and the extra cost lands only on
+ * artifact-authoring turns — where a wrong answer is a broken dashboard.
+ */
+const WORKSPACE_ARTIFACT_MIN_TIER: NexusRouterTier = "medium"
+
+/**
+ * Whether routing may apply the artifact floor to this turn at all — BOTH the
+ * raised tier and the `minTier` preference — without changing which model
+ * actually executes (#1840).
+ *
+ * Shadow mode is supposed to change nothing. It keeps the legacy fallback only
+ * while `requiredTools` is empty (`selectedRuntimeModel`); with a required tool
+ * present it executes `selection.model`, so on those turns a raised tier would
+ * pick the configured medium model — and a `minTier` preference an accessible
+ * high one — and shadow would quietly reroute live traffic. Both halves of the
+ * floor are therefore withheld there, leaving the turn's `metadata.tier` at the
+ * classifier's own verdict and its reason codes free of the floor, which is the
+ * honest record: the floor was not applied.
+ *
+ * `requiredToolCount` is NOT cached across the turn, because `requiredTools` is
+ * mutated while routing runs. The tier raise happens before
+ * `addRequiredWebSearchTool` has pushed a web-search decision's own tool, so it
+ * passes a LOOKAHEAD count (`willAddRequiredWebSearchTool`); every later caller —
+ * the `minTier` preference, the fetch-only `refloor`, the `_unmet` reason code —
+ * reads the live array, which by then includes that tool, or excludes it again
+ * after the fetch-only retry splices it out.
+ */
+function artifactFloorMayApply(
+  mode: Exclude<NexusRouterRuntimeMode, "off">,
+  requiredToolCount: number
+): boolean {
+  return mode === "active" || requiredToolCount === 0
+}
+
+function meetsMinTier(
+  model: Parameters<typeof inferTier>[0],
+  minTier: NexusRouterTier | undefined
+): boolean {
+  return minTier === undefined || TIER_RANK[inferTier(model)] >= TIER_RANK[minTier]
+}
+
+/**
+ * The artifact tier floor to pass to `selectModel`, or undefined when this turn
+ * has none (#1840).
+ *
+ * Skipped when `selectionIgnoresTier`: filtering the image specialists by tier
+ * could only discard the very model the intent requires.
+ */
+function workspaceArtifactMinTier(options: {
+  workspaceWantsPsdData: boolean
+  intent: NexusRouterIntent
+  requiredToolCount: number
+}): NexusRouterTier | undefined {
+  if (!options.workspaceWantsPsdData) return undefined
+  if (selectionIgnoresTier(options.intent, options.requiredToolCount)) return undefined
+  return WORKSPACE_ARTIFACT_MIN_TIER
+}
+
 function selectModel(args: {
   models: NexusModelRow[]
   config: NexusRouterConfig
@@ -82,6 +178,18 @@ function selectModel(args: {
   requiredTools: string[]
   /** Demand function calling even when no named tool is required (#1786). */
   requiresFunctionCalling?: boolean
+  /**
+   * Exclude models BELOW this tier (#1840).
+   *
+   * `selectRoutedTextModel` treats `tier` as a preference and sweeps
+   * `[tier, medium, light, high]`, so with the tier raised to `medium` it still
+   * prefers an accessible LIGHT model over an accessible high one — landing the
+   * turn on exactly the model the artifact floor exists to avoid. Passing the
+   * floor here makes those models ineligible, so the sweep reaches `high`
+   * instead. The caller retries without it when nothing qualifies, which keeps
+   * this a preference rather than a new way to fail a turn.
+   */
+  minTier?: NexusRouterTier
 }): { model: NexusModelRow; fallbackUsed: boolean } {
   const configuredIds = configuredCandidates(args.config, args.family, args.tier, args.intent)
   // A specialist-only image model cannot first call server-side input tools.
@@ -123,6 +231,7 @@ function selectModel(args: {
     additionalEligibility: model =>
       !hasCapability(model.capabilities, "imageGeneration")
       && !hasCapability(model.capabilities, "deepResearch")
+      && meetsMinTier(model, args.minTier)
       && (args.intent !== "instruction" || args.family !== "auto" || inferFamily(model) === "google")
       && (args.intent !== "web-search" || args.family !== "auto" || inferFamily(model) === "google"),
   })
@@ -196,11 +305,29 @@ function selectModelForRuntime(
  *     link without ever opening it, which is the failure this fix exists to
  *     remove, just one step later in the pipeline.
  *
+ * Since #1840 it also carries the artifact tier floor (`args.minTier`), for the
+ * same reason and on the same terms.
+ *
  * A PREFERENCE, not a requirement: with no function-calling model available the
  * turn keeps its normal model and the chat route's do-not-guess guidance covers
  * it, rather than failing outright. That matters most for the URL case —
  * demanding a capability here would re-introduce the hard "cannot access URLs"
  * dead end #1696 removed.
+ *
+ * The preferences are attempted strongest-first and are all dropped before the
+ * final, unconstrained selection. Function calling outranks the tier floor: a
+ * model that cannot invoke a tool is useless to an authoring turn at any tier.
+ *
+ * They also run in SHADOW mode, but ONLY while shadow is guaranteed not to
+ * execute what they pick. Shadow's job is to answer "what would active routing
+ * have chosen?", so a proposal that skipped these preferences compares the wrong
+ * thing — reporting the light model (and `workspace_artifact_min_tier_unmet`) for
+ * a deployment where active mode would have reached the high one.
+ *
+ * The exception is a shadow turn that ALSO has a required tool — see
+ * `artifactFloorMayApply`. Shadow keeps its original route there and its proposal
+ * stays unpreferenced: a less precise proposal is a far smaller cost than shadow
+ * mode quietly rerouting live traffic.
  */
 function selectModelForToolUse(
   args: Parameters<typeof selectModel>[0],
@@ -208,18 +335,28 @@ function selectModelForToolUse(
   fallback: NexusModelRow,
   prefersFunctionCalling: boolean
 ): { model: NexusModelRow; fallbackUsed: boolean } {
-  if (mode === "active" && prefersFunctionCalling) {
+  const unconstrained = { ...args, minTier: undefined }
+  const preferences: Partial<Parameters<typeof selectModel>[0]>[] = []
+  if (artifactFloorMayApply(mode, args.requiredTools.length)) {
+    if (prefersFunctionCalling && args.minTier) {
+      preferences.push({ requiresFunctionCalling: true, minTier: args.minTier })
+    }
+    if (prefersFunctionCalling) preferences.push({ requiresFunctionCalling: true, minTier: undefined })
+    if (args.minTier) preferences.push({ minTier: args.minTier })
+  }
+  for (const preference of preferences) {
     try {
-      return selectModel({ ...args, requiresFunctionCalling: true })
+      return selectModel({ ...unconstrained, ...preference })
     } catch (error) {
-      log.warn("No function-calling model for a tool-dependent turn; keeping the normal selection", {
+      log.warn("A routing preference could not be satisfied; trying the next one", {
+        preference: { ...preference, minTier: preference.minTier ?? null },
         error: error instanceof Error ? error.message : String(error),
       })
     }
   }
-  return args.requiredTools.length > 0
-    ? selectModel(args)
-    : selectModelForRuntime(args, mode, fallback)
+  return unconstrained.requiredTools.length > 0
+    ? selectModel(unconstrained)
+    : selectModelForRuntime(unconstrained, mode, fallback)
 }
 
 interface RouteNexusRequestArgs {
@@ -239,14 +376,29 @@ interface RouteNexusRequestArgs {
   workspace?: NexusWorkspaceRoutingContext | null
 }
 
+/**
+ * Whether `addRequiredWebSearchTool` is going to grow the list — the same test,
+ * without the mutation.
+ *
+ * The artifact floor gate needs this lookahead: a web-search decision gains its
+ * required `webSearch` tool inside `selectWithFetchOnlyFallback`, which is
+ * precisely what makes shadow mode execute the routed model instead of the legacy
+ * fallback, so the floor has to be judged against the EVENTUAL required-tool list
+ * rather than the one that exists before classification is acted on (#1840).
+ * Shared with the mutator so the two cannot drift.
+ */
+function willAddRequiredWebSearchTool(
+  decision: NexusClassifierDecision,
+  requiredTools: string[]
+): boolean {
+  return decision.intent === "web-search" && !requiredTools.includes("webSearch")
+}
+
 function addRequiredWebSearchTool(
   decision: NexusClassifierDecision,
   requiredTools: string[]
 ): void {
-  if (
-    decision.intent === "web-search"
-    && !requiredTools.includes("webSearch")
-  ) {
+  if (willAddRequiredWebSearchTool(decision, requiredTools)) {
     requiredTools.push("webSearch")
   }
 }
@@ -343,6 +495,63 @@ function selectedRuntimeModel(
 }
 
 /**
+ * Raise a classified decision to the artifact-authoring tier floor, recording
+ * `workspace_artifact_min_tier` when it actually changed the tier.
+ *
+ * Returns the decision UNTOUCHED (the same object) when there is nothing to
+ * raise, so a turn with no workspace, a document, a read-only viewer, or an
+ * already sufficient tier carries no extra reason code and routes exactly as
+ * before.
+ *
+ * INERT where `selectionIgnoresTier` holds: the image-specialist branch returns a
+ * capability-matched model without consulting `tier`, so a raise there cannot
+ * change which model is selected. The code is still recorded — it describes the
+ * DECISION, and `metadata.tier` did change — but do not read it as evidence of a
+ * different model on such a turn, and `workspace_artifact_min_tier_unmet` is
+ * deliberately not emitted for it either.
+ */
+function applyWorkspaceArtifactTierFloor(
+  decision: NexusClassifierDecision,
+  workspace: NexusWorkspaceRoutingContext | null | undefined
+): NexusClassifierDecision {
+  if (!workspaceNeedsPsdData(workspace)) return decision
+  if (TIER_RANK[decision.tier] >= TIER_RANK[WORKSPACE_ARTIFACT_MIN_TIER]) return decision
+  return {
+    ...decision,
+    tier: WORKSPACE_ARTIFACT_MIN_TIER,
+    reasonCodes: [...decision.reasonCodes, "workspace_artifact_min_tier"],
+  }
+}
+
+/**
+ * Whether the artifact tier floor was asked for but the ROUTED model still came
+ * out below it (#1840) — see `workspaceArtifactTierUnmet` below for why that is
+ * worth its own reason code.
+ *
+ * Takes the routed model, never the executed one: in shadow mode the executed
+ * model is the legacy fallback by design, and the question worth monitoring in
+ * every mode is whether routing could honour the floor.
+ */
+function workspaceArtifactTierUnmet(options: {
+  workspaceWantsPsdData: boolean
+  intent: NexusRouterIntent
+  routedModel: NexusModelRow
+  /** The turn's one `artifactFloorMayApply` decision, passed in rather than
+   *  recomputed: `requiredTools` is mutated during routing, so a second
+   *  evaluation here could disagree with the one that governed the tier. */
+  floorApplied: boolean
+  requiredToolCount: number
+}): boolean {
+  if (!options.workspaceWantsPsdData) return false
+  // Only meaningful when the floor was actually asked for: a shadow turn with a
+  // required tool never applies it, so "unmet" would report a miss on a turn that
+  // never aimed.
+  if (!options.floorApplied) return false
+  if (selectionIgnoresTier(options.intent, options.requiredToolCount)) return false
+  return TIER_RANK[inferTier(options.routedModel)] < TIER_RANK[WORKSPACE_ARTIFACT_MIN_TIER]
+}
+
+/**
  * The classifier's own reason codes plus what routing added on top of them, so
  * the stored per-message metadata explains the turn's tools after the fact.
  */
@@ -353,6 +562,18 @@ function buildReasonCodes(options: {
   /** Whether the connector reached the turn's connector list — NOT whether its
    *  tools bound, which only the chat route can know. Telemetry, not behaviour. */
   workspacePsdDataAttached: boolean
+  /**
+   * Whether the ROUTED model still came out below the artifact tier floor
+   * (#1840). `selectRoutedTextModel` treats a tier as a preference and sweeps
+   * `[tier, medium, light, high]` when nothing in the requested tier is
+   * accessible, so a deployment with no configured medium candidates — or a user
+   * whose role grants only light models — lands back on a light model while
+   * `metadata.tier` reads `medium`. Without this code the presence of
+   * `workspace_artifact_min_tier` would look like proof the fix is live on turns
+   * where it was silently defeated, and the #1786-style guessing could recur
+   * unseen.
+   */
+  workspaceArtifactTierUnmet: boolean
 }): string[] {
   const reasonCodes = [...options.decision.reasonCodes]
   if (options.requiredTools.length > 0) reasonCodes.push("required_tools_enforced")
@@ -362,6 +583,9 @@ function buildReasonCodes(options: {
         ? "workspace_artifact_psd_data"
         : "workspace_psd_data_unavailable"
     )
+    if (options.workspaceArtifactTierUnmet) {
+      reasonCodes.push("workspace_artifact_min_tier_unmet")
+    }
   }
   return reasonCodes
 }
@@ -414,6 +638,16 @@ async function buildRoutedResult(options: {
     workspacePsdDataAttached:
       workspacePsdDataConnectorId !== null
       && connectorIds.includes(workspacePsdDataConnectorId),
+    workspaceArtifactTierUnmet: workspaceArtifactTierUnmet({
+      workspaceWantsPsdData,
+      intent: decision.intent,
+      routedModel: selection.model,
+      // The LIVE list, which is the one the final decision was floored against:
+      // `refloor` re-applies the gate after the fetch-only retry removes the tool,
+      // so this evaluation and the tier can no longer disagree.
+      floorApplied: artifactFloorMayApply(mode, requiredTools.length),
+      requiredToolCount: requiredTools.length,
+    }),
   })
 
   return {
@@ -476,8 +710,18 @@ function selectWithFetchOnlyFallback(options: {
   decision: NexusClassifierDecision
   requiredTools: string[]
   select: (decision: NexusClassifierDecision) => { model: NexusModelRow; fallbackUsed: boolean }
+  /**
+   * Re-apply the artifact tier floor to the RETRY decision (#1840).
+   *
+   * The retry removes the `webSearch` tool this function added, so the turn's
+   * required-tool list — and with it whether the floor may be applied at all —
+   * is not what it was when the original decision was floored. Handed in as a
+   * callback rather than recomputed here so this module keeps knowing nothing
+   * about workspaces.
+   */
+  refloor: (decision: NexusClassifierDecision) => NexusClassifierDecision
 }): { decision: NexusClassifierDecision; selection: { model: NexusModelRow; fallbackUsed: boolean } } {
-  const { decision, requiredTools, select } = options
+  const { decision, requiredTools, select, refloor } = options
   const hadWebSearch = requiredTools.includes("webSearch")
   addRequiredWebSearchTool(decision, requiredTools)
   try {
@@ -496,11 +740,13 @@ function selectWithFetchOnlyFallback(options: {
     // Drop only the web-search requirement this decision added, never one the
     // user enabled themselves.
     if (!hadWebSearch) requiredTools.splice(requiredTools.indexOf("webSearch"), 1)
-    const fetchOnly: NexusClassifierDecision = {
+    // Refloored AFTER the splice: the retry may now qualify for the floor that the
+    // added tool disqualified the original decision from.
+    const fetchOnly = refloor({
       ...decision,
       intent: "general",
       reasonCodes: [...decision.reasonCodes, "web_search_unavailable_fetch_only"],
-    }
+    })
     return { decision: fetchOnly, selection: select(fetchOnly) }
   }
 }
@@ -523,10 +769,32 @@ async function routeWithConfiguredRouter(options: {
     accessibleIds,
     requiredTools,
   } = options
-  const classified = await classifyNexusRequest(args.text, config, {
+  const rawDecision = await classifyNexusRequest(args.text, config, {
     hasImageInput: args.hasImageInput,
     hasPreviousGeneratedImage: args.hasPreviousGeneratedImage,
   })
+  // The classifier sees the latest message only. An open editable artifact is a
+  // routing input it cannot know about, so the floor is applied to its verdict
+  // before anything reads `tier` (#1840) — unless doing so would change what
+  // shadow mode EXECUTES, which `artifactFloorMayApply` explains. Judged against
+  // the EVENTUAL required-tool list, because a web-search decision has not yet
+  // added its own tool at this point.
+  //
+  // Everything downstream of this point reads the LIVE `requiredTools` instead,
+  // because by then the tool has been added — and the fetch-only retry may have
+  // removed it again, which is why `refloor` exists.
+  const floorAppliesToLiveToolList = (): boolean =>
+    artifactFloorMayApply(mode, requiredTools.length)
+  const floorDecision = (candidate: NexusClassifierDecision): NexusClassifierDecision =>
+    floorAppliesToLiveToolList()
+      ? applyWorkspaceArtifactTierFloor(candidate, args.workspace)
+      : candidate
+  const classified = artifactFloorMayApply(
+    mode,
+    requiredTools.length + (willAddRequiredWebSearchTool(rawDecision, requiredTools) ? 1 : 0)
+  )
+    ? applyWorkspaceArtifactTierFloor(rawDecision, args.workspace)
+    : rawDecision
   // Shadow mode may retain a legacy fallback only when doing so is safe. A
   // server-required input tool is an authorization/correctness boundary, so
   // execute a compatible text model even while recording the proposed route.
@@ -537,11 +805,22 @@ async function routeWithConfiguredRouter(options: {
   const { decision, selection } = selectWithFetchOnlyFallback({
     decision: classified,
     requiredTools,
+    refloor: floorDecision,
+    // `current.intent`, not `classified.intent`: the fetch-only fallback rewrites
+    // a web-search decision to `general`, and the retry must then be governed by
+    // the floor the rewritten intent actually has (#1840).
     select: current => selectModelForToolUse(
       {
         models, config, family: args.requestedFamily, tier: current.tier,
         intent: current.intent, fallbackModelId: args.fallbackModelId, accessibleIds,
         requiredTools,
+        minTier: floorAppliesToLiveToolList()
+          ? workspaceArtifactMinTier({
+            workspaceWantsPsdData: workspaceNeedsPsdData(args.workspace),
+            intent: current.intent,
+            requiredToolCount: requiredTools.length,
+          })
+          : undefined,
       },
       mode,
       fallback,
