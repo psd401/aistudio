@@ -842,3 +842,408 @@ describe("Nexus model router credential filtering", () => {
     })).rejects.toThrow("Image generation is not available")
   })
 })
+
+/**
+ * #1840: the classifier rates the latest message alone. With an artifact open
+ * beside the chat, the shortest authoring follow-ups ("did that work?", "turn
+ * live data back on") score `light` — and on the light tier the model was
+ * observed making no tool calls at all and describing a panel control that does
+ * not exist, instead of calling `update_workspace_artifact`. An editable
+ * artifact therefore raises the tier FLOOR to medium.
+ */
+describe("Nexus model router workspace artifact tier floor", () => {
+  const PSD_CONNECTOR_ID = "54f0f531-f7ab-485e-bd6b-65a95c4bc871"
+  const editableArtifact = {
+    objectId: "441910f0-9e0e-4633-acf1-62415e388db4",
+    kind: "artifact" as const,
+    editable: true,
+  }
+  // Advanced + a single family so the tier maps to exactly one model id:
+  // light -> gpt-luna, medium -> gpt-terra.
+  const shortFollowUp = {
+    text: "Did that work?",
+    fallbackModelId: "gpt-luna",
+    experienceMode: "advanced" as const,
+    requestedFamily: "openai" as const,
+    enabledConnectorIds: [],
+    userId: 7,
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockGetNexusEnabledModels.mockResolvedValue(models)
+    mockFilterAccessibleResourceIds.mockResolvedValue(models.map(model => String(model.id)))
+    mockGetConfig.mockResolvedValue({ config, mode: "active" })
+    mockGetConfiguredChatProviders.mockResolvedValue(
+      new Set(["openai", "google", "amazon-bedrock", "azure", "latimer"])
+    )
+    mockExecuteQuery.mockResolvedValue([{ id: PSD_CONNECTOR_ID, name: "PSD Data" }])
+    // The reproduction: a three-word follow-up in an authoring session.
+    mockClassify.mockResolvedValue({
+      intent: "general", tier: "light", confidence: 0.9,
+      reasonCodes: ["simple_request"], source: "classifier",
+    })
+  })
+
+  it("raises a light follow-up to medium with an editable artifact bound", async () => {
+    const result = await routeNexusRequest({ ...shortFollowUp, workspace: editableArtifact })
+
+    expect(result.metadata.tier).toBe("medium")
+    expect(result.modelId).toBe("gpt-terra")
+    expect(result.metadata.reasonCodes).toContain("workspace_artifact_min_tier")
+  })
+
+  it("leaves a turn with no workspace on the light tier", async () => {
+    const result = await routeNexusRequest({ ...shortFollowUp, workspace: null })
+
+    expect(result.metadata.tier).toBe("light")
+    expect(result.modelId).toBe("gpt-luna")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier")
+  })
+
+  it("leaves a bound document on the light tier", async () => {
+    const result = await routeNexusRequest({
+      ...shortFollowUp,
+      workspace: { ...editableArtifact, kind: "document" as const },
+    })
+
+    expect(result.metadata.tier).toBe("light")
+    expect(result.modelId).toBe("gpt-luna")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier")
+  })
+
+  it("leaves a read-only artifact viewer on the light tier", async () => {
+    const result = await routeNexusRequest({
+      ...shortFollowUp,
+      workspace: { ...editableArtifact, editable: false },
+    })
+
+    expect(result.metadata.tier).toBe("light")
+    expect(result.modelId).toBe("gpt-luna")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier")
+  })
+
+  it("is a floor, not a cap: a high classification keeps its own tier", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "general", tier: "high", confidence: 0.95,
+      reasonCodes: ["complex_request"], source: "classifier",
+    })
+
+    const result = await routeNexusRequest({ ...shortFollowUp, workspace: editableArtifact })
+
+    expect(result.metadata.tier).toBe("high")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier")
+  })
+
+  it("adds no reason code when the classifier already chose medium", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "general", tier: "medium", confidence: 0.9,
+      reasonCodes: ["normal_request"], source: "classifier",
+    })
+
+    const result = await routeNexusRequest({ ...shortFollowUp, workspace: editableArtifact })
+
+    expect(result.metadata.tier).toBe("medium")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier")
+  })
+
+  it("still attaches PSD Data on the raised turn", async () => {
+    const result = await routeNexusRequest({ ...shortFollowUp, workspace: editableArtifact })
+
+    expect(result.connectorIds).toEqual([PSD_CONNECTOR_ID])
+    expect(result.metadata.reasonCodes).toContain("workspace_artifact_psd_data")
+  })
+
+  it("records the raise in shadow mode, which still executes the legacy fallback", async () => {
+    mockGetConfig.mockResolvedValue({ config, mode: "shadow" })
+
+    const result = await routeNexusRequest({ ...shortFollowUp, workspace: editableArtifact })
+
+    expect(result.modelId).toBe("gpt-luna")
+    expect(result.metadata.proposedModelId).toBe("gpt-terra")
+    expect(result.metadata.tier).toBe("medium")
+    expect(result.metadata.reasonCodes).toContain("workspace_artifact_min_tier")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier_unmet")
+  })
+
+  /**
+   * The floor is still a PREFERENCE, never a new way to fail a turn: with nothing
+   * at or above it, the turn keeps the light model it would have had — and says
+   * so, because `workspace_artifact_min_tier` alone would look like proof the fix
+   * was live on exactly the turns where it was defeated.
+   */
+  it("flags the floor as unmet when only a light model is accessible", async () => {
+    mockFilterAccessibleResourceIds.mockResolvedValue(["1"])
+
+    const result = await routeNexusRequest({ ...shortFollowUp, workspace: editableArtifact })
+
+    expect(result.modelId).toBe("gpt-luna")
+    expect(result.metadata.tier).toBe("medium")
+    expect(result.metadata.reasonCodes).toContain("workspace_artifact_min_tier")
+    expect(result.metadata.reasonCodes).toContain("workspace_artifact_min_tier_unmet")
+  })
+
+  it("does not flag the floor unmet for a turn with no workspace", async () => {
+    mockFilterAccessibleResourceIds.mockResolvedValue(["1"])
+
+    const result = await routeNexusRequest({ ...shortFollowUp, workspace: null })
+
+    expect(result.modelId).toBe("gpt-luna")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier_unmet")
+  })
+
+  /**
+   * The specialist lists ignore `tier` entirely, so neither the raise nor a
+   * below-floor specialist model says anything about tool-capable routing.
+   */
+  it("does not flag the floor unmet on a specialist image turn", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "image", tier: "light", confidence: 0.99,
+      reasonCodes: ["explicit_image_request"], source: "deterministic",
+    })
+
+    const result = await routeNexusRequest({
+      ...shortFollowUp,
+      requestedFamily: "auto" as const,
+      workspace: editableArtifact,
+    })
+
+    expect(result.modelId).toBe("gemini-3.1-flash-image")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier_unmet")
+  })
+})
+
+/**
+ * Shadow mode keeps the legacy fallback only while `requiredTools` is empty
+ * (`selectedRuntimeModel`); with a required tool it EXECUTES the routed model. So
+ * on those turns the floor has to be withheld entirely — even the raised tier
+ * alone would reroute, straight to the configured medium candidate — and it must
+ * be judged against the EVENTUAL required-tool list, because a `web-search`
+ * decision adds its own tool after classification (#1840).
+ */
+describe("Nexus model router artifact floor gating by required tools", () => {
+  const PSD_CONNECTOR_ID = "54f0f531-f7ab-485e-bd6b-65a95c4bc871"
+  const editableArtifact = {
+    objectId: "441910f0-9e0e-4633-acf1-62415e388db4",
+    kind: "artifact" as const,
+    editable: true,
+  }
+  const shortFollowUp = {
+    text: "Did that work?",
+    fallbackModelId: "gpt-luna",
+    experienceMode: "advanced" as const,
+    requestedFamily: "openai" as const,
+    enabledConnectorIds: [],
+    userId: 7,
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockGetNexusEnabledModels.mockResolvedValue(models)
+    mockFilterAccessibleResourceIds.mockResolvedValue(models.map(model => String(model.id)))
+    mockGetConfig.mockResolvedValue({ config, mode: "active" })
+    mockGetConfiguredChatProviders.mockResolvedValue(
+      new Set(["openai", "google", "amazon-bedrock", "azure", "latimer"])
+    )
+    mockExecuteQuery.mockResolvedValue([{ id: PSD_CONNECTOR_ID, name: "PSD Data" }])
+    mockClassify.mockResolvedValue({
+      intent: "general", tier: "light", confidence: 0.9,
+      reasonCodes: ["simple_request"], source: "classifier",
+    })
+  })
+
+  it("withholds the floor from a shadow turn with a required tool", async () => {
+    mockGetConfig.mockResolvedValue({ config, mode: "shadow" })
+
+    const result = await routeNexusRequest({
+      ...shortFollowUp,
+      enabledToolNames: ["searchNexusAttachments"],
+      workspace: editableArtifact,
+    })
+
+    expect(result.modelId).toBe("gpt-luna")
+    expect(result.metadata.tier).toBe("light")
+    expect(result.metadata.reasonCodes).toContain("required_tools_enforced")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier_unmet")
+  })
+
+  /**
+   * A `web-search` decision grows the required-tool list ITSELF, inside
+   * `selectWithFetchOnlyFallback`. Judging the floor against the list as it stands
+   * before that would apply the floor and then let shadow reroute live traffic.
+   */
+  it("withholds the floor from a shadow web-search turn that adds its own tool", async () => {
+    mockGetConfig.mockResolvedValue({ config, mode: "shadow" })
+    mockClassify.mockResolvedValue({
+      intent: "web-search", tier: "light", confidence: 0.95,
+      reasonCodes: ["current_information"], source: "classifier",
+    })
+
+    const result = await routeNexusRequest({
+      ...shortFollowUp,
+      requestedFamily: "auto" as const,
+      workspace: editableArtifact,
+    })
+
+    expect(result.metadata.tier).toBe("light")
+    expect(result.metadata.reasonCodes).toContain("required_tools_enforced")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier_unmet")
+  })
+
+  /**
+   * ...and the fetch-only retry takes that tool back out again (#1696), so the
+   * retry qualifies for the floor the original decision was disqualified from.
+   * `refloor` re-applies the gate after the splice, which is what keeps shadow's
+   * proposal equal to the route active mode would take on the same path.
+   */
+  it("refloors the fetch-only retry once its web-search tool is removed", async () => {
+    mockGetConfig.mockResolvedValue({ config, mode: "shadow" })
+    mockClassify.mockResolvedValue({
+      intent: "web-search", tier: "light", confidence: 0.96,
+      reasonCodes: ["current_web_information", "explicit_url_web_fetch"], source: "deterministic",
+    })
+
+    const result = await routeNexusRequest({
+      ...shortFollowUp,
+      // Anthropic has no web-search model, which is what forces the retry.
+      requestedFamily: "anthropic" as const,
+      text: "Summarize https://example.com and say whether that worked",
+      workspace: editableArtifact,
+    })
+
+    expect(result.metadata.reasonCodes).toContain("web_search_unavailable_fetch_only")
+    expect(result.metadata.tier).toBe("medium")
+    expect(result.metadata.reasonCodes).toContain("workspace_artifact_min_tier")
+    // Still shadow: the legacy fallback executes, only the proposal is floored.
+    expect(result.modelId).toBe("gpt-luna")
+    expect(result.metadata.proposedModelId).toBe("us.anthropic.claude-sonnet")
+  })
+
+  // The paired control: withholding is scoped to shadow, not a silent loss of the
+  // fix for every turn that happens to carry a tool.
+  it("still applies the floor to an ACTIVE turn with a required tool", async () => {
+    const result = await routeNexusRequest({
+      ...shortFollowUp,
+      enabledToolNames: ["searchNexusAttachments"],
+      workspace: editableArtifact,
+    })
+
+    expect(result.modelId).toBe("gpt-terra")
+    expect(result.metadata.tier).toBe("medium")
+    expect(result.metadata.reasonCodes).toContain("workspace_artifact_min_tier")
+  })
+})
+
+/**
+ * `selectRoutedTextModel` sweeps `[tier, medium, light, high]`, so with the tier
+ * raised to medium it would still prefer an accessible LIGHT model over an
+ * accessible high one — landing the turn on exactly the model the floor exists to
+ * avoid. `minTier` makes the below-floor models ineligible first (#1840).
+ */
+describe("Nexus model router artifact floor with no medium model accessible", () => {
+  const PSD_CONNECTOR_ID = "54f0f531-f7ab-485e-bd6b-65a95c4bc871"
+  const editableArtifact = {
+    objectId: "441910f0-9e0e-4633-acf1-62415e388db4",
+    kind: "artifact" as const,
+    editable: true,
+  }
+  const shortFollowUp = {
+    text: "Did that work?",
+    fallbackModelId: "gpt-luna",
+    experienceMode: "advanced" as const,
+    requestedFamily: "openai" as const,
+    enabledConnectorIds: [],
+    userId: 7,
+  }
+  const gptSol = {
+    id: 9, name: "GPT Sol", provider: "openai", modelId: "gpt-sol",
+    capabilities: "[]", providerMetadata: { nexusRouterTier: "high" },
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    // Only the light and the high model are reachable — no medium anywhere.
+    mockGetNexusEnabledModels.mockResolvedValue([...models, gptSol])
+    mockFilterAccessibleResourceIds.mockResolvedValue(["1", "9"])
+    mockGetConfig.mockResolvedValue({ config, mode: "active" })
+    mockGetConfiguredChatProviders.mockResolvedValue(
+      new Set(["openai", "google", "amazon-bedrock", "azure", "latimer"])
+    )
+    mockExecuteQuery.mockResolvedValue([{ id: PSD_CONNECTOR_ID, name: "PSD Data" }])
+    mockClassify.mockResolvedValue({
+      intent: "general", tier: "light", confidence: 0.9,
+      reasonCodes: ["simple_request"], source: "classifier",
+    })
+  })
+
+  it("reaches the high model instead of falling back below the floor", async () => {
+    const result = await routeNexusRequest({ ...shortFollowUp, workspace: editableArtifact })
+
+    expect(result.modelId).toBe("gpt-sol")
+    expect(result.metadata.reasonCodes).toContain("workspace_artifact_min_tier")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier_unmet")
+  })
+
+  it("still keeps the light model for the same access with no workspace bound", async () => {
+    const result = await routeNexusRequest({ ...shortFollowUp, workspace: null })
+
+    expect(result.modelId).toBe("gpt-luna")
+  })
+
+  /**
+   * Shadow mode exists to answer "what would active routing have chosen?", so a
+   * proposal that skipped the floor would compare the wrong thing — naming the
+   * light model for a deployment where active mode reaches the high one.
+   */
+  it("proposes the same high model in shadow mode while executing the fallback", async () => {
+    mockGetConfig.mockResolvedValue({ config, mode: "shadow" })
+
+    const result = await routeNexusRequest({ ...shortFollowUp, workspace: editableArtifact })
+
+    expect(result.modelId).toBe("gpt-luna")
+    expect(result.metadata.proposedModelId).toBe("gpt-sol")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier_unmet")
+  })
+
+  /**
+   * `selectModel` takes its image-specialist branch only while no input tool is
+   * required. An image turn WITH one falls through to ordinary tier-aware text
+   * routing, so treating every image intent as tier-independent would drop the
+   * floor exactly where it still applies.
+   */
+  it("applies the floor to an image turn that falls through to text routing", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "image", tier: "light", confidence: 0.99,
+      reasonCodes: ["explicit_image_request"], source: "deterministic",
+    })
+
+    const result = await routeNexusRequest({
+      ...shortFollowUp,
+      enabledToolNames: ["searchNexusAttachments"],
+      workspace: editableArtifact,
+    })
+
+    expect(result.modelId).toBe("gpt-sol")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier_unmet")
+  })
+
+  /**
+   * A shadow turn with a required tool EXECUTES `selection.model`, not the legacy
+   * fallback, so the preferences must not touch it: shadow mode quietly rerouting
+   * live traffic would break the one contract it has.
+   */
+  it("leaves a shadow turn with a required tool on its original route", async () => {
+    mockGetConfig.mockResolvedValue({ config, mode: "shadow" })
+
+    const result = await routeNexusRequest({
+      ...shortFollowUp,
+      enabledToolNames: ["searchNexusAttachments"],
+      workspace: editableArtifact,
+    })
+
+    expect(result.modelId).toBe("gpt-luna")
+    expect(result.metadata.reasonCodes).toContain("required_tools_enforced")
+  })
+})
