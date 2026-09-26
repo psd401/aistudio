@@ -372,14 +372,29 @@ interface RouteNexusRequestArgs {
   workspace?: NexusWorkspaceRoutingContext | null
 }
 
+/**
+ * Whether `addRequiredWebSearchTool` is going to grow the list — the same test,
+ * without the mutation.
+ *
+ * The artifact floor gate needs this lookahead: a web-search decision gains its
+ * required `webSearch` tool inside `selectWithFetchOnlyFallback`, which is
+ * precisely what makes shadow mode execute the routed model instead of the legacy
+ * fallback, so the floor has to be judged against the EVENTUAL required-tool list
+ * rather than the one that exists before classification is acted on (#1840).
+ * Shared with the mutator so the two cannot drift.
+ */
+function willAddRequiredWebSearchTool(
+  decision: NexusClassifierDecision,
+  requiredTools: string[]
+): boolean {
+  return decision.intent === "web-search" && !requiredTools.includes("webSearch")
+}
+
 function addRequiredWebSearchTool(
   decision: NexusClassifierDecision,
   requiredTools: string[]
 ): void {
-  if (
-    decision.intent === "web-search"
-    && !requiredTools.includes("webSearch")
-  ) {
+  if (willAddRequiredWebSearchTool(decision, requiredTools)) {
     requiredTools.push("webSearch")
   }
 }
@@ -517,14 +532,17 @@ function workspaceArtifactTierUnmet(options: {
   workspaceWantsPsdData: boolean
   intent: NexusRouterIntent
   routedModel: NexusModelRow
-  mode: Exclude<NexusRouterRuntimeMode, "off">
+  /** The turn's one `artifactFloorMayApply` decision, passed in rather than
+   *  recomputed: `requiredTools` is mutated during routing, so a second
+   *  evaluation here could disagree with the one that governed the tier. */
+  floorApplied: boolean
   requiredToolCount: number
 }): boolean {
   if (!options.workspaceWantsPsdData) return false
   // Only meaningful when the floor was actually asked for: a shadow turn with a
   // required tool never applies it, so "unmet" would report a miss on a turn that
   // never aimed.
-  if (!artifactFloorMayApply(options.mode, options.requiredToolCount)) return false
+  if (!options.floorApplied) return false
   if (selectionIgnoresTier(options.intent, options.requiredToolCount)) return false
   return TIER_RANK[inferTier(options.routedModel)] < TIER_RANK[WORKSPACE_ARTIFACT_MIN_TIER]
 }
@@ -577,6 +595,9 @@ async function buildRoutedResult(options: {
   selection: { model: NexusModelRow; fallbackUsed: boolean }
   psdConnectorId: string | null
   requiredTools: string[]
+  /** The ONE artifact-floor gate decision for this turn, so the reason codes can
+   *  never disagree with what routing actually did (#1840). */
+  floorMayApply: boolean
 }): Promise<NexusRouteResult> {
   const {
     args,
@@ -587,6 +608,7 @@ async function buildRoutedResult(options: {
     selection,
     psdConnectorId,
     requiredTools,
+    floorMayApply,
   } = options
   const retainFallback = mode === "shadow" && requiredTools.length === 0
   const selected = selectedRuntimeModel(
@@ -620,7 +642,7 @@ async function buildRoutedResult(options: {
       workspaceWantsPsdData,
       intent: decision.intent,
       routedModel: selection.model,
-      mode,
+      floorApplied: floorMayApply,
       requiredToolCount: requiredTools.length,
     }),
   })
@@ -739,8 +761,13 @@ async function routeWithConfiguredRouter(options: {
   // The classifier sees the latest message only. An open editable artifact is a
   // routing input it cannot know about, so the floor is applied to its verdict
   // before anything reads `tier` (#1840) — unless doing so would change what
-  // shadow mode EXECUTES, which `artifactFloorMayApply` explains.
-  const floorMayApply = artifactFloorMayApply(mode, requiredTools.length)
+  // shadow mode EXECUTES, which `artifactFloorMayApply` explains. Judged against
+  // the EVENTUAL required-tool list, because a web-search decision has not yet
+  // added its own tool at this point.
+  const floorMayApply = artifactFloorMayApply(
+    mode,
+    requiredTools.length + (willAddRequiredWebSearchTool(rawDecision, requiredTools) ? 1 : 0)
+  )
   const classified = floorMayApply
     ? applyWorkspaceArtifactTierFloor(rawDecision, args.workspace)
     : rawDecision
@@ -810,6 +837,7 @@ async function routeWithConfiguredRouter(options: {
     selection,
     psdConnectorId,
     requiredTools,
+    floorMayApply,
   })
 }
 
