@@ -595,9 +595,6 @@ async function buildRoutedResult(options: {
   selection: { model: NexusModelRow; fallbackUsed: boolean }
   psdConnectorId: string | null
   requiredTools: string[]
-  /** The ONE artifact-floor gate decision for this turn, so the reason codes can
-   *  never disagree with what routing actually did (#1840). */
-  floorMayApply: boolean
 }): Promise<NexusRouteResult> {
   const {
     args,
@@ -608,7 +605,6 @@ async function buildRoutedResult(options: {
     selection,
     psdConnectorId,
     requiredTools,
-    floorMayApply,
   } = options
   const retainFallback = mode === "shadow" && requiredTools.length === 0
   const selected = selectedRuntimeModel(
@@ -642,7 +638,10 @@ async function buildRoutedResult(options: {
       workspaceWantsPsdData,
       intent: decision.intent,
       routedModel: selection.model,
-      floorApplied: floorMayApply,
+      // The LIVE list, which is the one the final decision was floored against:
+      // `refloor` re-applies the gate after the fetch-only retry removes the tool,
+      // so this evaluation and the tier can no longer disagree.
+      floorApplied: artifactFloorMayApply(mode, requiredTools.length),
       requiredToolCount: requiredTools.length,
     }),
   })
@@ -707,8 +706,18 @@ function selectWithFetchOnlyFallback(options: {
   decision: NexusClassifierDecision
   requiredTools: string[]
   select: (decision: NexusClassifierDecision) => { model: NexusModelRow; fallbackUsed: boolean }
+  /**
+   * Re-apply the artifact tier floor to the RETRY decision (#1840).
+   *
+   * The retry removes the `webSearch` tool this function added, so the turn's
+   * required-tool list — and with it whether the floor may be applied at all —
+   * is not what it was when the original decision was floored. Handed in as a
+   * callback rather than recomputed here so this module keeps knowing nothing
+   * about workspaces.
+   */
+  refloor: (decision: NexusClassifierDecision) => NexusClassifierDecision
 }): { decision: NexusClassifierDecision; selection: { model: NexusModelRow; fallbackUsed: boolean } } {
-  const { decision, requiredTools, select } = options
+  const { decision, requiredTools, select, refloor } = options
   const hadWebSearch = requiredTools.includes("webSearch")
   addRequiredWebSearchTool(decision, requiredTools)
   try {
@@ -727,11 +736,13 @@ function selectWithFetchOnlyFallback(options: {
     // Drop only the web-search requirement this decision added, never one the
     // user enabled themselves.
     if (!hadWebSearch) requiredTools.splice(requiredTools.indexOf("webSearch"), 1)
-    const fetchOnly: NexusClassifierDecision = {
+    // Refloored AFTER the splice: the retry may now qualify for the floor that the
+    // added tool disqualified the original decision from.
+    const fetchOnly = refloor({
       ...decision,
       intent: "general",
       reasonCodes: [...decision.reasonCodes, "web_search_unavailable_fetch_only"],
-    }
+    })
     return { decision: fetchOnly, selection: select(fetchOnly) }
   }
 }
@@ -764,11 +775,20 @@ async function routeWithConfiguredRouter(options: {
   // shadow mode EXECUTES, which `artifactFloorMayApply` explains. Judged against
   // the EVENTUAL required-tool list, because a web-search decision has not yet
   // added its own tool at this point.
-  const floorMayApply = artifactFloorMayApply(
+  //
+  // Everything downstream of this point reads the LIVE `requiredTools` instead,
+  // because by then the tool has been added — and the fetch-only retry may have
+  // removed it again, which is why `refloor` exists.
+  const floorAppliesToLiveToolList = (): boolean =>
+    artifactFloorMayApply(mode, requiredTools.length)
+  const floorDecision = (candidate: NexusClassifierDecision): NexusClassifierDecision =>
+    floorAppliesToLiveToolList()
+      ? applyWorkspaceArtifactTierFloor(candidate, args.workspace)
+      : candidate
+  const classified = artifactFloorMayApply(
     mode,
     requiredTools.length + (willAddRequiredWebSearchTool(rawDecision, requiredTools) ? 1 : 0)
   )
-  const classified = floorMayApply
     ? applyWorkspaceArtifactTierFloor(rawDecision, args.workspace)
     : rawDecision
   // Shadow mode may retain a legacy fallback only when doing so is safe. A
@@ -781,6 +801,7 @@ async function routeWithConfiguredRouter(options: {
   const { decision, selection } = selectWithFetchOnlyFallback({
     decision: classified,
     requiredTools,
+    refloor: floorDecision,
     // `current.intent`, not `classified.intent`: the fetch-only fallback rewrites
     // a web-search decision to `general`, and the retry must then be governed by
     // the floor the rewritten intent actually has (#1840).
@@ -789,7 +810,7 @@ async function routeWithConfiguredRouter(options: {
         models, config, family: args.requestedFamily, tier: current.tier,
         intent: current.intent, fallbackModelId: args.fallbackModelId, accessibleIds,
         requiredTools,
-        minTier: floorMayApply
+        minTier: floorAppliesToLiveToolList()
           ? workspaceArtifactMinTier({
             workspaceWantsPsdData: workspaceNeedsPsdData(args.workspace),
             intent: current.intent,
@@ -837,7 +858,6 @@ async function routeWithConfiguredRouter(options: {
     selection,
     psdConnectorId,
     requiredTools,
-    floorMayApply,
   })
 }
 

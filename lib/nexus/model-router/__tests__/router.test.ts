@@ -1092,6 +1092,35 @@ describe("Nexus model router artifact floor gating by required tools", () => {
     expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier_unmet")
   })
 
+  /**
+   * ...and the fetch-only retry takes that tool back out again (#1696), so the
+   * retry qualifies for the floor the original decision was disqualified from.
+   * `refloor` re-applies the gate after the splice, which is what keeps shadow's
+   * proposal equal to the route active mode would take on the same path.
+   */
+  it("refloors the fetch-only retry once its web-search tool is removed", async () => {
+    mockGetConfig.mockResolvedValue({ config, mode: "shadow" })
+    mockClassify.mockResolvedValue({
+      intent: "web-search", tier: "light", confidence: 0.96,
+      reasonCodes: ["current_web_information", "explicit_url_web_fetch"], source: "deterministic",
+    })
+
+    const result = await routeNexusRequest({
+      ...shortFollowUp,
+      // Anthropic has no web-search model, which is what forces the retry.
+      requestedFamily: "anthropic" as const,
+      text: "Summarize https://example.com and say whether that worked",
+      workspace: editableArtifact,
+    })
+
+    expect(result.metadata.reasonCodes).toContain("web_search_unavailable_fetch_only")
+    expect(result.metadata.tier).toBe("medium")
+    expect(result.metadata.reasonCodes).toContain("workspace_artifact_min_tier")
+    // Still shadow: the legacy fallback executes, only the proposal is floored.
+    expect(result.modelId).toBe("gpt-luna")
+    expect(result.metadata.proposedModelId).toBe("us.anthropic.claude-sonnet")
+  })
+
   // The paired control: withholding is scoped to shadow, not a silent loss of the
   // fix for every turn that happens to carry a tool.
   it("still applies the floor to an ACTIVE turn with a required tool", async () => {
