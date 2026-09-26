@@ -68,7 +68,15 @@ if [ "${SKIP_E2E:-}" = "1" ]; then echo "e2e-local: SKIP_E2E=1 — skipping"; ex
 # there with `page.route` (tests/e2e/helpers/atrium-sandbox-host.ts), so the app
 # gets a real cross-origin frame with no CloudFront. Exported so `routeAppSandbox`
 # intercepts the same origin; the default matches SANDBOX_ORIGIN in that helper.
-export E2E_SANDBOX_ORIGIN="${E2E_SANDBOX_ORIGIN:-https://atrium-sandbox.test}"
+# Canonicalized to `new URL(...).origin` — what the app's normalizeOrigin and the
+# helper both use — so the CSP reuse/readiness probe below greps for the exact
+# string the server emits (a trailing slash or upper-case host would never match).
+if ! E2E_SANDBOX_ORIGIN="$(E2E_SANDBOX_ORIGIN_RAW="${E2E_SANDBOX_ORIGIN:-https://atrium-sandbox.test}" \
+  bun -e 'console.log(new URL(process.env.E2E_SANDBOX_ORIGIN_RAW).origin)' 2>/dev/null)"; then
+  echo "❌ e2e-local: E2E_SANDBOX_ORIGIN is not a valid URL."
+  exit 1
+fi
+export E2E_SANDBOX_ORIGIN
 
 ROOT="$(git rev-parse --show-toplevel)"; cd "$ROOT" || exit 1
 
