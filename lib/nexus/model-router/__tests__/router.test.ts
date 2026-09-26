@@ -1120,6 +1120,28 @@ describe("Nexus model router artifact floor with no medium model accessible", ()
   })
 
   /**
+   * `selectModel` takes its image-specialist branch only while no input tool is
+   * required. An image turn WITH one falls through to ordinary tier-aware text
+   * routing, so treating every image intent as tier-independent would drop the
+   * floor exactly where it still applies.
+   */
+  it("applies the floor to an image turn that falls through to text routing", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "image", tier: "light", confidence: 0.99,
+      reasonCodes: ["explicit_image_request"], source: "deterministic",
+    })
+
+    const result = await routeNexusRequest({
+      ...shortFollowUp,
+      enabledToolNames: ["searchNexusAttachments"],
+      workspace: editableArtifact,
+    })
+
+    expect(result.modelId).toBe("gpt-sol")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier_unmet")
+  })
+
+  /**
    * A shadow turn with a required tool EXECUTES `selection.model`, not the legacy
    * fallback, so the preferences must not touch it: shadow mode quietly rerouting
    * live traffic would break the one contract it has.

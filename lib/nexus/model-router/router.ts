@@ -75,10 +75,23 @@ function firstAccessibleModel(
 const TIER_RANK: Record<NexusRouterTier, number> = { light: 1, medium: 2, high: 3 }
 
 /**
- * Intents whose candidates come from a specialist list, so `configuredCandidates`
- * never consults `tier` — there is no tier for a floor to govern or to miss.
+ * True only when selection genuinely cannot consult `tier`, so there is no tier
+ * for a floor to govern or to miss.
+ *
+ * That is the image-specialist branch of `selectModel` alone, which returns a
+ * capability-matched model or throws without ever reaching the tier-aware path.
+ *
+ * NOT every image turn: that branch is taken only while no input tool is
+ * required, and an image turn WITH one falls through to ordinary tier-aware text
+ * routing (the case #1840's review round 5 caught). And not `web-search` either —
+ * its specialist list is consulted first, but when nothing there is eligible the
+ * tier-aware sweep decides, so the floor still matters. A false "tier is
+ * irrelevant here" silently drops the floor; a false negative only costs one
+ * discarded preference attempt, which the caller retries without it.
  */
-const TIER_INDEPENDENT_INTENTS = new Set<NexusRouterIntent>(["image", "web-search"])
+function selectionIgnoresTier(intent: NexusRouterIntent, requiredToolCount: number): boolean {
+  return intent === "image" && requiredToolCount === 0
+}
 
 /**
  * The lowest tier an editable-artifact turn may run on (#1840).
@@ -137,16 +150,16 @@ function meetsMinTier(
  * The artifact tier floor to pass to `selectModel`, or undefined when this turn
  * has none (#1840).
  *
- * Skipped for the `TIER_INDEPENDENT_INTENTS`, whose candidates come from a
- * specialist list: filtering those by tier could only discard the very model the
- * intent requires.
+ * Skipped when `selectionIgnoresTier`: filtering the image specialists by tier
+ * could only discard the very model the intent requires.
  */
 function workspaceArtifactMinTier(options: {
   workspaceWantsPsdData: boolean
   intent: NexusRouterIntent
+  requiredToolCount: number
 }): NexusRouterTier | undefined {
   if (!options.workspaceWantsPsdData) return undefined
-  if (TIER_INDEPENDENT_INTENTS.has(options.intent)) return undefined
+  if (selectionIgnoresTier(options.intent, options.requiredToolCount)) return undefined
   return WORKSPACE_ARTIFACT_MIN_TIER
 }
 
@@ -471,12 +484,12 @@ function selectedRuntimeModel(
  * already sufficient tier carries no extra reason code and routes exactly as
  * before.
  *
- * INERT for the `TIER_INDEPENDENT_INTENTS`: `configuredCandidates` reads the
- * specialist lists for those and never consults `tier`, so a raise there cannot
+ * INERT where `selectionIgnoresTier` holds: the image-specialist branch returns a
+ * capability-matched model without consulting `tier`, so a raise there cannot
  * change which model is selected. The code is still recorded — it describes the
  * DECISION, and `metadata.tier` did change — but do not read it as evidence of a
- * different model on a specialist turn, and `workspace_artifact_min_tier_unmet`
- * is deliberately not emitted for them either.
+ * different model on such a turn, and `workspace_artifact_min_tier_unmet` is
+ * deliberately not emitted for it either.
  */
 function applyWorkspaceArtifactTierFloor(
   decision: NexusClassifierDecision,
@@ -512,7 +525,7 @@ function workspaceArtifactTierUnmet(options: {
   // required tool never applies it, so "unmet" would report a miss on a turn that
   // never aimed.
   if (!artifactFloorMayApply(options.mode, options.requiredToolCount)) return false
-  if (TIER_INDEPENDENT_INTENTS.has(options.intent)) return false
+  if (selectionIgnoresTier(options.intent, options.requiredToolCount)) return false
   return TIER_RANK[inferTier(options.routedModel)] < TIER_RANK[WORKSPACE_ARTIFACT_MIN_TIER]
 }
 
@@ -753,6 +766,7 @@ async function routeWithConfiguredRouter(options: {
           ? workspaceArtifactMinTier({
             workspaceWantsPsdData: workspaceNeedsPsdData(args.workspace),
             intent: current.intent,
+            requiredToolCount: requiredTools.length,
           })
           : undefined,
       },
