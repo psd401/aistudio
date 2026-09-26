@@ -2125,6 +2125,7 @@ async function bindWorkspaceToolsForChat(args: {
     // whether the read tool survived so it never points at a tool that is gone.
     workspacePreviewDiagnosticsFragment: workspace?.renderPreviewDiagnosticsPrompt?.({
       readToolAvailable: !!workspaceTools?.read_workspace_content,
+      updateToolAvailable: !!workspaceTools?.update_workspace_artifact,
     }),
   };
 }

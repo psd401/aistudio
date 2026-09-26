@@ -50,9 +50,9 @@ export function buildNexusSystemPrompt(input: {
     prompt += `\n\n---\n\n${userMemoryFragment}`
   }
   // #1839: LAST, and in its own `---` section rather than glued onto the
-  // workspace fragment — the block quotes untrusted artifact text, so a hard
-  // boundary around it is worth more than paragraph proximity to the object
-  // description.
+  // workspace fragment — it is the one turn-scoped block here, and the model must
+  // act on it this turn, so later context must not bury it. It carries only
+  // server-controlled values (count, kind, validated code), never artifact text.
   if (workspacePreviewDiagnosticsFragment) {
     prompt += `\n\n---\n\n${workspacePreviewDiagnosticsFragment}`
   }

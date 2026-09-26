@@ -516,30 +516,35 @@ model two ways, from one validated source:
   the identical guards: the client's `contentId` must match the object the server
   actually bound, entries are re-capped at 10, the free text is re-flattened with
   `boundBridgeErrorMessage` (which removes the line structure `JSON.stringify`
-  does not escape, U+2028/U+2029 included) and then quoted, and documents never
-  get a block at all.
+  does not escape, U+2028/U+2029 included), and documents never get a block at
+  all. The block itself carries none of that free text — see the first rule
+  below.
 - `buildNexusSystemPrompt` appends the rendered block LAST, in its own `---`
   section. It is the only turn-scoped fragment in that prompt: the model must act
   on it during this turn, so a conversation that also carries repository or
-  memory context must not bury it, and the untrusted artifact text is worth a
-  hard boundary of its own.
+  memory context must not bury it.
 
 Four rules hold this together:
 
-- **Another author's text never reaches the SYSTEM role.** Any VIEWABLE object
-  binds these tools, read-only ones included, so an artifact's author could
-  otherwise plant instructions in a thrown error and have them read as system
-  text in someone else's chat. Quoting is gated on strict OWNERSHIP
-  (`isSelfAuthored`, not `canEdit` — an admin does not qualify). For an artifact
-  the viewer does not own, the block carries only server-controlled values: the
-  entry count and each entry's `kind` and `code` (a zod-validated enum), and it
-  points at `read_workspace_content` for the exact text — the lower-trust
-  tool-result channel that text already travelled on. Either way the model learns
-  the preview is broken with no tool call, which is the point of #1839.
-- **The block never names a tool this turn does not have.** It is a RENDERER, not
-  a string, because whether `read_workspace_content` survived the skill pin is
-  known only in the route. With no workspace tools it tells the model to report
-  the failure and leave the fix to the person.
+- **No artifact-produced text reaches the SYSTEM role.** A `message` or `sql`
+  string comes from the artifact's CODE, and flattening or quoting it changes its
+  shape without making a trust boundary. Ownership is not a safe gate either: an
+  artifact the user owns is usually one the MODEL wrote (`buildArtifactUpdateTool`
+  saves model-authored code under the user's own requester), and that code can
+  build an exception message out of live `AtriumData` rows. Any VIEWABLE object
+  binds these tools too, read-only ones included. So the block carries only
+  server-controlled values — the entry count and each entry's `kind` and `code`
+  (a zod-validated enum) — and points at `read_workspace_content` for the exact
+  text, the lower-trust tool-result channel that text already travelled on. The
+  model still learns the preview is broken with no tool call, which is the point
+  of #1839.
+- **The block never names a tool this turn does not have, and never denies one
+  it does.** It is a RENDERER, not a string, because which tools survived the
+  skill pin is known only in the route. It takes `readToolAvailable` and
+  `updateToolAvailable` separately, since a pin can keep
+  `update_workspace_artifact` while dropping `read_workspace_content`: a missing
+  read tool only removes the pointer to it, and only a missing update tool tells
+  the model to leave the fix to the person.
 - **It is returned SEPARATELY from `systemPromptFragment`** because a skill's
   `allowed-tools` pin that filters every workspace tool away drops the object
   description (it promises tools the model no longer has) but must NOT drop this.
