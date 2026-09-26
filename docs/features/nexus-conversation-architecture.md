@@ -496,6 +496,47 @@ error results) is never pruned: it cannot be shown to belong to the same
 object as a later part. Persisted messages are never touched. Tool parts keep their exact
 shape so every tool call still pairs with its result on replay.
 
+### Preview failures are turn-scoped, and do not travel with the tools (#1839)
+
+An artifact's live preview runs cross-origin in the person's browser, so the
+model cannot see it. `lib/atrium/artifact-preview-diagnostics.ts` keeps a
+client-side ring buffer of its failures (rejected `AtriumData` calls with a
+typed `code` and the failing SQL, plus uncaught script errors), and the chat
+request body carries it as `workspacePreviewDiagnostics` (#1787).
+
+That buffer is TAKEN when the message is sent, not when the model reads it, so
+each failure is delivered exactly once and #1787's single delivery channel —
+the `previewDiagnostics` field on `read_workspace_content` — lost it entirely on
+any turn the model chose not to call that tool. So the failures now reach the
+model two ways, from one validated source:
+
+- `buildWorkspaceChatTools` returns `previewDiagnosticsPromptFragment` beside
+  its `systemPromptFragment`, built by `buildPreviewDiagnosticsPromptFragment`
+  from the same `previewDiagnosticsFor` helper the tool result uses — so both
+  inherit the identical guards: the client's `contentId` must match the object
+  the server actually bound, entries are re-capped at 10, the free text is
+  re-flattened with `boundBridgeErrorMessage` (which removes the line structure
+  `JSON.stringify` does not escape, U+2028/U+2029 included) and then quoted, and
+  documents never get a block at all.
+- `buildNexusSystemPrompt` appends it LAST, in its own `---` section. It is the
+  only turn-scoped fragment in that prompt: the model must act on it during this
+  turn, so a conversation that also carries repository or memory context must
+  not bury it, and the untrusted artifact text it quotes is worth a hard
+  boundary of its own.
+
+Two consequences worth keeping:
+
+- The fragment is returned SEPARATELY from `systemPromptFragment` because a
+  skill's `allowed-tools` pin that filters every workspace tool away drops the
+  object description (it promises tools the model no longer has) but must NOT
+  drop this. A model that can no longer fix the artifact can still tell the
+  person their preview is broken.
+- The guidance for interpreting a failure lives in one constant,
+  `PREVIEW_FAILURE_INTERPRETATION_GUIDANCE`, consumed by the prompt block and by
+  the `read_workspace_content` description. Two hand-written copies drift, and a
+  model that is told to "check previewDiagnostics" by one and "this arrives on
+  its own" by the other has a contradiction to resolve.
+
 ---
 
 ## Durable repository bindings

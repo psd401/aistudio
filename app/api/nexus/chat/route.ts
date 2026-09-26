@@ -94,7 +94,6 @@ import {
 import { readSkillMarkdown } from '@/lib/skills/skill-publish-pipeline';
 import {
   buildWorkspaceChatTools,
-  workspacePromptFragmentForTurn,
   type WorkspacePreviewDiagnostics,
 } from '@/lib/nexus/workspace-chat-tools';
 import {
@@ -460,6 +459,12 @@ async function executeStreaming(params: {
   workspaceTools?: ToolSet;
   /** System-prompt line describing the open workspace object + how to edit it. */
   workspacePromptFragment?: string;
+  /**
+   * #1839: this turn's artifact preview failures, as their own system-prompt
+   * block. Separate from `workspacePromptFragment` because it is scoped to one
+   * turn and it survives a skill pin that filtered the workspace tools away.
+   */
+  workspacePreviewDiagnosticsFragment?: string;
   /** Owner-validated search over repositories attached to this conversation. */
   attachmentTools?: ToolSet;
   /** Server-derived project and skill repository instructions. */
@@ -496,6 +501,7 @@ async function executeStreaming(params: {
     skillName,
     workspaceTools,
     workspacePromptFragment,
+    workspacePreviewDiagnosticsFragment,
     attachmentTools,
     repositoryPromptFragment,
     memoryTools,
@@ -520,6 +526,7 @@ async function executeStreaming(params: {
     skillInstructions,
     skillName,
     workspacePromptFragment,
+    workspacePreviewDiagnosticsFragment,
     hasAttachmentTools,
     repositoryPromptFragment,
     userMemoryFragment,
@@ -2062,7 +2069,11 @@ async function bindWorkspaceToolsForChat(args: {
   resolvedWorkspace: ResolvedWorkspace | null;
   /** #1787: the preview failures the client observed since the last turn. */
   previewDiagnostics: WorkspacePreviewDiagnostics | undefined;
-}): Promise<{ workspaceTools: ToolSet | undefined; workspacePromptFragment: string | undefined }> {
+}): Promise<{
+  workspaceTools: ToolSet | undefined;
+  workspacePromptFragment: string | undefined;
+  workspacePreviewDiagnosticsFragment: string | undefined;
+}> {
   const workspace = await bindWorkspaceTools(
     args.workspaceId,
     args.userId,
@@ -2071,12 +2082,17 @@ async function bindWorkspaceToolsForChat(args: {
     args.previewDiagnostics
   );
   const workspaceTools = filterWorkspaceToolsBySkillPin(workspace?.tools, args.skillAllowedTools);
-  // Drop the object description when the pin filtered every workspace tool away;
-  // #1839's preview-failure block survives it (see workspacePromptFragmentForTurn).
+  // Drop the object description when the pin filtered every workspace tool away:
+  // it promises tools the model does not have.
   const hasTools = !!workspaceTools && Object.keys(workspaceTools).length > 0;
   return {
     workspaceTools,
-    workspacePromptFragment: workspacePromptFragmentForTurn(workspace, hasTools),
+    workspacePromptFragment: hasTools ? workspace?.systemPromptFragment : undefined,
+    // #1839: NOT gated on `hasTools`. A model that can no longer fix the artifact
+    // can still tell the user their preview is broken, which beats answering "I
+    // can't see your browser" — the failure reached the server either way, and
+    // the client already emptied its buffer to send it.
+    workspacePreviewDiagnosticsFragment: workspace?.previewDiagnosticsPromptFragment,
   };
 }
 
@@ -2810,7 +2826,7 @@ async function resolveToolsAndStream(params: {
     ...repositories.projectTools,
     ...skillRepositoryTools,
   };
-  const { workspaceTools, workspacePromptFragment } =
+  const { workspaceTools, workspacePromptFragment, workspacePreviewDiagnosticsFragment } =
     await bindWorkspaceToolsForChat({
       workspaceId: prepared.workspaceId,
       userId: prepared.userId,
@@ -2886,6 +2902,7 @@ async function resolveToolsAndStream(params: {
     skillName: skillBinding.skillName,
     workspaceTools,
     workspacePromptFragment: effectiveWorkspacePromptFragment,
+    workspacePreviewDiagnosticsFragment,
     attachmentTools: repositoryTools,
     repositoryPromptFragment: buildRepositoryPromptFragment({
       projectBinding: prepared.projectBinding,

@@ -9,6 +9,14 @@ export function buildNexusSystemPrompt(input: {
   skillInstructions?: string
   skillName?: string
   workspacePromptFragment?: string
+  /**
+   * #1839: what the user's artifact preview failed with since their previous
+   * message. Turn-scoped, unlike every other fragment here, and appended LAST:
+   * it is the most perishable thing in the prompt and the model must act on it
+   * this turn, so it must not be buried behind the repository/memory blocks by
+   * a conversation that happens to have those too.
+   */
+  workspacePreviewDiagnosticsFragment?: string
   hasAttachmentTools?: boolean
   repositoryPromptFragment?: string
   userMemoryFragment?: string
@@ -17,6 +25,7 @@ export function buildNexusSystemPrompt(input: {
     skillInstructions,
     skillName,
     workspacePromptFragment,
+    workspacePreviewDiagnosticsFragment,
     hasAttachmentTools = false,
     repositoryPromptFragment,
     userMemoryFragment,
@@ -39,6 +48,13 @@ export function buildNexusSystemPrompt(input: {
   }
   if (userMemoryFragment) {
     prompt += `\n\n---\n\n${userMemoryFragment}`
+  }
+  // #1839: LAST, and in its own `---` section rather than glued onto the
+  // workspace fragment — the block quotes untrusted artifact text, so a hard
+  // boundary around it is worth more than paragraph proximity to the object
+  // description.
+  if (workspacePreviewDiagnosticsFragment) {
+    prompt += `\n\n---\n\n${workspacePreviewDiagnosticsFragment}`
   }
   return prompt
 }
