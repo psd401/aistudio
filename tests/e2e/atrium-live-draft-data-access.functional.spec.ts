@@ -66,6 +66,18 @@ async function listVersions(
   return body.data ?? []
 }
 
+/** Flip the artifact's data-bridge mode through the REST surface. */
+async function setDataAccess(
+  page: import('@playwright/test').Page,
+  id: string,
+  mode: string
+): Promise<void> {
+  const res = await page.request.patch(`/api/v1/content/${id}`, {
+    data: { dataAccess: mode },
+  })
+  expect(res.status()).toBe(200)
+}
+
 /** Best-effort teardown. Failures never mask the real assertion failure. */
 async function cleanup(
   page: import('@playwright/test').Page,
@@ -140,10 +152,7 @@ test.describe('Atrium Live/Draft artifact data access (authenticated)', () => {
 
       // The author starts turning it into a live dashboard and flips the mode.
       // BEFORE #1789 this re-capabilitied the published version in place.
-      const patched = await page.request.patch(`/api/v1/content/${data.id}`, {
-        data: { dataAccess: 'query' },
-      })
-      expect(patched.status()).toBe(200)
+      await setDataAccess(page, data.id as string, 'query')
 
       const after = await listVersions(page, data.id as string)
       // A NEW version carries the new mode; the published one is untouched.
@@ -182,10 +191,7 @@ test.describe('Atrium Live/Draft artifact data access (authenticated)', () => {
       const data = (await res.json())?.data
       created.push(data.id as string)
 
-      const patched = await page.request.patch(`/api/v1/content/${data.id}`, {
-        data: { dataAccess: 'query' },
-      })
-      expect(patched.status()).toBe(200)
+      await setDataAccess(page, data.id as string, 'query')
 
       // Nothing is Live, so there is nothing to protect: the head is stamped in
       // place and no version is forked (the author's preview picks the new mode
@@ -234,6 +240,9 @@ test.describe('Atrium Live/Draft artifact data access (authenticated)', () => {
 
       // Advance the head so "the published version" and "the head" differ — the
       // exact state in which the old unqualified link showed readers the draft.
+      // A plain save moves Live onto the new head since #1837, unless the data
+      // mode differs from Live's — so flip the mode first to stay draft-ahead.
+      await setDataAccess(page, data.id as string, 'query')
       const newVersion = await page.request.post(
         `/api/v1/content/${data.id}/versions`,
         {

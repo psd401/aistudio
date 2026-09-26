@@ -57,32 +57,41 @@ test.describe('Semantic decision search (#1252)', () => {
     expect(capRes.status()).toBe(201)
     const decisionId = ((await capRes.json()) as CaptureResponse).data.decisionNodeId
 
-    // 2. Search with a PARAPHRASE that shares no keywords with the stored text.
-    const paraphrase = `which tool runs our evening batch report jobs on a timer`
-    const res = await page.request.get(
-      `/api/v1/graph/nodes?q=${encodeURIComponent(paraphrase)}&nodeType=decision&limit=25`,
-    )
-    expect(res.status()).toBe(200)
-    const body = (await res.json()) as SearchResponse
-
-    if (body.meta.method === 'semantic') {
-      // Embeddings available: the paraphrase should surface the decision.
-      const ids = body.data.map((n) => n.id)
-      expect(ids).toContain(decisionId)
-      // Semantic results carry a similarity score.
-      const match = body.data.find((n) => n.id === decisionId)
-      expect(typeof match?.similarity).toBe('number')
-    } else {
-      // Embeddings unavailable in this env: verify documented graceful
-      // degradation, then confirm the endpoint still finds the node via a
-      // lexical keyword the fallback can match.
-      expect(body.meta.method).toBe('lexical-fallback')
-      const kwRes = await page.request.get(
-        `/api/v1/graph/nodes?q=${encodeURIComponent(keyword)}&nodeType=decision&limit=25`,
+    // Delete the decision afterwards. Every run captures the same fixture text,
+    // so leftover copies carry near-identical embeddings; once more than `limit`
+    // of them pile up, this run's decision ranks out of the semantic top-N and
+    // the spec fails on stale data rather than on the search. Deleting the node
+    // cascades its edges.
+    try {
+      // 2. Search with a PARAPHRASE that shares no keywords with the stored text.
+      const paraphrase = `which tool runs our evening batch report jobs on a timer`
+      const res = await page.request.get(
+        `/api/v1/graph/nodes?q=${encodeURIComponent(paraphrase)}&nodeType=decision&limit=25`,
       )
-      expect(kwRes.status()).toBe(200)
-      const kw = (await kwRes.json()) as SearchResponse
-      expect(kw.data.map((n) => n.id)).toContain(decisionId)
+      expect(res.status()).toBe(200)
+      const body = (await res.json()) as SearchResponse
+
+      if (body.meta.method === 'semantic') {
+        // Embeddings available: the paraphrase should surface the decision.
+        const ids = body.data.map((n) => n.id)
+        expect(ids).toContain(decisionId)
+        // Semantic results carry a similarity score.
+        const match = body.data.find((n) => n.id === decisionId)
+        expect(typeof match?.similarity).toBe('number')
+      } else {
+        // Embeddings unavailable in this env: verify documented graceful
+        // degradation, then confirm the endpoint still finds the node via a
+        // lexical keyword the fallback can match.
+        expect(body.meta.method).toBe('lexical-fallback')
+        const kwRes = await page.request.get(
+          `/api/v1/graph/nodes?q=${encodeURIComponent(keyword)}&nodeType=decision&limit=25`,
+        )
+        expect(kwRes.status()).toBe(200)
+        const kw = (await kwRes.json()) as SearchResponse
+        expect(kw.data.map((n) => n.id)).toContain(decisionId)
+      }
+    } finally {
+      await page.request.delete(`/api/v1/graph/nodes/${decisionId}`)
     }
   })
 })
