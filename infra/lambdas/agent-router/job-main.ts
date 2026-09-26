@@ -385,9 +385,11 @@ async function main(): Promise<number> {
     workspaceFinalizationConfirmed =
       agentResult.workspaceFinalizationConfirmed === true;
 
-    // Deliver exactly like the router's Step 6: truncate the raw response,
-    // then prefix in shared spaces. A failed turn's response is already the
-    // harness's failure frame — posting it satisfies "always post something".
+    // Deliver exactly like the router's Step 6: prefix in shared spaces, and
+    // let sendGoogleChatResponse fit the result to Google Chat's byte budget
+    // (formatJobChatResponse no longer truncates — see chat-text-budget.ts).
+    // A failed turn's response is already the harness's failure frame —
+    // posting it satisfies "always post something".
     const deliveryOutcome = await sendGoogleChatResponse(
       job.spaceName,
       job.threadName,

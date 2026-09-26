@@ -69,7 +69,8 @@ import type { Readable } from 'node:stream';
 import * as chatPkg from '@googleapis/chat';
 import { Agent as UndiciAgent, fetch as undiciFetch } from 'undici';
 import { classifyTopic, isPrivateMessage, isoWeek, type Topic } from './topic-classifier';
-import { extractRichEnvelope } from './rich-envelope';
+import { extractRichEnvelope, recomposeRichText } from './rich-envelope';
+import { fitChatMessageText, utf8Bytes } from './chat-text-budget';
 import {
   buildWorkspacePath,
   extractAttachments,
@@ -557,7 +558,22 @@ const ROUTER_QUEUE_MAX_RECEIVE_COUNT = parseInt(
   10
 );
 const CHAT_DELIVERY_ENVELOPE_KIND = 'agent-chat-delivery-v1';
-const MAX_CHAT_DELIVERY_ENVELOPE_BYTES = 32 * 1024;
+/**
+ * The durable outbox must never reject a reply the primary Chat call accepted,
+ * so both bounds sit above the 32,000-byte message budget with headroom for
+ * JSON escaping and the re-wrapped rich envelope. SQS itself allows 256 KiB.
+ *
+ * Raise these two together with GOOGLE_CHAT_MESSAGE_BYTE_LIMIT — a mismatch is
+ * invisible until a long reply's first delivery attempt fails and its retry is
+ * silently dropped on the floor.
+ */
+const MAX_CHAT_DELIVERY_ENVELOPE_BYTES = 240 * 1024;
+/**
+ * Canonical text is bounded by construction: prose fits the 32,000-byte budget
+ * and the re-wrapped envelope is reserved out of that same budget, so the worst
+ * case is roughly 64,000 bytes. This is double that, in UTF-16 units.
+ */
+const MAX_CHAT_DELIVERY_TEXT_CHARS = 128 * 1024;
 
 class WorkspaceTurnDeferredError extends Error {
   readonly messageName: string | undefined;
@@ -3096,10 +3112,15 @@ async function sendGoogleChatResponse(
             deliveryContext.deliveryRequestId ?? crypto.randomUUID(),
         }
       : deliveryContext;
+  // Normalize once, here, so the primary Chat call and the durable outbox carry
+  // byte-identical content. Before this, the outbox received the raw reply and
+  // its own envelope guard could reject a response the primary path had already
+  // shortened and accepted — a silently dropped redelivery.
+  const prepared = prepareGoogleChatMessage(spaceName, text, log);
   const input = {
     spaceName,
     threadName,
-    text,
+    text: prepared.deliverableText,
     deliveryContext: retryableContext,
   };
   try {
@@ -3112,7 +3133,8 @@ async function sendGoogleChatResponse(
           await chatClient.spaces.messages.create(request);
         },
         recordFailure,
-      }
+      },
+      prepared
     );
     if (
       outcome !== 'failed' ||
@@ -3278,7 +3300,9 @@ function parseDeferredChatDelivery(
   if (envelope.kind !== CHAT_DELIVERY_ENVELOPE_KIND) return null;
   if (!isBoundedString(envelope.spaceName, 1, 512)) return null;
   if (!validOptionalBoundedString(envelope.threadName, 1024)) return null;
-  if (!isBoundedString(envelope.text, 1, 16 * 1024)) return null;
+  if (!isBoundedString(envelope.text, 1, MAX_CHAT_DELIVERY_TEXT_CHARS)) {
+    return null;
+  }
   const deliveryContext = parseDeferredChatDeliveryContext(
     envelope.deliveryContext
   );
@@ -3323,18 +3347,15 @@ function parseDeferredChatDeliveryRecord(
   return null;
 }
 
-async function enqueueDeferredChatDelivery(
+/**
+ * Serialize the durable-delivery envelope for an already-normalized reply.
+ * Exposed for tests: the outbox's bounds have to stay wide enough for anything
+ * the primary Chat path accepted.
+ */
+function buildDeferredChatDeliveryEnvelope(
   input: ChatResponseInput,
-  log: ReturnType<typeof createLogger>
-): Promise<void> {
-  const queueUrl = process.env.ROUTER_QUEUE_URL;
-  if (!queueUrl) {
-    throw new Error('ROUTER_QUEUE_URL is not configured');
-  }
-  const requestId = input.deliveryContext.deliveryRequestId;
-  if (!requestId) {
-    throw new Error('Durable Chat delivery requires a request id');
-  }
+  requestId: string
+): string {
   const envelope: DeferredChatDeliveryEnvelope = {
     kind: CHAT_DELIVERY_ENVELOPE_KIND,
     spaceName: input.spaceName,
@@ -3353,6 +3374,22 @@ async function enqueueDeferredChatDelivery(
   ) {
     throw new Error('Durable Chat delivery envelope is too large');
   }
+  return messageBody;
+}
+
+async function enqueueDeferredChatDelivery(
+  input: ChatResponseInput,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const queueUrl = process.env.ROUTER_QUEUE_URL;
+  if (!queueUrl) {
+    throw new Error('ROUTER_QUEUE_URL is not configured');
+  }
+  const requestId = input.deliveryContext.deliveryRequestId;
+  if (!requestId) {
+    throw new Error('Durable Chat delivery requires a request id');
+  }
+  const messageBody = buildDeferredChatDeliveryEnvelope(input, requestId);
   const request = {
     QueueUrl: queueUrl,
     MessageBody: messageBody,
@@ -3443,15 +3480,35 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+interface PreparedGoogleChatMessage {
+  messageBody: Record<string, unknown>;
+  hasCards: boolean;
+  hasAccessoryWidgets: boolean;
+  /** True when prose was dropped to fit Google Chat's per-message budget. */
+  truncated: boolean;
+  /**
+   * The canonical reply for the durable outbox: the already-fitted prose with
+   * any rich envelope re-wrapped, so a retry re-extracts the identical body.
+   * Running `prepareGoogleChatMessage` over this value is a no-op.
+   */
+  deliverableText: string;
+}
+
+/**
+ * Build the `spaces.messages.create` request body for an agent reply.
+ *
+ * This is the **only** place the router shortens a reply. Ordering matters: the
+ * rich envelope has to come out before anything is cut, or a long reply that
+ * carries a card gets its closing sentinel chopped off and the user sees raw
+ * JSON instead of a card (`rich_envelope_malformed`). Truncation then happens
+ * against Google's real 32,000-**byte** request budget, with the card payload
+ * reserved out of it.
+ */
 function prepareGoogleChatMessage(
   spaceName: string,
   text: string,
   log: ReturnType<typeof createLogger>
-): {
-  messageBody: Record<string, unknown>;
-  hasCards: boolean;
-  hasAccessoryWidgets: boolean;
-} {
+): PreparedGoogleChatMessage {
   // Pull a rich-output envelope out of the agent reply, if one is present.
   // The envelope carries cardsV2 / accessoryWidgets the chat-card / chat-chart
   // skills produced. Remaining prose becomes the message's `text` field
@@ -3464,23 +3521,44 @@ function prepareGoogleChatMessage(
     });
   }
 
-  const messageBody: Record<string, unknown> = {};
+  const richParts: Record<string, unknown> = {};
   if (envelope) {
-    if (envelope.cardsV2) messageBody.cardsV2 = envelope.cardsV2;
-    if (envelope.accessoryWidgets) messageBody.accessoryWidgets = envelope.accessoryWidgets;
-    if (envelope.actionResponse) messageBody.actionResponse = envelope.actionResponse;
-    // Google Chat requires `text` non-empty for notification previews, even
-    // when cardsV2 carries the visible payload. Prefer the agent's prose,
-    // then the explicit textFallback, then a generic placeholder.
-    const fallback = remaining || envelope.textFallback || 'Rich response';
-    messageBody.text = fallback;
-  } else {
-    messageBody.text = remaining || text;
+    if (envelope.cardsV2) richParts.cardsV2 = envelope.cardsV2;
+    if (envelope.accessoryWidgets) {
+      richParts.accessoryWidgets = envelope.accessoryWidgets;
+    }
+    if (envelope.actionResponse) {
+      richParts.actionResponse = envelope.actionResponse;
+    }
   }
+  // Google Chat requires `text` non-empty for notification previews, even when
+  // cardsV2 carries the visible payload. Prefer the agent's prose, then the
+  // explicit textFallback, then a generic placeholder.
+  // `remaining` arrives trimmed; trim the fallback too so re-preparing
+  // `deliverableText` yields the identical body (extraction trims the prose it
+  // returns, and the outbox re-runs this function on retry).
+  const prose = envelope
+    ? remaining || envelope.textFallback?.trim() || 'Rich response'
+    : remaining || text;
+  // Cards count against the same 32,000-byte request budget as the text field.
+  const fitted = fitChatMessageText(prose, richParts);
+  if (fitted.truncated) {
+    log.warn('chat_text_truncated_at_cap', {
+      space: spaceName,
+      originalBytes: fitted.originalBytes,
+      deliveredBytes: fitted.deliveredBytes,
+      reservedBytes: fitted.reservedBytes,
+      budgetExhausted: fitted.budgetExhausted,
+      hasCards: Boolean(envelope?.cardsV2),
+    });
+  }
+
   return {
-    messageBody,
+    messageBody: { ...richParts, text: fitted.text },
     hasCards: Boolean(envelope?.cardsV2),
     hasAccessoryWidgets: Boolean(envelope?.accessoryWidgets),
+    truncated: fitted.truncated,
+    deliverableText: recomposeRichText(fitted.text, richParts),
   };
 }
 
@@ -3540,10 +3618,17 @@ async function recordInPlaceChatDeliveryFailure(
 async function sendGoogleChatResponseWithDependencies(
   input: ChatResponseInput,
   log: ReturnType<typeof createLogger>,
-  dependencies: ChatResponseDependencies
+  dependencies: ChatResponseDependencies,
+  /**
+   * Reuse of the caller's already-normalized request body. Recomputing it is
+   * safe (preparation is idempotent over `deliverableText`) but would log the
+   * truncation warning twice for one delivery.
+   */
+  preparedMessage?: PreparedGoogleChatMessage
 ): Promise<ChatResponseDeliveryOutcome> {
   const { spaceName, threadName, text, deliveryContext } = input;
-  const prepared = prepareGoogleChatMessage(spaceName, text, log);
+  const prepared =
+    preparedMessage ?? prepareGoogleChatMessage(spaceName, text, log);
   const messageBody: Record<string, unknown> = {
     ...prepared.messageBody,
     ...(threadName ? { thread: { name: threadName } } : {}),
@@ -3606,6 +3691,8 @@ async function sendGoogleChatResponseWithDependencies(
   log.info('Response sent to Google Chat', {
     space: spaceName,
     responseLength: text.length,
+    responseBytes: utf8Bytes(text),
+    truncatedAtCap: prepared.truncated,
     hasCards: prepared.hasCards,
     hasAccessoryWidgets: prepared.hasAccessoryWidgets,
     ...(channelRebound ? { channelRebound: true } : {}),
@@ -5151,34 +5238,20 @@ async function invokeCrossUserAgent(
 function buildCrossUserResponse(
   invocation: CrossUserInvocation,
   targetUser: AgentUser,
-  result: AgentCoreResult,
-  log: ReturnType<typeof createLogger>
+  result: AgentCoreResult
 ): string {
   const deprecationNotice =
     invocation.source === 'text-prefix'
       ? `\n\n_Tip: \`/ask ${invocation.targetUsername} ...\` works too (and is faster)_`
       : '';
-  const maxLength = 4096;
-  const truncationSuffix =
-    '\n\n_(Response truncated -- ask me to continue)_';
   const ownerLabel = targetUser.displayName || targetUser.email;
   const prefix = `[${ownerLabel}'s Agent] `;
-  const reservedLength = prefix.length + deprecationNotice.length;
-  const availableLength = Math.max(maxLength - reservedLength, 0);
-  if (availableLength === 0) {
-    log.warn(
-      'Cross-user response body fully truncated due to long prefix/notice',
-      { reservedLength, maxLength, ownerLabel }
-    );
-  }
-  const response =
-    result.response.length > availableLength
-      ? result.response.substring(
-          0,
-          Math.max(availableLength - truncationSuffix.length, 0)
-        ) + truncationSuffix
-      : result.response;
-  return `${prefix}${response}${deprecationNotice}`;
+  // Composition only. Fitting the result into Google Chat's byte budget happens
+  // once, in prepareGoogleChatMessage, after the rich envelope has been lifted
+  // out — see chat-text-budget.ts. In the rare case the reply exceeds the
+  // budget, the truncation notice replaces this `/ask` tip; the notice is the
+  // more useful of the two at that point.
+  return `${prefix}${result.response}${deprecationNotice}`;
 }
 
 interface CrossUserTurnContext {
@@ -5268,7 +5341,7 @@ async function runCrossUserTurn(
   await sendGoogleChatResponse(
     human.spaceName,
     human.threadName,
-    buildCrossUserResponse(invocation, targetUser, turn.result, log),
+    buildCrossUserResponse(invocation, targetUser, turn.result),
     log,
     humanChatDeliveryContext(human, turn.sessionId, true)
   );
@@ -5622,23 +5695,13 @@ function buildOwnerResponse(
   result: AgentCoreResult,
   responsePrefix = ''
 ): string {
-  const maxLength = 4096;
-  const truncationSuffix =
-    '\n\n_(Response truncated — ask me to continue)_';
   const prefix =
     responsePrefix ||
     (human.chatEvent.space.type === 'DM'
       ? ''
       : `[${human.senderDisplayName}'s Agent] `);
-  const availableLength = maxLength - prefix.length;
-  const response =
-    result.response.length > availableLength
-      ? result.response.substring(
-          0,
-          availableLength - truncationSuffix.length
-        ) + truncationSuffix
-      : result.response;
-  return `${prefix}${response}`;
+  // Composition only — see buildCrossUserResponse and chat-text-budget.ts.
+  return `${prefix}${result.response}`;
 }
 
 async function recordOwnerResult(
@@ -5823,6 +5886,8 @@ export const agentRouterTestHelpers = {
   isDuplicateMessage,
   parseDeferredChatDelivery,
   parseDeferredChatDeliveryRecord,
+  prepareGoogleChatMessage,
+  buildDeferredChatDeliveryEnvelope,
   markPromotedTurnRecoveredWithDependencies,
   btwSlashCommandId: BTW_SLASH_COMMAND_ID,
 };

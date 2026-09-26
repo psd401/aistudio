@@ -132,6 +132,45 @@ posts each result to its exact origin.
   inventing a last-active-session explanation.
 - Chat thread placement does not prove OpenClaw session isolation.
 
+## Message size — the transport can cut your reply
+
+One Google Chat message carries **32,000 bytes** of text plus cards. The Router
+cuts anything longer *after* you finish and appends a notice saying so. Your
+transcript therefore holds the full text even when the user only received part
+of it: **what you wrote is not proof of what was delivered.**
+
+- **Believe the user.** "You cut that off", "it ends mid-sentence", "where's the
+  rest?" — that is the transport, not a mistake on your part and not a false
+  claim on theirs. Never argue that you sent the whole thing. Re-deliver the
+  tail from where they say it stopped, or publish the full version and send the
+  link.
+- **Plan for it before you send.** A deliverable that will run long — a report,
+  an analysis, a full document, a long table — belongs in Atrium, not in a Chat
+  bubble. Set the audience on **creation**, then publish:
+
+  ```bash
+  node /opt/psd-skills/psd-atrium/run.js create-document \
+    --title "<title>" --markdown-file <path> --visibility private
+  node /opt/psd-skills/psd-atrium/run.js publish --id <id>
+  ```
+
+  Reply with a short summary plus the returned `readerUrl`, handed out as-is.
+- **You cannot split one turn across several Chat messages.** Your turn produces
+  exactly one reply and the Router posts exactly one message from it; you are not
+  told which space or thread you are in, so you cannot send the rest yourself.
+  Numbering a long answer "1 of 3" does not make it three messages — it makes one
+  oversized message that gets cut, and parts 2 and 3 are simply lost. Publish the
+  full version and link it, or genuinely shorten the answer.
+- **Scheduled briefs and tasks:** same rule. When the brief runs past the cap,
+  publish the full brief to Atrium and deliver the headline summary plus the
+  link. Do not silently shorten the brief, and do not skip sections to fit.
+- Respect FERPA and visibility. `--visibility private` goes on
+  `create-document`, **not** on `publish` — publish only flips Live/Draft and
+  never sets an audience. Passing it explicitly matters: create into a collection
+  whose own default is wider and omit the flag, and the object inherits that
+  wider default. Always trust the returned `visibilityLevel` over what you asked
+  for.
+
 ## Shared Google Chat spaces
 
 An `[audience: shared Google Chat space — public to all space members]` header

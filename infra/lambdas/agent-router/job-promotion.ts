@@ -196,14 +196,15 @@ export function jobAgentAudienceContext(
   return job.isDM ? {} : { audience: 'shared-space' };
 }
 
-const JOB_RESPONSE_MAX_LENGTH = 4096;
-const JOB_TRUNCATION_SUFFIX =
-  '\n\n_(Response truncated — ask me to continue)_';
-
 /**
  * Format the final background-job reply exactly once, independently of the
  * runner's AWS/Chat side effects. A router-selected prefix (such as
  * "[aside]") takes precedence over the normal shared-space attribution.
+ *
+ * Composition only: fitting the reply into Google Chat's 32,000-byte request
+ * budget happens downstream in `prepareGoogleChatMessage`, after the rich
+ * envelope has been lifted out. Cutting here would sever a card's closing
+ * sentinel and deliver raw JSON — see chat-text-budget.ts.
  */
 export function formatJobChatResponse(
   job: Pick<JobPayload, 'isDM' | 'displayName' | 'responsePrefix'>,
@@ -212,15 +213,7 @@ export function formatJobChatResponse(
   const prefix =
     job.responsePrefix ||
     (job.isDM ? '' : `[${job.displayName}'s Agent] `);
-  const availableLength = JOB_RESPONSE_MAX_LENGTH - prefix.length;
-  const truncatedResponse =
-    response.length > availableLength
-      ? response.substring(
-          0,
-          availableLength - JOB_TRUNCATION_SUFFIX.length
-        ) + JOB_TRUNCATION_SUFFIX
-      : response;
-  return `${prefix}${truncatedResponse}`;
+  return `${prefix}${response}`;
 }
 
 /**
