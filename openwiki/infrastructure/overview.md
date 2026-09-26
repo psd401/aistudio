@@ -1,7 +1,7 @@
 ---
 type: Infrastructure Overview
 title: AWS CDK Infrastructure
-description: AWS CDK infrastructure with ECS Fargate, Aurora Serverless v2, Cognito authentication, and modular construct library for K-12 AI platform deployment.
+description: AWS CDK infrastructure with ECS Fargate, Aurora Serverless v2, Cognito authentication, modular construct library, and chat delivery budget enforcement for K-12 AI platform deployment.
 tags: [infrastructure, cdk, aws, deployment, ecs]
 openwiki:
   roles: [infrastructure, operations]
@@ -19,6 +19,8 @@ openwiki:
     - infra/lib/atrium-sandbox-host-page.ts
     - infra/sandbox-host/render.html
     - infra/agent-image/check_config_consistency.py
+    - infra/lambdas/agent-router/chat-text-budget.ts
+    - infra/lambdas/agent-cron/chat-text-budget.ts
   test_paths:
     - infra/test/ecs-scheduled-scaling.test.ts
     - infra/test/frontend-waf-body-signatures.test.ts
@@ -26,6 +28,9 @@ openwiki:
     - infra/agent-image/test_check_config_consistency.py
     - tests/e2e/atrium-sandbox-script-order.spec.ts
     - tests/smoke/atrium-artifact-sandbox-host.smoke.ts
+    - infra/lambdas/agent-router/chat-text-budget.test.ts
+    - infra/lambdas/agent-router/chat-delivery-budget.test.ts
+    - infra/lambdas/agent-cron/chat-text-budget.lockstep.test.ts
 ---
 
 # Infrastructure
@@ -271,6 +276,32 @@ The `agent-router` Lambda handles agent request routing with automatic failure t
 - **Fails safe on missing attributes**: If `ApproximateReceiveCount` is missing or unparseable, records anyway—the prior default of "skip" meant records with no attributes dead-lettered silently
 - **Receives retry limit via env var**: `ROUTER_QUEUE_MAX_RECEIVE_COUNT` is passed from the stack (line 122 of `/infra/lib/agent-platform-stack.ts`) to ensure Lambda and queue redrive policy stay synchronized
 - **Decouples retry latency from DB health**: Visibility shortening runs before the telemetry write, so a slow or exhausted DB pool cannot block prompt retry
+
+Without this telemetry, deferred retries could vanish with no `agent_failures` row, no metric, and nothing on the usage dashboard. In production (2026-08-20 to 2026-08-31), 50 real user messages died across 8 people while the failure table recorded only 2 router-sourced rows that week—the DLQ alarm had been publishing to a topic with no subscribers.
+
+For multi-turn agent architecture, see **[agent-platform/overview.md](../agent-platform/overview.md)**.
+
+### Chat Text Budget (#1845)
+
+**Sources**: `/infra/lambdas/agent-router/chat-text-budget.ts`, `/infra/lambdas/agent-cron/chat-text-budget.ts`
+
+Google Chat messages carry **32,000 bytes** of text plus cards—a combined budget measured in serialized request bytes, not character count. The `chat-text-budget` module enforces this limit with:
+
+- **Byte-aware truncation**: Measures `wireBytes(text)` — the size inside JSON, including escaping — not UTF-8 character count
+- **Grapheme-safe cutting**: Uses `Intl.Segmenter` to cut at grapheme boundaries, preserving emoji ZWJ sequences, surrogate pairs, and combining marks
+- **Card reservation**: Reserves bytes for `cardsV2`, `accessoryWidgets`, and request metadata (`thread` object) before cutting text
+- **Metadata reserve**: `REQUEST_METADATA_RESERVE_BYTES = 1,200` held back for fields added after body construction (thread name validated at ≤1024 chars upstream)
+
+**Ordering invariant**: Rich envelopes (`PSD_AGENT_RICH_V1`) are extracted before truncation. Cutting inside the sentinels would leave malformed JSON visible to users (`rich_envelope_malformed`).
+
+**Durable outbox bounds**: `MAX_CHAT_DELIVERY_ENVELOPE_BYTES = 240 KiB` ensures the SQS retry queue never rejects a reply the primary Chat call accepted. Text bound: `MAX_CHAT_DELIVERY_TEXT_CHARS = 128 Ki` in UTF-16 units (double the worst-case serialized size).
+
+**Lockstep test**: `/infra/lambdas/agent-cron/chat-text-budget.lockstep.test.ts` fails if the router and cron copies of `chat-text-budget.ts` drift. Both must stay byte-identical in budget logic.
+
+**Focused Tests**:
+- `/infra/lambdas/agent-router/chat-text-budget.test.ts` — grapheme boundaries, multi-byte prose, card reservation
+- `/infra/lambdas/agent-router/chat-delivery-budget.test.ts` — outbox round-trip with cards
+- `/infra/lambdas/agent-cron/chat-text-budget.lockstep.test.ts` — router/cron parity
 
 Without this telemetry, deferred retries could vanish with no `agent_failures` row, no metric, and nothing on the usage dashboard. In production (2026-08-20 to 2026-08-31), 50 real user messages died across 8 people while the failure table recorded only 2 router-sourced rows that week—the DLQ alarm had been publishing to a topic with no subscribers.
 
