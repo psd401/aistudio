@@ -275,6 +275,12 @@ function selectModelForRuntime(
  * The preferences are attempted strongest-first and are all dropped before the
  * final, unconstrained selection. Function calling outranks the tier floor: a
  * model that cannot invoke a tool is useless to an authoring turn at any tier.
+ *
+ * They run in SHADOW mode too, even though shadow executes the legacy fallback.
+ * Shadow's whole job is to answer "what would active routing have chosen?", so a
+ * proposal that skipped these preferences would compare the wrong thing —
+ * reporting the light model (and `workspace_artifact_min_tier_unmet`) for a
+ * deployment where active mode would have reached the high one.
  */
 function selectModelForToolUse(
   args: Parameters<typeof selectModel>[0],
@@ -283,22 +289,20 @@ function selectModelForToolUse(
   prefersFunctionCalling: boolean
 ): { model: NexusModelRow; fallbackUsed: boolean } {
   const unconstrained = { ...args, minTier: undefined }
-  if (mode === "active") {
-    const preferences: Partial<Parameters<typeof selectModel>[0]>[] = []
-    if (prefersFunctionCalling && args.minTier) {
-      preferences.push({ requiresFunctionCalling: true, minTier: args.minTier })
-    }
-    if (prefersFunctionCalling) preferences.push({ requiresFunctionCalling: true, minTier: undefined })
-    if (args.minTier) preferences.push({ minTier: args.minTier })
-    for (const preference of preferences) {
-      try {
-        return selectModel({ ...unconstrained, ...preference })
-      } catch (error) {
-        log.warn("A routing preference could not be satisfied; trying the next one", {
-          preference: { ...preference, minTier: preference.minTier ?? null },
-          error: error instanceof Error ? error.message : String(error),
-        })
-      }
+  const preferences: Partial<Parameters<typeof selectModel>[0]>[] = []
+  if (prefersFunctionCalling && args.minTier) {
+    preferences.push({ requiresFunctionCalling: true, minTier: args.minTier })
+  }
+  if (prefersFunctionCalling) preferences.push({ requiresFunctionCalling: true, minTier: undefined })
+  if (args.minTier) preferences.push({ minTier: args.minTier })
+  for (const preference of preferences) {
+    try {
+      return selectModel({ ...unconstrained, ...preference })
+    } catch (error) {
+      log.warn("A routing preference could not be satisfied; trying the next one", {
+        preference: { ...preference, minTier: preference.minTier ?? null },
+        error: error instanceof Error ? error.message : String(error),
+      })
     }
   }
   return unconstrained.requiredTools.length > 0

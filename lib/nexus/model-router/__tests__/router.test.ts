@@ -996,6 +996,21 @@ describe("Nexus model router workspace artifact tier floor", () => {
 
       expect(result.modelId).toBe("gpt-luna")
     })
+
+    /**
+     * Shadow mode exists to answer "what would active routing have chosen?", so
+     * a proposal that skipped the floor would compare the wrong thing — naming
+     * the light model for a deployment where active mode reaches the high one.
+     */
+    it("proposes the same high model in shadow mode while executing the fallback", async () => {
+      mockGetConfig.mockResolvedValue({ config, mode: "shadow" })
+
+      const result = await routeNexusRequest({ ...shortFollowUp, workspace: editableArtifact })
+
+      expect(result.modelId).toBe("gpt-luna")
+      expect(result.metadata.proposedModelId).toBe("gpt-sol")
+      expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier_unmet")
+    })
   })
 
   /**
