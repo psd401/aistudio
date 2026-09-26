@@ -26,18 +26,33 @@ while still overshooting Google's real 32,000-byte combined limit.
 
 ## Solution
 
-Write the regression test to serialize the *actual outgoing request body*
-(prose + cards + accessory widgets, exactly as constructed for the Google Chat
-API call) and assert its byte length against the vendor's stated limit
-directly, not against an internal reservation constant.
+Two changes, and the order matters — the failing test came first:
+
+1. The regression test was written against the *assembled request*, not against
+   the reservation constant: it measures the delivered text plus the card payload
+   and asserts the total against the vendor's stated limit. That is what surfaced
+   the 12-byte overshoot; a test comparing the reservation to the card size alone
+   would have passed.
+2. The reservation was then widened to
+   `JSON.stringify({ ...richParts, text: '' })`, which prices the field names,
+   braces and array wrappers as well as the card itself.
+
+Note what the assertion deliberately does **not** do: measure
+`JSON.stringify(messageBody)`. JSON escaping inflates the text field (a newline
+becomes `\n`, two bytes for one), and Google's documented limit is on message
+content, not on the escaped transport encoding. Asserting the escaped size would
+have been a stricter-but-wrong bar that the helper could never satisfy.
 
 ## Prevention
 
 - Before building logic on a numeric vendor limit, verify it against the
-  vendor's own docs (in this case, developers.google.com/workspace/chat —
-  32,000 bytes for text + cards combined, not per-field), and treat it as a
-  falsifiable assumption until confirmed.
-- For any budget/cap enforced against a serialized wire format, test against
-  the actual serialized bytes of the real payload, not an internal proxy
-  quantity — the proxy can drift from the wire format by exactly the amount
-  of scaffolding the format adds.
+  vendor's own docs and quote it in the code. Here,
+  developers.google.com/workspace/chat/create-messages states verbatim: "The
+  maximum message size (including any text or cards) is 32,000 bytes." It is one
+  combined budget, not a per-field ceiling — which is exactly why a reservation
+  model is needed rather than a fixed cap on the text field. An adversarial
+  review flagged this figure as an unverified assumption; it happened to be
+  right, but nothing in the branch had established that.
+- For any budget enforced against an assembled payload, test the assembled
+  payload, not an internal proxy quantity — the proxy drifts from the real thing
+  by exactly the scaffolding the format adds.

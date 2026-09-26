@@ -10,11 +10,14 @@ applicable_to: project
 
 ## What Happened
 
-Fixing the Google Chat byte-budget bug (PR #1845), the durable-outbox retry path
-dead-lettered every reply on redelivery even though the primary send had
-succeeded. Root cause: `recomposeRichText()` re-serialized the *entire parsed*
-rich envelope object to build the canonical outbox text, rather than the
-specific fields the caller actually forwarded to the Google Chat API.
+While fixing the Google Chat byte-budget bug (PR #1845), review found that the
+durable-outbox retry path could dead-letter a reply the primary send had already
+accepted. Caught in review, not in production — the window was a card-bearing
+reply carrying an unbudgeted field large enough to push the canonical outbox text
+past its bound, not every reply. Root cause: `recomposeRichText()` re-serialized
+the *entire parsed* rich envelope object to build the canonical outbox text,
+rather than the specific fields the caller actually forwarded to the Google Chat
+API.
 
 ## Root Cause
 
@@ -23,9 +26,10 @@ specific fields the caller actually forwarded to the Google Chat API.
 (`reservedBytes`) was computed only from the fields sent to Google
 (`cardsV2`/`accessoryWidgets`/`actionResponse`), but the re-wrap for the retry
 queue serialized the whole parsed object. A model-invented `textFallback`
-property (never sent to Google, never budgeted) rode along in the re-wrap: the
-primary call fit and succeeded, the re-serialized retry payload did not fit the
-same bound, and it failed on every dequeue attempt until it dead-lettered.
+property (never sent to Google, never budgeted, and capped nowhere in the
+chat-card or chat-chart skills) rode along in the re-wrap: the primary call fit
+and succeeded, and a large enough value made the re-serialized retry payload
+exceed the same bound, so it would fail on every dequeue until it dead-lettered.
 
 The first attempt at a fix removed `textFallback` by name — a deny-list. Review
 caught that this doesn't generalize: any other unbudgeted property the model
