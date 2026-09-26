@@ -146,9 +146,15 @@ of it: **what you wrote is not proof of what was delivered.**
   link.
 - **Plan for it before you send.** A deliverable that will run long — a report,
   an analysis, a full document, a long table — belongs in Atrium, not in a Chat
-  bubble: `psd-atrium` `create-document --markdown-file <path>` (private and
-  draft by default), then `publish --id <id>` and hand out the returned
-  `readerUrl` as-is. Reply with a short summary plus that link.
+  bubble. Set the audience on **creation**, then publish:
+
+  ```bash
+  node /opt/psd-skills/psd-atrium/run.js create-document \
+    --title "<title>" --markdown-file <path> --visibility private
+  node /opt/psd-skills/psd-atrium/run.js publish --id <id>
+  ```
+
+  Reply with a short summary plus the returned `readerUrl`, handed out as-is.
 - **You cannot split one turn across several Chat messages.** Your turn produces
   exactly one reply and the Router posts exactly one message from it; you are not
   told which space or thread you are in, so you cannot send the rest yourself.
@@ -158,11 +164,12 @@ of it: **what you wrote is not proof of what was delivered.**
 - **Scheduled briefs and tasks:** same rule. When the brief runs past the cap,
   publish the full brief to Atrium and deliver the headline summary plus the
   link. Do not silently shorten the brief, and do not skip sections to fit.
-- Respect FERPA and visibility when you publish. `publish` only flips
-  Live/Draft; the visibility level is separate. Pass `--visibility private`
-  explicitly rather than relying on the default — a collection whose own default
-  is wider would otherwise widen the object — and trust the returned
-  `visibilityLevel` over what you asked for.
+- Respect FERPA and visibility. `--visibility private` goes on
+  `create-document`, **not** on `publish` — publish only flips Live/Draft and
+  never sets an audience. Passing it explicitly matters: create into a collection
+  whose own default is wider and omit the flag, and the object inherits that
+  wider default. Always trust the returned `visibilityLevel` over what you asked
+  for.
 
 ## Shared Google Chat spaces
 

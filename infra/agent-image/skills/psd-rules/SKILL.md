@@ -214,10 +214,15 @@ of what arrived**.
   send or claim you delivered the whole thing. Re-deliver the tail from where
   they say it stopped, or publish the full version and send the link.
 - **Decide before you send, not after.** A long deliverable — report, analysis,
-  full document, long table — goes to Atrium: `psd-atrium`
-  `create-document --markdown-file <path>` (private + draft by default), then
-  `publish --id <id>`, and hand out the returned `readerUrl` verbatim (R2). Reply
-  with a short summary plus that link.
+  full document, long table — goes to Atrium. Set the audience on creation, then
+  publish, and hand out the returned `readerUrl` verbatim (R2) with a short
+  summary:
+
+  ```bash
+  node /opt/psd-skills/psd-atrium/run.js create-document \
+    --title "<title>" --markdown-file <path> --visibility private
+  node /opt/psd-skills/psd-atrium/run.js publish --id <id>
+  ```
 - **You cannot split one turn across several messages.** Your turn yields exactly
   one reply and the Router posts exactly one message from it; you are never told
   which space or thread you are in, so there is no way to send the rest yourself.
@@ -227,11 +232,11 @@ of what arrived**.
 - **Scheduled briefs and tasks obey the same rule:** over the cap, publish the
   full brief to Atrium and deliver the headline summary plus the link. Never drop
   sections to fit, and never pad a brief toward the limit.
-- Publishing respects FERPA and visibility. `publish` flips Live/Draft only; the
-  visibility level is a separate setting. Pass `--visibility private`
-  explicitly rather than relying on the default — a collection whose own default
-  is wider would otherwise widen the object — and report the returned
-  `visibilityLevel`, not the one you requested.
+- FERPA and visibility: `--visibility private` belongs on `create-document`,
+  **never** on `publish`, which flips Live/Draft only and sets no audience.
+  Omitting it while creating into a collection whose own default is wider makes
+  the object inherit that wider default. Report the returned `visibilityLevel`,
+  not the one you requested.
 
 ---
 

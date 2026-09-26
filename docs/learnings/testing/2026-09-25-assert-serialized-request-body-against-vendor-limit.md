@@ -37,11 +37,22 @@ Two changes, and the order matters — the failing test came first:
    `JSON.stringify({ ...richParts, text: '' })`, which prices the field names,
    braces and array wrappers as well as the card itself.
 
-Note what the assertion deliberately does **not** do: measure
-`JSON.stringify(messageBody)`. JSON escaping inflates the text field (a newline
-becomes `\n`, two bytes for one), and Google's documented limit is on message
-content, not on the escaped transport encoding. Asserting the escaped size would
-have been a stricter-but-wrong bar that the helper could never satisfy.
+A later review round pushed this further, and was right to. My first instinct was
+that asserting `JSON.stringify(messageBody)` would be a stricter-but-wrong bar,
+because Google's limit reads as being on message *content* while JSON escaping
+inflates the text field (a newline becomes `\n`, two bytes for one). The numbers
+settled it: `'a\n'.repeat(16_000)` is 32,000 UTF-8 bytes and serializes to
+48,000. Budgeting the decoded length "fitted" that reply to exactly the limit and
+would have had Google reject the assembled request outright — and a rejection
+loses the *entire* response and then dead-letters every durable retry of it,
+which is strictly worse than truncating the reply. So the budget is now spent in
+serialized bytes (`wireBytes`), plus a held-back allowance for request fields
+spliced in after the fit (`thread`), and the test asserts the fully assembled,
+serialized body.
+
+The general lesson: when you cannot confirm which side of an encoding boundary a
+vendor measures, pick the accounting whose failure mode is graceful. Over-counting
+delivers a few percent less text; under-counting loses the whole message.
 
 ## Prevention
 
