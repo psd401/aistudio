@@ -1,7 +1,7 @@
 ---
 type: Platform Overview
 title: Agent Platform & Skills System
-description: Extensible agent skill system with 39 domain-specific capabilities including media processing (HTML-to-PDF, ffmpeg, transcription), Google Workspace integration, Cedar governance, and MCP tool exposure for K-12 AI assistants.
+description: Extensible agent skill system with 39 domain-specific capabilities including media processing, Google Workspace integration, Cedar governance, MCP tool exposure, and transport truncation awareness for K-12 AI assistants.
 tags: [agents, skills, mcp, workspace, governance]
 openwiki:
   roles: [infrastructure, domain]
@@ -9,6 +9,8 @@ openwiki:
     - infra/agent-image/skills/psd-atrium/SKILL.md
     - infra/agent-image/skills/psd-html-artifact/SKILL.md
     - infra/agent-image/skills/psd-workspace/SKILL.md
+    - infra/agent-image/SOUL.md
+    - infra/agent-image/skills/psd-rules/SKILL.md
     - lib/content/atrium-data-contract.ts
     - lib/agent-workspace/command-executor.ts
   test_paths:
@@ -287,6 +289,41 @@ This was invisible to `ReplyIsTheAnswerOnly` tests for two years because `FakeGa
 ### Test Validation
 
 **Source**: `/infra/agent-image/test_reply_replay.py`
+
+---
+
+## Transport Truncation Awareness
+
+**Sources**: `/infra/agent-image/SOUL.md`, `/infra/agent-image/skills/psd-rules/SKILL.md`
+
+### Message Size Boundary
+
+One Google Chat message carries **32,000 bytes** of text plus cards. The Router truncates anything longer *after* the agent finishes and appends a notice. The agent's transcript therefore holds full text even when the user received only part of it: **what the agent wrote is not proof of what was delivered.**
+
+### Agent Guidance
+
+The SOUL.md "Message size — the transport can cut your reply" section (lines 135-172) instructs the agent on:
+
+- **Believe the user.** When they say "you cut that off" or "where's the rest?", they are right. The transport did it, not the agent. Never argue that the full text was sent. Re-deliver the tail from where they say it stopped, or publish the full version and share the link.
+- **Plan before sending.** Long deliverables (reports, analyses, tables) belong in Atrium, not Chat bubbles. Create the document with `--visibility private`, publish it, and reply with a short summary plus the returned `readerUrl`.
+- **One turn produces one message.** The agent cannot split across multiple Chat messages. Numbering "1 of 3" does not make three messages—it makes one oversized message that gets cut. Parts 2 and 3 are lost.
+- **Scheduled briefs follow the same rule.** When a scheduled brief runs past the cap, publish the full brief and deliver the headline summary plus link. Never silently shorten the brief or skip sections to fit.
+
+### FERPA and Visibility
+
+Document creation uses `--visibility private` on the `create-document` command, not on `publish`. Publish flips only Live/Draft and never sets an audience. Creation into a collection with a wider default audience, without the visibility flag, causes the document to inherit that wider default—so explicit visibility matters.
+
+### Rule 6a Integration
+
+The `psd-rules` skill includes Rule 6a covering transport truncation behavior, matching the SOUL.md guidance. The self-check line at rule end verifies the agent's reply does not claim a tool/step/file or use forbidden narration patterns.
+
+### Historical Context
+
+Prior to #1845, every Chat delivery path capped replies at 4,096 *characters* (not bytes) and appended "(Response truncated -- ask me to continue)". The cap was 87% below Google's real 32,000-byte limit. The suffix blamed the agent ("ask me"), but truncation happened after the agent returned. When users said "you cut that off", the agent truthfully denied it—the transcript held the full text. The new guidance closes this mismatch by naming the transport as the cause and offering two recovery paths (re-send tail, or publish + link).
+
+---
+
+## Fused Chat Final Recovery
 
 The `FusedChatFinalDoesNotOverrideTheTerminalSegment` test suite validates:
 
