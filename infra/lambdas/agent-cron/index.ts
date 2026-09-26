@@ -61,7 +61,8 @@ import {
   ExecuteStatementCommand,
   RDSDataClient,
 } from '@aws-sdk/client-rds-data';
-import { extractRichEnvelope } from './rich-envelope';
+import { extractRichEnvelope, recomposeRichText } from './rich-envelope';
+import { fitChatText, utf8Bytes } from './chat-text-budget';
 import {
   createScheduledInvocationContextToken,
   deriveScheduledRequestProofKey,
@@ -1182,6 +1183,8 @@ type PreparedScheduledChatMessage = {
   requestBody: Record<string, unknown>;
   retryText: string;
   responseLength: number;
+  responseBytes: number;
+  truncated: boolean;
   hasCards: boolean;
   hasAccessoryWidgets: boolean;
 };
@@ -1192,10 +1195,9 @@ function prepareScheduledChatMessage(
   log: Logger,
 ): PreparedScheduledChatMessage {
   // Lift any PSD_AGENT_RICH_V1 envelope out of the reply before truncating —
-  // the sentinels are way past the 4096 ceiling when the envelope is real,
-  // and we want the card payload to survive intact. Mirrors the
-  // agent-router behaviour so scheduled tasks (morning brief etc.) can
-  // deliver cards/charts too.
+  // a cut inside the sentinels leaves a malformed envelope and the user sees
+  // raw JSON instead of a card. Mirrors the agent-router behaviour so
+  // scheduled tasks (morning brief etc.) can deliver cards/charts too.
   const { envelope, remaining, malformed } = extractRichEnvelope(text);
   if (malformed) {
     log.warn('rich_envelope_malformed — falling back to plain text', {
@@ -1204,26 +1206,42 @@ function prepareScheduledChatMessage(
     });
   }
 
-  const maxLength = 4096;
-  const proseSource = envelope ? remaining || envelope.textFallback || 'Rich response' : remaining || text;
-  const truncated =
-    proseSource.length > maxLength
-      ? proseSource.substring(0, maxLength - 50) + '\n\n_(Response truncated)_'
-      : proseSource;
-
-  const requestBody: Record<string, unknown> = { text: truncated };
+  const richParts: Record<string, unknown> = {};
   if (envelope) {
-    if (envelope.cardsV2) requestBody.cardsV2 = envelope.cardsV2;
-    if (envelope.accessoryWidgets) requestBody.accessoryWidgets = envelope.accessoryWidgets;
+    if (envelope.cardsV2) richParts.cardsV2 = envelope.cardsV2;
+    if (envelope.accessoryWidgets) {
+      richParts.accessoryWidgets = envelope.accessoryWidgets;
+    }
+  }
+  const proseSource = envelope
+    ? remaining || envelope.textFallback || 'Rich response'
+    : remaining || text;
+  // Google Chat's real ceiling is 32,000 bytes of text + cards, not 4,096
+  // characters. Cards share that budget, so reserve the serialized body with an
+  // empty text field — the card payload plus the JSON scaffolding around it.
+  const reservedBytes = utf8Bytes(JSON.stringify({ ...richParts, text: '' }));
+  const fitted = fitChatText(proseSource, { reservedBytes });
+  if (fitted.truncated) {
+    log.warn('chat_text_truncated_at_cap', {
+      space: spaceName,
+      originalBytes: fitted.originalBytes,
+      deliveredBytes: fitted.deliveredBytes,
+      reservedBytes,
+      budgetExhausted: fitted.budgetExhausted,
+      hasCards: Boolean(envelope?.cardsV2),
+    });
   }
 
   return {
-    requestBody,
-    // The durable outbox intentionally carries the already-normalized prose.
-    // Its strict 32-KiB envelope can therefore never reject a response that
-    // the initial Chat call accepted after applying the 4096-char limit.
-    retryText: truncated,
-    responseLength: truncated.length,
+    requestBody: { ...richParts, text: fitted.text },
+    // The durable outbox carries the already-fitted prose with the rich
+    // envelope re-wrapped, so its bounds can never reject a response the
+    // initial Chat call accepted — and a retried card stays a card instead of
+    // silently degrading to plain prose.
+    retryText: recomposeRichText(fitted.text, envelope),
+    responseLength: fitted.text.length,
+    responseBytes: fitted.deliveredBytes,
+    truncated: fitted.truncated,
     hasCards: Boolean(envelope?.cardsV2),
     hasAccessoryWidgets: Boolean(envelope?.accessoryWidgets),
   };
@@ -1244,6 +1262,8 @@ async function sendPreparedChatMessage(
   log.info('Scheduled response sent to Google Chat', {
     space: spaceName,
     responseLength: prepared.responseLength,
+    responseBytes: prepared.responseBytes,
+    truncatedAtCap: prepared.truncated,
     hasCards: prepared.hasCards,
     hasAccessoryWidgets: prepared.hasAccessoryWidgets,
   });
@@ -1277,7 +1297,10 @@ async function enqueueScheduledChatDelivery(
     text,
     requestId,
   );
-  if (Buffer.byteLength(messageBody, 'utf8') > 32 * 1024) {
+  if (
+    Buffer.byteLength(messageBody, 'utf8') >
+    MAX_SCHEDULED_CHAT_DELIVERY_ENVELOPE_BYTES
+  ) {
     throw new Error('Scheduled Chat delivery envelope is too large');
   }
   let lastError: unknown;
@@ -1305,6 +1328,13 @@ async function enqueueScheduledChatDelivery(
     requestId,
   });
 }
+
+/**
+ * Must stay in lockstep with the router's MAX_CHAT_DELIVERY_ENVELOPE_BYTES:
+ * the router is what parses this envelope back off the queue, and the outbox
+ * must never reject a reply the primary Chat call accepted. SQS allows 256 KiB.
+ */
+const MAX_SCHEDULED_CHAT_DELIVERY_ENVELOPE_BYTES = 240 * 1024;
 
 function buildScheduledChatDeliveryEnvelope(
   spaceName: string,

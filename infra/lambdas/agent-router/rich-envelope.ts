@@ -92,3 +92,24 @@ export function extractRichEnvelope(text: string | null | undefined): ExtractRes
     malformed: sawMalformed,
   };
 }
+
+/**
+ * Re-emit `prose` plus an envelope as a single canonical string that
+ * `extractRichEnvelope` parses back into exactly these two parts.
+ *
+ * The durable delivery outbox carries one `text` field and re-runs extraction
+ * on retry, so a reply whose cards were lifted out for the first attempt has to
+ * be re-wrapped before it goes on the queue — otherwise the retry silently
+ * degrades a card into plain prose. `prose` must already be trimmed, which is
+ * what `extractRichEnvelope` returns.
+ */
+export function recomposeRichText(
+  prose: string,
+  envelope: RichEnvelope | null
+): string {
+  if (!envelope) return prose;
+  const block = `${RICH_ENVELOPE_OPEN}${JSON.stringify(
+    envelope
+  )}${RICH_ENVELOPE_CLOSE}`;
+  return prose ? `${prose}\n${block}` : block;
+}
