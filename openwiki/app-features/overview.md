@@ -203,6 +203,11 @@ openwiki:
     - Personal and archived collections never grant passage — passage only through active district collections (#1837)
     - Live follows latest save — readers see newest version without Republish unless collection requires approval or data-bridge mode differs (#1837)
     - Migration 185 backfilled Live publications — deploy and migration could land in either order (#1837)
+    - Workspace artifact tier floor — editable-artifact turns run at medium or higher, never light, because short follow-ups need tool-calling models (#1840)
+    - Tier floor is a minimum not a cap — high classification keeps its tier with floor applied only to raise light to medium (#1840)
+    - Shadow mode with required tools withholds floor — avoids rerouting live traffic when shadow executes routed model (#1840)
+    - workspace_artifact_min_tier reason code recorded when floor raised — presence does not guarantee floor took effect (#1840)
+    - workspace_artifact_min_tier_unmet reason code when final model below floor — signals tier preference could not be satisfied (#1840)
   validation_commands:
     - bun run typecheck
     - bun run lint
@@ -276,6 +281,8 @@ openwiki:
     - tests/unit/atrium-rollback.test.ts
     - tests/e2e/atrium-group-visibility.functional.spec.ts
     - tests/e2e/atrium-share-live-follows-save.functional.spec.ts
+    - tests/unit/lib/nexus/model-router/__tests__/router.test.ts
+    - tests/e2e/nexus-workspace-artifact-tier-floor.spec.ts
 ---
 
 # Core Application Features
@@ -528,6 +535,40 @@ The model must keep existing SQL unchanged and ask the user how to proceed rathe
 - `tests/unit/lib/nexus/workspace-routing-contract.test.ts` — Routing predicates
 - `tests/unit/lib/nexus/workspace-routing-context.test.ts` — Workspace resolution logic
 - `tests/unit/nexus-mcp-popover-workspace-connector.test.tsx` — Popover rendering for workspace auto-attached
+
+#### Workspace Artifact Tier Floor (#1840)
+
+While an **editable artifact** is bound to the turn, the router raises the tier floor from `light` to `medium`. The classifier rates only the latest message, so short follow-ups like "did that work?" or "turn live data back on" classify as `light` and would run on models that skip artifact tools entirely. The floor ensures those turns land on a tier where tool-calling is reliable.
+
+**Why this matters**: Observed on the light tier, the model made no tool calls at all and invented UI ("a Live data toggle in the panel header") in place of the `update_workspace_artifact` call that would have done the job. The PSD Data connector from #1786 gave the turn the *tools* — this gives it a model that *decides to use them*.
+
+**Floor Predicate** (same scope as PSD Data attach):
+- **Editable artifacts** → Floor raised to `medium`
+- **Documents** → No floor (different kind)
+- **Read-only viewers** → No floor (`editable: false`)
+
+**Floor as Minimum, Not Cap**: A `high` classification keeps its own tier — the floor only raises `light` to `medium`, never lowers a higher classification.
+
+**Shadow Mode Interaction**: Shadow mode keeps the legacy fallback only when `requiredTools` is empty. When a required tool is present, shadow executes the routed model — so applying the floor would silently reroute live traffic. Both the tier raise AND the `minTier` preference are withheld on those turns, leaving `metadata.tier` at the classifier's verdict. This ensures shadow never changes what actually runs.
+
+**Min-Tier Eligibility**: The candidate sweep (`[tier, medium, light, high]`) prefers accessible light models over high ones. To reach `high` instead when the floor is `medium`, the floor is passed as a hard minimum that makes below-floor models ineligible. Function-calling ability still outranks tier (a model that cannot invoke tools is useless regardless), and the floor is dropped for the final attempt so it never becomes a new way to fail a turn.
+
+**Image Intent Exception**: The image-specialist branch (`intent === "image"` with no input tools) returns a capability-matched model without a tier-aware sweep, so the floor does not apply. An image turn THAT requires input tools falls through to normal tier-aware routing and is floored like any other.
+
+**Reason Codes**:
+- `workspace_artifact_min_tier` — Floor was applied for this turn
+- `workspace_artifact_min_tier_unmet` — Final model fell below floor after all attempts
+
+The presence of `workspace_artifact_min_tier` does NOT guarantee the floor took effect — when the final binding lands below floor (no accessible medium/high candidates), `workspace_artifact_min_tier_unmet` is also recorded.
+
+**Key Sources**:
+- `/lib/nexus/model-router/router.ts` — `WORKSPACE_ARTIFACT_MIN_TIER`, `artifactFloorMayApply()`, `workspaceArtifactMinTier()`, `meetsMinTier()`, `selectionIgnoresTier()`
+- `/lib/nexus/workspace-routing-contract.ts` — `workspaceNeedsPsdData()` predicate shared with connector attach
+- `/docs/features/nexus-model-routing.md` — Full routing documentation
+
+**Focused Tests**:
+- `tests/unit/lib/nexus/model-router/__tests__/router.test.ts` — Unit suite for routing decisions, floor application, shadow mode handling, reason codes
+- `tests/e2e/nexus-workspace-artifact-tier-floor.spec.ts` — E2E wiring test proving browser state → transport → route integration with artifact bound
 - `tests/e2e/nexus-workspace-psd-data-connector.functional.spec.ts` — E2E (gated) popover behavior
 
 **Bound Tools**:
