@@ -94,32 +94,37 @@ export function extractRichEnvelope(text: string | null | undefined): ExtractRes
 }
 
 /**
- * Re-emit `prose` plus an envelope as a single canonical string that
- * `extractRichEnvelope` parses back into exactly these two parts.
+ * Re-emit `prose` plus the rich parts of a message as one canonical string that
+ * `extractRichEnvelope` parses back into exactly those two pieces.
  *
- * The durable delivery outbox carries one `text` field and re-runs extraction
- * on retry, so a reply whose cards were lifted out for the first attempt has to
- * be re-wrapped before it goes on the queue — otherwise the retry silently
- * degrades a card into plain prose. `prose` must already be trimmed, which is
- * what `extractRichEnvelope` returns.
+ * The durable delivery outbox carries a single `text` field and re-runs
+ * extraction on retry, so a reply whose cards were lifted out for the first
+ * attempt has to be re-wrapped before it goes on the queue — otherwise the
+ * retry silently degrades a card into plain prose. `prose` must already be
+ * trimmed, which is what `extractRichEnvelope` returns.
  *
- * `textFallback` is dropped, deliberately. It is not a field Google's API
- * receives — it only stands in as prose when the reply carried none — and no
- * caller budgets it, so re-wrapping it verbatim let an agent smuggle an
- * arbitrarily long string past the size bounds the outbox is validated
- * against: the primary Chat call would succeed and the retry would then be
- * rejected on dequeue and dead-lettered. Dropping it is also lossless, because
- * `prose` is what a second extraction returns as `remaining`, so the fallback
- * would never be consulted again.
+ * `richParts` is deliberately the caller's **allow-list** of fields it actually
+ * forwarded to Google (`cardsV2` / `accessoryWidgets` / and, for the router
+ * only, `actionResponse`) — never the parsed envelope. `extractRichEnvelope`
+ * casts any JSON object to `RichEnvelope`, so spreading it would carry along
+ * whatever else the model emitted, including:
+ *
+ *   - `textFallback`, which Google never receives and nothing budgets; and
+ *   - arbitrary unknown properties.
+ *
+ * Either one is excluded from the primary request (so it escapes the
+ * 32,000-byte budget) and then serialized into the outbox text, where an
+ * oversized value trips the 240 KiB guard and the completed response is lost.
+ * Recomposing from the forwarded parts alone makes the queued retry
+ * byte-for-byte the message the first attempt tried to send.
  */
 export function recomposeRichText(
   prose: string,
-  envelope: RichEnvelope | null
+  richParts: Record<string, unknown>
 ): string {
-  if (!envelope) return prose;
-  const { textFallback: _textFallback, ...canonical } = envelope;
+  if (Object.keys(richParts).length === 0) return prose;
   const block = `${RICH_ENVELOPE_OPEN}${JSON.stringify(
-    canonical
+    richParts
   )}${RICH_ENVELOPE_CLOSE}`;
   return prose ? `${prose}\n${block}` : block;
 }

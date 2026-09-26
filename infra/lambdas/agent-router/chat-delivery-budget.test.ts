@@ -140,33 +140,59 @@ describe('prepareGoogleChatMessage — envelope before truncation', () => {
 });
 
 describe('recomposeRichText', () => {
-  test('drops the unbudgeted textFallback so the outbox stays bounded', () => {
-    const envelope = { ...card('Tiny'), textFallback: 'f'.repeat(300_000) };
-    const recomposed = recomposeRichText('fitted prose', envelope);
-
-    expect(recomposed).not.toContain('ffff');
-    expect(recomposed.length).toBeLessThan(2_000);
-    // Nothing is lost: a second extraction returns the prose as `remaining`,
-    // so the fallback would never have been consulted again.
-    const extracted = extractRichEnvelope(recomposed);
-    expect(extracted.remaining).toBe('fitted prose');
-    expect(extracted.envelope?.cardsV2).toEqual(envelope.cardsV2);
-    expect(extracted.envelope?.textFallback).toBeUndefined();
-  });
-
-  test('round-trips prose and envelope through extraction', () => {
-    const envelope = card('Round trip');
-    const recomposed = recomposeRichText('some prose', envelope);
+  test('round-trips prose and the forwarded rich parts through extraction', () => {
+    const richParts = { cardsV2: card('Round trip').cardsV2 };
+    const recomposed = recomposeRichText('some prose', richParts);
     const extracted = extractRichEnvelope(recomposed);
 
     expect(extracted.malformed).toBe(false);
     expect(extracted.remaining).toBe('some prose');
-    expect(extracted.envelope?.cardsV2).toEqual(envelope.cardsV2);
+    expect(extracted.envelope?.cardsV2).toEqual(richParts.cardsV2);
   });
 
-  test('returns the prose unchanged when there is no envelope', () => {
-    expect(recomposeRichText('plain', null)).toBe('plain');
+  test('returns the prose unchanged when nothing rich was forwarded', () => {
+    expect(recomposeRichText('plain', {})).toBe('plain');
   });
+
+  test('carries only what the caller forwarded, never the parsed envelope', () => {
+    // The canonical text is an allow-list, not a deny-list: extractRichEnvelope
+    // casts any JSON object to RichEnvelope, so an unbudgeted textFallback or an
+    // unknown model-invented field would otherwise escape the 32,000-byte budget
+    // and then trip the 240 KiB outbox guard, losing a completed response.
+    const recomposed = recomposeRichText('fitted prose', {
+      cardsV2: card('Tiny').cardsV2,
+    });
+
+    expect(recomposed).not.toContain('textFallback');
+    expect(recomposed).not.toContain('somethingUnknown');
+    expect(recomposed.length).toBeLessThan(2_000);
+  });
+});
+
+describe('an oversized field outside the forwarded parts cannot reach the outbox', () => {
+  const oversized = 'f'.repeat(300_000);
+
+  for (const [name, extra] of [
+    ['textFallback', { textFallback: oversized }],
+    ['an unknown model-invented field', { somethingUnknown: oversized }],
+  ] as const) {
+    test(name, () => {
+      const { log } = silentLog();
+      const prepared = prepareGoogleChatMessage(
+        SPACE,
+        wrapped('prose', { ...card('Tiny card'), ...extra }),
+        log
+      );
+
+      // Not forwarded to Google, and not carried into the outbox either.
+      expect(prepared.messageBody).not.toHaveProperty('textFallback');
+      expect(prepared.messageBody).not.toHaveProperty('somethingUnknown');
+      expect(prepared.deliverableText).not.toContain('ffff');
+      expect(
+        Buffer.byteLength(prepared.deliverableText, 'utf8')
+      ).toBeLessThan(240 * 1024);
+    });
+  }
 });
 
 describe('durable outbox accepts everything the primary path accepted', () => {

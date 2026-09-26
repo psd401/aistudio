@@ -1242,7 +1242,7 @@ function prepareScheduledChatMessage(
     // envelope re-wrapped, so its bounds can never reject a response the
     // initial Chat call accepted — and a retried card stays a card instead of
     // silently degrading to plain prose.
-    retryText: recomposeRichText(fitted.text, envelope),
+    retryText: recomposeRichText(fitted.text, richParts),
     responseLength: fitted.text.length,
     responseBytes: fitted.deliveredBytes,
     truncated: fitted.truncated,

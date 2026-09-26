@@ -118,6 +118,27 @@ describe('scheduled Chat delivery outbox', () => {
     expect(replayed.remaining).toBe(prepared.requestBody.text as string);
   });
 
+  test('the retry carries only what this Lambda forwards — no actionResponse', () => {
+    // The cron never forwards actionResponse (a scheduled fire has no
+    // interactive Chat event to respond to). Recomposing from the parsed
+    // envelope would have smuggled it into the retry, so the redelivery would
+    // not have matched the first attempt.
+    const prepared = agentCronTestHelpers.prepareScheduledChatMessage(
+      'spaces/AAAA',
+      wrapped('brief body', {
+        ...CARD_ENVELOPE,
+        actionResponse: { type: 'NEW_MESSAGE' },
+      }),
+      log,
+    );
+
+    expect(prepared.requestBody).not.toHaveProperty('actionResponse');
+    expect(prepared.retryText).not.toContain('actionResponse');
+    expect(extractRichEnvelope(prepared.retryText).envelope?.cardsV2).toEqual(
+      CARD_ENVELOPE.cardsV2,
+    );
+  });
+
   test('re-preparing the retry text reproduces the same request body', () => {
     const first = agentCronTestHelpers.prepareScheduledChatMessage(
       'spaces/AAAA',

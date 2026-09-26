@@ -3558,7 +3558,7 @@ function prepareGoogleChatMessage(
     hasCards: Boolean(envelope?.cardsV2),
     hasAccessoryWidgets: Boolean(envelope?.accessoryWidgets),
     truncated: fitted.truncated,
-    deliverableText: recomposeRichText(fitted.text, envelope),
+    deliverableText: recomposeRichText(fitted.text, richParts),
   };
 }
 
