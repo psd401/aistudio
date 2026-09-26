@@ -52,15 +52,19 @@ export async function routeHost(page: Page, cdns: string[] = []): Promise<void> 
  * Serve the host page INSIDE the app (#1839), so `ArtifactSandbox` gets a real
  * cross-origin preview frame with no CloudFront.
  *
- * Needs a server started with `ATRIUM_SANDBOX_ORIGIN=SANDBOX_ORIGIN`, which
- * `scripts/test/e2e-local.sh` does: the app then frames `<origin>/render` (never
+ * Needs a server started with `ATRIUM_SANDBOX_ORIGIN` set to `E2E_SANDBOX_ORIGIN`
+ * (default `SANDBOX_ORIGIN`), which `scripts/test/e2e-local.sh` does and exports
+ * to Playwright: the app then frames `<origin>/render` (never
  * resolvable) and allows it in its CSP `frame-src`, and this route answers it
  * with the committed host page, allowlisting the app as its parent. `page.route`
  * covers the page's frames too.
  */
 export async function routeAppSandbox(page: Page, appOrigin: string): Promise<void> {
+  // The runner exports the origin it gave the server, so an `E2E_SANDBOX_ORIGIN`
+  // override is intercepted too; the default matches the runner's.
+  const sandboxOrigin = new URL(process.env.E2E_SANDBOX_ORIGIN || SANDBOX_ORIGIN).origin;
   await page.route(
-    (url) => url.origin === SANDBOX_ORIGIN && url.pathname === "/render",
+    (url) => url.origin === sandboxOrigin && url.pathname === "/render",
     (route) =>
       route.fulfill({
         status: 200,

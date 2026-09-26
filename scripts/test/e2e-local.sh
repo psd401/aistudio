@@ -66,8 +66,8 @@ if [ "${SKIP_E2E:-}" = "1" ]; then echo "e2e-local: SKIP_E2E=1 — skipping"; ex
 # The artifact sandbox origin the started server frames (ATRIUM_SANDBOX_ORIGIN).
 # It never resolves: specs that need a live preview serve the committed host page
 # there with `page.route` (tests/e2e/helpers/atrium-sandbox-host.ts), so the app
-# gets a real cross-origin frame with no CloudFront. Must match SANDBOX_ORIGIN in
-# that helper; exported so Playwright specs can read it too.
+# gets a real cross-origin frame with no CloudFront. Exported so `routeAppSandbox`
+# intercepts the same origin; the default matches SANDBOX_ORIGIN in that helper.
 export E2E_SANDBOX_ORIGIN="${E2E_SANDBOX_ORIGIN:-https://atrium-sandbox.test}"
 
 ROOT="$(git rev-parse --show-toplevel)"; cd "$ROOT" || exit 1
