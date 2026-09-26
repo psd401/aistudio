@@ -342,6 +342,51 @@ function selectedRuntimeModel(
   return selection.model
 }
 
+/** Ascending, so a floor is a plain index comparison. */
+const TIER_RANK: Record<NexusRouterTier, number> = { light: 1, medium: 2, high: 3 }
+
+/**
+ * The lowest tier an editable-artifact turn may run on (#1840).
+ *
+ * #1786 gave those turns the PSD Data tools; this gives them a model that
+ * reliably decides to USE them. The classifier rates the latest message alone,
+ * with no history and no knowledge that an artifact is open, so the shortest
+ * follow-ups in an authoring session — "did that work?", "can you turn live data
+ * back on?" — score `light` and run on the light tier. Those are exactly the
+ * turns that need tool use: read the current artifact, check the preview
+ * diagnostics, write a new version. Observed on the light tier instead: no tool
+ * calls at all, and invented UI ("a Live data toggle in the panel header") in
+ * place of the `update_workspace_artifact` call that would have done the job.
+ *
+ * A FLOOR, never a cap: a `high` classification keeps its own tier.
+ *
+ * Scoped by the same predicate as the connector attach, so documents and
+ * read-only viewers are untouched and the extra cost lands only on
+ * artifact-authoring turns — where a wrong answer is a broken dashboard.
+ */
+const WORKSPACE_ARTIFACT_MIN_TIER: NexusRouterTier = "medium"
+
+/**
+ * Raise a classified decision to the artifact-authoring tier floor, recording
+ * `workspace_artifact_min_tier` when it actually changed the tier.
+ *
+ * Returns the decision UNTOUCHED (same object) when there is nothing to raise,
+ * so a turn with no workspace, a document, a read-only viewer, or an already
+ * sufficient tier carries no extra reason code and routes exactly as before.
+ */
+export function applyWorkspaceArtifactTierFloor(
+  decision: NexusClassifierDecision,
+  workspace: NexusWorkspaceRoutingContext | null | undefined
+): NexusClassifierDecision {
+  if (!workspaceNeedsPsdData(workspace)) return decision
+  if (TIER_RANK[decision.tier] >= TIER_RANK[WORKSPACE_ARTIFACT_MIN_TIER]) return decision
+  return {
+    ...decision,
+    tier: WORKSPACE_ARTIFACT_MIN_TIER,
+    reasonCodes: [...decision.reasonCodes, "workspace_artifact_min_tier"],
+  }
+}
+
 /**
  * The classifier's own reason codes plus what routing added on top of them, so
  * the stored per-message metadata explains the turn's tools after the fact.
@@ -523,10 +568,16 @@ async function routeWithConfiguredRouter(options: {
     accessibleIds,
     requiredTools,
   } = options
-  const classified = await classifyNexusRequest(args.text, config, {
-    hasImageInput: args.hasImageInput,
-    hasPreviousGeneratedImage: args.hasPreviousGeneratedImage,
-  })
+  // The classifier sees the latest message only. An open editable artifact is a
+  // routing input it cannot know about, so the floor is applied to its verdict
+  // before anything reads `tier` (#1840).
+  const classified = applyWorkspaceArtifactTierFloor(
+    await classifyNexusRequest(args.text, config, {
+      hasImageInput: args.hasImageInput,
+      hasPreviousGeneratedImage: args.hasPreviousGeneratedImage,
+    }),
+    args.workspace
+  )
   // Shadow mode may retain a legacy fallback only when doing so is safe. A
   // server-required input tool is an authorization/correctness boundary, so
   // execute a compatible text model even while recording the proposed route.

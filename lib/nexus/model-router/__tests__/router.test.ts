@@ -842,3 +842,115 @@ describe("Nexus model router credential filtering", () => {
     })).rejects.toThrow("Image generation is not available")
   })
 })
+
+/**
+ * #1840: the classifier rates the latest message alone. With an artifact open
+ * beside the chat, the shortest authoring follow-ups ("did that work?", "turn
+ * live data back on") score `light` — and on the light tier the model was
+ * observed making no tool calls at all and describing a panel control that does
+ * not exist, instead of calling `update_workspace_artifact`. An editable
+ * artifact therefore raises the tier FLOOR to medium.
+ */
+describe("Nexus model router workspace artifact tier floor", () => {
+  const PSD_CONNECTOR_ID = "54f0f531-f7ab-485e-bd6b-65a95c4bc871"
+  const editableArtifact = {
+    objectId: "441910f0-9e0e-4633-acf1-62415e388db4",
+    kind: "artifact" as const,
+    editable: true,
+  }
+  // Advanced + a single family so the tier maps to exactly one model id:
+  // light -> gpt-luna, medium -> gpt-terra.
+  const shortFollowUp = {
+    text: "Did that work?",
+    fallbackModelId: "gpt-luna",
+    experienceMode: "advanced" as const,
+    requestedFamily: "openai" as const,
+    enabledConnectorIds: [],
+    userId: 7,
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockGetNexusEnabledModels.mockResolvedValue(models)
+    mockFilterAccessibleResourceIds.mockResolvedValue(models.map(model => String(model.id)))
+    mockGetConfig.mockResolvedValue({ config, mode: "active" })
+    mockGetConfiguredChatProviders.mockResolvedValue(
+      new Set(["openai", "google", "amazon-bedrock", "azure", "latimer"])
+    )
+    mockExecuteQuery.mockResolvedValue([{ id: PSD_CONNECTOR_ID, name: "PSD Data" }])
+    // The reproduction: a three-word follow-up in an authoring session.
+    mockClassify.mockResolvedValue({
+      intent: "general", tier: "light", confidence: 0.9,
+      reasonCodes: ["simple_request"], source: "classifier",
+    })
+  })
+
+  it("raises a light follow-up to medium with an editable artifact bound", async () => {
+    const result = await routeNexusRequest({ ...shortFollowUp, workspace: editableArtifact })
+
+    expect(result.metadata.tier).toBe("medium")
+    expect(result.modelId).toBe("gpt-terra")
+    expect(result.metadata.reasonCodes).toContain("workspace_artifact_min_tier")
+  })
+
+  it("leaves a turn with no workspace on the light tier", async () => {
+    const result = await routeNexusRequest({ ...shortFollowUp, workspace: null })
+
+    expect(result.metadata.tier).toBe("light")
+    expect(result.modelId).toBe("gpt-luna")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier")
+  })
+
+  it("leaves a bound document on the light tier", async () => {
+    const result = await routeNexusRequest({
+      ...shortFollowUp,
+      workspace: { ...editableArtifact, kind: "document" as const },
+    })
+
+    expect(result.metadata.tier).toBe("light")
+    expect(result.modelId).toBe("gpt-luna")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier")
+  })
+
+  it("leaves a read-only artifact viewer on the light tier", async () => {
+    const result = await routeNexusRequest({
+      ...shortFollowUp,
+      workspace: { ...editableArtifact, editable: false },
+    })
+
+    expect(result.metadata.tier).toBe("light")
+    expect(result.modelId).toBe("gpt-luna")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier")
+  })
+
+  it("is a floor, not a cap: a high classification keeps its own tier", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "general", tier: "high", confidence: 0.95,
+      reasonCodes: ["complex_request"], source: "classifier",
+    })
+
+    const result = await routeNexusRequest({ ...shortFollowUp, workspace: editableArtifact })
+
+    expect(result.metadata.tier).toBe("high")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier")
+  })
+
+  it("adds no reason code when the classifier already chose medium", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "general", tier: "medium", confidence: 0.9,
+      reasonCodes: ["normal_request"], source: "classifier",
+    })
+
+    const result = await routeNexusRequest({ ...shortFollowUp, workspace: editableArtifact })
+
+    expect(result.metadata.tier).toBe("medium")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier")
+  })
+
+  it("still attaches PSD Data on the raised turn", async () => {
+    const result = await routeNexusRequest({ ...shortFollowUp, workspace: editableArtifact })
+
+    expect(result.connectorIds).toEqual([PSD_CONNECTOR_ID])
+    expect(result.metadata.reasonCodes).toContain("workspace_artifact_psd_data")
+  })
+})

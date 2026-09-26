@@ -12,6 +12,10 @@ Nexus defaults to **Standard** mode. Users see one Nexus experience instead of a
 6. Automatically select an image-capable model for image intent, attach the existing database-backed PSD-data MCP server for PSD-data intent, or select a web-search-capable Gemini model and enable its native Google Search tool for web-search intent.
 7. Persist the route decision on assistant-message metadata and expose it in `X-Nexus-Routing` for evaluation.
 
+### Workspace artifact turns
+
+The classifier rates the latest message only, so it cannot see that an editable Atrium artifact is open beside the chat (`?workspace=<id|slug>`). When one is — the same `workspaceNeedsPsdData` predicate that attaches PSD Data for the turn (#1786) — routing also raises the **tier floor to medium** before model selection and records `workspace_artifact_min_tier` in the stored reason codes (#1840). Short authoring follow-ups ("did that work?", "turn live data back on") otherwise classify as light, and the light tier was observed skipping the artifact and preview tools entirely. It is a floor, not a cap: a high classification keeps its own tier. Bound documents and read-only viewers are unaffected, and turns with no workspace route exactly as before.
+
 The deterministic rules run before the model classifier because capability requirements are not discretionary. Classifier failure, timeout, malformed output, or confidence below the configured floor falls back to a conservative heuristic; ordinary requests default to Medium.
 
 ## Runtime modes
