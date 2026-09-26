@@ -1350,9 +1350,9 @@ export async function buildWorkspaceChatTools(params: {
     params.previewDiagnostics
   );
 
-  return {
-    tools,
-    systemPromptFragment,
-    ...(previewDiagnosticsPromptFragment ? { previewDiagnosticsPromptFragment } : {}),
-  };
+  // Assigned unconditionally (undefined when there is nothing to report) rather
+  // than conditionally spread: the spread's ternary is one more decision point in
+  // a function already at the repo's complexity ceiling, and every consumer tests
+  // the VALUE, never the key's presence.
+  return { tools, systemPromptFragment, previewDiagnosticsPromptFragment };
 }
