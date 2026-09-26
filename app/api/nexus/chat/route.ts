@@ -94,6 +94,7 @@ import {
 import { readSkillMarkdown } from '@/lib/skills/skill-publish-pipeline';
 import {
   buildWorkspaceChatTools,
+  workspacePromptFragmentForTurn,
   type WorkspacePreviewDiagnostics,
 } from '@/lib/nexus/workspace-chat-tools';
 import {
@@ -2070,11 +2071,12 @@ async function bindWorkspaceToolsForChat(args: {
     args.previewDiagnostics
   );
   const workspaceTools = filterWorkspaceToolsBySkillPin(workspace?.tools, args.skillAllowedTools);
-  // Drop the prompt fragment when the pin filtered every workspace tool away.
+  // Drop the object description when the pin filtered every workspace tool away;
+  // #1839's preview-failure block survives it (see workspacePromptFragmentForTurn).
   const hasTools = !!workspaceTools && Object.keys(workspaceTools).length > 0;
   return {
     workspaceTools,
-    workspacePromptFragment: hasTools ? workspace?.systemPromptFragment : undefined,
+    workspacePromptFragment: workspacePromptFragmentForTurn(workspace, hasTools),
   };
 }
 
