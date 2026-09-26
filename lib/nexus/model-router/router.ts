@@ -276,11 +276,18 @@ function selectModelForRuntime(
  * final, unconstrained selection. Function calling outranks the tier floor: a
  * model that cannot invoke a tool is useless to an authoring turn at any tier.
  *
- * They run in SHADOW mode too, even though shadow executes the legacy fallback.
- * Shadow's whole job is to answer "what would active routing have chosen?", so a
- * proposal that skipped these preferences would compare the wrong thing —
- * reporting the light model (and `workspace_artifact_min_tier_unmet`) for a
- * deployment where active mode would have reached the high one.
+ * They also run in SHADOW mode, but ONLY while shadow is guaranteed not to
+ * execute what they pick. Shadow's job is to answer "what would active routing
+ * have chosen?", so a proposal that skipped these preferences compares the wrong
+ * thing — reporting the light model (and `workspace_artifact_min_tier_unmet`) for
+ * a deployment where active mode would have reached the high one.
+ *
+ * The exception is a shadow turn that ALSO has a required tool: there
+ * `selectedRuntimeModel` executes `selection.model` rather than the legacy
+ * fallback, so applying the preferences would silently change the executed model
+ * of a mode whose whole contract is to change nothing. Shadow keeps its original
+ * route there and its proposal stays unpreferenced — a less precise proposal is
+ * a far smaller cost than shadow mode quietly rerouting live traffic.
  */
 function selectModelForToolUse(
   args: Parameters<typeof selectModel>[0],
@@ -289,12 +296,15 @@ function selectModelForToolUse(
   prefersFunctionCalling: boolean
 ): { model: NexusModelRow; fallbackUsed: boolean } {
   const unconstrained = { ...args, minTier: undefined }
+  const preferencesAffectExecution = mode === "shadow" && args.requiredTools.length > 0
   const preferences: Partial<Parameters<typeof selectModel>[0]>[] = []
-  if (prefersFunctionCalling && args.minTier) {
-    preferences.push({ requiresFunctionCalling: true, minTier: args.minTier })
+  if (!preferencesAffectExecution) {
+    if (prefersFunctionCalling && args.minTier) {
+      preferences.push({ requiresFunctionCalling: true, minTier: args.minTier })
+    }
+    if (prefersFunctionCalling) preferences.push({ requiresFunctionCalling: true, minTier: undefined })
+    if (args.minTier) preferences.push({ minTier: args.minTier })
   }
-  if (prefersFunctionCalling) preferences.push({ requiresFunctionCalling: true, minTier: undefined })
-  if (args.minTier) preferences.push({ minTier: args.minTier })
   for (const preference of preferences) {
     try {
       return selectModel({ ...unconstrained, ...preference })
