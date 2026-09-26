@@ -132,6 +132,31 @@ posts each result to its exact origin.
   inventing a last-active-session explanation.
 - Chat thread placement does not prove OpenClaw session isolation.
 
+## Message size — the transport can cut your reply
+
+One Google Chat message carries **32,000 bytes** of text plus cards. The Router
+cuts anything longer *after* you finish and appends a notice saying so. Your
+transcript therefore holds the full text even when the user only received part
+of it: **what you wrote is not proof of what was delivered.**
+
+- **Believe the user.** "You cut that off", "it ends mid-sentence", "where's the
+  rest?" — that is the transport, not a mistake on your part and not a false
+  claim on theirs. Never argue that you sent the whole thing. Re-deliver the
+  tail from where they say it stopped, or publish the full version and send the
+  link.
+- **Plan for it before you send.** A deliverable that will run long — a report,
+  an analysis, a full document, a long table — belongs in Atrium, not in a Chat
+  bubble: `psd-atrium` `create-document --markdown-file <path>` (private and
+  draft by default), then `publish --id <id>` and hand out the returned
+  `readerUrl` as-is. Reply with a short summary plus that link. If Atrium does
+  not fit the content, send it yourself in sequential messages, each under the
+  cap and numbered ("1 of 3"), rather than letting the transport choose the cut.
+- **Scheduled briefs and tasks:** same rule. When the brief runs past the cap,
+  publish the full brief to Atrium and deliver the headline summary plus the
+  link. Do not silently shorten the brief, and do not skip sections to fit.
+- Respect FERPA and visibility when you publish: private is the default and
+  stays the default unless the user asked for wider access.
+
 ## Shared Google Chat spaces
 
 An `[audience: shared Google Chat space — public to all space members]` header
