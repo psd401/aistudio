@@ -544,7 +544,10 @@ Four rules hold this together:
   `updateToolAvailable` separately, since a pin can keep
   `update_workspace_artifact` while dropping `read_workspace_content`: a missing
   read tool only removes the pointer to it, and only a missing update tool tells
-  the model to leave the fix to the person.
+  the model to leave the fix to the person. Both flags also require
+  `modelSupportsFunctionCalling`: a tool that survived the pin is still unusable
+  for a model that cannot call functions (Latimer, say), so the route computes
+  that capability BEFORE binding and passes it in.
 - **It is returned SEPARATELY from `systemPromptFragment`** because a skill's
   `allowed-tools` pin that filters every workspace tool away drops the object
   description (it promises tools the model no longer has) but must NOT drop this.

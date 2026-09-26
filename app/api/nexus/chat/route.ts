@@ -2099,6 +2099,8 @@ async function bindWorkspaceToolsForChat(args: {
   resolvedWorkspace: ResolvedWorkspace | null;
   /** #1787: the preview failures the client observed since the last turn. */
   previewDiagnostics: WorkspacePreviewDiagnostics | undefined;
+  /** False for a model without function calling: no tool is usable this turn. */
+  modelCanCallTools: boolean;
 }): Promise<{
   workspaceTools: ToolSet | undefined;
   workspacePromptFragment: string | undefined;
@@ -2122,10 +2124,11 @@ async function bindWorkspaceToolsForChat(args: {
     // can still tell the user their preview is broken, which beats answering "I
     // can't see your browser" — the failure reached the server either way, and
     // the client already emptied its buffer to send it. The renderer is told
-    // whether the read tool survived so it never points at a tool that is gone.
+    // which tools are USABLE — surviving the pin is not enough when the model
+    // cannot call functions at all — so it never points at a tool it cannot use.
     workspacePreviewDiagnosticsFragment: workspace?.renderPreviewDiagnosticsPrompt?.({
-      readToolAvailable: !!workspaceTools?.read_workspace_content,
-      updateToolAvailable: !!workspaceTools?.update_workspace_artifact,
+      readToolAvailable: args.modelCanCallTools && !!workspaceTools?.read_workspace_content,
+      updateToolAvailable: args.modelCanCallTools && !!workspaceTools?.update_workspace_artifact,
     }),
   };
 }
@@ -2872,6 +2875,10 @@ async function resolveToolsAndStream(params: {
     ...repositories.projectTools,
     ...skillRepositoryTools,
   };
+  const toolCallingSupported = modelSupportsFunctionCalling({
+    provider: resolved.modelConfig.provider,
+    providerMetadata: resolved.modelConfig.providerMetadata,
+  });
   const { workspaceTools, workspacePromptFragment, workspacePreviewDiagnosticsFragment } =
     await bindWorkspaceToolsForChat({
       workspaceId: prepared.workspaceId,
@@ -2881,6 +2888,7 @@ async function resolveToolsAndStream(params: {
       resolvedWorkspace: prepared.workspace,
       previewDiagnostics:
         prepared.validationData.workspacePreviewDiagnostics,
+      modelCanCallTools: toolCallingSupported,
     });
   // #1786: the artifact-authoring guidance tells the model to explore the data
   // first. When this turn ended up with no PSD Data tools, say so in the same
@@ -2892,10 +2900,6 @@ async function resolveToolsAndStream(params: {
   // Ungated by `workspacePromptFragment` on purpose — a skill pin that filters
   // every workspace tool away drops that fragment, and dropping the warning
   // with it is exactly how the model ends up guessing column names again.
-  const toolCallingSupported = modelSupportsFunctionCalling({
-    provider: resolved.modelConfig.provider,
-    providerMetadata: resolved.modelConfig.providerMetadata,
-  });
   const effectiveWorkspacePromptFragment = workspacePsdDataToolsMissing({
     workspace: prepared.workspace?.context ?? null,
     connectorId: resolved.routing.workspacePsdDataConnectorId,
