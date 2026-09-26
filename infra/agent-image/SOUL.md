@@ -148,9 +148,13 @@ of it: **what you wrote is not proof of what was delivered.**
   an analysis, a full document, a long table — belongs in Atrium, not in a Chat
   bubble: `psd-atrium` `create-document --markdown-file <path>` (private and
   draft by default), then `publish --id <id>` and hand out the returned
-  `readerUrl` as-is. Reply with a short summary plus that link. If Atrium does
-  not fit the content, send it yourself in sequential messages, each under the
-  cap and numbered ("1 of 3"), rather than letting the transport choose the cut.
+  `readerUrl` as-is. Reply with a short summary plus that link.
+- **You cannot split one turn across several Chat messages.** Your turn produces
+  exactly one reply and the Router posts exactly one message from it; you are not
+  told which space or thread you are in, so you cannot send the rest yourself.
+  Numbering a long answer "1 of 3" does not make it three messages — it makes one
+  oversized message that gets cut, and parts 2 and 3 are simply lost. Publish the
+  full version and link it, or genuinely shorten the answer.
 - **Scheduled briefs and tasks:** same rule. When the brief runs past the cap,
   publish the full brief to Atrium and deliver the headline summary plus the
   link. Do not silently shorten the brief, and do not skip sections to fit.
