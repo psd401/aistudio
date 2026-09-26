@@ -48,6 +48,9 @@
 #                      postgres). Deliberately NOT plain DATABASE_URL — that is
 #                      sourced from .env.local and may be container-perspective.
 #   E2E_DB_SSL         DB_SSL for a runner-started server (default: false)
+#   E2E_SANDBOX_ORIGIN ATRIUM_SANDBOX_ORIGIN for a runner-started server
+#                      (default: https://atrium-sandbox.test, which never
+#                      resolves — specs route the host page onto it)
 #   E2E_ATRIUM_STORAGE_DIR local filesystem root for Atrium snapshots (default:
 #                      /tmp/aistudio-atrium-e2e-<port>; never touches AWS S3)
 #   E2E_WORKERS=2      Playwright worker count (global-setup warms every route the
@@ -59,6 +62,21 @@ set -uo pipefail
 
 if [ "${CI:-}" = "true" ]; then echo "e2e-local: in CI — skipping (local-only suite)"; exit 0; fi
 if [ "${SKIP_E2E:-}" = "1" ]; then echo "e2e-local: SKIP_E2E=1 — skipping"; exit 0; fi
+
+# The artifact sandbox origin the started server frames (ATRIUM_SANDBOX_ORIGIN).
+# It never resolves: specs that need a live preview serve the committed host page
+# there with `page.route` (tests/e2e/helpers/atrium-sandbox-host.ts), so the app
+# gets a real cross-origin frame with no CloudFront. Exported so `routeAppSandbox`
+# intercepts the same origin; the default matches SANDBOX_ORIGIN in that helper.
+# Canonicalized to `new URL(...).origin` — what the app's normalizeOrigin and the
+# helper both use — so the CSP reuse/readiness probe below greps for the exact
+# string the server emits (a trailing slash or upper-case host would never match).
+if ! E2E_SANDBOX_ORIGIN="$(E2E_SANDBOX_ORIGIN_RAW="${E2E_SANDBOX_ORIGIN:-https://atrium-sandbox.test}" \
+  bun -e 'console.log(new URL(process.env.E2E_SANDBOX_ORIGIN_RAW).origin)' 2>/dev/null)"; then
+  echo "❌ e2e-local: E2E_SANDBOX_ORIGIN is not a valid URL."
+  exit 1
+fi
+export E2E_SANDBOX_ORIGIN
 
 ROOT="$(git rev-parse --show-toplevel)"; cd "$ROOT" || exit 1
 
@@ -213,12 +231,16 @@ port_owner_cwd() {
 }
 
 # A same-worktree server is reusable only when it was started by this E2E
-# runner with the action-auth probe enabled. Process environments are immutable,
-# so an ordinary dev server cannot be retrofitted with the flag after startup.
+# runner with the action-auth probe enabled AND the E2E sandbox origin (its CSP
+# frame-src names it). Process environments are immutable, so an ordinary dev
+# server — or one this runner started before the sandbox origin existed — cannot
+# be retrofitted after startup.
 server_has_artifact_data_probe() {
-  curl -sf --max-time 3 -D - -o /dev/null \
-    "http://localhost:$1/api/healthz" 2>/dev/null |
-    grep -Fqi 'x-aistudio-artifact-data-e2e-probe: enabled'
+  local headers
+  headers="$(curl -sf --max-time 3 -D - -o /dev/null \
+    "http://localhost:$1/api/healthz" 2>/dev/null)" || return 1
+  printf '%s' "$headers" | grep -Fqi 'x-aistudio-artifact-data-e2e-probe: enabled' &&
+    printf '%s' "$headers" | grep -i '^content-security-policy:' | grep -Fq "$E2E_SANDBOX_ORIGIN"
 }
 
 # Two passes: prefer REUSING this worktree's own healthy server anywhere in the
@@ -239,7 +261,7 @@ if [ "$REUSE" != "1" ]; then
     if curl -sf --max-time 3 "http://localhost:${port}/api/healthz" >/dev/null 2>&1; then
       owner="$(port_owner_cwd "$port")"
       if [ "$owner" = "$ROOT_CANON" ]; then
-        echo "e2e-local: :$port serves this worktree without the artifact-data E2E action probe — starting an isolated server elsewhere."
+        echo "e2e-local: :$port serves this worktree without the artifact-data E2E action probe or sandbox origin — starting an isolated server elsewhere."
       else
         echo "e2e-local: :$port serves ${owner:-an unknown directory}, not this worktree — can't gate this push on it."
       fi
@@ -295,6 +317,7 @@ else
   DATABASE_URL="${E2E_DATABASE_URL:-postgresql://postgres:postgres@localhost:5432/aistudio}" \
   ATRIUM_LOCAL_STORAGE_DIR="${E2E_ATRIUM_STORAGE_DIR:-/tmp/aistudio-atrium-e2e-${E2E_PORT}}" \
   ATRIUM_ARTIFACT_DATA_E2E_ACTION_PROBE=true \
+  ATRIUM_SANDBOX_ORIGIN="$E2E_SANDBOX_ORIGIN" \
   API_RATE_LIMIT_DEFAULT_RPM="${E2E_API_RATE_LIMIT_RPM:-600}" \
   DB_SSL="${E2E_DB_SSL:-false}" PORT="$E2E_PORT" HOSTNAME=127.0.0.1 \
     bun run server.ts > "$SERVER_LOG" 2>&1 &

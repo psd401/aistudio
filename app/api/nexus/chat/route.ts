@@ -97,6 +97,10 @@ import {
   type WorkspacePreviewDiagnostics,
 } from '@/lib/nexus/workspace-chat-tools';
 import {
+  PREVIEW_DIAGNOSTICS_UNCONSUMED_HEADER,
+  PREVIEW_DIAGNOSTICS_UNCONSUMED_VALUE,
+} from '@/lib/nexus/preview-diagnostics-header';
+import {
   ARTIFACT_BRIDGE_ERROR_CODES,
   MAX_ARTIFACT_BRIDGE_ERROR_MESSAGE_LENGTH,
 } from '@/lib/content/artifact-bridge-errors';
@@ -459,6 +463,12 @@ async function executeStreaming(params: {
   workspaceTools?: ToolSet;
   /** System-prompt line describing the open workspace object + how to edit it. */
   workspacePromptFragment?: string;
+  /**
+   * #1839: this turn's artifact preview failures, as their own system-prompt
+   * block. Separate from `workspacePromptFragment` because it is scoped to one
+   * turn and it survives a skill pin that filtered the workspace tools away.
+   */
+  workspacePreviewDiagnosticsFragment?: string;
   /** Owner-validated search over repositories attached to this conversation. */
   attachmentTools?: ToolSet;
   /** Server-derived project and skill repository instructions. */
@@ -495,6 +505,7 @@ async function executeStreaming(params: {
     skillName,
     workspaceTools,
     workspacePromptFragment,
+    workspacePreviewDiagnosticsFragment,
     attachmentTools,
     repositoryPromptFragment,
     memoryTools,
@@ -519,6 +530,7 @@ async function executeStreaming(params: {
     skillInstructions,
     skillName,
     workspacePromptFragment,
+    workspacePreviewDiagnosticsFragment,
     hasAttachmentTools,
     repositoryPromptFragment,
     userMemoryFragment,
@@ -1267,6 +1279,32 @@ async function handleDeepResearch(params: {
  * Extracted to keep POST() under the cyclomatic-complexity threshold and
  * to centralize the place where new "special" model classes get added.
  */
+/**
+ * Add `PREVIEW_DIAGNOSTICS_UNCONSUMED_HEADER` to `response` when the request
+ * carried preview failures this turn never looked at (#1839).
+ *
+ * Returns the SAME response when there was nothing to report, so an ordinary turn
+ * is untouched. Otherwise it rebuilds the response around the identical body —
+ * `Response.headers` is immutable on a constructed response — preserving status and
+ * every existing header, which matters because the bodies here stream.
+ */
+function markPreviewDiagnosticsUnconsumed(
+  response: Response,
+  diagnostics: WorkspacePreviewDiagnostics | undefined
+): Response {
+  if (!diagnostics || diagnostics.entries.length === 0) return response;
+  const headers = new Headers(response.headers);
+  headers.set(
+    PREVIEW_DIAGNOSTICS_UNCONSUMED_HEADER,
+    PREVIEW_DIAGNOSTICS_UNCONSUMED_VALUE
+  );
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 async function routeSpecialModel(params: {
   isImageGenerationModel: boolean;
   isDeepResearchModel: boolean;
@@ -2061,7 +2099,13 @@ async function bindWorkspaceToolsForChat(args: {
   resolvedWorkspace: ResolvedWorkspace | null;
   /** #1787: the preview failures the client observed since the last turn. */
   previewDiagnostics: WorkspacePreviewDiagnostics | undefined;
-}): Promise<{ workspaceTools: ToolSet | undefined; workspacePromptFragment: string | undefined }> {
+  /** False for a model without function calling: no tool is usable this turn. */
+  modelCanCallTools: boolean;
+}): Promise<{
+  workspaceTools: ToolSet | undefined;
+  workspacePromptFragment: string | undefined;
+  workspacePreviewDiagnosticsFragment: string | undefined;
+}> {
   const workspace = await bindWorkspaceTools(
     args.workspaceId,
     args.userId,
@@ -2070,11 +2114,26 @@ async function bindWorkspaceToolsForChat(args: {
     args.previewDiagnostics
   );
   const workspaceTools = filterWorkspaceToolsBySkillPin(workspace?.tools, args.skillAllowedTools);
-  // Drop the prompt fragment when the pin filtered every workspace tool away.
+  // Drop the object description when the pin filtered every workspace tool away,
+  // or when the model cannot call functions at all: either way it promises
+  // tools (read_workspace_content, update_workspace_artifact) the model cannot
+  // use, and would contradict the preview-failure block below, which is told
+  // those tools are unavailable.
   const hasTools = !!workspaceTools && Object.keys(workspaceTools).length > 0;
   return {
     workspaceTools,
-    workspacePromptFragment: hasTools ? workspace?.systemPromptFragment : undefined,
+    workspacePromptFragment:
+      hasTools && args.modelCanCallTools ? workspace?.systemPromptFragment : undefined,
+    // #1839: NOT gated on `hasTools`. A model that can no longer fix the artifact
+    // can still tell the user their preview is broken, which beats answering "I
+    // can't see your browser" — the failure reached the server either way, and
+    // the client already emptied its buffer to send it. The renderer is told
+    // which tools are USABLE — surviving the pin is not enough when the model
+    // cannot call functions at all — so it never points at a tool it cannot use.
+    workspacePreviewDiagnosticsFragment: workspace?.renderPreviewDiagnosticsPrompt?.({
+      readToolAvailable: args.modelCanCallTools && !!workspaceTools?.read_workspace_content,
+      updateToolAvailable: args.modelCanCallTools && !!workspaceTools?.update_workspace_artifact,
+    }),
   };
 }
 
@@ -2538,7 +2597,19 @@ async function resolveChatModel(params: {
     routingMetadata: routing.metadata,
   });
   if (specialRoute) {
-    return { ok: false, response: specialRoute };
+    // #1839: an image-generation or Deep Research turn returns here, long before
+    // the workspace tools or the preview-failure block are built — so this turn
+    // consumed nothing, while the client already EMPTIED its one-shot buffer to
+    // send it. Tell the client to put the entries back, or the next ordinary turn
+    // (the one that could actually fix the artifact) has no record of the failure
+    // unless the preview happens to hit it again. (PR #1842 review, Codex P2.)
+    return {
+      ok: false,
+      response: markPreviewDiagnosticsUnconsumed(
+        specialRoute,
+        prepared.validationData.workspacePreviewDiagnostics
+      ),
+    };
   }
   return {
     ok: true,
@@ -2808,7 +2879,11 @@ async function resolveToolsAndStream(params: {
     ...repositories.projectTools,
     ...skillRepositoryTools,
   };
-  const { workspaceTools, workspacePromptFragment } =
+  const toolCallingSupported = modelSupportsFunctionCalling({
+    provider: resolved.modelConfig.provider,
+    providerMetadata: resolved.modelConfig.providerMetadata,
+  });
+  const { workspaceTools, workspacePromptFragment, workspacePreviewDiagnosticsFragment } =
     await bindWorkspaceToolsForChat({
       workspaceId: prepared.workspaceId,
       userId: prepared.userId,
@@ -2817,6 +2892,7 @@ async function resolveToolsAndStream(params: {
       resolvedWorkspace: prepared.workspace,
       previewDiagnostics:
         prepared.validationData.workspacePreviewDiagnostics,
+      modelCanCallTools: toolCallingSupported,
     });
   // #1786: the artifact-authoring guidance tells the model to explore the data
   // first. When this turn ended up with no PSD Data tools, say so in the same
@@ -2828,10 +2904,6 @@ async function resolveToolsAndStream(params: {
   // Ungated by `workspacePromptFragment` on purpose — a skill pin that filters
   // every workspace tool away drops that fragment, and dropping the warning
   // with it is exactly how the model ends up guessing column names again.
-  const toolCallingSupported = modelSupportsFunctionCalling({
-    provider: resolved.modelConfig.provider,
-    providerMetadata: resolved.modelConfig.providerMetadata,
-  });
   const effectiveWorkspacePromptFragment = workspacePsdDataToolsMissing({
     workspace: prepared.workspace?.context ?? null,
     connectorId: resolved.routing.workspacePsdDataConnectorId,
@@ -2884,6 +2956,7 @@ async function resolveToolsAndStream(params: {
     skillName: skillBinding.skillName,
     workspaceTools,
     workspacePromptFragment: effectiveWorkspacePromptFragment,
+    workspacePreviewDiagnosticsFragment,
     attachmentTools: repositoryTools,
     repositoryPromptFragment: buildRepositoryPromptFragment({
       projectBinding: prepared.projectBinding,

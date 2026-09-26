@@ -133,6 +133,35 @@ describe("Nexus memory turn context", () => {
     )
   })
 
+  it("puts the turn's preview failures LAST, in their own section (#1839)", () => {
+    // The block is the most perishable thing in the prompt and the model has to
+    // act on it this turn, so a conversation that also has repository or memory
+    // context must not bury it behind them.
+    const prompt = buildNexusSystemPrompt({
+      workspacePromptFragment: "Workspace context",
+      repositoryPromptFragment: "Repository context",
+      userMemoryFragment: "User memory marker",
+      workspacePreviewDiagnosticsFragment: "PREVIEW FAILURES marker",
+    })
+
+    expect(prompt.indexOf("User memory marker")).toBeLessThan(
+      prompt.indexOf("PREVIEW FAILURES marker"),
+    )
+    // Its own delimited section, not glued onto the workspace fragment.
+    expect(prompt).toContain("\n\n---\n\nPREVIEW FAILURES marker")
+    expect(prompt.endsWith("PREVIEW FAILURES marker")).toBe(true)
+  })
+
+  it("adds no preview-failure section on a turn with no failures (#1839)", () => {
+    const prompt = buildNexusSystemPrompt({
+      workspacePromptFragment: "Workspace context",
+    })
+
+    expect(prompt).toContain("Workspace context")
+    expect(prompt).not.toContain("PREVIEW FAILURES")
+    expect(prompt.endsWith("Workspace context")).toBe(true)
+  })
+
   it("bounds prompt injection while preserving complete quoted JSON entries", () => {
     const memories = Array.from({ length: 10 }, (_, index) => ({
       ...MEMORY,

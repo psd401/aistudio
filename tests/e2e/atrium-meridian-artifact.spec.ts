@@ -25,8 +25,9 @@ import { mkdirSync } from "node:fs";
  *    so the minted session has manage rights).
  *
  * NOTE (local S3): the reader (`/c/[slug]`, `/p/[slug]`) renders a document body
- * from S3 `source.md`, and the sandbox iframe needs ATRIUM_SANDBOX_ORIGIN — neither
- * is configured in local dev. The reader-render + visibility-masking legs are
+ * from S3 `source.md`, which local dev does not have, and the sandbox iframe needs
+ * a served host page (the E2E server's ATRIUM_SANDBOX_ORIGIN serves nothing unless
+ * a spec routes it — see `routeAppSandbox`). The reader-render + visibility-masking legs are
  * therefore covered by tests/smoke/atrium-embed-render.smoke.ts (the exact split
  * the reader renders) rather than driven here; this spec asserts the two S3-free UI
  * legs (viewer chrome + editor embed insertion).

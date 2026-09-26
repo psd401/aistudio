@@ -496,6 +496,85 @@ error results) is never pruned: it cannot be shown to belong to the same
 object as a later part. Persisted messages are never touched. Tool parts keep their exact
 shape so every tool call still pairs with its result on replay.
 
+### Preview failures are turn-scoped, and do not travel with the tools (#1839)
+
+An artifact's live preview runs cross-origin in the person's browser, so the
+model cannot see it. `lib/atrium/artifact-preview-diagnostics.ts` keeps a
+client-side ring buffer of its failures (rejected `AtriumData` calls with a
+typed `code` and the failing SQL, plus uncaught script errors), and the chat
+request body carries it as `workspacePreviewDiagnostics` (#1787).
+
+That buffer is TAKEN when the message is sent, not when the model reads it, so
+each failure is delivered exactly once and #1787's single delivery channel —
+the `previewDiagnostics` field on `read_workspace_content` — lost it entirely on
+any turn the model chose not to call that tool. So the failures now reach the
+model two ways, from one validated source:
+
+- `buildWorkspaceChatTools` returns `renderPreviewDiagnosticsPrompt` beside its
+  `systemPromptFragment`, built by `buildPreviewDiagnosticsPromptFragment` from
+  the same `previewDiagnosticsFor` helper the tool result uses — so both inherit
+  the identical guards: the client's `contentId` must match the object the server
+  actually bound, entries are re-capped at 10, the free text is re-flattened with
+  `boundBridgeErrorMessage` (which removes the line structure `JSON.stringify`
+  does not escape, U+2028/U+2029 included), and documents never get a block at
+  all. The block itself carries none of that free text — see the first rule
+  below.
+- `buildNexusSystemPrompt` appends the rendered block LAST, in its own `---`
+  section. It is the only turn-scoped fragment in that prompt: the model must act
+  on it during this turn, so a conversation that also carries repository or
+  memory context must not bury it.
+
+Four rules hold this together:
+
+- **No artifact-produced text reaches the SYSTEM role.** A `message` or `sql`
+  string comes from the artifact's CODE, and flattening or quoting it changes its
+  shape without making a trust boundary. Ownership is not a safe gate either: an
+  artifact the user owns is usually one the MODEL wrote (`buildArtifactUpdateTool`
+  saves model-authored code under the user's own requester), and that code can
+  build an exception message out of live `AtriumData` rows. Any VIEWABLE object
+  binds these tools too, read-only ones included. So the block carries only
+  server-controlled values — the entry count and each entry's `kind` and `code`
+  (a zod-validated enum) — and points at `read_workspace_content` for the exact
+  text, the lower-trust tool-result channel that text already travelled on. The
+  model still learns the preview is broken with no tool call, which is the point
+  of #1839.
+- **The block never names a tool this turn does not have, and never denies one
+  it does.** It is a RENDERER, not a string, because which tools survived the
+  skill pin is known only in the route. It takes `readToolAvailable` and
+  `updateToolAvailable` separately, since a pin can keep
+  `update_workspace_artifact` while dropping `read_workspace_content`: a missing
+  read tool only removes the pointer to it, and only a missing update tool tells
+  the model to leave the fix to the person. Both flags also require
+  `modelSupportsFunctionCalling`: a tool that survived the pin is still unusable
+  for a model that cannot call functions (Latimer, say), so the route computes
+  that capability BEFORE binding and passes it in.
+- **It is returned SEPARATELY from `systemPromptFragment`** because a skill's
+  `allowed-tools` pin that filters every workspace tool away drops the object
+  description (it promises tools the model no longer has) but must NOT drop this.
+  The object description is dropped for a model without function calling too,
+  for the same reason — otherwise the assembled prompt tells that model to call
+  `read_workspace_content` in one fragment and that the tool is unavailable in
+  the next.
+- **The interpretation guidance lives in one constant,**
+  `PREVIEW_FAILURE_INTERPRETATION_GUIDANCE`, consumed by the prompt block and by
+  the `read_workspace_content` description. Two hand-written copies drift, and a
+  model told to "check previewDiagnostics" by one and "this arrives on its own"
+  by the other has a contradiction to resolve.
+
+One turn cannot deliver the block at all: an image-generation or Deep Research
+request returns from `routeSpecialModel` before the workspace tools exist, while
+the browser has already emptied its one-shot buffer to send it. Those responses
+carry `PREVIEW_DIAGNOSTICS_UNCONSUMED_HEADER`
+(`lib/nexus/preview-diagnostics-header.ts`), and the client's fetch wrapper
+restores the buffer so the next ordinary turn — the one that could actually fix
+the artifact — still sees the failure. That restore is generation-guarded, so a
+preview that moved on meanwhile still drops the entries.
+
+`tests/e2e/nexus-workspace-preview-diagnostics.functional.spec.ts` drives this
+path in a real browser, with a real sandbox frame whose artifact throws. It
+checks that the next send carries the failure and the one after it does not, and
+that a response with the header puts the failure back for the following send.
+
 ---
 
 ## Durable repository bindings
