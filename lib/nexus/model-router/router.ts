@@ -128,9 +128,13 @@ const WORKSPACE_ARTIFACT_MIN_TIER: NexusRouterTier = "medium"
  * classifier's own verdict and its reason codes free of the floor, which is the
  * honest record: the floor was not applied.
  *
- * Asked of the same predicate on both sides (the tier raise in
- * `routeWithConfiguredRouter`, the preferences in `selectModelForToolUse`) so the
- * two cannot drift apart.
+ * `requiredToolCount` is NOT cached across the turn, because `requiredTools` is
+ * mutated while routing runs. The tier raise happens before
+ * `addRequiredWebSearchTool` has pushed a web-search decision's own tool, so it
+ * passes a LOOKAHEAD count (`willAddRequiredWebSearchTool`); every later caller —
+ * the `minTier` preference, the fetch-only `refloor`, the `_unmet` reason code —
+ * reads the live array, which by then includes that tool, or excludes it again
+ * after the fetch-only retry splices it out.
  */
 function artifactFloorMayApply(
   mode: Exclude<NexusRouterRuntimeMode, "off">,
