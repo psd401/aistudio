@@ -62,7 +62,7 @@ import {
   RDSDataClient,
 } from '@aws-sdk/client-rds-data';
 import { extractRichEnvelope, recomposeRichText } from './rich-envelope';
-import { fitChatText, utf8Bytes } from './chat-text-budget';
+import { fitChatMessageText } from './chat-text-budget';
 import {
   createScheduledInvocationContextToken,
   deriveScheduledRequestProofKey,
@@ -1206,6 +1206,10 @@ function prepareScheduledChatMessage(
     });
   }
 
+  // Deliberately narrower than the router's equivalent: `actionResponse` steers
+  // the reply to an interactive Chat event (a card click, a dialog) and a
+  // scheduled fire has no such event to respond to, so the cron has never
+  // forwarded it. This is not drift from agent-router/index.ts.
   const richParts: Record<string, unknown> = {};
   if (envelope) {
     if (envelope.cardsV2) richParts.cardsV2 = envelope.cardsV2;
@@ -1213,20 +1217,20 @@ function prepareScheduledChatMessage(
       richParts.accessoryWidgets = envelope.accessoryWidgets;
     }
   }
+  // `remaining` arrives trimmed; trim the fallback too so re-preparing
+  // `retryText` yields the identical body on the durable retry.
   const proseSource = envelope
-    ? remaining || envelope.textFallback || 'Rich response'
+    ? remaining || envelope.textFallback?.trim() || 'Rich response'
     : remaining || text;
   // Google Chat's real ceiling is 32,000 bytes of text + cards, not 4,096
-  // characters. Cards share that budget, so reserve the serialized body with an
-  // empty text field — the card payload plus the JSON scaffolding around it.
-  const reservedBytes = utf8Bytes(JSON.stringify({ ...richParts, text: '' }));
-  const fitted = fitChatText(proseSource, { reservedBytes });
+  // characters, and cards share that one budget.
+  const fitted = fitChatMessageText(proseSource, richParts);
   if (fitted.truncated) {
     log.warn('chat_text_truncated_at_cap', {
       space: spaceName,
       originalBytes: fitted.originalBytes,
       deliveredBytes: fitted.deliveredBytes,
-      reservedBytes,
+      reservedBytes: fitted.reservedBytes,
       budgetExhausted: fitted.budgetExhausted,
       hasCards: Boolean(envelope?.cardsV2),
     });

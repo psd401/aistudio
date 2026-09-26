@@ -4,12 +4,18 @@
  * COPY of infra/lambdas/agent-router/chat-text-budget.ts. The cron Lambda is a
  * separate bundling target with its own package.json, so we duplicate the file
  * rather than wire up a cross-package import (same arrangement as
- * rich-envelope.ts). Keep the two byte-identical except for this header.
+ * rich-envelope.ts). Keep the two byte-identical except for this header —
+ * chat-text-budget.lockstep.test.ts fails if they drift.
  */
 
 /**
- * Google Chat's documented per-message ceiling for text + cards, in bytes.
- * https://developers.google.com/workspace/chat/limits
+ * Google Chat's documented per-message ceiling. Verbatim from
+ * https://developers.google.com/workspace/chat/create-messages :
+ * "The maximum message size (including any text or cards) is 32,000 bytes."
+ *
+ * Note that it is one combined budget for text *and* cards, which is why
+ * fitChatMessageText reserves the card payload out of it rather than treating
+ * the text field as having a ceiling of its own.
  */
 export const GOOGLE_CHAT_MESSAGE_BYTE_LIMIT = 32_000;
 
@@ -24,20 +30,8 @@ export const CHAT_TRUNCATION_NOTICE =
   'bytes, so the rest was not delivered. Ask me to send the remainder, or to ' +
   'publish the full version and share a link.)_';
 
-export interface FitChatTextOptions {
-  /** Total request budget. Defaults to Google Chat's 32,000-byte limit. */
-  limitBytes?: number;
-  /**
-   * Bytes already claimed by non-text parts of the same request — the JSON
-   * cost of cardsV2 / accessoryWidgets / actionResponse.
-   */
-  reservedBytes?: number;
-  /** Notice appended when the body is cut. Defaults to CHAT_TRUNCATION_NOTICE. */
-  notice?: string;
-}
-
 export interface FitChatTextResult {
-  /** The text to send. Never exceeds `limitBytes - reservedBytes`. */
+  /** The text to send. Never exceeds the budget left after `reservedBytes`. */
   text: string;
   /** True when content was dropped, i.e. the notice is present. */
   truncated: boolean;
@@ -46,11 +40,16 @@ export interface FitChatTextResult {
   /** UTF-8 size of `text`. */
   deliveredBytes: number;
   /**
-   * True when the reserved payload (or an oversized notice) left no room for
-   * the body at all. Callers should log this: the request will very likely be
-   * rejected by Google no matter what we do with the prose.
+   * True when the reserved payload left no room for the body at all. Callers
+   * should log this: the request will very likely be rejected by Google no
+   * matter what we do with the prose.
    */
   budgetExhausted: boolean;
+}
+
+/** `FitChatTextResult` plus the reservation `fitChatMessageText` computed. */
+export interface FitChatMessageResult extends FitChatTextResult {
+  reservedBytes: number;
 }
 
 /** UTF-8 byte length of a string. */
@@ -58,10 +57,7 @@ export function utf8Bytes(text: string): number {
   return Buffer.byteLength(text, 'utf8');
 }
 
-const segmenter =
-  typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
-    ? new Intl.Segmenter('en', { granularity: 'grapheme' })
-    : null;
+const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' });
 
 /**
  * Cut `text` to at most `maxBytes` UTF-8 bytes without splitting a grapheme
@@ -77,22 +73,11 @@ export function cutToByteBudget(text: string, maxBytes: number): string {
   const candidate = text.slice(0, maxBytes);
   let used = 0;
   let end = 0;
-  if (segmenter) {
-    for (const { segment, index } of segmenter.segment(candidate)) {
-      const size = utf8Bytes(segment);
-      if (used + size > maxBytes) break;
-      used += size;
-      end = index + segment.length;
-    }
-    return candidate.slice(0, end);
-  }
-  // Intl.Segmenter is present on every Node runtime this Lambda targets; the
-  // fallback only guarantees code-point safety (no split surrogate pairs).
-  for (const codePoint of candidate) {
-    const size = utf8Bytes(codePoint);
+  for (const { segment, index } of segmenter.segment(candidate)) {
+    const size = utf8Bytes(segment);
     if (used + size > maxBytes) break;
     used += size;
-    end += codePoint.length;
+    end = index + segment.length;
   }
   return candidate.slice(0, end);
 }
@@ -102,17 +87,16 @@ export function cutToByteBudget(text: string, maxBytes: number): string {
  *
  * The body is cut from the tail, so a shared-space attribution prefix such as
  * `[Kris's Agent] ` survives as long as the budget is larger than the prefix
- * itself.
+ * itself. `reservedBytes` is what the rest of the request already claims — the
+ * JSON cost of cardsV2/accessoryWidgets and the body scaffolding around them.
  */
 export function fitChatText(
   body: string,
-  options: FitChatTextOptions = {}
+  reservedBytes = 0
 ): FitChatTextResult {
-  const limitBytes = options.limitBytes ?? GOOGLE_CHAT_MESSAGE_BYTE_LIMIT;
-  const reservedBytes = Math.max(options.reservedBytes ?? 0, 0);
-  const notice = options.notice ?? CHAT_TRUNCATION_NOTICE;
+  const reserved = Math.max(reservedBytes, 0);
   const originalBytes = utf8Bytes(body);
-  const available = limitBytes - reservedBytes;
+  const available = GOOGLE_CHAT_MESSAGE_BYTE_LIMIT - reserved;
 
   if (available <= 0) {
     return {
@@ -133,12 +117,12 @@ export function fitChatText(
     };
   }
 
-  const bodyBudget = available - utf8Bytes(notice);
+  const bodyBudget = available - utf8Bytes(CHAT_TRUNCATION_NOTICE);
   if (bodyBudget <= 0) {
     // The reservation is so large that even the notice does not fit cleanly.
     // Send as much of the notice as there is room for: the user at least
     // learns the message was cut rather than silently receiving a fragment.
-    const text = cutToByteBudget(notice.trimStart(), available);
+    const text = cutToByteBudget(CHAT_TRUNCATION_NOTICE.trimStart(), available);
     return {
       text,
       truncated: true,
@@ -148,7 +132,7 @@ export function fitChatText(
     };
   }
 
-  const text = cutToByteBudget(body, bodyBudget) + notice;
+  const text = cutToByteBudget(body, bodyBudget) + CHAT_TRUNCATION_NOTICE;
   return {
     text,
     truncated: true,
@@ -156,4 +140,20 @@ export function fitChatText(
     deliveredBytes: utf8Bytes(text),
     budgetExhausted: false,
   };
+}
+
+/**
+ * Fit the prose of a Chat message whose request also carries rich parts
+ * (cardsV2 / accessoryWidgets / actionResponse).
+ *
+ * Reserving the serialized body with an empty text field accounts for the JSON
+ * scaffolding — keys, braces, commas — as well as the card payload itself. Both
+ * Lambdas call this so the reservation arithmetic cannot drift between them.
+ */
+export function fitChatMessageText(
+  prose: string,
+  richParts: Record<string, unknown>
+): FitChatMessageResult {
+  const reservedBytes = utf8Bytes(JSON.stringify({ ...richParts, text: '' }));
+  return { ...fitChatText(prose, reservedBytes), reservedBytes };
 }

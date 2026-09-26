@@ -70,7 +70,7 @@ import * as chatPkg from '@googleapis/chat';
 import { Agent as UndiciAgent, fetch as undiciFetch } from 'undici';
 import { classifyTopic, isPrivateMessage, isoWeek, type Topic } from './topic-classifier';
 import { extractRichEnvelope, recomposeRichText } from './rich-envelope';
-import { fitChatText, utf8Bytes } from './chat-text-budget';
+import { fitChatMessageText, utf8Bytes } from './chat-text-budget';
 import {
   buildWorkspacePath,
   extractAttachments,
@@ -568,7 +568,12 @@ const CHAT_DELIVERY_ENVELOPE_KIND = 'agent-chat-delivery-v1';
  * silently dropped on the floor.
  */
 const MAX_CHAT_DELIVERY_ENVELOPE_BYTES = 240 * 1024;
-const MAX_CHAT_DELIVERY_TEXT_CHARS = 64 * 1024;
+/**
+ * Canonical text is bounded by construction: prose fits the 32,000-byte budget
+ * and the re-wrapped envelope is reserved out of that same budget, so the worst
+ * case is roughly 64,000 bytes. This is double that, in UTF-16 units.
+ */
+const MAX_CHAT_DELIVERY_TEXT_CHARS = 128 * 1024;
 
 class WorkspaceTurnDeferredError extends Error {
   readonly messageName: string | undefined;
@@ -3529,20 +3534,20 @@ function prepareGoogleChatMessage(
   // Google Chat requires `text` non-empty for notification previews, even when
   // cardsV2 carries the visible payload. Prefer the agent's prose, then the
   // explicit textFallback, then a generic placeholder.
+  // `remaining` arrives trimmed; trim the fallback too so re-preparing
+  // `deliverableText` yields the identical body (extraction trims the prose it
+  // returns, and the outbox re-runs this function on retry).
   const prose = envelope
-    ? remaining || envelope.textFallback || 'Rich response'
+    ? remaining || envelope.textFallback?.trim() || 'Rich response'
     : remaining || text;
-  // Cards count against the same request budget as the text field. Reserving
-  // the serialized body with an empty text field also accounts for the JSON
-  // scaffolding (keys, braces, commas) rather than the card payload alone.
-  const reservedBytes = utf8Bytes(JSON.stringify({ ...richParts, text: '' }));
-  const fitted = fitChatText(prose, { reservedBytes });
+  // Cards count against the same 32,000-byte request budget as the text field.
+  const fitted = fitChatMessageText(prose, richParts);
   if (fitted.truncated) {
     log.warn('chat_text_truncated_at_cap', {
       space: spaceName,
       originalBytes: fitted.originalBytes,
       deliveredBytes: fitted.deliveredBytes,
-      reservedBytes,
+      reservedBytes: fitted.reservedBytes,
       budgetExhausted: fitted.budgetExhausted,
       hasCards: Boolean(envelope?.cardsV2),
     });

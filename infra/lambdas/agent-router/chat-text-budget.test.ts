@@ -10,6 +10,7 @@ import {
   CHAT_TRUNCATION_NOTICE,
   GOOGLE_CHAT_MESSAGE_BYTE_LIMIT,
   cutToByteBudget,
+  fitChatMessageText,
   fitChatText,
   utf8Bytes,
 } from './chat-text-budget';
@@ -89,9 +90,7 @@ describe('fitChatText', () => {
 
   test('reserves card bytes out of the same request budget', () => {
     const cardBytes = 12_000;
-    const fitted = fitChatText('a'.repeat(30_000), {
-      reservedBytes: cardBytes,
-    });
+    const fitted = fitChatText('a'.repeat(30_000), cardBytes);
 
     expect(fitted.truncated).toBe(true);
     expect(fitted.deliveredBytes + cardBytes).toBeLessThanOrEqual(
@@ -111,9 +110,7 @@ describe('fitChatText', () => {
   });
 
   test('flags a reservation that leaves no room for prose at all', () => {
-    const fitted = fitChatText('a'.repeat(1_000), {
-      reservedBytes: GOOGLE_CHAT_MESSAGE_BYTE_LIMIT,
-    });
+    const fitted = fitChatText('a'.repeat(1_000), GOOGLE_CHAT_MESSAGE_BYTE_LIMIT);
 
     expect(fitted.budgetExhausted).toBe(true);
     expect(fitted.truncated).toBe(true);
@@ -121,10 +118,10 @@ describe('fitChatText', () => {
   });
 
   test('still says the message was cut when only the notice fits', () => {
-    const fitted = fitChatText('a'.repeat(1_000), {
-      reservedBytes:
-        GOOGLE_CHAT_MESSAGE_BYTE_LIMIT - utf8Bytes(CHAT_TRUNCATION_NOTICE) + 10,
-    });
+    const fitted = fitChatText(
+      'a'.repeat(1_000),
+      GOOGLE_CHAT_MESSAGE_BYTE_LIMIT - utf8Bytes(CHAT_TRUNCATION_NOTICE) + 10
+    );
 
     expect(fitted.truncated).toBe(true);
     expect(fitted.budgetExhausted).toBe(true);
@@ -132,6 +129,27 @@ describe('fitChatText', () => {
     expect(fitted.deliveredBytes).toBeLessThanOrEqual(
       utf8Bytes(CHAT_TRUNCATION_NOTICE)
     );
+  });
+
+  test('fitChatMessageText reserves the card payload and its JSON scaffolding', () => {
+    const richParts = { cardsV2: [{ cardId: 'c', card: { x: 'y'.repeat(500) } }] };
+    const fitted = fitChatMessageText('a'.repeat(40_000), richParts);
+
+    // Reservation covers the card JSON plus the body's keys/braces, so it is
+    // strictly larger than the card payload measured on its own.
+    expect(fitted.reservedBytes).toBeGreaterThan(
+      utf8Bytes(JSON.stringify(richParts))
+    );
+    expect(fitted.deliveredBytes + fitted.reservedBytes).toBeLessThanOrEqual(
+      GOOGLE_CHAT_MESSAGE_BYTE_LIMIT
+    );
+  });
+
+  test('fitChatMessageText leaves a short reply with no card untouched', () => {
+    const fitted = fitChatMessageText('hello', {});
+
+    expect(fitted.truncated).toBe(false);
+    expect(fitted.text).toBe('hello');
   });
 
   test('fitting an already-fitted reply is a no-op (the outbox re-runs it)', () => {

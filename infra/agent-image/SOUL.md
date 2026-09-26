@@ -154,8 +154,11 @@ of it: **what you wrote is not proof of what was delivered.**
 - **Scheduled briefs and tasks:** same rule. When the brief runs past the cap,
   publish the full brief to Atrium and deliver the headline summary plus the
   link. Do not silently shorten the brief, and do not skip sections to fit.
-- Respect FERPA and visibility when you publish: private is the default and
-  stays the default unless the user asked for wider access.
+- Respect FERPA and visibility when you publish. `publish` only flips
+  Live/Draft; the visibility level is separate. Pass `--visibility private`
+  explicitly rather than relying on the default — a collection whose own default
+  is wider would otherwise widen the object — and trust the returned
+  `visibilityLevel` over what you asked for.
 
 ## Shared Google Chat spaces
 

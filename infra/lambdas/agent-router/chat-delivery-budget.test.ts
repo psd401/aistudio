@@ -140,6 +140,20 @@ describe('prepareGoogleChatMessage — envelope before truncation', () => {
 });
 
 describe('recomposeRichText', () => {
+  test('drops the unbudgeted textFallback so the outbox stays bounded', () => {
+    const envelope = { ...card('Tiny'), textFallback: 'f'.repeat(300_000) };
+    const recomposed = recomposeRichText('fitted prose', envelope);
+
+    expect(recomposed).not.toContain('ffff');
+    expect(recomposed.length).toBeLessThan(2_000);
+    // Nothing is lost: a second extraction returns the prose as `remaining`,
+    // so the fallback would never have been consulted again.
+    const extracted = extractRichEnvelope(recomposed);
+    expect(extracted.remaining).toBe('fitted prose');
+    expect(extracted.envelope?.cardsV2).toEqual(envelope.cardsV2);
+    expect(extracted.envelope?.textFallback).toBeUndefined();
+  });
+
   test('round-trips prose and envelope through extraction', () => {
     const envelope = card('Round trip');
     const recomposed = recomposeRichText('some prose', envelope);
@@ -147,7 +161,7 @@ describe('recomposeRichText', () => {
 
     expect(extracted.malformed).toBe(false);
     expect(extracted.remaining).toBe('some prose');
-    expect(extracted.envelope).toEqual(envelope);
+    expect(extracted.envelope?.cardsV2).toEqual(envelope.cardsV2);
   });
 
   test('returns the prose unchanged when there is no envelope', () => {
@@ -163,6 +177,16 @@ describe('durable outbox accepts everything the primary path accepted', () => {
     {
       name: 'long reply carrying a card',
       reply: wrapped('b'.repeat(40_000), card('Outbox card')),
+    },
+    {
+      // textFallback is not a field Google receives and nothing budgets it, so
+      // re-wrapping it verbatim let an oversized one past the outbox bounds:
+      // the primary call succeeded and the retry was dead-lettered on dequeue.
+      name: 'card whose textFallback is enormous',
+      reply: wrapped('', {
+        ...card('Tiny card'),
+        textFallback: 'f'.repeat(300_000),
+      }),
     },
     {
       name: 'shared-space job reply',

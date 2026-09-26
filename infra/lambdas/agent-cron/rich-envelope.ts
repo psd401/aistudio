@@ -99,14 +99,24 @@ export function extractRichEnvelope(text: string | null | undefined): ExtractRes
  * be re-wrapped before it goes on the queue — otherwise the retry silently
  * degrades a card into plain prose. `prose` must already be trimmed, which is
  * what `extractRichEnvelope` returns.
+ *
+ * `textFallback` is dropped, deliberately. It is not a field Google's API
+ * receives — it only stands in as prose when the reply carried none — and no
+ * caller budgets it, so re-wrapping it verbatim let an agent smuggle an
+ * arbitrarily long string past the size bounds the outbox is validated
+ * against: the primary Chat call would succeed and the retry would then be
+ * rejected on dequeue and dead-lettered. Dropping it is also lossless, because
+ * `prose` is what a second extraction returns as `remaining`, so the fallback
+ * would never be consulted again.
  */
 export function recomposeRichText(
   prose: string,
   envelope: RichEnvelope | null
 ): string {
   if (!envelope) return prose;
+  const { textFallback: _textFallback, ...canonical } = envelope;
   const block = `${RICH_ENVELOPE_OPEN}${JSON.stringify(
-    envelope
+    canonical
   )}${RICH_ENVELOPE_CLOSE}`;
   return prose ? `${prose}\n${block}` : block;
 }

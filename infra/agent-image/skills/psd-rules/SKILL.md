@@ -224,8 +224,11 @@ of what arrived**.
 - **Scheduled briefs and tasks obey the same rule:** over the cap, publish the
   full brief to Atrium and deliver the headline summary plus the link. Never drop
   sections to fit, and never pad a brief toward the limit.
-- Publishing respects FERPA and visibility: private is the default and stays
-  private unless the user asked otherwise.
+- Publishing respects FERPA and visibility. `publish` flips Live/Draft only; the
+  visibility level is a separate setting. Pass `--visibility private`
+  explicitly rather than relying on the default — a collection whose own default
+  is wider would otherwise widen the object — and report the returned
+  `visibilityLevel`, not the one you requested.
 
 ---
 
