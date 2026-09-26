@@ -953,4 +953,63 @@ describe("Nexus model router workspace artifact tier floor", () => {
     expect(result.connectorIds).toEqual([PSD_CONNECTOR_ID])
     expect(result.metadata.reasonCodes).toContain("workspace_artifact_psd_data")
   })
+
+  it("records the raise in shadow mode, which still executes the legacy fallback", async () => {
+    mockGetConfig.mockResolvedValue({ config, mode: "shadow" })
+
+    const result = await routeNexusRequest({ ...shortFollowUp, workspace: editableArtifact })
+
+    expect(result.modelId).toBe("gpt-luna")
+    expect(result.metadata.proposedModelId).toBe("gpt-terra")
+    expect(result.metadata.tier).toBe("medium")
+    expect(result.metadata.reasonCodes).toContain("workspace_artifact_min_tier")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier_unmet")
+  })
+
+  /**
+   * `selectRoutedTextModel` treats a tier as a PREFERENCE and sweeps
+   * `[tier, medium, light, high]`, so the floor can be silently defeated: the
+   * turn keeps working, but on the very model the floor exists to avoid. Without
+   * a distinct code, `workspace_artifact_min_tier` would look like proof the fix
+   * is live on exactly those turns.
+   */
+  it("flags the floor as unmet when only a light model is accessible", async () => {
+    mockFilterAccessibleResourceIds.mockResolvedValue(["1"])
+
+    const result = await routeNexusRequest({ ...shortFollowUp, workspace: editableArtifact })
+
+    expect(result.modelId).toBe("gpt-luna")
+    expect(result.metadata.tier).toBe("medium")
+    expect(result.metadata.reasonCodes).toContain("workspace_artifact_min_tier")
+    expect(result.metadata.reasonCodes).toContain("workspace_artifact_min_tier_unmet")
+  })
+
+  it("does not flag the floor unmet for a turn with no workspace", async () => {
+    mockFilterAccessibleResourceIds.mockResolvedValue(["1"])
+
+    const result = await routeNexusRequest({ ...shortFollowUp, workspace: null })
+
+    expect(result.modelId).toBe("gpt-luna")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier_unmet")
+  })
+
+  /**
+   * The specialist lists ignore `tier` entirely, so neither the raise nor a
+   * below-floor specialist model says anything about tool-capable routing.
+   */
+  it("does not flag the floor unmet on a specialist image turn", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "image", tier: "light", confidence: 0.99,
+      reasonCodes: ["explicit_image_request"], source: "deterministic",
+    })
+
+    const result = await routeNexusRequest({
+      ...shortFollowUp,
+      requestedFamily: "auto" as const,
+      workspace: editableArtifact,
+    })
+
+    expect(result.modelId).toBe("gemini-3.1-flash-image")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier_unmet")
+  })
 })

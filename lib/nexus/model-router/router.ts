@@ -346,6 +346,12 @@ function selectedRuntimeModel(
 const TIER_RANK: Record<NexusRouterTier, number> = { light: 1, medium: 2, high: 3 }
 
 /**
+ * Intents whose candidates come from a specialist list, so `configuredCandidates`
+ * never consults `tier` — there is no tier for a floor to govern or to miss.
+ */
+const TIER_INDEPENDENT_INTENTS = new Set<NexusRouterIntent>(["image", "web-search"])
+
+/**
  * The lowest tier an editable-artifact turn may run on (#1840).
  *
  * #1786 gave those turns the PSD Data tools; this gives them a model that
@@ -370,11 +376,19 @@ const WORKSPACE_ARTIFACT_MIN_TIER: NexusRouterTier = "medium"
  * Raise a classified decision to the artifact-authoring tier floor, recording
  * `workspace_artifact_min_tier` when it actually changed the tier.
  *
- * Returns the decision UNTOUCHED (same object) when there is nothing to raise,
- * so a turn with no workspace, a document, a read-only viewer, or an already
- * sufficient tier carries no extra reason code and routes exactly as before.
+ * Returns the decision UNTOUCHED (the same object) when there is nothing to
+ * raise, so a turn with no workspace, a document, a read-only viewer, or an
+ * already sufficient tier carries no extra reason code and routes exactly as
+ * before.
+ *
+ * INERT for the `TIER_INDEPENDENT_INTENTS`: `configuredCandidates` reads the
+ * specialist lists for those and never consults `tier`, so a raise there cannot
+ * change which model is selected. The code is still recorded — it describes the
+ * DECISION, and `metadata.tier` did change — but do not read it as evidence of a
+ * different model on a specialist turn, and `workspace_artifact_min_tier_unmet`
+ * is deliberately not emitted for them either.
  */
-export function applyWorkspaceArtifactTierFloor(
+function applyWorkspaceArtifactTierFloor(
   decision: NexusClassifierDecision,
   workspace: NexusWorkspaceRoutingContext | null | undefined
 ): NexusClassifierDecision {
@@ -388,6 +402,25 @@ export function applyWorkspaceArtifactTierFloor(
 }
 
 /**
+ * Whether the artifact tier floor was asked for but the ROUTED model still came
+ * out below it (#1840) — see `workspaceArtifactTierUnmet` below for why that is
+ * worth its own reason code.
+ *
+ * Takes the routed model, never the executed one: in shadow mode the executed
+ * model is the legacy fallback by design, and the question worth monitoring in
+ * every mode is whether routing could honour the floor.
+ */
+function workspaceArtifactTierUnmet(options: {
+  workspaceWantsPsdData: boolean
+  intent: NexusRouterIntent
+  routedModel: NexusModelRow
+}): boolean {
+  if (!options.workspaceWantsPsdData) return false
+  if (TIER_INDEPENDENT_INTENTS.has(options.intent)) return false
+  return TIER_RANK[inferTier(options.routedModel)] < TIER_RANK[WORKSPACE_ARTIFACT_MIN_TIER]
+}
+
+/**
  * The classifier's own reason codes plus what routing added on top of them, so
  * the stored per-message metadata explains the turn's tools after the fact.
  */
@@ -398,6 +431,18 @@ function buildReasonCodes(options: {
   /** Whether the connector reached the turn's connector list — NOT whether its
    *  tools bound, which only the chat route can know. Telemetry, not behaviour. */
   workspacePsdDataAttached: boolean
+  /**
+   * Whether the ROUTED model still came out below the artifact tier floor
+   * (#1840). `selectRoutedTextModel` treats a tier as a preference and sweeps
+   * `[tier, medium, light, high]` when nothing in the requested tier is
+   * accessible, so a deployment with no configured medium candidates — or a user
+   * whose role grants only light models — lands back on a light model while
+   * `metadata.tier` reads `medium`. Without this code the presence of
+   * `workspace_artifact_min_tier` would look like proof the fix is live on turns
+   * where it was silently defeated, and the #1786-style guessing could recur
+   * unseen.
+   */
+  workspaceArtifactTierUnmet: boolean
 }): string[] {
   const reasonCodes = [...options.decision.reasonCodes]
   if (options.requiredTools.length > 0) reasonCodes.push("required_tools_enforced")
@@ -407,6 +452,9 @@ function buildReasonCodes(options: {
         ? "workspace_artifact_psd_data"
         : "workspace_psd_data_unavailable"
     )
+    if (options.workspaceArtifactTierUnmet) {
+      reasonCodes.push("workspace_artifact_min_tier_unmet")
+    }
   }
   return reasonCodes
 }
@@ -459,6 +507,11 @@ async function buildRoutedResult(options: {
     workspacePsdDataAttached:
       workspacePsdDataConnectorId !== null
       && connectorIds.includes(workspacePsdDataConnectorId),
+    workspaceArtifactTierUnmet: workspaceArtifactTierUnmet({
+      workspaceWantsPsdData,
+      intent: decision.intent,
+      routedModel: selection.model,
+    }),
   })
 
   return {
