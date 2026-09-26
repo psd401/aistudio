@@ -954,6 +954,41 @@ describe("Nexus model router workspace artifact tier floor", () => {
     expect(result.metadata.reasonCodes).toContain("workspace_artifact_psd_data")
   })
 
+  /**
+   * The strongest form of the shadow contract: with a required tool present,
+   * `selectedRuntimeModel` executes `selection.model`, so even the RAISED TIER
+   * alone would reroute — straight to the configured medium candidate, no
+   * `minTier` needed. Shadow must therefore withhold the floor entirely, keeping
+   * `metadata.tier` at the classifier's own verdict.
+   */
+  it("withholds the floor from a shadow turn with a required tool", async () => {
+    mockGetConfig.mockResolvedValue({ config, mode: "shadow" })
+
+    const result = await routeNexusRequest({
+      ...shortFollowUp,
+      enabledToolNames: ["searchNexusAttachments"],
+      workspace: editableArtifact,
+    })
+
+    expect(result.modelId).toBe("gpt-luna")
+    expect(result.metadata.tier).toBe("light")
+    expect(result.metadata.reasonCodes).toContain("required_tools_enforced")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier")
+    expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier_unmet")
+  })
+
+  it("still applies the floor to an ACTIVE turn with a required tool", async () => {
+    const result = await routeNexusRequest({
+      ...shortFollowUp,
+      enabledToolNames: ["searchNexusAttachments"],
+      workspace: editableArtifact,
+    })
+
+    expect(result.modelId).toBe("gpt-terra")
+    expect(result.metadata.tier).toBe("medium")
+    expect(result.metadata.reasonCodes).toContain("workspace_artifact_min_tier")
+  })
+
   it("records the raise in shadow mode, which still executes the legacy fallback", async () => {
     mockGetConfig.mockResolvedValue({ config, mode: "shadow" })
 

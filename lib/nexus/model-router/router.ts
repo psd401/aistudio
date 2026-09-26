@@ -101,6 +101,31 @@ const TIER_INDEPENDENT_INTENTS = new Set<NexusRouterIntent>(["image", "web-searc
  */
 const WORKSPACE_ARTIFACT_MIN_TIER: NexusRouterTier = "medium"
 
+/**
+ * Whether routing may apply the artifact floor to this turn at all — BOTH the
+ * raised tier and the `minTier` preference — without changing which model
+ * actually executes (#1840).
+ *
+ * Shadow mode is supposed to change nothing. It keeps the legacy fallback only
+ * while `requiredTools` is empty (`selectedRuntimeModel`); with a required tool
+ * present it executes `selection.model`, so on those turns a raised tier would
+ * pick the configured medium model — and a `minTier` preference an accessible
+ * high one — and shadow would quietly reroute live traffic. Both halves of the
+ * floor are therefore withheld there, leaving the turn's `metadata.tier` at the
+ * classifier's own verdict and its reason codes free of the floor, which is the
+ * honest record: the floor was not applied.
+ *
+ * Asked of the same predicate on both sides (the tier raise in
+ * `routeWithConfiguredRouter`, the preferences in `selectModelForToolUse`) so the
+ * two cannot drift apart.
+ */
+function artifactFloorMayApply(
+  mode: Exclude<NexusRouterRuntimeMode, "off">,
+  requiredToolCount: number
+): boolean {
+  return mode === "active" || requiredToolCount === 0
+}
+
 function meetsMinTier(
   model: Parameters<typeof inferTier>[0],
   minTier: NexusRouterTier | undefined
@@ -282,12 +307,10 @@ function selectModelForRuntime(
  * thing — reporting the light model (and `workspace_artifact_min_tier_unmet`) for
  * a deployment where active mode would have reached the high one.
  *
- * The exception is a shadow turn that ALSO has a required tool: there
- * `selectedRuntimeModel` executes `selection.model` rather than the legacy
- * fallback, so applying the preferences would silently change the executed model
- * of a mode whose whole contract is to change nothing. Shadow keeps its original
- * route there and its proposal stays unpreferenced — a less precise proposal is
- * a far smaller cost than shadow mode quietly rerouting live traffic.
+ * The exception is a shadow turn that ALSO has a required tool — see
+ * `artifactFloorMayApply`. Shadow keeps its original route there and its proposal
+ * stays unpreferenced: a less precise proposal is a far smaller cost than shadow
+ * mode quietly rerouting live traffic.
  */
 function selectModelForToolUse(
   args: Parameters<typeof selectModel>[0],
@@ -296,9 +319,8 @@ function selectModelForToolUse(
   prefersFunctionCalling: boolean
 ): { model: NexusModelRow; fallbackUsed: boolean } {
   const unconstrained = { ...args, minTier: undefined }
-  const preferencesAffectExecution = mode === "shadow" && args.requiredTools.length > 0
   const preferences: Partial<Parameters<typeof selectModel>[0]>[] = []
-  if (!preferencesAffectExecution) {
+  if (artifactFloorMayApply(mode, args.requiredTools.length)) {
     if (prefersFunctionCalling && args.minTier) {
       preferences.push({ requiresFunctionCalling: true, minTier: args.minTier })
     }
@@ -482,8 +504,14 @@ function workspaceArtifactTierUnmet(options: {
   workspaceWantsPsdData: boolean
   intent: NexusRouterIntent
   routedModel: NexusModelRow
+  mode: Exclude<NexusRouterRuntimeMode, "off">
+  requiredToolCount: number
 }): boolean {
   if (!options.workspaceWantsPsdData) return false
+  // Only meaningful when the floor was actually asked for: a shadow turn with a
+  // required tool never applies it, so "unmet" would report a miss on a turn that
+  // never aimed.
+  if (!artifactFloorMayApply(options.mode, options.requiredToolCount)) return false
   if (TIER_INDEPENDENT_INTENTS.has(options.intent)) return false
   return TIER_RANK[inferTier(options.routedModel)] < TIER_RANK[WORKSPACE_ARTIFACT_MIN_TIER]
 }
@@ -579,6 +607,8 @@ async function buildRoutedResult(options: {
       workspaceWantsPsdData,
       intent: decision.intent,
       routedModel: selection.model,
+      mode,
+      requiredToolCount: requiredTools.length,
     }),
   })
 
@@ -689,16 +719,18 @@ async function routeWithConfiguredRouter(options: {
     accessibleIds,
     requiredTools,
   } = options
+  const rawDecision = await classifyNexusRequest(args.text, config, {
+    hasImageInput: args.hasImageInput,
+    hasPreviousGeneratedImage: args.hasPreviousGeneratedImage,
+  })
   // The classifier sees the latest message only. An open editable artifact is a
   // routing input it cannot know about, so the floor is applied to its verdict
-  // before anything reads `tier` (#1840).
-  const classified = applyWorkspaceArtifactTierFloor(
-    await classifyNexusRequest(args.text, config, {
-      hasImageInput: args.hasImageInput,
-      hasPreviousGeneratedImage: args.hasPreviousGeneratedImage,
-    }),
-    args.workspace
-  )
+  // before anything reads `tier` (#1840) — unless doing so would change what
+  // shadow mode EXECUTES, which `artifactFloorMayApply` explains.
+  const floorMayApply = artifactFloorMayApply(mode, requiredTools.length)
+  const classified = floorMayApply
+    ? applyWorkspaceArtifactTierFloor(rawDecision, args.workspace)
+    : rawDecision
   // Shadow mode may retain a legacy fallback only when doing so is safe. A
   // server-required input tool is an authorization/correctness boundary, so
   // execute a compatible text model even while recording the proposed route.
@@ -717,10 +749,12 @@ async function routeWithConfiguredRouter(options: {
         models, config, family: args.requestedFamily, tier: current.tier,
         intent: current.intent, fallbackModelId: args.fallbackModelId, accessibleIds,
         requiredTools,
-        minTier: workspaceArtifactMinTier({
-          workspaceWantsPsdData: workspaceNeedsPsdData(args.workspace),
-          intent: current.intent,
-        }),
+        minTier: floorMayApply
+          ? workspaceArtifactMinTier({
+            workspaceWantsPsdData: workspaceNeedsPsdData(args.workspace),
+            intent: current.intent,
+          })
+          : undefined,
       },
       mode,
       fallback,
