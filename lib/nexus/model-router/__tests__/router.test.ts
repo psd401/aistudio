@@ -967,11 +967,42 @@ describe("Nexus model router workspace artifact tier floor", () => {
   })
 
   /**
-   * `selectRoutedTextModel` treats a tier as a PREFERENCE and sweeps
-   * `[tier, medium, light, high]`, so the floor can be silently defeated: the
-   * turn keeps working, but on the very model the floor exists to avoid. Without
-   * a distinct code, `workspace_artifact_min_tier` would look like proof the fix
-   * is live on exactly those turns.
+   * `selectRoutedTextModel` sweeps `[tier, medium, light, high]`, so with the
+   * tier raised to medium it would still prefer an accessible LIGHT model over an
+   * accessible high one — landing the turn on exactly the model the floor exists
+   * to avoid. `minTier` makes the below-floor models ineligible first.
+   */
+  describe("with no medium model accessible but a high one available", () => {
+    const gptSol = {
+      id: 9, name: "GPT Sol", provider: "openai", modelId: "gpt-sol",
+      capabilities: "[]", providerMetadata: { nexusRouterTier: "high" },
+    }
+
+    beforeEach(() => {
+      mockGetNexusEnabledModels.mockResolvedValue([...models, gptSol])
+      mockFilterAccessibleResourceIds.mockResolvedValue(["1", "9"])
+    })
+
+    it("reaches the high model instead of falling back below the floor", async () => {
+      const result = await routeNexusRequest({ ...shortFollowUp, workspace: editableArtifact })
+
+      expect(result.modelId).toBe("gpt-sol")
+      expect(result.metadata.reasonCodes).toContain("workspace_artifact_min_tier")
+      expect(result.metadata.reasonCodes).not.toContain("workspace_artifact_min_tier_unmet")
+    })
+
+    it("still keeps the light model for the same access with no workspace bound", async () => {
+      const result = await routeNexusRequest({ ...shortFollowUp, workspace: null })
+
+      expect(result.modelId).toBe("gpt-luna")
+    })
+  })
+
+  /**
+   * The floor is still a PREFERENCE, never a new way to fail a turn: with nothing
+   * at or above it, the turn keeps the light model it would have had — and says
+   * so, because `workspace_artifact_min_tier` alone would look like proof the fix
+   * was live on exactly the turns where it was defeated.
    */
   it("flags the floor as unmet when only a light model is accessible", async () => {
     mockFilterAccessibleResourceIds.mockResolvedValue(["1"])

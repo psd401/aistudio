@@ -71,6 +71,60 @@ function firstAccessibleModel(
   return null
 }
 
+/** Ascending, so a floor is a plain rank comparison. */
+const TIER_RANK: Record<NexusRouterTier, number> = { light: 1, medium: 2, high: 3 }
+
+/**
+ * Intents whose candidates come from a specialist list, so `configuredCandidates`
+ * never consults `tier` — there is no tier for a floor to govern or to miss.
+ */
+const TIER_INDEPENDENT_INTENTS = new Set<NexusRouterIntent>(["image", "web-search"])
+
+/**
+ * The lowest tier an editable-artifact turn may run on (#1840).
+ *
+ * #1786 gave those turns the PSD Data tools; this gives them a model that
+ * reliably decides to USE them. The classifier rates the latest message alone,
+ * with no history and no knowledge that an artifact is open, so the shortest
+ * follow-ups in an authoring session — "did that work?", "can you turn live data
+ * back on?" — score `light` and run on the light tier. Those are exactly the
+ * turns that need tool use: read the current artifact, check the preview
+ * diagnostics, write a new version. Observed on the light tier instead: no tool
+ * calls at all, and invented UI ("a Live data toggle in the panel header") in
+ * place of the `update_workspace_artifact` call that would have done the job.
+ *
+ * A FLOOR, never a cap: a `high` classification keeps its own tier.
+ *
+ * Scoped by the same predicate as the connector attach, so documents and
+ * read-only viewers are untouched and the extra cost lands only on
+ * artifact-authoring turns — where a wrong answer is a broken dashboard.
+ */
+const WORKSPACE_ARTIFACT_MIN_TIER: NexusRouterTier = "medium"
+
+function meetsMinTier(
+  model: Parameters<typeof inferTier>[0],
+  minTier: NexusRouterTier | undefined
+): boolean {
+  return minTier === undefined || TIER_RANK[inferTier(model)] >= TIER_RANK[minTier]
+}
+
+/**
+ * The artifact tier floor to pass to `selectModel`, or undefined when this turn
+ * has none (#1840).
+ *
+ * Skipped for the `TIER_INDEPENDENT_INTENTS`, whose candidates come from a
+ * specialist list: filtering those by tier could only discard the very model the
+ * intent requires.
+ */
+function workspaceArtifactMinTier(options: {
+  workspaceWantsPsdData: boolean
+  intent: NexusRouterIntent
+}): NexusRouterTier | undefined {
+  if (!options.workspaceWantsPsdData) return undefined
+  if (TIER_INDEPENDENT_INTENTS.has(options.intent)) return undefined
+  return WORKSPACE_ARTIFACT_MIN_TIER
+}
+
 function selectModel(args: {
   models: NexusModelRow[]
   config: NexusRouterConfig
@@ -82,6 +136,18 @@ function selectModel(args: {
   requiredTools: string[]
   /** Demand function calling even when no named tool is required (#1786). */
   requiresFunctionCalling?: boolean
+  /**
+   * Exclude models BELOW this tier (#1840).
+   *
+   * `selectRoutedTextModel` treats `tier` as a preference and sweeps
+   * `[tier, medium, light, high]`, so with the tier raised to `medium` it still
+   * prefers an accessible LIGHT model over an accessible high one — landing the
+   * turn on exactly the model the artifact floor exists to avoid. Passing the
+   * floor here makes those models ineligible, so the sweep reaches `high`
+   * instead. The caller retries without it when nothing qualifies, which keeps
+   * this a preference rather than a new way to fail a turn.
+   */
+  minTier?: NexusRouterTier
 }): { model: NexusModelRow; fallbackUsed: boolean } {
   const configuredIds = configuredCandidates(args.config, args.family, args.tier, args.intent)
   // A specialist-only image model cannot first call server-side input tools.
@@ -123,6 +189,7 @@ function selectModel(args: {
     additionalEligibility: model =>
       !hasCapability(model.capabilities, "imageGeneration")
       && !hasCapability(model.capabilities, "deepResearch")
+      && meetsMinTier(model, args.minTier)
       && (args.intent !== "instruction" || args.family !== "auto" || inferFamily(model) === "google")
       && (args.intent !== "web-search" || args.family !== "auto" || inferFamily(model) === "google"),
   })
@@ -196,11 +263,18 @@ function selectModelForRuntime(
  *     link without ever opening it, which is the failure this fix exists to
  *     remove, just one step later in the pipeline.
  *
+ * Since #1840 it also carries the artifact tier floor (`args.minTier`), for the
+ * same reason and on the same terms.
+ *
  * A PREFERENCE, not a requirement: with no function-calling model available the
  * turn keeps its normal model and the chat route's do-not-guess guidance covers
  * it, rather than failing outright. That matters most for the URL case —
  * demanding a capability here would re-introduce the hard "cannot access URLs"
  * dead end #1696 removed.
+ *
+ * The preferences are attempted strongest-first and are all dropped before the
+ * final, unconstrained selection. Function calling outranks the tier floor: a
+ * model that cannot invoke a tool is useless to an authoring turn at any tier.
  */
 function selectModelForToolUse(
   args: Parameters<typeof selectModel>[0],
@@ -208,18 +282,28 @@ function selectModelForToolUse(
   fallback: NexusModelRow,
   prefersFunctionCalling: boolean
 ): { model: NexusModelRow; fallbackUsed: boolean } {
-  if (mode === "active" && prefersFunctionCalling) {
-    try {
-      return selectModel({ ...args, requiresFunctionCalling: true })
-    } catch (error) {
-      log.warn("No function-calling model for a tool-dependent turn; keeping the normal selection", {
-        error: error instanceof Error ? error.message : String(error),
-      })
+  const unconstrained = { ...args, minTier: undefined }
+  if (mode === "active") {
+    const preferences: Partial<Parameters<typeof selectModel>[0]>[] = []
+    if (prefersFunctionCalling && args.minTier) {
+      preferences.push({ requiresFunctionCalling: true, minTier: args.minTier })
+    }
+    if (prefersFunctionCalling) preferences.push({ requiresFunctionCalling: true, minTier: undefined })
+    if (args.minTier) preferences.push({ minTier: args.minTier })
+    for (const preference of preferences) {
+      try {
+        return selectModel({ ...unconstrained, ...preference })
+      } catch (error) {
+        log.warn("A routing preference could not be satisfied; trying the next one", {
+          preference: { ...preference, minTier: preference.minTier ?? null },
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
     }
   }
-  return args.requiredTools.length > 0
-    ? selectModel(args)
-    : selectModelForRuntime(args, mode, fallback)
+  return unconstrained.requiredTools.length > 0
+    ? selectModel(unconstrained)
+    : selectModelForRuntime(unconstrained, mode, fallback)
 }
 
 interface RouteNexusRequestArgs {
@@ -341,36 +425,6 @@ function selectedRuntimeModel(
   if (mode === "shadow" && requiredTools.length === 0) return fallback
   return selection.model
 }
-
-/** Ascending, so a floor is a plain index comparison. */
-const TIER_RANK: Record<NexusRouterTier, number> = { light: 1, medium: 2, high: 3 }
-
-/**
- * Intents whose candidates come from a specialist list, so `configuredCandidates`
- * never consults `tier` — there is no tier for a floor to govern or to miss.
- */
-const TIER_INDEPENDENT_INTENTS = new Set<NexusRouterIntent>(["image", "web-search"])
-
-/**
- * The lowest tier an editable-artifact turn may run on (#1840).
- *
- * #1786 gave those turns the PSD Data tools; this gives them a model that
- * reliably decides to USE them. The classifier rates the latest message alone,
- * with no history and no knowledge that an artifact is open, so the shortest
- * follow-ups in an authoring session — "did that work?", "can you turn live data
- * back on?" — score `light` and run on the light tier. Those are exactly the
- * turns that need tool use: read the current artifact, check the preview
- * diagnostics, write a new version. Observed on the light tier instead: no tool
- * calls at all, and invented UI ("a Live data toggle in the panel header") in
- * place of the `update_workspace_artifact` call that would have done the job.
- *
- * A FLOOR, never a cap: a `high` classification keeps its own tier.
- *
- * Scoped by the same predicate as the connector attach, so documents and
- * read-only viewers are untouched and the extra cost lands only on
- * artifact-authoring turns — where a wrong answer is a broken dashboard.
- */
-const WORKSPACE_ARTIFACT_MIN_TIER: NexusRouterTier = "medium"
 
 /**
  * Raise a classified decision to the artifact-authoring tier floor, recording
@@ -641,11 +695,18 @@ async function routeWithConfiguredRouter(options: {
   const { decision, selection } = selectWithFetchOnlyFallback({
     decision: classified,
     requiredTools,
+    // `current.intent`, not `classified.intent`: the fetch-only fallback rewrites
+    // a web-search decision to `general`, and the retry must then be governed by
+    // the floor the rewritten intent actually has (#1840).
     select: current => selectModelForToolUse(
       {
         models, config, family: args.requestedFamily, tier: current.tier,
         intent: current.intent, fallbackModelId: args.fallbackModelId, accessibleIds,
         requiredTools,
+        minTier: workspaceArtifactMinTier({
+          workspaceWantsPsdData: workspaceNeedsPsdData(args.workspace),
+          intent: current.intent,
+        }),
       },
       mode,
       fallback,
