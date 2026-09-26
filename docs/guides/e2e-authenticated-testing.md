@@ -83,6 +83,26 @@ PLAYWRIGHT_AUTH_ENABLED=true PLAYWRIGHT_BASE_URL=http://localhost:3100 \
   bunx playwright test tests/e2e/capability-functional.spec.ts
 ```
 
+## Live artifact preview frames
+
+An Atrium artifact's preview runs in a cross-origin `ArtifactSandbox` frame, and
+with no `ATRIUM_SANDBOX_ORIGIN` the app shows a fail-closed notice instead. The
+runner (`bun run test:e2e:local`) starts its server with
+`ATRIUM_SANDBOX_ORIGIN=https://atrium-sandbox.test` (override with
+`E2E_SANDBOX_ORIGIN`). That origin never resolves, so a frame loads only when a
+spec serves the committed host page there:
+
+```ts
+import { routeAppSandbox } from "./helpers/atrium-sandbox-host";
+
+await routeAppSandbox(page, new URL(baseURL).origin); // before page.goto
+```
+
+The artifact's code then really runs, and its forwarded errors and bridge calls
+reach the app. `nexus-workspace-preview-diagnostics.functional.spec.ts` is the
+reference use. A server you start by hand (step 2) has no sandbox origin, so
+those specs fail with a message saying to use the runner.
+
 ## Running the live workflow-gateway E2E
 
 `tests/e2e/workflow-gateway.spec.ts` always exercises the unsigned guard on the

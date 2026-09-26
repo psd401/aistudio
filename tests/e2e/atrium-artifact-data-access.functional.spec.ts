@@ -16,9 +16,10 @@
  * (`tests/unit/atrium-artifact-query-action.test.ts`).
  *
  * The #1712 loaded-mode pin is likewise NOT exercised here. Driving it end to end
- * means posting a bridge request from the sandbox frame, and the local harness has
- * no `ATRIUM_SANDBOX_ORIGIN`, so the reader renders the fail-closed notice instead
- * of a frame (see `atrium-artifact.guard.spec.ts`). It is covered by
+ * means posting a bridge request from the sandbox frame, and the local harness's
+ * `ATRIUM_SANDBOX_ORIGIN` serves nothing unless a spec routes the host page onto
+ * it (`routeAppSandbox`, which this spec does not), so no frame ever renders
+ * artifact code here. It is covered by
  * `tests/unit/atrium-artifact-data-bridge.test.tsx` ("loaded-mode pin", both
  * directions plus `none`) and by the reader-page prop assertions in
  * `tests/unit/atrium-reader-page-masking.test.tsx`. What this spec does cover is
@@ -220,9 +221,10 @@ test.describe("Atrium artifact data access (#1705)", () => {
 
   /**
    * #1725. The bridge itself cannot be driven end to end in this harness: it
-   * needs a real `ATRIUM_SANDBOX_ORIGIN` (the local host server has none, so the
-   * sandbox renders its fail-closed notice — see `atrium-artifact.guard.spec.ts`)
-   * plus a live Cognito ID token and a deployed PSD Data MCP. The prop wiring is
+   * needs a sandbox frame that actually runs code (the local server's
+   * `ATRIUM_SANDBOX_ORIGIN` serves nothing unless a spec routes the host page —
+   * see `routeAppSandbox`) plus a live Cognito ID token and a deployed PSD Data
+   * MCP. The prop wiring is
    * covered by `tests/unit/atrium-artifact-view-page-bridge.test.tsx` and
    * `tests/unit/atrium-artifact-canvas-bridge.test.tsx`.
    *
@@ -266,7 +268,8 @@ test.describe("Atrium artifact data access (#1705)", () => {
       await expect(page.getByTestId("artifact-viewport")).toBeVisible();
 
       // The viewer resolves to exactly one of the sandbox's three states. The
-      // fail-closed notice is CORRECT here when ATRIUM_SANDBOX_ORIGIN is unset;
+      // fail-closed notice is CORRECT here when ATRIUM_SANDBOX_ORIGIN is unset
+      // (and the frame-error notice when it is set but nothing serves it);
       // what matters is that the route renders the artifact surface instead of
       // bouncing or 404ing.
       await expect(

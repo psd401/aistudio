@@ -570,6 +570,11 @@ restores the buffer so the next ordinary turn — the one that could actually fi
 the artifact — still sees the failure. That restore is generation-guarded, so a
 preview that moved on meanwhile still drops the entries.
 
+`tests/e2e/nexus-workspace-preview-diagnostics.functional.spec.ts` drives this
+path in a real browser, with a real sandbox frame whose artifact throws. It
+checks that the next send carries the failure and the one after it does not, and
+that a response with the header puts the failure back for the following send.
+
 ---
 
 ## Durable repository bindings
