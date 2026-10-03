@@ -34,7 +34,6 @@ import type {
   AgentCostProjection,
   PricableModel,
 } from "@/actions/admin/agent-cost-projection.actions"
-import { AGENT_MODEL_LABEL } from "@/lib/agents/platform-model"
 import { formatUsd } from "@/lib/utils/format-currency"
 import { meridianPortalClassName } from "@/lib/meridian/fonts"
 
@@ -281,7 +280,9 @@ function ProjectionPanel({
             <TableBody>
               <TableRow>
                 <TableCell className="font-medium">
-                  Actual ({AGENT_MODEL_LABEL})
+                  {projection.actualModels.length > 0
+                    ? `Actual (${projection.actualModels.join(", ")})`
+                    : "Actual"}
                 </TableCell>
                 <TableCell className="text-right">
                   {usd(projection.actualUsd)}

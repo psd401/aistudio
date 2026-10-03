@@ -4,9 +4,10 @@
  * The Google-Chat agent platform runs on exactly one model today. Its id is
  * recorded on `agent_messages.model` by the wrapper (see
  * infra/agent-image/openclaw.json + agentcore_wrapper.py) and priced by the
- * `ai_models` row in migration 092. Several places need this id/label (the
- * cost-projection self-exclusion filter, the cost UI's "Actual" label); this
- * module keeps them from drifting. If a second agent model is ever added, turn
+ * `ai_models` rows in migrations 092 / 186. Several places need these ids (the
+ * cost-projection self-exclusion filter, the wrapper's telemetry fallback, the
+ * drift tests); this module keeps them from drifting. The cost UI's "Actual"
+ * label is derived from the models in telemetry, not from here. If a second agent model is ever added, turn
  * AGENT_MODEL_ID into a set and update the consumers.
  *
  * Switched GLM-5 -> Claude Sonnet 5 for #1089 (caching-capable harness model),
@@ -74,6 +75,3 @@ export const AGENT_MODEL_ID_ALIASES: readonly string[] = [
  * verbatim; see the AGENT_MODEL_ID doc comment.
  */
 export const AGENT_REQUEST_MODEL_ID = "us.anthropic.claude-sonnet-5-5"
-
-/** Human label for AGENT_MODEL_ID shown in the cost UI. */
-export const AGENT_MODEL_LABEL = "Claude Sonnet 5.5"

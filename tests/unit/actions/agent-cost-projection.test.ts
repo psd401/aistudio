@@ -180,6 +180,39 @@ describe("getAgentCostProjection", () => {
     expect(res.data.candidates[0].name).toBe("Claude Opus 4.7")
   })
 
+  it("reports the distinct models in the window for the Actual label", async () => {
+    // A window spanning a harness-model switch holds both models; the UI must
+    // not label that mix as a single hard-coded model.
+    queryResults = [
+      [
+        {
+          promptInputTokens: 10,
+          outputTokens: 5,
+          actualUsd: "0",
+          actualModels: [
+            "us.anthropic.claude-sonnet-5",
+            "us.anthropic.claude-sonnet-5-5",
+          ],
+        },
+      ],
+    ]
+    const res = await getAgentCostProjection("30d", [])
+    if (!res.isSuccess || !res.data) throw new Error("expected success")
+    expect(res.data.actualModels).toEqual([
+      "us.anthropic.claude-sonnet-5",
+      "us.anthropic.claude-sonnet-5-5",
+    ])
+  })
+
+  it("returns no models for an empty window (ARRAY_AGG yields NULL)", async () => {
+    queryResults = [
+      [{ promptInputTokens: 0, outputTokens: 0, actualUsd: "0", actualModels: null }],
+    ]
+    const res = await getAgentCostProjection("30d", [])
+    if (!res.isSuccess || !res.data) throw new Error("expected success")
+    expect(res.data.actualModels).toEqual([])
+  })
+
   it("flags a candidate with no pricing row instead of implying $0", async () => {
     queryResults = [
       // promptInputTokens = de-cached billable input + cache read/write (the full
