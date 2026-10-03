@@ -13,10 +13,15 @@ openwiki:
     - infra/agent-image/skills/psd-rules/SKILL.md
     - lib/content/atrium-data-contract.ts
     - lib/agent-workspace/command-executor.ts
+    - lib/agents/platform-model.ts
+    - infra/agent-image/openclaw.json
+    - infra/database/schema/186-agent-sonnet-5-5-pricing.sql
   test_paths:
     - tests/e2e/atrium-sandbox-script-order.spec.ts
     - tests/smoke/atrium-artifact-sandbox-host.smoke.ts
     - tests/unit/lib/agent-workspace/command-executor.test.ts
+    - tests/unit/actions/agent-cost-projection.test.ts
+    - lib/agents/__tests__/platform-model.test.ts
 ---
 
 # Agent Platform
@@ -159,6 +164,63 @@ Agent image builds include a bundled skill catalog (`/infra/lib/bundled-skill-ma
 - Enforces catalog approval before execution
 
 The skill initializer (`infra/lambdas/agent-skill-initializer/`) handles both registration and retirement of bundled skills, ensuring only approved capabilities execute in the agent container.
+
+---
+
+## Agent Harness Model
+
+**Sources**: `/lib/agents/platform-model.ts`, `/infra/agent-image/openclaw.json`, `/infra/database/schema/186-agent-sonnet-5-5-pricing.sql`
+
+The Google Chat agent platform runs on a single harness model selected in `openclaw.json`. This model is recorded on `agent_messages.model` by the wrapper and priced by `ai_models` rows.
+
+### Current Model: Claude Sonnet 5.5 (Dev Trial)
+
+**Status**: Dev only (as of 2026-10-03). Production remains on Claude Sonnet 5.
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `AGENT_MODEL_ID` | `us.anthropic.claude-sonnet-5-5` | Recorded on `agent_messages.model` |
+| `AGENT_REQUEST_MODEL_ID` | `us.anthropic.claude-sonnet-5-5` | Sent in OpenClaw provider request |
+
+**Migration 186** seeds pricing for Sonnet 5.5 in `ai_models`. Without matching rows, every agent turn silently prices at $0 (bug #1083).
+
+**Pricing** (same rates as Sonnet 5):
+- Input: $3.00/1M tokens
+- Output: $15.00/1M tokens
+- Cache read: $0.30/1M tokens
+- Cache write: $6.00/1M tokens (1h TTL)
+
+### Model Identity Module
+
+**Source**: `/lib/agents/platform-model.ts`
+
+The `platform-model.ts` module is the single source of truth for harness model identity:
+
+- `AGENT_MODEL_ID` — What the wrapper RECORDS on `agent_messages.model`
+- `AGENT_REQUEST_MODEL_ID` — What OpenClaw SENDS in the provider request
+- `AGENT_MODEL_ID_ALIASES` — All historical ids the harness model has been recorded under
+
+These constants prevent drift between cost-projection filters, telemetry fallback, and drift tests. Multiple places need these ids:
+
+1. **Cost projection self-exclusion**: `AGENT_MODEL_ID_ALIASES` prevents projecting the harness model onto itself
+2. **Wrapper telemetry fallback**: `agentcore_wrapper.py` uses `AGENT_MODEL_ID` when logging latency
+3. **Drift tests**: Test files verify the model id constants match the deployed harness
+
+**Historical context**: The REQUEST id and RECORDED id historically DIFFERED — Bedrock Mantle's Anthropic Messages endpoint echoed the bare `claude-sonnet-5` for a request of `anthropic.claude-sonnet-5`. Since #1227 moved to bedrock-runtime's native endpoint, both are equal again, but they remain separate constants because they are distinct concepts.
+
+**Why this matters**: Getting the recorded id wrong does NOT fail loudly — rows simply stop joining `ai_models` and the cost UI silently reads $0. Migration 092 priced Sonnet 5 forms; migration 186 prices Sonnet 5.5 forms.
+
+### Deploy Order for Model Changes
+
+When changing the harness model:
+
+1. **Web app + database migration** — Before the first turn with the new model. Without the migration, turns record $0; without the web app, skills using the model proxy (`psd-summarize`) get a 400.
+2. **IAM grant** — `AgentPlatformStack` grants must include both old and new models during the transition period to support rollback.
+3. **Agent image** — Build and push by digest; deploy to dev for trial before prod.
+
+**Rollback**: Redeploy the previous agent image digest. IAM grants and pricing rows should cover both models.
+
+**Dev Trial Checklist**: See `/docs/operations/agent-sonnet-5-5-dev-trial.md` for the complete Sonnet 5.5 validation checklist including 10 test prompts and post-run verification steps.
 
 ---
 
