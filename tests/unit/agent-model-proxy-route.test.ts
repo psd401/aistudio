@@ -265,6 +265,27 @@ function defineAgentModelCredentialBrokerSuite1Part2() {it("rejects unapproved e
     expect(forwarded.messages).toEqual([{ role: "user", content: "hello" }])
   })
 
+  // psd-summarize sends whatever its image defaults to: Sonnet 5.5 in the
+  // current image, Sonnet 5 in an environment not yet promoted to it. One test
+  // per model: a second call in one test would reuse the signed nonce and be
+  // refused as a replay.
+  it.each([
+    "us.anthropic.claude-sonnet-5-5",
+    "us.anthropic.claude-sonnet-5",
+  ])("admits %s while images on Sonnet 5 and 5.5 coexist", async (model) => {
+    const response = await POST(
+      request({
+        model,
+        max_tokens: 2_000,
+        messages: [{ role: "user", content: "summarize" }],
+      }) as never,
+      { params: Promise.resolve({ path: ["anthropic", "v1", "messages"] }) },
+    )
+    expect(response.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(forwardedBody()).model).toBe(model)
+  })
+
   it("does not overwrite an anthropic_version the client already set", async () => {
     await POST(
       request({

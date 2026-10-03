@@ -318,7 +318,7 @@ class ModelPricingTests(unittest.TestCase):
 
         self.assertEqual(
             loaded["primary"],
-            "amazon-bedrock/us.anthropic.claude-sonnet-5",
+            "amazon-bedrock/us.anthropic.claude-sonnet-5-5",
         )
         self.assertEqual(
             loaded["pricing_usd_per_million_tokens"]["cacheRead"],

@@ -73,8 +73,8 @@ const defineAgentPlatformModelIdConsistency108310874Suite1 = () => {
     expect(match?.[1]).toBe(AGENT_MODEL_ID)
   })
 
-  it("migration 092 seeds pricing rows for BOTH the recorded and request ids", () => {
-    const sql = read("infra/database/schema/092-agent-cache-tokens.sql")
+  it("migration 186 seeds pricing rows for BOTH the recorded and request ids", () => {
+    const sql = read("infra/database/schema/186-agent-sonnet-5-5-pricing.sql")
     // Recorded id (what agent_messages.model actually contains) must be priced.
     expect(sql).toContain(`'${AGENT_MODEL_ID}'`)
     // Request id seeded as an alias too (defensive, in case Mantle ever echoes it).
@@ -86,7 +86,10 @@ const defineAgentPlatformModelIdConsistency108310874Suite1 = () => {
     // up to 2026-07-29, `us.anthropic.claude-sonnet-5` from 2026-07-31). The
     // cost UI aggregates across the whole range, so an unpriced alias silently
     // drops those rows to $0 rather than failing.
-    const sql = read("infra/database/schema/092-agent-cache-tokens.sql")
+    // Sonnet 5 forms are priced by 092, Sonnet 5.5 forms by 186.
+    const sql =
+      read("infra/database/schema/092-agent-cache-tokens.sql") +
+      read("infra/database/schema/186-agent-sonnet-5-5-pricing.sql")
     for (const alias of AGENT_MODEL_ID_ALIASES) {
       expect(sql).toContain(`'${alias}'`)
     }

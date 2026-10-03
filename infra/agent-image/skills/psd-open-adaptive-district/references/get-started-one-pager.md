@@ -1,50 +1,51 @@
+> Official source: <https://psd401.ai/open-adaptive-district/get-started>. Transcribed verbatim from psd401.ai on 2026-10-03. If the live page differs, the live page wins.
+
 # Get Started — One Page
 
-*Print this. Do the steps in order. That's it — you're in.*
+Print this and do the steps in order.
 
----
+------------------------------------------------------------------------
 
-## Week 1 — Plan
+## Week 1: Plan
 
-**1. Get your team.** Three to six people. Pick a **lead** (owns the build) and a **scribe** (posts the updates).
+**1. Get your team.** Three to six people. Pick a **lead**, who owns the build, and a **scribe**, who posts the check-ins. Your team also has a **sponsor**, usually the leader who oversees your department, who clears blockers when you are stuck.
 
-**2. Make your team's space.** Create a Google Chat space, add your team. This space is your team's memory for the cycle.
+**2. Make your team’s space.** Create a Google Chat space and add your team. Then invite the agents by their agnt\_ accounts: each member’s own, and Kris Hagel’s (<agnt_hagelk@psd401.net>), which needs to be in every team’s space. The space holds the team’s record for the cycle.
 
-**3. Read Start Here.** Five minutes. That's all the required reading in this entire project.
+**3. Read Start Here.** It takes five minutes and is the only required reading.
 
-**4. Meet for 30 minutes.** One question on the table: *"What eats our time, or isn't working the way our kids and staff need?"* List three problems. Real ones.
+**4. Meet for 30 minutes.** Ask one question: *“What eats our time, or isn’t working the way our students and staff need?”* List three real problems.
 
-**5. Pick ONE.** The smallest one you could honestly improve in six weeks. Too big? Split it — the rest can be next cycle's build.
+**5. Pick one.** Choose the smallest one you could honestly improve in six weeks. If it is too big, split it and save the rest for the next cycle.
 
-**6. Draft your Build Plan with your Agent.** Open your PSD AI Agent and say: *"Help me write a one-page Build Plan. Our problem is ___ and we want to try ___."* Fill in the blanks. Ten minutes.
+**6. Draft your build plan with your agent.** Open your PSD AI Agent and say: *“Help me write a one-page build plan. Our goal is \_\_\_, our problem is \_\_\_, and we want to try \_\_\_.”* It takes about ten minutes. You can also copy the template from the Playbook.
 
-**7. Post it in your space by Friday.** Done. Your plan is locked — and it doesn't need to be pretty.
+**7. Post it in your space, then file it by Friday.** Use the [build plan form](https://docs.google.com/forms/d/e/1FAIpQLSfEpYbPG7SLF2GLFwe-Q5GuU5SrUOV7InZ3BhPdhKUD6Lv6pw/viewform), linked from the Playbook. That locks the plan. It does not need to be polished.
 
-> **Editor's note — first check-in.** The Playbook adds one thing this page leaves out: post your **first Weekly Check-In** alongside the locked Build Plan in week 1. Follow the Playbook — otherwise the missed-check-in count starts a week early.
+## Weeks 2–5: Do
 
-## Weeks 2–5 — Do
+**8. Build it and use it.** Ask your agent for help whenever you need it, and adjust as you learn.
 
-**8. Build it and use it.** Ask your Agent for help constantly — that's what it's for. Adjust as you learn.
+**9. Every Friday, the scribe posts the check-in:** what we **tried**, what we **learned**, where we are **stuck**, and what we **need**. Two or three sentences each.
 
-**9. Every Friday, the scribe posts four short answers:** what we **tried**, what we **learned**, where we're **stuck**, what we **need**. Two or three sentences each.
+**10. Meet however you like, then leave a trail.** After a hallway talk, meeting or call, drop the whiteboard photo, notes or transcript into your space. The agent can only use what is in the space.
 
-**10. Meet whenever you want — just leave a trail.** Hallway talks, real meetings, calls: all fine. Drop the whiteboard photo, the notes, or the transcript into your space afterward. If it's in the space, it counts.
+## Week 6: Study and share
 
-## Week 6 — Study & Share
+**11. Ask your agent:** *“Draft our wrap-up from this space.”* Edit it together. It takes about twenty minutes.
 
-**11. Ask your Agent:** *"Draft our Wrap-Up from this space."* Edit it as a team — about twenty minutes.
+**12. Make the call and post it.** **Keep it**: it worked, and it becomes a tool everyone can use. **Stop it**: say why, so no other team repeats it. **Run it again**: one more cycle, with a sharper question.
 
-> **Editor's note — drafting the Wrap-Up.** The v1 Agent cannot read a Google Chat space on its own,
-> so this step does not work as written yet. Paste or export the Build Plan and the cycle's
-> check-ins into the conversation, then ask for the draft. Live space-watching is the planned next
-> build.
-
-**12. Make the call and post it. Keep it** (it works — it becomes a tool everyone gets), **Stop it** (say why — you just saved every other team a dead end), or **Run it again** (one more cycle, sharper question).
-
----
+------------------------------------------------------------------------
 
 ## If you only remember three things
 
-**One build per team per cycle.  •  Leave a trail in your space.  •  A shared flop is a win.**
+- **One build per team per cycle.**
+- **Leave a trail in your space.**
+- **Publish what didn’t work, too.**
 
-*Stuck at any step? Ask your PSD AI Agent first, your sponsor second.*
+*Stuck at any step? Ask your PSD AI Agent first, then your sponsor.*
+
+*Other districts: use any team chat your AI agent can read, and any AI assistant your staff already have.*
+
+[Open the printable version](https://psd401.ai/openadaptivedistrict/05-Get-Started-Flyer.html)

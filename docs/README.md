@@ -157,6 +157,11 @@ full PSD Agent eval run.
 Reproduction evidence, prompt hardening, repeated trials, and the non-promotion
 decision for the GLM-5 stable-skill contract follow-up.
 
+#### [operations/agent-sonnet-5-5-dev-trial.md](./operations/agent-sonnet-5-5-dev-trial.md)
+What changed to move the agent harness to Claude Sonnet 5.5, why no
+request-shaping change was needed, deploy order, the 10-prompt dev verification
+run, and rollback.
+
 #### [operations/psd-observances-annual-refresh.md](./operations/psd-observances-annual-refresh.md)
 Annual NSPRA publication replacement, protected-source handling, repository
 configuration, retrieval validation, and prior-edition retirement.

@@ -79,7 +79,7 @@ test('request body uses the broker-approved model and output limit', async () =>
   expect(code).toBe(0);
   expect(capturedBody).toMatchObject({
     anthropic_version: 'bedrock-2023-05-31',
-    model: 'us.anthropic.claude-sonnet-5',
+    model: 'us.anthropic.claude-sonnet-5-5',
     max_tokens: 2000,
     system: expect.any(String),
     messages: expect.any(Array),

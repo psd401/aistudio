@@ -1615,8 +1615,13 @@ export class AgentPlatformStack extends cdk.Stack {
     // exactly this mechanism in production since #1184, which is the proof it
     // works from inside an AgentCore microVM.
     //
-    // Scoped to the ONE model the agent may call. A wildcard here would let
+    // Scoped to the agent's chat models. A wildcard here would let
     // model-authored code reach any Bedrock model in the account.
+    //
+    // Two Sonnet generations are granted while Sonnet 5.5 is trialled on dev:
+    // the image's openclaw.json selects which one runs, so rolling back to a
+    // Sonnet 5 image digest needs no IAM change. Drop Sonnet 5 once 5.5 is
+    // promoted everywhere.
     resources.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
       sid: 'BedrockMemoryEmbeddingOnly',
       effect: iam.Effect.ALLOW,
@@ -1628,7 +1633,7 @@ export class AgentPlatformStack extends cdk.Stack {
       ],
     }));
 
-    // us.anthropic.claude-sonnet-5 is a CROSS-REGION inference profile. Bedrock
+    // us.anthropic.claude-sonnet-5(-5) are CROSS-REGION inference profiles. Bedrock
     // authorizes such a call against the profile ARN *and* against the
     // foundation-model ARN in whichever region it routes the request to, so a
     // grant naming only the profile fails 100% of the time with AccessDenied —
@@ -1639,7 +1644,9 @@ export class AgentPlatformStack extends cdk.Stack {
     // silently gaining a region does not silently widen this grant; if AWS adds
     // one, calls routed there fail loudly and this list gets updated.
     // Source: `aws bedrock get-inference-profile --inference-profile-identifier
-    // us.anthropic.claude-sonnet-5` (verified 2026-07-27).
+    // us.anthropic.claude-sonnet-5` (verified 2026-07-27); the
+    // us.anthropic.claude-sonnet-5-5 profile spans the same three regions
+    // (`aws bedrock list-inference-profiles`, verified 2026-10-03).
     const sonnetProfileRegions = ['us-east-1', 'us-east-2', 'us-west-2'];
     resources.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
       sid: 'BedrockChatModelInvoke',
@@ -1652,6 +1659,10 @@ export class AgentPlatformStack extends cdk.Stack {
         `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.anthropic.claude-sonnet-5`,
         ...sonnetProfileRegions.map(
           (r) => `arn:aws:bedrock:${r}::foundation-model/anthropic.claude-sonnet-5`,
+        ),
+        `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.anthropic.claude-sonnet-5-5`,
+        ...sonnetProfileRegions.map(
+          (r) => `arn:aws:bedrock:${r}::foundation-model/anthropic.claude-sonnet-5-5`,
         ),
       ],
     }));

@@ -23,7 +23,7 @@
  *
  * Env: MANTLE_ANTHROPIC_URL
  *      (default http://127.0.0.1:18791/anthropic/v1/messages),
- *      SUMMARIZE_MODEL_ID (default us.anthropic.claude-sonnet-5).
+ *      SUMMARIZE_MODEL_ID (default us.anthropic.claude-sonnet-5-5).
  */
 
 'use strict';
@@ -31,7 +31,7 @@
 const MANTLE_URL =
   process.env.MANTLE_ANTHROPIC_URL ||
   'http://127.0.0.1:18791/anthropic/v1/messages';
-const MODEL_ID = process.env.SUMMARIZE_MODEL_ID || 'us.anthropic.claude-sonnet-5';
+const MODEL_ID = process.env.SUMMARIZE_MODEL_ID || 'us.anthropic.claude-sonnet-5-5';
 const MAX_OUTPUT_TOKENS = 2000;
 
 function fail(message, code = 1) {

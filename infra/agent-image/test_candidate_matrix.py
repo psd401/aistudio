@@ -38,6 +38,7 @@ class CandidateMatrixTests(unittest.TestCase):
                 "qwen3-coder-next",
                 "conservative-tool-routing",
                 "sonnet-5-mantle-anthropic",
+                "sonnet-5-native",
             },
         )
         for manifest_path in manifest_paths:
@@ -178,7 +179,7 @@ class CandidateMatrixTests(unittest.TestCase):
             temporary_manifest = Path(directory) / "candidate.json"
             source["baseline"] = "../manifests/baseline.json"
             source["axes"]["model"]["providerTemplate"] = (
-                "../providers/native-bedrock-sonnet-5.json"
+                "../providers/native-bedrock-sonnet-5-5.json"
             )
             temporary_manifest.write_text(json.dumps(source), encoding="utf-8")
 
@@ -204,7 +205,7 @@ class CandidateMatrixTests(unittest.TestCase):
             temporary_manifest = Path(directory) / "candidate.json"
             source["baseline"] = "../manifests/baseline.json"
             source["axes"]["model"]["providerTemplate"] = (
-                "../providers/native-bedrock-sonnet-5.json"
+                "../providers/native-bedrock-sonnet-5-5.json"
             )
             temporary_manifest.write_text(json.dumps(source), encoding="utf-8")
 
@@ -283,7 +284,7 @@ class CandidateMatrixTests(unittest.TestCase):
                 source["baseline"] = "../manifests/baseline.json"
                 source["declaredAxis"] = path[0]
                 source["axes"]["model"]["providerTemplate"] = (
-                    "../providers/native-bedrock-sonnet-5.json"
+                    "../providers/native-bedrock-sonnet-5-5.json"
                 )
                 source["axes"][path[0]][path[1]] = escape
                 temporary_manifest = Path(directory) / "candidate.json"
@@ -305,7 +306,7 @@ class CandidateMatrixTests(unittest.TestCase):
                 source["baseline"] = "../manifests/baseline.json"
                 source["declaredAxis"] = declared_axis
                 source["axes"]["model"]["providerTemplate"] = (
-                    "../providers/native-bedrock-sonnet-5.json"
+                    "../providers/native-bedrock-sonnet-5-5.json"
                 )
                 if declared_axis == "harness":
                     source["axes"]["harness"]["hostVersion"] = "2026.7.2"
@@ -341,7 +342,7 @@ class CandidateMatrixTests(unittest.TestCase):
             source["baseline"] = "../manifests/baseline.json"
             source["declaredAxis"] = "harness"
             source["axes"]["model"]["providerTemplate"] = (
-                "../providers/native-bedrock-sonnet-5.json"
+                "../providers/native-bedrock-sonnet-5-5.json"
             )
             source["axes"]["harness"].update(
                 {
@@ -399,7 +400,7 @@ class CandidateMatrixTests(unittest.TestCase):
                 source["baseline"] = "../manifests/baseline.json"
                 source["declaredAxis"] = "prompt"
                 source["axes"]["model"]["providerTemplate"] = (
-                    "../providers/native-bedrock-sonnet-5.json"
+                    "../providers/native-bedrock-sonnet-5-5.json"
                 )
                 if case == "variant-only":
                     source["axes"]["prompt"]["variant"] = "alternate"
@@ -470,7 +471,7 @@ class CandidateMatrixTests(unittest.TestCase):
                 baseline = json.loads(json.dumps(original_baseline))
                 source = json.loads(json.dumps(original_candidate))
                 baseline["axes"]["model"]["providerTemplate"] = (
-                    "../providers/native-bedrock-sonnet-5.json"
+                    "../providers/native-bedrock-sonnet-5-5.json"
                 )
                 source["baseline"] = "baseline.json"
                 source["axes"]["model"]["providerTemplate"] = (
@@ -514,7 +515,7 @@ class CandidateMatrixTests(unittest.TestCase):
         ) as directory:
             directory_path = Path(directory)
             baseline["axes"]["model"]["providerTemplate"] = (
-                "../providers/native-bedrock-sonnet-5.json"
+                "../providers/native-bedrock-sonnet-5-5.json"
             )
             source["baseline"] = "baseline.json"
             source["axes"]["model"]["providerTemplate"] = (

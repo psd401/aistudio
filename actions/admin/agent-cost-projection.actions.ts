@@ -107,6 +107,13 @@ export interface AgentCostProjection {
    * side-by-side comparison against the no-caching candidate projections.
    */
   actualUsd: number
+  /**
+   * Distinct agent_messages.model ids in the window, sorted. The "Actual" row
+   * is labelled from these rather than a hard-coded model name: environments
+   * can run different harness models (dev trialled Sonnet 5.5 while prod ran
+   * Sonnet 5), and a window spanning a switch is a mix of both.
+   */
+  actualModels: string[]
   /** One row per requested candidate model. */
   candidates: ProjectionItem[]
   windowDays: number | null
@@ -345,6 +352,7 @@ export async function getAgentCostProjection(
             outputTokens: sql<number>`COALESCE(SUM(${agentMessages.outputTokens}), 0)`,
             // Exact per-direction cost — see perDirectionCostUsdSql above.
             actualUsd: perDirectionCostUsdSql,
+            actualModels: sql<string[] | null>`ARRAY_AGG(DISTINCT ${agentMessages.model} ORDER BY ${agentMessages.model}) FILTER (WHERE ${agentMessages.model} IS NOT NULL)`,
           })
           .from(agentMessages)
           .leftJoin(aiModels, eq(agentMessages.model, aiModels.modelId))
@@ -357,6 +365,9 @@ export async function getAgentCostProjection(
     const actualInputTokens = Number(totals?.promptInputTokens) || 0
     const actualOutputTokens = Number(totals?.outputTokens) || 0
     const actualUsd = Number(totals?.actualUsd) || 0
+    const actualModels = Array.isArray(totals?.actualModels)
+      ? totals.actualModels.map(String)
+      : []
 
     // Fetch pricing for the requested candidates in one query.
     const pricingRows =
@@ -405,6 +416,7 @@ export async function getAgentCostProjection(
       actualInputTokens,
       actualOutputTokens,
       actualUsd,
+      actualModels,
       candidates: candidateResults,
       windowDays: rangeDays(safeRange),
     }

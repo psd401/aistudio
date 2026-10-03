@@ -8,8 +8,8 @@
         "timeoutSeconds": 300,
         "models": [
           {
-            "id": "us.anthropic.claude-sonnet-5",
-            "name": "Claude Sonnet 5 (Bedrock, SigV4 via execution role)",
+            "id": "us.anthropic.claude-sonnet-5-5",
+            "name": "Claude Sonnet 5.5 (Bedrock, SigV4 via execution role)",
             "reasoning": false,
             "input": ["text", "image"],
             "contextWindow": 200000,
@@ -23,7 +23,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "amazon-bedrock/us.anthropic.claude-sonnet-5"
+        "primary": "amazon-bedrock/us.anthropic.claude-sonnet-5-5"
       },
       "bootstrapMaxChars": 64000,
       "bootstrapTotalMaxChars": 80000,

@@ -64,7 +64,7 @@ OPENCLAW_DATABASE_MIGRATOR = "/app/openclaw_agent_db_migrate.mjs"
 # `agent_messages.model` is priced against. A mismatch does not fail loudly; the
 # rows simply stop joining `ai_models` and the cost UI reads $0 (bug #1083).
 # lib/agents/__tests__/platform-model.test.ts fails CI if these drift.
-DEFAULT_AGENT_MODEL_ID = "us.anthropic.claude-sonnet-5"
+DEFAULT_AGENT_MODEL_ID = "us.anthropic.claude-sonnet-5-5"
 BEDROCK_BEARER_ENV = "AWS_BEARER_TOKEN_BEDROCK"
 CANDIDATE_MANTLE_RELAY_BASE_URL = (
     "http://127.0.0.1:18791/candidate-mantle"

@@ -1,28 +1,29 @@
-# Wrap-Up
+# Wrap-up
 
-*Paper #3 of 3. Written in week 6. The PSD AI Agent drafts it from the team's own check-ins; the team edits it in about twenty minutes and makes the call.*
+*Week 6. Your agent drafts it from the team's check-ins. The team edits it in about twenty minutes, makes the call, and publishes it. Then read the other teams' wrap-ups.*
 
-## The template — verbatim from The Playbook
+## The template — verbatim from The Playbook (psd401.ai/open-adaptive-district/playbook)
 
-> **What we tried** — from your Build Plan.
+> **What we tried.** From your build plan.
 >
-> **What happened** — what you actually did and what resulted, in plain terms.
+> **What happened.** What you actually did and what resulted, in plain terms.
 >
-> **What we learned** — including the surprises and the things you still don't understand.
+> **What we learned.** Including the surprises and anything you still don’t understand.
 >
-> **The call — pick one:**
+> **The call.** Pick one:
 >
-> - **KEEP IT.** It worked. Now we make it real for everyone — usually by adding it as a skill in the PSD AI Agent or building it as a tool in AI Studio — and here's what other teams should know before borrowing it.
-> - **STOP IT.** It didn't work. Here's why, and what nobody else should waste a cycle repeating. *(Publishing this is a badge of honor here — stopped builds teach the most.)*
-> - **RUN IT AGAIN.** Not sure yet — but now we have a sharper question. Here's the question the next cycle starts from. *(Two cycles without a sharper question usually means it's really a Stop.)*
+> - **Keep it.** It worked. We make it available to everyone, usually as a skill in the PSD AI Agent or a tool in AI Studio. Note what other teams should know before they use it.
+> - **Stop it.** It didn’t work. Say why, so no other team spends a cycle repeating it. Stopped builds are published like any other.
+> - **Run it again.** You’re not sure yet, but you have a sharper question. Write down the question the next cycle starts from. If a build has run twice without producing a sharper question, it is usually a stop.
 
 ## Drafting notes
 
-- **Quote the Build Plan's "Our build" sentence verbatim** under *What we tried*. The whole point of the Wrap-Up is measuring what happened against what the team said it would do.
-- **Keep it to one page.** Overflow is a signal the build was too big.
-- **Lead with the surprises.** The things that didn't go as expected are the most valuable lines in the document.
+- **Draft from the team's own space** — the build plan, the Friday check-ins, and whatever notes, photos or transcripts the team dropped in. Don't invent results that aren't there.
+- **Quote the build plan's "Our build" sentence** under *What we tried*, so the wrap-up measures what happened against what the team said it would do.
+- **Say what each tool was good for** — the build plan's "Tools we'll try" asks for exactly this.
+- **Lead with the surprises.**
 - **Exactly one call.** Not two, not "mostly keep it."
-- **Run it again requires a sharper question** — a genuinely different, more precise question than the one the cycle started with. Missing its success signs is not by itself a Stop; missing them *without* a sharper question is. Two cycles without a sharper question usually means it's really a Stop.
-- **Stop it is published, not buried.** Name the dead end plainly so no other team spends a cycle on it. Nobody has to defend a stopped build.
-- **Keep it names the handoff** — which skill in the PSD AI Agent, or which tool in AI Studio, other teams will get.
-- **Don't sand off the rough edges.** The point is to learn, not to perform.
+- **Run it again needs a sharper question**, written down. Missing the signs of success is not by itself a stop; missing them with no sharper question is. Twice without a sharper question is usually a stop.
+- **Stop it is published like any other build.** Name the dead end plainly. Nobody has to defend a stopped build.
+- **Keep it names the handoff** — the PSD AI Agent skill or AI Studio tool other teams will get.
+- **One page, rough is fine.** Public versions have student and staff details removed.

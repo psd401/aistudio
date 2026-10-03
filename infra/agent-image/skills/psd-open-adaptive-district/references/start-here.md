@@ -1,83 +1,78 @@
+> Official source: <https://psd401.ai/open-adaptive-district/start-here>. Transcribed verbatim from psd401.ai on 2026-10-03. If the live page differs, the live page wins.
+
 # The Open Adaptive District — Start Here
 
-**Every six weeks, your team picks one problem and builds a better way. Your AI Agent keeps the notes. We all share what happened — even when it flops.**
+**A team of three to six staff picks one problem in their work and spends six weeks building a better way to handle it. An AI agent keeps the team’s notes. At the end, the team publishes what happened, including when it didn’t work.**
 
-That's the whole model. Everything else is just detail.
+*We wrote this for two readers: Peninsula School District staff on a team this year, and other districts that want to run the same protocol. Everything here is free to copy and adapt. Where we name a Peninsula tool, a note says what you would need in its place.*
 
----
+------------------------------------------------------------------------
 
-## This is about YOUR goals
+## The goals stay the same
 
-Here's the most important thing to understand: this project does not replace your goals. It's how you reach them.
+Teams use this protocol to reach goals they already have: stronger instruction, smoother operations, better communication with families, more time with students. Wherever AI can make that work better, a team builds it in. Sometimes that means doing an old task faster. Sometimes it means changing how the task is done.
 
-You already know what you're shooting for — stronger instruction, smoother operations, better communication with families, more time with kids. Keep shooting for it. The change is this: **everywhere AI can make that work better, we build it in.** Sometimes that means doing an old thing faster. Sometimes it means changing how we do the thing entirely. Both count.
+At Peninsula, those goals include commitments we have spent years building: a guaranteed and viable curriculum, our Instructional Essentials, a multi-tiered system of supports (MTSS), and Universal Design for Learning (UDL). None of them change. A team might build something that flags a student who needs support weeks earlier, or that produces scaffolds fast enough that every student gets grade-level work.
 
-The goal is a district full of leaders who keep getting better at this — so PSD stays at the front of the change instead of chasing it.
-
-**And no — we are not walking away from what matters.** Some people worry that this means dropping the things we've built: our guaranteed and viable curriculum, our Instructional Essentials, MTSS, UDL. It doesn't. Those are still the goals. Not one of them changes. What changes is *how* we reach them. A team might build something that spots a student who needs support weeks sooner, or that creates scaffolds faster so every kid gets grade-level work. Same goals. New and better ways to get there.
+The longer aim is a district full of leaders who keep getting better at this, so that Peninsula helps decide how AI is used in schools instead of catching up later.
 
 ## Why now
 
-Think about the kids who started kindergarten this fall. They graduate in 2039. They'll be in the middle of their careers in the 2050s. We are not preparing them for our world — we're preparing them for one we'll never fully see.
+Children who started kindergarten in fall 2026 graduate in 2039 and will be in the middle of their careers in the 2050s. AI is already changing what it takes to be ready for work and for civic life, and new capabilities arrive every few months. Schools usually take years to change anything. If we wait for settled answers, someone else will choose them for us.
 
-And here's the trap on the other side: when schools stand still, they end up preparing students for a world *the students* will never see — the world of ten, twenty, fifty years ago. We refuse to do that to our kids.
+So we are doing what we ask students to do every day: try something, learn from it, and be honest about what happened. We start with adult work, such as paperwork, planning and communication, so the early mistakes don’t land on students.
 
-AI is already changing what it means to be ready for life, for work, and for being a good citizen. And it keeps changing — big new abilities show up every few months. Schools normally take years to change anything. If we wait for perfect answers, someone else will pick the answers for us.
+## Anyone can build
 
-So we're going to do what we ask kids to do every day: **try things, learn from them, and be honest about what happened.** We start on the adult side of the schoolhouse — the paperwork, the planning, the communication — so teachers and students feel the benefit, not the churn.
+Building a tool used to mean writing code. Now, if you can describe a problem clearly, you can build a fix, either by asking your PSD AI Agent or in AI Studio. In AI Studio you can set up a tool, or a **knowledge repository**: a collection of documents, such as handbooks, procedures or past plans, that AI can search and answer questions from. A repository is a good first build. If a task eats hours of your week, try building your way out of it. The habit we want every team member to leave with is thinking “I could build something for this.”
 
-## Everyone is a builder now
+## How a cycle runs
 
-Here's the mindset shift at the heart of all of this: **in the age of AI, you don't wait for someone to build the tool you need. You build it.**
+Each cycle, a team does **one build**: one attempt to make part of its work better, using tools the district already has. The steps will be familiar from school improvement work, with a sharing step at the end.
 
-That used to mean coding. It doesn't anymore. If you can describe a problem clearly, you can build the fix — by asking your PSD AI Agent, or by putting together a tool in AI Studio. Have a problem that eats your week? Build your way out of it. That habit — *"I can build the solution to this"* — is the skill this whole project grows in every single one of us.
+1.  **Plan** *(week 1)*. Pick one problem worth solving. Write a one-page build plan: what you are building, why, and how you will know it is working.
+2.  **Do** *(weeks 2–5)*. Build it and use it, and adjust as you go. Every Friday, the team posts four short answers in its chat space: what we tried, what we learned, where we are stuck, and what we need.
+3.  **Study** *(week 6)*. Look at what actually happened. The agent drafts the team’s wrap-up from the team’s own notes, and the team edits it in about twenty minutes.
+4.  **Share**. Publish the wrap-up where everyone can see it, with one of three decisions: **keep it, stop it, or run it again.**
 
-## How it works
+Two weeks between cycles give teams a break, and give district leaders time to read every wrap-up and set the focus for the next cycle.
 
-Teams of three to six people. Every six weeks, each team does **one build** — one honest attempt to make a piece of their work better, using tools we already have.
+Most organizations quietly drop what doesn’t work, and what they learned goes with it. We publish stopped builds alongside the ones we keep. A stopped build that saves ten other teams from the same dead end was worth running.
 
-The rhythm is one you already know from school improvement, with one new step at the end:
+Teams can meet however they like: in person, in the hallway, on a call. The chat space is where the team’s record lives. After a conversation, drop in the whiteboard photo, the notes or the transcript. The agent can only use what is in the space.
 
-1. **Plan** *(week 1)* — Pick one problem worth solving. Write a one-page Build Plan: what we're building, why, and how we'll know it's working.
-2. **Do** *(weeks 2–5)* — Build it and use it. Adjust as you learn. Each week, your team posts four short answers in your team's chat space: what we tried, what we learned, where we're stuck, what we need.
-3. **Study** *(week 6)* — Look at what actually happened. Your AI Agent writes the first draft of your Wrap-Up from your team's own notes. You fix it up in about twenty minutes.
-4. **Share** — Post the Wrap-Up where everyone can see it. Every build ends one of three honest ways: **Keep it. Stop it. Run it again.**
+## When a build works
 
-Then two catch-up weeks, and the next cycle starts.
+A build that works should outlast the team that made it. When a team keeps a build, we turn it into something every staff member can use, usually a new skill in the PSD AI Agent or a tool in AI Studio. The next team starts from there.
 
-**Share is the step that makes this special.** Most places quietly drop the stuff that doesn't work — and everything they learned dies in silence. We share it all, including the flops. A stopped build that saves ten other teams from the same dead end is a win.
+## The quarterly focus
 
-**And meetings are fine.** Your team's chat space is the team's *memory*, not its meeting room. Meet in person, talk in the hallway, hop on a call — whatever works. Just leave a trail afterward: drop in the whiteboard photo, the notes, the transcript. If it's in the space, nothing is lost and your Agent can use it.
+Each quarter, the superintendent writes three sentences: what we are after, why it matters now, and what we will not compromise on. Teams choose their own builds within that focus. Nobody assigns them.
 
-## Build it so others can use it
+The focus for this first cycle is exploration and innovation: explore the tools, and innovate on a process or practice that matches your goals.
 
-A build that works shouldn't live and die with your team. When you land on something good, we make it part of the tools everyone already has — usually as a **new skill in the PSD AI Agent**, or as a **tool anyone can run in AI Studio**. The next team starts where you finished, not from scratch. Every cycle leaves the district better equipped than it found it.
+The focus always points back to what we already value: grade-level learning for every student, MTSS, UDL, and the commitments in Peninsula 2030, our strategic plan.
 
-(New to the Agent or AI Studio? You'll get a full walkthrough — short, simple guides are coming with the September launch.)
+## Your AI agents
 
-## The Quarterly Focus
+Every Peninsula staff member on a team has a PSD AI Agent. Each team invites two kinds of agent into its chat space: team members’ own agents, and Kris Hagel’s agent (<agnt_hagelk@psd401.net>), which is in every team’s space so it can report across all of them.
 
-Each quarter, the superintendent writes three sentences: what we're after, why it matters right now, and what we will never compromise on. That's it. Your team picks its own build inside that focus — nobody hands you a to-do list.
+- **Your own agent** helps draft the build plan, helps build the fix, and drafts the wrap-up from the team’s notes, so week 6 is not a writing assignment.
+- **Kris Hagel’s agent** reads every team’s space on Sunday afternoon, after the Friday check-ins. If two teams are working on the same problem, it tells both. If a team posts nothing for two weeks, it flags that so someone can check in. It reports what it finds to district leaders.
 
-And the focus will always point at the things we already value: grade-level learning for every student, the supports of MTSS, the access of UDL, the promises of Peninsula 2030. AI changes the *how*. It never changes the *what*.
+Neither agent touches evaluations, discipline, or anything personal. Everything they read stays on district systems.
 
-## Your AI Agent
-
-Everyone in this work already has the PSD AI Agent. For your team, it does four jobs:
-
-- **Keeps the notes** — it reads your weekly check-ins and whatever you drop in the space, so nothing gets lost.
-- **Spots patterns** — if two teams are working the same problem, it tells both.
-- **Drafts your Wrap-Up** — so week 6 isn't a writing assignment.
-- **Notices quiet teams** — if a team goes silent for two weeks, someone checks in. That's care, not surveillance.
-
-It never touches evaluations, discipline, or anything personal. What it reads stays on district systems.
+> **For other districts.** You need an AI assistant that can read a team’s shared chat or notes and draft from them, one agent that can see every team’s space, and somewhere to share the tools teams build. Ours are [PSD AI Agents](https://psd401.ai/software/psd-ai-agents) and [AI Studio](https://psd401.ai/software/ai-studio), both open source.
 
 ## Who and when
 
-Cabinet teams and principal teams start in **September 2026**. Teacher and support-staff teams join later in the fall. We share results inside PSD first. Public versions go on psd401.ai so other districts can borrow anything that helps.
+At Peninsula, the first teams started in fall 2026: executive cabinet, principals, and district office departments such as athletics, student services, teaching and learning, and career and technical education. Each team starts when it is ready. Teacher and support-staff teams join later. Wrap-ups are shared inside the district first. Public versions, with student and staff details removed, go on psd401.ai for other districts to use.
 
 ## Where to go next
 
-- **The Playbook** — everything your team actually touches. Three one-pagers, four weekly questions, nothing more.
-- **What We're Learning** — every Wrap-Up, as teams publish them.
-- **The Deep Dive** — the research and reasoning behind the design, for anyone who wants it. Nobody has to read it.
+- **[The Playbook](https://psd401.ai/open-adaptive-district/playbook)**: the three documents a team uses, with templates.
+- **[Get Started](https://psd401.ai/open-adaptive-district/get-started)**: the whole cycle as twelve steps on one page, for printing.
+- **[What We’re Learning](https://psd401.ai/open-adaptive-district/what-were-learning)**: every wrap-up, as teams publish them.
+- **[The Deep Dive](https://psd401.ai/open-adaptive-district/deep-dive)**: the reasoning and research behind the design. Optional.
+
+[Open the printable version](https://psd401.ai/openadaptivedistrict/01-Start-Here.html)

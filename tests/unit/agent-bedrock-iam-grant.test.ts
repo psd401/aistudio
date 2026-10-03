@@ -58,9 +58,8 @@ const openclaw = JSON.parse(
 }
 
 /**
- * Regions the Sonnet 5 inference profile routes to. Verified 2026-07-27 with
- * `aws bedrock get-inference-profile --inference-profile-identifier
- * us.anthropic.claude-sonnet-5`.
+ * Regions the Sonnet 5 / 5.5 inference profiles route to. Verified 2026-07-27
+ * (5) and 2026-10-03 (5.5) with `aws bedrock list-inference-profiles`.
  */
 const PROFILE_REGIONS = ["us-east-1", "us-east-2", "us-west-2"]
 
@@ -88,10 +87,13 @@ describe("agent Bedrock access via execution-role SigV4", () => {
     // The failure this exists to prevent: profile-only grants AccessDeny 100%
     // of calls, and a missing member region fails only on requests routed
     // there — an intermittent, region-dependent outage.
-    expect(stackSource).toContain(
-      "inference-profile/us.anthropic.claude-sonnet-5",
-    )
-    expect(stackSource).toContain("foundation-model/anthropic.claude-sonnet-5")
+    // Both Sonnet generations stay granted while 5.5 is trialled, so a
+    // rollback to a Sonnet 5 image digest needs no IAM deploy. The trailing
+    // backtick pins the exact ARN (sonnet-5 is a prefix of sonnet-5-5).
+    for (const model of ["claude-sonnet-5", "claude-sonnet-5-5"]) {
+      expect(stackSource).toContain(`inference-profile/us.anthropic.${model}\``)
+      expect(stackSource).toContain(`foundation-model/anthropic.${model}\``)
+    }
     for (const region of PROFILE_REGIONS) {
       expect(stackSource).toContain(`'${region}'`)
     }
@@ -113,8 +115,8 @@ describe("agent Bedrock access via execution-role SigV4", () => {
     const [provider, modelId] =
       openclaw.agents.defaults.model.primary.split("/")
     expect(provider).toBe("amazon-bedrock")
-    expect(modelId).toBe("us.anthropic.claude-sonnet-5")
-    expect(stackSource).toContain(`inference-profile/${modelId}`)
+    expect(modelId).toBe("us.anthropic.claude-sonnet-5-5")
+    expect(stackSource).toContain(`inference-profile/${modelId}\``)
 
     const declared = openclaw.models.providers[provider]?.models?.map(
       (m) => m.id,
