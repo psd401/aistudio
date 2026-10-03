@@ -21,6 +21,7 @@ openwiki:
     - infra/agent-image/check_config_consistency.py
     - infra/lambdas/agent-router/chat-text-budget.ts
     - infra/lambdas/agent-cron/chat-text-budget.ts
+    - infra/database/schema/186-agent-sonnet-5-5-pricing.sql
   test_paths:
     - infra/test/ecs-scheduled-scaling.test.ts
     - infra/test/frontend-waf-body-signatures.test.ts
@@ -247,6 +248,9 @@ Migrations run via Lambda function:
 **Key Files**:
 - `/infra/database/` — Migration files
 - `/infra/lambdas/database-migration/` — Runner Lambda
+
+**Notable Migrations**:
+- **Migration 186**: Claude Sonnet 5.5 pricing for agent platform harness model (#1851, dev trial) — seeds `ai_models` rows for `us.anthropic.claude-sonnet-5-5` and `anthropic.claude-sonnet-5-5` to prevent silent $0 pricing on agent turns
 
 ---
 
