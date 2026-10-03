@@ -114,6 +114,10 @@ const NON_ASSET_REFERENCE_HOSTS = [
   // stylesheet host. `fonts.googleapis.com` is the loadable one and stays in
   // DOCUMENTED_AS_BLOCKED above.
   'fonts.google.com',
+  // Citation and license links in the psd401.ai Open Adaptive District pages,
+  // transcribed verbatim into psd-open-adaptive-district/references/
+  'metr.org',
+  'creativecommons.org',
   // Spec namespace in `<svg xmlns=...>` — never fetched
   'www.w3.org',
   // RFC 2606 placeholders in examples
