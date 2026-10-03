@@ -17,7 +17,7 @@ It calls the model **directly** (not through AI Studio's logging proxy), so the
 **input text is never written to logs**.
 
 The runtime defaults to the broker-approved
-`us.anthropic.claude-sonnet-5` model and requests at most 2,000 output tokens
+`us.anthropic.claude-sonnet-5-5` model and requests at most 2,000 output tokens
 per summary, below the broker's 32,768-token ceiling.
 
 ## Invoke

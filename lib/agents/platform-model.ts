@@ -9,7 +9,8 @@
  * module keeps them from drifting. If a second agent model is ever added, turn
  * AGENT_MODEL_ID into a set and update the consumers.
  *
- * Switched GLM-5 -> Claude Sonnet 5 for #1089 (caching-capable harness model).
+ * Switched GLM-5 -> Claude Sonnet 5 for #1089 (caching-capable harness model),
+ * then Sonnet 5 -> Sonnet 5.5 (2026-10-03, dev trial; priced by migration 186).
  * Historically the REQUEST id OpenClaw sent and the id RECORDED on the response
  * DIFFERED — Bedrock Mantle's Anthropic Messages endpoint echoed the bare
  * `claude-sonnet-5` for a request of `anthropic.claude-sonnet-5` — so this
@@ -40,17 +41,20 @@
  * ai_models and the cost UI silently reads $0 (bug #1083). Migration 092 seeds
  * pricing for this id and both aliases.
  */
-export const AGENT_MODEL_ID = "us.anthropic.claude-sonnet-5"
+export const AGENT_MODEL_ID = "us.anthropic.claude-sonnet-5-5"
 
 /**
  * Every id form the harness model has EVER been recorded under, including
- * historical ones still present in `agent_messages` and priced by migration 092.
+ * historical ones still present in `agent_messages` (Sonnet 5 forms priced by
+ * migration 092, Sonnet 5.5 forms by migration 186).
  *
  * Used to exclude the harness model from the cost-projection candidate list:
  * projecting the harness model onto itself is meaningless, and excluding only
  * the current id would let a re-activated historical alias slip back in.
  */
 export const AGENT_MODEL_ID_ALIASES: readonly string[] = [
+  "us.anthropic.claude-sonnet-5-5",
+  "anthropic.claude-sonnet-5-5",
   "us.anthropic.claude-sonnet-5",
   "anthropic.claude-sonnet-5",
   "claude-sonnet-5",
@@ -69,7 +73,7 @@ export const AGENT_MODEL_ID_ALIASES: readonly string[] = [
  * Currently equal to AGENT_MODEL_ID because that endpoint echoes the request id
  * verbatim; see the AGENT_MODEL_ID doc comment.
  */
-export const AGENT_REQUEST_MODEL_ID = "us.anthropic.claude-sonnet-5"
+export const AGENT_REQUEST_MODEL_ID = "us.anthropic.claude-sonnet-5-5"
 
 /** Human label for AGENT_MODEL_ID shown in the cost UI. */
-export const AGENT_MODEL_LABEL = "Claude Sonnet 5"
+export const AGENT_MODEL_LABEL = "Claude Sonnet 5.5"

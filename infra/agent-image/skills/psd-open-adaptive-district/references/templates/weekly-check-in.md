@@ -1,34 +1,29 @@
-# Weekly Check-In
+# Weekly check-in
 
-*Paper #2 of 3. Four questions, two or three sentences each, posted by the scribe in the team's chat space — same day every week. Five minutes, tops.*
+*Every Friday, weeks 1–5. Four questions, two or three sentences each, posted by the scribe in the team's chat space. It should take five minutes. On Sunday afternoon, Kris Hagel's agent reads every team's space.*
 
-## The template — verbatim from The Playbook
+## The template — verbatim from The Playbook (psd401.ai/open-adaptive-district/playbook)
 
-> **Tried** — What did we actually do this week? Name real moves, not intentions.
+> **Tried.** What did we actually do this week? Name specific actions.
 >
-> **Learned** — What did we find out? Include the surprises; they're the valuable part.
+> **Learned.** What did we find out? Include the surprises.
 >
-> **Stuck** — Where are we blocked? Be honest, not heroic.
+> **Stuck.** Where are we blocked?
 >
-> **Needs** — What would unblock us, and from whom? Be specific.
+> **Needs.** What would unblock us, and who can help?
 
-## Cadence
+## Cadence and practice (from The Playbook and Get Started)
 
-- **When:** Same day every week — the first one posts in week 1 with the locked Build Plan, then weekly through week 5. In week 6 the check-ins become the raw material for the Wrap-Up. Friday is the suggested default; what matters is picking one day and holding it.
-- **Where:** The team's chat space. That's where the PSD AI Agent reads from.
-- **Who:** The scribe posts it; the team weighs in first.
-- **How long:** Two or three sentences per field. Essays mean you're trying too hard.
-- **Week 1 counts too.** Lock the Build Plan by Friday and post the first check-in the same week.
-
-Skip a week and the system goes blind to your team. **Miss two in a row and someone will check on you — that's care, not surveillance.**
+- **When:** every Friday. The first check-in posts in week 1, alongside the build plan.
+- **Where:** the team's chat space. The agent can only learn from what is in the space.
+- **Who:** the scribe posts it. Your agent can remind you and post the questions.
+- **Meet however you like, then leave a trail.** "Our pilot teams taught us not to force every conversation into chat." After a meeting, hallway talk or call, drop in what came out of it: a photo of the whiteboard, a transcript or recording, or three bullet points.
+- **If a team misses two check-ins in a row, someone will check in to see what is blocking it.**
 
 ## Writing a useful one
 
-- **Tried — name moves, not intentions.** "We piloted it with 12 teachers" is a move. "We thought about piloting" is not.
-- **Learned — include the surprises.** The lines about what *didn't* go as expected are the valuable part.
-- **Stuck — be honest, not heroic.** "Nothing" is almost always wrong. Truly nothing stuck three weeks running usually means the build is too small.
-- **Needs — be specific.** "Need help" is too vague. "Need fifteen minutes with the Tech team about IEP scheduling" is something the Agent can match to another team.
-
-**Meetings are fine — the space is the memory, not the meeting room.** Meet in person, talk in the hallway, hop on a call. Then capture it — a photo of the whiteboard, a transcript, three bullets of notes — dropped into the space. Rule of thumb: if it's not in the space, the system can't learn from it.
-
-*On a hard week — a sick lead, a holiday, a crisis — one sentence per field is still a check-in, and still far better than silence.*
+- **Tried — name specific actions**, not intentions. "We piloted it with 12 teachers" is an action; "we thought about piloting" is not.
+- **Learned — include the surprises.** They are the most useful lines.
+- **Stuck — be honest.** "Nothing" week after week usually means the build is too small.
+- **Needs — say who can help.** "Need help" is too vague to act on; "need fifteen minutes with the tech team about IEP scheduling" is something the agent can match to another team.
+- On a hard week, one sentence per question is still a check-in, and far better than silence.

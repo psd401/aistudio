@@ -73,6 +73,9 @@ KNOWN_CONTEXT_WINDOWS: Dict[str, int] = {
     "anthropic.claude-sonnet-5": 200000,
     "us.anthropic.claude-sonnet-5": 200000,
     "claude-sonnet-5": 200000,
+    "anthropic.claude-sonnet-5-5": 200000,
+    "us.anthropic.claude-sonnet-5-5": 200000,
+    "claude-sonnet-5-5": 200000,
     "zai.glm-5": 200000,
 }
 

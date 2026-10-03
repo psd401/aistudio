@@ -26,7 +26,13 @@ const UPSTREAM = "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic/v1/m
 // on EVERY call. The proxy forwards the body verbatim, so it has to supply the
 // field itself.
 const BEDROCK_ANTHROPIC_VERSION = "bedrock-2023-05-31"
-const ALLOWED_MODELS = new Set(["us.anthropic.claude-sonnet-5"])
+// Sonnet 5.5 is the summarize model in the current agent image; Sonnet 5 stays
+// allowed until every environment runs that image (prod still sends 5). Both
+// carry the same per-token price, so the SONNET_* cost constants cover both.
+const ALLOWED_MODELS = new Set([
+  "us.anthropic.claude-sonnet-5-5",
+  "us.anthropic.claude-sonnet-5",
+])
 const MAX_INPUT_TOKEN_UPPER_BOUND = 200_000
 const MAX_OUTPUT_TOKENS = 32_768
 const MODEL_PROXY_CALL_LIMITS = {

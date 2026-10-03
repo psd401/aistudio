@@ -175,6 +175,7 @@
     "182-index-chunks-missing-embedding.sql",
     "183-nexus-workspace-chat-iteration.sql",
     "184-atrium-version-data-access.sql",
-    "185-atrium-live-follows-head-backfill.sql"
+    "185-atrium-live-follows-head-backfill.sql",
+    "186-agent-sonnet-5-5-pricing.sql"
   ]
 }
