@@ -53,7 +53,7 @@ infra/agent-image/skills/{skill-name}/
 **Administrative & District Operations**
 - `psd-atrium` — Read/search/create content in Atrium; artifact data persistence (list-data, submit); viewer-scoped PSD data queries from artifacts via shared connector resolution with Nexus; CSP guidance for artifact scripts/styles (inline preferred, CDN allowlist enforced); visibility/grant management with `read-grants` command and merge mode (`--add-grants`/`--remove-grants`) for safe audience changes (#1763); "Live PSD data inside an artifact" section mirrors `lib/content/atrium-data-contract.ts` guidance but is hand-maintained — change both when the bridge contract changes (#1749)
 - `psd-freshservice` — Freshservice tickets, service catalog items, approvals, and team summaries using each caller's own API key; create catalog request forms with field validation
-- `psd-email-triage` — Automated email response drafting
+- `psd-email-triage` — Smart email triage with three-stage classification (rules → content → LLM), human sender protection (never muted, never marked as news), keyword rules with stable IDs, preferences system for user-stated classification intent, and real digest counts from daily stats. Configured entirely from chat. See `/docs/operations/email-triage.md` for runtime architecture and Phase 3 (#1855) details
 - `psd-schedules` — Scheduled agent tasks (cron/rate/at) with read access for scheduled-mode turns; reply IS the delivery — never hunt for DM
 - `psd-rules` — Tier-1 governance rules for agent behavior
 - `psd-conversation-coach` — Crucial Conversations framework coaching for difficult conversations
@@ -98,6 +98,93 @@ infra/agent-image/skills/{skill-name}/
 - `chat-card`, `chat-chart` — Chat UI enhancements
 - `psd-brand-guidelines` — PSD branding enforcement
 - `psd-skills-meta` — Skill metadata and discovery
+
+### Email Triage Content-First Classification (#1855)
+
+**Sources**: `/docs/operations/email-triage.md`, `/infra/lambdas/agent-triage-poll/content-features.ts`, `/infra/agent-image/skills/psd-email-triage/SKILL.md`
+
+Phase 3 introduced a three-stage classification pipeline that decides based on content first, sender identity last. This prevents the same message from different addresses receiving different classifications.
+
+#### Three-Stage Pipeline
+
+For each new message, the classifier runs stages in order (cheapest first):
+
+1. **User's own rules** — VIP, mute, thread-with-user-reply, keyword rules. An explicit instruction always wins.
+2. **Content stage** (`content-features.ts`) — Derives signals from what the message asks and who it is addressed to, independent of sender identity:
+   - Approval or signature request → `important` (even from a machine)
+   - Reply in a thread the user has written in → `important`
+   - Direct question or action request with user in `To` → `important`
+   - Something that asks nothing of a recipient who is only copied → `later`
+   - Automated notice with no ask → `later`
+3. **Bedrock Nova Micro** — Only for what remains, with content signals leading the prompt and sender demoted to a weak prior.
+
+The content stage is deterministic, recorded as `source: "content"` with confidence 0.9, and produces consistent labels regardless of which address sent the message.
+
+#### Human Sender Protection
+
+**Rule**: An address that cannot be proven automated counts as a person and is never muted or marked as news.
+
+Automated senders are detected from:
+- `noreply`/`no-reply`/`donotreply` local parts
+- PSD service-account naming: `serv_*`, `tsd-*`, `svc_*`
+- Headers: `List-Unsubscribe`, `Auto-Submitted`, `Precedence`
+
+The nightly learner refuses to emit `mute` suggestions for unproven-automated targets. `suggestions apply` refuses to write a human mute without `--confirm-human`. The `prefs people-suggestions off` setting additionally silences VIP suggestions about individuals.
+
+#### Keyword Rules with Stable IDs
+
+**Problem**: Legacy keyword rules stored by `--from` with no value matched nothing and could not be addressed by value for deletion.
+
+**Solution**: Keyword rules now have stable `id` fields. Removal accepts:
+- The rule's `id`
+- The `#index` from `rules list` (or `--index <n>`)
+- Any value the rule matches on (case-insensitive)
+
+`rules remove keyword --malformed` deletes all rules that can never match. `isWellFormedKeywordRule()` rejects rules with empty or boolean criteria.
+
+#### Preferences System
+
+The classifier reads the user's stated preferences on every message:
+
+| Subcommand | Effect |
+|------------|--------|
+| `prefs show` | Stated profile + learned patterns in plain language |
+| `prefs set "<text>"` | Store profile (max 2000 chars). Outranks built-in heuristics |
+| `prefs clear` | Clear stated profile (learned patterns untouched) |
+| `prefs people-suggestions on\|off` | Whether suggestions may name individuals |
+
+The preferences text is injected into the LLM prompt and can express intent that per-sender rules cannot capture ("FYI forwards from X are Later unless they ask me something").
+
+#### Correction-Driven Content Guards
+
+Decisions record the message's `shape` (what it asks). Corrections snapshot it. `computeContentPreferences` mines those into per-shape leanings, and `applyContentGuards` enforces them:
+
+- Two archives of an `important` that asked nothing demotes the next message of that shape (from any sender)
+- Guards only demote, never promote (over-promotion was the reported failure mode)
+
+#### Real Digest Counts
+
+**Problem**: `recentDecisions` capped at 20, so digests reported "20 messages sorted in the last 24h" daily at any volume.
+
+**Solution**: The classifier writes `dailyStats` — per-day counters keyed `YYYY-MM-DD` in the user's digest timezone (45 days retained). Digests sum the days since `lastDigestAt` (clamped to 14). `recentDecisions` still supplies example rows; header counts come from the aggregates.
+
+Sweep slices deliberately do not count — a backfill of 1000 messages is not today's mail.
+
+#### Broker Allowlist Synchronization
+
+**Source**: `/app/api/agent/email-triage/route.ts` — `SAFE_STATE_FIELDS`
+
+`update-state` is gated by an allowlist. Missing fields return HTTP 400. When the skill starts writing a new attribute, add it in the same change. Missing fields: `pendingSuggestions`, `dismissedSuggestions`, `appliedSuggestions`, `tasksMode`, `tasksNotifySuccess`.
+
+**Validation**: `tests/unit/agent-triage-worker-security.test.ts`
+
+#### Phase 3 Files
+
+- `infra/lambdas/agent-triage-poll/` — `content-features.ts`, `daily-stats.ts`, `content-features.test.ts`, `content-learning.test.ts`, `daily-stats.test.ts` (+ extensions to `rules.ts`, `learning.ts`, `storage.ts`, `gmail.ts`, `types.ts`, `index.ts`)
+- `infra/lambdas/agent-triage-digest/` — `digest-window.ts`, `digest-window.test.ts` (+ extension to `index.ts`)
+- `infra/agent-image/skills/psd-email-triage/` — `run.js`, `run.test.js`, `lib.js`, `parity.test.js`, `SKILL.md`
+- `app/api/agent/email-triage/` — `route.ts`, `__tests__/route-security.test.ts`
+- `.github/workflows/ci.yml` — `test:skill:email-triage`, `test:lambda:triage-poll`, `test:lambda:triage-digest` jobs
 
 ### Skill Execution
 
