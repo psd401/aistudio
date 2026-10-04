@@ -381,7 +381,8 @@ EventBridge daily 09:00 ─ {job:"learn"} ─►  (lists users,   (group =   (po
 ### Decide on content, not on who sent it
 
 `content-features.ts` derives every signal from the message: whether the
-opening text asks a question, requests an action, requests an approval or
+opening text puts a question to the reader, requests an action, requests an
+approval or
 names a deadline; whether the user is in `To`, only on `Cc`, or one of
 many; whether this is a reply inside a thread they have written in.
 `classifyByContent` turns those into a label without consulting the
@@ -494,3 +495,62 @@ Aggregate: comfortably under $3k/yr for the whole org, before any cost optimisat
 - `app/(protected)/admin/agents/[userEmail]/triage/` — admin sub-page.
 - `actions/admin/agent-triage.actions.ts` — admin server actions.
 - This file.
+
+---
+
+## #1861 — the content stage over-promoted bulk mail
+
+A Google Search Console blast (`sc-noreply@google.com`, "Congrats on
+reaching 50 clicks in 28 days!") was labelled `important` at confidence
+0.9 with reason `content:direct-question-addressed-to-you`, and pinged
+Chat in `high-confidence` escalation mode. Four separate defects lined up
+to produce it:
+
+1. **`directQuestion` was `text.includes("?")`.** Any question mark
+   anywhere counted, including the marketing line "Think this is awesome?
+   Go ahead and …". It now requires the clause the question mark
+   *terminates* to speak to the reader in the second person
+   (`hasDirectQuestion`). `.`, `!`, `?` and a newline all close a clause,
+   so a "your" in the next sentence cannot rescue a rhetorical question.
+2. **`automatedSender` was detected but did not veto.** A question or a
+   soft action request from an automated or bulk sender no longer decides
+   the label — nobody is waiting on a reply to a noreply mailbox. Those
+   messages fall through to the LLM (which still sees every signal) or to
+   the default `later`. **Approval and signature requests are exempt**:
+   a service desk legitimately asks for one from a noreply address, and
+   that branch returns before the veto.
+3. **The fixed content confidence cleared the escalation bar.** The stage
+   stamps one number on every hit, so a single regex match read as 0.9 and
+   cleared the 0.85 `high-confidence` threshold. Two independent guards
+   now: `CONTENT_DECISION_CONFIDENCE` is 0.7, and `shouldEscalate` only
+   lets `source === "llm"` clear the bar at all — which is what the
+   `high-confidence` mode has always been documented to mean ("rule
+   matches and LLM decisions"). Explicit escalation sender/keyword rules
+   still ping in every mode except `none`; the veto is on the mode's
+   confidence bar, not on the user's own instruction.
+4. **Bulk-mail boilerplate did not mark `informational`.** A
+   `List-Unsubscribe` header is now enough on its own, and marketing
+   footer phrases ("unsubscribe", "you are receiving this", "go ahead
+   and") count **only when the sender is already automated** — "go ahead
+   and" is ordinary English from a colleague and must not turn their mail
+   into an FYI.
+
+### What `simulate` reports now
+
+`simulate` emits `firedSignals` — the names of the signals that are true,
+in the order `classifyByContent` consults them — and emits them on the
+rules-decided branch too, so "which signal fired?" is answerable without
+reading a ten-key boolean map. `--list-unsubscribe` simulates bulk mail.
+
+### Still sender-dependent: the LLM stage
+
+The content stage is sender-identity-independent and the regression pair
+in `content-features.test.ts` pins that. The **LLM** stage is not: the
+same AWS VPN notice scored `important` 0.9 (reason
+`internal-AWS-account-notice`) from an internal relay and `later` 0.6 from
+`health@aws.com`. Both sides now produce identical content signals and
+both fall through to Bedrock undecided, so the divergence is entirely in
+the model call, which is still handed `fromEmail` and an
+`internal`/`external` flag as a "weak prior" (`buildUserPrompt` in
+`llm.ts`). Removing or neutralising that prior input is a separate,
+un-made decision — not fixed here.

@@ -321,3 +321,88 @@ describe('prefs', () => {
     expect(shown.data.learned[0].inPlainWords).toContain('out of the way');
   });
 });
+
+/**
+ * #1861 acceptance: "simulate shows which signal fired". Before this,
+ * `simulate` emitted the raw ten-key boolean map and nothing at all on the
+ * rules-decided branch, so the agent had to infer the deciding signal.
+ */
+describe('simulate (#1861)', () => {
+  test('the reported Google Search Console blast would be labelled later', async () => {
+    const out = await invoke(run.cmd_simulate, [
+      'simulate',
+      '--user', USER,
+      '--from', 'sc-noreply@google.com',
+      '--subject', 'Congrats on reaching 50 clicks in 28 days!',
+      '--snippet', 'Your site is getting noticed. Think this is awesome? Go ahead and ',
+      '--to', USER,
+      '--list-unsubscribe', '<mailto:unsub@google.com>',
+    ]);
+    expect(out.data.stage).toBe('content');
+    expect(out.data.decision).toEqual({
+      label: 'later',
+      reason: 'content:automated-notice-no-ask',
+    });
+    expect(out.data.signals.directQuestion).toBe(false);
+    expect(out.data.firedSignals).toEqual([
+      'addressedToUser',
+      'broadcast',
+      'informational',
+      'automatedSender',
+    ]);
+    expect(out.summary).toContain('Content signals that fired:');
+    expect(out.summary).toContain('automatedSender');
+  });
+
+  test('a colleague asking a direct question is important, and names the signal', async () => {
+    const out = await invoke(run.cmd_simulate, [
+      'simulate',
+      '--user', USER,
+      '--from', 'jsmith@psd401.net',
+      '--subject', 'Chromebook refresh',
+      '--snippet', 'Can you confirm the budget line for this?',
+      '--to', USER,
+    ]);
+    expect(out.data.stage).toBe('content');
+    expect(out.data.decision.reason).toBe('content:direct-question-addressed-to-you');
+    expect(out.data.firedSignals).toContain('directQuestion');
+  });
+
+  test('the signals are reported even when a rule decides first', async () => {
+    currentRow = baseRow({
+      rules: { vipSenders: ['boss@psd401.net'], muteSenders: [], keywordRules: [] },
+    });
+    const out = await invoke(run.cmd_simulate, [
+      'simulate',
+      '--user', USER,
+      '--from', 'boss@psd401.net',
+      '--subject', 'Lunch',
+      '--snippet', 'Nothing needed.',
+      '--to', USER,
+    ]);
+    expect(out.data.stage).toBe('rules');
+    expect(out.data.firedSignals).toEqual(['addressedToUser']);
+    expect(out.summary).toContain('the rule decided first');
+  });
+
+  test('an undecided message says the model would decide, and still lists signals', async () => {
+    const out = await invoke(run.cmd_simulate, [
+      'simulate',
+      '--user', USER,
+      '--from', 'jsmith@psd401.net',
+      '--subject', 'Thoughts on the vendor demo',
+      '--snippet', 'That demo went about how I expected.',
+      '--to', USER,
+    ]);
+    expect(out.data.stage).toBe('llm');
+    expect(out.summary).toContain('Bedrock Nova Micro');
+    expect(out.data.firedSignals).toEqual(['addressedToUser']);
+  });
+
+  test('--from is required', async () => {
+    const err = await invokeExpectingBail(run.cmd_simulate, [
+      'simulate', '--user', USER,
+    ]);
+    expect(err.code).toBe('missing-from');
+  });
+});

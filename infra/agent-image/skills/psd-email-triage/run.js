@@ -991,37 +991,52 @@ async function cmd_simulate(args) {
     snippetLower: (args.snippet || "").toLowerCase(),
     hasUserReply: args["has-user-reply"] === true,
   };
+  // Derived unconditionally so the answer to "which signal fired?" is in
+  // the output even when the user's own rules settle the label (#1861).
+  const signals = lib.detectContentSignals({
+    subject: args.subject || "",
+    body: args.snippet || "",
+    headers: {
+      to: args.to,
+      cc: args.cc,
+      listUnsubscribe: args["list-unsubscribe"],
+    },
+    userEmail: user,
+    hasUserReply: features.hasUserReply,
+    fromEmail,
+  });
+  const firedSignals = lib.firedContentSignals(signals);
+  const firedText = firedSignals.length > 0 ? firedSignals.join(", ") : "none";
+
   const decision = lib.applyRules(features, row.rules);
   if ("label" in decision) {
     emit({
       ok: true,
       subcommand: "simulate",
-      summary: `Would label as ${decision.label} (${decision.reason})`,
-      data: { features, decision, stage: "rules" },
+      summary:
+        `Would label as ${decision.label} (${decision.reason}). ` +
+        `Content signals that fired: ${firedText} ` +
+        `(not consulted — the rule decided first).`,
+      data: { features, signals, firedSignals, decision, stage: "rules" },
     });
     return;
   }
 
   // Mirror the Lambda's second stage so simulate doesn't claim "Bedrock
   // decides" for a message the deterministic content stage settles.
-  const signals = lib.detectContentSignals({
-    subject: args.subject || "",
-    body: args.snippet || "",
-    headers: { to: args.to, cc: args.cc },
-    userEmail: user,
-    hasUserReply: features.hasUserReply,
-    fromEmail,
-  });
   const contentDecision = lib.classifyByContent(signals);
   emit({
     ok: true,
     subcommand: "simulate",
-    summary: contentDecision
-      ? `Would label as ${contentDecision.label} (${contentDecision.reason})`
-      : "Rules and content signals are both undecided — the classifier would ask Bedrock Nova Micro.",
+    summary:
+      (contentDecision
+        ? `Would label as ${contentDecision.label} (${contentDecision.reason}).`
+        : "Rules and content signals are both undecided — the classifier would ask Bedrock Nova Micro.") +
+      ` Content signals that fired: ${firedText}.`,
     data: {
       features,
       signals,
+      firedSignals,
       decision: contentDecision || decision,
       stage: contentDecision ? "content" : "llm",
     },
@@ -1557,6 +1572,7 @@ module.exports = {
   rulesAddKeyword,
   rulesRemove,
   cmd_prefs,
+  cmd_simulate,
   cmd_suggestions,
 };
 

@@ -406,6 +406,50 @@ const NEGATED_ASK_RE =
   /\bno (?:action|response|reply|rsvp|approval|authori[sz]ation|sign[- ]?off|signature) (?:is )?(?:needed|required|necessary)\b|\bnothing (?:is )?(?:needed|required)(?: from you)?\b|\bno need to (?:reply|respond|act|approve|sign)\b|\b(?:does not|doesn't|do not|don't|no longer) (?:need|require)s? (?:your )?(?:approval|authori[sz]ation|sign[- ]?off|signature)\b/gi;
 const INFORMATIONAL_RE =
   /\b(fyi|for your (?:information|awareness|records|reference)|just (?:a )?(?:heads[- ]up|so you know)|no action (?:is )?(?:needed|required|necessary)|nothing (?:is )?(?:needed|required) from you|status (?:report|update)|(?:daily|weekly|monthly|quarterly) (?:report|digest|summary|roundup|recap)|newsletter|read[- ]only|informational(?:ly)? )\b/i;
+// Bulk-mail footer boilerplate (#1861). Only consulted for automated
+// senders — "go ahead and" is ordinary English from a colleague. Kept as
+// literals, not one alternation regex: that form tripped
+// security/detect-unsafe-regex, and this array is a verbatim copy of
+// MARKETING_FOOTER_PHRASES in content-features.ts.
+const MARKETING_FOOTER_PHRASES = [
+  'unsubscribe',
+  'manage your preferences',
+  'manage your email preferences',
+  'manage email preferences',
+  'update your preferences',
+  'update your email preferences',
+  'opt out of these',
+  'opt-out of these',
+  'you are receiving this',
+  "you're receiving this",
+  'this email was sent to',
+  'this e-mail was sent to',
+  'this message was sent to',
+  'view this in your browser',
+  'view this email in your browser',
+  'view it in your browser',
+  'view in browser',
+  'add us to your address book',
+  'add us to your safe sender',
+  'go ahead and',
+  'think this is awesome',
+  'was this email helpful',
+];
+
+function hasMarketingFooter(text) {
+  const lower = String(text || '').toLowerCase();
+  return MARKETING_FOOTER_PHRASES.some((phrase) => lower.includes(phrase));
+}
+// A question only counts when the clause it terminates speaks to the
+// reader (#1861) — "Think this is awesome?" is not an ask.
+const SECOND_PERSON_RE = /\b(you|your|yours|yourself|you'(?:re|ll|ve|d))\b/i;
+const QUESTION_CLAUSE_RE = /[^.!?\n]*\?/g;
+
+function hasDirectQuestion(text) {
+  const clauses = String(text || '').match(QUESTION_CLAUSE_RE);
+  if (!clauses) return false;
+  return clauses.some((clause) => SECOND_PERSON_RE.test(clause));
+}
 
 const AUTOMATED_LOCALPARTS = new Set([
   'admin',
@@ -480,8 +524,10 @@ function detectContentSignals(input) {
   const ccAddresses = parseAddressList(headers.cc);
   const addressedToUser = toAddresses.includes(userEmail);
   const askText = opening.replace(NEGATED_ASK_RE, ' ');
+  const listMail = Boolean(String(headers.listUnsubscribe || '').trim());
+  const automatedSender = isAutomatedSender(input.fromEmail, headers);
   const base = {
-    directQuestion: askText.includes('?'),
+    directQuestion: hasDirectQuestion(askText),
     actionRequest: ACTION_RE.test(askText),
     approvalRequest: APPROVAL_RE.test(askText),
     deadline: DEADLINE_RE.test(askText),
@@ -493,8 +539,11 @@ function detectContentSignals(input) {
     liveThread:
       Boolean(input.hasUserReply) &&
       Boolean(headers.inReplyTo || headers.references || /^\s*re\s*:/i.test(subject)),
-    informational: INFORMATIONAL_RE.test(opening),
-    automatedSender: isAutomatedSender(input.fromEmail, headers),
+    informational:
+      INFORMATIONAL_RE.test(opening) ||
+      listMail ||
+      (automatedSender && hasMarketingFooter(opening)),
+    automatedSender,
   };
   return { ...base, shape: deriveShape(base) };
 }
@@ -515,7 +564,14 @@ function classifyByContent(signals) {
   if (signals.liveThread) {
     return { label: 'important', reason: 'content:reply-in-a-thread-you-are-in' };
   }
-  if (signals.addressedToUser && (signals.directQuestion || signals.actionRequest)) {
+  // An automated/bulk sender is vetoed here (#1861): nobody is waiting on a
+  // reply to a noreply mailbox, and marketing copy is full of second-person
+  // questions. Approval requests are exempt — they returned above.
+  if (
+    signals.addressedToUser &&
+    !signals.automatedSender &&
+    (signals.directQuestion || signals.actionRequest)
+  ) {
     return {
       label: 'important',
       reason: signals.directQuestion
@@ -535,6 +591,25 @@ function classifyByContent(signals) {
     }
   }
   return null;
+}
+
+// The order classifyByContent consults the signals in, so the first name
+// reported is the one most likely to have produced the label (#1861).
+const SIGNAL_PRECEDENCE = [
+  'approvalRequest',
+  'liveThread',
+  'directQuestion',
+  'actionRequest',
+  'deadline',
+  'addressedToUser',
+  'ccOnly',
+  'broadcast',
+  'informational',
+  'automatedSender',
+];
+
+function firedContentSignals(signals) {
+  return SIGNAL_PRECEDENCE.filter((name) => signals[name] === true);
 }
 
 module.exports = {
@@ -566,9 +641,12 @@ module.exports = {
   isWellFormedKeywordRule,
   wildcardMatch,
   // content signals
+  MARKETING_FOOTER_PHRASES,
   classifyByContent,
   detectContentSignals,
+  firedContentSignals,
   hasAsk,
+  hasDirectQuestion,
   isAutomatedSender,
   parseAddressList,
 };

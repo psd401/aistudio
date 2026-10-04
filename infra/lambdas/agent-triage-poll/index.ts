@@ -414,8 +414,18 @@ function shouldSkipMessage(
   return { skip: false };
 }
 
-/** Confidence attached to a deterministic content-stage decision. */
-const CONTENT_DECISION_CONFIDENCE = 0.9;
+/**
+ * Confidence attached to a deterministic content-stage decision.
+ *
+ * Deliberately below `DEFAULT_ESCALATION_CONFIDENCE_THRESHOLD` (0.85).
+ * This is a fixed number stamped on every content-stage hit, not a
+ * calibrated estimate, and at the old 0.9 it read as near-certainty to
+ * everything downstream — including `high-confidence` escalation, where
+ * one regex hit was enough to ping Chat (#1861 item 3). `shouldEscalate`
+ * now also refuses to clear the bar on a non-LLM source, so this value is
+ * the second of two independent guards.
+ */
+const CONTENT_DECISION_CONFIDENCE = 0.7;
 
 interface MessageContext {
   features: EmailFeatures;

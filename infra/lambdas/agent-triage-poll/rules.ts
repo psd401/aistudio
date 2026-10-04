@@ -383,7 +383,17 @@ function modeEscalationReason(
     return hasExplicitRules ? undefined : `label:${label}`;
   }
   if (source === "rule") return `rule:${label}`;
-  if (mode === "high-confidence" && confidence >= threshold) {
+  // Only a real LLM call can clear the confidence bar (#1861 item 3). The
+  // deterministic content stage reports a FIXED confidence, so before this
+  // guard a single heuristic hit — one question mark in a marketing
+  // footer — cleared the 0.85 threshold and pinged Chat. A fixed number is
+  // not a calibrated one, and `high-confidence` has always been documented
+  // as "rule matches and LLM decisions at or above the threshold".
+  if (
+    mode === "high-confidence" &&
+    source === "llm" &&
+    confidence >= threshold
+  ) {
     return `high-confidence:${confidence.toFixed(2)}`;
   }
   return undefined;

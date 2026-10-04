@@ -69,6 +69,14 @@ const TEXTS = [
   { subject: 'Confirm', body: 'Please approve your subscription to keep receiving emails.' },
   { subject: 'Long thread', body: `${'filler text '.repeat(60)} can you call me?` },
   { subject: 'AWS Health Event', body: 'Your EC2 instance is scheduled for retirement. Action required.' },
+  // #1861: rhetorical marketing question + bulk footer boilerplate.
+  {
+    subject: 'Congrats on reaching 50 clicks in 28 days!',
+    body: 'Your site is getting noticed. Think this is awesome? Go ahead and share it.',
+  },
+  { subject: 'Want to see more?', body: 'Unsubscribe at any time.' },
+  { subject: 'Any update on your section?', body: 'Let me know where it landed.' },
+  { subject: 'Great news!', body: 'Isn’t it time? Act now. You are receiving this because you signed up.' },
 ];
 
 function contentCases() {
@@ -152,6 +160,47 @@ describe('content stage parity', () => {
       same('detectContentSignals', input, js, ts);
       same('hasAsk', input, lib.hasAsk(js), tsContent.hasAsk(ts));
       same('classifyByContent', input, lib.classifyByContent(js), tsContent.classifyByContent(ts));
+      // #1861: `simulate` prints firedContentSignals, so a drift here
+      // would have the CLI name a different signal than the classifier.
+      same(
+        'firedContentSignals',
+        input,
+        lib.firedContentSignals(js),
+        tsContent.firedContentSignals(ts),
+      );
+    }
+  });
+
+  test('the marketing-footer phrase lists are identical (#1861)', () => {
+    // The one duplicated DATA structure across the two copies. The corpus
+    // below cannot catch a phrase added to only one side, so pin it here.
+    expect(lib.MARKETING_FOOTER_PHRASES).toEqual(
+      tsContent.MARKETING_FOOTER_PHRASES,
+    );
+  });
+
+  test('hasDirectQuestion agrees (#1861)', () => {
+    const texts = [
+      '',
+      'no question here',
+      '?',
+      'Think this is awesome?',
+      'Can you confirm the budget line for this?',
+      'Thoughts?',
+      'Want to see your top queries?',
+      'Think this is awesome? Go ahead and share your success.',
+      'Great news! Are you ready?',
+      'Why does this matter? Because your data says so.',
+      'line one\nis this yours?',
+      'Nope. Not for you. Right?',
+    ];
+    for (const text of texts) {
+      same(
+        'hasDirectQuestion',
+        { text },
+        lib.hasDirectQuestion(text),
+        tsContent.hasDirectQuestion(text),
+      );
     }
   });
 

@@ -14,7 +14,9 @@ import { describe, expect, test } from "bun:test";
 import {
   classifyByContent,
   detectContentSignals,
+  firedContentSignals,
   hasAsk,
+  hasDirectQuestion,
   isAutomatedSender,
   parseAddressList,
   type ContentSignalInput,
@@ -270,5 +272,220 @@ describe("classifyByContent", () => {
       headers: { to: USER },
     });
     expect(classifyByContent(signals)).toBeNull();
+  });
+});
+
+/**
+ * #1861. A Google Search Console blast scored `important` 0.9 and pinged
+ * Chat because `directQuestion` was `text.includes("?")` and the marketing
+ * line "Think this is awesome? Go ahead and …" contains one — and because
+ * `automatedSender` was detected but did not veto the content stage.
+ */
+describe("directQuestion requires a question put to the reader (#1861)", () => {
+  test("a rhetorical marketing question is not a question to the reader", () => {
+    for (const text of [
+      "Think this is awesome?",
+      "Think this is awesome? Go ahead and share it.",
+      "Why does this matter?",
+      "Ready for the next release?",
+      "Want to see more?",
+      "?",
+    ]) {
+      expect([text, hasDirectQuestion(text)]).toEqual([text, false]);
+    }
+  });
+
+  test("a second-person question still counts", () => {
+    for (const text of [
+      "Can you confirm the budget line for this?",
+      "Would you mind reviewing this?",
+      "Any update on your section?",
+      "Is this yours?",
+      "Are you available Thursday?",
+    ]) {
+      expect([text, hasDirectQuestion(text)]).toEqual([text, true]);
+    }
+  });
+
+  test("only the clause the question mark terminates is considered", () => {
+    // "your" sits in the NEXT sentence, so it must not rescue the
+    // rhetorical question before it.
+    expect(hasDirectQuestion("Think this is awesome? Go ahead and share your success.")).toBe(
+      false,
+    );
+    // ...and a second-person question later in the text still counts.
+    expect(hasDirectQuestion("Big news! Can you join us?")).toBe(true);
+  });
+
+  test("the reported Google Search Console blast classifies later", () => {
+    const signals = signalsFor({
+      fromEmail: "sc-noreply@google.com",
+      subject: "Congrats on reaching 50 clicks in 28 days!",
+      body:
+        "Your site is getting noticed in Google Search. " +
+        "Think this is awesome? Go ahead and ",
+      headers: { to: USER, listUnsubscribe: "<mailto:unsub@google.com>" },
+    });
+    expect(signals.directQuestion).toBe(false);
+    expect(signals.automatedSender).toBe(true);
+    expect(signals.informational).toBe(true);
+    expect(hasAsk(signals)).toBe(false);
+    expect(classifyByContent(signals)).toEqual({
+      label: "later",
+      reason: "content:automated-notice-no-ask",
+    });
+    // The acceptance criterion: simulate can name the signals that fired.
+    expect(firedContentSignals(signals)).toEqual([
+      "addressedToUser",
+      "broadcast",
+      "informational",
+      "automatedSender",
+    ]);
+  });
+});
+
+describe("an automated sender cannot buy `important` with a soft ask (#1861)", () => {
+  test("a second-person question from a noreply mailbox does not decide", () => {
+    // Nobody is waiting on a reply to a noreply address, so this falls
+    // through to the model (which still sees every signal) rather than
+    // being stamped `important` by one regex hit.
+    const signals = signalsFor({
+      fromEmail: "sc-noreply@google.com",
+      subject: "Want to see your top queries?",
+      body: "Can you spare two minutes to tell us what you think?",
+      headers: { to: USER },
+    });
+    expect(signals.directQuestion).toBe(true);
+    expect(signals.automatedSender).toBe(true);
+    expect(classifyByContent(signals)).toBeNull();
+  });
+
+  test("the identical message from a colleague IS important", () => {
+    // The veto is on the sender CLASS, not a sender identity — the same
+    // words from a person still land `important`.
+    const signals = signalsFor({
+      fromEmail: "jsmith@psd401.net",
+      subject: "Want to see your top queries?",
+      body: "Can you spare two minutes to tell us what you think?",
+      headers: { to: USER },
+    });
+    expect(classifyByContent(signals)).toEqual({
+      label: "important",
+      reason: "content:direct-question-addressed-to-you",
+    });
+  });
+
+  test("an approval request from a machine is still exempt from the veto", () => {
+    const signals = signalsFor({
+      fromEmail: "noreply@servicedesk.example",
+      subject: "Approval required: purchase order 4471",
+      body: "A request is pending your approval. Can you action it?",
+      headers: { to: USER },
+    });
+    expect(signals.automatedSender).toBe(true);
+    expect(classifyByContent(signals)).toEqual({
+      label: "important",
+      reason: "content:approval-or-signature-requested",
+    });
+  });
+});
+
+describe("bulk-mail boilerplate marks informational (#1861 item 4)", () => {
+  test("List-Unsubscribe alone is enough", () => {
+    const signals = signalsFor({
+      fromEmail: "news@vendor.com",
+      subject: "Spring product roundup",
+      body: "Here is what shipped this quarter.",
+      headers: { to: USER, listUnsubscribe: "<mailto:unsub@vendor.com>" },
+    });
+    expect(signals.informational).toBe(true);
+  });
+
+  test("marketing footer phrases count — but only from an automated sender", () => {
+    const text = "Go ahead and tell a friend. You are receiving this because you signed up.";
+    expect(
+      signalsFor({ fromEmail: "promo-noreply@vendor.com", body: text }).informational,
+    ).toBe(true);
+    // "Go ahead and" is ordinary English from a colleague and must not
+    // turn their mail into an FYI.
+    expect(
+      signalsFor({
+        fromEmail: "jsmith@psd401.net",
+        subject: "Budget",
+        body: "Go ahead and send it whenever you get a chance.",
+        headers: { to: USER },
+      }).informational,
+    ).toBe(false);
+  });
+});
+
+describe("firedContentSignals (#1861 acceptance)", () => {
+  test("names only the true signals, in the order the stage consults them", () => {
+    const signals = signalsFor({
+      fromEmail: "jsmith@psd401.net",
+      subject: "Board packet",
+      body: "Please send your section by EOD Friday.",
+      headers: { to: USER },
+    });
+    expect(firedContentSignals(signals)).toEqual([
+      "actionRequest",
+      "deadline",
+      "addressedToUser",
+    ]);
+  });
+
+  test("an empty signal set is an empty list, not a throw", () => {
+    expect(firedContentSignals(signalsFor())).toEqual([]);
+  });
+});
+
+describe("sender-independence regression pair (#1861 comment)", () => {
+  // The reported pair: an "Important notice about your AWS Account
+  // regarding VPN connections" scored important 0.9 (reason
+  // "internal-AWS-account-notice") from an internal relay and later 0.6
+  // from health@aws.com. Identical content must produce identical
+  // deterministic output — the content stage may not read the sender's
+  // identity, only its CLASS.
+  const subject =
+    "Important notice about your AWS Account regarding VPN connections";
+  const body =
+    "We are reaching out because your account has VPN connections that " +
+    "will be affected by an upcoming change.";
+
+  test("the same notice from an internal relay and from aws.com agrees", () => {
+    const internal = signalsFor({
+      fromEmail: "aws-notices@psd401.net",
+      subject,
+      body,
+      headers: { to: USER },
+    });
+    const external = signalsFor({
+      fromEmail: "health@aws.com",
+      subject,
+      body,
+      headers: { to: USER },
+    });
+    expect(internal).toEqual(external);
+    expect(firedContentSignals(internal)).toEqual(firedContentSignals(external));
+    expect(classifyByContent(internal)).toEqual(classifyByContent(external));
+  });
+
+  test("...and still agrees once the sender IS an automated mailbox", () => {
+    // `automatedSender` is a sender CLASS, so both sides move together
+    // when both addresses are machine mailboxes.
+    const internal = signalsFor({
+      fromEmail: "serv_awsrelay@psd401.net",
+      subject,
+      body,
+      headers: { to: USER },
+    });
+    const external = signalsFor({
+      fromEmail: "no-reply@aws.com",
+      subject,
+      body,
+      headers: { to: USER },
+    });
+    expect(classifyByContent(internal)).toEqual(classifyByContent(external));
+    expect(classifyByContent(internal)?.label).toBe("later");
   });
 });
