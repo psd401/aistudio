@@ -12,6 +12,7 @@ import type {
   EscalationConfig,
   EscalationMode,
 } from "./rules";
+import type { ContentShape } from "./content-features";
 
 export type { Label, TriageRules, EscalationConfig, EscalationMode };
 
@@ -65,6 +66,34 @@ export interface TriageRow {
   dismissedSuggestions?: string[];
   /** Suggestion ids the user has applied — audit trail, not re-raised. */
   appliedSuggestions?: string[];
+  /**
+   * Content-shape leanings mined from this user's corrections (#1855).
+   * Unlike `learnedPatterns` these key on what a message ASKS rather than
+   * on who sent it, so a correction changes behaviour for every sender
+   * that writes the same kind of mail.
+   */
+  contentPreferences?: ContentPreference[];
+  /**
+   * The user's own preferences in plain language (#1855 acceptance 4).
+   * Written by the user through the skill and passed verbatim to the
+   * classifier. Nothing in code is specific to any one person.
+   */
+  preferences?: UserPreferenceProfile;
+  /**
+   * Opt-out for rule suggestions that target a person (#1855 item 3).
+   * Absent ⇒ true. Mute suggestions against human senders are refused
+   * regardless of this setting; this switch additionally silences VIP
+   * suggestions about people.
+   */
+  suggestPeopleRules?: boolean;
+  /**
+   * Per-day triage counters, keyed `YYYY-MM-DD` in the user's digest
+   * timezone (#1855 addendum 1). The digest reports from these; the
+   * 20-entry `recentDecisions` buffer can only ever say "20".
+   */
+  dailyStats?: Record<string, DailyStat>;
+  /** ISO timestamp of the last digest posted — bounds the next window. */
+  lastDigestAt?: string;
   /** ISO timestamp of the last nightly learning run. */
   learnedAt?: string;
   /** Initial-inbox-sweep state (#1172). Absent ⇒ no sweep requested. */
@@ -100,17 +129,69 @@ export interface TriageRow {
   agentcoreRuntimeId?: string;
 }
 
+/**
+ * Where a label came from.
+ *   rule    — one of the user's own configured rules (VIP, mute, keyword)
+ *   content — the deterministic, sender-independent content stage (#1855)
+ *   llm     — the Bedrock fallback
+ */
+export type DecisionSource = "rule" | "content" | "llm";
+
 export interface DecisionRecord {
   messageId: string;
   threadId: string;
   label: Label;
-  source: "rule" | "llm";
+  source: DecisionSource;
   reason: string;
   confidence: number;
   ts: string;
   /** Snapshot of sender + subject so we can show training context later. */
   fromEmail: string;
   subject: string;
+  /**
+   * Body snippet, so `training recent` can be reviewed by content rather
+   * than by sender (#1855 item 6).
+   */
+  snippet?: string;
+  /**
+   * What the message asked of the reader. Corrections are learned against
+   * this, which is how a correction generalises beyond one sender.
+   */
+  shape?: ContentShape;
+  /** True when the sender is an automated mailbox rather than a person. */
+  automatedSender?: boolean;
+}
+
+/**
+ * A learned leaning for one content shape — "you keep archiving FYI
+ * digests" becomes `{ shape: "fyi", lean: "later", … }` and demotes the
+ * next FYI digest from any sender.
+ */
+export interface ContentPreference {
+  shape: ContentShape;
+  lean: Label;
+  /** Age-decayed strength, same half-life as `learnedPatterns`. */
+  weight: number;
+  /** Number of corrections behind this leaning. */
+  count: number;
+}
+
+/** The user's plain-language preference profile (#1855 acceptance 4). */
+export interface UserPreferenceProfile {
+  /** Free text the user wrote, passed to the classifier verbatim. */
+  text?: string;
+  updatedAt?: string;
+}
+
+/** One day's triage counters. */
+export interface DailyStat {
+  total: number;
+  important: number;
+  later: number;
+  news: number;
+  rule: number;
+  llm: number;
+  corrections: number;
 }
 
 export interface CorrectionRecord {
@@ -133,6 +214,14 @@ export interface CorrectionRecord {
   fromEmail?: string;
   /** Sender domain, derived from `fromEmail`. */
   fromDomain?: string;
+  /**
+   * Content shape of the corrected message, snapshotted from the prior
+   * decision. This is what makes a correction generalise past the one
+   * sender it happened to arrive from (#1855).
+   */
+  shape?: ContentShape;
+  /** Whether the corrected message came from an automated mailbox. */
+  automatedSender?: boolean;
 }
 
 export interface LearnedPattern {
@@ -203,5 +292,5 @@ export interface ClassifierResult {
   label: Label;
   confidence: number;
   reason: string;
-  source: "rule" | "llm";
+  source: DecisionSource;
 }

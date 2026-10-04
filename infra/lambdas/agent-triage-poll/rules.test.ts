@@ -12,6 +12,9 @@ import {
   type EmailFeatures,
   type TriageRules,
   type EscalationConfig,
+  type KeywordRule,
+  describeKeywordRule,
+  isWellFormedKeywordRule,
 } from "./rules";
 
 function makeFeatures(overrides: Partial<EmailFeatures> = {}): EmailFeatures {
@@ -369,3 +372,124 @@ const defineShouldEscalateSuite3 = () => {
 };
 
 describe("shouldEscalate", defineShouldEscalateSuite3);
+
+// ---------------------------------------------------------------------
+// Keyword-rule shape (#1855 items 1 and 5)
+// ---------------------------------------------------------------------
+
+describe("keyword rule well-formedness", () => {
+  test("a boolean criterion is malformed, not a wildcard", () => {
+    // `rules add-keyword x --from` used to persist `from_domain: true`.
+    // It matched nothing, could not be deleted by value, and sat in the
+    // classifier forever — #1855 item 1.
+    const broken = {
+      from_domain: true,
+      label: "later",
+    } as unknown as KeywordRule;
+    expect(isWellFormedKeywordRule(broken)).toBe(false);
+    expect(describeKeywordRule(broken)).toBe("malformed");
+    expect(
+      applyRules(makeFeatures(), { ...emptyRules, keywordRules: [broken] }),
+    ).toEqual({ decided: false, reason: "no-rule-match" });
+  });
+
+  test("an external-only rule does not match everything external", () => {
+    const rule = { external: true, label: "later" } as KeywordRule;
+    expect(isWellFormedKeywordRule(rule)).toBe(false);
+    expect(
+      applyRules(makeFeatures({ isInternal: false }), {
+        ...emptyRules,
+        keywordRules: [rule],
+      }),
+    ).toEqual({ decided: false, reason: "no-rule-match" });
+  });
+
+  test("an empty-string criterion is malformed", () => {
+    expect(
+      isWellFormedKeywordRule({ subject_contains: "   ", label: "news" }),
+    ).toBe(false);
+  });
+
+  test("an unknown label makes a rule malformed", () => {
+    expect(
+      isWellFormedKeywordRule({
+        subject_contains: "x",
+        label: "archive",
+      } as unknown as KeywordRule),
+    ).toBe(false);
+  });
+});
+
+describe("keyword rule matching", () => {
+  test("sender AND subject in one rule — both must hold", () => {
+    const rule: KeywordRule = {
+      id: "kw-1",
+      from_address: "vendor@example.com",
+      subject_contains: "invoice",
+      label: "important",
+    };
+    const rules = { ...emptyRules, keywordRules: [rule] };
+    expect(
+      applyRules(
+        makeFeatures({
+          fromEmail: "vendor@example.com",
+          subjectLower: "march invoice",
+        }),
+        rules,
+      ),
+    ).toMatchObject({ label: "important" });
+    // Right sender, wrong subject.
+    expect(
+      applyRules(
+        makeFeatures({ fromEmail: "vendor@example.com", subjectLower: "hello" }),
+        rules,
+      ),
+    ).toEqual({ decided: false, reason: "no-rule-match" });
+    // Right subject, wrong sender.
+    expect(
+      applyRules(
+        makeFeatures({ fromEmail: "other@example.com", subjectLower: "march invoice" }),
+        rules,
+      ),
+    ).toEqual({ decided: false, reason: "no-rule-match" });
+  });
+
+  test("subject_any is an OR across keywords", () => {
+    const rules = {
+      ...emptyRules,
+      keywordRules: [
+        { id: "kw-2", subject_any: ["invoice", "receipt", "statement"], label: "news" } as KeywordRule,
+      ],
+    };
+    expect(applyRules(makeFeatures({ subjectLower: "your receipt" }), rules)).toMatchObject(
+      { label: "news" },
+    );
+    expect(applyRules(makeFeatures({ subjectLower: "lunch?" }), rules)).toEqual({
+      decided: false,
+      reason: "no-rule-match",
+    });
+  });
+
+  test("from_address is matched case-insensitively", () => {
+    const rules = {
+      ...emptyRules,
+      keywordRules: [
+        { from_address: "Vendor@Example.com", label: "news" } as KeywordRule,
+      ],
+    };
+    expect(
+      applyRules(makeFeatures({ fromEmail: "vendor@example.com" }), rules),
+    ).toMatchObject({ label: "news" });
+  });
+
+  test("the reason names every criterion, so two rules are tellable apart", () => {
+    expect(
+      describeKeywordRule({
+        from_domain: "example.com",
+        subject_contains: "invoice",
+        external: true,
+        label: "later",
+      }),
+    ).toBe('from_domain=example.com + subject~"invoice" + external');
+  });
+});
