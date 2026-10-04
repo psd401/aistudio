@@ -238,6 +238,40 @@ class TurnResultNudgedTests(unittest.TestCase):
         self.assertTrue(TurnResult(text="hi", nudged=True).nudged)
 
 
+class SilentScheduledTurnWiringTests(unittest.TestCase):
+    """Deliberate silence (OpenClaw NO_REPLY) is honoured for scheduled runs
+    only, and reaches agent-cron as metadata.silent.
+
+    The wrapper's invoke path is an async generator with no unit seam, so the
+    two contract lines are pinned on the source. Both failure modes are
+    silent in prod: drop the first and every watcher with nothing new posts
+    "I processed your message but had no response." again; drop the second
+    and agent-cron never learns the run was meant to be quiet.
+    """
+
+    def setUp(self):
+        import pathlib
+        self.source = (
+            pathlib.Path(agentcore_wrapper.__file__).read_text(encoding="utf-8")
+        )
+
+    def test_turnresult_silent_defaults_false(self):
+        from harness_adapter import TurnResult
+        self.assertFalse(TurnResult(text="hi").silent)
+        self.assertTrue(TurnResult(text="", silent=True).silent)
+
+    def test_only_scheduled_invocations_may_end_silently(self):
+        self.assertIn(
+            'allow_silent = payload.get("source") == "scheduled"', self.source,
+        )
+        self.assertIn("deadline_s, allow_silent=allow_silent,", self.source)
+
+    def test_silent_reaches_the_metadata(self):
+        self.assertIn(
+            '"silent": bool(getattr(result, "silent", False)),', self.source,
+        )
+
+
 class UsageCaptureLooksBrokenTests(unittest.TestCase):
     """The zero-usage detector behind the UsageCaptureZero alarm.
 
