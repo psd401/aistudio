@@ -783,7 +783,7 @@ async function readGrants(args) {
  */
 async function findPeople(args) {
   const query = requireStr(args, 'query', 'query');
-  const { payload } = await restFetch('GET', '/people', { query: { query } });
+  const { payload } = await restFetch('GET', '/_people', { query: { query } });
   const people = (payload && payload.people) || [];
   const minQueryLength = payload && payload.minQueryLength;
   emit({

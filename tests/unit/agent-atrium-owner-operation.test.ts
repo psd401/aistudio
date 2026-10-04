@@ -208,7 +208,7 @@ describe("signed-owner Atrium people lookup (#1860)", () => {
       ownerEmail: "owner@psd401.net",
       requestId: "req-people",
       method: "GET",
-      path: "/people",
+      path: "/_people",
       query: { query: "mondryj@psd401.net" },
     })
 
@@ -239,7 +239,7 @@ describe("signed-owner Atrium people lookup (#1860)", () => {
       ownerEmail: "owner@psd401.net",
       requestId: "req-people-cap",
       method: "GET",
-      path: "/people",
+      path: "/_people",
       query: { query: "person" },
     })
 
@@ -251,7 +251,7 @@ describe("signed-owner Atrium people lookup (#1860)", () => {
       ownerEmail: "owner@psd401.net",
       requestId: "req-people-long",
       method: "GET",
-      path: "/people",
+      path: "/_people",
       query: { query: "x".repeat(101) },
     })
 
@@ -271,7 +271,7 @@ describe("signed-owner Atrium people lookup (#1860)", () => {
       ownerEmail: "owner@psd401.net",
       requestId: "req-people-denied",
       method: "GET",
-      path: "/people",
+      path: "/_people",
       query: { query: "mondryj" },
     })
 
@@ -284,7 +284,7 @@ describe("signed-owner Atrium people lookup (#1860)", () => {
       ownerEmail: "owner@psd401.net",
       requestId: "req-people-noquery",
       method: "GET",
-      path: "/people",
+      path: "/_people",
     })
 
     expect(result.httpStatus).toBe(400)
@@ -296,12 +296,30 @@ describe("signed-owner Atrium people lookup (#1860)", () => {
       ownerEmail: "owner@psd401.net",
       requestId: "req-people-post",
       method: "POST",
-      path: "/people",
+      path: "/_people",
       body: { query: "mondryj" },
     })
 
     expect(result.httpStatus).toBe(403)
     expect(searchPeopleMock).not.toHaveBeenCalled()
+  })
+
+  it("treats the reserved segment as a content id on the write methods, never as the lookup", async () => {
+    // PATCH/DELETE on a bare segment are the generic metadata-write paths and the
+    // route allowlist admits them. They must fall through to the content services
+    // with `_people` as an ordinary (and unresolvable) identifier — the lookup is
+    // reachable by GET only.
+    for (const method of ["PATCH", "DELETE"] as const) {
+      searchPeopleMock.mockClear()
+      await executeOwnerAtriumOperation({
+        ownerEmail: "owner@psd401.net",
+        requestId: `req-people-${method}`,
+        method,
+        path: "/_people",
+        ...(method === "PATCH" ? { body: { title: "Hijack" } } : {}),
+      })
+      expect(searchPeopleMock).not.toHaveBeenCalled()
+    }
   })
 })
 

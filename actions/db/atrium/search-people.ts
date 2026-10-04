@@ -13,7 +13,7 @@
  * needs it, and this is not the admin user-management surface.
  *
  * The query itself lives in `lib/content/people-search` (#1860) so this action
- * and the agent broker's `GET /people` share one projection, one result cap, and
+ * and the agent broker's `GET /_people` share one projection, one result cap, and
  * one minimum query length. This file is the SESSION door onto it: auth, the
  * capability gate, logging, and the `ActionState` envelope.
  */

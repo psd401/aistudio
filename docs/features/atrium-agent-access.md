@@ -109,7 +109,7 @@ district collection discovery.
 `find-people --query <name|email>` (#1860) resolves a person to the numeric
 `users.id` a `user` visibility grant stores, so per-person sharing is reachable
 from the agent at all — `psd-directory` returns names and Chat ids, and the web
-people picker is a server action no agent can call. It maps to `GET /people` on
+people picker is a server action no agent can call. It maps to `GET /_people` on
 the broker, shares its query with the web picker
 (`lib/content/people-search.ts`), and is gated on the same `atrium-content`
 authoring capability as that picker — it returns directory rows, so it does not

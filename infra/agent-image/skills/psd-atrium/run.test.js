@@ -1236,7 +1236,7 @@ test('find-people GETs /people with the query and relays the id to use', async (
   await run('find-people', '--query', 'mondryj@psd401.net');
 
   expect(restCalls).toHaveLength(1);
-  expect(restCalls[0]).toMatchObject({ method: 'GET', path: '/people' });
+  expect(restCalls[0]).toMatchObject({ method: 'GET', path: '/_people' });
   expect(restCalls[0].opts.query).toEqual({ query: 'mondryj@psd401.net' });
   expect(emitted[0]).toMatchObject({
     people: [{ id: 412, email: 'mondryj@psd401.net' }],

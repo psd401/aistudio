@@ -9,7 +9,7 @@
  *
  *   - the web visibility editor's people picker
  *     (`actions/db/atrium/search-people.ts` → `components/atrium/PeoplePicker.tsx`)
- *   - the owner-bound agent broker (`GET /people` in
+ *   - the owner-bound agent broker (`GET /_people` in
  *     `lib/agent-workspace/atrium-owner-operation.ts`, surfaced as
  *     `psd-atrium find-people`)
  *

@@ -29,10 +29,12 @@ const ALLOWED_PATHS: Record<AtriumBody["method"], readonly RegExp[]> = {
     /^$/,
     /^\/collections$/,
     // Resolve a person to the `users.id` a `user` visibility grant stores
-    // (#1860). Listed in its own right, like `/collections`, because this table
-    // is the enumeration of the agent surface — even though the generic
-    // identifier pattern below would also match the literal word.
-    /^\/people$/,
+    // (#1860). The leading underscore makes this a RESERVED segment rather than
+    // a reachable identifier: `slugifyTitle` emits `[a-z0-9-]` only, so no
+    // content object's slug can ever be `_people` and nothing is shadowed. (The
+    // bare `/collections` entry above does shadow a slug; this is deliberately
+    // not a second instance of that.)
+    /^\/_people$/,
     new RegExp(`^/${IDENTIFIER}$`),
     // Committed markdown source — the ONLY way an agent can read a document's
     // body text (`GET /<id>` returns bodyLocation "proof" with no text).

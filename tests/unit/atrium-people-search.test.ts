@@ -2,7 +2,7 @@
  * Unit tests for the shared Atrium people-search query (#1860).
  *
  * `lib/content/people-search.ts` is the ONE query behind both the web visibility
- * editor's picker and the agent broker's `GET /people`, so the rules it enforces
+ * editor's picker and the agent broker's `GET /_people`, so the rules it enforces
  * are the rules both surfaces get: the minimum query length, the row cap, the
  * truthfulness of the `truncated` signal, and the exclusion of rows whose email is
  * NULL (a person the caller cannot confirm is the intended grantee).

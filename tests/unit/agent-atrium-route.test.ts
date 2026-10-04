@@ -209,3 +209,70 @@ describe("POST /api/agent/atrium", () => {
     )
   })
 })
+
+/**
+ * The #1860 people lookup, kept as its own top-level block: the route-level
+ * contract for it is the allowlist (GET only, one allowed query key) plus the
+ * signed-authority gate, and the suite above is already at the lint ceiling.
+ */
+describe("POST /api/agent/atrium — people lookup (#1860)", () => {
+  it("admits the signed-owner lookup and forwards the query verbatim", async () => {
+    executeOwnerAtriumOperationMock.mockResolvedValue({
+      httpStatus: 200,
+      payload: { data: { people: [] } },
+    })
+
+    const response = await POST(
+      request({
+        method: "GET",
+        path: "/_people",
+        query: { query: "mondryj@psd401.net" },
+      })
+    )
+
+    expect(response.status).toBe(200)
+    expect(executeOwnerAtriumOperationMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "GET",
+        path: "/_people",
+        query: { query: "mondryj@psd401.net" },
+        // The lookup runs as the SIGNED owner, never a caller-named one.
+        ownerEmail: "owner@psd401.net",
+      })
+    )
+  })
+
+  it("refuses the lookup without signed authority", async () => {
+    context = null
+    const response = await POST(
+      request({ method: "GET", path: "/_people", query: { query: "mondryj" } })
+    )
+    expect(response.status).toBe(403)
+    expect(executeOwnerAtriumOperationMock).not.toHaveBeenCalled()
+  })
+
+  it("rejects a POST to the lookup path at the allowlist", async () => {
+    // The POST allowlist has no bare-identifier entry, so a write aimed at the
+    // lookup never reaches the operation layer. PATCH/DELETE on a bare segment
+    // ARE allowlisted (they are the generic metadata-write paths) and are
+    // refused one layer down, where `_people` is just a content id that cannot
+    // reach the lookup — asserted in agent-atrium-owner-operation.test.ts.
+    const response = await POST(
+      request({ method: "POST", path: "/_people", body: { query: "mondryj" } })
+    )
+    expect(response.status).toBe(400)
+    expect(executeOwnerAtriumOperationMock).not.toHaveBeenCalled()
+  })
+
+  it("rejects an unexpected query field on the lookup path", async () => {
+    const response = await POST(
+      request({
+        method: "GET",
+        path: "/_people",
+        query: { query: "mondryj", limit: "500", redirect: "https://x.example" },
+      })
+    )
+    expect(response.status).toBe(400)
+    expect(executeOwnerAtriumOperationMock).not.toHaveBeenCalled()
+  })
+})

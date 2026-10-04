@@ -92,7 +92,7 @@ const visibilitySchema = z
   .strict()
 
 /**
- * `GET /people?query=…` (#1860). `query` is required: there is no "list everyone"
+ * `GET /_people?query=…` (#1860). `query` is required: there is no "list everyone"
  * form of this surface, and omitting it is a usage error rather than a silent
  * empty result. The ceiling is the search's OWN maximum, so an over-long query is
  * a 400 instead of being silently truncated to a different term than the caller
@@ -323,7 +323,7 @@ function recordAudit(
 type SetAudit = (audit: MutationAudit) => void
 
 /**
- * `GET /people?query=…` — resolve a person to the `users.id` a `user` visibility
+ * `GET /_people?query=…` — resolve a person to the `users.id` a `user` visibility
  * grant stores (#1860).
  *
  * A `user` grant value is a numeric id and never an email
@@ -339,8 +339,10 @@ type SetAudit = (audit: MutationAudit) => void
  * the web picker that shares this query — so the two surfaces answer to the same
  * capability.
  *
- * Handled ahead of the content reads for the same reason `collections` is: the
- * first path segment is a reserved word here, not an object identifier.
+ * Handled ahead of the content reads because the first segment is a RESERVED
+ * word, not an object identifier. The leading underscore makes that airtight:
+ * `slugifyTitle` emits `[a-z0-9-]` only, so no object's slug can be `_people` and
+ * this shadows nothing — unlike the bare `collections` segment, which does.
  *
  * SCOPE: this searches `users`, which is a SIGN-IN-derived population, not a
  * directory mirror. A row exists once someone has signed in to AI Studio or
@@ -367,7 +369,7 @@ async function executePeopleRead(
   cognitoSub: string
 ): Promise<AgentAtriumOperationResult | null> {
   if (input.method !== "GET") return null
-  if (segments.length !== 1 || segments[0] !== "people") return null
+  if (segments.length !== 1 || segments[0] !== "_people") return null
 
   await assertContentAuthoringCapability({ authType: "session", cognitoSub })
   const { query } = peopleQuerySchema.parse(input.query ?? {})
