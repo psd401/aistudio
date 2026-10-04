@@ -3443,21 +3443,18 @@ class OpenClawAdapter(HarnessAdapter):
             # failed/error_class propagate through the TurnResult below — but
             # only because this is a "did it come back with something to show
             # the user" test, not a success test.
-            if nudged.silent:
-                # Only reachable with allow_silent: the first leg ended empty
-                # WITHOUT the token, and the nudge leg then chose silence. That
-                # is the model's answer, not a failure.
-                return dataclasses.replace(
-                    _result("", silent=True, nudged=True),
-                    tool_calls=tool_calls + nudged.tool_calls,
-                )
             nudge_returned_text = bool(nudged.text.strip()) and (
                 nudged.error_class != "EmptyAgentResponse"
             )
-            if nudge_returned_text:
+            # A nudge leg that chose silence (only possible with allow_silent:
+            # the first leg ended empty WITHOUT the token) is the model's
+            # answer, not a failure. It merges exactly like a recovered reply
+            # so the nudge leg's usage, model and messages are not dropped.
+            if nudge_returned_text or nudged.silent:
                 merged_tools = tool_calls + nudged.tool_calls
                 return TurnResult(
                     text=nudged.text,
+                    silent=nudged.silent,
                     model=nudged.model or observed_model,
                     # Safe to sum: this leg's transcript window was read before
                     # the nudge was sent, so the nudge's own window starts after

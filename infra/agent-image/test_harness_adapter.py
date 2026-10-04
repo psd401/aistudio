@@ -1707,7 +1707,12 @@ class TestEmptyFinalNudgeFires(unittest.TestCase):
                 # The nested leg honours allow_silent only when it is passed
                 # through; assert that here so a dropped kwarg fails loudly.
                 self.assertTrue(kw.get("allow_silent"))
-                return harness_adapter.TurnResult(text="", silent=True)
+                return harness_adapter.TurnResult(
+                    text="", silent=True, tokens_in=7, tokens_out=3,
+                    cache_read=11, cache_write=5,
+                    usage_capture_complete=True,
+                    model="us.anthropic.claude-sonnet-5-5",
+                )
             if nudge_reply is not None:
                 return harness_adapter.TurnResult(
                     text=nudge_reply, failed=False
@@ -1895,6 +1900,14 @@ class TestEmptyFinalNudgeFires(unittest.TestCase):
         self.assertEqual(len(nudges), 1)
         self.assertEqual(recorded, [])
         self.assertEqual(len(result.tool_calls), 1)
+        # The nudge leg's model calls are real spend: they must be counted,
+        # and capture cannot claim complete when the first leg's read was not.
+        self.assertEqual(result.tokens_in, 7)
+        self.assertEqual(result.tokens_out, 3)
+        self.assertEqual(result.cache_read, 11)
+        self.assertEqual(result.cache_write, 5)
+        self.assertFalse(result.usage_capture_complete)
+        self.assertEqual(result.model, "us.anthropic.claude-sonnet-5-5")
 
     def test_a_recovered_nudge_writes_no_failure_row(self):
         _result, nudges, recorded, _m = self._run(
