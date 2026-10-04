@@ -125,6 +125,30 @@ describe("detectContentSignals", () => {
     expect(signals.shape).toBe("approval");
   });
 
+  test("approval is a request construction, not a bare noun (PR #1856 review)", () => {
+    for (const text of [
+      "Please approve the attached PO",
+      "This needs your approval by Friday",
+      "Requires your signature",
+      "Submitted for approval: travel request",
+      "Awaiting your sign-off",
+      "Can you sign off on the budget?",
+    ]) {
+      expect([text, signalsFor({ subject: text }).approvalRequest]).toEqual([text, true]);
+    }
+    for (const text of [
+      "FYI: the new approval workflow is live",
+      "Approval is not required for this change",
+      "No approval needed — already processed",
+      "This does not require your signature",
+      "Authorization policy update",
+      "Approver list for 2026-27",
+      "Update your email signature",
+    ]) {
+      expect([text, signalsFor({ subject: text }).approvalRequest]).toEqual([text, false]);
+    }
+  });
+
   test("a live thread needs BOTH a reply from the user and thread headers", () => {
     expect(
       signalsFor({ subject: "Re: budget", hasUserReply: true }).liveThread,

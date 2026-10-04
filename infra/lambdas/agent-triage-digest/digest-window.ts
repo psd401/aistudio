@@ -63,11 +63,17 @@ function shiftDayKey(key: string, days: number): string {
 }
 
 /**
- * The day keys this digest covers: from the day after the last digest
+ * The day keys this digest covers: from the day of the last digest
  * through today, in the user's timezone. With no previous digest — a new
  * user, or the first run after this change — it reports today and
- * yesterday, which is what an 08:00 digest means by "since you last
- * looked".
+ * yesterday.
+ *
+ * Counters are per DAY, so the day of the last digest is re-counted in
+ * full: consecutive digests overlap by the hours before the previous send.
+ * That is deliberate — the alternative (starting the day after) drops the
+ * rest of that day entirely — and the wording stays truthful because
+ * describeWindow names the calendar span ("since yesterday"), never
+ * "since your last digest". An exact boundary would need sub-day buckets.
  *
  * A long gap (the user was away, the schedule was paused) is clamped to
  * the most recent MAX_DIGEST_WINDOW_DAYS so one catch-up digest cannot

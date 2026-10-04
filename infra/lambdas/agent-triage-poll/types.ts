@@ -160,6 +160,11 @@ export interface DecisionRecord {
   shape?: ContentShape;
   /** True when the sender is an automated mailbox rather than a person. */
   automatedSender?: boolean;
+  /**
+   * Gmail history id of the classifier's own label write (which also
+   * removes INBOX). History at or before it is ours, not a user gesture.
+   */
+  labeledHistoryId?: string;
 }
 
 /**

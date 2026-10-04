@@ -319,7 +319,7 @@ export async function modifyMessage(
   messageId: string,
   addLabelIds: string[],
   removeLabelIds: string[] = [],
-): Promise<void> {
+): Promise<string | undefined> {
   const resp = await gmailFetch(accessToken, `/messages/${messageId}/modify`, {
     method: "POST",
     body: JSON.stringify({ addLabelIds, removeLabelIds }),
@@ -328,6 +328,14 @@ export async function modifyMessage(
     throw new Error(
       `Gmail messages.modify failed for ${messageId}: ${resp.status} ${await resp.text()}`,
     );
+  }
+  // The returned Message's historyId is the history record of THIS change,
+  // which lets the next poll tell our own INBOX removal from a user archive.
+  try {
+    const body = (await resp.json()) as { historyId?: unknown };
+    return typeof body.historyId === "string" ? body.historyId : undefined;
+  } catch {
+    return undefined;
   }
 }
 
