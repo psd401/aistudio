@@ -79,6 +79,33 @@ const SAFE_STATE_FIELDS = new Set([
   "tasksNotifySuccess",
 ])
 
+/** Mirrors the skill's `prefs set` cap; enforced here so a raw broker call can't skip it. */
+const PREFERENCES_MAX_CHARS = 2000
+/**
+ * DynamoDB rejects items over 400 KB, and once a row is over, every later
+ * write to it fails — including the classifier's own. Refuse an update that
+ * would push the row past this, leaving headroom for the Lambdas' writes.
+ */
+const MAX_TRIAGE_ROW_BYTES = 350_000
+
+function invalidPreferences(value: unknown): string | null {
+  const prefs = objectBody(value)
+  if (!prefs || typeof prefs.text !== "string") {
+    return "preferences must be an object with a text string"
+  }
+  if (prefs.text.length > PREFERENCES_MAX_CHARS) {
+    return `preferences.text is capped at ${PREFERENCES_MAX_CHARS} characters (got ${prefs.text.length})`
+  }
+  if (prefs.updatedAt !== undefined && typeof prefs.updatedAt !== "string") {
+    return "preferences.updatedAt must be a string"
+  }
+  return null
+}
+
+function badStateUpdate(error: string, status = 400): OperationDispatch<NextResponse> {
+  return { handled: true, value: NextResponse.json({ error }, { status }) }
+}
+
 function tableName(): string {
   return (
     process.env.AGENT_TRIAGE_TABLE ||
@@ -265,6 +292,25 @@ async function executeStateOperation(
           { status: 400 }
         ),
       }
+    }
+    if ("preferences" in attrs) {
+      const error = invalidPreferences(attrs.preferences)
+      if (error) return badStateUpdate(error)
+    }
+    const current = await ddb.send(
+      new GetCommand({
+        TableName: tableName(),
+        Key: { userEmail: context.ownerEmail },
+      })
+    )
+    const projectedBytes = Buffer.byteLength(
+      JSON.stringify({ ...(current.Item ?? {}), ...attrs })
+    )
+    if (projectedBytes > MAX_TRIAGE_ROW_BYTES) {
+      return badStateUpdate(
+        `Triage state update would grow the row to ${projectedBytes} bytes (limit ${MAX_TRIAGE_ROW_BYTES})`,
+        413
+      )
     }
     const names: Record<string, string> = {}
     const values: Record<string, unknown> = {}

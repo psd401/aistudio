@@ -12,7 +12,9 @@
  *
  * Rules engine is a port of infra/lambdas/agent-triage-poll/rules.ts —
  * keep behaviour-equivalent so the skill's `simulate` subcommand matches
- * what the classifier Lambda would actually do.
+ * what the classifier Lambda would actually do. parity.test.js runs both
+ * copies (and the content-features.ts port below) over a shared corpus
+ * and fails CI on any divergence.
  */
 
 'use strict';

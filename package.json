@@ -56,7 +56,7 @@
     "test:skill:sop-creator": "cd infra/agent-image/skills/psd-sop-creator && bun test",
     "test:skill:conversation-coach": "cd infra/agent-image/skills/psd-conversation-coach && bun test",
     "test:skill:open-adaptive-district": "cd infra/agent-image/skills/psd-open-adaptive-district && bun test",
-    "test:skill:email-triage": "cd infra/agent-image/skills/psd-email-triage && bun test run.test.js",
+    "test:skill:email-triage": "cd infra/agent-image/skills/psd-email-triage && bun test run.test.js parity.test.js",
     "test:lambda:triage-poll": "cd infra/lambdas/agent-triage-poll && bun install --frozen-lockfile && bun test",
     "test:lambda:triage-digest": "cd infra/lambdas/agent-triage-digest && bun test digest-window.test.ts",
     "test:skill:morning-brief": "cd infra/agent-image/skills/psd-morning-brief && bun test",
