@@ -1,7 +1,7 @@
 ---
 type: Platform Overview
 title: Agent Platform & Skills System
-description: Extensible agent skill system with 39 domain-specific capabilities including media processing, Google Workspace integration, Cedar governance, MCP tool exposure, and transport truncation awareness for K-12 AI assistants.
+description: Extensible agent skill system with 39 domain-specific capabilities including media processing, Google Workspace integration, Cedar governance, MCP tool exposure, scheduled run silent reply, and transport truncation awareness for K-12 AI assistants.
 tags: [agents, skills, mcp, workspace, governance]
 openwiki:
   roles: [infrastructure, domain]
@@ -16,12 +16,17 @@ openwiki:
     - lib/agents/platform-model.ts
     - infra/agent-image/openclaw.json
     - infra/database/schema/186-agent-sonnet-5-5-pricing.sql
+    - infra/agent-image/harness_adapter.py
+    - infra/agent-image/agentcore_wrapper.py
+    - infra/lambdas/agent-cron/index.ts
   test_paths:
     - tests/e2e/atrium-sandbox-script-order.spec.ts
     - tests/smoke/atrium-artifact-sandbox-host.smoke.ts
     - tests/unit/lib/agent-workspace/command-executor.test.ts
     - tests/unit/actions/agent-cost-projection.test.ts
     - lib/agents/__tests__/platform-model.test.ts
+    - infra/agent-image/test_harness_adapter.py
+    - infra/lambdas/agent-cron/silent-scheduled-run.test.ts
 ---
 
 # Agent Platform
@@ -382,6 +387,79 @@ The `psd-rules` skill includes Rule 6a covering transport truncation behavior, m
 ### Historical Context
 
 Prior to #1845, every Chat delivery path capped replies at 4,096 *characters* (not bytes) and appended "(Response truncated -- ask me to continue)". The cap was 87% below Google's real 32,000-byte limit. The suffix blamed the agent ("ask me"), but truncation happened after the agent returned. When users said "you cut that off", the agent truthfully denied it—the transcript held the full text. The new guidance closes this mismatch by naming the transport as the cause and offering two recovery paths (re-send tail, or publish + link).
+
+---
+
+## Scheduled Run Silent Reply (#1853)
+
+**Sources**: `/infra/agent-image/harness_adapter.py`, `/infra/agent-image/agentcore_wrapper.py`, `/infra/lambdas/agent-cron/index.ts`
+
+Scheduled runs (watchers, monitors, periodic checks) can deliberately end in silence when there is nothing to report. This prevents noise from filling DMs with "📋 Watcher Name" headers every time a condition check finds no changes.
+
+### Silent Reply Token
+
+OpenClaw defines `NO_REPLY` as the silent reply token. When a model ends a scheduled turn with exactly this text (case-insensitive, optionally repeated, optionally wrapped in whitespace or edge punctuation), the harness recognizes it as intentional silence:
+
+- **Scheduled runs**: The turn completes successfully with no Chat post, no failure row, and no nudge
+- **Interactive runs**: The token is treated like any other empty reply — the nudge fires and the fallback text is delivered
+- **Transcript**: The model's raw text ("NO_REPLY") is preserved in transcript_events; only the delivery path strips it
+
+### Harness Implementation
+
+**Source**: `/infra/agent-image/harness_adapter.py`
+
+The `is_silent_reply_text()` function mirrors OpenClaw's `isSilentReplyText` from the pinned host (2026.7.2-beta.5):
+
+- Matches the token, optionally repeated (`NO_REPLY NO_REPLY`)
+- Case-insensitive (`no_reply`, `NO_REPLY`, `No_Reply` all work)
+- Allows edge Unicode punctuation wrapping (stripped before matching)
+- Rejects the token inside a sentence ("Got it, NO_REPLY for now" is a real reply)
+
+The harness passes `allow_silent=True` to `process()` only when `payload.source == "scheduled"`. This is not an authority boundary — the worst a forged value can do is let a turn stay quiet.
+
+`TurnResult.silent` (default `False`) is set when:
+1. The final assistant record in the turn window ended with the silent token
+2. `allow_silent=True` was passed
+3. The turn did not fail
+
+The `_fold_usage_records()` method reports `final_silent: 0/1` in the usage dict, allowing downstream consumers to distinguish intentional silence from an empty turn that needs nudging.
+
+### Delivery Path
+
+**Source**: `/infra/lambdas/agent-cron/index.ts`
+
+The `toInvokeResult()` function maps `metadata.silent` to `InvokeResult.silent` only when `metadata.failed !== true`. A failed turn always surfaces its error text.
+
+`deliverScheduledResult()` checks `result.silent`:
+- **Silent result**: Logs "Scheduled run ended silently — nothing posted", records success telemetry, skips the Chat post entirely (no bare "📋 name" header)
+- **Non-silent result**: Posts `📋 **{scheduleName}**\n\n{response}` to the owner's DM
+
+Both paths record identical telemetry via `recordScheduledCompletion()` — only the Chat post differs.
+
+### Historical Context
+
+**Prod regression** (2026-10-03, surfaced by Sonnet 5.5 rollout #1851):
+
+Two every-15-minute watchers in prod tell the model to reply exactly `NO_REPLY` when the sheet's row count has not changed. Sonnet 5 had been leaving a stray character instead, so the schedules posted a near-empty "📋 name" DM every run. Sonnet 5.5 follows instructions exactly and turned that noise into failures:
+
+- 22 runs in ~75 minutes
+- 9 nudges fired
+- 6 `EmptyAgentResponse` failures recorded
+- Owner's DM filled with "I processed your message but had no response" every 15 minutes
+
+The fix honors `NO_REPLY` only for scheduled runs, and only when the model explicitly said it. Interactive turns are unchanged.
+
+### Test Validation
+
+**Sources**:
+- `/infra/agent-image/test_harness_adapter.py` — Silent reply recognition, scheduled vs interactive behavior, nudge leg silence, usage fold
+- `/infra/lambdas/agent-cron/silent-scheduled-run.test.ts` — Metadata mapping, delivery skipping, failure precedence
+
+**Test commands**:
+```bash
+cd infra/agent-image && python -m pytest test_harness_adapter.py -k silent -v
+cd infra/lambdas/agent-cron && bun test silent-scheduled-run.test.ts
+```
 
 ---
 
