@@ -282,6 +282,12 @@ interface InvokeResult {
    * whether a failed scheduled turn is worth promoting to a background job.
    */
   errorClass?: string;
+  /**
+   * The model deliberately ended the run in silence (OpenClaw's NO_REPLY,
+   * surfaced by the harness as metadata.silent). A watcher with nothing new
+   * does this on purpose: the run succeeded and there is nothing to post.
+   */
+  silent?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -608,13 +614,29 @@ async function readAgentCoreResponse(
 
 function toInvokeResult(responseBody: Record<string, unknown>): InvokeResult {
   const rawResult = responseBody.result;
-  const result = typeof rawResult === 'string' && rawResult.length > 0
-    ? rawResult
-    : 'No response from agent.';
   const metadata =
     responseBody.metadata && typeof responseBody.metadata === 'object'
       ? (responseBody.metadata as Record<string, unknown>)
       : {};
+  // Deliberate silence is only trusted on a turn that did not fail; a failed
+  // turn always surfaces its error text.
+  const silent = metadata.silent === true && metadata.failed !== true;
+  if (silent) {
+    return {
+      response: '',
+      inputTokens:
+        typeof metadata.input_tokens === 'number' ? metadata.input_tokens : 0,
+      outputTokens:
+        typeof metadata.output_tokens === 'number' ? metadata.output_tokens : 0,
+      ok: true,
+      silent: true,
+      workspaceFinalizationConfirmed:
+        metadata.workspace_finalization_confirmed === true,
+    };
+  }
+  const result = typeof rawResult === 'string' && rawResult.length > 0
+    ? rawResult
+    : 'No response from agent.';
   const ok =
     typeof rawResult === 'string' &&
     rawResult.length > 0 &&
@@ -1705,6 +1727,16 @@ async function deliverScheduledResult(
   context: ScheduledResultContext,
 ): Promise<HandlerResult> {
   const { schedule, scheduleName, sessionId, result, startTime, log } = context;
+  if (result.silent) {
+    // Nothing to say is the intended outcome for a watcher whose condition did
+    // not fire. Posting the bare "📋 name" header (or a fallback sentence)
+    // every run is exactly the noise the schedule asked to avoid.
+    log.info('Scheduled run ended silently — nothing posted', {
+      scheduleId: schedule.scheduleId,
+      scheduleName,
+    });
+    return recordScheduledCompletion(context);
+  }
   const deliveryText = `📋 **${scheduleName}**\n\n${result.response}`;
   const preparedDelivery = prepareScheduledChatMessage(
     schedule.dmSpaceName,
@@ -1755,6 +1787,13 @@ async function deliverScheduledResult(
       return { status: 'error', scheduleId: schedule.scheduleId };
     }
   }
+  return recordScheduledCompletion(context);
+}
+
+async function recordScheduledCompletion(
+  context: ScheduledResultContext,
+): Promise<HandlerResult> {
+  const { schedule, scheduleName, sessionId, result, startTime, log } = context;
   const status: 'success' | 'error' = result.ok ? 'success' : 'error';
   await runTelemetry.recordRun(
     {
@@ -2371,6 +2410,7 @@ export const agentCronTestHelpers = {
   invokeFailure,
   toInvokeResult,
   shouldRetainScheduledTurnLock,
+  deliverScheduledResult,
 };
 
 export async function handler(

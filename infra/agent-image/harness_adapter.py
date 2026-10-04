@@ -19,6 +19,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from typing import (
@@ -92,6 +93,41 @@ def _wait_for_process_group_quiescence(
 # transcript path, so they must be filename-safe before they touch the FS.
 _SAFE_PATH_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 TERMINAL_USAGE_STOP_REASONS = frozenset({"stop", "end_turn"})
+
+# OpenClaw's "say nothing" token. A model that ends a turn with exactly this
+# text is choosing silence: OpenClaw strips it at delivery, so the gateway's
+# final event carries no text. The transcript keeps the model's raw text, which
+# is the only place an intentional NO_REPLY can be told apart from a turn that
+# genuinely produced nothing.
+SILENT_REPLY_TOKEN = "NO_REPLY"
+_SILENT_REPLY_RE = re.compile(
+    rf"^\s*{SILENT_REPLY_TOKEN}(?:\s+{SILENT_REPLY_TOKEN})*\s*$", re.IGNORECASE,
+)
+
+
+def _strip_edge_punctuation(text: str) -> str:
+    """Drop leading/trailing Unicode punctuation, like OpenClaw's
+    `stripEdgePunctuation` (`/^\\p{P}+|\\p{P}+$/gu`)."""
+    start, end = 0, len(text)
+    while start < end and unicodedata.category(text[start]).startswith("P"):
+        start += 1
+    while end > start and unicodedata.category(text[end - 1]).startswith("P"):
+        end -= 1
+    return text[start:end]
+
+
+def is_silent_reply_text(text: object) -> bool:
+    """True when `text` is only the silent token — a mirror of OpenClaw's
+    `isSilentReplyText` (pinned host 2026.7.2-beta.5, tokens-*.js): the token,
+    optionally repeated, optionally wrapped in whitespace or edge punctuation,
+    case-insensitive. Anything else, including the token inside a sentence, is
+    a real reply."""
+    if not isinstance(text, str) or not text:
+        return False
+    return bool(
+        _SILENT_REPLY_RE.match(text)
+        or _SILENT_REPLY_RE.match(_strip_edge_punctuation(text.strip()))
+    )
 
 
 class TranscriptTableMissing(Exception):
@@ -204,6 +240,11 @@ class TurnResult:
     # the dashboard can trend nudge-fire rate. A recovered-after-nudge turn
     # writes no agent_failures row, so this flag is its only persisted signal.
     nudged: bool = False
+    # True when the model deliberately ended the turn with OpenClaw's silent
+    # token (NO_REPLY) and the caller allowed silence (scheduled runs only).
+    # `text` is empty and this is NOT a failure: the wrapper forwards it as
+    # metadata.silent and agent-cron skips the Chat post.
+    silent: bool = False
     # A failure this ATTEMPT hit that has not been written to agent_failures
     # yet, because `process()` may still recover the turn by retrying it (see
     # `_should_retry_upstream`). `process()` is the only reader: it flushes the
@@ -996,7 +1037,7 @@ class OpenClawAdapter(HarnessAdapter):
         exceptions from `raw_records` and are handled by the callers.
         """
         totals = {"input": 0, "output": 0, "cache_read": 0,
-                  "cache_write": 0, "model_calls": 0}
+                  "cache_write": 0, "model_calls": 0, "final_silent": 0}
         complete = False
         for raw in raw_records:
             raw = raw.strip()
@@ -1047,6 +1088,15 @@ class OpenClawAdapter(HarnessAdapter):
                 # record without a stopReason is not a turn-boundary signal at
                 # all, so it leaves the verdict alone.
                 complete = stop_reason in TERMINAL_USAGE_STOP_REASONS
+                # Same last-stopReason-wins rule: 1 only when the record that
+                # ENDED the turn said nothing but the silent token. Stored as
+                # 0/1 to keep the totals dict int-valued.
+                totals["final_silent"] = int(
+                    complete
+                    and is_silent_reply_text(
+                        self._extract_text(msg.get("content"))
+                    )
+                )
         return totals, complete
 
     def _sum_sqlite_transcript_usage(
@@ -1234,7 +1284,7 @@ class OpenClawAdapter(HarnessAdapter):
         must never break a chat turn.
         """
         empty = {"input": 0, "output": 0, "cache_read": 0,
-                 "cache_write": 0, "model_calls": 0,
+                 "cache_write": 0, "model_calls": 0, "final_silent": 0,
                  "capture_complete": False}
         if not session_uuid:
             logger.warning(
@@ -1348,7 +1398,7 @@ class OpenClawAdapter(HarnessAdapter):
         """
         totals: Dict[str, int] = {
             "input": 0, "output": 0, "cache_read": 0,
-            "cache_write": 0, "model_calls": 0,
+            "cache_write": 0, "model_calls": 0, "final_silent": 0,
         }
         # Seeded alongside `totals` so the corrupt-database fast-break below is
         # self-contained. Nothing after the loop reads it today, but a future
@@ -1394,6 +1444,8 @@ class OpenClawAdapter(HarnessAdapter):
         model_override: Optional[str] = None,
         deadline_s: Optional[int] = None,
         _is_nudge: bool = False,
+        *,
+        allow_silent: bool = False,
     ) -> TurnResult:
         """Run one turn, retrying once when the UPSTREAM model call fails
         before any work happened.
@@ -1412,7 +1464,8 @@ class OpenClawAdapter(HarnessAdapter):
         """
         started_at = time.monotonic()
         attempt = self._process_once(
-            message, session_id, model_override, deadline_s, _is_nudge
+            message, session_id, model_override, deadline_s, _is_nudge,
+            allow_silent=allow_silent,
         )
         if not self._should_retry_upstream(attempt):
             return self._flush_deferred_failure(attempt)
@@ -1440,7 +1493,8 @@ class OpenClawAdapter(HarnessAdapter):
         )
         time.sleep(UPSTREAM_RETRY_DELAY_S)
         retried = self._process_once(
-            message, session_id, model_override, remaining_s, _is_nudge
+            message, session_id, model_override, remaining_s, _is_nudge,
+            allow_silent=allow_silent,
         )
         if retried.failed:
             # Keep the retry's result — it is the more recent evidence — but
@@ -1766,8 +1820,16 @@ class OpenClawAdapter(HarnessAdapter):
         model_override: Optional[str] = None,
         deadline_s: Optional[int] = None,
         _is_nudge: bool = False,
+        *,
+        allow_silent: bool = False,
     ) -> TurnResult:
         """Send a message to OpenClaw via WebSocket and return a TurnResult.
+
+        `allow_silent` (scheduled runs only): a turn the model ended with
+        OpenClaw's silent token (NO_REPLY) returns `silent=True` with no text,
+        no nudge and no agent_failures row, instead of being treated as an
+        empty response. Interactive turns keep the nudge/fallback behaviour —
+        a person who asked something should never get nothing back.
 
         Uses the native OpenClaw gateway WebSocket protocol:
         connect.challenge → connect (auth) → chat.send → collect chat events
@@ -3098,6 +3160,7 @@ class OpenClawAdapter(HarnessAdapter):
             failed: bool = False,
             error_class: Optional[str] = None,
             nudged: bool = False,
+            silent: bool = False,
         ) -> TurnResult:
             assistant = text or ""
             log = list(messages_log)
@@ -3120,6 +3183,7 @@ class OpenClawAdapter(HarnessAdapter):
                 failed=failed,
                 error_class=error_class,
                 nudged=nudged,
+                silent=silent,
             )
 
         # A lifecycle error is terminal unless OpenClaw subsequently emits a
@@ -3284,6 +3348,16 @@ class OpenClawAdapter(HarnessAdapter):
 
         if response_text.strip():
             return _result(_format_for_chat(response_text.strip()))
+        if allow_silent and turn_usage.get("final_silent"):
+            # The model chose silence on purpose (e.g. a watcher with nothing
+            # new). Not an empty response: no nudge — it would only coax out
+            # filler or a second NO_REPLY — and no agent_failures row.
+            logger.info(
+                "turn ended with the silent reply token — no reply sent "
+                "(tool_calls=%d)",
+                len(tool_calls),
+            )
+            return _result("", silent=True)
         # A start with no terminal event is replay-unsafe: the call may have
         # already created the Doc, and tool_starts is emptied by pop() the
         # moment a terminal event lands, so a non-empty tool_starts means
@@ -3352,6 +3426,7 @@ class OpenClawAdapter(HarnessAdapter):
                 model_override,
                 deadline_s=180,
                 _is_nudge=True,
+                allow_silent=allow_silent,
             )
             # A nudge leg that ALSO ends empty does not come back with empty
             # text — it falls through to the canned fallback below and returns
@@ -3368,6 +3443,14 @@ class OpenClawAdapter(HarnessAdapter):
             # failed/error_class propagate through the TurnResult below — but
             # only because this is a "did it come back with something to show
             # the user" test, not a success test.
+            if nudged.silent:
+                # Only reachable with allow_silent: the first leg ended empty
+                # WITHOUT the token, and the nudge leg then chose silence. That
+                # is the model's answer, not a failure.
+                return dataclasses.replace(
+                    _result("", silent=True, nudged=True),
+                    tool_calls=tool_calls + nudged.tool_calls,
+                )
             nudge_returned_text = bool(nudged.text.strip()) and (
                 nudged.error_class != "EmptyAgentResponse"
             )

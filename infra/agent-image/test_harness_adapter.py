@@ -1131,7 +1131,7 @@ class TestUpstreamRetry(unittest.TestCase):
         calls = []
 
         def fake_once(message, session_id, model_override=None,
-                      deadline_s=None, _is_nudge=False):
+                      deadline_s=None, _is_nudge=False, allow_silent=False):
             calls.append(message)
             if len(calls) == 1:
                 return self._result()
@@ -1492,7 +1492,7 @@ class TestUpstreamRetry(unittest.TestCase):
         deadlines = []
 
         def fake_once(message, session_id, model_override=None,
-                      deadline_s=None, _is_nudge=False):
+                      deadline_s=None, _is_nudge=False, allow_silent=False):
             deadlines.append(deadline_s)
             if len(deadlines) == 1:
                 return self._result()
@@ -1690,7 +1690,8 @@ class TestEmptyFinalNudgeFires(unittest.TestCase):
         return fake_websocket_module
 
     def _run(self, *, with_tool, is_nudge=False, nudge_reply=None,
-             leave_in_flight=False, second_tool_in_flight=False):
+             leave_in_flight=False, second_tool_in_flight=False,
+             final_silent=False, allow_silent=False, nudge_silent=False):
         adapter = OpenClawAdapter()
         ws = self._drive_empty_final(
             adapter, with_tool=with_tool, leave_in_flight=leave_in_flight,
@@ -1700,8 +1701,13 @@ class TestEmptyFinalNudgeFires(unittest.TestCase):
         recorded = []
         metrics = []
 
-        def fake_process(message, *_a, **_kw):
+        def fake_process(message, *_a, **kw):
             nudges.append(message)
+            if nudge_silent:
+                # The nested leg honours allow_silent only when it is passed
+                # through; assert that here so a dropped kwarg fails loudly.
+                self.assertTrue(kw.get("allow_silent"))
+                return harness_adapter.TurnResult(text="", silent=True)
             if nudge_reply is not None:
                 return harness_adapter.TurnResult(
                     text=nudge_reply, failed=False
@@ -1722,6 +1728,7 @@ class TestEmptyFinalNudgeFires(unittest.TestCase):
             mock.patch.object(adapter, "_read_turn_usage", return_value={
                 "input": 0, "output": 0, "cache_read": 0,
                 "cache_write": 0, "model_calls": 0,
+                "final_silent": int(final_silent),
                 "capture_complete": False,
             }),
             mock.patch.object(adapter, "process", side_effect=fake_process),
@@ -1731,7 +1738,8 @@ class TestEmptyFinalNudgeFires(unittest.TestCase):
                        side_effect=lambda n, *a, **kw: metrics.append(n)),
         ):
             result = adapter._process_once(
-                "hello", "s1", deadline_s=600, _is_nudge=is_nudge
+                "hello", "s1", deadline_s=600, _is_nudge=is_nudge,
+                allow_silent=allow_silent,
             )
         return result, nudges, recorded, metrics
 
@@ -1833,6 +1841,60 @@ class TestEmptyFinalNudgeFires(unittest.TestCase):
         self.assertTrue(ctx["nudge_attempted"])
         self.assertEqual(ctx["nudge_variant"], "tools")
         self.assertFalse(ctx["nudge_skipped_tools_in_flight"])
+
+    # --- Deliberate silence (OpenClaw NO_REPLY) on scheduled runs ----------
+    # Prod 2026-10-03: two every-15-minute watchers are told to reply exactly
+    # NO_REPLY when nothing changed. OpenClaw strips the token, the final
+    # event carries no text, and the harness used to nudge and then post
+    # "I processed your message but had no response." every run.
+
+    def test_scheduled_silent_turn_is_silent_not_a_failure(self):
+        result, nudges, recorded, metrics = self._run(
+            with_tool=True, final_silent=True, allow_silent=True,
+        )
+        self.assertTrue(result.silent)
+        self.assertFalse(result.failed)
+        self.assertIsNone(result.error_class)
+        self.assertEqual(result.text, "")
+        self.assertEqual(nudges, [], "silence on purpose must not be nudged")
+        self.assertEqual(recorded, [], "silence on purpose is not a failure")
+        self.assertEqual(metrics.count("AgentNudgeFired"), 0)
+        # Telemetry still sees the tool work the watcher did.
+        self.assertEqual(len(result.tool_calls), 1)
+
+    def test_interactive_silent_turn_keeps_the_nudge(self):
+        # A person who asked something must always hear back: without
+        # allow_silent the token is treated like any other empty turn.
+        result, nudges, recorded, _m = self._run(
+            with_tool=True, final_silent=True, allow_silent=False,
+        )
+        self.assertFalse(result.silent)
+        self.assertEqual(nudges, [OpenClawAdapter.EMPTY_TURN_NUDGE])
+        self.assertEqual(len(recorded), 1)
+
+    def test_scheduled_empty_turn_without_the_token_still_nudges(self):
+        # allow_silent only honours the explicit token. A scheduled turn that
+        # just produced nothing is still the empty-response failure.
+        result, nudges, recorded, _m = self._run(
+            with_tool=True, final_silent=False, allow_silent=True,
+        )
+        self.assertFalse(result.silent)
+        self.assertTrue(result.failed)
+        self.assertEqual(nudges, [OpenClawAdapter.EMPTY_TURN_NUDGE])
+        self.assertEqual(len(recorded), 1)
+
+    def test_a_nudge_leg_that_chooses_silence_ends_the_turn_silently(self):
+        result, nudges, recorded, _m = self._run(
+            with_tool=True, final_silent=False, allow_silent=True,
+            nudge_silent=True,
+        )
+        self.assertTrue(result.silent)
+        self.assertFalse(result.failed)
+        self.assertTrue(result.nudged)
+        self.assertEqual(result.text, "")
+        self.assertEqual(len(nudges), 1)
+        self.assertEqual(recorded, [])
+        self.assertEqual(len(result.tool_calls), 1)
 
     def test_a_recovered_nudge_writes_no_failure_row(self):
         _result, nudges, recorded, _m = self._run(
@@ -1961,6 +2023,37 @@ class SqliteTranscriptUsageTests(unittest.TestCase):
         self.assertEqual(usage["cache_read"], 30)
         self.assertEqual(usage["cache_write"], 40)
         self.assertEqual(usage["model_calls"], 2)
+
+    def _with_text(self, record, text):
+        record["message"]["content"] = [{"type": "text", "text": text}]
+        return record
+
+    def test_final_silent_set_when_the_turn_ends_on_the_silent_token(self):
+        self._write("s1", [
+            _assistant(5_000, inp=10, out=1, stop="toolUse"),
+            self._with_text(_assistant(6_000, out=4), "NO_REPLY"),
+        ])
+        usage = self.adapter._read_turn_usage("s1", "main", 5_000)
+        self.assertTrue(usage["capture_complete"])
+        self.assertEqual(usage["final_silent"], 1)
+
+    def test_final_silent_clear_for_a_real_answer(self):
+        self._write("s1", [
+            self._with_text(_assistant(6_000, out=9), "Row count went to 12."),
+        ])
+        usage = self.adapter._read_turn_usage("s1", "main", 5_000)
+        self.assertEqual(usage["final_silent"], 0)
+
+    def test_final_silent_only_counts_the_record_that_ended_the_turn(self):
+        # A NO_REPLY from an EARLIER turn (outside the window) or on a
+        # non-terminal record must not silence this turn.
+        self._write("s1", [
+            self._with_text(_assistant(1_000), "NO_REPLY"),
+            self._with_text(_assistant(5_500, stop="toolUse"), "NO_REPLY"),
+            self._with_text(_assistant(6_000, out=3), "Done — 2 new rows."),
+        ])
+        usage = self.adapter._read_turn_usage("s1", "main", 5_000)
+        self.assertEqual(usage["final_silent"], 0)
 
     def test_a_terminal_record_without_usage_still_completes_the_turn(self):
         # Completeness must be decided by the last record carrying a stopReason,
@@ -2920,3 +3013,19 @@ class TestStructuralMarks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SilentReplyTextTests(unittest.TestCase):
+    """Mirror of OpenClaw's isSilentReplyText (pinned 2026.7.2-beta.5)."""
+
+    def test_token_variants_that_are_silent(self):
+        for text in ("NO_REPLY", "  NO_REPLY\n", "no_reply", "NO_REPLY.",
+                     "**NO_REPLY**"[2:-2], "NO_REPLY NO_REPLY", "\"NO_REPLY\""):
+            with self.subTest(text=text):
+                self.assertTrue(harness_adapter.is_silent_reply_text(text))
+
+    def test_text_that_is_a_real_reply(self):
+        for text in ("", None, "NO_REPLY because nothing changed",
+                     "Nothing new: NO_REPLY", "No reply needed", "NO REPLY"):
+            with self.subTest(text=text):
+                self.assertFalse(harness_adapter.is_silent_reply_text(text))

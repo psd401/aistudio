@@ -1565,6 +1565,12 @@ def main():
             deadline_s = int(raw_deadline) if raw_deadline is not None else None
         except (TypeError, ValueError):
             deadline_s = None
+        # Scheduled runs (agent-cron sends source="scheduled") may end in
+        # deliberate silence — a watcher replying NO_REPLY when nothing changed.
+        # Only they get that; an interactive turn keeps the nudge/fallback so a
+        # person who asked something always hears back. Not an authority
+        # boundary: the worst a forged value does is let a turn stay quiet.
+        allow_silent = payload.get("source") == "scheduled"
         # Cross-user invocation fields
         invoked_by_email = payload.get("invoked_by_email", "")
         invoked_by_display_name = payload.get("invoked_by_display_name", "")
@@ -1965,8 +1971,11 @@ def main():
         # baseline must be fully read before process_task is scheduled.
         usage_baseline = await loop.run_in_executor(None, read_proxy_usage)
         process_task = loop.run_in_executor(
-            None, adapter.process, framed, conversation_session_id, model_override,
-            deadline_s,
+            None,
+            functools.partial(
+                adapter.process, framed, conversation_session_id, model_override,
+                deadline_s, allow_silent=allow_silent,
+            ),
         )
 
         # Heartbeat every 30s while adapter.process runs in the executor.
@@ -2137,6 +2146,10 @@ def main():
                 # the agent_failures row for these.
                 "failed": result.failed,
                 "error_class": result.error_class,
+                # Deliberate silence (harness TurnResult.silent, scheduled runs
+                # only). agent-cron reads this to skip the Chat post; the empty
+                # result is intended, not a failure.
+                "silent": bool(getattr(result, "silent", False)),
             }
 
         # Zero-usage successful turn: emit the metric the AgentPlatform stack
@@ -2158,7 +2171,7 @@ def main():
         logger.info(
             "Invocation complete: session=%s response_length=%d elapsed_s=%d "
             "model=%s tokens_in=%s tokens_out=%s usage_complete=%s "
-            "tool_calls=%d model_calls=%s duration_ms=%s nudged=%s",
+            "tool_calls=%d model_calls=%s duration_ms=%s nudged=%s silent=%s",
             session_id,
             len(reply_text),
             int(time.time() - invocation_start),
@@ -2170,6 +2183,7 @@ def main():
             metadata.get("model_call_count"),
             metadata.get("duration_ms"),
             metadata.get("nudged"),
+            bool(metadata.get("silent")),
         )
 
         yield {
