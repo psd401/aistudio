@@ -36,6 +36,7 @@
  *   node run.js archive --id <id>
  *   node run.js delete --id <id>
  *   node run.js read-grants --id <idOrSlug>
+ *   node run.js find-people --query <name|email>
  *   node run.js set-visibility --id <id> [--level private|group|internal|public]
  *                    [--grants role:staff,building:GHS]           (REPLACES the list)
  *                    [--add-grants k:v,...] [--remove-grants k:v,...]  (merge; keeps
@@ -123,6 +124,9 @@ function usage() {
       '  list-assets --id <idOrSlug>',
       "  read-grants --id <idOrSlug>   (who can see it: level + the ACTUAL grants;",
       "                                 `read` shows only a grantCount integer)",
+      '  find-people --query <name|email>   (resolve a person to the numeric id a',
+      "                                 `user` grant needs — run this BEFORE",
+      '                                 --add-grants user:<id>)',
       '',
       'Images (authored assets — the canonical way to put a picture in a document):',
       '  upload-asset --id <id> --file <png|jpeg|webp> [--alt <text>] [--filename <name>]',
@@ -149,7 +153,8 @@ function usage() {
       '                 the stored list instead (keeps the current level; --level',
       '                 is required only when NOT merging)',
       '                 kinds: role|building|department|grade|group|user — `group`',
-      '                 takes a group email, `user` a numeric id (never an email)',
+      '                 takes a group email, `user` a numeric id (never an email —',
+      '                 get it from `find-people`)',
       '',
       'Collections (private for every owner; district requires administrator):',
       '  list-collections',
@@ -757,6 +762,44 @@ async function readGrants(args) {
 }
 
 /**
+ * Resolve a person to the numeric `users.id` a `user` grant stores (#1860).
+ *
+ * A `user` grant value is an id and NEVER an email, so sharing an object with a
+ * named person is a TWO-step operation: `find-people` to get the id, then
+ * `set-visibility --add-grants user:<id>`. Nothing else on the agent surface
+ * produces that id — `psd-directory` returns names and Chat ids, not AI Studio
+ * row ids.
+ *
+ * Matches email, first name, last name, and the full name. Requires at least
+ * `minQueryLength` characters and returns at most `limit` rows, both echoed back
+ * so a truncated result is visible rather than silently partial.
+ *
+ * An EMPTY result does not prove the person does not work here: this searches AI
+ * Studio's own user table, which fills in when someone first signs in to AI
+ * Studio or connects the Google Chat agent. A colleague who has done neither has
+ * no id yet, and a `user` grant cannot name them — say so and offer a `group`
+ * grant or wait for them to sign in, rather than silently dropping them from the
+ * audience.
+ */
+async function findPeople(args) {
+  const query = requireStr(args, 'query', 'query');
+  const { payload } = await restFetch('GET', '/people', { query: { query } });
+  const people = (payload && payload.people) || [];
+  emit({
+    ...payload,
+    note:
+      people.length === 0
+        ? 'No AI Studio user matched. Try a last name or the full email. If the ' +
+          'person has never signed in to AI Studio and has never connected the ' +
+          'Google Chat agent, they have no id yet and a `user` grant cannot name ' +
+          'them — report that instead of omitting them silently.'
+        : 'Pass the numeric `id` as `set-visibility --add-grants user:<id>`. ' +
+          'Confirm the email before granting — a `user` grant on the wrong row ' +
+          'shares the object with the wrong person.',
+  });
+}
+
+/**
  * The one GET of an object's stored audience: used both by `read-grants` (which
  * formats it for the caller) and by the merge path (which computes against it).
  */
@@ -916,6 +959,7 @@ const COMMANDS = {
   delete: deleteObject,
   'set-visibility': setVisibility,
   'read-grants': readGrants,
+  'find-people': findPeople,
   publish: publishObject,
   unpublish: unpublishObject,
 };

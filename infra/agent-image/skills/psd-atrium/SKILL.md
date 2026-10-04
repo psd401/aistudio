@@ -69,6 +69,10 @@ node run.js read-source --id <uuid-or-slug>
 # Read who can see it: the level plus the ACTUAL grant entries. `read` reports
 # only a grantCount integer, and set-visibility --grants REPLACES the list.
 node run.js read-grants --id <uuid-or-slug>
+
+# Resolve a person to the numeric AI Studio user id a `user` grant needs.
+# Matches email, first name, last name, or full name (2+ characters, 20 results).
+node run.js find-people --query "mondryj@psd401.net"
 ```
 
 `find` filters: `--kind document|artifact`, `--collection <slug|id>`, `--tag <t>`,
@@ -666,10 +670,33 @@ follow:
 A grant is `kind:value`. Valid kinds are `role`, `building`, `department`,
 `grade`, `group` and `user`. Two of them constrain the value and reject anything
 else with a 400: `group` takes a group EMAIL (`group:cabinet@psd401.net`), and
-`user` takes the numeric AI Studio user id, never an email (`user:42`). Nothing
-in this skill resolves a person's email to that id — to grant one named person,
-read an existing `user` grant off another object, or use the web visibility
-editor's people picker.
+`user` takes the numeric AI Studio user id, never an email (`user:42`).
+
+### Share with a named person
+
+Per-person sharing is two steps — resolve, then grant:
+
+```bash
+node run.js find-people --query "mondryj@psd401.net"
+# → { "people": [{ "id": 412, "name": "J Mondry", "email": "mondryj@psd401.net" }], … }
+node run.js set-visibility --id <id> --level group --add-grants user:412
+```
+
+`find-people` matches email, first name, last name, and full name; it needs at
+least 2 characters and returns at most 20 rows. The response echoes
+`minQueryLength` and `limit`, plus `truncated: true` when the result hit the cap —
+narrow the query rather than treating a capped list as the whole answer. **Always
+check the returned `email`** before granting: a `user` grant on the wrong row
+shares the object with the wrong person, and two staff can share a surname.
+
+It searches AI Studio's own user table, which is **not** a district directory
+mirror: a row exists once someone has signed in to AI Studio or connected the
+Google Chat agent. So an empty result is ambiguous — it may mean no such person,
+or it may mean a real colleague who has never used AI Studio and therefore has no
+id a `user` grant could name. Try a last name or the full email first; if there is
+still no match, **say so** and offer a `group` grant (a synced Google group covers
+everyone in it, signed in or not) instead of quietly dropping that person from the
+audience. Do not invent an id.
 
 `read-grants --id <id>` returns the level plus the actual `grants: [{kind,
 value}]` entries. It needs EDIT rights on the object — the list names every

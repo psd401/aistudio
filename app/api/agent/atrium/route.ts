@@ -28,6 +28,11 @@ const ALLOWED_PATHS: Record<AtriumBody["method"], readonly RegExp[]> = {
   GET: [
     /^$/,
     /^\/collections$/,
+    // Resolve a person to the `users.id` a `user` visibility grant stores
+    // (#1860). Listed in its own right, like `/collections`, because this table
+    // is the enumeration of the agent surface — even though the generic
+    // identifier pattern below would also match the literal word.
+    /^\/people$/,
     new RegExp(`^/${IDENTIFIER}$`),
     // Committed markdown source — the ONLY way an agent can read a document's
     // body text (`GET /<id>` returns bodyLocation "proof" with no text).

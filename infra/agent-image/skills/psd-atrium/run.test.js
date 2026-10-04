@@ -11,6 +11,7 @@
  *   edit (replace)  → POST   /<id>/versions
  *   edit (append)   → GET /<id> then POST /<id>/versions (concatenated body)
  *   read-grants     → GET    /<id>/visibility  (#1763 — the ACTUAL grant list)
+ *   find-people     → GET    /people           (#1860 — email/name → users.id)
  *   set-visibility  → PATCH  /<id>/visibility  (+ --add-grants/--remove-grants merge)
  *   publish         → POST   /<id>/publish     (+ approval_required relay)
  *   unpublish       → DELETE /<id>/publish/<destination>
@@ -1210,6 +1211,66 @@ test('edit accepts --body-file, and refuses it combined with --body', async () =
   let code;
   try {
     await run('edit', '--id', 'obj-1', '--body-file', file, '--body', 'inline');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+  expect(restCalls).toHaveLength(0);
+});
+
+test('find-people GETs /people with the query and relays the id to use', async () => {
+  // The whole point of #1860: a `user` grant stores a numeric users.id, and this
+  // is the only agent-reachable way to get one.
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: {
+      query: 'mondryj@psd401.net',
+      people: [{ id: 412, name: 'J Mondry', email: 'mondryj@psd401.net' }],
+      minQueryLength: 2,
+      limit: 20,
+      truncated: false,
+    },
+  });
+
+  await run('find-people', '--query', 'mondryj@psd401.net');
+
+  expect(restCalls).toHaveLength(1);
+  expect(restCalls[0]).toMatchObject({ method: 'GET', path: '/people' });
+  expect(restCalls[0].opts.query).toEqual({ query: 'mondryj@psd401.net' });
+  expect(emitted[0]).toMatchObject({
+    people: [{ id: 412, email: 'mondryj@psd401.net' }],
+    truncated: false,
+  });
+  expect(emitted[0].note).toContain('user:<id>');
+});
+
+test('find-people explains an empty result instead of implying the person is unknown', async () => {
+  // A staff member who has never signed in to AI Studio (and never connected the
+  // Chat agent) has no users row at all, so a `user` grant cannot name them. The
+  // note must say that, or the agent silently drops them from the audience.
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: {
+      query: 'nobody',
+      people: [],
+      minQueryLength: 2,
+      limit: 20,
+      truncated: false,
+    },
+  });
+
+  await run('find-people', '--query', 'nobody');
+
+  expect(emitted[0].people).toEqual([]);
+  expect(emitted[0].note).toContain('never signed in');
+});
+
+test('find-people requires --query (exit 1, no request sent)', async () => {
+  let code;
+  try {
+    await run('find-people');
   } catch (err) {
     code = err.code;
   }

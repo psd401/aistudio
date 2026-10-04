@@ -18,6 +18,11 @@ import {
   type Requester,
 } from "@/lib/content"
 import { decodeContentBody } from "@/lib/content/code-encoding"
+import {
+  searchPeople,
+  PEOPLE_SEARCH_MIN_QUERY_LENGTH,
+  PEOPLE_SEARCH_RESULT_LIMIT,
+} from "@/lib/content/people-search"
 import type { PublishDestination } from "@/lib/content/publish-adapters/types"
 import { requesterForUserId } from "@/lib/content/requester-from-auth"
 import {
@@ -82,6 +87,17 @@ const visibilitySchema = z
           .strict()
       )
       .optional(),
+  })
+  .strict()
+
+/**
+ * `GET /people?query=…` (#1860). `query` is required: there is no "list everyone"
+ * form of this surface, and omitting it is a usage error rather than a silent
+ * empty result.
+ */
+const peopleQuerySchema = z
+  .object({
+    query: z.string().min(1).max(200),
   })
   .strict()
 
@@ -302,6 +318,60 @@ function recordAudit(
 
 /** Hands a branch's audit record back to the top-level catch. */
 type SetAudit = (audit: MutationAudit) => void
+
+/**
+ * `GET /people?query=…` — resolve a person to the `users.id` a `user` visibility
+ * grant stores (#1860).
+ *
+ * A `user` grant value is a numeric id and never an email
+ * (`visibility-service.assertValidGrant`), and nothing else on the agent surface
+ * could produce one: `psd-directory` returns names and Chat ids, and the web
+ * people picker is a server action no agent can call. Without this, an agent
+ * could share an object with a ROLE, a BUILDING or a GOOGLE GROUP but never with
+ * a named person.
+ *
+ * Gated on the authoring capability even though it is a GET: this returns
+ * directory rows, not content, so it does not belong on the ungated read side
+ * next to `source` and `visibility`. The gate matches `searchPeopleAction`'s —
+ * the web picker that shares this query — so the two surfaces answer to the same
+ * capability.
+ *
+ * Handled ahead of the content reads for the same reason `collections` is: the
+ * first path segment is a reserved word here, not an object identifier.
+ *
+ * SCOPE: this searches `users`, which is a SIGN-IN-derived population, not a
+ * directory mirror. A row exists once someone has signed in to AI Studio or
+ * connected the Google Chat agent (`provisionAgentUser`); group-sync and
+ * OneRoster-sync only JOIN `users` on `lower(email)` and never insert. So an
+ * empty result can mean either "no such person" or "that person has never used
+ * AI Studio", and a `user` grant is simply not expressible for the latter. The
+ * caller has to be able to tell those apart, which is why the response carries
+ * the bounds rather than just the rows.
+ *
+ * Returns `null` when the path is not this one, so the caller falls through.
+ */
+async function executePeopleRead(
+  input: AgentAtriumOperationInput,
+  segments: string[],
+  cognitoSub: string
+): Promise<AgentAtriumOperationResult | null> {
+  if (input.method !== "GET") return null
+  if (segments.length !== 1 || segments[0] !== "people") return null
+
+  await assertContentAuthoringCapability({ authType: "session", cognitoSub })
+  const { query } = peopleQuerySchema.parse(input.query ?? {})
+  const people = await searchPeople(query)
+  return success(
+    {
+      query,
+      people,
+      minQueryLength: PEOPLE_SEARCH_MIN_QUERY_LENGTH,
+      limit: PEOPLE_SEARCH_RESULT_LIMIT,
+      truncated: people.length === PEOPLE_SEARCH_RESULT_LIMIT,
+    },
+    input.requestId
+  )
+}
 
 async function executeSingleSegmentRead(
   req: Requester,
@@ -796,10 +866,10 @@ async function executePublishWrite(
  * Execute the fixed Atrium agent surface as the human named by the signed
  * invocation proof. No reusable service credential crosses into the workspace.
  *
- * The body is deliberately a short dispatch: reads, then the
- * authoring-capability gate, then the three write families. The gate's position
- * is the security-relevant line in this function, and it is only legible when
- * the branches around it are this few.
+ * The body is deliberately a short dispatch: the self-gating people lookup,
+ * reads, then the authoring-capability gate, then the write families. The gate's
+ * position is the security-relevant line in this function, and it is only
+ * legible when the branches around it are this few.
  */
 export async function executeOwnerAtriumOperation(
   input: AgentAtriumOperationInput
@@ -812,6 +882,12 @@ export async function executeOwnerAtriumOperation(
   }
 
   try {
+    // Directory lookup first: it holds its OWN authoring-capability gate (it
+    // returns people, not content), so it must not sit under either the ungated
+    // content reads or the write gate below.
+    const people = await executePeopleRead(input, segments, cognitoSub)
+    if (people) return people
+
     const read = await executeAtriumRead(req, input, segments)
     if (read) return read
 
