@@ -167,15 +167,15 @@ function hasMarketingFooter(text: string): boolean {
  * A second-person reference. `directQuestion` requires one inside the
  * question clause itself, so a rhetorical marketing question ("Think this
  * is awesome?") is not read as an ask (#1861 item 1).
+ *
+ * Contractions need no alternative of their own: an apostrophe — straight
+ * or curly — is a non-word character, so `\byou\b` already matches
+ * "you're", "you’ll" and friends.
  */
-const SECOND_PERSON_RE = /\b(you|your|yours|yourself|you'(?:re|ll|ve|d))\b/i;
+const SECOND_PERSON_RE = /\b(you|your|yours|yourself)\b/i;
 
-/**
- * One run of text ending in a question mark. `.`, `!`, `?` and a newline
- * all close the preceding clause, so each match is the sentence that the
- * question mark actually terminates rather than the whole paragraph.
- */
-const QUESTION_CLAUSE_RE = /[^.!?\n]*\?/g;
+/** `.`, `!`, `?` and a newline each close the clause before them. */
+const CLAUSE_TERMINATORS = new Set([".", "!", "?", "\n"]);
 
 /**
  * Does the text put a question to the READER?
@@ -184,12 +184,29 @@ const QUESTION_CLAUSE_RE = /[^.!?\n]*\?/g;
  * mark anywhere — including the marketing line "Think this is awesome? Go
  * ahead and …" in a Google Search Console blast, which then scored
  * `important` and pinged Chat. A question only counts when the clause it
- * terminates speaks to the reader in the second person.
+ * terminates speaks to the reader in the second person — a "your" in the
+ * NEXT sentence must not rescue a rhetorical question.
+ *
+ * Scanned by hand rather than with `/[^.!?\n]*\?/g`, which is QUADRATIC on
+ * text containing no question mark: the star consumes to the end, fails,
+ * backtracks, and the whole walk repeats from the next start position.
+ * `eslint security/detect-unsafe-regex` does not flag it, but measured at
+ * 2.5s for 64KB and rising 16x per 4x of length — and this text is
+ * attacker-controlled (any sender's subject and body, and the
+ * `OPENING_TEXT_CHARS` cap does not bound the subject). This loop is
+ * linear: each character is visited once, and each clause is tested once.
  */
 export function hasDirectQuestion(text: string): boolean {
-  const clauses = text.match(QUESTION_CLAUSE_RE);
-  if (!clauses) return false;
-  return clauses.some((clause) => SECOND_PERSON_RE.test(clause));
+  let clauseStart = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i] as string;
+    if (!CLAUSE_TERMINATORS.has(char)) continue;
+    if (char === "?" && SECOND_PERSON_RE.test(text.slice(clauseStart, i))) {
+      return true;
+    }
+    clauseStart = i + 1;
+  }
+  return false;
 }
 
 /**

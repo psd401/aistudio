@@ -441,14 +441,25 @@ function hasMarketingFooter(text) {
   return MARKETING_FOOTER_PHRASES.some((phrase) => lower.includes(phrase));
 }
 // A question only counts when the clause it terminates speaks to the
-// reader (#1861) — "Think this is awesome?" is not an ask.
-const SECOND_PERSON_RE = /\b(you|your|yours|yourself|you'(?:re|ll|ve|d))\b/i;
-const QUESTION_CLAUSE_RE = /[^.!?\n]*\?/g;
+// reader (#1861) — "Think this is awesome?" is not an ask. No contraction
+// alternative needed: an apostrophe is a non-word char, so \byou\b already
+// matches "you're". Scanned by hand rather than with /[^.!?\n]*\?/g, which
+// is quadratic on text with no question mark — see content-features.ts.
+const SECOND_PERSON_RE = /\b(you|your|yours|yourself)\b/i;
+const CLAUSE_TERMINATORS = new Set(['.', '!', '?', '\n']);
 
 function hasDirectQuestion(text) {
-  const clauses = String(text || '').match(QUESTION_CLAUSE_RE);
-  if (!clauses) return false;
-  return clauses.some((clause) => SECOND_PERSON_RE.test(clause));
+  const str = String(text || '');
+  let clauseStart = 0;
+  for (let i = 0; i < str.length; i += 1) {
+    const char = str[i];
+    if (!CLAUSE_TERMINATORS.has(char)) continue;
+    if (char === '?' && SECOND_PERSON_RE.test(str.slice(clauseStart, i))) {
+      return true;
+    }
+    clauseStart = i + 1;
+  }
+  return false;
 }
 
 const AUTOMATED_LOCALPARTS = new Set([

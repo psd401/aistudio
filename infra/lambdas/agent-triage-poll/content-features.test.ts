@@ -317,6 +317,36 @@ describe("directQuestion requires a question put to the reader (#1861)", () => {
     expect(hasDirectQuestion("Big news! Can you join us?")).toBe(true);
   });
 
+  test("contractions need no special case — straight or curly apostrophe", () => {
+    // `\byou\b` matches across an apostrophe because the apostrophe is a
+    // non-word character. A dedicated `you'(?:re|ll|ve|d)` alternative was
+    // dead code and was removed; this pins why that is safe.
+    for (const text of [
+      "you're on it, right?",
+      "you’re on it, right?",
+      "you'll review this?",
+      "you’ve seen this?",
+    ]) {
+      expect([text, hasDirectQuestion(text)]).toEqual([text, true]);
+    }
+  });
+
+  test("stays linear on a hostile subject", () => {
+    // The first implementation used `/[^.!?\n]*\?/g`, which is quadratic on
+    // text containing no question mark — the star consumes to the end,
+    // fails, backtracks, and repeats from the next start position. Measured
+    // at 2.5s for 64KB, rising 16x per 4x of length. The text is
+    // attacker-controlled (any sender's subject, which OPENING_TEXT_CHARS
+    // does not bound), so this was a Lambda DoS. The bound below is loose
+    // on purpose: the linear scan does 1MB in ~2ms, the regex took minutes.
+    const hostile = "a".repeat(1_000_000);
+    const started = Date.now();
+    expect(hasDirectQuestion(hostile)).toBe(false);
+    expect(hasDirectQuestion(`${hostile}?`)).toBe(false);
+    expect(hasDirectQuestion(`can you? ${hostile}`)).toBe(true);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
   test("the reported Google Search Console blast classifies later", () => {
     const signals = signalsFor({
       fromEmail: "sc-noreply@google.com",
