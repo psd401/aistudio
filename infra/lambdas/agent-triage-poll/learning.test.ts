@@ -35,6 +35,8 @@ function correction(
     ts: over.ts ?? "2026-07-10T00:00:00Z",
     fromEmail: over.fromEmail,
     fromDomain: over.fromDomain,
+    shape: over.shape,
+    automatedSender: over.automatedSender,
   };
 }
 
@@ -46,19 +48,21 @@ function defineComputeLearningSuite1Part1() {
   });
 
   test("repeated archives of important → mute suggestion + pattern", () => {
+    // An automated mailbox: the only kind of sender a mute may target
+    // (#1855 item 3).
     const corrections = [
-      correction({ toLabel: "archived", fromLabel: "important", fromEmail: "noise@vendor.com" }),
-      correction({ toLabel: "archived", fromLabel: "important", fromEmail: "noise@vendor.com" }),
-      correction({ toLabel: "archived", fromLabel: "important", fromEmail: "noise@vendor.com" }),
+      correction({ toLabel: "archived", fromLabel: "important", fromEmail: "noreply@vendor.com" }),
+      correction({ toLabel: "archived", fromLabel: "important", fromEmail: "noreply@vendor.com" }),
+      correction({ toLabel: "archived", fromLabel: "important", fromEmail: "noreply@vendor.com" }),
     ];
     const r = computeLearning({ corrections, decisions: [], rules: emptyRules, now: NOW });
     expect(r.learnedPatterns).toHaveLength(1);
-    expect(r.learnedPatterns[0]).toMatchObject({ pattern: "noise@vendor.com", kind: "mute", count: 3 });
+    expect(r.learnedPatterns[0]).toMatchObject({ pattern: "noreply@vendor.com", kind: "mute", count: 3 });
     expect(r.suggestions).toHaveLength(1);
     expect(r.suggestions[0]).toMatchObject({
-      id: "mute:noise@vendor.com",
+      id: "mute:noreply@vendor.com",
       kind: "mute",
-      target: "noise@vendor.com",
+      target: "noreply@vendor.com",
       count: 3,
     });
     expect(r.suggestions[0].reason).toContain("mute");
@@ -104,7 +108,7 @@ function defineComputeLearningSuite1Part1() {
         reason: "x",
         confidence: 0.8,
         ts: "2026-07-09T00:00:00Z",
-        fromEmail: "joinme@vendor.com",
+        fromEmail: "no-reply@vendor.com",
         subject: "s",
       },
       {
@@ -115,7 +119,7 @@ function defineComputeLearningSuite1Part1() {
         reason: "x",
         confidence: 0.8,
         ts: "2026-07-09T00:00:00Z",
-        fromEmail: "joinme@vendor.com",
+        fromEmail: "no-reply@vendor.com",
         subject: "s",
       },
     ];
@@ -124,9 +128,96 @@ function defineComputeLearningSuite1Part1() {
       correction({ messageId: "m2", toLabel: "archived", fromLabel: "important" }),
     ];
     const r = computeLearning({ corrections, decisions, rules: emptyRules, now: NOW });
-    expect(r.suggestions[0]).toMatchObject({ id: "mute:joinme@vendor.com" });
+    expect(r.suggestions[0]).toMatchObject({ id: "mute:no-reply@vendor.com" });
   });
 
+}
+
+/** Human-sender protection for rule suggestions (#1855 item 3). */
+function definePeopleGuardSuite() {
+  test("NEVER proposes muting a person, however many times they are archived", () => {
+    // #1855 item 3: ~40 of 75 pending suggestions were mutes aimed at the
+    // user's own direct reports. Archiving mail after reading it is not a
+    // request to stop receiving it.
+    const corrections = Array.from({ length: 6 }, () =>
+      correction({
+        toLabel: "archived",
+        fromLabel: "important",
+        fromEmail: "direct.report@psd401.net",
+      }),
+    );
+    const r = computeLearning({ corrections, decisions: [], rules: emptyRules, now: NOW });
+    // The soft hint still forms — it just never becomes a hard rule.
+    expect(r.learnedPatterns[0]).toMatchObject({
+      pattern: "direct.report@psd401.net",
+      kind: "mute",
+    });
+    expect(r.suggestions).toHaveLength(0);
+  });
+
+  test("an unprovable sender counts as a person", () => {
+    // `health@aws.com` has no automation marker on the correction, so the
+    // conservative read is "person" and no mute is proposed.
+    const corrections = [
+      correction({ toLabel: "archived", fromLabel: "important", fromEmail: "health@aws.com" }),
+      correction({ toLabel: "archived", fromLabel: "important", fromEmail: "health@aws.com" }),
+      correction({ toLabel: "archived", fromLabel: "important", fromEmail: "health@aws.com" }),
+    ];
+    expect(
+      computeLearning({ corrections, decisions: [], rules: emptyRules, now: NOW })
+        .suggestions,
+    ).toHaveLength(0);
+  });
+
+  test("a header-proven automated sender IS mutable even with a human-looking address", () => {
+    const corrections = [
+      correction({
+        toLabel: "archived",
+        fromLabel: "important",
+        fromEmail: "health@aws.com",
+        automatedSender: true,
+      }),
+      correction({
+        toLabel: "archived",
+        fromLabel: "important",
+        fromEmail: "health@aws.com",
+        automatedSender: true,
+      }),
+      correction({
+        toLabel: "archived",
+        fromLabel: "important",
+        fromEmail: "health@aws.com",
+        automatedSender: true,
+      }),
+    ];
+    const r = computeLearning({ corrections, decisions: [], rules: emptyRules, now: NOW });
+    expect(r.suggestions[0]).toMatchObject({ id: "mute:health@aws.com" });
+  });
+
+  test("people-suggestions off also silences VIP suggestions about people", () => {
+    const corrections = [
+      correction({ toLabel: "inbox", fromLabel: "later", fromEmail: "boss@psd401.net" }),
+      correction({ toLabel: "inbox", fromLabel: "later", fromEmail: "boss@psd401.net" }),
+    ];
+    expect(
+      computeLearning({
+        corrections,
+        decisions: [],
+        rules: emptyRules,
+        allowPeopleSuggestions: false,
+        now: NOW,
+      }).suggestions,
+    ).toHaveLength(0);
+    // Default (absent) still allows the harmless VIP suggestion.
+    expect(
+      computeLearning({ corrections, decisions: [], rules: emptyRules, now: NOW })
+        .suggestions,
+    ).toHaveLength(1);
+  });
+
+}
+
+function defineComputeLearningSuite1Part1b() {
   test("corrections with unresolvable sender are ignored", () => {
     const corrections = [
       correction({ messageId: "orphan", toLabel: "archived", fromLabel: "important" }),
@@ -137,7 +228,7 @@ function defineComputeLearningSuite1Part1() {
     expect(r.suggestions).toEqual([]);
   });
 
-  }
+}
 
 function defineComputeLearningSuite1Part2() {test("already-VIP sender is not re-suggested", () => {
     const corrections = [
@@ -209,7 +300,9 @@ function defineComputeLearningSuite1Part2() {test("already-VIP sender is not re-
 
 const defineComputeLearningSuite1 = () => {
   defineComputeLearningSuite1Part1()
+  defineComputeLearningSuite1Part1b()
   defineComputeLearningSuite1Part2()
+  definePeopleGuardSuite()
 };
 
 describe("computeLearning", defineComputeLearningSuite1);

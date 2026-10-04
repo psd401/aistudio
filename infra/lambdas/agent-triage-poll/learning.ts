@@ -19,10 +19,13 @@
  */
 
 import { wildcardMatch, type TriageRules } from "./rules";
+import { isAutomatedSender, type ContentShape } from "./content-features";
 import type {
+  ContentPreference,
   CorrectionRecord,
   DecisionRecord,
   LearnedPattern,
+  Label,
   Suggestion,
 } from "./types";
 
@@ -50,6 +53,8 @@ interface Accum {
   muteWeight: number;
   vipCount: number;
   muteCount: number;
+  /** True when at least one correction showed this address is a machine. */
+  automated: boolean;
 }
 
 export interface LearningContext {
@@ -61,6 +66,12 @@ export interface LearningContext {
   dismissedSuggestionIds?: string[];
   /** Suggestion ids already applied — no need to re-suggest. */
   appliedSuggestionIds?: string[];
+  /**
+   * Per-user switch for suggestions that name a person (#1855 item 3).
+   * Absent ⇒ allowed. Mute suggestions against people are refused either
+   * way; this only additionally silences VIP suggestions about people.
+   */
+  allowPeopleSuggestions?: boolean;
   /** Injected clock for deterministic tests; defaults to Date.now(). */
   now?: number;
 }
@@ -68,6 +79,7 @@ export interface LearningContext {
 export interface LearningResult {
   learnedPatterns: LearnedPattern[];
   suggestions: Suggestion[];
+  contentPreferences: ContentPreference[];
 }
 
 /**
@@ -132,7 +144,22 @@ function accumulateCorrections(
     const w = decayedWeight(c.ts, now);
     const acc =
       bySender.get(mapped.sender) ??
-      { sender: mapped.sender, vipWeight: 0, muteWeight: 0, vipCount: 0, muteCount: 0 };
+      {
+        sender: mapped.sender,
+        vipWeight: 0,
+        muteWeight: 0,
+        vipCount: 0,
+        muteCount: 0,
+        // Evidence from the message itself wins; fall back to the local
+        // part for corrections recorded before #1855 snapshotted it.
+        automated: isAutomatedSender(mapped.sender),
+      };
+    if (
+      c.automatedSender === true ||
+      decisionsById.get(c.messageId)?.automatedSender === true
+    ) {
+      acc.automated = true;
+    }
     if (mapped.kind === "vip") {
       acc.vipWeight += w;
       acc.vipCount += 1;
@@ -161,6 +188,26 @@ function candidateFromAccum(acc: Accum): {
   };
 }
 
+/**
+ * Would this suggestion name a person?
+ *
+ * A mute silently drops mail. Proposing one against a colleague turns
+ * "I read that and archived it" into "stop showing me their mail", which
+ * is not what the gesture meant — #1855 item 3 found ~40 of 75 pending
+ * suggestions were mutes aimed at the user's own direct reports and
+ * chiefs. Mute suggestions are therefore limited to addresses that show
+ * an automation signal, and an address we cannot prove is automated
+ * counts as a person.
+ */
+function suggestionBlockedForPerson(
+  acc: Accum,
+  kind: PatternKind,
+  allowPeopleSuggestions: boolean,
+): boolean {
+  if (acc.automated) return false;
+  return kind === "mute" || !allowPeopleSuggestions;
+}
+
 function suggestionForCandidate(
   acc: Accum,
   candidate: { kind: PatternKind; weight: number; count: number },
@@ -175,6 +222,11 @@ function suggestionForCandidate(
     count < SUGGESTION_MIN_COUNT ||
     excluded.dismissed.has(id) ||
     excluded.applied.has(id) ||
+    suggestionBlockedForPerson(
+      acc,
+      kind,
+      ctx.allowPeopleSuggestions !== false,
+    ) ||
     alreadyRuled(acc.sender, kind, ctx.rules)
   ) {
     return null;
@@ -229,7 +281,70 @@ export function computeLearning(ctx: LearningContext): LearningResult {
   return {
     learnedPatterns: learnedPatterns.slice(0, MAX_LEARNED_PATTERNS),
     suggestions,
+    contentPreferences: computeContentPreferences(ctx, now),
   };
+}
+
+/**
+ * Mine the same corrections for what they say about the KIND of message
+ * rather than the sender (#1855 addendum 2 item 1).
+ *
+ * This is the half of learning that changes behaviour. A sender hint only
+ * ever nudged the prompt; a content-shape leaning is applied by
+ * `applyContentGuards`, so twenty "you called this important and I
+ * archived it" corrections actually stop the next one of those being
+ * called important — for every sender, not just the ones corrected.
+ */
+export function computeContentPreferences(
+  ctx: LearningContext,
+  now: number,
+): ContentPreference[] {
+  const decisionsById = new Map<string, DecisionRecord>();
+  for (const d of ctx.decisions ?? []) decisionsById.set(d.messageId, d);
+
+  const byShape = new Map<
+    ContentShape,
+    { importantWeight: number; laterWeight: number; count: number }
+  >();
+  for (const c of ctx.corrections ?? []) {
+    const shape = c.shape ?? decisionsById.get(c.messageId)?.shape;
+    if (!shape || shape === "unknown") continue;
+    const lean = correctionLean(c.toLabel);
+    if (!lean) continue;
+    const entry =
+      byShape.get(shape) ?? { importantWeight: 0, laterWeight: 0, count: 0 };
+    const w = decayedWeight(c.ts, now);
+    if (lean === "important") entry.importantWeight += w;
+    else entry.laterWeight += w;
+    entry.count += 1;
+    byShape.set(shape, entry);
+  }
+
+  const prefs: ContentPreference[] = [];
+  for (const [shape, entry] of byShape) {
+    const net = entry.importantWeight - entry.laterWeight;
+    const weight = Math.abs(net);
+    if (weight < LEARN_MIN_WEIGHT) continue;
+    prefs.push({
+      shape,
+      lean: net >= 0 ? "important" : "later",
+      weight: round2(weight),
+      count: entry.count,
+    });
+  }
+  prefs.sort((a, b) => b.weight - a.weight);
+  return prefs;
+}
+
+/** Which direction a correction argues for. */
+function correctionLean(
+  toLabel: CorrectionRecord["toLabel"],
+): Label | null {
+  if (toLabel === "archived" || toLabel === "later" || toLabel === "news") {
+    return "later";
+  }
+  if (toLabel === "inbox" || toLabel === "important") return "important";
+  return null;
 }
 
 function round2(n: number): number {
