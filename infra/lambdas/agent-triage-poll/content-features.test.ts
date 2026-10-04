@@ -331,6 +331,33 @@ describe("directQuestion requires a question put to the reader (#1861)", () => {
     }
   });
 
+  test("a dot inside a token does not end a clause", () => {
+    // A version, a hostname, a decimal or a URL carries a `.` that is not
+    // a sentence boundary. Resetting the clause there swallowed the
+    // second-person reference sitting before it, so a real question to the
+    // user silently lost its deterministic `important`.
+    for (const text of [
+      "What do you think of v1.2?",
+      "What do you think of example.com?",
+      "Can you review https://psd401.net/doc?",
+      "Did you see the 3.5 GPA report?",
+    ]) {
+      expect([text, hasDirectQuestion(text)]).toEqual([text, true]);
+    }
+  });
+
+  test("a real sentence-ending dot still ends the clause", () => {
+    // The counter-direction: the dotted-token exemption must not let a
+    // second-person word reach a rhetorical question in the next sentence.
+    for (const text of [
+      "Your site is noticed. Think this is awesome?",
+      "We updated v1.2 for your site. Think this is awesome?",
+      "Nope. Not for you. Right?",
+    ]) {
+      expect([text, hasDirectQuestion(text)]).toEqual([text, false]);
+    }
+  });
+
   test("a blank line DOES end a thought", () => {
     // ...so flattening wraps must not let a second-person word reach a
     // rhetorical question in the next paragraph.

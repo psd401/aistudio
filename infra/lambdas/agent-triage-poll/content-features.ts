@@ -192,16 +192,46 @@ function isInformational(
 const SECOND_PERSON_RE = /\b(you|your|yours|yourself)\b/i;
 
 /**
- * `.`, `!` and `?` each close the clause before them.
+ * `.`, `!` and `?` each close the clause before them — but see
+ * `isSentenceBoundary` for the two cases where a character in this set is
+ * not actually a sentence boundary.
  *
- * A single newline deliberately does NOT. In a hard-wrapped plain-text or
- * forwarded body the newline is just where the mail client wrapped the
- * line, not a sentence boundary, so treating it as one lost real questions:
- * "Could you confirm\nthe budget by Friday?" tested only "the budget by
- * Friday" and missed the "you" on the line above. A BLANK line does
- * separate thoughts, and is handled by `PARAGRAPH_BREAK_RE`.
+ * A single newline deliberately is NOT in this set. In a hard-wrapped
+ * plain-text or forwarded body the newline is just where the mail client
+ * wrapped the line, not a sentence boundary, so treating it as one lost
+ * real questions: "Could you confirm\nthe budget by Friday?" tested only
+ * "the budget by Friday" and missed the "you" on the line above. A BLANK
+ * line does separate thoughts, and is handled by `PARAGRAPH_BREAK_RE`.
  */
 const CLAUSE_TERMINATORS = new Set([".", "!", "?"]);
+
+/** Letters and digits — the characters a dot can sit *inside*. */
+const ALPHANUMERIC_RE = /[a-z0-9]/i;
+
+/**
+ * Is the character at `index` really ending a sentence?
+ *
+ * `!` and `?` always are. A `.` is not when it sits INSIDE a token — a
+ * version, a hostname, a decimal, an initialism. Without this, every such
+ * dot reset the clause and swallowed the second-person reference before
+ * it: "What do you think of v1.2?", "...of example.com?", "Can you review
+ * https://psd401.net/doc?" and "Did you see the 3.5 GPA report?" all
+ * returned false, so a real question to the user lost its deterministic
+ * `important` and fell through to the model.
+ *
+ * Known remaining edge: a mid-sentence abbreviation whose final dot IS
+ * followed by a space ("..., i.e. the draft?") still splits the clause.
+ * Closing that needs an abbreviation list, which is not worth the weight
+ * — the model still sees the message and every other signal.
+ */
+function isSentenceBoundary(text: string, index: number): boolean {
+  const char = text[index];
+  if (char !== ".") return true;
+  return !(
+    ALPHANUMERIC_RE.test(text[index - 1] ?? "") &&
+    ALPHANUMERIC_RE.test(text[index + 1] ?? "")
+  );
+}
 
 /** A blank line — the one newline-ish thing that really does end a thought. */
 const PARAGRAPH_BREAK_RE = /\n[ \t]*\n/;
@@ -241,6 +271,7 @@ function scanQuestionClauses(paragraph: string): boolean {
   for (let i = 0; i < paragraph.length; i += 1) {
     const char = paragraph[i] as string;
     if (!CLAUSE_TERMINATORS.has(char)) continue;
+    if (!isSentenceBoundary(paragraph, i)) continue;
     if (char === "?" && SECOND_PERSON_RE.test(paragraph.slice(clauseStart, i))) {
       return true;
     }

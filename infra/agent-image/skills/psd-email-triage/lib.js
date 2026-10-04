@@ -460,12 +460,25 @@ const SECOND_PERSON_RE = /\b(you|your|yours|yourself)\b/i;
 const CLAUSE_TERMINATORS = new Set(['.', '!', '?']);
 const PARAGRAPH_BREAK_RE = /\n[ \t]*\n/;
 const NEWLINE_RE = /\n/g;
+const ALPHANUMERIC_RE = /[a-z0-9]/i;
+
+// A '.' inside a token (v1.2, example.com, 3.5) is not a sentence
+// boundary; resetting the clause there swallowed the second-person
+// reference before it. See content-features.ts.
+function isSentenceBoundary(text, index) {
+  if (text[index] !== '.') return true;
+  return !(
+    ALPHANUMERIC_RE.test(text[index - 1] || '') &&
+    ALPHANUMERIC_RE.test(text[index + 1] || '')
+  );
+}
 
 function scanQuestionClauses(paragraph) {
   let clauseStart = 0;
   for (let i = 0; i < paragraph.length; i += 1) {
     const char = paragraph[i];
     if (!CLAUSE_TERMINATORS.has(char)) continue;
+    if (!isSentenceBoundary(paragraph, i)) continue;
     if (char === '?' && SECOND_PERSON_RE.test(paragraph.slice(clauseStart, i))) {
       return true;
     }

@@ -77,6 +77,7 @@ const TEXTS = [
   { subject: 'Want to see more?', body: 'Unsubscribe at any time.' },
   { subject: 'Any update on your section?', body: 'Let me know where it landed.' },
   { subject: 'Quick one', body: 'Could you confirm\nthe budget by Friday?' },
+  { subject: 'Release v1.2', body: 'What do you think of v1.2 on example.com?' },
   { subject: 'Notice', body: 'Your report is attached\n\nThink this is awesome?' },
   { subject: 'Great news!', body: 'Isn’t it time? Act now. You are receiving this because you signed up.' },
 ];
@@ -201,6 +202,16 @@ describe('content stage parity', () => {
       'Thanks for your time.\n\nThink this is awesome?',
       'Your report is attached\n\nThink this is awesome?',
       'a\n\n\nb you?',
+      // Codex review: intra-token dots must not split the clause.
+      'What do you think of v1.2?',
+      'What do you think of example.com?',
+      'Can you review https://psd401.net/doc?',
+      'Did you see the 3.5 GPA report?',
+      'We updated v1.2 for your site. Think this is awesome?',
+      '...you?',
+      'you.?',
+      '1.2?',
+      'a.b.c you?',
       'you\n?',
       '\n\n',
     ];
