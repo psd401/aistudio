@@ -4,9 +4,11 @@
  *
  * Why Nova Micro: cheapest Bedrock model available, fast (<1s typical),
  * good enough at "classify this short email into one of N buckets"
- * which is essentially what we're doing. Per-call cost ~$0.0001 with
- * the small prompt we send. Annual cost projection at 1000 users ≈
- * $900/yr in the worst case — well under what SaneBox costs at scale.
+ * which is essentially what we're doing. Per-call cost was ~$0.0001
+ * (≈ $900/yr worst case at 1000 users) when the prompt was rules-only;
+ * the system prompt now also carries free-text preferences (≤2000
+ * chars), content preferences, learned patterns and corrections, so
+ * input cost per call is higher than that original estimate.
  *
  * Why not the agent's main model: the agent harness runs Claude Sonnet 5
  * (Bedrock Mantle, per #1089; formerly GLM-5). That's a much heavier model

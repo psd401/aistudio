@@ -962,6 +962,16 @@ async function cmd_training(args) {
 // simulate
 // ---------------------------------------------------------------------
 
+// `--external` forces an outside sender so external-only rules can be
+// exercised from an internal test address.
+function simulatedIsInternal(args, fromEmail, internalDomain) {
+  if (args.external === true) return false;
+  return (
+    (fromEmail.split("@")[1] || "").toLowerCase() ===
+    internalDomain.toLowerCase()
+  );
+}
+
 async function cmd_simulate(args) {
   const user = requireUser(args, "simulate");
   const row = await requireEnabledRow(user, "simulate");
@@ -972,9 +982,7 @@ async function cmd_simulate(args) {
   const features = {
     fromEmail,
     fromDomain: fromEmail.split("@")[1] || "",
-    isInternal:
-      (fromEmail.split("@")[1] || "").toLowerCase() ===
-      internalDomain.toLowerCase(),
+    isInternal: simulatedIsInternal(args, fromEmail, internalDomain),
     subject: args.subject || "",
     subjectLower: (args.subject || "").toLowerCase(),
     snippetLower: (args.snippet || "").toLowerCase(),

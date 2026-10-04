@@ -59,18 +59,6 @@ export function shiftDayKey(key: string, days: number): string {
   return shifted.toISOString().slice(0, 10);
 }
 
-/** Every day key from `from` to `to`, inclusive. Capped for safety. */
-export function dayKeysBetween(from: string, to: string, maxDays = 90): string[] {
-  if (!from || !to || from > to) return from && from === to ? [from] : [];
-  const keys: string[] = [];
-  let cursor = from;
-  while (cursor <= to && keys.length < maxDays) {
-    keys.push(cursor);
-    cursor = shiftDayKey(cursor, 1);
-  }
-  return keys;
-}
-
 function addDecision(stat: DailyStat, decision: DecisionRecord): void {
   stat.total += 1;
   if (decision.label === "important") stat.important += 1;

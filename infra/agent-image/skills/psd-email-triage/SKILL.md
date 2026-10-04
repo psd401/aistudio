@@ -53,7 +53,7 @@ node /opt/psd-skills/psd-email-triage/run.js <subcommand> --user <email> [args]
 | `rules add-vip <email>` | Always classify as Important. Beats every other rule. |
 | `rules mute <pattern>` | Auto-archive sender. Supports `*` wildcards (e.g. `noreply@*`, `*.vendor.com`). **Mute only automated senders** — muting a person silently drops their mail. |
 | `rules add-keyword <kw> --label <important\|later\|news> [selectors]` | Add a keyword rule with a stable id. Selectors: `--subject` / `--snippet` (where the keyword applies), `--from <domain>`, `--from-address <email>`, `--subject-any a,b,c`, `--snippet-any a,b,c`, `--external`. All selectors are ANDed, so one rule can say "from this person AND this subject"; values inside `--*-any` are ORed. A flag given without a value is **rejected** rather than stored. |
-| `rules remove <type> <value>` | Remove a rule. `type` is `vip`, `mute`, or `keyword`. A keyword rule may be addressed by its `id`, by `#index` from `rules list`, or by any value it matches on. Removing nothing returns `not-found` — it never claims success. |
+| `rules remove <type> <value>` | Remove a rule. `type` is `vip`, `mute`, or `keyword`. A keyword rule may be addressed by its `id`, by `#index` (or `--index <n>`) from `rules list`, or by any value it matches on. Removing nothing returns `not-found` — it never claims success. |
 | `rules remove keyword --malformed` | Delete every keyword rule that can never match (e.g. legacy rules stored by `--from` with no value). |
 
 ### Escalation (Chat pings)
@@ -120,7 +120,7 @@ any one person.
 | Subcommand | Effect |
 |------------|--------|
 | `labels list` | Show current label names + Gmail label IDs. |
-| `labels rename <key> <new-name>` | Rename one of `important` / `later` / `news` (renames the Gmail label too). |
+| `labels rename <key> <new-name>` | **Refused** (`fixed-labels`). Label names are fixed so scheduled classification can verify them; tell the user they cannot be renamed. |
 
 ### Digest
 

@@ -16,7 +16,6 @@ import {
   detectContentSignals,
   hasAsk,
   isAutomatedSender,
-  isHumanSender,
   parseAddressList,
   type ContentSignalInput,
 } from "./content-features";
@@ -85,7 +84,6 @@ describe("isAutomatedSender", () => {
       "health@aws.com",
     ]) {
       expect(isAutomatedSender(address)).toBe(false);
-      expect(isHumanSender(address)).toBe(true);
     }
   });
 });

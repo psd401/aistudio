@@ -10,6 +10,8 @@
  * SDK or Gmail mock — pure functions in, label decision out.
  */
 
+import type { DecisionSource } from "./types";
+
 export type Label = "important" | "later" | "news";
 
 export interface EmailFeatures {
@@ -341,7 +343,7 @@ export interface EscalationDecisionParams {
    * user; `content` and `llm` are both the system's own judgement and so
    * stay subject to the confidence bar.
    */
-  source: "rule" | "content" | "llm";
+  source: DecisionSource;
   /** Classifier confidence (rule matches are 1). */
   confidence: number;
   features: EmailFeatures;

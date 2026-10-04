@@ -196,18 +196,6 @@ export function isAutomatedSender(
   return AUTOMATED_LOCALPART_PREFIXES.some((p) => localPart.startsWith(p));
 }
 
-/**
- * A human sender is simply one that shows no automation signal. The
- * learner uses this to refuse mute suggestions against colleagues (#1855
- * item 3) and the classifier uses it to keep people's mail out of `news`.
- */
-export function isHumanSender(
-  fromEmail: string,
-  headers: MessageHeaders = {},
-): boolean {
-  return Boolean(fromEmail) && !isAutomatedSender(fromEmail, headers);
-}
-
 function deriveShape(
   signals: Omit<ContentSignals, "shape">,
 ): ContentShape {

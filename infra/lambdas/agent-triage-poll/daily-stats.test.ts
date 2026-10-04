@@ -8,7 +8,6 @@ import { describe, expect, test } from "bun:test";
 import {
   accumulateDailyStats,
   dayKey,
-  dayKeysBetween,
   DAILY_STATS_RETENTION_DAYS,
   shiftDayKey,
   sumDailyStats,
@@ -51,22 +50,10 @@ describe("dayKey", () => {
   });
 });
 
-describe("shiftDayKey / dayKeysBetween", () => {
+describe("shiftDayKey", () => {
   test("crosses a month boundary", () => {
     expect(shiftDayKey("2026-08-01", -1)).toBe("2026-07-31");
     expect(shiftDayKey("2026-02-28", 1)).toBe("2026-03-01");
-  });
-
-  test("an inclusive range", () => {
-    expect(dayKeysBetween("2026-07-09", "2026-07-11")).toEqual([
-      "2026-07-09",
-      "2026-07-10",
-      "2026-07-11",
-    ]);
-  });
-
-  test("an inverted range is empty", () => {
-    expect(dayKeysBetween("2026-07-11", "2026-07-09")).toEqual([]);
   });
 });
 
