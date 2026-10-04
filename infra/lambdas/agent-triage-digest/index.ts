@@ -30,6 +30,7 @@ import * as chatPkg from "@googleapis/chat";
 
 import {
   type DailyStat,
+  dayKey,
   describeWindow,
   digestWindowKeys,
   sumDailyStats,
@@ -145,18 +146,21 @@ async function loadDigestTarget(
 function bucketExamples(
   decisions: DecisionRecord[],
   windowKeys: string[],
+  timeZone: string | undefined,
 ): Record<string, DecisionRecord[]> {
+  // Compare day keys in the user's timezone, the same way the window was
+  // built. Parsing the key as UTC midnight put the cut 7-8h early for a
+  // Pacific user and let the previous evening's mail in as examples.
   const firstKey = windowKeys[0];
-  const windowStart = firstKey ? Date.parse(`${firstKey}T00:00:00Z`) : NaN;
   const buckets: Record<string, DecisionRecord[]> = {
     important: [],
     later: [],
     news: [],
   };
   for (const d of decisions) {
-    const t = Date.parse(d.ts);
-    if (!Number.isFinite(t)) continue;
-    if (Number.isFinite(windowStart) && t < windowStart) continue;
+    const key = dayKey(d.ts, timeZone);
+    if (!key) continue;
+    if (firstKey && key < firstKey) continue;
     if (buckets[d.label]) buckets[d.label].push(d);
   }
   return buckets;
@@ -183,7 +187,11 @@ export const handler: Handler<DigestEvent, void> = async (event) => {
   );
   const totals = sumDailyStats(triage.dailyStats, windowKeys);
   const windowLabel = describeWindow(windowKeys);
-  const buckets = bucketExamples(triage.recentDecisions ?? [], windowKeys);
+  const buckets = bucketExamples(
+    triage.recentDecisions ?? [],
+    windowKeys,
+    triage.digestTz,
+  );
 
   const labels = triage.labels ?? {
     important: "@psd/Important",

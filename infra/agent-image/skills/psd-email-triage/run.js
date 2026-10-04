@@ -518,16 +518,15 @@ function keywordRuleFromArgs(args, keyword, label) {
   if (subjectAny) rule.subject_any = subjectAny;
   if (snippetAny) rule.snippet_any = snippetAny;
 
-  // The positional keyword goes where the selector flags point. A rule
-  // that already carries list criteria and no text selector treats the
-  // positional as the subject, which is the pre-#1855 default.
+  // The positional keyword goes where the selector flags point, and
+  // defaults to the subject (the pre-#1855 behaviour). When the rule
+  // already matches text through --subject-any / --snippet-any, the
+  // positional is NOT stored unless --subject / --snippet asks for it:
+  // ANDing a placeholder keyword onto the list would make the rule
+  // unmatchable.
   if (args.snippet === true) rule.snippet_contains = keyword;
   else if (args.subject === true) rule.subject_contains = keyword;
-  else if (!fromDomain && !fromAddress && !subjectAny && !snippetAny) {
-    rule.subject_contains = keyword;
-  } else if (!subjectAny && !snippetAny) {
-    rule.subject_contains = keyword;
-  }
+  else if (!subjectAny && !snippetAny) rule.subject_contains = keyword;
 
   if (args.external === true) rule.external = true;
   return rule;
@@ -616,12 +615,16 @@ function keywordRuleSelector(args, value) {
     describe: `"${needle}"`,
     matches: (rule) =>
       rule.id === needle ||
-      rule.subject_contains === needle ||
-      rule.snippet_contains === needle ||
-      String(rule.from_domain ?? "").toLowerCase() === lowered ||
-      String(rule.from_address ?? "").toLowerCase() === lowered ||
-      (rule.subject_any || []).includes(needle) ||
-      (rule.snippet_any || []).includes(needle),
+      // Text criteria match case-insensitively at classification time,
+      // so removal by value must too.
+      [
+        rule.subject_contains,
+        rule.snippet_contains,
+        rule.from_domain,
+        rule.from_address,
+        ...(rule.subject_any || []),
+        ...(rule.snippet_any || []),
+      ].some((v) => v !== undefined && String(v).toLowerCase() === lowered),
   };
 }
 

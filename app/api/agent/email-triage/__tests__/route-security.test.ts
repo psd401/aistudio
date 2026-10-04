@@ -340,7 +340,6 @@ describe("email triage state-update allowlist", () => {
       "tasksNotifySuccess",
       "preferences",
       "suggestPeopleRules",
-      "contentPreferences",
     ]) {
       mockDdbSend.mockClear()
       const response = await POST(
@@ -358,6 +357,8 @@ describe("email triage state-update allowlist", () => {
       "labelIdsByKey",
       "labelMappingOwnerEmail",
       "userEmail",
+      // Learned by the nightly Lambda only; never skill-writable.
+      "contentPreferences",
     ]) {
       mockDdbSend.mockClear()
       const response = await POST(

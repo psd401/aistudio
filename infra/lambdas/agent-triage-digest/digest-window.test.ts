@@ -57,7 +57,10 @@ describe("digestWindowKeys", () => {
       "2026-01-01T15:00:00Z",
       "UTC",
     );
-    expect(keys.length).toBeLessThanOrEqual(MAX_DIGEST_WINDOW_DAYS);
+    // Clamped to the most recent 14 days — not collapsed to the 2-day
+    // first-run default, which would drop 12 days of real counters.
+    expect(keys.length).toBe(MAX_DIGEST_WINDOW_DAYS);
+    expect(keys[0]).toBe("2026-06-27");
     expect(keys[keys.length - 1]).toBe("2026-07-10");
   });
 

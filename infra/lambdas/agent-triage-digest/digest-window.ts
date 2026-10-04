@@ -70,8 +70,9 @@ function shiftDayKey(key: string, days: number): string {
  * looked".
  *
  * A long gap (the user was away, the schedule was paused) is clamped to
- * MAX_DIGEST_WINDOW_DAYS so one catch-up digest cannot claim a quarter's
- * worth of mail arrived overnight.
+ * the most recent MAX_DIGEST_WINDOW_DAYS so one catch-up digest cannot
+ * claim a quarter's worth of mail arrived overnight — but it still
+ * reports that full clamped window, not the 2-day first-run default.
  */
 export function digestWindowKeys(
   nowIso: string,
@@ -84,7 +85,9 @@ export function digestWindowKeys(
   const earliest = shiftDayKey(today, -(MAX_DIGEST_WINDOW_DAYS - 1));
   // Re-count the day of the last digest: a digest at 08:00 leaves the
   // rest of that day uncounted, and the alternative drops it entirely.
-  let cursor = lastKey && lastKey > earliest ? lastKey : shiftDayKey(today, -1);
+  let cursor: string;
+  if (!lastKey) cursor = shiftDayKey(today, -1);
+  else cursor = lastKey > earliest ? lastKey : earliest;
   if (cursor > today) cursor = today;
   const keys: string[] = [];
   while (cursor <= today && keys.length < MAX_DIGEST_WINDOW_DAYS) {

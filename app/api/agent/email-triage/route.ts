@@ -45,12 +45,14 @@ const SAFE_ID = /^[A-Za-z0-9_-]{1,256}$/
  * When adding a field the skill writes, add it here in the same change,
  * and keep the Gmail-label attributes (`labels`, `labelIdsByKey`,
  * `labelMapping*`) OUT: those are resolved only by the trusted
- * `ensure-labels` operation so a model cannot choose a label id.
+ * `ensure-labels` operation so a model cannot choose a label id. Keep
+ * `contentPreferences` out too: it is learned-signal state the nightly
+ * learn Lambda writes straight to DynamoDB, and a forged high-weight
+ * leaning would silently demote real approval requests.
  */
 const SAFE_STATE_FIELDS = new Set([
   "appliedSuggestions",
   "classifierStartHistoryId",
-  "contentPreferences",
   "digestEnabled",
   "digestScheduleArn",
   "digestTime",

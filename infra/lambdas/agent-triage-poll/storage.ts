@@ -308,8 +308,10 @@ export async function stampTrustedTriageLabelMapping(
  * arrays stay at most ~20 elements long.
  *
  * Calls UpdateItem twice when trimming is needed: once to append, once
- * to slice. The two-step is fine because the classifier Lambda is the
- * only writer for these fields — no one else races us.
+ * to slice. The per-day counters are folded into the FIRST write, with
+ * the cursor: if the Lambda dies before the trim, the buffers are merely
+ * over-long until the next tick, whereas a counter update left for the
+ * second write would be lost for good once the cursor had moved on.
  */
 export async function recordPollResult(
   userEmail: string,
@@ -325,6 +327,15 @@ export async function recordPollResult(
   // Append + cursor update in one call so the cursor moves only when
   // we successfully recorded what we did at this cursor.
   if (newDecisions.length > 0 || newCorrections.length > 0) {
+    // dailyStats is written only by this Lambda (one poll per user at a
+    // time), so a read-before-write merge does not race another writer.
+    const before = await getTriageRow(userEmail);
+    const dailyStats = accumulateDailyStats(
+      before?.dailyStats,
+      newDecisions,
+      newCorrections,
+      before?.digestTz,
+    );
     await ddb().send(
       new UpdateCommand({
         TableName: TABLE,
@@ -332,6 +343,7 @@ export async function recordPollResult(
         UpdateExpression: [
           "SET lastHistoryId = :h",
           "lastPollAt = :p",
+          "dailyStats = :s",
           newDecisions.length > 0
             ? "recentDecisions = list_append(if_not_exists(recentDecisions, :empty), :d)"
             : null,
@@ -344,17 +356,16 @@ export async function recordPollResult(
         ExpressionAttributeValues: {
           ":h": cursorUpdate.lastHistoryId,
           ":p": cursorUpdate.lastPollAt,
+          ":s": dailyStats,
           ":empty": [],
           ...(newDecisions.length > 0 ? { ":d": newDecisions } : {}),
           ...(newCorrections.length > 0 ? { ":c": newCorrections } : {}),
         },
       }),
     );
-    // Re-read, then trim the rolling buffers and fold this tick into the
-    // per-day counters in one write. Separate call because DynamoDB has no
-    // atomic "append then truncate to last N" primitive, and the counters
-    // need the stored map to merge into. Cost: one extra RU per
-    // poll-with-new-decisions. Fine at our scale.
+    // Re-read, then trim the rolling buffers. Separate call because
+    // DynamoDB has no atomic "append then truncate to last N" primitive.
+    // Cost: two extra reads per poll-with-new-decisions. Fine at our scale.
     const row = await getTriageRow(userEmail);
     if (row) {
       const trimmedDecisions = (row.recentDecisions ?? []).slice(-RECENT_MAX);
@@ -363,17 +374,10 @@ export async function recordPollResult(
         new UpdateCommand({
           TableName: TABLE,
           Key: { userEmail },
-          UpdateExpression:
-            "SET recentDecisions = :d, recentCorrections = :c, dailyStats = :s",
+          UpdateExpression: "SET recentDecisions = :d, recentCorrections = :c",
           ExpressionAttributeValues: {
             ":d": trimmedDecisions,
             ":c": trimmedCorrections,
-            ":s": accumulateDailyStats(
-              row.dailyStats,
-              newDecisions,
-              newCorrections,
-              row.digestTz,
-            ),
           },
         }),
       );
