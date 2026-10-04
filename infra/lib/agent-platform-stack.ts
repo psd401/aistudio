@@ -647,9 +647,26 @@ export class AgentPlatformStack extends cdk.Stack {
     //   digestTime           "HH:MM"
     //   digestTz             IANA tz
     //   digestScheduleArn    string  (EventBridge Scheduler entry, for delete)
-    //   recentDecisions      list<map> (rolling 20)
+    //   recentDecisions      list<map> (rolling 20 — SAMPLES, not counts)
     //   recentCorrections    list<map> (rolling 20)
-    //   learnedPatterns      list<map> (populated in Phase 2)
+    //   learnedPatterns      list<map> (sender hints, Phase 2)
+    //   pendingSuggestions   list<map> (user-approvable rule changes)
+    //   dismissedSuggestions list<string>
+    //   appliedSuggestions   list<string>
+    //   sweep                map<…>    (initial-inbox backfill progress)
+    //   tasksMode            "none" | "invoke-agent"
+    //   tasksNotifySuccess   bool
+    //   recentTaskCreations  list<map> (rolling 20)
+    //   taskGestureClaims    map<messageId, ISO ts>
+    //   contentPreferences   list<map> (#1855, content-shape leanings)
+    //   preferences          map<text, updatedAt> (#1855, user's own words)
+    //   suggestPeopleRules   bool      (#1855, opt out of people suggestions)
+    //   dailyStats           map<"YYYY-MM-DD", counters> (#1855)
+    //   lastDigestAt         ISO ts    (#1855, bounds the digest window)
+    //
+    // `dailyStats` exists because `recentDecisions` is capped at 20: the
+    // digest counted that buffer and so reported "20 messages sorted"
+    // every single day regardless of the real volume (#1855).
     //
     // PITR ON: rules are user-curated and learned patterns accumulate over
     // weeks — losing them on accidental table deletion would be a real

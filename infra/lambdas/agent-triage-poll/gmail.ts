@@ -7,6 +7,8 @@
  * Lambda cold start.
  */
 
+import type { MessageHeaders } from "./content-features";
+
 export interface HistoryEvent {
   id: string;
   messages?: { id: string; threadId: string }[];
@@ -186,8 +188,23 @@ export async function getMessageMetadata(
     // Only the headers we actually use.
     metadataHeaders: "From",
   });
-  params.append("metadataHeaders", "Subject");
-  params.append("metadataHeaders", "Date");
+  // Recipient role, thread position and the standards-defined automation
+  // markers. All of them feed content-features.ts (#1855) — without them
+  // the classifier can only see who sent the mail, which is the defect
+  // that issue reports.
+  for (const header of [
+    "Subject",
+    "Date",
+    "To",
+    "Cc",
+    "List-Unsubscribe",
+    "Auto-Submitted",
+    "Precedence",
+    "In-Reply-To",
+    "References",
+  ]) {
+    params.append("metadataHeaders", header);
+  }
   const resp = await gmailFetch(accessToken, `/messages/${messageId}?${params.toString()}`);
   if (resp.status === 404 || resp.status === 410) return null;
   if (!resp.ok) {
@@ -268,6 +285,30 @@ export function extractSubject(msg: MessageResponse): string {
   );
 }
 
+function header(msg: MessageResponse, name: string): string | undefined {
+  const lowered = name.toLowerCase();
+  return msg.payload?.headers?.find((h) => h.name.toLowerCase() === lowered)
+    ?.value;
+}
+
+/**
+ * Collect the headers the content classifier reasons over (#1855):
+ * recipient role (`To` / `Cc`), thread position (`In-Reply-To` /
+ * `References`) and the automation markers (`List-Unsubscribe`,
+ * `Auto-Submitted`, `Precedence`).
+ */
+export function extractContentHeaders(msg: MessageResponse): MessageHeaders {
+  return {
+    to: header(msg, "To"),
+    cc: header(msg, "Cc"),
+    listUnsubscribe: header(msg, "List-Unsubscribe"),
+    autoSubmitted: header(msg, "Auto-Submitted"),
+    precedence: header(msg, "Precedence"),
+    inReplyTo: header(msg, "In-Reply-To"),
+    references: header(msg, "References"),
+  };
+}
+
 /**
  * Add a label to a message (we never REMOVE labels — that's user
  * territory). `removeLabelIds: ["INBOX"]` auto-archives, used when the
@@ -278,7 +319,7 @@ export async function modifyMessage(
   messageId: string,
   addLabelIds: string[],
   removeLabelIds: string[] = [],
-): Promise<void> {
+): Promise<string | undefined> {
   const resp = await gmailFetch(accessToken, `/messages/${messageId}/modify`, {
     method: "POST",
     body: JSON.stringify({ addLabelIds, removeLabelIds }),
@@ -287,6 +328,14 @@ export async function modifyMessage(
     throw new Error(
       `Gmail messages.modify failed for ${messageId}: ${resp.status} ${await resp.text()}`,
     );
+  }
+  // The returned Message's historyId is the history record of THIS change,
+  // which lets the next poll tell our own INBOX removal from a user archive.
+  try {
+    const body = (await resp.json()) as { historyId?: unknown };
+    return typeof body.historyId === "string" ? body.historyId : undefined;
+  } catch {
+    return undefined;
   }
 }
 

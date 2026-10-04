@@ -97,11 +97,32 @@ For each opted-in user every 5 minutes:
    `untrusted_label_mapping`.
 3. **Pull Gmail history** since `lastHistoryId` (only `messageAdded`,
    `labelAdded`, `labelRemoved` events).
-4. For each new message: **deterministic rules first** (VIP → important,
-   mute → later, thread-with-user-reply → important, keyword rules in
-   order). If undecided, **call Bedrock Nova Micro** with a small system
-   prompt summarising the user's rules + sender/subject/snippet. Default
-   to `later` if model confidence < 0.6.
+4. For each new message, **three stages, cheapest first** (#1855):
+   1. **The user's own rules** (VIP → important, mute → later,
+      thread-with-user-reply → important, keyword rules in order). An
+      explicit instruction from the user always wins.
+   2. **The content stage** (`content-features.ts`), deterministic and
+      **independent of the sender's identity**. It decides from what the
+      message asks and who it is addressed to: an approval or signature
+      request → important (even from a machine, and even when the user
+      will act on it in another system); a reply in a thread the user has
+      written in → important; a direct question or action request with
+      the user in `To` → important; anything that asks nothing of a
+      recipient who is only copied, or an automated notice with no ask →
+      later. Source is recorded as `content`, confidence 0.9.
+   3. **Bedrock Nova Micro**, only for what is left. The prompt leads with
+      the content signals and the user's own stated preferences, and
+      labels the sender explicitly as a weak prior that must not flip a
+      decision the content has settled. Default to `later` below 0.6, and
+      an LLM `important` needs 0.75.
+   Then two guards run on the model's answer (`applyContentGuards`):
+   a content-shape leaning learned from this user's corrections can demote
+   an `important` that asks nothing, and a human sender is never filed as
+   `news`.
+
+   Why: before #1855 the only deterministic features were the sender's
+   address and domain, so the same AWS health notice scored `important`
+   0.9 from an internal relay and `later` 0.6 from `health@aws.com`.
 5. **Apply Gmail label** via `messages.modify`. **All three labels also
    remove `INBOX`** — the design treats labels as mutually-exclusive
    folders so the user reviews each in one place. Inbox empty = triage
@@ -352,6 +373,91 @@ EventBridge daily 09:00 ─ {job:"learn"} ─►  (lists users,   (group =   (po
 (queue/DLQ/worker/dispatcher/rules/alarm); `infra/agent-image/skills/psd-email-triage/`
 (`run.js`, `SKILL.md`); `app/(protected)/admin/agents/[userEmail]/triage/` +
 `actions/admin/agent-triage.actions.ts`.
+
+---
+
+## Phase 3 (#1855) — content classification, human protection, real counts
+
+### Decide on content, not on who sent it
+
+`content-features.ts` derives every signal from the message: whether the
+opening text asks a question, requests an action, requests an approval or
+names a deadline; whether the user is in `To`, only on `Cc`, or one of
+many; whether this is a reply inside a thread they have written in.
+`classifyByContent` turns those into a label without consulting the
+sender's identity, which is what makes two copies of the same message from
+two different addresses land on the same label.
+
+The one sender-derived signal is `isAutomatedSender` — a sender *class*,
+not an identity. It is read from `List-Unsubscribe`, `Auto-Submitted` and
+`Precedence` headers, from `noreply`/`no-reply`/`donotreply` local parts,
+and from PSD service-account naming (`serv_*`, `tsd-*`, `svc_*`). An
+address that cannot be proven automated counts as a person.
+
+`getMessageMetadata` now requests `To`, `Cc`, `List-Unsubscribe`,
+`Auto-Submitted`, `Precedence`, `In-Reply-To` and `References` in addition
+to `From`/`Subject`/`Date`. Still `format=metadata` — no body is pulled
+for the rule stage.
+
+### Mutes never target a person
+
+The nightly learner refuses to emit a `mute` suggestion whose target is
+not provably automated, and `suggestions apply` refuses to *write* one
+without `--confirm-human` (which also covers suggestions stored before
+this change). `prefs people-suggestions off` additionally silences VIP
+suggestions about individuals. Soft `learnedPatterns` are unaffected — a
+hint never drops mail.
+
+### Corrections change behaviour
+
+Decisions now record the message's `shape`, and corrections snapshot it.
+`computeContentPreferences` mines those into per-shape leanings, and
+`applyContentGuards` enforces them: two archives of an `important` that
+asked nothing demote the next message of that shape — **from any sender**.
+Previously corrections only produced a sender-keyed prompt hint, which is
+why 20 corrections on the reporting account changed nothing.
+
+A guard only ever demotes. Over-promotion was the reported failure, and a
+silent automatic promotion is the harder one to notice.
+
+### Digest counts are real
+
+`recentDecisions` is trimmed to 20, so a digest built from it reported
+"20 messages sorted in the last 24h" every day at any volume. The
+classifier now writes `dailyStats` — per-day counters keyed `YYYY-MM-DD`
+in the user's digest timezone, 45 days retained — and the digest totals
+the days since `lastDigestAt` (clamped to 14). `recentDecisions` still
+supplies the example rows shown in each section; the header counts come
+from the aggregates. Sweep slices deliberately do **not** count: a
+backfill of 1000 messages from the last 30 days is not today's mail.
+
+### Broker allowlist
+
+`app/api/agent/email-triage/route.ts` gates `update-state` with
+`SAFE_STATE_FIELDS`. `pendingSuggestions`, `dismissedSuggestions`,
+`appliedSuggestions`, `tasksMode` and `tasksNotifySuccess` were missing,
+so `suggestions dismiss` and `tasks mode` returned HTTP 400 for every
+input. **When the skill starts writing a new attribute, add it there in
+the same change** — the failure is silent from the Lambda's side and
+surfaces to the user only as "Invalid triage state update".
+
+### Phase 3 files
+
+`infra/lambdas/agent-triage-poll/` — `content-features.ts`,
+`daily-stats.ts` (+ `llm.ts`, `learning.ts`, `rules.ts`, `storage.ts`,
+`gmail.ts`, `types.ts`, `index.ts` extended);
+`infra/lambdas/agent-triage-digest/` — `digest-window.ts` (+ `index.ts`);
+`app/api/agent/email-triage/route.ts`;
+`infra/agent-image/skills/psd-email-triage/` (`run.js`, `lib.js`,
+`SKILL.md`).
+
+Tests: `content-features.test.ts`, `content-learning.test.ts`,
+`daily-stats.test.ts`, `digest-window.test.ts`, `run.test.js`, plus
+additions to `rules.test.ts`, `learning.test.ts` and
+`route-security.test.ts`. The skill CLI and both Lambdas' Bun suites were
+previously collected by no runner at all; they are wired into `ci.yml` as
+`test:skill:email-triage`, `test:lambda:triage-poll` and
+`test:lambda:triage-digest`.
 
 ---
 

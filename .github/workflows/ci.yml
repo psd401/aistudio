@@ -270,6 +270,29 @@ jobs:
       env:
         CI: true
 
+    # psd-email-triage (#1855). This CJS CLI sits outside Jest's roots, so
+    # until now nothing ran it — which is how `rules remove` could report
+    # "Removed keyword" while removing nothing. The suite pins the
+    # valueless-flag rejection, rule-id/index/malformed removal, the
+    # not-found contract, and the human-mute confirmation.
+    - name: Run psd-email-triage skill tests (Bun)
+      run: bun run test:skill:email-triage
+      env:
+        CI: true
+
+    # agent-triage-poll + agent-triage-digest (#1855). Both Lambdas' Bun
+    # suites were outside every runner: the root Jest config only collects
+    # `agent-triage-poll/__tests__/`, and infra's `lambdas` project matches
+    # the same path, so the co-located `*.test.ts` files ran nowhere. They
+    # hold the content-classification, learning and digest-counter proofs.
+    - name: Run email-triage Lambda tests (Bun)
+      run: |
+        set -euo pipefail
+        bun run test:lambda:triage-poll
+        bun run test:lambda:triage-digest
+      env:
+        CI: true
+
     # Direct-AWS credential boundary (#1442). OpenClaw strips inherited AWS
     # credentials from model-launched exec subprocesses; these tests prove TTS
     # and HyperFrames use only the root-owned fixed-operation relay and that the

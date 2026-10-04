@@ -12,7 +12,9 @@
  *
  * Rules engine is a port of infra/lambdas/agent-triage-poll/rules.ts —
  * keep behaviour-equivalent so the skill's `simulate` subcommand matches
- * what the classifier Lambda would actually do.
+ * what the classifier Lambda would actually do. parity.test.js runs both
+ * copies (and the content-features.ts port below) over a shared corpus
+ * and fails CI on any divergence.
  */
 
 'use strict';
@@ -269,24 +271,89 @@ function wildcardMatch(pattern, value) {
   return true;
 }
 
+/** Non-empty string, or null. A boolean `true` is NOT a criterion. */
+function criterionText(value) {
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
+function criterionList(value) {
+  return Array.isArray(value) ? value.filter((entry) => criterionText(entry)) : [];
+}
+
+/**
+ * A rule is well-formed when at least one positive criterion carries real
+ * text. `rules add-keyword x --from` used to store `from_domain: true`,
+ * which matches nothing and cannot be addressed by value — #1855 item 1.
+ */
+function isWellFormedKeywordRule(rule) {
+  if (!rule || typeof rule !== 'object') return false;
+  const hasText = ['subject_contains', 'snippet_contains', 'from_domain', 'from_address'].some(
+    (key) => criterionText(rule[key]),
+  );
+  const hasList = ['subject_any', 'snippet_any'].some(
+    (key) => criterionList(rule[key]).length > 0,
+  );
+  const labelIsValid = ['important', 'later', 'news'].includes(rule.label);
+  return labelIsValid && (hasText || hasList);
+}
+
+/** Human-readable summary of what a rule matches on. */
+function describeKeywordRule(rule) {
+  const parts = [];
+  if (!rule || typeof rule !== 'object') return 'malformed';
+  const fromAddress = criterionText(rule.from_address);
+  const fromDomain = criterionText(rule.from_domain);
+  const subject = criterionText(rule.subject_contains);
+  const snippet = criterionText(rule.snippet_contains);
+  const subjectAny = criterionList(rule.subject_any);
+  const snippetAny = criterionList(rule.snippet_any);
+  if (fromAddress) parts.push(`from=${fromAddress}`);
+  if (fromDomain) parts.push(`from_domain=${fromDomain}`);
+  if (subject) parts.push(`subject~"${subject}"`);
+  if (subjectAny.length > 0) parts.push(`subject~any(${subjectAny.join('|')})`);
+  if (snippet) parts.push(`snippet~"${snippet}"`);
+  if (snippetAny.length > 0) parts.push(`snippet~any(${snippetAny.join('|')})`);
+  if (rule.external) parts.push('external');
+  return parts.length > 0 ? parts.join(' + ') : 'malformed';
+}
+
+function senderCriteriaMatch(rule, features) {
+  const fromDomain = criterionText(rule.from_domain);
+  if (fromDomain && features.fromDomain !== fromDomain.toLowerCase()) return false;
+  const fromAddress = criterionText(rule.from_address);
+  return !fromAddress || features.fromEmail === fromAddress.toLowerCase();
+}
+
+function textCriteriaMatch(rule, features) {
+  const subject = criterionText(rule.subject_contains);
+  if (subject && !features.subjectLower.includes(subject.toLowerCase())) return false;
+  const snippet = criterionText(rule.snippet_contains);
+  return !snippet || features.snippetLower.includes(snippet.toLowerCase());
+}
+
+function listCriteriaMatch(rule, features) {
+  const subjectAny = criterionList(rule.subject_any);
+  if (
+    subjectAny.length > 0 &&
+    !subjectAny.some((kw) => features.subjectLower.includes(kw.toLowerCase()))
+  ) {
+    return false;
+  }
+  const snippetAny = criterionList(rule.snippet_any);
+  return (
+    snippetAny.length === 0 ||
+    snippetAny.some((kw) => features.snippetLower.includes(kw.toLowerCase()))
+  );
+}
+
 function matchesKeywordRule(rule, features) {
+  if (!isWellFormedKeywordRule(rule)) return false;
   if (rule.external && features.isInternal) return false;
-  if (rule.from_domain && features.fromDomain !== String(rule.from_domain).toLowerCase()) {
-    return false;
-  }
-  if (
-    rule.subject_contains &&
-    !features.subjectLower.includes(String(rule.subject_contains).toLowerCase())
-  ) {
-    return false;
-  }
-  if (
-    rule.snippet_contains &&
-    !features.snippetLower.includes(String(rule.snippet_contains).toLowerCase())
-  ) {
-    return false;
-  }
-  return Boolean(rule.from_domain || rule.subject_contains || rule.snippet_contains);
+  return (
+    senderCriteriaMatch(rule, features) &&
+    textCriteriaMatch(rule, features) &&
+    listCriteriaMatch(rule, features)
+  );
 }
 
 function applyRules(features, rules) {
@@ -306,17 +373,168 @@ function applyRules(features, rules) {
   }
   for (const rule of rules.keywordRules || []) {
     if (matchesKeywordRule(rule, features)) {
-      const desc = rule.subject_contains
-        ? `subject~"${rule.subject_contains}"`
-        : rule.snippet_contains
-          ? `snippet~"${rule.snippet_contains}"`
-          : rule.from_domain
-            ? `from_domain=${rule.from_domain}`
-            : 'rule';
-      return { label: rule.label, reason: `keyword:${desc}`, source: 'rule' };
+      return {
+        label: rule.label,
+        reason: `keyword:${describeKeywordRule(rule)}`,
+        source: 'rule',
+      };
     }
   }
   return { decided: false, reason: 'no-rule-match' };
+}
+
+// =====================================================================
+// Content signals — JS port of
+// infra/lambdas/agent-triage-poll/content-features.ts. Used by the
+// `simulate` subcommand and by the human-sender check on `suggestions
+// apply`. Keep behaviour-equivalent with the TypeScript original; that
+// file carries the reasoning behind each pattern.
+// =====================================================================
+
+const OPENING_TEXT_CHARS = 400;
+const BROADCAST_RECIPIENT_COUNT = 8;
+
+const ACTION_RE =
+  /\b(can you|could you|would you|will you|are you able|please (?:review|send|confirm|respond|reply|complete|fill|sign|update|look|advise|provide|share|let)|need (?:you|your)|needs your|let me know|your (?:thoughts|input|feedback|take)|action (?:required|needed)|requires? your|waiting on you|over to you|follow up with)\b/i;
+const APPROVAL_RE =
+  /\b(approve|authorize|authorise|sign[- ]?off on|please sign|pending your|awaiting your|ready for (?:your )?(?:review|signature)|(?:your|submitted for|sent for|routed for) (?:approval|authori[sz]ation|sign[- ]?off)|(?:needs?|requires?|requesting|request for|awaiting|pending) (?:your )?(?:approval|authori[sz]ation|sign[- ]?off|signature)|(?:approval|authori[sz]ation|sign[- ]?off|signature) (?:needed|required|requested))\b/i;
+const DEADLINE_RE =
+  /\b(by (?:eod|cob|end of day|close of business|tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}\/\d{1,2})|due (?:by|on|date)|deadline|no later than|before the (?:end|close) of|asap|as soon as possible|expires? (?:on|in)|last chance to (?:respond|reply|submit))\b/i;
+// Removed before the ask patterns run: "no action required" contains
+// "action required" and would otherwise read as a request.
+const NEGATED_ASK_RE =
+  /\bno (?:action|response|reply|rsvp|approval|authori[sz]ation|sign[- ]?off|signature) (?:is )?(?:needed|required|necessary)\b|\bnothing (?:is )?(?:needed|required)(?: from you)?\b|\bno need to (?:reply|respond|act|approve|sign)\b|\b(?:does not|doesn't|do not|don't|no longer) (?:need|require)s? (?:your )?(?:approval|authori[sz]ation|sign[- ]?off|signature)\b/gi;
+const INFORMATIONAL_RE =
+  /\b(fyi|for your (?:information|awareness|records|reference)|just (?:a )?(?:heads[- ]up|so you know)|no action (?:is )?(?:needed|required|necessary)|nothing (?:is )?(?:needed|required) from you|status (?:report|update)|(?:daily|weekly|monthly|quarterly) (?:report|digest|summary|roundup|recap)|newsletter|read[- ]only|informational(?:ly)? )\b/i;
+
+const AUTOMATED_LOCALPARTS = new Set([
+  'admin',
+  'alert',
+  'alerts',
+  'auto',
+  'automated',
+  'bounce',
+  'bounces',
+  'daemon',
+  'mailer',
+  'mailer-daemon',
+  'noreply',
+  'notification',
+  'notifications',
+  'postmaster',
+  'robot',
+  'system',
+]);
+const AUTOMATED_LOCALPART_FRAGMENTS = [
+  'noreply',
+  'no-reply',
+  'no_reply',
+  'no.reply',
+  'donotreply',
+  'do-not-reply',
+  'do_not_reply',
+  'mailer-daemon',
+];
+const AUTOMATED_LOCALPART_PREFIXES = ['serv_', 'svc_', 'svc-', 'tsd-', 'noreply'];
+
+function parseAddressList(headerValue) {
+  if (!headerValue) return [];
+  const matches = String(headerValue).match(
+    /[\w!#$%&'*+/=?^`{|}~.-]+@[\w.-]+\.[A-Za-z]{2,}/g,
+  );
+  return matches ? matches.map((address) => address.toLowerCase()) : [];
+}
+
+function isAutomatedSender(fromEmail, headers = {}) {
+  if (headers.listUnsubscribe && String(headers.listUnsubscribe).trim()) return true;
+  const autoSubmitted = String(headers.autoSubmitted || '').trim().toLowerCase();
+  if (autoSubmitted && autoSubmitted !== 'no') return true;
+  const precedence = String(headers.precedence || '').trim().toLowerCase();
+  if (['bulk', 'list', 'junk', 'auto_reply'].includes(precedence)) return true;
+
+  const localPart = String(fromEmail || '').split('@')[0].toLowerCase().split('+')[0];
+  if (!localPart) return false;
+  if (AUTOMATED_LOCALPARTS.has(localPart)) return true;
+  if (AUTOMATED_LOCALPART_FRAGMENTS.some((f) => localPart.includes(f))) return true;
+  return AUTOMATED_LOCALPART_PREFIXES.some((p) => localPart.startsWith(p));
+}
+
+function deriveShape(signals) {
+  if (signals.approvalRequest) return 'approval';
+  if (signals.liveThread) return 'live-thread';
+  if (signals.directQuestion || signals.actionRequest) return 'direct-ask';
+  if (signals.automatedSender) return 'notification';
+  if (signals.informational || signals.ccOnly || signals.broadcast) return 'fyi';
+  return 'unknown';
+}
+
+function detectContentSignals(input) {
+  const subject = input.subject || '';
+  const headers = input.headers || {};
+  const opening = `${subject}\n${input.body || ''}`.slice(
+    0,
+    OPENING_TEXT_CHARS + subject.length,
+  );
+  const userEmail = String(input.userEmail || '').toLowerCase();
+  const toAddresses = parseAddressList(headers.to);
+  const ccAddresses = parseAddressList(headers.cc);
+  const addressedToUser = toAddresses.includes(userEmail);
+  const askText = opening.replace(NEGATED_ASK_RE, ' ');
+  const base = {
+    directQuestion: askText.includes('?'),
+    actionRequest: ACTION_RE.test(askText),
+    approvalRequest: APPROVAL_RE.test(askText),
+    deadline: DEADLINE_RE.test(askText),
+    addressedToUser,
+    ccOnly: !addressedToUser && ccAddresses.includes(userEmail),
+    broadcast:
+      Boolean(headers.listUnsubscribe) ||
+      toAddresses.length + ccAddresses.length >= BROADCAST_RECIPIENT_COUNT,
+    liveThread:
+      Boolean(input.hasUserReply) &&
+      Boolean(headers.inReplyTo || headers.references || /^\s*re\s*:/i.test(subject)),
+    informational: INFORMATIONAL_RE.test(opening),
+    automatedSender: isAutomatedSender(input.fromEmail, headers),
+  };
+  return { ...base, shape: deriveShape(base) };
+}
+
+function hasAsk(signals) {
+  return Boolean(
+    signals.directQuestion ||
+      signals.actionRequest ||
+      signals.approvalRequest ||
+      signals.deadline,
+  );
+}
+
+function classifyByContent(signals) {
+  if (signals.approvalRequest) {
+    return { label: 'important', reason: 'content:approval-or-signature-requested' };
+  }
+  if (signals.liveThread) {
+    return { label: 'important', reason: 'content:reply-in-a-thread-you-are-in' };
+  }
+  if (signals.addressedToUser && (signals.directQuestion || signals.actionRequest)) {
+    return {
+      label: 'important',
+      reason: signals.directQuestion
+        ? 'content:direct-question-addressed-to-you'
+        : 'content:action-requested-of-you',
+    };
+  }
+  if (!hasAsk(signals)) {
+    if (signals.automatedSender) {
+      return { label: 'later', reason: 'content:automated-notice-no-ask' };
+    }
+    if (signals.informational) {
+      return { label: 'later', reason: 'content:fyi-nothing-asked-of-you' };
+    }
+    if (signals.ccOnly || signals.broadcast) {
+      return { label: 'later', reason: 'content:you-are-not-the-recipient' };
+    }
+  }
+  return null;
 }
 
 module.exports = {
@@ -344,4 +562,13 @@ module.exports = {
   deleteDigestSchedule,
   // rules
   applyRules,
+  describeKeywordRule,
+  isWellFormedKeywordRule,
+  wildcardMatch,
+  // content signals
+  classifyByContent,
+  detectContentSignals,
+  hasAsk,
+  isAutomatedSender,
+  parseAddressList,
 };

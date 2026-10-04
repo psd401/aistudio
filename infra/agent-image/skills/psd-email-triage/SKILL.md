@@ -21,6 +21,7 @@ Smart email triage controlled entirely through chat. The user says things like "
 - User says "only ping me when you're sure" / "stop pinging me for everything" / "quiet down the notifications" → `escalation mode <high-confidence|rules-only|none>` (+ `escalation threshold`)
 - User says "triage my existing inbox" / "sweep my backlog" / "catch up on my old mail" → `sweep`
 - User says "show me your suggestions" / "apply that" / "yes do the first one" / "ignore that suggestion" → `suggestions list|apply <id>|dismiss <id>`
+- User describes how they want mail judged ("I only care if someone's asking me something", "status reports can wait") → `prefs set "<their words>"`. Do NOT translate a preference into a per-sender rule.
 
 Don't call this skill for:
 - Generic Gmail operations (use `psd-workspace` / `gws-*`)
@@ -48,11 +49,12 @@ node /opt/psd-skills/psd-email-triage/run.js <subcommand> --user <email> [args]
 
 | Subcommand | Effect |
 |------------|--------|
-| `rules list` | Show all configured rules grouped by type. |
+| `rules list` | Show all rules. Keyword rules show their `id`, their `#index`, what they match on, and whether they are malformed. |
 | `rules add-vip <email>` | Always classify as Important. Beats every other rule. |
-| `rules mute <pattern>` | Auto-archive sender. Supports `*` wildcards (e.g. `noreply@*`, `*.vendor.com`). |
-| `rules add-keyword <kw> --label <important\|later\|news> [--subject\|--snippet\|--from <domain>\|--external]` | Add a keyword rule. Defaults to subject-match. |
-| `rules remove <type> <value>` | Remove a rule. `type` is `vip`, `mute`, or `keyword`. |
+| `rules mute <pattern>` | Auto-archive sender. Supports `*` wildcards (e.g. `noreply@*`, `*.vendor.com`). **Mute only automated senders** — muting a person silently drops their mail. |
+| `rules add-keyword <kw> --label <important\|later\|news> [selectors]` | Add a keyword rule with a stable id. Selectors: `--subject` / `--snippet` (where the keyword applies), `--from <domain>`, `--from-address <email>`, `--subject-any a,b,c`, `--snippet-any a,b,c`, `--external`. All selectors are ANDed, so one rule can say "from this person AND this subject"; values inside `--*-any` are ORed. With `--subject-any` / `--snippet-any`, the positional `<kw>` is ignored unless `--subject` or `--snippet` is also given. A flag given without a value is **rejected** rather than stored. |
+| `rules remove <type> <value>` | Remove a rule. `type` is `vip`, `mute`, or `keyword`. A keyword rule may be addressed by its `id`, by `#index` (or `--index <n>`) from `rules list`, or by any value it matches on (case-insensitive; a value shared by several rules removes all of them, so prefer the `id`). Removing nothing returns `not-found` — it never claims success. |
+| `rules remove keyword --malformed` | Delete every keyword rule that can never match (e.g. legacy rules stored by `--from` with no value). |
 
 ### Escalation (Chat pings)
 
@@ -84,21 +86,41 @@ suggestions also arrive as a Chat card.
 | Subcommand | Effect |
 |------------|--------|
 | `suggestions list` | Show pending rule suggestions (each has an `id`, `kind` = `mute`/`vip`, `target`, and `reason`). |
-| `suggestions apply <id>` | Approve a suggestion — writes the real rule (`vip` → VIP sender, `mute` → mute pattern) and clears it from pending. |
+| `suggestions apply <id> [--confirm-human]` | Approve a suggestion — writes the real rule (`vip` → VIP sender, `mute` → mute pattern) and clears it from pending. A `mute` whose target looks like a **person** is refused unless `--confirm-human` is passed. |
 | `suggestions dismiss <id>` | Reject a suggestion — cleared from pending and **never raised again**. |
+
+**The learner never proposes muting a person.** Mute suggestions are limited
+to automated senders, detected from `noreply`/`no-reply` local parts,
+service-account naming (`serv_*`, `tsd-*`), and the `List-Unsubscribe`,
+`Auto-Submitted` and `Precedence` headers. An address that cannot be proven
+automated counts as a person. Archiving an email after reading it is not a
+request to stop receiving that person's mail.
+
+### Preferences
+
+The classifier reads the user's own words on every message, and they outrank
+the built-in heuristics when they disagree. Nothing in the code is specific to
+any one person.
+
+| Subcommand | Effect |
+|------------|--------|
+| `prefs show` | The stated profile plus what has been learned from this user's corrections, in plain language. |
+| `prefs set "<text>"` | Store the profile (e.g. "FYI forwards from X are Later unless they ask me something"). Max 2000 characters. |
+| `prefs clear` | Clear the stated profile. Learned patterns are untouched. |
+| `prefs people-suggestions on\|off` | Whether suggestions may name an individual person. Mute suggestions for people stay blocked either way. |
 
 ### Simulation
 
 | Subcommand | Effect |
 |------------|--------|
-| `simulate --from <email> [--subject "..."] [--snippet "..."] [--external] [--has-user-reply]` | Dry-run the rule engine against a synthetic email. Useful for "would my mute rule catch this?" without waiting for real mail. |
+| `simulate --from <email> [--subject "..."] [--snippet "..."] [--to "..."] [--cc "..."] [--external] [--has-user-reply]` | Dry-run both deterministic stages — the user's rules, then the content stage — against a synthetic email. Reports which stage decided (`rules`, `content`, or `llm` for "the model would decide"), the content signals it derived, and the reason. |
 
 ### Labels
 
 | Subcommand | Effect |
 |------------|--------|
 | `labels list` | Show current label names + Gmail label IDs. |
-| `labels rename <key> <new-name>` | Rename one of `important` / `later` / `news` (renames the Gmail label too). |
+| `labels rename <key> <new-name>` | **Refused** (`fixed-labels`). Label names are fixed so scheduled classification can verify them; tell the user they cannot be renamed. |
 
 ### Digest
 

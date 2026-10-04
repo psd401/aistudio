@@ -32,13 +32,33 @@ const ddb = DynamoDBDocumentClient.from(
   { marshallOptions: { removeUndefinedValues: true } }
 ) as unknown as EmailTriageDynamoClient
 const SAFE_ID = /^[A-Za-z0-9_-]{1,256}$/
+/**
+ * Attributes the owner-bound skill may write.
+ *
+ * This is a denial boundary, not documentation: anything missing here is
+ * rejected with HTTP 400 and the skill surfaces "Invalid triage state
+ * update". That is what broke `suggestions dismiss` and `tasks mode` for
+ * every id (#1855 item 2) — the skill wrote `pendingSuggestions` /
+ * `tasksMode`, which were never allowlisted, so the user could not clear
+ * a single one of their 75 pending suggestions.
+ *
+ * When adding a field the skill writes, add it here in the same change,
+ * and keep the Gmail-label attributes (`labels`, `labelIdsByKey`,
+ * `labelMapping*`) OUT: those are resolved only by the trusted
+ * `ensure-labels` operation so a model cannot choose a label id. Keep
+ * `contentPreferences` out too: it is learned-signal state the nightly
+ * learn Lambda writes straight to DynamoDB, and a forged high-weight
+ * leaning would silently demote real approval requests.
+ */
 const SAFE_STATE_FIELDS = new Set([
+  "appliedSuggestions",
   "classifierStartHistoryId",
   "digestEnabled",
   "digestScheduleArn",
   "digestTime",
   "digestTz",
   "disabledAt",
+  "dismissedSuggestions",
   "enabled",
   "enabledAt",
   "escalation",
@@ -48,11 +68,43 @@ const SAFE_STATE_FIELDS = new Set([
   "lastHistoryId",
   "lastPollAt",
   "learnedPatterns",
+  "pendingSuggestions",
+  "preferences",
   "recentCorrections",
   "recentDecisions",
   "rules",
+  "suggestPeopleRules",
   "sweep",
+  "tasksMode",
+  "tasksNotifySuccess",
 ])
+
+/** Mirrors the skill's `prefs set` cap; enforced here so a raw broker call can't skip it. */
+const PREFERENCES_MAX_CHARS = 2000
+/**
+ * DynamoDB rejects items over 400 KB, and once a row is over, every later
+ * write to it fails — including the classifier's own. Refuse an update that
+ * would push the row past this, leaving headroom for the Lambdas' writes.
+ */
+const MAX_TRIAGE_ROW_BYTES = 350_000
+
+function invalidPreferences(value: unknown): string | null {
+  const prefs = objectBody(value)
+  if (!prefs || typeof prefs.text !== "string") {
+    return "preferences must be an object with a text string"
+  }
+  if (prefs.text.length > PREFERENCES_MAX_CHARS) {
+    return `preferences.text is capped at ${PREFERENCES_MAX_CHARS} characters (got ${prefs.text.length})`
+  }
+  if (prefs.updatedAt !== undefined && typeof prefs.updatedAt !== "string") {
+    return "preferences.updatedAt must be a string"
+  }
+  return null
+}
+
+function badStateUpdate(error: string, status = 400): OperationDispatch<NextResponse> {
+  return { handled: true, value: NextResponse.json({ error }, { status }) }
+}
 
 function tableName(): string {
   return (
@@ -240,6 +292,25 @@ async function executeStateOperation(
           { status: 400 }
         ),
       }
+    }
+    if ("preferences" in attrs) {
+      const error = invalidPreferences(attrs.preferences)
+      if (error) return badStateUpdate(error)
+    }
+    const current = await ddb.send(
+      new GetCommand({
+        TableName: tableName(),
+        Key: { userEmail: context.ownerEmail },
+      })
+    )
+    const projectedBytes = Buffer.byteLength(
+      JSON.stringify({ ...(current.Item ?? {}), ...attrs })
+    )
+    if (projectedBytes > MAX_TRIAGE_ROW_BYTES) {
+      return badStateUpdate(
+        `Triage state update would grow the row to ${projectedBytes} bytes (limit ${MAX_TRIAGE_ROW_BYTES})`,
+        413
+      )
     }
     const names: Record<string, string> = {}
     const values: Record<string, unknown> = {}

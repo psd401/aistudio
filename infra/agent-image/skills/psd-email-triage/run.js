@@ -46,9 +46,22 @@ function emit(payload) {
   process.stdout.write(JSON.stringify(payload) + "\n");
 }
 
+/**
+ * A refusal with a machine-readable code. Thrown rather than exiting so
+ * the control flow is testable and so a caller that wraps a subcommand
+ * still unwinds cleanly; `main` turns it into the documented JSON line.
+ */
+class BailError extends Error {
+  constructor(code, message, subcommand) {
+    super(message);
+    this.name = "BailError";
+    this.code = code;
+    this.subcommand = subcommand;
+  }
+}
+
 function bail(code, message, subcommand) {
-  emit({ ok: false, subcommand, error: message, code });
-  process.exit(1);
+  throw new BailError(code, message, subcommand);
 }
 
 function requireUser(args, subcmd) {
@@ -67,6 +80,52 @@ function requirePositional(args, n, subcmd) {
     bail("missing-args", `Expected ${n} positional argument(s)`, subcmd);
   }
   return args._positional;
+}
+
+/**
+ * Read a flag that must carry a value.
+ *
+ * `parseArgs` stores a bare `--foo` as the boolean `true`, which is right
+ * for switches like `--external` and wrong for everything else. Before
+ * #1855 `rules add-keyword x --from` persisted `from_domain: true`; the
+ * rule then matched nothing, and `rules remove keyword <value>` compared
+ * strings so it could never delete it — while still reporting "Removed
+ * keyword". Rejecting the valueless flag at the door is the fix.
+ */
+function flagValue(args, name, subcmd) {
+  const raw = args[name];
+  if (raw === undefined) return undefined;
+  if (raw === true || String(raw).trim() === "") {
+    bail(
+      "missing-value",
+      `--${name} requires a value (e.g. --${name} <value>)`,
+      subcmd,
+    );
+  }
+  return String(raw).trim();
+}
+
+/** Split a comma-separated flag into trimmed, non-empty parts. */
+function flagList(args, name, subcmd) {
+  const raw = flagValue(args, name, subcmd);
+  if (raw === undefined) return undefined;
+  const parts = raw
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length === 0) {
+    bail("missing-value", `--${name} needs at least one value`, subcmd);
+  }
+  return parts;
+}
+
+/**
+ * Stable per-rule id (#1855 item 1). Rules created before this change
+ * have none, which is why removal also accepts a list index.
+ */
+function newRuleId() {
+  const random = Math.random().toString(36).slice(2, 8);
+  return `kw-${Date.now().toString(36)}${random}`;
 }
 
 // Escalation modes recognised by the classifier Lambda (rules.ts). Keep in
@@ -379,11 +438,32 @@ async function requireEnabledRow(user, subcommand) {
 async function rulesList(args) {
   const user = requireUser(args, "rules list");
   const row = await requireEnabledRow(user, "rules list");
+  const keywordRules = (row.rules?.keywordRules || []).map((rule, index) => ({
+    index,
+    id: rule.id || null,
+    label: rule.label,
+    matches: lib.describeKeywordRule(rule),
+    wellFormed: lib.isWellFormedKeywordRule(rule),
+    rule,
+  }));
+  const malformed = keywordRules.filter((entry) => !entry.wellFormed).length;
   emit({
     ok: true,
     subcommand: "rules list",
-    summary: "Current rules",
-    data: { rules: row.rules },
+    summary:
+      `${(row.rules?.vipSenders || []).length} VIP · ` +
+      `${(row.rules?.muteSenders || []).length} muted · ` +
+      `${keywordRules.length} keyword rule(s)` +
+      (malformed > 0
+        ? ` · ${malformed} malformed (remove with 'rules remove keyword --malformed')`
+        : ""),
+    data: {
+      rules: row.rules,
+      keywordRules,
+      malformedCount: malformed,
+      removeHint:
+        "Remove a keyword rule by id, by #index as shown above, or by a value it matches on.",
+    },
   });
 }
 
@@ -417,10 +497,45 @@ async function rulesMute(args) {
   });
 }
 
+/**
+ * Build a keyword rule from the flags.
+ *
+ * Every criterion is ANDed, so one rule can say "from this person AND
+ * this subject" — the combination #1855 item 5 asks for. The positional
+ * keyword fills whichever text field the selector flags name, defaulting
+ * to the subject as before.
+ */
+function keywordRuleFromArgs(args, keyword, label) {
+  const subcmd = "rules add-keyword";
+  const rule = { id: newRuleId(), label };
+  const fromDomain = flagValue(args, "from", subcmd);
+  const fromAddress = flagValue(args, "from-address", subcmd);
+  const subjectAny = flagList(args, "subject-any", subcmd);
+  const snippetAny = flagList(args, "snippet-any", subcmd);
+
+  if (fromDomain) rule.from_domain = fromDomain.toLowerCase();
+  if (fromAddress) rule.from_address = fromAddress.toLowerCase();
+  if (subjectAny) rule.subject_any = subjectAny;
+  if (snippetAny) rule.snippet_any = snippetAny;
+
+  // The positional keyword goes where the selector flags point, and
+  // defaults to the subject (the pre-#1855 behaviour). When the rule
+  // already matches text through --subject-any / --snippet-any, the
+  // positional is NOT stored unless --subject / --snippet asks for it:
+  // ANDing a placeholder keyword onto the list would make the rule
+  // unmatchable.
+  if (args.snippet === true) rule.snippet_contains = keyword;
+  else if (args.subject === true) rule.subject_contains = keyword;
+  else if (!subjectAny && !snippetAny) rule.subject_contains = keyword;
+
+  if (args.external === true) rule.external = true;
+  return rule;
+}
+
 async function rulesAddKeyword(args) {
   const user = requireUser(args, "rules add-keyword");
   const [, keyword] = requirePositional(args, 2, "rules add-keyword");
-  const label = args.label || "later";
+  const label = flagValue(args, "label", "rules add-keyword") || "later";
   if (!["important", "later", "news"].includes(label)) {
     bail(
       "bad-label",
@@ -429,11 +544,15 @@ async function rulesAddKeyword(args) {
     );
   }
   const row = await requireEnabledRow(user, "rules add-keyword");
-  const rule = { label };
-  if (args.snippet) rule.snippet_contains = keyword;
-  else if (args.from) rule.from_domain = args.from;
-  else rule.subject_contains = keyword;
-  if (args.external === true) rule.external = true;
+  const rule = keywordRuleFromArgs(args, keyword, label);
+  if (!lib.isWellFormedKeywordRule(rule)) {
+    bail(
+      "empty-rule",
+      "That rule has nothing to match on. Give a keyword, or one of " +
+        "--from <domain> / --from-address <email> / --subject-any a,b.",
+      "rules add-keyword",
+    );
+  }
   const keywordRules = [...(row.rules.keywordRules || []), rule];
   await lib.updateRow(user, {
     rules: { ...row.rules, keywordRules },
@@ -441,39 +560,127 @@ async function rulesAddKeyword(args) {
   emit({
     ok: true,
     subcommand: "rules add-keyword",
-    summary: `Keyword rule added: "${keyword}" → ${label}`,
+    summary:
+      `Keyword rule ${rule.id} added: ${lib.describeKeywordRule(rule)} → ${label}`,
     data: { rule },
   });
 }
 
+/**
+ * Every way a keyword rule can be addressed.
+ *
+ * Matching on values alone was the #1855 item 1 defect: a rule whose
+ * `from_domain` was the boolean `true` matched no string, so it could
+ * never be deleted through the CLI and had to be removed by writing the
+ * row directly. Id and index are addressable whatever the rule contains,
+ * and `--malformed` sweeps out entries that can never match anything.
+ */
+function keywordRuleSelector(args, value) {
+  if (args.malformed === true) {
+    return {
+      describe: "malformed rules",
+      matches: (rule) => !lib.isWellFormedKeywordRule(rule),
+    };
+  }
+  const byIndexFlag = args.index !== undefined
+    ? Number(flagValue(args, "index", "rules remove"))
+    : undefined;
+  const indexToken = /^#\d+$/.test(String(value ?? ""))
+    ? Number(String(value).slice(1))
+    : undefined;
+  const index = byIndexFlag ?? indexToken;
+  if (index !== undefined) {
+    if (!Number.isInteger(index) || index < 0) {
+      bail(
+        "bad-index",
+        `Index must be a non-negative integer (got "${value ?? args.index}")`,
+        "rules remove",
+      );
+    }
+    return {
+      describe: `rule #${index}`,
+      matches: (_rule, position) => position === index,
+    };
+  }
+  if (value === undefined) {
+    bail(
+      "missing-args",
+      "Give a rule id, a #index, a value to match, or --malformed",
+      "rules remove",
+    );
+  }
+  const needle = String(value);
+  const lowered = needle.toLowerCase();
+  return {
+    describe: `"${needle}"`,
+    matches: (rule) =>
+      rule.id === needle ||
+      // Text criteria match case-insensitively at classification time,
+      // so removal by value must too.
+      [
+        rule.subject_contains,
+        rule.snippet_contains,
+        rule.from_domain,
+        rule.from_address,
+        ...(rule.subject_any || []),
+        ...(rule.snippet_any || []),
+      ].some((v) => v !== undefined && String(v).toLowerCase() === lowered),
+  };
+}
+
+function removeFromList(list, value) {
+  const lowered = String(value).toLowerCase();
+  const kept = (list || []).filter((candidate) => candidate !== lowered);
+  return { kept, removed: (list || []).length - kept.length };
+}
+
 async function rulesRemove(args) {
   const user = requireUser(args, "rules remove");
-  const [, type, value] = requirePositional(args, 3, "rules remove");
+  requirePositional(args, 2, "rules remove");
+  const [, type, value] = args._positional;
   const row = await requireEnabledRow(user, "rules remove");
   const next = { ...row.rules };
+  let removed = 0;
+  let described = value;
+
   if (type === "vip") {
-    next.vipSenders = (row.rules.vipSenders || []).filter(
-      (candidate) => candidate !== value.toLowerCase(),
-    );
+    requirePositional(args, 3, "rules remove");
+    const result = removeFromList(row.rules.vipSenders, value);
+    next.vipSenders = result.kept;
+    removed = result.removed;
   } else if (type === "mute") {
-    next.muteSenders = (row.rules.muteSenders || []).filter(
-      (candidate) => candidate !== value.toLowerCase(),
-    );
+    requirePositional(args, 3, "rules remove");
+    const result = removeFromList(row.rules.muteSenders, value);
+    next.muteSenders = result.kept;
+    removed = result.removed;
   } else if (type === "keyword") {
-    next.keywordRules = (row.rules.keywordRules || []).filter(
-      (rule) =>
-        rule.subject_contains !== value &&
-        rule.snippet_contains !== value &&
-        rule.from_domain !== value,
+    const selector = keywordRuleSelector(args, value);
+    described = selector.describe;
+    const existing = row.rules.keywordRules || [];
+    next.keywordRules = existing.filter(
+      (rule, position) => !selector.matches(rule, position),
     );
+    removed = existing.length - next.keywordRules.length;
   } else {
     bail("bad-type", `Unknown rule type "${type}"`, "rules remove");
+  }
+
+  // Report the truth. Claiming "Removed" when nothing matched is how the
+  // undeletable rule in #1855 stayed hidden for so long.
+  if (removed === 0) {
+    bail(
+      "not-found",
+      `No ${type} rule matched ${described} — nothing was removed. ` +
+        `Run 'rules list' to see ids and indexes.`,
+      "rules remove",
+    );
   }
   await lib.updateRow(user, { rules: next });
   emit({
     ok: true,
     subcommand: "rules remove",
-    summary: `Removed ${type}: ${value}`,
+    summary: `Removed ${removed} ${type} rule(s) matching ${described}`,
+    data: { removed },
   });
 }
 
@@ -758,6 +965,16 @@ async function cmd_training(args) {
 // simulate
 // ---------------------------------------------------------------------
 
+// `--external` forces an outside sender so external-only rules can be
+// exercised from an internal test address.
+function simulatedIsInternal(args, fromEmail, internalDomain) {
+  if (args.external === true) return false;
+  return (
+    (fromEmail.split("@")[1] || "").toLowerCase() ===
+    internalDomain.toLowerCase()
+  );
+}
+
 async function cmd_simulate(args) {
   const user = requireUser(args, "simulate");
   const row = await requireEnabledRow(user, "simulate");
@@ -768,23 +985,46 @@ async function cmd_simulate(args) {
   const features = {
     fromEmail,
     fromDomain: fromEmail.split("@")[1] || "",
-    isInternal:
-      (fromEmail.split("@")[1] || "").toLowerCase() ===
-      internalDomain.toLowerCase(),
+    isInternal: simulatedIsInternal(args, fromEmail, internalDomain),
     subject: args.subject || "",
     subjectLower: (args.subject || "").toLowerCase(),
     snippetLower: (args.snippet || "").toLowerCase(),
     hasUserReply: args["has-user-reply"] === true,
   };
   const decision = lib.applyRules(features, row.rules);
+  if ("label" in decision) {
+    emit({
+      ok: true,
+      subcommand: "simulate",
+      summary: `Would label as ${decision.label} (${decision.reason})`,
+      data: { features, decision, stage: "rules" },
+    });
+    return;
+  }
+
+  // Mirror the Lambda's second stage so simulate doesn't claim "Bedrock
+  // decides" for a message the deterministic content stage settles.
+  const signals = lib.detectContentSignals({
+    subject: args.subject || "",
+    body: args.snippet || "",
+    headers: { to: args.to, cc: args.cc },
+    userEmail: user,
+    hasUserReply: features.hasUserReply,
+    fromEmail,
+  });
+  const contentDecision = lib.classifyByContent(signals);
   emit({
     ok: true,
     subcommand: "simulate",
-    summary:
-      "label" in decision
-        ? `Would label as ${decision.label} (${decision.reason})`
-        : `Rules engine undecided — classifier would call Bedrock Nova Micro for the final decision`,
-    data: { features, decision },
+    summary: contentDecision
+      ? `Would label as ${contentDecision.label} (${contentDecision.reason})`
+      : "Rules and content signals are both undecided — the classifier would ask Bedrock Nova Micro.",
+    data: {
+      features,
+      signals,
+      decision: contentDecision || decision,
+      stage: contentDecision ? "content" : "llm",
+    },
   });
 }
 
@@ -1032,6 +1272,23 @@ async function applySuggestion(args, user, row, pending) {
       "suggestions apply",
     );
   }
+  // A mute silently drops mail. The learner no longer proposes one
+  // against a person, but a suggestion stored before #1855 still can, and
+  // so can a hand-typed id — so the write itself refuses without an
+  // explicit confirmation (#1855 item 3).
+  if (
+    suggestion.kind === "mute" &&
+    !lib.isAutomatedSender(String(suggestion.target)) &&
+    args["confirm-human"] !== true
+  ) {
+    bail(
+      "needs-human-confirmation",
+      `"${suggestion.target}" looks like a person, and muting silently ` +
+        `auto-archives everything they send you. Re-run with ` +
+        `--confirm-human if that is really what you want.`,
+      "suggestions apply",
+    );
+  }
   const rules = rulesWithSuggestion(row.rules, suggestion, id);
   await lib.updateRow(user, {
     rules,
@@ -1114,6 +1371,127 @@ async function cmd_suggestions(args) {
 }
 
 // ---------------------------------------------------------------------
+// prefs — the user's plain-language preference profile (#1855)
+// ---------------------------------------------------------------------
+
+/** Cap on the stored profile. Long enough for a paragraph of guidance. */
+const PREFERENCES_MAX_CHARS = 2000;
+
+function renderContentPreferences(contentPreferences) {
+  return (contentPreferences || []).map((pref) => ({
+    shape: pref.shape,
+    lean: pref.lean,
+    count: pref.count,
+    weight: pref.weight,
+    inPlainWords:
+      pref.lean === "later"
+        ? `You usually move "${pref.shape}" mail out of the way (${pref.count} correction(s)).`
+        : `You usually want "${pref.shape}" mail in front of you (${pref.count} correction(s)).`,
+  }));
+}
+
+async function prefsShow(args, user, row) {
+  void args;
+  void user;
+  const stated = row.preferences?.text || "";
+  const learned = renderContentPreferences(row.contentPreferences);
+  emit({
+    ok: true,
+    subcommand: "prefs show",
+    summary: stated
+      ? `Your stated preferences (${stated.length} chars) plus ${learned.length} learned pattern(s).`
+      : `No stated preferences yet. ${learned.length} pattern(s) learned from your corrections.`,
+    data: {
+      stated,
+      updatedAt: row.preferences?.updatedAt || null,
+      learned,
+      peopleSuggestions: row.suggestPeopleRules !== false,
+    },
+  });
+}
+
+async function prefsSet(args, user) {
+  const [, ...rest] = requirePositional(args, 2, "prefs set");
+  const text = rest.join(" ").trim();
+  if (!text) {
+    bail("missing-args", "Give the preference text to store", "prefs set");
+  }
+  if (text.length > PREFERENCES_MAX_CHARS) {
+    bail(
+      "too-long",
+      `Preferences are capped at ${PREFERENCES_MAX_CHARS} characters (got ${text.length})`,
+      "prefs set",
+    );
+  }
+  await lib.updateRow(user, {
+    preferences: { text, updatedAt: new Date().toISOString() },
+  });
+  emit({
+    ok: true,
+    subcommand: "prefs set",
+    summary:
+      "Saved. The classifier reads this with every message, and it outranks " +
+      "the built-in heuristics when they disagree.",
+    data: { stated: text },
+  });
+}
+
+async function prefsClear(args, user) {
+  void args;
+  await lib.updateRow(user, {
+    preferences: { text: "", updatedAt: new Date().toISOString() },
+  });
+  emit({
+    ok: true,
+    subcommand: "prefs clear",
+    summary: "Cleared your stated preferences. Learned patterns are untouched.",
+  });
+}
+
+async function prefsPeopleSuggestions(args, user) {
+  const [, flag] = requirePositional(args, 2, "prefs people-suggestions");
+  if (!["on", "off"].includes(flag)) {
+    bail(
+      "bad-value",
+      `Expected 'on' or 'off' (got "${flag}")`,
+      "prefs people-suggestions",
+    );
+  }
+  const on = flag === "on";
+  await lib.updateRow(user, { suggestPeopleRules: on });
+  emit({
+    ok: true,
+    subcommand: "prefs people-suggestions",
+    summary: on
+      ? "Suggestions about individual people are enabled. Mute suggestions for people stay blocked either way."
+      : "Suggestions about individual people are off. Only automated senders will be suggested.",
+    data: { suggestPeopleRules: on },
+  });
+}
+
+const PREFS_COMMANDS = {
+  show: prefsShow,
+  set: prefsSet,
+  clear: prefsClear,
+  "people-suggestions": prefsPeopleSuggestions,
+};
+
+async function cmd_prefs(args) {
+  const verb = args._positional[0] || "show";
+  const handler = PREFS_COMMANDS[verb];
+  if (!handler) {
+    bail(
+      "bad-verb",
+      `Unknown prefs subcommand: ${verb} (try 'show', 'set "<text>"', 'clear', 'people-suggestions on|off')`,
+      "prefs",
+    );
+  }
+  const user = requireUser(args, `prefs ${verb}`);
+  const row = await requireEnabledRow(user, `prefs ${verb}`);
+  await handler(args, user, row);
+}
+
+// ---------------------------------------------------------------------
 // Dispatcher
 // ---------------------------------------------------------------------
 
@@ -1130,6 +1508,7 @@ const COMMANDS = {
   tasks: cmd_tasks,
   sweep: cmd_sweep,
   suggestions: cmd_suggestions,
+  prefs: cmd_prefs,
 };
 
 async function main() {
@@ -1144,22 +1523,45 @@ async function main() {
     );
     process.exit(args.help === true ? 0 : 2);
   }
-  const fn = COMMANDS[args._subcmd];
-  if (!fn) {
-    bail(
-      "unknown-subcommand",
-      `Unknown subcommand: ${args._subcmd}`,
-      args._subcmd,
-    );
-  }
   try {
+    const fn = COMMANDS[args._subcmd];
+    if (!fn) {
+      bail(
+        "unknown-subcommand",
+        `Unknown subcommand: ${args._subcmd}`,
+        args._subcmd,
+      );
+    }
     await fn(args);
   } catch (err) {
     const code = (err && err.code) || "unexpected-error";
     const msg = err && err.message ? err.message : String(err);
-    emit({ ok: false, subcommand: args._subcmd, error: msg, code });
+    const subcommand =
+      err instanceof BailError && err.subcommand
+        ? err.subcommand
+        : args._subcmd;
+    emit({ ok: false, subcommand, error: msg, code });
     process.exit(1);
   }
 }
 
-main();
+module.exports = {
+  BailError,
+  PREFERENCES_MAX_CHARS,
+  flagList,
+  flagValue,
+  keywordRuleFromArgs,
+  keywordRuleSelector,
+  parseArgs,
+  // Subcommands exercised end-to-end in run.test.js with a stubbed lib.
+  rulesAddKeyword,
+  rulesRemove,
+  cmd_prefs,
+  cmd_suggestions,
+};
+
+// Only run the CLI when invoked as a program; `require()` from the test
+// suite must not execute a subcommand.
+if (require.main === module) {
+  main();
+}

@@ -24,6 +24,9 @@ jest.mock("@/infra/lambdas/agent-triage-poll/workspace-token", () => ({
 }))
 
 jest.mock("@/infra/lambdas/agent-triage-poll/gmail", () => ({
+  // No recipient or automation headers: these suites assert the label
+  // sink and the task-gesture path, not the content classifier.
+  extractContentHeaders: () => ({}),
   extractFromEmail: () => "sender@example.net",
   extractSubject: () => "Subject",
   getCurrentHistoryId: jest.fn(),

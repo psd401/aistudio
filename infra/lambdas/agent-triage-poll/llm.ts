@@ -4,9 +4,11 @@
  *
  * Why Nova Micro: cheapest Bedrock model available, fast (<1s typical),
  * good enough at "classify this short email into one of N buckets"
- * which is essentially what we're doing. Per-call cost ~$0.0001 with
- * the small prompt we send. Annual cost projection at 1000 users ≈
- * $900/yr in the worst case — well under what SaneBox costs at scale.
+ * which is essentially what we're doing. Per-call cost was ~$0.0001
+ * (≈ $900/yr worst case at 1000 users) when the prompt was rules-only;
+ * the system prompt now also carries free-text preferences (≤2000
+ * chars), content preferences, learned patterns and corrections, so
+ * input cost per call is higher than that original estimate.
  *
  * Why not the agent's main model: the agent harness runs Claude Sonnet 5
  * (Bedrock Mantle, per #1089; formerly GLM-5). That's a much heavier model
@@ -26,7 +28,17 @@ import {
 
 import type { Label, TriageRules } from "./rules";
 import type { EmailFeatures } from "./rules";
-import type { CorrectionRecord, LearnedPattern } from "./types";
+import type {
+  ContentPreference,
+  CorrectionRecord,
+  LearnedPattern,
+  UserPreferenceProfile,
+} from "./types";
+import {
+  describeContentSignals,
+  hasAsk,
+  type ContentSignals,
+} from "./content-features";
 
 const MODEL_ID = process.env.TRIAGE_LLM_MODEL_ID ?? "us.amazon.nova-micro-v1:0";
 
@@ -54,6 +66,12 @@ export interface ClassifyOptions {
   learnedPatterns?: LearnedPattern[];
   /** Recent user corrections, summarised into the prompt. */
   recentCorrections?: CorrectionRecord[];
+  /** Deterministic content signals — the primary evidence (#1855). */
+  contentSignals?: ContentSignals;
+  /** Content-shape leanings mined from this user's corrections. */
+  contentPreferences?: ContentPreference[];
+  /** The user's own plain-language preferences. */
+  preferences?: UserPreferenceProfile;
 }
 
 let cachedClient: BedrockRuntimeClient | null = null;
@@ -89,8 +107,9 @@ export async function classifyWithLLM(
     userInternalDomain,
     opts.learnedPatterns ?? [],
     opts.recentCorrections ?? [],
+    opts,
   );
-  const userPrompt = buildUserPrompt(features, opts.bodyExcerpt);
+  const userPrompt = buildUserPrompt(features, opts.bodyExcerpt, opts);
 
   try {
     const resp = await client().send(
@@ -146,6 +165,7 @@ function buildSystemPrompt(
   userInternalDomain: string,
   learnedPatterns: LearnedPattern[],
   recentCorrections: CorrectionRecord[],
+  opts: ClassifyOptions = {},
 ): string {
   const vip = rules.vipSenders.length > 0
     ? rules.vipSenders.join(", ")
@@ -169,28 +189,50 @@ function buildSystemPrompt(
 
   const lines = [
     `You classify incoming emails for a Peninsula School District (PSD) employee into one of three Gmail labels:`,
-    `  - important: needs attention soon. Real work, real people, real decisions.`,
-    `  - later:     can wait. Notifications, FYI, low-priority discussion.`,
-    `  - news:      pure information. Newsletters, marketing, vendor blasts.`,
+    `  - important: the message asks something of this user, or they are in a live exchange about it.`,
+    `  - later:     nothing is asked of this user right now. FYI, status, discussion they are copied on.`,
+    `  - news:      pure broadcast information. Newsletters, marketing, vendor blasts.`,
     ``,
     `Reply with EXACTLY one JSON line, no preamble or markdown, in this shape:`,
     `  {"label":"important|later|news","confidence":0.0-1.0,"reason":"<8-word phrase>"}`,
     ``,
+    `DECIDE FROM THE CONTENT, NOT FROM WHO SENT IT.`,
+    `This is the single most important instruction. Two messages with the same body`,
+    `and the same recipient role MUST get the same label even when they arrive from`,
+    `different addresses, different relays or different domains. The sender is a weak`,
+    `prior only; it may adjust your confidence slightly and must never flip a label`,
+    `that the content has already settled.`,
+    ``,
+    `What makes a message "important" (any one of these, in priority order):`,
+    `  1. It asks this user to approve, sign, authorise or decide something — even when`,
+    `     the actual click happens in another system (service desk, travel, HR).`,
+    `  2. It is a reply inside a thread this user has already written in.`,
+    `  3. It puts a direct question to this user, and this user is in To.`,
+    `  4. It asks this user to do something by a stated deadline.`,
+    ``,
+    `What makes a message "later":`,
+    `  - FYI, status reports, digests, recaps, "no action required".`,
+    `  - This user is only on Cc, or is one of many recipients, and nothing is asked of them.`,
+    `  - An automated notice that reports a fact and asks for nothing.`,
+    ``,
+    `"news" is for broadcast publications only. Mail written by a person is never`,
+    `"news" — at worst it is "later".`,
+    ``,
     `Confidence calibration:`,
-    `  0.9+  obvious case (signature human conversation, clear newsletter)`,
+    `  0.9+  the content signals are unambiguous`,
     `  0.75+ confident it is genuinely important (needed before "important" sticks)`,
     `  0.6+  reasonable signal but not certain`,
     `  <0.6  genuine ambiguity — Lambda will default to "later" anyway`,
     ``,
-    `Be conservative with "important": it should mean the user must look soon. When`,
-    `unsure between important and later, prefer later or lower your confidence.`,
+    `Be conservative with "important": it should mean the user must act. Urgency words`,
+    `in a subject line are not an ask; spam and marketing both shout "URGENT".`,
     ``,
-    `Heuristics (in priority order):`,
-    `  1. Spam pretends to be urgent. External senders shouting "URGENT" without a thread or prior contact → almost always later.`,
-    `  2. Internal threads from this user's org (${userInternalDomain}) get the benefit of the doubt.`,
-    `  3. Single-recipient direct mail from a real person beats broadcast/list mail.`,
-    `  4. Numeric-sender domains, "noreply", "donotreply", marketing patterns → news.`,
-    `  5. Calendar invites are not in scope here — Gmail's own system handles those.`,
+    `The "reason" you return must name the CONTENT signal you used (for example`,
+    `"direct question addressed to you" or "status digest, nothing asked"). Do not`,
+    `give the sender as the reason.`,
+    ``,
+    `This user's organisation domain is ${userInternalDomain}; treat that as context,`,
+    `not as evidence of importance.`,
     ``,
     `User's configured rules for context (already attempted and didn't match — you are the fallback):`,
     `  VIP senders: ${vip}`,
@@ -199,12 +241,35 @@ function buildSystemPrompt(
     `${keywords}`,
   ];
 
+  const stated = (opts.preferences?.text ?? "").trim();
+  if (stated) {
+    lines.push(
+      ``,
+      `The user stated these preferences in their own words. They outrank the`,
+      `general heuristics above when they conflict:`,
+      stated
+        .split("\n")
+        .map((line) => `  ${line}`)
+        .join("\n"),
+    );
+  }
+
+  const shapeHints = formatContentPreferences(opts.contentPreferences ?? []);
+  if (shapeHints) {
+    lines.push(
+      ``,
+      `Learned from this user's corrections, keyed on what the message ASKS (these`,
+      `apply to every sender that writes the same kind of mail):`,
+      shapeHints,
+    );
+  }
+
   const learned = formatLearnedPatterns(learnedPatterns);
   if (learned) {
     lines.push(
       ``,
-      `Learned sender signals (soft hints from this user's past corrections; higher`,
-      `weight = stronger. Use as evidence, not a hard rule):`,
+      `Learned sender signals. These are the WEAKEST input you have: use them only`,
+      `to break a tie the content left open, never to override a content signal:`,
       learned,
     );
   }
@@ -241,6 +306,25 @@ function formatLearnedPatterns(patterns: LearnedPattern[]): string {
     .join("\n");
 }
 
+/**
+ * Render content-shape leanings. Highest weight first, capped at 6 lines.
+ * These are stronger than sender hints because they describe the kind of
+ * message rather than the person who sent it.
+ */
+function formatContentPreferences(prefs: ContentPreference[]): string {
+  if (!prefs || prefs.length === 0) return "";
+  return prefs
+    .slice()
+    .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
+    .slice(0, 6)
+    .map(
+      (p) =>
+        `  - messages shaped "${p.shape}" → lean ${p.lean} ` +
+        `(${p.count} correction(s), w=${(p.weight ?? 0).toFixed(1)})`,
+    )
+    .join("\n");
+}
+
 /** Summarise the most recent corrections (newest first, capped at 5). */
 function formatRecentCorrections(corrections: CorrectionRecord[]): string {
   if (!corrections || corrections.length === 0) return "";
@@ -260,7 +344,11 @@ function formatRecentCorrections(corrections: CorrectionRecord[]): string {
     .join("\n");
 }
 
-function buildUserPrompt(features: EmailFeatures, bodyExcerpt?: string): string {
+function buildUserPrompt(
+  features: EmailFeatures,
+  bodyExcerpt?: string,
+  opts: ClassifyOptions = {},
+): string {
   // Prefer the fuller body excerpt (#1172) — the 200-char snippet often
   // cut off the signal ("please approve by Friday"). Fall back to the
   // snippet when no body could be fetched. Cap at BODY_EXCERPT_MAX so a
@@ -268,12 +356,22 @@ function buildUserPrompt(features: EmailFeatures, bodyExcerpt?: string): string 
   const raw = bodyExcerpt && bodyExcerpt.trim() ? bodyExcerpt : features.snippetLower;
   const body =
     raw.length > BODY_EXCERPT_MAX ? raw.slice(0, BODY_EXCERPT_MAX) + "…" : raw;
-  return [
-    `From: ${features.fromEmail} (${features.isInternal ? "internal" : "external"})`,
-    `Subject: ${features.subject}`,
-    `Body: ${body}`,
-    `Has-prior-reply-from-user: ${features.hasUserReply}`,
-  ].join("\n");
+  // Content first, sender last and explicitly labelled as the weak prior —
+  // the ordering is deliberate (#1855 item 4).
+  const parts = [`Subject: ${features.subject}`, `Body: ${body}`];
+  if (opts.contentSignals) {
+    parts.push(
+      `Content signals (computed from the message, not from the sender):`,
+      describeContentSignals(opts.contentSignals),
+    );
+  } else {
+    parts.push(`Has-prior-reply-from-user: ${features.hasUserReply}`);
+  }
+  parts.push(
+    `Weak prior — sender: ${features.fromEmail} ` +
+      `(${features.isInternal ? "internal" : "external"})`,
+  );
+  return parts.join("\n");
 }
 
 /**
@@ -315,6 +413,69 @@ export function finalizeLLMLabel(llm: LLMDecision): {
     reason: llm.reason,
     downgraded: false,
   };
+}
+
+/** Minimum learned weight before a content-shape leaning changes a label. */
+export const CONTENT_BIAS_MIN_WEIGHT = 1.5;
+
+/** Minimum number of corrections behind a content-shape leaning. */
+export const CONTENT_BIAS_MIN_COUNT = 2;
+
+export interface GuardedDecision {
+  label: Label;
+  confidence: number;
+  reason: string;
+  /** True when a guard changed the label the model returned. */
+  adjusted: boolean;
+}
+
+/**
+ * Deterministic guards applied to an LLM label (#1855). Two of them:
+ *
+ *  1. **Corrections must bite.** Before this, twenty corrections of
+ *     "you called this important, I archived it" changed nothing but a
+ *     soft prompt hint, and the classifier kept over-promoting. When the
+ *     user has repeatedly archived messages of this SHAPE and the current
+ *     message asks nothing of them, `important` is demoted to `later`.
+ *     Keyed on shape, not sender, so one correction generalises.
+ *
+ *  2. **People are never "news".** `news` is the auto-archive bucket for
+ *     broadcast publications. A colleague's mail may be `later`, never
+ *     filed away as a newsletter.
+ *
+ * Demote-only by design: the reported failure mode is over-promotion, and
+ * a learned rule that silently promotes mail is the harder one to notice.
+ */
+export function applyContentGuards(
+  decision: { label: Label; confidence: number; reason: string },
+  signals: ContentSignals | undefined,
+  contentPreferences: ContentPreference[] = [],
+): GuardedDecision {
+  let { label, reason } = decision;
+  let adjusted = false;
+
+  if (signals && label === "important" && !hasAsk(signals)) {
+    const leansLater = contentPreferences.some(
+      (pref) =>
+        pref.shape === signals.shape &&
+        pref.lean === "later" &&
+        (pref.weight ?? 0) >= CONTENT_BIAS_MIN_WEIGHT &&
+        (pref.count ?? 0) >= CONTENT_BIAS_MIN_COUNT,
+    );
+    if (leansLater) {
+      label = "later";
+      reason = `learned:you-archive-${signals.shape}-mail (${reason})`;
+      adjusted = true;
+    }
+  }
+
+  if (signals && label === "news" && !signals.automatedSender) {
+    label = "later";
+    reason = `human-sender-never-news (${reason})`;
+    adjusted = true;
+  }
+
+  return { label, confidence: decision.confidence, reason, adjusted };
 }
 
 /**

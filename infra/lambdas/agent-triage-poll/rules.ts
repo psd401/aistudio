@@ -10,6 +10,8 @@
  * SDK or Gmail mock — pure functions in, label decision out.
  */
 
+import type { DecisionSource } from "./types";
+
 export type Label = "important" | "later" | "news";
 
 export interface EmailFeatures {
@@ -30,16 +32,72 @@ export interface EmailFeatures {
 }
 
 export interface KeywordRule {
+  /**
+   * Stable identifier (#1855 item 1). Rules written before that change
+   * have none, which is exactly why `rules remove` also accepts a list
+   * index — an id-only delete could never reach them.
+   */
+  id?: string;
   /** Whole subject substring match, lowercased. */
   subject_contains?: string;
+  /** Any one of these subject substrings matches (OR). */
+  subject_any?: string[];
   /** Body snippet substring match, lowercased. */
   snippet_contains?: string;
+  /** Any one of these body substrings matches (OR). */
+  snippet_any?: string[];
   /** Sender domain match. */
   from_domain?: string;
+  /** Full sender address match — narrower than `from_domain`. */
+  from_address?: string;
   /** Require the sender to be external (not in user's org). */
   external?: boolean;
   /** Label to apply when this rule matches. */
   label: Label;
+}
+
+/**
+ * Criteria that are only meaningful as a non-empty string (or non-empty
+ * list of them). A rule whose `from_domain` is the boolean `true` — the
+ * shape `rules add-keyword --from` used to persist — matches nothing and
+ * cannot be addressed by value, so it is treated as malformed rather than
+ * silently carried in the engine. See #1855 item 1.
+ */
+const KEYWORD_RULE_CRITERIA = [
+  "subject_contains",
+  "snippet_contains",
+  "from_domain",
+  "from_address",
+] as const;
+
+const KEYWORD_RULE_LIST_CRITERIA = ["subject_any", "snippet_any"] as const;
+
+function criterionText(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function criterionList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => Boolean(criterionText(entry)))
+    : [];
+}
+
+/**
+ * A rule is well-formed when at least one positive criterion carries real
+ * text. Everything else — a bare `external: true`, a boolean
+ * `from_domain`, an empty string — would either match everything or
+ * nothing, and both are misconfigurations.
+ */
+export function isWellFormedKeywordRule(rule: KeywordRule): boolean {
+  const hasText = KEYWORD_RULE_CRITERIA.some((key) =>
+    criterionText(rule[key]),
+  );
+  const hasList = KEYWORD_RULE_LIST_CRITERIA.some(
+    (key) => criterionList(rule[key]).length > 0,
+  );
+  const labelIsValid =
+    rule.label === "important" || rule.label === "later" || rule.label === "news";
+  return labelIsValid && (hasText || hasList);
 }
 
 export interface TriageRules {
@@ -110,17 +168,9 @@ export function applyRules(
   // Keyword rules — first match wins.
   for (const rule of rules.keywordRules) {
     if (matchesKeywordRule(rule, features)) {
-      const desc =
-        rule.subject_contains
-          ? `subject~"${rule.subject_contains}"`
-          : rule.snippet_contains
-            ? `snippet~"${rule.snippet_contains}"`
-            : rule.from_domain
-              ? `from_domain=${rule.from_domain}`
-              : "rule";
       return {
         label: rule.label,
-        reason: `keyword:${desc}`,
+        reason: `keyword:${describeKeywordRule(rule)}`,
         source: "rule",
       };
     }
@@ -129,31 +179,92 @@ export function applyRules(
   return { decided: false, reason: "no-rule-match" };
 }
 
+/**
+ * Human-readable summary of what a rule matches on. Also what `rules
+ * list` shows beside the id, so the user can tell two rules apart.
+ */
+export function describeKeywordRule(rule: KeywordRule): string {
+  const parts: string[] = [];
+  const subjectAny = criterionList(rule.subject_any);
+  const snippetAny = criterionList(rule.snippet_any);
+  const fromAddress = criterionText(rule.from_address);
+  const fromDomain = criterionText(rule.from_domain);
+  const subject = criterionText(rule.subject_contains);
+  const snippet = criterionText(rule.snippet_contains);
+  if (fromAddress) parts.push(`from=${fromAddress}`);
+  if (fromDomain) parts.push(`from_domain=${fromDomain}`);
+  if (subject) parts.push(`subject~"${subject}"`);
+  if (subjectAny.length > 0) {
+    parts.push(`subject~any(${subjectAny.join("|")})`);
+  }
+  if (snippet) parts.push(`snippet~"${snippet}"`);
+  if (snippetAny.length > 0) {
+    parts.push(`snippet~any(${snippetAny.join("|")})`);
+  }
+  if (rule.external) parts.push("external");
+  return parts.length > 0 ? parts.join(" + ") : "malformed";
+}
+
+/** An absent criterion is satisfied; a present one must match exactly. */
+function senderCriteriaMatch(
+  rule: KeywordRule,
+  features: EmailFeatures,
+): boolean {
+  const fromDomain = criterionText(rule.from_domain);
+  if (fromDomain && features.fromDomain !== fromDomain.toLowerCase()) {
+    return false;
+  }
+  const fromAddress = criterionText(rule.from_address);
+  return !fromAddress || features.fromEmail === fromAddress.toLowerCase();
+}
+
+/** An absent criterion is satisfied; a present one must be a substring. */
+function textCriteriaMatch(
+  rule: KeywordRule,
+  features: EmailFeatures,
+): boolean {
+  const subject = criterionText(rule.subject_contains);
+  if (subject && !features.subjectLower.includes(subject.toLowerCase())) {
+    return false;
+  }
+  const snippet = criterionText(rule.snippet_contains);
+  return !snippet || features.snippetLower.includes(snippet.toLowerCase());
+}
+
+/** Within a list criterion the alternatives are an OR. */
+function listCriteriaMatch(
+  rule: KeywordRule,
+  features: EmailFeatures,
+): boolean {
+  const subjectAny = criterionList(rule.subject_any);
+  if (
+    subjectAny.length > 0 &&
+    !subjectAny.some((kw) => features.subjectLower.includes(kw.toLowerCase()))
+  ) {
+    return false;
+  }
+  const snippetAny = criterionList(rule.snippet_any);
+  return (
+    snippetAny.length === 0 ||
+    snippetAny.some((kw) => features.snippetLower.includes(kw.toLowerCase()))
+  );
+}
+
+/**
+ * All criteria on a rule must hold (AND), which is what lets one rule say
+ * "from this person AND this subject" — the combination #1855 item 5 asks
+ * for.
+ */
 function matchesKeywordRule(
   rule: KeywordRule,
   features: EmailFeatures,
 ): boolean {
+  if (!isWellFormedKeywordRule(rule)) return false;
   if (rule.external && features.isInternal) return false;
-  if (rule.from_domain && features.fromDomain !== rule.from_domain.toLowerCase()) {
-    return false;
-  }
-  if (
-    rule.subject_contains &&
-    !features.subjectLower.includes(rule.subject_contains.toLowerCase())
-  ) {
-    return false;
-  }
-  if (
-    rule.snippet_contains &&
-    !features.snippetLower.includes(rule.snippet_contains.toLowerCase())
-  ) {
-    return false;
-  }
-  // Require at least one positive criterion — a rule with only an
-  // `external` filter would match everything external; that's almost
-  // certainly a misconfiguration, so we refuse to match.
-  return Boolean(
-    rule.from_domain || rule.subject_contains || rule.snippet_contains,
+  return (
+    senderCriteriaMatch(rule, features) &&
+    textCriteriaMatch(rule, features) &&
+    listCriteriaMatch(rule, features)
   );
 }
 
@@ -226,8 +337,13 @@ export const DEFAULT_ESCALATION_CONFIDENCE_THRESHOLD = 0.85;
 
 export interface EscalationDecisionParams {
   label: Label;
-  /** Where the classification came from — a deterministic rule or the LLM. */
-  source: "rule" | "llm";
+  /**
+   * Where the classification came from. Only `rule` — the user's own
+   * configured rules — is treated as an explicit instruction from the
+   * user; `content` and `llm` are both the system's own judgement and so
+   * stay subject to the confidence bar.
+   */
+  source: DecisionSource;
   /** Classifier confidence (rule matches are 1). */
   confidence: number;
   features: EmailFeatures;
@@ -267,11 +383,7 @@ function modeEscalationReason(
     return hasExplicitRules ? undefined : `label:${label}`;
   }
   if (source === "rule") return `rule:${label}`;
-  if (
-    mode === "high-confidence" &&
-    source === "llm" &&
-    confidence >= threshold
-  ) {
+  if (mode === "high-confidence" && confidence >= threshold) {
     return `high-confidence:${confidence.toFixed(2)}`;
   }
   return undefined;

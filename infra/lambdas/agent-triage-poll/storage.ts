@@ -18,7 +18,9 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 
 import type { TrustedTriageLabelMapping } from "./label-mapping";
+import { accumulateDailyStats } from "./daily-stats";
 import type {
+  ContentPreference,
   CorrectionRecord,
   DecisionRecord,
   LearnedPattern,
@@ -306,8 +308,10 @@ export async function stampTrustedTriageLabelMapping(
  * arrays stay at most ~20 elements long.
  *
  * Calls UpdateItem twice when trimming is needed: once to append, once
- * to slice. The two-step is fine because the classifier Lambda is the
- * only writer for these fields — no one else races us.
+ * to slice. The per-day counters are folded into the FIRST write, with
+ * the cursor: if the Lambda dies before the trim, the buffers are merely
+ * over-long until the next tick, whereas a counter update left for the
+ * second write would be lost for good once the cursor had moved on.
  */
 export async function recordPollResult(
   userEmail: string,
@@ -323,6 +327,15 @@ export async function recordPollResult(
   // Append + cursor update in one call so the cursor moves only when
   // we successfully recorded what we did at this cursor.
   if (newDecisions.length > 0 || newCorrections.length > 0) {
+    // dailyStats is written only by this Lambda (one poll per user at a
+    // time), so a read-before-write merge does not race another writer.
+    const before = await getTriageRow(userEmail);
+    const dailyStats = accumulateDailyStats(
+      before?.dailyStats,
+      newDecisions,
+      newCorrections,
+      before?.digestTz,
+    );
     await ddb().send(
       new UpdateCommand({
         TableName: TABLE,
@@ -330,6 +343,7 @@ export async function recordPollResult(
         UpdateExpression: [
           "SET lastHistoryId = :h",
           "lastPollAt = :p",
+          "dailyStats = :s",
           newDecisions.length > 0
             ? "recentDecisions = list_append(if_not_exists(recentDecisions, :empty), :d)"
             : null,
@@ -342,35 +356,31 @@ export async function recordPollResult(
         ExpressionAttributeValues: {
           ":h": cursorUpdate.lastHistoryId,
           ":p": cursorUpdate.lastPollAt,
+          ":s": dailyStats,
           ":empty": [],
           ...(newDecisions.length > 0 ? { ":d": newDecisions } : {}),
           ...(newCorrections.length > 0 ? { ":c": newCorrections } : {}),
         },
       }),
     );
-    // Re-read and trim — separate call because DynamoDB doesn't have an
-    // atomic "append then truncate to last N" primitive. Cost: one extra
-    // RU per poll-with-new-decisions. Fine at our scale.
+    // Re-read, then trim the rolling buffers. Separate call because
+    // DynamoDB has no atomic "append then truncate to last N" primitive.
+    // Cost: two extra reads per poll-with-new-decisions. Fine at our scale.
     const row = await getTriageRow(userEmail);
     if (row) {
       const trimmedDecisions = (row.recentDecisions ?? []).slice(-RECENT_MAX);
       const trimmedCorrections = (row.recentCorrections ?? []).slice(-RECENT_MAX);
-      if (
-        trimmedDecisions.length < (row.recentDecisions ?? []).length ||
-        trimmedCorrections.length < (row.recentCorrections ?? []).length
-      ) {
-        await ddb().send(
-          new UpdateCommand({
-            TableName: TABLE,
-            Key: { userEmail },
-            UpdateExpression: "SET recentDecisions = :d, recentCorrections = :c",
-            ExpressionAttributeValues: {
-              ":d": trimmedDecisions,
-              ":c": trimmedCorrections,
-            },
-          }),
-        );
-      }
+      await ddb().send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: { userEmail },
+          UpdateExpression: "SET recentDecisions = :d, recentCorrections = :c",
+          ExpressionAttributeValues: {
+            ":d": trimmedDecisions,
+            ":c": trimmedCorrections,
+          },
+        }),
+      );
     }
   } else {
     // Nothing happened — just advance the cursor so we don't re-scan
@@ -442,6 +452,11 @@ export async function recordTaskCreated(
  * the `sweep` state map (status, pageToken, counts). Kept separate from
  * recordPollResult so a sweep never touches the live Gmail-history cursor
  * (`lastHistoryId`) — the two run independently.
+ *
+ * Deliberately does NOT touch `dailyStats`: a sweep backfills up to 1000
+ * messages from the last 30 days, and counting them against the day the
+ * sweep happened to run would make that day's digest report a thousand
+ * messages the user never received today.
  */
 export async function recordSweepSlice(
   userEmail: string,
@@ -502,16 +517,19 @@ export async function saveLearning(
   learnedPatterns: LearnedPattern[],
   pendingSuggestions: Suggestion[],
   learnedAt: string,
+  contentPreferences: ContentPreference[] = [],
 ): Promise<void> {
   await ddb().send(
     new UpdateCommand({
       TableName: TABLE,
       Key: { userEmail },
       UpdateExpression:
-        "SET learnedPatterns = :lp, pendingSuggestions = :ps, learnedAt = :at",
+        "SET learnedPatterns = :lp, pendingSuggestions = :ps, " +
+        "contentPreferences = :cp, learnedAt = :at",
       ExpressionAttributeValues: {
         ":lp": learnedPatterns,
         ":ps": pendingSuggestions,
+        ":cp": contentPreferences,
         ":at": learnedAt,
       },
     }),

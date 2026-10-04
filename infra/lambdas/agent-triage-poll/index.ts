@@ -23,6 +23,7 @@ import {
 } from "./workspace-token";
 
 import {
+  extractContentHeaders,
   extractFromEmail,
   extractSubject,
   getCurrentHistoryId,
@@ -35,10 +36,17 @@ import {
   threadHasUserReply,
 } from "./gmail";
 import {
+  applyContentGuards,
   classifyWithLLM,
   finalizeLLMLabel,
   BODY_EXCERPT_MAX,
 } from "./llm";
+import {
+  classifyByContent,
+  detectContentSignals,
+  type ContentSignals,
+  type MessageHeaders,
+} from "./content-features";
 import {
   applyRules,
   shouldEscalate,
@@ -183,11 +191,11 @@ function collectCorrections(
   corrections: CorrectionRecord[],
 ): void {
   for (const item of event.labelsAdded ?? []) {
-    const correction = detectCorrection(row, item, "added");
+    const correction = detectCorrection(row, item, "added", event);
     if (correction) corrections.push(correction);
   }
   for (const item of event.labelsRemoved ?? []) {
-    const correction = detectCorrection(row, item, "removed");
+    const correction = detectCorrection(row, item, "removed", event);
     if (correction) corrections.push(correction);
   }
 }
@@ -406,12 +414,48 @@ function shouldSkipMessage(
   return { skip: false };
 }
 
+/** Confidence attached to a deterministic content-stage decision. */
+const CONTENT_DECISION_CONFIDENCE = 0.9;
+
+interface MessageContext {
+  features: EmailFeatures;
+  headers: MessageHeaders;
+  snippet: string;
+}
+
+function signalsFor(
+  row: TriageRow,
+  ctx: MessageContext,
+  body: string,
+): ContentSignals {
+  return detectContentSignals({
+    subject: ctx.features.subject,
+    body,
+    headers: ctx.headers,
+    userEmail: row.userEmail,
+    hasUserReply: ctx.features.hasUserReply,
+    fromEmail: ctx.features.fromEmail,
+  });
+}
+
+/**
+ * Three stages, cheapest first:
+ *
+ *   1. The user's own rules. An explicit instruction always wins.
+ *   2. The deterministic content stage (#1855). Decided entirely by what
+ *      the message asks and who it is addressed to, so the same body from
+ *      two different senders lands on the same label — and no Bedrock
+ *      call is paid for the clear cases.
+ *   3. Bedrock, with the content signals in front of it and the sender
+ *      demoted to a weak prior, then the learned-correction guards.
+ */
 async function classifyMessage(
   row: TriageRow,
   accessToken: string,
   messageId: string,
-  features: EmailFeatures,
-): Promise<ClassifierResult> {
+  ctx: MessageContext,
+): Promise<ClassifierResult & { signals: ContentSignals }> {
+  const { features } = ctx;
   const ruleDecision = applyRules(features, row.rules);
   if ("label" in ruleDecision) {
     return {
@@ -419,6 +463,7 @@ async function classifyMessage(
       confidence: 1,
       reason: ruleDecision.reason,
       source: "rule",
+      signals: signalsFor(row, ctx, ctx.snippet),
     };
   }
 
@@ -439,17 +484,39 @@ async function classifyMessage(
       err: err instanceof Error ? err.message : String(err),
     });
   }
+
+  const signals = signalsFor(row, ctx, bodyExcerpt ?? ctx.snippet);
+  const contentDecision = classifyByContent(signals);
+  if (contentDecision) {
+    return {
+      label: contentDecision.label,
+      confidence: CONTENT_DECISION_CONFIDENCE,
+      reason: contentDecision.reason,
+      source: "content",
+      signals,
+    };
+  }
+
   const llm = await classifyWithLLM(features, row.rules, internalDomain, {
     bodyExcerpt,
     learnedPatterns: row.learnedPatterns ?? [],
     recentCorrections: row.recentCorrections ?? [],
+    contentSignals: signals,
+    contentPreferences: row.contentPreferences ?? [],
+    preferences: row.preferences,
   });
   const finalized = finalizeLLMLabel(llm);
+  const guarded = applyContentGuards(
+    finalized,
+    signals,
+    row.contentPreferences ?? [],
+  );
   return {
-    label: finalized.label,
-    confidence: finalized.confidence,
-    reason: finalized.reason,
+    label: guarded.label,
+    confidence: guarded.confidence,
+    reason: guarded.reason,
     source: "llm",
+    signals,
   };
 }
 
@@ -561,12 +628,12 @@ export async function classifyAndLabel(
   }
 
   const features = await buildFeatures(row, accessToken, meta);
-  const result = await classifyMessage(
-    row,
-    accessToken,
-    msgRef.id,
+  const ctx: MessageContext = {
     features,
-  );
+    headers: extractContentHeaders(meta),
+    snippet: meta.snippet ?? "",
+  };
+  const result = await classifyMessage(row, accessToken, msgRef.id, ctx);
 
   // Apply the label via Gmail.
   const labelId = row.labelIdsByKey?.[result.label];
@@ -576,7 +643,8 @@ export async function classifyAndLabel(
   }
   // The mapping has been provenance-checked and confirmed against live Gmail
   // above, so preserving the product's folder semantics is safe here.
-  await modifyMessage(accessToken, msgRef.id, [labelId], ["INBOX"]);
+  const labeledHistoryId =
+    await modifyMessage(accessToken, msgRef.id, [labelId], ["INBOX"]);
 
   const record: DecisionRecord = {
     messageId: msgRef.id,
@@ -588,6 +656,10 @@ export async function classifyAndLabel(
     ts: new Date().toISOString(),
     fromEmail: features.fromEmail,
     subject: features.subject,
+    snippet: ctx.snippet.slice(0, 300),
+    shape: result.signals.shape,
+    automatedSender: result.signals.automatedSender,
+    ...(labeledHistoryId ? { labeledHistoryId } : {}),
   };
 
   const escalated = await maybeEscalateMessage({
@@ -643,6 +715,40 @@ async function buildFeatures(
  * Phase 1 records corrections only. Phase 2 will act on them to update
  * `learnedPatterns`.
  */
+/**
+ * True when an INBOX removal is the classifier's own write, not the user
+ * archiving. `classifyAndLabel` removes INBOX on every message it labels,
+ * and Gmail reports that in the next tick's history. Counted as a
+ * correction, every `important` decision became a fake "archived" one, and
+ * with corrections now steering future labels (#1855 addendum 2) that would
+ * demote mail nobody corrected.
+ */
+function removedByClassifier(
+  row: TriageRow,
+  prior: DecisionRecord,
+  messageId: string,
+  event: HistoryEvent | undefined,
+): boolean {
+  if (!event) return false;
+  if (prior.labeledHistoryId) {
+    try {
+      return BigInt(event.id) <= BigInt(prior.labeledHistoryId);
+    } catch {
+      // Non-numeric id — fall through to the same-record check.
+    }
+  }
+  // No recorded id (older decision, or Gmail omitted it): our write adds
+  // the triage label in the same history record that removes INBOX.
+  const ourLabelId = row.labelIdsByKey?.[prior.label];
+  return Boolean(
+    ourLabelId &&
+      (event.labelsAdded ?? []).some(
+        (added) =>
+          added.message.id === messageId && added.labelIds.includes(ourLabelId),
+      ),
+  );
+}
+
 function detectCorrection(
   row: TriageRow,
   evt: {
@@ -650,6 +756,7 @@ function detectCorrection(
     labelIds: string[];
   },
   direction: "added" | "removed",
+  event?: HistoryEvent,
 ): CorrectionRecord | null {
   const prior = (row.recentDecisions ?? []).find((d) => d.messageId === evt.message.id);
   if (!prior) return null;
@@ -671,13 +778,20 @@ function detectCorrection(
       ts: new Date().toISOString(),
       fromEmail,
       fromDomain,
+      shape: prior.shape,
+      automatedSender: prior.automatedSender,
     };
   }
 
   // Direction "removed" + INBOX in labelIds = user archived a message
   // we classified as "important" → we got it wrong, they didn't want
   // to see it. Previously this branch was dead (hardcoded false).
-  if (direction === "removed" && inboxInEvent && prior.label === "important") {
+  if (
+    direction === "removed" &&
+    inboxInEvent &&
+    prior.label === "important" &&
+    !removedByClassifier(row, prior, evt.message.id, event)
+  ) {
     return {
       messageId: evt.message.id,
       fromLabel: prior.label,
@@ -685,6 +799,8 @@ function detectCorrection(
       ts: new Date().toISOString(),
       fromEmail,
       fromDomain,
+      shape: prior.shape,
+      automatedSender: prior.automatedSender,
     };
   }
 

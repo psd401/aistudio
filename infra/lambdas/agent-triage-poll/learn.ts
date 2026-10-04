@@ -26,7 +26,7 @@ import type { TriageRow } from "./types";
 export async function runLearning(row: TriageRow): Promise<void> {
   const t0 = Date.now();
 
-  const { learnedPatterns, suggestions } = computeLearning({
+  const { learnedPatterns, suggestions, contentPreferences } = computeLearning({
     corrections: row.recentCorrections ?? [],
     decisions: row.recentDecisions ?? [],
     // Defensive: a row missing `rules` (shouldn't happen post-enable) would
@@ -34,6 +34,7 @@ export async function runLearning(row: TriageRow): Promise<void> {
     rules: row.rules ?? { vipSenders: [], muteSenders: [], keywordRules: [] },
     dismissedSuggestionIds: row.dismissedSuggestions,
     appliedSuggestionIds: row.appliedSuggestions,
+    allowPeopleSuggestions: row.suggestPeopleRules,
   });
 
   const { merged, added } = mergeSuggestions(
@@ -48,6 +49,7 @@ export async function runLearning(row: TriageRow): Promise<void> {
     learnedPatterns,
     merged,
     new Date().toISOString(),
+    contentPreferences,
   );
 
   // Surface only the NEW suggestions via Chat — don't re-nag about ones
@@ -82,6 +84,7 @@ export async function runLearning(row: TriageRow): Promise<void> {
   log("INFO", "learning_run", {
     user: row.userEmail,
     patterns: learnedPatterns.length,
+    content_preferences: contentPreferences.length,
     pending: merged.length,
     new_suggestions: added.length,
     elapsed_ms: Date.now() - t0,

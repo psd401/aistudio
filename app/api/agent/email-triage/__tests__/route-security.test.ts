@@ -56,6 +56,13 @@ import {
   EMAIL_TRIAGE_LABELS,
 } from "@/lib/agent/email-triage-label-map"
 
+/** update-state now reads the row first (size check); find the write itself. */
+function updateCall(): { input: Record<string, unknown> } | undefined {
+  return mockDdbSend.mock.calls
+    .map((call) => call[0] as { input: Record<string, unknown> })
+    .find((command) => "UpdateExpression" in command.input)
+}
+
 function request(body: Record<string, unknown>): NextRequest {
   return new NextRequest("http://localhost/api/agent/email-triage", {
     method: "POST",
@@ -261,7 +268,7 @@ describe("email triage route invocation boundary", () => {
     )
 
     expect(response.status).toBe(200)
-    const command = mockDdbSend.mock.calls[0][0] as {
+    const command = updateCall() as unknown as {
       input: {
         Key: { userEmail: string }
         ExpressionAttributeNames: Record<string, string>
@@ -290,5 +297,121 @@ describe("email triage route invocation boundary", () => {
     expect(response.status).toBe(409)
     expect(await response.json()).toMatchObject({ status: "needs-auth" })
     expect(mockDdbSend).not.toHaveBeenCalled()
+  })
+})
+
+describe("email triage state-update allowlist", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    globalThis.fetch = mockFetch
+    mockVerifyInvocation.mockResolvedValue({
+      ownerEmail: "owner@example.com",
+      mode: "owner",
+    })
+    mockGetAccessToken.mockResolvedValue({ access_token: "token" })
+    mockDdbSend.mockResolvedValue({})
+  })
+
+  it("accepts the suggestion attributes the skill writes (#1855)", async () => {
+    // `suggestions dismiss` failed for every id with "Invalid triage
+    // state update" because these three were never allowlisted — the
+    // user could not clear a single one of 75 pending suggestions.
+    const response = await POST(
+      request({
+        operation: "update-state",
+        attrs: {
+          pendingSuggestions: [],
+          dismissedSuggestions: ["mute:someone@example.com"],
+          appliedSuggestions: [],
+        },
+      })
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ ok: true })
+    const command = updateCall() as unknown as {
+      input: { ExpressionAttributeNames: Record<string, string> }
+    }
+    expect(Object.values(command.input.ExpressionAttributeNames)).toEqual([
+      "pendingSuggestions",
+      "dismissedSuggestions",
+      "appliedSuggestions",
+    ])
+  })
+
+  it("accepts the remaining attributes the skill writes (#1855)", async () => {
+    // Every one of these is written by a documented subcommand; a gap
+    // here is a 400 the user sees as "the CLI is broken".
+    const values: Record<string, unknown> = {
+      tasksMode: "value",
+      tasksNotifySuccess: "value",
+      preferences: { text: "value", updatedAt: "2026-10-04T00:00:00Z" },
+      suggestPeopleRules: "value",
+    }
+    for (const [field, value] of Object.entries(values)) {
+      mockDdbSend.mockClear()
+      const response = await POST(
+        request({ operation: "update-state", attrs: { [field]: value } })
+      )
+      expect([field, response.status]).toEqual([field, 200])
+    }
+  })
+
+  it("enforces the preferences cap server-side, not only in the skill", async () => {
+    for (const preferences of [
+      { text: "x".repeat(2001) },
+      "a bare string",
+      { text: 42 },
+    ]) {
+      mockDdbSend.mockClear()
+      const response = await POST(
+        request({ operation: "update-state", attrs: { preferences } })
+      )
+      expect(response.status).toBe(400)
+      expect(updateCall()).toBeUndefined()
+    }
+    const atCap = await POST(
+      request({
+        operation: "update-state",
+        attrs: { preferences: { text: "x".repeat(2000) } },
+      })
+    )
+    expect(atCap.status).toBe(200)
+  })
+
+  it("refuses an update that would push the row past the size limit", async () => {
+    // Over 400 KB DynamoDB rejects every later write to the row, including
+    // the classifier's — so refuse before it gets there.
+    mockDdbSend.mockResolvedValue({
+      Item: { userEmail: "owner@example.com", recentDecisions: ["x".repeat(300_000)] },
+    })
+    const response = await POST(
+      request({
+        operation: "update-state",
+        attrs: { pendingSuggestions: ["y".repeat(60_000)] },
+      })
+    )
+    expect(response.status).toBe(413)
+    expect(updateCall()).toBeUndefined()
+  })
+
+  it("still refuses label attributes that only the trusted path may write", async () => {
+    // Widening the allowlist must not reach the Gmail label mapping:
+    // those ids are resolved solely by `ensure-labels`.
+    for (const field of [
+      "labels",
+      "labelIdsByKey",
+      "labelMappingOwnerEmail",
+      "userEmail",
+      // Learned by the nightly Lambda only; never skill-writable.
+      "contentPreferences",
+    ]) {
+      mockDdbSend.mockClear()
+      const response = await POST(
+        request({ operation: "update-state", attrs: { [field]: "x" } })
+      )
+      expect([field, response.status]).toEqual([field, 400])
+      expect(mockDdbSend).not.toHaveBeenCalled()
+    }
   })
 })
