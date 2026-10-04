@@ -431,9 +431,10 @@ const MARKETING_FOOTER_PHRASES = [
   'view in browser',
   'add us to your address book',
   'add us to your safe sender',
+  // Both named verbatim in #1861 item 4. "go ahead and" is ordinary
+  // English, which is why the list is gated on automatedSender.
   'go ahead and',
   'think this is awesome',
-  'was this email helpful',
 ];
 
 function hasMarketingFooter(text) {
@@ -604,23 +605,25 @@ function classifyByContent(signals) {
   return null;
 }
 
-// The order classifyByContent consults the signals in, so the first name
-// reported is the one most likely to have produced the label (#1861).
-const SIGNAL_PRECEDENCE = [
-  'approvalRequest',
-  'liveThread',
+// Reporting order only — the declaration order of the signals object, so
+// the list is stable across calls and across the TS/JS copies. NOT a claim
+// about which signal "won"; the deciding branch is named by `reason`.
+// See the SIGNAL_REPORT_ORDER comment in content-features.ts.
+const SIGNAL_REPORT_ORDER = [
   'directQuestion',
   'actionRequest',
+  'approvalRequest',
   'deadline',
   'addressedToUser',
   'ccOnly',
   'broadcast',
+  'liveThread',
   'informational',
   'automatedSender',
 ];
 
 function firedContentSignals(signals) {
-  return SIGNAL_PRECEDENCE.filter((name) => signals[name] === true);
+  return SIGNAL_REPORT_ORDER.filter((name) => signals[name] === true);
 }
 
 module.exports = {

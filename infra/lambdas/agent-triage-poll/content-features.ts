@@ -153,9 +153,11 @@ export const MARKETING_FOOTER_PHRASES = [
   "view in browser",
   "add us to your address book",
   "add us to your safe sender",
+  // Both named verbatim in #1861 item 4 as phrases to detect. "go ahead
+  // and" is ordinary English, which is why the whole list is gated on
+  // `automatedSender` — see `detectContentSignals`.
   "go ahead and",
   "think this is awesome",
-  "was this email helpful",
 ];
 
 function hasMarketingFooter(text: string): boolean {
@@ -436,30 +438,40 @@ export function classifyByContent(
 }
 
 /**
- * The order `classifyByContent` consults the signals in. Also the order
- * `firedContentSignals` reports them in, so the first name in that list is
- * the one most likely to have produced the label.
+ * Reporting order for `firedContentSignals` — the declaration order of
+ * `ContentSignals` above, so the list is stable across calls and across
+ * the TS/JS copies.
+ *
+ * Deliberately NOT a claim about which signal "won". An earlier version of
+ * this list claimed to mirror the order `classifyByContent` consults the
+ * signals in, which it could not: `deadline` is never branched on directly
+ * (it only feeds `hasAsk`), `automatedSender` is consulted twice at
+ * different points (once as a veto, once as a positive branch), and
+ * `addressedToUser` only ever matters as a conjunct. Nothing could enforce
+ * that correspondence, so a reorder of `classifyByContent` would have
+ * silently made this report a misleading "most likely culprit". The
+ * deciding branch is already named exactly, by the `reason` string.
  */
-const SIGNAL_PRECEDENCE: (keyof Omit<ContentSignals, "shape">)[] = [
-  "approvalRequest",
-  "liveThread",
+const SIGNAL_REPORT_ORDER: (keyof Omit<ContentSignals, "shape">)[] = [
   "directQuestion",
   "actionRequest",
+  "approvalRequest",
   "deadline",
   "addressedToUser",
   "ccOnly",
   "broadcast",
+  "liveThread",
   "informational",
   "automatedSender",
 ];
 
 /**
- * The names of the signals that are true. `simulate` prints this so the
- * answer to "which signal fired?" is explicit rather than something the
- * reader has to infer from a ten-key boolean map (#1861 acceptance).
+ * The names of the signals that are true. `simulate` prints this alongside
+ * the decision's `reason`, so "which signal fired?" is answerable without
+ * reading a ten-key boolean map (#1861 acceptance).
  */
 export function firedContentSignals(signals: ContentSignals): string[] {
-  return SIGNAL_PRECEDENCE.filter((name) => signals[name] === true);
+  return SIGNAL_REPORT_ORDER.filter((name) => signals[name] === true);
 }
 
 /** Render the signals as prompt lines the model can reason over. */

@@ -538,9 +538,14 @@ to produce it:
 ### What `simulate` reports now
 
 `simulate` emits `firedSignals` — the names of the signals that are true,
-in the order `classifyByContent` consults them — and emits them on the
-rules-decided branch too, so "which signal fired?" is answerable without
-reading a ten-key boolean map. `--list-unsubscribe` simulates bulk mail.
+in a stable reporting order — and emits them on the rules-decided branch
+too, so "which signal fired?" is answerable without reading a ten-key
+boolean map. The deciding branch itself is named by the decision's
+`reason`; `firedSignals` deliberately makes no claim about which signal
+"won", because no such ordering could be kept faithful to
+`classifyByContent` (`deadline` is never branched on directly,
+`automatedSender` is consulted twice, and `addressedToUser` only ever
+matters as a conjunct). `--list-unsubscribe` simulates bulk mail.
 
 ### Still sender-dependent: the LLM stage
 
