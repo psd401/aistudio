@@ -22,6 +22,7 @@ openwiki:
     - infra/lambdas/agent-router/chat-text-budget.ts
     - infra/lambdas/agent-cron/chat-text-budget.ts
     - infra/database/schema/186-agent-sonnet-5-5-pricing.sql
+    - infra/lambdas/agent-cron/index.ts
   test_paths:
     - infra/test/ecs-scheduled-scaling.test.ts
     - infra/test/frontend-waf-body-signatures.test.ts
@@ -32,6 +33,7 @@ openwiki:
     - infra/lambdas/agent-router/chat-text-budget.test.ts
     - infra/lambdas/agent-router/chat-delivery-budget.test.ts
     - infra/lambdas/agent-cron/chat-text-budget.lockstep.test.ts
+    - infra/lambdas/agent-cron/silent-scheduled-run.test.ts
 ---
 
 # Infrastructure
@@ -266,7 +268,17 @@ Migrations run via Lambda function:
 | `group-sync/` | Google Directory synchronization |
 | `atrium-content-key-bootstrap/` | Atrium key provisioning |
 | `agent-router/` | Agent request routing with promoted turn recovery |
-| `agent-cron/` | Scheduled run telemetry including contention settlement |
+| `agent-cron/` | Scheduled run invocation, telemetry, and silent reply delivery (#1853) |
+
+### Agent Cron
+
+The `agent-cron` Lambda handles scheduled agent runs (watchers, monitors, periodic briefs):
+
+**Scheduled Run Delivery**: On success, posts `📋 **{scheduleName}**\n\n{response}` to the owner's DM. On failure, records the error and notifies the owner. For scheduled runs that deliberately end in silence (e.g., watchers with no changes), the Lambda skips the Chat post entirely — no bare header, no fallback text.
+
+**Silent Reply** (#1853): When the harness surfaces `metadata.silent`, `toInvokeResult()` maps it to `InvokeResult.silent` and `deliverScheduledResult()` records success without posting. This prevents noise from filling DMs with empty "📋 name" headers on every run.
+
+For harness implementation details including the NO_REPLY token and `allow_silent` contract, see **[agent-platform/overview.md → Scheduled Run Silent Reply](../agent-platform/overview.md#scheduled-run-silent-reply-1853)**.
 
 ### Agent Router
 
@@ -306,10 +318,6 @@ Google Chat messages carry **32,000 bytes** of text plus cards—a combined budg
 - `/infra/lambdas/agent-router/chat-text-budget.test.ts` — grapheme boundaries, multi-byte prose, card reservation
 - `/infra/lambdas/agent-router/chat-delivery-budget.test.ts` — outbox round-trip with cards
 - `/infra/lambdas/agent-cron/chat-text-budget.lockstep.test.ts` — router/cron parity
-
-Without this telemetry, deferred retries could vanish with no `agent_failures` row, no metric, and nothing on the usage dashboard. In production (2026-08-20 to 2026-08-31), 50 real user messages died across 8 people while the failure table recorded only 2 router-sourced rows that week—the DLQ alarm had been publishing to a topic with no subscribers.
-
-For multi-turn agent architecture, see **[agent-platform/overview.md](../agent-platform/overview.md)**.
 
 ### Agent Platform Lambdas
 
