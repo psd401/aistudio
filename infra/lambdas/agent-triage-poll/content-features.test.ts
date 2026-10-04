@@ -317,6 +317,51 @@ describe("directQuestion requires a question put to the reader (#1861)", () => {
     expect(hasDirectQuestion("Big news! Can you join us?")).toBe(true);
   });
 
+  test("a hard-wrapped question still counts", () => {
+    // A single newline in a plain-text or forwarded body is where the mail
+    // client wrapped the line, NOT a sentence boundary. Treating it as one
+    // tested only the text after the wrap and lost the "you" above it —
+    // the exact mechanism #1861 added, failing on real mail.
+    for (const text of [
+      "Could you confirm\nthe budget by Friday?",
+      "Can you please take a look at\nthe attached revision?",
+      "I wanted to ask whether you had\nany thoughts on the vendor?",
+    ]) {
+      expect([text, hasDirectQuestion(text)]).toEqual([text, true]);
+    }
+  });
+
+  test("a blank line DOES end a thought", () => {
+    // ...so flattening wraps must not let a second-person word reach a
+    // rhetorical question in the next paragraph.
+    expect(hasDirectQuestion("Thanks for your time.\n\nThink this is awesome?")).toBe(
+      false,
+    );
+    expect(hasDirectQuestion("Your report is attached\n\nThink this is awesome?")).toBe(
+      false,
+    );
+  });
+
+  test("the subject does not bleed into the body's first question", () => {
+    // The seam has to stay a hard boundary now that a newline is not one.
+    // A subject with no terminal punctuation would otherwise lend its
+    // "Your" to the body's rhetorical opener.
+    const signals = signalsFor({
+      fromEmail: "jsmith@psd401.net",
+      subject: "Your weekly report",
+      body: "Think this is awesome?",
+      headers: { to: USER },
+    });
+    expect(signals.directQuestion).toBe(false);
+  });
+
+  test("a question in the subject alone still counts", () => {
+    expect(
+      signalsFor({ subject: "Can you join Thursday?", headers: { to: USER } })
+        .directQuestion,
+    ).toBe(true);
+  });
+
   test("contractions need no special case — straight or curly apostrophe", () => {
     // `\byou\b` matches across an apostrophe because the apostrophe is a
     // non-word character. A dedicated `you'(?:re|ll|ve|d)` alternative was

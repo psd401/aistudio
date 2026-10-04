@@ -441,24 +441,43 @@ function hasMarketingFooter(text) {
   const lower = String(text || '').toLowerCase();
   return MARKETING_FOOTER_PHRASES.some((phrase) => lower.includes(phrase));
 }
+
+// Extracted from detectContentSignals to keep it under the complexity bar.
+function isInformational(opening, listMail, automatedSender) {
+  if (INFORMATIONAL_RE.test(opening)) return true;
+  if (listMail) return true;
+  return automatedSender && hasMarketingFooter(opening);
+}
 // A question only counts when the clause it terminates speaks to the
 // reader (#1861) — "Think this is awesome?" is not an ask. No contraction
 // alternative needed: an apostrophe is a non-word char, so \byou\b already
 // matches "you're". Scanned by hand rather than with /[^.!?\n]*\?/g, which
 // is quadratic on text with no question mark — see content-features.ts.
 const SECOND_PERSON_RE = /\b(you|your|yours|yourself)\b/i;
-const CLAUSE_TERMINATORS = new Set(['.', '!', '?', '\n']);
+// A single newline is NOT a clause boundary — in a hard-wrapped body it is
+// just where the client wrapped the line, and treating it as one lost real
+// questions ("Could you confirm\nthe budget by Friday?"). A BLANK line is.
+const CLAUSE_TERMINATORS = new Set(['.', '!', '?']);
+const PARAGRAPH_BREAK_RE = /\n[ \t]*\n/;
+const NEWLINE_RE = /\n/g;
 
-function hasDirectQuestion(text) {
-  const str = String(text || '');
+function scanQuestionClauses(paragraph) {
   let clauseStart = 0;
-  for (let i = 0; i < str.length; i += 1) {
-    const char = str[i];
+  for (let i = 0; i < paragraph.length; i += 1) {
+    const char = paragraph[i];
     if (!CLAUSE_TERMINATORS.has(char)) continue;
-    if (char === '?' && SECOND_PERSON_RE.test(str.slice(clauseStart, i))) {
+    if (char === '?' && SECOND_PERSON_RE.test(paragraph.slice(clauseStart, i))) {
       return true;
     }
     clauseStart = i + 1;
+  }
+  return false;
+}
+
+function hasDirectQuestion(text) {
+  const paragraphs = String(text || '').split(PARAGRAPH_BREAK_RE);
+  for (const paragraph of paragraphs) {
+    if (scanQuestionClauses(paragraph.replace(NEWLINE_RE, ' '))) return true;
   }
   return false;
 }
@@ -536,10 +555,17 @@ function detectContentSignals(input) {
   const ccAddresses = parseAddressList(headers.cc);
   const addressedToUser = toAddresses.includes(userEmail);
   const askText = opening.replace(NEGATED_ASK_RE, ' ');
+  // Subject and body scanned separately: the seam must stay a hard
+  // boundary now that a newline is not one. See content-features.ts.
+  const subjectAskText = subject.replace(NEGATED_ASK_RE, ' ');
+  const bodyAskText = String(input.body || '')
+    .slice(0, OPENING_TEXT_CHARS)
+    .replace(NEGATED_ASK_RE, ' ');
   const listMail = Boolean(String(headers.listUnsubscribe || '').trim());
   const automatedSender = isAutomatedSender(input.fromEmail, headers);
   const base = {
-    directQuestion: hasDirectQuestion(askText),
+    directQuestion:
+      hasDirectQuestion(subjectAskText) || hasDirectQuestion(bodyAskText),
     actionRequest: ACTION_RE.test(askText),
     approvalRequest: APPROVAL_RE.test(askText),
     deadline: DEADLINE_RE.test(askText),
@@ -551,10 +577,7 @@ function detectContentSignals(input) {
     liveThread:
       Boolean(input.hasUserReply) &&
       Boolean(headers.inReplyTo || headers.references || /^\s*re\s*:/i.test(subject)),
-    informational:
-      INFORMATIONAL_RE.test(opening) ||
-      listMail ||
-      (automatedSender && hasMarketingFooter(opening)),
+    informational: isInformational(opening, listMail, automatedSender),
     automatedSender,
   };
   return { ...base, shape: deriveShape(base) };

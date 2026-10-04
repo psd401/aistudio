@@ -166,6 +166,21 @@ function hasMarketingFooter(text: string): boolean {
 }
 
 /**
+ * FYI / status / digest language, bulk list mail, or marketing-footer
+ * boilerplate from a machine (#1861 item 4). Extracted from
+ * `detectContentSignals` to keep that function under the complexity bar.
+ */
+function isInformational(
+  opening: string,
+  listMail: boolean,
+  automatedSender: boolean,
+): boolean {
+  if (INFORMATIONAL_RE.test(opening)) return true;
+  if (listMail) return true;
+  return automatedSender && hasMarketingFooter(opening);
+}
+
+/**
  * A second-person reference. `directQuestion` requires one inside the
  * question clause itself, so a rhetorical marketing question ("Think this
  * is awesome?") is not read as an ask (#1861 item 1).
@@ -176,8 +191,23 @@ function hasMarketingFooter(text: string): boolean {
  */
 const SECOND_PERSON_RE = /\b(you|your|yours|yourself)\b/i;
 
-/** `.`, `!`, `?` and a newline each close the clause before them. */
-const CLAUSE_TERMINATORS = new Set([".", "!", "?", "\n"]);
+/**
+ * `.`, `!` and `?` each close the clause before them.
+ *
+ * A single newline deliberately does NOT. In a hard-wrapped plain-text or
+ * forwarded body the newline is just where the mail client wrapped the
+ * line, not a sentence boundary, so treating it as one lost real questions:
+ * "Could you confirm\nthe budget by Friday?" tested only "the budget by
+ * Friday" and missed the "you" on the line above. A BLANK line does
+ * separate thoughts, and is handled by `PARAGRAPH_BREAK_RE`.
+ */
+const CLAUSE_TERMINATORS = new Set([".", "!", "?"]);
+
+/** A blank line — the one newline-ish thing that really does end a thought. */
+const PARAGRAPH_BREAK_RE = /\n[ \t]*\n/;
+
+/** Every remaining newline, collapsed to a space before clauses are cut. */
+const NEWLINE_RE = /\n/g;
 
 /**
  * Does the text put a question to the READER?
@@ -199,11 +229,19 @@ const CLAUSE_TERMINATORS = new Set([".", "!", "?", "\n"]);
  * linear: each character is visited once, and each clause is tested once.
  */
 export function hasDirectQuestion(text: string): boolean {
+  for (const paragraph of text.split(PARAGRAPH_BREAK_RE)) {
+    if (scanQuestionClauses(paragraph.replace(NEWLINE_RE, " "))) return true;
+  }
+  return false;
+}
+
+/** One paragraph, line wraps already flattened. See `hasDirectQuestion`. */
+function scanQuestionClauses(paragraph: string): boolean {
   let clauseStart = 0;
-  for (let i = 0; i < text.length; i += 1) {
-    const char = text[i] as string;
+  for (let i = 0; i < paragraph.length; i += 1) {
+    const char = paragraph[i] as string;
     if (!CLAUSE_TERMINATORS.has(char)) continue;
-    if (char === "?" && SECOND_PERSON_RE.test(text.slice(clauseStart, i))) {
+    if (char === "?" && SECOND_PERSON_RE.test(paragraph.slice(clauseStart, i))) {
       return true;
     }
     clauseStart = i + 1;
@@ -329,12 +367,25 @@ export function detectContentSignals(
   // are the signal.
   const askText = opening.replace(NEGATED_ASK_RE, " ");
 
+  // The subject and the body are scanned for a question SEPARATELY. The
+  // seam between them has to stay a hard boundary now that a newline is
+  // not one (see `CLAUSE_TERMINATORS`), or a subject with no terminal
+  // punctuation would bleed into the body's first clause and lend it a
+  // second-person word: subject "Your weekly report" + body "Think this
+  // is awesome?" must not read as a question to the reader. The body is
+  // cut to the same `OPENING_TEXT_CHARS` that `opening` gives it.
+  const subjectAskText = input.subject.replace(NEGATED_ASK_RE, " ");
+  const bodyAskText = input.body
+    .slice(0, OPENING_TEXT_CHARS)
+    .replace(NEGATED_ASK_RE, " ");
+
   // List mail announces itself as bulk through List-Unsubscribe; that is
   // enough on its own to read the message as informational (#1861 item 4).
   const listMail = Boolean((input.headers.listUnsubscribe ?? "").trim());
 
   const base = {
-    directQuestion: hasDirectQuestion(askText),
+    directQuestion:
+      hasDirectQuestion(subjectAskText) || hasDirectQuestion(bodyAskText),
     actionRequest: ACTION_RE.test(askText),
     approvalRequest: APPROVAL_RE.test(askText),
     deadline: DEADLINE_RE.test(askText),
@@ -350,10 +401,7 @@ export function detectContentSignals(
           input.headers.references ||
           /^\s*re\s*:/i.test(input.subject),
       ),
-    informational:
-      INFORMATIONAL_RE.test(opening) ||
-      listMail ||
-      (automatedSender && hasMarketingFooter(opening)),
+    informational: isInformational(opening, listMail, automatedSender),
     automatedSender,
   };
   return { ...base, shape: deriveShape(base) };

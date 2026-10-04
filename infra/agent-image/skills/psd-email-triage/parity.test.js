@@ -76,6 +76,8 @@ const TEXTS = [
   },
   { subject: 'Want to see more?', body: 'Unsubscribe at any time.' },
   { subject: 'Any update on your section?', body: 'Let me know where it landed.' },
+  { subject: 'Quick one', body: 'Could you confirm\nthe budget by Friday?' },
+  { subject: 'Notice', body: 'Your report is attached\n\nThink this is awesome?' },
   { subject: 'Great news!', body: 'Isn’t it time? Act now. You are receiving this because you signed up.' },
 ];
 
@@ -193,6 +195,14 @@ describe('content stage parity', () => {
       'Why does this matter? Because your data says so.',
       'line one\nis this yours?',
       'Nope. Not for you. Right?',
+      // #1861 follow-up: hard-wrapped bodies and paragraph breaks.
+      'Could you confirm\nthe budget by Friday?',
+      'Can you please take a look at\nthe attached revision?',
+      'Thanks for your time.\n\nThink this is awesome?',
+      'Your report is attached\n\nThink this is awesome?',
+      'a\n\n\nb you?',
+      'you\n?',
+      '\n\n',
     ];
     for (const text of texts) {
       same(
