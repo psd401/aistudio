@@ -20,6 +20,7 @@ import {
 import { decodeContentBody } from "@/lib/content/code-encoding"
 import {
   searchPeople,
+  PEOPLE_SEARCH_MAX_QUERY_LENGTH,
   PEOPLE_SEARCH_MIN_QUERY_LENGTH,
   PEOPLE_SEARCH_RESULT_LIMIT,
 } from "@/lib/content/people-search"
@@ -93,11 +94,13 @@ const visibilitySchema = z
 /**
  * `GET /people?query=…` (#1860). `query` is required: there is no "list everyone"
  * form of this surface, and omitting it is a usage error rather than a silent
- * empty result.
+ * empty result. The ceiling is the search's OWN maximum, so an over-long query is
+ * a 400 instead of being silently truncated to a different term than the caller
+ * asked for.
  */
 const peopleQuerySchema = z
   .object({
-    query: z.string().min(1).max(200),
+    query: z.string().min(1).max(PEOPLE_SEARCH_MAX_QUERY_LENGTH),
   })
   .strict()
 
@@ -345,8 +348,16 @@ type SetAudit = (audit: MutationAudit) => void
  * OneRoster-sync only JOIN `users` on `lower(email)` and never insert. So an
  * empty result can mean either "no such person" or "that person has never used
  * AI Studio", and a `user` grant is simply not expressible for the latter. The
- * caller has to be able to tell those apart, which is why the response carries
- * the bounds rather than just the rows.
+ * response cannot resolve that ambiguity for the caller, so the skill's
+ * `find-people` note and SKILL.md both spell it out; what the response DOES carry
+ * is the bounds (`minQueryLength`, `limit`, `truncated`), so a result that is
+ * merely short or capped is never mistaken for the whole answer.
+ *
+ * Deliberately NOT rate-limited beyond those bounds, matching
+ * `searchPeopleAction`: the caller is the signed workspace owner acting with
+ * their own `atrium-content` authority, and the same person can already loop the
+ * web action from a browser session. A limiter here without one there would
+ * create the appearance of a control that is not actually in place.
  *
  * Returns `null` when the path is not this one, so the caller falls through.
  */
@@ -360,14 +371,14 @@ async function executePeopleRead(
 
   await assertContentAuthoringCapability({ authType: "session", cognitoSub })
   const { query } = peopleQuerySchema.parse(input.query ?? {})
-  const people = await searchPeople(query)
+  const { people, truncated } = await searchPeople(query)
   return success(
     {
       query,
       people,
       minQueryLength: PEOPLE_SEARCH_MIN_QUERY_LENGTH,
       limit: PEOPLE_SEARCH_RESULT_LIMIT,
-      truncated: people.length === PEOPLE_SEARCH_RESULT_LIMIT,
+      truncated,
     },
     input.requestId
   )

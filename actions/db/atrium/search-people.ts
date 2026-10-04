@@ -53,7 +53,10 @@ export async function searchPeopleAction(
       throw ErrorFactories.authzToolAccessDenied("atrium-content");
     }
 
-    const people = await searchPeople(query);
+    // The picker shows a bounded type-ahead list and has no "more results"
+    // affordance, so the `truncated` half of the result is deliberately dropped
+    // here; the agent surface, which has no scrollback, reports it.
+    const { people } = await searchPeople(query);
 
     timer({ status: "success" });
     log.info("People found", { count: people.length });

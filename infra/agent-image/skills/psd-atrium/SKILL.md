@@ -1,7 +1,7 @@
 ---
 name: psd-atrium
-summary: Read and write AI Studio Atrium content — PSD's collaborative document + live-artifact workspace with an intranet publishing flow. Find/read/create/edit/archive/delete documents and artifacts, embed images, add first-party artifact persistence with AtriumData, and publish them. Artifacts fully support HTML/CSS/JavaScript (including <script>/<style>).
-description: Use this to work with Atrium, PSD's collaborative content workspace in AI Studio (documents + interactive artifacts, with an internal "intranet" publishing flow). Find and read Atrium documents/artifacts, create new ones, edit them (append or replace), add live artifact persistence with window.AtriumData, archive them, hard-delete ones you own, and publish/unpublish them (a Live/Draft state — it does NOT change who can read them; the visibility level does). Interactive artifacts fully support real HTML, CSS, and JavaScript — including <script>, <style>, and inline style="…" — pass raw code; the skill base64-encodes it in transit so AI Studio cannot mangle it (do NOT work around with legacy attributes like bgcolor/width). That protects the write, NOT the render: `data:` URIs are still stripped when the page is served, so images must be uploaded with upload-asset or referenced by public https URL. Atrium is REAL and live — never say the district has no content workspace. Version-based: reads return the last saved version and edits create a new version; the real-time collaborative editor rail is not reachable from here.
+summary: Read and write AI Studio Atrium content — PSD's collaborative document + live-artifact workspace with an intranet publishing flow. Find/read/create/edit/archive/delete documents and artifacts, embed images, add first-party artifact persistence with AtriumData, control who can view them (visibility level + grants, including sharing with a named person), and publish them. Artifacts fully support HTML/CSS/JavaScript (including <script>/<style>).
+description: Use this to work with Atrium, PSD's collaborative content workspace in AI Studio (documents + interactive artifacts, with an internal "intranet" publishing flow). Find and read Atrium documents/artifacts, create new ones, edit them (append or replace), add live artifact persistence with window.AtriumData, archive them, hard-delete ones you own, read and change who can view them (read-grants / set-visibility, and find-people to resolve a colleague's email to the user id a per-person grant needs), and publish/unpublish them (a Live/Draft state — it does NOT change who can read them; the visibility level does). Interactive artifacts fully support real HTML, CSS, and JavaScript — including <script>, <style>, and inline style="…" — pass raw code; the skill base64-encodes it in transit so AI Studio cannot mangle it (do NOT work around with legacy attributes like bgcolor/width). That protects the write, NOT the render: `data:` URIs are still stripped when the page is served, so images must be uploaded with upload-asset or referenced by public https URL. Atrium is REAL and live — never say the district has no content workspace. Version-based: reads return the last saved version and edits create a new version; the real-time collaborative editor rail is not reachable from here.
 allowed-tools: Bash(node:*)
 ---
 
@@ -683,11 +683,15 @@ node run.js set-visibility --id <id> --level group --add-grants user:412
 ```
 
 `find-people` matches email, first name, last name, and full name; it needs at
-least 2 characters and returns at most 20 rows. The response echoes
-`minQueryLength` and `limit`, plus `truncated: true` when the result hit the cap —
-narrow the query rather than treating a capped list as the whole answer. **Always
-check the returned `email`** before granting: a `user` grant on the wrong row
-shares the object with the wrong person, and two staff can share a surname.
+least 2 characters and returns at most 20 rows, with an exact email match ranked
+first. The response echoes `minQueryLength` and `limit`, plus `truncated: true`
+when a further match exists beyond the ones listed — narrow the query (a last name
+or the full email) rather than treating a capped list as the whole answer.
+**Always check the returned `email`** before granting: nothing server-side can
+tell whether you picked the row the person actually meant, a `user` grant on the
+wrong row shares the object with the wrong person, and two staff can share a
+surname. Atrium keeps no grant history, so a wrong grant is only found by reading
+the audience back.
 
 It searches AI Studio's own user table, which is **not** a district directory
 mirror: a row exists once someone has signed in to AI Studio or connected the

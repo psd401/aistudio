@@ -72,6 +72,7 @@ const searchPeopleMock = jest.fn()
 jest.mock("@/lib/content/people-search", () => ({
   searchPeople: (...args: unknown[]) => searchPeopleMock(...args),
   PEOPLE_SEARCH_MIN_QUERY_LENGTH: 2,
+  PEOPLE_SEARCH_MAX_QUERY_LENGTH: 100,
   PEOPLE_SEARCH_RESULT_LIMIT: 20,
 }))
 jest.mock("@/lib/content", () => {
@@ -193,14 +194,15 @@ beforeEach(() => {
     kind: "artifact",
   })
   dataLimitMock.mockResolvedValue([])
-  searchPeopleMock.mockResolvedValue([])
+  searchPeopleMock.mockResolvedValue({ people: [], truncated: false })
 })
 
 describe("signed-owner Atrium people lookup (#1860)", () => {
   it("resolves an email to the users.id a `user` grant stores", async () => {
-    searchPeopleMock.mockResolvedValue([
-      { id: 412, name: "J Mondry", email: "mondryj@psd401.net" },
-    ])
+    searchPeopleMock.mockResolvedValue({
+      people: [{ id: 412, name: "J Mondry", email: "mondryj@psd401.net" }],
+      truncated: false,
+    })
 
     const result = await executeOwnerAtriumOperation({
       ownerEmail: "owner@psd401.net",
@@ -223,14 +225,15 @@ describe("signed-owner Atrium people lookup (#1860)", () => {
     })
   })
 
-  it("flags a result that hit the row cap so a partial list is not read as complete", async () => {
-    searchPeopleMock.mockResolvedValue(
-      Array.from({ length: 20 }, (_, index) => ({
+  it("relays the search's own truncation signal so a partial list is not read as complete", async () => {
+    searchPeopleMock.mockResolvedValue({
+      people: Array.from({ length: 20 }, (_, index) => ({
         id: index + 1,
         name: `Person ${index}`,
         email: `person${index}@psd401.net`,
-      }))
-    )
+      })),
+      truncated: true,
+    })
 
     const result = await executeOwnerAtriumOperation({
       ownerEmail: "owner@psd401.net",
@@ -241,6 +244,19 @@ describe("signed-owner Atrium people lookup (#1860)", () => {
     })
 
     expect(result.payload).toMatchObject({ data: { truncated: true } })
+  })
+
+  it("rejects a query longer than the search's own ceiling instead of silently truncating it", async () => {
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "req-people-long",
+      method: "GET",
+      path: "/people",
+      query: { query: "x".repeat(101) },
+    })
+
+    expect(result.httpStatus).toBe(400)
+    expect(searchPeopleMock).not.toHaveBeenCalled()
   })
 
   it("gates the directory read on the authoring capability BEFORE any row is read", async () => {

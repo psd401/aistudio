@@ -1277,3 +1277,43 @@ test('find-people requires --query (exit 1, no request sent)', async () => {
   expect(code).toBe(1);
   expect(restCalls).toHaveLength(0);
 });
+
+test('find-people tells the agent to narrow a truncated result in the note itself', async () => {
+  // SKILL.md tells the agent to narrow on `truncated`; the note is what every
+  // other subcommand uses as the next-action signal, so it must say so too.
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: {
+      query: 'smith',
+      people: [{ id: 1, name: 'A Smith', email: 'smitha@psd401.net' }],
+      minQueryLength: 2,
+      limit: 20,
+      truncated: true,
+    },
+  });
+
+  await run('find-people', '--query', 'smith');
+
+  expect(emitted[0].truncated).toBe(true);
+  expect(emitted[0].note).toContain('narrow the query');
+});
+
+test('find-people distinguishes a too-short query from a genuine no-match', async () => {
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: {
+      query: 'm',
+      people: [],
+      minQueryLength: 2,
+      limit: 20,
+      truncated: false,
+    },
+  });
+
+  await run('find-people', '--query', 'm');
+
+  expect(emitted[0].note).toContain('minimum');
+  expect(emitted[0].note).not.toContain('never signed in');
+});

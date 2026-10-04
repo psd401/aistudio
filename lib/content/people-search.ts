@@ -24,6 +24,7 @@
 
 import { asc, ilike, isNotNull, or, sql, and } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
+import { escapeSearchPattern } from "@/lib/db/drizzle/helpers/search";
 import { users } from "@/lib/db/schema";
 
 /**
@@ -32,21 +33,16 @@ import { users } from "@/lib/db/schema";
  */
 export const PEOPLE_SEARCH_MIN_QUERY_LENGTH = 2;
 
-/** Upper bound on the bound search parameter. */
-const MAX_QUERY_LENGTH = 100;
+/**
+ * Longest accepted query. Exported so a caller that validates its input (the
+ * agent broker's zod schema) rejects at the SAME length this truncates at,
+ * instead of declaring a second, different ceiling and silently dropping the
+ * tail of anything in between.
+ */
+export const PEOPLE_SEARCH_MAX_QUERY_LENGTH = 100;
 
 /** Max rows returned per search. This is a type-ahead, not a directory browser. */
 export const PEOPLE_SEARCH_RESULT_LIMIT = 20;
-
-/**
- * Escape LIKE/ILIKE metacharacters so a query like `50%` matches literally
- * instead of acting as a wildcard. Mirrors `visibility-service`'s helper; the
- * pattern is still a bound parameter, so this is pattern hygiene, not injection
- * protection.
- */
-function escapeLikePattern(text: string): string {
-  return text.replace(/[\\%_]/g, (m) => `\\${m}`);
-}
 
 export interface PersonOption {
   /** The `users.id` stored as the grant value. */
@@ -56,22 +52,47 @@ export interface PersonOption {
   email: string;
 }
 
+export interface PeopleSearchResult {
+  /** At most `PEOPLE_SEARCH_RESULT_LIMIT` matches. */
+  people: PersonOption[];
+  /** True only when a further match exists beyond the ones returned. */
+  truncated: boolean;
+}
+
 /**
  * Search the directory for people a `user` grant can name.
  *
- * Returns `[]` — never an error — for a query shorter than
+ * Returns an empty result — never an error — for a query shorter than
  * `PEOPLE_SEARCH_MIN_QUERY_LENGTH`, so a type-ahead can call it on every
  * keystroke.
  *
  * Rows with a NULL email are excluded: `users.email` is nullable (pre-provisioned
  * rows), and a person nobody can address by email cannot be confirmed as the
  * right grantee — returning one would invite granting access to the wrong row.
+ * The non-null email is re-checked in the mapping below rather than asserted with
+ * a cast, so a later edit to the WHERE clause cannot silently turn `email` into
+ * `null` behind a `string` type.
+ *
+ * Queries one row PAST the cap so `truncated` means "there is a further match",
+ * not merely "the result happens to be exactly as long as the cap".
+ *
+ * Ordering puts an exact email match first, then alphabetical. Neither caller can
+ * verify WHICH row the requester meant — that stays a human judgement made
+ * against the returned `email` — but the one case where the intended row is
+ * knowable (the caller passed a full address) must never be the row that falls
+ * off the end of a capped list.
  */
-export async function searchPeople(query: string): Promise<PersonOption[]> {
+export async function searchPeople(
+  query: string
+): Promise<PeopleSearchResult> {
   const trimmed = (query ?? "").trim();
-  if (trimmed.length < PEOPLE_SEARCH_MIN_QUERY_LENGTH) return [];
+  if (trimmed.length < PEOPLE_SEARCH_MIN_QUERY_LENGTH) {
+    return { people: [], truncated: false };
+  }
 
-  const pattern = `%${escapeLikePattern(trimmed.slice(0, MAX_QUERY_LENGTH))}%`;
+  const pattern = `%${escapeSearchPattern(
+    trimmed.slice(0, PEOPLE_SEARCH_MAX_QUERY_LENGTH)
+  )}%`;
   const displayName = sql<string>`coalesce(nullif(trim(concat_ws(' ', ${users.firstName}, ${users.lastName})), ''), split_part(${users.email}, '@', 1))`;
 
   const rows = await executeQuery(
@@ -96,10 +117,23 @@ export async function searchPeople(query: string): Promise<PersonOption[]> {
             )
           )
         )
-        .orderBy(asc(users.email))
-        .limit(PEOPLE_SEARCH_RESULT_LIMIT),
+        // An EXACT email match sorts first. Without this the order is purely
+        // alphabetical, so resolving a known address (the normal case — the
+        // caller already has the email and wants its id) could have the one
+        // right row pushed past the cap by same-prefix neighbours.
+        .orderBy(
+          sql`case when lower(${users.email}) = lower(${trimmed}) then 0 else 1 end`,
+          asc(users.email)
+        )
+        .limit(PEOPLE_SEARCH_RESULT_LIMIT + 1),
     "atrium.searchPeople"
   );
 
-  return rows as PersonOption[];
+  const matches = rows.flatMap((row) =>
+    row.email ? [{ id: row.id, name: row.name, email: row.email }] : []
+  );
+  return {
+    people: matches.slice(0, PEOPLE_SEARCH_RESULT_LIMIT),
+    truncated: matches.length > PEOPLE_SEARCH_RESULT_LIMIT,
+  };
 }

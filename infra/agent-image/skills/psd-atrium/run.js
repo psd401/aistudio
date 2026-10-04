@@ -785,17 +785,26 @@ async function findPeople(args) {
   const query = requireStr(args, 'query', 'query');
   const { payload } = await restFetch('GET', '/people', { query: { query } });
   const people = (payload && payload.people) || [];
+  const minQueryLength = payload && payload.minQueryLength;
   emit({
     ...payload,
-    note:
-      people.length === 0
-        ? 'No AI Studio user matched. Try a last name or the full email. If the ' +
-          'person has never signed in to AI Studio and has never connected the ' +
-          'Google Chat agent, they have no id yet and a `user` grant cannot name ' +
-          'them — report that instead of omitting them silently.'
-        : 'Pass the numeric `id` as `set-visibility --add-grants user:<id>`. ' +
-          'Confirm the email before granting — a `user` grant on the wrong row ' +
-          'shares the object with the wrong person.',
+    // The `note` is what every other subcommand here uses as the "what to do
+    // next" signal, so the truncation and too-short cases must appear IN it —
+    // not only as raw fields a caller may never read.
+    note: people.length === 0
+      ? (typeof minQueryLength === 'number' && query.trim().length < minQueryLength
+          ? `The query is shorter than the ${minQueryLength}-character minimum, so nothing was searched. Retry with a longer term.`
+          : 'No AI Studio user matched. Try a last name or the full email. If the ' +
+            'person has never signed in to AI Studio and has never connected the ' +
+            'Google Chat agent, they have no id yet and a `user` grant cannot name ' +
+            'them — report that instead of omitting them silently.')
+      : (payload && payload.truncated
+          ? 'More people match than are listed — narrow the query (a last name or ' +
+            'the full email) before granting, or you may be looking at the wrong ' +
+            'row. Then pass the numeric `id` as `set-visibility --add-grants user:<id>`.'
+          : 'Pass the numeric `id` as `set-visibility --add-grants user:<id>`. ' +
+            'Confirm the email before granting — a `user` grant on the wrong row ' +
+            'shares the object with the wrong person.'),
   });
 }
 

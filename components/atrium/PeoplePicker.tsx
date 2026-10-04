@@ -48,6 +48,10 @@ export function PeoplePicker({
 
   useEffect(() => {
     const term = query.trim();
+    // Mirrors PEOPLE_SEARCH_MIN_QUERY_LENGTH in lib/content/people-search.ts.
+    // Not imported: that module pulls in Drizzle and is server-only, so the floor
+    // is duplicated here to avoid a pointless round trip the server would answer
+    // with an empty list anyway. Change both together.
     if (term.length < 2) {
       setResults([]);
       setSearching(false);
