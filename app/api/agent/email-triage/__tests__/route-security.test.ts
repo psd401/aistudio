@@ -292,3 +292,79 @@ describe("email triage route invocation boundary", () => {
     expect(mockDdbSend).not.toHaveBeenCalled()
   })
 })
+
+describe("email triage state-update allowlist", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    globalThis.fetch = mockFetch
+    mockVerifyInvocation.mockResolvedValue({
+      ownerEmail: "owner@example.com",
+      mode: "owner",
+    })
+    mockGetAccessToken.mockResolvedValue({ access_token: "token" })
+    mockDdbSend.mockResolvedValue({})
+  })
+
+  it("accepts the suggestion attributes the skill writes (#1855)", async () => {
+    // `suggestions dismiss` failed for every id with "Invalid triage
+    // state update" because these three were never allowlisted — the
+    // user could not clear a single one of 75 pending suggestions.
+    const response = await POST(
+      request({
+        operation: "update-state",
+        attrs: {
+          pendingSuggestions: [],
+          dismissedSuggestions: ["mute:someone@example.com"],
+          appliedSuggestions: [],
+        },
+      })
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ ok: true })
+    const command = mockDdbSend.mock.calls[0][0] as {
+      input: { ExpressionAttributeNames: Record<string, string> }
+    }
+    expect(Object.values(command.input.ExpressionAttributeNames)).toEqual([
+      "pendingSuggestions",
+      "dismissedSuggestions",
+      "appliedSuggestions",
+    ])
+  })
+
+  it("accepts the remaining attributes the skill writes (#1855)", async () => {
+    // Every one of these is written by a documented subcommand; a gap
+    // here is a 400 the user sees as "the CLI is broken".
+    for (const field of [
+      "tasksMode",
+      "tasksNotifySuccess",
+      "preferences",
+      "suggestPeopleRules",
+      "contentPreferences",
+    ]) {
+      mockDdbSend.mockClear()
+      const response = await POST(
+        request({ operation: "update-state", attrs: { [field]: "value" } })
+      )
+      expect([field, response.status]).toEqual([field, 200])
+    }
+  })
+
+  it("still refuses label attributes that only the trusted path may write", async () => {
+    // Widening the allowlist must not reach the Gmail label mapping:
+    // those ids are resolved solely by `ensure-labels`.
+    for (const field of [
+      "labels",
+      "labelIdsByKey",
+      "labelMappingOwnerEmail",
+      "userEmail",
+    ]) {
+      mockDdbSend.mockClear()
+      const response = await POST(
+        request({ operation: "update-state", attrs: { [field]: "x" } })
+      )
+      expect([field, response.status]).toEqual([field, 400])
+      expect(mockDdbSend).not.toHaveBeenCalled()
+    }
+  })
+})

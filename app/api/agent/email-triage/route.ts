@@ -32,13 +32,31 @@ const ddb = DynamoDBDocumentClient.from(
   { marshallOptions: { removeUndefinedValues: true } }
 ) as unknown as EmailTriageDynamoClient
 const SAFE_ID = /^[A-Za-z0-9_-]{1,256}$/
+/**
+ * Attributes the owner-bound skill may write.
+ *
+ * This is a denial boundary, not documentation: anything missing here is
+ * rejected with HTTP 400 and the skill surfaces "Invalid triage state
+ * update". That is what broke `suggestions dismiss` and `tasks mode` for
+ * every id (#1855 item 2) — the skill wrote `pendingSuggestions` /
+ * `tasksMode`, which were never allowlisted, so the user could not clear
+ * a single one of their 75 pending suggestions.
+ *
+ * When adding a field the skill writes, add it here in the same change,
+ * and keep the Gmail-label attributes (`labels`, `labelIdsByKey`,
+ * `labelMapping*`) OUT: those are resolved only by the trusted
+ * `ensure-labels` operation so a model cannot choose a label id.
+ */
 const SAFE_STATE_FIELDS = new Set([
+  "appliedSuggestions",
   "classifierStartHistoryId",
+  "contentPreferences",
   "digestEnabled",
   "digestScheduleArn",
   "digestTime",
   "digestTz",
   "disabledAt",
+  "dismissedSuggestions",
   "enabled",
   "enabledAt",
   "escalation",
@@ -48,10 +66,15 @@ const SAFE_STATE_FIELDS = new Set([
   "lastHistoryId",
   "lastPollAt",
   "learnedPatterns",
+  "pendingSuggestions",
+  "preferences",
   "recentCorrections",
   "recentDecisions",
   "rules",
+  "suggestPeopleRules",
   "sweep",
+  "tasksMode",
+  "tasksNotifySuccess",
 ])
 
 function tableName(): string {
