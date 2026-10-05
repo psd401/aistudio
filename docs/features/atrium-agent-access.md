@@ -113,12 +113,10 @@ people picker is a server action no agent can call. It maps to `GET /_people` on
 the broker, shares its query with the web picker
 (`lib/content/people-search.ts`), and is gated on the same `atrium-content`
 authoring capability as that picker — it returns directory rows, so it does not
-sit with the ungated content reads. Scope caveat: staff in any synced Google group
-have a `users` row whether or not they ever signed in (group sync pre-provisions
-them — see [Google group sync](google-group-sync.md#staff-pre-provisioning-1860)),
-but that row has no name until first sign-in, so it matches by email only. Anyone
-in no synced group who has never signed in has no id and can only be reached
-through a `group` grant.
+sit with the ungated content reads. Scope caveat: `users` is a sign-in-derived
+population, not a directory mirror (a row appears on first AI Studio sign-in or
+on Google Chat agent provisioning), so a staff member who has done neither has no
+id and can only be reached through a `group` grant.
 
 The agent
 works **version-based** (create-as-private, owner permission and capability

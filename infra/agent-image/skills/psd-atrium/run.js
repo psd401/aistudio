@@ -774,13 +774,12 @@ async function readGrants(args) {
  * `minQueryLength` characters and returns at most `limit` rows, both echoed back
  * so a truncated result is visible rather than silently partial.
  *
- * This searches AI Studio's own user table. District staff in any synced Google
- * group have a row whether or not they ever signed in — the hourly group sync
- * pre-provisions them — but a row for someone who never signed in has NO name
- * yet, so it matches only by EMAIL. So an empty NAME search is not conclusive:
- * get the person's email and search that. An empty EMAIL search means they are in
- * no synced group and never used AI Studio — say so and offer a `group` grant,
- * rather than silently dropping them from the audience.
+ * An EMPTY result does not prove the person does not work here: this searches AI
+ * Studio's own user table, which fills in when someone first signs in to AI
+ * Studio or connects the Google Chat agent. A colleague who has done neither has
+ * no id yet, and a `user` grant cannot name them — say so and offer a `group`
+ * grant or wait for them to sign in, rather than silently dropping them from the
+ * audience.
  */
 async function findPeople(args) {
   const query = requireStr(args, 'query', 'query');
@@ -795,11 +794,10 @@ async function findPeople(args) {
     note: people.length === 0
       ? (typeof minQueryLength === 'number' && query.trim().length < minQueryLength
           ? `The query is shorter than the ${minQueryLength}-character minimum, so nothing was searched. Retry with a longer term.`
-          : 'No AI Studio user matched. Staff who have never signed in are findable ' +
-            'by full email only (their row has no name yet), so if you searched a ' +
-            'name, get their email and search that. If the full email finds nothing, ' +
-            'they have no id and a `user` grant cannot name them — report that ' +
-            'instead of omitting them silently, and offer a `group` grant.')
+          : 'No AI Studio user matched. Try a last name or the full email. If the ' +
+            'person has never signed in to AI Studio and has never connected the ' +
+            'Google Chat agent, they have no id yet and a `user` grant cannot name ' +
+            'them — report that instead of omitting them silently.')
       : (payload && payload.truncated
           ? 'More people match than are listed — narrow the query (a last name or ' +
             'the full email) before granting, or you may be looking at the wrong ' +

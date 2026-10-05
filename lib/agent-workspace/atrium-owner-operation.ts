@@ -344,15 +344,14 @@ type SetAudit = (audit: MutationAudit) => void
  * `slugifyTitle` emits `[a-z0-9-]` only, so no object's slug can be `_people` and
  * this shadows nothing — unlike the bare `collections` segment, which does.
  *
- * SCOPE: this searches `users`. Staff in any active synced Google group have a
- * row whether or not they ever signed in — the group-sync Lambda pre-provisions
- * them (`provisionGroupMemberUsers`) — and everyone else gets one at sign-in or
- * Google Chat agent connect (`provisionAgentUser`). A pre-provisioned row has no
- * name until first sign-in, so it matches by EMAIL only: an empty name search is
- * not conclusive, and an empty email search means "in no synced group and never
- * used AI Studio", for whom a `user` grant is not expressible. The response
- * cannot say which, so the skill's `find-people` note and SKILL.md spell it out;
- * what the response DOES carry
+ * SCOPE: this searches `users`, which is a SIGN-IN-derived population, not a
+ * directory mirror. A row exists once someone has signed in to AI Studio or
+ * connected the Google Chat agent (`provisionAgentUser`); group-sync and
+ * OneRoster-sync only JOIN `users` on `lower(email)` and never insert. So an
+ * empty result can mean either "no such person" or "that person has never used
+ * AI Studio", and a `user` grant is simply not expressible for the latter. The
+ * response cannot resolve that ambiguity for the caller, so the skill's
+ * `find-people` note and SKILL.md both spell it out; what the response DOES carry
  * is the bounds (`minQueryLength`, `limit`, `truncated`), so a result that is
  * merely short or capped is never mistaken for the whole answer.
  *
