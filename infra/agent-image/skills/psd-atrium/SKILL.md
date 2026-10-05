@@ -73,6 +73,9 @@ node run.js read-grants --id <uuid-or-slug>
 # Resolve a person to the numeric AI Studio user id a `user` grant needs.
 # Matches email, first name, last name, or full name (2+ characters, 20 results).
 node run.js find-people --query "mondryj@psd401.net"
+
+# No match? Get (or create) the id for a district colleague who never signed in.
+node run.js add-person --email "newteacher@psd401.net" [--first-name Ann] [--last-name Lee]
 ```
 
 `find` filters: `--kind document|artifact`, `--collection <slug|id>`, `--tag <t>`,
@@ -682,6 +685,20 @@ node run.js find-people --query "mondryj@psd401.net"
 node run.js set-visibility --id <id> --level group --add-grants user:412
 ```
 
+If `find-people` finds nothing, the colleague has probably just never signed in.
+For any district staff email, `add-person` returns their id, creating it if needed;
+their first sign-in keeps it, so the grant applies from then on:
+
+```bash
+node run.js add-person --email "newteacher@psd401.net" --first-name Ann --last-name Lee
+# → { "person": { "id": 913, "name": "Ann Lee", "email": "newteacher@psd401.net" }, "created": true, … }
+node run.js set-visibility --id <id> --level group --add-grants user:913
+```
+
+Only `@psd401.net` staff addresses are accepted (student-number addresses and
+other domains are rejected). Use the exact address — get it from the requester or
+`psd-directory` — since a typo creates an id for nobody.
+
 `find-people` matches email, first name, last name, and full name; it needs at
 least 2 characters and returns at most 20 rows, with an exact email match ranked
 first. The response echoes `minQueryLength` and `limit`, plus `truncated: true`
@@ -693,14 +710,9 @@ wrong row shares the object with the wrong person, and two staff can share a
 surname. Atrium keeps no grant history, so a wrong grant is only found by reading
 the audience back.
 
-It searches AI Studio's own user table, which is **not** a district directory
-mirror: a row exists once someone has signed in to AI Studio or connected the
-Google Chat agent. So an empty result is ambiguous — it may mean no such person,
-or it may mean a real colleague who has never used AI Studio and therefore has no
-id a `user` grant could name. Try a last name or the full email first; if there is
-still no match, **say so** and offer a `group` grant (a synced Google group covers
-everyone in it, signed in or not) instead of quietly dropping that person from the
-audience. Do not invent an id.
+It searches AI Studio's own user table, which has no row for someone who has
+never signed in — so an empty result usually means exactly that. For district
+staff, use `add-person --email` (above) to get their id. Do not invent an id.
 
 `read-grants --id <id>` returns the level plus the actual `grants: [{kind,
 value}]` entries. It needs EDIT rights on the object — the list names every

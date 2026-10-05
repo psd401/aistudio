@@ -113,10 +113,12 @@ people picker is a server action no agent can call. It maps to `GET /_people` on
 the broker, shares its query with the web picker
 (`lib/content/people-search.ts`), and is gated on the same `atrium-content`
 authoring capability as that picker — it returns directory rows, so it does not
-sit with the ungated content reads. Scope caveat: `users` is a sign-in-derived
-population, not a directory mirror (a row appears on first AI Studio sign-in or
-on Google Chat agent provisioning), so a staff member who has done neither has no
-id and can only be reached through a `group` grant.
+sit with the ungated content reads. `users` is a sign-in-derived population,
+so a colleague who has never signed in has no row; `add-person --email`
+(`POST /_people`, same capability gate) returns the id for any `@psd401.net`
+staff address, creating the row — plus the default `staff` role — when none
+exists (`ensureDistrictPerson`). Their first sign-in links that row by email and
+keeps the id, so grants made beforehand apply.
 
 The agent
 works **version-based** (create-as-private, owner permission and capability

@@ -13,6 +13,10 @@
  *     `lib/agent-workspace/atrium-owner-operation.ts`, surfaced as
  *     `psd-atrium find-people`)
  *
+ * `ensureDistrictPerson` (`POST /_people`, `psd-atrium add-person`) covers the
+ * person a search cannot find: a district colleague who has never signed in and
+ * so has no row yet.
+ *
  * The query lives here so those two cannot drift apart on the projection, the
  * result cap, or the minimum query length — the three things that keep this from
  * becoming a directory dump.
@@ -23,9 +27,9 @@
  */
 
 import { asc, ilike, isNotNull, or, sql, and } from "drizzle-orm";
-import { executeQuery } from "@/lib/db/drizzle-client";
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { escapeSearchPattern } from "@/lib/db/drizzle/helpers/search";
-import { users } from "@/lib/db/schema";
+import { roles, userRoles, users } from "@/lib/db/schema";
 
 /**
  * Shortest accepted query. Below this the search returns an empty list rather
@@ -136,4 +140,99 @@ export async function searchPeople(
     people: matches.slice(0, PEOPLE_SEARCH_RESULT_LIMIT),
     truncated: matches.length > PEOPLE_SEARCH_RESULT_LIMIT,
   };
+}
+
+export interface EnsureDistrictPersonInput {
+  email: string;
+  firstName?: string | null;
+  lastName?: string | null;
+}
+
+export interface EnsureDistrictPersonResult {
+  person: PersonOption;
+  /** False when a row for this email already existed (it is returned as-is). */
+  created: boolean;
+}
+
+/** Thrown for an email this path refuses to create a row for. */
+export class DistrictPersonRejectedError extends Error {}
+
+const SIMPLE_EMAIL_RE = /^[^\s@]+@[^\s@]+$/;
+
+/**
+ * Return the `users` row for a district STAFF email, creating it if none exists,
+ * so a `user` grant can name a colleague who has never signed in (#1860).
+ *
+ * The row is the same shape `provisionAgentUser` writes — lowercased email,
+ * optional names, `cognito_sub` NULL — and the person's first sign-in links it by
+ * `lower(email)` (`lib/auth/resolve-user.ts`), keeping this id and every grant
+ * made to it. A new row also gets `staff` (source `manual`), the default role
+ * sign-in gives a new staff user: the sign-in LINK path never assigns a default
+ * role, so a roleless row would sign in with none.
+ *
+ * Staff only: the email must be on the district domain exactly
+ * (`AGENT_WORKSPACE_ALLOWED_DOMAIN`, default `psd401.net`) with a non-numeric
+ * local part (all-digit ids are students — `lib/auth/default-role.ts`).
+ *
+ * Authorizes nothing; the caller gates.
+ */
+export async function ensureDistrictPerson(
+  input: EnsureDistrictPersonInput
+): Promise<EnsureDistrictPersonResult> {
+  const email = (input.email ?? "").trim().toLowerCase();
+  const domain = (process.env.AGENT_WORKSPACE_ALLOWED_DOMAIN?.trim() || "psd401.net").toLowerCase();
+  const [localPart, emailDomain] = email.split("@");
+  if (!SIMPLE_EMAIL_RE.test(email) || email.length > 255) {
+    throw new DistrictPersonRejectedError("Not a valid email address");
+  }
+  if (emailDomain !== domain) {
+    throw new DistrictPersonRejectedError(`Only @${domain} addresses can be added`);
+  }
+  if (/^\d+$/.test(localPart)) {
+    throw new DistrictPersonRejectedError("Student accounts cannot be added");
+  }
+  const firstName = input.firstName?.trim().slice(0, 255) || null;
+  const lastName = input.lastName?.trim().slice(0, 255) || null;
+
+  const { row, created } = await executeTransaction(async (tx) => {
+    const [existing] = await tx
+      .select({ id: users.id, firstName: users.firstName, lastName: users.lastName, email: users.email })
+      .from(users)
+      .where(sql`lower(${users.email}) = ${email}`)
+      .limit(1);
+    if (existing) return { row: existing, created: false };
+
+    const [staffRole] = await tx
+      .select({ id: roles.id })
+      .from(roles)
+      .where(sql`lower(${roles.name}) = 'staff'`)
+      .limit(1);
+    if (!staffRole) throw new Error("Required application role is missing: staff");
+
+    // ON CONFLICT covers a concurrent first sign-in inserting the same address
+    // between the SELECT above and here (uq_users_email_lower).
+    const [inserted] = await tx
+      .insert(users)
+      .values({ email, firstName, lastName })
+      .onConflictDoNothing()
+      .returning({ id: users.id, firstName: users.firstName, lastName: users.lastName, email: users.email });
+    if (!inserted) {
+      const [raced] = await tx
+        .select({ id: users.id, firstName: users.firstName, lastName: users.lastName, email: users.email })
+        .from(users)
+        .where(sql`lower(${users.email}) = ${email}`)
+        .limit(1);
+      return { row: raced, created: false };
+    }
+    await tx
+      .insert(userRoles)
+      .values({ userId: inserted.id, roleId: staffRole.id, source: "manual" })
+      .onConflictDoNothing();
+    return { row: inserted, created: true };
+  }, "atrium.ensureDistrictPerson");
+
+  const name =
+    [row.firstName, row.lastName].map((part) => part?.trim()).filter(Boolean).join(" ") ||
+    localPart;
+  return { person: { id: row.id, name, email: row.email ?? email }, created };
 }

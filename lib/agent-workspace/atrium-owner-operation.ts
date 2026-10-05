@@ -19,6 +19,8 @@ import {
 } from "@/lib/content"
 import { decodeContentBody } from "@/lib/content/code-encoding"
 import {
+  DistrictPersonRejectedError,
+  ensureDistrictPerson,
   searchPeople,
   PEOPLE_SEARCH_MAX_QUERY_LENGTH,
   PEOPLE_SEARCH_MIN_QUERY_LENGTH,
@@ -101,6 +103,19 @@ const visibilitySchema = z
 const peopleQuerySchema = z
   .object({
     query: z.string().min(1).max(PEOPLE_SEARCH_MAX_QUERY_LENGTH),
+  })
+  .strict()
+
+/**
+ * `POST /_people` (#1860): create the `users` row for a district colleague who
+ * has never signed in, so a `user` grant can name them. Names are optional and
+ * only make the row findable by name before that first sign-in.
+ */
+const addPersonSchema = z
+  .object({
+    email: z.string().min(3).max(255),
+    firstName: z.string().max(255).optional(),
+    lastName: z.string().max(255).optional(),
   })
   .strict()
 
@@ -323,7 +338,7 @@ function recordAudit(
 type SetAudit = (audit: MutationAudit) => void
 
 /**
- * `GET /_people?query=…` — resolve a person to the `users.id` a `user` visibility
+ * `GET /_people?query=…` / `POST /_people` — resolve (or create) a person to the `users.id` a `user` visibility
  * grant stores (#1860).
  *
  * A `user` grant value is a numeric id and never an email
@@ -344,16 +359,12 @@ type SetAudit = (audit: MutationAudit) => void
  * `slugifyTitle` emits `[a-z0-9-]` only, so no object's slug can be `_people` and
  * this shadows nothing — unlike the bare `collections` segment, which does.
  *
- * SCOPE: this searches `users`, which is a SIGN-IN-derived population, not a
- * directory mirror. A row exists once someone has signed in to AI Studio or
- * connected the Google Chat agent (`provisionAgentUser`); group-sync and
- * OneRoster-sync only JOIN `users` on `lower(email)` and never insert. So an
- * empty result can mean either "no such person" or "that person has never used
- * AI Studio", and a `user` grant is simply not expressible for the latter. The
- * response cannot resolve that ambiguity for the caller, so the skill's
- * `find-people` note and SKILL.md both spell it out; what the response DOES carry
- * is the bounds (`minQueryLength`, `limit`, `truncated`), so a result that is
- * merely short or capped is never mistaken for the whole answer.
+ * SCOPE: `users` is a sign-in-derived population, so a colleague who has never
+ * signed in has no row. `POST /_people` closes that: given a district staff
+ * email it returns the existing row or creates one (`ensureDistrictPerson`),
+ * which the person's first sign-in then links and keeps. The search response
+ * carries its bounds (`minQueryLength`, `limit`, `truncated`), so a result that
+ * is merely short or capped is never mistaken for the whole answer.
  *
  * Deliberately NOT rate-limited beyond those bounds, matching
  * `searchPeopleAction`: the caller is the signed workspace owner acting with
@@ -363,15 +374,29 @@ type SetAudit = (audit: MutationAudit) => void
  *
  * Returns `null` when the path is not this one, so the caller falls through.
  */
-async function executePeopleRead(
+async function executePeople(
   input: AgentAtriumOperationInput,
   segments: string[],
   cognitoSub: string
 ): Promise<AgentAtriumOperationResult | null> {
-  if (input.method !== "GET") return null
+  if (input.method !== "GET" && input.method !== "POST") return null
   if (segments.length !== 1 || segments[0] !== "_people") return null
 
   await assertContentAuthoringCapability({ authType: "session", cognitoSub })
+
+  if (input.method === "POST") {
+    const body = addPersonSchema.parse(input.body ?? {})
+    try {
+      const { person, created } = await ensureDistrictPerson(body)
+      return success({ person, created }, input.requestId, created ? 201 : 200)
+    } catch (error) {
+      if (error instanceof DistrictPersonRejectedError) {
+        throw new ValidationError(error.message)
+      }
+      throw error
+    }
+  }
+
   const { query } = peopleQuerySchema.parse(input.query ?? {})
   const { people, truncated } = await searchPeople(query)
   return success(
@@ -898,7 +923,7 @@ export async function executeOwnerAtriumOperation(
     // Directory lookup first: it holds its OWN authoring-capability gate (it
     // returns people, not content), so it must not sit under either the ungated
     // content reads or the write gate below.
-    const people = await executePeopleRead(input, segments, cognitoSub)
+    const people = await executePeople(input, segments, cognitoSub)
     if (people) return people
 
     const read = await executeAtriumRead(req, input, segments)

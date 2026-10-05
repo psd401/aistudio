@@ -53,6 +53,8 @@ const ALLOWED_PATHS: Record<AtriumBody["method"], readonly RegExp[]> = {
   POST: [
     /^$/,
     /^\/collections$/,
+    // Create the users row for a district colleague who never signed in (#1860).
+    /^\/_people$/,
     new RegExp(`^/${IDENTIFIER}/(?:versions|publish)$`),
     new RegExp(`^/${IDENTIFIER}/assets$`),
     new RegExp(`^/${IDENTIFIER}/assets/${IDENTIFIER}/complete$`),

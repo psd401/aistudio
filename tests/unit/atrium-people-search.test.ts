@@ -11,11 +11,15 @@
  */
 
 const executeQueryMock = jest.fn()
+const executeTransactionMock = jest.fn()
 jest.mock("@/lib/db/drizzle-client", () => ({
   executeQuery: (...args: unknown[]) => executeQueryMock(...args),
+  executeTransaction: (...args: unknown[]) => executeTransactionMock(...args),
 }))
 
 import {
+  DistrictPersonRejectedError,
+  ensureDistrictPerson,
   searchPeople,
   PEOPLE_SEARCH_MIN_QUERY_LENGTH,
   PEOPLE_SEARCH_RESULT_LIMIT,
@@ -90,5 +94,116 @@ describe("searchPeople projection", () => {
       "id",
       "name",
     ])
+  })
+})
+
+/**
+ * Fake transaction: each `select` resolves to the next queued select result,
+ * each `insert(...).values(...)` is recorded and resolves to the next queued
+ * insert result.
+ */
+function fakeTx(selects: unknown[][], inserts: unknown[][] = []) {
+  const insertedValues: unknown[] = []
+  const tx = {
+    select: () => {
+      const result = selects.shift() ?? []
+      const chain = {
+        from: () => chain,
+        where: () => chain,
+        limit: () => Promise.resolve(result),
+      }
+      return chain
+    },
+    insert: () => ({
+      values: (values: unknown) => {
+        insertedValues.push(values)
+        const result = inserts.shift() ?? []
+        const chain = {
+          onConflictDoNothing: () => chain,
+          returning: () => Promise.resolve(result),
+          then: (resolve: (value: unknown) => unknown) => resolve(undefined),
+        }
+        return chain
+      },
+    }),
+  }
+  executeTransactionMock.mockImplementation((fn: (t: unknown) => unknown) => fn(tx))
+  return insertedValues
+}
+
+describe("ensureDistrictPerson", () => {
+  it("refuses non-district, student-number and malformed emails before touching the DB", async () => {
+    for (const email of [
+      "someone@gmail.com",
+      "kid@edtools.psd401.net",
+      "evil@notpsd401.net",
+      "123456@psd401.net",
+      "not-an-email",
+      "a b@psd401.net",
+    ]) {
+      await expect(ensureDistrictPerson({ email })).rejects.toBeInstanceOf(
+        DistrictPersonRejectedError
+      )
+    }
+    expect(executeTransactionMock).not.toHaveBeenCalled()
+  })
+
+  it("returns an existing row unchanged, matched case-insensitively", async () => {
+    const inserted = fakeTx([
+      [{ id: 412, firstName: "J", lastName: "Mondry", email: "MondryJ@psd401.net" }],
+    ])
+
+    const result = await ensureDistrictPerson({ email: " MONDRYJ@psd401.net " })
+
+    expect(result).toEqual({
+      person: { id: 412, name: "J Mondry", email: "MondryJ@psd401.net" },
+      created: false,
+    })
+    expect(inserted).toEqual([])
+  })
+
+  it("creates a lowercased row plus the staff role when none exists", async () => {
+    const inserted = fakeTx(
+      [[], [{ id: 7 }]],
+      [[{ id: 913, firstName: "Ann", lastName: null, email: "newteacher@psd401.net" }]]
+    )
+
+    const result = await ensureDistrictPerson({
+      email: "NewTeacher@psd401.net",
+      firstName: "  Ann ",
+      lastName: "   ",
+    })
+
+    expect(result).toEqual({
+      person: { id: 913, name: "Ann", email: "newteacher@psd401.net" },
+      created: true,
+    })
+    expect(inserted).toEqual([
+      { email: "newteacher@psd401.net", firstName: "Ann", lastName: null },
+      { userId: 913, roleId: 7, source: "manual" },
+    ])
+  })
+
+  it("returns the concurrently-created row when the insert loses a race", async () => {
+    const inserted = fakeTx(
+      [[], [{ id: 7 }], [{ id: 500, firstName: null, lastName: null, email: "newteacher@psd401.net" }]],
+      [[]]
+    )
+
+    const result = await ensureDistrictPerson({ email: "newteacher@psd401.net" })
+
+    expect(result).toEqual({
+      person: { id: 500, name: "newteacher", email: "newteacher@psd401.net" },
+      created: false,
+    })
+    // Only the users insert was attempted — no role for a row this call did not create.
+    expect(inserted).toHaveLength(1)
+  })
+
+  it("fails loudly when the staff role is missing", async () => {
+    fakeTx([[], []])
+    await expect(
+      ensureDistrictPerson({ email: "newteacher@psd401.net" })
+    ).rejects.toThrow("staff")
   })
 })

@@ -251,17 +251,19 @@ describe("POST /api/agent/atrium — people lookup (#1860)", () => {
     expect(executeOwnerAtriumOperationMock).not.toHaveBeenCalled()
   })
 
-  it("rejects a POST to the lookup path at the allowlist", async () => {
-    // The POST allowlist has no bare-identifier entry, so a write aimed at the
-    // lookup never reaches the operation layer. PATCH/DELETE on a bare segment
-    // ARE allowlisted (they are the generic metadata-write paths) and are
-    // refused one layer down, where `_people` is just a content id that cannot
-    // reach the lookup — asserted in agent-atrium-owner-operation.test.ts.
+  it("admits POST /_people (add-person) and runs it as the signed owner", async () => {
     const response = await POST(
-      request({ method: "POST", path: "/_people", body: { query: "mondryj" } })
+      request({ method: "POST", path: "/_people", body: { email: "newteacher@psd401.net" } })
     )
-    expect(response.status).toBe(400)
-    expect(executeOwnerAtriumOperationMock).not.toHaveBeenCalled()
+    expect(response.status).toBe(200)
+    expect(executeOwnerAtriumOperationMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "POST",
+        path: "/_people",
+        body: { email: "newteacher@psd401.net" },
+        ownerEmail: "owner@psd401.net",
+      })
+    )
   })
 
   it("rejects an unexpected query field on the lookup path", async () => {

@@ -37,6 +37,7 @@
  *   node run.js delete --id <id>
  *   node run.js read-grants --id <idOrSlug>
  *   node run.js find-people --query <name|email>
+ *   node run.js add-person --email <district email> [--first-name <n>] [--last-name <n>]
  *   node run.js set-visibility --id <id> [--level private|group|internal|public]
  *                    [--grants role:staff,building:GHS]           (REPLACES the list)
  *                    [--add-grants k:v,...] [--remove-grants k:v,...]  (merge; keeps
@@ -127,6 +128,10 @@ function usage() {
       '  find-people --query <name|email>   (resolve a person to the numeric id a',
       "                                 `user` grant needs — run this BEFORE",
       '                                 --add-grants user:<id>)',
+      '  add-person --email <district email> [--first-name <n>] [--last-name <n>]',
+      "                                 (get or CREATE the id for a colleague who",
+      "                                 has never signed in — use when find-people",
+      "                                 finds nothing)",
       '',
       'Images (authored assets — the canonical way to put a picture in a document):',
       '  upload-asset --id <id> --file <png|jpeg|webp> [--alt <text>] [--filename <name>]',
@@ -775,11 +780,8 @@ async function readGrants(args) {
  * so a truncated result is visible rather than silently partial.
  *
  * An EMPTY result does not prove the person does not work here: this searches AI
- * Studio's own user table, which fills in when someone first signs in to AI
- * Studio or connects the Google Chat agent. A colleague who has done neither has
- * no id yet, and a `user` grant cannot name them — say so and offer a `group`
- * grant or wait for them to sign in, rather than silently dropping them from the
- * audience.
+ * Studio's own user table, which has no row for a colleague who has never signed
+ * in. For a district staff member, `add-person --email` creates that id.
  */
 async function findPeople(args) {
   const query = requireStr(args, 'query', 'query');
@@ -794,10 +796,9 @@ async function findPeople(args) {
     note: people.length === 0
       ? (typeof minQueryLength === 'number' && query.trim().length < minQueryLength
           ? `The query is shorter than the ${minQueryLength}-character minimum, so nothing was searched. Retry with a longer term.`
-          : 'No AI Studio user matched. Try a last name or the full email. If the ' +
-            'person has never signed in to AI Studio and has never connected the ' +
-            'Google Chat agent, they have no id yet and a `user` grant cannot name ' +
-            'them — report that instead of omitting them silently.')
+          : 'No AI Studio user matched — they may simply never have signed in. If ' +
+            'they are district staff, run `add-person --email <their email>` to get ' +
+            'their id (it creates it if needed), then grant `user:<id>`.')
       : (payload && payload.truncated
           ? 'More people match than are listed — narrow the query (a last name or ' +
             'the full email) before granting, or you may be looking at the wrong ' +
@@ -805,6 +806,26 @@ async function findPeople(args) {
           : 'Pass the numeric `id` as `set-visibility --add-grants user:<id>`. ' +
             'Confirm the email before granting — a `user` grant on the wrong row ' +
             'shares the object with the wrong person.'),
+  });
+}
+
+/**
+ * `add-person --email` — return the numeric id for a district staff email,
+ * creating the AI Studio user row if the person has never signed in (#1860).
+ * Their first sign-in keeps this id, so grants made now still apply. Names are
+ * optional; passing them (e.g. from psd-directory) makes the row findable by
+ * name before that sign-in.
+ */
+async function addPerson(args) {
+  const body = { email: requireStr(args, 'email', 'email') };
+  const firstName = optStr(args, 'first_name', 'first-name');
+  const lastName = optStr(args, 'last_name', 'last-name');
+  if (firstName !== undefined) body.firstName = firstName;
+  if (lastName !== undefined) body.lastName = lastName;
+  const { payload } = await restFetch('POST', '/_people', { body });
+  emit({
+    ...payload,
+    note: 'Pass the numeric `person.id` as `set-visibility --add-grants user:<id>`.',
   });
 }
 
@@ -969,6 +990,7 @@ const COMMANDS = {
   'set-visibility': setVisibility,
   'read-grants': readGrants,
   'find-people': findPeople,
+  'add-person': addPerson,
   publish: publishObject,
   unpublish: unpublishObject,
 };

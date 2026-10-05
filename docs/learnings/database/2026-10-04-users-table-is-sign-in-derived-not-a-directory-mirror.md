@@ -1,5 +1,5 @@
 ---
-title: users is populated only by sign-in-adjacent paths — per-user grants fail silently for staff who never authenticated
+title: users is sign-in-derived — give the caller an explicit create-by-email path instead of trying to mirror the directory
 category: database
 tags:
   - atrium
@@ -34,17 +34,25 @@ row at all, regardless of how long they've been a district employee.
 
 ## Solution
 
-Any feature keyed on `users.id` (per-user visibility grants, per-user
-assignment) is unexpressible for such people. The people-lookup endpoint
-returns "not found" rather than fabricating a row — do not auto-provision a
-`users` row from a lookup, since JIT provisioning elsewhere assumes it happens
-at the moment of actual sign-in (and carries auth-specific fields like
-`cognito_sub`).
+Any feature keyed on `users.id` (per-user visibility grants) needs an id for
+people who never signed in. Two sync-based attempts on #1860 were reverted:
+OneRoster-sync pre-provisioning (that sync has never been enabled anywhere, so
+it created nothing) and group-sync pre-provisioning (covers only members of
+selected groups and yields nameless rows). What shipped is on-demand:
+`ensureDistrictPerson` (`lib/content/people-search.ts`, agent surface
+`POST /_people` / `psd-atrium add-person`) returns the row for a district staff
+email or creates it (lowercased email, optional names, `cognito_sub` NULL) plus
+`staff` (source `manual`). First sign-in links it by `lower(email)`
+(`lib/auth/resolve-user.ts`) and keeps the id.
+
+The role must be created with the row: the sign-in LINK path
+(`linkExistingUserByEmail`) never calls `assignDefaultRole` — only the
+brand-new-row path does — so a roleless pre-created row signs in with no role.
 
 ## Prevention
 
-- Before building anything that resolves a person to `users.id`, check which
-  of the four insert paths would have created their row — "has an email in
-  the district directory" does not imply "has a `users` row."
-- Surface this constraint in error messages/UI: "grant pending — user has not
-  yet signed in" is more honest than a silent no-op or a generic not-found.
+- When a caller needs an id for a person who may not have signed in, give it
+  an explicit create-by-email path with domain/role guards rather than trying
+  to mirror the directory through a sync.
+- Before building on a sync or feed, confirm it is enabled and populated in
+  production, not just present in the codebase.

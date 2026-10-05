@@ -1246,9 +1246,8 @@ test('find-people GETs /people with the query and relays the id to use', async (
 });
 
 test('find-people explains an empty result instead of implying the person is unknown', async () => {
-  // A staff member who has never signed in to AI Studio (and never connected the
-  // Chat agent) has no users row at all, so a `user` grant cannot name them. The
-  // note must say that, or the agent silently drops them from the audience.
+  // A staff member who has never signed in has no users row; the note must send
+  // the agent to add-person instead of letting it drop them from the audience.
   restResponder = () => ({
     approvalRequired: false,
     status: 200,
@@ -1264,7 +1263,7 @@ test('find-people explains an empty result instead of implying the person is unk
   await run('find-people', '--query', 'nobody');
 
   expect(emitted[0].people).toEqual([]);
-  expect(emitted[0].note).toContain('never signed in');
+  expect(emitted[0].note).toContain('add-person');
 });
 
 test('find-people requires --query (exit 1, no request sent)', async () => {
@@ -1315,5 +1314,39 @@ test('find-people distinguishes a too-short query from a genuine no-match', asyn
   await run('find-people', '--query', 'm');
 
   expect(emitted[0].note).toContain('minimum');
-  expect(emitted[0].note).not.toContain('never signed in');
+  expect(emitted[0].note).not.toContain('add-person');
+});
+
+test('add-person posts the email and optional names to /_people', async () => {
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 201,
+    payload: {
+      person: { id: 913, name: 'Ann Lee', email: 'newteacher@psd401.net' },
+      created: true,
+    },
+  });
+
+  await run('add-person', '--email', 'newteacher@psd401.net', '--first-name', 'Ann', '--last-name', 'Lee');
+
+  expect(restCalls[0].method).toBe('POST');
+  expect(restCalls[0].path).toBe('/_people');
+  expect(restCalls[0].opts.body).toEqual({
+    email: 'newteacher@psd401.net',
+    firstName: 'Ann',
+    lastName: 'Lee',
+  });
+  expect(emitted[0].person.id).toBe(913);
+  expect(emitted[0].note).toContain('user:<id>');
+});
+
+test('add-person requires --email (exit 1, no request sent)', async () => {
+  let code;
+  try {
+    await run('add-person');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+  expect(restCalls).toHaveLength(0);
 });

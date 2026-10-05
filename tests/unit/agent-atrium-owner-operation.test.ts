@@ -69,8 +69,11 @@ jest.mock("@/lib/content/surface-helpers", () => ({
   resolveCollectionId: (...args: unknown[]) => resolveCollectionIdMock(...args),
 }))
 const searchPeopleMock = jest.fn()
+const ensureDistrictPersonMock = jest.fn()
 jest.mock("@/lib/content/people-search", () => ({
   searchPeople: (...args: unknown[]) => searchPeopleMock(...args),
+  ensureDistrictPerson: (...args: unknown[]) => ensureDistrictPersonMock(...args),
+  DistrictPersonRejectedError: class DistrictPersonRejectedError extends Error {},
   PEOPLE_SEARCH_MIN_QUERY_LENGTH: 2,
   PEOPLE_SEARCH_MAX_QUERY_LENGTH: 100,
   PEOPLE_SEARCH_RESULT_LIMIT: 20,
@@ -291,24 +294,11 @@ describe("signed-owner Atrium people lookup (#1860)", () => {
     expect(searchPeopleMock).not.toHaveBeenCalled()
   })
 
-  it("does not expose the lookup as a write path", async () => {
-    const result = await executeOwnerAtriumOperation({
-      ownerEmail: "owner@psd401.net",
-      requestId: "req-people-post",
-      method: "POST",
-      path: "/_people",
-      body: { query: "mondryj" },
-    })
-
-    expect(result.httpStatus).toBe(403)
-    expect(searchPeopleMock).not.toHaveBeenCalled()
-  })
-
   it("treats the reserved segment as a content id on the write methods, never as the lookup", async () => {
     // PATCH/DELETE on a bare segment are the generic metadata-write paths and the
     // route allowlist admits them. They must fall through to the content services
     // with `_people` as an ordinary (and unresolvable) identifier — the lookup is
-    // reachable by GET only.
+    // reachable by GET and POST only.
     for (const method of ["PATCH", "DELETE"] as const) {
       searchPeopleMock.mockClear()
       await executeOwnerAtriumOperation({
@@ -319,7 +309,92 @@ describe("signed-owner Atrium people lookup (#1860)", () => {
         ...(method === "PATCH" ? { body: { title: "Hijack" } } : {}),
       })
       expect(searchPeopleMock).not.toHaveBeenCalled()
+      expect(ensureDistrictPersonMock).not.toHaveBeenCalled()
     }
+  })
+})
+
+describe("signed-owner Atrium person creation (POST /_people)", () => {
+  it("creates (or returns) a district person's id on POST, as the signed owner", async () => {
+    ensureDistrictPersonMock.mockResolvedValue({
+      person: { id: 913, name: "Ann Lee", email: "newteacher@psd401.net" },
+      created: true,
+    })
+
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "req-people-post",
+      method: "POST",
+      path: "/_people",
+      body: { email: "newteacher@psd401.net", firstName: "Ann", lastName: "Lee" },
+    })
+
+    expect(result.httpStatus).toBe(201)
+    expect(ensureDistrictPersonMock).toHaveBeenCalledWith({
+      email: "newteacher@psd401.net",
+      firstName: "Ann",
+      lastName: "Lee",
+    })
+    expect(result.payload).toMatchObject({
+      data: { person: { id: 913 }, created: true },
+    })
+    expect(searchPeopleMock).not.toHaveBeenCalled()
+  })
+
+  it("returns 200 for an existing person and 400 for a refused email", async () => {
+    ensureDistrictPersonMock.mockResolvedValueOnce({
+      person: { id: 412, name: "J Mondry", email: "mondryj@psd401.net" },
+      created: false,
+    })
+    const existing = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "req-people-existing",
+      method: "POST",
+      path: "/_people",
+      body: { email: "mondryj@psd401.net" },
+    })
+    expect(existing.httpStatus).toBe(200)
+
+    ensureDistrictPersonMock.mockRejectedValueOnce(
+      new (jest.requireMock("@/lib/content/people-search") as {
+        DistrictPersonRejectedError: new (message: string) => Error
+      }).DistrictPersonRejectedError("Only @psd401.net addresses can be added")
+    )
+    const refused = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "req-people-refused",
+      method: "POST",
+      path: "/_people",
+      body: { email: "someone@gmail.com" },
+    })
+    expect(refused.httpStatus).toBe(400)
+  })
+
+  it("gates person creation on the authoring capability BEFORE any write", async () => {
+    assertContentAuthoringCapabilityMock.mockRejectedValueOnce(
+      new ForbiddenError("The atrium-content capability is required")
+    )
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "req-people-post-denied",
+      method: "POST",
+      path: "/_people",
+      body: { email: "newteacher@psd401.net" },
+    })
+    expect(result.httpStatus).toBe(403)
+    expect(ensureDistrictPersonMock).not.toHaveBeenCalled()
+  })
+
+  it("rejects an unknown field on person creation", async () => {
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "req-people-post-extra",
+      method: "POST",
+      path: "/_people",
+      body: { email: "newteacher@psd401.net", userId: 1 },
+    })
+    expect(result.httpStatus).toBe(400)
+    expect(ensureDistrictPersonMock).not.toHaveBeenCalled()
   })
 })
 
