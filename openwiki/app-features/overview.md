@@ -1125,7 +1125,7 @@ Each grant is `kind:value` where `kind` determines the value format:
 | `group` | Group email address | `group:cabinet@psd401.net` |
 | `user` | Numeric user ID (NOT email) | `user:42` |
 
-**Critical**: `user` grants require the numeric AI Studio user ID. Email addresses are rejected with a 400. This skill cannot resolve an email to an ID—use the web visibility editor's people picker for named individuals.
+**Critical**: `user` grants require the numeric AI Studio user ID. Email addresses are rejected with a 400. Use `find-people` to resolve an email/name to the id before granting. For district staff not yet in the system, `add-person` creates the row. See **[agent-platform/overview.md → Atrium Per-Person Sharing](../agent-platform/overview.md#atrium-per-person-sharing-1860)** for the two-step pattern and domain restrictions (#1860).
 
 #### Grant Target Existence Validation (#1777)
 
