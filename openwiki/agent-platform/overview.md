@@ -1,7 +1,7 @@
 ---
 type: Platform Overview
 title: Agent Platform & Skills System
-description: Extensible agent skill system with 39 domain-specific capabilities including media processing, Google Workspace integration, Cedar governance, MCP tool exposure, scheduled run silent reply, and transport truncation awareness for K-12 AI assistants.
+description: Extensible agent skill system with 39 domain-specific capabilities including media processing, Google Workspace integration, Cedar governance, MCP tool exposure, email triage with content-first classification and rhetorical question guard, scheduled run silent reply, and transport truncation awareness for K-12 AI assistants.
 tags: [agents, skills, mcp, workspace, governance]
 openwiki:
   roles: [infrastructure, domain]
@@ -53,7 +53,7 @@ infra/agent-image/skills/{skill-name}/
 **Administrative & District Operations**
 - `psd-atrium` — Read/search/create content in Atrium; artifact data persistence (list-data, submit); viewer-scoped PSD data queries from artifacts via shared connector resolution with Nexus; CSP guidance for artifact scripts/styles (inline preferred, CDN allowlist enforced); visibility/grant management with `read-grants` command and merge mode (`--add-grants`/`--remove-grants`) for safe audience changes (#1763); "Live PSD data inside an artifact" section mirrors `lib/content/atrium-data-contract.ts` guidance but is hand-maintained — change both when the bridge contract changes (#1749)
 - `psd-freshservice` — Freshservice tickets, service catalog items, approvals, and team summaries using each caller's own API key; create catalog request forms with field validation
-- `psd-email-triage` — Smart email triage with three-stage classification (rules → content → LLM), human sender protection (never muted, never marked as news), keyword rules with stable IDs, preferences system for user-stated classification intent, and real digest counts from daily stats. Configured entirely from chat. See `/docs/operations/email-triage.md` for runtime architecture and Phase 3 (#1855) details
+- `psd-email-triage` — Smart email triage with three-stage classification (rules → content → LLM), human sender protection (never muted, never marked as news), rhetorical question guard (`hasDirectQuestion` requires second-person clause), automated-sender veto on question/action-request branch, bulk-mail detection (List-Unsubscribe header + marketing footer phrases), keyword rules with stable IDs, preferences system for user-stated classification intent, and real digest counts from daily stats. Configured entirely from chat. See `/docs/operations/email-triage.md` for runtime architecture and Phase 3 (#1855, #1861) details
 - `psd-schedules` — Scheduled agent tasks (cron/rate/at) with read access for scheduled-mode turns; reply IS the delivery — never hunt for DM
 - `psd-rules` — Tier-1 governance rules for agent behavior
 - `psd-conversation-coach` — Crucial Conversations framework coaching for difficult conversations
@@ -99,7 +99,7 @@ infra/agent-image/skills/{skill-name}/
 - `psd-brand-guidelines` — PSD branding enforcement
 - `psd-skills-meta` — Skill metadata and discovery
 
-### Email Triage Content-First Classification (#1855)
+### Email Triage Content-First Classification (#1855, #1861)
 
 **Sources**: `/docs/operations/email-triage.md`, `/infra/lambdas/agent-triage-poll/content-features.ts`, `/infra/agent-image/skills/psd-email-triage/SKILL.md`
 
@@ -113,12 +113,14 @@ For each new message, the classifier runs stages in order (cheapest first):
 2. **Content stage** (`content-features.ts`) — Derives signals from what the message asks and who it is addressed to, independent of sender identity:
    - Approval or signature request → `important` (even from a machine)
    - Reply in a thread the user has written in → `important`
-   - Direct question or action request with user in `To` → `important`
+   - Direct question addressed to user, from non-automated sender → `important`
+   - Action request addressed to user, from non-automated sender → `important`
    - Something that asks nothing of a recipient who is only copied → `later`
    - Automated notice with no ask → `later`
+   - Bulk/list mail (List-Unsubscribe header or marketing footer) → `informational`
 3. **Bedrock Nova Micro** — Only for what remains, with content signals leading the prompt and sender demoted to a weak prior.
 
-The content stage is deterministic, recorded as `source: "content"` with confidence 0.9, and produces consistent labels regardless of which address sent the message.
+The content stage is deterministic, recorded as `source: "content"` with confidence 0.7, and produces consistent labels regardless of which address sent the message.
 
 #### Human Sender Protection
 
@@ -130,6 +132,20 @@ Automated senders are detected from:
 - Headers: `List-Unsubscribe`, `Auto-Submitted`, `Precedence`
 
 The nightly learner refuses to emit `mute` suggestions for unproven-automated targets. `suggestions apply` refuses to write a human mute without `--confirm-human`. The `prefs people-suggestions off` setting additionally silences VIP suggestions about individuals.
+
+#### Content-Stage Fixed (#1861)
+
+Four defects lined up to over-promote a Google Search Console blast to `important`:
+
+1. **Rhetorical questions counted as direct questions** — `directQuestion` was `text.includes("?")`, so "Think this is awesome?" counted. Now requires the question clause to speak to the reader in second person (`hasDirectQuestion`). A "your" in the next sentence cannot rescue a rhetorical question.
+
+2. **Automated senders were not vetoed** — Questions and action requests from `noreply` addresses counted as `important`. Nobody is waiting on a reply to a noreply mailbox. Now vetoed in `classifyByContent`; those messages fall through to the LLM (which still sees every signal) or to default `later`. **Approval/signature requests are exempt** — a service desk legitimately asks for one from a noreply address.
+
+3. **Fixed confidence cleared high-confidence bar** — Content-stage decisions stamped 0.9 confidence, clearing the 0.85 escalation threshold. Two guards now: `CONTENT_DECISION_CONFIDENCE` is 0.7, and `shouldEscalate` only lets `source === "llm"` clear the bar. Explicit escalation rules still ping in every mode except `none`.
+
+4. **Bulk-mail boilerplate was not informational** — Now a `List-Unsubscribe` header is sufficient on its own. Marketing footer phrases ("unsubscribe", "you are receiving this", "go ahead and") are consulted **only when sender is already automated** — "go ahead and" is ordinary English from a colleague.
+
+The `simulate` command now reports `firedSignals` (names of true signals) on all branches, and accepts `--list-unsubscribe` for bulk mail simulation.
 
 #### Keyword Rules with Stable IDs
 
