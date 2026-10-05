@@ -12,6 +12,8 @@ openwiki:
     - infra/agent-image/SOUL.md
     - infra/agent-image/skills/psd-rules/SKILL.md
     - lib/content/atrium-data-contract.ts
+    - lib/content/people-search.ts
+    - lib/agent-workspace/atrium-owner-operation.ts
     - lib/agent-workspace/command-executor.ts
     - lib/agents/platform-model.ts
     - infra/agent-image/openclaw.json
@@ -24,9 +26,12 @@ openwiki:
     - tests/smoke/atrium-artifact-sandbox-host.smoke.ts
     - tests/unit/lib/agent-workspace/command-executor.test.ts
     - tests/unit/actions/agent-cost-projection.test.ts
+    - tests/unit/atrium-people-search.test.ts
+    - tests/unit/agent-atrium-owner-operation.test.ts
     - lib/agents/__tests__/platform-model.test.ts
     - infra/agent-image/test_harness_adapter.py
     - infra/lambdas/agent-cron/silent-scheduled-run.test.ts
+    - infra/agent-image/skills/psd-atrium/run.test.js
 ---
 
 # Agent Platform
@@ -51,7 +56,7 @@ infra/agent-image/skills/{skill-name}/
 ### Skill Categories
 
 **Administrative & District Operations**
-- `psd-atrium` — Read/search/create content in Atrium; artifact data persistence (list-data, submit); viewer-scoped PSD data queries from artifacts via shared connector resolution with Nexus; CSP guidance for artifact scripts/styles (inline preferred, CDN allowlist enforced); visibility/grant management with `read-grants` command and merge mode (`--add-grants`/`--remove-grants`) for safe audience changes (#1763); "Live PSD data inside an artifact" section mirrors `lib/content/atrium-data-contract.ts` guidance but is hand-maintained — change both when the bridge contract changes (#1749)
+- `psd-atrium` — Read/search/create content in Atrium; artifact data persistence (list-data, submit); viewer-scoped PSD data queries from artifacts via shared connector resolution with Nexus; CSP guidance for artifact scripts/styles (inline preferred, CDN allowlist enforced); visibility/grant management with `read-grants` command and merge mode (`--add-grants`/`--remove-grants`) for safe audience changes (#1763); per-person sharing via `find-people` to resolve email/name to users.id plus `add-person` for staff who never signed in (#1860); "Live PSD data inside an artifact" section mirrors `lib/content/atrium-data-contract.ts` guidance but is hand-maintained — change both when the bridge contract changes (#1749)
 - `psd-freshservice` — Freshservice tickets, service catalog items, approvals, and team summaries using each caller's own API key; create catalog request forms with field validation
 - `psd-email-triage` — Smart email triage with three-stage classification (rules → content → LLM), human sender protection (never muted, never marked as news), rhetorical question guard (`hasDirectQuestion` requires second-person clause), automated-sender veto on question/action-request branch, bulk-mail detection (List-Unsubscribe header + marketing footer phrases), keyword rules with stable IDs, preferences system for user-stated classification intent, and real digest counts from daily stats. Configured entirely from chat. See `/docs/operations/email-triage.md` for runtime architecture and Phase 3 (#1855, #1861) details
 - `psd-schedules` — Scheduled agent tasks (cron/rate/at) with read access for scheduled-mode turns; reply IS the delivery — never hunt for DM
@@ -201,6 +206,83 @@ Sweep slices deliberately do not count — a backfill of 1000 messages is not to
 - `infra/agent-image/skills/psd-email-triage/` — `run.js`, `run.test.js`, `lib.js`, `parity.test.js`, `SKILL.md`
 - `app/api/agent/email-triage/` — `route.ts`, `__tests__/route-security.test.ts`
 - `.github/workflows/ci.yml` — `test:skill:email-triage`, `test:lambda:triage-poll`, `test:lambda:triage-digest` jobs
+
+### Atrium Per-Person Sharing (#1860)
+
+**Sources**: `/infra/agent-image/skills/psd-atrium/SKILL.md`, `/lib/content/people-search.ts`, `/lib/agent-workspace/atrium-owner-operation.ts`, `/docs/features/atrium-agent-access.md`
+
+A `user` visibility grant stores a numeric `users.id`, never an email. Before #1860, agents could share with roles, buildings, grades, and groups, but **not with a named person** — `psd-directory` returns names and Chat IDs, not AI Studio row IDs, and the web people picker is a server action unreachable from the agent.
+
+#### Two-Step Pattern
+
+Per-person sharing requires two operations:
+
+```bash
+# 1. Resolve email/name to users.id
+node run.js find-people --query "mondryj@psd401.net"
+# → { "people": [{ "id": 412, "name": "J Mondry", "email": "mondryj@psd401.net" }], … }
+
+# 2. Grant with the numeric id
+node run.js set-visibility --id <id> --level group --add-grants user:412
+```
+
+**Always verify the returned `email`** before granting — server cannot verify intended recipient, and a wrong `user` grant shares with the wrong person.
+
+#### User Table Derivation
+
+Critical invariant: `users` is a **sign-in-derived population**, not a directory mirror. Rows are created by:
+
+1. JIT sign-in provisioning (`lib/auth/resolve-user.ts`)
+2. Google Chat agent OAuth
+3. Admin POST endpoint
+4. Seeded service accounts
+5. **NEW**: Agent-initiated creation via `add-person` (#1860)
+
+A colleague who never signed in has no `users.id` until the agent creates one.
+
+#### Staff Who Never Signed In
+
+For district staff not yet in the system:
+
+```bash
+node run.js add-person --email "newteacher@psd401.net" --first-name Ann --last-name Lee
+# → { "person": { "id": 913, "name": "Ann Lee", "email": "newteacher@psd401.net" }, "created": true }
+```
+
+The person's first sign-in links this row by email and keeps the `id`, so grants made beforehand apply automatically.
+
+**Domain restriction**: Only `@psd401.net` staff addresses accepted. Student-number addresses (`@edtools.psd401.net`) and other domains are rejected.
+
+**Role assignment**: New rows get `staff` role with source `manual` — the default role sign-in gives a new staff user. Required because the first sign-in takes the link path which never calls `assignDefaultRole`.
+
+#### Query Bounds
+
+- **Minimum query length**: 2 characters (queries shorter return empty without searching)
+- **Maximum query length**: 100 characters (validated by zod schema before search)
+- **Result limit**: 20 rows
+- **Truncation flag**: `truncated: true` indicates more matches exist beyond the 20 returned
+
+Matches email, first name, last name, and full concatenated name. Exact email match ranks first to prevent the right row from falling off a capped list.
+
+#### Reserved Broker Path
+
+The lookup endpoint `/_people` uses an **underscore prefix** to prevent slug shadowing. Unlike bare `/collections` which intercepts any content object with that slug:
+
+- `slugifyTitle` emits only `[a-z0-9-]` characters
+- No slug can ever equal `_people`
+- The path is airtight against collision
+
+#### Security Model
+
+Both `find-people` (GET) and `add-person` (POST) are gated on the `atrium-content` authoring capability — they return directory rows, not content, so they do not belong with ungated reads. The gate matches the web people picker (`actions/db/atrium/search-people.ts`).
+
+**No rate limiting** beyond query bounds. The caller is the signed workspace owner acting with their own authoring authority, and that same person can already loop the web action from a browser.
+
+**Sources**:
+- `/lib/content/people-search.ts` — Shared query module (web + agent)
+- `/lib/agent-workspace/atrium-owner-operation.ts` — Broker implementation (`executePeople`)
+- `/tests/unit/atrium-people-search.test.ts` — Query module tests
+- `/tests/unit/agent-atrium-owner-operation.test.ts` — Broker tests
 
 ### Skill Execution
 
