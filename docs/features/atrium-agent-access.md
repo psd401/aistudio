@@ -96,7 +96,7 @@ that email to an active `users` row and `requesterForUserId`, then invokes the
 shared content services directly. No reusable content key enters the workspace
 and the route never falls back to the shared service principal.
 Subcommands include `find`, `read`, `create-document`, `create-artifact`, `edit`
-(`--mode replace|append`), `set-visibility`, `publish`, `unpublish`, plus
+(`--mode replace|append`), `set-visibility`, `find-people`, `publish`, `unpublish`, plus
 `list-collections`, `create-collection`, `edit-collection`, `move-collection`,
 `archive-collection`, and `restore-collection`. Collection mutations use the same
 owner/admin hierarchy service as the UI and REST API: every owner can manage only
@@ -106,6 +106,20 @@ authority. `list-collections` combines active requester-visible collections
 rows. Manageable rows include grants and direct/subtree counts, so an owner can
 rediscover the UUID required to restore an archived subtree without losing
 district collection discovery.
+`find-people --query <name|email>` (#1860) resolves a person to the numeric
+`users.id` a `user` visibility grant stores, so per-person sharing is reachable
+from the agent at all — `psd-directory` returns names and Chat ids, and the web
+people picker is a server action no agent can call. It maps to `GET /_people` on
+the broker, shares its query with the web picker
+(`lib/content/people-search.ts`), and is gated on the same `atrium-content`
+authoring capability as that picker — it returns directory rows, so it does not
+sit with the ungated content reads. `users` is a sign-in-derived population,
+so a colleague who has never signed in has no row; `add-person --email`
+(`POST /_people`, same capability gate) returns the id for any `@psd401.net`
+staff address, creating the row — plus the default `staff` role — when none
+exists (`ensureDistrictPerson`). Their first sign-in links that row by email and
+keeps the id, so grants made beforehand apply.
+
 The agent
 works **version-based** (create-as-private, owner permission and capability
 gating) and acts as the **signed workspace owner** — a `user` requester. Writes

@@ -18,6 +18,14 @@ import {
   type Requester,
 } from "@/lib/content"
 import { decodeContentBody } from "@/lib/content/code-encoding"
+import {
+  DistrictPersonRejectedError,
+  ensureDistrictPerson,
+  searchPeople,
+  PEOPLE_SEARCH_MAX_QUERY_LENGTH,
+  PEOPLE_SEARCH_MIN_QUERY_LENGTH,
+  PEOPLE_SEARCH_RESULT_LIMIT,
+} from "@/lib/content/people-search"
 import type { PublishDestination } from "@/lib/content/publish-adapters/types"
 import { requesterForUserId } from "@/lib/content/requester-from-auth"
 import {
@@ -82,6 +90,32 @@ const visibilitySchema = z
           .strict()
       )
       .optional(),
+  })
+  .strict()
+
+/**
+ * `GET /_people?query=…` (#1860). `query` is required: there is no "list everyone"
+ * form of this surface, and omitting it is a usage error rather than a silent
+ * empty result. The ceiling is the search's OWN maximum, so an over-long query is
+ * a 400 instead of being silently truncated to a different term than the caller
+ * asked for.
+ */
+const peopleQuerySchema = z
+  .object({
+    query: z.string().min(1).max(PEOPLE_SEARCH_MAX_QUERY_LENGTH),
+  })
+  .strict()
+
+/**
+ * `POST /_people` (#1860): create the `users` row for a district colleague who
+ * has never signed in, so a `user` grant can name them. Names are optional and
+ * only make the row findable by name before that first sign-in.
+ */
+const addPersonSchema = z
+  .object({
+    email: z.string().min(3).max(255),
+    firstName: z.string().max(255).optional(),
+    lastName: z.string().max(255).optional(),
   })
   .strict()
 
@@ -302,6 +336,80 @@ function recordAudit(
 
 /** Hands a branch's audit record back to the top-level catch. */
 type SetAudit = (audit: MutationAudit) => void
+
+/**
+ * `GET /_people?query=…` / `POST /_people` — resolve (or create) a person to the `users.id` a `user` visibility
+ * grant stores (#1860).
+ *
+ * A `user` grant value is a numeric id and never an email
+ * (`visibility-service.assertValidGrant`), and nothing else on the agent surface
+ * could produce one: `psd-directory` returns names and Chat ids, and the web
+ * people picker is a server action no agent can call. Without this, an agent
+ * could share an object with a ROLE, a BUILDING or a GOOGLE GROUP but never with
+ * a named person.
+ *
+ * Gated on the authoring capability even though it is a GET: this returns
+ * directory rows, not content, so it does not belong on the ungated read side
+ * next to `source` and `visibility`. The gate matches `searchPeopleAction`'s —
+ * the web picker that shares this query — so the two surfaces answer to the same
+ * capability.
+ *
+ * Handled ahead of the content reads because the first segment is a RESERVED
+ * word, not an object identifier. The leading underscore makes that airtight:
+ * `slugifyTitle` emits `[a-z0-9-]` only, so no object's slug can be `_people` and
+ * this shadows nothing — unlike the bare `collections` segment, which does.
+ *
+ * SCOPE: `users` is a sign-in-derived population, so a colleague who has never
+ * signed in has no row. `POST /_people` closes that: given a district staff
+ * email it returns the existing row or creates one (`ensureDistrictPerson`),
+ * which the person's first sign-in then links and keeps. The search response
+ * carries its bounds (`minQueryLength`, `limit`, `truncated`), so a result that
+ * is merely short or capped is never mistaken for the whole answer.
+ *
+ * Deliberately NOT rate-limited beyond those bounds, matching
+ * `searchPeopleAction`: the caller is the signed workspace owner acting with
+ * their own `atrium-content` authority, and the same person can already loop the
+ * web action from a browser session. A limiter here without one there would
+ * create the appearance of a control that is not actually in place.
+ *
+ * Returns `null` when the path is not this one, so the caller falls through.
+ */
+async function executePeople(
+  input: AgentAtriumOperationInput,
+  segments: string[],
+  cognitoSub: string
+): Promise<AgentAtriumOperationResult | null> {
+  if (input.method !== "GET" && input.method !== "POST") return null
+  if (segments.length !== 1 || segments[0] !== "_people") return null
+
+  await assertContentAuthoringCapability({ authType: "session", cognitoSub })
+
+  if (input.method === "POST") {
+    const body = addPersonSchema.parse(input.body ?? {})
+    try {
+      const { person, created } = await ensureDistrictPerson(body)
+      return success({ person, created }, input.requestId, created ? 201 : 200)
+    } catch (error) {
+      if (error instanceof DistrictPersonRejectedError) {
+        throw new ValidationError(error.message)
+      }
+      throw error
+    }
+  }
+
+  const { query } = peopleQuerySchema.parse(input.query ?? {})
+  const { people, truncated } = await searchPeople(query)
+  return success(
+    {
+      query,
+      people,
+      minQueryLength: PEOPLE_SEARCH_MIN_QUERY_LENGTH,
+      limit: PEOPLE_SEARCH_RESULT_LIMIT,
+      truncated,
+    },
+    input.requestId
+  )
+}
 
 async function executeSingleSegmentRead(
   req: Requester,
@@ -796,10 +904,10 @@ async function executePublishWrite(
  * Execute the fixed Atrium agent surface as the human named by the signed
  * invocation proof. No reusable service credential crosses into the workspace.
  *
- * The body is deliberately a short dispatch: reads, then the
- * authoring-capability gate, then the three write families. The gate's position
- * is the security-relevant line in this function, and it is only legible when
- * the branches around it are this few.
+ * The body is deliberately a short dispatch: the self-gating people lookup,
+ * reads, then the authoring-capability gate, then the write families. The gate's
+ * position is the security-relevant line in this function, and it is only
+ * legible when the branches around it are this few.
  */
 export async function executeOwnerAtriumOperation(
   input: AgentAtriumOperationInput
@@ -812,6 +920,12 @@ export async function executeOwnerAtriumOperation(
   }
 
   try {
+    // Directory lookup first: it holds its OWN authoring-capability gate (it
+    // returns people, not content), so it must not sit under either the ungated
+    // content reads or the write gate below.
+    const people = await executePeople(input, segments, cognitoSub)
+    if (people) return people
+
     const read = await executeAtriumRead(req, input, segments)
     if (read) return read
 

@@ -36,6 +36,8 @@
  *   node run.js archive --id <id>
  *   node run.js delete --id <id>
  *   node run.js read-grants --id <idOrSlug>
+ *   node run.js find-people --query <name|email>
+ *   node run.js add-person --email <district email> [--first-name <n>] [--last-name <n>]
  *   node run.js set-visibility --id <id> [--level private|group|internal|public]
  *                    [--grants role:staff,building:GHS]           (REPLACES the list)
  *                    [--add-grants k:v,...] [--remove-grants k:v,...]  (merge; keeps
@@ -123,6 +125,13 @@ function usage() {
       '  list-assets --id <idOrSlug>',
       "  read-grants --id <idOrSlug>   (who can see it: level + the ACTUAL grants;",
       "                                 `read` shows only a grantCount integer)",
+      '  find-people --query <name|email>   (resolve a person to the numeric id a',
+      "                                 `user` grant needs — run this BEFORE",
+      '                                 --add-grants user:<id>)',
+      '  add-person --email <district email> [--first-name <n>] [--last-name <n>]',
+      "                                 (get or CREATE the id for a colleague who",
+      "                                 has never signed in — use when find-people",
+      "                                 finds nothing)",
       '',
       'Images (authored assets — the canonical way to put a picture in a document):',
       '  upload-asset --id <id> --file <png|jpeg|webp> [--alt <text>] [--filename <name>]',
@@ -149,7 +158,8 @@ function usage() {
       '                 the stored list instead (keeps the current level; --level',
       '                 is required only when NOT merging)',
       '                 kinds: role|building|department|grade|group|user — `group`',
-      '                 takes a group email, `user` a numeric id (never an email)',
+      '                 takes a group email, `user` a numeric id (never an email —',
+      '                 get it from `find-people`)',
       '',
       'Collections (private for every owner; district requires administrator):',
       '  list-collections',
@@ -757,6 +767,69 @@ async function readGrants(args) {
 }
 
 /**
+ * Resolve a person to the numeric `users.id` a `user` grant stores (#1860).
+ *
+ * A `user` grant value is an id and NEVER an email, so sharing an object with a
+ * named person is a TWO-step operation: `find-people` to get the id, then
+ * `set-visibility --add-grants user:<id>`. Nothing else on the agent surface
+ * produces that id — `psd-directory` returns names and Chat ids, not AI Studio
+ * row ids.
+ *
+ * Matches email, first name, last name, and the full name. Requires at least
+ * `minQueryLength` characters and returns at most `limit` rows, both echoed back
+ * so a truncated result is visible rather than silently partial.
+ *
+ * An EMPTY result does not prove the person does not work here: this searches AI
+ * Studio's own user table, which has no row for a colleague who has never signed
+ * in. For a district staff member, `add-person --email` creates that id.
+ */
+async function findPeople(args) {
+  const query = requireStr(args, 'query', 'query');
+  const { payload } = await restFetch('GET', '/_people', { query: { query } });
+  const people = (payload && payload.people) || [];
+  const minQueryLength = payload && payload.minQueryLength;
+  emit({
+    ...payload,
+    // The `note` is what every other subcommand here uses as the "what to do
+    // next" signal, so the truncation and too-short cases must appear IN it —
+    // not only as raw fields a caller may never read.
+    note: people.length === 0
+      ? (typeof minQueryLength === 'number' && query.trim().length < minQueryLength
+          ? `The query is shorter than the ${minQueryLength}-character minimum, so nothing was searched. Retry with a longer term.`
+          : 'No AI Studio user matched — they may simply never have signed in. If ' +
+            'they are district staff, run `add-person --email <their email>` to get ' +
+            'their id (it creates it if needed), then grant `user:<id>`.')
+      : (payload && payload.truncated
+          ? 'More people match than are listed — narrow the query (a last name or ' +
+            'the full email) before granting, or you may be looking at the wrong ' +
+            'row. Then pass the numeric `id` as `set-visibility --add-grants user:<id>`.'
+          : 'Pass the numeric `id` as `set-visibility --add-grants user:<id>`. ' +
+            'Confirm the email before granting — a `user` grant on the wrong row ' +
+            'shares the object with the wrong person.'),
+  });
+}
+
+/**
+ * `add-person --email` — return the numeric id for a district staff email,
+ * creating the AI Studio user row if the person has never signed in (#1860).
+ * Their first sign-in keeps this id, so grants made now still apply. Names are
+ * optional; passing them (e.g. from psd-directory) makes the row findable by
+ * name before that sign-in.
+ */
+async function addPerson(args) {
+  const body = { email: requireStr(args, 'email', 'email') };
+  const firstName = optStr(args, 'first_name', 'first-name');
+  const lastName = optStr(args, 'last_name', 'last-name');
+  if (firstName !== undefined) body.firstName = firstName;
+  if (lastName !== undefined) body.lastName = lastName;
+  const { payload } = await restFetch('POST', '/_people', { body });
+  emit({
+    ...payload,
+    note: 'Pass the numeric `person.id` as `set-visibility --add-grants user:<id>`.',
+  });
+}
+
+/**
  * The one GET of an object's stored audience: used both by `read-grants` (which
  * formats it for the caller) and by the merge path (which computes against it).
  */
@@ -916,6 +989,8 @@ const COMMANDS = {
   delete: deleteObject,
   'set-visibility': setVisibility,
   'read-grants': readGrants,
+  'find-people': findPeople,
+  'add-person': addPerson,
   publish: publishObject,
   unpublish: unpublishObject,
 };

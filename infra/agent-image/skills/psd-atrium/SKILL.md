@@ -1,7 +1,7 @@
 ---
 name: psd-atrium
-summary: Read and write AI Studio Atrium content — PSD's collaborative document + live-artifact workspace with an intranet publishing flow. Find/read/create/edit/archive/delete documents and artifacts, embed images, add first-party artifact persistence with AtriumData, and publish them. Artifacts fully support HTML/CSS/JavaScript (including <script>/<style>).
-description: Use this to work with Atrium, PSD's collaborative content workspace in AI Studio (documents + interactive artifacts, with an internal "intranet" publishing flow). Find and read Atrium documents/artifacts, create new ones, edit them (append or replace), add live artifact persistence with window.AtriumData, archive them, hard-delete ones you own, and publish/unpublish them (a Live/Draft state — it does NOT change who can read them; the visibility level does). Interactive artifacts fully support real HTML, CSS, and JavaScript — including <script>, <style>, and inline style="…" — pass raw code; the skill base64-encodes it in transit so AI Studio cannot mangle it (do NOT work around with legacy attributes like bgcolor/width). That protects the write, NOT the render: `data:` URIs are still stripped when the page is served, so images must be uploaded with upload-asset or referenced by public https URL. Atrium is REAL and live — never say the district has no content workspace. Version-based: reads return the last saved version and edits create a new version; the real-time collaborative editor rail is not reachable from here.
+summary: Read and write AI Studio Atrium content — PSD's collaborative document + live-artifact workspace with an intranet publishing flow. Find/read/create/edit/archive/delete documents and artifacts, embed images, add first-party artifact persistence with AtriumData, control who can view them (visibility level + grants, including sharing with a named person), and publish them. Artifacts fully support HTML/CSS/JavaScript (including <script>/<style>).
+description: Use this to work with Atrium, PSD's collaborative content workspace in AI Studio (documents + interactive artifacts, with an internal "intranet" publishing flow). Find and read Atrium documents/artifacts, create new ones, edit them (append or replace), add live artifact persistence with window.AtriumData, archive them, hard-delete ones you own, read and change who can view them (read-grants / set-visibility, and find-people to resolve a colleague's email to the user id a per-person grant needs), and publish/unpublish them (a Live/Draft state — it does NOT change who can read them; the visibility level does). Interactive artifacts fully support real HTML, CSS, and JavaScript — including <script>, <style>, and inline style="…" — pass raw code; the skill base64-encodes it in transit so AI Studio cannot mangle it (do NOT work around with legacy attributes like bgcolor/width). That protects the write, NOT the render: `data:` URIs are still stripped when the page is served, so images must be uploaded with upload-asset or referenced by public https URL. Atrium is REAL and live — never say the district has no content workspace. Version-based: reads return the last saved version and edits create a new version; the real-time collaborative editor rail is not reachable from here.
 allowed-tools: Bash(node:*)
 ---
 
@@ -69,6 +69,13 @@ node run.js read-source --id <uuid-or-slug>
 # Read who can see it: the level plus the ACTUAL grant entries. `read` reports
 # only a grantCount integer, and set-visibility --grants REPLACES the list.
 node run.js read-grants --id <uuid-or-slug>
+
+# Resolve a person to the numeric AI Studio user id a `user` grant needs.
+# Matches email, first name, last name, or full name (2+ characters, 20 results).
+node run.js find-people --query "mondryj@psd401.net"
+
+# No match? Get (or create) the id for a district colleague who never signed in.
+node run.js add-person --email "newteacher@psd401.net" [--first-name Ann] [--last-name Lee]
 ```
 
 `find` filters: `--kind document|artifact`, `--collection <slug|id>`, `--tag <t>`,
@@ -666,10 +673,46 @@ follow:
 A grant is `kind:value`. Valid kinds are `role`, `building`, `department`,
 `grade`, `group` and `user`. Two of them constrain the value and reject anything
 else with a 400: `group` takes a group EMAIL (`group:cabinet@psd401.net`), and
-`user` takes the numeric AI Studio user id, never an email (`user:42`). Nothing
-in this skill resolves a person's email to that id — to grant one named person,
-read an existing `user` grant off another object, or use the web visibility
-editor's people picker.
+`user` takes the numeric AI Studio user id, never an email (`user:42`).
+
+### Share with a named person
+
+Per-person sharing is two steps — resolve, then grant:
+
+```bash
+node run.js find-people --query "mondryj@psd401.net"
+# → { "people": [{ "id": 412, "name": "J Mondry", "email": "mondryj@psd401.net" }], … }
+node run.js set-visibility --id <id> --level group --add-grants user:412
+```
+
+If `find-people` finds nothing, the colleague has probably just never signed in.
+For any district staff email, `add-person` returns their id, creating it if needed;
+their first sign-in keeps it, so the grant applies from then on:
+
+```bash
+node run.js add-person --email "newteacher@psd401.net" --first-name Ann --last-name Lee
+# → { "person": { "id": 913, "name": "Ann Lee", "email": "newteacher@psd401.net" }, "created": true, … }
+node run.js set-visibility --id <id> --level group --add-grants user:913
+```
+
+Only `@psd401.net` staff addresses are accepted (student-number addresses and
+other domains are rejected). Use the exact address — get it from the requester or
+`psd-directory` — since a typo creates an id for nobody.
+
+`find-people` matches email, first name, last name, and full name; it needs at
+least 2 characters and returns at most 20 rows, with an exact email match ranked
+first. The response echoes `minQueryLength` and `limit`, plus `truncated: true`
+when a further match exists beyond the ones listed — narrow the query (a last name
+or the full email) rather than treating a capped list as the whole answer.
+**Always check the returned `email`** before granting: nothing server-side can
+tell whether you picked the row the person actually meant, a `user` grant on the
+wrong row shares the object with the wrong person, and two staff can share a
+surname. Atrium keeps no grant history, so a wrong grant is only found by reading
+the audience back.
+
+It searches AI Studio's own user table, which has no row for someone who has
+never signed in — so an empty result usually means exactly that. For district
+staff, use `add-person --email` (above) to get their id. Do not invent an id.
 
 `read-grants --id <id>` returns the level plus the actual `grants: [{kind,
 value}]` entries. It needs EDIT rights on the object — the list names every

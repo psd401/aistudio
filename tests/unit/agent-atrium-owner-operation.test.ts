@@ -68,6 +68,16 @@ jest.mock("@/lib/content/surface-helpers", () => ({
       : `/atrium/${object.id}/${object.kind === "artifact" ? "view" : "edit"}`,
   resolveCollectionId: (...args: unknown[]) => resolveCollectionIdMock(...args),
 }))
+const searchPeopleMock = jest.fn()
+const ensureDistrictPersonMock = jest.fn()
+jest.mock("@/lib/content/people-search", () => ({
+  searchPeople: (...args: unknown[]) => searchPeopleMock(...args),
+  ensureDistrictPerson: (...args: unknown[]) => ensureDistrictPersonMock(...args),
+  DistrictPersonRejectedError: class DistrictPersonRejectedError extends Error {},
+  PEOPLE_SEARCH_MIN_QUERY_LENGTH: 2,
+  PEOPLE_SEARCH_MAX_QUERY_LENGTH: 100,
+  PEOPLE_SEARCH_RESULT_LIMIT: 20,
+}))
 jest.mock("@/lib/content", () => {
   class MockContentError extends Error {
     readonly code: string
@@ -187,6 +197,205 @@ beforeEach(() => {
     kind: "artifact",
   })
   dataLimitMock.mockResolvedValue([])
+  searchPeopleMock.mockResolvedValue({ people: [], truncated: false })
+})
+
+describe("signed-owner Atrium people lookup (#1860)", () => {
+  it("resolves an email to the users.id a `user` grant stores", async () => {
+    searchPeopleMock.mockResolvedValue({
+      people: [{ id: 412, name: "J Mondry", email: "mondryj@psd401.net" }],
+      truncated: false,
+    })
+
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "req-people",
+      method: "GET",
+      path: "/_people",
+      query: { query: "mondryj@psd401.net" },
+    })
+
+    expect(result.httpStatus).toBe(200)
+    expect(searchPeopleMock).toHaveBeenCalledWith("mondryj@psd401.net")
+    expect(result.payload).toMatchObject({
+      data: {
+        query: "mondryj@psd401.net",
+        people: [{ id: 412, name: "J Mondry", email: "mondryj@psd401.net" }],
+        minQueryLength: 2,
+        limit: 20,
+        truncated: false,
+      },
+    })
+  })
+
+  it("relays the search's own truncation signal so a partial list is not read as complete", async () => {
+    searchPeopleMock.mockResolvedValue({
+      people: Array.from({ length: 20 }, (_, index) => ({
+        id: index + 1,
+        name: `Person ${index}`,
+        email: `person${index}@psd401.net`,
+      })),
+      truncated: true,
+    })
+
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "req-people-cap",
+      method: "GET",
+      path: "/_people",
+      query: { query: "person" },
+    })
+
+    expect(result.payload).toMatchObject({ data: { truncated: true } })
+  })
+
+  it("rejects a query longer than the search's own ceiling instead of silently truncating it", async () => {
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "req-people-long",
+      method: "GET",
+      path: "/_people",
+      query: { query: "x".repeat(101) },
+    })
+
+    expect(result.httpStatus).toBe(400)
+    expect(searchPeopleMock).not.toHaveBeenCalled()
+  })
+
+  it("gates the directory read on the authoring capability BEFORE any row is read", async () => {
+    // This returns people, not content, so it must not ride along with the
+    // ungated content reads (`source`, `visibility`). The gate is not advisory:
+    // no query may run when it rejects.
+    assertContentAuthoringCapabilityMock.mockRejectedValueOnce(
+      new ForbiddenError("The atrium-content capability is required")
+    )
+
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "req-people-denied",
+      method: "GET",
+      path: "/_people",
+      query: { query: "mondryj" },
+    })
+
+    expect(result.httpStatus).toBe(403)
+    expect(searchPeopleMock).not.toHaveBeenCalled()
+  })
+
+  it("rejects a lookup with no query rather than returning a directory slice", async () => {
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "req-people-noquery",
+      method: "GET",
+      path: "/_people",
+    })
+
+    expect(result.httpStatus).toBe(400)
+    expect(searchPeopleMock).not.toHaveBeenCalled()
+  })
+
+  it("treats the reserved segment as a content id on the write methods, never as the lookup", async () => {
+    // PATCH/DELETE on a bare segment are the generic metadata-write paths and the
+    // route allowlist admits them. They must fall through to the content services
+    // with `_people` as an ordinary (and unresolvable) identifier — the lookup is
+    // reachable by GET and POST only.
+    for (const method of ["PATCH", "DELETE"] as const) {
+      searchPeopleMock.mockClear()
+      await executeOwnerAtriumOperation({
+        ownerEmail: "owner@psd401.net",
+        requestId: `req-people-${method}`,
+        method,
+        path: "/_people",
+        ...(method === "PATCH" ? { body: { title: "Hijack" } } : {}),
+      })
+      expect(searchPeopleMock).not.toHaveBeenCalled()
+      expect(ensureDistrictPersonMock).not.toHaveBeenCalled()
+    }
+  })
+})
+
+describe("signed-owner Atrium person creation (POST /_people)", () => {
+  it("creates (or returns) a district person's id on POST, as the signed owner", async () => {
+    ensureDistrictPersonMock.mockResolvedValue({
+      person: { id: 913, name: "Ann Lee", email: "newteacher@psd401.net" },
+      created: true,
+    })
+
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "req-people-post",
+      method: "POST",
+      path: "/_people",
+      body: { email: "newteacher@psd401.net", firstName: "Ann", lastName: "Lee" },
+    })
+
+    expect(result.httpStatus).toBe(201)
+    expect(ensureDistrictPersonMock).toHaveBeenCalledWith({
+      email: "newteacher@psd401.net",
+      firstName: "Ann",
+      lastName: "Lee",
+    })
+    expect(result.payload).toMatchObject({
+      data: { person: { id: 913 }, created: true },
+    })
+    expect(searchPeopleMock).not.toHaveBeenCalled()
+  })
+
+  it("returns 200 for an existing person and 400 for a refused email", async () => {
+    ensureDistrictPersonMock.mockResolvedValueOnce({
+      person: { id: 412, name: "J Mondry", email: "mondryj@psd401.net" },
+      created: false,
+    })
+    const existing = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "req-people-existing",
+      method: "POST",
+      path: "/_people",
+      body: { email: "mondryj@psd401.net" },
+    })
+    expect(existing.httpStatus).toBe(200)
+
+    ensureDistrictPersonMock.mockRejectedValueOnce(
+      new (jest.requireMock("@/lib/content/people-search") as {
+        DistrictPersonRejectedError: new (message: string) => Error
+      }).DistrictPersonRejectedError("Only @psd401.net addresses can be added")
+    )
+    const refused = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "req-people-refused",
+      method: "POST",
+      path: "/_people",
+      body: { email: "someone@gmail.com" },
+    })
+    expect(refused.httpStatus).toBe(400)
+  })
+
+  it("gates person creation on the authoring capability BEFORE any write", async () => {
+    assertContentAuthoringCapabilityMock.mockRejectedValueOnce(
+      new ForbiddenError("The atrium-content capability is required")
+    )
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "req-people-post-denied",
+      method: "POST",
+      path: "/_people",
+      body: { email: "newteacher@psd401.net" },
+    })
+    expect(result.httpStatus).toBe(403)
+    expect(ensureDistrictPersonMock).not.toHaveBeenCalled()
+  })
+
+  it("rejects an unknown field on person creation", async () => {
+    const result = await executeOwnerAtriumOperation({
+      ownerEmail: "owner@psd401.net",
+      requestId: "req-people-post-extra",
+      method: "POST",
+      path: "/_people",
+      body: { email: "newteacher@psd401.net", userId: 1 },
+    })
+    expect(result.httpStatus).toBe(400)
+    expect(ensureDistrictPersonMock).not.toHaveBeenCalled()
+  })
 })
 
 describe("signed-owner Atrium artifact data reads", () => {

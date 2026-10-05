@@ -11,6 +11,7 @@
  *   edit (replace)  → POST   /<id>/versions
  *   edit (append)   → GET /<id> then POST /<id>/versions (concatenated body)
  *   read-grants     → GET    /<id>/visibility  (#1763 — the ACTUAL grant list)
+ *   find-people     → GET    /people           (#1860 — email/name → users.id)
  *   set-visibility  → PATCH  /<id>/visibility  (+ --add-grants/--remove-grants merge)
  *   publish         → POST   /<id>/publish     (+ approval_required relay)
  *   unpublish       → DELETE /<id>/publish/<destination>
@@ -1210,6 +1211,139 @@ test('edit accepts --body-file, and refuses it combined with --body', async () =
   let code;
   try {
     await run('edit', '--id', 'obj-1', '--body-file', file, '--body', 'inline');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+  expect(restCalls).toHaveLength(0);
+});
+
+test('find-people GETs /people with the query and relays the id to use', async () => {
+  // The whole point of #1860: a `user` grant stores a numeric users.id, and this
+  // is the only agent-reachable way to get one.
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: {
+      query: 'mondryj@psd401.net',
+      people: [{ id: 412, name: 'J Mondry', email: 'mondryj@psd401.net' }],
+      minQueryLength: 2,
+      limit: 20,
+      truncated: false,
+    },
+  });
+
+  await run('find-people', '--query', 'mondryj@psd401.net');
+
+  expect(restCalls).toHaveLength(1);
+  expect(restCalls[0]).toMatchObject({ method: 'GET', path: '/_people' });
+  expect(restCalls[0].opts.query).toEqual({ query: 'mondryj@psd401.net' });
+  expect(emitted[0]).toMatchObject({
+    people: [{ id: 412, email: 'mondryj@psd401.net' }],
+    truncated: false,
+  });
+  expect(emitted[0].note).toContain('user:<id>');
+});
+
+test('find-people explains an empty result instead of implying the person is unknown', async () => {
+  // A staff member who has never signed in has no users row; the note must send
+  // the agent to add-person instead of letting it drop them from the audience.
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: {
+      query: 'nobody',
+      people: [],
+      minQueryLength: 2,
+      limit: 20,
+      truncated: false,
+    },
+  });
+
+  await run('find-people', '--query', 'nobody');
+
+  expect(emitted[0].people).toEqual([]);
+  expect(emitted[0].note).toContain('add-person');
+});
+
+test('find-people requires --query (exit 1, no request sent)', async () => {
+  let code;
+  try {
+    await run('find-people');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+  expect(restCalls).toHaveLength(0);
+});
+
+test('find-people tells the agent to narrow a truncated result in the note itself', async () => {
+  // SKILL.md tells the agent to narrow on `truncated`; the note is what every
+  // other subcommand uses as the next-action signal, so it must say so too.
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: {
+      query: 'smith',
+      people: [{ id: 1, name: 'A Smith', email: 'smitha@psd401.net' }],
+      minQueryLength: 2,
+      limit: 20,
+      truncated: true,
+    },
+  });
+
+  await run('find-people', '--query', 'smith');
+
+  expect(emitted[0].truncated).toBe(true);
+  expect(emitted[0].note).toContain('narrow the query');
+});
+
+test('find-people distinguishes a too-short query from a genuine no-match', async () => {
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 200,
+    payload: {
+      query: 'm',
+      people: [],
+      minQueryLength: 2,
+      limit: 20,
+      truncated: false,
+    },
+  });
+
+  await run('find-people', '--query', 'm');
+
+  expect(emitted[0].note).toContain('minimum');
+  expect(emitted[0].note).not.toContain('add-person');
+});
+
+test('add-person posts the email and optional names to /_people', async () => {
+  restResponder = () => ({
+    approvalRequired: false,
+    status: 201,
+    payload: {
+      person: { id: 913, name: 'Ann Lee', email: 'newteacher@psd401.net' },
+      created: true,
+    },
+  });
+
+  await run('add-person', '--email', 'newteacher@psd401.net', '--first-name', 'Ann', '--last-name', 'Lee');
+
+  expect(restCalls[0].method).toBe('POST');
+  expect(restCalls[0].path).toBe('/_people');
+  expect(restCalls[0].opts.body).toEqual({
+    email: 'newteacher@psd401.net',
+    firstName: 'Ann',
+    lastName: 'Lee',
+  });
+  expect(emitted[0].person.id).toBe(913);
+  expect(emitted[0].note).toContain('user:<id>');
+});
+
+test('add-person requires --email (exit 1, no request sent)', async () => {
+  let code;
+  try {
+    await run('add-person');
   } catch (err) {
     code = err.code;
   }

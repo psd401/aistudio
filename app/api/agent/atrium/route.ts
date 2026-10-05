@@ -28,6 +28,13 @@ const ALLOWED_PATHS: Record<AtriumBody["method"], readonly RegExp[]> = {
   GET: [
     /^$/,
     /^\/collections$/,
+    // Resolve a person to the `users.id` a `user` visibility grant stores
+    // (#1860). The leading underscore makes this a RESERVED segment rather than
+    // a reachable identifier: `slugifyTitle` emits `[a-z0-9-]` only, so no
+    // content object's slug can ever be `_people` and nothing is shadowed. (The
+    // bare `/collections` entry above does shadow a slug; this is deliberately
+    // not a second instance of that.)
+    /^\/_people$/,
     new RegExp(`^/${IDENTIFIER}$`),
     // Committed markdown source — the ONLY way an agent can read a document's
     // body text (`GET /<id>` returns bodyLocation "proof" with no text).
@@ -46,6 +53,8 @@ const ALLOWED_PATHS: Record<AtriumBody["method"], readonly RegExp[]> = {
   POST: [
     /^$/,
     /^\/collections$/,
+    // Create the users row for a district colleague who never signed in (#1860).
+    /^\/_people$/,
     new RegExp(`^/${IDENTIFIER}/(?:versions|publish)$`),
     new RegExp(`^/${IDENTIFIER}/assets$`),
     new RegExp(`^/${IDENTIFIER}/assets/${IDENTIFIER}/complete$`),
