@@ -9,6 +9,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test"
 
 import postgres from "postgres";
 import {
+  provisionRosterStaffUsers,
   reconcileCollection,
   reconcileOneRosterRoles,
   writeSyncStatus,
@@ -58,6 +59,11 @@ function defineOneRosterPostgreSQLReconciliationSuite1Part1() {
         role_version integer DEFAULT 1,
         updated_at timestamp DEFAULT now() NOT NULL
       );
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name varchar(255);
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name varchar(255);
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS cognito_sub varchar(255);
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email_lower
+        ON users (lower(email));
       CREATE TABLE IF NOT EXISTS roles (
         id serial PRIMARY KEY,
         name varchar(100) NOT NULL,
@@ -502,11 +508,94 @@ function defineOneRosterPostgreSQLReconciliationSuite1Part3() {
   });
 }
 
+function defineOneRosterPostgreSQLReconciliationSuite1Part4() {
+  it("pre-provisions never-signed-in roster staff with a reconciler-owned staff role", async () => {
+    if (!sql) throw new Error("database connection was not initialized");
+    await sql`
+      INSERT INTO users (email, first_name, cognito_sub)
+      VALUES ('Signed.In@oneroster-role.test', 'Kept', 'sub-signed-in')
+    `;
+    await sql`
+      INSERT INTO oneroster_users (
+        sourced_id, email, given_name, family_name, enabled_user, status, is_active
+      )
+      VALUES
+        ('p-teacher', 'new.teacher@oneroster-role.test', ' Ada ', 'Lovelace', true, 'active', true),
+        ('p-teacher-dupe', 'NEW.TEACHER@oneroster-role.test', 'Dupe', 'Row', true, 'active', true),
+        ('p-signed-in', 'signed.in@oneroster-role.test', 'Roster', 'Name', true, 'active', true),
+        ('p-student', 'student@oneroster-role.test', 'Stu', 'Dent', true, 'active', true),
+        ('p-student-aide', 'aide.student@oneroster-role.test', 'Mixed', 'Roles', true, 'active', true),
+        ('p-parent', 'parent@oneroster-role.test', 'Par', 'Ent', true, 'active', true),
+        ('p-disabled', 'disabled@oneroster-role.test', 'Dis', 'Abled', false, 'active', true),
+        ('p-inactive', 'inactive@oneroster-role.test', 'In', 'Active', true, 'active', false),
+        ('p-inactive-role', 'inactive.role@oneroster-role.test', 'Old', 'Role', true, 'active', true),
+        ('p-no-email', NULL, 'No', 'Email', true, 'active', true)
+    `;
+    await sql`
+      INSERT INTO oneroster_user_roles (user_sourced_id, role, role_type, status, is_active)
+      VALUES
+        ('p-teacher', 'Teacher', 'primary', 'active', true),
+        ('p-teacher-dupe', 'aide', 'primary', 'active', true),
+        ('p-signed-in', 'staff', 'primary', 'active', true),
+        ('p-student', 'student', 'primary', 'active', true),
+        ('p-student-aide', 'aide', 'primary', 'active', true),
+        ('p-student-aide', 'student', 'secondary', 'active', true),
+        ('p-parent', 'parent', 'primary', 'active', true),
+        ('p-disabled', 'teacher', 'primary', 'active', true),
+        ('p-inactive', 'teacher', 'primary', 'active', true),
+        ('p-inactive-role', 'teacher', 'primary', 'tobedeleted', false),
+        ('p-no-email', 'teacher', 'primary', 'active', true)
+    `;
+
+    const first = await provisionRosterStaffUsers(sql);
+    const second = await provisionRosterStaffUsers(sql);
+
+    const rows = await sql<
+      Array<{
+        email: string;
+        first_name: string | null;
+        last_name: string | null;
+        cognito_sub: string | null;
+        roles: string | null;
+      }>
+    >`
+      SELECT u.email, u.first_name, u.last_name, u.cognito_sub,
+             string_agg(lower(r.name) || ':' || ur.source, ',' ORDER BY r.name) AS roles
+        FROM users u
+        LEFT JOIN user_roles ur ON ur.user_id = u.id
+        LEFT JOIN roles r ON r.id = ur.role_id
+       WHERE lower(u.email) LIKE ${"%@oneroster-role.test"}
+       GROUP BY u.id
+       ORDER BY lower(u.email)
+    `;
+
+    expect(first).toEqual({ provisioned: 1 });
+    expect(second).toEqual({ provisioned: 0 });
+    expect(rows).toEqual([
+      {
+        email: "new.teacher@oneroster-role.test",
+        first_name: "Ada",
+        last_name: "Lovelace",
+        cognito_sub: null,
+        roles: "staff:oneroster",
+      },
+      {
+        email: "Signed.In@oneroster-role.test",
+        first_name: "Kept",
+        last_name: null,
+        cognito_sub: "sub-signed-in",
+        roles: null,
+      },
+    ]);
+  });
+}
+
 const defineOneRosterPostgreSQLReconciliationSuite1 = () => {
   defineOneRosterPostgreSQLReconciliationSuite1Part1();
   defineOneRosterPostgreSQLReconciliationSuite1CollectionTests();
   defineOneRosterPostgreSQLReconciliationSuite1Part2();
   defineOneRosterPostgreSQLReconciliationSuite1Part3();
+  defineOneRosterPostgreSQLReconciliationSuite1Part4();
 };
 
 describeDatabase("OneRoster PostgreSQL reconciliation", defineOneRosterPostgreSQLReconciliationSuite1);

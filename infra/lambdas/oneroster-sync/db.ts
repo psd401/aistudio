@@ -368,6 +368,96 @@ export async function reconcileOneRosterRoles(
   });
 }
 
+export interface StaffProvisionResult {
+  /** users rows created for roster staff with no row yet. */
+  provisioned: number;
+}
+
+/**
+ * Pre-provision a users row for every active roster staff member (#1860).
+ *
+ * `users` is otherwise sign-in-derived, so a colleague who never signed in has
+ * no numeric id and cannot be named in an Atrium `user` visibility grant. This
+ * inserts the same stub shape provisionAgentUser writes — lowercased email,
+ * roster names, cognito_sub NULL — and the first sign-in links it by
+ * lower(email) (lib/auth/resolve-user.ts), keeping the id and every grant made
+ * to it.
+ *
+ * Staff only: an active staff-shaped roster role and no active student role.
+ * Each new row also gets `staff` as source='oneroster', because the sign-in
+ * link path does not assign a default role; reconcileOneRosterRoles owns that
+ * row from then on (revokes it when the person leaves the roster). Existing
+ * users rows are never touched, and rows are never deleted.
+ */
+export async function provisionRosterStaffUsers(
+  sql: postgres.Sql
+): Promise<StaffProvisionResult> {
+  return sql.begin(async (tx) => {
+    const [staffRole] = await tx<{ id: number }[]>`
+      SELECT id FROM roles WHERE lower(name) = 'staff' LIMIT 1
+    `;
+    if (!staffRole) {
+      throw new Error("Required application role is missing: staff");
+    }
+
+    const provisioned = await tx<{ id: number }[]>`
+      INSERT INTO users (email, first_name, last_name)
+      SELECT DISTINCT ON (lower(roster_user.email))
+             lower(roster_user.email),
+             left(nullif(trim(roster_user.given_name), ''), 255),
+             left(nullif(trim(roster_user.family_name), ''), 255)
+        FROM oneroster_users roster_user
+       WHERE roster_user.is_active = true
+         AND coalesce(roster_user.enabled_user, true) = true
+         AND roster_user.email IS NOT NULL
+         AND length(roster_user.email) BETWEEN 3 AND 255
+         AND EXISTS (
+           SELECT 1
+             FROM oneroster_user_roles roster_role
+            WHERE roster_role.user_sourced_id = roster_user.sourced_id
+              AND roster_role.is_active = true
+              AND regexp_replace(
+                lower(trim(roster_role.role)),
+                '[^a-z0-9]+',
+                '',
+                'g'
+              ) = ANY(${[...STAFF_ONEROSTER_ROLE_NAMES]}::text[])
+         )
+         AND NOT EXISTS (
+           SELECT 1
+             FROM oneroster_user_roles roster_role
+            WHERE roster_role.user_sourced_id = roster_user.sourced_id
+              AND roster_role.is_active = true
+              AND regexp_replace(
+                lower(trim(roster_role.role)),
+                '[^a-z0-9]+',
+                '',
+                'g'
+              ) = 'student'
+         )
+         AND NOT EXISTS (
+           SELECT 1
+             FROM users existing
+            WHERE lower(existing.email) = lower(roster_user.email)
+         )
+       ORDER BY lower(roster_user.email), roster_user.sourced_id
+      ON CONFLICT ((lower(email))) DO NOTHING
+      RETURNING id
+    `;
+
+    if (provisioned.length > 0) {
+      await tx`
+        INSERT INTO user_roles (user_id, role_id, source)
+        SELECT user_id, ${staffRole.id}, 'oneroster'
+          FROM unnest(${provisioned.map((row) => row.id)}::int[]) AS user_id
+        ON CONFLICT (user_id, role_id) DO NOTHING
+      `;
+    }
+
+    return { provisioned: provisioned.length };
+  });
+}
+
 export async function reconcileCollection(
   sql: postgres.Sql,
   collection: CollectionPullSuccess

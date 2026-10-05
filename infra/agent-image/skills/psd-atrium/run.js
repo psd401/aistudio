@@ -774,12 +774,13 @@ async function readGrants(args) {
  * `minQueryLength` characters and returns at most `limit` rows, both echoed back
  * so a truncated result is visible rather than silently partial.
  *
- * An EMPTY result does not prove the person does not work here: this searches AI
- * Studio's own user table, which fills in when someone first signs in to AI
- * Studio or connects the Google Chat agent. A colleague who has done neither has
- * no id yet, and a `user` grant cannot name them — say so and offer a `group`
- * grant or wait for them to sign in, rather than silently dropping them from the
- * audience.
+ * This searches AI Studio's own user table. Every active staff member on the
+ * district roster has a row whether or not they have signed in — the nightly
+ * OneRoster sync pre-provisions them — and anyone who has signed in or connected
+ * the Google Chat agent has one too. So an EMPTY result means the person is not
+ * district staff on the roster (a student, a contractor, a hire newer than the
+ * last nightly sync) and has never used AI Studio — say so and offer a `group`
+ * grant, rather than silently dropping them from the audience.
  */
 async function findPeople(args) {
   const query = requireStr(args, 'query', 'query');
@@ -794,10 +795,11 @@ async function findPeople(args) {
     note: people.length === 0
       ? (typeof minQueryLength === 'number' && query.trim().length < minQueryLength
           ? `The query is shorter than the ${minQueryLength}-character minimum, so nothing was searched. Retry with a longer term.`
-          : 'No AI Studio user matched. Try a last name or the full email. If the ' +
-            'person has never signed in to AI Studio and has never connected the ' +
-            'Google Chat agent, they have no id yet and a `user` grant cannot name ' +
-            'them — report that instead of omitting them silently.')
+          : 'No AI Studio user matched. Try a last name or the full email. District ' +
+            'staff on the roster have an id even if they have never signed in, so ' +
+            'no match means the person is not on the district staff roster (a ' +
+            'student, a contractor, or a hire newer than the last nightly sync) — ' +
+            'report that instead of omitting them silently, and offer a `group` grant.')
       : (payload && payload.truncated
           ? 'More people match than are listed — narrow the query (a last name or ' +
             'the full email) before granting, or you may be looking at the wrong ' +

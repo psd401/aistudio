@@ -693,14 +693,15 @@ wrong row shares the object with the wrong person, and two staff can share a
 surname. Atrium keeps no grant history, so a wrong grant is only found by reading
 the audience back.
 
-It searches AI Studio's own user table, which is **not** a district directory
-mirror: a row exists once someone has signed in to AI Studio or connected the
-Google Chat agent. So an empty result is ambiguous — it may mean no such person,
-or it may mean a real colleague who has never used AI Studio and therefore has no
-id a `user` grant could name. Try a last name or the full email first; if there is
-still no match, **say so** and offer a `group` grant (a synced Google group covers
-everyone in it, signed in or not) instead of quietly dropping that person from the
-audience. Do not invent an id.
+It searches AI Studio's own user table. Every active staff member on the
+district roster has a row **whether or not they have ever signed in** — the
+nightly OneRoster sync creates it — and so does anyone who has signed in or
+connected the Google Chat agent. So an empty result means the person is not on
+the district staff roster (a student, a contractor, a hire newer than the last
+nightly sync) and has never used AI Studio. Try a last name or the full email
+first; if there is still no match, **say so** and offer a `group` grant (a synced
+Google group covers everyone in it) instead of quietly dropping that person from
+the audience. Do not invent an id.
 
 `read-grants --id <id>` returns the level plus the actual `grants: [{kind,
 value}]` entries. It needs EDIT rights on the object — the list names every

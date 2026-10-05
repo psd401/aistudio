@@ -20,12 +20,14 @@ import { parseCredentials, resolveConfig } from "./config";
 import {
   closeSql,
   getSql,
+  provisionRosterStaffUsers,
   readLastPermRev,
   reconcileCollection,
   reconcileOneRosterRoles,
   writeLastPermRev,
   writeSyncStatus,
   type RoleReconcileResult,
+  type StaffProvisionResult,
 } from "./db";
 import { OneRosterClient } from "./oneroster-client";
 import {
@@ -33,6 +35,7 @@ import {
   runPostSyncRoleReconciliation,
 } from "./role-reconciliation";
 import { runOneRosterSync, type OneRosterSyncResult } from "./sync";
+import { runPostSyncStaffProvisioning } from "./user-provisioning";
 
 const METRIC_NAMESPACE = "AIStudio/RosterSync";
 const ENVIRONMENT = process.env.ENVIRONMENT ?? "dev";
@@ -183,10 +186,17 @@ export async function handler(
     syncResult = result;
 
     if (!result.fullySuccessful) {
-      await emitMetrics(result, null);
+      await emitMetrics(result, null, null);
       metricsEmitted = true;
       throw new Error(INCOMPLETE_SYNC_ERROR);
     }
+
+    // Before role reconciliation, so the reconciler sees the new stubs as it
+    // sees every other users row.
+    const staffProvision = await runPostSyncStaffProvisioning(
+      result.fullySuccessful,
+      { provision: () => provisionRosterStaffUsers(sql), log }
+    );
 
     const roleReconcile = await runPostSyncRoleReconciliation(
       {
@@ -199,7 +209,7 @@ export async function handler(
         log,
       }
     );
-    await emitMetrics(result, roleReconcile);
+    await emitMetrics(result, roleReconcile, staffProvision);
     metricsEmitted = true;
 
     log.info("OneRoster sync completed", {
@@ -226,7 +236,7 @@ export async function handler(
     const errorMessage = syncFailureMessage(error, syncResult);
     log.error("OneRoster sync failed", { error: errorMessage, runId });
     if (!metricsEmitted) {
-      await emitMetrics(null, null).catch(() => {});
+      await emitMetrics(null, null, null).catch(() => {});
     }
     await writeStatusSafely(
       sql,
@@ -302,7 +312,8 @@ async function loadSecret(secretArn: string): Promise<string> {
 
 async function emitMetrics(
   result: OneRosterSyncResult | null,
-  roleReconcile: RoleReconcileResult | null
+  roleReconcile: RoleReconcileResult | null,
+  staffProvision: StaffProvisionResult | null
 ): Promise<void> {
   const environmentDimension = [{ Name: "Environment", Value: ENVIRONMENT }];
   const metrics: MetricDatum[] = result
@@ -385,6 +396,15 @@ async function emitMetrics(
         Dimensions: environmentDimension,
       });
     }
+  }
+
+  if (staffProvision) {
+    metrics.push({
+      MetricName: "StaffUsersProvisioned",
+      Value: staffProvision.provisioned,
+      Unit: "Count",
+      Dimensions: environmentDimension,
+    });
   }
 
   try {
