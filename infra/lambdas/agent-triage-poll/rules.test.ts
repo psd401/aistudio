@@ -349,6 +349,36 @@ function defineShouldEscalateSuite3Part2() {describe("mode: high-confidence", ()
       ).toEqual({ escalate: false });
     });
 
+    test("a content-stage hit never clears the bar, however high (#1861)", () => {
+      // The content stage stamps a FIXED confidence on every hit, so before
+      // #1861 one heuristic match — a question mark in a marketing footer —
+      // read as 0.9 and pinged Chat. `high-confidence` is documented as
+      // "rule matches and LLM decisions", and now behaves that way.
+      for (const confidence of [0.7, 0.85, 0.9, 1]) {
+        expect([
+          confidence,
+          esc("important", makeFeatures(), base, {
+            mode: "high-confidence",
+            source: "content",
+            confidence,
+          }),
+        ]).toEqual([confidence, { escalate: false }]);
+      }
+    });
+
+    test("an explicit escalation rule still pings a content-stage hit (#1861)", () => {
+      // The veto is on the MODE's confidence bar, not on the user's own
+      // "always tell me about this sender" instruction.
+      expect(
+        esc(
+          "important",
+          makeFeatures({ fromEmail: "boss@psd401.net" }),
+          { senders: ["boss@psd401.net"], keywords: [], labelTriggers: ["important"] },
+          { mode: "high-confidence", source: "content", confidence: 0.7 },
+        ),
+      ).toMatchObject({ escalate: true, reason: "sender:boss@psd401.net" });
+    });
+
     test("custom threshold boundary is honoured", () => {
       const below = esc("important", makeFeatures(), base, {
         mode: "high-confidence",

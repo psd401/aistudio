@@ -406,6 +406,94 @@ const NEGATED_ASK_RE =
   /\bno (?:action|response|reply|rsvp|approval|authori[sz]ation|sign[- ]?off|signature) (?:is )?(?:needed|required|necessary)\b|\bnothing (?:is )?(?:needed|required)(?: from you)?\b|\bno need to (?:reply|respond|act|approve|sign)\b|\b(?:does not|doesn't|do not|don't|no longer) (?:need|require)s? (?:your )?(?:approval|authori[sz]ation|sign[- ]?off|signature)\b/gi;
 const INFORMATIONAL_RE =
   /\b(fyi|for your (?:information|awareness|records|reference)|just (?:a )?(?:heads[- ]up|so you know)|no action (?:is )?(?:needed|required|necessary)|nothing (?:is )?(?:needed|required) from you|status (?:report|update)|(?:daily|weekly|monthly|quarterly) (?:report|digest|summary|roundup|recap)|newsletter|read[- ]only|informational(?:ly)? )\b/i;
+// Bulk-mail footer boilerplate (#1861). Only consulted for automated
+// senders — "go ahead and" is ordinary English from a colleague. Kept as
+// literals, not one alternation regex: that form tripped
+// security/detect-unsafe-regex, and this array is a verbatim copy of
+// MARKETING_FOOTER_PHRASES in content-features.ts.
+const MARKETING_FOOTER_PHRASES = [
+  'unsubscribe',
+  'manage your preferences',
+  'manage your email preferences',
+  'manage email preferences',
+  'update your preferences',
+  'update your email preferences',
+  'opt out of these',
+  'opt-out of these',
+  'you are receiving this',
+  "you're receiving this",
+  'this email was sent to',
+  'this e-mail was sent to',
+  'this message was sent to',
+  'view this in your browser',
+  'view this email in your browser',
+  'view it in your browser',
+  'view in browser',
+  'add us to your address book',
+  'add us to your safe sender',
+  // Both named verbatim in #1861 item 4. "go ahead and" is ordinary
+  // English, which is why the list is gated on automatedSender.
+  'go ahead and',
+  'think this is awesome',
+];
+
+function hasMarketingFooter(text) {
+  const lower = String(text || '').toLowerCase();
+  return MARKETING_FOOTER_PHRASES.some((phrase) => lower.includes(phrase));
+}
+
+// Extracted from detectContentSignals to keep it under the complexity bar.
+function isInformational(opening, listMail, automatedSender) {
+  if (INFORMATIONAL_RE.test(opening)) return true;
+  if (listMail) return true;
+  return automatedSender && hasMarketingFooter(opening);
+}
+// A question only counts when the clause it terminates speaks to the
+// reader (#1861) — "Think this is awesome?" is not an ask. No contraction
+// alternative needed: an apostrophe is a non-word char, so \byou\b already
+// matches "you're". Scanned by hand rather than with /[^.!?\n]*\?/g, which
+// is quadratic on text with no question mark — see content-features.ts.
+const SECOND_PERSON_RE = /\b(you|your|yours|yourself)\b/i;
+// A single newline is NOT a clause boundary — in a hard-wrapped body it is
+// just where the client wrapped the line, and treating it as one lost real
+// questions ("Could you confirm\nthe budget by Friday?"). A BLANK line is.
+const CLAUSE_TERMINATORS = new Set(['.', '!', '?']);
+const PARAGRAPH_BREAK_RE = /\n[ \t]*\n/;
+const NEWLINE_RE = /\n/g;
+const ALPHANUMERIC_RE = /[a-z0-9]/i;
+
+// A '.' inside a token (v1.2, example.com, 3.5) is not a sentence
+// boundary; resetting the clause there swallowed the second-person
+// reference before it. See content-features.ts.
+function isSentenceBoundary(text, index) {
+  if (text[index] !== '.') return true;
+  return !(
+    ALPHANUMERIC_RE.test(text[index - 1] || '') &&
+    ALPHANUMERIC_RE.test(text[index + 1] || '')
+  );
+}
+
+function scanQuestionClauses(paragraph) {
+  let clauseStart = 0;
+  for (let i = 0; i < paragraph.length; i += 1) {
+    const char = paragraph[i];
+    if (!CLAUSE_TERMINATORS.has(char)) continue;
+    if (!isSentenceBoundary(paragraph, i)) continue;
+    if (char === '?' && SECOND_PERSON_RE.test(paragraph.slice(clauseStart, i))) {
+      return true;
+    }
+    clauseStart = i + 1;
+  }
+  return false;
+}
+
+function hasDirectQuestion(text) {
+  const paragraphs = String(text || '').split(PARAGRAPH_BREAK_RE);
+  for (const paragraph of paragraphs) {
+    if (scanQuestionClauses(paragraph.replace(NEWLINE_RE, ' '))) return true;
+  }
+  return false;
+}
 
 const AUTOMATED_LOCALPARTS = new Set([
   'admin',
@@ -480,8 +568,17 @@ function detectContentSignals(input) {
   const ccAddresses = parseAddressList(headers.cc);
   const addressedToUser = toAddresses.includes(userEmail);
   const askText = opening.replace(NEGATED_ASK_RE, ' ');
+  // Subject and body scanned separately: the seam must stay a hard
+  // boundary now that a newline is not one. See content-features.ts.
+  const subjectAskText = subject.replace(NEGATED_ASK_RE, ' ');
+  const bodyAskText = String(input.body || '')
+    .slice(0, OPENING_TEXT_CHARS)
+    .replace(NEGATED_ASK_RE, ' ');
+  const listMail = Boolean(String(headers.listUnsubscribe || '').trim());
+  const automatedSender = isAutomatedSender(input.fromEmail, headers);
   const base = {
-    directQuestion: askText.includes('?'),
+    directQuestion:
+      hasDirectQuestion(subjectAskText) || hasDirectQuestion(bodyAskText),
     actionRequest: ACTION_RE.test(askText),
     approvalRequest: APPROVAL_RE.test(askText),
     deadline: DEADLINE_RE.test(askText),
@@ -493,8 +590,8 @@ function detectContentSignals(input) {
     liveThread:
       Boolean(input.hasUserReply) &&
       Boolean(headers.inReplyTo || headers.references || /^\s*re\s*:/i.test(subject)),
-    informational: INFORMATIONAL_RE.test(opening),
-    automatedSender: isAutomatedSender(input.fromEmail, headers),
+    informational: isInformational(opening, listMail, automatedSender),
+    automatedSender,
   };
   return { ...base, shape: deriveShape(base) };
 }
@@ -515,7 +612,14 @@ function classifyByContent(signals) {
   if (signals.liveThread) {
     return { label: 'important', reason: 'content:reply-in-a-thread-you-are-in' };
   }
-  if (signals.addressedToUser && (signals.directQuestion || signals.actionRequest)) {
+  // An automated/bulk sender is vetoed here (#1861): nobody is waiting on a
+  // reply to a noreply mailbox, and marketing copy is full of second-person
+  // questions. Approval requests are exempt — they returned above.
+  if (
+    signals.addressedToUser &&
+    !signals.automatedSender &&
+    (signals.directQuestion || signals.actionRequest)
+  ) {
     return {
       label: 'important',
       reason: signals.directQuestion
@@ -535,6 +639,27 @@ function classifyByContent(signals) {
     }
   }
   return null;
+}
+
+// Reporting order only — the declaration order of the signals object, so
+// the list is stable across calls and across the TS/JS copies. NOT a claim
+// about which signal "won"; the deciding branch is named by `reason`.
+// See the SIGNAL_REPORT_ORDER comment in content-features.ts.
+const SIGNAL_REPORT_ORDER = [
+  'directQuestion',
+  'actionRequest',
+  'approvalRequest',
+  'deadline',
+  'addressedToUser',
+  'ccOnly',
+  'broadcast',
+  'liveThread',
+  'informational',
+  'automatedSender',
+];
+
+function firedContentSignals(signals) {
+  return SIGNAL_REPORT_ORDER.filter((name) => signals[name] === true);
 }
 
 module.exports = {
@@ -566,9 +691,12 @@ module.exports = {
   isWellFormedKeywordRule,
   wildcardMatch,
   // content signals
+  MARKETING_FOOTER_PHRASES,
   classifyByContent,
   detectContentSignals,
+  firedContentSignals,
   hasAsk,
+  hasDirectQuestion,
   isAutomatedSender,
   parseAddressList,
 };

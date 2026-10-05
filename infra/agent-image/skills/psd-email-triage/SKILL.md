@@ -113,7 +113,7 @@ any one person.
 
 | Subcommand | Effect |
 |------------|--------|
-| `simulate --from <email> [--subject "..."] [--snippet "..."] [--to "..."] [--cc "..."] [--external] [--has-user-reply]` | Dry-run both deterministic stages — the user's rules, then the content stage — against a synthetic email. Reports which stage decided (`rules`, `content`, or `llm` for "the model would decide"), the content signals it derived, and the reason. |
+| `simulate --from <email> [--subject "..."] [--snippet "..."] [--to "..."] [--cc "..."] [--list-unsubscribe "..."] [--external] [--has-user-reply]` | Dry-run both deterministic stages — the user's rules, then the content stage — against a synthetic email. Reports which stage decided (`rules`, `content`, or `llm` for "the model would decide"), the reason, every derived content signal, and `firedSignals` — the names of the signals that are true, so you can tell the user which signals the message set. The deciding branch itself is named by the decision's `reason`. Pass `--list-unsubscribe` to simulate bulk/marketing mail. |
 
 ### Labels
 

@@ -414,8 +414,24 @@ function shouldSkipMessage(
   return { skip: false };
 }
 
-/** Confidence attached to a deterministic content-stage decision. */
-const CONTENT_DECISION_CONFIDENCE = 0.9;
+/**
+ * Confidence attached to a deterministic content-stage decision.
+ *
+ * This is a fixed number stamped on every content-stage hit, not a
+ * calibrated estimate, and at the old 0.9 it claimed a near-certainty the
+ * stage cannot have (#1861 item 3).
+ *
+ * To be clear about what this value does and does not do: escalation is
+ * fixed in `shouldEscalate`, which now refuses to clear the
+ * `high-confidence` bar on any non-LLM source, so the number here is
+ * irrelevant to pinging — `rules.test.ts` asserts `escalate: false` for a
+ * content source at 0.7, 0.85, 0.9 and 1.0 alike. It is lowered for the
+ * OTHER reader of `DecisionRecord.confidence`: the admin triage detail
+ * page renders it verbatim ("confidence 0.90") next to the reason, where
+ * an uncalibrated 0.9 misrepresents a single regex hit to whoever is
+ * debugging a misfile.
+ */
+const CONTENT_DECISION_CONFIDENCE = 0.7;
 
 interface MessageContext {
   features: EmailFeatures;

@@ -155,7 +155,8 @@ Then set rules in plain language:
 
 Not sure a rule will catch what you intend? Ask the agent to **simulate**:
 "Would my rules catch an email from news@vendor.com with subject 'Special
-offer'?" — it dry-runs the rule engine without waiting for real mail.
+offer'?" — it dry-runs your rules *and* the content stage without waiting
+for real mail, and tells you which signal produced the label.
 
 ### b. Correct individual messages
 

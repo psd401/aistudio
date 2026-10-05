@@ -47,7 +47,11 @@ export interface MessageHeaders {
 }
 
 export interface ContentSignals {
-  /** The opening text contains a question mark. */
+  /**
+   * The opening text puts a question to the reader — a question clause
+   * that speaks to them in the second person, not merely a question mark
+   * somewhere in the text (#1861).
+   */
   directQuestion: boolean;
   /** The text asks the reader to do something ("can you", "please review"). */
   actionRequest: boolean;
@@ -63,7 +67,10 @@ export interface ContentSignals {
   broadcast: boolean;
   /** A reply in a thread the user has already participated in. */
   liveThread: boolean;
-  /** FYI / status / digest language with nothing asked of the reader. */
+  /**
+   * FYI / status / digest language with nothing asked of the reader, or
+   * bulk-mail footer boilerplate (#1861).
+   */
   informational: boolean;
   /** The sender speaks for a machine rather than a person. */
   automatedSender: boolean;
@@ -112,6 +119,166 @@ const NEGATED_ASK_RE =
 
 const INFORMATIONAL_RE =
   /\b(fyi|for your (?:information|awareness|records|reference)|just (?:a )?(?:heads[- ]up|so you know)|no action (?:is )?(?:needed|required|necessary)|nothing (?:is )?(?:needed|required) from you|status (?:report|update)|(?:daily|weekly|monthly|quarterly) (?:report|digest|summary|roundup|recap)|newsletter|read[- ]only|informational(?:ly)? )\b/i;
+
+/**
+ * Bulk-mail footer boilerplate (#1861 item 4). These phrases only mean
+ * "marketing" in mail a machine sent — "go ahead and" is ordinary English
+ * from a colleague — so they are only consulted when the sender is already
+ * an automated or list sender. See `detectContentSignals`.
+ */
+/*
+ * Plain literals rather than one alternation regex: the regex form stacked
+ * optional groups ("manage (?:your )?(?:email )?preferences") and tripped
+ * `security/detect-unsafe-regex`. A substring scan over lowercased text is
+ * ReDoS-free by construction, and the same array ports verbatim into
+ * `lib.js`, which is what keeps the two copies in parity.
+ */
+export const MARKETING_FOOTER_PHRASES = [
+  "unsubscribe",
+  "manage your preferences",
+  "manage your email preferences",
+  "manage email preferences",
+  "update your preferences",
+  "update your email preferences",
+  "opt out of these",
+  "opt-out of these",
+  "you are receiving this",
+  "you're receiving this",
+  "this email was sent to",
+  "this e-mail was sent to",
+  "this message was sent to",
+  "view this in your browser",
+  "view this email in your browser",
+  "view it in your browser",
+  "view in browser",
+  "add us to your address book",
+  "add us to your safe sender",
+  // Both named verbatim in #1861 item 4 as phrases to detect. "go ahead
+  // and" is ordinary English, which is why the whole list is gated on
+  // `automatedSender` — see `detectContentSignals`.
+  "go ahead and",
+  "think this is awesome",
+];
+
+function hasMarketingFooter(text: string): boolean {
+  const lower = text.toLowerCase();
+  return MARKETING_FOOTER_PHRASES.some((phrase) => lower.includes(phrase));
+}
+
+/**
+ * FYI / status / digest language, bulk list mail, or marketing-footer
+ * boilerplate from a machine (#1861 item 4). Extracted from
+ * `detectContentSignals` to keep that function under the complexity bar.
+ */
+function isInformational(
+  opening: string,
+  listMail: boolean,
+  automatedSender: boolean,
+): boolean {
+  if (INFORMATIONAL_RE.test(opening)) return true;
+  if (listMail) return true;
+  return automatedSender && hasMarketingFooter(opening);
+}
+
+/**
+ * A second-person reference. `directQuestion` requires one inside the
+ * question clause itself, so a rhetorical marketing question ("Think this
+ * is awesome?") is not read as an ask (#1861 item 1).
+ *
+ * Contractions need no alternative of their own: an apostrophe — straight
+ * or curly — is a non-word character, so `\byou\b` already matches
+ * "you're", "you’ll" and friends.
+ */
+const SECOND_PERSON_RE = /\b(you|your|yours|yourself)\b/i;
+
+/**
+ * `.`, `!` and `?` each close the clause before them — but see
+ * `isSentenceBoundary` for the one case where a character in this set is
+ * not actually a sentence boundary.
+ *
+ * A single newline deliberately is NOT in this set. In a hard-wrapped
+ * plain-text or forwarded body the newline is just where the mail client
+ * wrapped the line, not a sentence boundary, so treating it as one lost
+ * real questions: "Could you confirm\nthe budget by Friday?" tested only
+ * "the budget by Friday" and missed the "you" on the line above. A BLANK
+ * line does separate thoughts, and is handled by `PARAGRAPH_BREAK_RE`.
+ */
+const CLAUSE_TERMINATORS = new Set([".", "!", "?"]);
+
+/** Letters and digits — the characters a dot can sit *inside*. */
+const ALPHANUMERIC_RE = /[a-z0-9]/i;
+
+/**
+ * Is the character at `index` really ending a sentence?
+ *
+ * `!` and `?` always are. A `.` is not when it sits INSIDE a token — a
+ * version, a hostname, a decimal, an initialism. Without this, every such
+ * dot reset the clause and swallowed the second-person reference before
+ * it: "What do you think of v1.2?", "...of example.com?", "Can you review
+ * https://psd401.net/doc?" and "Did you see the 3.5 GPA report?" all
+ * returned false, so a real question to the user lost its deterministic
+ * `important` and fell through to the model.
+ *
+ * Known remaining edge: a mid-sentence abbreviation whose final dot IS
+ * followed by a space ("..., i.e. the draft?") still splits the clause.
+ * Closing that needs an abbreviation list, which is not worth the weight
+ * — the model still sees the message and every other signal.
+ */
+function isSentenceBoundary(text: string, index: number): boolean {
+  const char = text[index];
+  if (char !== ".") return true;
+  return !(
+    ALPHANUMERIC_RE.test(text[index - 1] ?? "") &&
+    ALPHANUMERIC_RE.test(text[index + 1] ?? "")
+  );
+}
+
+/** A blank line — the one newline-ish thing that really does end a thought. */
+const PARAGRAPH_BREAK_RE = /\n[ \t]*\n/;
+
+/** Every remaining newline, collapsed to a space before clauses are cut. */
+const NEWLINE_RE = /\n/g;
+
+/**
+ * Does the text put a question to the READER?
+ *
+ * The pre-#1861 test was `text.includes("?")`, which fired on any question
+ * mark anywhere — including the marketing line "Think this is awesome? Go
+ * ahead and …" in a Google Search Console blast, which then scored
+ * `important` and pinged Chat. A question only counts when the clause it
+ * terminates speaks to the reader in the second person — a "your" in the
+ * NEXT sentence must not rescue a rhetorical question.
+ *
+ * Scanned by hand rather than with `/[^.!?\n]*\?/g`, which is QUADRATIC on
+ * text containing no question mark: the star consumes to the end, fails,
+ * backtracks, and the whole walk repeats from the next start position.
+ * `eslint security/detect-unsafe-regex` does not flag it, but measured at
+ * 2.5s for 64KB and rising 16x per 4x of length — and this text is
+ * attacker-controlled (any sender's subject and body, and the
+ * `OPENING_TEXT_CHARS` cap does not bound the subject). This loop is
+ * linear: each character is visited once, and each clause is tested once.
+ */
+export function hasDirectQuestion(text: string): boolean {
+  for (const paragraph of text.split(PARAGRAPH_BREAK_RE)) {
+    if (scanQuestionClauses(paragraph.replace(NEWLINE_RE, " "))) return true;
+  }
+  return false;
+}
+
+/** One paragraph, line wraps already flattened. See `hasDirectQuestion`. */
+function scanQuestionClauses(paragraph: string): boolean {
+  let clauseStart = 0;
+  for (let i = 0; i < paragraph.length; i += 1) {
+    const char = paragraph[i] as string;
+    if (!CLAUSE_TERMINATORS.has(char)) continue;
+    if (!isSentenceBoundary(paragraph, i)) continue;
+    if (char === "?" && SECOND_PERSON_RE.test(paragraph.slice(clauseStart, i))) {
+      return true;
+    }
+    clauseStart = i + 1;
+  }
+  return false;
+}
 
 /**
  * Local-parts that are machine mailboxes outright. Matched exactly against
@@ -231,8 +398,25 @@ export function detectContentSignals(
   // are the signal.
   const askText = opening.replace(NEGATED_ASK_RE, " ");
 
+  // The subject and the body are scanned for a question SEPARATELY. The
+  // seam between them has to stay a hard boundary now that a newline is
+  // not one (see `CLAUSE_TERMINATORS`), or a subject with no terminal
+  // punctuation would bleed into the body's first clause and lend it a
+  // second-person word: subject "Your weekly report" + body "Think this
+  // is awesome?" must not read as a question to the reader. The body is
+  // cut to the same `OPENING_TEXT_CHARS` that `opening` gives it.
+  const subjectAskText = input.subject.replace(NEGATED_ASK_RE, " ");
+  const bodyAskText = input.body
+    .slice(0, OPENING_TEXT_CHARS)
+    .replace(NEGATED_ASK_RE, " ");
+
+  // List mail announces itself as bulk through List-Unsubscribe; that is
+  // enough on its own to read the message as informational (#1861 item 4).
+  const listMail = Boolean((input.headers.listUnsubscribe ?? "").trim());
+
   const base = {
-    directQuestion: askText.includes("?"),
+    directQuestion:
+      hasDirectQuestion(subjectAskText) || hasDirectQuestion(bodyAskText),
     actionRequest: ACTION_RE.test(askText),
     approvalRequest: APPROVAL_RE.test(askText),
     deadline: DEADLINE_RE.test(askText),
@@ -248,7 +432,7 @@ export function detectContentSignals(
           input.headers.references ||
           /^\s*re\s*:/i.test(input.subject),
       ),
-    informational: INFORMATIONAL_RE.test(opening),
+    informational: isInformational(opening, listMail, automatedSender),
     automatedSender,
   };
   return { ...base, shape: deriveShape(base) };
@@ -298,7 +482,19 @@ export function classifyByContent(
       reason: "content:reply-in-a-thread-you-are-in",
     };
   }
-  if (signals.addressedToUser && (signals.directQuestion || signals.actionRequest)) {
+  // A question or a soft ask only earns `important` from a sender that
+  // could actually be waiting on a reply. An automated or bulk sender is
+  // vetoed here (#1861 item 2): marketing copy is full of second-person
+  // questions and "let me know" phrasing, and nobody is on the other end
+  // of a noreply mailbox. Those messages fall through to the LLM (which
+  // still sees every signal) or to the default `later`. An approval or
+  // signature request is exempt — it returned above — because a service
+  // desk legitimately asks for one from a noreply address.
+  if (
+    signals.addressedToUser &&
+    !signals.automatedSender &&
+    (signals.directQuestion || signals.actionRequest)
+  ) {
     return {
       label: "important",
       reason: signals.directQuestion
@@ -320,6 +516,43 @@ export function classifyByContent(
   return null;
 }
 
+/**
+ * Reporting order for `firedContentSignals` — the declaration order of
+ * `ContentSignals` above, so the list is stable across calls and across
+ * the TS/JS copies.
+ *
+ * Deliberately NOT a claim about which signal "won". An earlier version of
+ * this list claimed to mirror the order `classifyByContent` consults the
+ * signals in, which it could not: `deadline` is never branched on directly
+ * (it only feeds `hasAsk`), `automatedSender` is consulted twice at
+ * different points (once as a veto, once as a positive branch), and
+ * `addressedToUser` only ever matters as a conjunct. Nothing could enforce
+ * that correspondence, so a reorder of `classifyByContent` would have
+ * silently made this report a misleading "most likely culprit". The
+ * deciding branch is already named exactly, by the `reason` string.
+ */
+const SIGNAL_REPORT_ORDER: (keyof Omit<ContentSignals, "shape">)[] = [
+  "directQuestion",
+  "actionRequest",
+  "approvalRequest",
+  "deadline",
+  "addressedToUser",
+  "ccOnly",
+  "broadcast",
+  "liveThread",
+  "informational",
+  "automatedSender",
+];
+
+/**
+ * The names of the signals that are true. `simulate` prints this alongside
+ * the decision's `reason`, so "which signal fired?" is answerable without
+ * reading a ten-key boolean map (#1861 acceptance).
+ */
+export function firedContentSignals(signals: ContentSignals): string[] {
+  return SIGNAL_REPORT_ORDER.filter((name) => signals[name] === true);
+}
+
 /** Render the signals as prompt lines the model can reason over. */
 export function describeContentSignals(signals: ContentSignals): string {
   const recipient = signals.addressedToUser
@@ -329,7 +562,7 @@ export function describeContentSignals(signals: ContentSignals): string {
       : "the user is not named in To or Cc";
   return [
     `  - shape: ${signals.shape}`,
-    `  - asks a question in the opening text: ${signals.directQuestion}`,
+    `  - puts a second-person question to the reader: ${signals.directQuestion}`,
     `  - requests an action from the reader: ${signals.actionRequest}`,
     `  - requests an approval or signature: ${signals.approvalRequest}`,
     `  - names a deadline: ${signals.deadline}`,
