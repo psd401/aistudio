@@ -23,7 +23,7 @@ import {
   PutMetricDataCommand,
   type MetricDatum,
 } from "@aws-sdk/client-cloudwatch";
-import { getSql, closeSql, listActiveRules, upsertGroup, replaceMembers, markSynced, markError, deactivateGroupsNotIn, reconcileManagedRoles, type RoleReconcileResult } from "./db";
+import { getSql, closeSql, listActiveRules, upsertGroup, replaceMembers, markSynced, markError, deactivateGroupsNotIn, provisionGroupMemberUsers, reconcileManagedRoles, type RoleReconcileResult } from "./db";
 import { resolveConfig, parseServiceAccountKey } from "./config";
 import { createDirectoryClient } from "./directory-client";
 import { runGroupSync, type GroupSyncPorts, type GroupSyncResult } from "./sync";
@@ -95,6 +95,20 @@ export async function handler(event: GroupSyncEvent = {}): Promise<HandlerResult
     const result = await runGroupSync(ports);
     log.info("Group sync completed", { ...result });
 
+    // Pre-provision users rows for district members who never signed in, so a
+    // per-user Atrium grant can name them (#1860). Before role reconciliation,
+    // so the new rows pick up group-mapped roles in this same run. Best-effort
+    // for the same reason as the role pass below: membership is committed.
+    let usersProvisioned: number | null = null;
+    try {
+      ({ provisioned: usersProvisioned } = await provisionGroupMemberUsers(sql));
+      log.info("Group-member user provisioning completed", { usersProvisioned });
+    } catch (error) {
+      log.error("Group-member user provisioning failed (membership sync still succeeded)", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
     // Drive managed roles from the freshly-synced memberships (Phase 1 / #1204).
     // Best-effort: membership is already committed and the login-time reconciler
     // is the backstop, so a role-reconcile failure must NOT fail the whole run
@@ -114,12 +128,12 @@ export async function handler(event: GroupSyncEvent = {}): Promise<HandlerResult
       });
     }
 
-    await emitMetrics(result, roleReconcile);
+    await emitMetrics(result, roleReconcile, usersProvisioned);
     return { status: "ok", result };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     log.error("Group sync failed", { error: message });
-    await emitMetrics(null, null).catch(() => {});
+    await emitMetrics(null, null, null).catch(() => {});
     throw error;
   } finally {
     await closeSql().catch(() => {});
@@ -141,7 +155,8 @@ async function loadSecret(secretArn: string): Promise<string> {
  */
 async function emitMetrics(
   result: GroupSyncResult | null,
-  roleReconcile: RoleReconcileResult | null
+  roleReconcile: RoleReconcileResult | null,
+  usersProvisioned: number | null
 ): Promise<void> {
   const dims = [{ Name: "Environment", Value: ENVIRONMENT }];
   const metrics: MetricDatum[] = result
@@ -171,6 +186,10 @@ async function emitMetrics(
       { MetricName: "RolesRevoked", Value: roleReconcile.removed, Unit: "Count", Dimensions: dims },
       { MetricName: "RoleUsersChanged", Value: roleReconcile.usersChanged, Unit: "Count", Dimensions: dims }
     );
+  }
+
+  if (usersProvisioned !== null) {
+    metrics.push({ MetricName: "UsersProvisioned", Value: usersProvisioned, Unit: "Count", Dimensions: dims });
   }
 
   try {

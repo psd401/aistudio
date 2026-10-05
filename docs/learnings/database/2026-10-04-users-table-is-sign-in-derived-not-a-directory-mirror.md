@@ -1,5 +1,5 @@
 ---
-title: users is populated only by sign-in-adjacent paths — per-user grants fail silently for staff who never authenticated
+title: users was sign-in-derived — group sync now pre-provisions staff so per-user grants can name people who never signed in
 category: database
 tags:
   - atrium
@@ -35,16 +35,30 @@ row at all, regardless of how long they've been a district employee.
 ## Solution
 
 Any feature keyed on `users.id` (per-user visibility grants, per-user
-assignment) is unexpressible for such people. The people-lookup endpoint
-returns "not found" rather than fabricating a row — do not auto-provision a
-`users` row from a lookup, since JIT provisioning elsewhere assumes it happens
-at the moment of actual sign-in (and carries auth-specific fields like
-`cognito_sub`).
+assignment) was unexpressible for such people. The fix (#1860, PR #1862) adds a
+fifth insert path in the hourly group-sync Lambda: `provisionGroupMemberUsers`
+creates a stub row (lowercased email, `cognito_sub` NULL, no names) for each
+district-domain, non-numeric member of an active synced group, plus `staff`
+(source `manual`). First sign-in links the stub by `lower(email)`
+(`lib/auth/resolve-user.ts`), keeping the id and every grant made to it.
+
+Non-obvious constraints:
+- **Check the source is actually running.** The first attempt hung this on the
+  OneRoster sync, which exists in code but has never been enabled anywhere — it
+  would have created zero rows. Group sync is the live directory feed.
+- **The role must ship with the stub.** The sign-in link path
+  (`linkExistingUserByEmail`) never calls `assignDefaultRole`; only the
+  brand-new-row path does, so a roleless stub would sign in with no role.
+- **No names.** Cloud Identity memberships carry no display names (and the
+  service account has group scopes only), so stubs match people-search by
+  email only until first sign-in.
 
 ## Prevention
 
 - Before building anything that resolves a person to `users.id`, check which
-  of the four insert paths would have created their row — "has an email in
-  the district directory" does not imply "has a `users` row."
-- Surface this constraint in error messages/UI: "grant pending — user has not
-  yet signed in" is more honest than a silent no-op or a generic not-found.
+  insert path would have created their row; coverage of pre-provisioning is
+  "member of a synced group", not "in the district directory".
+- Before building on a sync or feed, confirm it is enabled and populated in
+  production, not just present in the codebase.
+- Admin "pending" counts (`last_sign_in_at IS NULL`) now include stubs, so they
+  no longer mean "invited but not yet signed in".

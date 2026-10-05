@@ -1246,9 +1246,10 @@ test('find-people GETs /people with the query and relays the id to use', async (
 });
 
 test('find-people explains an empty result instead of implying the person is unknown', async () => {
-  // A staff member who has never signed in to AI Studio (and never connected the
-  // Chat agent) has no users row at all, so a `user` grant cannot name them. The
-  // note must say that, or the agent silently drops them from the audience.
+  // A never-signed-in staff row has no name, so an empty name search is not
+  // conclusive — the note must send the agent to the email, and say a `user`
+  // grant cannot name someone the email also misses, or the agent silently
+  // drops them from the audience.
   restResponder = () => ({
     approvalRequired: false,
     status: 200,
@@ -1264,7 +1265,7 @@ test('find-people explains an empty result instead of implying the person is unk
   await run('find-people', '--query', 'nobody');
 
   expect(emitted[0].people).toEqual([]);
-  expect(emitted[0].note).toContain('never signed in');
+  expect(emitted[0].note).toContain('full email only');
 });
 
 test('find-people requires --query (exit 1, no request sent)', async () => {
@@ -1315,5 +1316,5 @@ test('find-people distinguishes a too-short query from a genuine no-match', asyn
   await run('find-people', '--query', 'm');
 
   expect(emitted[0].note).toContain('minimum');
-  expect(emitted[0].note).not.toContain('never signed in');
+  expect(emitted[0].note).not.toContain('full email only');
 });

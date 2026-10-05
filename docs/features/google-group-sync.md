@@ -59,6 +59,25 @@ the reconcilers and the resource gate lowercases **both** sides. Because email i
 authz join key it must be single-valued: migration 112 (#1207) adds a unique index
 on `lower(users.email)` — see [Duplicate-email remediation](#duplicate-email-remediation).
 
+### Staff pre-provisioning (#1860)
+
+After membership sync and before role reconciliation, each run calls
+`provisionGroupMemberUsers` (`infra/lambdas/group-sync/db.ts`). For every member of an
+**active** synced group whose email is on the district domain exactly
+(`PROVISION_EMAIL_DOMAIN`, default `psd401.net` — so `@edtools.psd401.net` is out),
+whose local part is not all digits (student ids), and who has no `users` row, it
+inserts a stub row (lowercased email, `cognito_sub` NULL, names NULL — Cloud Identity
+memberships carry none) plus `staff` with source `'manual'`. That is the same default
+role sign-in gives a new staff user. The role is needed because the first sign-in
+*links* the stub by `lower(email)` (`lib/auth/resolve-user.ts`), keeping its id, and
+that link path does not assign a default role. Group-mapped roles then arrive from
+the role pass in the same run. Existing rows are never modified and stubs are never
+deleted. The step is best-effort: a failure is logged and does not fail the run.
+
+The purpose is per-user Atrium grants: a `user` grant needs a `users.id`, so before
+this step a colleague who had never signed in could not be named. Coverage is
+whoever is in a synced group, so a staff member in no selected group still has no id.
+
 ### Fail-safety invariants (do not regress)
 
 - A per-group member-fetch failure keeps that group's **last-known-good** membership
@@ -103,7 +122,8 @@ to a not-yet-synced group simply grants nothing until the group syncs).
 The Lambda emits CloudWatch metrics in namespace **`AIStudio/GroupSync`** (dimension
 `Environment`): `GroupsSelected`, `GroupsSynced`, `GroupsFailed`,
 `GroupsDeactivated`, `MembersTotal`, `RolesGranted`, `RolesRevoked`,
-`RoleUsersChanged`, `SyncRunFailed`, and `SyncRunSucceeded`.
+`RoleUsersChanged`, `UsersProvisioned` (stub rows created by the step above),
+`SyncRunFailed`, and `SyncRunSucceeded`.
 
 Two alarms are defined in `infra/lib/processing-stack.ts`. Both publish to the
 shared `aistudio-<environment>-monitoring-alarms` topic owned by MonitoringStack;
