@@ -193,7 +193,7 @@ const SECOND_PERSON_RE = /\b(you|your|yours|yourself)\b/i;
 
 /**
  * `.`, `!` and `?` each close the clause before them — but see
- * `isSentenceBoundary` for the two cases where a character in this set is
+ * `isSentenceBoundary` for the one case where a character in this set is
  * not actually a sentence boundary.
  *
  * A single newline deliberately is NOT in this set. In a hard-wrapped
