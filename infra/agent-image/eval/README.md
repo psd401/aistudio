@@ -243,7 +243,9 @@ status 2.
 ## Nightly and on-demand runs
 
 `.github/workflows/agent-eval-nightly.yml` runs all 55 regression and capability
-tasks at three trials nightly on an ARM64 runner. It resolves the immutable
+tasks at three trials on an ARM64 runner, on manual dispatch only (the nightly
+schedule was removed 2026-10-07; it never passed because the
+`AGENT_EVAL_AWS_ROLE_ARN` secret was never provisioned). It resolves the immutable
 image currently exposed by the dev AgentCore runtime, verifies its AI Studio
 source labels, uploads only the safe summary, removes both JSONL transcripts
 even on failure, and fails when any task misses `pass^3`. It has no
@@ -423,8 +425,8 @@ when the current baseline should reliably pass it 3/3.
 
 ### Weekly live-dev fixture-drift run
 
-`.github/workflows/agent-eval-l2.yml` runs `l2-live.yaml` every Tuesday and on
-manual dispatch. It requires the immutable image digest exposed by the dev
+`.github/workflows/agent-eval-l2.yml` runs `l2-live.yaml` on manual dispatch
+(the weekly Tuesday schedule was removed 2026-10-07 for the same reason). It requires the immutable image digest exposed by the dev
 AgentCore runtime (or accepts an explicit ECR digest for manual runs), executes
 three trials per task on an ARM64 runner, and fails unless every trial passes.
 Mutable tags are rejected because AgentCore does not expose which digest a tag

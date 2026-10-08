@@ -1,9 +1,8 @@
 name: Agent Eval Nightly Baseline
 
 on:
-  schedule:
-    # Nightly, outside the main CI traffic window.
-    - cron: "43 13 * * *"
+  # Schedule removed 2026-10-07: it never passed (AGENT_EVAL_AWS_ROLE_ARN was
+  # never provisioned). Manual dispatch only until the eval design is revisited.
   workflow_dispatch:
 
 concurrency:
