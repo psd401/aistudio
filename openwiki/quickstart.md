@@ -132,3 +132,4 @@ The following areas have substantial existing documentation and are deferred fro
 - **K-12 Content Safety**: See `/docs/features/k12-content-safety.md`
 - **Individual Skill Docs**: See `/infra/agent-image/skills/*/SKILL.md`
 - **Database Migrations**: See `/docs/database/drizzle-migration-guide.md`
+- **Agent Eval Suite**: Eval harness, graders, and suites under `/infra/agent-image/eval/` (README at `/infra/agent-image/eval/README.md`); only its CI trigger state is recorded in [infrastructure/overview.md](infrastructure/overview.md). Deferred because the suite has its own README and was not part of the surveyed source changes.
