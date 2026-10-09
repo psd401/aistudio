@@ -24,6 +24,9 @@ openwiki:
     - infra/database/schema/186-agent-sonnet-5-5-pricing.sql
     - infra/lambdas/agent-cron/index.ts
     - .github/workflows/security-scan.yml
+    - .github/workflows/sdk-version-guard.yml
+    - .github/workflows/claude-code-review.yml
+    - .gitleaksignore
   test_paths:
     - infra/test/ecs-scheduled-scaling.test.ts
     - infra/test/frontend-waf-body-signatures.test.ts
@@ -821,6 +824,14 @@ AI Studio uses GitHub Actions for continuous integration and deployment. Non-tri
 
 The Claude review caller passes only the one secret the reusable workflow reads, `BEDROCK_API_KEY`, by name instead of `secrets: inherit`, so the review job does not receive every other org and repo secret. The OpenWiki caller still uses `secrets: inherit`. Keep new callers on explicit secret names unless the reusable workflow needs more than one secret.
 
+### Workflow Hardening Rules
+
+Recent workflow changes establish conventions to follow when editing or adding workflows:
+
+- **Pin third-party actions to commit SHAs.** `ci.yml`, `claude.yml`, `agent-eval-l2.yml`, and `agent-eval-nightly.yml` pin actions such as `aws-actions/configure-aws-credentials`, `aws-actions/amazon-ecr-login`, `docker/setup-qemu-action`, and `anthropics/claude-code-action` to a full SHA with the release as a trailing comment. Not every action is pinned yet (for example `actions/github-script@v9` is still a tag). The org security-scan call is deliberately left on `@main` and marked with a zizmor ignore in `security-scan.yml`.
+- **Pass expressions to scripts through `env:`, not inline interpolation.** `sdk-version-guard.yml` previously interpolated `${{ steps.version-check.outputs.* }}` and `${{ github.base_ref }}` directly into `run:` and `script:` bodies, which is a template-injection risk. The steps now declare those values in a step-level `env:` block and read them as shell variables or `process.env`. Use the same pattern for any new step that handles branch names, PR fields, or step outputs.
+- **Secret scanning uses a reviewed baseline.** The root `.gitleaksignore` lists fingerprints of reviewed historical findings (documentation placeholders, test fixtures, and one SQL column name). Its header states that anything not listed still fails `security-scan.yml`. Do not add fingerprints for new code to make a scan pass; fix the finding or review it explicitly.
+
 ### Caller Pattern
 
 Caller workflows are minimal—granting permissions and passing configuration:
@@ -872,6 +883,7 @@ Benefits:
 | `/infra/policies/` | Cedar policies |
 | `/infra/agent-image/` | Agent container |
 | `/.github/workflows/` | CI/CD workflows |
+| `/.gitleaksignore` | Reviewed secret-scan baseline (see [Workflow Hardening Rules](#workflow-hardening-rules)) |
 
 ---
 
