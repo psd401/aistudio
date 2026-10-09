@@ -17,4 +17,6 @@ jobs:
     uses: PSD401/.github/.github/workflows/reusable-openwiki.yml@main
     with:
       base_branch: dev
-    secrets: inherit
+    secrets:
+      BEDROCK_API_KEY: ${{ secrets.BEDROCK_API_KEY }}
+      PSD_AUTOMATION_APP_PRIVATE_KEY: ${{ secrets.PSD_AUTOMATION_APP_PRIVATE_KEY }}
