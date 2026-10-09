@@ -26,6 +26,7 @@ openwiki:
     - .github/workflows/security-scan.yml
     - .github/workflows/sdk-version-guard.yml
     - .github/workflows/claude-code-review.yml
+    - .github/workflows/openwiki-update.yml
     - .gitleaksignore
   test_paths:
     - infra/test/ecs-scheduled-scaling.test.ts
@@ -822,7 +823,7 @@ AI Studio uses GitHub Actions for continuous integration and deployment. Non-tri
 | `claude-code-review.yml` | `PSD401/.github/.github/workflows/reusable-claude-review.yml@main` | AI-assisted PR review |
 | `openwiki-update.yml` | `PSD401/.github/.github/workflows/reusable-openwiki.yml@main` | Automated documentation regeneration |
 
-The Claude review caller passes only the one secret the reusable workflow reads, `BEDROCK_API_KEY`, by name instead of `secrets: inherit`, so the review job does not receive every other org and repo secret. The OpenWiki caller still uses `secrets: inherit`. Keep new callers on explicit secret names unless the reusable workflow needs more than one secret.
+The Claude review caller passes only the one secret the reusable workflow reads, `BEDROCK_API_KEY`, by name instead of `secrets: inherit`, so the review job does not receive every other org and repo secret. The OpenWiki caller follows the same rule with two named secrets: `BEDROCK_API_KEY` for the model and `PSD_AUTOMATION_APP_PRIVATE_KEY` for the psd-automation GitHub App that opens and merges the docs PR. Keep new callers on explicit secret names; pass only the secrets the reusable workflow actually reads.
 
 ### Workflow Hardening Rules
 
@@ -845,7 +846,9 @@ jobs:
     uses: PSD401/.github/.github/workflows/reusable-openwiki.yml@main
     with:
       base_branch: dev
-    secrets: inherit
+    secrets:
+      BEDROCK_API_KEY: ${{ secrets.BEDROCK_API_KEY }}
+      PSD_AUTOMATION_APP_PRIVATE_KEY: ${{ secrets.PSD_AUTOMATION_APP_PRIVATE_KEY }}
 ```
 
 Benefits:
@@ -862,7 +865,7 @@ Benefits:
 | `claude.yml` | Issue and PR comments, issue opened/assigned, PR review submitted | Interactive Claude assistant triggered from GitHub events |
 | `claude-dispatch.yml` | `repository_dispatch` (`claude-dispatch`) | Claude run started by an external dispatch event |
 | `sdk-version-guard.yml` | PRs touching `package.json`, `bun.lock`, or `lib/streaming/**`; weekly schedule; manual | SDK version guard for streaming changes |
-| `openwiki-update.yml` | Push to dev (excluding openwiki/**), weekly schedule | Regenerate OpenWiki docs |
+| `openwiki-update.yml` | Push to dev (excluding openwiki/**), weekly schedule, manual | Regenerate OpenWiki docs; passes only `BEDROCK_API_KEY` and `PSD_AUTOMATION_APP_PRIVATE_KEY` by name |
 | `agent-eval-nightly.yml` | Manual dispatch only (nightly schedule removed 2026-10-07) | Agent skill evaluation baseline (55 regression and capability tasks) |
 | `agent-eval-l2.yml` | Manual dispatch only (weekly schedule removed 2026-10-07) | Live-dev fixture-drift eval run |
 | `agent-eval-upstream-inventory.yml` | PRs and pushes to main/dev touching the agent image, eval coverage, or upstream inventory files; weekly schedule; manual | Upstream skill inventory and eval coverage check |
@@ -892,3 +895,4 @@ Benefits:
 - **[architecture/overview.md](../architecture/overview.md)** — Overall architecture
 - **[data-models/overview.md](../data-models/overview.md)** — Database schema
 - **[agent-platform/overview.md](../agent-platform/overview.md)** — Agent-specific infrastructure
+w.md](../agent-platform/overview.md)** — Agent-specific infrastructure
