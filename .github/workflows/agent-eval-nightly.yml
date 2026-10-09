@@ -55,7 +55,7 @@ jobs:
 
       - name: Configure AWS credentials
         id: aws-credentials
-        uses: aws-actions/configure-aws-credentials@v5
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
         with:
           role-to-assume: ${{ secrets.AGENT_EVAL_AWS_ROLE_ARN }}
           role-session-name: agent-eval-nightly-${{ github.run_id }}
@@ -84,7 +84,7 @@ jobs:
           echo "runtime_id=${runtime_id}" >> "${GITHUB_OUTPUT}"
 
       - name: Log in to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
 
       - name: Read candidate provenance and model pricing
         id: candidate

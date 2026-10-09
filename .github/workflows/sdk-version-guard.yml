@@ -37,10 +37,13 @@ jobs:
 
       - name: Check for AI SDK version changes
         id: version-check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_REF: ${{ github.base_ref }}
         run: |
           # Get current branch (for PRs)
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE_REF="${{ github.base_ref }}"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            BASE_REF="$PR_BASE_REF"
           else
             BASE_REF="main"
           fi
@@ -104,12 +107,14 @@ jobs:
           github.event_name == 'pull_request' &&
           steps.version-check.outputs.major_change == 'true'
         uses: actions/github-script@v9
+        env:
+          OLD_VERSION: ${{ steps.version-check.outputs.old_version }}
+          NEW_VERSION: ${{ steps.version-check.outputs.new_version }}
+          OLD_MAJOR: ${{ steps.version-check.outputs.old_major }}
+          NEW_MAJOR: ${{ steps.version-check.outputs.new_major }}
         with:
           script: |
-            const oldVersion = '${{ steps.version-check.outputs.old_version }}';
-            const newVersion = '${{ steps.version-check.outputs.new_version }}';
-            const oldMajor = '${{ steps.version-check.outputs.old_major }}';
-            const newMajor = '${{ steps.version-check.outputs.new_major }}';
+            const { OLD_VERSION: oldVersion, NEW_VERSION: newVersion, OLD_MAJOR: oldMajor, NEW_MAJOR: newMajor } = process.env;
 
             const body = `## ⚠️ Major AI SDK Version Change Detected
 
@@ -151,10 +156,12 @@ jobs:
           steps.version-check.outputs.version_changed == 'true' &&
           steps.version-check.outputs.major_change == 'false'
         uses: actions/github-script@v9
+        env:
+          OLD_VERSION: ${{ steps.version-check.outputs.old_version }}
+          NEW_VERSION: ${{ steps.version-check.outputs.new_version }}
         with:
           script: |
-            const oldVersion = '${{ steps.version-check.outputs.old_version }}';
-            const newVersion = '${{ steps.version-check.outputs.new_version }}';
+            const { OLD_VERSION: oldVersion, NEW_VERSION: newVersion } = process.env;
 
             const body = `## ℹ️ AI SDK Version Updated
 
@@ -219,18 +226,23 @@ jobs:
 
       - name: Summary
         if: always()
+        env:
+          VERSION_CHANGED: ${{ steps.version-check.outputs.version_changed }}
+          OLD_VERSION: ${{ steps.version-check.outputs.old_version }}
+          NEW_VERSION: ${{ steps.version-check.outputs.new_version }}
+          MAJOR_CHANGE: ${{ steps.version-check.outputs.major_change }}
         run: |
           echo "### SDK Version Check Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Check | Result |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Version Changed | ${{ steps.version-check.outputs.version_changed }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Old Version | ${{ steps.version-check.outputs.old_version }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| New Version | ${{ steps.version-check.outputs.new_version }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Major Change | ${{ steps.version-check.outputs.major_change }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version Changed | $VERSION_CHANGED |" >> $GITHUB_STEP_SUMMARY
+          echo "| Old Version | $OLD_VERSION |" >> $GITHUB_STEP_SUMMARY
+          echo "| New Version | $NEW_VERSION |" >> $GITHUB_STEP_SUMMARY
+          echo "| Major Change | $MAJOR_CHANGE |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          if [ "${{ steps.version-check.outputs.major_change }}" = "true" ]; then
+          if [ "$MAJOR_CHANGE" = "true" ]; then
             echo "⚠️ **Action Required:** This PR changes the major version of the AI SDK." >> $GITHUB_STEP_SUMMARY
             echo "Please review the [upgrade checklist](/docs/operations/ai-sdk-upgrade-checklist.md)." >> $GITHUB_STEP_SUMMARY
           fi
