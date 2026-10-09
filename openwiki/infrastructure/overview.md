@@ -23,6 +23,7 @@ openwiki:
     - infra/lambdas/agent-cron/chat-text-budget.ts
     - infra/database/schema/186-agent-sonnet-5-5-pricing.sql
     - infra/lambdas/agent-cron/index.ts
+    - .github/workflows/security-scan.yml
   test_paths:
     - infra/test/ecs-scheduled-scaling.test.ts
     - infra/test/frontend-waf-body-signatures.test.ts
@@ -845,10 +846,15 @@ Benefits:
 |----------|---------|---------|
 | `ci.yml` | Push to dev, PR | Lint, typecheck, tests |
 | `claude-code-review.yml` | PR opened/ready | AI-assisted code review |
+| `claude.yml` | Issue and PR comments, issue opened/assigned, PR review submitted | Interactive Claude assistant triggered from GitHub events |
+| `claude-dispatch.yml` | `repository_dispatch` (`claude-dispatch`) | Claude run started by an external dispatch event |
+| `sdk-version-guard.yml` | PRs touching `package.json`, `bun.lock`, or `lib/streaming/**`; weekly schedule; manual | SDK version guard for streaming changes |
 | `openwiki-update.yml` | Push to dev (excluding openwiki/**), weekly schedule | Regenerate OpenWiki docs |
 | `agent-eval-nightly.yml` | Manual dispatch only (nightly schedule removed 2026-10-07) | Agent skill evaluation baseline (55 regression and capability tasks) |
 | `agent-eval-l2.yml` | Manual dispatch only (weekly schedule removed 2026-10-07) | Live-dev fixture-drift eval run |
-| `codeql.yml` | Weekly schedule | Security analysis |
+| `agent-eval-upstream-inventory.yml` | PRs and pushes to main/dev touching the agent image, eval coverage, or upstream inventory files; weekly schedule; manual | Upstream skill inventory and eval coverage check |
+| `security-scan.yml` | PRs, push to dev, weekly schedule (Mondays 09:00 UTC), manual | Calls the org reusable security scan |
+| `codeql.yml` | Push and PR to main/dev, weekly schedule | Security analysis |
 
 ---
 
@@ -862,6 +868,17 @@ Benefits:
 | `/infra/database/` | Migrations |
 | `/infra/lambdas/` | Lambda function code |
 | `/infra/policies/` | Cedar policies |
+| `/infra/agent-image/` | Agent container |
+| `/.github/workflows/` | CI/CD workflows |
+
+---
+
+## Related Concepts
+
+- **[architecture/overview.md](../architecture/overview.md)** — Overall architecture
+- **[data-models/overview.md](../data-models/overview.md)** — Database schema
+- **[agent-platform/overview.md](../agent-platform/overview.md)** — Agent-specific infrastructure
+nfra/policies/` | Cedar policies |
 | `/infra/agent-image/` | Agent container |
 | `/.github/workflows/` | CI/CD workflows |
 
