@@ -14,3 +14,12 @@ jobs:
     uses: PSD401/.github/.github/workflows/reusable-claude-review.yml@main
     secrets:
       BEDROCK_API_KEY: ${{ secrets.BEDROCK_API_KEY }}
+  # Dependabot PRs aren't reviewed, but production repos require a
+  # `claude-review / claude-review` check, and the skipped job above reports
+  # only `claude-review`. This job has the same name and calls a no-op
+  # reusable, so the required context passes (PSD401/.github#27).
+  claude-review-dependabot:
+    name: claude-review
+    permissions: {}
+    if: github.actor == 'dependabot[bot]'
+    uses: PSD401/.github/.github/workflows/reusable-claude-review-skip.yml@main # zizmor: ignore[unpinned-uses]
