@@ -52,6 +52,9 @@ b5d0143942d98e7e3f923e8b562187fc610ab101:lib/voice/__tests__/ws-handler.test.ts:
 c3207ea0ab6fa5a2e819297ec8bf2a32a6669484:tests/lib/logger.test.ts:generic-api-key:36
 c3207ea0ab6fa5a2e819297ec8bf2a32a6669484:tests/lib/logger.test.ts:generic-api-key:37
 d6b0cd76826cc9d761072ed15009322f7b876621:tests/integration/docker-image-cache-test.sh:generic-api-key:52
+dba4e97b67ffaaefa377aeeb928b050e45279a84:tests/unit/lib/agent-workspace/retired-exec-approvals.test.ts:generic-api-key:15
+dba4e97b67ffaaefa377aeeb928b050e45279a84:tests/unit/lib/agent-workspace/storage-broker-checkpoint.test.ts:generic-api-key:306
+dba4e97b67ffaaefa377aeeb928b050e45279a84:tests/unit/lib/agent-workspace/storage-broker-list.test.ts:generic-api-key:41
 e58d1891e3e22b70a7d247074bd6a81c2263c087:docs/API/v1/context-graph.md:curl-auth-header:599
 ee97a88cd03e5eda286fac46d9f29305f194d148:docs/deployment/ses-email-configuration.md:generic-api-key:28
 ee97a88cd03e5eda286fac46d9f29305f194d148:docs/deployment/ses-email-configuration.md:generic-api-key:61
