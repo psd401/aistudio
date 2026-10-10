@@ -1,0 +1,26 @@
+name: PSD CI
+on:
+  pull_request:
+  push:
+    branches: [dev]
+permissions:
+  contents: read
+jobs:
+  psd-ci:
+    # @main is deliberate: org-owned reusable; central bumps must propagate
+    # (psd-dev-standards standards/06). zizmor: ignore[unpinned-uses]
+    uses: PSD401/.github/.github/workflows/reusable-psd-ci.yml@main # zizmor: ignore[unpinned-uses]
+    with:
+      # Mirrors ci.yml "Test, Lint, and Type Check": the agent-router and
+      # agent-cron Lambdas resolve AWS SDK deps from their own package.json;
+      # a root-only install fails typecheck (see CLAUDE.md Quick Reference).
+      install-command: >-
+        bun install --frozen-lockfile &&
+        (cd infra/lambdas/agent-router && bun install --frozen-lockfile) &&
+        (cd infra/lambdas/agent-cron && bun install --frozen-lockfile)
+      # `next build` needs AUTH_* env; ci.yml covers it in "Auth Edge
+      # Production Artifact". This gate runs without secrets or env.
+      build-command: ""
+      # Jest unit suites as ci.yml runs them; DB-backed suites stay in
+      # ci.yml's Postgres job.
+      test-command: bun run test:ci
