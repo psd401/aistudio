@@ -57,3 +57,9 @@ ee97a88cd03e5eda286fac46d9f29305f194d148:docs/deployment/ses-email-configuration
 ee97a88cd03e5eda286fac46d9f29305f194d148:docs/deployment/ses-email-configuration.md:generic-api-key:61
 f29829b89e7e3655aaba10a788bf3ec3dfeb9e0b:app/api/nexus/voice-info/__tests__/route.test.ts:generic-api-key:130
 f29829b89e7e3655aaba10a788bf3ec3dfeb9e0b:app/api/nexus/voice/availability/__tests__/route.test.ts:generic-api-key:140
+
+# agent-workspace storage-broker test fixtures: a placeholder token ("AbCd...") on a fake socket
+# path, not a credential. Reviewed 2026-10-10 (Hagel).
+dba4e97b67ffaaefa377aeeb928b050e45279a84:tests/unit/lib/agent-workspace/storage-broker-list.test.ts:generic-api-key:41
+dba4e97b67ffaaefa377aeeb928b050e45279a84:tests/unit/lib/agent-workspace/storage-broker-checkpoint.test.ts:generic-api-key:306
+dba4e97b67ffaaefa377aeeb928b050e45279a84:tests/unit/lib/agent-workspace/retired-exec-approvals.test.ts:generic-api-key:15
