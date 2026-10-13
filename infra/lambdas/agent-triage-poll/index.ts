@@ -39,6 +39,7 @@ import {
   applyContentGuards,
   classifyWithLLM,
   finalizeLLMLabel,
+  learnedNewsShapes,
   BODY_EXCERPT_MAX,
 } from "./llm";
 import {
@@ -455,6 +456,32 @@ function signalsFor(
 }
 
 /**
+ * Full-body excerpt for the content stage and the prompt. A fetch failure
+ * is not fatal — the caller falls back to the Gmail snippet.
+ */
+async function fetchBodyExcerpt(
+  row: TriageRow,
+  accessToken: string,
+  messageId: string,
+): Promise<string | undefined> {
+  try {
+    const full = await getMessageFullBody(
+      accessToken,
+      messageId,
+      BODY_EXCERPT_MAX,
+    );
+    return full?.trim() ? full : undefined;
+  } catch (err) {
+    log("WARN", "body_fetch_failed", {
+      user: row.userEmail,
+      messageId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return undefined;
+  }
+}
+
+/**
  * Three stages, cheapest first:
  *
  *   1. The user's own rules. An explicit instruction always wins.
@@ -485,24 +512,13 @@ async function classifyMessage(
 
   const internalDomain =
     row.internalDomain ?? row.userEmail.split("@")[1] ?? "";
-  let bodyExcerpt: string | undefined;
-  try {
-    const full = await getMessageFullBody(
-      accessToken,
-      messageId,
-      BODY_EXCERPT_MAX,
-    );
-    if (full?.trim()) bodyExcerpt = full;
-  } catch (err) {
-    log("WARN", "body_fetch_failed", {
-      user: row.userEmail,
-      messageId,
-      err: err instanceof Error ? err.message : String(err),
-    });
-  }
+  const bodyExcerpt = await fetchBodyExcerpt(row, accessToken, messageId);
 
   const signals = signalsFor(row, ctx, bodyExcerpt ?? ctx.snippet);
-  const contentDecision = classifyByContent(signals);
+  const contentDecision = classifyByContent(signals, {
+    hasStatedPreferences: Boolean(row.preferences?.text?.trim()),
+    learnedNewsShapes: learnedNewsShapes(row.contentPreferences ?? []),
+  });
   if (contentDecision) {
     return {
       label: contentDecision.label,

@@ -37,6 +37,7 @@ import type {
 import {
   describeContentSignals,
   hasAsk,
+  type ContentShape,
   type ContentSignals,
 } from "./content-features";
 
@@ -190,8 +191,8 @@ function buildSystemPrompt(
   const lines = [
     `You classify incoming emails for a Peninsula School District (PSD) employee into one of three Gmail labels:`,
     `  - important: the message asks something of this user, or they are in a live exchange about it.`,
-    `  - later:     nothing is asked of this user right now. FYI, status, discussion they are copied on.`,
-    `  - news:      pure broadcast information. Newsletters, marketing, vendor blasts.`,
+    `  - later:     real mail that matters to this user but asks nothing of them right now.`,
+    `  - news:      broadcast publications. Newsletters, digests, association and vendor mailings.`,
     ``,
     `Reply with EXACTLY one JSON line, no preamble or markdown, in this shape:`,
     `  {"label":"important|later|news","confidence":0.0-1.0,"reason":"<8-word phrase>"}`,
@@ -211,12 +212,25 @@ function buildSystemPrompt(
     `  4. It asks this user to do something by a stated deadline.`,
     ``,
     `What makes a message "later":`,
-    `  - FYI, status reports, digests, recaps, "no action required".`,
-    `  - This user is only on Cc, or is one of many recipients, and nothing is asked of them.`,
-    `  - An automated notice that reports a fact and asks for nothing.`,
+    `  - A person wrote it to this user or their team, and nothing is asked right now:`,
+    `    an FYI forward, a status report, a thread they are copied on.`,
+    `  - A one-off automated notice about this user's own account or request.`,
     ``,
-    `"news" is for broadcast publications only. Mail written by a person is never`,
-    `"news" — at worst it is "later".`,
+    `What makes a message "news" (any one of these):`,
+    `  - It is a newsletter, digest, daily/weekly highlights, bulletin or roundup.`,
+    `  - It is an association, conference or membership mailing.`,
+    `  - It is vendor marketing, a product announcement, a webinar pitch or outreach`,
+    `    from a company this user has no open request with.`,
+    `  - It carries List-Unsubscribe, a bulk/list Precedence, or any other sign it went`,
+    `    to a mailing list rather than to this user personally.`,
+    ``,
+    `"Nothing is asked of me" does NOT make a message "later". Decide Later vs News by`,
+    `WHO IT WAS WRITTEN FOR: a publication sent to a list is "news" however interesting`,
+    `it is, and "later" is for mail written to this user that they still want to read.`,
+    `When you cannot tell which of the two a no-ask message is, choose "news".`,
+    ``,
+    `Mail written by a person TO THIS USER is never "news" — at worst it is "later".`,
+    `A person's name on a newsletter or a vendor blast does not make it personal mail.`,
     ``,
     `Confidence calibration:`,
     `  0.9+  the content signals are unambiguous`,
@@ -421,6 +435,41 @@ export const CONTENT_BIAS_MIN_WEIGHT = 1.5;
 /** Minimum number of corrections behind a content-shape leaning. */
 export const CONTENT_BIAS_MIN_COUNT = 2;
 
+/**
+ * Shapes whose learned leaning is News and clears both bars. Passed to
+ * `classifyByContent`, which decides machine notices before any guard
+ * here runs, so a learned News leaning reaches that stage too.
+ */
+export function learnedNewsShapes(
+  contentPreferences: ContentPreference[] = [],
+): ContentShape[] {
+  return contentPreferences
+    .filter(
+      (pref) =>
+        pref.lean === "news" &&
+        (pref.weight ?? 0) >= CONTENT_BIAS_MIN_WEIGHT &&
+        (pref.count ?? 0) >= CONTENT_BIAS_MIN_COUNT,
+    )
+    .map((pref) => pref.shape);
+}
+
+/**
+ * The learned leaning for this message's shape, if it clears both bars.
+ * Returns undefined when the user has not corrected this shape enough for
+ * the leaning to be worth acting on.
+ */
+function strongLeanForShape(
+  signals: ContentSignals,
+  contentPreferences: ContentPreference[],
+): Label | undefined {
+  return contentPreferences.find(
+    (pref) =>
+      pref.shape === signals.shape &&
+      (pref.weight ?? 0) >= CONTENT_BIAS_MIN_WEIGHT &&
+      (pref.count ?? 0) >= CONTENT_BIAS_MIN_COUNT,
+  )?.lean;
+}
+
 export interface GuardedDecision {
   label: Label;
   confidence: number;
@@ -430,16 +479,27 @@ export interface GuardedDecision {
 }
 
 /**
- * Deterministic guards applied to an LLM label (#1855). Two of them:
+ * Deterministic guards applied to an LLM label (#1855, #1866). Four, in
+ * the order `GUARDS` runs them:
  *
  *  1. **Corrections must bite.** Before this, twenty corrections of
  *     "you called this important, I archived it" changed nothing but a
  *     soft prompt hint, and the classifier kept over-promoting. When the
- *     user has repeatedly archived messages of this SHAPE and the current
- *     message asks nothing of them, `important` is demoted to `later`.
- *     Keyed on shape, not sender, so one correction generalises.
+ *     user has repeatedly filed messages of this SHAPE lower and the
+ *     current message asks nothing of them, `important` is demoted to
+ *     whatever they file it as. Keyed on shape, not sender, so one
+ *     correction generalises.
  *
- *  2. **People are never "news".** `news` is the auto-archive bucket for
+ *  2. **A learned "this is News" reaches Later too** (#1866). Corrections
+ *     to News used to be folded into Later and could never teach News, so
+ *     newsletters the user re-labelled kept coming back as Later. Machine
+ *     mail only — guard 3 holds the line for people.
+ *
+ *  2b. **A declared list mailing the model called Later is News**
+ *     (#1866). Only the model's own confident `later`: a floor downgrade
+ *     or the Bedrock fail-safe stays `later`, the conservative default.
+ *
+ *  3. **People are never "news".** `news` is the auto-archive bucket for
  *     broadcast publications. A colleague's mail may be `later`, never
  *     filed away as a newsletter.
  *
@@ -447,36 +507,92 @@ export interface GuardedDecision {
  * a learned rule that silently promotes mail is the harder one to notice.
  */
 export function applyContentGuards(
-  decision: { label: Label; confidence: number; reason: string },
+  decision: {
+    label: Label;
+    confidence: number;
+    reason: string;
+    /** Set by `finalizeLLMLabel` when a confidence floor forced `later`. */
+    downgraded?: boolean;
+  },
   signals: ContentSignals | undefined,
   contentPreferences: ContentPreference[] = [],
 ): GuardedDecision {
   let { label, reason } = decision;
-  let adjusted = false;
-
-  if (signals && label === "important" && !hasAsk(signals)) {
-    const leansLater = contentPreferences.some(
-      (pref) =>
-        pref.shape === signals.shape &&
-        pref.lean === "later" &&
-        (pref.weight ?? 0) >= CONTENT_BIAS_MIN_WEIGHT &&
-        (pref.count ?? 0) >= CONTENT_BIAS_MIN_COUNT,
-    );
-    if (leansLater) {
-      label = "later";
-      reason = `learned:you-archive-${signals.shape}-mail (${reason})`;
-      adjusted = true;
-    }
+  if (!signals) {
+    return { label, confidence: decision.confidence, reason, adjusted: false };
   }
 
-  if (signals && label === "news" && !signals.automatedSender) {
-    label = "later";
-    reason = `human-sender-never-news (${reason})`;
-    adjusted = true;
+  for (const guard of GUARDS) {
+    const next = guard(label, signals, contentPreferences, decision);
+    if (!next) continue;
+    label = next.label;
+    reason = `${next.note} (${reason})`;
   }
 
-  return { label, confidence: decision.confidence, reason, adjusted };
+  return {
+    label,
+    confidence: decision.confidence,
+    reason,
+    adjusted: label !== decision.label,
+  };
 }
+
+/** A guard rewrites the label, or returns null to leave it alone. */
+type ContentGuard = (
+  label: Label,
+  signals: ContentSignals,
+  contentPreferences: ContentPreference[],
+  decision: { label: Label; downgraded?: boolean },
+) => { label: Label; note: string } | null;
+
+/**
+ * Applied in order; each sees the label the previous one left. Guard 3
+ * runs last on purpose, so nothing above it can leave a person's mail
+ * labelled `news`.
+ */
+const GUARDS: ContentGuard[] = [
+  // 1. A learned leaning demotes an `important` that asks nothing.
+  (label, signals, prefs) => {
+    if (label !== "important" || hasAsk(signals)) return null;
+    const lean = strongLeanForShape(signals, prefs);
+    if (!lean || lean === "important") return null;
+    return {
+      label: lean,
+      note: `learned:you-file-${signals.shape}-mail-as-${lean}`,
+    };
+  },
+  // 2. The user keeps re-labelling this shape to News and the model keeps
+  // saying Later (#1866). Machine mail only, so a learned leaning can
+  // never file a colleague's message away as a newsletter.
+  (label, signals, prefs) => {
+    if (label !== "later" || !signals.automatedSender) return null;
+    if (strongLeanForShape(signals, prefs) !== "news") return null;
+    return {
+      label: "news",
+      note: `learned:you-file-${signals.shape}-mail-as-news`,
+    };
+  },
+  // 2b. A message that declared itself a list mailing is News when the
+  // model itself called it Later (#1866). The content stage already
+  // decides exactly this for the no-ask case; this extends it to the ones
+  // that carry an ask ("register by Friday") and so had to go to the
+  // model. Only the model's own confident `later`: a `later` forced by a
+  // confidence floor or the Bedrock fail-safe (an under-confident
+  // `important`, or no answer at all) stays Later, and so does a `later`
+  // that guard 1 took from this user's own corrections.
+  (label, signals, _prefs, decision) =>
+    label === "later" &&
+    decision.label === "later" &&
+    !decision.downgraded &&
+    signals.bulkPublication
+      ? { label: "news", note: "bulk-publication-not-later" }
+      : null,
+  // 3. People are never `news`.
+  (label, signals) =>
+    label === "news" && !signals.automatedSender
+      ? { label: "later", note: "human-sender-never-news" }
+      : null,
+];
 
 /**
  * Parse the model's one-line JSON output. Tolerant of: surrounding

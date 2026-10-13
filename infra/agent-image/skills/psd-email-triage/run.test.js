@@ -320,6 +320,24 @@ describe('prefs', () => {
     const shown = await invoke(run.cmd_prefs, ['prefs', 'show', '--user', USER]);
     expect(shown.data.learned[0].inPlainWords).toContain('out of the way');
   });
+
+  test('a learned News leaning reads as News, not as "in front of you" (#1866)', async () => {
+    currentRow = baseRow({
+      contentPreferences: [{ shape: 'bulk', lean: 'news', weight: 2.4, count: 3 }],
+    });
+    const shown = await invoke(run.cmd_prefs, ['prefs', 'show', '--user', USER]);
+    expect(shown.data.learned[0].inPlainWords).toBe(
+      'You usually file "bulk" mail as News (3 correction(s)).',
+    );
+  });
+
+  test('an important leaning still reads as "in front of you"', async () => {
+    currentRow = baseRow({
+      contentPreferences: [{ shape: 'approval', lean: 'important', weight: 2.4, count: 3 }],
+    });
+    const shown = await invoke(run.cmd_prefs, ['prefs', 'show', '--user', USER]);
+    expect(shown.data.learned[0].inPlainWords).toContain('in front of you');
+  });
 });
 
 /**
@@ -328,7 +346,7 @@ describe('prefs', () => {
  * rules-decided branch, so the agent had to infer the deciding signal.
  */
 describe('simulate (#1861)', () => {
-  test('the reported Google Search Console blast would be labelled later', async () => {
+  test('the reported Google Search Console blast would be labelled news', async () => {
     const out = await invoke(run.cmd_simulate, [
       'simulate',
       '--user', USER,
@@ -339,9 +357,10 @@ describe('simulate (#1861)', () => {
       '--list-unsubscribe', '<mailto:unsub@google.com>',
     ]);
     expect(out.data.stage).toBe('content');
+    // #1861 pinned `later`; #1866 files marketing blasts under news.
     expect(out.data.decision).toEqual({
-      label: 'later',
-      reason: 'content:automated-notice-no-ask',
+      label: 'news',
+      reason: 'content:bulk-publication-no-ask',
     });
     expect(out.data.signals.directQuestion).toBe(false);
     expect(out.data.firedSignals).toEqual([
@@ -349,9 +368,29 @@ describe('simulate (#1861)', () => {
       'broadcast',
       'informational',
       'automatedSender',
+      'bulkPublication',
     ]);
     expect(out.summary).toContain('Content signals that fired:');
     expect(out.summary).toContain('automatedSender');
+  });
+
+  test('a bulk-Precedence association mailing simulates as news (#1866)', async () => {
+    const out = await invoke(run.cmd_simulate, [
+      'simulate',
+      '--user', USER,
+      '--from', 'members@assoc.example',
+      '--subject', 'Member bulletin: fall conference registration is open',
+      '--snippet', 'Registration details inside.',
+      '--to', USER,
+      '--precedence', 'bulk',
+    ]);
+    expect(out.data.stage).toBe('content');
+    expect(out.data.decision).toEqual({
+      label: 'news',
+      reason: 'content:bulk-publication-no-ask',
+    });
+    expect(out.data.signals.shape).toBe('bulk');
+    expect(out.data.firedSignals).toContain('bulkPublication');
   });
 
   test('a colleague asking a direct question is important, and names the signal', async () => {
@@ -404,5 +443,73 @@ describe('simulate (#1861)', () => {
       'simulate', '--user', USER,
     ]);
     expect(err.code).toBe('missing-from');
+  });
+});
+
+describe('learned News leaning and correction snapshots (#1866 review)', () => {
+  test('simulate applies a learned News leaning like the Lambda does', async () => {
+    const argv = [
+      'simulate',
+      '--user', USER,
+      '--from', 'noreply@vendor.example',
+      '--subject', 'Your monthly usage summary',
+      '--snippet', 'Usage for September is attached.',
+      '--to', USER,
+    ];
+    const before = await invoke(run.cmd_simulate, argv);
+    expect(before.data.decision.label).toBe('later');
+    const shape = before.data.signals.shape;
+    currentRow = baseRow({
+      contentPreferences: [{ shape, lean: 'news', weight: 3, count: 3 }],
+    });
+    const after = await invoke(run.cmd_simulate, argv);
+    expect(after.data.stage).toBe('content');
+    expect(after.data.decision).toEqual({
+      label: 'news',
+      reason: `content:learned-you-file-${shape}-mail-as-news`,
+    });
+  });
+
+  test('training correct snapshots the shape and sender class', async () => {
+    const saved = {
+      getUserAccessToken: lib.getUserAccessToken,
+      ensureLabels: lib.ensureLabels,
+      modifyMessage: lib.modifyMessage,
+    };
+    lib.getUserAccessToken = mock(async () => 'token');
+    lib.ensureLabels = mock(async () => ({
+      important: 'L1',
+      later: 'L2',
+      news: 'L3',
+    }));
+    lib.modifyMessage = mock(async () => undefined);
+    try {
+      currentRow = baseRow({
+        recentDecisions: [
+          {
+            messageId: 'm1',
+            label: 'later',
+            fromEmail: 'noreply@vendor.example',
+            shape: 'notification',
+            automatedSender: true,
+          },
+        ],
+      });
+      const out = await invoke(run.cmd_training, [
+        'training', 'correct', 'm1', 'news', '--user', USER,
+      ]);
+      expect(out.ok).toBe(true);
+      // recentDecisions is trimmed every poll, so the learner must not
+      // depend on finding m1 there to recover its shape.
+      expect(writes[0].recentCorrections[0]).toMatchObject({
+        messageId: 'm1',
+        fromLabel: 'later',
+        toLabel: 'news',
+        shape: 'notification',
+        automatedSender: true,
+      });
+    } finally {
+      Object.assign(lib, saved);
+    }
   });
 });

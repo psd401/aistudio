@@ -107,18 +107,25 @@ For each opted-in user every 5 minutes:
       request → important (even from a machine, and even when the user
       will act on it in another system); a reply in a thread the user has
       written in → important; a direct question or action request with
-      the user in `To` → important; anything that asks nothing of a
-      recipient who is only copied, or an automated notice with no ask →
-      later. Source is recorded as `content`, confidence 0.9.
+      the user in `To` → important; a bulk publication with no ask (list
+      headers, or publication/marketing wording from a machine) → **news**
+      (#1866); anything that asks nothing of a recipient who is only
+      copied → later. A one-off machine notice with no ask is `later`,
+      except when the user has written a preference profile — then the
+      stage leaves that judgement call to the model, which is the only
+      stage that reads their words. Source is recorded as `content`,
+      confidence 0.7.
    3. **Bedrock Nova Micro**, only for what is left. The prompt leads with
       the content signals and the user's own stated preferences, and
       labels the sender explicitly as a weak prior that must not flip a
       decision the content has settled. Default to `later` below 0.6, and
       an LLM `important` needs 0.75.
-   Then two guards run on the model's answer (`applyContentGuards`):
+   Then four guards run on the model's answer (`applyContentGuards`):
    a content-shape leaning learned from this user's corrections can demote
-   an `important` that asks nothing, and a human sender is never filed as
-   `news`.
+   an `important` that asks nothing (and can move a machine `later` to
+   `news`), a declared list mailing the model itself called `later` is
+   `news`, and a human sender is
+   never filed as `news`.
 
    Why: before #1855 the only deterministic features were the sender's
    address and domain, so the same AWS health notice scored `important`
@@ -392,6 +399,8 @@ two different addresses land on the same label.
 The one sender-derived signal is `isAutomatedSender` — a sender *class*,
 not an identity. It is read from `List-Unsubscribe`, `Auto-Submitted` and
 `Precedence` headers, from `noreply`/`no-reply`/`donotreply` local parts,
+from unambiguous publication mailboxes (`newsletter@`, `enews@`,
+`mailings@` — #1866),
 and from PSD service-account naming (`serv_*`, `tsd-*`, `svc_*`). An
 address that cannot be proven automated counts as a person.
 
@@ -559,3 +568,96 @@ the model call, which is still handed `fromEmail` and an
 `internal`/`external` flag as a "weak prior" (`buildUserPrompt` in
 `llm.ts`). Removing or neutralising that prior input is a separate,
 un-made decision — not fixed here.
+
+---
+
+## #1866 — newsletters and digests landed in Later instead of News
+
+### What was wrong
+
+Of the last ~20 decisions on the test account, every newsletter and digest
+went to Later: 9 stamped `content:automated-notice-no-ask` by the content
+stage and 10 by the model with "FYI, no action required". Three separate
+causes, all of them needing a fix:
+
+1. **The content stage had no News outcome.** `ContentDecision["label"]`
+   was `"important" | "later"`. Bulk mail with no ask could only ever be
+   Later, so removing the old keyword rules (`newsletter`, …) in #1855 on
+   the premise that the content stage replaced them left nothing at all
+   pointing at News.
+2. **The stage decided before the user's own words were read.** Its fixed
+   `later` for machine mail fired first, so a stated profile ("when unsure
+   choose News") never got a vote — only the model sees `preferences`.
+3. **Corrections to News could not be learned.** `correctionLean` folded
+   `news` into `later`, so `training correct <id> news` taught "this shape
+   is Later" — the opposite of what the user asked for.
+
+### What changed
+
+- **`bulkPublication` signal + `bulk` shape.** True when the message
+  declares itself a list mailing (`List-Unsubscribe`, or a bulk/list
+  `Precedence`), or when a machine sent it and it reads like a publication
+  (large recipient fan-out, publication vocabulary — "digest",
+  "newsletter", "highlights", "latest issue", "bulletin" — or marketing
+  footer boilerplate). `isAutomatedSender` also learned the publication
+  mailboxes (`newsletter@`, `newsletters@`, `enews@`, `e-news@`,
+  `mailings@`), without which a newsletter carrying no list header read
+  as a person. `news@`, `marketing@`, `bulletin@` and `digest@` are
+  deliberately NOT on the list: they are often staffed by people, and the
+  same check decides which mutes `suggestions apply` lets through without
+  `--confirm-human`. They still reach News whenever they send with a list
+  header.
+  `bulkPublication` implies `automatedSender` by construction.
+- **A colleague's list post stays a person's mail.** A district Google
+  Group stamps `List-Unsubscribe` and `Precedence: list` on every post,
+  which would read the colleague as a machine and the post as News. For
+  a sender on the user's own domain, `detectContentSignals` discounts
+  those two list headers (`isAutomatedMessageSender`), so the post is
+  Later at most (`content:fyi-nothing-asked-of-you`). `Auto-Submitted`
+  (an out-of-office reply) and a machine-shaped local part
+  (`newsletter@psd401.net`, `noreply@`, `serv_*`) still count, so a
+  district newsletter still reaches News. Consequence: a district
+  mailbox with a human-looking local part (`comms@psd401.net` sending a
+  newsletter) is treated as a person and lands in Later, not News.
+- **`classifyByContent` emits `news`** for a bulk publication with no ask
+  (`content:bulk-publication-no-ask`), ahead of the automated-notice
+  branch.
+- **A one-off machine notice stays Later** — a password reset is not a
+  publication and must not be hidden in the News bucket — **unless the
+  user has a stated profile**, in which case the stage returns null and the
+  model decides with their words in front of it
+  (`classifyByContent(signals, { hasStatedPreferences })`, passed by the
+  Lambda and by `simulate`).
+- **Prompt rewritten** so Later vs News is decided by *who the message was
+  written for*, not by "nothing is asked of me", with an explicit
+  tie-break to News and the "a person's mail is never News" line kept.
+- **Three-way shape learning.** `ContentPreference.lean` is now really
+  3-valued: weights accumulate per label and the leaning is the winner's
+  margin over the runner-up, so a shape corrected in both directions
+  produces no leaning at all. `applyContentGuards` gained a guard that
+  moves a machine `later` to `news` on a learned News leaning, and one
+  that moves a declared list mailing the model called Later to News. That
+  one deliberately skips a `later` forced by a confidence floor or the
+  Bedrock fail-safe: an under-confident `important` or an outage keeps
+  the conservative Later default rather than being filed with the
+  newsletters.
+- **A learned News leaning reaches the content stage too.** The stage
+  decides a machine notice (`notification` shape) as Later before any
+  model-path guard runs, so a shape the user kept re-filing as News never
+  moved. `classifyByContent` now takes `learnedNewsShapes` (computed by
+  `learnedNewsShapes` in llm.ts with the same `CONTENT_BIAS_MIN_*` bars)
+  and files those machine notices as News
+  (`content:learned-you-file-<shape>-mail-as-news`). People are excluded.
+  `simulate` passes the same option.
+- **`training correct` snapshots the shape.** Like the Lambda's own
+  corrections, a manual correction now stores `shape` and
+  `automatedSender` from the prior decision, so the nightly learner does
+  not depend on the decision still being in the 20-entry
+  `recentDecisions` buffer.
+
+### Note on the recipient fan-out
+
+`broadcast` now reads a bulk/list `Precedence` as well as
+`List-Unsubscribe`, and tests `List-Unsubscribe` for non-whitespace
+content rather than mere presence — previously a whitespace-only header
+set `broadcast` while leaving `informational` alone.
