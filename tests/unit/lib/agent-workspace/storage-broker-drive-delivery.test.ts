@@ -680,6 +680,33 @@ describe("deliverStagedUploadToDrive failure handling", () => {
     expect(result.fileId).toBe("drive-file-1")
   })
 
+  it("reports the delivered file even if its reservation cannot be settled", async () => {
+    const row = reservationRow()
+    installQueries({
+      getOwnedWorkspaceUploadReservation: [row],
+      claimWorkspaceUploadCompletion: [{ ...row, status: "verifying" }],
+    })
+    installS3()
+    executeTransactionMock.mockImplementation(async (...args) => {
+      if (args[1] === "settleWorkspaceUploadCompletion") {
+        throw new Error("connection terminated")
+      }
+      throw new Error(`unexpected transaction ${String(args[1])}`)
+    })
+    const drive = fakeDrive()
+    const result = await broker.deliverStagedUploadToDrive(
+      OWNER,
+      RESERVATION,
+      { drive: drive.deps },
+    )
+    // The file is in the user's Drive; an error here would send the agent into
+    // a fresh reservation that shares a second copy.
+    expect(result.fileId).toBe("drive-file-1")
+    expect(drive.state.created).toHaveLength(1)
+    expect(drive.state.permissions).toHaveLength(1)
+    expect(drive.state.deleted).toEqual([])
+  })
+
   it("refuses a malformed reservation id without touching the database", async () => {
     await expect(
       broker.deliverStagedUploadToDrive(OWNER, "not-a-uuid"),

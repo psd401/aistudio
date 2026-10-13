@@ -67,9 +67,10 @@ and verbatim filler. That is usually not what the user wants as a deliverable.
 
 A recording is someone's voice, and often a meeting they did not expect to be
 republished. The transport copy is deleted after transcription, and nothing here
-publishes anything. Do not publish the audio or the transcript with
-`psd-publish-file` unless the user explicitly asks — an unguessable public link
-is still a public link.
+publishes anything. If the user wants the transcript as a file, `psd-publish-file`
+with no `--to` flag shares it to their own Drive, privately. Never use
+`--to public` for a recording or transcript unless the user explicitly asks — an
+unguessable public link is still a public link.
 
 ## Errors
 

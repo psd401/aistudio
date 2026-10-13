@@ -333,6 +333,48 @@ describe("createAgentDriveFile", () => {
       }),
     ).rejects.toThrow("no resumable upload session")
   })
+
+  it("reports create_failed when Drive cannot be reached to open the session", async () => {
+    const deps = {
+      fetchImpl: (async () => {
+        throw new Error("socket hang up")
+      }) as unknown as typeof fetch,
+    }
+    const error = await rejectedBy(
+      createAgentDriveFile({
+        accessToken: TOKEN,
+        name: "deck.pptx",
+        contentType: DRIVE_DELIVERY_CONTENT_TYPES.get(".pptx")!,
+        bytes: BYTES,
+        deps,
+      }),
+    )
+    expect(error.code).toBe("create_failed")
+    expect(error.message).toContain("socket hang up")
+  })
+
+  it("reports create_failed when the upload PUT times out", async () => {
+    const drive = fakeDrive()
+    const deps = {
+      fetchImpl: (async (input: URL | string, init?: RequestInit) => {
+        if (init?.method === "PUT") {
+          throw new DOMException("The operation timed out.", "TimeoutError")
+        }
+        return drive.deps.fetchImpl!(input, init)
+      }) as unknown as typeof fetch,
+    }
+    const error = await rejectedBy(
+      createAgentDriveFile({
+        accessToken: TOKEN,
+        name: "deck.pptx",
+        contentType: DRIVE_DELIVERY_CONTENT_TYPES.get(".pptx")!,
+        bytes: BYTES,
+        deps,
+      }),
+    )
+    expect(error.code).toBe("create_failed")
+    expect(error.message).toContain("upload the file")
+  })
 })
 
 describe("shareDriveFileWithUser", () => {

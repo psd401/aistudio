@@ -174,8 +174,13 @@ export function driveFileWebViewLink(fileId: string): string {
   return `https://drive.google.com/file/d/${encodeURIComponent(fileId)}/view`
 }
 
-const DRIVE_TIMEOUT_MS = 60_000
-const DRIVE_UPLOAD_TIMEOUT_MS = 180_000
+// The worst case — initiate + upload + share = 210s — must finish inside the
+// skill's 240s DELIVER_TIMEOUT_MS (drive-deliverer.js) with room for the token
+// mint, the staged S3 read and the DB writes. If the skill gives up first, the
+// server still delivers, and the agent's retry stages a NEW reservation and
+// shares a second copy.
+const DRIVE_TIMEOUT_MS = 30_000
+const DRIVE_UPLOAD_TIMEOUT_MS = 150_000
 
 async function driveErrorDetail(response: Response): Promise<string> {
   const raw = await response.text().catch(() => "")
@@ -185,6 +190,30 @@ async function driveErrorDetail(response: Response): Promise<string> {
 
 export interface DriveDeliveryDeps {
   fetchImpl?: typeof fetch
+}
+
+/**
+ * A network or timeout failure while creating the file is still a
+ * `create_failed`, not a bare TypeError/DOMException: the route only maps a
+ * `DriveDeliveryError` to its structured `{ error, code }` response.
+ */
+async function fetchOrCreateFailed(
+  fetchImpl: typeof fetch,
+  input: URL | string,
+  init: RequestInit,
+  step: string,
+): Promise<Response> {
+  try {
+    return await fetchImpl(input, init)
+  } catch (error) {
+    throw new DriveDeliveryError(
+      "create_failed",
+      `Drive could not be reached to ${step}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      { cause: error },
+    )
+  }
 }
 
 /**
@@ -218,18 +247,23 @@ export async function createAgentDriveFile(params: {
   )
   initiateUrl.searchParams.set("uploadType", "resumable")
   initiateUrl.searchParams.set("fields", "id,webViewLink")
-  const initiated = await fetchImpl(initiateUrl, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${params.accessToken}`,
-      "Content-Type": "application/json; charset=UTF-8",
-      "X-Upload-Content-Type": params.contentType,
-      "X-Upload-Content-Length": String(params.bytes.byteLength),
+  const initiated = await fetchOrCreateFailed(
+    fetchImpl,
+    initiateUrl,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${params.accessToken}`,
+        "Content-Type": "application/json; charset=UTF-8",
+        "X-Upload-Content-Type": params.contentType,
+        "X-Upload-Content-Length": String(params.bytes.byteLength),
+      },
+      body: JSON.stringify({ name: params.name, mimeType: params.contentType }),
+      redirect: "error",
+      signal: AbortSignal.timeout(DRIVE_TIMEOUT_MS),
     },
-    body: JSON.stringify({ name: params.name, mimeType: params.contentType }),
-    redirect: "error",
-    signal: AbortSignal.timeout(DRIVE_TIMEOUT_MS),
-  })
+    "open an upload session",
+  )
   if (!initiated.ok) {
     throw new DriveDeliveryError(
       "create_failed",
@@ -243,17 +277,22 @@ export async function createAgentDriveFile(params: {
       "Drive returned no resumable upload session",
     )
   }
-  const uploaded = await fetchImpl(sessionUrl, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bearer ${params.accessToken}`,
-      "Content-Type": params.contentType,
-      "Content-Length": String(params.bytes.byteLength),
+  const uploaded = await fetchOrCreateFailed(
+    fetchImpl,
+    sessionUrl,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${params.accessToken}`,
+        "Content-Type": params.contentType,
+        "Content-Length": String(params.bytes.byteLength),
+      },
+      body: params.bytes,
+      redirect: "error",
+      signal: AbortSignal.timeout(DRIVE_UPLOAD_TIMEOUT_MS),
     },
-    body: params.bytes,
-    redirect: "error",
-    signal: AbortSignal.timeout(DRIVE_UPLOAD_TIMEOUT_MS),
-  })
+    "upload the file",
+  )
   if (!uploaded.ok) {
     throw new DriveDeliveryError(
       "create_failed",

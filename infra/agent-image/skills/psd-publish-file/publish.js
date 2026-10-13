@@ -305,6 +305,14 @@ async function main() {
   await publishPublicly(bytes, file, extension, contentType);
 }
 
+// The broker echoes a DriveDeliveryError's `code` (share_failed, create_failed,
+// unsupported_type, content_type_mismatch) on the response body; SKILL.md tells
+// the agent to branch on it, so surface it instead of a generic 'error'.
 main().catch((err) => {
-  fail(err instanceof Error ? err.message : String(err), 'error');
+  const body = err && typeof err === 'object' ? err.responseBody : null;
+  const code =
+    body && typeof body === 'object' && typeof body.code === 'string'
+      ? body.code
+      : 'error';
+  fail(err instanceof Error ? err.message : String(err), code);
 });

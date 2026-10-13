@@ -6,8 +6,10 @@ suite: regression
 prompt: "Write a small CSV to /tmp/eval-publish-file.csv with a header row and two data rows, then give me a shareable link to it. Paste the link in your reply."
 trials: 3
 graders:
-  # The whole point of the skill: a real, bare, fetchable URL lands in the
-  # reply. A description of the file without a link is the failure it fixes.
-  - {"type":"output_match","pattern":"https://[^\\s`)\\]]+\\.csv"}
+  # The whole point of the skill: a real, bare link lands in the reply. A
+  # description of the file without a link is the failure it fixes. No `--to`
+  # flag now means a private Drive share (#1885), so the link is a Drive
+  # webViewLink, not a `.csv` URL.
+  - {"type":"output_match","pattern":"https://drive\\.google\\.com/file/d/[^\\s`)\\]/]+/view"}
   # And the URL must not be wrapped — a trailing backtick becomes %60 and 404s.
-  - {"type":"output_match","pattern":"(?m)^\\s*https://\\S+\\.csv\\s*$"}
+  - {"type":"output_match","pattern":"(?m)^\\s*https://drive\\.google\\.com/file/d/\\S+/view\\s*$"}

@@ -22,6 +22,7 @@ import {
   inArray,
   isNotNull,
   lt,
+  notLike,
   sql,
   sum,
 } from "drizzle-orm"
@@ -537,6 +538,12 @@ async function createUploadReservation(params: {
             params.publicArtifact,
           ),
           inArray(workspaceUploadReservations.status, RETAINED_UPLOAD_STATUSES),
+          // A Drive delivery's bytes leave S3 once delivered — its committed
+          // row is not retained storage and must not feed this S3-spend signal.
+          notLike(
+            workspaceUploadReservations.targetKey,
+            `${DRIVE_DELIVERY_PREFIX}/%`,
+          ),
         )
         const [byteRows, objectRows] = await Promise.all([
           tx
@@ -5253,12 +5260,27 @@ async function finishDriveDelivery(params: {
     }
     // `object_version_id` records the DELIVERED object's identity — here the
     // Drive file id, which is also what an idempotent replay returns.
-    await settleUploadReservation(
-      reservationId,
-      delivered.fileId,
-      [],
-      defaultDatabaseExecutor,
-    )
+    //
+    // Same reasoning as the staging delete: the file IS delivered. A settle
+    // failure leaves the row in `verifying`, where a replay of this
+    // reservation is refused — so throwing would only push the agent into a
+    // fresh reservation that shares a second copy. Unlike the private path,
+    // there is no S3 object to recover a lost settle from, so it is logged
+    // loudly with the file id instead.
+    try {
+      await settleUploadReservation(
+        reservationId,
+        delivered.fileId,
+        [],
+        defaultDatabaseExecutor,
+      )
+    } catch (error) {
+      log.error("Drive delivery succeeded but its reservation did not settle", {
+        reservationId,
+        fileId: delivered.fileId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
     await Promise.allSettled([
       settleLease(reservation.byteLeaseId, reservation.expectedBytes),
       settleLease(reservation.objectLeaseId, 1),

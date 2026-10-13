@@ -19,7 +19,8 @@ const { test, expect, describe, beforeAll, afterAll } = require('bun:test');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const http = require('node:http');
+const { spawn, spawnSync } = require('node:child_process');
 
 const { validatedFs } = require('../../../validated-fs.cjs');
 
@@ -189,5 +190,47 @@ describe('broker contract', () => {
     expect(cliExtensions).toEqual(brokerExtensions);
     // The rule this pair encodes: HTML is never a public artifact.
     expect(brokerExtensions).not.toContain('.html');
+  });
+});
+
+describe('broker error codes', () => {
+  // The broker answers a DriveDeliveryError with `{ error, code }`, and
+  // SKILL.md tells the agent to branch on that code — `share_failed` must
+  // never collapse into a generic 'error' the agent reads as "try public".
+  // agent-broker.js targets a fixed loopback port, so the fake broker binds it
+  // and the CLI runs asynchronously (spawnSync would block the server).
+  test('a Drive refusal surfaces the broker code, not a generic error', async () => {
+    const server = http.createServer((req, res) => {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: 'Drive refused to share the file',
+          code: 'share_failed',
+        })
+      );
+    });
+    const bound = await new Promise((resolve) => {
+      server.once('error', () => resolve(false));
+      server.listen(18791, '127.0.0.1', () => resolve(true));
+    });
+    // Port held by a real broker on this machine; nothing to assert against.
+    if (!bound) return;
+    try {
+      const file = write('coded.pdf', '%PDF-1.4\n');
+      const child = spawn('node', [CLI, '--file', file], {
+        cwd: path.join(__dirname, '..', '..', '..', '..'),
+      });
+      let stdout = '';
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk;
+      });
+      const code = await new Promise((resolve) => child.on('close', resolve));
+      expect(code).toBe(1);
+      const json = JSON.parse(stdout.trim());
+      expect(json.error).toBe('share_failed');
+      expect(json.message).toContain('Drive refused to share the file');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 });
