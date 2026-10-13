@@ -14,6 +14,8 @@ const commitWorkspaceCheckpointMock = jest.fn()
 const finalizeWorkspaceCheckpointMock = jest.fn()
 const deleteWorkspacePathMock = jest.fn()
 const releaseWorkspaceUploadsMock = jest.fn()
+const createDriveDeliveryUploadMock = jest.fn()
+const deliverStagedUploadToDriveMock = jest.fn()
 
 jest.mock("@/lib/agent-workspace/invocation-context", () => ({
   verifyAgentInvocationContext: (...args: unknown[]) =>
@@ -44,6 +46,10 @@ jest.mock("@/lib/agent-workspace/storage-broker", () => ({
     deleteWorkspacePathMock(...args),
   releaseWorkspaceUploads: (...args: unknown[]) =>
     releaseWorkspaceUploadsMock(...args),
+  createDriveDeliveryUpload: (...args: unknown[]) =>
+    createDriveDeliveryUploadMock(...args),
+  deliverStagedUploadToDrive: (...args: unknown[]) =>
+    deliverStagedUploadToDriveMock(...args),
 }))
 jest.mock("@/lib/logger", () => ({
   createLogger: () => ({
@@ -98,6 +104,18 @@ beforeEach(() => {
     workspaceGeneration: "2".repeat(64),
   })
   releaseWorkspaceUploadsMock.mockResolvedValue({ released: 2 })
+  createDriveDeliveryUploadMock.mockResolvedValue({
+    uploadUrl: "https://upload.example/drive",
+    reservationId: "11111111-2222-4333-8444-555555555555",
+    requiredHeaders: {},
+  })
+  deliverStagedUploadToDriveMock.mockResolvedValue({
+    fileId: "drive-file-1",
+    webViewLink: "https://drive.google.com/file/d/drive-file-1/view",
+    fileName: "deck.pptx",
+    sharedWith: "owner@example.com",
+    ownedBy: "agnt_owner@example.com",
+  })
   deleteWorkspacePathMock.mockResolvedValue({
     deleted: true,
     workspaceGeneration: "3".repeat(64),
@@ -584,6 +602,120 @@ describe("POST /api/agent/workspace-storage", () => {
       expect(response.status).toBe(400)
     }
     expect(releaseWorkspaceUploadsMock).not.toHaveBeenCalled()
+  })
+
+  // Private Drive delivery (#1885). The route's job is to bind the owner from
+  // the signed context (never from the payload) and to keep the broker's
+  // machine-readable refusal code intact so the skill can branch on it.
+  it("stages a Drive delivery against the signed owner", async () => {
+    const response = await POST(
+      request({
+        operation: "drive-upload",
+        path: "deck.pptx",
+        contentType:
+          "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        contentLength: 1024,
+        idempotencyKey: "drive-delivery-idempotency",
+        checksumSha256: "A".repeat(43) + "=",
+      }),
+    )
+
+    expect(response.status).toBe(200)
+    expect(createDriveDeliveryUploadMock).toHaveBeenCalledWith({
+      ownerEmail: "owner@example.com",
+      fileName: "deck.pptx",
+      contentType:
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      contentLength: 1024,
+      contextKey: "session-1:nonce-1",
+      idempotencyKey: "drive-delivery-idempotency",
+      checksumSha256: "A".repeat(43) + "=",
+    })
+  })
+
+  it("rejects a Drive staging request missing its integrity fields", async () => {
+    for (const body of [
+      { operation: "drive-upload", path: "deck.pptx" },
+      {
+        operation: "drive-upload",
+        path: "deck.pptx",
+        contentType: "application/pdf",
+        contentLength: 10,
+      },
+    ]) {
+      const response = await POST(request(body))
+      expect(response.status).toBe(400)
+    }
+    expect(createDriveDeliveryUploadMock).not.toHaveBeenCalled()
+  })
+
+  it("delivers a claimed reservation to the signed owner's Drive", async () => {
+    const response = await POST(
+      request({
+        operation: "deliver-to-drive",
+        reservationId: "11111111-2222-4333-8444-555555555555",
+      }),
+    )
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      fileId: "drive-file-1",
+      sharedWith: "owner@example.com",
+    })
+    expect(deliverStagedUploadToDriveMock).toHaveBeenCalledWith(
+      "owner@example.com",
+      "11111111-2222-4333-8444-555555555555",
+    )
+  })
+
+  it("surfaces a Drive refusal with its code and never a public fallback", async () => {
+    const { DriveDeliveryError } = await import(
+      "@/lib/agent-workspace/drive-delivery"
+    )
+    deliverStagedUploadToDriveMock.mockRejectedValue(
+      new DriveDeliveryError(
+        "share_failed",
+        "Drive refused to share the file with owner@example.com. The file was not delivered — retry the delivery.",
+      ),
+    )
+
+    const response = await POST(
+      request({
+        operation: "deliver-to-drive",
+        reservationId: "11111111-2222-4333-8444-555555555555",
+      }),
+    )
+
+    expect(response.status).toBe(409)
+    const body = (await response.json()) as { error: string; code: string }
+    expect(body.code).toBe("share_failed")
+    expect(body.error).toContain("retry the delivery")
+    expect(JSON.stringify(body)).not.toMatch(/public/i)
+  })
+
+  it("reports an unsupported Drive type as a 400 with its code", async () => {
+    const { DriveDeliveryError } = await import(
+      "@/lib/agent-workspace/drive-delivery"
+    )
+    createDriveDeliveryUploadMock.mockRejectedValue(
+      new DriveDeliveryError("unsupported_type", "Cannot deliver .zip to Drive"),
+    )
+
+    const response = await POST(
+      request({
+        operation: "drive-upload",
+        path: "archive.zip",
+        contentType: "application/zip",
+        contentLength: 10,
+        idempotencyKey: "drive-delivery-idempotency",
+        checksumSha256: "A".repeat(43) + "=",
+      }),
+    )
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toMatchObject({
+      code: "unsupported_type",
+    })
   })
 
   it("generation-fences deletes inside the signed prefix", async () => {

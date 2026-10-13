@@ -59,9 +59,17 @@ The PDF is a **local file and nothing else**. It is not shared, not published,
 and not reachable by a link.
 
 - If the user wants to keep or print it, say where it is and stop.
-- If the user wants a **link**, publish it deliberately with
-  `psd-publish-file`, which will make you decide whether the contents are safe
-  for an unguessable public URL. A staff flyer, yes. A student record, no.
+- If the user wants a **link**, deliver it with `psd-publish-file`:
+
+  ```bash
+  node /opt/psd-skills/psd-publish-file/publish.js --file /tmp/<name>.pdf
+  ```
+
+  With no `--to` flag the PDF is created in your agent's Drive and shared with
+  the caller alone. **That is the right answer for anything with personal data
+  in it** — a student record, an IEP, a personnel letter, a roster. Only add
+  `--to public` when the content is genuinely public (a staff flyer, a
+  published agenda), and note that a public link is deleted after 30 days.
 - Do not paste the local path as if it were a URL.
 
 ## Working with psd-html-artifact

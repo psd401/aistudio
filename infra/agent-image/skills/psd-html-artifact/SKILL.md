@@ -171,7 +171,9 @@ Returns JSON: `{ "url": "https://psd401.ai/c/<slug>", "artifactId": N, "slug": "
 level, a publication record and an audit trail; the old S3 path gave it an unsigned URL
 that was public to anyone who ever received it. `.html` is no longer an accepted public
 artifact extension in the broker, so this is enforced, not just documented. Every other
-file type (`.png`, `.pdf`, `.csv`, …) still goes to S3 — see `psd-publish-file`.
+file type (`.png`, `.pdf`, `.csv`, `.docx`, …) goes through `psd-publish-file`, which by
+default delivers it into the agent's Drive shared with the caller alone — use that, not
+`--to public`, for anything carrying personal data.
 
 The command does both Atrium steps for you: `create-artifact --body-format html
 --visibility internal`, then `publish --destination intranet`. It never reports a URL for

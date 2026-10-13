@@ -4,8 +4,10 @@ import { verifyAgentInvocationContext } from "@/lib/agent-workspace/invocation-c
 import {
   createPublicArtifactUpload,
   createPublicArtifactDownloadUrl,
+  createDriveDeliveryUpload,
   completeWorkspaceUpload,
   commitWorkspaceCheckpoint,
+  deliverStagedUploadToDrive,
   deleteWorkspacePath,
   createWorkspaceDownloadUrl,
   createWorkspaceUploadUrl,
@@ -16,6 +18,7 @@ import {
   WorkspaceStorageAdmissionError,
   WorkspaceStorageCompletionError,
 } from "@/lib/agent-workspace/storage-broker"
+import { DriveDeliveryError } from "@/lib/agent-workspace/drive-delivery"
 import { workspaceRelativePathRejectionReason } from "@/lib/agent-workspace/path-policy"
 import { describeQueryErrorCause } from "@/lib/db/query-error"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
@@ -42,6 +45,13 @@ const STORAGE_OPERATIONS = new Set([
   "upload",
   "publish",
   "download-public",
+  // Private delivery into the agent account's Drive (#1885): `drive-upload`
+  // stages the bytes, `deliver-to-drive` creates the file as the agent account
+  // and shares it with the caller alone. Two steps rather than one for the same
+  // reason `publish` is: the bytes go to S3 over a signed PUT, never through
+  // this JSON route.
+  "drive-upload",
+  "deliver-to-drive",
   "complete-upload",
   "release-upload",
   "ensure-checkpoint",
@@ -74,6 +84,8 @@ type StorageRequest = {
     | "upload"
     | "publish"
     | "download-public"
+    | "drive-upload"
+    | "deliver-to-drive"
     | "complete-upload"
     | "release-upload"
     | "ensure-checkpoint"
@@ -255,6 +267,12 @@ async function executeStorageOperation(
       return input.path
         ? createPublicArtifactDownloadUrl(context.ownerEmail, input.path)
         : null
+    case "drive-upload":
+      return executeDriveDeliveryUpload(input, context, contextKey)
+    case "deliver-to-drive":
+      return input.reservationId
+        ? deliverStagedUploadToDrive(context.ownerEmail, input.reservationId)
+        : null
     case "complete-upload":
       return input.reservationId
         ? completeWorkspaceUpload(
@@ -355,6 +373,79 @@ function executePublicUpload(
   })
 }
 
+function executeDriveDeliveryUpload(
+  input: StorageRequest,
+  context: AgentInvocation,
+  contextKey: string
+): Promise<object> | null {
+  if (
+    !input.path ||
+    !input.contentType ||
+    input.contentLength === undefined ||
+    !input.idempotencyKey ||
+    !input.checksumSha256
+  ) return null
+  return createDriveDeliveryUpload({
+    ownerEmail: context.ownerEmail,
+    fileName: input.path,
+    contentType: input.contentType,
+    contentLength: input.contentLength,
+    contextKey,
+    idempotencyKey: input.idempotencyKey,
+    checksumSha256: input.checksumSha256,
+  })
+}
+
+/**
+ * Turn a broker rejection into the response the AGENT can act on.
+ *
+ * Two classes of error are reported verbatim rather than collapsed into the
+ * generic message:
+ *
+ *  - anything starting with "Invalid" — a request the caller can correct;
+ *  - a `DriveDeliveryError` — `unsupported_type` names what IS deliverable and
+ *    `share_failed` says to retry. Its `code` is echoed so the skill branches on
+ *    a code rather than on English, and `share_failed` in particular must never
+ *    read as "fall back to a public link".
+ *
+ * Everything else stays opaque: a storage failure's internals are not the
+ * model's business.
+ */
+function storageFailureResponse(error: unknown): NextResponse {
+  const isInvalidRequest =
+    error instanceof Error && error.message.startsWith("Invalid")
+  const isDriveRefusal = error instanceof DriveDeliveryError
+  return NextResponse.json(
+    {
+      error:
+        isDriveRefusal || isInvalidRequest
+          ? (error as Error).message
+          : "Workspace storage operation failed",
+      ...(isDriveRefusal ? { code: error.code } : {}),
+    },
+    {
+      status: storageFailureStatus(error, isInvalidRequest),
+      ...(error instanceof WorkspaceStorageAdmissionError
+        ? { headers: { "Retry-After": "60" } }
+        : {}),
+    }
+  )
+}
+
+function storageFailureStatus(
+  error: unknown,
+  isInvalidRequest: boolean
+): number {
+  if (error instanceof WorkspaceStorageAdmissionError) return 429
+  if (error instanceof DriveDeliveryError) {
+    // A share that failed is retryable (409, same as a lost completion race);
+    // a type or MIME refusal is the caller's own request to fix (400).
+    return error.code === "share_failed" ? 409 : 400
+  }
+  if (error instanceof WorkspaceStorageCompletionError) return 409
+  return isInvalidRequest ? 400 : 502
+}
+
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId()
   const context = await verifyAgentInvocationContext(request, {
@@ -406,26 +497,6 @@ export async function POST(request: NextRequest) {
         ...describeQueryErrorCause(error),
       })
     )
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error && error.message.startsWith("Invalid")
-            ? error.message
-            : "Workspace storage operation failed",
-      },
-      {
-        status:
-          error instanceof WorkspaceStorageAdmissionError
-            ? 429
-            : error instanceof WorkspaceStorageCompletionError
-              ? 409
-            : error instanceof Error && error.message.startsWith("Invalid")
-              ? 400
-              : 502,
-        ...(error instanceof WorkspaceStorageAdmissionError
-          ? { headers: { "Retry-After": "60" } }
-          : {}),
-      }
-    )
+    return storageFailureResponse(error)
   }
 }

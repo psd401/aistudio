@@ -3,9 +3,9 @@
 /**
  * publish.js — psd-publish-file.publish
  * Usage:
- *   node publish.js --file <path> [--content-type <type>]
+ *   node publish.js --file <path> [--to drive|public] [--content-type <type>]
  *
- * Turns a file the agent just produced into a shareable HTTPS link.
+ * Hands a file the agent just produced to the person who asked for it.
  *
  * WHY THIS EXISTS. A user asked for "a link to this PDF" and there was no way
  * to give them one. `drive +upload <path>` looks like the answer and cannot
@@ -15,18 +15,28 @@
  * bare `operation_not_allowed` (command-executor.ts now refuses it with a
  * pointer here instead).
  *
- * The bytes path already existed — `_shared/artifact-publisher.js` is what
- * psd-image-gen and chat-chart use — it simply had no entry point for "a file
- * on disk". This is that entry point and nothing more: it does not generate,
- * convert, or rename anything.
+ * TWO DESTINATIONS, AND THE DEFAULT IS THE PRIVATE ONE (#1885).
  *
- * NOT for HTML. `.html` is not an accepted public artifact type: HTML pages are
+ *   --to drive   (default)  The file is created in the agent account's own
+ *                           Drive and shared with the caller alone, as a
+ *                           writer. Nothing is public. Word, Excel and
+ *                           PowerPoint files can only go this way.
+ *   --to public             An unsigned, public-by-link S3 object. Anyone with
+ *                           the URL can open it, with no sign-in, and the
+ *                           object is deleted 30 days after it is written.
+ *                           For content that is genuinely meant to be public.
+ *
+ * Drive is the default because the old default was wrong: the only outbound
+ * path used to be the public one, so files with student and staff data in them
+ * went onto public links because nothing else existed.
+ *
+ * NOT for HTML. `.html` is accepted by neither destination: HTML pages are
  * district documents and go to Atrium, where they carry an owner, a visibility
  * level and a publication record. Use psd-html-artifact.
  *
  * Exit codes:
- *   0  published (JSON with the URL on stdout)
- *   1  bad arguments / unsupported type / upload failure (JSON error on stdout)
+ *   0  delivered (JSON with the link on stdout)
+ *   1  bad arguments / unsupported type / delivery failure (JSON error on stdout)
  */
 
 'use strict';
@@ -35,6 +45,11 @@ const { validatedFs } = require("../../../validated-fs.cjs");
 const path = require('node:path');
 
 const { publishArtifact } = require('../_shared/artifact-publisher');
+const {
+  DRIVE_DELIVERABLE_TYPES,
+  MAX_DRIVE_DELIVERY_BYTES,
+  deliverFileToDrive,
+} = require('../_shared/drive-deliverer');
 
 // Mirrors PUBLIC_EXTENSIONS / PUBLIC_CONTENT_TYPES in
 // lib/agent-workspace/storage-broker.ts, which is the real gate. Checking here
@@ -61,6 +76,25 @@ const PUBLISHABLE_TYPES = new Map([
 // file fails immediately with its own size in the message, rather than after a
 // full read and a broker round trip.
 const MAX_PUBLIC_ARTIFACT_BYTES = 100 * 1024 * 1024;
+
+const DESTINATIONS = new Map([
+  [
+    'drive',
+    {
+      types: DRIVE_DELIVERABLE_TYPES,
+      maxBytes: MAX_DRIVE_DELIVERY_BYTES,
+      label: 'Drive (shared with you only)',
+    },
+  ],
+  [
+    'public',
+    {
+      types: PUBLISHABLE_TYPES,
+      maxBytes: MAX_PUBLIC_ARTIFACT_BYTES,
+      label: 'public link',
+    },
+  ],
+]);
 
 // Pasted verbatim into the result. A trailing backtick percent-encodes to %60
 // and the link 404s — that has happened in production.
@@ -101,6 +135,21 @@ function parseArgs(argv) {
   return args;
 }
 
+/** Which destination to use. Drive unless `--to public` was asked for. */
+function resolveDestination(requested) {
+  if (requested === undefined) return 'drive';
+  const name = requested === true ? '' : String(requested).trim().toLowerCase();
+  if (!DESTINATIONS.has(name)) {
+    fail(
+      `--to ${name || '(no value)'} is not a destination. Use --to drive ` +
+        '(private, shared with you only — the default) or --to public ' +
+        '(unsigned public link, deleted after 30 days).',
+      'bad_args'
+    );
+  }
+  return name;
+}
+
 /**
  * Resolve the content type for a file, or fail with a message that says what
  * to do instead.
@@ -109,9 +158,10 @@ function parseArgs(argv) {
  * own type: the broker enforces the pairing anyway, and letting the caller
  * disagree with it would just move the rejection somewhere less legible.
  */
-function resolveContentType(file, requested) {
+function resolveContentType(file, requested, destination) {
+  const { types } = DESTINATIONS.get(destination);
   const extension = path.extname(file).toLowerCase();
-  const known = PUBLISHABLE_TYPES.get(extension);
+  const known = types.get(extension);
   if (!known) {
     if (extension === '.html' || extension === '.htm') {
       fail(
@@ -122,10 +172,17 @@ function resolveContentType(file, requested) {
         'html_goes_to_atrium'
       );
     }
+    // Office files are Drive-only, and that is the common case worth naming:
+    // a generated .docx/.xlsx/.pptx asked for with --to public used to dead-end
+    // with no route at all.
+    const otherDestination = destination === 'drive' ? 'public' : 'drive';
+    const alsoTry = DESTINATIONS.get(otherDestination).types.has(extension)
+      ? ` It can go to the other destination: add --to ${otherDestination}.`
+      : ' Convert the file to one of those types first.';
     fail(
-      `Cannot publish ${extension || '(no extension)'} — publishable types are ` +
-        `${[...PUBLISHABLE_TYPES.keys()].join(', ')}. Convert the file first, ` +
-        'or attach it to the reply instead of linking it.',
+      `Cannot deliver ${extension || '(no extension)'} to ` +
+        `${DESTINATIONS.get(destination).label} — accepted types are ` +
+        `${[...types.keys()].join(', ')}.${alsoTry}`,
       'unsupported_type'
     );
   }
@@ -155,7 +212,8 @@ function resolveContentType(file, requested) {
   return { extension, contentType: known };
 }
 
-function readPublishableFile(file) {
+function readDeliverableFile(file, destination) {
+  const { maxBytes } = DESTINATIONS.get(destination);
   let stat;
   try {
     stat = validatedFs.statSync(file);
@@ -164,11 +222,10 @@ function readPublishableFile(file) {
   }
   if (!stat.isFile()) fail(`--file is not a file: ${file}`, 'bad_args');
   if (stat.size === 0) fail(`--file is empty: ${file}`, 'bad_args');
-  if (stat.size > MAX_PUBLIC_ARTIFACT_BYTES) {
+  if (stat.size > maxBytes) {
     fail(
-      `--file is ${stat.size} bytes; the maximum publishable size is ` +
-        `${MAX_PUBLIC_ARTIFACT_BYTES}. Split it, compress it, or share it ` +
-        'through Drive instead.',
+      `--file is ${stat.size} bytes; the maximum deliverable size is ` +
+        `${maxBytes}. Split it or compress it.`,
       'too_large'
     );
   }
@@ -177,36 +234,75 @@ function readPublishableFile(file) {
   return validatedFs.readFileSync(file);
 }
 
-async function main() {
-  const args = parseArgs(process.argv);
-  if (args.help) {
-    console.log(
-      'Usage: publish.js --file <path> [--content-type <type>]\n' +
-        '\n' +
-        'Publishes a local file and prints a shareable HTTPS URL.\n' +
-        `Publishable: ${[...PUBLISHABLE_TYPES.keys()].join(', ')}\n` +
-        'HTML pages go to Atrium instead — use psd-html-artifact.'
-    );
-    process.exit(0);
-  }
+async function deliverToDrive(bytes, file, contentType) {
+  const fileName = path.basename(file);
+  const delivered = await deliverFileToDrive(bytes, fileName, contentType);
+  emit({
+    url: delivered.webViewLink,
+    driveFileId: delivered.fileId,
+    fileName: delivered.fileName,
+    bytes: bytes.length,
+    contentType,
+    sharing: 'private-shared-with-caller',
+    sharedWith: delivered.sharedWith,
+    ...(delivered.ownedBy ? { ownedBy: delivered.ownedBy } : {}),
+    // Drive files do not expire. Say so explicitly, because the public path
+    // does and the agent must not carry one path's rule to the other.
+    expires: 'never',
+    instruction: BARE_URL_INSTRUCTION,
+  });
+}
 
-  const file = args.file && args.file !== true ? String(args.file) : null;
-  if (!file) fail('--file is required (path to the file to publish)', 'bad_args');
-
-  const { extension, contentType } = resolveContentType(file, args.content_type);
-  const bytes = readPublishableFile(file);
+async function publishPublicly(bytes, file, extension, contentType) {
   const { url, key } = await publishArtifact(bytes, extension, contentType);
-
   emit({
     url,
     s3Key: key,
     fileName: path.basename(file),
     bytes: bytes.length,
     contentType,
-    // Unsigned and non-expiring: anyone who receives the link can fetch it.
+    // Unsigned: anyone who receives the link can fetch it, with no sign-in.
     sharing: 'public-by-link',
+    // The `expire-public-artifacts` lifecycle rule deletes the object 30 days
+    // after it is written. Tell the user if the link is meant to last.
+    expires: '30 days after publication',
     instruction: BARE_URL_INSTRUCTION,
   });
+}
+
+async function main() {
+  const args = parseArgs(process.argv);
+  if (args.help) {
+    console.log(
+      'Usage: publish.js --file <path> [--to drive|public] [--content-type <type>]\n' +
+        '\n' +
+        '--to drive  (default) create the file in your agent\'s Drive and share\n' +
+        '            it with you alone. Nothing becomes public.\n' +
+        `            Deliverable: ${[...DRIVE_DELIVERABLE_TYPES.keys()].join(', ')}\n` +
+        '--to public unsigned public-by-link URL, deleted after 30 days.\n' +
+        `            Publishable: ${[...PUBLISHABLE_TYPES.keys()].join(', ')}\n` +
+        '\n' +
+        'HTML pages go to Atrium instead — use psd-html-artifact.'
+    );
+    process.exit(0);
+  }
+
+  const file = args.file && args.file !== true ? String(args.file) : null;
+  if (!file) fail('--file is required (path to the file to deliver)', 'bad_args');
+
+  const destination = resolveDestination(args.to);
+  const { extension, contentType } = resolveContentType(
+    file,
+    args.content_type,
+    destination
+  );
+  const bytes = readDeliverableFile(file, destination);
+
+  if (destination === 'drive') {
+    await deliverToDrive(bytes, file, contentType);
+    return;
+  }
+  await publishPublicly(bytes, file, extension, contentType);
 }
 
 main().catch((err) => {

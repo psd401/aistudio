@@ -81,5 +81,6 @@ This skill enforces the `skill.image-gen` capability at invocation time. The cap
 - Always uses the fixed `openai-image` operation broker. The OpenAI key stays in the trusted web tier and is never returned to the model process.
 - Uploads through the owner-bound artifact broker, which derives the storage
   prefix from the signed invocation and returns a public-by-link URL.
-- Returned URL is **unsigned** and does not embed any STS token. It does not expire — anyone who receives the link can fetch until the object is deleted.
+- Returned URL is **unsigned** and does not embed any STS token — anyone who receives the link can fetch it, with no sign-in, until the `expire-public-artifacts` lifecycle rule deletes the object **30 days** after it is written.
+- Generated imagery is public-by-link by design (flyers, headers, social cards). If an image instead carries personal data — a chart of one student's scores, a screenshot of a record, a photo of an identifiable child — do **not** hand back this URL. Write the bytes to `/tmp` and deliver them privately with `node /opt/psd-skills/psd-publish-file/publish.js --file <path>`, which puts the file in the agent's Drive shared with the caller alone.
 - This was a deliberate switch from presigned URLs (PR #934 dev rollout 2026-05-03): presigned URLs signed with AgentCore's STS session credentials produced intermittent `InvalidToken` failures when fetched through chat clients. Unsigned-public-by-link is the structural fix.
