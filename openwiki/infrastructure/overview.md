@@ -375,6 +375,9 @@ Google Chat messages carry **32,000 bytes** of text plus cards—a combined budg
 | `agent-mint/` | DWD token broker (isolated security) |
 | `hyperframes-render/` | HTML to video rendering |
 | `agent-media/` | HTML-to-PDF, ffmpeg transcode/probe, and Amazon Transcribe |
+<!-- openwiki: broken internal link [../agent-platform/overview.md#runtime-topology] heading anchor "runtime-topology" does not exist in "../agent-platform/overview.md". Fix the href or restore the target, then delete this comment. -->
+| `agent-triage-poll/` | Email triage dispatcher and worker: a 5-minute poll and a daily learning run fan out one FIFO message per opted-in user. See [agent-platform triage topology](../agent-platform/overview.md#runtime-topology) |
+| `agent-triage-digest/` | Per-user daily triage digest, invoked by EventBridge Scheduler and summing `dailyStats` through `digest-window.ts`. See [agent-platform triage](../agent-platform/overview.md#email-triage-content-first-classification-1855-1861) |
 
 ### Agent Media Function
 

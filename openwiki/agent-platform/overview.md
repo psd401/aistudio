@@ -58,7 +58,7 @@ infra/agent-image/skills/{skill-name}/
 **Administrative & District Operations**
 - `psd-atrium` — Read/search/create content in Atrium; artifact data persistence (list-data, submit); viewer-scoped PSD data queries from artifacts via shared connector resolution with Nexus; CSP guidance for artifact scripts/styles (inline preferred, CDN allowlist enforced); visibility/grant management with `read-grants` command and merge mode (`--add-grants`/`--remove-grants`) for safe audience changes (#1763); per-person sharing via `find-people` to resolve email/name to users.id plus `add-person` for staff who never signed in (#1860); "Live PSD data inside an artifact" section mirrors `lib/content/atrium-data-contract.ts` guidance but is hand-maintained — change both when the bridge contract changes (#1749)
 - `psd-freshservice` — Freshservice tickets, service catalog items, approvals, and team summaries using each caller's own API key; create catalog request forms with field validation
-- `psd-email-triage` — Smart email triage with three-stage classification (rules → content → LLM), human sender protection (never muted, never marked as news), rhetorical question guard (`hasDirectQuestion` requires second-person clause), automated-sender veto on question/action-request branch, bulk-mail detection (List-Unsubscribe header + marketing footer phrases), keyword rules with stable IDs, preferences system for user-stated classification intent, and real digest counts from daily stats. Configured entirely from chat. See `/docs/operations/email-triage.md` for runtime architecture and Phase 3 (#1855, #1861) details
+- `psd-email-triage` — Smart email triage with three-stage classification (rules → content → LLM), human sender protection (never muted, never marked as news), rhetorical question guard (`hasDirectQuestion` requires second-person clause), automated-sender veto on question/action-request branch, bulk-publication detection (List-Unsubscribe or bulk Precedence, publication wording, and marketing footers) filed as News (#1866), keyword rules with stable IDs, preferences system for user-stated classification intent, and real digest counts from daily stats. Configured entirely from chat. See `/docs/operations/email-triage.md` for runtime architecture and Phase 3 (#1855, #1861) details
 - `psd-schedules` — Scheduled agent tasks (cron/rate/at) with read access for scheduled-mode turns; reply IS the delivery — never hunt for DM
 - `psd-rules` — Tier-1 governance rules for agent behavior
 - `psd-conversation-coach` — Crucial Conversations framework coaching for difficult conversations
@@ -106,13 +106,38 @@ infra/agent-image/skills/{skill-name}/
 
 ### Email Triage Content-First Classification (#1855, #1861)
 
-**Sources**: `/docs/operations/email-triage.md`, `/infra/lambdas/agent-triage-poll/content-features.ts`, `/infra/agent-image/skills/psd-email-triage/SKILL.md`
+**Sources**: `/docs/operations/email-triage.md`, `/infra/lambdas/agent-triage-poll/content-features.ts`, `/infra/lambdas/agent-triage-poll/llm.ts`, `/infra/lambdas/agent-triage-poll/learning.ts`, `/infra/agent-image/skills/psd-email-triage/SKILL.md`
 
-Phase 3 introduced a three-stage classification pipeline that decides based on content first, sender identity last. This prevents the same message from different addresses receiving different classifications.
+Phase 3 introduced a three-stage classification pipeline that decides based on content first, sender identity last. This prevents the same message from different addresses receiving different classifications. Since #1866 the pipeline has three labels with a defined split: **Important** (needs action), **Later** (real mail written to this user that asks nothing of them yet), and **News** (broadcast publications written for a list rather than for this reader). Later vs News is decided by who the message was written for, not by whether it asks something.
 
 #### Three-Stage Pipeline
 
-For each new message, the classifier runs stages in order (cheapest first):
+For each new message, the classifier runs stages in order (cheapest first). The Lambda's `classifyMessage` in `index.ts` owns the order; each stage is a separate module.
+
+```mermaid
+flowchart TD
+    A["New Gmail message"] --> B{"1. User rules match?"}
+    B -- yes --> R["Apply rule label"]
+    B -- no --> C["2. classifyByContent"]
+    C --> D{"Approval, live thread, or human direct ask?"}
+    D -- yes --> I["important"]
+    D -- no --> H{"Any ask at all?"}
+    H -- yes --> M["3. Bedrock Nova Micro"]
+    H -- no --> E{"bulkPublication?"}
+    E -- yes --> N["news: bulk-publication-no-ask"]
+    E -- no --> K{"Machine sender?"}
+    K -- yes --> J{"Learned News shape?"}
+    J -- yes --> N2["news: learned-you-file-*-mail-as-news"]
+    J -- no --> P{"Stated preferences?"}
+    P -- yes --> M
+    P -- no --> L["later: automated-notice-no-ask"]
+    K -- no --> Q{"FYI, copy-only, or broadcast?"}
+    Q -- yes --> L2["later"]
+    Q -- no --> M
+    M --> G["applyContentGuards"]
+```
+
+*Caption: the order of `classifyByContent` and `classifyNoAsk` in `content-features.ts`, followed by the model stage in `llm.ts`. Stage 3 runs only when the content stage returns `null`.*
 
 1. **User's own rules** — VIP, mute, thread-with-user-reply, keyword rules. An explicit instruction always wins.
 2. **Content stage** (`content-features.ts`) — Derives signals from what the message asks and who it is addressed to, independent of sender identity:
@@ -120,10 +145,11 @@ For each new message, the classifier runs stages in order (cheapest first):
    - Reply in a thread the user has written in → `important`
    - Direct question addressed to user, from non-automated sender → `important`
    - Action request addressed to user, from non-automated sender → `important`
+   - Bulk publication with no ask (see [Bulk Publications Route to News](#bulk-publications-route-to-news-1866)) → `news`
    - Something that asks nothing of a recipient who is only copied → `later`
-   - Automated notice with no ask → `later`
-   - Bulk/list mail (List-Unsubscribe header or marketing footer) → `informational`
-3. **Bedrock Nova Micro** — Only for what remains, with content signals leading the prompt and sender demoted to a weak prior.
+   - One-off automated notice with no ask → `later`, unless the user has a stated preference profile, in which case the stage returns no decision and the model judges it
+   - Human FYI with no ask → `later`
+3. **Bedrock Nova Micro** — Only for what remains (`classifyByContent` returned `null`), with content signals leading the prompt and sender demoted to a weak prior. Its output then passes through `applyContentGuards`.
 
 The content stage is deterministic, recorded as `source: "content"` with confidence 0.7, and produces consistent labels regardless of which address sent the message.
 
@@ -131,10 +157,15 @@ The content stage is deterministic, recorded as `source: "content"` with confide
 
 **Rule**: An address that cannot be proven automated counts as a person and is never muted or marked as news.
 
-Automated senders are detected from:
+Automated senders are detected by `isAutomatedSender` from:
 - `noreply`/`no-reply`/`donotreply` local parts
 - PSD service-account naming: `serv_*`, `tsd-*`, `svc_*`
+- Unambiguous publication mailboxes (`newsletter@`, `newsletters@`, `enews@`, `e-news@`, `mailings@`) and local parts containing `-newsletter` (#1866)
 - Headers: `List-Unsubscribe`, `Auto-Submitted`, `Precedence`
+
+`news@`, `marketing@`, `bulletin@` and `digest@` are deliberately not in the mailbox set: they are often staffed by people. Those mailboxes still reach News when they send with a list header. The set also bounds which senders the learner may suggest muting, so it must stay narrow.
+
+**Colleague list posts stay people.** For a sender on the user's own domain, `isAutomatedMessageSender` discounts the `List-Unsubscribe` and bulk `Precedence` headers. A post by a colleague through a district Google Group therefore stays Later and is not treated as a newsletter. `Auto-Submitted`, a non-list `Precedence`, and a machine-shaped local part still count, so a district newsletter sent from `newsletter@psd401.net` still reaches News.
 
 The nightly learner refuses to emit `mute` suggestions for unproven-automated targets. `suggestions apply` refuses to write a human mute without `--confirm-human`. The `prefs people-suggestions off` setting additionally silences VIP suggestions about individuals.
 
@@ -151,6 +182,36 @@ Four defects lined up to over-promote a Google Search Console blast to `importan
 4. **Bulk-mail boilerplate was not informational** — Now a `List-Unsubscribe` header is sufficient on its own. Marketing footer phrases ("unsubscribe", "you are receiving this", "go ahead and") are consulted **only when sender is already automated** — "go ahead and" is ordinary English from a colleague.
 
 The `simulate` command now reports `firedSignals` (names of true signals) on all branches, and accepts `--list-unsubscribe` for bulk mail simulation.
+
+#### Bulk Publications Route to News (#1866)
+
+**Problem**: In the reported corpus every newsletter and digest landed in Later. Three causes: the content stage had no News outcome; its fixed `later` for machine mail fired before the user's stated preferences were read; and corrections to News were folded into Later, so they taught the opposite lesson.
+
+**Signal derivation** (`detectContentSignals` in `content-features.ts`):
+- `bulkHeader` is true for a non-blank `List-Unsubscribe` or a `Precedence` in `BULK_PRECEDENCE` (`bulk`, `list`). It also drives `broadcast` and `informational`.
+- `bulkPublication` is true only for an automated sender (`isAutomatedMessageSender`). With a bulk header it is true outright. Without one, it needs a broadcast fan-out (`BROADCAST_RECIPIENT_COUNT`), publication vocabulary (`PUBLICATION_RE`: "digest", "newsletter", "highlights", "latest issue", "webinar", and similar), or marketing-footer boilerplate.
+- A one-off machine notice to a single person ("your password was reset") is not a publication. It keeps the `notification` shape.
+- `deriveShape` returns `bulk` before `notification`, so corrections against one shape do not move the other.
+
+**Decision** (`classifyNoAsk`, reached only when `hasAsk` is false): `bulkPublication` returns `news` with `content:bulk-publication-no-ask`. Approval requests and human direct asks return `important` earlier in `classifyByContent`, so a list-bearing service desk's approval request still wins.
+
+**Invariants**
+- `bulkPublication` implies `automatedSender`. A person is never a publication, even with list headers.
+- A colleague's post to a district Google Group (own-domain sender with `List-Unsubscribe` and `Precedence: list`) stays Later. A machine-shaped mailbox on the same domain (`newsletter@psd401.net`) still reaches News.
+- The skill's `simulate` reports `bulkPublication` in `firedSignals`, and accepts `--list-unsubscribe` or `--precedence bulk` to exercise it.
+
+**Focused tests**
+- `infra/lambdas/agent-triage-poll/content-features.test.ts`: `newsletters and digests are News, not Later (#1866)` (named examples, colleague FYI, password-change notice, approval beats bulk); `a colleague's post to an internal list stays Later (#1866)`; `human-staffed publication mailboxes need header evidence (#1866)` under `isAutomatedSender`; `stated preferences get a vote on machine mail (#1866)`.
+- `infra/lambdas/agent-triage-poll/content-learning.test.ts`: `corrections to News generalise by shape (#1866)`, `a declared list mailing the model calls Later is News (#1866)`.
+- Skill mirror: `infra/agent-image/skills/psd-email-triage/parity.test.js` (`content stage parity`, `the publication vocabulary is identical (#1866)`, `learnedNewsShapes applies the same bars`) and `run.test.js`.
+
+**Mirror rule.** The skill's `lib.js` duplicates the Lambda's content logic in CommonJS (`run.js` calls into it for `simulate`), so a change to `PUBLICATION_RE`, the marketing-footer list, or `isAutomatedSender` must be made in both places and is enforced only by `parity.test.js`. Do not hand-edit `lib.js` without updating the Lambda first.
+
+**Validation**
+- `cd infra/lambdas/agent-triage-poll && bun test content-features.test.ts content-learning.test.ts` (focused; the root `test:lambda:triage-poll` script also runs `bun install --frozen-lockfile` first).
+- `cd infra/agent-image/skills/psd-email-triage && bun test run.test.js parity.test.js` (the same suite the root `test:skill:email-triage` script runs).
+
+**Scope boundary**: the human-facing rules (what News means to the user) live in `/docs/features/email-triage-user-guide.md`. This page documents the implementation.
 
 #### Keyword Rules with Stable IDs
 
@@ -174,14 +235,21 @@ The classifier reads the user's stated preferences on every message:
 | `prefs clear` | Clear stated profile (learned patterns untouched) |
 | `prefs people-suggestions on\|off` | Whether suggestions may name individuals |
 
-The preferences text is injected into the LLM prompt and can express intent that per-sender rules cannot capture ("FYI forwards from X are Later unless they ask me something").
+The preferences text is injected into the LLM prompt and can express intent that per-sender rules cannot capture ("FYI forwards from X are Later unless they ask me something"). A stated profile also changes the content stage: a one-off machine notice with no ask is passed to the model rather than fixed to Later, so the profile gets a vote (`classifyByContent(..., { hasStatedPreferences })`, passed by both `index.ts` and the skill's `simulate`).
 
 #### Correction-Driven Content Guards
 
-Decisions record the message's `shape` (what it asks). Corrections snapshot it. `computeContentPreferences` mines those into per-shape leanings, and `applyContentGuards` enforces them:
+Decisions record the message's `shape` (what it asks). Corrections snapshot it. `computeContentPreferences` in `learning.ts` mines those into per-shape leanings, and `applyContentGuards` in `llm.ts` enforces them.
 
-- Two archives of an `important` that asked nothing demotes the next message of that shape (from any sender)
-- Guards only demote, never promote (over-promotion was the reported failure mode)
+- **Three-way leaning** (#1866): `correctionLean` maps `news` to News, `archived`/`later` to Later, and `inbox`/`important` to Important. `strongestLean` picks the label with the most decayed weight and reports the margin over the runner-up. A shape corrected in two directions therefore yields no leaning.
+- **Bar to act**: a leaning applies only when its weight is at least `CONTENT_BIAS_MIN_WEIGHT` (1.5) and it has at least `CONTENT_BIAS_MIN_COUNT` (2) corrections.
+- **Guards run in order** over the model's label. Each guard may rewrite the label:
+  1. An `important` that asks nothing is demoted to the user's learned Later/News leaning for that shape.
+  2. A machine `later` on a learned News shape becomes `news` (`learned:you-file-<shape>-mail-as-news`). Machine mail only.
+  2b. A declared list mailing (`bulkPublication`) that the model itself called `later` becomes `news`. A `later` forced by a confidence floor (`downgraded`) or by the Bedrock fail-safe stays `later`.
+  3. `news` is never applied to a person's mail. This guard runs last so nothing above can leave a colleague filed as News.
+
+Guards are shape-keyed, not sender-keyed, so one correction generalises to other senders with the same shape. Keeping News distinct from Later matters: before #1866, `correctionLean` folded News into Later, so a user's News correction taught the opposite of what they asked for.
 
 #### Real Digest Counts
 
@@ -1132,6 +1200,72 @@ All agent actions are validated against Cedar policies before execution.
 1. **Allowlist principle** — Only explicitly permitted operations
 2. **Least privilege** — Each skill gets minimum required capabilities
 3. **Audit everything** — All actions logged with request context
+
+### Policy Enforcement
+
+```cedar
+permit(principal, action, resource)
+when { principal has capability && resource is allowed };
+```
+
+Policies are evaluated by the agent harness before each skill execution.
+
+---
+
+## Agent Identity & Auditing
+
+### Identity Model
+
+Agents operate with distinct identities tracked in `agent_identities` table:
+- Human owner association
+- Capability grants
+- Audit trail linkage
+
+### Audit Tables
+
+| Table | Purpose |
+|-------|---------|
+| `agent_messages` | All agent communications |
+| `agent_tool_invocations` | Tool calls made by agents |
+| `agent_credential_reads` | Every credential access |
+| `agent_credential_requests` | Permission to read credentials |
+| `content_audit_logs` | Content creation/modification |
+
+### Telemetry
+
+Agent health monitoring via:
+- `agent_health_snapshots`
+- `agent_failures`
+- `agent_patterns`
+
+---
+
+## Skill Publishing
+
+**Documentation**: `/docs/features/skill-publishing.md`
+
+Skills are published and managed through:
+1. Admin interface at `/admin/agents/skills/`
+2. Resource access grants for skill permissions
+3. Audit of all skill operations
+
+### Key Source Files
+
+| File | Purpose |
+|------|---------|
+| `/infra/agent-image/skills/*/SKILL.md` | Individual skill definitions |
+| `/lib/mcp/tool-handlers.ts` | MCP tool routing |
+| `/lib/agent-workspace/` | Workspace integration logic |
+| `/infra/lambdas/agent-router/` | Agent request routing |
+
+---
+
+## Related Concepts
+
+- **[app-features/overview.md](../app-features/overview.md)** — Features agents interact with
+- **[api-integration/overview.md](../api-integration/overview.md)** — External API access
+- **[infrastructure/overview.md](../infrastructure/overview.md)** — Agent infrastructure deployment
+uest context
 
 ### Policy Enforcement
 
