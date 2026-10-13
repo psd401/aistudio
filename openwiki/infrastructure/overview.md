@@ -23,6 +23,11 @@ openwiki:
     - infra/lambdas/agent-cron/chat-text-budget.ts
     - infra/database/schema/186-agent-sonnet-5-5-pricing.sql
     - infra/lambdas/agent-cron/index.ts
+    - infra/lambdas/document-processor-v2/index.ts
+    - infra/lambdas/document-processor-v2/package.json
+    - infra/lambdas/document-processor-v2/processors/factory.ts
+    - infra/lib/document-processing-stack.ts
+    - .github/workflows/ci.yml
     - .github/workflows/security-scan.yml
     - .github/workflows/sdk-version-guard.yml
     - .github/workflows/claude-code-review.yml
@@ -39,6 +44,7 @@ openwiki:
     - infra/lambdas/agent-router/chat-delivery-budget.test.ts
     - infra/lambdas/agent-cron/chat-text-budget.lockstep.test.ts
     - infra/lambdas/agent-cron/silent-scheduled-run.test.ts
+    - infra/lambdas/document-processor-v2/__tests__/handler.test.ts
 ---
 
 # Infrastructure
@@ -274,6 +280,44 @@ Migrations run via Lambda function:
 | `atrium-content-key-bootstrap/` | Atrium key provisioning |
 | `agent-router/` | Agent request routing with promoted turn recovery |
 | `agent-cron/` | Scheduled run invocation, telemetry, and silent reply delivery (#1853) |
+| `document-processor-v2/` | SQS-driven document text extraction (PDF, Office, text) with a standard and a high-memory processor |
+
+### Document Processor v2
+
+**Location**: `/infra/lambdas/document-processor-v2/` (own `package.json` and `package-lock.json`; the handler is `index.ts`)
+
+The `document-processor-v2` Lambda consumes document-processing jobs from SQS, downloads the source object from S3, selects a processor by file type, and records job progress in DynamoDB. `DocumentProcessorFactory.create()` in `processors/factory.ts` maps the detected type to the PDF, Office (XLSX, DOCX, PPTX), or text (TXT, CSV, MD) processor.
+
+**Two deployments of one bundle.** `DocumentProcessingStack` in `/infra/lib/document-processing-stack.ts` defines two `NodejsFunction`s from the same `index.ts` entry:
+
+| Function | `PROCESSOR_TYPE` | Memory | Timeout | Retries |
+|----------|------------------|--------|---------|---------|
+| `AIStudio-DocumentProcessor-Standard-{env}` | `STANDARD` (default) | 3008 MB | 15 min | 2 |
+| `AIStudio-DocumentProcessor-HighMemory-{env}` | `HIGH_MEMORY` | 1536 MB | 15 min | 1 |
+
+The standard function hands any file larger than 50 MiB to `HIGH_MEMORY_QUEUE_URL` instead of processing it. The high-memory function never re-routes, so it is the only path for large files. Failed documents are reported through `batchItemFailures`, so SQS retries and then redrives them to the processing DLQ.
+
+```mermaid
+flowchart TD
+    A["SQS job message"] --> B["Set job status: processing"]
+    B --> C{"STANDARD and size over 50 MiB?"}
+    C -- yes --> D["Send job to high-memory queue"]
+    D --> E["Status: routing_to_high_memory"]
+    C -- no --> F["Download object from S3"]
+    F --> G["DocumentProcessorFactory.create by fileType"]
+    G --> H["Extract text with the selected processor"]
+```
+
+*Caption: routing decision in the `document-processor-v2` handler; the high-memory function runs the same path without the size check.*
+
+**Dependency packaging.** `DocumentProcessingStack` bundles the Lambda with `externalModules: ["@aws-sdk/*"]` and installs `pdf-parse`, `mammoth`, `@e965/xlsx`, `csv-parse`, `marked`, `jszip`, and `xml2js` from the processor's own lockfile. Its `pdf-parse` v1 API depends on that lockfile, so changes to those packages must go through `/infra/lambdas/document-processor-v2/package.json`.
+
+**Audit override (mammoth → argparse).** `package.json` has a scoped npm override `"overrides": { "mammoth": { "argparse": "^2.0.1" } }`. It exists because `npm audit --omit=dev` reported a sprintf-js denial-of-service advisory through `mammoth → argparse@1.0.10 → sprintf-js`, and no mammoth release dropped argparse 1.x. The override is scoped to mammoth so the dev-only `js-yaml@3` chain keeps argparse 1.x. The processor only calls mammoth's library API (`extractRawText`, `convertToHtml`); the mammoth CLI, which requires argparse, is not used by the Lambda. Do not remove or widen the override without re-running the audit; keep `package-lock.json` regenerated together with `package.json`.
+
+**Focused checks**:
+- `cd infra/lambdas/document-processor-v2 && npm ci && npm run build && npm test` — the same steps as the CI job.
+- `cd infra/lambdas/document-processor-v2 && npm audit --omit=dev` — the CI runtime-audit gate. The full `npm audit` still reports dev-only findings that CI does not gate on.
+- `processors/__tests__/office-processor-docx-parse.test.ts` mocks `mammoth`, so the Jest suite does not exercise the real library. Confirming the override needs a real-library check, which the override commit ran as a manual smoke test outside the repo.
 
 ### Agent Cron
 
@@ -833,6 +877,71 @@ Recent workflow changes establish conventions to follow when editing or adding w
 - **Pin third-party actions to commit SHAs.** `ci.yml`, `claude.yml`, `agent-eval-l2.yml`, and `agent-eval-nightly.yml` pin actions such as `aws-actions/configure-aws-credentials`, `aws-actions/amazon-ecr-login`, `docker/setup-qemu-action`, and `anthropics/claude-code-action` to a full SHA with the release as a trailing comment. Not every action is pinned yet (for example `actions/github-script@v9` is still a tag). The org security-scan call (`security-scan.yml`) and the org `psd-ci` call (`psd-ci.yml`) are deliberately left on `@main` and marked with a zizmor ignore, so central fixes propagate.
 - **Pass expressions to scripts through `env:`, not inline interpolation.** `sdk-version-guard.yml` previously interpolated `${{ steps.version-check.outputs.* }}` and `${{ github.base_ref }}` directly into `run:` and `script:` bodies, which is a template-injection risk. The steps now declare those values in a step-level `env:` block and read them as shell variables or `process.env`. Use the same pattern for any new step that handles branch names, PR fields, or step outputs.
 - **Secret scanning uses a reviewed baseline.** The root `.gitleaksignore` lists fingerprints of reviewed historical findings (documentation placeholders, test fixtures, and one SQL column name). Its header states that anything not listed still fails `security-scan.yml`. Do not add fingerprints for new code to make a scan pass; fix the finding or review it explicitly.
+
+### Caller Pattern
+
+Caller workflows are minimal—granting permissions and passing configuration:
+
+```yaml
+jobs:
+  openwiki:
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: PSD401/.github/.github/workflows/reusable-openwiki.yml@main
+    with:
+      base_branch: dev
+    secrets:
+      BEDROCK_API_KEY: ${{ secrets.BEDROCK_API_KEY }}
+      PSD_AUTOMATION_APP_PRIVATE_KEY: ${{ secrets.PSD_AUTOMATION_APP_PRIVATE_KEY }}
+```
+
+Benefits:
+- Single source of truth for workflow logic
+- Centralized security and dependency updates
+- Reduced boilerplate in repository callers
+
+### Index of Workflows
+
+| Workflow | Trigger | Purpose |
+|----------|---------|---------|
+| `ci.yml` | Push and PR to main/dev | Lint, typecheck, tests; separate `Document Processor v2` job runs `npm ci`, build, test, and `npm audit --omit=dev` in `/infra/lambdas/document-processor-v2` (see [Document Processor v2](#document-processor-v2)) |
+| `claude-code-review.yml` | PR opened/ready | AI-assisted code review |
+| `claude.yml` | Issue and PR comments, issue opened/assigned, PR review submitted | Interactive Claude assistant triggered from GitHub events |
+| `claude-dispatch.yml` | `repository_dispatch` (`claude-dispatch`) | Claude run started by an external dispatch event |
+| `sdk-version-guard.yml` | PRs touching `package.json`, `bun.lock`, or `lib/streaming/**`; weekly schedule; manual | SDK version guard for streaming changes |
+| `openwiki-update.yml` | Push to dev (excluding openwiki/**), weekly schedule, manual | Regenerate OpenWiki docs; passes only `BEDROCK_API_KEY` and `PSD_AUTOMATION_APP_PRIVATE_KEY` by name |
+| `agent-eval-nightly.yml` | Manual dispatch only (nightly schedule removed 2026-10-07) | Agent skill evaluation baseline (55 regression and capability tasks) |
+| `agent-eval-l2.yml` | Manual dispatch only (weekly schedule removed 2026-10-07) | Live-dev fixture-drift eval run |
+| `agent-eval-upstream-inventory.yml` | PRs and pushes to main/dev touching the agent image, eval coverage, or upstream inventory files; weekly schedule; manual | Upstream skill inventory and eval coverage check |
+| `security-scan.yml` | PRs, push to dev, weekly schedule (Mondays 09:00 UTC), manual | Calls the org reusable security scan |
+| `codeql.yml` | Push and PR to main/dev, weekly schedule | Security analysis |
+| `psd-ci.yml` | Every pull request and pushes to `dev` | Org-standard `psd-ci / psd-ci` gate calling the reusable `reusable-psd-ci.yml@main` (install, lint, typecheck, `test:ci`; no build, no secrets) |
+
+---
+
+## Key Source Files
+
+| File/Directory | Purpose |
+|----------------|---------|
+| `/infra/bin/infra.ts` | CDK app entrypoint |
+| `/infra/lib/stacks/` | Stack definitions |
+| `/infra/lib/constructs/` | Reusable patterns |
+| `/infra/database/` | Migrations |
+| `/infra/lambdas/` | Lambda function code |
+| `/infra/policies/` | Cedar policies |
+| `/infra/agent-image/` | Agent container |
+| `/.github/workflows/` | CI/CD workflows |
+| `/.gitleaksignore` | Reviewed secret-scan baseline (see [Workflow Hardening Rules](#workflow-hardening-rules)) |
+
+---
+
+## Related Concepts
+
+- **[architecture/overview.md](../architecture/overview.md)** — Overall architecture
+- **[data-models/overview.md](../data-models/overview.md)** — Database schema
+- **[agent-platform/overview.md](../agent-platform/overview.md)** — Agent-specific infrastructure
+ts for new code to make a scan pass; fix the finding or review it explicitly.
 
 ### Caller Pattern
 
