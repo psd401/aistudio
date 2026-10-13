@@ -41,5 +41,10 @@
     "text-extraction"
   ],
   "author": "AI Studio Team",
-  "license": "MIT"
+  "license": "MIT",
+  "overrides": {
+    "mammoth": {
+      "argparse": "^2.0.1"
+    }
+  }
 }
