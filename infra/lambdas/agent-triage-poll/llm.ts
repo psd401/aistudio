@@ -460,7 +460,8 @@ export interface GuardedDecision {
 }
 
 /**
- * Deterministic guards applied to an LLM label (#1855, #1866). Three:
+ * Deterministic guards applied to an LLM label (#1855, #1866). Four, in
+ * the order `GUARDS` runs them:
  *
  *  1. **Corrections must bite.** Before this, twenty corrections of
  *     "you called this important, I archived it" changed nothing but a
@@ -475,6 +476,10 @@ export interface GuardedDecision {
  *     newsletters the user re-labelled kept coming back as Later. Machine
  *     mail only — guard 3 holds the line for people.
  *
+ *  2b. **A declared list mailing the model called Later is News**
+ *     (#1866). Only the model's own confident `later`: a floor downgrade
+ *     or the Bedrock fail-safe stays `later`, the conservative default.
+ *
  *  3. **People are never "news".** `news` is the auto-archive bucket for
  *     broadcast publications. A colleague's mail may be `later`, never
  *     filed away as a newsletter.
@@ -483,7 +488,13 @@ export interface GuardedDecision {
  * a learned rule that silently promotes mail is the harder one to notice.
  */
 export function applyContentGuards(
-  decision: { label: Label; confidence: number; reason: string },
+  decision: {
+    label: Label;
+    confidence: number;
+    reason: string;
+    /** Set by `finalizeLLMLabel` when a confidence floor forced `later`. */
+    downgraded?: boolean;
+  },
   signals: ContentSignals | undefined,
   contentPreferences: ContentPreference[] = [],
 ): GuardedDecision {
@@ -493,7 +504,7 @@ export function applyContentGuards(
   }
 
   for (const guard of GUARDS) {
-    const next = guard(label, signals, contentPreferences);
+    const next = guard(label, signals, contentPreferences, decision);
     if (!next) continue;
     label = next.label;
     reason = `${next.note} (${reason})`;
@@ -512,6 +523,7 @@ type ContentGuard = (
   label: Label,
   signals: ContentSignals,
   contentPreferences: ContentPreference[],
+  decision: { label: Label; downgraded?: boolean },
 ) => { label: Label; note: string } | null;
 
 /**
@@ -541,13 +553,19 @@ const GUARDS: ContentGuard[] = [
       note: `learned:you-file-${signals.shape}-mail-as-news`,
     };
   },
-  // 2b. A message that declared itself a list mailing is News even when
-  // the model, the confidence floors or the Bedrock fail-safe said Later
-  // (#1866). The content stage already decides exactly this for the no-ask
-  // case; this extends it to the ones that carry an ask ("register by
-  // Friday") and so had to go to the model.
-  (label, signals) =>
-    label === "later" && signals.bulkPublication
+  // 2b. A message that declared itself a list mailing is News when the
+  // model itself called it Later (#1866). The content stage already
+  // decides exactly this for the no-ask case; this extends it to the ones
+  // that carry an ask ("register by Friday") and so had to go to the
+  // model. Only the model's own confident `later`: a `later` forced by a
+  // confidence floor or the Bedrock fail-safe (an under-confident
+  // `important`, or no answer at all) stays Later, and so does a `later`
+  // that guard 1 took from this user's own corrections.
+  (label, signals, _prefs, decision) =>
+    label === "later" &&
+    decision.label === "later" &&
+    !decision.downgraded &&
+    signals.bulkPublication
       ? { label: "news", note: "bulk-publication-not-later" }
       : null,
   // 3. People are never `news`.

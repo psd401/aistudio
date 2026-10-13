@@ -120,10 +120,11 @@ For each opted-in user every 5 minutes:
       labels the sender explicitly as a weak prior that must not flip a
       decision the content has settled. Default to `later` below 0.6, and
       an LLM `important` needs 0.75.
-   Then three guards run on the model's answer (`applyContentGuards`):
+   Then four guards run on the model's answer (`applyContentGuards`):
    a content-shape leaning learned from this user's corrections can demote
    an `important` that asks nothing (and can move a machine `later` to
-   `news`), a declared list mailing is never `later`, and a human sender is
+   `news`), a declared list mailing the model itself called `later` is
+   `news`, and a human sender is
    never filed as `news`.
 
    Why: before #1855 the only deterministic features were the sender's
@@ -398,7 +399,8 @@ two different addresses land on the same label.
 The one sender-derived signal is `isAutomatedSender` — a sender *class*,
 not an identity. It is read from `List-Unsubscribe`, `Auto-Submitted` and
 `Precedence` headers, from `noreply`/`no-reply`/`donotreply` local parts,
-from publication mailboxes (`newsletter@`, `digest@`, `marketing@` — #1866),
+from unambiguous publication mailboxes (`newsletter@`, `enews@`,
+`mailings@` — #1866),
 and from PSD service-account naming (`serv_*`, `tsd-*`, `svc_*`). An
 address that cannot be proven automated counts as a person.
 
@@ -598,8 +600,13 @@ causes, all of them needing a fix:
   (large recipient fan-out, publication vocabulary — "digest",
   "newsletter", "highlights", "latest issue", "bulletin" — or marketing
   footer boilerplate). `isAutomatedSender` also learned the publication
-  mailboxes (`newsletter@`, `digest@`, `marketing@`, `news@`), without
-  which a newsletter carrying no list header read as a person.
+  mailboxes (`newsletter@`, `newsletters@`, `enews@`, `e-news@`,
+  `mailings@`), without which a newsletter carrying no list header read
+  as a person. `news@`, `marketing@`, `bulletin@` and `digest@` are
+  deliberately NOT on the list: they are often staffed by people, and the
+  same check decides which mutes `suggestions apply` lets through without
+  `--confirm-human`. They still reach News whenever they send with a list
+  header.
   `bulkPublication` implies `automatedSender` by construction.
 - **`classifyByContent` emits `news`** for a bulk publication with no ask
   (`content:bulk-publication-no-ask`), ahead of the automated-notice
@@ -618,9 +625,11 @@ causes, all of them needing a fix:
   margin over the runner-up, so a shape corrected in both directions
   produces no leaning at all. `applyContentGuards` gained a guard that
   moves a machine `later` to `news` on a learned News leaning, and one
-  that refuses to leave a declared list mailing in Later (which also
-  catches the confidence floors and the Bedrock fail-safe, both of which
-  default to `later`).
+  that moves a declared list mailing the model called Later to News. That
+  one deliberately skips a `later` forced by a confidence floor or the
+  Bedrock fail-safe: an under-confident `important` or an outage keeps
+  the conservative Later default rather than being filed with the
+  newsletters.
 
 ### Note on the recipient fan-out
 

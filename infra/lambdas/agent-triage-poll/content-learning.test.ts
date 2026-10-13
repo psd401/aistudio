@@ -16,7 +16,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { computeLearning } from "./learning";
-import { applyContentGuards } from "./llm";
+import { applyContentGuards, finalizeLLMLabel } from "./llm";
 import { detectContentSignals } from "./content-features";
 import type { CorrectionRecord, DecisionRecord, TriageRules } from "./types";
 
@@ -317,10 +317,10 @@ describe("corrections to News generalise by shape (#1866)", () => {
   });
 });
 
-describe("a declared list mailing is never Later (#1866)", () => {
-  // Covers the paths the content stage cannot reach: a bulk publication
-  // that carries an ask, a confidence-floor downgrade, and the Bedrock
-  // fail-safe — all of which produced `later`.
+describe("a declared list mailing the model calls Later is News (#1866)", () => {
+  // The content stage cannot reach a bulk publication that carries an
+  // ask, so the model decides it. Its own `later` becomes News; a `later`
+  // forced by a confidence floor or the Bedrock fail-safe does not.
   const registrationBlast = detectContentSignals({
     subject: "Last chance to register for the fall conference",
     body: "Register by Friday to keep your member rate.",
@@ -346,14 +346,49 @@ describe("a declared list mailing is never Later (#1866)", () => {
     expect(guarded.reason).toContain("bulk-publication-not-later");
   });
 
-  test("the Bedrock fail-safe default becomes news too", () => {
-    expect(
-      applyContentGuards(
-        { label: "later", confidence: 0, reason: "llm-error-default" },
-        registrationBlast,
-        [],
-      ).label,
-    ).toBe("news");
+  test("the Bedrock fail-safe stays later", () => {
+    // finalizeLLMLabel downgrades the confidence-0 fail-safe; an outage
+    // must not file a deadline-bearing message with the newsletters.
+    const failSafe = finalizeLLMLabel({
+      label: "later",
+      confidence: 0,
+      reason: "llm-error-default",
+    });
+    expect(applyContentGuards(failSafe, registrationBlast, []).label).toBe(
+      "later",
+    );
+  });
+
+  test("an under-confident `important` stays later, not news", () => {
+    const floored = finalizeLLMLabel({
+      label: "important",
+      confidence: 0.7,
+      reason: "asks you to register",
+    });
+    expect(floored.label).toBe("later");
+    const guarded = applyContentGuards(floored, registrationBlast, []);
+    expect(guarded.label).toBe("later");
+    expect(guarded.adjusted).toBe(false);
+  });
+
+  test("a learned Later leaning is not overridden by the list guard", () => {
+    // Guard 1 demotes an ask-less `important` to the user's own Later
+    // leaning for this shape; guard 2b must not then flip it to News.
+    const digest = detectContentSignals({
+      subject: "Your weekly digest",
+      body: "Here are this week's top stories.",
+      headers: { to: USER, listUnsubscribe: "<mailto:u@news.example>" },
+      userEmail: USER,
+      hasUserReply: false,
+      fromEmail: "digest@news.example",
+    });
+    expect(digest.shape).toBe("bulk");
+    const guarded = applyContentGuards(
+      { label: "important", confidence: 0.9, reason: "model" },
+      digest,
+      [{ shape: "bulk", lean: "later", weight: 5, count: 5 }],
+    );
+    expect(guarded.label).toBe("later");
   });
 
   test("an `important` from the model is left alone", () => {

@@ -529,17 +529,14 @@ const AUTOMATED_LOCALPARTS = new Set([
   'postmaster',
   'robot',
   'system',
-  // Publication mailboxes (#1866) — a mailbox named `newsletter` or
-  // `digest` speaks for a periodical. Only the unambiguous ones: `info`,
-  // `support` and `sales` are staffed by people and this set also bounds
-  // which senders the learner may suggest muting.
-  'bulletin',
-  'digest',
+  // Publication mailboxes (#1866) — a mailbox named `newsletter` speaks
+  // for a periodical. Only the unambiguous ones: `info`, `support`,
+  // `sales`, `news`, `marketing`, `bulletin` and `digest` are often
+  // staffed by people, and this set also bounds which senders the learner
+  // may suggest muting and which mutes skip `--confirm-human`.
   'e-news',
   'enews',
   'mailings',
-  'marketing',
-  'news',
   'newsletter',
   'newsletters',
 ]);
@@ -753,6 +750,7 @@ module.exports = {
   wildcardMatch,
   // content signals
   MARKETING_FOOTER_PHRASES,
+  PUBLICATION_RE,
   classifyByContent,
   detectContentSignals,
   firedContentSignals,

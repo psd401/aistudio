@@ -33,6 +33,17 @@ const SENDERS = [
   'mailer-daemon@googlemail.com',
   'bounce+abc@lists.example.org',
   'newsletter@industrydive.com',
+  // Publication mailboxes (#1866) — the ones in AUTOMATED_LOCALPARTS and
+  // the human-staffed ones deliberately left out, so a one-sided edit to
+  // either Set shows up here.
+  'bulletin@district.example',
+  'digest@substack.example',
+  'e-news@assoc.example',
+  'enews@assoc.example',
+  'mailings@vendor.example',
+  'marketing@vendor.example',
+  'news@k12dive.example',
+  'newsletters@vendor.example',
   'members@assoc.example',
   'serv_payroll@psd401.net',
   'svc-backup@psd401.net',
@@ -198,6 +209,13 @@ describe('content stage parity', () => {
     expect(lib.MARKETING_FOOTER_PHRASES).toEqual(
       tsContent.MARKETING_FOOTER_PHRASES,
     );
+  });
+
+  test('the publication vocabulary is identical (#1866)', () => {
+    // The corpus exercises only some of these alternatives, so a word added
+    // to one copy alone would pass it. Pin the pattern itself.
+    expect(lib.PUBLICATION_RE.source).toBe(tsContent.PUBLICATION_RE.source);
+    expect(lib.PUBLICATION_RE.flags).toBe(tsContent.PUBLICATION_RE.flags);
   });
 
   test('hasDirectQuestion agrees (#1861)', () => {

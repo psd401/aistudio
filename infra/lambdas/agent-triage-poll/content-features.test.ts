@@ -71,6 +71,25 @@ describe("isAutomatedSender", () => {
     );
   });
 
+  test("human-staffed publication mailboxes need header evidence (#1866)", () => {
+    // This check also lets a mute through `suggestions apply` without
+    // `--confirm-human`, so a comms office's `news@` must not pass on its
+    // local part alone.
+    for (const address of [
+      "news@psd401.net",
+      "marketing@vendor.example",
+      "bulletin@district.example",
+      "digest@assoc.example",
+    ]) {
+      expect(isAutomatedSender(address)).toBe(false);
+      expect(
+        isAutomatedSender(address, { listUnsubscribe: "<mailto:u@x.example>" }),
+      ).toBe(true);
+    }
+    expect(isAutomatedSender("newsletter@industrydive.com")).toBe(true);
+    expect(isAutomatedSender("k12dive-newsletter@industrydive.com")).toBe(true);
+  });
+
   test("Auto-Submitted: no is the explicit NOT-automated value", () => {
     expect(isAutomatedSender("a.person@psd401.net", { autoSubmitted: "no" })).toBe(
       false,

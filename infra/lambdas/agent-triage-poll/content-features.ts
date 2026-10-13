@@ -21,6 +21,8 @@
  * without Gmail or Bedrock.
  */
 
+import type { Label } from "./rules";
+
 /**
  * The shape of an email, in terms of what it asks of the reader. This is
  * what corrections are learned against (#1855 addendum 2 item 1) — the
@@ -180,11 +182,11 @@ function hasMarketingFooter(text: string): boolean {
  */
 function isInformational(
   opening: string,
-  listMail: boolean,
+  bulkHeader: boolean,
   automatedSender: boolean,
 ): boolean {
   if (INFORMATIONAL_RE.test(opening)) return true;
-  if (listMail) return true;
+  if (bulkHeader) return true;
   return automatedSender && hasMarketingFooter(opening);
 }
 
@@ -205,7 +207,7 @@ const BULK_PRECEDENCE = new Set(["bulk", "list"]);
  * describe a one-off notice, and reading those as a publication would file
  * real notices under News.
  */
-const PUBLICATION_RE =
+export const PUBLICATION_RE =
   /\b(newsletter|news ?letter|digest|bulletin|round[- ]?up|recap|highlights|top stories|this week in|latest issue|new (?:post|issue|edition)|press release|webinar|e[- ]?blast)\b/i;
 
 /**
@@ -359,16 +361,16 @@ const AUTOMATED_LOCALPARTS = new Set([
   // or `digest` speaks for a periodical, not a colleague, and without
   // these a newsletter that carries no List-Unsubscribe (K-12 Dive in the
   // reported corpus) read as a person and could never reach News.
-  // Deliberately only the unambiguous ones — `info`, `support` and
-  // `sales` are staffed by people and are NOT here, because this set also
-  // bounds which senders the learner may suggest muting.
-  "bulletin",
-  "digest",
+  // Deliberately only the unambiguous ones. `info`, `support` and `sales`
+  // are staffed by people, and so are many `news@`, `marketing@`,
+  // `bulletin@` and `digest@` boxes (a comms office, a vendor's PR desk):
+  // they are NOT here, because this set also decides which senders the
+  // learner may suggest muting and which mutes `suggestions apply` lets
+  // through without `--confirm-human`. Those mailboxes still reach News
+  // whenever they send with List-Unsubscribe or a bulk Precedence.
   "e-news",
   "enews",
   "mailings",
-  "marketing",
-  "news",
   "newsletter",
   "newsletters",
 ]);
@@ -537,7 +539,7 @@ export function hasAsk(signals: ContentSignals): boolean {
 }
 
 export interface ContentDecision {
-  label: "important" | "later" | "news";
+  label: Label;
   reason: string;
 }
 
