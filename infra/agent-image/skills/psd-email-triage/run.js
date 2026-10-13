@@ -936,6 +936,11 @@ async function trainingCorrect(args) {
     source: "user-correction",
     fromEmail: prior ? prior.fromEmail : undefined,
     fromDomain: prior?.fromEmail ? prior.fromEmail.split("@")[1] : undefined,
+    // Snapshotted like the Lambda's own corrections: recentDecisions is
+    // trimmed every poll, so the nightly learner cannot rely on finding
+    // this decision there to recover its shape (#1866 review).
+    shape: prior ? prior.shape : undefined,
+    automatedSender: prior ? prior.automatedSender : undefined,
   };
   const corrections = [...(row.recentCorrections || []), correction].slice(-50);
   await lib.updateRow(user, { recentCorrections: corrections });
@@ -1038,6 +1043,7 @@ async function cmd_simulate(args) {
     hasStatedPreferences: Boolean(
       row.preferences && String(row.preferences.text || "").trim(),
     ),
+    learnedNewsShapes: lib.learnedNewsShapes(row.contentPreferences),
   });
   emit({
     ok: true,
@@ -1601,6 +1607,7 @@ module.exports = {
   cmd_prefs,
   cmd_simulate,
   cmd_suggestions,
+  cmd_training,
 };
 
 // Only run the CLI when invoked as a program; `require()` from the test

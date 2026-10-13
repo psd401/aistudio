@@ -641,6 +641,19 @@ causes, all of them needing a fix:
   Bedrock fail-safe: an under-confident `important` or an outage keeps
   the conservative Later default rather than being filed with the
   newsletters.
+- **A learned News leaning reaches the content stage too.** The stage
+  decides a machine notice (`notification` shape) as Later before any
+  model-path guard runs, so a shape the user kept re-filing as News never
+  moved. `classifyByContent` now takes `learnedNewsShapes` (computed by
+  `learnedNewsShapes` in llm.ts with the same `CONTENT_BIAS_MIN_*` bars)
+  and files those machine notices as News
+  (`content:learned-you-file-<shape>-mail-as-news`). People are excluded.
+  `simulate` passes the same option.
+- **`training correct` snapshots the shape.** Like the Lambda's own
+  corrections, a manual correction now stores `shape` and
+  `automatedSender` from the prior decision, so the nightly learner does
+  not depend on the decision still being in the 20-entry
+  `recentDecisions` buffer.
 
 ### Note on the recipient fan-out
 

@@ -466,6 +466,22 @@ function isBulkPublication(opening, bulkHeader, automatedSender, broadcast) {
   if (bulkHeader) return true;
   return broadcast || PUBLICATION_RE.test(opening) || hasMarketingFooter(opening);
 }
+// Shapes the user's corrections strongly lean News — same bars as
+// CONTENT_BIAS_MIN_WEIGHT / CONTENT_BIAS_MIN_COUNT in llm.ts (pinned by
+// parity.test.js). The simulate command passes these to classifyByContent
+// exactly as the Lambda does.
+const CONTENT_BIAS_MIN_WEIGHT = 1.5;
+const CONTENT_BIAS_MIN_COUNT = 2;
+function learnedNewsShapes(contentPreferences) {
+  return (contentPreferences || [])
+    .filter(
+      (pref) =>
+        pref.lean === 'news' &&
+        (pref.weight || 0) >= CONTENT_BIAS_MIN_WEIGHT &&
+        (pref.count || 0) >= CONTENT_BIAS_MIN_COUNT,
+    )
+    .map((pref) => pref.shape);
+}
 // isAutomatedSender for one message, with a colleague's list post kept a
 // person (#1866): a district Google Group post carries List-Unsubscribe
 // and Precedence: list, so for a sender on the user's own domain those
@@ -568,8 +584,8 @@ const AUTOMATED_LOCALPART_FRAGMENTS = [
   'do-not-reply',
   'do_not_reply',
   'mailer-daemon',
-  // `k12dive-newsletter@`, `weekly-newsletter@` (#1866).
-  'newsletter',
+  // No 'newsletter' fragment (#1866 review): a substring match would let
+  // `newsletter-editor@` (a person) be muted without --confirm-human.
 ];
 const AUTOMATED_LOCALPART_PREFIXES = ['serv_', 'svc_', 'svc-', 'tsd-', 'noreply'];
 
@@ -709,6 +725,13 @@ function classifyNoAsk(signals, options) {
   if (signals.automatedSender) {
     // A one-off machine notice. Later vs News is a judgement call, so
     // hand it to the model when the user has stated preferences (#1866).
+    // A shape the user keeps re-filing as News is not a judgement call.
+    if ((options.learnedNewsShapes || []).includes(signals.shape)) {
+      return {
+        label: 'news',
+        reason: `content:learned-you-file-${signals.shape}-mail-as-news`,
+      };
+    }
     if (options.hasStatedPreferences) return null;
     return { label: 'later', reason: 'content:automated-notice-no-ask' };
   }
@@ -774,6 +797,7 @@ module.exports = {
   // content signals
   MARKETING_FOOTER_PHRASES,
   PUBLICATION_RE,
+  learnedNewsShapes,
   classifyByContent,
   detectContentSignals,
   firedContentSignals,

@@ -391,8 +391,11 @@ const AUTOMATED_LOCALPART_FRAGMENTS = [
   "do-not-reply",
   "do_not_reply",
   "mailer-daemon",
-  // `k12dive-newsletter@`, `weekly-newsletter@` (#1866).
-  "newsletter",
+  // No "newsletter" fragment (#1866 review): a substring match would make
+  // `newsletter-editor@` or `jdoe.newsletter@` — a person who runs the
+  // newsletter — mutable without `--confirm-human`. Only the exact
+  // `newsletter@` / `newsletters@` mailboxes are listed above; any other
+  // newsletter reaches News through its list header.
 ];
 
 /**
@@ -590,6 +593,13 @@ export interface ContentDecisionOptions {
    * got a vote.
    */
   hasStatedPreferences?: boolean;
+  /**
+   * Shapes this user's corrections strongly lean News (`learnedNewsShapes`
+   * in llm.ts). A machine notice of one of these shapes is filed as News
+   * here, because the stage decides it before the model-path guard that
+   * would otherwise apply the leaning ever runs (#1866 review).
+   */
+  learnedNewsShapes?: readonly ContentShape[];
 }
 
 /**
@@ -665,7 +675,14 @@ function classifyNoAsk(
     // A one-off machine notice with nothing asked (a password reset, a
     // sync report). Later vs News here is a judgement call, not a
     // certainty: hand it to the model when the user has told us how they
-    // want it judged, and keep the old default when they have not.
+    // want it judged, and keep the old default when they have not. A
+    // shape the user keeps re-filing as News is not a judgement call.
+    if (options.learnedNewsShapes?.includes(signals.shape)) {
+      return {
+        label: "news",
+        reason: `content:learned-you-file-${signals.shape}-mail-as-news`,
+      };
+    }
     if (options.hasStatedPreferences) return null;
     return { label: "later", reason: "content:automated-notice-no-ask" };
   }

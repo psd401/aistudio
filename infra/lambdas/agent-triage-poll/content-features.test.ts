@@ -87,7 +87,9 @@ describe("isAutomatedSender", () => {
       ).toBe(true);
     }
     expect(isAutomatedSender("newsletter@industrydive.com")).toBe(true);
-    expect(isAutomatedSender("k12dive-newsletter@industrydive.com")).toBe(true);
+    // Exact mailbox only: a person who runs the newsletter is not a machine.
+    expect(isAutomatedSender("newsletter-editor@psd401.net")).toBe(false);
+    expect(isAutomatedSender("jdoe.newsletter@psd401.net")).toBe(false);
   });
 
   test("Auto-Submitted: no is the explicit NOT-automated value", () => {
@@ -818,6 +820,49 @@ describe("a colleague's post to an internal list stays Later (#1866)", () => {
       headers: { to: USER, autoSubmitted: "auto-replied" },
     });
     expect(ooo.automatedSender).toBe(true);
+  });
+});
+
+describe("a learned News leaning reaches the content stage (#1866 review)", () => {
+  // A machine notice of the `notification` shape is decided Later by the
+  // stage, before the model-path guard that applies learned leanings.
+  const notice = signalsFor({
+    fromEmail: "noreply@vendor.example",
+    subject: "Your monthly usage summary",
+    body: "Usage for September is attached.",
+    headers: { to: USER },
+  });
+
+  test("the shape the user keeps filing as News is News", () => {
+    expect(classifyByContent(notice)?.label).toBe("later");
+    expect(
+      classifyByContent(notice, { learnedNewsShapes: [notice.shape] }),
+    ).toEqual({
+      label: "news",
+      reason: `content:learned-you-file-${notice.shape}-mail-as-news`,
+    });
+  });
+
+  test("it wins over deferring to the model for stated preferences", () => {
+    expect(
+      classifyByContent(notice, {
+        hasStatedPreferences: true,
+        learnedNewsShapes: [notice.shape],
+      })?.label,
+    ).toBe("news");
+  });
+
+  test("a person's mail of that shape is never News", () => {
+    const colleague = signalsFor({
+      fromEmail: "jsmith@psd401.net",
+      subject: "FYI: the assessment calendar changed",
+      body: "No action needed.",
+      headers: { to: USER },
+    });
+    expect(
+      classifyByContent(colleague, { learnedNewsShapes: [colleague.shape] })
+        ?.label,
+    ).not.toBe("news");
   });
 });
 

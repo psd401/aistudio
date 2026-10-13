@@ -445,3 +445,71 @@ describe('simulate (#1861)', () => {
     expect(err.code).toBe('missing-from');
   });
 });
+
+describe('learned News leaning and correction snapshots (#1866 review)', () => {
+  test('simulate applies a learned News leaning like the Lambda does', async () => {
+    const argv = [
+      'simulate',
+      '--user', USER,
+      '--from', 'noreply@vendor.example',
+      '--subject', 'Your monthly usage summary',
+      '--snippet', 'Usage for September is attached.',
+      '--to', USER,
+    ];
+    const before = await invoke(run.cmd_simulate, argv);
+    expect(before.data.decision.label).toBe('later');
+    const shape = before.data.signals.shape;
+    currentRow = baseRow({
+      contentPreferences: [{ shape, lean: 'news', weight: 3, count: 3 }],
+    });
+    const after = await invoke(run.cmd_simulate, argv);
+    expect(after.data.stage).toBe('content');
+    expect(after.data.decision).toEqual({
+      label: 'news',
+      reason: `content:learned-you-file-${shape}-mail-as-news`,
+    });
+  });
+
+  test('training correct snapshots the shape and sender class', async () => {
+    const saved = {
+      getUserAccessToken: lib.getUserAccessToken,
+      ensureLabels: lib.ensureLabels,
+      modifyMessage: lib.modifyMessage,
+    };
+    lib.getUserAccessToken = mock(async () => 'token');
+    lib.ensureLabels = mock(async () => ({
+      important: 'L1',
+      later: 'L2',
+      news: 'L3',
+    }));
+    lib.modifyMessage = mock(async () => undefined);
+    try {
+      currentRow = baseRow({
+        recentDecisions: [
+          {
+            messageId: 'm1',
+            label: 'later',
+            fromEmail: 'noreply@vendor.example',
+            shape: 'notification',
+            automatedSender: true,
+          },
+        ],
+      });
+      const out = await invoke(run.cmd_training, [
+        'training', 'correct', 'm1', 'news', '--user', USER,
+      ]);
+      expect(out.ok).toBe(true);
+      // recentDecisions is trimmed every poll, so the learner must not
+      // depend on finding m1 there to recover its shape.
+      expect(writes[0].recentCorrections[0]).toMatchObject({
+        messageId: 'm1',
+        fromLabel: 'later',
+        toLabel: 'news',
+        shape: 'notification',
+        automatedSender: true,
+      });
+    } finally {
+      Object.assign(lib, saved);
+    }
+  });
+});

@@ -16,7 +16,11 @@
 import { describe, expect, test } from "bun:test";
 
 import { computeLearning } from "./learning";
-import { applyContentGuards, finalizeLLMLabel } from "./llm";
+import {
+  applyContentGuards,
+  finalizeLLMLabel,
+  learnedNewsShapes,
+} from "./llm";
 import { detectContentSignals } from "./content-features";
 import type { CorrectionRecord, DecisionRecord, TriageRules } from "./types";
 
@@ -399,5 +403,19 @@ describe("a declared list mailing the model calls Later is News (#1866)", () => 
         [],
       ).label,
     ).toBe("important");
+  });
+});
+
+describe("learnedNewsShapes (#1866 review)", () => {
+  test("only a News leaning that clears both bars", () => {
+    expect(
+      learnedNewsShapes([
+        { shape: "notification", lean: "news", weight: 1.5, count: 2 },
+        { shape: "bulk", lean: "news", weight: 1.49, count: 5 },
+        { shape: "fyi", lean: "news", weight: 3, count: 1 },
+        { shape: "direct-ask", lean: "later", weight: 3, count: 5 },
+      ]),
+    ).toEqual(["notification"]);
+    expect(learnedNewsShapes()).toEqual([]);
   });
 });

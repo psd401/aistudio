@@ -19,6 +19,7 @@ const { test, expect, describe } = require('bun:test');
 const lib = require('./lib');
 const tsRules = require('../../../lambdas/agent-triage-poll/rules.ts');
 const tsContent = require('../../../lambdas/agent-triage-poll/content-features.ts');
+const tsLlm = require('../../../lambdas/agent-triage-poll/llm.ts');
 
 const USER = 'user@psd401.net';
 
@@ -192,6 +193,15 @@ describe('content stage parity', () => {
         lib.classifyByContent(js, { hasStatedPreferences: true }),
         tsContent.classifyByContent(ts, { hasStatedPreferences: true }),
       );
+      // #1866 review: a learned News leaning is applied by the stage, and
+      // `simulate` passes it too.
+      const learned = { learnedNewsShapes: ['notification', 'fyi'] };
+      same(
+        'classifyByContent+learnedNews',
+        input,
+        lib.classifyByContent(js, learned),
+        tsContent.classifyByContent(ts, learned),
+      );
       // #1861: `simulate` prints firedContentSignals, so a drift here
       // would have the CLI name a different signal than the classifier.
       same(
@@ -216,6 +226,19 @@ describe('content stage parity', () => {
     // to one copy alone would pass it. Pin the pattern itself.
     expect(lib.PUBLICATION_RE.source).toBe(tsContent.PUBLICATION_RE.source);
     expect(lib.PUBLICATION_RE.flags).toBe(tsContent.PUBLICATION_RE.flags);
+  });
+
+  test('learnedNewsShapes applies the same bars (#1866 review)', () => {
+    const prefs = [];
+    for (const lean of ['important', 'later', 'news']) {
+      for (const weight of [0, 1.49, 1.5, 3]) {
+        for (const count of [1, 2, 5]) {
+          prefs.push({ shape: `s-${lean}-${weight}-${count}`, lean, weight, count });
+        }
+      }
+    }
+    expect(lib.learnedNewsShapes(prefs)).toEqual(tsLlm.learnedNewsShapes(prefs));
+    expect(lib.learnedNewsShapes(undefined)).toEqual([]);
   });
 
   test('hasDirectQuestion agrees (#1861)', () => {

@@ -39,6 +39,7 @@ import {
   applyContentGuards,
   classifyWithLLM,
   finalizeLLMLabel,
+  learnedNewsShapes,
   BODY_EXCERPT_MAX,
 } from "./llm";
 import {
@@ -455,17 +456,6 @@ function signalsFor(
 }
 
 /**
- * Three stages, cheapest first:
- *
- *   1. The user's own rules. An explicit instruction always wins.
- *   2. The deterministic content stage (#1855). Decided entirely by what
- *      the message asks and who it is addressed to, so the same body from
- *      two different senders lands on the same label — and no Bedrock
- *      call is paid for the clear cases.
- *   3. Bedrock, with the content signals in front of it and the sender
- *      demoted to a weak prior, then the learned-correction guards.
- */
-/**
  * Full-body excerpt for the content stage and the prompt. A fetch failure
  * is not fatal — the caller falls back to the Gmail snippet.
  */
@@ -491,6 +481,17 @@ async function fetchBodyExcerpt(
   }
 }
 
+/**
+ * Three stages, cheapest first:
+ *
+ *   1. The user's own rules. An explicit instruction always wins.
+ *   2. The deterministic content stage (#1855). Decided entirely by what
+ *      the message asks and who it is addressed to, so the same body from
+ *      two different senders lands on the same label — and no Bedrock
+ *      call is paid for the clear cases.
+ *   3. Bedrock, with the content signals in front of it and the sender
+ *      demoted to a weak prior, then the learned-correction guards.
+ */
 async function classifyMessage(
   row: TriageRow,
   accessToken: string,
@@ -516,6 +517,7 @@ async function classifyMessage(
   const signals = signalsFor(row, ctx, bodyExcerpt ?? ctx.snippet);
   const contentDecision = classifyByContent(signals, {
     hasStatedPreferences: Boolean(row.preferences?.text?.trim()),
+    learnedNewsShapes: learnedNewsShapes(row.contentPreferences ?? []),
   });
   if (contentDecision) {
     return {

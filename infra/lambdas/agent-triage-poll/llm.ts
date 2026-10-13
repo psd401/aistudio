@@ -37,6 +37,7 @@ import type {
 import {
   describeContentSignals,
   hasAsk,
+  type ContentShape,
   type ContentSignals,
 } from "./content-features";
 
@@ -433,6 +434,24 @@ export const CONTENT_BIAS_MIN_WEIGHT = 1.5;
 
 /** Minimum number of corrections behind a content-shape leaning. */
 export const CONTENT_BIAS_MIN_COUNT = 2;
+
+/**
+ * Shapes whose learned leaning is News and clears both bars. Passed to
+ * `classifyByContent`, which decides machine notices before any guard
+ * here runs, so a learned News leaning reaches that stage too.
+ */
+export function learnedNewsShapes(
+  contentPreferences: ContentPreference[] = [],
+): ContentShape[] {
+  return contentPreferences
+    .filter(
+      (pref) =>
+        pref.lean === "news" &&
+        (pref.weight ?? 0) >= CONTENT_BIAS_MIN_WEIGHT &&
+        (pref.count ?? 0) >= CONTENT_BIAS_MIN_COUNT,
+    )
+    .map((pref) => pref.shape);
+}
 
 /**
  * The learned leaning for this message's shape, if it clears both bars.
