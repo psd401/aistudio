@@ -759,6 +759,68 @@ describe("newsletters and digests are News, not Later (#1866)", () => {
   });
 });
 
+describe("a colleague's post to an internal list stays Later (#1866)", () => {
+  // A district Google Group stamps List-Unsubscribe and Precedence: list
+  // on a colleague's post. That must not read the colleague as a machine
+  // or their post as a newsletter.
+  const groupHeaders = {
+    to: "staff-ghhs@psd401.net",
+    listUnsubscribe: "<mailto:staff-ghhs+unsubscribe@psd401.net>",
+    precedence: "list",
+  };
+  const colleaguePost = signalsFor({
+    fromEmail: "jsmith@psd401.net",
+    subject: "Notes from today's staff meeting",
+    body: "Sharing the notes from this afternoon for anyone who missed it.",
+    headers: groupHeaders,
+  });
+
+  test("the colleague is a person and the post is not a publication", () => {
+    expect(colleaguePost.automatedSender).toBe(false);
+    expect(colleaguePost.bulkPublication).toBe(false);
+    expect(colleaguePost.informational).toBe(true);
+  });
+
+  test("it is decided Later, not News, before the model is asked", () => {
+    expect(classifyByContent(colleaguePost)?.label).toBe("later");
+    expect(
+      classifyByContent(colleaguePost, { hasStatedPreferences: true })?.label,
+    ).toBe("later");
+  });
+
+  test("a machine mailbox on the district domain is still News", () => {
+    const districtNewsletter = signalsFor({
+      fromEmail: "newsletter@psd401.net",
+      subject: "PSD Weekly: highlights from around the district",
+      body: "This week's highlights.",
+      headers: groupHeaders,
+    });
+    expect(districtNewsletter.bulkPublication).toBe(true);
+    expect(classifyByContent(districtNewsletter)?.label).toBe("news");
+  });
+
+  test("an external list post is unaffected", () => {
+    const external = signalsFor({
+      fromEmail: "jsmith@othersd.org",
+      subject: "Notes from today's meeting",
+      body: "Sharing the notes.",
+      headers: groupHeaders,
+    });
+    expect(external.automatedSender).toBe(true);
+    expect(classifyByContent(external)?.label).toBe("news");
+  });
+
+  test("a colleague's out-of-office reply is still automated", () => {
+    const ooo = signalsFor({
+      fromEmail: "jsmith@psd401.net",
+      subject: "Automatic reply: budget",
+      body: "I am out of the office until Monday.",
+      headers: { to: USER, autoSubmitted: "auto-replied" },
+    });
+    expect(ooo.automatedSender).toBe(true);
+  });
+});
+
 describe("stated preferences get a vote on machine mail (#1866)", () => {
   // The stage's fixed `later` for machine mail fired before the model, so
   // the user's own words ("when unsure choose News") never applied. With a

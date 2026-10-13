@@ -461,9 +461,28 @@ const PUBLICATION_RE =
 // A broadcast publication rather than mail written to this reader.
 // See isBulkPublication in content-features.ts.
 function isBulkPublication(opening, bulkHeader, automatedSender, broadcast) {
-  if (bulkHeader) return true;
+  // A person is never a publication, list header or not.
   if (!automatedSender) return false;
+  if (bulkHeader) return true;
   return broadcast || PUBLICATION_RE.test(opening) || hasMarketingFooter(opening);
+}
+// isAutomatedSender for one message, with a colleague's list post kept a
+// person (#1866): a district Google Group post carries List-Unsubscribe
+// and Precedence: list, so for a sender on the user's own domain those
+// list headers are discounted. Auto-Submitted, a non-list Precedence and
+// a machine-shaped local part still count. See content-features.ts.
+function isAutomatedMessageSender(fromEmail, userEmail, headers) {
+  const fromDomain = (String(fromEmail || '').split('@')[1] || '').toLowerCase();
+  const userDomain = String(userEmail || '').split('@')[1] || '';
+  if (!fromDomain || fromDomain !== userDomain) {
+    return isAutomatedSender(fromEmail, headers);
+  }
+  const precedence = String(headers.precedence || '').trim().toLowerCase();
+  return isAutomatedSender(fromEmail, {
+    ...headers,
+    listUnsubscribe: undefined,
+    precedence: BULK_PRECEDENCE.has(precedence) ? undefined : headers.precedence,
+  });
 }
 // A question only counts when the clause it terminates speaks to the
 // reader (#1861) — "Think this is awesome?" is not an ask. No contraction
@@ -612,7 +631,11 @@ function detectContentSignals(input) {
   const bulkHeader =
     listMail ||
     BULK_PRECEDENCE.has(String(headers.precedence || '').trim().toLowerCase());
-  const automatedSender = isAutomatedSender(input.fromEmail, headers);
+  const automatedSender = isAutomatedMessageSender(
+    input.fromEmail,
+    userEmail,
+    headers,
+  );
   const broadcast =
     bulkHeader ||
     toAddresses.length + ccAddresses.length >= BROADCAST_RECIPIENT_COUNT;

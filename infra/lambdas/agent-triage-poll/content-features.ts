@@ -229,8 +229,11 @@ function isBulkPublication(
   automatedSender: boolean,
   broadcast: boolean,
 ): boolean {
-  if (bulkHeader) return true;
+  // A person is never a publication, list header or not (see
+  // `isAutomatedMessageSender`). For every other sender a list header
+  // already makes `automatedSender` true, so this order changes nothing.
   if (!automatedSender) return false;
+  if (bulkHeader) return true;
   return (
     broadcast || PUBLICATION_RE.test(opening) || hasMarketingFooter(opening)
   );
@@ -437,6 +440,35 @@ export function isAutomatedSender(
   return AUTOMATED_LOCALPART_PREFIXES.some((p) => localPart.startsWith(p));
 }
 
+/**
+ * `isAutomatedSender` for one message, with a colleague's list post kept
+ * a person (#1866). A post by `jsmith@psd401.net` to a district Google
+ * Group arrives with `List-Unsubscribe` and `Precedence: list`, which
+ * would otherwise read the colleague as a machine and their post as a
+ * publication — News. For a sender on the user's own domain the list
+ * headers are discounted, so the post stays a person's mail (Later at
+ * most). `Auto-Submitted` and a non-list `Precedence` still count (an
+ * out-of-office reply is still automated), and so does a machine-shaped
+ * local part (`newsletter@`, `noreply@`, `serv_*`).
+ */
+function isAutomatedMessageSender(
+  fromEmail: string,
+  userEmail: string,
+  headers: MessageHeaders,
+): boolean {
+  const fromDomain = (fromEmail.split("@")[1] ?? "").toLowerCase();
+  const userDomain = userEmail.split("@")[1] ?? "";
+  if (!fromDomain || fromDomain !== userDomain) {
+    return isAutomatedSender(fromEmail, headers);
+  }
+  const precedence = (headers.precedence ?? "").trim().toLowerCase();
+  return isAutomatedSender(fromEmail, {
+    ...headers,
+    listUnsubscribe: undefined,
+    precedence: BULK_PRECEDENCE.has(precedence) ? undefined : headers.precedence,
+  });
+}
+
 function deriveShape(
   signals: Omit<ContentSignals, "shape">,
 ): ContentShape {
@@ -469,7 +501,11 @@ export function detectContentSignals(
   const ccAddresses = parseAddressList(input.headers.cc);
   const addressedToUser = toAddresses.includes(userEmail);
   const ccOnly = !addressedToUser && ccAddresses.includes(userEmail);
-  const automatedSender = isAutomatedSender(input.fromEmail, input.headers);
+  const automatedSender = isAutomatedMessageSender(
+    input.fromEmail,
+    userEmail,
+    input.headers,
+  );
 
   // Ask detection runs against the text with withdrawals removed;
   // `informational` runs against the original, where those same phrases

@@ -608,6 +608,17 @@ causes, all of them needing a fix:
   `--confirm-human`. They still reach News whenever they send with a list
   header.
   `bulkPublication` implies `automatedSender` by construction.
+- **A colleague's list post stays a person's mail.** A district Google
+  Group stamps `List-Unsubscribe` and `Precedence: list` on every post,
+  which would read the colleague as a machine and the post as News. For
+  a sender on the user's own domain, `detectContentSignals` discounts
+  those two list headers (`isAutomatedMessageSender`), so the post is
+  Later at most (`content:fyi-nothing-asked-of-you`). `Auto-Submitted`
+  (an out-of-office reply) and a machine-shaped local part
+  (`newsletter@psd401.net`, `noreply@`, `serv_*`) still count, so a
+  district newsletter still reaches News. Consequence: a district
+  mailbox with a human-looking local part (`comms@psd401.net` sending a
+  newsletter) is treated as a person and lands in Later, not News.
 - **`classifyByContent` emits `news`** for a bulk publication with no ask
   (`content:bulk-publication-no-ask`), ahead of the automated-notice
   branch.
