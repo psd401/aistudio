@@ -320,6 +320,24 @@ describe('prefs', () => {
     const shown = await invoke(run.cmd_prefs, ['prefs', 'show', '--user', USER]);
     expect(shown.data.learned[0].inPlainWords).toContain('out of the way');
   });
+
+  test('a learned News leaning reads as News, not as "in front of you" (#1866)', async () => {
+    currentRow = baseRow({
+      contentPreferences: [{ shape: 'bulk', lean: 'news', weight: 2.4, count: 3 }],
+    });
+    const shown = await invoke(run.cmd_prefs, ['prefs', 'show', '--user', USER]);
+    expect(shown.data.learned[0].inPlainWords).toBe(
+      'You usually file "bulk" mail as News (3 correction(s)).',
+    );
+  });
+
+  test('an important leaning still reads as "in front of you"', async () => {
+    currentRow = baseRow({
+      contentPreferences: [{ shape: 'approval', lean: 'important', weight: 2.4, count: 3 }],
+    });
+    const shown = await invoke(run.cmd_prefs, ['prefs', 'show', '--user', USER]);
+    expect(shown.data.learned[0].inPlainWords).toContain('in front of you');
+  });
 });
 
 /**
@@ -328,7 +346,7 @@ describe('prefs', () => {
  * rules-decided branch, so the agent had to infer the deciding signal.
  */
 describe('simulate (#1861)', () => {
-  test('the reported Google Search Console blast would be labelled later', async () => {
+  test('the reported Google Search Console blast would be labelled news', async () => {
     const out = await invoke(run.cmd_simulate, [
       'simulate',
       '--user', USER,
@@ -339,9 +357,10 @@ describe('simulate (#1861)', () => {
       '--list-unsubscribe', '<mailto:unsub@google.com>',
     ]);
     expect(out.data.stage).toBe('content');
+    // #1861 pinned `later`; #1866 files marketing blasts under news.
     expect(out.data.decision).toEqual({
-      label: 'later',
-      reason: 'content:automated-notice-no-ask',
+      label: 'news',
+      reason: 'content:bulk-publication-no-ask',
     });
     expect(out.data.signals.directQuestion).toBe(false);
     expect(out.data.firedSignals).toEqual([
@@ -349,9 +368,29 @@ describe('simulate (#1861)', () => {
       'broadcast',
       'informational',
       'automatedSender',
+      'bulkPublication',
     ]);
     expect(out.summary).toContain('Content signals that fired:');
     expect(out.summary).toContain('automatedSender');
+  });
+
+  test('a bulk-Precedence association mailing simulates as news (#1866)', async () => {
+    const out = await invoke(run.cmd_simulate, [
+      'simulate',
+      '--user', USER,
+      '--from', 'members@assoc.example',
+      '--subject', 'Member bulletin: fall conference registration is open',
+      '--snippet', 'Registration details inside.',
+      '--to', USER,
+      '--precedence', 'bulk',
+    ]);
+    expect(out.data.stage).toBe('content');
+    expect(out.data.decision).toEqual({
+      label: 'news',
+      reason: 'content:bulk-publication-no-ask',
+    });
+    expect(out.data.signals.shape).toBe('bulk');
+    expect(out.data.firedSignals).toContain('bulkPublication');
   });
 
   test('a colleague asking a direct question is important, and names the signal', async () => {

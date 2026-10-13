@@ -105,7 +105,7 @@ describe("corrections change the next classification", () => {
     );
     expect(guarded.label).toBe("later");
     expect(guarded.adjusted).toBe(true);
-    expect(guarded.reason).toContain("learned:you-archive-fyi-mail");
+    expect(guarded.reason).toContain("learned:you-file-fyi-mail-as-later");
   });
 
   test("the lesson generalises to a sender who was never corrected", () => {
@@ -198,5 +198,171 @@ describe("people are never filed as news", () => {
     );
     expect(guarded.label).toBe("news");
     expect(guarded.adjusted).toBe(false);
+  });
+});
+
+describe("corrections to News generalise by shape (#1866)", () => {
+  /** A digest the stage files as `bulk`. */
+  function digestSignals(fromEmail: string) {
+    return detectContentSignals({
+      subject: "Daily Highlights",
+      body: "Today's top stories from the member network.",
+      headers: { to: USER, listUnsubscribe: "<mailto:u@x.example>" },
+      userEmail: USER,
+      hasUserReply: false,
+      fromEmail,
+    });
+  }
+
+  function relabelledToNews(
+    messageId: string,
+    fromEmail: string,
+  ): { decision: DecisionRecord; correction: CorrectionRecord } {
+    return {
+      decision: {
+        messageId,
+        threadId: `t-${messageId}`,
+        label: "later",
+        source: "llm",
+        reason: "FYI, no action required",
+        confidence: 0.7,
+        ts: "2026-07-09T00:00:00Z",
+        fromEmail,
+        subject: "Daily Highlights",
+        shape: "bulk",
+        automatedSender: true,
+      },
+      correction: {
+        messageId,
+        fromLabel: "later",
+        toLabel: "news",
+        ts: "2026-07-09T01:00:00Z",
+        fromEmail,
+        shape: "bulk",
+        automatedSender: true,
+      },
+    };
+  }
+
+  const twoNewsCorrections = () => {
+    const a = relabelledToNews("m1", "no-reply@mob.cosn.org");
+    const b = relabelledToNews("m2", "no-reply@mob.iste.org");
+    return computeLearning({
+      corrections: [a.correction, b.correction],
+      decisions: [a.decision, b.decision],
+      rules: emptyRules,
+      now: NOW,
+    });
+  };
+
+  test("two `training correct <id> news` calls learn lean=news, not lean=later", () => {
+    // Before this, `correctionLean` folded `news` into `later`, so the
+    // one correction the user was actually making could never be learned.
+    const { contentPreferences } = twoNewsCorrections();
+    expect(contentPreferences).toContainEqual(
+      expect.objectContaining({ shape: "bulk", lean: "news", count: 2 }),
+    );
+  });
+
+  test("the learned leaning moves the model's `later` to news, for any sender", () => {
+    const { contentPreferences } = twoNewsCorrections();
+    const guarded = applyContentGuards(
+      { label: "later", confidence: 0.8, reason: "FYI, no action required" },
+      digestSignals("never-corrected@newsletter.example"),
+      contentPreferences,
+    );
+    expect(guarded.label).toBe("news");
+    expect(guarded.adjusted).toBe(true);
+    expect(guarded.reason).toContain("learned:you-file-bulk-mail-as-news");
+  });
+
+  test("it never reaches a person's mail", () => {
+    // A learned "this shape is News" must not file a colleague away in
+    // the auto-archive bucket.
+    const { contentPreferences } = twoNewsCorrections();
+    const humanFyi = detectContentSignals({
+      subject: "Daily Highlights",
+      body: "Today's top stories from the member network.",
+      headers: { to: USER },
+      userEmail: USER,
+      hasUserReply: false,
+      fromEmail: "jsmith@psd401.net",
+    });
+    expect(humanFyi.automatedSender).toBe(false);
+    expect(
+      applyContentGuards(
+        { label: "later", confidence: 0.8, reason: "colleague FYI" },
+        humanFyi,
+        contentPreferences,
+      ).label,
+    ).toBe("later");
+  });
+
+  test("corrections in both directions produce no leaning", () => {
+    // The margin is over the runner-up, so a shape the user treats
+    // inconsistently does not silently pick a side.
+    const a = relabelledToNews("m1", "no-reply@mob.cosn.org");
+    const b = relabelledToNews("m2", "no-reply@mob.iste.org");
+    const rescued: CorrectionRecord[] = [
+      { messageId: "m3", fromLabel: "later", toLabel: "inbox", ts: "2026-07-09T01:00:00Z", shape: "bulk", fromEmail: "x@y.example" },
+      { messageId: "m4", fromLabel: "later", toLabel: "important", ts: "2026-07-09T01:00:00Z", shape: "bulk", fromEmail: "x@y.example" },
+    ];
+    const { contentPreferences } = computeLearning({
+      corrections: [a.correction, b.correction, ...rescued],
+      decisions: [a.decision, b.decision],
+      rules: emptyRules,
+      now: NOW,
+    });
+    expect(contentPreferences.find((p) => p.shape === "bulk")).toBeUndefined();
+  });
+});
+
+describe("a declared list mailing is never Later (#1866)", () => {
+  // Covers the paths the content stage cannot reach: a bulk publication
+  // that carries an ask, a confidence-floor downgrade, and the Bedrock
+  // fail-safe — all of which produced `later`.
+  const registrationBlast = detectContentSignals({
+    subject: "Last chance to register for the fall conference",
+    body: "Register by Friday to keep your member rate.",
+    headers: { to: USER, listUnsubscribe: "<mailto:u@assoc.example>" },
+    userEmail: USER,
+    hasUserReply: false,
+    fromEmail: "members@assoc.example",
+  });
+
+  test("the message really does carry an ask, so the model decides it", () => {
+    expect(registrationBlast.deadline).toBe(true);
+    expect(registrationBlast.bulkPublication).toBe(true);
+  });
+
+  test("a model `later` becomes news", () => {
+    const guarded = applyContentGuards(
+      { label: "later", confidence: 0.8, reason: "deadline but no ask of you" },
+      registrationBlast,
+      [],
+    );
+    expect(guarded.label).toBe("news");
+    expect(guarded.adjusted).toBe(true);
+    expect(guarded.reason).toContain("bulk-publication-not-later");
+  });
+
+  test("the Bedrock fail-safe default becomes news too", () => {
+    expect(
+      applyContentGuards(
+        { label: "later", confidence: 0, reason: "llm-error-default" },
+        registrationBlast,
+        [],
+      ).label,
+    ).toBe("news");
+  });
+
+  test("an `important` from the model is left alone", () => {
+    expect(
+      applyContentGuards(
+        { label: "important", confidence: 0.9, reason: "asks you to register" },
+        registrationBlast,
+        [],
+      ).label,
+    ).toBe("important");
   });
 });

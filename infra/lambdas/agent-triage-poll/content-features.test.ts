@@ -419,7 +419,7 @@ describe("directQuestion requires a question put to the reader (#1861)", () => {
     expect(Date.now() - started).toBeLessThan(1000);
   });
 
-  test("the reported Google Search Console blast classifies later", () => {
+  test("the reported Google Search Console blast classifies news", () => {
     const signals = signalsFor({
       fromEmail: "sc-noreply@google.com",
       subject: "Congrats on reaching 50 clicks in 28 days!",
@@ -432,9 +432,11 @@ describe("directQuestion requires a question put to the reader (#1861)", () => {
     expect(signals.automatedSender).toBe(true);
     expect(signals.informational).toBe(true);
     expect(hasAsk(signals)).toBe(false);
+    // #1861 pinned this as `later`; #1866 moved marketing blasts to News,
+    // where the user wanted them all along.
     expect(classifyByContent(signals)).toEqual({
-      label: "later",
-      reason: "content:automated-notice-no-ask",
+      label: "news",
+      reason: "content:bulk-publication-no-ask",
     });
     // The acceptance criterion: simulate can name the signals that fired.
     expect(firedContentSignals(signals)).toEqual([
@@ -442,6 +444,7 @@ describe("directQuestion requires a question put to the reader (#1861)", () => {
       "broadcast",
       "informational",
       "automatedSender",
+      "bulkPublication",
     ]);
   });
 });
@@ -589,5 +592,197 @@ describe("sender-independence regression pair (#1861 comment)", () => {
     });
     expect(classifyByContent(internal)).toEqual(classifyByContent(external));
     expect(classifyByContent(internal)?.label).toBe("later");
+  });
+});
+
+describe("newsletters and digests are News, not Later (#1866)", () => {
+  // The reported corpus: of the last ~20 decisions on the test account,
+  // every newsletter and digest landed in Later — 9 of them stamped
+  // `content:automated-notice-no-ask` by this very stage, which had no
+  // News outcome to reach for. Each case below is one of the named
+  // examples. The user should never have to write a keyword rule for
+  // these.
+  const cases: {
+    name: string;
+    input: Partial<ContentSignalInput>;
+  }[] = [
+    {
+      name: "a CoSN daily highlights digest",
+      input: {
+        fromEmail: "no-reply@mob.cosn.org",
+        subject: "CoSN Network Daily Highlights",
+        body: "Today's top stories from the CoSN member network.",
+        headers: { to: USER, listUnsubscribe: "<mailto:unsub@mob.cosn.org>" },
+      },
+    },
+    {
+      name: "an ISTE+ASCD highlights digest with no List-Unsubscribe",
+      input: {
+        fromEmail: "no-reply@mob.iste.org",
+        subject: "ISTE+ASCD Daily Highlights",
+        body: "Here are today's highlights from your professional network.",
+        headers: { to: USER },
+      },
+    },
+    {
+      name: "a K-12 Dive newsletter",
+      input: {
+        fromEmail: "newsletter@industrydive.com",
+        subject: "K-12 Dive: what districts are watching this week",
+        body: "The latest issue of K-12 Dive.",
+        headers: { to: USER },
+      },
+    },
+    {
+      name: "a Substack post",
+      input: {
+        fromEmail: "someone@substack.com",
+        subject: "The AI policy memo nobody read",
+        body: "New post from the author. Unsubscribe at any time.",
+        headers: { to: USER, listUnsubscribe: "<https://substack.com/unsub>" },
+      },
+    },
+    {
+      name: "a vendor pitch",
+      input: {
+        fromEmail: "sales-noreply@vendor.example",
+        subject: "See how districts cut helpdesk tickets 40%",
+        body:
+          "Join our webinar to see the platform in action. " +
+          "You are receiving this because you signed up.",
+        headers: { to: USER },
+      },
+    },
+    {
+      name: "an association mailing announced only by Precedence",
+      input: {
+        fromEmail: "members@association.example",
+        subject: "Member bulletin: fall conference registration is open",
+        body: "Registration details inside.",
+        headers: { to: USER, precedence: "bulk" },
+      },
+    },
+  ];
+
+  for (const { name, input } of cases) {
+    test(`${name} => news`, () => {
+      const signals = signalsFor(input);
+      expect(signals.bulkPublication).toBe(true);
+      expect(signals.shape).toBe("bulk");
+      expect(classifyByContent(signals)).toEqual({
+        label: "news",
+        reason: "content:bulk-publication-no-ask",
+      });
+    });
+  }
+
+  test("a colleague's FYI forward is still Later", () => {
+    const signals = signalsFor({
+      fromEmail: "jsmith@psd401.net",
+      subject: "FYI — the state updated the assessment calendar",
+      body: "Just so you know, no action needed on your side.",
+      headers: { to: USER },
+    });
+    expect(signals.bulkPublication).toBe(false);
+    expect(signals.automatedSender).toBe(false);
+    expect(classifyByContent(signals)).toEqual({
+      label: "later",
+      reason: "content:fyi-nothing-asked-of-you",
+    });
+  });
+
+  test("a colleague's mass FYI to the whole team is Later, not News", () => {
+    // `broadcast` fires on the recipient fan-out, but a person wrote it,
+    // so it can never be filed away as a publication.
+    const signals = signalsFor({
+      fromEmail: "jsmith@psd401.net",
+      subject: "Team update",
+      body: "Sharing where we landed. Nothing needed from you.",
+      headers: { to: Array.from({ length: 9 }, (_, i) => `p${i}@psd401.net`).join(", ") },
+    });
+    expect(signals.broadcast).toBe(true);
+    expect(signals.bulkPublication).toBe(false);
+    expect(classifyByContent(signals)?.label).toBe("later");
+  });
+
+  test("a one-off machine notice about the user's own account is not News", () => {
+    // No list headers, no publication wording, addressed to one person:
+    // this is a transactional notice, and filing it under News would hide
+    // it in the auto-archive bucket.
+    const signals = signalsFor({
+      fromEmail: "no-reply@accounts.example",
+      subject: "Your password was changed",
+      body: "The password on your account was changed today.",
+      headers: { to: USER },
+    });
+    expect(signals.bulkPublication).toBe(false);
+    expect(signals.shape).toBe("notification");
+    expect(classifyByContent(signals)).toEqual({
+      label: "later",
+      reason: "content:automated-notice-no-ask",
+    });
+  });
+
+  test("an approval request still beats the bulk headers", () => {
+    // A service desk that mails from a list-bearing address still gets
+    // its approval through — the News branch sits behind `hasAsk`.
+    const signals = signalsFor({
+      fromEmail: "no-reply@servicedesk.example",
+      subject: "Approval required: purchase order 4471",
+      body: "A request is pending your approval.",
+      headers: { to: USER, listUnsubscribe: "<mailto:unsub@servicedesk.example>" },
+    });
+    expect(signals.bulkPublication).toBe(true);
+    expect(classifyByContent(signals)).toEqual({
+      label: "important",
+      reason: "content:approval-or-signature-requested",
+    });
+  });
+});
+
+describe("stated preferences get a vote on machine mail (#1866)", () => {
+  // The stage's fixed `later` for machine mail fired before the model, so
+  // the user's own words ("when unsure choose News") never applied. With a
+  // stated profile the stage now decides only what it is certain about.
+  const notice = {
+    fromEmail: "no-reply@goguardian.example",
+    subject: "Weekly activity summary",
+    body: "Your weekly activity summary is ready.",
+    headers: { to: USER },
+  };
+
+  test("without stated preferences the stage still decides Later", () => {
+    expect(classifyByContent(signalsFor(notice))).toEqual({
+      label: "later",
+      reason: "content:automated-notice-no-ask",
+    });
+  });
+
+  test("with stated preferences the judgement call goes to the model", () => {
+    expect(
+      classifyByContent(signalsFor(notice), { hasStatedPreferences: true }),
+    ).toBeNull();
+  });
+
+  test("...but the certain branches are unaffected", () => {
+    const digest = signalsFor({
+      ...notice,
+      headers: { to: USER, listUnsubscribe: "<mailto:u@x.example>" },
+    });
+    expect(
+      classifyByContent(digest, { hasStatedPreferences: true }),
+    ).toEqual({ label: "news", reason: "content:bulk-publication-no-ask" });
+
+    const ask = signalsFor({
+      fromEmail: "jsmith@psd401.net",
+      subject: "Can you confirm the budget line?",
+      headers: { to: USER },
+    });
+    expect(
+      classifyByContent(ask, { hasStatedPreferences: true }),
+    ).toEqual({
+      label: "important",
+      reason: "content:direct-question-addressed-to-you",
+    });
   });
 });

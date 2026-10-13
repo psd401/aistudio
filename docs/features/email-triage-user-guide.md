@@ -18,8 +18,12 @@ one of three labels within about 5 minutes of arrival:
 | Label | Meaning | Inbox behavior |
 |-------|---------|----------------|
 | `@psd/Important` | Needs your attention | Moved out of Inbox into the label |
-| `@psd/Later` | Legitimate but not urgent | Moved out of Inbox into the label |
-| `@psd/News` | Newsletters, announcements | Moved out of Inbox into the label |
+| `@psd/Later` | Real mail you want to read, but nothing is asked of you yet | Moved out of Inbox into the label |
+| `@psd/News` | Newsletters, digests, association and vendor mailings | Moved out of Inbox into the label |
+
+Later vs News is decided by **who the message was written for**, not by whether
+it asks you for something: a publication sent to a mailing list is News however
+interesting it is, and you should not have to write a rule to get it there.
 
 **Labels are folders.** Every classified message lives in exactly one place —
 it is removed from Inbox when labeled. An empty Inbox means triage is caught
@@ -67,7 +71,10 @@ Say to your agent:
 Confirm on the card it shows you. The agent then:
 
 1. Creates the labels `@psd/Important`, `@psd/Later`, `@psd/News` in your Gmail.
-2. Seeds a few sensible default rules (e.g. `noreply@*` muted, newsletters → News).
+2. Seeds a few sensible default rules (e.g. `noreply@*` muted, `newsletter` in
+   the subject → News). You do not need to add rules of your own for
+   newsletters and digests — the classifier recognises list mail on its own,
+   whatever the subject says.
 3. Schedules your daily digest (default 08:00, your timezone — see §7).
 4. **Sweeps your existing inbox**: mail from the last 30 days still sitting in
    your Inbox (up to 1000 messages) is classified and filed through the same

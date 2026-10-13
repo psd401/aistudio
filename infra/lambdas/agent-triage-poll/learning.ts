@@ -302,33 +302,28 @@ export function computeContentPreferences(
   const decisionsById = new Map<string, DecisionRecord>();
   for (const d of ctx.decisions ?? []) decisionsById.set(d.messageId, d);
 
-  const byShape = new Map<
-    ContentShape,
-    { importantWeight: number; laterWeight: number; count: number }
-  >();
+  const byShape = new Map<ContentShape, ShapeTally>();
   for (const c of ctx.corrections ?? []) {
     const shape = c.shape ?? decisionsById.get(c.messageId)?.shape;
     if (!shape || shape === "unknown") continue;
     const lean = correctionLean(c.toLabel);
     if (!lean) continue;
     const entry =
-      byShape.get(shape) ?? { importantWeight: 0, laterWeight: 0, count: 0 };
-    const w = decayedWeight(c.ts, now);
-    if (lean === "important") entry.importantWeight += w;
-    else entry.laterWeight += w;
+      byShape.get(shape) ??
+      { important: 0, later: 0, news: 0, count: 0 };
+    entry[lean] += decayedWeight(c.ts, now);
     entry.count += 1;
     byShape.set(shape, entry);
   }
 
   const prefs: ContentPreference[] = [];
   for (const [shape, entry] of byShape) {
-    const net = entry.importantWeight - entry.laterWeight;
-    const weight = Math.abs(net);
-    if (weight < LEARN_MIN_WEIGHT) continue;
+    const winner = strongestLean(entry);
+    if (!winner) continue;
     prefs.push({
       shape,
-      lean: net >= 0 ? "important" : "later",
-      weight: round2(weight),
+      lean: winner.lean,
+      weight: round2(winner.margin),
       count: entry.count,
     });
   }
@@ -336,13 +331,40 @@ export function computeContentPreferences(
   return prefs;
 }
 
-/** Which direction a correction argues for. */
+/** Accumulated correction weight per label, for one content shape. */
+type ShapeTally = Record<Label, number> & { count: number };
+
+/**
+ * The label this shape's corrections argue for, and by how much.
+ *
+ * Three-way rather than the original important-vs-later subtraction: that
+ * version folded `news` into `later` (#1866), so "this digest is News"
+ * could only ever teach "this digest is Later" — the exact correction the
+ * user was making, discarded. The margin is over the runner-up, so a shape
+ * the user corrects in two directions produces no leaning until one side
+ * clearly wins.
+ */
+function strongestLean(
+  tally: ShapeTally,
+): { lean: Label; margin: number } | null {
+  const ranked = (["important", "later", "news"] as Label[])
+    .map((lean) => ({ lean, weight: tally[lean] }))
+    .sort((a, b) => b.weight - a.weight);
+  const margin = ranked[0]!.weight - ranked[1]!.weight;
+  if (margin < LEARN_MIN_WEIGHT) return null;
+  return { lean: ranked[0]!.lean, margin };
+}
+
+/**
+ * Which direction a correction argues for. `archived` is the gesture for
+ * "I did not need this in my inbox" and carries no News-vs-Later opinion,
+ * so it counts as `later`; an explicit re-label to News counts as News.
+ */
 function correctionLean(
   toLabel: CorrectionRecord["toLabel"],
 ): Label | null {
-  if (toLabel === "archived" || toLabel === "later" || toLabel === "news") {
-    return "later";
-  }
+  if (toLabel === "news") return "news";
+  if (toLabel === "archived" || toLabel === "later") return "later";
   if (toLabel === "inbox" || toLabel === "important") return "important";
   return null;
 }

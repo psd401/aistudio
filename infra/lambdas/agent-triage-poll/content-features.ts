@@ -31,6 +31,7 @@ export type ContentShape =
   | "approval"
   | "direct-ask"
   | "live-thread"
+  | "bulk"
   | "notification"
   | "fyi"
   | "unknown";
@@ -74,6 +75,13 @@ export interface ContentSignals {
   informational: boolean;
   /** The sender speaks for a machine rather than a person. */
   automatedSender: boolean;
+  /**
+   * A broadcast publication rather than mail written to this reader: a
+   * newsletter, a digest, an association mailing, a vendor blast. Proven
+   * from bulk/list headers, or from publication/marketing language in mail
+   * a machine sent (#1866).
+   */
+  bulkPublication: boolean;
   /** Derived summary used for learning and for the one-line reason. */
   shape: ContentShape;
 }
@@ -178,6 +186,52 @@ function isInformational(
   if (INFORMATIONAL_RE.test(opening)) return true;
   if (listMail) return true;
   return automatedSender && hasMarketingFooter(opening);
+}
+
+/**
+ * `Precedence` values that declare the message is list/bulk traffic. The
+ * other values `isAutomatedSender` accepts (`junk`, `auto_reply`) say
+ * "a machine sent this", which is not the same claim as "this is a
+ * publication", so they are deliberately absent.
+ */
+const BULK_PRECEDENCE = new Set(["bulk", "list"]);
+
+/**
+ * Publication vocabulary — the words a periodical uses about itself. Only
+ * consulted for mail a machine sent, because a colleague writing "here's
+ * my weekly recap" is not a newsletter.
+ *
+ * Deliberately narrower than `INFORMATIONAL_RE`: "fyi" and "status update"
+ * describe a one-off notice, and reading those as a publication would file
+ * real notices under News.
+ */
+const PUBLICATION_RE =
+  /\b(newsletter|news ?letter|digest|bulletin|round[- ]?up|recap|highlights|top stories|this week in|latest issue|new (?:post|issue|edition)|press release|webinar|e[- ]?blast)\b/i;
+
+/**
+ * Is this a broadcast publication rather than mail written to this reader?
+ *
+ * Headers settle it on their own: `List-Unsubscribe` and a bulk/list
+ * `Precedence` are how a sender declares "this went to a list", which is
+ * exactly the newsletter/digest/association-mailing shape #1866 asks for.
+ *
+ * Without those headers the sender must at least be a machine, and the
+ * message must then look like a publication — a large recipient fan-out,
+ * publication vocabulary, or marketing-footer boilerplate. A machine
+ * notice addressed to one person with none of that ("your password was
+ * reset") is NOT a publication and must not be filed under News.
+ */
+function isBulkPublication(
+  opening: string,
+  bulkHeader: boolean,
+  automatedSender: boolean,
+  broadcast: boolean,
+): boolean {
+  if (bulkHeader) return true;
+  if (!automatedSender) return false;
+  return (
+    broadcast || PUBLICATION_RE.test(opening) || hasMarketingFooter(opening)
+  );
 }
 
 /**
@@ -301,6 +355,22 @@ const AUTOMATED_LOCALPARTS = new Set([
   "postmaster",
   "robot",
   "system",
+  // Publication mailboxes (#1866). A mailbox literally named `newsletter`
+  // or `digest` speaks for a periodical, not a colleague, and without
+  // these a newsletter that carries no List-Unsubscribe (K-12 Dive in the
+  // reported corpus) read as a person and could never reach News.
+  // Deliberately only the unambiguous ones — `info`, `support` and
+  // `sales` are staffed by people and are NOT here, because this set also
+  // bounds which senders the learner may suggest muting.
+  "bulletin",
+  "digest",
+  "e-news",
+  "enews",
+  "mailings",
+  "marketing",
+  "news",
+  "newsletter",
+  "newsletters",
 ]);
 
 /**
@@ -316,6 +386,8 @@ const AUTOMATED_LOCALPART_FRAGMENTS = [
   "do-not-reply",
   "do_not_reply",
   "mailer-daemon",
+  // `k12dive-newsletter@`, `weekly-newsletter@` (#1866).
+  "newsletter",
 ];
 
 /**
@@ -369,6 +441,10 @@ function deriveShape(
   if (signals.approvalRequest) return "approval";
   if (signals.liveThread) return "live-thread";
   if (signals.directQuestion || signals.actionRequest) return "direct-ask";
+  // Before `notification`: both are machine mail, but a publication and a
+  // one-off service notice are different kinds of message and corrections
+  // against one must not move the other (#1866).
+  if (signals.bulkPublication) return "bulk";
   if (signals.automatedSender) return "notification";
   if (signals.informational || signals.ccOnly || signals.broadcast) return "fyi";
   return "unknown";
@@ -413,6 +489,14 @@ export function detectContentSignals(
   // List mail announces itself as bulk through List-Unsubscribe; that is
   // enough on its own to read the message as informational (#1861 item 4).
   const listMail = Boolean((input.headers.listUnsubscribe ?? "").trim());
+  // A bulk/list `Precedence` is the other standards-defined way to say
+  // "this went to a list" (#1866).
+  const bulkHeader =
+    listMail ||
+    BULK_PRECEDENCE.has((input.headers.precedence ?? "").trim().toLowerCase());
+
+  const broadcast =
+    bulkHeader || toAddresses.length + ccAddresses.length >= BROADCAST_RECIPIENT_COUNT;
 
   const base = {
     directQuestion:
@@ -422,9 +506,7 @@ export function detectContentSignals(
     deadline: DEADLINE_RE.test(askText),
     addressedToUser,
     ccOnly,
-    broadcast:
-      Boolean(input.headers.listUnsubscribe) ||
-      toAddresses.length + ccAddresses.length >= BROADCAST_RECIPIENT_COUNT,
+    broadcast,
     liveThread:
       input.hasUserReply &&
       Boolean(
@@ -432,8 +514,14 @@ export function detectContentSignals(
           input.headers.references ||
           /^\s*re\s*:/i.test(input.subject),
       ),
-    informational: isInformational(opening, listMail, automatedSender),
+    informational: isInformational(opening, bulkHeader, automatedSender),
     automatedSender,
+    bulkPublication: isBulkPublication(
+      opening,
+      bulkHeader,
+      automatedSender,
+      broadcast,
+    ),
   };
   return { ...base, shape: deriveShape(base) };
 }
@@ -449,8 +537,21 @@ export function hasAsk(signals: ContentSignals): boolean {
 }
 
 export interface ContentDecision {
-  label: "important" | "later";
+  label: "important" | "later" | "news";
   reason: string;
+}
+
+export interface ContentDecisionOptions {
+  /**
+   * True when the user has written their own preference profile.
+   *
+   * The stage then decides only the cases it is actually certain about and
+   * hands the judgement calls to the model, which is the only stage that
+   * reads the user's words (#1866). Without this the stage's fixed
+   * `later` for machine mail fired first and the stated preference never
+   * got a vote.
+   */
+  hasStatedPreferences?: boolean;
 }
 
 /**
@@ -466,6 +567,7 @@ export interface ContentDecision {
  */
 export function classifyByContent(
   signals: ContentSignals,
+  options: ContentDecisionOptions = {},
 ): ContentDecision | null {
   // An approval or signature request is important even when a machine sent
   // it and even when the user will act on it in another system — #1855
@@ -502,16 +604,38 @@ export function classifyByContent(
         : "content:action-requested-of-you",
     };
   }
-  if (!hasAsk(signals)) {
-    if (signals.automatedSender) {
-      return { label: "later", reason: "content:automated-notice-no-ask" };
-    }
-    if (signals.informational) {
-      return { label: "later", reason: "content:fyi-nothing-asked-of-you" };
-    }
-    if (signals.ccOnly || signals.broadcast) {
-      return { label: "later", reason: "content:you-are-not-the-recipient" };
-    }
+  if (!hasAsk(signals)) return classifyNoAsk(signals, options);
+  return null;
+}
+
+/**
+ * The nothing-is-asked-of-you half of `classifyByContent`, split out to
+ * keep each function under the complexity bar.
+ */
+function classifyNoAsk(
+  signals: ContentSignals,
+  options: ContentDecisionOptions,
+): ContentDecision | null {
+  // A newsletter, digest, association mailing or vendor blast is News,
+  // not Later. Before #1866 the stage had no News outcome at all, so every
+  // one of these landed in Later and the user was back to writing keyword
+  // rules for them.
+  if (signals.bulkPublication) {
+    return { label: "news", reason: "content:bulk-publication-no-ask" };
+  }
+  if (signals.automatedSender) {
+    // A one-off machine notice with nothing asked (a password reset, a
+    // sync report). Later vs News here is a judgement call, not a
+    // certainty: hand it to the model when the user has told us how they
+    // want it judged, and keep the old default when they have not.
+    if (options.hasStatedPreferences) return null;
+    return { label: "later", reason: "content:automated-notice-no-ask" };
+  }
+  if (signals.informational) {
+    return { label: "later", reason: "content:fyi-nothing-asked-of-you" };
+  }
+  if (signals.ccOnly || signals.broadcast) {
+    return { label: "later", reason: "content:you-are-not-the-recipient" };
   }
   return null;
 }
@@ -542,6 +666,7 @@ const SIGNAL_REPORT_ORDER: (keyof Omit<ContentSignals, "shape">)[] = [
   "liveThread",
   "informational",
   "automatedSender",
+  "bulkPublication",
 ];
 
 /**
@@ -571,5 +696,6 @@ export function describeContentSignals(signals: ContentSignals): string {
     `  - FYI / status / digest language: ${signals.informational}`,
     `  - broadcast or list mail: ${signals.broadcast}`,
     `  - sender is an automated mailbox: ${signals.automatedSender}`,
+    `  - broadcast publication (newsletter / digest / list mailing): ${signals.bulkPublication}`,
   ].join("\n");
 }

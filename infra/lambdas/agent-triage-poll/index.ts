@@ -465,6 +465,32 @@ function signalsFor(
  *   3. Bedrock, with the content signals in front of it and the sender
  *      demoted to a weak prior, then the learned-correction guards.
  */
+/**
+ * Full-body excerpt for the content stage and the prompt. A fetch failure
+ * is not fatal — the caller falls back to the Gmail snippet.
+ */
+async function fetchBodyExcerpt(
+  row: TriageRow,
+  accessToken: string,
+  messageId: string,
+): Promise<string | undefined> {
+  try {
+    const full = await getMessageFullBody(
+      accessToken,
+      messageId,
+      BODY_EXCERPT_MAX,
+    );
+    return full?.trim() ? full : undefined;
+  } catch (err) {
+    log("WARN", "body_fetch_failed", {
+      user: row.userEmail,
+      messageId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return undefined;
+  }
+}
+
 async function classifyMessage(
   row: TriageRow,
   accessToken: string,
@@ -485,24 +511,12 @@ async function classifyMessage(
 
   const internalDomain =
     row.internalDomain ?? row.userEmail.split("@")[1] ?? "";
-  let bodyExcerpt: string | undefined;
-  try {
-    const full = await getMessageFullBody(
-      accessToken,
-      messageId,
-      BODY_EXCERPT_MAX,
-    );
-    if (full?.trim()) bodyExcerpt = full;
-  } catch (err) {
-    log("WARN", "body_fetch_failed", {
-      user: row.userEmail,
-      messageId,
-      err: err instanceof Error ? err.message : String(err),
-    });
-  }
+  const bodyExcerpt = await fetchBodyExcerpt(row, accessToken, messageId);
 
   const signals = signalsFor(row, ctx, bodyExcerpt ?? ctx.snippet);
-  const contentDecision = classifyByContent(signals);
+  const contentDecision = classifyByContent(signals, {
+    hasStatedPreferences: Boolean(row.preferences?.text?.trim()),
+  });
   if (contentDecision) {
     return {
       label: contentDecision.label,

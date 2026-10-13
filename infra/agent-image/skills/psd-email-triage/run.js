@@ -975,14 +975,11 @@ function simulatedIsInternal(args, fromEmail, internalDomain) {
   );
 }
 
-async function cmd_simulate(args) {
-  const user = requireUser(args, "simulate");
-  const row = await requireEnabledRow(user, "simulate");
-  const fromEmail = (args.from || "").toLowerCase();
-  if (!fromEmail)
-    bail("missing-from", "--from <email> is required", "simulate");
+// The synthetic EmailFeatures the rules engine scores, built from the
+// simulate flags.
+function simulatedFeatures(args, user, row, fromEmail) {
   const internalDomain = row.internalDomain || user.split("@")[1];
-  const features = {
+  return {
     fromEmail,
     fromDomain: fromEmail.split("@")[1] || "",
     isInternal: simulatedIsInternal(args, fromEmail, internalDomain),
@@ -991,6 +988,15 @@ async function cmd_simulate(args) {
     snippetLower: (args.snippet || "").toLowerCase(),
     hasUserReply: args["has-user-reply"] === true,
   };
+}
+
+async function cmd_simulate(args) {
+  const user = requireUser(args, "simulate");
+  const row = await requireEnabledRow(user, "simulate");
+  const fromEmail = (args.from || "").toLowerCase();
+  if (!fromEmail)
+    bail("missing-from", "--from <email> is required", "simulate");
+  const features = simulatedFeatures(args, user, row, fromEmail);
   // Derived unconditionally so the answer to "which signal fired?" is in
   // the output even when the user's own rules settle the label (#1861).
   const signals = lib.detectContentSignals({
@@ -1000,6 +1006,7 @@ async function cmd_simulate(args) {
       to: args.to,
       cc: args.cc,
       listUnsubscribe: args["list-unsubscribe"],
+      precedence: args.precedence,
     },
     userEmail: user,
     hasUserReply: features.hasUserReply,
@@ -1024,7 +1031,14 @@ async function cmd_simulate(args) {
 
   // Mirror the Lambda's second stage so simulate doesn't claim "Bedrock
   // decides" for a message the deterministic content stage settles.
-  const contentDecision = lib.classifyByContent(signals);
+  // Same option the Lambda passes: with stated preferences the stage
+  // defers the Later-vs-News judgement calls to the model (#1866), and
+  // simulate has to report the stage the classifier would really use.
+  const contentDecision = lib.classifyByContent(signals, {
+    hasStatedPreferences: Boolean(
+      row.preferences && String(row.preferences.text || "").trim(),
+    ),
+  });
   emit({
     ok: true,
     subcommand: "simulate",
@@ -1392,16 +1406,29 @@ async function cmd_suggestions(args) {
 /** Cap on the stored profile. Long enough for a paragraph of guidance. */
 const PREFERENCES_MAX_CHARS = 2000;
 
+/**
+ * One learned shape leaning, in the user's terms. Three-valued since
+ * #1866 — a `news` leaning read as "you want this in front of you", which
+ * was the opposite of the correction that produced it.
+ */
+function plainWordsForLean(pref) {
+  const tail = `(${pref.count} correction(s)).`;
+  if (pref.lean === "news") {
+    return `You usually file "${pref.shape}" mail as News ${tail}`;
+  }
+  if (pref.lean === "later") {
+    return `You usually move "${pref.shape}" mail out of the way ${tail}`;
+  }
+  return `You usually want "${pref.shape}" mail in front of you ${tail}`;
+}
+
 function renderContentPreferences(contentPreferences) {
   return (contentPreferences || []).map((pref) => ({
     shape: pref.shape,
     lean: pref.lean,
     count: pref.count,
     weight: pref.weight,
-    inPlainWords:
-      pref.lean === "later"
-        ? `You usually move "${pref.shape}" mail out of the way (${pref.count} correction(s)).`
-        : `You usually want "${pref.shape}" mail in front of you (${pref.count} correction(s)).`,
+    inPlainWords: plainWordsForLean(pref),
   }));
 }
 

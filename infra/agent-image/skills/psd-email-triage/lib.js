@@ -443,10 +443,27 @@ function hasMarketingFooter(text) {
 }
 
 // Extracted from detectContentSignals to keep it under the complexity bar.
-function isInformational(opening, listMail, automatedSender) {
+function isInformational(opening, bulkHeader, automatedSender) {
   if (INFORMATIONAL_RE.test(opening)) return true;
-  if (listMail) return true;
+  if (bulkHeader) return true;
   return automatedSender && hasMarketingFooter(opening);
+}
+
+// `Precedence` values that declare list/bulk traffic (#1866). `junk` and
+// `auto_reply` say "a machine sent this", not "this is a publication".
+const BULK_PRECEDENCE = new Set(['bulk', 'list']);
+// Publication vocabulary — only consulted for machine mail, because a
+// colleague's "weekly recap" is not a newsletter. Narrower than
+// INFORMATIONAL_RE on purpose: "fyi" describes a one-off notice.
+const PUBLICATION_RE =
+  /\b(newsletter|news ?letter|digest|bulletin|round[- ]?up|recap|highlights|top stories|this week in|latest issue|new (?:post|issue|edition)|press release|webinar|e[- ]?blast)\b/i;
+
+// A broadcast publication rather than mail written to this reader.
+// See isBulkPublication in content-features.ts.
+function isBulkPublication(opening, bulkHeader, automatedSender, broadcast) {
+  if (bulkHeader) return true;
+  if (!automatedSender) return false;
+  return broadcast || PUBLICATION_RE.test(opening) || hasMarketingFooter(opening);
 }
 // A question only counts when the clause it terminates speaks to the
 // reader (#1861) — "Think this is awesome?" is not an ask. No contraction
@@ -512,6 +529,19 @@ const AUTOMATED_LOCALPARTS = new Set([
   'postmaster',
   'robot',
   'system',
+  // Publication mailboxes (#1866) — a mailbox named `newsletter` or
+  // `digest` speaks for a periodical. Only the unambiguous ones: `info`,
+  // `support` and `sales` are staffed by people and this set also bounds
+  // which senders the learner may suggest muting.
+  'bulletin',
+  'digest',
+  'e-news',
+  'enews',
+  'mailings',
+  'marketing',
+  'news',
+  'newsletter',
+  'newsletters',
 ]);
 const AUTOMATED_LOCALPART_FRAGMENTS = [
   'noreply',
@@ -522,6 +552,8 @@ const AUTOMATED_LOCALPART_FRAGMENTS = [
   'do-not-reply',
   'do_not_reply',
   'mailer-daemon',
+  // `k12dive-newsletter@`, `weekly-newsletter@` (#1866).
+  'newsletter',
 ];
 const AUTOMATED_LOCALPART_PREFIXES = ['serv_', 'svc_', 'svc-', 'tsd-', 'noreply'];
 
@@ -551,6 +583,9 @@ function deriveShape(signals) {
   if (signals.approvalRequest) return 'approval';
   if (signals.liveThread) return 'live-thread';
   if (signals.directQuestion || signals.actionRequest) return 'direct-ask';
+  // Before 'notification': a publication and a one-off service notice are
+  // different kinds of message and corrections must not cross over (#1866).
+  if (signals.bulkPublication) return 'bulk';
   if (signals.automatedSender) return 'notification';
   if (signals.informational || signals.ccOnly || signals.broadcast) return 'fyi';
   return 'unknown';
@@ -575,7 +610,15 @@ function detectContentSignals(input) {
     .slice(0, OPENING_TEXT_CHARS)
     .replace(NEGATED_ASK_RE, ' ');
   const listMail = Boolean(String(headers.listUnsubscribe || '').trim());
+  // A bulk/list Precedence is the other standards-defined "went to a
+  // list" declaration (#1866).
+  const bulkHeader =
+    listMail ||
+    BULK_PRECEDENCE.has(String(headers.precedence || '').trim().toLowerCase());
   const automatedSender = isAutomatedSender(input.fromEmail, headers);
+  const broadcast =
+    bulkHeader ||
+    toAddresses.length + ccAddresses.length >= BROADCAST_RECIPIENT_COUNT;
   const base = {
     directQuestion:
       hasDirectQuestion(subjectAskText) || hasDirectQuestion(bodyAskText),
@@ -584,14 +627,18 @@ function detectContentSignals(input) {
     deadline: DEADLINE_RE.test(askText),
     addressedToUser,
     ccOnly: !addressedToUser && ccAddresses.includes(userEmail),
-    broadcast:
-      Boolean(headers.listUnsubscribe) ||
-      toAddresses.length + ccAddresses.length >= BROADCAST_RECIPIENT_COUNT,
+    broadcast,
     liveThread:
       Boolean(input.hasUserReply) &&
       Boolean(headers.inReplyTo || headers.references || /^\s*re\s*:/i.test(subject)),
-    informational: isInformational(opening, listMail, automatedSender),
+    informational: isInformational(opening, bulkHeader, automatedSender),
     automatedSender,
+    bulkPublication: isBulkPublication(
+      opening,
+      bulkHeader,
+      automatedSender,
+      broadcast,
+    ),
   };
   return { ...base, shape: deriveShape(base) };
 }
@@ -605,7 +652,7 @@ function hasAsk(signals) {
   );
 }
 
-function classifyByContent(signals) {
+function classifyByContent(signals, options = {}) {
   if (signals.approvalRequest) {
     return { label: 'important', reason: 'content:approval-or-signature-requested' };
   }
@@ -627,16 +674,29 @@ function classifyByContent(signals) {
         : 'content:action-requested-of-you',
     };
   }
-  if (!hasAsk(signals)) {
-    if (signals.automatedSender) {
-      return { label: 'later', reason: 'content:automated-notice-no-ask' };
-    }
-    if (signals.informational) {
-      return { label: 'later', reason: 'content:fyi-nothing-asked-of-you' };
-    }
-    if (signals.ccOnly || signals.broadcast) {
-      return { label: 'later', reason: 'content:you-are-not-the-recipient' };
-    }
+  if (!hasAsk(signals)) return classifyNoAsk(signals, options);
+  return null;
+}
+
+// The nothing-is-asked half of classifyByContent, split out to keep each
+// function under the complexity bar.
+function classifyNoAsk(signals, options) {
+  // A newsletter, digest, association mailing or vendor blast is News,
+  // not Later — before #1866 the stage had no News outcome at all.
+  if (signals.bulkPublication) {
+    return { label: 'news', reason: 'content:bulk-publication-no-ask' };
+  }
+  if (signals.automatedSender) {
+    // A one-off machine notice. Later vs News is a judgement call, so
+    // hand it to the model when the user has stated preferences (#1866).
+    if (options.hasStatedPreferences) return null;
+    return { label: 'later', reason: 'content:automated-notice-no-ask' };
+  }
+  if (signals.informational) {
+    return { label: 'later', reason: 'content:fyi-nothing-asked-of-you' };
+  }
+  if (signals.ccOnly || signals.broadcast) {
+    return { label: 'later', reason: 'content:you-are-not-the-recipient' };
   }
   return null;
 }
@@ -656,6 +716,7 @@ const SIGNAL_REPORT_ORDER = [
   'liveThread',
   'informational',
   'automatedSender',
+  'bulkPublication',
 ];
 
 function firedContentSignals(signals) {

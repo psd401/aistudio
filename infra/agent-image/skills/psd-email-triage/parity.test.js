@@ -32,6 +32,8 @@ const SENDERS = [
   'notifications@github.com',
   'mailer-daemon@googlemail.com',
   'bounce+abc@lists.example.org',
+  'newsletter@industrydive.com',
+  'members@assoc.example',
   'serv_payroll@psd401.net',
   'svc-backup@psd401.net',
   'tsd-helpdesk@psd401.net',
@@ -55,6 +57,9 @@ const HEADERS = [
   { to: USER, listUnsubscribe: '<mailto:unsub@x.com>' },
   { to: USER, autoSubmitted: 'auto-generated' },
   { to: USER, precedence: 'bulk' },
+  // #1866: a list Precedence with no List-Unsubscribe, and the reverse.
+  { to: USER, precedence: 'list' },
+  { to: USER, precedence: 'junk' },
   { to: USER, references: '<x@y>' },
 ];
 
@@ -80,6 +85,10 @@ const TEXTS = [
   { subject: 'Release v1.2', body: 'What do you think of v1.2 on example.com?' },
   { subject: 'Notice', body: 'Your report is attached\n\nThink this is awesome?' },
   { subject: 'Great news!', body: 'Isn’t it time? Act now. You are receiving this because you signed up.' },
+  // #1866: publication vocabulary, with and without an ask.
+  { subject: 'CoSN Network Daily Highlights', body: "Today's top stories." },
+  { subject: 'K-12 Dive', body: 'The latest issue is out.' },
+  { subject: 'Member bulletin', body: 'Register by Friday to keep your rate.' },
 ];
 
 function contentCases() {
@@ -153,7 +162,7 @@ describe('content stage parity', () => {
     expect(cases.length).toBeGreaterThan(2000);
     // Every branch of classifyByContent is reached, so agreement means something.
     const labels = new Set(cases.map((c) => tsContent.classifyByContent(tsContent.detectContentSignals(c))?.label ?? 'llm'));
-    expect([...labels].sort()).toEqual(['important', 'later', 'llm']);
+    expect([...labels].sort()).toEqual(['important', 'later', 'llm', 'news']);
   });
 
   test('detectContentSignals / hasAsk / classifyByContent agree', () => {
@@ -163,6 +172,15 @@ describe('content stage parity', () => {
       same('detectContentSignals', input, js, ts);
       same('hasAsk', input, lib.hasAsk(js), tsContent.hasAsk(ts));
       same('classifyByContent', input, lib.classifyByContent(js), tsContent.classifyByContent(ts));
+      // #1866: with stated preferences the stage defers its judgement
+      // calls, and `simulate` passes the same option — so the option has
+      // to be in the parity corpus too.
+      same(
+        'classifyByContent+prefs',
+        input,
+        lib.classifyByContent(js, { hasStatedPreferences: true }),
+        tsContent.classifyByContent(ts, { hasStatedPreferences: true }),
+      );
       // #1861: `simulate` prints firedContentSignals, so a drift here
       // would have the CLI name a different signal than the classifier.
       same(
