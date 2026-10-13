@@ -391,11 +391,11 @@ const AUTOMATED_LOCALPART_FRAGMENTS = [
   "do-not-reply",
   "do_not_reply",
   "mailer-daemon",
-  // No "newsletter" fragment (#1866 review): a substring match would make
+  // `k12dive-newsletter@`, `weekly-newsletter@` (#1866). Anchored to the
+  // hyphen on purpose: a bare "newsletter" fragment would also make
   // `newsletter-editor@` or `jdoe.newsletter@` — a person who runs the
-  // newsletter — mutable without `--confirm-human`. Only the exact
-  // `newsletter@` / `newsletters@` mailboxes are listed above; any other
-  // newsletter reaches News through its list header.
+  // newsletter — mutable without `--confirm-human` (#1866 review).
+  "-newsletter",
 ];
 
 /**

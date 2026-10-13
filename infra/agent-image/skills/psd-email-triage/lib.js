@@ -584,8 +584,10 @@ const AUTOMATED_LOCALPART_FRAGMENTS = [
   'do-not-reply',
   'do_not_reply',
   'mailer-daemon',
-  // No 'newsletter' fragment (#1866 review): a substring match would let
-  // `newsletter-editor@` (a person) be muted without --confirm-human.
+  // `k12dive-newsletter@` (#1866). Anchored to the hyphen: a bare
+  // 'newsletter' fragment would let `newsletter-editor@` (a person) be
+  // muted without --confirm-human.
+  '-newsletter',
 ];
 const AUTOMATED_LOCALPART_PREFIXES = ['serv_', 'svc_', 'svc-', 'tsd-', 'noreply'];
 

@@ -87,7 +87,9 @@ describe("isAutomatedSender", () => {
       ).toBe(true);
     }
     expect(isAutomatedSender("newsletter@industrydive.com")).toBe(true);
-    // Exact mailbox only: a person who runs the newsletter is not a machine.
+    expect(isAutomatedSender("k12dive-newsletter@industrydive.com")).toBe(true);
+    expect(isAutomatedSender("weekly-newsletter@vendor.example")).toBe(true);
+    // A person who runs the newsletter is not a machine.
     expect(isAutomatedSender("newsletter-editor@psd401.net")).toBe(false);
     expect(isAutomatedSender("jdoe.newsletter@psd401.net")).toBe(false);
   });
