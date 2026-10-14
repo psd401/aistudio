@@ -1,5 +1,7 @@
 import {
+  draftWriteAudit,
   executeWorkspaceCommand,
+  expandGmailDraftHelper,
   outboundMessageAudit,
   requiredWorkspaceScopeGap,
   validateEmailTaskWorkspaceCommand,
@@ -498,6 +500,33 @@ const defineTrustedWorkspaceCommandPolicySuite1 = () => {
 
 describe("trusted Workspace command policy", defineTrustedWorkspaceCommandPolicySuite1)
 
+describe("gmail +draft gate parity", () => {
+  // The gate judges `gmail +draft`; gws executes what it expands into. That is
+  // only safe while all three operations carry the same verdict on every slot —
+  // moving `drafts update` into AGENT_ONLY_WRITES alone would let
+  // `+draft --draft-id` run an agent-only write on the user slot unjudged (#1894).
+  it.each([["agent"], ["user"]] as const)(
+    "gives gmail +draft the same %s-slot verdict as both of its expansions",
+    (scope) => {
+      const helper = ["gmail", "+draft", "--to", "bill@psd401.net", "--body", "x"]
+      const verdict = (argv: string[]) => {
+        try {
+          validateWorkspaceCommand({ scope, argv })
+          return "allowed"
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error)
+        }
+      }
+      const create = expandGmailDraftHelper(helper)
+      const update = expandGmailDraftHelper([...helper, "--draft-id", "r-1"])
+      expect(create.slice(0, 4).join(" ")).toBe("gmail users drafts create")
+      expect(update.slice(0, 4).join(" ")).toBe("gmail users drafts update")
+      expect(verdict(create)).toBe(verdict(helper))
+      expect(verdict(update)).toBe(verdict(helper))
+    }
+  )
+})
+
 describe("Sheet value command policy", () => {
   it.each([
     ["sheets", "spreadsheets", "values", "append"],
@@ -675,6 +704,30 @@ const defineWorkspaceOutboundAuditSuite4 = () => {
       outboundMessageAudit(["gmail", "users", "drafts", "create"])
     ).toBeNull()
     expect(outboundMessageAudit(["chat", "spaces", "list"])).toBeNull()
+  })
+
+  it("records whether a +draft created or replaced a draft, and which", () => {
+    expect(
+      draftWriteAudit(["gmail", "+draft", "--to", "a@b.c", "--body", "x"])
+    ).toEqual({ draftAction: "create", draftId: null, threadId: null })
+    expect(
+      draftWriteAudit([
+        "gmail", "+draft", "--to", "a@b.c", "--body", "x",
+        "--thread-id", "t-9", "--draft-id", "r-8812",
+        "--in-reply-to", "m@x", "--subject", "Re: x",
+      ])
+    ).toEqual({ draftAction: "update", draftId: "r-8812", threadId: "t-9" })
+  })
+
+  it("audits the raw drafts update form and ignores non-draft writes", () => {
+    expect(
+      draftWriteAudit([
+        "gmail", "users", "drafts", "update",
+        "--params", JSON.stringify({ userId: "me", id: "r-1" }),
+        "--json", JSON.stringify({ id: "r-1", message: { raw: "x" } }),
+      ])
+    ).toEqual({ draftAction: "update", draftId: "r-1", threadId: null })
+    expect(draftWriteAudit(["chat", "+send", "--text", "hi"])).toBeNull()
   })
 
   it("reports a missing destination rather than inventing one", () => {

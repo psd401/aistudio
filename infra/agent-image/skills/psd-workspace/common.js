@@ -1130,10 +1130,17 @@ function injectMarkers(commandString) {
   if (/\bgmail[\s.]+users[\s.]+drafts[\s.]+create\b/i.test(commandString)) {
     return mutateJsonField(commandString, (obj) => {
       // gws drafts.create wraps the message under .message.raw (base64url).
-      // Skip raw mutation here — too brittle. The +draft helper takes
-      // body/subject directly and is the recommended path; we marker the
-      // body field if present. For raw payloads the marker rule is
-      // enforced via SKILL.md prompt guidance instead.
+      // Skip raw mutation here — too brittle. For raw payloads the marker
+      // rule is enforced via SKILL.md prompt guidance instead.
+      //
+      // The `+draft` / `--draft-id` helper is NOT markered here and must not
+      // be: it carries no --json for this to reach, and its `--body` can
+      // arrive as a `--body-file` payload, whose placeholder is restored from
+      // the ORIGINAL file after this runs (see prepareWorkspaceArguments —
+      // only the JSON placeholder is re-extracted), so any edit made to it
+      // here would be silently discarded. The broker appends the identical
+      // footer while it builds the MIME instead — expandGmailDraftHelper in
+      // lib/agent-workspace/command-executor.ts (#1894).
       if (obj.message && typeof obj.message.body === 'string') {
         obj.message.body = `${obj.message.body}\n\n— Drafted by your agent. Review before sending.`;
       }

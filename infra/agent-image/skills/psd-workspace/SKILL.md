@@ -215,7 +215,39 @@ node /opt/psd-skills/psd-workspace/run.js \
 #
 #   ✅ --command "gmail +draft --to … --subject … --body …"
 #      Optional: --cc, --bcc, --html (body is HTML), or --body-file <abs-path>
-#      in place of --body.
+#      in place of --body. Threading: --thread-id, --in-reply-to. Revising:
+#      --draft-id (see below).
+#
+# REVISING A DRAFT: EDIT IT, DO NOT DRAFT IT AGAIN. The response to a +draft
+# is the Gmail Draft resource — its TOP-LEVEL `id` is the draft id:
+#     {"id": "r-8812", "message": {"id": "19a2…", "threadId": "19a2…"}}
+# Use `r-8812` here, NOT `message.id` — that is a message id, not a draft
+# id. Never guess an id; list drafts to find it if you lost it. To change anything
+# about that draft (reword it, add a recipient, fix the subject), pass that id
+# back as `--draft-id <id>`; the broker expands it into
+# `gmail users drafts update`, which REPLACES that draft's content in place.
+#
+#   ✅ --command "gmail +draft --draft-id r-8812 --to … --subject … --body …"
+#   ❌ re-running the plain +draft to produce a corrected version — that leaves
+#      the old draft sitting in the user's Drafts folder where it can be sent
+#      by mistake, and `drafts delete` is Phase-1 forbidden so you CANNOT
+#      clean it up afterwards. Office staff re-running a discipline-notice
+#      mail-merge, and leaders revising a reply, each ended up with several
+#      near-identical drafts this way (#1894).
+#
+# `--draft-id` rebuilds the WHOLE message, so repeat every flag the draft
+# should still have — anything you omit is dropped from the draft.
+#
+# REPLYING INSIDE A THREAD: pass `--thread-id <threadId>` (the `threadId` on
+# the message you are replying to) TOGETHER WITH `--in-reply-to <Message-ID>`
+# and `--subject` matching the thread's — Gmail only files the draft into the
+# thread when all three agree, so the broker refuses `--thread-id` alone.
+# `<Message-ID>` is the original message's RFC `Message-ID` header, NOT its
+# Gmail id; the broker writes `In-Reply-To` and `References` from it.
+#
+# UNKNOWN FLAGS ARE REFUSED, by name. `+draft` takes only the flags listed
+# above; it is not a pass-through to gws. A refusal naming a flag means that
+# flag does not exist here — do not retry with a variant spelling.
 #
 # `+draft` is a PSD helper, not a gws one: the trusted broker expands it into
 # `gmail users drafts create` and builds the RFC 5322 message for you. Do not
@@ -518,7 +550,8 @@ The skill silently adds these to every write:
 
 - **Calendar event create/update/patch** → description prepended with `🤖 Created by your agent on YYYY-MM-DD.`
 - **Drive file create** → filename prefixed `[Agent] `, `appProperties.psdAgentCreated=true`
-- **Gmail draft create** (when body is in the `.message.body` field) → footer `— Drafted by your agent. Review before sending.`
+- **Gmail `+draft`** (create and `--draft-id` update alike) → body footer `— Drafted by your agent. Review before sending.`, appended by the broker as it builds the message. Applied once: a body that already ends with the footer — e.g. one you read back to revise — is left alone.
+- **Gmail draft create, raw form** (when body is in the `.message.body` field) → the same footer. A hand-built `.message.raw` payload is NOT markered, which is one more reason to use `+draft`.
 
 You don't need to remember to add markers — the skill does it. **Do not** strip them or instruct the user to strip them; they're the audit substrate.
 
