@@ -248,6 +248,10 @@ schedule's id:
 | `name_conflict` | A schedule with that name already exists | `update` the schedule at `existingScheduleId`, or `delete` it first |
 | `possible_duplicate` | An **enabled** schedule already runs the same cadence and the same opening prompt | `update` the schedule at `existingScheduleId`, or pass `--confirm-new` |
 
+A 409 that carries no `code` is neither of these — it is a data-integrity
+refusal on an existing record, not a duplicate. Report its message to the user
+and stop; renaming or `--confirm-new` will not clear it.
+
 If `list` does not show the schedule the 409 names, do **not** force the
 create through with `--confirm-new`. That combination means the broker and the
 listing disagree — report the id from the error to the user and ask, rather

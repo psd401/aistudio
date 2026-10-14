@@ -820,6 +820,35 @@ function defineNameCollisionMappingSuite() {
     expect(error).not.toBeInstanceOf(AgentScheduleQuotaError)
   })
 
+  it("treats a guard row with no readable target as a taken name, not a free one", async () => {
+    // The row's presence is what proves the name is occupied. Reading a
+    // malformed row as "no row" would hand back the quota error again —
+    // #1889's exact failure, just reached through a corrupt record.
+    const { service, dynamoSend, schedulerSend } = harness()
+    dynamoSend
+      .mockResolvedValueOnce({ Items: [scheduleRecord()] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce(OWNER_ROW_RESPONSE)
+      .mockRejectedValueOnce(cancellation())
+      .mockResolvedValueOnce({ Item: { targetScheduleId: 42 } })
+    schedulerSend.mockResolvedValue({})
+
+    const error = await service
+      .create(OWNER, {
+        name: "Morning brief",
+        prompt: "Something else entirely",
+        cron: "0 15 * * *",
+      })
+      .catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(AgentScheduleNameConflictError)
+    expect(error).not.toBeInstanceOf(AgentScheduleQuotaError)
+    expect((error as AgentScheduleNameConflictError).details).toEqual({
+      code: "name_conflict",
+      existingScheduleId: null,
+    })
+  })
+
   it("pins the TransactWrite item order the create conditions rely on", async () => {
     const { service, dynamoSend, schedulerSend } = harness()
     dynamoSend
@@ -928,6 +957,28 @@ function defineLikelyDuplicateSuite() {
     ).resolves.toMatchObject({ name: "Morning brief v2" })
   })
 
+  it("does not treat the same cron in another timezone as a duplicate", async () => {
+    // Same cron text, three hours apart on the clock. Two campuses on two
+    // coasts is a real schedule pair, and refusing it would force the agent to
+    // reach for --confirm-new on a legitimate create.
+    const { service, dynamoSend, schedulerSend } = harness()
+    dynamoSend
+      .mockResolvedValueOnce({ Items: [scheduleRecord()] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce(OWNER_ROW_RESPONSE)
+      .mockResolvedValueOnce({})
+    schedulerSend.mockResolvedValue({})
+
+    await expect(
+      service.create(OWNER, {
+        name: "Morning brief East",
+        prompt: "Summarize my day",
+        cron: "0 8 * * *",
+        timezone: "America/New_York",
+      }),
+    ).resolves.toMatchObject({ name: "Morning brief East" })
+  })
+
   it("does not treat a different cadence as a duplicate", async () => {
     const { service, dynamoSend, schedulerSend } = harness()
     dynamoSend
@@ -959,5 +1010,104 @@ function defineLikelyDuplicateSuite() {
   })
 }
 
+/**
+ * Classification from the exception's own per-item reasons.
+ *
+ * Re-probing the guard row after the fact loses to a concurrent delete of the
+ * colliding schedule: the row is gone by probe time, so the cancellation reads
+ * as "quota" — #1889's wrong error, reached through a race instead of
+ * unconditionally. The reasons travel with the exception and cannot race.
+ */
+function cancellationWithReasons(codes: string[]) {
+  return Object.assign(new Error("cancelled"), {
+    name: "TransactionCanceledException",
+    CancellationReasons: codes.map((Code) => ({ Code })),
+  })
+}
+
+function defineCancellationReasonSuite() {
+  it("reads a name collision off the cancellation reasons, not a second probe", async () => {
+    const { service, dynamoSend, schedulerSend } = harness()
+    dynamoSend
+      .mockResolvedValueOnce({ Items: [scheduleRecord()] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce(OWNER_ROW_RESPONSE)
+      .mockRejectedValueOnce(
+        cancellationWithReasons(["None", "ConditionalCheckFailed", "None"]),
+      )
+      .mockResolvedValueOnce({ Item: { targetScheduleId: SCHEDULE_ID } })
+    schedulerSend.mockResolvedValue({})
+
+    const error = await service
+      .create(OWNER, {
+        name: "Morning brief",
+        prompt: "Something else entirely",
+        cron: "0 15 * * *",
+      })
+      .catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(AgentScheduleNameConflictError)
+    expect((error as AgentScheduleNameConflictError).details).toEqual({
+      code: "name_conflict",
+      existingScheduleId: SCHEDULE_ID,
+    })
+  })
+
+  it("still reports the collision when the id probe races a delete", async () => {
+    // The guard row is gone by probe time. Classification came from the
+    // reasons, so the agent is told the name is taken and loses only the id —
+    // rather than being told its quota is full.
+    const { service, dynamoSend, schedulerSend } = harness()
+    dynamoSend
+      .mockResolvedValueOnce({ Items: [scheduleRecord()] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce(OWNER_ROW_RESPONSE)
+      .mockRejectedValueOnce(
+        cancellationWithReasons(["None", "ConditionalCheckFailed", "None"]),
+      )
+      .mockResolvedValueOnce({})
+    schedulerSend.mockResolvedValue({})
+
+    const error = await service
+      .create(OWNER, {
+        name: "Morning brief",
+        prompt: "Something else entirely",
+        cron: "0 15 * * *",
+      })
+      .catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(AgentScheduleNameConflictError)
+    expect(error).not.toBeInstanceOf(AgentScheduleQuotaError)
+    expect((error as AgentScheduleNameConflictError).details).toEqual({
+      code: "name_conflict",
+      existingScheduleId: null,
+    })
+  })
+
+  it("reports quota from the reasons without probing the guard row at all", async () => {
+    const { service, dynamoSend, schedulerSend } = harness()
+    dynamoSend
+      .mockResolvedValueOnce({ Items: [] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce(OWNER_ROW_RESPONSE)
+      .mockRejectedValueOnce(
+        cancellationWithReasons(["ConditionalCheckFailed", "None", "None"]),
+      )
+    schedulerSend.mockResolvedValue({})
+
+    const error = await service
+      .create(OWNER, { name: "Over quota", prompt: "No room", cron: "0 8 * * *" })
+      .catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(AgentScheduleQuotaError)
+    // Four calls, not five: the diagnostic read is skipped entirely.
+    expect(dynamoSend).toHaveBeenCalledTimes(4)
+  })
+}
+
 describe("AgentScheduleService name collision mapping", defineNameCollisionMappingSuite)
+describe(
+  "AgentScheduleService cancellation reasons",
+  defineCancellationReasonSuite,
+)
 describe("AgentScheduleService likely-duplicate refusal", defineLikelyDuplicateSuite)

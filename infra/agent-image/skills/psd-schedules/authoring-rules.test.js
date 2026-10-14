@@ -131,4 +131,22 @@ describe('duplicate-prevention guidance', () => {
     expect(create).toContain('confirmNew:');
     expect(create).toContain('[--confirm-new]');
   });
+
+  test('tells the agent what a 409 without a code means', () => {
+    // The integrity refusals also answer 409, with no `code`. Without this
+    // carve-out the table above reads as "409 implies one of these two", and
+    // the agent would hunt for a field that is not there — or try to rename
+    // its way out of a corrupt-record error.
+    expect(SKILL).toMatch(/409 that carries no `code`/);
+  });
+
+  test('create.js surfaces the code the SKILL.md table tells the agent to read', () => {
+    // The broker returns `code` in the JSON body, which requestAgentBroker
+    // hangs off error.responseBody. Printing only error.message meant the
+    // documented field never reached the agent.
+    const create = fs.readFileSync(path.join(__dirname, 'create.js'), 'utf8');
+    expect(create).toContain('refusalDetail');
+    expect(create).toContain('responseBody');
+    expect(create).toContain('failWithRefusal');
+  });
 });

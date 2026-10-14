@@ -200,17 +200,76 @@ export class AgentScheduleNotFoundError extends Error {
   }
 }
 
+/**
+ * Which condition in `create`'s TransactWrite failed.
+ *
+ * `CancellationReasons` comes back positionally, one entry per transact item,
+ * so these indices must track the item order in `create`. A unit test pins
+ * that order precisely so this mapping cannot drift silently.
+ */
+const CREATE_QUOTA_ITEM_INDEX = 0;
+const CREATE_NAME_GUARD_ITEM_INDEX = 1;
+const CONDITION_CHECK_FAILED = "ConditionalCheckFailed";
+
+/**
+ * The per-item cancellation codes DynamoDB attached to the exception, or null
+ * when it did not carry any readable ones.
+ *
+ * Reading the reasons off the exception is what tells a name collision from
+ * quota exhaustion *without* a second read: re-probing the guard row after the
+ * fact loses to a concurrent delete, which would land right back on the
+ * misleading quota error #1889 is about.
+ */
+function cancellationReasonCodes(error: unknown): string[] | null {
+  if (!error || typeof error !== "object") return null;
+  const reasons = (error as { CancellationReasons?: unknown })
+    .CancellationReasons;
+  if (!Array.isArray(reasons)) return null;
+  return reasons.map((reason) => {
+    if (!reason || typeof reason !== "object") return "";
+    const code = (reason as { Code?: unknown }).Code;
+    return typeof code === "string" ? code : "";
+  });
+}
+
+/**
+ * The result of reading a name guard row, kept distinct from "no row" so a
+ * failed read can never be reported as an available name. See
+ * `AgentScheduleService.nameGuardTarget`.
+ */
+type NameGuardProbe =
+  | { status: "taken"; targetScheduleId: string | null }
+  | { status: "free" }
+  | { status: "unknown" };
+
+/**
+ * The machine-readable half of a 409, merged into the broker's response body.
+ *
+ * A closed union rather than a loose bag: the route spreads this straight into
+ * the JSON response, so a future subtype that invented a key — `error` above
+ * all, which would shadow the message — is a compile error here rather than a
+ * surprise in the agent's hands.
+ */
+export type AgentScheduleConflictDetails =
+  | { code: "name_conflict"; existingScheduleId: string | null }
+  | {
+      code: "possible_duplicate";
+      existingScheduleId: string;
+      existingScheduleName: string;
+    };
+
 export class AgentScheduleConflictError extends Error {
   /**
    * Extra fields the broker route merges into the 409 body.
    *
    * The agent acts on the machine-readable `code` and the existing schedule's
    * id; a prose message alone is what let it retry under a new name and create
-   * a real duplicate.
+   * a real duplicate. Absent on the integrity refusals, which are not
+   * duplicates and have no id to offer.
    */
-  readonly details?: Record<string, unknown>;
+  readonly details?: AgentScheduleConflictDetails;
 
-  constructor(message: string, details?: Record<string, unknown>) {
+  constructor(message: string, details?: AgentScheduleConflictDetails) {
     super(message);
     this.name = "AgentScheduleConflictError";
     this.details = details;
@@ -521,6 +580,13 @@ function parseOptionalFlag(value: unknown, field: string): boolean {
 
 const DUPLICATE_PROMPT_PREFIX_LENGTH = 200;
 
+/** The fields that decide whether two schedules are the same job. */
+interface DuplicateCandidate {
+  schedulerExpression: string;
+  timezone: string;
+  prompt: string;
+}
+
 function normalizedForComparison(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, " ");
 }
@@ -538,10 +604,17 @@ function normalizedPromptPrefix(prompt: string): string {
  * Called before the EventBridge schedule is created, so a refusal leaves
  * nothing to roll back and the agent gets the id of the schedule it should
  * have updated instead.
+ *
+ * Best-effort by construction, and deliberately so: it decides from a snapshot
+ * read before the transaction, and `create` takes no owner-level lock, so two
+ * genuinely concurrent creates can both pass. It catches the sequential
+ * retry-under-a-new-name loop that #1889 is about, not a race. Closing the
+ * race would need a second guard row keyed by cadence and prompt, conditioned
+ * inside the same transaction as the name guard.
  */
 function refuseIfLikelyDuplicate(
   records: AgentScheduleRecord[],
-  candidate: { schedulerExpression: string; prompt: string },
+  candidate: DuplicateCandidate,
 ): void {
   const duplicate = findLikelyDuplicate(records, candidate);
   if (!duplicate) return;
@@ -558,18 +631,26 @@ function refuseIfLikelyDuplicate(
  * An enabled schedule for this owner already running the same prompt on the
  * same cadence. Exact name equality is handled by the name guard row; this is
  * the "same job, slightly different name" case that had no check at all.
+ *
+ * The timezone is part of the cadence, not decoration: the same cron text in
+ * `America/Los_Angeles` and `America/New_York` fires three hours apart, so two
+ * such schedules are genuinely different jobs and must not be refused as
+ * duplicates. `schedulerExpression` does not carry the zone — EventBridge
+ * takes it as a separate field — so it has to be compared explicitly.
  */
 function findLikelyDuplicate(
   records: AgentScheduleRecord[],
-  candidate: { schedulerExpression: string; prompt: string },
+  candidate: DuplicateCandidate,
 ): AgentScheduleRecord | null {
   const expression = normalizedForComparison(candidate.schedulerExpression);
+  const timezone = normalizedForComparison(candidate.timezone);
   const promptPrefix = normalizedPromptPrefix(candidate.prompt);
   return (
     records.find(
       (record) =>
         record.enabled &&
         normalizedForComparison(record.schedulerExpression) === expression &&
+        normalizedForComparison(record.timezone) === timezone &&
         normalizedPromptPrefix(record.prompt) === promptPrefix,
     ) ?? null
   );
@@ -774,16 +855,16 @@ export class AgentScheduleService {
   }
 
   /**
-   * Backfill quota/name metadata for owners whose schedules predate the
-   * transactional admission scheme. New mutations require the reconciled
-   * marker, so concurrent creates cannot increment an unseeded zero counter.
-   */
-  /**
    * Reconciles the quota and name-guard rows, and hands back the owner's
    * current schedule records.
    *
-   * Returning them is what lets `create` run its duplicate check without a
-   * second consistent query — this method has already read every row.
+   * Backfills quota/name metadata for owners whose schedules predate the
+   * transactional admission scheme. New mutations require the reconciled
+   * marker, so concurrent creates cannot increment an unseeded zero counter.
+   *
+   * Returning the records is what lets `create` run its duplicate check
+   * without a second consistent query — this method has already read every
+   * row.
    */
   private async reconcileOwnerMetadata(
     ownerEmail: string,
@@ -821,7 +902,14 @@ export class AgentScheduleService {
         throw error;
       }
     }
-    return latestRecords;
+    // Unreachable: the final attempt rethrows rather than continuing. Stated
+    // as a throw and not `return latestRecords` so the control flow cannot be
+    // misread as a graceful give-up that hands back best-effort records —
+    // `create` would then run its duplicate check against a snapshot the
+    // reconciliation never managed to settle.
+    throw new AgentScheduleSyncError(
+      "Schedule metadata reconciliation did not converge",
+    );
   }
 
   private planQuotaReconciliation(
@@ -1029,7 +1117,11 @@ export class AgentScheduleService {
     const confirmNew = parseOptionalFlag(input.confirmNew, "confirmNew");
     const existingRecords = await this.reconcileOwnerMetadata(ownerEmail);
     if (!confirmNew) {
-      refuseIfLikelyDuplicate(existingRecords, { schedulerExpression, prompt });
+      refuseIfLikelyDuplicate(existingRecords, {
+        schedulerExpression,
+        timezone,
+        prompt,
+      });
     }
     const profile = await this.trustedOwnerProfile(ownerEmail);
     const scheduleId = randomUUID();
@@ -1130,7 +1222,21 @@ export class AgentScheduleService {
             GroupName: this.config.scheduleGroup,
           }),
         );
-      } catch {
+      } catch (rollbackError) {
+        // The EventBridge schedule now exists with no DynamoDB record behind
+        // it. It never appears in `list`, so it is invisible to the owner, and
+        // when it fires the cron Lambda finds no record. Log the handle an
+        // operator needs to delete it — without this the orphan is
+        // undiagnosable.
+        log.error("Orphaned EventBridge schedule after failed rollback", {
+          schedulerName,
+          scheduleGroup: this.config.scheduleGroup,
+          scheduleId,
+          error:
+            rollbackError instanceof Error
+              ? rollbackError.message
+              : String(rollbackError),
+        });
         throw new AgentScheduleSyncError(
           "Schedule persistence failed and scheduler rollback also failed",
         );
@@ -1139,7 +1245,7 @@ export class AgentScheduleService {
         error instanceof Error &&
         error.name === "TransactionCanceledException"
       ) {
-        throw await this.createCancellationError(ownerEmail, name);
+        throw await this.createCancellationError(ownerEmail, name, error);
       }
       throw error;
     }
@@ -1158,12 +1264,30 @@ export class AgentScheduleService {
   private async createCancellationError(
     ownerEmail: string,
     name: string,
+    cancellation: unknown,
   ): Promise<Error> {
-    const guardTarget = await this.nameGuardTarget(ownerEmail, name);
-    if (typeof guardTarget === "string") {
-      return new AgentScheduleNameConflictError(name, guardTarget);
+    // Preferred path: the exception says which condition failed, so no second
+    // read can race it. The probe is still used for the existing schedule's
+    // id, which the reasons do not carry — but a probe that comes back empty
+    // only costs us the id, not the classification.
+    const codes = cancellationReasonCodes(cancellation);
+    if (codes) {
+      if (codes[CREATE_NAME_GUARD_ITEM_INDEX] === CONDITION_CHECK_FAILED) {
+        const probe = await this.nameGuardTarget(ownerEmail, name);
+        return new AgentScheduleNameConflictError(
+          name,
+          probe.status === "taken" ? probe.targetScheduleId : null,
+        );
+      }
+      if (codes[CREATE_QUOTA_ITEM_INDEX] === CONDITION_CHECK_FAILED) {
+        return new AgentScheduleQuotaError(this.config.maxSchedulesPerOwner);
+      }
     }
-    if (guardTarget === undefined) {
+    const probe = await this.nameGuardTarget(ownerEmail, name);
+    if (probe.status === "taken") {
+      return new AgentScheduleNameConflictError(name, probe.targetScheduleId);
+    }
+    if (probe.status === "unknown") {
       // The probe itself failed, so we do not know why the write was
       // cancelled. Answering "quota exceeded" here would be the #1889 bug
       // with a new trigger: the agent would retry under a different name, or
@@ -1177,17 +1301,23 @@ export class AgentScheduleService {
   }
 
   /**
-   * The schedule id the owner's name guard row points at.
+   * Whether the owner's name guard row for this name exists.
    *
-   * Three outcomes, and the caller must keep them apart: a string (the row
-   * exists, so the name is taken), `null` (no such row), and `undefined` (the
-   * read itself failed, so we know nothing). Collapsing the last two is how a
-   * transient DynamoDB throttle would come back out as "quota exceeded".
+   * Three outcomes the caller must keep apart, which is why this is a tagged
+   * union and not a nullable string: `taken` (the row is there, so the name is
+   * in use), `free` (no such row, so the name-guard condition would have
+   * succeeded and the cancellation was the quota one), and `unknown` (the read
+   * itself failed, so we know nothing). Collapsing `unknown` into `free` is how
+   * a transient DynamoDB throttle would come back out as "quota exceeded".
+   *
+   * A row whose `targetScheduleId` is missing or malformed is still `taken`
+   * with a null id: the name is occupied either way, and reporting it as free
+   * would send the agent back to the misleading quota error.
    */
   private async nameGuardTarget(
     ownerEmail: string,
     name: string,
-  ): Promise<string | null | undefined> {
+  ): Promise<NameGuardProbe> {
     try {
       const response = await this.dynamo.send(
         new GetCommand({
@@ -1196,13 +1326,17 @@ export class AgentScheduleService {
           ConsistentRead: true,
         }),
       );
-      const target = response.Item?.targetScheduleId;
-      return typeof target === "string" ? target : null;
+      if (!response.Item) return { status: "free" };
+      const target = response.Item.targetScheduleId;
+      return {
+        status: "taken",
+        targetScheduleId: typeof target === "string" ? target : null,
+      };
     } catch (error) {
       log.warn("Could not read the schedule name guard row", {
         error: error instanceof Error ? error.message : String(error),
       });
-      return undefined;
+      return { status: "unknown" };
     }
   }
 
