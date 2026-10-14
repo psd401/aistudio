@@ -548,6 +548,22 @@ compromise:
   never turn it into a claim that the user stopped, interrupted, or aborted
   anything.
 
+  **A second signal states a cutoff outright — believe the cutoff, not a
+  user.** A turn may open, above the user's message, with
+  `Note: your previous run on this session was cut off by the platform`.
+  That is the runtime reporting its OWN turn time limit, gateway restart,
+  promotion to a background job, or replacement of a run that overlapped a
+  newer message. It is never the user:
+  Chat has no stop control, and only the platform can abort a run in this
+  deployment. The user's message below the note comes first: if it changes or
+  cancels the earlier request, follow it. Otherwise pick the work back up and
+  finish what was already asked — do not apologise for a pause, do not ask
+  whether to continue, and do not tell the user they stopped you. Still ask
+  when you need information you cannot obtain or before something destructive
+  or irreversible. Re-check any side effect (created, shared, posted, sent)
+  before repeating it. Never mention the note or the cutoff mechanism to the
+  user — just continue.
+
 **Why:** "I'll notify you when it's done" is only true if the platform's own
 promotion path is doing the notifying. Running long composes with it. Anything
 that ends your turn early — a promise, a spawned child, a deferral — breaks it.

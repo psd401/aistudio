@@ -1,4 +1,5 @@
 # Files
 
+- [Agent Schedules: Validation, Read-Back, and Audit](agent-schedules.md) - How AI Studio validates, normalizes, describes, and audits agent schedules (cron, rate, at) that EventBridge Scheduler fires, covering the EventBridge cron dialect rules, next-run read-back, and the read-only audit script.
 - [One-Time Credential Entry (#1887)](credential-entry.md) - How agents collect a user-held secret, such as a vendor API key or personal token, through a single-use, 15-minute entry link instead of chat. Covers the consent-link mint route, the entry page server action, claim-before-write ordering, and the psd-credentials request_entry skill.
 - [Agent Platform & Skills System](overview.md) - Extensible agent skill system with 39 domain-specific capabilities including media processing, private Drive delivery of agent-made files, Google Workspace integration, Cedar governance, MCP tool exposure, email triage with content-first classification and rhetorical question guard, scheduled run silent reply, scheduled-post thread mapping, one-time credential entry links that keep user secrets out of chat, and transport truncation awareness for K-12 AI assistants.

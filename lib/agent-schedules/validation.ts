@@ -1,3 +1,11 @@
+/**
+ * Timezone a schedule falls back to when the record does not name one.
+ *
+ * Lives here rather than in `service.ts` so the read-only audit script can
+ * share it without pulling the AWS SDK in through the service module.
+ */
+export const DEFAULT_SCHEDULE_TIMEZONE = "America/Los_Angeles";
+
 const MAX_NAME_LENGTH = 120;
 const MAX_PROMPT_LENGTH = 20_000;
 const MAX_EXPRESSION_LENGTH = 256;
@@ -154,6 +162,30 @@ function numericValuesOutOfRange(
 const DAY_OF_WEEK_NAME = /^(SUN|MON|TUE|WED|THU|FRI|SAT)/i;
 
 /**
+ * Is this cron field a YEAR — `*`, a 4-digit year, or a list/range/step of
+ * them?
+ *
+ * Written as a parser rather than one regex: the equivalent pattern nests
+ * quantifiers inside an alternation, which is a ReDoS shape on attacker-
+ * reachable input (this field comes straight off an agent request).
+ */
+function isYearField(field: string): boolean {
+  if (field === "*") return true;
+  return field.split(",").every((segment) => {
+    const pieces = segment.split("/");
+    if (pieces.length > 2) return false;
+    // `(?!0+$)` rejects a zero step: `2024/0` is nonsense, and accepting it
+    // here would let it reach AWS as an opaque 400.
+    if (pieces.length === 2 && !/^(?!0+$)\d{1,3}$/.test(pieces[1])) return false;
+    if (pieces[0] === "*") return true;
+    const bounds = pieces[0].split("-");
+    return (
+      bounds.length <= 2 && bounds.every((token) => /^\d{4}$/.test(token))
+    );
+  });
+}
+
+/**
  * Reject an expression whose field COUNT is right but whose field VALUES are
  * not EventBridge's.
  *
@@ -182,6 +214,14 @@ function validateCronFieldDomains(fields: string[]): void {
       "cron fields look shifted by one — EventBridge takes " +
         "minute hour day-of-month month day-of-week year (6 fields, no " +
         "seconds). For 6:45am on weekdays use cron(45 6 ? * MON-FRI *).",
+    );
+  }
+  // Same year rule the unwrapped path enforces, applied to a hand-wrapped
+  // `cron(...)` so both entry points agree on what field 6 is.
+  if (!isYearField(fields[5])) {
+    throw new AgentScheduleInputError(
+      "the 6th cron field must be a 4-digit year or *. EventBridge takes " +
+        "minute hour day-of-month month day-of-week year (no seconds field).",
     );
   }
   if (numericValuesOutOfRange(fields[2], 1, 31)) {
@@ -268,6 +308,71 @@ function normalizeWrappedScheduleExpression(expression: string): string | null {
   return null;
 }
 
+/**
+ * Reject an UNWRAPPED 6-field cron whose sixth field is not a year.
+ *
+ * The 6-field unwrapped path assumes EventBridge shape — field 6 is the year.
+ * A seconds-first (Quartz/standard-cron-with-seconds) expression also has six
+ * fields, so it is accepted here and then silently rewritten into a different
+ * schedule. `0 15 18 * * *` means 6:15pm daily to whoever wrote it; this path
+ * turned it into `cron(0 15 18 * ? *)` — 3:00pm on the 18th of every month.
+ *
+ * The `?` guard in validateCronFieldDomains cannot catch it, because this
+ * function sets `?` itself before that guard runs: by the time the fields are
+ * validated the expression looks well-formed. A principal's "evening heads-up"
+ * fired monthly on the 18th for weeks for exactly this reason.
+ *
+ * Two checks, in order:
+ *  1. Field 6 must be a 4-digit year (or `*`). That catches the shape whose
+ *     day names landed in the year slot, e.g. `0 45 6 * ? MON-FRI`.
+ *  2. The seconds-first shape, whose year slot is a legitimate-looking `*`:
+ *     field 3 an hour-sized number and neither day field `?`. Narrowing to
+ *     "neither day field is `?`" keeps a real EventBridge expression like
+ *     `0 0 1 * ? *` (midnight on the 1st) out of the net — EventBridge
+ *     requires `?` in exactly one day field, so every expression it actually
+ *     accepts carries one, and that form must stay accepted.
+ *
+ * Check 2 does not look at the seconds field. It once required it to be `0`,
+ * which let every nonzero-seconds expression through: `30 15 18 * * *`
+ * (6:15:30pm daily) was rewritten to `cron(30 15 18 * ? *)`, 3:30pm on the
+ * 18th — the same silent wrong-time bug this function exists to stop, just
+ * one second off the tested case.
+ *
+ * Check 2 only runs when the year slot is `*`, because that is the only
+ * ambiguous form. An explicit 4-digit year can never be a seconds-first
+ * expression — a seconds-first cron carries day-of-week there, not a year —
+ * so `0 9 1 * * 2027` (9:00am on the 1st, in 2027) stays accepted.
+ */
+function rejectMisreadSixFieldCron(fields: string[]): void {
+  if (!isYearField(fields[5])) {
+    throw new AgentScheduleInputError(
+      "the 6th cron field must be a 4-digit year or *. EventBridge takes " +
+        "minute hour day-of-month month day-of-week year (no seconds field). " +
+        "Prefer the 5-field form — e.g. `45 6 * * MON-FRI` for 6:45am on " +
+        "weekdays — and let the skill expand it.",
+    );
+  }
+  const hourLike = /^\d{1,2}$/.test(fields[2])
+    ? Number.parseInt(fields[2], 10)
+    : null;
+  if (
+    fields[5] === "*" &&
+    hourLike !== null &&
+    hourLike <= 23 &&
+    fields[2] !== "?" &&
+    fields[4] !== "?"
+  ) {
+    throw new AgentScheduleInputError(
+      "this looks like a seconds-first cron (seconds minute hour " +
+        "day-of-month month day-of-week), which EventBridge does not " +
+        `accept — the hour you wrote would be read as day-of-month ` +
+        `${hourLike}. EventBridge takes minute hour day-of-month month ` +
+        "day-of-week year, with no seconds field. For 6:15pm daily use " +
+        "the 5-field form `15 18 * * *`.",
+    );
+  }
+}
+
 function normalizeUnwrappedCron(expression: string): string {
   const fields = expression.split(/\s+/);
   if (fields.length !== 5 && fields.length !== 6) {
@@ -275,6 +380,7 @@ function normalizeUnwrappedCron(expression: string): string {
       "cron must be a 5/6-field cron, cron(...), rate(...), or at(...)",
     );
   }
+  if (fields.length === 6) rejectMisreadSixFieldCron(fields);
   const expanded = fields.length === 5 ? [...fields, "*"] : fields;
   const dayOfMonthSpecified = expanded[2] !== "*" && expanded[2] !== "?";
   const dayOfWeekSpecified = expanded[4] !== "*" && expanded[4] !== "?";

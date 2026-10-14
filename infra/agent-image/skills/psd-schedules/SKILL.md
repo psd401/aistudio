@@ -219,10 +219,45 @@ context the future-you will have. So:
 **Creating.** Gather name, prompt, time-of-day, day(s), timezone (default
 Pacific). Translate to cron. **Run `list` first** and check whether this job
 already exists. State the full schedule back in plain language and confirm.
-Run `create`. Tell the user when the first fire will be.
+Run `create`. Then read back what was actually saved — see below.
 
 **Modifying.** If you don't know the `scheduleId`, run `list` first. Then
-`update` or `delete`. Confirm what changed — don't echo raw JSON.
+`update` or `delete`. Confirm what changed — don't echo raw JSON. Read back
+the saved schedule the same way you do on create.
+
+### Read back what was SAVED, not what you sent
+
+`create`, `update` and `list` each return, per schedule:
+
+| Field | Meaning |
+|---|---|
+| `schedulerExpression` | the normalized expression EventBridge actually holds |
+| `description` | plain-language reading of it, e.g. `At 6:30 AM, Monday through Friday` |
+| `nextRuns` | the next 3 fire times, ISO 8601 in the schedule's timezone — always empty for a disabled schedule, which cannot fire |
+
+A `rate(N unit)` schedule has no fixed clock time: EventBridge counts the
+interval from when the schedule was last saved, so its `nextRuns` shift every
+time it is updated. Use `cron` when the user asked for a particular time.
+
+`nextRuns` is accurate to the minute, which is all EventBridge promises — it
+invokes every schedule type with 60-second precision, so a 6:15 PM schedule
+fires somewhere in the 6:15 PM minute. Tell the user the minute, not the
+second.
+
+**Confirm from `description` and `nextRuns` — never from the cron string you
+typed.** Your own expression is what you *meant*; these fields are what the
+platform will *do*. They are the only place the two can be seen to disagree.
+
+> Saved "Evening heads-up" — At 6:15 PM, every day. Next runs: Oct 13 6:15 PM,
+> Oct 14 6:15 PM, Oct 15 6:15 PM (Pacific).
+
+If `description` or `nextRuns` is not what the user asked for, say so and fix
+it before confirming. If `nextRuns` is empty, say the next fire time could not
+be computed rather than inventing one — or, when `enabled` is false, say the
+schedule is paused and will not fire until it is enabled. Schedules created
+before this read-back existed were never re-checked — several have been firing on the wrong days or
+in the wrong month for weeks, unnoticed, because nothing ever showed the owner
+what was stored.
 
 ## Never create a second schedule for the same job
 

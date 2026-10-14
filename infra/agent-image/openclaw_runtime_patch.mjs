@@ -19,24 +19,15 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import {
+  PATCHED_ABORTED_HINT_ASSIGNMENT,
+  UPSTREAM_ABORTED_HINT_ANCHOR,
+} from "./openclaw_aborted_hint.mjs";
+import { fail, replaceOnce } from "./openclaw_patch_text.mjs";
+
 const EXPECTED_OPENCLAW_VERSION = "2026.7.2-beta.5";
 const distDir = path.resolve(process.argv[2] ?? "/app/dist");
 const packagePath = path.join(path.dirname(distDir), "package.json");
-
-function fail(message) {
-  throw new Error(`OpenClaw runtime patch failed: ${message}`);
-}
-
-function replaceOnce(source, before, after, label) {
-  const first = source.indexOf(before);
-  if (first < 0) {
-    fail(`${label}: expected anchor was not found`);
-  }
-  if (source.includes(before, first + before.length)) {
-    fail(`${label}: expected anchor occurred more than once`);
-  }
-  return source.slice(0, first) + after + source.slice(first + before.length);
-}
 
 function findUniqueBundle(files, label, markers) {
   const matches = files.filter((file) => {
@@ -332,6 +323,21 @@ patchTool.source = replaceOnce(
   "patch no-op must not terminate the run",
 );
 
+// The platform must not blame the user for its own cutoffs (issue #1897).
+// `applySessionHints` tells the model "the previous agent run was aborted by
+// the user" whenever `abortedLastRun` is set, and here only the platform ever
+// sets it. See openclaw_aborted_hint.mjs for the setters and the replacement.
+const replyBody = findUniqueBundle(files, "aborted-last-run session hint", [
+  UPSTREAM_ABORTED_HINT_ANCHOR,
+  "async function applySessionHints(params)",
+]);
+replyBody.source = replaceOnce(
+  replyBody.source,
+  UPSTREAM_ABORTED_HINT_ANCHOR,
+  PATCHED_ABORTED_HINT_ASSIGNMENT,
+  "aborted-last-run session hint",
+);
+
 for (const file of [
   embeddedAgent,
   agentCommand,
@@ -340,6 +346,7 @@ for (const file of [
   selection,
   fileTools,
   patchTool,
+  replyBody,
 ]) {
   // filePath is confined to the enumerated, version-checked dist directory.
   // eslint-disable-next-line security/detect-non-literal-fs-filename
@@ -356,6 +363,7 @@ process.stdout.write(
       selection,
       fileTools,
       patchTool,
+      replyBody,
     ]
       .map((file) => file.name)
       .join(", ") +
