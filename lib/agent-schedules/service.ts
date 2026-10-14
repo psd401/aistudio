@@ -869,16 +869,14 @@ export class AgentScheduleService {
   private async reconcileOwnerMetadata(
     ownerEmail: string,
   ): Promise<AgentScheduleRecord[]> {
-    let latestRecords: AgentScheduleRecord[] = [];
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const items = await this.ownerItems(ownerEmail);
       const { records, quota, guards } = ownerMetadataSnapshot(items, ownerEmail);
-      latestRecords = records;
       const transactItems = [
         ...this.planQuotaReconciliation(ownerEmail, records.length, quota),
         ...this.planNameGuardReconciliation(ownerEmail, records, guards),
       ];
-      if (transactItems.length === 0) return latestRecords;
+      if (transactItems.length === 0) return records;
       try {
         await this.dynamo.send(
           new TransactWriteCommand({
@@ -890,7 +888,7 @@ export class AgentScheduleService {
             TransactItems: transactItems,
           }),
         );
-        return latestRecords;
+        return records;
       } catch (error) {
         if (
           error instanceof Error &&
@@ -903,8 +901,8 @@ export class AgentScheduleService {
       }
     }
     // Unreachable: the final attempt rethrows rather than continuing. Stated
-    // as a throw and not `return latestRecords` so the control flow cannot be
-    // misread as a graceful give-up that hands back best-effort records —
+    // as a throw rather than returning the last snapshot so the control flow
+    // cannot be misread as a graceful give-up handing back stale records —
     // `create` would then run its duplicate check against a snapshot the
     // reconciliation never managed to settle.
     throw new AgentScheduleSyncError(
