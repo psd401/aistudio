@@ -4,7 +4,7 @@
  * Confirms each subcommand maps to the right MCP tool + arguments, threads the
  * optional --user through to key resolution, and handles the documented outcomes:
  *   - execute-assistant on a draft/missing id → { status: 'not_executable' }, exit 0
- *   - insufficient-scope JSON-RPC error → surfaced verbatim + a store/re-mint hint
+ *   - insufficient-scope JSON-RPC error → surfaced verbatim + an entry-link/re-mint hint
  *   - capabilities / list stay on the back-compat callMcp path (unchanged)
  *
  * common.js's callTool/callMcp/emit are overridden on the shared module.exports
@@ -390,7 +390,7 @@ test('create-assistant rejects a FIFO without blocking in open', () => {
 
 // ── insufficient-scope hint (never retried / key-swapped) ──────────────────────
 
-test('insufficient scope on the SHARED key → verbatim error + "store your own key" hint, exit 12', async () => {
+test('insufficient scope on the SHARED key → verbatim error + entry-link hint, exit 12', async () => {
   toolResponder = () => ({
     jsonrpcError: { code: -32602, message: 'Insufficient scope for tool: execute_assistant' },
     httpStatus: 200,
@@ -407,7 +407,8 @@ test('insufficient scope on the SHARED key → verbatim error + "store your own 
   expect(emitted[0].status).toBe('mcp-error');
   expect(emitted[0].jsonrpc_error.message).toContain('Insufficient scope');
   expect(emitted[0].hint).toContain('mcp:execute_assistant');
-  expect(emitted[0].hint).toMatch(/store your own/i);
+  expect(emitted[0].hint).toMatch(/their own AI Studio API key/i);
+  expectEntryLinkNotPaste(emitted[0].hint);
 });
 
 test('insufficient scope on a PERSONAL key → re-mint hint, exit 12', async () => {
@@ -426,6 +427,27 @@ test('insufficient scope on a PERSONAL key → re-mint hint, exit 12', async () 
   expect(code).toBe(12);
   expect(emitted[0].hint).toContain('mcp:capture_decision');
   expect(emitted[0].hint).toMatch(/mint a new/i);
+  expectEntryLinkNotPaste(emitted[0].hint);
+});
+
+// #1887: a remediation hint is what the agent reads at the moment it needs a
+// replacement key, so it must route the key through a one-time entry link —
+// never `put --value`, which can only be fed by a value pasted into chat.
+function expectEntryLinkNotPaste(hint) {
+  expect(hint).toContain('psd-credentials/request_entry.js --name aistudio_personal_key');
+  expect(hint).not.toMatch(/--value/);
+  expect(hint).not.toMatch(/psd-credentials put/);
+}
+
+test('the usage text points at the entry link, not put --value (#1887)', async () => {
+  let out = '';
+  process.stdout.write = (chunk) => {
+    out += String(chunk);
+    return true;
+  };
+  await expect(run('--help')).rejects.toMatchObject({ code: 0 });
+  expect(out).toContain('request_entry.js --name aistudio_personal_key');
+  expect(out).not.toMatch(/psd-credentials put/);
 });
 
 // ── search-decisions / capture-decision / get-decision-graph ───────────────────

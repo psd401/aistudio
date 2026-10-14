@@ -68,6 +68,21 @@ async function requestCredentialOperation(payload) {
   }
 }
 
+/**
+ * Mint a one-time credential-entry link (#1887).
+ *
+ * The web tier derives the owner from the signed invocation context, so this
+ * carries no identity. The returned URL is safe to show the user; the secret
+ * they type into it never comes back through the agent.
+ */
+async function requestConsentLink(payload) {
+  try {
+    return await requestAgentBroker('/api/agent/consent-link', payload);
+  } catch (error) {
+    throw new Error(`Credential broker rejected the request: ${error.message}`, { cause: error });
+  }
+}
+
 module.exports = {
   fail,
   parseArgs,
@@ -75,4 +90,5 @@ module.exports = {
   emit,
   validateCredentialName,
   requestCredentialOperation,
+  requestConsentLink,
 };

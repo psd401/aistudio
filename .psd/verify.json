@@ -6,6 +6,7 @@
   },
   "e2e_required": false,
   "e2e_flows": [
+    "agent-credential-entry",
     "admin-groups",
     "nexus-keep-toggle",
     "nexus-chat-slow-stream-visible-error",

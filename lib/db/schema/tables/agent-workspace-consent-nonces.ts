@@ -34,6 +34,12 @@ export const psdAgentWorkspaceConsentNonces = pgTable("psd_agent_workspace_conse
   //  - 'plaud'         = Plaud OAuth refresh-token capture (public client, PKCE).
   //  - 'canva'         = Canva Connect OAuth refresh-token capture (confidential
   //                      client, PKCE). Migration 101 widens the CHECK constraint.
+  //  - 'credential_entry' = a user-typed secret captured by
+  //                      /agent-connect-credential and written through the
+  //                      credential broker's owner-scoped put path, instead of
+  //                      the user pasting the value into chat (#1887,
+  //                      migration 187). The target credential NAME rides in
+  //                      the signed consent JWT, not on this row.
   tokenKind: varchar("token_kind", { length: 16 })
     .$type<
       | "agent_account"
@@ -42,6 +48,7 @@ export const psdAgentWorkspaceConsentNonces = pgTable("psd_agent_workspace_conse
       | "plaud"
       | "canva"
       | "aistudio"
+      | "credential_entry"
     >()
     .notNull()
     .default("agent_account"),

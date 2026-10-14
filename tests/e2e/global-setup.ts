@@ -51,6 +51,7 @@ const WARM_ROUTES = [
   "/settings",
   "/skills",
   "/agent-connect",
+  "/agent-connect-credential",
   "/utilities/assistant-architect",
   "/utilities/assistant-architect/create",
   "/utilities/assistant-catalog",

@@ -134,6 +134,21 @@ test.each([
   expect(stdout.join('')).toContain(status);
 });
 
+test('a rejected PERSONAL key is re-collected through an entry link, never put --value (#1887)', async () => {
+  brokerMock.mockResolvedValue({
+    httpStatus: 401,
+    keySource: 'personal',
+    payload: { error: 'upstream' },
+  });
+  await expect(common.callMcpRaw('tools/list', {}, undefined)).rejects.toMatchObject({
+    code: 11,
+  });
+  const out = stdout.join('');
+  expect(out).toContain('psd-credentials/request_entry.js --name aistudio_personal_key');
+  expect(out).not.toMatch(/--value/);
+  expect(out).not.toMatch(/psd-credentials put/);
+});
+
 test('returns JSON-RPC errors without retrying or exposing a key', async () => {
   brokerMock.mockResolvedValue({
     httpStatus: 200,

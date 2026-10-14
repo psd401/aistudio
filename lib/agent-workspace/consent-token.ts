@@ -12,6 +12,7 @@
  */
 
 import { createLogger, sanitizeForLogging } from "@/lib/logger"
+import { isCredentialName } from "@/lib/agent-credentials/name-grammar"
 
 const log = createLogger({ module: "consent-token" })
 
@@ -27,6 +28,13 @@ const log = createLogger({ module: "consent-token" })
  *   'canva'         — Canva Connect OAuth refresh token (confidential client,
  *                     PKCE). Captured by /agent-connect-canva, stored at
  *                     psd-agent-creds/{env}/user/{email}/canva.
+ *   'credential_entry'
+ *                   — A user-supplied secret (API key, vendor token) typed
+ *                     into /agent-connect-credential and written through the
+ *                     credential broker's owner-scoped put path. Replaces
+ *                     asking the user to paste the value into chat (#1887).
+ *                     Carries the target credential name in `cred` and expires
+ *                     in 15 minutes rather than 24 hours.
  */
 export type ConsentTokenKind =
   | "agent_account"
@@ -35,6 +43,7 @@ export type ConsentTokenKind =
   | "plaud"
   | "canva"
   | "aistudio"
+  | "credential_entry"
 
 export interface ConsentTokenPayload {
   /** Human user email (e.g. hagelk@psd401.net) */
@@ -54,9 +63,34 @@ export interface ConsentTokenPayload {
    * When absent, treated as 'agent_account'.
    */
   kind?: ConsentTokenKind
+  /**
+   * Target credential name for `kind: 'credential_entry'` (#1887). Matches the
+   * broker's own name grammar so the page can hand it straight to
+   * `AgentCredentialBroker.put`. Absent for every other kind.
+   *
+   * This is a slot NAME (e.g. `freshservice_api_key`), never a secret value —
+   * the secret is typed into the page and POSTed, and never appears in a URL.
+   */
+  cred?: string
 }
 
-const TOKEN_EXPIRY = "24h"
+const DEFAULT_TOKEN_EXPIRY = "24h"
+/**
+ * A credential-entry link is a live secret-entry form bound to one person, so
+ * it gets a much tighter window than an OAuth consent link. 15 minutes is long
+ * enough to open a vendor profile page, copy a key, and paste it into the form.
+ */
+const CREDENTIAL_ENTRY_TOKEN_EXPIRY = "15m"
+
+/**
+ * How long a token of this kind stays valid. Exported so callers (and tests)
+ * can assert the window without re-deriving it.
+ */
+export function consentTokenExpiry(kind: ConsentTokenKind | undefined): string {
+  return kind === "credential_entry"
+    ? CREDENTIAL_ENTRY_TOKEN_EXPIRY
+    : DEFAULT_TOKEN_EXPIRY
+}
 
 /**
  * Derive the HMAC secret from AUTH_SECRET or NEXTAUTH_SECRET. Throws if
@@ -73,15 +107,26 @@ function getSigningSecret(): Uint8Array {
 }
 
 /**
- * Sign a consent token JWT with 24-hour expiry.
+ * Sign a consent token JWT. Expiry is 24 hours for the OAuth kinds and 15
+ * minutes for `credential_entry` (see `consentTokenExpiry`).
+ *
+ * Throws when a `credential_entry` payload carries no usable credential name:
+ * the entry page cannot decide where to store the secret without it, and a
+ * link that fails at submit time has already cost the user their key.
  */
 export async function signConsentToken(payload: ConsentTokenPayload): Promise<string> {
   const { SignJWT } = await import("jose")
 
+  if (payload.kind === "credential_entry" && !isCredentialName(payload.cred)) {
+    throw new Error(
+      "credential_entry consent tokens require a valid `cred` credential name"
+    )
+  }
+
   const jwt = await new SignJWT({ ...payload } as unknown as Record<string, unknown>)
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
-    .setExpirationTime(TOKEN_EXPIRY)
+    .setExpirationTime(consentTokenExpiry(payload.kind))
     .sign(getSigningSecret())
 
   log.info(
@@ -98,6 +143,20 @@ export async function signConsentToken(payload: ConsentTokenPayload): Promise<st
     })
   )
   return jwt
+}
+
+const CONSENT_TOKEN_KINDS = new Set<string>([
+  "agent_account",
+  "user_account",
+  "cognito_data",
+  "plaud",
+  "canva",
+  "aistudio",
+  "credential_entry",
+])
+
+function isConsentTokenKind(value: unknown): value is ConsentTokenKind {
+  return typeof value === "string" && CONSENT_TOKEN_KINDS.has(value)
 }
 
 /**
@@ -117,6 +176,7 @@ export async function verifyConsentToken(token: string): Promise<ConsentTokenPay
     const purpose = raw.purpose
     const nonce = raw.nonce
     const kind = raw.kind
+    const cred = raw.cred
 
     if (
       typeof sub !== "string" ||
@@ -135,21 +195,33 @@ export async function verifyConsentToken(token: string): Promise<ConsentTokenPay
 
     // Validate kind if present. Absent = legacy token, treat as agent_account.
     let resolvedKind: ConsentTokenKind | undefined
-    if (
-      kind === "agent_account" ||
-      kind === "user_account" ||
-      kind === "cognito_data" ||
-      kind === "plaud" ||
-      kind === "canva" ||
-      kind === "aistudio"
-    ) {
+    if (isConsentTokenKind(kind)) {
       resolvedKind = kind
     } else if (kind !== undefined) {
       log.warn("Consent token has unknown kind", { kind })
       return null
     }
 
-    return { sub, agent, purpose: "workspace-consent", nonce, kind: resolvedKind }
+    // A credential_entry token without a usable slot name is unusable: the
+    // page would have nowhere to put the secret. Fail closed here rather than
+    // after the user has already typed their key into the form.
+    let resolvedCred: string | undefined
+    if (resolvedKind === "credential_entry") {
+      if (!isCredentialName(cred)) {
+        log.warn("Credential-entry consent token has no valid credential name")
+        return null
+      }
+      resolvedCred = cred
+    }
+
+    return {
+      sub,
+      agent,
+      purpose: "workspace-consent",
+      nonce,
+      kind: resolvedKind,
+      ...(resolvedCred ? { cred: resolvedCred } : {}),
+    }
   } catch (error) {
     logVerifyFailure(token, error)
     return null

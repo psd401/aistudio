@@ -16,8 +16,13 @@ You do not need to authenticate `gh` yourself. The owner-bound broker injects
 the caller's per-user `github_pat` into an invocation-private, noninteractive
 CLI environment and removes that environment after the command. If the caller
 has not provisioned a PAT,
-`gh` calls will fail with an auth error — that is the user's signal to
-add their PAT via `psd-credentials`.
+`gh` calls will fail with an auth error — that is the signal to send them a
+one-time entry link for it (never ask them to paste a PAT in chat, #1887):
+
+```bash
+node /opt/psd-skills/psd-credentials/request_entry.js \
+  --name github_pat --label "GitHub personal access token"
+```
 
 To check status:
 
@@ -26,8 +31,10 @@ gh auth status
 ```
 
 If `gh auth status` reports "not authenticated", the caller is missing
-a `github_pat` credential. Direct them to add one with the
-`psd-credentials` skill.
+a `github_pat` credential. Mint the `request_entry.js` link above and send the
+returned `url` on a line by itself — no markdown, no parens, no trailing
+period. Do not ask them to paste the token into chat, and do not store a pasted
+token with `put.js`.
 
 ## Commands
 

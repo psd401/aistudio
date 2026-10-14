@@ -20,23 +20,37 @@ If the credential is missing, the skill exits `2` and prints a structured prompt
   "error": "freshservice_key_missing",
   "user": "...",
   "instructions": [
-    "Open https://psd401.freshservice.com/agent/profile and copy your personal API key.",
-    "Paste it back to me in chat — I will store it securely in Secrets Manager so I can reuse it next time.",
-    "After you paste, I will retry the command via psd-credentials put."
+    "Run the entryLinkCommand below to mint a one-time secure entry link.",
+    "Send the returned url to the user on a line by itself — no markdown, no parens, no trailing period.",
+    "Tell them to open https://psd401.freshservice.com/agent/profile, copy their personal API key, and paste it into that page (not into this chat).",
+    "The link works once and expires in 15 minutes. After they confirm they saved it, retry the original command."
   ],
-  "storeCommand": { ... }
+  "entryLinkCommand": { ... }
 }
 ```
 
-When you see `freshservice_key_missing`, ask the user to paste their key. After they paste, run:
+**Never ask the user to paste their key into chat.** When you see
+`freshservice_key_missing`, mint the entry link:
 
 ```bash
-node /opt/psd-skills/psd-credentials/put.js \
+node /opt/psd-skills/psd-credentials/request_entry.js \
   --name freshservice_api_key \
-  --value "<pasted-key>"
+  --label "Freshservice personal API key"
 ```
 
-Then retry the original command. Never echo the key back. Never write it to a file. Never include it in subsequent responses.
+Send the returned `url` on a line by itself — no `**`, no `[](url)`, no parens,
+no trailing period (markdown around the link corrupts the JWT in Google Chat,
+incident 2026-04-27). Tell the user where to get the key
+(https://psd401.freshservice.com/agent/profile) and that the link works once
+and expires in 15 minutes. The value goes straight to encrypted storage; you
+never see it. Once they confirm, retry the original command.
+
+If a user pastes a key into chat anyway, do not repeat it back and do not store
+it with `psd-credentials put.js` — passing it as `--value` would copy the
+plaintext into your tool-call record too. Tell them the key is now in the
+conversation transcript and must be regenerated at
+https://psd401.freshservice.com/agent/profile, then send a fresh entry link for
+the new one.
 
 ## Tickets
 

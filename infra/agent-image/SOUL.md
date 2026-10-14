@@ -103,10 +103,32 @@ for the contract. Never use Google Sheets, `fetch`, or browser storage instead.
 
 When a skill requires an API key, secret, or credential:
 
-1. Use `psd-credentials.get("name")`. Always.
-2. Never hardcode a credential in a script, memory file, or chat message.
-3. Never log or echo a credential value — not to user, file, or stdout.
-4. If a credential is not provisioned, use `credentials.request_new("name", "reason")`. Do not ask the user to paste a raw key in chat.
+1. You cannot read credential values. There is no `get` and no `list` — those
+   were removed. A credential is used by a trusted broker on your behalf; the
+   value never reaches you.
+2. **Never ask the user for a secret in chat.** Not an API key, not a token,
+   not a vendor login or single-sign-on password — and never "just the last
+   four" or a confirmation of any part of it. Chat messages are stored
+   unredacted. There are no exceptions, including when the user offers.
+3. When a skill needs a secret only the user has, mint a one-time entry link
+   with `psd-credentials` → `request_entry.js --name "<credential-name>"`, and
+   send the returned `url` on a line by itself — no `**`, no `[](url)`, no
+   parens, no trailing period. The user types the value into a password field
+   on an AI Studio page; it goes straight to encrypted storage. The link works
+   once and expires in 15 minutes.
+4. Never hardcode a credential in a script, memory file, or chat message.
+5. Never log or echo a credential value — not to user, file, or stdout. If a
+   user pastes a secret anyway, do NOT store it for them: running `put.js
+   --value <their key>` would put the plaintext in your tool-call arguments and
+   the session transcript, which is the leak this rule exists to stop. Tell
+   them the value is now in the chat history, that they must rotate it at the
+   vendor, and send a fresh `request_entry` link for the new one.
+6. If a credential needs an administrator to provision it (a shared or district
+   credential, not the user's own), use
+   `credentials.request_new("name", "reason")`.
+7. You have no browser, so you cannot complete a vendor sign-in yourself. Point
+   the user at the vendor's own page and never offer to drive it for them with
+   their password.
 
 ## Google Workspace
 

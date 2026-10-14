@@ -13,6 +13,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
 import { signConsentToken } from "@/lib/agent-workspace/consent-token"
+import { isCredentialName } from "@/lib/agent-credentials/name-grammar"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema/tables/agent-workspace-consent-nonces"
 import { sql } from "drizzle-orm"
@@ -28,13 +29,20 @@ const log = createLogger({ module: "agent-consent-link" })
  * `agent_account` is RETIRED (#1232): Workspace operations now execute only
  * through the owner-bound operation broker. This route rejects the old slot.
  */
-type Kind = "user_account" | "cognito_data" | "plaud" | "canva" | "aistudio"
+type Kind =
+  | "user_account"
+  | "cognito_data"
+  | "plaud"
+  | "canva"
+  | "aistudio"
+  | "credential_entry"
 const ALLOWED_KINDS: Kind[] = [
   "user_account",
   "cognito_data",
   "plaud",
   "canva",
   "aistudio",
+  "credential_entry",
 ]
 
 /**
@@ -52,6 +60,8 @@ function resolveConsentPath(kind: Kind): string {
       return "/agent-connect-canva"
     case "aistudio":
       return "/agent-connect-aistudio"
+    case "credential_entry":
+      return "/agent-connect-credential"
     default:
       return "/agent-connect"
   }
@@ -145,7 +155,11 @@ function resolveConsentKind(
   ) {
     return {
       response: NextResponse.json(
-        { error: "kind must be 'user_account', 'cognito_data', 'plaud', 'canva', or 'aistudio' if provided" },
+        {
+          error:
+            "kind must be one of 'user_account', 'cognito_data', 'plaud', " +
+            "'canva', 'aistudio', or 'credential_entry' if provided",
+        },
         { status: 400 }
       ),
     }
@@ -153,6 +167,41 @@ function resolveConsentKind(
   return {
     kind: typeof body.kind === "string" ? body.kind as Kind : "user_account",
   }
+}
+
+/**
+ * The credential slot a `credential_entry` link writes to. Required for that
+ * kind and rejected for every other, so a caller cannot smuggle a slot name
+ * into an OAuth link and have it silently ignored.
+ */
+function resolveCredentialName(
+  body: Record<string, unknown>,
+  kind: Kind
+): { credentialName: string | null } | { response: NextResponse } {
+  if (kind !== "credential_entry") {
+    if (body.name !== undefined) {
+      return {
+        response: NextResponse.json(
+          { error: "name is only accepted with kind 'credential_entry'" },
+          { status: 400 }
+        ),
+      }
+    }
+    return { credentialName: null }
+  }
+  if (!isCredentialName(body.name)) {
+    return {
+      response: NextResponse.json(
+        {
+          error:
+            "name is required for kind 'credential_entry' and must be 1-128 " +
+            "characters of letters, digits, dot, hyphen, or underscore",
+        },
+        { status: 400 }
+      ),
+    }
+  }
+  return { credentialName: body.name }
 }
 
 async function createConsentNonce(
@@ -198,6 +247,9 @@ export async function POST(request: NextRequest) {
   const parsedKind = resolveConsentKind(parsedBody.body)
   if ("response" in parsedKind) return parsedKind.response
   const kind = parsedKind.kind
+  const parsedName = resolveCredentialName(parsedBody.body, kind)
+  if ("response" in parsedName) return parsedName.response
+  const credentialName = parsedName.credentialName
 
   // Rate limit
   const withinLimit = await checkRateLimit(ownerEmail)
@@ -228,6 +280,7 @@ export async function POST(request: NextRequest) {
     purpose: "workspace-consent",
     nonce,
     kind,
+    ...(credentialName ? { cred: credentialName } : {}),
   })
 
   // Build the consent URL. cognito_data has its own dedicated page that
@@ -236,7 +289,17 @@ export async function POST(request: NextRequest) {
   const baseUrl = getIssuerUrl()
   const url = `${baseUrl}${resolveConsentPath(kind)}?token=${encodeURIComponent(token)}`
 
-  log.info("Consent link generated", sanitizeForLogging({ ownerEmail, agentEmail, kind, requestId }))
+  log.info(
+    "Consent link generated",
+    sanitizeForLogging({
+      ownerEmail,
+      agentEmail,
+      kind,
+      // Slot name only — the secret itself is typed into the page, never here.
+      credentialName,
+      requestId,
+    })
+  )
 
   return NextResponse.json({ url })
 }

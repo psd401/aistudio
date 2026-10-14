@@ -2,5 +2,8 @@
   "name": "psd-credentials",
   "version": "1.0.0",
   "description": "OpenClaw skill: owner-bound credential broker client",
-  "private": true
+  "private": true,
+  "scripts": {
+    "test": "bun test"
+  }
 }
