@@ -286,15 +286,17 @@ export async function readFailureStreak(
  * no occurrence identity) it falls back to this schedule's newest run, which
  * is the row the caller just wrote.
  */
-export async function markOwnerNotified(
-  config: RunTelemetryConfig,
-  rdsDataClient: RunTelemetryRdsClient,
-  params: { userEmail: string; scheduleId: string; fireKey?: string },
-): Promise<void> {
-  if (!config.databaseResourceArn || !config.databaseSecretArn) {
-    throw new Error('Scheduled-run telemetry database is not configured');
-  }
-  const locator = params.fireKey
+/**
+ * The stamp write, as one statement per locator.
+ *
+ * Exported alongside the read for the same reason: if this UPDATE matches no
+ * row, the suppression never engages and the owner is messaged on every
+ * subsequent failure — the bug class the read was fixed for, from the other
+ * end. `tests/smoke/agent-schedule-failure-streak.smoke.ts` runs both of
+ * these against real PostgreSQL.
+ */
+export function ownerNotifiedSql(options: { fireKey: boolean }): string {
+  const locator = options.fireKey
     ? 'fire_key = :fire_key'
     : `id = (
          SELECT id
@@ -304,16 +306,27 @@ export async function markOwnerNotified(
          ORDER BY created_at DESC, id DESC
          LIMIT 1
        )`;
-  await rdsDataClient.execute({
-    resourceArn: config.databaseResourceArn,
-    secretArn: config.databaseSecretArn,
-    database: config.databaseName,
-    sql: `UPDATE agent_scheduled_runs
+  return `UPDATE agent_scheduled_runs
           SET owner_notified_at = NOW()
           WHERE ${locator}
             AND user_id = :user_id
             AND schedule_id = :schedule_id
-            AND owner_notified_at IS NULL`,
+            AND owner_notified_at IS NULL`;
+}
+
+export async function markOwnerNotified(
+  config: RunTelemetryConfig,
+  rdsDataClient: RunTelemetryRdsClient,
+  params: { userEmail: string; scheduleId: string; fireKey?: string },
+): Promise<void> {
+  if (!config.databaseResourceArn || !config.databaseSecretArn) {
+    throw new Error('Scheduled-run telemetry database is not configured');
+  }
+  await rdsDataClient.execute({
+    resourceArn: config.databaseResourceArn,
+    secretArn: config.databaseSecretArn,
+    database: config.databaseName,
+    sql: ownerNotifiedSql({ fireKey: Boolean(params.fireKey) }),
     parameters: [
       { name: 'user_id', value: { stringValue: params.userEmail } },
       { name: 'schedule_id', value: { stringValue: params.scheduleId } },

@@ -19,7 +19,10 @@
 
 import assert from "node:assert/strict";
 import postgres from "postgres";
-import { FAILURE_STREAK_SQL } from "../../infra/lambdas/agent-cron/run-telemetry";
+import {
+  FAILURE_STREAK_SQL,
+  ownerNotifiedSql,
+} from "../../infra/lambdas/agent-cron/run-telemetry";
 import { scriptLogger as log } from "../../scripts/db/script-logger";
 
 const databaseUrl =
@@ -41,6 +44,14 @@ const streakQuery = FAILURE_STREAK_SQL.replaceAll(":user_id", "$1").replaceAll(
   "$2",
 );
 
+const stampByFireKey = ownerNotifiedSql({ fireKey: true })
+  .replaceAll(":user_id", "$1")
+  .replaceAll(":schedule_id", "$2")
+  .replaceAll(":fire_key", "$3");
+const stampNewestRun = ownerNotifiedSql({ fireKey: false })
+  .replaceAll(":user_id", "$1")
+  .replaceAll(":schedule_id", "$2");
+
 /** The three columns the aggregate returns, as PostgreSQL names them. */
 interface StreakRow {
   failures: number;
@@ -50,6 +61,8 @@ interface StreakRow {
 
 interface Run {
   status: string;
+  /** Immutable occurrence identity, as a real fire carries. */
+  fireKey?: string;
   errorMessage?: string | null;
   notified?: boolean;
   /** Days before now. Defaults to recent, inside the 90-day window. */
@@ -63,6 +76,9 @@ interface Harness {
     options?: { userId?: string; scheduleId?: string },
   ): Promise<void>;
   streak(): Promise<StreakRow>;
+  /** Stamp as the Lambda does, and report how many rows it matched. */
+  stamp(fireKey?: string): Promise<number>;
+  stampedCount(): Promise<number>;
 }
 
 const FAIL: Run = { status: "error", errorMessage: "agent unavailable" };
@@ -213,6 +229,51 @@ async function newestErrorIsWhatClassifies({ given, streak }: Harness) {
   log.info("a NULL newest error does not borrow an older one");
 }
 
+/**
+ * The stamp write is as load-bearing as the read: an UPDATE that matches no
+ * row leaves the suppression disengaged and the owner messaged on every later
+ * failure — the same bug class from the other end.
+ */
+async function stampingEngagesSuppression({
+  given,
+  streak,
+  stamp,
+  stampedCount,
+}: Harness) {
+  // By fire key: the exact occurrence, and only it.
+  await given([FAIL, FAIL, { ...FAIL, fireKey: "fire-3" }]);
+  assert.equal(await stamp("fire-3"), 1, "the stamp matches its own fire");
+  assert.equal(await stampedCount(), 1, "and no other run");
+  assert.equal(
+    (await streak()).already_notified,
+    true,
+    "stamping is what engages the suppression the read looks for",
+  );
+
+  // Idempotent: a repeat stamp matches nothing rather than moving the time.
+  assert.equal(await stamp("fire-3"), 0, "a repeat stamp is a no-op");
+  assert.equal(await stampedCount(), 1);
+  log.info("stamp by fire key: one row, idempotent, suppression engaged");
+
+  // Without a fire key it falls back to the schedule's newest run, which is
+  // the row the caller just wrote.
+  await given([FAIL, FAIL, FAIL]);
+  assert.equal(await stamp(), 1);
+  assert.equal(await stampedCount(), 1);
+  assert.equal((await streak()).already_notified, true);
+  log.info("stamp without a fire key: newest run, suppression engaged");
+
+  // A fire key that is not this schedule's must match nothing.
+  await given([FAIL]);
+  assert.equal(
+    await stamp("fire-belonging-to-another-schedule"),
+    0,
+    "an unknown fire key stamps nothing",
+  );
+  assert.equal((await streak()).already_notified, false);
+  log.info("stamp with an unknown fire key: no row touched");
+}
+
 async function windowAndScoping({ given, streak }: Harness) {
   // A success older than the window cannot bound the streak, so every failure
   // inside the window counts. Reminding once per window is the documented
@@ -266,6 +327,7 @@ try {
         id                BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         user_id           VARCHAR(255) NOT NULL,
         schedule_id       VARCHAR(64),
+        fire_key          VARCHAR(192),
         status            VARCHAR(32) NOT NULL DEFAULT 'success',
         error_message     TEXT,
         owner_notified_at TIMESTAMPTZ,
@@ -284,11 +346,12 @@ try {
           // agree on order, as they do for real fires.
           await sql`
             INSERT INTO agent_scheduled_runs
-              (user_id, schedule_id, status, error_message,
+              (user_id, schedule_id, fire_key, status, error_message,
                owner_notified_at, created_at)
             VALUES (
               ${options.userId ?? OWNER},
               ${options.scheduleId ?? SCHEDULE},
+              ${run.fireKey ?? null},
               ${run.status},
               ${run.errorMessage ?? null},
               ${run.notified ? new Date() : null},
@@ -303,12 +366,27 @@ try {
         const [row] = await sql.unsafe(streakQuery, [OWNER, SCHEDULE]);
         return row as unknown as StreakRow;
       },
+      async stamp(fireKey) {
+        const result = fireKey
+          ? await sql.unsafe(stampByFireKey, [OWNER, SCHEDULE, fireKey])
+          : await sql.unsafe(stampNewestRun, [OWNER, SCHEDULE]);
+        return result.count;
+      },
+      async stampedCount() {
+        const [row] = await sql`
+          SELECT COUNT(*)::int AS stamped
+          FROM agent_scheduled_runs
+          WHERE owner_notified_at IS NOT NULL
+        `;
+        return Number((row as { stamped: number }).stamped);
+      },
     };
 
     await pageSizeCannotLoseTheStamp(harness);
     await successBoundsTheStreak(harness);
     await neutralRunsDecideNothing(harness);
     await newestErrorIsWhatClassifies(harness);
+    await stampingEngagesSuppression(harness);
     await windowAndScoping(harness);
 
     // Leave nothing behind beyond the temp table, which dies with the session.
