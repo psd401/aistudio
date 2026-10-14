@@ -48,3 +48,39 @@ inert exactly where the boundary is genuinely insensitive.
 - Don't trust a passing test — mutation-check it: deliberately break the
   logic one way the test should catch, and one way it legitimately
   shouldn't, and confirm both outcomes.
+
+## Addendum — a smoke test that could not fail
+
+Mutation-checking the replacement smokes (restore the bug, confirm the test
+goes red) caught a defect in one of the new tests itself.
+
+`agent-schedule-failing-marker.smoke.ts` drives the real Drizzle reader, whose
+connection pool holds the event loop open, so the script has to end itself.
+Its `finally` block called `process.exit(process.exitCode ?? 0)` — and
+`process.exitCode` is not set by a thrown assertion, so a failed assertion
+exited **0**. The test reported success on failure and would have done so
+forever.
+
+The fix is to catch the failure, record it, and exit non-zero:
+
+```ts
+let failed = false;
+try { /* assertions */ } catch (error) {
+  log.error(`... FAILED: ${...}`);
+  failed = true;
+} finally {
+  await cleanup();
+  process.exit(failed ? 1 : 0);
+}
+```
+
+Two rules from this:
+
+- **Any script that calls `process.exit()` in `finally` must derive the code
+  from whether the body threw.** `process.exitCode` does not reflect an
+  uncaught throw, and `finally` runs on the way out of one.
+- **Mutation-check a test before relying on it.** Both smokes here were
+  verified by reintroducing the exact bug they exist to catch; one of them only
+  revealed its own blindness that way. A green test proves nothing about a bug
+  it cannot see, and "the test passes" and "the test can fail" are different
+  claims.
