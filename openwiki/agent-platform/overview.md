@@ -15,6 +15,7 @@ openwiki:
     - infra/agent-image/skills/psd-atrium/SKILL.md
     - infra/agent-image/skills/psd-html-artifact/SKILL.md
     - infra/agent-image/skills/psd-workspace/SKILL.md
+    - infra/agent-image/skills/psd-workspace/common.js
     - infra/agent-image/SOUL.md
     - infra/agent-image/skills/psd-rules/SKILL.md
     - lib/content/atrium-data-contract.ts
@@ -37,6 +38,9 @@ openwiki:
     - tests/e2e/atrium-sandbox-script-order.spec.ts
     - tests/smoke/atrium-artifact-sandbox-host.smoke.ts
     - tests/unit/lib/agent-workspace/command-executor.test.ts
+    - tests/unit/lib/agent-workspace/gmail-draft-helper.test.ts
+    - tests/unit/lib/agent-workspace/allowlist-doc-drift.test.ts
+    - infra/agent-image/skills/psd-workspace/common.test.js
     - tests/unit/actions/agent-cost-projection.test.ts
     - tests/unit/atrium-people-search.test.ts
     - tests/unit/agent-atrium-owner-operation.test.ts
@@ -1220,7 +1224,7 @@ Google Workspace operations are classified into allowlist categories:
 | Category | Description | Examples |
 |----------|-------------|----------|
 | `READ_ACTIONS` | Read-only operations, never mutate | `get`, `list`, `search`, `findDirectMessage` |
-| `ALLOWED_WRITES` | User-slot permitted mutations | `gmail users settings filters`, `tasks tasks move` |
+| `ALLOWED_WRITES` | User-slot permitted mutations | `gmail +draft`, `gmail users drafts create`, `gmail users drafts update`, `gmail users settings filters`, `tasks tasks move` |
 | `AGENT_ONLY_WRITES` | Agent-slot mutations only | `tasks tasks patch`, `tasks tasks update` |
 
 **Removed Operations**: `drive +upload` is explicitly refused (both `ALLOWED_WRITES` and `AGENT_ONLY_WRITES`) because the Workspace CLI runs in an empty temp directory where container paths don't exist. Hand generated files to the user with `psd-publish-file`, which by default creates them in the agent's Drive through the broker rather than through `drive +upload` (see [Private File Delivery to Drive](#private-file-delivery-to-drive-1885)).
@@ -1266,6 +1270,63 @@ The `assertParamsParse()` function validates that `--params` is a parseable JSON
 **Ordering Invariant**: `validateWorkspaceArguments` (which calls `assertParamsParse`) runs **before** `validateWorkspaceMutation`, ensuring every gate that reads `--params` is guaranteed a value it can actually see.
 
 **Remedy**: When a Drive query requires single-quoted values (`name contains 'Budget'`), the tokenizer cannot preserve them. Write parameters to a file and use `--params-file <abs-path>` instead. See `infra/agent-image/skills/psd-workspace/SKILL.md` for the complete pattern.
+
+#### Gmail Draft Helper (`+draft`, #1894)
+
+**Source**: `/lib/agent-workspace/command-executor.ts`, `/infra/agent-image/skills/psd-workspace/common.js`
+
+`gmail +draft` is a broker-side helper, not a gws subcommand. The model supplies flags such as `--to`, `--subject`, `--body` or `--body-file`, and the broker builds the RFC 5322 MIME message itself. The model never hand-builds `message.raw` for this path.
+
+```mermaid
+sequenceDiagram
+    participant Agent as Agent model
+    participant Skill as psd-workspace run.js and common.js
+    participant Route as workspace-execute route
+    participant Exec as executeWorkspaceCommand
+    participant Gws as gws CLI
+    Agent->>Skill: gmail +draft, optional --draft-id and --thread-id
+    Skill->>Skill: injectMarkers leaves +draft unchanged
+    Skill->>Route: POST workspace-execute with argv
+    Route->>Exec: execute the command
+    Exec->>Exec: validateWorkspaceCommand allowlist and scope gates
+    Exec->>Exec: expandGmailDraftHelper builds MIME after validation
+    Exec->>Gws: drafts create, or drafts update when --draft-id is set
+    Route->>Route: draftWriteAudit logs action, draft id and thread id
+```
+
+*Validation runs on the `+draft` argv, so the allowlist judges the operation the model asked for. Only then is the helper expanded into the canonical `gmail users drafts` call that gws executes.*
+
+**Public surface and symbols**
+
+| Symbol | Role |
+|--------|------|
+| `expandGmailDraftHelper` | Turns `gmail +draft` into `gmail users drafts create`, or into `drafts update` when `--draft-id` is present. Other argv pass through unchanged. |
+| `parseDraftFlags` | Accepts only `--to`, `--cc`, `--bcc`, `--subject`, `--body`, `--in-reply-to`, `--thread-id`, `--draft-id` and the boolean `--html`. Any other flag or stray positional is refused, and only flag-shaped tokens are echoed in the error. |
+| `draftMessageHeaders` / `draftRawMessage` | Build the address, reply and body headers, then base64url-encode the message for `message.raw`. |
+| `assertGmailResourceId` | Restricts `--draft-id` and `--thread-id` to `[A-Za-z0-9_-]+`, so a value cannot change the URL path. |
+| `draftWriteAudit` | Reads the expanded argv and returns `{draftAction, draftId, threadId}` for create or update. Ids only, never message text. The route merges this into the completion log. |
+| `DRAFT_AGENT_MARKER` | The footer `— Drafted by your agent. Review before sending.`, kept byte-identical with `injectMarkers` in `common.js`. |
+
+**Invariants**
+
+- **Revision is replacement.** `--draft-id <id>` sends the whole message to `drafts update`, which replaces that draft in place. The request rebuilds the entire message, so every flag the draft should keep must be repeated. Re-running a plain `+draft` leaves the earlier draft in Drafts, and `drafts delete` is Phase-1 forbidden, so the stale draft cannot be removed.
+- **Threading needs three values together.** `--thread-id` is refused unless `--in-reply-to` and a non-empty `--subject` are also present. `--in-reply-to` is the RFC `Message-ID` header, not a Gmail id, and the helper adds angle brackets when they are missing and writes both `In-Reply-To` and `References`.
+- **Ids are validated before they reach a URL.** A draft or thread id containing `/`, `..` or other characters is refused before the request is built.
+- **The footer is applied once.** The helper appends the marker to `+draft` bodies. A body that already ends with the marker is left unchanged, so read-edit-resubmit cycles do not stack it. A marker in the middle of a body does not count. The skill-side `injectMarkers` deliberately skips `+draft`, because a `--body-file` placeholder is restored after that step and any edit there would be lost.
+- **Empty recipients are refused.** `--to` must have a non-blank value, and `--in-reply-to` cannot be blank.
+- **Mixed-case input is normalized.** `gmail +Draft` is matched case-insensitively, so it is expanded instead of reaching gws unexpanded.
+- **Attachments are not supported.** `--attach` is refused by name, not dropped silently.
+
+**Allowlist and parity.** `gmail +draft`, `gmail users drafts create` and `gmail users drafts update` are all in `ALLOWED_WRITES`, and none are in `AGENT_ONLY_WRITES`. A focused test checks that `+draft`, its create expansion and its update expansion receive the same verdict in both the agent and user slots. Moving only `drafts update` into a different list would break that parity.
+
+**Change navigation**
+
+- Start in `expandGmailDraftHelper`. Flag handling is in `parseDraftFlags`, MIME construction is in `draftRawMessage`, and audit is in `draftWriteAudit`.
+- If you change the footer text, update `DRAFT_AGENT_MARKER`, `injectMarkers` in `common.js`, and the marker wording in `psd-workspace/SKILL.md`. Those three must match.
+- If you add a `+draft` flag, add it to `DRAFT_VALUE_FLAGS` or `DRAFT_BOOLEAN_FLAGS`, document it in the `+draft` section of `psd-workspace/SKILL.md`, and add a test. The allowlist-doc-drift test checks that every `gws` example in SKILL.md is reachable through the validator.
+- Focused tests: `tests/unit/lib/agent-workspace/gmail-draft-helper.test.ts` covers expansion, threading, flag refusal, id validation and marker idempotence. `tests/unit/lib/agent-workspace/command-executor.test.ts` covers the `gmail +draft gate parity` and `draftWriteAudit` suites. `tests/unit/lib/agent-workspace/allowlist-doc-drift.test.ts` covers SKILL.md drift. `infra/agent-image/skills/psd-workspace/common.test.js` covers the skill-side marker.
+- Minimal validation: `bunx jest --silent tests/unit/lib/agent-workspace/gmail-draft-helper.test.ts tests/unit/lib/agent-workspace/command-executor.test.ts tests/unit/lib/agent-workspace/allowlist-doc-drift.test.ts`, then `bun run test:skill:workspace` when `common.js` changes.
+- Escalate to a broader check only when the Workspace allowlist or the broker route contract changes. Those cross into the `workspace-execute` route and [Operation Allowlist](#operation-allowlist) behavior.
 
 ---
 
