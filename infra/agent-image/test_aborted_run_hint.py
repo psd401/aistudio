@@ -134,6 +134,17 @@ class TheReplacementTextIsHonest(unittest.TestCase):
     def test_it_does_not_invite_a_permission_check(self):
         self.assertIn("without asking permission to continue", self.hint)
 
+    def test_it_defers_to_the_message_it_is_prepended_to(self):
+        # The note sits above the user's newest message, which may change or
+        # cancel the earlier request ("never mind", "do X instead"). Resuming
+        # the old work must not override that.
+        self.assertIn("message below comes first", self.hint)
+        self.assertIn("changes or cancels the earlier request", self.hint)
+        self.assertLess(
+            self.hint.index("changes or cancels"),
+            self.hint.index("pick the work back up"),
+        )
+
     def test_it_keeps_the_real_reasons_to_ask(self):
         # psd-rules R15: missing information and destructive actions still
         # warrant a question; the hint must not override that.
@@ -158,10 +169,14 @@ class TheNextTurnContextBlamesThePlatform(unittest.TestCase):
     """The headline contract: a deadline-aborted turn, then "please continue".
 
     Builds the session transcript the way the runtime leaves it after a chat
-    deadline expiry, drives it through upstream's own two steps —
-    `mark_interrupted` and `applySessionHints`'s hint composition, both ported
-    verbatim and both pinned by the docstring at the top of this file — and
+    deadline expiry, drives it through upstream's two steps —
+    `mark_interrupted` and `applySessionHints`'s hint composition — and
     asserts on the body the model is actually handed.
+
+    Both steps are hand-ported copies, not the pinned bundle's code. This pins
+    the hint text and its placement; it would not catch upstream changing how
+    the hint is composed. The anchor tests and the image build's
+    `findUniqueBundle` markers are what fail on that kind of upstream change.
     """
 
     DRIVER = """
@@ -425,6 +440,7 @@ class RulesMatchTheNewBehaviour(unittest.TestCase):
             "Re-check any side effect",
             "destructive or irreversible",
             "Never mention the note",
+            "changes or cancels the earlier request, follow it",
         ):
             self.assertIn(clause, flat, clause)
 

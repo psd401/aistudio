@@ -73,6 +73,9 @@ export const UPSTREAM_ABORTED_HINT_ANCHOR =
  *     real reasons to ask (missing information, destructive actions);
  *   - keep upstream's real safety intent ("resume carefully") as the concrete
  *     thing it was protecting: don't repeat a side effect that already landed;
+ *   - defer to the message it is prepended to: that message may change or
+ *     cancel the earlier request, and "finish what was already asked" must
+ *     not override it;
  *   - keep it out of the reply: every line the agent writes reaches the user
  *     (psd-rules R1), so the note and the cutoff mechanism stay internal.
  */
@@ -81,8 +84,10 @@ export const SYSTEM_CUTOFF_HINT =
   'turn time limit, a gateway restart, promotion to a background job, or ' +
   'the platform replacing a run that overlapped a newer message. The user ' +
   'did NOT stop, interrupt, pause, or abort you, and nobody asked you to ' +
-  'hold; do not say or imply that they did. Pick the work back up and finish ' +
-  'what was already asked, without asking permission to continue — ask only ' +
+  'hold; do not say or imply that they did. The user\'s message below comes ' +
+  'first: if it changes or cancels the earlier request, follow it. ' +
+  'Otherwise pick the work back up and finish what was already asked, ' +
+  'without asking permission to continue — ask only ' +
   'for information you cannot obtain yourself or before something ' +
   'destructive or irreversible. Before re-running any side effect (creating, ' +
   'sharing, posting, sending), check whether it already completed in your ' +
