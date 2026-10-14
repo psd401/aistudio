@@ -87,6 +87,25 @@ Authorized user input with a student's name
 
 Bedrock Guardrails continue to evaluate both inference input and output independently of this PII detection.
 
+### Public-Link Personal-Data Check (agent workspace, #1886)
+
+Before an agent-made file gets an unsigned, anyone-with-the-link URL, the storage broker reads its contents and refuses the link if it carries student or staff personal data. psd-tts applies the same patterns before it narrates, and chat-chart before it sends data to QuickChart. All three read one file, `lib/safety/personal-data-patterns.json`.
+
+| What | Rule |
+|------|------|
+| Detected | PSD student numbers, SSNs, email addresses, US phone numbers — four regexes, no ML |
+| Refused on a public file | One student number or SSN; **two or more distinct** emails or phone numbers (one front-office number in a flyer is allowed) |
+| Read | `.csv` `.txt` `.md` `.json` `.svg` and PDF text; UTF-8 and UTF-16 |
+| Too large to read in full | Text-extractable types over 32 MiB are refused at publish, before upload |
+
+**Accepted risks.** The check is a backstop for mistakes, not a barrier against an agent working around it. These limits are deliberate, so that refusals do not block legitimate public district content:
+
+- **Names, grades and free text are not detected.** A seating chart with names and grades but no student numbers passes.
+- **One contact detail per file is allowed**, and the check cannot tell a front-office number from a personal cell.
+- **Content the check cannot read is allowed, and logged as unscanned:** raster images, audio and video (never read); a PDF's scanned (image-only) pages (`reason: "needs-ocr"`); a PDF the parser cannot open, such as a password-protected one (`reason: "unreadable"`, with the parser's error class). Refusing image-only or unreadable PDFs would not close this gap: the same content rendered as a PNG is never read at all.
+
+The `psd-publish-file` skill tells the agent to deliver anything about a named person privately, and never to re-render refused data in another format. Unscanned uploads appear in the broker log as `Public link allowed without a contents check`, with their `reason`, so their volume can be watched. Refusals are recorded in `agent_failures` (`PublicArtifactPersonalDataRefused`, `NarrationPersonalDataRefused`).
+
 ### Violation Notifications
 
 Administrators can receive real-time notifications when the guardrail **blocks** content. Detect-only matches are not published to SNS (see `sendViolationNotification` in `lib/safety/bedrock-guardrails-service.ts`), so no notifications are sent under the current detect-only configuration:
