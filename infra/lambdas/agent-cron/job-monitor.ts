@@ -52,6 +52,20 @@ interface ScheduledJobIdentity {
   sessionId: string;
 }
 
+/**
+ * Where to reach the owner of a promoted schedule that failed (#1890).
+ *
+ * Taken straight from the JOB_PAYLOAD the cron wrote at promotion time, which
+ * already carries both fields — so this needs no second read of the
+ * authoritative schedule record, and cannot disagree with the job it describes.
+ * Absent on a payload written before those fields existed, in which case the
+ * run is still recorded and only the message is skipped.
+ */
+export interface ScheduledJobNoticeTarget {
+  dmSpaceName: string;
+  workspacePrefix: string;
+}
+
 export interface JobMonitorLogger {
   info: (message: string, metadata?: Record<string, unknown>) => void;
   warn: (message: string, metadata?: Record<string, unknown>) => void;
@@ -65,6 +79,17 @@ export interface JobMonitorDependencies {
   ) => Promise<JobTaskSnapshot>;
   writeRun: (record: ScheduledRunRecord) => Promise<boolean>;
   recordFailure: (record: CronFailureRecord) => Promise<void>;
+  /**
+   * Tell the owner when this failure has made their schedule visibly broken
+   * (#1890). A promoted run's terminal row is written here or by the job
+   * runner, and neither used to reach the notice path — so a schedule whose
+   * runs always time out, promote, and fail accumulated `error` rows, showed
+   * as failing in `list`, and never messaged anybody.
+   */
+  notifyOwner?: (
+    run: ScheduledRunRecord,
+    target: ScheduledJobNoticeTarget,
+  ) => Promise<void>;
 }
 
 export interface JobMonitorResult {
@@ -120,6 +145,37 @@ function scheduledJobIdentity(rawPayload: string): ScheduledJobIdentity | null {
     scheduleId,
     ...(scheduleName ? { scheduleName } : {}),
     sessionId,
+  };
+}
+
+const DM_SPACE_RE = /^spaces\/[\w-]{1,256}$/;
+
+/**
+ * The owner's DM space and workspace prefix, if this payload carries them.
+ *
+ * Validated rather than trusted: the space name becomes the destination of a
+ * Chat message, so a malformed value is dropped and the notice skipped.
+ */
+function scheduledJobNoticeTarget(
+  rawPayload: string,
+): ScheduledJobNoticeTarget | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(rawPayload);
+  } catch {
+    return null;
+  }
+  if (!value || typeof value !== 'object') return null;
+  const payload = value as Record<string, unknown>;
+  const dmSpaceName = nonEmptyString(payload.spaceName, 512);
+  if (!dmSpaceName || !DM_SPACE_RE.test(dmSpaceName)) return null;
+  // A promoted scheduled run always posts to the owner's own DM. `isDM` false
+  // means this payload is not that, and a failure notice must not be posted
+  // into a shared space where other people would read it.
+  if (payload.isDM === false) return null;
+  return {
+    dmSpaceName,
+    workspacePrefix: nonEmptyString(payload.workspacePrefix, 512) ?? '',
   };
 }
 
@@ -204,6 +260,31 @@ export function isJobRunnerStoppedEvent(
  * idempotent so Lambda's async retry/DLQ path runs without replacing a richer
  * terminal row already persisted by the job runner.
  */
+/**
+ * Hand a supervised failure to the owner notice, when the payload says where
+ * to reach them (#1890).
+ *
+ * Called AFTER the terminal row, so the streak the notice reads includes this
+ * run. Best-effort by contract: the injected function swallows its own errors,
+ * because a supervised failure must still be recorded even when the courtesy
+ * message cannot be sent.
+ */
+async function tellOwnerIfPossible(
+  record: ScheduledRunRecord,
+  rawPayload: string,
+  dependencies: JobMonitorDependencies,
+  log: JobMonitorLogger,
+  context: { scheduleId: string; taskArn: string },
+): Promise<void> {
+  if (!dependencies.notifyOwner) return;
+  const target = scheduledJobNoticeTarget(rawPayload);
+  if (!target) {
+    log.warn('Promoted job failure has no owner DM target in its payload', context);
+    return;
+  }
+  await dependencies.notifyOwner(record, target);
+}
+
 export async function monitorStoppedJob(
   event: JobRunnerStoppedEvent,
   containerName: string,
@@ -214,7 +295,8 @@ export async function monitorStoppedJob(
     event.detail.clusterArn,
     event.detail.taskArn,
   );
-  const identity = scheduledJobIdentity(jobPayload(task, containerName));
+  const payload = jobPayload(task, containerName);
+  const identity = scheduledJobIdentity(payload);
   if (!identity) {
     log.info('Interactive background job stop needs no schedule telemetry', {
       taskArn: event.detail.taskArn,
@@ -254,6 +336,12 @@ export async function monitorStoppedJob(
     });
   }
   await dependencies.writeRun(record);
+  if (errorMessage) {
+    await tellOwnerIfPossible(record, payload, dependencies, log, {
+      scheduleId: identity.scheduleId,
+      taskArn: event.detail.taskArn,
+    });
+  }
   if (errorMessage) {
     log.error('Scheduled background job stopped unsuccessfully', {
       scheduleId: identity.scheduleId,

@@ -179,6 +179,28 @@ describe('a queued Chat retry is recorded as deferred, not success', () => {
     expect(outcome).toEqual({ status: 'error', scheduleId: 'sched-morning' });
   });
 
+  test('the both-failed path still attempts the owner notice', async () => {
+    // This branch used to return without trying, so repeated failures here
+    // could reach any streak length in silence. It is reachable with the
+    // owner's DM working, too: a rich scheduled post can be rejected where a
+    // short plain-text warning would land.
+    const { recorded, deps } = dependencies({
+      sendFails: true,
+      enqueueFails: true,
+      streak: {
+        consecutiveFailures: 3,
+        newestErrorMessage: 'Chat delivery failed',
+      },
+    });
+
+    await deliverScheduledResultWithDependencies(context(), deps);
+
+    expect(recorded.runs[0]).toMatchObject({ status: 'error' });
+    expect(recorded.dms).toHaveLength(1);
+    expect(recorded.dms[0]).toContain('Morning brief');
+    expect(recorded.notifiedStamps).toHaveLength(1);
+  });
+
   test('a delivered post is still recorded as success', async () => {
     const { recorded, deps } = dependencies();
 

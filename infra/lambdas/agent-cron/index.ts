@@ -400,7 +400,7 @@ const CONSENT_LINK_TIMEOUT_MS = 5000;
  * and rejects any body selector.
  */
 async function mintOwnerConsentLink(
-  schedule: AuthorizedSchedule,
+  schedule: { ownerEmail: string; scheduleId: string; workspacePrefix: string },
   sessionId: string,
   log: Logger,
 ): Promise<string | null> {
@@ -1717,6 +1717,10 @@ async function enqueuePromotionReconciliation(
     scheduleName,
     sessionId,
     startedBy: launchIdentity.startedBy,
+    // Carried so a reconciliation that ends in failure can tell the owner,
+    // without a second read of the authoritative schedule record (#1890).
+    dmSpaceName: schedule.dmSpaceName,
+    workspacePrefix: schedule.workspacePrefix,
   };
   try {
     if (!SCHEDULE_RECONCILIATION_QUEUE_URL) {
@@ -1972,6 +1976,9 @@ async function deliverScheduledResultWithDependencies(
         enqueueError: enqueueDetail,
         deliveryRequestId,
       });
+      const hardFailure =
+        `Chat delivery failed: ${initialDetail}; ` +
+        `durable enqueue failed: ${enqueueDetail}`;
       await dependencies.recordRun(
         {
           fireKey: context.fireIdentity?.key,
@@ -1983,11 +1990,19 @@ async function deliverScheduledResultWithDependencies(
           outputTokens: result.outputTokens,
           latencyMs: Date.now() - startTime,
           status: 'error',
-          errorMessage:
-            `Chat delivery failed: ${initialDetail}; ` +
-            `durable enqueue failed: ${enqueueDetail}`,
+          errorMessage: hardFailure,
         },
         log,
+      );
+      // This branch used to return without attempting the notice, so repeated
+      // failures here could reach any streak length in silence — and it is
+      // reachable while the owner's DM still works, since the rich scheduled
+      // post can be rejected where a short plain-text warning would land.
+      await notifyOwnerIfScheduleFailing(
+        noticeTargetFromContext(context),
+        { errorMessage: hardFailure, fullErrorMessage: hardFailure },
+        log,
+        dependencies,
       );
       return { status: 'error', scheduleId: schedule.scheduleId };
     }
@@ -2104,8 +2119,9 @@ async function recordScheduledDeferral(
     hasFireKey: Boolean(context.fireIdentity?.key),
   });
   await notifyOwnerIfScheduleFailing(
-    context,
+    noticeTargetFromContext(context),
     { errorMessage, fullErrorMessage: errorMessage },
+    log,
     dependencies,
   );
   return { status: 'error', scheduleId: schedule.scheduleId };
@@ -2118,12 +2134,44 @@ async function recordScheduledDeferral(
  * Entirely best-effort: a scheduled run that actually worked must never be
  * reported as failed because a courtesy DM could not be sent.
  */
-async function notifyOwnerIfScheduleFailing(
+/**
+ * Everything the owner notice needs, independent of which path produced the
+ * failed run. The direct path builds it from the authoritative schedule
+ * record; the promoted path builds it from the JOB_PAYLOAD the cron wrote at
+ * promotion time. One notifier serves both (#1890).
+ */
+interface ScheduleNoticeTarget {
+  ownerEmail: string;
+  scheduleId: string;
+  scheduleName: string;
+  dmSpaceName: string;
+  workspacePrefix: string;
+  sessionId: string;
+  fireKey?: string;
+}
+
+function noticeTargetFromContext(
   context: ScheduledResultContext,
+): ScheduleNoticeTarget {
+  return {
+    ownerEmail: context.schedule.ownerEmail,
+    scheduleId: context.schedule.scheduleId,
+    scheduleName: context.scheduleName,
+    dmSpaceName: context.schedule.dmSpaceName,
+    workspacePrefix: context.schedule.workspacePrefix,
+    sessionId: context.sessionId,
+    ...(context.fireIdentity?.key ? { fireKey: context.fireIdentity.key } : {}),
+  };
+}
+
+async function notifyOwnerIfScheduleFailing(
+  target: ScheduleNoticeTarget,
   recorded: { errorMessage: string | null; fullErrorMessage: string | null },
+  log: Logger,
   dependencies: ScheduledDeliveryDependencies = scheduledDeliveryDependencies,
 ): Promise<void> {
-  const { schedule, scheduleName, sessionId, log } = context;
+  const schedule = target;
+  const { scheduleName, sessionId } = target;
   try {
     const streak = await dependencies.failureStreak(
       {
@@ -2162,11 +2210,9 @@ async function notifyOwnerIfScheduleFailing(
     // repeat message instead, which is the right way round.
     await dependencies.markOwnerNotified(
       {
-        userEmail: schedule.ownerEmail,
-        scheduleId: schedule.scheduleId,
-        ...(context.fireIdentity?.key
-          ? { fireKey: context.fireIdentity.key }
-          : {}),
+        userEmail: target.ownerEmail,
+        scheduleId: target.scheduleId,
+        ...(target.fireKey ? { fireKey: target.fireKey } : {}),
       },
       log,
     );
@@ -2213,13 +2259,14 @@ async function recordScheduledCompletion(
   );
   if (status === 'error') {
     await notifyOwnerIfScheduleFailing(
-      context,
+      noticeTargetFromContext(context),
       {
         errorMessage: errorMessage ?? null,
         // Untruncated, so an authorization signature sitting past the 500th
         // character still classifies this as the "speak now" case.
         fullErrorMessage: sanitizeDiagnostic(result.response),
       },
+      log,
       dependencies,
     );
   }
@@ -2708,6 +2755,29 @@ async function handleJobRunnerStopped(
         ),
       recordFailure: (record) =>
         runTelemetry.recordCronFailureStrict(record, log),
+      // Closes the promoted path (#1890). This supervisor is invoked for every
+      // stopped job task, whichever side wrote the terminal row, so it is the
+      // one hook that covers a normal job-runner failure, a hard task failure,
+      // and a reconciliation repair alike — and the JOB_PAYLOAD it reads
+      // already carries the owner's DM space, so no second read of the
+      // authoritative schedule record is needed.
+      notifyOwner: (run, target) =>
+        notifyOwnerIfScheduleFailing(
+          {
+            ownerEmail: run.userEmail,
+            scheduleId: run.scheduleId,
+            scheduleName: run.scheduleName ?? run.scheduleId,
+            dmSpaceName: target.dmSpaceName,
+            workspacePrefix: target.workspacePrefix,
+            sessionId: run.sessionId,
+            ...(run.fireKey ? { fireKey: run.fireKey } : {}),
+          },
+          {
+            errorMessage: run.errorMessage ?? null,
+            fullErrorMessage: run.errorMessage ?? null,
+          },
+          log,
+        ),
     },
     log,
   );
@@ -2792,6 +2862,28 @@ async function handleScheduledRunReconciliation(
     scheduleId: message.scheduleId,
     startedBy: message.startedBy,
   });
+  // The third and last path that writes a promoted run's terminal error row,
+  // after the job runner itself and the stopped-task supervisor. All three now
+  // reach the notice, so a schedule that only ever fails via promotion is no
+  // longer silent (#1890).
+  if (message.dmSpaceName) {
+    await notifyOwnerIfScheduleFailing(
+      {
+        ownerEmail: message.userEmail,
+        scheduleId: message.scheduleId,
+        scheduleName: message.scheduleName,
+        dmSpaceName: message.dmSpaceName,
+        workspacePrefix: message.workspacePrefix ?? '',
+        sessionId: message.sessionId,
+        fireKey: message.fireKey,
+      },
+      {
+        errorMessage: reconciliation.errorMessage,
+        fullErrorMessage: reconciliation.errorMessage,
+      },
+      log,
+    );
+  }
   return { status: 'error', scheduleId: message.scheduleId };
 }
 
