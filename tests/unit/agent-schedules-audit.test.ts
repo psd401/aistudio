@@ -102,6 +102,63 @@ describe("auditSchedule", () => {
     expect(finding?.issues[0]).toMatch(/fires only in a fixed year/)
   })
 
+  it("does not call a named ordinal day-of-week numeric", () => {
+    // MON#1 is "first Monday": the weekday is named and unambiguous, and the
+    // `1` is the occurrence within the month. A plain digit test read that
+    // `1` and told the owner a correct schedule needed attention.
+    expect(
+      auditSchedule(
+        schedule({
+          name: "Morning Brief",
+          schedulerExpression: "cron(30 6 ? * MON#1 *)",
+        })
+      )
+    ).toBeNull()
+  })
+
+  it("still flags a numeric day-of-week that carries an ordinal", () => {
+    // 6L is EventBridge's own 1=SUN numbering — last Friday, not last
+    // Saturday — so a field copied from ordinary cron is still off by a day.
+    const finding = auditSchedule(
+      schedule({ schedulerExpression: "cron(30 6 ? * 6L *)" })
+    )
+    expect(finding?.issues[0]).toMatch(/numeric day-of-week/)
+  })
+
+  it("treats a full-domain range as no restriction at all", () => {
+    // 1-31 matches every calendar day and JAN-DEC every month, so neither
+    // restricts the cadence — but neither is `*`, and reading them as
+    // restrictions reported correct daily schedules as needing attention.
+    for (const expression of [
+      "cron(0 9 1-31 * ? *)",
+      "cron(0 9 1-31/1 * ? *)",
+      "cron(0 9 * JAN-DEC ? *)",
+      "cron(0 9 * 1-12 ? *)",
+    ]) {
+      expect(
+        auditSchedule(schedule({ name: "Daily report", schedulerExpression: expression }))
+      ).toBeNull()
+    }
+  })
+
+  it("still flags a partial range on a daily-named schedule", () => {
+    const finding = auditSchedule(
+      schedule({
+        name: "Daily report",
+        schedulerExpression: "cron(0 9 1-15 * ? *)",
+      })
+    )
+    expect(finding?.issues[0]).toMatch(/fires only on specific days/)
+
+    const months = auditSchedule(
+      schedule({
+        name: "Daily report",
+        schedulerExpression: "cron(0 9 * JAN-JUN ? *)",
+      })
+    )
+    expect(months?.issues[0]).toMatch(/fires only in specific months/)
+  })
+
   it("ignores rate() and at() schedules", () => {
     expect(
       auditSchedule(schedule({ schedulerExpression: "rate(1 hour)" }))

@@ -97,6 +97,63 @@ function namedDayOfWeek(field: string): string | null {
   return /\d/.test(named) ? null : named;
 }
 
+const MONTH_NAMES_IN_ORDER = [
+  "JAN",
+  "FEB",
+  "MAR",
+  "APR",
+  "MAY",
+  "JUN",
+  "JUL",
+  "AUG",
+  "SEP",
+  "OCT",
+  "NOV",
+  "DEC",
+];
+
+/**
+ * The day-of-week token with EventBridge's ordinal suffixes removed.
+ *
+ * `#` selects an occurrence within the month and `L` the last one, and both
+ * carry digits that say nothing about how the weekday itself is written:
+ * `MON#1` (first Monday) names its weekday and is unambiguous, but a plain
+ * digit test read the `1` and reported it as a numeric day-of-week copied
+ * from ordinary cron. `6L` keeps its `6` and is still reported, correctly —
+ * that IS EventBridge's 1=SUN numbering, so a range copied from ordinary
+ * cron is off by a day whether or not it carries an ordinal.
+ */
+function dayOfWeekWithoutOrdinal(field: string): string {
+  return field
+    .split(",")
+    .map((segment) => segment.replace(/#\d+$/, "").replace(/L$/i, ""))
+    .join(",");
+}
+
+/**
+ * Does `field` already cover every value in its own domain?
+ *
+ * `1-31` on day-of-month and `JAN-DEC` (or `1-12`) on month match every
+ * calendar day or month, so they restrict nothing — but they are not `*`,
+ * and reading them as restrictions reported a correct "Daily report" as
+ * firing only on specific days.
+ */
+function coversWholeDomain(field: string, min: number, max: number): boolean {
+  const [range, step] = field.split("/");
+  if (step !== undefined && step !== "1") return false;
+  const bounds = range.split("-");
+  if (bounds.length !== 2) return false;
+  const toNumber = (token: string): number | null => {
+    const monthIndex = MONTH_NAMES_IN_ORDER.indexOf(token.toUpperCase());
+    if (monthIndex >= 0) return monthIndex + 1;
+    return /^\d+$/.test(token) ? Number.parseInt(token, 10) : null;
+  };
+  const start = toNumber(bounds[0]);
+  const end = toNumber(bounds[1]);
+  if (start === null || end === null) return false;
+  return start <= min && end >= max;
+}
+
 function nameSuggestsDaily(name: string): boolean {
   if (MONTHLY_OR_YEARLY_NAME_RE.test(name)) return false;
   return DAILY_NAME_RE.test(name) || WEEKDAY_NAME_RE.test(name);
@@ -109,15 +166,17 @@ function nameSuggestsDaily(name: string): boolean {
  * that is the shape an "every 5th day of the month" expression takes, and
  * treating any field containing a star as unrestricted missed it, so a
  * schedule named "Daily report" that fires only every fifth day went
- * unreported.
+ * unreported. A range spanning the field's whole domain (`1-31`, `JAN-DEC`)
+ * does not restrict anything either, however little it looks like `*`.
  */
-function isRestricted(field: string): boolean {
-  return !isWildcard(field) && field !== "*/1";
+function isRestricted(field: string, min: number, max: number): boolean {
+  if (isWildcard(field) || field === "*/1") return false;
+  return !coversWholeDomain(field, min, max);
 }
 
 function firesMonthlyOrYearly(fields: string[]): string | null {
-  const dayOfMonthPinned = isRestricted(fields[2]);
-  const monthPinned = isRestricted(fields[3]);
+  const dayOfMonthPinned = isRestricted(fields[2], 1, 31);
+  const monthPinned = isRestricted(fields[3], 1, 12);
   const yearPinned = fields[5] !== "*";
   if (yearPinned) return "fires only in a fixed year";
   if (monthPinned) return "fires only in specific months";
@@ -133,7 +192,8 @@ export function auditSchedule(schedule: StoredSchedule): ScheduleFinding | null 
   const suggested = [...fields];
 
   const named = namedDayOfWeek(fields[4]);
-  if (/\d/.test(fields[4]) && !isWildcard(fields[4])) {
+  const dayOfWeekTokens = dayOfWeekWithoutOrdinal(fields[4]);
+  if (/\d/.test(dayOfWeekTokens) && !isWildcard(fields[4])) {
     issues.push(
       "numeric day-of-week — EventBridge reads 1=SUN, so a range copied " +
         `from ordinary cron runs a day early (currently ${
