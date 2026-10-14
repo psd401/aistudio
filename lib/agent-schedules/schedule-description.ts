@@ -87,6 +87,14 @@ export interface ScheduleSummary {
    * `count` entries means the horizon was reached — or, for an enormous
    * `rate(...)`, the end of the representable `Date` range — not that the
    * schedule stops.
+   *
+   * These are scheduled times, not guaranteed instants. EventBridge Scheduler
+   * "invoke[s] their targets with 60 second precision… if you set your
+   * schedule to run at 1:00, it will invoke the target API between 1:00:00 and
+   * 1:00:59" (Scheduler User Guide, schedule types), so the minute is the
+   * meaningful unit here. The seconds are carried because they are part of
+   * what was stored — an `at(...)` names them, and a `rate(...)` inherits
+   * them from its anchor — not because the invocation lands on them.
    */
   nextRuns: string[];
 }
@@ -568,6 +576,15 @@ function rateIntervalMs(count: number, unit: string): number {
  * `at(yyyy-mm-ddThh:mm:ss)` carries them, so dropping them would make the
  * read-back disagree with the stored expression.
  */
+/** Days in a month, leap years included. */
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) {
+    const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+    return leap ? 29 : 28;
+  }
+  return month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31;
+}
+
 function describeAt(
   expression: string,
   timeZone: string,
@@ -589,10 +606,14 @@ function describeAt(
     date.month < 1 ||
     date.month > 12 ||
     date.day < 1 ||
-    date.day > 31 ||
     hour > 23 ||
     minute > 59 ||
-    second > 59
+    second > 59 ||
+    // Against the actual month, not a flat 31: `at(2027-02-30T09:00:00)` is
+    // shape-valid, and wallClockToInstant rightly returns null for it, but the
+    // description was still emitted as "Once, on February 30" — a confident
+    // reading of a date that does not exist.
+    date.day > daysInMonth(date.year, date.month)
   ) {
     return { description: expression, nextRuns: [] };
   }

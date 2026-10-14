@@ -98,6 +98,15 @@ export type PublicAgentSchedule = Pick<
    * when the expression has no computable occurrences, and always empty when
    * `enabled` is false — a held schedule has no upcoming executions to
    * promise.
+   *
+   * Accurate to the minute, which is EventBridge's own guarantee: it invokes
+   * every schedule type "with 60 second precision". For a `rate(...)`
+   * schedule the phase is taken from `updatedAt`, the timestamp written
+   * immediately before the Create/UpdateSchedule call — the platform anchors
+   * on activation instead, which differs by that request's latency and so
+   * sits well inside the same 60-second window. Pinning it exactly would
+   * require sending `StartDate`, which for a rate schedule also redefines
+   * its first occurrence.
    */
   nextRuns: string[];
   lastRunAt: string | null;

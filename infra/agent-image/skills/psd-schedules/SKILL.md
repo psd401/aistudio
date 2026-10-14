@@ -233,6 +233,11 @@ A `rate(N unit)` schedule has no fixed clock time: EventBridge counts the
 interval from when the schedule was last saved, so its `nextRuns` shift every
 time it is updated. Use `cron` when the user asked for a particular time.
 
+`nextRuns` is accurate to the minute, which is all EventBridge promises — it
+invokes every schedule type with 60-second precision, so a 6:15 PM schedule
+fires somewhere in the 6:15 PM minute. Tell the user the minute, not the
+second.
+
 **Confirm from `description` and `nextRuns` — never from the cron string you
 typed.** Your own expression is what you *meant*; these fields are what the
 platform will *do*. They are the only place the two can be seen to disagree.

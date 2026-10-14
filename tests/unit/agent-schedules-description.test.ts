@@ -353,6 +353,32 @@ describe("describeScheduleExpression — shapes an owner can really create", () 
     expect(result.description).toBe("Once, on October 15, 2026 at 8:15 PM")
   })
 
+  it("falls back on a date that does not exist in its month", () => {
+    // Shape-valid, and wallClockToInstant rightly returns null, but the
+    // description was still emitted as "Once, on February 30".
+    for (const expression of [
+      "at(2027-02-30T09:00:00)",
+      "at(2027-02-29T09:00:00)",
+      "at(2027-04-31T09:00:00)",
+    ]) {
+      const result = describeScheduleExpression(expression, PACIFIC, {
+        now: MONDAY_9AM_PDT,
+      })
+      expect(result.description).toBe(expression)
+      expect(result.nextRuns).toEqual([])
+    }
+  })
+
+  it("accepts February 29 in a leap year", () => {
+    const result = describeScheduleExpression(
+      "at(2028-02-29T09:00:00)",
+      PACIFIC,
+      { now: MONDAY_9AM_PDT }
+    )
+    expect(result.description).toBe("Once, on February 29, 2028 at 9:00 AM")
+    expect(result.nextRuns).toEqual(["2028-02-29T09:00:00-08:00"])
+  })
+
   it("falls back on an out-of-range seconds value in an at()", () => {
     const result = describeScheduleExpression(
       "at(2026-10-15T20:15:75)",
