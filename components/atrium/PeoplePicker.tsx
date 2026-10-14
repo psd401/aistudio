@@ -18,10 +18,12 @@
 import { useEffect, useState } from "react";
 import { Loader2, Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
-import {
-  searchPeopleAction,
-  type PersonOption,
-} from "@/actions/db/atrium/search-people";
+import { searchPeopleAction } from "@/actions/db/atrium/search-people";
+// Imported from its source, never re-exported through the "use server" file:
+// the dev server compiles a local `export type { X }` there as a VALUE export,
+// which throws `ReferenceError: PersonOption is not defined` at module load and
+// takes down every page that pulls in the action (the Atrium editor).
+import type { PersonOption } from "@/lib/content/people-search";
 import { createLogger } from "@/lib/client-logger";
 
 const log = createLogger({ component: "PeoplePicker" });
