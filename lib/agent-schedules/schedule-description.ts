@@ -22,6 +22,17 @@ const DEFAULT_OCCURRENCE_COUNT = 3;
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
+/**
+ * Largest instant a `Date` can represent (ECMA-262 time-value limit).
+ *
+ * `rate(...)` has no upper bound in `validation.ts` — it only rejects faster
+ * than every 5 minutes — so a stored `rate(100000000 days)` is reachable, and
+ * `anchor + k * interval` then lands outside this range. `Intl.formatToParts`
+ * throws `RangeError: Invalid time value` on such a value, which would reject
+ * the whole `list()` over one row. Occurrences past this point are dropped
+ * instead: this module's contract is that it never throws and never guesses.
+ */
+const MAX_INSTANT_MS = 8.64e15;
 
 const MONTH_NAMES = [
   "January",
@@ -73,7 +84,9 @@ export interface ScheduleSummary {
    * a year field already in the past, no match inside the search horizon
    * (five years, or the end of the expression's own last year when it pins
    * one), or a `rate(...)` expression described without its anchor. Fewer than
-   * `count` entries means the horizon was reached, not that the schedule stops.
+   * `count` entries means the horizon was reached — or, for an enormous
+   * `rate(...)`, the end of the representable `Date` range — not that the
+   * schedule stops.
    */
   nextRuns: string[];
 }
@@ -111,12 +124,6 @@ interface ZonedParts extends CivilDate {
   minute: number;
 }
 
-/**
- * Wall-clock parts of an instant in a timezone.
- *
- * `Intl` is the only timezone database available here; `formatToParts` with
- * `hourCycle: "h23"` avoids the 24-vs-0 midnight discrepancy between runtimes.
- */
 const formatterCache = new Map<string, Intl.DateTimeFormat>();
 
 /**
@@ -141,6 +148,15 @@ function zoneFormatter(timeZone: string): Intl.DateTimeFormat {
   return formatter;
 }
 
+/**
+ * Wall-clock parts of an instant in a timezone.
+ *
+ * `Intl` is the only timezone database available here; `formatToParts` with
+ * `hourCycle: "h23"` avoids the 24-vs-0 midnight discrepancy between runtimes.
+ *
+ * The caller owns the range check: `formatToParts` throws `RangeError` on an
+ * instant outside the representable `Date` range (see `MAX_INSTANT_MS`).
+ */
 function zonedParts(timestamp: number, timeZone: string): ZonedParts {
   const parts = zoneFormatter(timeZone).formatToParts(new Date(timestamp));
   const lookup: Record<string, string> = {};
@@ -517,7 +533,11 @@ function nextRateRuns(
   const firstIndex = elapsed < 0 ? 1 : Math.floor(elapsed / interval) + 1;
   const runs: number[] = [];
   for (let index = firstIndex; index < firstIndex + count; index += 1) {
-    runs.push(anchorMs + interval * index);
+    const instant = anchorMs + interval * index;
+    // A huge rate() runs off the end of the representable Date range; stop
+    // rather than hand an unformattable instant to Intl. See MAX_INSTANT_MS.
+    if (!Number.isFinite(instant) || Math.abs(instant) > MAX_INSTANT_MS) break;
+    runs.push(instant);
   }
   return runs;
 }
@@ -591,16 +611,15 @@ export function describeScheduleExpression(
   const now = (options.now ?? new Date()).getTime();
   const count = options.count ?? DEFAULT_OCCURRENCE_COUNT;
   const fallback: ScheduleSummary = { description: expression, nextRuns: [] };
-  const zone = timeZone;
   try {
-    new Intl.DateTimeFormat("en-US", { timeZone: zone });
+    new Intl.DateTimeFormat("en-US", { timeZone });
   } catch {
     return fallback;
   }
 
   const trimmed = expression.trim();
 
-  const at = describeAt(trimmed, zone, now);
+  const at = describeAt(trimmed, timeZone, now);
   if (at) return at;
 
   const rate = trimmed.match(/^rate\((\d+)\s+(minutes?|hours?|days?)\)$/);
@@ -618,7 +637,7 @@ export function describeScheduleExpression(
         anchorMs === null
           ? []
           : nextRateRuns(anchorMs, interval, now, count).map((instant) =>
-              formatZonedIso(instant, zone),
+              formatZonedIso(instant, timeZone),
             ),
     };
   }
@@ -631,8 +650,8 @@ export function describeScheduleExpression(
   const description = `${describeTime(parsed)}, ${describeDays(parsed)}`;
   return {
     description,
-    nextRuns: nextCronRuns(parsed, zone, now, count).map((instant) =>
-      formatZonedIso(instant, zone),
+    nextRuns: nextCronRuns(parsed, timeZone, now, count).map((instant) =>
+      formatZonedIso(instant, timeZone),
     ),
   };
 }

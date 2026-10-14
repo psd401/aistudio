@@ -22,6 +22,7 @@ import {
 } from "@aws-sdk/client-scheduler";
 import {
   AgentScheduleInputError,
+  DEFAULT_SCHEDULE_TIMEZONE,
   parseEnabled,
   toSchedulerExpression,
   validateScheduleId,
@@ -42,7 +43,6 @@ import {
 } from "./mutation-lock";
 import { createLogger } from "@/lib/logger";
 
-const DEFAULT_TIMEZONE = "America/Los_Angeles";
 const DEFAULT_MAX_SCHEDULES_PER_OWNER = 50;
 const LAST_RUN_ERROR_MAX_LENGTH = 500;
 const SCHEDULE_MAXIMUM_EVENT_AGE_SECONDS = 60 * 60;
@@ -322,7 +322,7 @@ function publicDegradedSchedule(
     256,
     degradedString(value.cronExpression, 256, ""),
   );
-  const timezone = degradedString(value.timezone, 100, DEFAULT_TIMEZONE);
+  const timezone = degradedString(value.timezone, 100, DEFAULT_SCHEDULE_TIMEZONE);
   const updatedAt = degradedString(value.updatedAt, 64, "");
   const summary = describeScheduleExpression(schedulerExpression, timezone, {
     // Empty or unparseable on a degraded row; a rate(...) schedule then
@@ -933,7 +933,7 @@ export class AgentScheduleService {
       typeof input.cron === "string" ? input.cron.trim() : input.cron;
     const schedulerExpression = toSchedulerExpression(cronExpression);
     const timezone = validateScheduleTimezone(
-      input.timezone ?? DEFAULT_TIMEZONE,
+      input.timezone ?? DEFAULT_SCHEDULE_TIMEZONE,
     );
     const enabled = !parseDisabled(input.disabled);
     await this.ensureOwnerMetadata(ownerEmail);

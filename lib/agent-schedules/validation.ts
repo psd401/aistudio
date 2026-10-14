@@ -1,3 +1,11 @@
+/**
+ * Timezone a schedule falls back to when the record does not name one.
+ *
+ * Lives here rather than in `service.ts` so the read-only audit script can
+ * share it without pulling the AWS SDK in through the service module.
+ */
+export const DEFAULT_SCHEDULE_TIMEZONE = "America/Los_Angeles";
+
 const MAX_NAME_LENGTH = 120;
 const MAX_PROMPT_LENGTH = 20_000;
 const MAX_EXPRESSION_LENGTH = 256;

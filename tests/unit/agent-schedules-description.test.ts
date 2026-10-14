@@ -226,6 +226,30 @@ describe("describeScheduleExpression — next fire times", () => {
     }
   })
 
+  it("drops rate() occurrences past the representable Date range", () => {
+    // validation.ts bounds rate() only from below (no faster than every 5
+    // minutes), so a stored rate(100000000 days) is reachable. Formatting an
+    // instant past the Date limit throws RangeError, which would have rejected
+    // the whole list() over one row.
+    const huge = describeScheduleExpression("rate(100000000 days)", PACIFIC, {
+      now: MONDAY_9AM_PDT,
+      anchor: "2026-10-12T15:00:00Z",
+    })
+    expect(huge.description).toBe("Every 100000000 days")
+    expect(huge.nextRuns).toEqual([])
+
+    // A rate whose first occurrence is representable but whose later ones are
+    // not returns the ones it can, and stops.
+    const edge = describeScheduleExpression("rate(100000 days)", PACIFIC, {
+      now: MONDAY_9AM_PDT,
+      anchor: "2026-10-12T15:00:00Z",
+    })
+    expect(edge.nextRuns).toHaveLength(3)
+    for (const run of edge.nextRuns) {
+      expect(Number.isNaN(Date.parse(run))).toBe(false)
+    }
+  })
+
   it("returns nothing when the year field is already in the past", () => {
     expect(
       describeScheduleExpression("cron(0 9 * * ? 2020)", PACIFIC, {

@@ -30,6 +30,7 @@ import {
   type ScheduleFinding,
   type StoredSchedule,
 } from "@/lib/agent-schedules/schedule-audit";
+import { DEFAULT_SCHEDULE_TIMEZONE } from "@/lib/agent-schedules/validation";
 import { scriptLogger as log } from "./db/script-logger";
 
 function toStoredSchedule(item: Record<string, unknown>): StoredSchedule | null {
@@ -51,7 +52,9 @@ function toStoredSchedule(item: Record<string, unknown>): StoredSchedule | null 
           : "unknown",
     name: item.name,
     timezone:
-      typeof item.timezone === "string" ? item.timezone : "America/Los_Angeles",
+      typeof item.timezone === "string"
+        ? item.timezone
+        : DEFAULT_SCHEDULE_TIMEZONE,
     enabled: item.enabled === true,
     schedulerExpression: item.schedulerExpression,
     // Anchors a rate(...) interval, so the reported fire times match reality.
