@@ -224,9 +224,17 @@ function formatZonedIso(timestamp: number, timeZone: string): string {
   const parts = zonedParts(timestamp, timeZone);
   const pad = (value: number, width = 2) =>
     String(value).padStart(width, "0");
+  // Seconds come off the instant, not the formatter: every IANA zone in use
+  // is a whole number of minutes from UTC, so the seconds-of-minute is the
+  // same in any zone, and `zonedParts` is deliberately minute-granular. A
+  // cron fire time always lands on :00, but an `at(...)` carries seconds and
+  // a `rate(...)` inherits them from its anchor, and printing :00 for those
+  // would contradict the stored expression in the field SKILL.md tells the
+  // agent to trust.
+  const second = ((Math.floor(timestamp / 1000) % 60) + 60) % 60;
   return (
     `${pad(parts.year, 4)}-${pad(parts.month)}-${pad(parts.day)}` +
-    `T${pad(parts.hour)}:${pad(parts.minute)}:00` +
+    `T${pad(parts.hour)}:${pad(parts.minute)}:${pad(second)}` +
     offsetSuffix(timestamp, timeZone)
   );
 }
@@ -427,10 +435,11 @@ function nextCronRuns(
   return runs;
 }
 
-function formatClock(hour: number, minute: number): string {
+function formatClock(hour: number, minute: number, second = 0): string {
   const suffix = hour < 12 ? "AM" : "PM";
   const display = hour % 12 === 0 ? 12 : hour % 12;
-  return `${display}:${String(minute).padStart(2, "0")} ${suffix}`;
+  const seconds = second === 0 ? "" : `:${String(second).padStart(2, "0")}`;
+  return `${display}:${String(minute).padStart(2, "0")}${seconds} ${suffix}`;
 }
 
 function joinList(items: string[]): string {
@@ -555,7 +564,9 @@ function rateIntervalMs(count: number, unit: string): number {
  * `at(...)` rule both accept any two digits, so a record holding
  * `at(2026-13-45T09:00:00)` can already exist. Returning the fallback for
  * those keeps a half-garbled "Once, on undefined 45, 2026" out of the
- * response.
+ * response. Seconds are range-checked and kept: AWS's documented
+ * `at(yyyy-mm-ddThh:mm:ss)` carries them, so dropping them would make the
+ * read-back disagree with the stored expression.
  */
 function describeAt(
   expression: string,
@@ -573,21 +584,27 @@ function describeAt(
   };
   const hour = Number.parseInt(at[4], 10);
   const minute = Number.parseInt(at[5], 10);
+  const second = Number.parseInt(at[6], 10);
   if (
     date.month < 1 ||
     date.month > 12 ||
     date.day < 1 ||
     date.day > 31 ||
     hour > 23 ||
-    minute > 59
+    minute > 59 ||
+    second > 59
   ) {
     return { description: expression, nextRuns: [] };
   }
-  const instant = wallClockToInstant(timeZone, date, hour, minute);
+  // AWS's at(yyyy-mm-ddThh:mm:ss) carries seconds, and nothing rejects a
+  // nonzero value, so the read-back has to carry them too: wallClockToInstant
+  // resolves the zone at minute granularity and the seconds are added on top.
+  const minuteInstant = wallClockToInstant(timeZone, date, hour, minute);
+  const instant = minuteInstant === null ? null : minuteInstant + second * 1000;
   return {
     description:
       `Once, on ${MONTH_NAMES[date.month - 1]} ${date.day}, ${date.year} ` +
-      `at ${formatClock(hour, minute)}`,
+      `at ${formatClock(hour, minute, second)}`,
     nextRuns:
       instant !== null && instant > now
         ? [formatZonedIso(instant, timeZone)]

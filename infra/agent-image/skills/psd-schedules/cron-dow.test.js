@@ -80,6 +80,21 @@ describe('an unwrapped 6-field cron must carry a YEAR in field 6', () => {
     expect(result.stderr).toContain('seconds-first');
   });
 
+  test('rejects a seconds-first form whose seconds are not zero', () => {
+    // The check once required field 1 to be `0`, which let every nonzero
+    // seconds value through: `30 15 18 * * *` (6:15:30pm daily) normalized to
+    // cron(30 15 18 * ? *) — 3:30pm on the 18th. Mirrors the server test in
+    // tests/unit/agent-schedules-cron-domains.test.ts.
+    const result = normalize('30 15 18 * * *');
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain('seconds-first');
+    expect(result.stderr).toContain('day-of-month 18');
+
+    const morning = normalize('45 30 6 * * *');
+    expect(morning.ok).toBe(false);
+    expect(morning.stderr).toContain('seconds-first');
+  });
+
   test('rejects a 6th field that is neither a year nor *', () => {
     const unwrapped = normalize('0 45 6 * ? MON-FRI');
     expect(unwrapped.ok).toBe(false);

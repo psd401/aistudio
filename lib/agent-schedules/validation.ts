@@ -325,11 +325,18 @@ function normalizeWrappedScheduleExpression(expression: string): string | null {
  * Two checks, in order:
  *  1. Field 6 must be a 4-digit year (or `*`). That catches the shape whose
  *     day names landed in the year slot, e.g. `0 45 6 * ? MON-FRI`.
- *  2. The seconds-first daily shape, whose year slot is a legitimate-looking
- *     `*`: field 1 = `0` (seconds), field 3 an hour-sized number, and neither
- *     day field `?`. Narrowing to "neither day field is `?`" keeps a real
- *     EventBridge expression like `0 0 1 * ? *` (midnight on the 1st) out of
- *     the net — that form is already valid and must stay accepted.
+ *  2. The seconds-first shape, whose year slot is a legitimate-looking `*`:
+ *     field 3 an hour-sized number and neither day field `?`. Narrowing to
+ *     "neither day field is `?`" keeps a real EventBridge expression like
+ *     `0 0 1 * ? *` (midnight on the 1st) out of the net — EventBridge
+ *     requires `?` in exactly one day field, so every expression it actually
+ *     accepts carries one, and that form must stay accepted.
+ *
+ * Check 2 does not look at the seconds field. It once required it to be `0`,
+ * which let every nonzero-seconds expression through: `30 15 18 * * *`
+ * (6:15:30pm daily) was rewritten to `cron(30 15 18 * ? *)`, 3:30pm on the
+ * 18th — the same silent wrong-time bug this function exists to stop, just
+ * one second off the tested case.
  *
  * Check 2 only runs when the year slot is `*`, because that is the only
  * ambiguous form. An explicit 4-digit year can never be a seconds-first
@@ -350,18 +357,18 @@ function rejectMisreadSixFieldCron(fields: string[]): void {
     : null;
   if (
     fields[5] === "*" &&
-    fields[0] === "0" &&
     hourLike !== null &&
     hourLike <= 23 &&
     fields[2] !== "?" &&
     fields[4] !== "?"
   ) {
     throw new AgentScheduleInputError(
-      "this looks like a seconds-first cron, which EventBridge does not " +
-        "accept — it would be read as day-of-month " +
-        `${hourLike}, not ${hourLike}:00. EventBridge takes minute hour ` +
-        "day-of-month month day-of-week year. For 6:15pm daily use the " +
-        "5-field form `15 18 * * *`.",
+      "this looks like a seconds-first cron (seconds minute hour " +
+        "day-of-month month day-of-week), which EventBridge does not " +
+        `accept — the hour you wrote would be read as day-of-month ` +
+        `${hourLike}. EventBridge takes minute hour day-of-month month ` +
+        "day-of-week year, with no seconds field. For 6:15pm daily use " +
+        "the 5-field form `15 18 * * *`.",
     );
   }
 }

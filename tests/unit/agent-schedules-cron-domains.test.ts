@@ -115,6 +115,26 @@ describe("an unwrapped 6-field cron must carry a YEAR in field 6", () => {
     expect(() => toSchedulerExpression("0 30 6 * * *")).toThrow(/seconds-first/)
   })
 
+  it("rejects a seconds-first form whose seconds are not zero", () => {
+    // The heuristic once required field 1 to be `0`, so every nonzero-seconds
+    // expression slipped past it: `30 15 18 * * *` (6:15:30pm daily) was
+    // rewritten to cron(30 15 18 * ? *) — 3:30pm on the 18th. Same silent
+    // wrong-time bug, one second off the tested case.
+    expect(() => toSchedulerExpression("30 15 18 * * *")).toThrow(
+      /seconds-first/
+    )
+    expect(() => toSchedulerExpression("45 30 6 * * *")).toThrow(
+      /seconds-first/
+    )
+    let message = ""
+    try {
+      toSchedulerExpression("30 15 18 * * *")
+    } catch (error) {
+      message = (error as Error).message
+    }
+    expect(message).toContain("day-of-month 18")
+  })
+
   it("rejects a 6th field that is neither a year nor *", () => {
     expect(() => toSchedulerExpression("0 45 6 * ? MON-FRI")).toThrow(
       /4-digit year/

@@ -330,6 +330,50 @@ describe("describeScheduleExpression — shapes an owner can really create", () 
     expect(description).toBe("At 9:00 AM, every day in 2027")
   })
 
+  it("keeps the seconds an at() expression carries", () => {
+    // AWS's at(yyyy-mm-ddThh:mm:ss) includes seconds and nothing rejects a
+    // nonzero value, so reporting :00 would contradict the stored expression
+    // in the very field SKILL.md tells the agent to confirm from.
+    const result = describeScheduleExpression(
+      "at(2026-10-15T20:15:30)",
+      PACIFIC,
+      { now: MONDAY_9AM_PDT }
+    )
+    expect(result.nextRuns).toEqual(["2026-10-15T20:15:30-07:00"])
+    expect(result.description).toBe("Once, on October 15, 2026 at 8:15:30 PM")
+  })
+
+  it("leaves a whole-minute at() reading as before", () => {
+    const result = describeScheduleExpression(
+      "at(2026-10-15T20:15:00)",
+      PACIFIC,
+      { now: MONDAY_9AM_PDT }
+    )
+    expect(result.nextRuns).toEqual(["2026-10-15T20:15:00-07:00"])
+    expect(result.description).toBe("Once, on October 15, 2026 at 8:15 PM")
+  })
+
+  it("falls back on an out-of-range seconds value in an at()", () => {
+    const result = describeScheduleExpression(
+      "at(2026-10-15T20:15:75)",
+      PACIFIC,
+      { now: MONDAY_9AM_PDT }
+    )
+    expect(result.description).toBe("at(2026-10-15T20:15:75)")
+    expect(result.nextRuns).toEqual([])
+  })
+
+  it("carries a rate() anchor's seconds into its fire times", () => {
+    // updatedAt is an ISO timestamp with seconds, and EventBridge re-anchors
+    // the interval there, so the fire times are offset by those seconds too.
+    const { nextRuns } = describeScheduleExpression("rate(1 hour)", PACIFIC, {
+      now: MONDAY_9AM_PDT,
+      anchor: "2026-10-12T15:15:42Z",
+      count: 1,
+    })
+    expect(nextRuns).toEqual(["2026-10-12T09:15:42-07:00"])
+  })
+
   it("falls back rather than half-describing an out-of-range at()", () => {
     // validation.ts's at() rule checks digit shape, not range, so a record
     // like this can already exist. It must not read back as

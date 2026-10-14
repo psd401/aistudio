@@ -95,24 +95,29 @@ function rejectMisreadSixFieldCron(parts) {
     ? Number.parseInt(parts[2], 10)
     : null;
   // Narrowed to "neither day field is ?" so a real EventBridge expression such
-  // as `0 0 1 * ? *` (midnight on the 1st) stays accepted, and to a `*` year
-  // because that is the only ambiguous form: a seconds-first cron carries
-  // day-of-week in field 6, never a 4-digit year, so an explicit-year
-  // expression like `0 9 1 * * 2027` (9:00am on the 1st, in 2027) is kept.
+  // as `0 0 1 * ? *` (midnight on the 1st) stays accepted — EventBridge
+  // requires `?` in exactly one day field, so every expression it accepts
+  // carries one — and to a `*` year because that is the only ambiguous form:
+  // a seconds-first cron carries day-of-week in field 6, never a 4-digit
+  // year, so `0 9 1 * * 2027` (9:00am on the 1st, in 2027) is kept.
+  //
+  // The seconds field is deliberately NOT part of the test. Requiring it to
+  // be `0` let every nonzero-seconds expression through: `30 15 18 * * *`
+  // (6:15:30pm daily) became `cron(30 15 18 * ? *)`, 3:30pm on the 18th.
   if (
     parts[5] === "*" &&
-    parts[0] === "0" &&
     hourLike !== null &&
     hourLike <= 23 &&
     parts[2] !== "?" &&
     parts[4] !== "?"
   ) {
     fail(
-      "this looks like a seconds-first cron, which EventBridge does not " +
-        "accept — it would be read as day-of-month " +
-        `${hourLike}, not ${hourLike}:00. EventBridge takes minute hour ` +
-        "day-of-month month day-of-week year. For 6:15pm daily use the " +
-        "5-field form `15 18 * * *`.",
+      "this looks like a seconds-first cron (seconds minute hour " +
+        "day-of-month month day-of-week), which EventBridge does not " +
+        `accept — the hour you wrote would be read as day-of-month ` +
+        `${hourLike}. EventBridge takes minute hour day-of-month month ` +
+        "day-of-week year, with no seconds field. For 6:15pm daily use " +
+        "the 5-field form `15 18 * * *`.",
     );
   }
 }
