@@ -62,3 +62,55 @@ describe('day-of-week must be named on BOTH entry paths', () => {
     expect(normalize('0 8 1,15 * *').stdout).toBe('cron(0 8 1,15 * ? *)');
   });
 });
+
+describe('an unwrapped 6-field cron must carry a YEAR in field 6', () => {
+  test('rejects the seconds-first daily form that became a monthly schedule', () => {
+    // #1888: "6:15pm daily". Six fields, year slot `*`, so every count and
+    // bound check passed — and normalizeUnwrappedCron then set `?` itself,
+    // producing cron(0 15 18 * ? *): 3:00pm on the 18th of every month.
+    const result = normalize('0 15 18 * * *');
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain('seconds-first');
+    expect(result.stderr).toContain('15 18 * * *');
+  });
+
+  test('rejects the seconds-first morning form', () => {
+    const result = normalize('0 30 6 * * *');
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain('seconds-first');
+  });
+
+  test('rejects a 6th field that is neither a year nor *', () => {
+    const unwrapped = normalize('0 45 6 * ? MON-FRI');
+    expect(unwrapped.ok).toBe(false);
+    expect(unwrapped.stderr).toContain('4-digit year');
+
+    // Same rule on the pre-wrapped path, so neither entry point is the soft one.
+    const wrapped = normalize('cron(45 6 ? * * JAN)');
+    expect(wrapped.ok).toBe(false);
+    expect(wrapped.stderr).toContain('4-digit year');
+  });
+
+  test('still accepts a valid 5-field cron', () => {
+    const result = normalize('30 6 * * MON-FRI');
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toBe('cron(30 6 ? * MON-FRI *)');
+  });
+
+  test('still accepts a valid wrapped 6-field cron', () => {
+    expect(normalize('cron(15 18 * * ? *)').stdout).toBe('cron(15 18 * * ? *)');
+    expect(normalize('cron(0 6 ? * MON-FRI 2027)').stdout).toBe(
+      'cron(0 6 ? * MON-FRI 2027)',
+    );
+  });
+
+  test('leaves a legitimate unwrapped 6-field expression alone', () => {
+    // Field 1 is `0` and field 3 is hour-sized — the seconds-first
+    // fingerprint — but `?` in day-of-week says this really is EventBridge
+    // shape, so it must stay accepted.
+    expect(normalize('0 0 1 * ? *').stdout).toBe('cron(0 0 1 * ? *)');
+    expect(normalize('45 6 ? * MON-FRI *').stdout).toBe(
+      'cron(45 6 ? * MON-FRI *)',
+    );
+  });
+});

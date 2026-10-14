@@ -35,4 +35,28 @@ describe('psd-schedules list last-run rendering', () => {
       lastRunError: 'RunTask failed',
     });
   });
+
+  it('passes the broker read-back fields through untouched', () => {
+    // SKILL.md tells the agent to confirm from `description` and `nextRuns`
+    // rather than from the cron string it typed. If list.js ever stops
+    // forwarding them, that instruction quietly becomes unfollowable.
+    const result = renderLastRunStatus({
+      schedules: [
+        {
+          scheduleId: 'echoed',
+          schedulerExpression: 'cron(30 6 ? * MON-FRI *)',
+          description: 'At 6:30 AM, on Monday through Friday',
+          nextRuns: ['2026-10-13T06:30:00-07:00'],
+          lastRunAt: null,
+          lastRunStatus: null,
+        },
+      ],
+    });
+
+    expect(result.schedules[0]).toMatchObject({
+      schedulerExpression: 'cron(30 6 ? * MON-FRI *)',
+      description: 'At 6:30 AM, on Monday through Friday',
+      nextRuns: ['2026-10-13T06:30:00-07:00'],
+    });
+  });
 });

@@ -29,6 +29,7 @@ import {
   validateSchedulePrompt,
   validateScheduleTimezone,
 } from "@/lib/agent-schedules/validation";
+import { describeScheduleExpression } from "@/lib/agent-schedules/schedule-description";
 import {
   DrizzleAgentScheduleRunReader,
   type AgentScheduleLastRun,
@@ -84,6 +85,19 @@ export type PublicAgentSchedule = Pick<
   | "createdAt"
   | "updatedAt"
 > & {
+  /**
+   * The expression actually handed to EventBridge Scheduler, after the 5-field
+   * expansion and the `?` day-field rule. It is what the schedule MEANS; the
+   * raw `cronExpression` is only what was typed.
+   */
+  schedulerExpression: string;
+  /** Plain-language reading of `schedulerExpression`, for read-back. */
+  description: string;
+  /**
+   * Next fire times in the schedule's timezone, ISO 8601 with offset. Empty
+   * when the expression has no computable occurrences.
+   */
+  nextRuns: string[];
   lastRunAt: string | null;
   lastRunStatus: string | null;
   lastRunError: string | null;
@@ -263,6 +277,8 @@ function publicSchedule(
     name: record.name,
     prompt: record.prompt,
     cronExpression: record.cronExpression,
+    schedulerExpression: record.schedulerExpression,
+    ...describeScheduleExpression(record.schedulerExpression, record.timezone),
     timezone: record.timezone,
     enabled: record.enabled,
     createdAt: record.createdAt,
@@ -294,6 +310,12 @@ function publicDegradedSchedule(
   lastRun?: AgentScheduleLastRun,
   runEnrichmentAvailable = true,
 ): PublicAgentSchedule {
+  const schedulerExpression = degradedString(
+    value.schedulerExpression,
+    256,
+    degradedString(value.cronExpression, 256, ""),
+  );
+  const timezone = degradedString(value.timezone, 100, DEFAULT_TIMEZONE);
   return {
     scheduleId: degradedString(value.scheduleId, 128, "unknown"),
     version:
@@ -303,7 +325,9 @@ function publicDegradedSchedule(
     name: degradedString(value.name, 120, "Invalid schedule"),
     prompt: degradedString(value.prompt, 20_000, ""),
     cronExpression: degradedString(value.cronExpression, 256, ""),
-    timezone: degradedString(value.timezone, 100, DEFAULT_TIMEZONE),
+    schedulerExpression,
+    ...describeScheduleExpression(schedulerExpression, timezone),
+    timezone,
     enabled: typeof value.enabled === "boolean" ? value.enabled : false,
     createdAt: degradedString(value.createdAt, 64, ""),
     updatedAt: degradedString(value.updatedAt, 64, ""),

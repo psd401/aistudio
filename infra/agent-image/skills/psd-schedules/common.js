@@ -50,6 +50,69 @@ function validateTimezone(timezone) {
   }
 }
 
+/**
+ * Is this cron field a YEAR — `*`, a 4-digit year, or a list/range/step of
+ * them? Mirrors `isYearField` in lib/agent-schedules/validation.ts.
+ *
+ * A parser rather than one regex: the equivalent pattern nests quantifiers
+ * inside an alternation, which is a ReDoS shape on model-supplied input.
+ */
+function isYearField(field) {
+  if (field === "*") return true;
+  return field.split(",").every((segment) => {
+    const pieces = segment.split("/");
+    if (pieces.length > 2) return false;
+    if (pieces.length === 2 && !/^\d{1,3}$/.test(pieces[1])) return false;
+    if (pieces[0] === "*") return true;
+    const bounds = pieces[0].split("-");
+    return bounds.length <= 2 && bounds.every((token) => /^\d{4}$/.test(token));
+  });
+}
+
+/**
+ * Reject an unwrapped 6-field cron whose sixth field is not a year.
+ *
+ * Mirrors `rejectMisreadSixFieldCron` in lib/agent-schedules/validation.ts —
+ * caught here too so the agent learns before spending a broker round trip.
+ *
+ * The 6-field unwrapped path assumes EventBridge shape, where field 6 is the
+ * year. A seconds-first expression also has six fields, so it was accepted and
+ * then rewritten into a different schedule: `0 15 18 * * *` ("6:15pm daily")
+ * became `cron(0 15 18 * ? *)` — 3:00pm on the 18th of every month. Nothing
+ * downstream caught it, because this function sets `?` itself before the
+ * server's `?` guard ever sees the fields.
+ */
+function rejectMisreadSixFieldCron(parts) {
+  if (!isYearField(parts[5])) {
+    fail(
+      "the 6th cron field must be a 4-digit year or *. EventBridge takes " +
+        "minute hour day-of-month month day-of-week year (no seconds " +
+        "field). Prefer the 5-field form — e.g. `45 6 * * MON-FRI` for " +
+        "6:45am on weekdays — and let the skill expand it.",
+    );
+  }
+  const hourLike = /^\d{1,2}$/.test(parts[2])
+    ? Number.parseInt(parts[2], 10)
+    : null;
+  // Narrowed to "neither day field is ?" so a real EventBridge expression such
+  // as `0 0 1 * ? *` (midnight on the 1st) stays accepted.
+  if (
+    parts[0] === "0" &&
+    hourLike !== null &&
+    hourLike <= 23 &&
+    parts[2] !== "?" &&
+    parts[4] !== "?"
+  ) {
+    fail(
+      "this looks like a seconds-first cron, which EventBridge does not " +
+        "accept — it would be read as day-of-month " +
+        `${hourLike}, not ${hourLike}:00. EventBridge takes minute hour ` +
+        "day-of-month month day-of-week year. For 6:15pm daily use the " +
+        "5-field form `15 18 * * *`.",
+    );
+  }
+}
+
 function normalizeUnwrappedCron(expr) {
   const parts = expr.split(/\s+/);
   if (parts.length !== 5 && parts.length !== 6) {
@@ -57,6 +120,7 @@ function normalizeUnwrappedCron(expr) {
       `Invalid cron "${expr}". Expected 5 or 6 fields (got ${parts.length}).`,
     );
   }
+  if (parts.length === 6) rejectMisreadSixFieldCron(parts);
   const expanded = parts.length === 6 ? [...parts] : [...parts, "*"];
   const minute = expanded[0];
   if (minute === "*" || minute === "*/1") {
@@ -116,6 +180,15 @@ function validateWrappedExpression(expr) {
       fail("Every-minute cron is not allowed. Minimum interval is 5 minutes.");
     }
     assertNamedDayOfWeek(fields[4]);
+    // Same year rule the unwrapped path enforces, so a hand-wrapped
+    // `cron(...)` cannot smuggle a day name or a seconds field into field 6.
+    if (!isYearField(fields[5])) {
+      fail(
+        "the 6th cron field must be a 4-digit year or *. EventBridge takes " +
+          "minute hour day-of-month month day-of-week year (no seconds " +
+          "field).",
+      );
+    }
     return expr;
   }
   const rateMatch = expr.match(

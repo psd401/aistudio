@@ -87,3 +87,65 @@ describe("day-of-week must be named, not numeric", () => {
     expect(toSchedulerExpression("0 8 1,15 * *")).toBe("cron(0 8 1,15 * ? *)")
   })
 })
+
+describe("an unwrapped 6-field cron must carry a YEAR in field 6", () => {
+  it("rejects the seconds-first daily form that became a monthly schedule", () => {
+    // #1888: "6:15pm daily". Six fields, so the count check passed; field 6 is
+    // `*`, so the year check passes too. normalizeUnwrappedCron then set `?`
+    // itself and produced cron(0 15 18 * ? *) — 3:00pm on the 18th of every
+    // month — which the server's `?` guard could never see as wrong.
+    expect(() => toSchedulerExpression("0 15 18 * * *")).toThrow(
+      /seconds-first/
+    )
+  })
+
+  it("names the right 5-field form in that error", () => {
+    let message = ""
+    try {
+      toSchedulerExpression("0 15 18 * * *")
+    } catch (error) {
+      message = (error as Error).message
+    }
+    expect(message).toContain("15 18 * * *")
+    expect(message).toContain("day-of-month 18")
+  })
+
+  it("rejects the seconds-first morning form too", () => {
+    // "6:30am daily" would have become 06:00 on the 30th of the month.
+    expect(() => toSchedulerExpression("0 30 6 * * *")).toThrow(/seconds-first/)
+  })
+
+  it("rejects a 6th field that is neither a year nor *", () => {
+    expect(() => toSchedulerExpression("0 45 6 * ? MON-FRI")).toThrow(
+      /4-digit year/
+    )
+    expect(() => toSchedulerExpression("cron(45 6 ? * * JAN)")).toThrow(
+      /4-digit year/
+    )
+  })
+
+  it("still accepts a valid 5-field cron", () => {
+    expect(toSchedulerExpression("30 6 * * MON-FRI")).toBe(
+      "cron(30 6 ? * MON-FRI *)"
+    )
+  })
+
+  it("still accepts a valid wrapped 6-field cron", () => {
+    expect(toSchedulerExpression("cron(15 18 * * ? *)")).toBe(
+      "cron(15 18 * * ? *)"
+    )
+    expect(toSchedulerExpression("cron(0 6 ? * MON-FRI 2027)")).toBe(
+      "cron(0 6 ? * MON-FRI 2027)"
+    )
+  })
+
+  it("leaves a legitimate unwrapped 6-field expression alone", () => {
+    // Minute 0, hour 0, day-of-month 1 — field 1 is `0` and field 3 is an
+    // hour-sized number, which is the seconds-first fingerprint, but `?` in
+    // day-of-week says this is really EventBridge shape.
+    expect(toSchedulerExpression("0 0 1 * ? *")).toBe("cron(0 0 1 * ? *)")
+    expect(toSchedulerExpression("45 6 ? * MON-FRI *")).toBe(
+      "cron(45 6 ? * MON-FRI *)"
+    )
+  })
+})

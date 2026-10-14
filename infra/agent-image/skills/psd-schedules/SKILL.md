@@ -213,10 +213,35 @@ context the future-you will have. So:
 
 **Creating.** Gather name, prompt, time-of-day, day(s), timezone (default
 Pacific). Translate to cron. State the full schedule back in plain language
-and confirm. Run `create`. Tell the user when the first fire will be.
+and confirm. Run `create`. Then read back what was actually saved — see below.
 
 **Modifying.** If you don't know the `scheduleId`, run `list` first. Then
-`update` or `delete`. Confirm what changed — don't echo raw JSON.
+`update` or `delete`. Confirm what changed — don't echo raw JSON. Read back
+the saved schedule the same way you do on create.
+
+### Read back what was SAVED, not what you sent
+
+`create`, `update` and `list` each return, per schedule:
+
+| Field | Meaning |
+|---|---|
+| `schedulerExpression` | the normalized expression EventBridge actually holds |
+| `description` | plain-language reading of it, e.g. `At 6:30 AM, Monday through Friday` |
+| `nextRuns` | the next 3 fire times, ISO 8601 in the schedule's timezone |
+
+**Confirm from `description` and `nextRuns` — never from the cron string you
+typed.** Your own expression is what you *meant*; these fields are what the
+platform will *do*. They are the only place the two can be seen to disagree.
+
+> Saved "Evening heads-up" — At 6:15 PM, every day. Next runs: Oct 13 6:15 PM,
+> Oct 14 6:15 PM, Oct 15 6:15 PM (Pacific).
+
+If `description` or `nextRuns` is not what the user asked for, say so and fix
+it before confirming. If `nextRuns` is empty, say the next fire time could not
+be computed rather than inventing one. Schedules created before this read-back
+existed were never re-checked — several have been firing on the wrong days or
+in the wrong month for weeks, unnoticed, because nothing ever showed the owner
+what was stored.
 
 **Rules.**
 

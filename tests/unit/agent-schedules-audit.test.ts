@@ -1,0 +1,93 @@
+import { auditSchedule } from "@/lib/agent-schedules/schedule-audit"
+
+function schedule(overrides: Partial<Parameters<typeof auditSchedule>[0]> = {}) {
+  return {
+    scheduleId: "11111111-2222-4333-8444-555555555555",
+    ownerEmail: "owner@psd401.net",
+    name: "Morning Brief",
+    timezone: "America/Los_Angeles",
+    enabled: true,
+    schedulerExpression: "cron(30 6 ? * MON-FRI *)",
+    ...overrides,
+  }
+}
+
+describe("auditSchedule", () => {
+  it("reports nothing for a correct weekday schedule", () => {
+    expect(auditSchedule(schedule())).toBeNull()
+  })
+
+  it("flags a legacy numeric day-of-week and suggests the named equivalent", () => {
+    const finding = auditSchedule(
+      schedule({ schedulerExpression: "cron(30 6 ? * 1-5 *)" })
+    )
+    expect(finding).not.toBeNull()
+    expect(finding?.issues[0]).toMatch(/numeric day-of-week/)
+    // EventBridge's own reading, not a guess at intent: 1-5 IS SUN-THU.
+    expect(finding?.suggestedExpression).toBe("cron(30 6 ? * SUN-THU *)")
+    expect(finding?.description).toBe("At 6:30 AM, on Sunday through Thursday")
+  })
+
+  it("flags a numeric day-of-week list too", () => {
+    const finding = auditSchedule(
+      schedule({ schedulerExpression: "cron(0 12 ? * 3,5 *)" })
+    )
+    expect(finding?.suggestedExpression).toBe("cron(0 12 ? * TUE,THU *)")
+  })
+
+  it("flags a daily-named schedule that actually fires monthly", () => {
+    // The #1888 fingerprint: "6:15pm daily" stored as 3:00pm on the 18th.
+    const finding = auditSchedule(
+      schedule({
+        name: "Evening heads-up",
+        schedulerExpression: "cron(0 15 18 * ? *)",
+      })
+    )
+    expect(finding?.issues[0]).toMatch(/fires only on specific days of the month/)
+    expect(finding?.suggestedExpression).toBe("cron(15 18 * * ? *)")
+    expect(finding?.nextRuns[0]).toMatch(/^\d{4}-\d{2}-18T15:00:00/)
+  })
+
+  it("flags a weekday-named schedule pinned to a single year", () => {
+    const finding = auditSchedule(
+      schedule({
+        name: "Weekday digest",
+        schedulerExpression: "cron(30 6 ? * MON-FRI 2024)",
+      })
+    )
+    expect(finding?.issues[0]).toMatch(/fires only in a fixed year/)
+  })
+
+  it("does not flag a monthly schedule whose NAME says monthly", () => {
+    expect(
+      auditSchedule(
+        schedule({
+          name: "Monthly board packet",
+          schedulerExpression: "cron(0 8 1 * ? *)",
+        })
+      )
+    ).toBeNull()
+  })
+
+  it("ignores rate() and at() schedules", () => {
+    expect(
+      auditSchedule(schedule({ schedulerExpression: "rate(1 hour)" }))
+    ).toBeNull()
+    expect(
+      auditSchedule(
+        schedule({ schedulerExpression: "at(2026-10-12T20:15:00)" })
+      )
+    ).toBeNull()
+  })
+
+  it("carries the owner through so the report says who to contact", () => {
+    const finding = auditSchedule(
+      schedule({
+        ownerEmail: "principal@psd401.net",
+        schedulerExpression: "cron(30 6 ? * 1-5 *)",
+      })
+    )
+    expect(finding?.ownerEmail).toBe("principal@psd401.net")
+    expect(finding?.enabled).toBe(true)
+  })
+})
