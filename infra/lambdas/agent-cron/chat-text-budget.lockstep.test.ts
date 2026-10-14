@@ -25,6 +25,19 @@ describe('duplicated Chat delivery modules stay in lockstep', () => {
     );
   });
 
+  // #1891: the cron writes these rows and the router reads them. A drifting
+  // key derivation is invisible at runtime — the reply just silently keeps the
+  // generic space+thread session it had before.
+  test('thread-session-map.ts', async () => {
+    expect(
+      await bodyAfterHeader(`${import.meta.dir}/thread-session-map.ts`),
+    ).toBe(
+      await bodyAfterHeader(
+        `${import.meta.dir}/../agent-router/thread-session-map.ts`,
+      ),
+    );
+  });
+
   test('rich-envelope.ts', async () => {
     expect(await bodyAfterHeader(`${import.meta.dir}/rich-envelope.ts`)).toBe(
       await bodyAfterHeader(

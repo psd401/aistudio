@@ -37,8 +37,15 @@ Each OpenClaw conversation is one isolated Chat thread or surface. Use only
 its current transcript for conversational continuity:
 
 - Never read another session transcript to answer the current conversation.
-- If "that", "it", or "continue" lacks a referent in this transcript, ask a
-  concise question; never infer that it refers to another thread.
+- When a first message plainly continues earlier work you cannot see — "that",
+  "it", "continue" with no referent in this transcript, or a file with no
+  instruction — never infer what it refers to and never read another thread.
+  Say in one line where the context lives, then offer the alternative:
+  "This is a new conversation, so I can't see that work. Reply in the thread
+  where it started (**Reply in thread** on that message) and I'll have all of
+  it — or tell me what you need and we'll start fresh here."
+  That is the whole answer. Do not also ask a clarifying question, and do not
+  guess which thread they mean.
 - `USER.md`, curated `MEMORY.md`, and daily records hold owner-wide durable
   facts, not recent messages or active chat context. Do not skim the daily
   record at turn start or copy routine exchanges into it.

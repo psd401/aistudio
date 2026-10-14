@@ -85,6 +85,7 @@ import {
   ownerWorkspaceLockId,
   scheduledConversationSessionId,
 } from './workspace-identity';
+import { recordThreadSession } from './thread-session-map';
 import {
   createPromotedRun,
   createRunTelemetry,
@@ -206,6 +207,12 @@ const scheduleRecordDynamoClient = {
   get: (input: ConstructorParameters<typeof GetCommand>[0]) =>
     dynamoClient.send(new GetCommand(input)),
 };
+const threadSessionDynamoClient = {
+  put: (input: ConstructorParameters<typeof PutCommand>[0]) =>
+    dynamoClient.send(new PutCommand(input)),
+  get: (input: ConstructorParameters<typeof GetCommand>[0]) =>
+    dynamoClient.send(new GetCommand(input)),
+};
 
 const agentCoreCredentials = defaultProvider();
 const agentCoreSigner = new SignatureV4({
@@ -228,6 +235,7 @@ const DATABASE_NAME = process.env.DATABASE_NAME || 'aistudio';
 const AGENT_INVOCATION_SIGNING_SECRET_ID =
   process.env.AGENT_INVOCATION_SIGNING_SECRET_ID || '';
 const SESSION_LOCKS_TABLE = process.env.SESSION_LOCKS_TABLE || '';
+const THREAD_SESSIONS_TABLE = process.env.THREAD_SESSIONS_TABLE || '';
 const JOB_CONTAINER_NAME = process.env.JOB_CONTAINER_NAME || 'job-runner';
 const ROUTER_QUEUE_URL = process.env.ROUTER_QUEUE_URL || '';
 const SCHEDULE_RECONCILIATION_QUEUE_URL =
@@ -1278,21 +1286,26 @@ async function sendPreparedChatMessage(
   prepared: PreparedScheduledChatMessage,
   log: Logger,
   requestId?: string,
-): Promise<void> {
+): Promise<string | null> {
   const chatClient = await getChatClient();
-  await chatClient.spaces.messages.create({
+  const created = await chatClient.spaces.messages.create({
     parent: spaceName,
     ...(requestId ? { requestId } : {}),
     requestBody: prepared.requestBody,
   });
+  // Google assigns the thread on create. It is the only handle a staff member
+  // can reply into, so it is what the thread → session mapping is keyed on.
+  const threadName = created?.data?.thread?.name ?? null;
   log.info('Scheduled response sent to Google Chat', {
     space: spaceName,
+    thread: threadName,
     responseLength: prepared.responseLength,
     responseBytes: prepared.responseBytes,
     truncatedAtCap: prepared.truncated,
     hasCards: prepared.hasCards,
     hasAccessoryWidgets: prepared.hasAccessoryWidgets,
   });
+  return threadName;
 }
 
 async function sendChatMessage(
@@ -1300,7 +1313,7 @@ async function sendChatMessage(
   text: string,
   log: Logger,
   requestId?: string,
-): Promise<void> {
+): Promise<string | null> {
   return sendPreparedChatMessage(
     spaceName,
     prepareScheduledChatMessage(spaceName, text, log),
@@ -1744,8 +1757,9 @@ async function deliverScheduledResult(
     log,
   );
   const deliveryRequestId = crypto.randomUUID();
+  let deliveredThreadName: string | null = null;
   try {
-    await sendPreparedChatMessage(
+    deliveredThreadName = await sendPreparedChatMessage(
       schedule.dmSpaceName,
       preparedDelivery,
       log,
@@ -1787,7 +1801,37 @@ async function deliverScheduledResult(
       return { status: 'error', scheduleId: schedule.scheduleId };
     }
   }
+  // A reply in this thread is about THIS post, so point it at the run's
+  // transcript instead of the generic space+thread session the router would
+  // otherwise derive (#1891). Deliberately outside the delivery try/catch:
+  // mapping must never be mistaken for a delivery failure and re-queue the
+  // post. The durable retry path has no thread name to record, so a post that
+  // only lands via the outbox keeps today's key.
+  await recordScheduledThreadSession(context, deliveredThreadName);
   return recordScheduledCompletion(context);
+}
+
+/**
+ * Best-effort thread → conversation mapping for a scheduled post. Never
+ * throws: the post is already delivered by the time this runs.
+ */
+async function recordScheduledThreadSession(
+  context: ScheduledResultContext,
+  threadName: string | null,
+): Promise<void> {
+  if (!threadName) return;
+  const { schedule, sessionId, log } = context;
+  await recordThreadSession(
+    threadSessionDynamoClient,
+    {
+      tableName: THREAD_SESSIONS_TABLE,
+      spaceName: schedule.dmSpaceName,
+      threadName,
+      conversationSessionId: sessionId,
+      workspacePrefix: schedule.workspacePrefix,
+    },
+    log,
+  );
 }
 
 async function recordScheduledCompletion(

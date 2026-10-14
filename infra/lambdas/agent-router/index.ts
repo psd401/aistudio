@@ -96,6 +96,10 @@ import {
 import { buildAccountRequestBody } from './account-request-payload';
 import { canInvokeOwnerAgent } from './delegation-policy';
 import {
+  lookupThreadSession,
+  resolveThreadConversationSessionId,
+} from './thread-session-map';
+import {
   sanitizeDiagnostic,
   sanitizeEmailForLog,
 } from './log-sanitization';
@@ -5160,6 +5164,67 @@ function ownerConversationSessionId(
   );
 }
 
+/** Read-only: scheduled posts are written by the cron, never by the router. */
+const threadSessionDynamoClient = {
+  get: (input: ConstructorParameters<typeof GetCommand>[0]) =>
+    dynamoClient.send(new GetCommand(input)),
+};
+
+/**
+ * Conversation identity for an owner turn, with one exception to the plain
+ * `space + thread` key: a thread that a scheduled post STARTED resolves to
+ * that run's transcript, so a reply to a morning brief can see the brief
+ * (#1891). Every other thread — including a new top-level message, which
+ * Google gives a brand-new thread name — keeps today's key.
+ *
+ * Fails open: no table, no row, an owner mismatch or a lookup error all fall
+ * back to the unmapped key rather than dropping the turn.
+ */
+async function resolveConversationSessionIdWithDependencies(
+  human: HumanMessage,
+  user: Pick<AgentUser, 'workspacePrefix'>,
+  log: ReturnType<typeof createLogger>,
+  dependencies: {
+    tableName?: string;
+    lookup: typeof lookupThreadSession;
+  }
+): Promise<string> {
+  const fallback = ownerConversationSessionId(human, user);
+  const { tableName } = dependencies;
+  if (!tableName || !human.threadName) return fallback;
+  const mapped = await dependencies.lookup(
+    threadSessionDynamoClient,
+    { tableName, spaceName: human.spaceName, threadName: human.threadName },
+    log
+  );
+  const resolved = resolveThreadConversationSessionId(
+    {
+      mapped,
+      workspacePrefix: user.workspacePrefix,
+      fallbackConversationSessionId: fallback,
+    },
+    log
+  );
+  if (resolved !== fallback) {
+    log.info('Reply resolved to a scheduled run conversation', {
+      conversationSessionId: resolved,
+      thread: human.threadName,
+    });
+  }
+  return resolved;
+}
+
+function resolveOwnerConversationSessionId(
+  human: HumanMessage,
+  user: Pick<AgentUser, 'workspacePrefix'>,
+  log: ReturnType<typeof createLogger>
+): Promise<string> {
+  return resolveConversationSessionIdWithDependencies(human, user, log, {
+    tableName: process.env.THREAD_SESSIONS_TABLE,
+    lookup: lookupThreadSession,
+  });
+}
+
 /**
  * Deployment-stable mutex for every process that can mutate an owner's
  * durable workspace. Cron intentionally duplicates this exact derivation
@@ -5497,7 +5562,11 @@ async function invokeOwnerAgentWithDependencies(
   dependencies: OwnerInvocationDependencies
 ): Promise<OwnerAgentTurn | null> {
   const mainSessionId = ownerSessionId(human, user);
-  const mainConversationSessionId = ownerConversationSessionId(human, user);
+  const mainConversationSessionId = await resolveOwnerConversationSessionId(
+    human,
+    user,
+    log
+  );
   const workspaceLockId = ownerWorkspaceLockId(user);
   const ownerDm = human.chatEvent.space.type === 'DM' && !human.isSharedSpace;
   const asideInvocation = ownerDm
@@ -5868,6 +5937,8 @@ export const agentRouterTestHelpers = {
   parseAsideInvocation,
   ownerSessionId,
   ownerConversationSessionId,
+  resolveOwnerConversationSessionId,
+  resolveConversationSessionIdWithDependencies,
   ownerWorkspaceLockId,
   asideSessionId,
   invokeOwnerAgentWithDependencies,
