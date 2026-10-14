@@ -15,6 +15,7 @@ import { join } from "node:path"
 import { describe, expect, it, jest } from "@jest/globals"
 
 import {
+  assertPublicArtifactScannable,
   decodeTextForScan,
   MAX_PERSONAL_DATA_SCAN_BYTES,
   scanPublicArtifactForPersonalData,
@@ -266,59 +267,62 @@ describe("public-file rule on files it cannot fully read", () => {
     expect(result).toEqual({ refused: true, kinds: ["psd-student-id"] })
   })
 
-  it("does not read a PDF larger than the scan budget", async () => {
-    const readBytes = jest.fn(async () => new Uint8Array())
-    const result = await scanPublicArtifactForPersonalData({
-      fileName: "huge.pdf",
-      contentType: "application/pdf",
-      byteLength: MAX_PERSONAL_DATA_SCAN_BYTES + 1,
-      readBytes,
-    })
-    expect(result).toEqual({
-      refused: false,
-      scanned: false,
-      reason: "over-scan-budget",
-    })
+  it("refuses, rather than partly reads, a file past the scan budget", async () => {
+    // Publish admission refuses these first; this is the fail-closed backstop
+    // if that is ever bypassed. Padding a roster past the read window must
+    // not get it a public link.
+    const readBytes = jest.fn(async () => new TextEncoder().encode("id\n1\n"))
+    for (const [fileName, contentType] of [
+      ["huge.pdf", "application/pdf"],
+      ["big.csv", "text/csv"],
+    ] as const) {
+      await expect(
+        scanPublicArtifactForPersonalData({
+          fileName,
+          contentType,
+          byteLength: MAX_PERSONAL_DATA_SCAN_BYTES + 1,
+          readBytes,
+        })
+      ).rejects.toThrow(/scan budget/)
+    }
     expect(readBytes).not.toHaveBeenCalled()
   })
+})
 
-  it("asks for no more than the scan budget on a large text file", async () => {
-    const readBytes = jest.fn<(maxBytes: number) => Promise<Uint8Array>>(
-      async () => new TextEncoder().encode("clean")
-    )
-    await scanPublicArtifactForPersonalData({
-      fileName: "big.csv",
-      contentType: "text/csv",
-      byteLength: 90 * 1024 * 1024,
-      readBytes,
-    })
-    expect(readBytes).toHaveBeenCalledWith(MAX_PERSONAL_DATA_SCAN_BYTES)
+describe("publish-time size limit for scanned types", () => {
+  it("refuses a text-extractable file the check could not read in full", () => {
+    for (const [fileName, contentType] of [
+      ["roster.csv", "text/csv"],
+      ["notes.txt", "text/plain"],
+      ["brochure.pdf", "application/pdf"],
+      ["chart.svg", "image/svg+xml"],
+    ] as const) {
+      expect(() =>
+        assertPublicArtifactScannable(
+          fileName,
+          contentType,
+          MAX_PERSONAL_DATA_SCAN_BYTES + 1
+        )
+      ).toThrow(/^Invalid public artifact size: .*without --to public/)
+    }
   })
 
-  it("does not call a text file past the budget clean: its tail was not read", async () => {
-    // Personal data after the first 32 MiB is never seen, so a clean prefix
-    // must not read the same as a clean file.
-    const result = await scanPublicArtifactForPersonalData({
-      fileName: "big.csv",
-      contentType: "text/csv",
-      byteLength: MAX_PERSONAL_DATA_SCAN_BYTES + 1,
-      readBytes: async () => new TextEncoder().encode("id,score\n1,90\n"),
-    })
-    expect(result).toEqual({
-      refused: false,
-      scanned: false,
-      reason: "over-scan-budget",
-    })
-  })
-
-  it("still refuses a text file past the budget when the part read carries personal data", async () => {
-    const result = await scanPublicArtifactForPersonalData({
-      fileName: "big.csv",
-      contentType: "text/csv",
-      byteLength: MAX_PERSONAL_DATA_SCAN_BYTES + 1,
-      readBytes: async () => new TextEncoder().encode("2240393,Garcia\n"),
-    })
-    expect(result).toEqual({ refused: true, kinds: ["psd-student-id"] })
+  it("allows a scanned type at the budget, and an unscanned type past it", () => {
+    expect(() =>
+      assertPublicArtifactScannable(
+        "roster.csv",
+        "text/csv",
+        MAX_PERSONAL_DATA_SCAN_BYTES
+      )
+    ).not.toThrow()
+    // Video is not read at all, so the broker's ordinary 100 MB limit applies.
+    expect(() =>
+      assertPublicArtifactScannable(
+        "clip.mp4",
+        "video/mp4",
+        MAX_PERSONAL_DATA_SCAN_BYTES + 1
+      )
+    ).not.toThrow()
   })
 })
 

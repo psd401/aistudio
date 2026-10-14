@@ -82,6 +82,11 @@ it does not read raster images, audio or video at all.
 Maximum 100 MB either way. Anything else is refused by name, and the error says
 whether the other destination accepts it.
 
+One tighter limit: a `.csv`, `.txt`, `.md`, `.json`, `.svg` or `.pdf` going to a
+**public link** may be at most **32 MiB**, because the personal-data check reads
+it in full. A larger one is refused before upload — deliver it to Drive, or
+split it.
+
 **Word, Excel and PowerPoint can ONLY go to Drive.** There is no public path for
 them, and that is deliberate: an Office file belongs somewhere it opens in
 place and keeps its format. Do not convert a deck to PDF just to get a link —

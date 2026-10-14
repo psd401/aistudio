@@ -296,6 +296,25 @@ function defineVerifiedWorkspaceUploadReservationsSuite1Part1() {
     expect(acquireMock).not.toHaveBeenCalled()
   })
 
+  // #1886: the personal-data check reads a text-extractable file in full, so
+  // one too large to read is refused here — before any bytes are uploaded —
+  // rather than published with its tail unread.
+  it("refuses a CSV too large for the personal-data check before reserving capacity", async () => {
+    await expect(
+      createPublicArtifactUpload({
+        ownerEmail: OWNER,
+        fileName: "roster.csv",
+        contentType: "text/csv",
+        contentLength: 32 * 1024 * 1024 + 1,
+        contextKey: "session:nonce",
+        idempotencyKey: "idempotency-oversize-csv",
+        checksumSha256: CHECKSUM,
+      }),
+    ).rejects.toThrow(/^Invalid public artifact size/)
+    expect(executeQueryMock).not.toHaveBeenCalled()
+    expect(acquireMock).not.toHaveBeenCalled()
+  })
+
   // Reversed deliberately. This used to assert that the UTF-8 HTML MIME was
   // accepted, back when psd-html-artifact dropped `text/html` into the
   // unsigned, public-by-link `public-images/` prefix. HTML pages are district

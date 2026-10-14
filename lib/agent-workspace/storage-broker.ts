@@ -51,7 +51,10 @@ import {
   validateWorkspaceRelativePath,
   workspaceRelativePathRejectionReason,
 } from "@/lib/agent-workspace/path-policy"
-import { scanPublicArtifactForPersonalData } from "@/lib/agent-workspace/public-artifact-personal-data"
+import {
+  assertPublicArtifactScannable,
+  scanPublicArtifactForPersonalData,
+} from "@/lib/agent-workspace/public-artifact-personal-data"
 import {
   MAX_RETIRED_EXEC_APPROVALS_BYTES,
   RETIRED_EXEC_APPROVALS_CLAIM_PATH,
@@ -2763,6 +2766,9 @@ export async function createPublicArtifactUpload(
   const normalizedContentType = expectedContentType(contentType)
   const key = publicArtifactKey(ownerEmail, fileName)
   assertPublicArtifactContentType(fileName, normalizedContentType)
+  // #1886: a file the personal-data check could not read in full never gets a
+  // public link — refused here, before the agent uploads a byte.
+  assertPublicArtifactScannable(fileName, normalizedContentType, length)
   const existing = await existingUploadReservation(ownerEmail, idempotencyKey)
   if (existing) {
     if (

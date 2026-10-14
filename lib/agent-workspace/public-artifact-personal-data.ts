@@ -20,13 +20,38 @@ import {
 } from "@/lib/safety/personal-data-scan";
 
 /**
- * How many bytes of an upload are read for the scan.
- *
- * Generous enough that no real district document is affected — the public
- * limit is 100 MB mostly for video — and small enough that one upload cannot
- * pull a hundred megabytes into the web container.
+ * The largest text-extractable file that may go to a public link: the check
+ * reads it in full, so this is also how much one upload can pull into the web
+ * container. The public limit is 100 MB mostly for video; a CSV, text file or
+ * PDF past this is refused at publish time rather than published partly read
+ * (#1886 review: an agent choosing to pad a roster past the read window would
+ * otherwise get it through).
  */
 export const MAX_PERSONAL_DATA_SCAN_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Refuse, before any bytes are uploaded, a public upload this check could not
+ * read in full. Only text-extractable types are bounded; images, audio and
+ * video keep the broker's ordinary public limit.
+ *
+ * The message starts with "Invalid" so the route returns it to the agent as a
+ * 400 with the guidance intact.
+ */
+export function assertPublicArtifactScannable(
+  fileName: string,
+  contentType: string,
+  byteLength: number
+): void {
+  if (!textExtractionFor(fileName, contentType)) return;
+  if (byteLength <= MAX_PERSONAL_DATA_SCAN_BYTES) return;
+  throw new Error(
+    `Invalid public artifact size: a file of this type over ` +
+      `${MAX_PERSONAL_DATA_SCAN_BYTES / (1024 * 1024)} MiB is too large to ` +
+      "check for personal data, so it cannot get a public link. Deliver it " +
+      "privately instead (run psd-publish-file without --to public, or with " +
+      "--to drive), or split it into smaller files."
+  );
+}
 
 /**
  * Why an upload went to a public link without its contents being read. Carried
@@ -36,12 +61,6 @@ export const MAX_PERSONAL_DATA_SCAN_BYTES = 32 * 1024 * 1024;
 export type UnscannedReason =
   /** A raster image, audio or video file: out of scope for #1886 by design. */
   | "not-text-extractable"
-  /**
-   * Larger than the scan budget. A PDF is not read at all (a truncated PDF
-   * does not parse); a text file has only its first
-   * `MAX_PERSONAL_DATA_SCAN_BYTES` read, and a match there is still refused.
-   */
-  | "over-scan-budget"
   /** A PDF that the parser could not read (encrypted, truncated, malformed). */
   | "unreadable"
   /**
@@ -148,8 +167,8 @@ async function defaultPdfTextReader(
  * so the caller can range-read instead of downloading a file it will truncate.
  *
  * A file the check could not fully read is ALLOWED, not refused — a PDF the
- * parser rejects, a scanned page with no text layer, the tail of a text file
- * past the budget. The risk the issue names is false positives blocking
+ * parser rejects, or a scanned page with no text layer. (A file too LARGE to
+ * read in full never gets here: see `assertPublicArtifactScannable`.) The risk the issue names is false positives blocking
  * legitimate public flyers, and "could not read it" is not evidence of
  * personal data. But each of those comes back `scanned: false` with its
  * reason, never as a clean scan, so the caller's log can tell them apart.
@@ -165,11 +184,13 @@ export async function scanPublicArtifactForPersonalData(input: {
   if (!extraction) {
     return { refused: false, scanned: false, reason: "not-text-extractable" };
   }
-  const overBudget = input.byteLength > MAX_PERSONAL_DATA_SCAN_BYTES;
-  if (extraction === "pdf" && overBudget) {
-    // A truncated PDF does not parse, so unlike the utf8 path there is no
-    // partial scan to fall back to.
-    return { refused: false, scanned: false, reason: "over-scan-budget" };
+  if (input.byteLength > MAX_PERSONAL_DATA_SCAN_BYTES) {
+    // assertPublicArtifactScannable refuses this at publish time, so reaching
+    // here means that check was bypassed. Fail CLOSED: throwing rejects the
+    // upload rather than publishing a file only partly read.
+    throw new Error(
+      "Public artifact exceeds the personal-data scan budget; refusing it"
+    );
   }
 
   const bytes = await input.readBytes(MAX_PERSONAL_DATA_SCAN_BYTES);
@@ -195,13 +216,10 @@ export async function scanPublicArtifactForPersonalData(input: {
     }
   }
 
-  // What WAS read is still checked: a match in the readable part refuses the
-  // file however much of it could not be read.
+  // What WAS read is still checked: a match in a PDF's text pages refuses the
+  // file however many of its pages are images.
   const kinds = detectPersonalDataKinds(text);
   if (kinds.length > 0) return { refused: true, kinds };
-  if (overBudget) {
-    return { refused: false, scanned: false, reason: "over-scan-budget" };
-  }
   if (imagePages) {
     return { refused: false, scanned: false, reason: "needs-ocr" };
   }
