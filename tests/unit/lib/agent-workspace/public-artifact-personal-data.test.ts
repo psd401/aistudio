@@ -165,8 +165,20 @@ describe("public-file personal-data rule", () => {
       )
     ).resolves.toEqual({ refused: true, kinds: ["psd-student-id"] })
   })
+  it("reads an SVG's text: a <text> element can carry a roster", async () => {
+    const result = await scanPublicArtifactForPersonalData(
+      utf8Upload(
+        "seating.svg",
+        "image/svg+xml",
+        '<svg xmlns="http://www.w3.org/2000/svg"><text>Garcia 2240393</text></svg>'
+      )
+    )
+    expect(result).toEqual({ refused: true, kinds: ["psd-student-id"] })
+  })
+})
 
-
+// Spreadsheet exports are often UTF-16; read as UTF-8 nothing would match.
+describe("public-file rule on text in other encodings", () => {
   it("reads a UTF-16 spreadsheet export, with or without a byte-order mark", async () => {
     // Read as UTF-8, every character comes out NUL-separated and nothing
     // matches — a UTF-16 roster would publish as clean.
@@ -195,20 +207,47 @@ describe("public-file personal-data rule", () => {
     }
   })
 
+  it("reads a UTF-16 roster with no byte-order mark whose names are mostly CJK", async () => {
+    // Few NUL bytes here — the CJK characters fill both bytes of their pair —
+    // so a NUL-placement guess at the byte order would miss it.
+    const roster = ["2240393,张伟明华", "2187654,李娜丽丽", "2203311,王芳芳芳"].join("\n")
+    const littleEndian = Uint8Array.from(Buffer.from(roster, "utf16le"))
+    const bigEndian = Uint8Array.from(littleEndian)
+    for (let index = 0; index + 1 < bigEndian.length; index += 2) {
+      ;[bigEndian[index], bigEndian[index + 1]] = [
+        bigEndian[index + 1]!,
+        bigEndian[index]!,
+      ]
+    }
+    for (const bytes of [littleEndian, bigEndian]) {
+      const result = await scanPublicArtifactForPersonalData({
+        fileName: "roster.csv",
+        contentType: "text/csv",
+        byteLength: bytes.byteLength,
+        readBytes: async () => bytes,
+      })
+      expect(result).toEqual({ refused: true, kinds: ["psd-student-id"] })
+    }
+  })
+
+  it("does not invent a contact list by reading one number in three encodings", async () => {
+    // One phone number in a UTF-16 flyer is found in more than one decoding;
+    // it is still one distinct number, and one is allowed.
+    const bytes = Uint8Array.from(
+      Buffer.from("Open house. Call 253-530-1000.", "utf16le")
+    )
+    const result = await scanPublicArtifactForPersonalData({
+      fileName: "flyer.txt",
+      contentType: "text/plain",
+      byteLength: bytes.byteLength,
+      readBytes: async () => bytes,
+    })
+    expect(result).toEqual({ refused: false, scanned: true })
+  })
+
   it("still reads plain UTF-8 text that happens to contain a stray NUL", async () => {
     const bytes = new TextEncoder().encode("note\u0000 student 2240393 moved")
     expect(decodeTextForScan(bytes)).toContain("2240393")
-  })
-
-  it("reads an SVG's text: a <text> element can carry a roster", async () => {
-    const result = await scanPublicArtifactForPersonalData(
-      utf8Upload(
-        "seating.svg",
-        "image/svg+xml",
-        '<svg xmlns="http://www.w3.org/2000/svg"><text>Garcia 2240393</text></svg>'
-      )
-    )
-    expect(result).toEqual({ refused: true, kinds: ["psd-student-id"] })
   })
 })
 

@@ -91,53 +91,43 @@ export type PdfTextReader = (
 ) => Promise<Pick<PdfExtractionResult, "pages" | "needsOcrPages">>;
 
 /**
- * Decode a text upload for scanning. UTF-8 unless the bytes say otherwise:
- * spreadsheet exports are often UTF-16, and read as UTF-8 every ASCII
- * character comes out separated by a NUL — `2\u00002\u00004...` — so no
- * pattern matches and the file would pass as clean.
+ * Decode a text upload for scanning. Spreadsheet exports are often UTF-16, and
+ * read as UTF-8 every ASCII character comes out separated by a NUL —
+ * `2\u00002\u00004...` — so no pattern matches and the file would pass as
+ * clean.
  *
- * A byte-order mark decides it when present. Without one, a run of NUL bytes
- * is the tell (real UTF-8 text does not contain them), and which side of each
- * character pair the NULs sit on gives the byte order. Big-endian is decoded
- * by swapping each pair to little-endian, which every runtime supports.
+ * A byte-order mark decides the encoding when present. Without one, NUL bytes
+ * are the tell (real UTF-8 text does not contain them), but guessing the byte
+ * order from them fails on a roster whose names are mostly non-Latin (CJK
+ * names beside ASCII student numbers carry few NULs). So no guess is made: the
+ * text is scanned as UTF-8, UTF-16LE AND UTF-16BE together. A wrong decoding
+ * only yields unrelated characters, and a value found in two decodings is
+ * still one distinct value to the counting rule.
+ *
+ * Big-endian is decoded by swapping each byte pair to little-endian, which
+ * every runtime's TextDecoder supports.
  */
 export function decodeTextForScan(bytes: Uint8Array): string {
-  const utf16 = utf16ByteOrder(bytes);
-  if (!utf16) {
-    // Non-fatal: a mis-declared or truncated-mid-codepoint file still yields
-    // text to scan rather than throwing the gate open.
-    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  if (bytes[0] === 0xFF && bytes[1] === 0xFE) {
+    return decodeUtf16le(bytes.subarray(2));
   }
-  const body = utf16.bom ? bytes.subarray(2) : bytes;
-  const littleEndian =
-    utf16.order === "le" ? body : swapBytePairs(body);
-  return new TextDecoder("utf-16le", { fatal: false }).decode(littleEndian);
+  if (bytes[0] === 0xFE && bytes[1] === 0xFF) {
+    return decodeUtf16le(swapBytePairs(bytes.subarray(2)));
+  }
+  // Non-fatal: a mis-declared or truncated-mid-codepoint file still yields
+  // text to scan rather than throwing the gate open.
+  const utf8 = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  if (!bytes.includes(0)) return utf8;
+  // Newlines keep a match from spanning two decodings.
+  return [
+    utf8,
+    decodeUtf16le(bytes),
+    decodeUtf16le(swapBytePairs(bytes)),
+  ].join("\n");
 }
 
-function utf16ByteOrder(
-  bytes: Uint8Array
-): { order: "le" | "be"; bom: boolean } | null {
-  if (bytes[0] === 0xFF && bytes[1] === 0xFE) return { order: "le", bom: true };
-  if (bytes[0] === 0xFE && bytes[1] === 0xFF) return { order: "be", bom: true };
-  const sample = bytes.subarray(0, 4096);
-  let evenNuls = 0;
-  let oddNuls = 0;
-  for (const [index, element] of sample.entries()) {
-    if (element !== 0) continue;
-    if (index % 2 === 0) evenNuls++;
-    else oddNuls++;
-  }
-  // A quarter of the bytes being NUL, nearly all on one side, is UTF-16 text
-  // that is mostly ASCII — the rosters and CSVs this check is for.
-  const pairs = Math.floor(sample.length / 2);
-  if (pairs === 0) return null;
-  if (oddNuls >= pairs / 2 && evenNuls < oddNuls / 8) {
-    return { order: "le", bom: false };
-  }
-  if (evenNuls >= pairs / 2 && oddNuls < evenNuls / 8) {
-    return { order: "be", bom: false };
-  }
-  return null;
+function decodeUtf16le(bytes: Uint8Array): string {
+  return new TextDecoder("utf-16le", { fatal: false }).decode(bytes);
 }
 
 function swapBytePairs(bytes: Uint8Array): Uint8Array {
