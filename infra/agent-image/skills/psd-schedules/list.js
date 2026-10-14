@@ -25,8 +25,14 @@ const {
 function failingMarker(schedule) {
   if (schedule.failing !== true) return null;
   const streak = Number(schedule.consecutiveFailures);
+  // `consecutiveFailuresCapped` says the count is a FLOOR: the streak reached
+  // the bounded number of runs it is measured over. Reporting it as exact
+  // would be a number the owner could check and find wrong — and a
+  // five-minute schedule saturates it in about two days. Saturation is the
+  // server's verdict too, so this does not need its own copy of the bound.
+  const atLeast = schedule.consecutiveFailuresCapped === true ? 'at least ' : '';
   const count = Number.isFinite(streak) && streak > 0
-    ? `${streak} consecutive failed runs`
+    ? `${atLeast}${streak} consecutive failed runs`
     : 'consecutive failed runs';
   return `failing — ${count}; tell the owner and `
     + 'check `runs` for the reason';

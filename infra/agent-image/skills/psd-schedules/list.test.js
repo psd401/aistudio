@@ -36,6 +36,9 @@ describe('psd-schedules list last-run rendering', () => {
     });
   });
 
+});
+
+describe('psd-schedules list failing marker', () => {
   it('renders the broker verdict rather than re-deciding it', () => {
     // #1890: `lastRunStatus: "error"` alone read like a one-off blip, so a job
     // dead for a month looked identical to one that hiccupped once. The
@@ -75,6 +78,40 @@ describe('psd-schedules list last-run rendering', () => {
     expect(result.schedules[2].failingReason).toContain(
       '23 consecutive failed runs',
     );
+  });
+
+  it('renders a capped streak as a floor, not an exact total', () => {
+    // A five-minute schedule saturates the bound in about two days, so the
+    // count is a minimum. Reporting it as exact would be a number the owner
+    // could check and find wrong.
+    const result = renderLastRunStatus({
+      schedules: [
+        {
+          scheduleId: 'saturated',
+          lastRunAt: '2026-10-14T13:30:00.000Z',
+          lastRunStatus: 'error',
+          failing: true,
+          consecutiveFailures: 500,
+          consecutiveFailuresCapped: true,
+        },
+        {
+          scheduleId: 'exact',
+          lastRunAt: '2026-10-14T13:30:00.000Z',
+          lastRunStatus: 'error',
+          failing: true,
+          consecutiveFailures: 499,
+          consecutiveFailuresCapped: false,
+        },
+      ],
+    });
+
+    expect(result.schedules[0].failingReason).toContain(
+      'at least 500 consecutive failed runs',
+    );
+    expect(result.schedules[1].failingReason).toContain(
+      '499 consecutive failed runs',
+    );
+    expect(result.schedules[1].failingReason).not.toContain('at least');
   });
 
   it('never upgrades a schedule the server did not call failing', () => {

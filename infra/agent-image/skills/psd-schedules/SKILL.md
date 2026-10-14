@@ -54,7 +54,9 @@ detail when applicable. Schedules that have not fired yet report
 the status is `"unknown"` instead of being reported as never run.
 
 A schedule with 3 or more consecutive failed runs also reports
-`failing: true` and a `failingReason` naming the streak. Treat that as
+`failing: true` and a `failingReason` naming the streak. When the streak is
+long enough to saturate the window the count is measured over, the reason says
+"at least N" — report it that way rather than as an exact total. Treat that as
 actionable, not informational: say so plainly in your reply, run
 `runs.js --schedule-id <id>` for the reason, and fix or disable the schedule.
 

@@ -2150,8 +2150,17 @@ interface ScheduleNoticeTarget {
   fireKey?: string;
 }
 
+/**
+ * Narrowed to the four fields the target needs, so both the delivery context
+ * and the pre-execution guard context satisfy it without a cast.
+ */
+type NoticeContext = Pick<
+  ScheduledResultContext,
+  'schedule' | 'scheduleName' | 'sessionId' | 'fireIdentity'
+>;
+
 function noticeTargetFromContext(
-  context: ScheduledResultContext,
+  context: NoticeContext,
 ): ScheduleNoticeTarget {
   return {
     ownerEmail: context.schedule.ownerEmail,
@@ -2375,6 +2384,28 @@ async function recordScheduleGuardFailure(
     },
     log,
   );
+  // A guard failure never reaches the agent, so it never reached the notice
+  // either — yet its `error` row counts in both streak readers and makes
+  // `psd-schedules list` report the schedule as failing. A schedule whose
+  // workspace lock is wedged would therefore be marked broken with its owner
+  // told nothing, indefinitely. `skipped` (a coalesced fire that never ran) is
+  // excluded, as everywhere else.
+  //
+  // A retryable guard failure records this row before throwing for Lambda's
+  // async retry, so a streak already two long can be pushed to three by a
+  // contention that the retry then clears. That costs one slightly-early
+  // message about a schedule which had in fact just failed twice — the
+  // trade is deliberate, and the other way round is the silence above.
+  if (status === 'error') {
+    await notifyOwnerIfScheduleFailing(
+      noticeTargetFromContext(context),
+      {
+        errorMessage: failure.errorMessage,
+        fullErrorMessage: failure.errorMessage,
+      },
+      log,
+    );
+  }
   return { status, scheduleId: schedule.scheduleId };
 }
 

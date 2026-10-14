@@ -32,7 +32,7 @@ const STREAK_DECIDING_STATUSES = ["success", ...FAILED_RUN_STATUSES] as const;
  * the scan. Kept in step with `FAILURE_STREAK_RUN_LIMIT` in
  * `infra/lambdas/agent-cron/run-telemetry.ts`.
  */
-const FAILURE_STREAK_RUN_LIMIT = 500;
+export const FAILURE_STREAK_RUN_LIMIT = 500;
 
 /** Consecutive failed runs at which `list` marks a schedule as failing. */
 export const FAILING_SCHEDULE_THRESHOLD = 3;

@@ -428,6 +428,9 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part2() {it("rolls bac
     })
   })
 
+}
+
+function defineAgentScheduleRunEnrichmentSuite() {
   it("marks run status unknown when telemetry is unavailable", async () => {
     const { service, dynamoSend, latestBySchedule } = harness()
     dynamoSend.mockResolvedValueOnce({ Items: [scheduleRecord()] })
@@ -442,6 +445,7 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part2() {it("rolls bac
         // An unreadable history must not read as a healthy schedule OR as a
         // failing one (#1890); "unknown" already says it cannot be read.
         consecutiveFailures: 0,
+        consecutiveFailuresCapped: false,
         failing: false,
       }),
     ])
@@ -482,8 +486,31 @@ function defineAgentScheduleFailureStreakSuite() {
     })
     expect(schedules[1]).toMatchObject({
       consecutiveFailures: 7,
+      consecutiveFailuresCapped: false,
       failing: true,
     })
+  })
+
+}
+
+function defineAgentScheduleSaturationSuite() {
+  it("reports a saturated streak as capped, so a reader says 'at least'", async () => {
+    // The count is measured over a bounded number of runs, so at that bound it
+    // is a floor. Saturation is the server's verdict for the same reason
+    // `failing` is: a reader inferring it would need its own copy of the bound.
+    const { service, dynamoSend } = harness(
+      new Map(),
+      new Map([[SCHEDULE_ID, 500]]),
+    )
+    dynamoSend.mockResolvedValueOnce({ Items: [scheduleRecord()] })
+
+    await expect(service.list(OWNER)).resolves.toEqual([
+      expect.objectContaining({
+        consecutiveFailures: 500,
+        consecutiveFailuresCapped: true,
+        failing: true,
+      }),
+    ])
   })
 
   it("degrades both run fields when only the streak query fails", async () => {
@@ -512,6 +539,7 @@ function defineAgentScheduleFailureStreakSuite() {
         lastRunAt: null,
         lastRunStatus: "unknown",
         consecutiveFailures: 0,
+        consecutiveFailuresCapped: false,
         failing: false,
       }),
     ])
@@ -713,7 +741,9 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part3() {it("repairs a
 const defineAgentScheduleServiceAuthorityBoundarySuite1 = () => {
   defineAgentScheduleServiceAuthorityBoundarySuite1Part1()
   defineAgentScheduleServiceAuthorityBoundarySuite1Part2()
+  defineAgentScheduleRunEnrichmentSuite()
   defineAgentScheduleFailureStreakSuite()
+  defineAgentScheduleSaturationSuite()
   defineAgentScheduleServiceAuthorityBoundarySuite1Part2b()
   defineAgentScheduleServiceAuthorityBoundarySuite1Part3()
 };

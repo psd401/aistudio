@@ -34,6 +34,7 @@ import { describeScheduleExpression } from "@/lib/agent-schedules/schedule-descr
 import {
   DrizzleAgentScheduleRunReader,
   FAILING_SCHEDULE_THRESHOLD,
+  FAILURE_STREAK_RUN_LIMIT,
   type AgentScheduleLastRun,
   type AgentScheduleRun,
   type AgentScheduleRunReader,
@@ -119,6 +120,13 @@ export type PublicAgentSchedule = Pick<
    * which is how ~30 staff kept a dead schedule without knowing (#1890).
    */
   consecutiveFailures: number;
+  /**
+   * `consecutiveFailures` is a FLOOR, not a total: the streak reached the
+   * bounded number of runs the count is measured over. A reader must say "at
+   * least N" rather than N, which is a number the owner could check and find
+   * wrong — a five-minute schedule saturates this in about two days.
+   */
+  consecutiveFailuresCapped: boolean;
   /** `consecutiveFailures` has reached the attention threshold. */
   failing: boolean;
   degraded: boolean;
@@ -296,13 +304,24 @@ export function scheduleTransactionToken(
 function runHealth(
   runEnrichmentAvailable: boolean,
   consecutiveFailures: number,
-): Pick<PublicAgentSchedule, "consecutiveFailures" | "failing"> {
+): Pick<
+  PublicAgentSchedule,
+  "consecutiveFailures" | "consecutiveFailuresCapped" | "failing"
+> {
   return runEnrichmentAvailable
     ? {
         consecutiveFailures,
+        // Saturation is the server's to report, for the same reason `failing`
+        // is: a reader that inferred it would need its own copy of the bound.
+        consecutiveFailuresCapped:
+          consecutiveFailures >= FAILURE_STREAK_RUN_LIMIT,
         failing: consecutiveFailures >= FAILING_SCHEDULE_THRESHOLD,
       }
-    : { consecutiveFailures: 0, failing: false };
+    : {
+        consecutiveFailures: 0,
+        consecutiveFailuresCapped: false,
+        failing: false,
+      };
 }
 
 function publicSchedule(
