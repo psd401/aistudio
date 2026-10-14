@@ -224,8 +224,8 @@ function renderPodcast(podcast) {
     // Distinguish "the relay was down" from "we chose not to record this"
     // (#1886): psd-tts refuses to narrate a phone number, email address, SSN
     // or student number, because its audio is public by link for 30 days and
-    // cannot be re-checked once recorded. The edition is still delivered; only the recording is withheld,
-    // and the reader is told which it was.
+    // cannot be re-checked once recorded. The edition is still delivered;
+    // only the recording is withheld, and the reader is told which it was.
     if (podcast.refused === 'personal_data_detected') {
       return (
         '<aside class="podcast"><p class="kicker">Podcast edition</p>' +

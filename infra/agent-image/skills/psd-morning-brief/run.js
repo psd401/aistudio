@@ -1925,9 +1925,10 @@ function synthesizePodcast(synthesis, user, config, runExternal) {
     // A REFUSAL is not a failure, and it must not cost the user their brief.
     // psd-tts declines to narrate a phone number, email address, SSN or
     // student number because its MP3s are public by link for 30 days and
-    // cannot be re-checked once they are audio (#1886). The edition is still written and delivered; only the audio is
-    // withheld, and the page says so. Every other psd-tts failure keeps its
-    // existing hard-fail behaviour — a broken relay should still be loud.
+    // cannot be re-checked once they are audio (#1886). The edition is still
+    // written and delivered; only the audio is withheld, and the page says
+    // so. Every other psd-tts failure keeps its existing hard-fail behaviour —
+    // a broken relay should still be loud.
     const refusal = narrationRefusalDetail(error);
     if (!refusal) throw error;
     return { enabled: true, url: null, refused: 'personal_data_detected' };

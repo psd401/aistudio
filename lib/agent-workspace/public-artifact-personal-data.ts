@@ -59,7 +59,10 @@ export type PublicArtifactScanResult =
       refused: false;
       scanned: false;
       reason: UnscannedReason;
-      /** For `unreadable`: the parser's own error, never the file's text. */
+      /**
+       * For `unreadable`: the parser's error CLASS (e.g. `PasswordException`).
+       * Never its message — pdf.js messages can quote tokens from the file.
+       */
       parserError?: string;
     };
 
@@ -67,6 +70,65 @@ export type PublicArtifactScanResult =
 export type PdfTextReader = (
   bytes: Uint8Array
 ) => Promise<Pick<PdfExtractionResult, "pages" | "needsOcrPages">>;
+
+/**
+ * Decode a text upload for scanning. UTF-8 unless the bytes say otherwise:
+ * spreadsheet exports are often UTF-16, and read as UTF-8 every ASCII
+ * character comes out separated by a NUL — `2\u00002\u00004...` — so no
+ * pattern matches and the file would pass as clean.
+ *
+ * A byte-order mark decides it when present. Without one, a run of NUL bytes
+ * is the tell (real UTF-8 text does not contain them), and which side of each
+ * character pair the NULs sit on gives the byte order. Big-endian is decoded
+ * by swapping each pair to little-endian, which every runtime supports.
+ */
+export function decodeTextForScan(bytes: Uint8Array): string {
+  const utf16 = utf16ByteOrder(bytes);
+  if (!utf16) {
+    // Non-fatal: a mis-declared or truncated-mid-codepoint file still yields
+    // text to scan rather than throwing the gate open.
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  }
+  const body = utf16.bom ? bytes.subarray(2) : bytes;
+  const littleEndian =
+    utf16.order === "le" ? body : swapBytePairs(body);
+  return new TextDecoder("utf-16le", { fatal: false }).decode(littleEndian);
+}
+
+function utf16ByteOrder(
+  bytes: Uint8Array
+): { order: "le" | "be"; bom: boolean } | null {
+  if (bytes[0] === 0xFF && bytes[1] === 0xFE) return { order: "le", bom: true };
+  if (bytes[0] === 0xFE && bytes[1] === 0xFF) return { order: "be", bom: true };
+  const sample = bytes.subarray(0, 4096);
+  let evenNuls = 0;
+  let oddNuls = 0;
+  for (const [index, element] of sample.entries()) {
+    if (element !== 0) continue;
+    if (index % 2 === 0) evenNuls++;
+    else oddNuls++;
+  }
+  // A quarter of the bytes being NUL, nearly all on one side, is UTF-16 text
+  // that is mostly ASCII — the rosters and CSVs this check is for.
+  const pairs = Math.floor(sample.length / 2);
+  if (pairs === 0) return null;
+  if (oddNuls >= pairs / 2 && evenNuls < oddNuls / 8) {
+    return { order: "le", bom: false };
+  }
+  if (evenNuls >= pairs / 2 && oddNuls < evenNuls / 8) {
+    return { order: "be", bom: false };
+  }
+  return null;
+}
+
+function swapBytePairs(bytes: Uint8Array): Uint8Array {
+  const swapped = new Uint8Array(bytes.length - (bytes.length % 2));
+  for (let index = 0; index + 1 < bytes.length; index += 2) {
+    swapped[index] = bytes[index + 1];
+    swapped[index + 1] = bytes[index];
+  }
+  return swapped;
+}
 
 async function defaultPdfTextReader(
   bytes: Uint8Array
@@ -114,9 +176,7 @@ export async function scanPublicArtifactForPersonalData(input: {
   let text: string;
   let imagePages = false;
   if (extraction === "utf8") {
-    // Non-fatal: a mis-declared or truncated-mid-codepoint file still yields
-    // text to scan rather than throwing the gate open.
-    text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    text = decodeTextForScan(bytes);
   } else {
     try {
       const extracted = await (input.readPdfText ?? defaultPdfTextReader)(
@@ -130,8 +190,7 @@ export async function scanPublicArtifactForPersonalData(input: {
         scanned: false,
         reason: "unreadable",
         // So a bug in our own extraction does not hide among encrypted PDFs.
-        parserError: (error instanceof Error ? error.message : String(error))
-          .slice(0, 200),
+        parserError: error instanceof Error ? error.name : typeof error,
       };
     }
   }

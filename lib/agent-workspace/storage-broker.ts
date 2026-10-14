@@ -3291,9 +3291,7 @@ async function assertPublicArtifactCarriesNoPersonalData(
   const fileName = claimed.targetKey.slice(
     claimed.targetKey.lastIndexOf("/") + 1,
   )
-  const extensionIndex = fileName.lastIndexOf(".")
-  const extension =
-    extensionIndex === -1 ? "" : fileName.slice(extensionIndex).toLowerCase()
+  const extension = publicArtifactExtension(fileName)
   const result = await scanPublicArtifactForPersonalData({
     fileName,
     contentType: claimed.contentType,

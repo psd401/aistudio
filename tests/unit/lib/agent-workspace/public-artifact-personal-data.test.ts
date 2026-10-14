@@ -15,6 +15,7 @@ import { join } from "node:path"
 import { describe, expect, it, jest } from "@jest/globals"
 
 import {
+  decodeTextForScan,
   MAX_PERSONAL_DATA_SCAN_BYTES,
   scanPublicArtifactForPersonalData,
 } from "@/lib/agent-workspace/public-artifact-personal-data"
@@ -165,6 +166,39 @@ describe("public-file personal-data rule", () => {
   })
 
 
+  it("reads a UTF-16 spreadsheet export, with or without a byte-order mark", async () => {
+    // Read as UTF-8, every character comes out NUL-separated and nothing
+    // matches — a UTF-16 roster would publish as clean.
+    const roster = "student_id,last\n2240393,Garcia\n"
+    const littleEndian = Uint8Array.from(Buffer.from(roster, "utf16le"))
+    const bigEndian = Uint8Array.from(littleEndian)
+    for (let index = 0; index + 1 < bigEndian.length; index += 2) {
+      ;[bigEndian[index], bigEndian[index + 1]] = [
+        bigEndian[index + 1]!,
+        bigEndian[index]!,
+      ]
+    }
+    for (const bytes of [
+      Uint8Array.from([0xFF, 0xFE, ...littleEndian]),
+      Uint8Array.from([0xFE, 0xFF, ...bigEndian]),
+      littleEndian,
+      bigEndian,
+    ]) {
+      const result = await scanPublicArtifactForPersonalData({
+        fileName: "roster.csv",
+        contentType: "text/csv",
+        byteLength: bytes.byteLength,
+        readBytes: async () => bytes,
+      })
+      expect(result).toEqual({ refused: true, kinds: ["psd-student-id"] })
+    }
+  })
+
+  it("still reads plain UTF-8 text that happens to contain a stray NUL", async () => {
+    const bytes = new TextEncoder().encode("note\u0000 student 2240393 moved")
+    expect(decodeTextForScan(bytes)).toContain("2240393")
+  })
+
   it("reads an SVG's text: a <text> element can carry a roster", async () => {
     const result = await scanPublicArtifactForPersonalData(
       utf8Upload(
@@ -186,16 +220,18 @@ describe("public-file rule on files it cannot fully read", () => {
     const result = await scanPublicArtifactForPersonalData({
       ...utf8Upload("encrypted.pdf", "application/pdf", "%PDF-1.7 ..."),
       readPdfText: async () => {
-        throw new Error("encrypted")
+        const error = new Error("Incorrect Password: Garcia-2240393")
+        error.name = "PasswordException"
+        throw error
       },
     })
     expect(result).toEqual({
       refused: false,
       scanned: false,
       reason: "unreadable",
-      // The parser's own message, so a bug in our extraction is visible in the
-      // log rather than hiding among genuinely encrypted files.
-      parserError: "encrypted",
+      // The parser's error CLASS, so a bug in our extraction is visible in the
+      // log — and never its message, which pdf.js can fill from the file.
+      parserError: "PasswordException",
     })
   })
 
