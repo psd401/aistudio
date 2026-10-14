@@ -113,6 +113,12 @@ describe('an unwrapped 6-field cron must carry a YEAR in field 6', () => {
       'cron(45 6 ? * MON-FRI *)',
     );
   });
+
+  test('keeps an explicit-year expression that matches the seconds fingerprint', () => {
+    // 9:00am on the 1st, in 2027. A seconds-first cron carries day-of-week in
+    // field 6, never a 4-digit year, so this form is not ambiguous.
+    expect(normalize('0 9 1 * * 2027').stdout).toBe('cron(0 9 1 * ? 2027)');
+  });
 });
 
 describe('the hand-wrapped cron path enforces the same rules as the server', () => {

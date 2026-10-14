@@ -322,6 +322,11 @@ function normalizeWrappedScheduleExpression(expression: string): string | null {
  *     day field `?`. Narrowing to "neither day field is `?`" keeps a real
  *     EventBridge expression like `0 0 1 * ? *` (midnight on the 1st) out of
  *     the net — that form is already valid and must stay accepted.
+ *
+ * Check 2 only runs when the year slot is `*`, because that is the only
+ * ambiguous form. An explicit 4-digit year can never be a seconds-first
+ * expression — a seconds-first cron carries day-of-week there, not a year —
+ * so `0 9 1 * * 2027` (9:00am on the 1st, in 2027) stays accepted.
  */
 function rejectMisreadSixFieldCron(fields: string[]): void {
   if (!isYearField(fields[5])) {
@@ -336,6 +341,7 @@ function rejectMisreadSixFieldCron(fields: string[]): void {
     ? Number.parseInt(fields[2], 10)
     : null;
   if (
+    fields[5] === "*" &&
     fields[0] === "0" &&
     hourLike !== null &&
     hourLike <= 23 &&

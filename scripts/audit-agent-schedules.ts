@@ -54,6 +54,8 @@ function toStoredSchedule(item: Record<string, unknown>): StoredSchedule | null 
       typeof item.timezone === "string" ? item.timezone : "America/Los_Angeles",
     enabled: item.enabled === true,
     schedulerExpression: item.schedulerExpression,
+    // Anchors a rate(...) interval, so the reported fire times match reality.
+    updatedAt: typeof item.updatedAt === "string" ? item.updatedAt : undefined,
   };
 }
 
@@ -109,7 +111,12 @@ async function main(): Promise<void> {
     .filter((finding): finding is ScheduleFinding => finding !== null);
 
   if (asJson) {
-    log.info(JSON.stringify({ scanned: schedules.length, findings }, null, 2));
+    // Straight to stdout, not through the logger: `log.info` prefixes an
+    // ANSI-colored timestamp and level, which makes the documented
+    // machine-readable mode unparseable by `jq`.
+    process.stdout.write(
+      `${JSON.stringify({ scanned: schedules.length, findings }, null, 2)}\n`,
+    );
     return;
   }
 

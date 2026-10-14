@@ -20,6 +20,12 @@ export interface StoredSchedule {
   timezone: string;
   enabled: boolean;
   schedulerExpression: string;
+  /**
+   * Stored `updatedAt`, which anchors a `rate(...)` interval. Optional because
+   * an old row may not carry one; its fire times are then left uncomputed
+   * rather than reported from the wrong phase.
+   */
+  updatedAt?: string;
 }
 
 /** EventBridge numbers day-of-week 1=SUN; ordinary cron numbers it 0=SUN. */
@@ -155,6 +161,7 @@ export function auditSchedule(schedule: StoredSchedule): ScheduleFinding | null 
   const summary = describeScheduleExpression(
     schedule.schedulerExpression,
     schedule.timezone,
+    { anchor: schedule.updatedAt },
   );
   return {
     scheduleId: schedule.scheduleId,

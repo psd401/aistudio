@@ -95,8 +95,12 @@ function rejectMisreadSixFieldCron(parts) {
     ? Number.parseInt(parts[2], 10)
     : null;
   // Narrowed to "neither day field is ?" so a real EventBridge expression such
-  // as `0 0 1 * ? *` (midnight on the 1st) stays accepted.
+  // as `0 0 1 * ? *` (midnight on the 1st) stays accepted, and to a `*` year
+  // because that is the only ambiguous form: a seconds-first cron carries
+  // day-of-week in field 6, never a 4-digit year, so an explicit-year
+  // expression like `0 9 1 * * 2027` (9:00am on the 1st, in 2027) is kept.
   if (
+    parts[5] === "*" &&
     parts[0] === "0" &&
     hourLike !== null &&
     hourLike <= 23 &&

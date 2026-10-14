@@ -274,6 +274,8 @@ function publicSchedule(
   const summary = describeScheduleExpression(
     record.schedulerExpression,
     record.timezone,
+    // `updatedAt` is when EventBridge last re-anchored a rate(...) interval.
+    { anchor: record.updatedAt },
   );
   return {
     scheduleId: record.scheduleId,
@@ -321,7 +323,12 @@ function publicDegradedSchedule(
     degradedString(value.cronExpression, 256, ""),
   );
   const timezone = degradedString(value.timezone, 100, DEFAULT_TIMEZONE);
-  const summary = describeScheduleExpression(schedulerExpression, timezone);
+  const updatedAt = degradedString(value.updatedAt, 64, "");
+  const summary = describeScheduleExpression(schedulerExpression, timezone, {
+    // Empty or unparseable on a degraded row; a rate(...) schedule then
+    // reports no fire times instead of ones measured from the wrong phase.
+    anchor: updatedAt,
+  });
   return {
     scheduleId: degradedString(value.scheduleId, 128, "unknown"),
     version:
@@ -337,7 +344,7 @@ function publicDegradedSchedule(
     timezone,
     enabled: typeof value.enabled === "boolean" ? value.enabled : false,
     createdAt: degradedString(value.createdAt, 64, ""),
-    updatedAt: degradedString(value.updatedAt, 64, ""),
+    updatedAt,
     lastRunAt: lastRun?.createdAt.toISOString() ?? null,
     lastRunStatus: runEnrichmentAvailable
       ? lastRun?.status ?? null

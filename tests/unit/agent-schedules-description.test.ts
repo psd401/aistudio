@@ -176,15 +176,54 @@ describe("describeScheduleExpression — next fire times", () => {
     ).toEqual([])
   })
 
-  it("projects rate() forward from now", () => {
+  it("counts rate() intervals from the anchor, not from now", () => {
+    // Anchored at 08:15 and read at 09:00: EventBridge fires at anchor + k*1h,
+    // so the next run is 09:15 — not 10:00, which is what projecting from now
+    // reported before.
     const { nextRuns } = describeScheduleExpression("rate(1 hour)", PACIFIC, {
       now: MONDAY_9AM_PDT,
+      anchor: "2026-10-12T15:15:00Z",
     })
     expect(nextRuns).toEqual([
-      "2026-10-12T10:00:00-07:00",
-      "2026-10-12T11:00:00-07:00",
-      "2026-10-12T12:00:00-07:00",
+      "2026-10-12T09:15:00-07:00",
+      "2026-10-12T10:15:00-07:00",
+      "2026-10-12T11:15:00-07:00",
     ])
+  })
+
+  it("starts a rate() interval at the anchor when the anchor is still ahead", () => {
+    const { nextRuns } = describeScheduleExpression("rate(1 day)", PACIFIC, {
+      now: MONDAY_9AM_PDT,
+      anchor: "2026-10-13T16:00:00Z",
+      count: 2,
+    })
+    expect(nextRuns).toEqual([
+      "2026-10-14T09:00:00-07:00",
+      "2026-10-15T09:00:00-07:00",
+    ])
+  })
+
+  it("skips an occurrence that lands exactly on now", () => {
+    const { nextRuns } = describeScheduleExpression("rate(1 hour)", PACIFIC, {
+      now: MONDAY_9AM_PDT,
+      anchor: "2026-10-12T15:00:00Z",
+      count: 1,
+    })
+    expect(nextRuns).toEqual(["2026-10-12T10:00:00-07:00"])
+  })
+
+  it("computes no rate() fire times without a usable anchor", () => {
+    // A rate schedule's phase is not in the expression, so reporting a guess
+    // would contradict the read-back the skill now asks the agent to do.
+    for (const anchor of [undefined, "", "not-a-date"]) {
+      const { description, nextRuns } = describeScheduleExpression(
+        "rate(1 hour)",
+        PACIFIC,
+        { now: MONDAY_9AM_PDT, anchor }
+      )
+      expect(description).toBe("Every hour")
+      expect(nextRuns).toEqual([])
+    }
   })
 
   it("returns nothing when the year field is already in the past", () => {

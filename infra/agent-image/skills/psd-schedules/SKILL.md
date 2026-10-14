@@ -229,6 +229,10 @@ the saved schedule the same way you do on create.
 | `description` | plain-language reading of it, e.g. `At 6:30 AM, Monday through Friday` |
 | `nextRuns` | the next 3 fire times, ISO 8601 in the schedule's timezone |
 
+A `rate(N unit)` schedule has no fixed clock time: EventBridge counts the
+interval from when the schedule was last saved, so its `nextRuns` shift every
+time it is updated. Use `cron` when the user asked for a particular time.
+
 **Confirm from `description` and `nextRuns` — never from the cron string you
 typed.** Your own expression is what you *meant*; these fields are what the
 platform will *do*. They are the only place the two can be seen to disagree.

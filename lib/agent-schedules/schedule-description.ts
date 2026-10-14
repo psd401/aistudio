@@ -70,10 +70,10 @@ export interface ScheduleSummary {
    * Upcoming fire times as ISO 8601 with the schedule timezone's UTC offset,
    * e.g. `2026-10-14T06:30:00-07:00`. Empty when the expression has no
    * computable occurrences: an unsupported cron extension, a past `at(...)`,
-   * a year field already in the past, or no match inside the search horizon
+   * a year field already in the past, no match inside the search horizon
    * (five years, or the end of the expression's own last year when it pins
-   * one). Fewer than `count` entries means the horizon was reached, not that
-   * the schedule stops.
+   * one), or a `rate(...)` expression described without its anchor. Fewer than
+   * `count` entries means the horizon was reached, not that the schedule stops.
    */
   nextRuns: string[];
 }
@@ -86,6 +86,18 @@ export interface DescribeScheduleOptions {
    * every production caller uses; tests widen it to span a DST boundary.
    */
   count?: number;
+  /**
+   * When the schedule's interval was last anchored — the record's `updatedAt`,
+   * because EventBridge Scheduler restarts a `rate(...)` interval at create and
+   * at update. Only a `rate(...)` expression uses it; `cron(...)` and `at(...)`
+   * carry their own wall-clock anchor.
+   *
+   * Without it a `rate(...)` schedule has no computable fire times: projecting
+   * from "now" would report an hourly schedule anchored at 09:15 as firing at
+   * 10:45 when read at 09:45. Absent or unparseable, `nextRuns` is empty rather
+   * than wrong.
+   */
+  anchor?: Date | string;
 }
 
 interface CivilDate {
@@ -475,6 +487,41 @@ function describeRate(count: number, unit: string): string {
     : `Every ${count} ${singular}s`;
 }
 
+/**
+ * Milliseconds of the anchor instant, or null when there is nothing usable.
+ *
+ * `updatedAt` reaches here as a stored string, and the degraded read path can
+ * hand over an empty string or a truncated one, so an unparseable value has to
+ * mean "no anchor" rather than `NaN` arithmetic that formats as a bogus date.
+ */
+function resolveAnchorMs(anchor: Date | string | undefined): number | null {
+  if (anchor === undefined) return null;
+  const ms = anchor instanceof Date ? anchor.getTime() : Date.parse(anchor);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * Fire times of a `rate(...)` schedule, counting intervals from its anchor.
+ *
+ * EventBridge Scheduler fires a rate schedule at `anchor + k * interval`, so
+ * the first upcoming run is the smallest such instant strictly after `now` —
+ * not `now + interval`.
+ */
+function nextRateRuns(
+  anchorMs: number,
+  interval: number,
+  now: number,
+  count: number,
+): number[] {
+  const elapsed = now - anchorMs;
+  const firstIndex = elapsed < 0 ? 1 : Math.floor(elapsed / interval) + 1;
+  const runs: number[] = [];
+  for (let index = firstIndex; index < firstIndex + count; index += 1) {
+    runs.push(anchorMs + interval * index);
+  }
+  return runs;
+}
+
 function rateIntervalMs(count: number, unit: string): number {
   if (unit.startsWith("minute")) return count * MINUTE_MS;
   if (unit.startsWith("hour")) return count * HOUR_MS;
@@ -560,13 +607,20 @@ export function describeScheduleExpression(
   if (rate) {
     const every = Number.parseInt(rate[1], 10);
     const interval = rateIntervalMs(every, rate[2]);
-    const runs: string[] = [];
-    // EventBridge anchors a rate schedule at its creation time, which is not
-    // knowable from the expression alone, so these are projected from now.
-    for (let index = 1; index <= count; index += 1) {
-      runs.push(formatZonedIso(now + interval * index, zone));
-    }
-    return { description: describeRate(every, rate[2]), nextRuns: runs };
+    // A rate schedule's phase lives in the record, not the expression: it is
+    // anchored when created or updated. Without that anchor there is no honest
+    // answer, and a wrong one is worse than none now that SKILL.md tells the
+    // agent to confirm the schedule from `nextRuns`.
+    const anchorMs = resolveAnchorMs(options.anchor);
+    return {
+      description: describeRate(every, rate[2]),
+      nextRuns:
+        anchorMs === null
+          ? []
+          : nextRateRuns(anchorMs, interval, now, count).map((instant) =>
+              formatZonedIso(instant, zone),
+            ),
+    };
   }
 
   const cron = trimmed.match(/^cron\((.+)\)$/);

@@ -148,4 +148,14 @@ describe("an unwrapped 6-field cron must carry a YEAR in field 6", () => {
       "cron(45 6 ? * MON-FRI *)"
     )
   })
+
+  it("keeps an explicit-year expression that matches the seconds fingerprint", () => {
+    // 9:00am on the 1st, in 2027. Field 1 is `0` and field 3 is hour-sized, so
+    // the seconds-first heuristic would fire — but a seconds-first cron carries
+    // day-of-week in field 6, never a 4-digit year, so this form is unambiguous.
+    expect(toSchedulerExpression("0 9 1 * * 2027")).toBe("cron(0 9 1 * ? 2027)")
+    expect(toSchedulerExpression("0 23 23 * * 2027-2029")).toBe(
+      "cron(0 23 23 * ? 2027-2029)"
+    )
+  })
 })
