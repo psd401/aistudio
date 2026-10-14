@@ -37,7 +37,12 @@ openwiki:
     - lib/agent-credentials/name-grammar.ts
     - actions/agent-credential-entry.actions.ts
     - infra/agent-image/skills/psd-credentials/request_entry.js
+    - infra/agent-image/openclaw_aborted_hint.mjs
+    - infra/agent-image/openclaw_runtime_patch.mjs
+    - infra/agent-image/openclaw_patch_text.mjs
   test_paths:
+    - infra/agent-image/test_aborted_run_hint.py
+    - tests/unit/agent-image-openclaw-runtime-patch.test.ts
     - tests/unit/lib/agent-workspace/drive-delivery.test.ts
     - tests/unit/lib/agent-workspace/storage-broker-drive-delivery.test.ts
     - tests/unit/agent-image-drive-delivery-drift.test.ts
@@ -622,6 +627,72 @@ The model interprets this error as the user interrupting it. In a real session, 
 The `psd-rules` skill contains a rule that names the synthetic repair marker verbatim. This teaches the model that the marker is **bookkeeping about a tool**, never a statement about the user.
 
 The rule instructs the agent to read the marker as "that one tool produced nothing — redo it or work around it" and to never turn it into a claim that the user stopped, interrupted, or aborted anything.
+
+The aborted-run hint is a second, independent source of the same false stop claim. It is handled in [Aborted-Run Session Hint (#1897)](#aborted-run-session-hint-1897) below.
+
+### Aborted-Run Session Hint (#1897)
+
+**Sources**: `/infra/agent-image/openclaw_aborted_hint.mjs`, `/infra/agent-image/openclaw_runtime_patch.mjs`, `/infra/agent-image/openclaw_patch_text.mjs`, `/infra/agent-image/skills/psd-rules/SKILL.md` (R15 "second signal" paragraph)
+
+OpenClaw keeps a one-shot `abortedLastRun` flag per session. When the next turn's reply pipeline (`applySessionHints`) sees it, upstream prepends "The previous agent run was aborted by the user. Resume carefully or ask for clarification." above the user's message and clears the flag. The model therefore reads, before anything the user typed, that the user stopped it and that it should ask permission to continue. That is the origin of "it looks like you stopped the last run" replies and of unnecessary "continue?" pauses.
+
+In this deployment the sentence is never true. Each setter of `abortedLastRun` in the pinned bundle is the platform: a startup sweep that marks sessions left at `running` after a turn was cut short, a `chat.abort` the harness itself sends, a forced run-registry clear, and restart-recovery cleanup. Google Chat has no stop control. The fix therefore replaces the sentence instead of suppressing the hint, because the hint still carries real information (the previous run did not finish).
+
+```mermaid
+sequenceDiagram
+    participant Turn as Turn N (harness shutdown)
+    participant Store as OpenClaw session store
+    participant Next as Turn N+1 gateway
+    participant Reply as applySessionHints (patched)
+    Turn->>Store: turn cut short by deadline, restart, or promotion, entry left at running
+    Next->>Store: startup sweep marks running entries interrupted, sets abortedLastRun
+    Next->>Reply: build prompt body for the new user message
+    Reply->>Reply: prepend SYSTEM_CUTOFF_HINT and clear the flag
+    Reply-->>Next: prompt = cutoff note, blank line, user message
+```
+
+*Caption: how the cutoff note reaches the model. The build-time patch changes only the text prepended in the last step.*
+
+**What the model reads instead** (`SYSTEM_CUTOFF_HINT`). The note names the four platform causes (turn time limit, gateway restart, promotion to a background job, replacement of an overlapping run). It states that the user did not stop or abort the agent and tells the model not to say or imply that they did. It tells the model that the user's message comes first and may change or cancel the earlier request. It tells the model to resume without asking permission, with two exceptions the skill keeps: missing information it cannot obtain, and destructive or irreversible actions. It tells the model to re-check side effects before repeating them, and not to mention the note to the user.
+
+**Build-time patch.** `openclaw_runtime_patch.mjs` finds the reply-body bundle by the upstream assignment anchor (`UPSTREAM_ABORTED_HINT_ANCHOR`) and the `async function applySessionHints(params)` marker, so it cannot bind to the control-UI bundle that repeats the sentence. It replaces the assignment with `PATCHED_ABORTED_HINT_ASSIGNMENT` through the shared `replaceOnce` helper in `openclaw_patch_text.mjs`. The helper is fail-closed: a missing anchor, a repeated anchor, or a second run throws and fails the image build. The `Dockerfile` RUN step that runs the patch also deletes `openclaw_runtime_patch.mjs`, `openclaw_aborted_hint.mjs`, and `openclaw_patch_text.mjs`, so the helpers do not ship in `/app`.
+
+**Skill parity.** `psd-rules/SKILL.md` R15 quotes the note's opening and carries the same instructions, so the model recognises the note and does not treat it as a user statement. The parity is pinned by tests and must be updated together with the constant.
+
+**Invariants**
+- The note never attributes a cutoff to the user, and never uses the forbidden phrases in `FORBIDDEN_HINT_PHRASES` ("aborted by the user", "ask for clarification", "you stopped", "you interrupted").
+- The user's message follows the note unchanged.
+- The patch applies only to the reply-body bundle, exactly once per build.
+- Upstream anchor drift fails the build; it is never shipped silently.
+
+**Change guidance**
+- To change wording, edit `SYSTEM_CUTOFF_HINT` and the psd-rules R15 "second signal" paragraph in the same change. The clause-parity tests fail if they drift.
+- After a pinned OpenClaw host bump, the anchor test in `test_aborted_run_hint.py` and the build patch both depend on the upstream text. Update `UPSTREAM_ABORTED_HINT_ANCHOR` and the pinned version together, and verify the bundle as described below.
+- Do not re-add "ask for clarification" or user-stop wording to the note. The explicit denial is deliberate, because the false claim reinforces itself once it is in the session history.
+- The helper modules are build-only. Do not import them from runtime code.
+- This is a separate source from the orphaned `ask_user` repair marker above, which #1740 fixed.
+
+**Tests**
+- `infra/agent-image/test_aborted_run_hint.py` (`unittest`) contains these suites:
+  - `TheAnchorMatchesThePinnedHost` pins the upstream anchor.
+  - `TheReplacementTextIsHonest` covers the platform-cause naming, the denial, no permission invitation, deferral to the user's message, and the forbidden-phrase check.
+  - `TheNextTurnContextBlamesThePlatform` checks that the note precedes the user's message and leaves it intact.
+  - `AHostBumpMustFailTheBuild` covers missing, duplicated, and rerun anchors.
+  - `TheRewriteRunsOnARealisticBundle` checks that only the hint text changes and the result is valid JavaScript.
+  - `TheBuildAppliesTheRewrite` checks the patch-script wiring and the build-only modules.
+  - `RulesMatchTheNewBehaviour` checks psd-rules parity.
+- `tests/unit/agent-image-openclaw-runtime-patch.test.ts` asserts that the patch script imports `fail` and `replaceOnce` from `openclaw_patch_text.mjs`, and that the helper keeps its fail-closed messages.
+- The Python suite is listed in the agent-image unittest step in `.github/workflows/ci.yml`.
+
+**Minimal validation**
+```bash
+python -m unittest infra/agent-image/test_aborted_run_hint.py
+bun run test -- tests/unit/agent-image-openclaw-runtime-patch.test.ts
+```
+
+Run the Python check from the repository root, as CI does. The Jest run uses the root `test` script with a narrow path.
+
+**Conditional, expensive check.** Running the real patch against the extracted pinned OpenClaw bundle requires the digest-pinned base image from the `Dockerfile`. Run that only when the upstream anchor, the pinned version, or the patch script changes. It is not needed for wording-only edits covered by the unit suites.
 
 ### Contract Validation
 
