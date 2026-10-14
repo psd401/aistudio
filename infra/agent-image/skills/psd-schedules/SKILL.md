@@ -227,7 +227,7 @@ the saved schedule the same way you do on create.
 |---|---|
 | `schedulerExpression` | the normalized expression EventBridge actually holds |
 | `description` | plain-language reading of it, e.g. `At 6:30 AM, Monday through Friday` |
-| `nextRuns` | the next 3 fire times, ISO 8601 in the schedule's timezone |
+| `nextRuns` | the next 3 fire times, ISO 8601 in the schedule's timezone — always empty for a disabled schedule, which cannot fire |
 
 A `rate(N unit)` schedule has no fixed clock time: EventBridge counts the
 interval from when the schedule was last saved, so its `nextRuns` shift every
@@ -242,8 +242,9 @@ platform will *do*. They are the only place the two can be seen to disagree.
 
 If `description` or `nextRuns` is not what the user asked for, say so and fix
 it before confirming. If `nextRuns` is empty, say the next fire time could not
-be computed rather than inventing one. Schedules created before this read-back
-existed were never re-checked — several have been firing on the wrong days or
+be computed rather than inventing one — or, when `enabled` is false, say the
+schedule is paused and will not fire until it is enabled. Schedules created
+before this read-back existed were never re-checked — several have been firing on the wrong days or
 in the wrong month for weeks, unnoticed, because nothing ever showed the owner
 what was stored.
 

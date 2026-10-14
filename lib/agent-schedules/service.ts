@@ -95,7 +95,9 @@ export type PublicAgentSchedule = Pick<
   description: string;
   /**
    * Next fire times in the schedule's timezone, ISO 8601 with offset. Empty
-   * when the expression has no computable occurrences.
+   * when the expression has no computable occurrences, and always empty when
+   * `enabled` is false — a held schedule has no upcoming executions to
+   * promise.
    */
   nextRuns: string[];
   lastRunAt: string | null;
@@ -285,7 +287,11 @@ function publicSchedule(
     cronExpression: record.cronExpression,
     schedulerExpression: record.schedulerExpression,
     description: summary.description,
-    nextRuns: summary.nextRuns,
+    // A disabled schedule cannot fire: EventBridge holds it, so reporting
+    // upcoming times would promise executions that never happen in the field
+    // SKILL.md tells the agent to confirm the schedule from. The description
+    // still reads back what the expression means.
+    nextRuns: record.enabled ? summary.nextRuns : [],
     timezone: record.timezone,
     enabled: record.enabled,
     createdAt: record.createdAt,
@@ -324,6 +330,7 @@ function publicDegradedSchedule(
   );
   const timezone = degradedString(value.timezone, 100, DEFAULT_SCHEDULE_TIMEZONE);
   const updatedAt = degradedString(value.updatedAt, 64, "");
+  const enabled = typeof value.enabled === "boolean" ? value.enabled : false;
   const summary = describeScheduleExpression(schedulerExpression, timezone, {
     // Empty or unparseable on a degraded row; a rate(...) schedule then
     // reports no fire times instead of ones measured from the wrong phase.
@@ -340,9 +347,11 @@ function publicDegradedSchedule(
     cronExpression: degradedString(value.cronExpression, 256, ""),
     schedulerExpression,
     description: summary.description,
-    nextRuns: summary.nextRuns,
+    // Same rule as the normal path: no fire times for a schedule that cannot
+    // fire. A degraded row defaults to disabled, so this is usually empty.
+    nextRuns: enabled ? summary.nextRuns : [],
     timezone,
-    enabled: typeof value.enabled === "boolean" ? value.enabled : false,
+    enabled,
     createdAt: degradedString(value.createdAt, 64, ""),
     updatedAt,
     lastRunAt: lastRun?.createdAt.toISOString() ?? null,

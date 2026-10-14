@@ -28,6 +28,50 @@ describe("auditSchedule", () => {
     expect(finding?.description).toBe("At 6:30 AM, on Sunday through Thursday")
   })
 
+  it("leaves a monthly or yearly schedule alone when its name says so", () => {
+    // "morning" is a time of day, not a frequency. A correct monthly job was
+    // reported as a mismatch and handed cron(9 1 * * ? *) — a 1:09am daily
+    // schedule. A name that states its cadence wins over the time-of-day word.
+    for (const name of [
+      "Monthly board packet",
+      "Monthly morning report",
+      "Month-end evening summary",
+      "Quarterly morning digest",
+      "Annual overnight archive",
+      "Yearly nightly cleanup",
+    ]) {
+      expect(
+        auditSchedule(
+          schedule({ name, schedulerExpression: "cron(0 9 1 * ? *)" })
+        )
+      ).toBeNull()
+    }
+  })
+
+  it("still flags a daily name with no cadence word", () => {
+    // The guard above must not swallow the real signal this audit exists for.
+    const finding = auditSchedule(
+      schedule({
+        name: "Morning report",
+        schedulerExpression: "cron(0 9 1 * ? *)",
+      })
+    )
+    expect(finding?.issues[0]).toMatch(/fires only on specific days/)
+  })
+
+  it("reports no fire times for a disabled schedule", () => {
+    const finding = auditSchedule(
+      schedule({
+        name: "Evening heads-up",
+        schedulerExpression: "cron(0 15 18 * ? *)",
+        enabled: false,
+      })
+    )
+    expect(finding?.enabled).toBe(false)
+    expect(finding?.nextRuns).toEqual([])
+    expect(finding?.description).toBe("At 3:00 PM, on day 18 of the month")
+  })
+
   it("flags a numeric day-of-week list too", () => {
     const finding = auditSchedule(
       schedule({ schedulerExpression: "cron(0 12 ? * 3,5 *)" })
@@ -56,17 +100,6 @@ describe("auditSchedule", () => {
       })
     )
     expect(finding?.issues[0]).toMatch(/fires only in a fixed year/)
-  })
-
-  it("does not flag a monthly schedule whose NAME says monthly", () => {
-    expect(
-      auditSchedule(
-        schedule({
-          name: "Monthly board packet",
-          schedulerExpression: "cron(0 8 1 * ? *)",
-        })
-      )
-    ).toBeNull()
   })
 
   it("ignores rate() and at() schedules", () => {

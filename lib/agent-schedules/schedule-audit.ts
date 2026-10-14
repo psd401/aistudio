@@ -42,6 +42,18 @@ const EVENTBRIDGE_DAY_NAMES = [
 const DAILY_NAME_RE =
   /\b(daily|every\s*day|each\s*day|morning|evening|nightly|overnight)\b/i;
 const WEEKDAY_NAME_RE = /\b(weekday|weekdays|workday|workdays|business\s*day)\b/i;
+/**
+ * Names that state a monthly or yearly cadence outright.
+ *
+ * DAILY_NAME_RE matches times of day, not just frequencies, and a time of day
+ * says nothing about frequency: "Monthly morning report" on
+ * `cron(0 9 1 * ? *)` is a correct monthly schedule, but it was reported as a
+ * mismatch and handed the suggestion `cron(9 1 * * ? *)` — turning a 9:00am
+ * monthly job into a 1:09am daily one. When the name names the cadence, it
+ * wins over the time-of-day word.
+ */
+const MONTHLY_OR_YEARLY_NAME_RE =
+  /\b(month|monthly|quarter|quarterly|annual|annually|year|yearly)\b/i;
 
 export interface ScheduleFinding {
   scheduleId: string;
@@ -86,6 +98,7 @@ function namedDayOfWeek(field: string): string | null {
 }
 
 function nameSuggestsDaily(name: string): boolean {
+  if (MONTHLY_OR_YEARLY_NAME_RE.test(name)) return false;
   return DAILY_NAME_RE.test(name) || WEEKDAY_NAME_RE.test(name);
 }
 
@@ -171,7 +184,9 @@ export function auditSchedule(schedule: StoredSchedule): ScheduleFinding | null 
     timezone: schedule.timezone,
     schedulerExpression: schedule.schedulerExpression,
     description: summary.description,
-    nextRuns: summary.nextRuns,
+    // Same rule as the broker's publicSchedule: a disabled schedule is held
+    // by EventBridge and has no upcoming executions to report.
+    nextRuns: schedule.enabled ? summary.nextRuns : [],
     issues,
     suggestedExpression:
       suggestedExpression === schedule.schedulerExpression

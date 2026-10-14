@@ -726,6 +726,22 @@ describe("schedules echo back what was actually saved", () => {
     }
   })
 
+  it("reports no fire times for a disabled schedule", async () => {
+    // EventBridge holds a disabled schedule, so upcoming times would promise
+    // executions that never happen — in the field SKILL.md tells the agent to
+    // confirm the schedule from. The description still reads back the meaning.
+    const { service, dynamoSend } = harness()
+    dynamoSend.mockResolvedValueOnce({
+      Items: [scheduleRecord({ enabled: false })],
+    })
+
+    const [schedule] = await service.list(OWNER)
+
+    expect(schedule.enabled).toBe(false)
+    expect(schedule.description).toBe("At 8:00 AM, every day")
+    expect(schedule.nextRuns).toEqual([])
+  })
+
   it("describes a legacy numeric day-of-week the way EventBridge reads it", async () => {
     // 1-5 is SUN-THU here, not MON-FRI. The description is what makes that
     // visible to an owner who never saw the expression.
@@ -766,5 +782,31 @@ describe("schedules echo back what was actually saved", () => {
     expect(schedule.degraded).toBe(true)
     expect(schedule.schedulerExpression).toBe("cron(0 6 ? * MON-FRI *)")
     expect(schedule.description).toBe("At 6:00 AM, on Monday through Friday")
+    expect(schedule.nextRuns).toHaveLength(3)
+  })
+
+  it("reports no fire times for a disabled degraded row either", async () => {
+    const legacyId = "a273413f-7a93-4e43-9b49-1bc8880be024"
+    const { service, dynamoSend } = harness()
+    dynamoSend.mockResolvedValueOnce({
+      Items: [
+        {
+          userId: OWNER,
+          scheduleId: legacyId,
+          name: "Legacy dispatch",
+          prompt: "Generate it",
+          cronExpression: "cron(0 6 ? * MON-FRI *)",
+          timezone: "America/Los_Angeles",
+          enabled: false,
+          createdAt: "2026-07-24T00:00:00.000Z",
+          updatedAt: "2026-07-24T00:00:00.000Z",
+        },
+      ],
+    })
+
+    const [schedule] = await service.list(OWNER)
+    expect(schedule.enabled).toBe(false)
+    expect(schedule.description).toBe("At 6:00 AM, on Monday through Friday")
+    expect(schedule.nextRuns).toEqual([])
   })
 })
