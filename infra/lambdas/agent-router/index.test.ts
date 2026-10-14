@@ -40,6 +40,9 @@ const {
   parseDeferredChatDeliveryRecord,
   parseDeferredScheduledRun,
   isFinalDeliveryAttempt,
+  processDeferredChatDelivery,
+  parseScheduledRunSettlementRecord,
+  processScheduledRunSettlement,
   resolveDeferredScheduledRun,
   markPromotedTurnRecoveredWithDependencies,
   btwSlashCommandId,
@@ -829,7 +832,7 @@ describe("deferred scheduled-run resolution", () => {
         databaseConfigured: true,
         getDbClient: exploding,
       })
-    ).resolves.toBeUndefined()
+    ).resolves.toBe(true)
 
     let opened = 0
     await resolveDeferredScheduledRun(
@@ -847,14 +850,126 @@ describe("deferred scheduled-run resolution", () => {
     )
     expect(opened).toBe(0)
 
+    // `false` is the signal the caller hands the settlement to a durable
+    // retry on — it must still be a resolve, never a throw.
     await expect(
       resolveDeferredScheduledRun({ fireKey: "k" }, "success", null, log, {
         databaseConfigured: true,
         getDbClient: exploding,
       })
+    ).resolves.toBe(false)
+  })
+})
+
+// Codex P2 on PR #1925: a delivered post whose row cannot be settled must not
+// be left `deferred` — counted as a failure — with nothing to repair it.
+describe("deferred scheduled-run settlement durability", () => {
+  const queuedPost = {
+    kind: "agent-chat-delivery-v1" as const,
+    spaceName: "spaces/owner-dm",
+    text: "📋 Morning brief",
+    deliveryContext: {
+      isSharedSpace: false,
+      durableDelivery: false as const,
+      deliveryRequestId: "11111111-2222-4333-8444-555555555555",
+    },
+    scheduledRun: { fireKey: "sched-morning#2026-10-14T13:30:00Z" },
+  }
+  const firstReceive = {
+    attributes: { ApproximateReceiveCount: "1" },
+  } as never
+
+  test("a delivered post whose settle fails is re-queued settle-only, not re-posted", async () => {
+    // Codex P2 on PR #1925: the settle used to log and return, the record was
+    // acknowledged, and the delivered run stayed `deferred` — counted as a
+    // failure by both streak readers — with nothing left to repair it.
+    let posts = 0
+    const requeued: unknown[] = []
+    await expect(
+      processDeferredChatDelivery(queuedPost as never, firstReceive, TEST_LOG, {
+        send: (async () => {
+          posts += 1
+          return "delivered"
+        }) as never,
+        resolve: (async () => false) as never,
+        requeueSettlement: (async (delivery: unknown) => {
+          requeued.push(delivery)
+        }) as never,
+      })
     ).resolves.toBeUndefined()
+
+    expect(posts).toBe(1)
+    expect(requeued).toEqual([queuedPost])
   })
 
+  test("a settled post queues nothing", async () => {
+    let requeues = 0
+    await processDeferredChatDelivery(queuedPost as never, firstReceive, TEST_LOG, {
+      send: (async () => "delivered") as never,
+      resolve: (async () => true) as never,
+      requeueSettlement: (async () => {
+        requeues += 1
+      }) as never,
+    })
+    expect(requeues).toBe(0)
+  })
+
+  test("the settlement record carries no text and retries until it settles", async () => {
+    // A separate kind with nothing to post: a router predating it would drop
+    // a "settle only" flag on the delivery envelope and post the brief again.
+    const body = JSON.stringify({
+      kind: "agent-scheduled-run-settlement-v1",
+      scheduledRun: { fireKey: queuedPost.scheduledRun.fireKey },
+    })
+    const settlement = parseScheduledRunSettlementRecord(body)
+    expect(settlement).toEqual(JSON.parse(body))
+    // ...and it is not mistaken for a delivery envelope, which would post.
+    expect(parseDeferredChatDelivery(body)).toBeNull()
+
+    const settled: unknown[] = []
+    await processScheduledRunSettlement(
+      settlement as never,
+      TEST_LOG,
+      (async (...args: unknown[]) => {
+        settled.push(args.slice(0, 3))
+      }) as never
+    )
+    expect(settled).toEqual([
+      [{ fireKey: queuedPost.scheduledRun.fireKey }, "success", null],
+    ])
+
+    // Strict: a failed settle fails the record, so SQS retries it and
+    // dead-letters it if it never lands.
+    await expect(
+      processScheduledRunSettlement(
+        settlement as never,
+        TEST_LOG,
+        (async () => {
+          throw new Error("pool exhausted")
+        }) as never
+      )
+    ).rejects.toThrow("Deferred scheduled-run settlement failed: pool exhausted")
+  })
+
+  test("only the settlement kind parses, and a malformed one is redriven", () => {
+    expect(parseScheduledRunSettlementRecord("not json")).toBeNull()
+    expect(
+      parseScheduledRunSettlementRecord(JSON.stringify(queuedPost))
+    ).toBeNull()
+    for (const malformed of [
+      { kind: "agent-scheduled-run-settlement-v1" },
+      { kind: "agent-scheduled-run-settlement-v1", scheduledRun: { fireKey: "" } },
+      {
+        kind: "agent-scheduled-run-settlement-v1",
+        scheduledRun: { fireKey: "ok" },
+        text: "post me",
+      },
+    ]) {
+      expect(() =>
+        parseScheduledRunSettlementRecord(JSON.stringify(malformed))
+      ).toThrow("Malformed scheduled-run settlement envelope")
+    }
+  })
 })
 
 describe("durable Chat delivery envelope redrive", () => {

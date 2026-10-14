@@ -563,6 +563,7 @@ const ROUTER_QUEUE_MAX_RECEIVE_COUNT = parseInt(
   10
 );
 const CHAT_DELIVERY_ENVELOPE_KIND = 'agent-chat-delivery-v1';
+const SCHEDULED_RUN_SETTLEMENT_KIND = 'agent-scheduled-run-settlement-v1';
 /**
  * The durable outbox must never reject a reply the primary Chat call accepted,
  * so both bounds sit above the 32,000-byte message budget with headroom for
@@ -3188,6 +3189,21 @@ interface DeferredScheduledRunRef {
   fireKey: string;
 }
 
+/**
+ * Queued by the router to ITSELF when a deferred post has landed but its run
+ * row could not be settled, so the settlement retries durably on its own
+ * record (#1890).
+ *
+ * A separate kind, carrying no text, rather than the delivery envelope with a
+ * "settle only" flag: a router that predates this kind (a rollback, or an
+ * instance mid-deploy) would drop an unknown flag and post the message again.
+ * An unknown kind it cannot post at all.
+ */
+interface ScheduledRunSettlementEnvelope {
+  kind: typeof SCHEDULED_RUN_SETTLEMENT_KIND;
+  scheduledRun: DeferredScheduledRunRef;
+}
+
 interface DeferredChatDeliveryEnvelope {
   kind: typeof CHAT_DELIVERY_ENVELOPE_KIND;
   spaceName: string;
@@ -3416,6 +3432,95 @@ function buildDeferredChatDeliveryEnvelope(
   return messageBody;
 }
 
+async function sendToRouterQueueWithRetry(
+  request: ConstructorParameters<typeof SendMessageCommand>[0]
+): Promise<void> {
+  let lastError: unknown;
+  for (const delayMs of [0, 250, 750]) {
+    if (delayMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+    try {
+      await sqsClient.send(new SendMessageCommand(request));
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+const SCHEDULED_RUN_SETTLEMENT_KEYS = new Set(['kind', 'scheduledRun']);
+
+/**
+ * `null` for any body that is not this kind. A body that claims the kind but
+ * is malformed throws, so it retries and dead-letters visibly instead of
+ * falling through to the Chat event parser and being acknowledged.
+ */
+function parseScheduledRunSettlementRecord(
+  body: string
+): ScheduledRunSettlementEnvelope | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  const envelope = strictObject(parsed);
+  if (envelope?.kind !== SCHEDULED_RUN_SETTLEMENT_KIND) return null;
+  const scheduledRun = hasOnlyKeys(envelope, SCHEDULED_RUN_SETTLEMENT_KEYS)
+    ? parseDeferredScheduledRun(envelope.scheduledRun)
+    : null;
+  if (!scheduledRun) {
+    throw new ChatDeliveryRetryError(
+      'Malformed scheduled-run settlement envelope'
+    );
+  }
+  return { kind: SCHEDULED_RUN_SETTLEMENT_KIND, scheduledRun };
+}
+
+/**
+ * Re-queue a delivered post as settle-only, so its `deferred` row is settled
+ * by a retrying SQS record instead of being left to look like a failure.
+ *
+ * NEVER throws. The caller has already delivered, and a throw would post the
+ * message again; if even the queue is unavailable the only honest remainder
+ * is a loud log, and the row stays `deferred` — never a false success.
+ */
+async function enqueueDeferredSettlement(
+  delivery: Pick<DeferredChatDeliveryEnvelope, 'scheduledRun'>,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const scheduledRun = delivery.scheduledRun;
+  if (!scheduledRun) return;
+  const { fireKey } = scheduledRun;
+  const queueUrl = process.env.ROUTER_QUEUE_URL;
+  if (!queueUrl) {
+    log.error('Delivered a queued scheduled post but cannot queue its settlement', {
+      fireKey,
+      reason: 'ROUTER_QUEUE_URL is not configured',
+    });
+    return;
+  }
+  const envelope: ScheduledRunSettlementEnvelope = {
+    kind: SCHEDULED_RUN_SETTLEMENT_KIND,
+    scheduledRun: { fireKey },
+  };
+  try {
+    await sendToRouterQueueWithRetry({
+      QueueUrl: queueUrl,
+      MessageBody: JSON.stringify(envelope),
+      DelaySeconds: 15,
+    });
+    log.warn('Queued settlement for a delivered scheduled post', { fireKey });
+  } catch (error) {
+    log.error('Delivered a queued scheduled post but cannot queue its settlement', {
+      fireKey,
+      error: sanitizeDiagnostic(errorMessage(error)),
+    });
+  }
+}
+
 async function enqueueDeferredChatDelivery(
   input: ChatResponseInput,
   log: ReturnType<typeof createLogger>
@@ -3429,25 +3534,11 @@ async function enqueueDeferredChatDelivery(
     throw new Error('Durable Chat delivery requires a request id');
   }
   const messageBody = buildDeferredChatDeliveryEnvelope(input, requestId);
-  const request = {
+  await sendToRouterQueueWithRetry({
     QueueUrl: queueUrl,
     MessageBody: messageBody,
     DelaySeconds: 15,
-  };
-  let lastError: unknown;
-  for (const delayMs of [0, 250, 750]) {
-    if (delayMs > 0) {
-      await new Promise(resolve => setTimeout(resolve, delayMs));
-    }
-    try {
-      await sqsClient.send(new SendMessageCommand(request));
-      lastError = undefined;
-      break;
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  if (lastError) throw lastError;
+  });
   log.warn('Queued completed Chat response for durable delivery retry', {
     spaceName: input.spaceName,
     hasThread: Boolean(input.threadName),
@@ -4017,57 +4108,81 @@ async function writeScheduledRun(params: ScheduledRunWrite): Promise<void> {
             ${errorMessage}, ${params.fireKey ?? null})`;
 }
 
+interface DeferredRunDependencies {
+  databaseConfigured?: boolean;
+  getDbClient?: typeof getDbClient;
+}
+
 /**
  * Settle the `deferred` run row the cron left when its own Chat post failed
- * and was queued here (#1890).
+ * and was queued here (#1890). Throws on a database error.
  *
  * Scoped to `status = 'deferred'`: a later redelivery, or a row the ECS
  * supervisor has already repaired, must not be rewritten. Idempotent, so a
  * duplicate SQS receive is harmless — the second update simply matches nothing.
- *
- * NEVER throws. It is called on the success path immediately after a Chat post
- * has landed, and a telemetry error there would be re-raised as a retry and
- * post the same message to the owner a second time.
  */
-async function resolveDeferredScheduledRun(
+async function settleDeferredScheduledRun(
   reference: DeferredScheduledRunRef | undefined,
   status: 'success' | 'error',
   errorMessage: string | null,
   log: ReturnType<typeof createLogger>,
-  dependencies: {
-    databaseConfigured?: boolean;
-    getDbClient?: typeof getDbClient;
-  } = {}
+  dependencies: DeferredRunDependencies = {}
 ): Promise<void> {
   if (!reference) return;
   const configured =
     dependencies.databaseConfigured
     ?? Boolean(DATABASE_HOST && DATABASE_SECRET_ARN);
   if (!configured) return;
+  const sql = await (dependencies.getDbClient ?? getDbClient)();
+  const updated = await sql`UPDATE agent_scheduled_runs
+    SET status = ${status},
+        error_message = ${
+          errorMessage ? sanitizeDiagnostic(errorMessage, 4000) : null
+        }
+    WHERE fire_key = ${reference.fireKey}
+      AND status = 'deferred'
+    RETURNING id`;
+  log.info('Resolved a deferred scheduled run', {
+    fireKey: reference.fireKey,
+    status,
+    // 0 is expected on a duplicate receive or after a supervisor repair.
+    rowsUpdated: updated.length,
+  });
+}
+
+/**
+ * `settleDeferredScheduledRun` that NEVER throws, for the calls made right
+ * after a Chat post has landed (or on the final failed attempt): a telemetry
+ * error re-raised there would be retried and post the same message twice.
+ *
+ * Returns whether the row is settled — `false` only when the update failed,
+ * so the caller can hand the settlement to a durable retry.
+ */
+async function resolveDeferredScheduledRun(
+  reference: DeferredScheduledRunRef | undefined,
+  status: 'success' | 'error',
+  errorMessage: string | null,
+  log: ReturnType<typeof createLogger>,
+  dependencies: DeferredRunDependencies = {}
+): Promise<boolean> {
   try {
-    const sql = await (dependencies.getDbClient ?? getDbClient)();
-    const updated = await sql`UPDATE agent_scheduled_runs
-      SET status = ${status},
-          error_message = ${
-            errorMessage ? sanitizeDiagnostic(errorMessage, 4000) : null
-          }
-      WHERE fire_key = ${reference.fireKey}
-        AND status = 'deferred'
-      RETURNING id`;
-    log.info('Resolved a deferred scheduled run', {
-      fireKey: reference.fireKey,
+    await settleDeferredScheduledRun(
+      reference,
       status,
-      // 0 is expected on a duplicate receive or after a supervisor repair.
-      rowsUpdated: updated.length,
-    });
+      errorMessage,
+      log,
+      dependencies
+    );
+    return true;
   } catch (error) {
     log.error('Failed to resolve a deferred scheduled run', {
-      fireKey: reference.fireKey,
+      fireKey: reference?.fireKey,
       status,
       error: sanitizeDiagnostic(
         error instanceof Error ? error.message : String(error)
       ),
     });
+    return false;
   }
 }
 
@@ -5977,18 +6092,25 @@ function isFinalDeliveryAttempt(record: SQSRecord): boolean {
   );
 }
 
+interface DeferredChatDeliveryDependencies {
+  send?: typeof sendGoogleChatResponse;
+  resolve?: typeof resolveDeferredScheduledRun;
+  requeueSettlement?: typeof enqueueDeferredSettlement;
+}
+
 async function processDeferredChatDelivery(
   delivery: DeferredChatDeliveryEnvelope,
   record: SQSRecord,
-  log: ReturnType<typeof createLogger>
+  log: ReturnType<typeof createLogger>,
+  dependencies: DeferredChatDeliveryDependencies = {}
 ): Promise<void> {
-  // Tracked separately from the try/catch because the post landing and the
-  // row being settled are two different facts. Without this, a settle that
-  // threw AFTER a successful post fell into the catch below and — on the last
-  // attempt — recorded "never succeeded" for a message the owner was reading.
-  let delivered = false;
+  const send = dependencies.send ?? sendGoogleChatResponse;
+  const resolve = dependencies.resolve ?? resolveDeferredScheduledRun;
+  const requeueSettlement =
+    dependencies.requeueSettlement ?? enqueueDeferredSettlement;
+
   try {
-    const outcome = await sendGoogleChatResponse(
+    const outcome = await send(
       delivery.spaceName,
       delivery.threadName,
       delivery.text,
@@ -5998,23 +6120,10 @@ async function processDeferredChatDelivery(
     if (outcome === 'failed') {
       throw new Error('Google Chat delivery returned a failed outcome');
     }
-    delivered = true;
-    // The post the cron could not make has now landed, so the run it left as
-    // `deferred` really did reach its owner (#1890).
-    await resolveDeferredScheduledRun(delivery.scheduledRun, 'success', null, log);
   } catch (error) {
     const detail = sanitizeDiagnostic(errorMessage(error));
-    if (delivered) {
-      // Nothing to retry: the owner has the message. Leave the row `deferred`
-      // rather than claiming either outcome — truthful, and never a false
-      // failure that could tell the owner a working schedule is broken.
-      log.error('Delivered a queued scheduled post but could not settle it', {
-        error: detail,
-      });
-      return;
-    }
     if (isFinalDeliveryAttempt(record)) {
-      await resolveDeferredScheduledRun(
+      await resolve(
         delivery.scheduledRun,
         'error',
         `Queued Chat delivery never succeeded: ${detail}`,
@@ -6023,6 +6132,35 @@ async function processDeferredChatDelivery(
     }
     throw new ChatDeliveryRetryError(detail);
   }
+
+  // The post the cron could not make has now landed, so the run it left as
+  // `deferred` really did reach its owner (#1890). If that update fails, the
+  // row must not be left looking like a failure — yet this record cannot be
+  // retried, since a retry posts again. Hand the settlement to a settle-only
+  // record instead.
+  if (await resolve(delivery.scheduledRun, 'success', null, log)) return;
+  await requeueSettlement(delivery, log);
+}
+
+/**
+ * The settlement a delivered post could not make inline. Strict, unlike the
+ * delivery path: nothing is posted here, so a throw costs only a retry — and
+ * the record dead-letters, visibly, if it never lands.
+ */
+async function processScheduledRunSettlement(
+  envelope: ScheduledRunSettlementEnvelope,
+  log: ReturnType<typeof createLogger>,
+  settle: typeof settleDeferredScheduledRun = settleDeferredScheduledRun
+): Promise<void> {
+  try {
+    await settle(envelope.scheduledRun, 'success', null, log);
+  } catch (error) {
+    throw new ChatDeliveryRetryError(
+      `Deferred scheduled-run settlement failed: ${
+        sanitizeDiagnostic(errorMessage(error))
+      }`
+    );
+  }
 }
 
 async function processRecord(
@@ -6030,6 +6168,11 @@ async function processRecord(
   log: ReturnType<typeof createLogger>
 ): Promise<void> {
   const startTime = Date.now();
+  const settlement = parseScheduledRunSettlementRecord(record.body);
+  if (settlement) {
+    await processScheduledRunSettlement(settlement, log);
+    return;
+  }
   const deferredDelivery = parseDeferredChatDeliveryRecord(record.body);
   if (deferredDelivery) {
     await processDeferredChatDelivery(deferredDelivery, record, log);
@@ -6098,6 +6241,10 @@ export const agentRouterTestHelpers = {
   isDuplicateMessage,
   parseDeferredChatDelivery,
   parseDeferredChatDeliveryRecord,
+  processDeferredChatDelivery,
+  parseScheduledRunSettlementRecord,
+  processScheduledRunSettlement,
+  enqueueDeferredSettlement,
   parseDeferredScheduledRun,
   isFinalDeliveryAttempt,
   resolveDeferredScheduledRun,
