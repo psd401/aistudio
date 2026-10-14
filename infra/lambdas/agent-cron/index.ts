@@ -1892,6 +1892,7 @@ interface ScheduledDeliveryDependencies {
   enqueueScheduledChatDelivery: typeof enqueueScheduledChatDelivery;
   recordRun: typeof runTelemetry.recordRun;
   recentRunStatuses: typeof runTelemetry.recentRunStatuses;
+  markOwnerNotified: typeof runTelemetry.markOwnerNotified;
   sendChatMessage: typeof sendChatMessage;
   mintOwnerConsentLink: typeof mintOwnerConsentLink;
 }
@@ -1902,6 +1903,7 @@ const scheduledDeliveryDependencies: ScheduledDeliveryDependencies = {
   enqueueScheduledChatDelivery,
   recordRun: (...args) => runTelemetry.recordRun(...args),
   recentRunStatuses: (...args) => runTelemetry.recentRunStatuses(...args),
+  markOwnerNotified: (...args) => runTelemetry.markOwnerNotified(...args),
   sendChatMessage,
   mintOwnerConsentLink,
 };
@@ -1930,7 +1932,11 @@ async function deliverScheduledResultWithDependencies(
     });
     return recordScheduledCompletion(context, dependencies);
   }
-  const deliveryText = `📋 **${scheduleName}**\n\n${result.response}`;
+  // Single-asterisk bold: Google Chat shows `**name**` as literal asterisks
+  // (infra/agent-image/chat_format.py documents the subset). The agent's own
+  // prose below is already converted by that module at the harness boundary;
+  // this header is composed here and so was never converted.
+  const deliveryText = `📋 *${scheduleName}*\n\n${result.response}`;
   const preparedDelivery = prepareScheduledChatMessage(
     schedule.dmSpaceName,
     deliveryText,
@@ -2097,7 +2103,11 @@ async function recordScheduledDeferral(
     deliveryRequestId,
     hasFireKey: Boolean(context.fireIdentity?.key),
   });
-  await notifyOwnerIfScheduleFailing(context, errorMessage, dependencies);
+  await notifyOwnerIfScheduleFailing(
+    context,
+    { errorMessage, fullErrorMessage: errorMessage },
+    dependencies,
+  );
   return { status: 'error', scheduleId: schedule.scheduleId };
 }
 
@@ -2110,7 +2120,7 @@ async function recordScheduledDeferral(
  */
 async function notifyOwnerIfScheduleFailing(
   context: ScheduledResultContext,
-  errorMessage: string | null,
+  recorded: { errorMessage: string | null; fullErrorMessage: string | null },
   dependencies: ScheduledDeliveryDependencies = scheduledDeliveryDependencies,
 ): Promise<void> {
   const { schedule, scheduleName, sessionId, log } = context;
@@ -2123,10 +2133,13 @@ async function notifyOwnerIfScheduleFailing(
       log,
     );
     // `null` is "history unreadable", not "no failures" — staying quiet is the
-    // only safe reading, since the threshold and the suppression both live in
-    // these rows.
+    // only safe reading, since the streak and the suppression both live in
+    // these rows. The next failing run reads them again.
     if (!rows) return;
-    const decision = decideScheduleFailureNotice(rows);
+    const decision = decideScheduleFailureNotice({
+      rows,
+      currentErrorMessage: recorded.fullErrorMessage,
+    });
     if (!decision.notify) return;
     const consentUrl =
       decision.reason === 'auth'
@@ -2138,9 +2151,23 @@ async function notifyOwnerIfScheduleFailing(
         scheduleName,
         reason: decision.reason,
         consecutiveFailures: decision.consecutiveFailures,
-        errorMessage,
+        errorMessage: recorded.errorMessage,
         consentUrl,
       }),
+      log,
+    );
+    // Stamp only now that Chat has accepted the message. Stamping first would
+    // silence the schedule on a send that never landed — the same silence
+    // #1890 exists to end, just harder to notice. Stamping after risks one
+    // repeat message instead, which is the right way round.
+    await dependencies.markOwnerNotified(
+      {
+        userEmail: schedule.ownerEmail,
+        scheduleId: schedule.scheduleId,
+        ...(context.fireIdentity?.key
+          ? { fireKey: context.fireIdentity.key }
+          : {}),
+      },
       log,
     );
     log.warn('Told the owner their schedule is failing', {
@@ -2164,9 +2191,11 @@ async function recordScheduledCompletion(
 ): Promise<HandlerResult> {
   const { schedule, scheduleName, sessionId, result, startTime, log } = context;
   const status: 'success' | 'error' = result.ok ? 'success' : 'error';
+  // Sanitized like every other error text that crosses a boundary here: this
+  // one now reaches the owner's Chat DM, not just the admin page.
   const errorMessage = result.ok
     ? undefined
-    : result.response.substring(0, 500);
+    : sanitizeDiagnostic(result.response, 500);
   await dependencies.recordRun(
     {
       fireKey: context.fireIdentity?.key,
@@ -2185,7 +2214,12 @@ async function recordScheduledCompletion(
   if (status === 'error') {
     await notifyOwnerIfScheduleFailing(
       context,
-      errorMessage ?? null,
+      {
+        errorMessage: errorMessage ?? null,
+        // Untruncated, so an authorization signature sitting past the 500th
+        // character still classifies this as the "speak now" case.
+        fullErrorMessage: sanitizeDiagnostic(result.response),
+      },
       dependencies,
     );
   }

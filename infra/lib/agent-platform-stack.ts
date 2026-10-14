@@ -3484,6 +3484,22 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(resources.routerLambda).add('Environment', environment);
     cdk.Tags.of(resources.routerLambda).add('ManagedBy', 'cdk');
 
+    // Update the CONSUMER of the Chat-delivery envelope before its PRODUCER.
+    //
+    // The cron queues that envelope and the router parses it with a strict key
+    // allowlist, so any field the cron adds is a field the router must already
+    // accept. Both functions live in this stack and a code-only update to two
+    // Lambdas is otherwise unordered: in the window where the new cron has
+    // shipped and the old router has not, a scheduled post whose primary Chat
+    // delivery failed would be REJECTED by the old parser as malformed and
+    // dead-lettered — the owner silently loses the brief this very issue
+    // (#1890) exists to stop losing. CloudFormation processes updates in
+    // dependency order, so this closes that window.
+    //
+    // Direction matters and must not be reversed: the router does not
+    // reference the cron, and a dependency the other way would be a cycle.
+    resources.cronLambda.node.addDependency(resources.routerLambda);
+
     // Thread → conversation map (#1891). The router only ever reads it, so it
     // is granted here instead of in the role factory's read/write table list.
     // Tag conditions kept so a dev router still cannot read the prod table.

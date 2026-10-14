@@ -3,7 +3,8 @@
  *
  * Records each EventBridge Scheduler fire and its terminal status so schedule
  * owners can see whether their automation last succeeded, failed, or was
- * skipped before invocation. Migrations 066, 067, and 164.
+ * skipped before invocation. Migrations 066, 067, 165 (`fire_key`) and 188
+ * (`owner_notified_at`).
  */
 
 import { desc, sql } from "drizzle-orm";
@@ -38,6 +39,13 @@ export const agentScheduledRuns = pgTable(
     scheduleId: varchar("schedule_id", { length: 64 }),
     scheduleName: varchar("schedule_name", { length: 256 }),
     fireKey: varchar("fire_key", { length: 192 }),
+    /**
+     * When the owner was sent the Chat message saying this schedule is
+     * failing (#1890). Set on the one run of a failure streak that carried
+     * the message, so the streak's suppression is a recorded fact rather
+     * than something inferred from how long the streak happens to be.
+     */
+    ownerNotifiedAt: timestamp("owner_notified_at", { withTimezone: true }),
   },
   (table) => [
     index("idx_agent_scheduled_runs_user").on(
@@ -55,6 +63,14 @@ export const agentScheduledRuns = pgTable(
     uniqueIndex("uq_agent_scheduled_runs_fire")
       .on(table.fireKey)
       .where(sql`fire_key IS NOT NULL`),
+    // Narrows an owner's rows by schedule AND date together, which the
+    // consecutive-failure window function needs; the two older indexes cover
+    // only one of those dimensions each.
+    index("idx_agent_scheduled_runs_owner_schedule").on(
+      table.userId,
+      table.scheduleId,
+      desc(table.createdAt),
+    ),
   ],
 );
 

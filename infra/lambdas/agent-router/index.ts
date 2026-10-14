@@ -5982,6 +5982,11 @@ async function processDeferredChatDelivery(
   record: SQSRecord,
   log: ReturnType<typeof createLogger>
 ): Promise<void> {
+  // Tracked separately from the try/catch because the post landing and the
+  // row being settled are two different facts. Without this, a settle that
+  // threw AFTER a successful post fell into the catch below and — on the last
+  // attempt — recorded "never succeeded" for a message the owner was reading.
+  let delivered = false;
   try {
     const outcome = await sendGoogleChatResponse(
       delivery.spaceName,
@@ -5993,11 +5998,21 @@ async function processDeferredChatDelivery(
     if (outcome === 'failed') {
       throw new Error('Google Chat delivery returned a failed outcome');
     }
+    delivered = true;
     // The post the cron could not make has now landed, so the run it left as
     // `deferred` really did reach its owner (#1890).
     await resolveDeferredScheduledRun(delivery.scheduledRun, 'success', null, log);
   } catch (error) {
     const detail = sanitizeDiagnostic(errorMessage(error));
+    if (delivered) {
+      // Nothing to retry: the owner has the message. Leave the row `deferred`
+      // rather than claiming either outcome — truthful, and never a false
+      // failure that could tell the owner a working schedule is broken.
+      log.error('Delivered a queued scheduled post but could not settle it', {
+        error: detail,
+      });
+      return;
+    }
     if (isFinalDeliveryAttempt(record)) {
       await resolveDeferredScheduledRun(
         delivery.scheduledRun,

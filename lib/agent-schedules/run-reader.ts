@@ -11,6 +11,15 @@ import { agentScheduledRuns } from "@/lib/db/schema";
 const FAILED_RUN_STATUSES = ["error", "deferred"] as const;
 
 /**
+ * Statuses that decide a streak at all: a success ends one, a failure extends
+ * one. `skipped` (a coalesced fire that never ran) and `promoted` (handed to
+ * the background job runner, whose own row carries the outcome) decide
+ * neither. Mirrors `STREAK_DECIDING_STATUSES` in
+ * `infra/lambdas/agent-cron/run-telemetry.ts`.
+ */
+const STREAK_DECIDING_STATUSES = ["success", ...FAILED_RUN_STATUSES] as const;
+
+/**
  * How far back a consecutive-failure count looks. Bounds the scan for an owner
  * with a five-minute schedule; a streak longer than this still reports well
  * above the `failing` threshold, so the marker does not depend on the window.
@@ -121,6 +130,15 @@ export class DrizzleAgentScheduleRunReader
       FAILED_RUN_STATUSES.map((status) => sql`${status}`),
       sql`, `,
     );
+    // Narrowed in the subquery, not only in the outer filter: the window
+    // function has to materialize every row this predicate admits before the
+    // count can discard any, and `skipped` / `promoted` rows decide nothing.
+    // An owner with contended five-minute schedules accumulates far more of
+    // those than real runs.
+    const streakDecidingStatuses = sql.join(
+      STREAK_DECIDING_STATUSES.map((status) => sql`${status}`),
+      sql`, `,
+    );
     // One pass with a window function rather than N per-schedule queries: the
     // last successful run's id per schedule is the streak boundary, and every
     // failed run after it is in the current streak. `id` is the tiebreaker the
@@ -140,6 +158,7 @@ export class DrizzleAgentScheduleRunReader
             FROM agent_scheduled_runs
             WHERE user_id = ${ownerEmail}
               AND schedule_id IN (${scheduleList})
+              AND status IN (${streakDecidingStatuses})
               AND created_at
                   > NOW() - make_interval(
                       days => ${FAILURE_STREAK_WINDOW_DAYS}

@@ -56,6 +56,7 @@ interface Recorded {
   enqueued: Array<unknown[]>;
   dms: string[];
   consentCalls: number;
+  notifiedStamps: Array<Record<string, unknown>>;
 }
 
 function dependencies(
@@ -71,6 +72,7 @@ function dependencies(
     enqueued: [],
     dms: [],
     consentCalls: 0,
+    notifiedStamps: [],
   };
   return {
     recorded,
@@ -89,6 +91,9 @@ function dependencies(
       }) as never,
       recentRunStatuses: (async () =>
         options.history === undefined ? null : options.history) as never,
+      markOwnerNotified: (async (params: Record<string, unknown>) => {
+        recorded.notifiedStamps.push(params);
+      }) as never,
       sendChatMessage: (async (
         _space: string,
         text: string,
@@ -216,12 +221,17 @@ describe('the owner hears about a schedule that keeps failing', () => {
   const FAIL: ScheduleRunStatusRow = {
     status: 'error',
     errorMessage: 'Agent temporarily unavailable',
+    ownerNotified: false,
   };
 
   test('a third consecutive failure sends one DM naming the schedule', async () => {
     const { recorded, deps } = dependencies({
       history: [
-        { status: 'error', errorMessage: 'No response from agent.' },
+        {
+          status: 'error',
+          errorMessage: 'No response from agent.',
+          ownerNotified: false,
+        },
         FAIL,
         FAIL,
       ],
@@ -239,6 +249,47 @@ describe('the owner hears about a schedule that keeps failing', () => {
     expect(recorded.dms[0]).toContain('ask your agent to check this schedule');
     // No consent link is minted for a non-authorization failure.
     expect(recorded.consentCalls).toBe(0);
+    // Stamped with THIS fire, so the next failure stays quiet.
+    expect(recorded.notifiedStamps).toEqual([
+      {
+        userEmail: 'owner@psd401.net',
+        scheduleId: 'sched-morning',
+        fireKey: FIRE_KEY,
+      },
+    ]);
+  });
+
+  test('nothing is stamped when no message is sent', async () => {
+    const { recorded, deps } = dependencies({
+      history: [FAIL, { ...FAIL, ownerNotified: true }],
+    });
+
+    await deliverScheduledResultWithDependencies(
+      context({ ok: false }),
+      deps,
+    );
+
+    expect(recorded.dms).toHaveLength(0);
+    expect(recorded.notifiedStamps).toHaveLength(0);
+  });
+
+  test('a send that throws leaves the run unstamped, so it retries', async () => {
+    // The stamp is the suppression. Writing it before the send landed would
+    // silence the schedule on a message nobody received.
+    const { recorded, deps } = dependencies({ history: [FAIL, FAIL, FAIL] });
+    const failingDeps = {
+      ...deps,
+      sendChatMessage: (async () => {
+        throw new Error('Chat unavailable');
+      }) as never,
+    };
+
+    await deliverScheduledResultWithDependencies(
+      context({ ok: false }),
+      failingDeps,
+    );
+
+    expect(recorded.notifiedStamps).toHaveLength(0);
   });
 
   test('a revoked grant sends a DM with the consent link', async () => {
@@ -247,6 +298,7 @@ describe('the owner hears about a schedule that keeps failing', () => {
         {
           status: 'error',
           errorMessage: 'Workspace authorization was revoked',
+          ownerNotified: false,
         },
       ],
       consentUrl: 'https://ai.psd401.net/agent-connect?token=abc',
@@ -264,9 +316,9 @@ describe('the owner hears about a schedule that keeps failing', () => {
     );
   });
 
-  test('a fourth consecutive failure sends nothing', async () => {
+  test('a failure after the owner was told sends nothing', async () => {
     const { recorded, deps } = dependencies({
-      history: [FAIL, FAIL, FAIL, FAIL],
+      history: [FAIL, { ...FAIL, ownerNotified: true }, FAIL, FAIL],
     });
 
     await deliverScheduledResultWithDependencies(
@@ -281,7 +333,11 @@ describe('the owner hears about a schedule that keeps failing', () => {
     const { recorded, deps } = dependencies({
       sendFails: true,
       history: [
-        { status: 'deferred', errorMessage: 'queued for retry' },
+        {
+          status: 'deferred',
+          errorMessage: 'queued for retry',
+          ownerNotified: false,
+        },
         FAIL,
         FAIL,
       ],

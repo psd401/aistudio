@@ -60,6 +60,12 @@ export interface RunTelemetryRdsClient {
 export interface ScheduleRunStatusRow {
   status: string;
   errorMessage: string | null;
+  /**
+   * Whether THIS run carried the "your schedule is failing" message to the
+   * owner. The rule reads it as the streak's suppression state, so it must be
+   * a recorded fact and never inferred from the streak's length (#1890).
+   */
+  ownerNotified: boolean;
 }
 
 export interface RunTelemetry {
@@ -72,6 +78,15 @@ export interface RunTelemetry {
     params: { userEmail: string; scheduleId: string; limit?: number },
     log: CronTelemetryLogger,
   ): Promise<ScheduleRunStatusRow[] | null>;
+  /**
+   * Stamp the run that carried the owner's failure message. Best-effort: a
+   * stamp that cannot be written risks one repeat message, which is the right
+   * way to fail for a feature whose whole purpose is not being silent.
+   */
+  markOwnerNotified(
+    params: { userEmail: string; scheduleId: string; fireKey?: string },
+    log: CronTelemetryLogger,
+  ): Promise<void>;
   recordPreflightRun(
     params: ScheduledRunRecord,
     log: CronTelemetryLogger,
@@ -142,7 +157,11 @@ function statusRows(result: unknown): ScheduleRunStatusRow[] {
   const records = (
     result as {
       records?: Array<
-        Array<{ stringValue?: unknown; isNull?: unknown }>
+        Array<{
+          stringValue?: unknown;
+          booleanValue?: unknown;
+          isNull?: unknown;
+        }>
       >;
     }
   ).records;
@@ -155,13 +174,34 @@ function statusRows(result: unknown): ScheduleRunStatusRow[] {
     rows.push({
       status,
       errorMessage: typeof errorMessage === 'string' ? errorMessage : null,
+      // Defaults to true on an unreadable value, which SUPPRESSES a message.
+      // A row we cannot classify must not be read as "nobody has been told".
+      ownerNotified: record?.[2]?.booleanValue !== false,
     });
   }
   return rows;
 }
 
 /**
- * Recent terminal statuses for one schedule, newest first.
+ * Statuses that decide a failure streak: a success ends it, a failure extends
+ * it. Everything else — `skipped` (a coalesced fire that never ran) and
+ * `promoted` (handed to the background job runner, whose own row carries the
+ * outcome) — is excluded AT THE QUERY, not filtered afterwards.
+ *
+ * Filtering in SQL is the point. The row budget below is a count of rows, not
+ * of failures, so leaving the neutral rows in let them crowd the real ones
+ * out: an owner whose five-minute schedules contend on one workspace lock
+ * accumulates `skipped` rows between real fires, and a streak of three
+ * failures spread across a dozen coalesced fires would have been read as a
+ * streak of one or two and never reported (#1890).
+ */
+const STREAK_DECIDING_STATUSES = "('success', 'error', 'deferred')";
+
+/** How far back the streak rule looks when the caller names no bound. */
+const RECENT_RUN_STATUS_LIMIT = 12;
+
+/**
+ * Recent streak-deciding runs for one schedule, newest first.
  *
  * Bounded by `limit` because this only has to see far enough back to find the
  * last success and whether the owner was already told about this streak.
@@ -174,17 +214,25 @@ export async function readRecentRunStatuses(
   if (!config.databaseResourceArn || !config.databaseSecretArn) {
     throw new Error('Scheduled-run telemetry database is not configured');
   }
-  // Floored as well as clamped: a fraction reaching Postgres is an error, not
-  // a smaller page.
-  const limit = Math.floor(Math.min(Math.max(1, params.limit ?? 12), 50));
+  // Floored as well as clamped, and NaN-guarded: `Math.max` PROPAGATES NaN
+  // rather than clamping it, so an unusable value would reach Postgres as
+  // `LIMIT NaN` — a syntax error, not a smaller page. A fraction is the same
+  // kind of failure.
+  const requested = params.limit;
+  const limit = Number.isFinite(requested)
+    ? Math.floor(Math.min(Math.max(1, requested as number), 50))
+    : RECENT_RUN_STATUS_LIMIT;
   const result = await rdsDataClient.execute({
     resourceArn: config.databaseResourceArn,
     secretArn: config.databaseSecretArn,
     database: config.databaseName,
-    sql: `SELECT status, error_message
+    sql: `SELECT status,
+                 error_message,
+                 owner_notified_at IS NOT NULL AS owner_notified
           FROM agent_scheduled_runs
           WHERE user_id = :user_id
             AND schedule_id = :schedule_id
+            AND status IN ${STREAK_DECIDING_STATUSES}
           ORDER BY created_at DESC, id DESC
           LIMIT ${limit}`,
     parameters: [
@@ -193,6 +241,58 @@ export async function readRecentRunStatuses(
     ],
   });
   return statusRows(result);
+}
+
+/**
+ * Stamp the run that carried the owner's failure message.
+ *
+ * Called AFTER the Chat message is accepted, deliberately. Stamping first
+ * would mean a message that failed to send still silences the schedule until
+ * it succeeds again — trading the bug #1890 fixes for a quieter version of
+ * itself. Stamping afterwards risks at most one repeat message if the stamp
+ * fails, which is the right way round.
+ *
+ * `owner_notified_at IS NULL` keeps it idempotent, and the fire key targets
+ * the exact occurrence. Without a fire key (a legacy invocation that carries
+ * no occurrence identity) it falls back to this schedule's newest run, which
+ * is the row the caller just wrote.
+ */
+export async function markOwnerNotified(
+  config: RunTelemetryConfig,
+  rdsDataClient: RunTelemetryRdsClient,
+  params: { userEmail: string; scheduleId: string; fireKey?: string },
+): Promise<void> {
+  if (!config.databaseResourceArn || !config.databaseSecretArn) {
+    throw new Error('Scheduled-run telemetry database is not configured');
+  }
+  const locator = params.fireKey
+    ? 'fire_key = :fire_key'
+    : `id = (
+         SELECT id
+         FROM agent_scheduled_runs
+         WHERE user_id = :user_id
+           AND schedule_id = :schedule_id
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1
+       )`;
+  await rdsDataClient.execute({
+    resourceArn: config.databaseResourceArn,
+    secretArn: config.databaseSecretArn,
+    database: config.databaseName,
+    sql: `UPDATE agent_scheduled_runs
+          SET owner_notified_at = NOW()
+          WHERE ${locator}
+            AND user_id = :user_id
+            AND schedule_id = :schedule_id
+            AND owner_notified_at IS NULL`,
+    parameters: [
+      { name: 'user_id', value: { stringValue: params.userEmail } },
+      { name: 'schedule_id', value: { stringValue: params.scheduleId } },
+      ...(params.fireKey
+        ? [{ name: 'fire_key', value: { stringValue: params.fireKey } }]
+        : []),
+    ],
+  });
 }
 
 function updatedRecordCount(result: unknown): 0 | 1 {
@@ -270,7 +370,11 @@ export async function writeScheduledRun(
               output_tokens = EXCLUDED.output_tokens,
               latency_ms = EXCLUDED.latency_ms,
               status = EXCLUDED.status,
-              error_message = EXCLUDED.error_message`,
+              error_message = EXCLUDED.error_message
+            WHERE NOT (
+              EXCLUDED.status = 'deferred'
+              AND agent_scheduled_runs.status IN ('success', 'error')
+            )`,
       parameters: scheduledRunParameters(params),
     },
   );
@@ -762,6 +866,29 @@ function createPreflightRecorder(
  * notify" rather than "no failures". Guessing either way from a read error
  * would produce the exact noise the suppression rule exists to prevent.
  */
+/**
+ * The two best-effort history operations the owner-notice rule needs, built
+ * together so the factory below stays readable.
+ */
+function createBestEffortRunReaders(
+  config: RunTelemetryConfig,
+  rdsDataClient: RunTelemetryRdsClient,
+  databaseConfigured: boolean,
+): Pick<RunTelemetry, 'recentRunStatuses' | 'markOwnerNotified'> {
+  return {
+    recentRunStatuses: createRecentRunStatusesReader(
+      config,
+      rdsDataClient,
+      databaseConfigured,
+    ),
+    markOwnerNotified: createOwnerNotifiedStamper(
+      config,
+      rdsDataClient,
+      databaseConfigured,
+    ),
+  };
+}
+
 function createRecentRunStatusesReader(
   config: RunTelemetryConfig,
   rdsDataClient: RunTelemetryRdsClient,
@@ -783,6 +910,30 @@ function createRecentRunStatusesReader(
   };
 }
 
+/**
+ * Best-effort stamper for the run that carried the owner's failure message.
+ * Never throws: the message has already been delivered by the time this runs.
+ */
+function createOwnerNotifiedStamper(
+  config: RunTelemetryConfig,
+  rdsDataClient: RunTelemetryRdsClient,
+  databaseConfigured: boolean,
+): RunTelemetry['markOwnerNotified'] {
+  return async (params, log) => {
+    if (!databaseConfigured) return;
+    try {
+      await markOwnerNotified(config, rdsDataClient, params);
+    } catch (error) {
+      log.warn('Failed to stamp the run that notified a schedule owner', {
+        scheduleId: params.scheduleId,
+        error: sanitizeDiagnostic(
+          error instanceof Error ? error.message : String(error),
+        ),
+      });
+    }
+  };
+}
+
 export function createRunTelemetry(
   config: RunTelemetryConfig,
   rdsDataClient: RunTelemetryRdsClient,
@@ -790,8 +941,8 @@ export function createRunTelemetry(
   const databaseConfigured =
     config.databaseResourceArn.length > 0 &&
     config.databaseSecretArn.length > 0;
-  const recentRunStatuses =
-    createRecentRunStatusesReader(config, rdsDataClient, databaseConfigured);
+  const bestEffortReads =
+    createBestEffortRunReaders(config, rdsDataClient, databaseConfigured);
 
   function logCronFailure(
     params: CronFailureRecord,
@@ -951,7 +1102,7 @@ export function createRunTelemetry(
   }
 
   return {
-    recentRunStatuses,
+    ...bestEffortReads,
     recordPreflightRun,
     recordRun,
     recordRunStrict,
