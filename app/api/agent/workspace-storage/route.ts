@@ -18,7 +18,11 @@ import {
   WorkspaceStorageAdmissionError,
   WorkspaceStorageCompletionError,
 } from "@/lib/agent-workspace/storage-broker"
-import { DriveDeliveryError } from "@/lib/agent-workspace/drive-delivery"
+import {
+  DriveDeliveryError,
+  driveDeliveryExtension,
+  isDriveDeliverableName,
+} from "@/lib/agent-workspace/drive-delivery"
 import { workspaceRelativePathRejectionReason } from "@/lib/agent-workspace/path-policy"
 import { describeQueryErrorCause } from "@/lib/db/query-error"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
@@ -453,12 +457,26 @@ function storageFailureStatus(
 /**
  * The path to log for an operation. A `drive-upload` path is the name of a file
  * whose whole purpose is carrying personal data (often named after a student),
- * so only its extension is logged.
+ * so at most a KNOWN deliverable extension is logged. Anything after the last
+ * dot is not safe on its own: "Maria.Garcia" would log a surname.
  */
 function loggablePath(input: StorageRequest): string | undefined {
   if (input.operation !== "drive-upload" || !input.path) return input.path
-  const dot = input.path.lastIndexOf(".")
-  return dot > 0 ? `*${input.path.slice(dot).toLowerCase()}` : "*"
+  return isDriveDeliverableName(input.path)
+    ? `*${driveDeliveryExtension(input.path)}`
+    : "*"
+}
+
+/**
+ * The error to log. A Drive type refusal on `drive-upload` quotes the name's
+ * "extension" back to the agent — useful in the response, a leak in the log —
+ * so only its code is logged.
+ */
+function loggableError(input: StorageRequest, error: unknown): string {
+  if (input.operation === "drive-upload" && error instanceof DriveDeliveryError) {
+    return error.code
+  }
+  return error instanceof Error ? error.message : String(error)
 }
 
 export async function POST(request: NextRequest) {
@@ -507,7 +525,7 @@ export async function POST(request: NextRequest) {
         ownerEmail: context.ownerEmail,
         operation: input.operation,
         path: loggablePath(input),
-        error: error instanceof Error ? error.message : String(error),
+        error: loggableError(input, error),
         // See lib/db/query-error.ts — Drizzle swallows the driver's real cause.
         ...describeQueryErrorCause(error),
       })

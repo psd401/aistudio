@@ -770,6 +770,43 @@ describe("POST /api/agent/workspace-storage", () => {
     expect(logged).toContain('"path":"*.pdf"')
   })
 
+  it("never logs a name with no real extension, even inside a Drive refusal", async () => {
+    const { DriveDeliveryError } = await import(
+      "@/lib/agent-workspace/drive-delivery"
+    )
+    createDriveDeliveryUploadMock.mockRejectedValueOnce(
+      new DriveDeliveryError(
+        "unsupported_type",
+        "Cannot deliver .garcia to Drive — deliverable types are .pdf",
+      ),
+    )
+    mockLogWarn.mockClear()
+    const response = await POST(
+      request({
+        operation: "drive-upload",
+        path: "Maria.Garcia",
+        contentType: "application/pdf",
+        contentLength: 10,
+        idempotencyKey: "drive-delivery-idempotency",
+        checksumSha256: "A".repeat(43) + "=",
+      }),
+    )
+
+    // The agent still gets the actionable message...
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toMatchObject({
+      code: "unsupported_type",
+      error: expect.stringContaining(".garcia"),
+    })
+    // ...but the log carries neither the name nor its last dot-segment.
+    const logged = JSON.stringify(mockLogWarn.mock.calls)
+    expect(mockLogWarn).toHaveBeenCalled()
+    expect(logged.toLowerCase()).not.toContain("garcia")
+    expect(logged.toLowerCase()).not.toContain("maria")
+    expect(logged).toContain('"path":"*"')
+    expect(logged).toContain('"error":"unsupported_type"')
+  })
+
   it("generation-fences deletes inside the signed prefix", async () => {
     const response = await POST(
       request({
